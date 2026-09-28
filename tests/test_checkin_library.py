@@ -36,7 +36,7 @@ DOORS = ['claudlobby --fleet "$FLEET_NAME" checkins --bot $BOT_ID --last --json'
          'claudlobby --fleet "$FLEET_NAME" status --json', "claudron lookup --limit 5", "gh issue list",
          'bash "$CLAUDLOBBY_NATIVE_DIR/checkin-record.sh" <<\'EOF\'', 'ck=$(bash "$CLAUDLOBBY_NATIVE_DIR/checkin-record.sh" <<\'EOF\'', '--checkin "$ck"',
          'ck=$(bash "$CLAUDLOBBY_NATIVE_DIR/checkin-record.sh" --dry-run <<\'EOF\'', ') && claudlobby --fleet "$FLEET_NAME" checkins --bot $BOT_ID --last --json',
-         "lib/dispatch-task.sh", "--checkin", "--project", "lib/tg-post.sh", "## Projects", "## Fleet Mission",
+         "$CLAUDLOBBY_NATIVE_DIR/dispatch-task.sh", "--checkin", "--project", "$CLAUDLOBBY_NATIVE_DIR/tg-post.sh", "## Projects", "## Fleet Mission",
          "pane_state", "issues_seen", "DRY-RUN", "checkins[0]", "unavailable"]
 CONTRACT = REPO / "lib" / "checkin-contract.py"
 _spec = importlib.util.spec_from_file_location("checkin_contract", CONTRACT)

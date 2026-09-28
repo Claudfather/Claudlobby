@@ -8,6 +8,7 @@ resolved — so the shadowing tests here are the point of the file, and the
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from textwrap import dedent
 
@@ -69,7 +70,8 @@ def world(tmp_path: Path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     fleet, _ = load_fleet(fleet_dir / "fleet.yaml")
-    paths = Paths(root=tmp_path, fleet_dir=fleet_dir, package=source_package())
+    package = replace(source_package(), library=tmp_path / "library", native=tmp_path / "lib")
+    paths = Paths(root=tmp_path, fleet_dir=fleet_dir, package=package)
     paths.bot_runtime("solo").mkdir(parents=True)
     return fleet, paths, fleet_dir, home
 
@@ -169,7 +171,7 @@ def test_the_bot_tier_is_reported_unresolved_without_a_bot(world) -> None:
 def test_the_register_refuses_rather_than_guessing(world) -> None:
     """Its whole claim is that it reports what a boot would actually find."""
     fleet, paths, _, _ = world
-    (paths.root / "lib" / "env-tiers.sh").unlink()
+    (paths.lib / "env-tiers.sh").unlink()
     with pytest.raises(reg.ResolverUnavailable):
         reg.build(fleet, paths, bot="solo")
 

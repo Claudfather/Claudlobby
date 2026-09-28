@@ -67,6 +67,7 @@ def _fleet_root(tmp_path: Path, *, armed: bool = True,
     env = "env: {}"   # arming rides the .env TIER, never this
     (root / "fleet.yaml").write_text(
         "fleet:\n"
+        "  manager: lead\n"
         "  name: test-fleet\n"
         "  service_prefix: com.test\n"
         "  defaults:\n"
@@ -385,25 +386,32 @@ def test_incomplete_enumeration_never_tombstones(tmp_path, monkeypatch, *, scrat
     assert complete_flags[-1] == 0                   # the incomplete scan says so
 
 
-def test_empty_but_complete_scan_tombstones_everything_in_scope(tmp_path, *, scratch_plane_env):
-    """F11's fourth arm: an empty fleet that ENUMERATED COMPLETELY is a
-    true deletion of everything it owned."""
+def test_empty_but_complete_scan_tombstones_everything_in_scope(
+    tmp_path, monkeypatch, *, scratch_plane_env
+):
+    """F11's fourth arm: an empty COMPLETE enumeration deletes its scope.
+
+    Fleet admission requires a registered manager. Keep that config valid and
+    control the enumeration result, the boundary the tombstone diff consumes.
+    """
+    from claudlobby.plane import registry_emit
+
     root = _fleet_root(tmp_path)
     _scan(root, scratch_plane_env=scratch_plane_env)
-    root2 = _fleet_root(tmp_path, workers="[]", worker_stanza=False)
-    # also drop lead: an empty roster
-    text = (root2 / "fleet.yaml").read_text().replace(
-        "\n    lead:\n      expertise: [orchestration]\n", "\n"
-    ).replace("manager: lead", "manager: ''")
-    (root2 / "fleet.yaml").write_text(text)
-    s = _scan(root2, scratch_plane_env=scratch_plane_env)
+    conn = _db(root)
+    prior = {(r["entity_type"], r["entity_alias"]) for r in conn.execute(
+        "SELECT DISTINCT entity_type, entity_alias FROM registry_snapshots")}
+    conn.close()
+    assert {("bot", "bot:test-fleet/lead"),
+            ("bot", "bot:test-fleet/worker-1")} <= prior
+    monkeypatch.setattr(registry_emit, "assemble_entities", lambda *a: ([], True))
+    s = _scan(root, scratch_plane_env=scratch_plane_env)
     assert s["complete"] is True
     conn = _db(root)
-    stones = {r["entity_alias"] for r in conn.execute(
-        "SELECT entity_alias FROM registry_snapshots WHERE tombstone=1")}
+    stones = {(r["entity_type"], r["entity_alias"]) for r in conn.execute(
+        "SELECT entity_type, entity_alias FROM registry_snapshots WHERE tombstone=1")}
     conn.close()
-    assert "bot:test-fleet/lead" in stones
-    assert "bot:test-fleet/worker-1" in stones
+    assert stones == prior
 
 
 def test_a_tier_that_says_zero_emits_nothing(tmp_path, *, scratch_plane_env):

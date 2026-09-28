@@ -87,19 +87,19 @@ class TestLoadEnv:
 
 class TestLoadFleetOrExit:
     def test_missing_file_exits(self, tmp_path):
-        paths = SimpleNamespace(fleet_yaml=tmp_path / "nonexistent.yaml")
+        paths = Paths(root=tmp_path, package=source_package())
         with pytest.raises(SystemExit):
             _load_fleet_or_exit(paths)
 
     def test_malformed_yaml_exits(self, tmp_path):
-        bad = tmp_path / "bad.yaml"
+        bad = tmp_path / "fleet.yaml"
         bad.write_text(": [invalid\n")
-        paths = SimpleNamespace(fleet_yaml=bad)
+        paths = Paths(root=tmp_path, package=source_package())
         with pytest.raises(SystemExit):
             _load_fleet_or_exit(paths)
 
     def test_valid_fleet_returns_config(self, fleet_dir):
-        paths = Paths(root=fleet_dir, fleet_dir=fleet_dir, package=source_package())
+        paths = Paths(root=fleet_dir, package=source_package())
         config, merged_defaults = _load_fleet_or_exit(paths)
         assert config.name == "test-fleet"
         assert "lead" in config.bots

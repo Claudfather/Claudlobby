@@ -34,8 +34,9 @@
 #   switch_is_on       — THE opt-out gate (polarity in one place; loud no-op)
 #   walk_back_uncomposed_host_units — disable host units nothing composes now
 #
-# Variables set on source:
+# Context supplied by stateful callers:
 #   CLAUDLOBBY_ROOT — explicit mutable host data root (never the package dir)
+# Variables set on source:
 #   _OS          — "Linux" or "Darwin"
 #   _HOMEBREW    — Homebrew prefix (macOS only; empty on Linux)
 #   _TMUX_BIN    — resolved path to tmux binary
@@ -49,10 +50,16 @@ set -euo pipefail
 _LIB_COMMON_LOADED=1
 
 # --- Resolved context --------------------------------------------------------
-# A private native adapter must be invoked by its resolved CLI/unit/bot context.
-# Inferring storage from this installed script could write into release assets.
-: "${CLAUDLOBBY_ROOT:?native adapter requires a resolved CLAUDLOBBY_ROOT data directory}"
-export CLAUDLOBBY_ROOT
+# Loading pure helpers (JSON escaping, process inspection, supervisor state)
+# does not select storage. Require context at the stateful operation boundary;
+# never infer it from this installed script or default an absent root to '/'.
+require_data_root() {
+    case "${CLAUDLOBBY_ROOT:-}" in
+        /*) return 0 ;;
+        *) echo 'native adapter requires an absolute CLAUDLOBBY_ROOT data directory' >&2
+           return 2 ;;
+    esac
+}
 
 # --- OS detection -----------------------------------------------------------
 
@@ -87,10 +94,9 @@ detect_os
 # Resolved from THIS file's own location, not $CLAUDLOBBY_ROOT: many hermetic
 # tests/*.sh suites export a throwaway CLAUDLOBBY_ROOT (an empty temp dir,
 # with no lib/ under it) before sourcing lib-common.sh, precisely so stamp
-# and lock files never touch a real state/ directory — that is what
-# CLAUDLOBBY_ROOT's own self-detection two paragraphs above is ALSO careful
-# to survive (`${CLAUDLOBBY_ROOT:=...}` only fills it in when unset). A
-# lookup keyed on that variable would break those suites at source time.
+# and lock files never touch a real state/ directory.
+# The mutable root never selects installed code. A lookup keyed on that
+# variable would break those suites and installed releases at source time.
 #
 # Derived by parameter expansion, NOT `$(cd "$(dirname ...)" && pwd)`: this
 # file is sourced on hot paths (every keepalive tick, every report-back,
@@ -138,7 +144,6 @@ unset _p
 #
 # own_tool_path APPENDS every prefix this repo installs tools into:
 #   $_HOMEBREW/bin          — Homebrew (macOS node/claude)
-#   $CLAUDLOBBY_ROOT/.venv/bin — repo-local venv (`pip install -e .` inside one)
 #   $HOME/.local/bin        — pip install --user console scripts
 #   $HOME/.bun/bin          — bun global bin (mirrors fleet_launch_path)
 #   $HOME/.npm-global/bin   — npm global prefix (claude)
@@ -158,7 +163,7 @@ own_tool_path() {
     # test below discards — so no set -u guard is needed on top.
     local d IFS=:
     # shellcheck disable=SC2086  # deliberate split on the colon-separated list
-    set -- ${CLAUDLOBBY_TOOL_PREFIXES-${_HOMEBREW:+$_HOMEBREW/bin:}$CLAUDLOBBY_ROOT/.venv/bin:${HOME:-}/.local/bin:${HOME:-}/.bun/bin:${HOME:-}/.npm-global/bin}
+    set -- ${CLAUDLOBBY_TOOL_PREFIXES-${_HOMEBREW:+$_HOMEBREW/bin:}${HOME:-}/.local/bin:${HOME:-}/.bun/bin:${HOME:-}/.npm-global/bin}
     for d; do
         [ -d "$d" ] || continue          # absent prefix — resolves nothing
         case ":$PATH:" in
@@ -1912,6 +1917,7 @@ tmux_socket_for_bot() {
 # target. If none are live, warn and pick deterministically (sorted) so the
 # result is stable across calls rather than filesystem-glob-order dependent.
 _resolve_cross_fleet_bot_dir() {
+    require_data_root || return $?
     local session="$1" d matches=()
     for d in "$CLAUDLOBBY_ROOT"/local/*/runtime/bots/"$session"; do
         [ -d "$d" ] && matches+=("$d")
@@ -3752,6 +3758,7 @@ proc_rss_kb() {
 # none. The bash twin of Python paths._find_fleet_dir — the ONE home for the
 # flat-vs-nested rule every supervision path routes through.
 resolve_fleet_dir() {
+    require_data_root || return $?
     local fleet="$1" root="${CLAUDLOBBY_ROOT:?}" flat d
     flat="$root/local/$fleet"
     # Flat wins first — byte-identical: a bare dir resolves (scaffolding relies on it).
@@ -3769,6 +3776,7 @@ resolve_fleet_dir() {
 # shellcheck disable=SC2120  # fleet arg is optional by design (env fallback);
 # tmux_socket_for_session calls it argless, other-file callers pass a fleet.
 resolve_bots_dir() {
+    require_data_root || return $?
     # Resolve the runtime/bots directory for a fleet.
     # Usage: BOTS_DIR=$(resolve_bots_dir [fleet-name])
     # Falls back to CLAUDLOBBY_FLEET / FLEET_NAME env vars, then root-mode runtime/bots.
@@ -3790,6 +3798,7 @@ resolve_bots_dir() {
 # Paths.fleet_state — the one home for this overlay-vs-root rule.
 # Usage: DIR=$(fleet_runtime_dir [fleet-name])
 fleet_runtime_dir() {
+    require_data_root || return $?
     local fleet="${1:-${CLAUDLOBBY_FLEET:-${FLEET_NAME:-}}}"
     local fleet_dir
     if [ -n "$fleet" ]; then
@@ -3883,6 +3892,7 @@ env_tier_present_files() {
 # its own caller-dir-first loop — a different contract (the caller's dir may
 # be any path, and root-mode is the caller's dir there, not a fallback).
 host_bots_dirs() {
+    require_data_root || return $?
     local d
     [ -d "$CLAUDLOBBY_ROOT/runtime/bots" ] && printf '%s\n' "$CLAUDLOBBY_ROOT/runtime/bots"
     for d in "$CLAUDLOBBY_ROOT"/local/*/runtime/bots; do
@@ -3897,6 +3907,7 @@ host_bots_dirs() {
 }
 
 discover_fleet_manifests() {
+    require_data_root || return $?
     # Emit "<fleet-name><TAB><path to its fleet.yaml>" for every fleet overlay on
     # this host, one per line.
     #
@@ -4012,6 +4023,7 @@ bot_in_fleet() {
 # happy path and diverge only on the failure path — gated by a test that runs
 # both over the same manifests.
 declared_bots_strict() {
+    require_data_root || return $?
     local bad_out="${1:-}" fleet man names b bdir rc=0
     : "${CLAUDLOBBY_ROOT:?declared_bots_strict needs CLAUDLOBBY_ROOT}"
     local tmp_bad
@@ -4414,6 +4426,7 @@ plugin_ensure() {
 
     # Per (epoch, plugin), never per boot alone -- see the function comment.
     local sanitized boot_dir stamp lockfile
+    require_data_root || return $?
     sanitized="$(printf '%s' "$plugin" | tr -c 'A-Za-z0-9._-' '_')"
     boot_dir="$CLAUDLOBBY_ROOT/state/boot"
     stamp="$boot_dir/plugins-updated.$epoch.$sanitized"
@@ -5499,7 +5512,10 @@ bot_conf_get_path() {
     local val
     val=$(bot_conf_get "$1" "$2" "$3")
     val="${val/#\$HOME/$HOME}"
-    val="${val/#\$CLAUDLOBBY_ROOT/$CLAUDLOBBY_ROOT}"
+    if [[ "$val" == '$CLAUDLOBBY_ROOT'* ]]; then
+        require_data_root || return $?
+        val="${val/#\$CLAUDLOBBY_ROOT/$CLAUDLOBBY_ROOT}"
+    fi
     printf '%s' "$val"
 }
 
@@ -5543,6 +5559,7 @@ first_bot_with_conf() {
 # alert" a number instead of a worry, and a second copy of these two globs is
 # exactly how that number would drift away from the walk it describes.
 host_fleet_bots_dirs() {
+    require_data_root || return $?
     local d
     for d in "$CLAUDLOBBY_ROOT"/local/*/runtime/bots "$CLAUDLOBBY_ROOT"/local/*/*/runtime/bots; do
         [ -d "$d" ] || continue

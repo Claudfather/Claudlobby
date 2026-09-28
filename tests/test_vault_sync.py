@@ -252,7 +252,7 @@ class TestItShipsDormant:
         job = d["host"]["jobs"]["vault-sync"]
         assert job["enroll"] is False, (
             "armed, this job commits and pushes on every host it runs on")
-        assert job["script"].endswith("lib/vault-sync.sh")
+        assert job["script"] == "$CLAUDLOBBY_NATIVE_DIR/vault-sync.sh"
 
     def test_the_switch_row_exists_so_doctor_can_SEE_the_off_door(self):
         """Without the row the switches rung cannot list it, and a door nobody

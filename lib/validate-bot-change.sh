@@ -12,7 +12,7 @@
 # worked example of the loop for other bot-behavior changes (see
 # documentation/validating-bot-changes.md).
 #
-# Usage: bash lib/validate-bot-change.sh
+# Usage: PLANE_EMIT_CLI=/selected/venv/bin/claudlobby bash lib/validate-bot-change.sh
 #   Exit 0 = all observations matched intent, 1 = a behavior did not fire.
 set -euo pipefail
 
@@ -124,24 +124,21 @@ EVENTS="$BOT_DIR/data/events"   # the marker/idle files still live under data/; 
 # that does not exist, at a SHORT path (sun_path is 104 bytes on macOS).
 # ---------------------------------------------------------------------------
 VAL_REPO="$(cd "$LIB_DIR/.." && pwd)"
-# A pytest wrapper supplies its preflighted checkout CLI. Honour an explicit
-# override rather than silently selecting a different repository-local venv.
-VAL_CLI="${PLANE_EMIT_CLI:-}"
-if [ -n "$VAL_CLI" ]; then
-    if [ ! -x "$VAL_CLI" ]; then
-        echo "validate-bot-change: explicit PLANE_EMIT_CLI is not executable: $VAL_CLI" >&2
-        exit 2
-    fi
-elif [ -x "$VAL_REPO/.venv/bin/claudlobby" ]; then
-    VAL_CLI="$VAL_REPO/.venv/bin/claudlobby"
-elif command -v claudlobby >/dev/null 2>&1; then
-    VAL_CLI="$(command -v claudlobby)"
-fi
-if [ -z "$VAL_CLI" ]; then
-    echo "validate-bot-change: no claudlobby CLI resolvable (python3 -m venv .venv && ./.venv/bin/python -m pip install -e '.[dev]') — the plane is the only record the doors write, so nothing can be observed without it" >&2
+# The pytest wrapper supplies its preflighted CLI. Hand callers must also select
+# one explicitly; neither PATH nor a nearby checkout chooses this harness's code.
+VAL_CLI="${PLANE_EMIT_CLI:-${CLAUDLOBBY_CLI:-}}"
+if [[ "$VAL_CLI" != /* ]] || [ ! -x "$VAL_CLI" ]; then
+    echo "validate-bot-change: set PLANE_EMIT_CLI to an executable absolute test CLI path" >&2
     exit 2
 fi
-export PLANE_EMIT_CLI="$VAL_CLI"
+VAL_PY="$(dirname "$VAL_CLI")/python"
+if [ ! -x "$VAL_PY" ]; then
+    echo "validate-bot-change: selected test CLI has no sibling Python: $VAL_PY" >&2
+    exit 2
+fi
+export PLANE_EMIT_CLI="$VAL_CLI" CLAUDLOBBY_CLI="$VAL_CLI"
+# This is a source harness: these selected assets belong to its isolated export.
+export CLAUDLOBBY_NATIVE_DIR="$LIB_DIR" CLAUDLOBBY_LIBRARY_DIR="$VAL_REPO/library"
 # This directory was just allocated by mktemp and belongs to this run. A
 # PID-derived name directly under /tmp could already name another listener.
 export PLANE_SOCKET="$TMUX_TMPDIR/no-plane.sock"
@@ -300,8 +297,9 @@ val_backdate() {
     touch -t "$stamp" "$f"
 }
 # val_plane_ready <root> <fleet>: the plane db exists (a first fleet-level
-# receipt through the real door creates it). A fleet with no manifest gets an
-# EMPTY one (parse_fleet_bots reads an empty bots map exactly like a missing
+# receipt through the real door creates it). A fleet with no manifest gets a
+# deliberately EMPTY low-level fixture (not a loadable FleetConfig):
+# parse_fleet_bots reads an empty bots map exactly like a missing
 # file — every dir is scanned, as before). Nothing is declared: since the F18
 # closure (R3) every reader reads the plane alone, no flag, no declaration.
 val_plane_ready() {
@@ -775,16 +773,10 @@ TA_MGR="valmgr1481"
 tmux new-session -d -s "$TA_MGR" "sleep 600"
 sleep 1
 val_seed_dispatch "$ROOT" "$FLEET" "$TA_MGR" "$TA_BOT" t-1481-0004 "$((now - 300))" "$((now + 3600))" "the nudged one"
-# The CLI reaches the send door at <root>/lib/dispatch.sh -- a production root
-# has one and this throwaway does not, so a bare run would report "the install
-# has no dispatch door" and prove nothing about the pane. Linked for THIS
-# scenario and removed after it, because the harness rule is that a scenario
-# must not leave the shared root in a shape its neighbours did not expect.
-ln -sfn "$LIB_DIR" "$ROOT/lib"
+# The selected prepared package owns dispatch.sh; mutable data needs no lib link.
 CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$FLEET" USER=valop \
     "$VAL_CLI" --root "$ROOT" task nudge t-1481-0004 "any movement" --as valop \
     > "$ROOT/ta-nudge.out" 2> "$ROOT/ta-nudge.err" || true
-rm -f "$ROOT/lib"
 
 tn_event=$(val_sql "$ROOT" "SELECT COUNT(*) FROM events e JOIN assignments a ON a.assignment_id = e.assignment_id WHERE e.kind = 'task' AND e.event = 'nudged' AND a.source_ref = 'dispatch-log:t-1481-0004'")
 [ "${tn_event:-0}" -eq 1 ] && r=yes || r=no
@@ -844,9 +836,7 @@ val_plane_ready "$ROOT" "$TR_FLEET"
 tmux new-session -d -s "$TR_MGR" "sleep 600"
 sleep 1
 val_seed_dispatch "$ROOT" "$TR_FLEET" "$TR_MGR" "$TR_BOT" t-1481-0010 "$((now - 7200))" "$((now - 3600))" "the row that stopped moving"
-# The CLI reaches its send door at <root>/lib/dispatch.sh -- linked for THIS
-# scenario and removed after it, the neighbour rule the nudge scenario keeps.
-ln -sfn "$LIB_DIR" "$ROOT/lib"
+# The selected prepared package owns the send door for this scenario too.
 CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$TR_FLEET" \
     "$VAL_CLI" --root "$ROOT" task recheck --fleet "$TR_FLEET" \
     > "$ROOT/tr-recheck.out" 2> "$ROOT/tr-recheck.err" || true
@@ -876,7 +866,6 @@ harness_check "#1481   ...with an HONEST carrier fact (the send returned 0)" "$r
 CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$TR_FLEET" \
     "$VAL_CLI" --root "$ROOT" task recheck --fleet "$TR_FLEET" \
     > "$ROOT/tr-recheck2.out" 2> "$ROOT/tr-recheck2.err" || true
-rm -f "$ROOT/lib"
 tr_ask2=$(val_sql "$ROOT" "SELECT COUNT(*) FROM communications WHERE source_ref = 'task-recheck:$tr_asg'")
 { [ "${tr_ask2:-0}" -eq 1 ] && grep -q 'nothing sent' "$ROOT/tr-recheck2.out"; } && r=yes || r=no
 harness_check "#1481 a second run inside the repeat window asks NOTHING (the stamp is the debounce)" "$r"
@@ -1121,7 +1110,8 @@ harness_check "#1024 the manager is actually pushed the strand via [FLEET-PULSE]
 
 # ===========================================================================
 # Mechanism 1 (fleet update lifecycle) — daily plugin/skill live reload.
-# Stubs claude/claudlobby on PATH so this needs no Claude auth or real fleet.
+# Stubs claude on PATH and selects a CLI stub explicitly, so this needs no
+# Claude auth or real composition.
 # ===========================================================================
 val_scenario "validate reload-fleet (Mechanism 1: daily live reload)"
 
@@ -1135,7 +1125,8 @@ echo 'FLEET_PLUGINS_REQUIRED="claudna@Claudfather"' >> "$BOT_DIR/bot.conf"
 
 # Happy path: download + generate succeed -> .reload-pending dropped on the running bot.
 rm -f "$BOT_DIR/data/.reload-pending"
-CLAUDLOBBY_ROOT="$ROOT" PATH="$STUB_BIN:$PATH" "$LIB_DIR/reload-fleet.sh" "$FLEET" >/dev/null 2>&1 || true
+CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_CLI="$STUB_BIN/claudlobby" PATH="$STUB_BIN:$PATH" \
+    "$LIB_DIR/reload-fleet.sh" "$FLEET" >/dev/null 2>&1 || true
 [ -f "$BOT_DIR/data/.reload-pending" ] && r=yes || r=no
 harness_check "reload-fleet marks a running bot with .reload-pending (happy path)" "$r"
 
@@ -1143,7 +1134,8 @@ harness_check "reload-fleet marks a running bot with .reload-pending (happy path
 printf '#!/bin/bash\necho boom >&2; exit 1\n' > "$STUB_BIN/claude"
 chmod +x "$STUB_BIN/claude"
 rm -f "$BOT_DIR/data/.reload-pending"
-CLAUDLOBBY_ROOT="$ROOT" PATH="$STUB_BIN:$PATH" "$LIB_DIR/reload-fleet.sh" "$FLEET" >/dev/null 2>&1 || true
+CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_CLI="$STUB_BIN/claudlobby" PATH="$STUB_BIN:$PATH" \
+    "$LIB_DIR/reload-fleet.sh" "$FLEET" >/dev/null 2>&1 || true
 val_events "$ROOT" "$FLEET" fleet reload_failed | grep -q '"type":"reload_failed"' && r=yes || r=no
 harness_check "reload-fleet emits reload_failed event on failure (loud, not silent)" "$r"
 mgr_pane=$(tmux capture-pane -t "$MGR" -p 2>/dev/null || true)
@@ -1537,6 +1529,10 @@ exec cat
 STUB
 chmod +x "$RB_ROOT/bin/claude"
 cat > "$RB_DIR/bot.conf" <<CONF
+CLAUDLOBBY_CLI="$VAL_CLI"
+CLAUDLOBBY_NATIVE_DIR="$LIB_DIR"
+CLAUDLOBBY_LIBRARY_DIR="$VAL_REPO/library"
+FLEET_ROOT="$RB_ROOT/local/$FLEET"
 BOT_NAME="valrb"
 BOT_ID="valrb"
 BOT_LABEL="valrb"
@@ -1982,6 +1978,10 @@ _mp_fail_before=$fail
 MP_DIR="$RB_ROOT/local/$FLEET/runtime/bots/valmp"
 mkdir -p "$MP_DIR/.claude" "$MP_DIR/logs"
 cat > "$MP_DIR/bot.conf" <<CONF
+CLAUDLOBBY_CLI="$VAL_CLI"
+CLAUDLOBBY_NATIVE_DIR="$LIB_DIR"
+CLAUDLOBBY_LIBRARY_DIR="$VAL_REPO/library"
+FLEET_ROOT="$RB_ROOT/local/$FLEET"
 BOT_NAME="valmp"
 BOT_ID="valmp"
 BOT_LABEL="valmp"
@@ -2089,7 +2089,10 @@ mkdir -p "$ROOT/local/$F2" "$F2_BOTS/$KEEP/data" "$F2_BOTS/$ORPH/data" "$F2_BOTS
 cat > "$ROOT/local/$F2/fleet.yaml" <<YAML
 fleet:
   name: $F2
+  manager: $MGR
   bots:
+    $MGR:
+      expertise: [orchestration]
     $KEEP:
       expertise: [software-engineering]
     $IDLEK:
@@ -2179,7 +2182,10 @@ sleep 1
 cat > "$ROOT/local/$F2/fleet.yaml" <<YAML
 fleet:
   name: $F2
+  manager: $MGR
   bots:
+    $MGR:
+      expertise: [orchestration]
     $KEEP:
       expertise: [software-engineering]
     $IDLEK:
@@ -2405,7 +2411,10 @@ mkdir -p "$NF_BOTS/$NBOT/data"
 cat > "$NF_DIR/fleet.yaml" <<YAML
 fleet:
   name: $NF
+  manager: $MGR
   bots:
+    $MGR:
+      expertise: [orchestration]
     $NBOT:
       expertise: [software-engineering]
 YAML
@@ -2496,7 +2505,7 @@ done
 # lost link). BRIEFWAIT needs it too: its retry must reach the send.
 for _d in "$BRIEF_DIR" "$BRIEFBUSY_DIR" "$BRIEFWAIT_DIR"; do
     mkdir -p "$_d/.claude/skills"
-    ln -s "$VAL_REPO/library/skills/briefing" "$_d/.claude/skills/briefing"
+    ln -s "$CLAUDLOBBY_LIBRARY_DIR/skills/briefing" "$_d/.claude/skills/briefing"
 done
 
 # Idle briefing bot: plain pane, no esc-to-interrupt, no fresh .last-tool-call
@@ -2599,7 +2608,7 @@ harness_check "dispatch classifier keeps set +H; on a leading-whitespace slash (
 # is the deterministic file-contract gate. NOTE: the prior version re-read a
 # bot.conf var the test itself wrote and never touched SKILL.md, so a gutted
 # skill stayed green — hollow (#640 request-changes).
-_skill="$LIB_DIR/../library/skills/briefing/SKILL.md"
+_skill="$CLAUDLOBBY_LIBRARY_DIR/skills/briefing/SKILL.md"
 _instr=$(awk '/^## Instructions/{f=1; next} /^## /{f=0} f' "$_skill" 2>/dev/null)
 { [ -f "$_skill" ] \
     && printf '%s\n' "$_instr" | grep -q 'BRIEFING_SECTIONS' \
@@ -3353,8 +3362,8 @@ val_scenario "validate #892: an audit verb with no --enroll must not write"
 # depend on it being fixed, and must not contribute to it.
 FS_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-fs.XXXXXX")"
 mkdir -p "$FS_ROOT/local/f-alpha/runtime/bots" "$FS_ROOT/local/f-beta/runtime/bots" "$FS_ROOT/state"
-printf 'fleet:\n  name: f-alpha\n  bots:\n    a1:\n      expertise: [x]\n' > "$FS_ROOT/local/f-alpha/fleet.yaml"
-printf 'fleet:\n  name: f-beta\n  bots:\n    b1:\n      expertise: [x]\n' > "$FS_ROOT/local/f-beta/fleet.yaml"
+printf 'fleet:\n  name: f-alpha\n  manager: a1\n  bots:\n    a1:\n      expertise: [x]\n' > "$FS_ROOT/local/f-alpha/fleet.yaml"
+printf 'fleet:\n  name: f-beta\n  manager: b1\n  bots:\n    b1:\n      expertise: [x]\n' > "$FS_ROOT/local/f-beta/fleet.yaml"
 FS_STATE="$FS_ROOT/state/fleet-state.json"
 # a1: declared by f-alpha. a0: f-alpha's DEPARTED bot, still stamped as hers --
 # the only row a f-alpha prune may remove, and the witness that the write still
@@ -3392,7 +3401,7 @@ harness_check "  ...unmodified, not merely present" "$r"
 harness_check "  ...and stamps .updated, like the delete and update arms" "$r"
 
 # Zero extraction is the guard the wipe needed: an empty keep-set matches no key.
-printf 'fleet:\n  name: f-alpha\n  bots:  # my bots\n    a1:\n      expertise: [x]\n' > "$FS_ROOT/local/f-alpha/drift.yaml"
+printf 'fleet:\n  name: f-alpha\n  manager: a1\n  bots:  # my bots\n    a1:\n      expertise: [x]\n' > "$FS_ROOT/local/f-alpha/drift.yaml"
 fs_seed
 fs_before="$(cat "$FS_STATE")"
 CLAUDLOBBY_ROOT="$FS_ROOT" FLEET_STATE_PATH="$FS_STATE" \
@@ -3424,21 +3433,23 @@ printf '[user]\n\temail = operator@example.com\n' > "$GA_ROOT/home/.gitconfig"
 
 # Compose the gitconfig with the REAL compositor against this root.
 GA_CFG="$GA_ROOT/composed.gitconfig"
-# The composer needs the venv deps (jinja2); the CLI-resolver convention:
-# prefer the checkout venv, fall back to python3 for editable installs.
-GA_PY="$LIB_DIR/../.venv/bin/python"
-[ -x "$GA_PY" ] || GA_PY=python3
-HOME="$GA_ROOT/home" "$GA_PY" - "$GA_ROOT" "$GA_CFG" <<GAPY 2>"$GA_ROOT/compose.err" || sed "s/^/  compose: /" "$GA_ROOT/compose.err" >&2
+# Select the test CLI's interpreter and inject this source harness's assets.
+# Only the native helper is copied into this scenario's private stub directory.
+HOME="$GA_ROOT/home" "$VAL_PY" -I -B - "$VAL_REPO" "$GA_ROOT" "$GA_CFG" <<'GAPY' 2>"$GA_ROOT/compose.err" || sed "s/^/  compose: /" "$GA_ROOT/compose.err" >&2
 import sys
-sys.path.insert(0, '$LIB_DIR/..')
+sys.path.insert(0, sys.argv[1])
+from dataclasses import replace
 from pathlib import Path
 from claudlobby.composer import compose_bot_gitconfig
 from claudlobby.config import BotConfig, GithubAppConfig
 from claudlobby.paths import Paths
-root = Path(sys.argv[1])
+from tests.package_fixtures import source_package
+root = Path(sys.argv[2])
 bot = BotConfig(bot_id="ga", name="ga", expertise=["eng"],
                 github_app=GithubAppConfig(slug="harness-app", bot_user_id=77))
-Path(sys.argv[2]).write_text(compose_bot_gitconfig(bot, Paths(root=root, fleet_dir=root)))
+package = replace(source_package(), native=root / "lib")
+Path(sys.argv[3]).write_text(compose_bot_gitconfig(
+    bot, Paths(root=root, fleet_dir=root, package=package)))
 GAPY
 
 # The git-isolation contract lives ONCE (ga_env_base); the App-credentialed
@@ -3492,12 +3503,10 @@ rm -rf "$GA_ROOT"
 # of the real script running with a real environment, not of a fixture.
 # =============================================================================
 SW_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-sw.XXXXXX")"
-for _d in library templates voices lib; do
-    ln -s "$VAL_REPO/$_d" "$SW_ROOT/$_d"
-done
 cat > "$SW_ROOT/fleet.yaml" <<'SWEOF'
 fleet:
   name: sw-validate
+  manager: m1
   service_prefix: com.swvalidate
   bots:
     m1:
@@ -3507,6 +3516,8 @@ SWEOF
 sw_generate() {  # $1 = optional .env body ("" = no .env at all)
     rm -rf "$SW_ROOT/runtime" "$SW_ROOT/.env"
     [ -n "${1:-}" ] && printf '%s' "$1" > "$SW_ROOT/.env"
+    # CI prepares the selected package's assets before this real CLI runs.
+    # Mutable data must not provide package resources through source symlinks.
     ( cd "$SW_ROOT" && PLANE_EMIT_DISABLED=1 "$VAL_CLI" --root "$SW_ROOT" generate ) \
         > "$SW_ROOT/gen.log" 2>&1 || true
 }
@@ -3843,16 +3854,13 @@ harness_check "checkin: ...and neither the record nor the refusal fired a script
 ck_other=$(printf '%s' "$ck_decision" | env CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$CK_FLEET_H" BOT_ID="valckother" \
     PLANE_EMIT_CLI="$VAL_CLI" PLANE_SOCKET="$PLANE_SOCKET" \
     bash "$VAL_REPO/lib/checkin-record.sh" 2>> "$ROOT/ck-record.err" || true)
-# The CLI reaches the plane through <root>/lib/dispatch-overdue.py -- linked for
-# THIS scenario and removed after it (the #1481 neighbour rule at :652/:682).
-ln -sfn "$LIB_DIR" "$ROOT/lib"
+# The selected prepared package supplies this read door's native resources.
 CLAUDLOBBY_ROOT="$ROOT" val_read "checkins of $CK_FLEET_H" \
     "$VAL_CLI" --root "$ROOT" checkins --fleet "$CK_FLEET_H" --json > "$ROOT/ck-read.out"
 { [ -n "$ck_id" ] && grep -q "$ck_id" "$ROOT/ck-read.out"; } && r=yes || r=no
 harness_check "checkin: the read door LISTS the decision (positive control, gated on a non-empty id)" "$r"
 CLAUDLOBBY_ROOT="$ROOT" val_read "checkins of $CK_FLEET_H/valckmgr --last" \
     "$VAL_CLI" --root "$ROOT" checkins --fleet "$CK_FLEET_H" --bot valckmgr --last --json > "$ROOT/ck-read2.out"
-rm -f "$ROOT/lib"
 { [ -n "$ck_id" ] && [ -n "$ck_other" ] && grep -q "$ck_id" "$ROOT/ck-read2.out" && ! grep -q "$ck_other" "$ROOT/ck-read2.out"; } && r=yes || r=no
 harness_check "checkin: ...--bot --last returns THIS manager's newest row and not the other manager's (a real negative)" "$r"
 
@@ -3872,7 +3880,7 @@ val_scenario "validate manager check-in: the beat injects, gates, and records on
 CK2_FLEET="valckbeat"
 CK2_BOT="valckmgr2"
 val_plane_ready "$ROOT" "$CK2_FLEET"
-printf 'fleet:\n  name: %s\n  bots:\n    %s:\n      expertise: [orchestration]\n' "$CK2_FLEET" "$CK2_BOT" \
+printf 'fleet:\n  name: %s\n  manager: %s\n  bots:\n    %s:\n      expertise: [orchestration]\n' "$CK2_FLEET" "$CK2_BOT" "$CK2_BOT" \
     > "$ROOT/local/$CK2_FLEET/fleet.yaml"
 CK2_DIR="$ROOT/local/$CK2_FLEET/runtime/bots/$CK2_BOT"
 mkdir -p "$CK2_DIR/data" "$CK2_DIR/logs" "$CK2_DIR/.claude/skills"
@@ -3888,7 +3896,7 @@ MANAGER_TMUX=$CK2_BOT
 BOT_SERVICE=$(vsock "$CK2_BOT")
 CONF
 # The equip gate: the real symlink shape the composer writes.
-ln -sfn "$VAL_REPO/library/skills/checkin" "$CK2_DIR/.claude/skills/checkin"
+ln -sfn "$CLAUDLOBBY_LIBRARY_DIR/skills/checkin" "$CK2_DIR/.claude/skills/checkin"
 
 # Chunk 1's harness decision, reused verbatim ($ck_decision, above): both list
 # keys present, raise.reason non-empty, prev_checkin_id present -- the
@@ -3955,13 +3963,9 @@ harness_check "checkin: ...and recorded ONE checkin_triggered anchored on the ma
 # CLI rung, disclosed there by design) -- grep the one line shaped like an id.
 ck2_id=$(grep -Eo '^ck_[0-9a-f]{32}$' "$CK2_DIR/logs/record.out" 2>/dev/null | head -1 || true)
 ck2_dec=$(val_sql "$ROOT" "SELECT COUNT(*) FROM events WHERE kind='system' AND event='checkin_decision' AND source_ref='checkin:$ck2_id'")
-# The CLI reaches its read door at <root>/lib -- linked for THIS call and
-# removed after it, the #1481 neighbour rule the checkin chunk-1 scenario
-# above keeps too.
-ln -sfn "$LIB_DIR" "$ROOT/lib"
+# The selected prepared package supplies the read door, with no data-root link.
 CLAUDLOBBY_ROOT="$ROOT" val_read "checkins of $CK2_FLEET" \
     "$VAL_CLI" --root "$ROOT" checkins --fleet "$CK2_FLEET" --json > "$ROOT/ck2-read.out"
-rm -f "$ROOT/lib"
 { [ -n "$ck2_id" ] && [ "${ck2_dec:-0}" -eq 1 ] && grep -q "$ck2_id" "$ROOT/ck2-read.out"; } && r=yes || r=no
 harness_check "checkin: ...and the session's answer landed a checkin_decision the read door lists" "$r"
 
@@ -4007,7 +4011,7 @@ harness_check "checkin: a BUSY manager is never injected into mid-turn, and the 
 CK2_ROOT2="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-ck2.XXXXXX")"
 CK2_DIR2="$CK2_ROOT2/local/$CK2_FLEET/runtime/bots/$CK2_BOT"
 mkdir -p "$CK2_DIR2/.claude/skills"
-printf 'fleet:\n  name: %s\n  bots:\n    %s:\n      expertise: [orchestration]\n' "$CK2_FLEET" "$CK2_BOT" \
+printf 'fleet:\n  name: %s\n  manager: %s\n  bots:\n    %s:\n      expertise: [orchestration]\n' "$CK2_FLEET" "$CK2_BOT" "$CK2_BOT" \
     > "$CK2_ROOT2/local/$CK2_FLEET/fleet.yaml"
 cat > "$CK2_DIR2/bot.conf" <<CONF
 BOT_ID=$CK2_BOT
@@ -4015,7 +4019,7 @@ FLEET_NAME=$CK2_FLEET
 MANAGER_TMUX=$CK2_BOT
 BOT_SERVICE=$(vsock "$CK2_BOT")
 CONF
-ln -sfn "$VAL_REPO/library/skills/checkin" "$CK2_DIR2/.claude/skills/checkin"
+ln -sfn "$CLAUDLOBBY_LIBRARY_DIR/skills/checkin" "$CK2_DIR2/.claude/skills/checkin"
 CLAUDLOBBY_ROOT="$CK2_ROOT2" CLAUDLOBBY_FLEET="$CK2_FLEET" bash "$VAL_REPO/lib/manager-checkin.sh" "$CK2_FLEET" || true
 sleep 1
 ck2_n4=$(tmux capture-pane -t "$CK2_BOT" -p | grep -c '/checkin' || true)
@@ -4072,7 +4076,10 @@ mkdir -p "$ROOT/local/$F3" "$F3_BOTS/$SIDLE/data" "$F3_BOTS/$SNOMARK/data" "$F3_
 cat > "$ROOT/local/$F3/fleet.yaml" <<YAML
 fleet:
   name: $F3
+  manager: $MGR
   bots:
+    $MGR:
+      expertise: [orchestration]
     $SIDLE:
       expertise: [software-engineering]
     $SNOMARK:
@@ -4208,7 +4215,10 @@ mkdir -p "$S3_HOME/.config/systemd/user" "$S3_HOME/Library/LaunchAgents"
 cat > "$ROOT/local/$F4/fleet.yaml" <<YAML
 fleet:
   name: $F4
+  manager: $MGR
   bots:
+    $MGR:
+      expertise: [orchestration]
     $S3BOT:
       expertise: [software-engineering]
     $S3DOWN:

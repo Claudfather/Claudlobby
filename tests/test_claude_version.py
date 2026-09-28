@@ -629,6 +629,9 @@ def test_no_other_script_reads_a_claude_version():
     py = [
         p.relative_to(REPO)
         for p in (REPO / "claudlobby").rglob("*.py")
-        if '"--version"' in p.read_text() and p.name != "__main__.py"
+        # Build copies of native scripts/assets retain their source owners;
+        # this half of the ratchet checks the Python implementation package.
+        if p.relative_to(REPO / "claudlobby").parts[0] not in {"_native", "_resources"}
+        and '"--version"' in p.read_text() and p.name != "__main__.py"
     ]
     assert py == [], py

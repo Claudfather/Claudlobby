@@ -24,6 +24,7 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -55,6 +56,13 @@ def _rows_of(r):
 def _wire(bot, status, summary, **extras):
     tail = "".join(f" | {k}:{v}" for k, v in extras.items())
     return f"[BOTREPORT] {bot} | {status} | {summary}{tail}"
+
+
+def _without_matcher(paths, native):
+    """A selected private native directory with readers but no matcher."""
+    native.mkdir()
+    (native / "plane-readers.py").write_bytes((paths.lib / "plane-readers.py").read_bytes())
+    return replace(paths, package=replace(paths.package, native=native))
 
 
 # --- the reader ----------------------------------------------------------------
@@ -141,15 +149,18 @@ def test_report_back_serves_the_plane(tmp_path):
     assert gone.returncode == 3 and gone.stdout == "" and "UNREACHABLE" in gone.stderr    # unreachable is not empty
 
 
-def test_report_back_refuses_when_the_matcher_is_unreachable(tmp_path):
+def test_report_back_refuses_when_the_matcher_is_unreachable(tmp_path, monkeypatch, capsys):
     """Every reader rides the install's matcher session (R2b-1 fold): a lib/
     without it cannot answer, and the command REFUSES — never an empty table."""
+    from claudlobby import context
+    from claudlobby.__main__ import main
+
     root, paths, _, _ = _scene(tmp_path)
-    (root / "lib").unlink()
-    (root / "lib").mkdir()
-    (root / "lib" / "plane-readers.py").symlink_to(REPO / "lib" / "plane-readers.py")
-    gone = _report_back(root, "--json")
-    assert gone.returncode == 3 and gone.stdout == "" and "UNREACHABLE" in gone.stderr
+    paths = _without_matcher(paths, tmp_path / "native")
+    monkeypatch.setattr(context, "get_resources", lambda: paths.package)
+    rc = main(["--root", str(root), "--fleet", F, "report-back", "--json"])
+    gone = capsys.readouterr()
+    assert rc == 3 and gone.out == "" and "UNREACHABLE" in gone.err
 
 
 # --- brief: unacked reports + --ack ---------------------------------------------------
@@ -186,8 +197,7 @@ def test_brief_omits_the_section_when_the_matcher_is_unreachable(tmp_path):
     install whose lib/ lacks it cannot answer, and the section is OMITTED —
     never '0 unacked'."""
     root, paths, _, _ = _scene(tmp_path)
-    (root / "lib").unlink(); (root / "lib").mkdir()
-    (root / "lib" / "plane-readers.py").symlink_to(REPO / "lib" / "plane-readers.py")
+    paths = _without_matcher(paths, tmp_path / "native")
     deg = []
     assert _reports_section(paths, "mgr", TERMINAL, deg) == {}
     assert any(x.field == "reports" and x.mode == "omitted" for x in deg)

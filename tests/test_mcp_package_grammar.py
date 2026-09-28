@@ -16,10 +16,12 @@ from __future__ import annotations
 
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 import pytest
 
 from tests.conftest import constructed_env, load_lib_module
+from tests.package_fixtures import source_package
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CHECKER = REPO_ROOT / "lib" / "check-npx-cache.sh"
@@ -247,7 +249,9 @@ class TestTheProbeSeesUvPackages:
             "exit 1\n"
         )
         stub.chmod(0o755)
-        env = constructed_env(CLAUDLOBBY_ROOT=root, NPX_CACHE_DIR=npx_cache)
+        env = constructed_env(CLAUDLOBBY_ROOT=root,
+                              CLAUDLOBBY_LIBRARY_DIR=root / "library",
+                              NPX_CACHE_DIR=npx_cache)
         env["PATH"] = f"{bindir}:{env.get('PATH', '')}"
         return subprocess.run(
             ["bash", str(CHECKER)], capture_output=True, text=True, env=env
@@ -328,7 +332,9 @@ class TestTheProbeSeesUvPackages:
         root = self._root(tmp_path, {"u": {"command": "uvx", "args": ["some-pkg"]}})
         npx_cache = tmp_path / "npx"; npx_cache.mkdir()
         bindir = tmp_path / "emptybin"; bindir.mkdir()
-        env = constructed_env(CLAUDLOBBY_ROOT=root, NPX_CACHE_DIR=npx_cache)
+        env = constructed_env(CLAUDLOBBY_ROOT=root,
+                              CLAUDLOBBY_LIBRARY_DIR=root / "library",
+                              NPX_CACHE_DIR=npx_cache)
         env["PATH"] = f"{bindir}:/usr/bin:/bin"
         r = subprocess.run(["bash", str(CHECKER)], capture_output=True, text=True, env=env)
         assert r.returncode == 1, r.stdout + r.stderr
@@ -345,7 +351,8 @@ class TestTheRefusalCanActuallyFire:
         from tests.conftest import make_paths
 
         (fleet_dir / "lib" / "mcp-package-grammar.py").unlink()
-        paths = make_paths(fleet_dir)
+        paths = replace(make_paths(fleet_dir),
+                        package=replace(source_package(), native=fleet_dir / "lib"))
         try:
             grammar(paths)
         except GrammarUnavailable as e:
@@ -354,7 +361,7 @@ class TestTheRefusalCanActuallyFire:
             raise AssertionError("a missing grammar was silently tolerated")
 
     def test_warm_cache_refuses_rather_than_warming_the_wrong_thing(
-        self, fleet_dir: Path, caplog
+        self, fleet_dir: Path, caplog, monkeypatch
     ):
         """A fallback grammar would be consulted exactly when the two copies
         had diverged, so warm-cache exits nonzero instead of guessing."""
@@ -363,12 +370,16 @@ class TestTheRefusalCanActuallyFire:
         import argparse
 
         from claudlobby.commands.core import cmd_warm_cache
+        from claudlobby import context
 
         _equip(fleet_dir, {"n": {"command": "npx", "args": ["-y", "demo@1.0"]}})
         (fleet_dir / "lib" / "mcp-package-grammar.py").unlink()
+        monkeypatch.setattr(context, "get_resources", lambda: replace(
+            source_package(), native=fleet_dir / "lib"))
         args = argparse.Namespace(root=str(fleet_dir), fleet=None, seed=False, dry_run=False)
         with caplog.at_level(logging.INFO):
             assert cmd_warm_cache(args) != 0
+        assert "mcp-package-grammar.py" in caplog.text
         assert "cache warm complete" not in caplog.text
 
 

@@ -1,6 +1,8 @@
 """Installed resource, composition and authoring smoke without service operation."""
 
 import hashlib
+from email.parser import BytesParser
+from importlib import metadata as importlib_metadata
 import json
 from pathlib import Path
 import shutil
@@ -8,6 +10,9 @@ import subprocess
 import sys
 import tarfile
 import zipfile
+
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 
 from tests.conftest import constructed_env
 
@@ -41,6 +46,63 @@ def _asset_hashes(package):
             hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mode & 0o111,
         ) for path in paths
     }
+
+
+def _copy_installed_dependencies(wheel, installed):
+    """Copy this wheel's core dependency closure from the test interpreter.
+
+    A nested --system-site-packages venv sees the base interpreter's packages,
+    not its parent venv's. Use the wheel's requirements and installed RECORDs
+    instead, without downloading or adding the source checkout to sys.path.
+    """
+    with zipfile.ZipFile(wheel) as archive:
+        metadata_file, = [name for name in archive.namelist()
+                          if name.endswith(".dist-info/METADATA")]
+        metadata = BytesParser().parsebytes(archive.read(metadata_file))
+    pending = [Requirement(value) for value in metadata.get_all("Requires-Dist", [])
+               if Requirement(value).marker is None
+               or Requirement(value).marker.evaluate({"extra": ""})]
+    copied, expanded = set(), set()
+    while pending:
+        requirement = pending.pop()
+        name = canonicalize_name(requirement.name)
+        assert name != "claudlobby", "dependency closure must not copy the source package"
+        distribution = importlib_metadata.distribution(requirement.name)
+        assert requirement.specifier.contains(distribution.version, prereleases=True), (
+            f"Installed {name}=={distribution.version} does not satisfy {requirement}")
+        if name not in copied:
+            source_root = Path(distribution.locate_file("")).resolve()
+            files = distribution.files
+            assert files is not None, f"{name} has no installed file inventory"
+            assert any(str(path).endswith(".dist-info/WHEEL") for path in files), (
+                f"{name} must be an installed wheel, not an editable source dependency")
+            for relative in files:
+                relative = Path(relative)
+                if (relative.is_absolute() or ".." in relative.parts
+                        or "__pycache__" in relative.parts or relative.suffix in {".pyc", ".pyo"}):
+                    continue
+                source = Path(distribution.locate_file(relative)).resolve()
+                if not source.is_relative_to(source_root):
+                    continue
+                assert source.is_file(), f"{name} installed file is missing: {relative}"
+                destination = installed / relative
+                assert destination.resolve().is_relative_to(installed.resolve())
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if destination.exists():
+                    assert destination.read_bytes() == source.read_bytes(), (
+                        f"Dependency files conflict at {relative}")
+                else:
+                    shutil.copy2(source, destination)
+            copied.add(name)
+        for extra in {"", *requirement.extras}:
+            if (name, extra) in expanded:
+                continue
+            expanded.add((name, extra))
+            for value in distribution.requires or []:
+                dependency = Requirement(value)
+                if dependency.marker is None or dependency.marker.evaluate({"extra": extra}):
+                    pending.append(dependency)
+    return sorted(copied)
 
 
 def test_installed_resources_match_direct_and_sdist_wheels(tmp_path):
@@ -142,14 +204,15 @@ def test_installed_resources_match_direct_and_sdist_wheels(tmp_path):
         assert not any(prefix + name in archive.getnames() for name in ignored)
 
     release = tmp_path / "release"
-    _run([sys.executable, "-m", "venv", "--system-site-packages", release], tmp_path)
+    _run([sys.executable, "-m", "venv", release], tmp_path)
     python, cli = release / "bin/python", release / "bin/claudlobby"
-    # Reuse development dependencies, but install this wheel into the private
-    # release even if a host copy exists. Never uninstall or replace that copy.
+    # Install only into the private environment. Populate its dependency closure
+    # from the current test interpreter's installed distributions below.
     _run([python, "-m", "pip", "install", "--ignore-installed", "--no-deps",
           "--no-index", "--no-compile", wheel], tmp_path)
     installed = Path(_run([python, "-I", "-c",
                           "import sysconfig; print(sysconfig.get_path('purelib'))"], tmp_path).strip())
+    dependencies = _copy_installed_dependencies(wheel, installed)
     _run([sys.executable, "-I", "-S", "-B", "-c", """
 import sys
 sys.path.insert(0, sys.argv[1])
@@ -212,13 +275,16 @@ print(json.dumps({'artifact_id': r.artifact_id, 'content_sha256': r.content_sha2
     # No sys.path or resource injection: these imports must come from the
     # installed wheel while the working directory and data root are unrelated.
     _run([python, "-I", "-B", "-c", """
-import pathlib, plistlib, shlex, sys
+import importlib.metadata, pathlib, plistlib, shlex, sys
 import claudlobby
 from claudlobby.context import resolve_context
 from claudlobby.composer import compose_fleet
 from claudlobby.resources import get_resources, selected_cli
-root, package, cli = map(pathlib.Path, sys.argv[1:])
+root, package, cli = map(pathlib.Path, sys.argv[1:4])
 assert pathlib.Path(claudlobby.__file__).resolve().parent == package.resolve()
+for name in sys.argv[4:]:
+    distribution = importlib.metadata.distribution(name)
+    assert pathlib.Path(distribution.locate_file('')).resolve() == package.parent.resolve()
 resources = get_resources()
 assert resources.native == package / '_native'
 assert selected_cli() == cli
@@ -241,6 +307,6 @@ for bot_id, directory in outputs.items():
     assert unit['EnvironmentVariables']['CLAUDLOBBY_CLI'] == str(cli)
     assert unit['EnvironmentVariables']['CLAUDLOBBY_ROOT'] == str(root)
 assert (outputs['worker'] / '.claude/skills/installed-smoke').resolve() == root / 'library/skills/installed-smoke'
-""", data, package, cli], outside)
+""", data, package, cli, *dependencies], outside)
     assert _asset_hashes(package) == immutable_before
     assert not any((data / name).exists() for name in (".git", "pyproject.toml", "claudlobby", "lib"))

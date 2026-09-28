@@ -345,6 +345,10 @@ def test_the_send_carries_the_rows_fleet_in_the_environment(tmp_path, monkeypatc
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setenv("BOT_DIR", "/nowhere")
+    destination = tmp_path / "local" / "engineering"
+    destination.mkdir(parents=True)
+    (destination / "fleet.yaml").write_text(
+        "fleet:\n  name: engineering\n  manager: lead\n  bots:\n    lead: {}\n")
     paths = Paths(tmp_path, package=replace(source_package(), native=tmp_path / "lib"))
     rc, _ = task_cmd.send_to_bot(paths, "lead", "NUDGE …", fleet="engineering")
     assert rc == 0 and seen["argv"][-2:] == ["lead", "NUDGE …"]
@@ -377,6 +381,10 @@ def test_fold_f5_send_to_bot_puts_the_msg_id_on_the_wire_as_plane_msg_id(tmp_pat
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.delenv("PLANE_MSG_ID", raising=False)
+    destination = tmp_path / "local" / "eng"
+    destination.mkdir(parents=True)
+    (destination / "fleet.yaml").write_text(
+        "fleet:\n  name: eng\n  manager: lead\n  bots:\n    lead: {}\n")
     paths = Paths(tmp_path, package=replace(source_package(), native=tmp_path / "lib"))
     mid = "msg_" + "a" * 32
     task_cmd.send_to_bot(paths, "lead", "NUDGE …", fleet="eng",

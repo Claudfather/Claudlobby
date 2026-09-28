@@ -25,6 +25,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -301,10 +302,6 @@ class TestTheRungIsAWarningNeverAnError:
 
         mcp_dir = tmp_path / "library" / "mcp"
         mcp_dir.mkdir(parents=True)
-        # The REAL shared grammar, not a stand-in: mcp_grammar refuses rather
-        # than falling back, so a test root without lib/ exercises the refusal
-        # path instead of the rung.
-        (tmp_path / "lib").symlink_to(REPO_ROOT / "lib")
         for name, body in fragments.items():
             (mcp_dir / f"{name}.json").write_text(json.dumps(body))
         bot = BotConfig(
@@ -362,13 +359,16 @@ class TestTheRungIsAWarningNeverAnError:
         from tests.package_fixtures import source_package
         from claudlobby.paths import Paths
 
-        # No lib/, no library/ — the grammar cannot load from this root at all.
+        # No native directory or library — the grammar cannot load at all.
         bot = BotConfig(bot_id="alpha", name="alpha", expertise=["x"], mcp=[])
         fleet = FleetConfig(manager="alpha",
             name="probe", service_prefix="com.example.probe", bots={"alpha": bot}
         )
         report = validator.ValidationReport()
-        validator._validate_mcp_packages(fleet, Paths(root=tmp_path, package=source_package()), report)
+        paths = Paths(root=tmp_path, package=replace(
+            source_package(), library=tmp_path / "library",
+            native=tmp_path / "missing-native"))
+        validator._validate_mcp_packages(fleet, paths, report)
 
         assert report.warnings == []
         assert report.errors == []
@@ -393,7 +393,10 @@ class TestTheRungIsAWarningNeverAnError:
             name="probe", service_prefix="com.example.probe", bots={"alpha": bot}
         )
         report = validator.ValidationReport()
-        validator._validate_mcp_packages(fleet, Paths(root=tmp_path, package=source_package()), report)
+        paths = Paths(root=tmp_path, package=replace(
+            source_package(), library=tmp_path / "library",
+            native=tmp_path / "missing-native"))
+        validator._validate_mcp_packages(fleet, paths, report)
 
         assert len(report.warnings) == 1
         assert "UNKNOWN" in report.warnings[0]

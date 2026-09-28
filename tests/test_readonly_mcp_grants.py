@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -74,7 +75,8 @@ def _build_library(
         (skill_dir / "SKILL.md").write_text(
             f"---\nname: catalog\ntool_grants:\n{grants_yaml}---\n\n# catalog\n\nbody\n"
         )
-    return Paths(root=root, fleet_dir=root, package=source_package())
+    return Paths(root=root, fleet_dir=root,
+                 package=replace(source_package(), library=root / "library"))
 
 
 def _bot(

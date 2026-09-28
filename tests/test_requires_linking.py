@@ -73,7 +73,8 @@ def _equip(fleet_dir: Path, bot_id: str, **fields: list[str]) -> None:
 
 
 def _paths(fleet_dir: Path) -> Paths:
-    return Paths(root=fleet_dir, fleet_dir=fleet_dir, package=source_package())
+    return Paths(root=fleet_dir, fleet_dir=fleet_dir,
+                 package=replace(source_package(), library=fleet_dir / "library"))
 
 
 # ---------------------------------------------------------------------------

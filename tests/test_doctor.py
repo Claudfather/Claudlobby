@@ -751,11 +751,12 @@ class TestCheckCredentialsScoping:
         go and set a credential — and the runtime raises precisely so the
         distinction survives. Folding it into an empty mapping would recreate
         the unreachable-vs-empty defect inside a fix for its sibling. The
-        fixture deliberately does NOT stage lib/env-tiers.sh.
+        selected package deliberately has no native env-tiers.sh resolver.
         """
         _, fleet, paths = doctor_fleet
         self._no_network(monkeypatch)
         monkeypatch.setenv("GITHUB_PAT", "ghp_whatever")
+        paths = replace(paths, package=replace(paths.package, native=paths.root / "lib"))
 
         report = DoctorReport()
         from claudlobby.doctor import check_credentials
@@ -995,7 +996,7 @@ _BRIEFING_SLOT = (
 _NO_CHECKIN = "  system_defaults:\n    protocols: false\n"
 
 
-def _fleet_yaml(*, manager: bool = True, armed: bool = False, equipped: bool = True) -> str:
+def _fleet_yaml(*, leaf_manager: bool = True, armed: bool = False, equipped: bool = True) -> str:
     """A fleet manifest varying only the three facts #1680's rungs read.
 
     Written at zero indent: these strings are assembled by concatenation and
@@ -1003,9 +1004,10 @@ def _fleet_yaml(*, manager: bool = True, armed: bool = False, equipped: bool = T
     leading whitespace.
     """
     briefing = _BRIEFING_SLOT if armed else ""
-    if not manager:
+    if not leaf_manager:
         return (
-            "fleet:\nmanager: worker\n"
+            "fleet:\n"
+            "  manager: worker\n"
             "  name: solo-fleet\n"
             "  service_prefix: com.solo\n"
             "  bots:\n"
@@ -1014,6 +1016,7 @@ def _fleet_yaml(*, manager: bool = True, armed: bool = False, equipped: bool = T
         )
     return (
         "fleet:\n"
+        "  manager: lead\n"
         "  name: mgr-fleet\n"
         "  service_prefix: com.mgr\n"
         + ("" if equipped else _NO_CHECKIN)
@@ -1137,7 +1140,11 @@ def _doctor_rungs(tmp_path, monkeypatch, fleet_yaml: str, *, projects: bool = Fa
     monkeypatch.delenv("FLEET_NAME", raising=False)
     fleet, _md = load_fleet(root / "fleet.yaml")
     _pin_plugin_manifest(tmp_path, monkeypatch, fleet)
-    report = run_doctor(fleet, Paths(root=root, fleet_dir=root, package=source_package()))
+    # This scaffold authors a minimal library and explicitly wires native
+    # peers. Select those assets so unrelated packaged MCP defaults cannot
+    # turn a work-dispatch warning test into a host npx-cache probe.
+    package = replace(source_package(), library=root / "library", native=root / "lib")
+    report = run_doctor(fleet, Paths(root=root, fleet_dir=root, package=package))
     return {c.name: c for c in report.checks}
 
 
@@ -1183,7 +1190,8 @@ class TestCheckIgnition:
     def _check(self, tmp_path, fleet_yaml: str):
         root = _doctor_root(tmp_path, fleet_yaml)
         fleet, _md = load_fleet(root / "fleet.yaml")
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        package = replace(source_package(), library=root / "library", native=root / "lib")
+        paths = Paths(root=root, fleet_dir=root, package=package)
         report = DoctorReport()
         check_ignition(fleet, paths, report)
         assert len(report.checks) == 1
@@ -1210,7 +1218,7 @@ class TestCheckIgnition:
 
 
 
-class TestRungAgreementOnAManagerLessFleet:
+class TestRungAgreementOnASingletonFleet:
     """#1680: `goal-binding` and `ignition` are two halves of one question —
     will this fleet ever do any work? — and they were built in parallel
     without seeing each other. On a fleet with no leaf manager they printed a
@@ -1227,7 +1235,7 @@ class TestRungAgreementOnAManagerLessFleet:
     def test_both_rungs_pass_and_give_the_same_not_applicable_reason(
         self, tmp_path, monkeypatch
     ):
-        by_name = _doctor_rungs(tmp_path, monkeypatch, _fleet_yaml(manager=False))
+        by_name = _doctor_rungs(tmp_path, monkeypatch, _fleet_yaml(leaf_manager=False))
         # Fail closed: a renamed or dropped rung must break this test rather
         # than make it vacuously true.
         assert {"goal-binding", "ignition"} <= set(by_name), sorted(by_name)
@@ -1240,25 +1248,25 @@ class TestRungAgreementOnAManagerLessFleet:
     ):
         """The tripwire the acceptance criterion asks for.
 
-        A fleet with no leaf manager has no dispatcher, so no rung may report
-        a *work-dispatch* gap on it as a finding. `services` is the one
+        A singleton manager has no workers, so no rung may report a
+        *work-dispatch* gap on it as a finding. `services` is the one
         legitimate warning on this fixture — bots exist and are not enrolled,
         which is true and unrelated. Any OTHER rung warning here is either
         the #1680 divergence rebuilt or a deliberate new finding; both need a
         human to look, which is what an allowlist that must be edited buys.
         """
-        by_name = _doctor_rungs(tmp_path, monkeypatch, _fleet_yaml(manager=False))
+        by_name = _doctor_rungs(tmp_path, monkeypatch, _fleet_yaml(leaf_manager=False))
         warned = {n for n, c in by_name.items() if c.status in ("warn", "fail")}
         assert warned <= {"services"}, {n: by_name[n].detail for n in warned}
 
-    def test_a_manager_less_fleet_with_projects_still_reports_them(
+    def test_a_singleton_fleet_with_projects_still_reports_them(
         self, tmp_path, monkeypatch
     ):
-        """The gate replaces the no-projects WARN only. A manager-less fleet
+        """The gate replaces the no-projects WARN only. A singleton fleet
         that HAS declared projects keeps its informative PASS — the gate is
         an applicability test, not a mute button."""
         by_name = _doctor_rungs(
-            tmp_path, monkeypatch, _fleet_yaml(manager=False), projects=True
+            tmp_path, monkeypatch, _fleet_yaml(leaf_manager=False), projects=True
         )
         goal = by_name["goal-binding"]
         assert goal.status == "pass", goal.detail
@@ -1369,22 +1377,23 @@ class TestIgnitionGapIsTheRungsOwnPredicate:
     there."""
 
     @pytest.mark.parametrize(
-        "armed,manager",
+        "armed,leaf_manager",
         [(False, True), (True, True), (False, False), (True, False)],
     )
     def test_the_predicate_agrees_with_the_rung(
-        self, tmp_path, monkeypatch, armed, manager
+        self, tmp_path, monkeypatch, armed, leaf_manager
     ):
         from claudlobby.ignition import ignition_gap
 
-        root = _doctor_root(tmp_path, _fleet_yaml(manager=manager, armed=armed))
+        root = _doctor_root(tmp_path, _fleet_yaml(leaf_manager=leaf_manager, armed=armed))
         monkeypatch.delenv("FLEET_NAME", raising=False)
         fleet, _md = load_fleet(root / "fleet.yaml")
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        package = replace(source_package(), library=root / "library", native=root / "lib")
+        paths = Paths(root=root, fleet_dir=root, package=package)
         report = DoctorReport()
         check_ignition(fleet, paths, report)
         rung_warns = report.checks[0].status == "warn"
-        assert rung_warns is (not armed and manager), report.checks[0].detail
+        assert rung_warns is (not armed and leaf_manager), report.checks[0].detail
         assert ignition_gap(fleet, paths) is rung_warns, report.checks[0].detail
 
 
@@ -1408,7 +1417,7 @@ class TestTheFixtureRefusesDeadWiring:
 
     No shortcut for WHICH tests stay silent has survived: neither assertion
     shape (a presence assertion,
-    `test_a_manager_less_fleet_with_projects_still_reports_them`, is silent)
+    `test_a_singleton_fleet_with_projects_still_reports_them`, is silent)
     nor asserts-why-not-what. The only property that held is the near-tautology
     that a test is silent exactly when its expected outcome is identical under
     both wiring states. Hence a structural refusal, which needs no

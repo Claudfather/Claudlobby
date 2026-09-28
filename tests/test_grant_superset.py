@@ -17,6 +17,7 @@ gitignored ``local/`` overlays and cannot be referenced from a committed test.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from claudlobby.composer import (
@@ -123,7 +124,8 @@ class TestGrantSupersetSweep:
     def _paths_and_fleet(self, tmp_path: Path):
         root = tmp_path / "claudlobby"
         _build_library(root)
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root,
+                      package=replace(source_package(), library=root / "library"))
         bots = _representative_bots()
         # Keep every grant-shape subject a worker under one explicit owner.
         lead = BotConfig(bot_id="lead", name="lead", expertise=["orchestration"])
@@ -186,7 +188,8 @@ class TestGrantSupersetSweep:
             "---\ntitle: native\ntype: connector\n"
             'tool_grants:\n  - "mcp__claude_ai_Gmail__*"\n---\n\n# native\n'
         )
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root,
+                      package=replace(source_package(), library=root / "library"))
         bot = BotConfig(
             bot_id="folder-bot",
             name="folder-bot",
@@ -215,7 +218,8 @@ class TestGrantSupersetGateHasTeeth:
                 }
             )
         )
-        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        paths = Paths(root=root, fleet_dir=root,
+                      package=replace(source_package(), library=root / "library"))
         bot = BotConfig(
             bot_id="w", name="w", expertise=["eng"], mcp=[McpEntry(name="github")]
         )

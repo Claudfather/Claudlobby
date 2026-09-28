@@ -37,9 +37,9 @@ branch. Merges and production activation remain operator decisions.
 
 | Step | State | Evidence / remaining work |
 |---|---|---|
-| P0 evidence safety | CI running | #1846 integrated locally; private HOME/XDG/temp and executable-origin changes in draft #1928 (current `af1cc44d`). First Linux run passed all 14 isolation cases but failed on private-env placement/socket length; corrected, fresh pytest pending, two conformance jobs green. |
-| P1 command loading/package | Partial validation | Lazy argparse dispatch and canonical resource packaging in draft #1929 (current `c2b8188a`). Initial CI collection found two main-added recording tests using retired fixtures and a wrong test import; corrected. Bootstrap and artifact assertions passed in isolated exports; normal pytest and host acceptance remain outstanding. |
-| P2 context/release | In progress | Explicit package/data/overlay foundation and caller migration underway; untested. Explicit fleet manager and native caller wiring implemented; fixture migration underway. Release assembly/activation and installed composition remain pending. |
+| P0 evidence safety | Linux CI passed | #1846 integrated locally; private HOME/XDG/temp and executable-origin changes in draft [#1928](https://github.com/Claudfather/Claudlobby/pull/1928). Current head `af1cc44d`: 5,812 passed, 13 skipped, 3 warnings; all three checks green. Native macOS remains unverified. |
+| P1 command loading/package | Linux CI passed | Lazy argparse dispatch and canonical resource packaging in draft [#1929](https://github.com/Claudfather/Claudlobby/pull/1929). Current head `c2b8188a`: 5,980 passed, 13 skipped, 3 warnings; all three checks green. Bootstrap and artifact assertions also passed in isolated exports; installed composition and host acceptance remain outstanding. |
+| P2 context/release | Draft; repairing failed suite | P2a package/data/overlay and caller migration in [#1930](https://github.com/Claudfather/Claudlobby/pull/1930), head `50ad5acd`: 5,550 passed, 472 failed, 12 skipped, 3 warnings; both conformance checks green. Fixes in progress. Installed-composition smoke, native macOS, Pi and real-agent canary unverified. P2b release assembly/activation remains pending. |
 | A0–A4 tasks/messages | Pending | Follow the plan's migration audit and ordered semantic cutover. |
 | B lifecycle/setup | Pending | Reuse supervisor consolidation; verify affected native platforms. |
 | C coordination/jobs/plane | Pending | Migrate complete operation/caller bundles. |
@@ -49,6 +49,40 @@ Tracking limitation: Linear team configuration is unavailable; no ticket was
 created in an unverified team. GitHub #1747 and this record track the work.
 
 ## Evidence so far
+
+Current hosted results, checked on 2026-09-28:
+
+| Slice | Exact head | Hosted result |
+|---|---|---|
+| P0 / #1928 | `af1cc44d293f4456f2ef49d9d391afd39d974ade` | [All three checks green](https://github.com/Claudfather/Claudlobby/pull/1928/checks); 5,812 passed, 13 skipped, 3 warnings in 1,035.53 s; zero failures/errors. |
+| P1 / #1929 | `c2b8188a6ca974601bcbeba3ef41c61a9396f29f` | [All three checks green](https://github.com/Claudfather/Claudlobby/pull/1929/checks); 5,980 passed, 13 skipped, 3 warnings in 1,047.77 s; zero failures/errors. |
+| P2a / #1930 | `50ad5acd8940dea2030078c768893ff2a10092dc` | [Full suite failed; conformance green](https://github.com/Claudfather/Claudlobby/pull/1930/checks): 5,550 passed, 472 failed, 12 skipped, 3 warnings. |
+
+Full P0/P1 logs are `/tmp/claudlobby-cli-evidence-1747/p0-af1-ci.log` and
+`p1-c2b-ci.log`. Both have the same 13 skips:
+
+| Count | Test / reason |
+|---|---|
+| 2 | `test_boot_strand_sampler.py`: real boots require `BOOT_SAMPLER_REALBOOT=1`. |
+| 1 | `test_claude_session_pid.py`: no live Claude process for the control. |
+| 4 | `test_claudron_loop.py`: three cases lack `claudron.hooks`; contention case needs the `[vault]` extra and git. |
+| 1 | `test_env_cascade.py`: shallow history cannot establish historical transcription drift. |
+| 1 | `test_freshbox_boot_harness.py`: real boot requires `FRESHBOX_REALBOOT=1`. |
+| 1 | `test_macos_supervision.py`: Linux has no `launchctl`. |
+| 1 | `test_plane_daemon_units.py`: regular site-packages installation does not satisfy this user-site-only regression's premise. |
+| 1 | `test_rename_map_gate.py`: no local clauDNA skills checkout; network clone belongs to its separate CI job. |
+| 1 | `test_send_size_probe.py`: real Claude boot requires `SEND_PROBE_REAL=1`. |
+
+The three pytest warnings remain unresolved in both runs: Starlette's `httpx`
+test-client deprecation; an invalid backslash escape in
+`tests/test_pr_review_state.py:147`; and a `PytestUnraisableExceptionWarning`
+reported during `test_grid_fleet_filter_keeps_twin_named_bots_apart`, where
+`BaseSubprocessTransport.__del__` encounters a closed event loop. The last
+traceback contains a workflow error annotation, but pytest records it as a
+warning, with no failed test or teardown error. This is distinct from the
+corrected session-cleanup errors below. Workflow Node deprecation notices are
+outside the three pytest warnings. These Linux passes do not cover the skipped
+real-agent/platform/dependency cases or establish installed-composition smoke.
 
 - P0 local attempts on Python 3.11 and 3.12 stalled while loading third-party
   native extensions, before pytest collection. They are not passing or failing
@@ -68,9 +102,10 @@ created in an unverified team. GitHub #1747 and this record track the work.
 - On this arm64 Mac, dependency-blocked help took median 0.02255 s and p95
   0.02399 s over 20 samples at load approximately 3.1. No Pi acceptance claim.
 - #1929 compares against `codex/unified-cli-integration-base`: current main plus
-  #1846 and the P0 change. Its two new implementation commits are `a2a654e2`
-  (loading) and `870010d1` (packaging); its published merge tree is identical to
-  `870010d1`. Retarget after prerequisite reviews/merges; none is merged here.
+  #1846 and the P0 change. The original implementation commits are `a2a654e2`
+  (loading) and `870010d1` (packaging); the current head also carries subsequent
+  isolation and recording-fixture corrections. Retarget after prerequisite
+  reviews/merges; none is merged here.
 
 Local execution artifacts are under `/tmp/claudlobby-cli-evidence-1747`:
 `p1-parser-parity.json`, `p1-standalone/bootstrap-timing.json`, and
@@ -80,10 +115,10 @@ descriptions must carry final results before a slice is presented as ready.
 - Initial #1928 Linux suite: 5,798 passed, 12 failed, 13 skipped, 2 errors. The
   failures exposed environment directories inside fixture data and long Unix
   socket paths. Short independent private directories fix that shared cause;
-  the amended suite must pass before this slice is ready.
-- #1929 current head also carries that correction and migrates the newer
-  pull-root/vault-hook recording tests to #1846's scratch fixture. Current-head
-  conformance passes; full Linux pytest remains running.
+  the current-head full suite passes as recorded above.
+- #1929 carries that correction and migrates the newer pull-root/vault-hook
+  recording tests to #1846's scratch fixture. Its initial collection failure
+  also exposed a wrong packaging-test conftest import, now corrected.
 - P2 uses `state/releases/` under the selected host data root as the canonical
   immutable release store. Code guards and composed isolation protect its real
   retained targets as well as the installed package assets. This is implementation
@@ -93,7 +128,7 @@ descriptions must carry final results before a slice is presented as ready.
   function-private TMPDIR that was subsequently removed (P1: 1 failed, 2,157
   passed, 12 skipped, 3,823 errors). Session initialization now owns that base.
   Exact fixture-only before/after probe: 1 failed + 1 error before, 2 passed
-  after. Current P0/P1 full suites rerun; conformance passes.
+  after. The current P0/P1 full-suite passes include this correction.
 - P2 paths assertions: 12 passed, 2 YAML-dependent cases not run, using
   --noconftest in a disposable export. This is scoped path evidence, not the
   full resource/composition lane. A session-CLI stub execution attempt on macOS
@@ -106,18 +141,30 @@ descriptions must carry final results before a slice is presented as ready.
   helper environments and synthetic libraries accidentally reading the package
   base. These are being repaired; this is not a native macOS acceptance claim.
 
-- P0 latest completed full suite: 5,812 passed, 13 skipped, two teardown errors;
-  P1: 5,973 passed, seven failed, 13 skipped, two teardown errors. Shared cleanup
+- The previous P0 full suite reported 5,812 passed, 13 skipped and two teardown
+  errors; P1 reported 5,973 passed, seven failed, 13 skipped and two teardown
+  errors. Shared cleanup
   now belongs to the session after filesystem monkeypatches restore. Existing
   source-state suite proves the correction: 23 passed + two errors before,
   23 passed afterward. P1's seven failures were newer recording callers missing
-  the scratch fixture; those callers are migrated. Current heads rerun in CI.
+  the scratch fixture in fleet-pulse escalation/events and plane dispatch tests;
+  those callers now receive the owned recording fixture. The exact current heads
+  above pass with zero failures/errors, including session-owned cleanup and
+  those caller migrations.
 - P2 indexed disposable-export resource preparation passed: builds a private
   wheel and installs only its resource/native assets for editable test imports.
 - After composition fixture repairs, 597 tests passed with one stale anchor-set
   assertion and two export-index setup errors; the assertion is corrected. Twelve
   subprocess-dependent cases were excluded from that scoped pure-Python run.
-  The export-index cases require the normal indexed CI checkout. Full P2 CI,
-  installed-composition smoke, native macOS, Pi and real-agent canary remain
+  The export-index cases require the normal indexed CI checkout. P2a #1930's
+  first full suite failed as recorded above; conformance is green. Installed-composition smoke,
+  native macOS, Pi and real-agent canary remain
   unverified. The source/resource/caller migration is deliberately one coherent
   breaking bundle; mechanical fixture changes dominate its file count.
+
+- P2a first full suite exposed an overly broad source-time host-context check in
+  `lib-common.sh`: pure helpers and supervisor queries require no host storage.
+  The correction moves the explicit-root requirement to stateful boundaries,
+  without restoring checkout/PATH fallbacks. Other failures expose old implicit
+  manager, synthetic package, native-helper and CLI fixture assumptions. Existing
+  assertions are migrated to explicit owned resources, not weakened.

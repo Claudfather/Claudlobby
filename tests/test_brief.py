@@ -1397,7 +1397,7 @@ def _fleet_with_manager(**kw) -> FleetConfig:
         "alex": BotConfig(bot_id="alex", name="Alex", expertise=["software-engineering"]),
         "mgr": BotConfig(bot_id="mgr", name="Mgr", expertise=[]),
     }
-    base = dict(bots=bots)
+    base = dict(bots=bots, manager="mgr")
     base.update(kw)
     return _fleet(**base)
 

@@ -26,6 +26,7 @@ REAL_SCRIPTS = [
     "setup-fleet",
     "setup-fleets",
     "lib-common.sh",
+    "cli-context.sh",
     "supervisor.sh",
     "install_fleet_timer.sh",
 ]
@@ -202,6 +203,7 @@ class Harness:
             HOME=self.home,
             TMPDIR=self.root,
             CLAUDLOBBY_ROOT=self.root,
+            CLAUDLOBBY_CLI=self.bin / "claudlobby",
             STUB_LOG=self.log,
             TMUX_HEALTHY=self.tmux_healthy,
             STUB_ENROLLED=self.enrolled,

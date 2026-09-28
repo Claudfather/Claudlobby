@@ -8,6 +8,7 @@ credential VALUE ever reaches the output.
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from pathlib import Path
 from textwrap import dedent
 
@@ -80,7 +81,8 @@ def estate(tmp_path: Path, monkeypatch):
     (fleet_dir / "fleet.yaml").write_text(FLEET_YAML)
 
     fleet, _ = load_fleet(fleet_dir / "fleet.yaml")
-    paths = Paths(root=root, fleet_dir=fleet_dir, package=source_package())
+    package = replace(source_package(), library=root / "library", native=root / "lib")
+    paths = Paths(root=root, fleet_dir=fleet_dir, package=package)
     return root, fleet_dir, fleet, paths
 
 
