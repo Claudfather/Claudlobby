@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 import importlib.util
+import json
 from pathlib import Path
 import plistlib
 import shlex
@@ -128,6 +129,54 @@ class Observations:
 
     def collect(self):
         return collect_enrollment(self.root, tuple(self.declarations), package=self.package, runner=self.runner)
+
+
+@pytest.mark.parametrize("manager", ["Linux", "Darwin"])
+def test_explicit_empty_bootstrap_proves_full_catalog_with_foreign_units(tmp_path, manager):
+    obs = Observations(tmp_path)
+    obs.manager = manager
+    obs.env = {"CLAUDLOBBY_ROOT": str(tmp_path / "foreign-root")}
+    foreign = obs.add("foreign.service" if manager == "Linux" else "com.foreign.plist",
+                      working=tmp_path / "foreign-root", declared=False)
+    original = foreign.read_bytes()
+    with pytest.raises(InventoryError, match="empty generated manifest"):
+        obs.collect()
+    inventory = collect_enrollment(obs.root, (), package=obs.package, runner=obs.runner,
+                                   bootstrap_empty=True).require_complete()
+    assert inventory.bootstrap_empty is True and inventory.units == ()
+    assert inventory.foreign == (str(foreign),) and inventory.observed_files[0].content == original
+    assert sum(function == "svc_inventory_catalog" for function, _ in obs.calls) == 2
+    assert any(function == "svc_inventory_properties" for function, _ in obs.calls)
+    assert foreign.read_bytes() == original
+    if manager == "Darwin":
+        obs.launchd.clear()  # installed but unloaded foreign jobs still coexist
+        collect_enrollment(obs.root, (), package=obs.package, runner=obs.runner,
+                           bootstrap_empty=True).require_complete()
+    with pytest.raises(InventoryError, match="incomplete"):
+        replace(inventory, bootstrap_empty=False).require_complete()
+    # A changed/unknown managed observation is not another empty host.
+    obs.env = {"CLAUDLOBBY_ROOT": str(obs.root)}
+    obs.add("owned.service" if manager == "Linux" else "com.owned.plist", "bot", declared=False)
+    if manager == "Darwin":
+        obs.launchd.clear()  # no loaded definition to reveal this owned bot
+    with pytest.raises(InventoryError, match="owned consumer"):
+        collect_enrollment(obs.root, (), package=obs.package, runner=obs.runner,
+                           bootstrap_empty=True).require_complete()
+
+
+def test_empty_bootstrap_refuses_unknown_catalog_and_prior_selection(tmp_path):
+    obs = Observations(tmp_path)
+    foreign = obs.add("foreign.service", working=tmp_path / "foreign-root", declared=False)
+    obs.properties[foreign.name]["Environment"] = ""
+    del obs.properties[foreign.name]["Id"]
+    with pytest.raises(InventoryError, match="cannot observe"):
+        collect_enrollment(obs.root, (), package=obs.package, runner=obs.runner,
+                           bootstrap_empty=True).require_complete()
+    obs.root.joinpath("state").mkdir()
+    obs.root.joinpath("state/selected-release.json").write_text(json.dumps(
+        {"schema": 1, "activation_id": "prior", "release_id": "prior", "plan_id": "prior"}))
+    with pytest.raises(InventoryError, match="prior release selection"):
+        collect_enrollment(obs.root, (), package=obs.package, runner=obs.runner, bootstrap_empty=True)
 
 
 def test_all_scopes_bytes_links_and_exact_candidate_cleanup(tmp_path):

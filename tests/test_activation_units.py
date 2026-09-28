@@ -11,9 +11,9 @@ from claudlobby import activation_state as state
 from claudlobby import activation_units as units
 from claudlobby import config_install
 from claudlobby.config_plan import ConfigPlanBuilder
-from claudlobby.supervision_inventory import EnrollmentInventory, EnrolledUnit, FileSnapshot, UnitDeclaration
+from claudlobby.supervision_inventory import Adapter, EnrollmentInventory, EnrolledUnit, FileSnapshot, UnitDeclaration, collect_enrollment
 from tests.test_releases import installed, r
-from tests.test_supervision_inventory import observed_print
+from tests.test_supervision_inventory import Observations, observed_print
 
 
 class RecordedAdapter:
@@ -130,6 +130,22 @@ def _prepare(store, inventory, phases, plan, adapter):
     return units.prepare_unit_pause(store, "cutover", inventory, phases, adapter=adapter)
 
 
+@pytest.fixture
+def empty_enrollment(installed, tmp_path):
+    root, inputs, paths, _, _ = installed
+    release = r.seal_release(root, inputs, paths)
+    observations = tmp_path / "observations"
+    observations.mkdir()
+    obs = Observations(observations)
+    obs.root = root
+    obs.env = {"CLAUDLOBBY_ROOT": str(tmp_path / "foreign")}
+    foreign = obs.add("foreign.service", working=tmp_path / "foreign", declared=False)
+    adapter = Adapter(obs.package, runner=obs.runner)
+    inventory = collect_enrollment(root, (), bootstrap_empty=True, adapter=adapter).require_complete()
+    plan = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, (), effects={}).seal()
+    return inventory, {phase: [] for phase in units.PHASES}, plan, adapter, foreign, obs
+
+
 def _complete(store, step, evidence="a" * 64):
     store.begin("cutover", step)
     store.complete("cutover", step, evidence_digest=evidence)
@@ -137,7 +153,7 @@ def _complete(store, step, evidence="a" * 64):
 
 def _pause_all(store, adapter):
     for phase, intermediate in (("producers", None), ("bots", "sessions_handed_off"),
-                                ("ingest", "queues_classified")):
+                                ("ingest", None)):
         if intermediate:
             _complete(store, intermediate)
         step = {"producers": "producers_paused", "bots": "sessions_quiesced", "ingest": "ingest_quiesced"}[phase]
@@ -145,6 +161,7 @@ def _pause_all(store, adapter):
         result = units.pause_phase(store, "cutover", phase, adapter=adapter)
         assert state.read_activation(store.root, "cutover").body["pending"] == step
         store.complete("cutover", step, evidence_digest=result.digest)
+    _complete(store, "queues_classified")
 
 
 def test_phases_park_exact_nodes_then_restore_original_state_and_links(enrollment):
@@ -188,6 +205,41 @@ def test_phases_park_exact_nodes_then_restore_original_state_and_links(enrollmen
     assert adapter.states == adapter.original  # disabled/inactive bot stays so
     assert foreign.read_bytes() == before_foreign
     assert os.readlink(wants / "collector.service") == "../collector.service"
+
+
+def test_proven_empty_bootstrap_parking_and_restore_are_frozen_noops(empty_enrollment):
+    inventory, phases, plan, adapter, foreign, obs = empty_enrollment
+    original = foreign.read_bytes()
+    with state.locked_activation(inventory.data_root) as store:
+        prepared = _prepare(store, inventory, phases, plan, adapter)
+        assert prepared.enrollment["bootstrap_empty"] is True and prepared.units() == ()
+        assert all(p.effects["original_release_id"] is None and p.changes == () for p in prepared.plans)
+        assert all(p.release_id == plan.release_id for p in prepared.plans)  # real recovery carrier only
+        assert state.read_selection(store.root) is None
+        late = obs.add("late.service", working=store.root, declared=False)
+        store.begin("cutover", "producers_paused")
+        with pytest.raises(state.ActivationError, match="owned consumer"):
+            units.pause_phase(store, "cutover", "producers", adapter=adapter)
+        assert late.is_file()  # changed evidence never becomes removal authority
+        late.unlink()
+        del obs.properties[late.name]
+        _pause_all(store, adapter)
+        store.begin_rollback("cutover")
+        for step in state.ROLLBACK_STEPS[:state.ROLLBACK_STEPS.index("selection_restored")]:
+            _complete(store, step)
+        store.begin("cutover", "selection_restored")
+        store.restore_selection("cutover")
+        for phase, step in (("ingest", "ingest_started"), ("bots", "bots_started"),
+                            ("producers", "producers_resumed")):
+            if phase == "producers":
+                _complete(store, "verified")
+            store.begin("cutover", step)
+            evidence = units.restore_phase(store, "cutover", phase, adapter=adapter)
+            assert evidence.targets == ()
+            store.complete("cutover", step, evidence_digest=evidence.digest)
+        assert state.read_activation(store.root, "cutover").status == "rolled_back"
+    assert foreign.read_bytes() == original and state.read_selection(inventory.data_root) is None
+    assert not any(function.startswith("svc_activation_") for function, _ in obs.calls)
 
 
 @pytest.mark.parametrize("fault", ["missing", "overlap", "digest", "self-hosted", "unknown"])

@@ -23,6 +23,7 @@ from pathlib import Path
 import plistlib
 import re
 import shlex
+import signal
 import stat
 import subprocess
 
@@ -37,21 +38,41 @@ class Adapter:
     """One selected-native invocation owner, also usable by activation controls.
 
     ``call`` returns CompletedProcess so callers retain the adapter's 0/1/3
-    ownership and caller-membership meanings. It never sources lib-common or a
-    bot.conf, and explicitly overrides an inherited native adapter directory.
+    ownership and caller-membership meanings. Inventory never sources lib-common
+    or bot.conf; cold bot readiness calls source their existing helper owner.
+    Every call explicitly overrides an inherited native adapter directory.
     """
 
     _FUNCTIONS = frozenset({
         "svc_inventory_catalog", "svc_inventory_properties", "svc_inventory_disabled", "svc_inventory_state", "svc_bot_unit_owned_by",
         "svc_activation_snapshot", "svc_activation_assert_external",
         "svc_activation_pause", "svc_activation_resume",
+        "svc_activation_start", "svc_activation_quiet", "svc_activation_bot_fence",
+        "svc_activation_bot_ready",
     })
 
-    def __init__(self, package: PackageResources | None = None, *, runner=subprocess.run):
+    def __init__(self, package: PackageResources | None = None, *, runner=None):
         self.package = package if package is not None else get_resources()
-        self.runner = runner
+        self.runner = runner if runner is not None else self._run
 
-    def call(self, function: str, *args: str | Path):
+    @staticmethod
+    def _run(command, *, timeout, env, capture_output, text):
+        # A timed-out Bash must not leave its readiness poll/native child behind.
+        # This never signals supervisor-owned services that the manager started.
+        with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=text, env=env, start_new_session=True) as process:
+            try:
+                stdout, stderr = process.communicate(timeout=timeout)
+            except BaseException:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.communicate()
+                raise
+            return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+    def call(self, function: str, *args: str | Path, timeout: float = 30):
         if function not in self._FUNCTIONS:
             raise InventoryError(f"unsupported private adapter function: {function}")
         native = self.package.native
@@ -68,7 +89,7 @@ class Adapter:
                    '. "$_SUPERVISOR_LIB_DIR/supervisor.sh" || exit 3; "$@"']
         return self.runner(["/bin/bash", "-c", " ".join(command), "supervision-inventory",
                             str(native), function, *(str(arg) for arg in args)],
-                           capture_output=True, text=True, timeout=30, env=env)
+                           capture_output=True, text=True, timeout=timeout, env=env)
 
     def read(self, function, *args) -> str:
         result = self.call(function, *args)
@@ -150,6 +171,7 @@ class EnrollmentInventory:
     observed_files: tuple[FileSnapshot, ...]
     foreign: tuple[str, ...]
     issues: tuple[str, ...]
+    bootstrap_empty: bool = False
 
     def payload(self) -> dict:
         return _json_value(asdict(self))
@@ -160,8 +182,14 @@ class EnrollmentInventory:
                              separators=(",", ":")).encode()).hexdigest()
 
     def require_complete(self):
-        if self.issues or not self.units:
+        if self.issues or (not self.units and not self.bootstrap_empty):
             raise InventoryError("incomplete enrollment inventory: " + "; ".join(self.issues))
+        if self.bootstrap_empty:
+            if self.units or self.bootstrap_empty is not True:
+                raise InventoryError("bootstrap inventory must have no original declarations")
+            manager, _, _, _, _ = _catalog(self.catalog)
+            if manager != self.manager or set(self.foreign) != {row.path for row in self.observed_files}:
+                raise InventoryError("bootstrap inventory lacks complete foreign-file coverage")
         return self
 
     def candidate_only(self, recovery: EnrollmentInventory) -> tuple[EnrolledUnit, ...]:
@@ -176,8 +204,8 @@ class EnrollmentInventory:
     def check_files(self) -> None:
         """Recheck immediately before parking; file bytes alone are not liveness."""
         _, _, directories, _, _ = _catalog(self.catalog)
-        present = {str(path) for directory in directories if directory.exists()
-                   for path in directory.iterdir() if path.name.endswith(_SUFFIXES)}
+        present = {str(path) for directory in directories for path in _directory_files(directory)
+                   if path.name.endswith(_SUFFIXES)}
         if present != {saved.path for saved in self.observed_files}:
             raise InventoryError("installed search-path contents changed")
         for saved in self.observed_files:
@@ -191,6 +219,22 @@ class EnrollmentInventory:
 
 _NAME = re.compile(r"[A-Za-z0-9_.@:-]+")
 _SUFFIXES = (".service", ".timer", ".socket", ".path", ".plist")
+
+
+def _directory_files(directory):
+    try:
+        return tuple(directory.iterdir())
+    except FileNotFoundError:
+        return ()  # An absent native search directory is observable; unreadable is not.
+
+
+def _require_no_selection(data_root):
+    from .activation_state import ActivationError, read_selection
+    try:
+        if read_selection(data_root) is not None:
+            raise InventoryError("bootstrap requires no prior release selection")
+    except (ActivationError, OSError) as exc:
+        raise InventoryError(f"bootstrap selection cannot be proved absent: {exc}") from exc
 
 
 def _catalog(text):
@@ -390,7 +434,8 @@ def _darwin_source(content: bytes) -> dict:
             or type(source.get("Disabled", False)) is not bool):
         raise InventoryError("unsupported plist program, arguments, environment or disabling")
     return {"label": source.get("Label"), "program": program, "arguments": argv, "environment": env,
-            "disabled": source.get("Disabled", False), "has_directory": "WorkingDirectory" in source}
+            "disabled": source.get("Disabled", False), "has_directory": "WorkingDirectory" in source,
+            "directory": source.get("WorkingDirectory")}
 
 
 def _darwin_binding(name, content, installed_path, directory, environment, props, loaded, disabled):
@@ -442,18 +487,28 @@ def validate_darwin_unit(adapter, target: str, *, source: bytes, installed_path:
 
 
 def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...], *,
-                       package: PackageResources | None = None, runner=subprocess.run) -> EnrollmentInventory:
+                       package: PackageResources | None = None, runner=None,
+                       bootstrap_empty: bool = False, adapter=None) -> EnrollmentInventory:
     """Observe every installed/loaded candidate, preserving incomplete evidence.
 
     This accepts the current manifest, including intentionally uninstalled units;
     a missing generated source is always torn evidence. Calling this twice around
     the native reads detects ordinary source/list drift, not an atomic OS snapshot.
     Activation still must recheck under its host lock and prove quiescence.
+
+    ``bootstrap_empty`` is a distinct no-prior-enrollment proof: declarations
+    must be empty and the release selector absent. The same full catalog and
+    installed-file checks must classify every observation before it is complete.
+    Candidate declarations never stand in for a previous installed release.
     """
     data_root = data_root.resolve(strict=True)
-    if not declarations:
+    if type(bootstrap_empty) is not bool or bootstrap_empty and declarations:
+        raise InventoryError("bootstrap inventory must have no original declarations")
+    if not declarations and not bootstrap_empty:
         raise InventoryError("empty generated manifest is not deletion authority")
-    adapter = Adapter(package, runner=runner)
+    if bootstrap_empty:
+        _require_no_selection(data_root)
+    adapter = adapter if adapter is not None else Adapter(package, runner=runner)
     expected = {}
     for declaration in declarations:
         name = declaration.source.name
@@ -480,9 +535,7 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
     issues, foreign, installed, units = [], [], {}, []
     try:
         for directory in dict.fromkeys(directories):
-            if not directory.exists():
-                continue
-            for path in sorted(directory.iterdir()):
+            for path in sorted(_directory_files(directory)):
                 if path.name.endswith(_SUFFIXES):
                     installed.setdefault(path.name, []).append(FileSnapshot.read(path))
                     names.add(path.name)
@@ -521,9 +574,14 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
 
     for name in sorted(names - set(expected)):
         props = properties.get(name, {})
+        if bootstrap_empty and manager == "Linux" and name in loaded and props.get("LoadState") != "loaded":
+            issues.append(f"{name}: loaded ownership is unknown")
         related = related_properties(props)
         anchors = {anchor for declaration in declarations for key, anchor in declaration.environment
                    if key in ("CLAUDLOBBY_ROOT", "CLAUDLOBBY_NATIVE_DIR", "CLAUDLOBBY_CLI")}
+        if bootstrap_empty:
+            anchors.add(str(data_root))
+            related |= str(data_root) in props.get("ExecStart", "")
         related |= any(anchor in arg for anchor in anchors for arg in
                        [props.get("Program", ""), *json.loads(props.get("Arguments", "[]"))])
         related |= any(unit in expected or related_properties(properties.get(unit, {}))
@@ -533,6 +591,28 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                 # An undeclared activation source cannot be classified by a
                 # filename; its observed Triggers must prove its destination.
                 continue
+            if bootstrap_empty and manager == "Linux":
+                # A stale cached definition cannot prove the installed source
+                # foreign. Bind its parsed directory to the effective one with
+                # the existing ownership reader, including nested bot roots.
+                if (props.get("FragmentPath") != saved.path or props.get("NeedDaemonReload") != "no"
+                        or adapter.call("svc_bot_unit_owned_by", saved.path,
+                                        props.get("WorkingDirectory", "")).returncode != 0):
+                    issues.append(f"{name}: installed/effective ownership is unknown")
+            if bootstrap_empty and manager == "Darwin":
+                try:
+                    source = _darwin_source(saved.content)
+                    if source["has_directory"]:
+                        # The shared ownership reader validates the raw plist
+                        # directory before it can establish a nested root link.
+                        if adapter.call("svc_bot_unit_owned_by", saved.path, source["directory"]).returncode != 0:
+                            raise InventoryError("installed ownership is unknown")
+                        related |= Path(source["directory"]).resolve().is_relative_to(data_root)
+                    related |= (source["environment"].get("CLAUDLOBBY_ROOT") == str(data_root)
+                                or any(anchor in arg for anchor in anchors
+                                       for arg in [source["program"], *source["arguments"]]))
+                except InventoryError as exc:
+                    issues.append(f"{name}: {exc}")
             results = [adapter.call("svc_bot_unit_owned_by", saved.path, owner).returncode for owner in owners]
             if 0 in results:
                 related = True
@@ -604,13 +684,17 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
             target = domain + "/" + name.removesuffix(".plist") if domain else name
             units.append(EnrolledUnit(declaration, target, generated, sources, tuple(sorted(props.items()))))
     observed_files = tuple(saved for name in sorted(installed) for saved in installed[name])
-    result = EnrollmentInventory(data_root, manager, catalog, tuple(units), observed_files, tuple(sorted(foreign)), tuple(issues))
+    result = EnrollmentInventory(data_root, manager, catalog, tuple(units), observed_files,
+                                 tuple(sorted(foreign)), tuple(issues), bootstrap_empty)
     try:
         result.check_files()
         if adapter.read("svc_inventory_catalog") != catalog:
             raise InventoryError("installed/loaded catalog changed during inventory")
         if manager == "Darwin" and _darwin_disabled(adapter.read("svc_inventory_disabled", domain)) != disabled:
             raise InventoryError("launchd disabled overrides changed during inventory")
+        if bootstrap_empty:
+            _require_no_selection(data_root)
     except (InventoryError, OSError, subprocess.SubprocessError) as exc:
-        result = EnrollmentInventory(data_root, manager, catalog, tuple(units), observed_files, tuple(sorted(foreign)), (*issues, str(exc)))
+        result = EnrollmentInventory(data_root, manager, catalog, tuple(units), observed_files,
+                                     tuple(sorted(foreign)), (*issues, str(exc)), bootstrap_empty)
     return result

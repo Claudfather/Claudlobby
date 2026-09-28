@@ -26,7 +26,7 @@ from .config_install import apply_config, prepare_config, read_config_install, r
 from .config_plan import ConfigPlan, ConfigPlanBuilder, read_plan
 from .releases import read_release
 from .supervision_inventory import (
-    Adapter, EnrollmentInventory, FileSnapshot, InventoryError, validate_darwin_unit,
+    Adapter, EnrollmentInventory, FileSnapshot, InventoryError, collect_enrollment, validate_darwin_unit,
 )
 
 
@@ -155,6 +155,30 @@ def _darwin_check(adapter, enrollment, targets=None, *, original_load=False):
             raise ActivationError(f"Darwin enrollment drift: {exc}") from exc
 
 
+def _original_release(record, enrollment):
+    if enrollment.get("bootstrap_empty"):
+        if (enrollment["bootstrap_empty"] is not True or enrollment["units"]
+                or enrollment["issues"] or record.body["previous_selection"] is not None):
+            raise ActivationError("bootstrap parking requires proven empty original enrollment and no prior selection")
+        return None
+    release_ids = {unit["declaration"]["release_id"] for unit in enrollment["units"]}
+    if len(release_ids) != 1:
+        raise ActivationError("original enrollment mixes releases")
+    return next(iter(release_ids))
+
+
+def _check_empty(enrollment, adapter):
+    if not enrollment.get("bootstrap_empty"):
+        return
+    try:
+        observed = collect_enrollment(Path(enrollment["data_root"]), (), bootstrap_empty=True,
+                                      adapter=adapter).require_complete()
+        if observed.payload() != enrollment:
+            raise InventoryError("bootstrap enrollment changed since its frozen observation")
+    except (InventoryError, OSError) as exc:
+        raise ActivationError(f"empty original enrollment cannot be reverified: {exc}") from exc
+
+
 def prepare_unit_pause(store: ActivationStore, activation_id: str,
                        inventory: EnrollmentInventory, phases: dict, *, adapter=None) -> UnitPause:
     """Freeze/prepare all parking phases before effects; use load after parking.
@@ -170,10 +194,11 @@ def prepare_unit_pause(store: ActivationStore, activation_id: str,
         raise ActivationError("enrollment does not match the persisted activation intent")
     enrollment = inventory.payload()
     membership = _membership(enrollment, phases)
-    release_ids = {unit.declaration.release_id for unit in inventory.units}
-    if len(release_ids) != 1:
-        raise ActivationError("original enrollment mixes releases")
-    release = read_release(store.root, next(iter(release_ids)))
+    original_release_id = _original_release(record, enrollment)
+    # ConfigPlan always binds a real release seal. Empty bootstrap plans use
+    # the explicit recovery release only as their zero-change storage carrier;
+    # original_release_id remains None, never a fabricated prior installation.
+    release = read_release(store.root, original_release_id or record.body["intent"]["recovery_release_id"])
     for unit in inventory.units:
         env = dict(unit.declaration.environment)
         if (env.get("CLAUDLOBBY_NATIVE_DIR") != str(release.native_path)
@@ -185,6 +210,7 @@ def prepare_unit_pause(store: ActivationStore, activation_id: str,
         raise ActivationError("enrollment differs from the saved selected release")
     inventory.check_files()
     adapter = adapter or Adapter()
+    _check_empty(enrollment, adapter)
     enrolled = tuple(unit for unit in enrollment["units"] if unit["installed"])
     # Finish every external-caller check before preparing any parking write.
     for unit in enrolled:
@@ -197,7 +223,7 @@ def prepare_unit_pause(store: ActivationStore, activation_id: str,
     for phase in PHASES:
         effects = {"owner": _OWNER, "activation_id": activation_id,
                    "enrollment_digest": inventory.digest, "enrollment": enrollment,
-                   "phases": membership, "phase": phase}
+                   "phases": membership, "phase": phase, "original_release_id": original_release_id}
         builder = ConfigPlanBuilder(store.root, release.release_id, release.seal_sha256,
                                     tuple(sorted({unit.declaration.fleet for unit in inventory.units
                                                   if unit.declaration.fleet})), effects=effects)
@@ -208,6 +234,7 @@ def prepare_unit_pause(store: ActivationStore, activation_id: str,
                 builder.remove(Path(_file(unit)))
         plans.append(builder.seal())
     inventory.check_files()
+    _check_empty(enrollment, adapter)
     for phase, plan in zip(PHASES, plans):
         prepare_config(plan, journal_id(activation_id, phase))
     return load_unit_pause(store, activation_id)
@@ -234,6 +261,10 @@ def load_unit_pause(store: ActivationStore, activation_id: str) -> UnitPause:
         membership = _membership(effects["enrollment"], effects["phases"])
         if membership != effects["phases"]:
             raise ActivationError("parking membership changed")
+        original_release_id = _original_release(record, effects["enrollment"])
+        if effects.get("original_release_id") != original_release_id or plan.release_id != (
+                original_release_id or record.body["intent"]["recovery_release_id"]):
+            raise ActivationError("parking plan differs from its original enrollment or recovery carrier")
         targets = {_file(unit) for unit in effects["enrollment"]["units"]
                    if unit["target"] in membership[phase]}
         if ({change.target for change in plan.changes} != targets
@@ -242,7 +273,7 @@ def load_unit_pause(store: ActivationStore, activation_id: str) -> UnitPause:
         plans.append(plan)
     release = read_release(store.root, plans[0].release_id)
     if any(plan.release_id != release.release_id or plan.release_seal != release.seal_sha256 for plan in plans):
-        raise ActivationError("parking plans disagree about the sealed original release")
+        raise ActivationError("parking plans disagree about their sealed release carrier")
     return UnitPause(activation_id, tuple(plans))
 
 
@@ -257,6 +288,7 @@ def pause_phase(store: ActivationStore, activation_id: str, phase: str, *, adapt
         raise ActivationError("unit pause phase is not the admitted activation step")
     pause = load_unit_pause(store, activation_id)
     adapter = adapter or Adapter()
+    _check_empty(pause.enrollment, adapter)
     for unit in pause.enrollment["units"]:
         _check_source(unit["generated"])
     _external(adapter, pause)
@@ -293,6 +325,7 @@ def restore_phase(store: ActivationStore, activation_id: str, phase: str, *, ada
         raise ActivationError("original unit restoration is not the admitted rollback step")
     pause = load_unit_pause(store, activation_id)
     adapter = adapter or Adapter()
+    _check_empty(pause.enrollment, adapter)
     for unit in pause.enrollment["units"]:
         _check_source(unit["generated"])
     _external(adapter, pause)

@@ -15,14 +15,15 @@ from claudlobby import activation_enrollment as publish, activation_state as sta
 from claudlobby import activation_units, config_install, runtime_admission
 from claudlobby.config_plan import ConfigPlanBuilder
 from claudlobby.config_units import planned_units, unit_family
-from tests.test_activation_units import enrollment, RecordedAdapter, _complete, _pause_all
+from claudlobby.supervision_inventory import _catalog
+from tests.test_activation_units import empty_enrollment, enrollment, RecordedAdapter, _complete, _pause_all
 from tests.test_releases import installed, r
 
 
 class Manager(RecordedAdapter):
     def __init__(self, inventory, plan):
         super().__init__(inventory)
-        self.directory = Path(inventory.units[0].installed[0].path).parent
+        self.directory = _catalog(inventory.catalog)[2][0]
         self.declarations = {d.source.name: (d, item) for d, item in planned_units(plan, "Linux")}
         self.loaded_foreign = set()
 
@@ -52,9 +53,7 @@ class Manager(RecordedAdapter):
         return subprocess.CompletedProcess([function, *args], 0, text, "")
 
 
-@pytest.fixture
-def case(enrollment, installed, monkeypatch):
-    inventory, phases, _, _, foreign, wants = enrollment
+def _candidate_plan(installed):
     root, inputs, paths, _, original_dir = installed
     old = r.read_release(root, inputs.release_id)
     candidate_inputs = replace(inputs, source_revision="c" * 40)
@@ -94,6 +93,13 @@ def case(enrollment, installed, monkeypatch):
             builder.file(destination / name, content, mode=mode)
         builder.effects["units"].extend(items)
     plan = builder.seal()
+    return plan, old, candidate
+
+
+@pytest.fixture
+def case(enrollment, installed, monkeypatch):
+    inventory, phases, _, _, foreign, wants = enrollment
+    plan, old, candidate = _candidate_plan(installed)
     adapter = Manager(inventory, plan)
     guard_checks = []
 
@@ -125,6 +131,48 @@ def prepared(case, store):
 
 def _complete_pending(store, step):
     store.complete("cutover", step, evidence_digest="b" * 64)
+
+
+def test_bootstrap_candidate_publishes_new_units_then_removes_only_its_files(empty_enrollment, installed, monkeypatch):
+    inventory, phases, _, empty_adapter, foreign, _ = empty_enrollment
+    plan, recovery, candidate = _candidate_plan(installed)
+    adapter = Manager(inventory, plan)
+    original = foreign.read_bytes()
+    checks = []
+    def validate(release, declaration, item, content):
+        assert release.release_id == candidate.release_id
+        assert hashlib.sha256(content).hexdigest() == item["sha256"]
+        checks.append(declaration.source.name)
+    monkeypatch.setattr(runtime_admission, "validate_unit_admission", validate)
+    with state.locked_activation(inventory.data_root) as store:
+        store.prepare("cutover", plan, recovery_release_id=recovery.release_id, enrollment_digest=inventory.digest)
+        config_install.prepare_config(plan, "generated-config")
+        pause = activation_units.prepare_unit_pause(store, "cutover", inventory, phases, adapter=empty_adapter)
+        assert pause.plan("bots").effects["original_release_id"] is None
+        _pause_all(store, empty_adapter)
+        for step in ("backup_saved", "migration_applied"):
+            _complete(store, step)
+        store.begin("cutover", "selection_switched")
+        store.select("cutover")
+        store.begin("cutover", "configuration_applied")
+        config_install.apply_config(store.root, "generated-config")
+        _complete_pending(store, "configuration_applied")
+        plans = publish.prepare_candidate_enrollment(store, "cutover", configuration_journal="generated-config",
+                                                     install_directory=adapter.directory, adapter=adapter)
+        assert all(not entry["original"] for entry in plans[0].effects["entries"])
+        assert set(checks) == {d.source.name for d, item in planned_units(plan, "Linux") if item["enroll"]}
+        store.begin("cutover", "ingest_started")
+        result = publish.install_candidate_units(store, "cutover", "ingest", adapter=adapter)
+        assert result.targets == ("collector.service",)
+        assert (adapter.directory / "collector.service").is_file()
+        store.begin_rollback("cutover")
+        for step in state.ROLLBACK_STEPS[:state.ROLLBACK_STEPS.index("candidate_units_removed")]:
+            _complete(store, step)
+        store.begin("cutover", "candidate_units_removed")
+        publish.remove_candidate_units(store, "cutover", adapter=adapter)
+        assert not (adapter.directory / "collector.service").exists()
+        assert foreign.read_bytes() == original
+        assert not any(call[0] in ("svc_activation_resume", "svc_enroll") for call in adapter.calls)
 
 
 def test_phase_publication_retry_and_owned_cleanup_preserve_foreign(case, monkeypatch):
