@@ -126,8 +126,11 @@ def detect_vault(path: Path) -> Path | None:
     :func:`_resolve_vault_fleet`): nothing else in claudlobby imports
     ``claudron.*``. Uses claudron's own ``vault.detect`` when the ``[vault]``
     extra is installed — that is authoritative. Without it, falls back to the
-    documented marker walk-up (a ``_shared/`` or ``shared/`` directory, the way
-    git ascends for ``.git/``; Claudron ``VAULT-STRUCTURE.md``).
+    documented rule (Claudron ``VAULT-STRUCTURE.md``, Claudron #183): walk-up
+    binds a directory carrying the ``.claudron-vault`` identity file, and the
+    addressed *path itself* is also accepted when it has a ``_shared/`` or
+    ``shared/`` hub but no identity file yet (an explicit address still opens
+    a vault awaiting ``claudron doctor --fix``).
 
     The fallback is deliberately *coarser* than the engine's: it does not
     re-implement the overlay/system-container guards, so it can bind a fleet
@@ -144,10 +147,11 @@ def detect_vault(path: Path) -> Path | None:
         vault = _claudron_detect(start)
         return vault.root if vault else None
 
+    if any((start / marker).is_dir() for marker in ("_shared", "shared")):
+        return start
     for candidate in [start, *start.parents]:
-        for marker in ("_shared", "shared"):
-            if (candidate / marker).is_dir():
-                return candidate
+        if (candidate / ".claudron-vault").is_file():
+            return candidate
     return None
 
 
