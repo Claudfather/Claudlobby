@@ -97,11 +97,8 @@ def register_subparsers(sub) -> None:
     )
     pht.set_defaults(func=_command("core", "cmd_host_timers"))
 
-    pl = sub.add_parser(
-        "list-library",
-        help="List available personas, skills, mcp, guardrails, protocols, voices",
-    )
-    pl.set_defaults(func=_command("core", "cmd_list_library"))
+    from ._library_parsers import register_library_subparsers
+    register_library_subparsers(sub)
 
     pd = sub.add_parser(
         "diff",
@@ -302,43 +299,6 @@ def register_subparsers(sub) -> None:
         help="Run `claudlobby generate --bot <name>` after writing",
     )
     pn.set_defaults(func=_command("scaffolding", "cmd_new_bot"))
-
-    pns = sub.add_parser(
-        "new-skill",
-        help="Scaffold a new skill directory with SKILL.md template",
-    )
-    pns.add_argument("--name", help="Skill name (lowercase, e.g. 'deploy-status')")
-    pns.add_argument("--description", help="One-line description of the skill")
-    pns.add_argument(
-        "--argument-hint",
-        help="Argument hint (e.g. '<task> [--repo <repo>]')",
-    )
-    pns.add_argument(
-        "--interactive",
-        action="store_true",
-        help="Force interactive mode even if flags provided",
-    )
-    pns.add_argument(
-        "--dry-run", action="store_true", help="Show output but don't write"
-    )
-    pns.set_defaults(func=_command("scaffolding", "cmd_new_skill"))
-
-    png = sub.add_parser(
-        "new-guardrail",
-        help="Scaffold a new guardrail file with frontmatter template",
-    )
-    png.add_argument("--name", help="Guardrail slug (lowercase, e.g. 'no-push-main')")
-    png.add_argument("--title", help="Human-readable title")
-    png.add_argument("--description", help="One-line description of the rule")
-    png.add_argument(
-        "--interactive",
-        action="store_true",
-        help="Force interactive mode even if flags provided",
-    )
-    png.add_argument(
-        "--dry-run", action="store_true", help="Show output but don't write"
-    )
-    png.set_defaults(func=_command("scaffolding", "cmd_new_guardrail"))
 
     pev = sub.add_parser(
         "events",

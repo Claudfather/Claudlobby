@@ -1,109 +1,11 @@
-"""Scaffolding commands: new-bot, new-skill, new-guardrail."""
+"""Bot scaffolding command."""
 
 from __future__ import annotations
 
 import logging
-import re
-
 from ._helpers import _resolve_paths
 
 log = logging.getLogger("claudlobby")
-
-_SLUG_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
-
-
-def cmd_new_skill(args) -> int:
-    """Interactive (or flag-driven) skill scaffolding."""
-    from ..newskill import interactive_collect, render_skill
-
-    paths = _resolve_paths(args)
-
-    if args.interactive or not args.name:
-        name, description, argument_hint = interactive_collect()
-    else:
-        name = args.name
-        description = args.description or ""
-        argument_hint = args.argument_hint
-        if not description:
-            log.error("--description is required in non-interactive mode")
-            return 1
-
-    if not _SLUG_RE.match(name):
-        log.error(
-            "name must be lowercase, start with a letter, only [a-z0-9_-]: %r", name
-        )
-        return 1
-
-    try:
-        skill_dir = paths.assert_writable(paths.overlay_library / "skills" / name)
-        paths.assert_writable(skill_dir / "SKILL.md")
-    except ValueError as exc:
-        log.error("%s", exc)
-        return 1
-
-    if skill_dir.exists():
-        log.error("skill already exists: %s", skill_dir)
-        return 1
-
-    content = render_skill(name, description, argument_hint)
-
-    if args.dry_run:
-        print(f"\n=== Would create {skill_dir}/SKILL.md ===\n")
-        print(content)
-        return 0
-
-    skill_dir.mkdir(parents=True, exist_ok=True)
-    (skill_dir / "SKILL.md").write_text(content)
-    log.info("created %s/SKILL.md", skill_dir)
-    log.info("next: edit %s/SKILL.md to flesh out the skill behavior", skill_dir)
-    return 0
-
-
-def cmd_new_guardrail(args) -> int:
-    """Interactive (or flag-driven) guardrail scaffolding."""
-    from ..newguardrail import interactive_collect, render_guardrail
-
-    paths = _resolve_paths(args)
-
-    if args.interactive or not args.name:
-        name, title, description = interactive_collect()
-    else:
-        name = args.name
-        title = args.title or name.replace("-", " ").title()
-        description = args.description or ""
-        if not description:
-            log.error("--description is required in non-interactive mode")
-            return 1
-
-    if not _SLUG_RE.match(name):
-        log.error(
-            "name must be lowercase, start with a letter, only [a-z0-9_-]: %r", name
-        )
-        return 1
-
-    try:
-        guardrail_path = paths.assert_writable(
-            paths.overlay_library / "guardrails" / f"{name}.md")
-    except ValueError as exc:
-        log.error("%s", exc)
-        return 1
-
-    if guardrail_path.exists():
-        log.error("guardrail already exists: %s", guardrail_path)
-        return 1
-
-    content = render_guardrail(name, title, description)
-
-    if args.dry_run:
-        print(f"\n=== Would create {guardrail_path} ===\n")
-        print(content)
-        return 0
-
-    guardrail_path.parent.mkdir(parents=True, exist_ok=True)
-    guardrail_path.write_text(content)
-    log.info("created %s", guardrail_path)
-    log.info("next: edit %s to add specific rules and examples", guardrail_path)
-    return 0
 
 
 def cmd_new_bot(args) -> int:

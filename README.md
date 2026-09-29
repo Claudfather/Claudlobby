@@ -89,7 +89,7 @@ claudlobby validate              # check fleet.yaml against library/
 claudlobby generate              # compose runtime/bots/ from fleet.yaml
 claudlobby generate --bot <name> # compose only one bot
 claudlobby host-timers           # compose host-global timer units from system.yaml
-claudlobby list-library          # show available personas / skills / mcp / etc.
+claudlobby library list          # show available personas / skills / mcp / etc.
 claudlobby diff [--bot <name>]   # show drift between runtime/ and library/
 claudlobby promote <bot>         # move runtime drift back to library/ (v1: manual)
 claudlobby fleet status             # fleet health dashboard
@@ -99,8 +99,8 @@ claudlobby --json fleet reports list  # paginated worker reports (--bot, --statu
 claudlobby fleet uptime [--bot <name>] # per-bot uptime, MTBR, restart-rate metrics
 claudlobby events                # fleet events from the plane (--bot, --type, --critical)
 claudlobby new-bot               # interactive bot scaffolding
-claudlobby new-skill             # scaffold a new skill directory
-claudlobby new-guardrail         # scaffold a new guardrail file
+claudlobby library create --kind skill             # scaffold a new skill directory
+claudlobby library create --kind guardrail         # scaffold a new guardrail file
 claudlobby bot move <bot> --to <fleet>  # move a bot between fleets
 claudlobby host cache warm            # pre-download npx + uvx packages for MCP servers
 ```

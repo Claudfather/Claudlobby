@@ -17,10 +17,10 @@ Ask the user (or parse from arguments if provided). Do not dump all questions at
 - **Bot name** — lowercase, alphanumeric + hyphens. Suggest a name based on the described role if the user does not have one.
 - **What should the bot do?** — Map to expertise areas from `library/expertise/`. List available options:
   ```bash
-  claudlobby list-library
+  claudlobby library list
   ```
   Read frontmatter descriptions to help the user choose.
-- **What personality?** — Use the voices listed by `claudlobby list-library`, which includes the selected package and fleet overlay. Voice is optional.
+- **What personality?** — Use the voices listed by `claudlobby library list`, which includes the selected package and fleet overlay. Voice is optional.
 - **What model?** — sonnet for cost-efficiency, opus for complex tasks. Default: inherit from fleet defaults.
 - **What repos should it work on?** — These become `scope.repos` in the bot's fleet.yaml stanza.
 - **Does it need Telegram?** — If yes, guide through @BotFather setup (see Step 3).

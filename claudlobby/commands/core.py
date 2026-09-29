@@ -1,4 +1,4 @@
-"""Core compositor commands: validate, generate, list-library, diff, promote, status, uptime, warm-cache."""
+"""Core compositor commands: validate, generate, diff, promote, status, uptime, warm-cache."""
 
 from __future__ import annotations
 
@@ -297,101 +297,6 @@ def cmd_host_timers(args) -> int:
         log.info("composed host timers → %s", host_timers_dir)
     else:
         log.info("no host jobs declared — nothing composed")
-    return 0
-
-
-def cmd_list_library(args) -> int:
-    paths = _resolve_paths(args)
-
-    def _list_md(label: str, kind: str):
-        """Walk overlay → base recursively. Display nested files as `dir/name`."""
-        log.info("%s:", label)
-        seen: dict[str, str] = {}  # rel_key (no .md) → "[overlay]" or "[base]"
-        for d in paths.library_search_dirs(kind):
-            if not d.is_dir():
-                continue
-            tag = (
-                "[overlay]"
-                if (paths.overlay_library and d == paths.overlay_library / kind)
-                else "[base]"
-            )
-            for p in sorted(d.rglob("*.md")):
-                if p.stem.lower().startswith("readme"):
-                    continue
-                rel_key = str(p.relative_to(d).with_suffix(""))
-                if rel_key not in seen:
-                    seen[rel_key] = tag
-        for rel_key, tag in sorted(seen.items()):
-            marker = " (override)" if tag == "[overlay]" else ""
-            log.info("  %s%s", rel_key, marker)
-
-    _list_md("Expertise", "expertise")
-
-    log.info("MCP fragments (base only):")
-    if paths.base_mcp.is_dir():
-        for p in sorted(paths.base_mcp.glob("*.json")):
-            log.info("  %s", p.stem)
-
-    _list_md("Integrations", "integrations")
-    _list_md("Protocols", "protocols")
-    _list_md("Guardrails", "guardrails")
-    _list_md("Resources", "resources")
-    _list_md("Lessons", "lessons")
-    _list_md("Post-actions", "post_actions")
-
-    log.info("Skills:")
-    seen_skills: dict[str, str] = {}  # rel_key → tag
-    for d in paths.library_search_dirs("skills"):
-        if not d.is_dir():
-            continue
-        tag = (
-            "[overlay]"
-            if (paths.overlay_library and d == paths.overlay_library / "skills")
-            else "[base]"
-        )
-        for sub in sorted(d.rglob("*")):
-            if not sub.is_dir():
-                continue
-            if not (sub / "SKILL.md").is_file():
-                continue
-            rel_key = str(sub.relative_to(d))
-            if rel_key not in seen_skills:
-                seen_skills[rel_key] = tag
-    for rel_key, tag in sorted(seen_skills.items()):
-        marker = " (override)" if tag == "[overlay]" else ""
-        log.info("  %s%s", rel_key, marker)
-
-    log.info("Tools:")
-    for name, is_overlay in sorted(
-        paths.library_dir_names("tools", "tool.yaml").items()
-    ):
-        log.info("  %s%s", name, " (override)" if is_overlay else "")
-
-    log.info("Voices:")
-    seen_voices: dict[str, Path] = {}
-    if paths.overlay_voices and paths.overlay_voices.is_dir():
-        for p in sorted(paths.overlay_voices.rglob("*.md")):
-            seen_voices[p.name] = p
-    if paths.base_voices.is_dir():
-        for p in sorted(paths.base_voices.rglob("*.md")):
-            seen_voices.setdefault(p.name, p)
-    for name in sorted(seen_voices):
-        p = seen_voices[name]
-        try:
-            tag = (
-                " (override)"
-                if (paths.overlay_voices and p.is_relative_to(paths.overlay_voices))
-                else ""
-            )
-        except ValueError:
-            tag = ""
-        voice_root = paths.overlay_voices if tag else paths.base_voices
-        log.info("  voices/%s%s", p.relative_to(voice_root), tag)
-
-    if paths.fleet_dir:
-        log.info("[fleet overlay: %s]", paths.fleet_dir.relative_to(paths.root))
-    else:
-        log.info("[no fleet overlay — root mode. Use --fleet <name> for overlay mode.]")
     return 0
 
 

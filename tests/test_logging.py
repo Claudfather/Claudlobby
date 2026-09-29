@@ -12,7 +12,7 @@ import types
 from pathlib import Path
 from unittest.mock import patch  # noqa: F401 — used in generate tests
 
-from claudlobby.commands.core import cmd_generate, cmd_list_library, cmd_validate
+from claudlobby.commands.core import cmd_generate, cmd_validate
 from claudlobby.commands.memory_migrate import cmd_memory_migrate
 
 
@@ -155,39 +155,6 @@ class TestGenerateCommandLogging:
         assert "lead" in caplog.text
 
 
-# ── cmd_list_library ──────────────────────────────────────────────────────────
-
-
-class TestListLibraryLogging:
-    def test_list_library_logs_expertise_header(self, fleet_dir, caplog):
-        args = _args(root=str(fleet_dir))
-        with caplog.at_level(logging.INFO, logger="claudlobby"):
-            result = cmd_list_library(args)
-        assert result == 0
-        assert "Expertise" in caplog.text
-
-    def test_list_library_logs_skills_header(self, fleet_dir, caplog):
-        args = _args(root=str(fleet_dir))
-        with caplog.at_level(logging.INFO, logger="claudlobby"):
-            cmd_list_library(args)
-        assert "Skills" in caplog.text
-
-    def test_list_library_logs_root_mode_message(self, fleet_dir, caplog):
-        """No fleet overlay → logs root-mode message."""
-        args = _args(root=str(fleet_dir))
-        with caplog.at_level(logging.INFO, logger="claudlobby"):
-            cmd_list_library(args)
-        assert "root mode" in caplog.text or "no fleet overlay" in caplog.text.lower()
-
-    def test_list_library_logs_expertise_names(self, fleet_dir, caplog):
-        """Expertise entries are logged as INFO records."""
-        args = _args(root=str(fleet_dir))
-        with caplog.at_level(logging.INFO, logger="claudlobby"):
-            cmd_list_library(args)
-        # orchestration.md and software-engineering.md are in the fixture
-        assert "orchestration" in caplog.text
-
-
 # ── cmd_memory_migrate ────────────────────────────────────────────────────────
 
 
@@ -228,11 +195,4 @@ class TestNoPrintInMainCommands:
         with patch("claudlobby.commands.core.compose_fleet", return_value={}):
             cmd_generate(args)
         captured = capsys.readouterr()
-        assert captured.out == ""
-
-    def test_no_print_in_list_library(self, fleet_dir, capsys):
-        args = _args(root=str(fleet_dir))
-        cmd_list_library(args)
-        captured = capsys.readouterr()
-        # list-library now uses log.info(), not print()
         assert captured.out == ""

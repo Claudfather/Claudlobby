@@ -69,6 +69,8 @@ def _run(code, *argv, tmp_path):
     (("fleet", "reports", "list", "--help"), "--unacknowledged"),
     (("fleet", "reports", "ack", "--help"), "ACK_CURSOR"),
     (("fleet", "inbox", "--help"), "VIEWER"),
+    (("library", "list", "--help"), "schema-1"),
+    (("library", "create", "--help"), "--kind"),
     (("fleet", "status", "--help"), "schema-1"),
     (("bot", "status", "--help"), "BOT"),
     (("fleet", "uptime", "--help"), "30d"),

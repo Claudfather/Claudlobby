@@ -416,7 +416,7 @@ claudlobby generate --bot <name>       # compose one bot
 claudlobby host-timers                 # compose host-global timer units from system.yaml
 claudlobby diff                        # show drift between runtime and generate
 claudlobby promote <name>              # extract bot drift back into library
-claudlobby list-library                # show available building blocks
+claudlobby library list                # show available building blocks
 claudlobby new-bot                     # interactive bot scaffolding
 
 # Operations
@@ -447,8 +447,8 @@ claudlobby bot move <bot> --to <fleet> # move a bot between fleets
 
 # Scaffolding
 claudlobby new-bot                     # interactive bot scaffolding
-claudlobby new-skill                   # scaffold a new skill directory
-claudlobby new-guardrail               # scaffold a new guardrail file
+claudlobby library create --kind skill                   # scaffold a new skill directory
+claudlobby library create --kind guardrail               # scaffold a new guardrail file
 
 # Migration (from legacy layouts)
 claudlobby env-migrate                 # migrate .env files into fleet structure

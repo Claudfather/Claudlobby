@@ -50,7 +50,7 @@ class TestCmdNewGuardrail:
             [
                 "--root",
                 str(tmp_path),
-                "new-guardrail",
+                "library", "create", "--kind", "guardrail",
                 "--name",
                 "no-yolo",
                 "--title",
@@ -76,14 +76,14 @@ class TestCmdNewGuardrail:
             [
                 "--root",
                 str(tmp_path),
-                "new-guardrail",
+                "library", "create", "--kind", "guardrail",
                 "--name",
                 "existing",
                 "--description",
                 "Already there",
             ]
         )
-        assert rc == 1
+        assert rc == 4
 
     def test_auto_generates_title(self, tmp_path):
         from claudlobby.__main__ import main
@@ -94,7 +94,7 @@ class TestCmdNewGuardrail:
             [
                 "--root",
                 str(tmp_path),
-                "new-guardrail",
+                "library", "create", "--kind", "guardrail",
                 "--name",
                 "no-force-push",
                 "--description",
@@ -114,11 +114,11 @@ class TestCmdNewGuardrail:
             [
                 "--root",
                 str(tmp_path),
-                "new-guardrail",
+                "library", "create", "--kind", "guardrail",
                 "--name",
                 "Bad Name!",
                 "--description",
                 "x",
             ]
         )
-        assert rc == 1
+        assert rc == 2

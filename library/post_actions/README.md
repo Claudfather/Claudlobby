@@ -25,7 +25,7 @@ These instructions tell the bot **what to do at each lifecycle moment** — the 
 
 No `post_actions/*.md` files exist in the library yet. The mechanism is fully wired —
 `config.py` (`post_actions:` field), `composer.py` (composes them into a `## Post-actions`
-section), `validator.py`, `commands/core.py` (`claudlobby list-library`), and
+section), `validator.py`, `commands/library.py` (`claudlobby library list`), and
 `fleet.yaml.example` all support it — but nobody has committed real content, so there's
 no file to point to as a working sample yet. The block below is illustrative only: it
 shows the shape a file would need, not something present in the repo today.

@@ -266,7 +266,7 @@ print(json.dumps({'artifact_id': r.artifact_id, 'content_sha256': r.content_sha2
 """)
     package = installed / "claudlobby"
     immutable_before = _asset_hashes(package)
-    _run([cli, "--root", data, "new-skill", "--name", "installed-smoke",
+    _run([cli, "--root", data, "library", "create", "--kind", "skill", "--name", "installed-smoke",
           "--description", "Authored outside the installed package"], outside)
     authored = data / "library/skills/installed-smoke/SKILL.md"
     assert "Authored outside the installed package" in authored.read_text()

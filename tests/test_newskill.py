@@ -55,7 +55,7 @@ class TestCmdNewSkill:
             [
                 "--root",
                 str(tmp_path),
-                "new-skill",
+                "library", "create", "--kind", "skill",
                 "--name",
                 "my-tool",
                 "--description",
@@ -78,22 +78,22 @@ class TestCmdNewSkill:
             [
                 "--root",
                 str(tmp_path),
-                "new-skill",
+                "library", "create", "--kind", "skill",
                 "--name",
                 "existing",
                 "--description",
                 "Already there",
             ]
         )
-        assert rc == 1
+        assert rc == 4
 
     def test_requires_description(self, tmp_path):
         from claudlobby.__main__ import main
 
         (tmp_path / "library" / "skills").mkdir(parents=True)
         (tmp_path / "lib").mkdir()
-        rc = main(["--root", str(tmp_path), "new-skill", "--name", "no-desc"])
-        assert rc == 1
+        rc = main(["--root", str(tmp_path), "library", "create", "--kind", "skill", "--name", "no-desc"])
+        assert rc == 2
 
     def test_rejects_invalid_name(self, tmp_path):
         from claudlobby.__main__ import main
@@ -104,14 +104,14 @@ class TestCmdNewSkill:
             [
                 "--root",
                 str(tmp_path),
-                "new-skill",
+                "library", "create", "--kind", "skill",
                 "--name",
                 "Bad Name",
                 "--description",
                 "x",
             ]
         )
-        assert rc == 1
+        assert rc == 2
 
     def test_rejects_name_starting_with_number(self, tmp_path):
         from claudlobby.__main__ import main
@@ -122,11 +122,11 @@ class TestCmdNewSkill:
             [
                 "--root",
                 str(tmp_path),
-                "new-skill",
+                "library", "create", "--kind", "skill",
                 "--name",
                 "123bad",
                 "--description",
                 "x",
             ]
         )
-        assert rc == 1
+        assert rc == 2
