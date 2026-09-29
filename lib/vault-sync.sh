@@ -108,11 +108,17 @@ sync_one_vault() {
     local vault="$1" alias samples="" state="$STATE_UNKNOWN" ok=0 detail=""
     alias="vault:$(basename "$vault")"
 
+    # Both calls NAME the vault (--vault), never find it by walk-up (#1993).
+    # The job already holds the path, read from bot.conf. Since Claudron 0.5.2
+    # walk-up binds a vault only once its .claudron-vault identity file is
+    # committed, so between a CLI upgrade and the migration that writes it the
+    # walk-up form failed with rc 3 and no envelope, and paged every run.
+    #
     # 1. The health verdict, when the engine has one. rc 2 is argparse's usage
     #    error (the CLI contract), i.e. an engine that predates the flag --
     #    recorded as unknown and NOT treated as a failing vault.
     local chk_out chk_rc=0
-    chk_out="$(cd "$vault" && claudron sync --check --json 2>/dev/null)" || chk_rc=$?
+    chk_out="$(cd "$vault" && claudron sync --check --json --vault "$vault" 2>/dev/null)" || chk_rc=$?
     if [ "$chk_rc" -eq 0 ] && [ -n "$chk_out" ]; then
         state="$(_envelope_field "$chk_out" "data.state" "$STATE_UNKNOWN")"
     elif [ "$chk_rc" -eq 2 ]; then
@@ -124,11 +130,19 @@ sync_one_vault() {
     # 2. The sync itself. Runs whatever --check said, including unknown: the
     #    verdict is a report, never a gate.
     local out rc=0
-    out="$(cd "$vault" && claudron sync --json --timeout "$SYNC_TIMEOUT_S" 2>/dev/null)" || rc=$?
+    out="$(cd "$vault" && claudron sync --json --timeout "$SYNC_TIMEOUT_S" --vault "$vault" 2>/dev/null)" || rc=$?
     if [ -n "$out" ]; then
-        [ "$(_envelope_field "$out" "ok" "false")" = "true" ] && ok=1
         detail="$(_envelope_field "$out" "data.detail" "")"
         [ -n "$detail" ] || detail="$(_envelope_field "$out" "error" "")"
+        # ok needs BOTH rc 0 and the envelope's ok. Before Claudron 0.5.3 a
+        # refused sync printed "ok": true while exiting 1 with its reason in
+        # data.detail (#1970, Claudron #142), and this job logged every refusal
+        # as a success. The exit code is Claudron's own failure signal on every
+        # engine version, so it is never skipped.
+        if [ "$rc" -eq 0 ] \
+            && [ "$(_envelope_field "$out" "ok" "false")" = "true" ]; then
+            ok=1
+        fi
     else
         detail="claudron sync produced no envelope (rc=$rc)"
     fi
@@ -194,7 +208,7 @@ _alert_on_state_change() {
             | plane_emit_events vault-sync \
             || _log "$alias: the vault_sync event was NOT recorded"
         emit_failure_alert "$bots_dir" "vault_sync_failed" \
-            "vault sync FAILED for $alias (state=$state): ${detail:-no detail} -- run 'claudron sync --check' in that vault; this job never resolves a conflict" || true
+            "vault sync FAILED for $alias (state=$state): ${detail:-no detail} -- run 'claudron sync --check --vault $vault'; this job never resolves a conflict" || true
     fi
     printf '%s' "$now" > "$marker" 2>/dev/null || true
 }

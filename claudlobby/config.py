@@ -758,6 +758,10 @@ class BotConfig:
     # arming is additionally gated at compose time on the installed CLI exposing
     # `brief --boot` (composed settings outlive installs on this estate).
     brief_on_start: bool = False
+    # #1604, opt-in per bot: launch each exactly pinned npx MCP server as
+    # `node <entry>` from the copy warm-cache installs under state/mcp/npm,
+    # with no resident `npm exec` wrapper (composer.compose_mcp_json).
+    mcp_direct_launch: bool = False
     # #1665 Layer 0b, opt-in per bot: deny rules on the shared config dir, the
     # .env tiers and the install's code (composer.compose_settings_local).
     isolation: IsolationConfig = field(default_factory=IsolationConfig)
@@ -1892,6 +1896,10 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         autonomous_runner=_coerce_autonomous_runner(raw.get("autonomous_runner"), name),
         briefing=_coerce_briefing(raw.get("briefing")),
         brief_on_start=_parse_brief(raw.get("brief", defaults.get("brief"))),
+        mcp_direct_launch=_strict_bool(
+            "'mcp_direct_launch'",
+            raw.get("mcp_direct_launch", defaults.get("mcp_direct_launch", False)),
+        ),
         isolation=_parse_isolation(
             defaults.get("isolation"), raw.get("isolation"), name
         ),

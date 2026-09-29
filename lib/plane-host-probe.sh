@@ -38,6 +38,10 @@ _host_raw="$(hostname 2>/dev/null || uname -n 2>/dev/null)"
 [ -n "$_host_raw" ] || _host_raw="unknown-host"
 HOST="$(json_escape "$_host_raw")"
 
+# Where the Linux /proc facets are read from. A test seam only: a fixture dir
+# stands in for /proc so a present, missing or garbled field can be pinned.
+PROC="${HOST_PROBE_PROC:-/proc}"
+
 # Each reader prints one metric_sample EVENT object, or nothing when the
 # facet is unavailable (absent ≠ zero). subject_kind=host; value is a
 # number, bool, or small object per the metric.
@@ -94,8 +98,8 @@ fi
 # greedily captured the wrong number (every Mac recorded a 1970 boot
 # every minute — gauntlet SEV-1, live).
 _boot=""; _bsec=""
-if [ -r /proc/stat ]; then
-    _bsec="$(awk '/^btime /{print $2}' /proc/stat 2>/dev/null)"
+if [ -r "$PROC/stat" ]; then
+    _bsec="$(awk '/^btime /{print $2}' "$PROC/stat" 2>/dev/null)"
 else
     # ONE parser (lib-common.sh boot_epoch_from_sysctl): this file had its own
     # copy of the kern.boottime sed while resolve_boot_epoch kept the greedy
@@ -122,6 +126,57 @@ if [ -f "$_db" ]; then
     case "$_wal" in ''|*[!0-9]*) _wal="" ;; esac
     [ -n "$_wal" ] && _add "$(_metric host.plane_wal_bytes "$_wal")"
 fi
+
+# #1644: what splits load into CPU and IO, for reading the minutes before a
+# reset. Linux load counts tasks waiting on IO as well as tasks waiting for a
+# CPU, so load alone cannot tell a CPU burst from an SD-card stall. PSI would,
+# but /proc/pressure needs psi=1 on the kernel command line, a host decision.
+# Each facet reads /proc and is ABSENT when its file or a field is unreadable
+# or not a plain number (macOS has no /proc): never a fabricated 0. The
+# cumulative ones count since boot; a rate is the difference of two samples.
+
+# host.swap_used_mb — SwapTotal - SwapFree, in MB.
+_swap=""
+if [ -r "$PROC/meminfo" ]; then
+    _swap="$(awk '$1 == "SwapTotal:" && $2 ~ /^[0-9]+$/ { t = $2; ht = 1 }
+        $1 == "SwapFree:" && $2 ~ /^[0-9]+$/ { f = $2; hf = 1 }
+        END { if (ht && hf && t >= f) printf "%d", (t - f) / 1024 }' "$PROC/meminfo" 2>/dev/null)"
+fi
+case "$_swap" in ''|*[!0-9]*) _swap="" ;; esac
+[ -n "$_swap" ] && _add "$(_metric host.swap_used_mb "$_swap")"
+
+# host.swap_pages — pages swapped in and out since boot (vmstat pswpin/pswpout).
+_swp=""
+if [ -r "$PROC/vmstat" ]; then
+    _swp="$(awk '$1 == "pswpin" && $2 ~ /^[0-9]+$/ { i = $2; hi = 1 }
+        $1 == "pswpout" && $2 ~ /^[0-9]+$/ { o = $2; ho = 1 }
+        END { if (hi && ho) printf "{\"in\":%s,\"out\":%s}", i, o }' "$PROC/vmstat" 2>/dev/null)"
+fi
+[ -n "$_swp" ] && _add "$(_metric host.swap_pages "$_swp")"
+
+# host.procs — processes runnable now, and blocked on IO now (stat).
+_procs=""
+if [ -r "$PROC/stat" ]; then
+    _procs="$(awk '$1 == "procs_running" && $2 ~ /^[0-9]+$/ { r = $2; hr = 1 }
+        $1 == "procs_blocked" && $2 ~ /^[0-9]+$/ { b = $2; hb = 1 }
+        END { if (hr && hb) printf "{\"running\":%s,\"blocked\":%s}", r, b }' "$PROC/stat" 2>/dev/null)"
+fi
+[ -n "$_procs" ] && _add "$(_metric host.procs "$_procs")"
+
+# host.cpu_ticks — iowait ticks since boot, and every CPU tick since boot, from
+# the aggregate cpu line. The iowait share of a minute is the difference of
+# iowait over the difference of total, with no tick rate or core count
+# assumed. The total stops at steal: guest and guest_nice are already inside
+# user and nice.
+_ticks=""
+if [ -r "$PROC/stat" ]; then
+    _ticks="$(awk '$1 == "cpu" {
+            ok = (NF >= 6); t = 0; last = (NF < 9) ? NF : 9
+            for (i = 2; i <= last; i++) { if ($i !~ /^[0-9]+$/) ok = 0; t += $i }
+            if (ok) printf "{\"iowait\":%s,\"total\":%.0f}", $6, t
+            exit }' "$PROC/stat" 2>/dev/null)"
+fi
+[ -n "$_ticks" ] && _add "$(_metric host.cpu_ticks "$_ticks")"
 
 # host.job_ran — one proof-of-run sample per probe, so a silent probe (a
 # facet-less host, an unarmed fleet) is distinguishable from a probe that
