@@ -171,6 +171,16 @@ def test_timeout_kills_only_owned_group_with_a_bounded_cleanup(destination, monk
     monkeypatch.setattr(transport.subprocess, "Popen", popen)
     monkeypatch.setattr(transport.os, "killpg", lambda pid, sig: kills.append((pid, sig)))
     result = transport.send(source_package(), destination, message_id=MSG, body="hi", timeout=2)
-    assert result.status == "unknown" and kills == [(process.pid, signal.SIGKILL)]
-    assert waits == [{"input": b"hi", "timeout": 2}, {"timeout": 1}]
+    assert result.status == "unknown"
+    assert kills == [(process.pid, signal.SIGTERM), (process.pid, signal.SIGKILL)]
+    assert waits == [{"input": b"hi", "timeout": 2}, {"timeout": 1}, {"timeout": 1}]
     assert all(stream.closed for stream in (process.stdin, process.stdout, process.stderr))
+
+
+def test_timeout_allows_shell_exit_cleanup(tmp_path):
+    temporary = tmp_path / "credential-config"
+    command = ["/bin/bash", "--noprofile", "--norc", "-c",
+               'trap \'rm -f -- "$1"\' EXIT; : > "$1"; sleep 30', "_", str(temporary)]
+    with pytest.raises(subprocess.TimeoutExpired):
+        transport._run(command, input=b"", env={"PATH": "/usr/bin:/bin"}, timeout=0.5)
+    assert not temporary.exists()

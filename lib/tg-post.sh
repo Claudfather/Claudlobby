@@ -97,7 +97,9 @@ if [ "$PLANE_ARMED" = "1" ]; then
     | plane_emit_events tg-post || true
 fi
 
-RESP="$(curl -s -X POST --config "$URL_CFG" \
+# Finish below the alert adapter's eight-second channel deadline so the EXIT
+# cleanup can remove the token-bearing config even when Telegram stalls.
+RESP="$(curl -s --max-time 6 -X POST --config "$URL_CFG" \
   -d "chat_id=${CHAT_ID}" \
   --data-urlencode "text=${MSG}" \
   -d "disable_web_page_preview=true")" || RESP=""

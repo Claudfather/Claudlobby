@@ -95,14 +95,22 @@ def _run(command, *, input, env, timeout):
     except BaseException as exc:
         # No process-table scan: only this invocation's new process group.
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
         try:
             stdout, stderr = process.communicate(timeout=1)
         except subprocess.TimeoutExpired:
-            # An escaped descendant retaining a pipe cannot make cleanup unbounded.
-            stdout, stderr = getattr(exc, "output", None), getattr(exc, "stderr", None)
+            # Give EXIT traps a bounded chance to remove credential files, then
+            # enforce the deadline even if a child ignores TERM or holds a pipe.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                stdout, stderr = process.communicate(timeout=1)
+            except subprocess.TimeoutExpired:
+                stdout, stderr = getattr(exc, "output", None), getattr(exc, "stderr", None)
         finally:
             for stream in (process.stdin, process.stdout, process.stderr):
                 if stream is not None:
