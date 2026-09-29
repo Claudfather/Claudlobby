@@ -1,5 +1,47 @@
 # Unified CLI implementation record
 
+### 2026-09-29 15:16 UTC — retired-bot cleanup passed on the live canary
+
+**Measured:** source `0868310` is active only on the independent Mac canary,
+activation `50854030-71df-4799-8495-9d4b32c02c21`. After the authored and
+activated fleet omitted the completed worker, `bot remove cli-worker` returned
+`ok=true`, `native_outcome=observed`, `purged=false`. The worker unit is absent
+and its directory is retained. The teardown intent is recorded as
+`ev_f5b54e78471e4ffab9e6a433a8fb5a6e`. Evidence:
+`~/.local/share/claudlobby-canary-live-1747/evidence/bot-remove/`
+`{remove-fixed.json,observed-after.json,events-after-fixed.json}`;
+[PR #1985](https://github.com/Claudfather/Claudlobby/pull/1985).
+
+**Measured / read from code:** the first removal refused because an exited
+tmux server had left a socket file. The private supervisor owner now accepts
+only tmux's exact no-server result for that retired bot's socket, including
+macOS's canonical `/private/tmp` spelling. Unknown/permission failures still
+refuse. Three focused socket cases and both supervisor-ratchet checks passed.
+The stale socket node may remain; cleanup does not claim it is a live process
+or remove a socket belonging to another server.
+
+**Read from code / measured checks:** `lib/setup-fleet` and `lib/setup-fleets`
+are deleted. Guidance points to sealed `fleet setup` or `config plan` and
+`host activate`. Obsolete setup-wrapper test classes were removed; the existing
+briefing rehearsal still checks composition, pruning and delivery, with one
+activation-owner case covering omitted timer removal while preserving a
+foreign timer. Focused owner/composition, generated-table, doctor, packaging
+and briefing checks passed; the README count checks passed after deletion.
+This cleanup removes substantially more code than it adds and creates no
+new migration harness.
+
+**Measured:** `plane status --json` read the actual canary database at schema
+13, with zero pending or quarantined spool entries. Production activation
+`437af124-851e-449c-bfd2-2fd6eab545b8`, Lumbergh PID 2598 and primary Plane PID
+1498 remain unchanged. The [published `ddeaa63` Linux 3.11 run](https://github.com/Claudfather/Claudlobby/actions/runs/36586580070/job/109468411198)
+finished with 6,320 passed and three failures: two obsolete setup-command
+expectations and the direct-supervisor-call ratchet. All three exact cases
+pass on this local cleanup (0.43 seconds). Other hosted lanes remain running;
+this checkpoint does not claim current-head CI success.
+Remaining work includes the fleet-layout migration decision, remaining Plane
+administration contracts, development-instrument placement, Linux/Pi evidence
+and protected production adoption. The epic is not complete.
+
 ### 2026-09-29 14:54 UTC — real handoff/restart/resume passed
 
 **Measured:** source `9fab743` is active only on the independent Mac canary,
