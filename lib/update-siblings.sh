@@ -30,9 +30,8 @@
 # ever desynchronises the reporter from the applier.
 #
 # $CLAUDLOBBY_ROOT IS DELIBERATELY NOT UPDATED HERE. Pulling the compositor is
-# not the same decision as updating a dependency, and it has its own opt-in
-# job, lib/pull-root.sh, with a watch and a hold this script has no reason to
-# carry. It is NOT excluded because a pull would rewrite this script under the
+# not the same decision as updating a dependency: immutable Claudlobby releases
+# require an operator's sealed build, plan, and activation. It is NOT excluded because a pull would rewrite this script under the
 # running interpreter: git's checkout replaces a changed file (a new inode)
 # instead of writing it in place, and bash keeps reading the inode it opened,
 # so a running script finishes on its old bytes. Measured on the Pi (git

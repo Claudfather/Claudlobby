@@ -72,6 +72,7 @@ while IFS= read -r _r; do
 done < <(discover_framework_checkouts)
 
 log "WATCHING ${#WATCHED[@]} repo(s): ${WATCHED[*]}"
+root_checkout=$(git -C "$CLAUDLOBBY_ROOT" rev-parse --show-toplevel)
 
 # currency_outcome_phrase
 # Render the verdict notify_currency just recorded, for the audit log.
@@ -101,6 +102,10 @@ currency_outcome_phrase() {
 
 for repo in "${WATCHED[@]}"; do
     name=$(basename "$repo")
+    apply_hint="git -C $repo pull --ff-only"
+    if [ "$repo" = "$root_checkout" ]; then
+        apply_hint="build and seal an immutable Claudlobby release, stage its config plan, then run host activate as the operator; do not pull the running root"
+    fi
 
     if ! with_timeout 120 git -C "$repo" fetch --quiet --tags origin 2>>"$LOG"; then
         log "[$name] FETCH FAILED — source currency unknown (nudge skipped)"
@@ -122,7 +127,7 @@ for repo in "${WATCHED[@]}"; do
     if [ -z "$tag" ]; then
         if [ "$behind" -gt 0 ]; then
             notify_currency "$name" "source_behind" "$behind" \
-                "$name on $(hostname) is $behind commit(s) behind origin/$branch — apply with: git -C $repo pull --ff-only"
+                "$name on $(hostname) is $behind commit(s) behind origin/$branch — apply with: $apply_hint"
             log "[$name] BEHIND origin/$branch by $behind (untagged repo) — $(currency_outcome_phrase)"
         else
             log "[$name] IN SYNC with origin/$branch"
@@ -135,7 +140,7 @@ for repo in "${WATCHED[@]}"; do
     if [ "${tag_behind:-0}" -gt 0 ]; then
         # Behind a cut release — the case update-siblings.sh can actually fix.
         notify_currency "$name" "source_behind" "$tag_behind" \
-            "$name on $(hostname) is $tag_behind commit(s) behind release $tag — apply with: git -C $repo pull --ff-only"
+            "$name on $(hostname) is $tag_behind commit(s) behind release $tag — apply with: $apply_hint"
         log "[$name] BEHIND TAG $tag by $tag_behind — $(currency_outcome_phrase)"
     elif [ "$behind" -gt 0 ]; then
         # On the newest release, but main has moved. Deliberately NOT phrased as

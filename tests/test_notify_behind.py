@@ -146,6 +146,7 @@ class TestNotifyBehind:
         assert "FLEET NOTICE [source_behind]:" in msg
         assert "FLEET ALERT" not in msg
         assert "2 commit" in msg
+        assert "host activate" in msg and "git -C " not in msg
 
     def test_never_pulls(self, tmp_path, *, scratch_plane_env):
         # The core F5=c contract: notify-only. HEAD must be untouched and the

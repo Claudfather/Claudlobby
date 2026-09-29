@@ -15,7 +15,7 @@ import pytest
 from claudlobby import activation_state as a
 from claudlobby.releases import read_release
 from claudlobby.runtime_admission import (
-    ReleaseMismatch, RuntimeIdentity, activation_start, admit_native, mutation_admission,
+    ReleaseMismatch, RuntimeIdentity, WatchdogActivationPause, activation_start, admit_native, mutation_admission,
 )
 from tests.test_activation_state import _advance, _prepare
 from tests.test_config_plan import proposal
@@ -86,6 +86,20 @@ def test_missing_host_state_never_creates_an_install(tmp_path):
         with mutation_admission(root):
             pytest.fail("missing install admitted")
     assert not root.exists()
+
+
+def test_native_watchdog_pause_has_distinct_exit(monkeypatch, capsys):
+    from claudlobby import runtime_admission as admission
+
+    monkeypatch.setattr(admission.RuntimeIdentity, "current", classmethod(
+        lambda cls: admission.RuntimeIdentity(Path("/cli"), Path("/native"), "artifact")))
+    def paused(*_args, **_kwargs):
+        raise WatchdogActivationPause("host activation is running; watchdog remains paused")
+    monkeypatch.setattr(admission, "admit_native", paused)
+    monkeypatch.setattr(sys, "argv", ["runtime_admission", "acquire", "9", "123", "/root",
+                                     "keepalive", "/root/bot", "r-test", "/cli", "/native", "artifact"])
+    assert admission._native_main() == 75
+    assert "watchdog remains paused" in capsys.readouterr().err
 
 
 def _starting(store, plan, operation="start-bot"):
@@ -173,7 +187,7 @@ def test_coordinator_scope_admits_one_exact_start_never_watchdog(proposal):
                                     timeout=0.2)
             with activation_start(store, "candidate", operation="start-bot",
                                   bot_dir=settings.parent, identity=identity):
-                with pytest.raises(a.ActivationError, match="watchdog remains paused"):
+                with pytest.raises(WatchdogActivationPause, match="watchdog remains paused"):
                     enter("keepalive")
                 with pytest.raises(a.ActivationError, match="does not admit"):
                     enter(bot_dir=other)

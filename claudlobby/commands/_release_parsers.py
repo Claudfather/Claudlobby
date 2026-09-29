@@ -121,7 +121,7 @@ def register_release_subparsers(sub):
         route = jobs.add_parser(action, help=f"{action.capitalize()} effective host jobs")
         route.add_argument("--json", action="store_true", help="One schema-1 result object")
         if action == "show":
-            route.add_argument("name", help="Packaged host job name, e.g. pull-root")
+            route.add_argument("name", help="Packaged host job name, e.g. plane-prune")
         route.set_defaults(func=_dispatch_host_job, public_command=f"host.job.{action}")
     run = jobs.add_parser("run", help="Request one selected, enabled host timer job")
     run.add_argument("name", help="Packaged host timer job name")

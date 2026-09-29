@@ -31,6 +31,10 @@ RESIDENT_UNIT_PHASES = {"plane-daemon": "ingest"}
 _UNIT_PREFIX = ("-I", "-B", "-m", "claudlobby.runtime_admission", "unit-start")
 
 
+class WatchdogActivationPause(ActivationError):
+    """The coordinator holds EX; this watchdog tick must wait for the next sweep."""
+
+
 def wrap_unit_argv(environment: dict[str, str], *, unit: str, phase: str,
                    mode: str, argv: tuple[str, ...] | list[str]) -> tuple[str, ...]:
     """Bind sealed generated units; source-only renders are not activatable."""
@@ -376,7 +380,7 @@ def admit_native(root: Path, fd: int, *, owner_pid: int, operation: str,
         fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
     except BlockingIOError as exc:
         if operation == "keepalive":
-            raise ActivationError("host activation is running; watchdog remains paused") from exc
+            raise WatchdogActivationPause("host activation is running; watchdog remains paused") from exc
         _request_start(root, request, timeout)
         return "activation"
     try:
@@ -646,6 +650,9 @@ def _native_main() -> int:
                          operation=operation, bot_dir=Path(bot) if bot else None,
                          expected_release=expected, identity=identity)
         return 0
+    except WatchdogActivationPause as exc:
+        print(f"native admission: {exc}", file=sys.stderr)
+        return 75
     except (ActivationError, OSError, ValueError) as exc:
         print(f"native admission: {exc}; inspect claudlobby host releases", file=sys.stderr)
         return 7

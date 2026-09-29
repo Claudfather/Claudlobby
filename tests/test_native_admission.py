@@ -46,6 +46,27 @@ def test_guard_is_only_at_native_start_and_watchdog_boundary():
         assert "runtime-admission.sh" not in (ROOT / "lib" / name).read_text()
 
 
+def test_shell_guard_preserves_temporary_pause_exit(tmp_path):
+    root = tmp_path / "data"
+    (root / "state").mkdir(parents=True)
+    (root / "state/activation.lock").write_text("")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name in ("python", "claudlobby"):
+        tool = bindir / name
+        tool.write_text("#!/bin/sh\nexit 75\n" if name == "python" else "#!/bin/sh\n")
+        tool.chmod(0o755)
+    script = (f'CLAUDLOBBY_ROOT={shlex.quote(str(root))}\n'
+              f'BOT_DIR={shlex.quote(str(root / "bot"))}\n'
+              f'CLAUDLOBBY_CLI={shlex.quote(str(bindir / "claudlobby"))}\n'
+              f'LIB_DIR={shlex.quote(str(ROOT / "lib"))}\n'
+              'CLAUDLOBBY_RELEASE_ID=r-test\nCLAUDLOBBY_ARTIFACT_ID=a-test\n'
+              f'. {shlex.quote(str(ROOT / "lib/runtime-admission.sh"))}\n'
+              'native_admission keepalive\n')
+    result = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True)
+    assert result.returncode == 75
+
+
 def test_private_tmux_child_cannot_retain_native_activation_descriptor(tmp_path):
     """A reaped starter cannot leave its admission lease in a surviving server."""
     lock = tmp_path / "activation.lock"

@@ -35,7 +35,6 @@ SEEDS = ("fleet.yaml.seed", "fleet.yaml.example", "projects.yaml.seed", ".env.se
 # the installed native runtime. These two remaining lib sources are likewise
 # not runtime dependencies.
 NATIVE_EXCLUDED = {"CLAUDE.md", "personal/finance-presync.sh"}
-# pull-root.sh remains a production dependency until its explicit P2 retirement.
 
 
 @cache
