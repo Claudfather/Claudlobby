@@ -1,7 +1,7 @@
 """Host facet probe (chunk 3) — the cause=probe emitter for host.* metrics.
 
-Drives the REAL lib/plane-host-probe.sh (real lib-common, real shim, real
-cold-CLI ingest into a scratch db; the facet tools stubbed on PATH so the
+Drives the REAL lib/plane-host-probe.sh (real lib-common, real shim, private
+Plane daemon committing to a scratch db; the facet tools stubbed on PATH so the
 values are deterministic). Load-bearing laws: subject_kind=host keyed by
 hostname (joins the Host card); Pi-only facets are ABSENT on a non-Pi host,
 never a fabricated 0; the job_ran proof-of-run always lands; always on
@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 from claudlobby.plane.db import db_path
+from tests.test_plane_events_door import _serving
 
 REPO = Path(__file__).resolve().parent.parent
 CLI = Path(sys.executable).parent / "claudlobby"
@@ -75,6 +76,11 @@ def _run(root, env):
         capture_output=True, text=True, env=env, timeout=120)
 
 
+def _run_committed(root, env, scratch_plane_env):
+    with _serving(root, scratch_plane_env) as socket:
+        return _run(root, {**env, "PLANE_SOCKET": str(socket)})
+
+
 def _samples(root):
     db = db_path(root)
     if not db.is_file():
@@ -91,7 +97,7 @@ def _samples(root):
 
 def test_probe_emits_the_portable_facets(tmp_path, *, scratch_plane_env):
     root, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
-    r = _run(root, env)
+    r = _run_committed(root, env, scratch_plane_env)
     assert r.returncode == 0, r.stderr
     s = _samples(root)
     assert json.loads(s["host.load"]["value"]) == {
@@ -105,7 +111,7 @@ def test_probe_emits_the_portable_facets(tmp_path, *, scratch_plane_env):
 
 def test_pi_facets_present_only_on_a_pi(tmp_path, *, scratch_plane_env):
     root, env = _rig(tmp_path, pi=True, scratch_plane_env=scratch_plane_env)
-    assert _run(root, env).returncode == 0
+    assert _run_committed(root, env, scratch_plane_env).returncode == 0
     s = _samples(root)
     assert s["host.thermal_flags"]["value"].strip('"') == "0x50005"
     assert json.loads(s["host.undervoltage"]["value"]) is True   # bit0 set
@@ -113,7 +119,7 @@ def test_pi_facets_present_only_on_a_pi(tmp_path, *, scratch_plane_env):
 
 def test_no_pi_facets_are_fabricated_off_a_pi(tmp_path, *, scratch_plane_env):
     root, env = _rig(tmp_path, pi=False, scratch_plane_env=scratch_plane_env)   # no vcgencmd on PATH
-    assert _run(root, env).returncode == 0
+    assert _run_committed(root, env, scratch_plane_env).returncode == 0
     s = _samples(root)
     assert "host.thermal_flags" not in s   # absent, never a fabricated 0
     assert "host.undervoltage" not in s
@@ -123,7 +129,7 @@ def test_records_without_any_flag_and_disabled_silences_it(tmp_path, *, scratch_
     """The always-on contract (F18 closure R1): no plane flag → the probe
     records (the job_ran proof-of-run lands); PLANE_EMIT_DISABLED=1 → nothing."""
     root, env = _rig(tmp_path, armed=False, scratch_plane_env=scratch_plane_env)
-    r = _run(root, env)
+    r = _run_committed(root, env, scratch_plane_env)
     assert r.returncode == 0, r.stderr
     assert _samples(root)["host.job_ran"]["value"] in ("1", 1)
     root2, env2 = _rig(tmp_path / "d", disabled=True, scratch_plane_env=scratch_plane_env)
@@ -200,7 +206,7 @@ def test_boot_time_is_a_real_utc_instant_not_1970(tmp_path, *, scratch_plane_env
     UTC+Z ISO instant and never 1970 (the SEV-1 symptom)."""
     import re
     root, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
-    assert _run(root, env).returncode == 0
+    assert _run_committed(root, env, scratch_plane_env).returncode == 0
     bt = _samples(root)["host.boot_time"]["value"].strip('"')
     assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", bt), bt
     assert not bt.startswith("1970")
@@ -220,7 +226,7 @@ def test_comma_decimal_locale_load_is_dropped_not_corrupted(tmp_path, *, scratch
         '#!/bin/bash\ncase "$*" in *-s*) exit 1 ;;'
         ' *) echo " up  load average: 0,52, 0,58, 0,59" ;; esac\n')
     (tmp_path / "bin" / "uptime").chmod(0o755)
-    assert _run(root, env).returncode == 0
+    assert _run_committed(root, env, scratch_plane_env).returncode == 0
     s = _samples(root)
     assert "host.load" not in s              # dropped, not {"one":0,...}
     assert "host.job_ran" in s               # the rest of the batch survives
@@ -235,7 +241,7 @@ def test_empty_hostname_never_poisons_the_whole_batch(tmp_path, *, scratch_plane
     (tmp_path / "bin" / "hostname").chmod(0o755)
     (tmp_path / "bin" / "uname").write_text('#!/bin/bash\necho\n')  # empty -n
     (tmp_path / "bin" / "uname").chmod(0o755)
-    assert _run(root, env).returncode == 0
+    assert _run_committed(root, env, scratch_plane_env).returncode == 0
     s = _samples(root)
     assert s["host.job_ran"]["subject_uid"].startswith("host_")  # batch landed
 
@@ -246,7 +252,7 @@ def test_the_wal_size_is_recorded_once_a_plane_exists(tmp_path, *, scratch_plane
     beside an initialized plane reports 0; once a writer keeps the WAL on disk
     the sample is its size at the probe's instant."""
     root, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
-    assert _run(root, env).returncode == 0
+    assert _run_committed(root, env, scratch_plane_env).returncode == 0
     assert int(_samples(root)["host.plane_wal_bytes"]["value"]) == 0
     # A held writer connection keeps a WAL on disk, the shape the daemon's
     # long-lived connection leaves between checkpoints.
@@ -257,11 +263,14 @@ def test_the_wal_size_is_recorded_once_a_plane_exists(tmp_path, *, scratch_plane
         held.execute("INSERT INTO probe_wal_scratch VALUES (zeroblob(65536))")
         held.commit()
         wal = Path(str(db_path(root)) + "-wal")
-        before = wal.stat().st_size
-        assert before > 65536
-        assert _run(root, env).returncode == 0
-        values = [int(r[0]) for r in held.execute(
-            "SELECT value FROM metric_samples WHERE metric = 'host.plane_wal_bytes'")]
+        with _serving(root, scratch_plane_env) as socket:
+            # The daemon may extend WAL as it opens; measure only after it
+            # is serving, immediately before the probe's own stat.
+            before = wal.stat().st_size
+            assert before > 65536
+            assert _run(root, {**env, "PLANE_SOCKET": str(socket)}).returncode == 0
+            values = [int(r[0]) for r in held.execute(
+                "SELECT value FROM metric_samples WHERE metric = 'host.plane_wal_bytes'")]
     finally:
         held.close()
     assert values == [0, before]

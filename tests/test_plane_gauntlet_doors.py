@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from claudlobby.plane.db import connect, db_path
+from tests.test_plane_events_door import _serving
 
 LIB_DIR = Path(__file__).resolve().parent.parent / "lib"
 CLI = Path(sys.executable).parent / "claudlobby"
@@ -61,6 +62,11 @@ def _bash(cmd: str, env: dict, cwd=None, stdin: str | None = None):
         ["bash", "-c", cmd], capture_output=True, text=True,
         env=env, cwd=cwd, timeout=120, input=stdin,
     )
+
+
+def _bash_committed(root: Path, scratch_plane_env, cmd: str, env: dict):
+    with _serving(root, scratch_plane_env) as socket:
+        return _bash(cmd, {**env, "PLANE_SOCKET": str(socket)})
 
 
 def _rows(tmp_path: Path, sql: str, params: tuple = ()):
@@ -162,7 +168,7 @@ class TestTgPostArmed:
             TELEGRAM_GROUP_CHAT_ID="-100123", TELEGRAM_BOT_TOKEN="tok",
         )
 
-    def test_accepted_post_lands_comm_and_carrier_ref(self, tmp_path, armed):
+    def test_accepted_post_lands_comm_and_carrier_ref(self, tmp_path, armed, scratch_plane_env):
         libdir, env = armed
         # Full capture so the body CONTENT is assertable (default metadata
         # mode drops it at the door, correctly).
@@ -174,7 +180,8 @@ class TestTgPostArmed:
         )
         # Tab in the body — the F14 class the per-string escaper was added
         # for; the single jq -nc assembly must encode it correctly.
-        r = _bash(f'"{libdir}/tg-post.sh" "line1\ttabbed"', tge)
+        r = _bash_committed(tmp_path, scratch_plane_env,
+                            f'"{libdir}/tg-post.sh" "line1\ttabbed"', tge)
         assert r.returncode == 0, r.stderr
         comm = _rows(
             tmp_path,
@@ -191,12 +198,12 @@ class TestTgPostArmed:
         assert tx[0]["carrier"] == "telegram-tgpost"
         assert tx[0]["carrier_ref"] == "tg:42"
 
-    def test_nonnumeric_message_id_never_reaches_carrier_ref(self, tmp_path, armed):
+    def test_nonnumeric_message_id_never_reaches_carrier_ref(self, tmp_path, armed, scratch_plane_env):
         libdir, env = armed
         tge = self._tg_env(
             tmp_path, env, '{"ok":true,"result":{"message_id":"weird"}}'
         )
-        r = _bash(f'"{libdir}/tg-post.sh" "hello"', tge)
+        r = _bash_committed(tmp_path, scratch_plane_env, f'"{libdir}/tg-post.sh" "hello"', tge)
         assert r.returncode == 0, r.stderr
         tx = _rows(
             tmp_path,
@@ -204,12 +211,12 @@ class TestTgPostArmed:
         )
         assert tx and tx[0]["carrier_ref"] is None
 
-    def test_rejected_post_lands_failed_transmission(self, tmp_path, armed):
+    def test_rejected_post_lands_failed_transmission(self, tmp_path, armed, scratch_plane_env):
         libdir, env = armed
         tge = self._tg_env(
             tmp_path, env, '{"ok":false,"description":"chat not found"}'
         )
-        r = _bash(f'"{libdir}/tg-post.sh" "hello"', tge)
+        r = _bash_committed(tmp_path, scratch_plane_env, f'"{libdir}/tg-post.sh" "hello"', tge)
         assert r.returncode == 3
         tx = _rows(
             tmp_path,
@@ -221,7 +228,7 @@ class TestTgPostArmed:
 # ---------------------------------------------------------------------------
 # briefing-trigger armed path (previously zero plane assertions)
 # ---------------------------------------------------------------------------
-def test_briefing_trigger_armed_lands_briefing_comm(tmp_path, armed):
+def test_briefing_trigger_armed_lands_briefing_comm(tmp_path, armed, scratch_plane_env):
     libdir, env = armed
     cfg = tmp_path / "state" / "plane"
     cfg.mkdir(parents=True, exist_ok=True)
@@ -231,7 +238,8 @@ def test_briefing_trigger_armed_lands_briefing_comm(tmp_path, armed):
     (botdir / "data").mkdir(parents=True)
     (botdir / ".claude" / "skills" / "briefing").mkdir(parents=True)  # composed skill
     (botdir / "bot.conf").write_text('export FLEET_NAME="brf-fleet"\n')
-    r = _bash(f'"{libdir}/briefing-trigger.sh" brf-fleet w1 morning', env)
+    r = _bash_committed(tmp_path, scratch_plane_env,
+                        f'"{libdir}/briefing-trigger.sh" brf-fleet w1 morning', env)
     assert r.returncode == 0, r.stderr
     comm = _rows(
         tmp_path,

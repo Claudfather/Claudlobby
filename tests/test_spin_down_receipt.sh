@@ -22,9 +22,23 @@ assert_eq() {
 
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bin"
-# The receipt's record is the plane (F18 closure R1); the CLI rung is stood in
-# for by tests/plane_capture_cli.sh, which renders each batch as the legacy row.
+# Capture at the emission boundary. C3 has no cold CLI rung to intercept;
+# this suite checks teardown's payload and ordering, not transport commitment
+# (the real socket/staging contract is covered by test_plane_emit.sh).
 CAPTURE="$T/plane-capture.jsonl"; : > "$CAPTURE"
+SOURCE_LIB="$LIB_DIR"; LIB_DIR="$T/lib"; mkdir -p "$LIB_DIR"
+for script in spin-down-bot.sh lib-common.sh supervisor.sh fleet-state-update.sh; do
+    cp "$SOURCE_LIB/$script" "$LIB_DIR/$script"
+done
+cat > "$LIB_DIR/plane-emit.sh" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+batch="${PLANE_CAPTURE}.batch"
+trap 'rm -f "$batch"' EXIT
+cat > "$batch"
+bash "$PLANE_CAPTURE_BATCH" "$batch"
+EOF
+chmod +x "$LIB_DIR/plane-emit.sh"
 # Pin the supervision branch to Linux: the production Darwin reaper uses an
 # absolute /bin/launchctl, which PATH cannot intercept. The dedicated lifecycle
 # matrix covers Darwin through an explicit seam in a test-only script copy.
@@ -53,7 +67,7 @@ spin_down() {
     env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T" CLAUDLOBBY_ROOT="$ROOT" USER=testuser \
         FLEET_NAME=f1 SPINDOWN_ACTOR="${SPINDOWN_ACTOR:-}" \
         SPINDOWN_RECEIPT_ENABLED="${SPINDOWN_RECEIPT_ENABLED-1}" \
-        PLANE_EMIT_DISABLED=0 PLANE_EMIT_CLI="$SCRIPT_DIR/plane_capture_cli.sh" PLANE_CAPTURE="$CAPTURE" PLANE_SOCKET="$T/no.sock" \
+        PLANE_EMIT_DISABLED=0 PLANE_CAPTURE_BATCH="$SCRIPT_DIR/plane_capture_cli.sh" PLANE_CAPTURE="$CAPTURE" PLANE_SOCKET="$T/no.sock" \
         bash "$LIB_DIR/spin-down-bot.sh" "$bdir" "$@" 2>&1 || true
 }
 
