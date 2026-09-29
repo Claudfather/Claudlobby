@@ -104,7 +104,7 @@ def _envelope(seq, event_id, env, *, host_uid, fleet_uid, now) -> dict:
     }
 
 
-def _batch_resolver(conn, now):
+def _batch_resolver(conn, now, host_uid):
     """Per-batch identity memo (gauntlet round, measured): a 3-event dispatch
     batch made 8 resolve() calls for 3 unique aliases — each 3 SQL statements
     plus a last_seen UPDATE writing an identical value (now is fixed per
@@ -112,25 +112,40 @@ def _batch_resolver(conn, now):
     batch; last_seen still advances once per batch, which is what it means."""
     memo: dict = {}
 
-    def party(alias):
-        key = ("party", alias)
-        if key not in memo:
-            memo[key] = resolve_party(conn, alias, now)
-        return memo[key]
-
     def fleet(alias):
         key = ("fleet", alias)
         if key not in memo:
-            memo[key] = resolve_fleet(conn, alias, now)
+            memo[key] = resolve_fleet(conn, alias, now, host_uid)
+        return memo[key]
+
+    def bot_parent(alias):
+        # The referenced bot can belong to another fleet (for example, a
+        # message recipient), so the envelope's fleet is not its parent.
+        if alias.startswith("bot:"):
+            fleet_alias, separator, bot_name = alias[4:].partition("/")
+            if fleet_alias and separator and bot_name:
+                return fleet(fleet_alias)
+        return None
+
+    def party(alias):
+        key = ("actor", alias)
+        if key not in memo:
+            memo[key] = resolve_party(conn, alias, now, bot_parent(alias))
         return memo[key]
 
     def entity(kind, alias):
         # kind-explicit resolution for the registry lane (Phase 2b): entity
         # snapshots and metric subjects name kinds the party() inference
         # cannot (host, vault, bot_instance, project, library_item)
+        if kind == "fleet":
+            return fleet(alias)
+        if kind == "actor":
+            return party(alias)
         key = (kind, alias)
         if key not in memo:
-            memo[key] = resolve(conn, kind, alias, now=now)
+            parent_uid = bot_parent(alias) if kind == "bot_instance" else None
+            memo[key] = resolve(conn, kind, alias, now=now,
+                                parent_uid=parent_uid)
         return memo[key]
 
     return party, fleet, entity
@@ -482,7 +497,7 @@ def ingest_many(conn, items, *, host_uid) -> list[IngestResult]:
                          f" (items {seen_ids[event_id]} and {idx})"}]
             )
         seen_ids[event_id] = idx
-    party, fleet, entity = _batch_resolver(conn, now)
+    party, fleet, entity = _batch_resolver(conn, now, host_uid)
     try:
         conn.execute("BEGIN IMMEDIATE")
         results = []
