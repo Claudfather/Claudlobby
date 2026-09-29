@@ -369,9 +369,14 @@ def _expected_default_fleet_ops_allow() -> list[str]:
         "Bash(claudlobby --json event list)",
         "Bash(claudlobby --json event list *)",
         "Bash(claudlobby --json event show *)",
+        "Bash(claudlobby --json fleet logs)",
+        "Bash(claudlobby --json fleet logs --lines *)",
         "Bash(claudlobby --json fleet start --workers)",
         "Bash(claudlobby --json fleet stop --workers)",
         "Bash(claudlobby --json fleet restart --workers)",
+        "Bash(claudlobby --json bot session solo)",
+        "Bash(claudlobby --json bot logs solo)",
+        "Bash(claudlobby --json bot logs solo --lines *)",
         "Bash(claudlobby --json bot restart solo)",
     ]
 
@@ -424,6 +429,11 @@ class TestComposeSettingsLocal:
         assert "Bash(claudlobby --json bot restart worker)" in worker_grants
         assert "Bash(claudlobby --json fleet pulse)" in lead_grants
         assert "Bash(claudlobby --json fleet pulse)" not in worker_grants
+        assert "Bash(claudlobby --json bot session worker)" in worker_grants
+        assert "Bash(claudlobby --json bot logs worker)" in worker_grants
+        assert "Bash(claudlobby --json bot logs lead)" in lead_grants
+        assert "Bash(claudlobby --json bot logs lead)" not in worker_grants
+        assert "Bash(claudlobby --json fleet logs)" not in worker_grants
         assert not any(g.startswith("Bash(claudlobby --json bot start ") or
                        g.startswith("Bash(claudlobby --json bot stop ") or
                        g == "Bash(claudlobby --json bot restart lead)" for g in worker_grants)

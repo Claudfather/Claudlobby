@@ -110,10 +110,12 @@ def set_fleet_running(*, root: Path, fleet: str | None, action: str,
                                 workers_only, tuple(completed))
 
 
-def reconcile_fleet(*, root: Path, fleet: str | None,
+def reconcile_fleet(*, root: Path, fleet: str | None, bot: str | None = None,
                     adapter: Adapter | None = None) -> FleetReconcileResult:
     """Report declared, enrolled, native-active and private-session evidence separately."""
     destination, _, selected = _scope(root, fleet, mutating=False)
+    if bot is not None and bot not in destination.fleet.bots:
+        raise FleetLifecycleError("bot is not declared in the selected fleet")
     plan = read_plan(destination.paths.root, selected["plan_id"])
     if plan.release_id != selected["release_id"]:
         raise FleetLifecycleError("selected fleet plan differs from selected release")
@@ -127,11 +129,12 @@ def reconcile_fleet(*, root: Path, fleet: str | None,
     platform, _, _, _, _ = _catalog(catalog)
     declarations = current_declarations(plan, platform)
     bot_names = frozenset(declaration.source.name for declaration in declarations
-                          if declaration.scope == "bot" and declaration.fleet == destination.fleet.name)
+                          if declaration.scope == "bot" and declaration.fleet == destination.fleet.name
+                          and (bot is None or declaration.bot == bot))
     inventory = collect_enrollment(destination.paths.root, declarations, adapter=adapter,
                                    only_names=bot_names).require_complete()
     completed = []
-    for bot in _targets(destination, workers_only=False):
+    for bot in ((bot,) if bot is not None else _targets(destination, workers_only=False)):
         try:
             entry = selected_bot_entry(destination.paths.root, destination.fleet.name, bot, platform)
             units = [unit for unit in inventory.units if unit.declaration.scope == "bot"

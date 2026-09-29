@@ -17,7 +17,10 @@ tool_grants:
   - "Bash(claudlobby task nudge --help)"
   - "Bash(claudlobby workstream --help)"
   - "Bash(claudlobby bot status --help)"
+  - "Bash(claudlobby bot session --help)"
+  - "Bash(claudlobby bot logs --help)"
   - "Bash(claudlobby fleet status --help)"
+  - "Bash(claudlobby fleet logs --help)"
   - "Bash(claudlobby fleet uptime --help)"
   - "Bash(claudlobby bot usage --help)"
   - "Bash(claudlobby bot start --help)"
@@ -132,7 +135,11 @@ reports and recent alerts. Its `data.brief.work` uses canonical task IDs; inspec
 `data.brief.degraded` and `data.brief.work.issues` before treating an empty view as clear.
 `--bot BOT` changes only the view. It does not change your caller identity.
 For current session and supervision evidence, use `claudlobby --json fleet status`
-or `claudlobby --json bot status BOT`. Native state and recorded activity are
+or `claudlobby --json bot status BOT`. `claudlobby --json bot session BOT` reads
+the selected private session and native enrollment; it does not inspect another
+process by name. Use `claudlobby --json bot logs BOT` or the manager's
+`claudlobby --json fleet logs` for bounded file tails. A missing bot log is
+different from an unreadable source. Native state and recorded activity are
 separate observations. `claudlobby --json fleet uptime --window 24h` reports
 recorded keepalive coverage; missing evidence does not prove downtime or health.
 

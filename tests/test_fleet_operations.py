@@ -161,3 +161,7 @@ def test_reconcile_keeps_enrollment_and_private_session_distinct(tmp_path, monke
                 ("worker-a", True, False, "absent", "unsupervised_down"),
                 ("worker-b", True, True, "absent", "missing"),
                 ("manager", True, True, "ready", "healthy")]
+    sessions = iter(("absent",))
+    expected_bots = iter(("worker-a",))
+    one = fleet.reconcile_fleet(root=tmp_path, fleet="example", bot="worker-a", adapter=Native())
+    assert [(row.bot, row.state) for row in one.bots] == [("worker-a", "unsupervised_down")]
