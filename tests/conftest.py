@@ -282,7 +282,9 @@ def built_test_cli(tmp_path_factory):
     venv = owned / "venv"
     subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
     python = venv / "bin/python"
-    subprocess.run([python, "-m", "pip", "install", "--no-index", "--no-deps",
+    # The source test process may export PYTHONPATH; pip must not mistake that
+    # checkout for a wheel already installed in this otherwise empty venv.
+    subprocess.run([python, "-I", "-m", "pip", "install", "--no-index", "--no-deps",
                     "--no-compile", str(wheel)], check=True,
                    capture_output=True, text=True)
     installed = Path(subprocess.check_output(
