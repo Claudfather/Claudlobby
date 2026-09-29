@@ -1,6 +1,6 @@
 # fleet.yaml — schema reference
 
-`fleet.yaml` is the recipe. It tells `claudlobby generate` which bots to compose, which library pieces to assemble, and how to wire them up. One file at the repo root, hand-edited or `claudlobby new-bot`-driven.
+`fleet.yaml` is the recipe. It tells `claudlobby generate` which bots to compose, which library pieces to assemble, and how to wire them up. One file at the repo root, hand-edited or authored with `claudlobby bot create`. Source edits reach a selected host only after a configuration plan and activation.
 
 ## Top-level shape
 

@@ -59,7 +59,7 @@ def _validation_gate(fleet: "FleetConfig", paths: Paths, *, context: str) -> boo
     """Run validate() and report; return True when composing may proceed.
 
     The shared load->validate->log gate for every command that composes
-    outside `claudlobby generate` (new-bot --auto-generate, move-bot).
+    outside `claudlobby generate` (currently move-bot).
     Warnings are surfaced (not just errors) so did-you-mean hints reach
     the user on these paths too.
     """

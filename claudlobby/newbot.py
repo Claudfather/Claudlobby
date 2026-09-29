@@ -1,16 +1,15 @@
-"""`claudlobby new-bot` — interactive bot creation.
+"""Bot source authoring for `claudlobby bot create`.
 
 Two modes:
 
-  Interactive:    `claudlobby new-bot`               (prompts for each field)
-  Non-interactive: `claudlobby new-bot --name X ...` (all flags up front)
+  Interactive:    `claudlobby bot create --interactive` (prompts for each field)
+  Non-interactive: `claudlobby bot create --name X ...` (all flags up front)
 
 Both modes share the same backend. Always:
   1. Builds a BotConfig stanza
   2. Walks through @BotFather + chat-id setup if needed
-  3. Edits fleet.yaml (in-place, preserving comments)
-  4. Optionally runs `claudlobby generate --bot <name>`
-  5. Prints next-step instructions
+  3. Edits fleet.yaml (in-place, preserving comments) after confirmation
+  4. Prints selected configuration staging and activation next steps
 
 YAML editing: text-based, not round-tripped through PyYAML. Inserts
 the new stanza as a properly-indented block at the end of `bots:`.
@@ -20,7 +19,7 @@ Preserves all comments and formatting.
 from __future__ import annotations
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -68,6 +67,7 @@ class NewBotInputs:
     require_mention: bool | None = None
     chat_id: str | None = None
     startup_prompt: str | None = None
+    telegram_token: str | None = field(default=None, repr=False)  # deferred until confirmation
 
 
 def _yaml_list(items: list[str]) -> str:
@@ -330,7 +330,7 @@ def _list_skills(p: Path) -> list[str]:
 
 def interactive_collect(paths: Paths) -> NewBotInputs:
     """Walk the user through every field. Returns a populated NewBotInputs."""
-    print("\n=== claudlobby new-bot — interactive ===\n")
+    print("\n=== claudlobby bot create — interactive ===\n")
 
     name = _ask("Bot name (lowercase, no spaces, e.g. 'eng-1')", allow_empty=False)
     while not re.match(r"^[a-z][a-z0-9_-]*$", name):
@@ -436,13 +436,11 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
     print(f"  - Bot username: {handle}  (must end in '_bot' and be globally unique)")
     print("  - Copy the token BotFather replies with")
     do_token = _ask_yn("Have a token to paste now?", default=True)
+    token = None
     if do_token:
         token = _ask(
             "  Paste token (format: <numbers>:<letters_and_numbers>)", allow_empty=False
         )
-        # Save to .env
-        write_token_to_env(paths.env_file, token_env, token)
-        log.info("  ✓ Saved %s to %s", token_env, paths.env_file)
 
     startup_prompt = (
         _ask("Startup prompt (sent once when the bot boots; leave blank for default)")
@@ -474,6 +472,7 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
         require_mention=require_mention,
         chat_id=chat_id,
         startup_prompt=startup_prompt,
+        telegram_token=token,
     )
 
 

@@ -60,6 +60,7 @@ def _run(code, *argv, tmp_path):
     (("--help",), "Compositor for Claude Code agent fleets"),
     (("brief", "--help"), "--boot"),
     (("bot", "automation", "status", "--help"), "BOT"),
+    (("bot", "create", "--help"), "--expertise"),
     (("plane", "view", "--help"), "--host"),
     (("data-migrate", "--help"), "--source"),
     (("message", "show", "--help"), "MESSAGE_ID"),

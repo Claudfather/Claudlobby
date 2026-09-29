@@ -41,6 +41,12 @@ def _bot_runtime_dispatch(args):
                    json_output=args.json)
 
 
+def _bot_create_dispatch(args):
+    return execute(args.public_command,
+                   lambda: import_module(".scaffolding", __package__).cmd_new_bot(args),
+                   json_output=args.json)
+
+
 def _fleet_runtime_dispatch(args):
     return execute(args.public_command,
                    lambda: import_module(".fleet_runtime", __package__).dispatch(args),
@@ -97,6 +103,8 @@ def register_orientation_subparsers(sub):
             usage.add_argument("--json", action="store_true", help="One schema-1 result object")
             usage.set_defaults(func=_usage_dispatch, public_command=f"{domain}.usage")
         if domain == "bot":
+            from ._bot_create_parsers import register_bot_create
+            register_bot_create(children, _bot_create_dispatch)
             status = children.add_parser("status", help="Read one bot's session, native and recorded status")
             status.add_argument("bot_id", metavar="BOT", help="Exact declared bot ID")
             status.add_argument("--json", action="store_true", help="One schema-1 result object")

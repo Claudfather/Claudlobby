@@ -1,4 +1,4 @@
-"""Shared interactive prompt helpers for CLI wizard commands (bot create, library create)."""
+"""Shared interactive prompt helpers for CLI source-authoring wizards."""
 
 from __future__ import annotations
 

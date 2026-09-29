@@ -55,10 +55,10 @@ For each bot the user wants to create, collect:
 4. **Model** — Explain the trade-offs: Opus (most capable, highest cost), Sonnet (balanced), Haiku (fastest, cheapest). Default: Sonnet.
 5. **Timezone** — Ask: "What timezone are you in? e.g., America/New_York, Europe/London, Asia/Tokyo". Used for human-friendly timestamps in bot output. Set as `env: { TZ: "<value>" }` in the bot's fleet.yaml stanza.
 
-Use `claudlobby new-bot` to add each bot:
+Use `claudlobby bot create` to author each bot; stage and activate the resulting fleet source separately:
 
 ```bash
-claudlobby --fleet <name> new-bot \
+claudlobby --fleet <name> bot create \
   --name <bot-name> \
   --expertise <areas> \
   --model <model> \

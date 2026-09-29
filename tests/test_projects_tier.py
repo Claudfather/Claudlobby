@@ -313,29 +313,30 @@ def test_root_mode_projects_yaml_is_gitignored():
     )
 
 
-def test_new_bot_auto_generate_refuses_on_validation_errors(fleet_dir):
-    # scaffolding --auto-generate must gate on validate() like generate does;
-    # an invalid tier must block composition, not reach bot.conf verbatim.
+def test_bot_create_has_no_auto_generate_path(fleet_dir):
+    # Source authoring cannot compose a bot as a side effect; the retired flag
+    # is a syntax error even if a caller tries it with a complete request.
     from claudlobby.__main__ import main
 
     _write_projects(
         fleet_dir,
         "projects:\n  p:\n    repos: [a/b]\n    validation: {tier: revew}\n",
     )
-    rc = main(
-        [
+    original = (fleet_dir / "fleet.yaml").read_text()
+    with pytest.raises(SystemExit) as exc:
+        main([
             "--root",
             str(fleet_dir),
-            "new-bot",
+            "bot", "create",
             "--name",
             "newbie",
             "--expertise",
             "orchestration",
             "--auto-generate",
             "--yes",
-        ]
-    )
-    assert rc != 0, "auto-generate must refuse while validate() reports errors"
+        ])
+    assert exc.value.code == 2, "auto-generate must no longer be a bot-create option"
+    assert (fleet_dir / "fleet.yaml").read_text() == original
     assert not (fleet_dir / "runtime" / "bots" / "newbie" / "bot.conf").exists()
 
 
@@ -457,7 +458,7 @@ def test_fleet_yaml_example_cross_references_projects_yaml():
 
 # --- timer-script parity on the shared compose gate (#735 follow-up) ------------
 # validate reads timer jobs off fleet.defaults, so the shared compose-outside-
-# generate gate (new-bot, move-bot) catches a denied timer script with no extra
+# generate gate (move-bot) catches a denied timer script with no extra
 # threading — the same L1 rule generate enforces via compose_fleet_timers.
 
 

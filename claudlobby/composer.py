@@ -3102,7 +3102,7 @@ def compose_bot(
 
     ``boot_delay_s`` defaults to this bot's own rung on the host boot ladder,
     DERIVED rather than threaded: every caller that composes a single bot
-    (``generate --bot``, ``move-bot``, ``new-bot``) would otherwise silently
+    (``generate --bot`` and ``move-bot``) would otherwise silently
     write a unit with no stagger at all, collapsing that bot to rung 0 and
     re-creating the collision the ladder exists to prevent (#1002). Pass an
     explicit value only to compose a unit off the host ladder, e.g. in tests.

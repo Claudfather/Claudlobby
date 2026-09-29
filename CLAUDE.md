@@ -417,7 +417,7 @@ claudlobby host-timers                 # compose host-global timer units from sy
 claudlobby diff                        # show drift between runtime and generate
 claudlobby promote <name>              # extract bot drift back into library
 claudlobby library list                # show available building blocks
-claudlobby new-bot                     # interactive bot scaffolding
+claudlobby bot create --interactive                     # author a bot; stage and activate separately
 
 # Operations
 claudlobby status                      # fleet health dashboard
@@ -446,7 +446,7 @@ claudlobby host cache warm                  # pre-download npx + uvx packages fo
 claudlobby bot move <bot> --to <fleet> # move a bot between fleets
 
 # Scaffolding
-claudlobby new-bot                     # interactive bot scaffolding
+claudlobby bot create --interactive                     # author a bot; stage and activate separately
 claudlobby library create --kind skill                   # scaffold a new skill directory
 claudlobby library create --kind guardrail               # scaffold a new guardrail file
 
