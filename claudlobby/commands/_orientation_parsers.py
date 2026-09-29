@@ -67,6 +67,9 @@ def register_orientation_subparsers(sub):
         group = sub.add_parser(domain, help=f"Read {domain} declarations and available evidence")
         children = group.add_subparsers(dest=f"{domain}_command", required=True)
         if domain == "fleet":
+            utilization = children.add_parser("utilization", help="Read observed fleet busy/idle time with coverage")
+            utilization.add_argument("--json", action="store_true", help="One schema-1 result object")
+            utilization.set_defaults(func=_status_dispatch, public_command="fleet.utilization")
             status = children.add_parser("status", help="Read fleet session, native and recorded status")
             status.add_argument("--json", action="store_true", help="One schema-1 result object")
             status.set_defaults(func=_status_dispatch, public_command="fleet.status")

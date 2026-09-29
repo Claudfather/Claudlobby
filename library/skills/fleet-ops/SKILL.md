@@ -78,6 +78,7 @@ tool_grants:
   - "Bash(claudlobby --json fleet status)"
   - "Bash(claudlobby --json fleet uptime)"
   - "Bash(claudlobby --json fleet uptime *)"
+  - "Bash(claudlobby --json fleet utilization)"
   - "Bash(claudlobby --json bot usage *)"
   - "Bash(claudlobby --json bot automation status *)"
   - "Bash(claudlobby --json bot automation pause *)"
@@ -133,6 +134,9 @@ For current session and supervision evidence, use `claudlobby --json fleet statu
 or `claudlobby --json bot status BOT`. Native state and recorded activity are
 separate observations. `claudlobby --json fleet uptime --window 24h` reports
 recorded keepalive coverage; missing evidence does not prove downtime or health.
+`claudlobby --json fleet utilization` reports busy share and observed seconds from
+Plane heartbeat samples alongside canonical task assignments. A bot with no
+observed BUSY/IDLE duration is unknown, not idle.
 
 When token counts are needed, run `claudlobby --json bot usage BOT --since 24h`,
 `claudlobby --json fleet usage --since 24h`, or

@@ -24,7 +24,6 @@ from claudlobby.utilization import (
     compute_bot_utilization,
     compute_fleet_utilization,
     format_utilization_summary,
-    write_utilization_json,
 )
 
 REPO = Path(__file__).resolve().parent.parent
@@ -317,50 +316,29 @@ class TestComputeFleetUtilization:
         with pytest.raises(PlaneUnreachable, match="fleet"):
             compute_fleet_utilization(bots_dir, self._paths(tmp_path))
 
+    def test_public_read_reports_missing_bot_history_as_unknown(self, tmp_path, monkeypatch, capsys):
+        from types import SimpleNamespace
+        from claudlobby import activation_state
+        from claudlobby.__main__ import main
+        from claudlobby.commands import orientation
 
-# ── write_utilization_json ───────────────────────────────────────────────────
+        now = datetime.now(timezone.utc)
+        # An unrelated heartbeat establishes the fleet in a reachable Plane;
+        # the declared worker still has no observed BUSY/IDLE duration.
+        _land_heartbeats(tmp_path, "f", "other", [(now - timedelta(minutes=1), "IDLE")])
+        paths = self._paths(tmp_path)
+        monkeypatch.setattr(orientation, "_context", lambda args: SimpleNamespace(
+            paths=paths, fleet=SimpleNamespace(name="f", bots={"worker": object()})))
+        monkeypatch.setattr(activation_state, "read_selection", lambda root: None)
 
-
-class TestWriteUtilizationJson:
-    def test_writes_valid_json(self, tmp_path):
-        now = datetime(2026, 6, 9, 18, 0, 0, tzinfo=timezone.utc)
-        (tmp_path / "library").mkdir()
-        (tmp_path / "lib").symlink_to(REPO / "lib")
-        from tests.package_fixtures import source_package
-        from claudlobby.paths import Paths
-
-        paths = Paths(root=tmp_path, package=source_package())
-
-        results = [
-            BotUtilization(
-                name="eng-1",
-                busy_pct_24h=42.3,
-                busy_pct_7d=38.1,
-                idle_since=datetime(2026, 6, 9, 14, 30, 0, tzinfo=timezone.utc),
-                state="idle",
-            ),
-        ]
-        out_path = write_utilization_json(results, paths, now=now)
-
-        assert out_path.exists()
-        data = json.loads(out_path.read_text())
-        assert "updated" in data
-        assert "eng-1" in data["bots"]
-        assert data["bots"]["eng-1"]["busy_pct_24h"] == 42.3
-        assert data["bots"]["eng-1"]["state"] == "idle"
-
-    def test_creates_state_dir(self, tmp_path):
-        now = datetime(2026, 6, 9, 18, 0, 0, tzinfo=timezone.utc)
-        (tmp_path / "library").mkdir()
-        (tmp_path / "lib").symlink_to(REPO / "lib")
-        from tests.package_fixtures import source_package
-        from claudlobby.paths import Paths
-
-        paths = Paths(root=tmp_path, package=source_package())
-
-        out_path = write_utilization_json([], paths, now=now)
-        assert out_path.parent.is_dir()
-        assert out_path.parent.name == "state"
+        assert main(["--json", "fleet", "utilization"]) == 0
+        result = json.loads(capsys.readouterr().out)
+        assert result["command"] == "fleet.utilization"
+        worker = result["data"]["items"][0]
+        assert worker["name"] == "worker" and worker["state"] == "unknown"
+        assert worker["observed_secs_24h"] == 0
+        assert worker["busy_pct_24h"] is None and worker["busy_pct_7d"] is None
+        assert "worker unknown" in result["data"]["summary"]
 
 
 # ── format_utilization_summary ───────────────────────────────────────────────
@@ -392,7 +370,7 @@ class TestFormatUtilizationSummary:
 
     def test_busy_only(self):
         results = [
-            BotUtilization(name="eng-1", busy_pct_24h=50.0, state="unknown"),
+            BotUtilization(name="eng-1", busy_pct_24h=50.0, observed_secs_24h=600, state="unknown"),
         ]
         summary = format_utilization_summary(results)
         assert "50% busy" in summary

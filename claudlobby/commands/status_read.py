@@ -20,6 +20,8 @@ def dispatch(args) -> CommandOutput:
     except ActivationError as exc:
         raise CommandFailure("conflict", "release selection cannot be read") from exc
     release_id = selected["release_id"] if selected else None
+    if args.public_command == "fleet.utilization":
+        return _utilization(context, release_id)
     if args.public_command == "fleet.uptime":
         return _uptime(args, context, release_id)
 
@@ -78,3 +80,31 @@ def _uptime(args, context, release_id: str | None) -> CommandOutput:
             "source": "Plane keepalive samples and restart transitions"}
     lines = (format_table(results, window=display_window), coverage[display_window])
     return CommandOutput(data, release_id=release_id, lines=lines)
+
+
+def _utilization(context, release_id: str | None) -> CommandOutput:
+    from dataclasses import asdict
+    from ..utilization import PlaneUnreachable, compute_fleet_utilization, format_utilization_summary
+
+    try:
+        results = compute_fleet_utilization(context.paths.runtime_bots, context.paths,
+                                            bot_names=sorted(context.fleet.bots), fleet=context.fleet.name)
+    except PlaneUnreachable as exc:
+        raise CommandFailure("unavailable", "utilization Plane source could not answer") from exc
+    items = []
+    lines = []
+    for result in results:
+        row = asdict(result)
+        row["idle_since"] = result.idle_since.isoformat() if result.idle_since else None
+        row["work_unresolved"] = result.work_unresolved
+        for window in ("24h", "7d"):
+            if row[f"observed_secs_{window}"] == 0:
+                row[f"busy_pct_{window}"] = None
+        items.append(row)
+        busy = "unknown" if row["busy_pct_24h"] is None else f"{row['busy_pct_24h']}%"
+        lines.append(f"{result.name}: {busy} busy over {row['observed_secs_24h']:g}s observed in 24h")
+    meaning = "Busy share of observed BUSY/IDLE time; missing and UNKNOWN intervals are not idle."
+    return CommandOutput({"fleet": context.fleet.name, "items": items, "next_cursor": None,
+                          "source": "Plane bot.heartbeat and canonical Task snapshot",
+                          "meaning": meaning, "summary": format_utilization_summary(results)},
+                         release_id=release_id, lines=(*lines, meaning))

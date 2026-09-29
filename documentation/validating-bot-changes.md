@@ -42,6 +42,7 @@ lib/spin-up-bot.sh <bot-dir>           # or restart the affected bot
 # drive the affected path, then observe:
 claudlobby events --bot <bot> --tail 20      # the plane's rows for the bot
 claudlobby fleet uptime --bot <bot>                 # heartbeat history, from the plane
+claudlobby fleet utilization                        # busy share of observed heartbeat time; no history is unknown
 tmux attach -t <bot>                   # watch the pane
 ```
 
