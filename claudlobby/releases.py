@@ -252,8 +252,13 @@ def release_path(data_root: Path, release_id: str) -> Path:
     return path
 
 
-def inventory_release(directory: Path) -> tuple[InventoryEntry, ...]:
-    """Inventory every entry except the seal; never follow directory symlinks."""
+def inventory_release(directory: Path, *, runtime_cache: bool = False) -> tuple[InventoryEntry, ...]:
+    """Inventory authored entries; accept only derived bytecode after sealing.
+
+    Assembly rejects every cache. A running Python process may later create
+    ``__pycache__/*.pyc`` under an already sealed release, so verification
+    ignores those regular files while still refusing any other new entry.
+    """
     directory = Path(directory)
     if not directory.is_dir() or directory.is_symlink():
         raise ReleaseError("release directory is missing or redirected")
@@ -271,7 +276,15 @@ def inventory_release(directory: Path) -> tuple[InventoryEntry, ...]:
                 continue
             if Path(parent) == root and name.startswith(".release-"):
                 raise ReleaseError("release contains an incomplete seal temporary file")
-            if name == "__pycache__" or path.suffix in {".pyc", ".pyo"}:
+            if name == "__pycache__":
+                if not runtime_cache or not stat.S_ISDIR(path.lstat().st_mode):
+                    raise ReleaseError(f"bytecode is not an immutable install input: {relative}")
+                for child in path.iterdir():
+                    if child.suffix != ".pyc" or not stat.S_ISREG(child.lstat().st_mode):
+                        raise ReleaseError(f"unexpected release cache entry: {child.relative_to(root)}")
+                dirs.remove(name)
+                continue
+            if path.suffix in {".pyc", ".pyo"}:
                 raise ReleaseError(f"bytecode is not an immutable install input: {relative}")
             metadata = path.lstat()
             mode = stat.S_IMODE(metadata.st_mode)
@@ -395,7 +408,7 @@ def read_release(data_root: Path, release_id: str, *, verify_files: bool = True)
         paths = ReleasePaths(**raw["paths"])
         compatibility = Compatibility.from_dict(raw["compatibility"])
         expected = tuple(InventoryEntry(**value) for value in raw["inventory"])
-        actual = inventory_release(directory) if verify_files else expected
+        actual = inventory_release(directory, runtime_cache=True) if verify_files else expected
         if expected != actual or raw["runtime_sha256"] != _inventory_digest(actual):
             raise ReleaseError("installed runtime inventory digest mismatch")
         if verify_files and _verify_inputs(directory, inputs, paths) != compatibility:
