@@ -174,10 +174,10 @@ def register_release_subparsers(sub):
 
     config = sub.add_parser("config", help="Stage and inspect configuration proposals")
     configs = config.add_subparsers(dest="config_command", required=True)
-    explain = configs.add_parser("explain", help="Explain environment keys and tier shadowing without values")
+    explain = configs.add_parser("explain", help="Explain environment tiers or supported fleet/bot scalar sources without values")
     explain.add_argument("key", nargs="?", metavar="KEY",
-                         help="Environment variable; omit to list declared variables")
-    explain.add_argument("--bot", metavar="BOT", help="Include a declared bot's environment tier")
+                         help="Environment variable or fleet.FIELD / bot.FIELD; omit to list environment variables")
+    explain.add_argument("--bot", metavar="BOT", help="Select a declared bot for bot fields or its environment tier")
     explain.add_argument("--json", action="store_true", help="One schema-1 result object")
     explain.set_defaults(func=_dispatch_config_explain, public_command="config.explain")
     validate = configs.add_parser("validate", help="Validate the selected fleet without composing it")

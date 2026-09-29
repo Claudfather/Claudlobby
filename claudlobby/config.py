@@ -1696,6 +1696,15 @@ def _parse_enum(label: str, value: str | None, known: frozenset[str]) -> str | N
     return value
 
 
+def _select_bot_scalar(raw: dict, defaults: dict, key: str, fallback=None) -> tuple[Any, str]:
+    """The presence-based scalar choice shared by coercion and provenance."""
+    if key in raw:
+        return raw[key], "bot"
+    if key in defaults:
+        return defaults[key], "fleet.defaults"
+    return fallback, "built_in"
+
+
 def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> BotConfig:
     raw = raw or {}
     tg_defaults = defaults.get("telegram", {}) or {}
@@ -1712,18 +1721,10 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         raise ValueError(f"bot '{name}': missing required field 'expertise'")
 
     def _bool(key: str, fallback: bool) -> bool:
-        if key in raw:
-            return bool(raw[key])
-        if key in defaults:
-            return bool(defaults[key])
-        return fallback
+        return bool(_select_bot_scalar(raw, defaults, key, fallback)[0])
 
     def _str(key: str, fallback: str) -> str:
-        if key in raw:
-            return str(raw[key])
-        if key in defaults:
-            return str(defaults[key])
-        return fallback
+        return str(_select_bot_scalar(raw, defaults, key, fallback)[0])
 
     def _tristate(key: str) -> bool | None:
         """Presence-based tri-state: an explicit *non-null* bot/fleet value wins,
@@ -1769,10 +1770,10 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         model_strategy=_coerce_model_strategy(
             raw.get("model_strategy") or defaults.get("model_strategy")
         ),
-        account=raw.get("account", defaults.get("account", "default")),
-        model=raw.get("model", defaults.get("model")),
+        account=_select_bot_scalar(raw, defaults, "account", "default")[0],
+        model=_select_bot_scalar(raw, defaults, "model")[0],
         effort=_parse_enum(
-            "effort", raw.get("effort", defaults.get("effort")), KNOWN_EFFORTS
+            "effort", _select_bot_scalar(raw, defaults, "effort")[0], KNOWN_EFFORTS
         ),
         remote_control=_bool("remote_control", True),
         dangerously_skip_permissions=_bool("dangerously_skip_permissions", False),
@@ -2173,6 +2174,47 @@ def load_fleet(fleet_yaml: Path, *, projects_yaml: Path | None = None) -> tuple[
         doc = yaml.safe_load(f)
     return _fleet_document(fleet_yaml, doc, lambda: load_projects(
         projects_yaml if projects_yaml is not None else fleet_yaml.parent / "projects.yaml"))
+
+
+_EXPLAIN_FLEET_SCALARS = frozenset({
+    "name", "service_prefix", "manager", "telegram_group_chat_id",
+    "human_telegram_id", "mission", "mission_file",
+})
+_EXPLAIN_BOT_INHERITED_SCALARS = frozenset({
+    "account", "model", "effort", "remote_control", "dangerously_skip_permissions",
+    "skip_auto_permission_prompt", "skip_dangerous_mode_permission_prompt",
+    "prompt_suggestions", "disable_nonessential_traffic", "spinner_tips_enabled",
+    "preferred_notif_channel", "prefers_reduced_motion",
+})
+_EXPLAIN_BOT_LOCAL_SCALARS = frozenset({"name", "voice", "reports_to", "startup_prompt"})
+
+
+def scalar_config_origin(fleet_yaml: Path, merged_defaults: dict, field: str,
+                         *, bot: str | None = None) -> tuple[str, str | None]:
+    """Name the authored source of supported scalar fields; never return values.
+
+    Only fields with a simple, known selection path are covered. Complex
+    unions, per-field mappings and composer-resolved defaults need their own
+    operation owner; callers must report those as unsupported.
+    """
+    with fleet_yaml.open() as source:
+        raw_fleet = yaml.safe_load(source)["fleet"]
+    if bot is None:
+        if field not in _EXPLAIN_FLEET_SCALARS:
+            raise NotImplementedError
+        return ("fleet", f"fleet.{field}") if field in raw_fleet else ("built_in", None)
+    raw_bot = (raw_fleet.get("bots") or {}).get(bot) or {}
+    if field in _EXPLAIN_BOT_INHERITED_SCALARS:
+        _, source = _select_bot_scalar(raw_bot, merged_defaults, field)
+        if source == "fleet.defaults" and field not in (raw_fleet.get("defaults") or {}):
+            source = "system_defaults"
+        declaration = (f"fleet.bots.{bot}.{field}" if source == "bot" else
+                       f"fleet.defaults.{field}" if source == "fleet.defaults" else
+                       f"system.yaml.defaults.{field}" if source == "system_defaults" else None)
+        return source, declaration
+    if field in _EXPLAIN_BOT_LOCAL_SCALARS:
+        return ("bot", f"fleet.bots.{bot}.{field}") if field in raw_bot else ("built_in", None)
+    raise NotImplementedError
 
 
 def load_fleet_snapshot(fleet_yaml: Path, fleet_content: bytes,

@@ -983,6 +983,14 @@ does not own.
 
 Generate proceeds through warnings. Pass `--strict` to make warnings errors (CI use).
 
+`claudlobby --fleet <fleet> config explain fleet.manager` and
+`claudlobby --fleet <fleet> config explain bot.model --bot <bot>` name the
+declaration or built-in default that supplied supported scalar settings.
+`config explain GITHUB_PAT --bot <bot>` uses the environment tier register.
+These reads report source and set/unset state without printing values. Nested
+merge fields such as `bot.env` are explicitly unsupported; `bot.env` is read
+from the bot stanza itself and does not inherit `defaults.env`.
+
 ### Warning discipline
 
 Warnings are advisory: `validate` and `generate` exit 0 on warnings alone, by design.

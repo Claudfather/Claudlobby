@@ -132,6 +132,53 @@ def test_public_config_explain_resolves_undeclared_key_and_refuses_unknown_bot(w
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "not_found"
 
 
+def test_config_explain_scalar_sources_follow_loader_without_values(world, capsys, monkeypatch):
+    _fleet, paths, fleet_dir, _home = world
+    monkeypatch.setattr("claudlobby.context.resolve_paths", lambda **_kwargs: paths)
+    manifest = fleet_dir / "fleet.yaml"
+    manifest.write_text(FLEET.replace("mcp: [github]", "mcp: [github]\n    model: fleet-private-model")
+                        .replace("solo:\n      expertise: [x]", "solo:\n      expertise: [x]\n      model: bot-private-model"))
+    argv = ["--root", str(paths.root), "--fleet", "acme", "--json", "config", "explain"]
+
+    assert main([*argv, "fleet.manager"]) == 0
+    fleet_result = json.loads(capsys.readouterr().out)["data"]
+    assert (fleet_result["kind"], fleet_result["source"], fleet_result["declaration"]) == (
+        "configuration", "fleet", "fleet.manager")
+
+    assert main([*argv, "bot.model", "--bot", "solo"]) == 0
+    output = capsys.readouterr()
+    bot_result = json.loads(output.out)["data"]
+    assert (bot_result["source"], bot_result["declaration"], bot_result["state"]) == (
+        "bot", "fleet.bots.solo.model", "set")
+    assert "private-model" not in output.out + output.err
+
+    manifest.write_text(manifest.read_text().replace("      model: bot-private-model\n", ""))
+    assert main([*argv, "model", "--bot", "solo"]) == 0
+    inherited = json.loads(capsys.readouterr().out)["data"]
+    assert (inherited["source"], inherited["declaration"]) == (
+        "fleet.defaults", "fleet.defaults.model")
+
+    manifest.write_text(manifest.read_text().replace("    model: fleet-private-model\n", ""))
+    assert main([*argv, "bot.model", "--bot", "solo"]) == 0
+    fallback = json.loads(capsys.readouterr().out)["data"]
+    assert (fallback["source"], fallback["state"], fallback["declaration"]) == (
+        "built_in", "unset", None)
+
+
+def test_config_explain_refuses_unsupported_or_unknown_config_paths(world, capsys, monkeypatch):
+    _fleet, paths, _fleet_dir, _home = world
+    monkeypatch.setattr("claudlobby.context.resolve_paths", lambda **_kwargs: paths)
+    argv = ["--root", str(paths.root), "--fleet", "acme", "--json", "config", "explain"]
+    assert main([*argv, "bot.env", "--bot", "solo"]) == 6
+    assert "unsupported" in json.loads(capsys.readouterr().out)["error"]["message"]
+    assert main([*argv, "fleet.defaults.env"]) == 6
+    assert "unsupported" in json.loads(capsys.readouterr().out)["error"]["message"]
+    assert main([*argv, "fleet.unknown_field"]) == 3
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "not_found"
+    assert main([*argv, "bot.model"]) == 2
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "invalid_argument"
+
+
 def test_a_var_set_once_reports_set(world) -> None:
     fleet, paths, root, _ = world
     (root / ".env").write_text("export GITHUB_PAT=real\n")
