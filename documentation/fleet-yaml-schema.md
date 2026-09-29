@@ -238,6 +238,7 @@ Opt a fleet **out** of an on-by-default job the same way, with `enroll: false`.
 | `boot-capture-stamp` | **off** — no deployment gate, and more sharply than boot-capture: this half has no enrollment step at all, so a root pull reaches every bot start immediately | door | fleet.yaml env: → bot.conf | BOOT_CAPTURE_ENABLED=1 in fleet.yaml bots.NAME.env: (then generate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `code-audit-sweep` | **off** — model spend + outbound GitHub issues | fleet job | fleet.yaml | sweep.enabled: true in fleet.yaml (plus owner_bot and repos), then generate + lib/setup-fleet |
 | `manager-checkin` | **off** — model spend — one manager turn per idle beat — and it injects into a live session | fleet job | fleet.yaml | defaults.jobs.manager-checkin.enroll: true in fleet.yaml, then generate + lib/setup-fleet |
+| `mcp-direct-launch` | **off** — no deployment gate: .mcp.json is read at session start and sessions restart whether or not anyone chose to (keepalive, context restarts), so after the nightly reload-fleet generate a default-on change would reach every bot of every fleet with nobody choosing which went first, and it changes how every MCP server starts. The manifest is the only place one bot can go first | generate | fleet.yaml bots.<bot> → generate | bots.<bot>.mcp_direct_launch: true in fleet.yaml for ONE bot first, then claudlobby --fleet <fleet> warm-cache, then generate --bot <bot> (it takes effect when that bot next restarts: .mcp.json is read at session start); widen to defaults.mcp_direct_launch once it has run clean |
 | `mcp-package-probe` | **off** — reaches the NETWORK on a compose. A generate must stay offline and fast by default, and a registry outage must never be the reason a fleet cannot compose. The offline half of the check (is the package pinned?) is unconditional and needs no flag | generate | fleet .env | CLAUDLOBBY_MCP_PROBE_ENABLED=1 in the fleet-tier .env |
 | `session-digest` | **off** — model spend (a Haiku pass per finished session) | door | fleet.yaml env: → bot.conf | SESSION_DIGEST_ENABLED=1 in fleet.yaml bots.NAME.env: (then generate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `shared-config-isolation` | **off** — no deployment gate: a composed deny binds on the bot's next tool call with no restart in between, and the nightly reload-fleet generate would carry a default-on rule set onto every bot of every fleet with nobody choosing to — the manifest is the only place one bot can go first | generate | fleet.yaml bots.<bot> → generate | bots.<bot>.isolation.shared_config: true in fleet.yaml for ONE bot first, then claudlobby --fleet <fleet> generate --bot <bot> (it binds on that bot's next tool call, no restart); widen to defaults.isolation.shared_config once it has run clean |
@@ -518,6 +519,36 @@ mcp:
 This emits one `.mcp.json` server per instance — `notion` (the `default`) and `notion-work` — and namespaces each instance's env-var placeholders by an uppercased prefix: the `default` instance keeps `NOTION_` (so it reads `NOTION_TOKEN`), while `work` becomes `NOTION_WORK_` (so it reads `NOTION_WORK_TOKEN`). Set one env var per instance in `.env`. Parsed by `config.py` (`_parse_mcp_list` → `McpEntry`); placeholder resolution lives in `claudlobby/mcp_resolve.py`. See the Notion integration guide for a worked example.
 
 `integrations:` lists usage docs from `library/integrations/`. By default, integrations are **auto-paired with mcp** — listing `mcp: [github]` automatically pulls in `library/integrations/github.md` (when it exists). Override by setting `integrations:` explicitly.
+
+### `bots.<name>.mcp_direct_launch` / `fleet.defaults.mcp_direct_launch`
+
+Opt-in, off by default (#1604). `npx -y <pkg>@<version>` keeps an `npm exec` process resident as the parent of the server it starts, for the server's whole life. On the Pi, 41 of those wrappers held 45 MB of private memory and 1,388 MB of swap. With `mcp_direct_launch: true`, the bot launches each **exactly pinned** npx server as `node <entry point>` from a copy that `claudlobby warm-cache` installs under `$CLAUDLOBBY_ROOT/state/mcp/npm/<name>@<version>/`. No wrapper process exists at all.
+
+```yaml
+bots:
+  ravi:
+    mcp_direct_launch: true   # STRICT bool: a typo string is a parse error, never an arming
+```
+
+To arm one bot:
+
+1. Set the key on that bot.
+2. Run `claudlobby --fleet <fleet> warm-cache`. It installs the copies, and only for armed bots.
+3. Run `claudlobby --fleet <fleet> generate --bot <bot>`.
+4. Restart the bot. `.mcp.json` is read at session start, so a running bot keeps its npx servers until then.
+
+To widen it, set `defaults.mcp_direct_launch: true`. A bot's own `false` still opts that bot out.
+
+Any server that can't launch directly keeps today's npx launch. That launch can't break the server; it only forgoes the saving. `generate` names every such server with its reason, in one warning per bot, and `doctor`'s `mcp-launch` rung says the same:
+
+| reason | fix |
+|---|---|
+| `not installed` | run `warm-cache` for the fleet, then `generate` |
+| `not an exact version pin` | pin the fragment. A range or dist-tag would install whatever the registry serves today |
+| `entry point is not a plain node script` | none. `node <path>` would drop a shebang's flags, and a non-node bin is not node at all |
+| `cannot tell which bin npx would run` | none. npx itself refuses an ambiguous bin |
+
+The copy installs the fragment's exact pin. npm resolves the rest of its dependency tree from its own cache first (`--prefer-offline`). uvx servers are untouched. `lib/fleet-memory-check.sh` does not show the saving (#862): its fleet total never matched an `npm exec` line, and its per-bot figure counts only the pane process and its direct children.
 
 ### `bots.<name>.guardrails` / `protocols` / `resources` / `lessons` / `principles` / `permissions` / `post_actions`
 

@@ -267,6 +267,41 @@ def check_npx_cache(paths: Paths, report: DoctorReport) -> None:
 # ----------------------------------------------------------------------
 
 
+def check_mcp_launch(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> None:
+    """#1604: an armed bot's npx servers launch directly, or this names each one
+    still carrying an npm wrapper and why.
+
+    It reads the composer's own plan (`mcp_launch_plan`), so doctor and
+    generate cannot disagree. No armed bot adds no line: off is the shipped
+    default, and the switches rung already names it with its arm line."""
+    from . import mcp_direct
+    from .composer import mcp_launch_plan
+    from .mcp_grammar import GrammarUnavailable
+
+    armed = [b for b in fleet.bots.values() if b.mcp_direct_launch]
+    if not armed:
+        return
+    left: list[str] = []
+    fixable = False
+    try:
+        for bot in armed:
+            _merged, fallbacks = mcp_launch_plan(bot, paths)
+            for name, _spec, why in fallbacks:
+                left.append(f"{bot.bot_id}/{name} ({why})")
+                fixable = fixable or why == mcp_direct.NOT_INSTALLED
+    except (GrammarUnavailable, ValueError, OSError) as exc:
+        report.add("mcp-launch", "warn", f"could not read the launch plan: {exc}")
+        return
+    if not left:
+        report.add("mcp-launch", "pass",
+                   f"{len(armed)} armed bot(s): every npx server launches directly")
+        return
+    shown = ", ".join(left[:6]) + (f" (+{len(left) - 6} more)" if len(left) > 6 else "")
+    fix = " — run `claudlobby warm-cache` for this fleet, then generate" if fixable else ""
+    report.add("mcp-launch", "warn",
+               f"{len(left)} server(s) on armed bot(s) still launch through npx: {shown}{fix}")
+
+
 def check_services(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> None:
     """Check systemd/launchd enrollment and tmux session presence per bot."""
     import platform
@@ -1287,6 +1322,7 @@ def run_doctor(fleet: FleetConfig, paths: Paths, *,
     check_mcp_configs(fleet, paths, report)
     check_mcp_packages(fleet, paths, report)
     check_npx_cache(paths, report)
+    check_mcp_launch(fleet, paths, report)
     check_services(fleet, paths, report)
     check_credentials(fleet, paths, report)
     check_claudron(fleet, paths, report)

@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — pinned MCP servers launch without npx's npm wrapper, opt-in per bot (#1604)
+
+`npx -y <pkg>@<version>` keeps an `npm exec` process resident as the parent of every MCP server it starts, with a `sh -c` shim between the two. Measured on the Pi on 2026-09-29, while the host was out of swap: 41 wrappers, 1,173 MB RSS but only 58 MB PSS. What they actually held was 45 MB private and 1,388 MB of swap, a third of the swap file.
+
+- **The key.** `bots.<bot>.mcp_direct_launch: true` (or `defaults.`) composes each exactly pinned npx server as `node <entry point>` from a copy under `state/mcp/npm/<name>@<version>/`.
+  - The entry point is the one npx would choose: the single bin, else the bin named after the package.
+  - Only a plain `#!/usr/bin/env node` script qualifies, so `node <path>` runs what npx ran.
+- **The install.** `claudlobby warm-cache` installs those copies, for armed bots only.
+  - It runs `npm install --prefix` into a temporary sibling and renames it into place only once it holds a launchable entry point.
+  - A failed or torn install leaves nothing behind, and fails the warm.
+- **The fallback.** A server that can't launch directly keeps its npx launch, and `generate` names it with the reason. `doctor` has a matching `mcp-launch` rung that reads the same plan (`composer.mcp_launch_plan`).
+- **Why it's opt-in.** It is registered in `switches.py` as `mcp-direct-launch`. `.mcp.json` is read at session start, but sessions restart without anyone choosing to (keepalive, context restarts), so a default-on change would spread with nobody choosing which bot goes first.
+- **Registry plumbing.**
+  - The `COMPOSE_BOT` carrier's arm line now carries its own steps and timing; `shared-config-isolation` renders unchanged.
+  - Per-bot switch state is read off each switch's own `config` path, replacing the special case for isolation.
+- **Tests.** `tests/test_switches.py`'s table-alone check now looks for the `npx-cache` rung by name, because the table itself now names npx.
+
 ### Changed — `[vault]` pin bumped to Claudron v0.5.2; vaults need the `.claudron-vault` identity file (Claudron #183, #190)
 
 The `[vault]` extra now pins `claudron @ …@v0.5.2`. It carries three changes.
