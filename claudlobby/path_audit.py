@@ -645,6 +645,8 @@ _FIELD_POSTURES: dict[str, Posture] = {
     "permissions": Posture.EXEMPT,  # Tool(spec) grants — classified at the grant choke
     "tool_permissions": Posture.EXEMPT,  # Tool(spec) grants — classified at the grant choke
     "autonomous_runner.skill": Posture.EXEMPT,  # a slash-command ref, not a path
+    "env.SESSION_HANDOFF_COMMAND": Posture.EXEMPT,  # literal TUI input, never a shell path
+    "env.SESSION_RESUME_COMMAND": Posture.EXEMPT,  # same configured session-provider contract
     "hooks.type": Posture.EXEMPT,  # hook event kind (e.g. "command"), not a path
     "hooks.matcher": Posture.EXEMPT,  # tool-name matcher, not a path
     # word-split (rule 6, F3=b) — the only fields whose value is scanned token by
@@ -662,7 +664,7 @@ def _posture_for(segments: tuple[str, ...]) -> Posture:
     if not segments:
         return Posture.CHECK
     top = segments[0]
-    if top in ("hooks", "autonomous_runner"):
+    if top in ("hooks", "autonomous_runner", "env"):
         # Both structured fields refine by terminal key and default to CHECK, so a
         # NEW hook/runner sub-field is deny-by-default covered (not silently
         # exempt). The known non-path keys (hooks.type/matcher,

@@ -50,6 +50,16 @@ def _fleet():
     )
 
 
+def test_session_provider_commands_are_tui_input_not_filesystem_paths():
+    from claudlobby.path_audit import audit_bot_sources
+
+    bot = _bot(env={"SESSION_HANDOFF_COMMAND": "/session handoff --auto",
+                    "SESSION_RESUME_COMMAND": "/claudna:session resume --auto",
+                    "OTHER_PATH": "/foreign/file"})
+    findings = audit_bot_sources(bot, _fleet())
+    assert [finding.source for finding in findings] == ["bots.kev.env.OTHER_PATH"]
+
+
 class TestImproperFleetPaths:
     def test_flat_husk_is_flagged(self, tmp_path):
         paths = _paths(tmp_path)

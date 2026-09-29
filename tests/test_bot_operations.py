@@ -172,6 +172,14 @@ def test_explicit_handoff_keeps_running_session_env_while_stop_cleans_it(tmp_pat
     assert explicit.returncode == 0, explicit.stderr
     assert explicit.stdout.strip() == "handoff-skipped:recent"
     assert secret_env.read_text() == "private launch values\n"
+    (bot_dir / ".claude/session.md").write_text(
+        "<!-- claudlobby first-adoption reference refresh begin -->\n"
+        "Canonical task references, not a session capture.\n")
+    reference_only = subprocess.run(["/bin/bash", str(script), str(bot_dir), "--explicit"],
+                                   env=env, capture_output=True, text=True, timeout=10)
+    assert reference_only.returncode == 0, reference_only.stderr
+    assert reference_only.stdout.strip() == "handoff-skipped:no-session"
+    assert secret_env.exists()
     stopping = subprocess.run(["/bin/bash", str(script), str(bot_dir)],
                               env=env, capture_output=True, text=True, timeout=10)
     assert stopping.returncode == 0, stopping.stderr

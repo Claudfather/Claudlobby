@@ -43,8 +43,10 @@ if [ "$MODE" = --explicit ]; then
     fi
 fi
 
-# If a fresh handoff was written in the last 5 minutes, skip
-if [ -f "$HANDOFF_FILE" ]; then
+# Activation refreshes canonical task references without capturing the session.
+# Its newly written mtime must not suppress the actual session provider.
+if [ -f "$HANDOFF_FILE" ] && ! grep -Fq \
+    '<!-- claudlobby first-adoption reference refresh begin -->' "$HANDOFF_FILE"; then
     AGE=$(( $(date +%s) - $(stat_mtime "$HANDOFF_FILE" 2>/dev/null || echo 0) ))
     if [ "$AGE" -lt 300 ]; then
         if [ "$MODE" = --explicit ]; then echo "handoff-skipped:recent";
