@@ -441,7 +441,7 @@ claudlobby checkin selection focus-refs FILE                                    
 claudlobby brief --bot <name>          # one read door over fleet state for a bot
 claudlobby brief --bot <name> --json   # schema-1 envelope (what other tools consume)
 claudlobby brief --bot <name> --ack    # advance that bot's unacked-report cursor
-claudlobby warm-cache                  # pre-download npx + uvx packages for MCP servers
+claudlobby host cache warm                  # pre-download npx + uvx packages for MCP servers
 claudlobby bot move <bot> --to <fleet> # move a bot between fleets
 
 # Scaffolding

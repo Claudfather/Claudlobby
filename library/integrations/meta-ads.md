@@ -158,7 +158,7 @@ campaigns is a deliberate, separate, reviewed change.
 7. **Attach the MCP** — add `meta-ads` to a bot's `mcp:` list, then
    `claudlobby generate` (see *Equipping a bot*). The first `npx` run downloads the
    package — warm it once (`npx -y meta-ads-mcp-server@1.5.1 --help`, or
-   `claudlobby warm-cache`) so first bot use isn't a cold download. **Verify** on
+   `claudlobby host cache warm`) so first bot use isn't a cold download. **Verify** on
    first live use with `meta_ads_list_ad_accounts` (confirms the token sees the
    account), then a small `meta_ads_get_adaccount_insights` for the last 7 days.
 
@@ -229,7 +229,7 @@ campaigns → drill with `meta_ads_get_adset_insights` / `meta_ads_get_ad_insigh
   request Standard/Advanced access for real reporting volume — Development-tier apps
   throttle quickly.
 - **`npx` / Node required.** The host needs Node + `npx` on `PATH`. Pre-warm the
-  npx cache (`claudlobby warm-cache`) so first bot start isn't a 30–60s download.
+  npx cache (`claudlobby host cache warm`) so first bot start isn't a 30–60s download.
 - **Verify tool names on a version bump.** The 35 grants match `1.5.1`. If you bump
   the pin, re-confirm the tool list — a rename must update both `read_only_tools`
   (fragment) and `tool_grants` (this doc) together, or generation fails with a

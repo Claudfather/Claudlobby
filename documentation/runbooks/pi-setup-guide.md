@@ -252,7 +252,7 @@ rm -rf ~/.npm/_npx/        # instant fleet-wide cold start regression
 
 ```bash
 lib/check-npx-cache.sh --fleet <name>   # verify all MCP packages are cached
-claudlobby warm-cache                    # pre-download any missing packages
+claudlobby host cache warm                    # pre-download any missing packages
 ```
 
 **Recovery if cache is cleared:**
@@ -266,7 +266,7 @@ systemctl --user stop <service_prefix>.keepalive.timer
 systemctl --user stop bot1 bot2 bot3 ...   # all bots in the fleet
 
 # Re-warm the cache serially (not in parallel)
-claudlobby --fleet <name> warm-cache
+claudlobby --fleet <name> host cache warm
 
 # Restart fleet, then re-arm keepalive
 systemctl --user start bot1 bot2 bot3 ...  # same list

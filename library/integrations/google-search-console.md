@@ -155,7 +155,7 @@ Never set `GSC_ALLOW_DESTRUCTIVE=true`, and never add a write tool to a bot's
 6. **Attach the MCP** — add `google-search-console` to a bot's `mcp:` list, then
    `claudlobby generate` (see *Equipping a bot*). The first `uvx` run downloads the
    package into the uv cache — warm it once (`uvx --from mcp-search-console==0.3.2
-   mcp-search-console --help`, or `claudlobby warm-cache`) so first bot use isn't slow.
+   mcp-search-console --help`, or `claudlobby host cache warm`) so first bot use isn't slow.
 7. **Verify the connection.** On first live use, run `list_properties` to confirm the
    SA sees the property, then a small `get_search_analytics` for the last 7 days on
    its `site_url`. A successful authenticated response is the proof — see gotchas on

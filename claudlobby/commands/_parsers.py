@@ -372,17 +372,6 @@ def register_subparsers(sub) -> None:
     )
     png.set_defaults(func=_command("scaffolding", "cmd_new_guardrail"))
 
-    pw = sub.add_parser(
-        "warm-cache",
-        help="Pre-download npx and uvx packages for all MCP servers in fleet",
-    )
-    pw.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Show packages that would be warmed without downloading",
-    )
-    pw.set_defaults(func=_command("core", "cmd_warm_cache"))
-
     pev = sub.add_parser(
         "events",
         help="Tail/filter the fleet's events on the plane",

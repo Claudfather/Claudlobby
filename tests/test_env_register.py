@@ -18,6 +18,7 @@ from claudlobby import env_register as reg
 from claudlobby.config import load_fleet
 from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
+from claudlobby.__main__ import main
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -78,6 +79,20 @@ def world(tmp_path: Path, monkeypatch):
 
 def _row(r, name="GITHUB_PAT"):
     return next(x for x in r.rows if x.name == name)
+
+
+def test_public_host_env_tiers_uses_runtime_order_without_values(world, capsys, monkeypatch):
+    _fleet, paths, fleet_dir, home = world
+    monkeypatch.setattr("claudlobby.context.resolve_paths", lambda **_kwargs: paths)
+    (home / ".env").write_text("export GITHUB_PAT=secret\n")
+    (fleet_dir / ".env").write_text("export GITHUB_PAT=\n")
+    assert main(["--root", str(paths.root), "--fleet", "acme", "host", "env", "tiers",
+                 "--json"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["command"] == "host.env.tiers"
+    assert [row["tier"] for row in result["data"]["tiers"]] == ["host", "root", "fleet", "bot"]
+    assert [row["state"] for row in result["data"]["tiers"]] == ["present", "absent", "present", "unresolved"]
+    assert "secret" not in json.dumps(result)
 
 
 def test_a_var_set_once_reports_set(world) -> None:

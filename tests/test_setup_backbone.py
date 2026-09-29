@@ -285,8 +285,8 @@ class TestSetupFleetColdStart:
         assert "step 2/4: warm npx cache" in r.stdout
         log = h.stub_log()
         # warm-cache invoked for the fleet, and BEFORE the bot spun up.
-        assert "claudlobby --fleet f1 warm-cache" in log
-        assert log.index("warm-cache") < log.index("spin-up-bot.sh")
+        assert "claudlobby --fleet f1 host cache warm" in log
+        assert log.index("host cache warm") < log.index("spin-up-bot.sh")
 
     def test_skips_warm_when_all_bots_healthy(self, h):
         # Skip-when-healthy discipline: if every bot is already running (its MCP
@@ -296,7 +296,7 @@ class TestSetupFleetColdStart:
         r = h.run(_sf(h), "f1")
         assert r.returncode == 0, r.stdout + r.stderr
         assert "all bots healthy, cache already warm (skip)" in r.stdout
-        assert "warm-cache" not in h.stub_log()  # warm-cache NOT invoked
+        assert "host cache warm" not in h.stub_log()  # warm-cache NOT invoked
 
     def test_missing_timers_dir_fails_with_generate_pointer(self, h):
         f = h.fleet("f1", bots=(), timers=())
@@ -319,7 +319,7 @@ class TestSetupFleetColdStart:
         assert "systemctl --user enable --now test.prefix.fleet-pulse.timer" in log
         assert "spin-up-bot.sh" not in log
         assert "reconcile-fleet.sh" not in log
-        assert "warm-cache" not in log
+        assert "host cache warm" not in log
 
     def test_jobs_only_flag_can_precede_the_fleet_name(self, h):
         # Usage: setup-fleet [<fleet-name>] [--jobs-only] — either order.

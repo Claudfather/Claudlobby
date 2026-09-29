@@ -236,6 +236,6 @@ else
     done
     _report_extra
     echo ""
-    echo "  Fix: claudlobby warm-cache"
+    echo "  Fix: claudlobby host cache warm"
     exit 1
 fi

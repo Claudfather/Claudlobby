@@ -110,7 +110,7 @@ layer 2 into one all-tunnelling grant).
 
 5. **Wire the MCP** — add `posthog` to a bot's `mcp:` list, `claudlobby generate`
    (see *Equipping a bot*). First `npx` run downloads `mcp-remote` into the cache —
-   `claudlobby warm-cache` warms it so the first bot use isn't slow.
+   `claudlobby host cache warm` warms it so the first bot use isn't slow.
 6. **Verify it's connected *and* capturing.** These are two different questions —
    check both:
    - **Connected?** Run a trivial read (e.g. `projects-get`) to confirm auth + project

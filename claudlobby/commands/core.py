@@ -600,7 +600,7 @@ def cmd_uptime(args) -> int:
     return 0
 
 
-def cmd_warm_cache(args) -> int:
+def cmd_warm_cache(args, *, paths=None, fleet=None, summary=None) -> int:
     """Pre-download the packages referenced by MCP fragments.
 
     Scans every MCP fragment the fleet uses and runs each package's own
@@ -617,9 +617,10 @@ def cmd_warm_cache(args) -> int:
     grammar is `lib/mcp-package-grammar.py`, shared with the composer's binary
     swap and with `check-npx-cache.sh`, the probe that gates this command.
     """
-    paths = _resolve_paths(args)
+    paths = paths if paths is not None else _resolve_paths(args)
     _load_env(paths)
-    fleet, _md = _load_fleet_or_exit(paths)
+    if fleet is None:
+        fleet, _md = _load_fleet_or_exit(paths)
     try:
         g = grammar(paths)
     except GrammarUnavailable as e:
@@ -662,6 +663,11 @@ def cmd_warm_cache(args) -> int:
             len(unreadable),
             ", ".join(sorted(unreadable)),
         )
+
+    if summary is not None:
+        summary.update(packages=[{"package": pkg, "runtime": runtime}
+                                 for (runtime, _prefix), pkg in sorted(targets.items())],
+                       unreadable=sorted(unreadable), failed=[], dry_run=args.dry_run)
 
     if not targets:
         log.info("no npx- or uvx-based MCP packages found in fleet")
@@ -720,6 +726,8 @@ def cmd_warm_cache(args) -> int:
     if args.dry_run:
         log.info("(dry run — no downloads)")
     elif failed:
+        if summary is not None:
+            summary["failed"] = failed
         log.warning(
             "%d of %d packages failed to warm: %s",
             len(failed),

@@ -182,7 +182,7 @@ _step_rc=$(safe_mktemp)
 
 _warm_npx() {
     printf '%s npx cache degraded — warming (best-effort, once per episode)\n' "$(ts_iso)" >> "$LOG"
-    claudlobby_cli ${FLEET:+--fleet "$FLEET"} warm-cache >> "$LOG" 2>&1 || true
+    claudlobby_cli ${FLEET:+--fleet "$FLEET"} host cache warm >> "$LOG" 2>&1 || true
 }
 
 # _run_step <label> <command...>

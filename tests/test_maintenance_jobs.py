@@ -245,15 +245,15 @@ class TestReloadFleetNpxPreflight:
         self._run_reload(root, env, plugins)
         calls = self._calls(tmp_path)
         assert calls.index("check-npx-cache") < calls.index("claude plugin update")
-        assert "warm-cache" not in calls
+        assert "host cache warm" not in calls
 
     def test_degraded_cache_warms_and_reload_continues(self, tmp_path):
         root, env, plugins = self._harness(tmp_path, npx_rc=1)
         self._run_reload(root, env, plugins)
         calls = self._calls(tmp_path)
-        assert "warm-cache" in calls
-        assert calls.index("check-npx-cache") < calls.index("warm-cache")
-        assert calls.index("warm-cache") < calls.index("claude plugin update")
+        assert "host cache warm" in calls
+        assert calls.index("check-npx-cache") < calls.index("host cache warm")
+        assert calls.index("host cache warm") < calls.index("claude plugin update")
 
     def test_warm_is_debounced_within_a_degradation_episode(self, tmp_path):
         # A permanently-missing package (e.g. a stale MCP fragment) must not
@@ -262,7 +262,7 @@ class TestReloadFleetNpxPreflight:
         root, env, plugins = self._harness(tmp_path, npx_rc=1)
         self._run_reload(root, env, plugins)
         self._run_reload(root, env, plugins)
-        assert self._calls(tmp_path).count("warm-cache") == 1
+        assert self._calls(tmp_path).count("host cache warm") == 1
 
     def test_selected_plugin_arguments_stay_separate(self, tmp_path):
         root, env, plugins = self._harness(tmp_path, npx_rc=0,

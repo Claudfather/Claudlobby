@@ -32,6 +32,12 @@ def _dispatch_host_job(args):
                    json_output=args.json)
 
 
+def _dispatch_host_env_cache(args):
+    return execute(args.public_command,
+                   lambda: import_module(".host_env_cache", __package__).dispatch(args),
+                   json_output=args.json)
+
+
 def _route(sub, name, command, help):
     parser = sub.add_parser(name, help=help)
     parser.add_argument("--json", action="store_true", help="One schema-1 result object")
@@ -44,6 +50,18 @@ def register_release_subparsers(sub):
     hosts = host.add_subparsers(dest="host_command", required=True)
     from ._setup_parsers import register_host_setup
     register_host_setup(hosts)
+    env = hosts.add_parser("env", help="Inspect the runtime's environment tier paths")
+    envs = env.add_subparsers(dest="env_command", required=True)
+    tiers = envs.add_parser("tiers", help="List host, root, fleet, and bot .env tiers without values")
+    tiers.add_argument("--bot", help="Declared bot whose .env tier to include")
+    tiers.add_argument("--json", action="store_true", help="One schema-1 result object")
+    tiers.set_defaults(func=_dispatch_host_env_cache, public_command="host.env.tiers")
+    cache = hosts.add_parser("cache", help="Prepare host-shared MCP package caches")
+    caches = cache.add_subparsers(dest="cache_command", required=True)
+    warm = caches.add_parser("warm", help="Pre-download npx and uvx packages used by the fleet")
+    warm.add_argument("--dry-run", action="store_true", help="Identify packages without downloading")
+    warm.add_argument("--json", action="store_true", help="One schema-1 result object")
+    warm.set_defaults(func=_dispatch_host_env_cache, public_command="host.cache.warm")
     job = hosts.add_parser("job", help="Inspect or request selected host jobs")
     jobs = job.add_subparsers(dest="job_command", required=True)
     for action in ("list", "show"):

@@ -109,7 +109,7 @@ If validation fails, read the error and help fix it. Common issues:
 ## Step 5: Warm Cache + Spin Up
 
 ```bash
-claudlobby --fleet <fleet-name> warm-cache 2>&1 || true
+claudlobby --fleet <fleet-name> host cache warm 2>&1 || true
 ```
 
 Then enroll and start each bot:
