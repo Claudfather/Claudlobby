@@ -2532,6 +2532,8 @@ def _resolve_fleet_ops_grants(bot: BotConfig, fleet: FleetConfig) -> list[str]:
             grants.append(f"Bash(claudlobby --json bot logs {target})")
             grants.append(f"Bash(claudlobby --json bot logs {target} --lines *)")
             grants.append(f"Bash(claudlobby --json bot handoff {target})")
+            grants.append(f"Bash(claudlobby --json bot interrupt {target})")
+            grants.append(f"Bash(claudlobby --json bot compact {target})")
             for verb in ("start", "stop", "restart"):
                 grants.append(f"Bash(claudlobby --json bot {verb} {target})")
             grants.append(f"Bash(claudlobby --json bot restart {target} --ceiling *)")

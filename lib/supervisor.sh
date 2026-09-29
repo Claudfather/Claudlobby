@@ -647,6 +647,27 @@ svc_bot_session_observe() (
     case "$state" in up|no_handle|no_token) printf 'ready\n' ;; *) printf 'unknown\n' ;; esac
 )
 
+# Submit exactly one explicit control to the selected bot's private session.
+# The public owner has already proved the frozen bot.conf and native unit. Check
+# that binding again here before touching tmux; never discover a pane by name.
+svc_bot_control_exact() (
+    local bot_dir="$1" expected="$2" tmpdir="$3" control="$4"
+    local session
+    case "$control" in interrupt|compact) ;; *) return 3 ;; esac
+    [ "$(svc_bot_session_observe "$bot_dir" "$expected" "$tmpdir")" = ready ] || return 3
+    export TMUX_TMPDIR="$tmpdir"
+    . "$_SUPERVISOR_LIB_DIR/lib-common.sh" || return 3
+    session=$(tmux_session_name "$bot_dir") || return 3
+    if [ "$control" = interrupt ]; then
+        bot_tmux "$expected" send-keys -t "$session" C-c || return 3
+    else
+        # Keep the existing chunked pane primitive, but disable its optional
+        # Enter repair: this explicit control is never automatically resent.
+        PANE_SEND_VERIFY_TICKS=0 pane_send_verified "$expected" "$session" /compact || return 3
+    fi
+    printf 'control-submitted\n'
+)
+
 # Private activation controls. FILE/TARGET come from the verified enrollment
 # manifest, not a label glob. TARGET is a systemd basename (including suffix),
 # or an explicit launchd gui/<uid>/<label> or user/<uid>/<label>.

@@ -28,6 +28,8 @@ tool_grants:
   - "Bash(claudlobby bot stop --help)"
   - "Bash(claudlobby bot restart --help)"
   - "Bash(claudlobby bot handoff --help)"
+  - "Bash(claudlobby bot interrupt --help)"
+  - "Bash(claudlobby bot compact --help)"
   - "Bash(claudlobby bot automation --help)"
   - "Bash(claudlobby fleet usage --help)"
   - "Bash(claudlobby fleet start --help)"
@@ -175,6 +177,12 @@ use `/restart` for that sequence. Use `claudlobby bot start --help`, `claudlobby
 worker's handoff without stopping it with `claudlobby --json bot handoff WORKER`.
 Only `data.handoff=saved` confirms a fresh handoff file; `skipped` and an
 unavailable result do not. The request does not commit a Plane record:
+
+Use `claudlobby --json bot interrupt WORKER` to submit one Ctrl-C to a
+worker's selected private session, or `claudlobby --json bot compact WORKER`
+to submit `/compact`. A successful result means only that the control was
+submitted; inspect the session before claiming interruption or compaction.
+An unknown result may have reached the pane, so do not automatically retry.
 
 ```bash
 claudlobby --json bot start WORKER

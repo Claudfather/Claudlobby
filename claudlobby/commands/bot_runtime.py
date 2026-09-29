@@ -8,7 +8,7 @@ from ..command_result import CommandFailure, CommandOutput
 
 def dispatch(args) -> CommandOutput:
     from ..activation_state import ActivationError
-    from ..bot_operations import BotLifecycleError, handoff_bot, set_bot_running
+    from ..bot_operations import BotLifecycleError, control_bot, handoff_bot, set_bot_running
     from ..config_plan import PlanError
     from ..context import resolve_paths
     from ..operation_context import OperationContextError
@@ -32,6 +32,8 @@ def dispatch(args) -> CommandOutput:
         root = resolve_paths(root=args.root).root
         if action == "handoff":
             result = handoff_bot(root=root, fleet=args.fleet, bot=args.bot_id)
+        elif action in {"interrupt", "compact"}:
+            result = control_bot(root=root, fleet=args.fleet, bot=args.bot_id, control=action)
         else:
             result = set_bot_running(root=root, fleet=args.fleet, bot=args.bot_id,
                                      running=running, restart=action == "restart",
@@ -41,7 +43,11 @@ def dispatch(args) -> CommandOutput:
             data["native_outcome"] = "unknown"
             data["release_id"] = exc.release_id
             data["target"] = exc.target
-            if action == "handoff":
+            if action in {"interrupt", "compact"}:
+                data["outcome"] = "unknown"
+                message = f"bot {action} submission is unverified; inspect its private session"
+                hint = "inspect the exact private session before considering another control"
+            elif action == "handoff":
                 data["handoff"] = "unknown"
                 data["reason"] = exc.handoff_reason or "unverified"
                 message = str(exc) if exc.handoff_reason else "bot handoff outcome is unverified; inspect its private session"
@@ -75,6 +81,11 @@ def dispatch(args) -> CommandOutput:
                  if result.handoff == "saved" else
                  f"{result.fleet}/{result.bot}: handoff skipped ({result.reason}); no new handoff verified.",)
         return CommandOutput(data, release_id=result.release_id, lines=lines)
+    if action in {"interrupt", "compact"}:
+        data = asdict(result)
+        data["native_outcome"] = "submitted"
+        return CommandOutput(data, release_id=result.release_id,
+                             lines=(f"{result.fleet}/{result.bot}: {action} submitted to private session; completion unverified.",))
     data = {key: value for key, value in asdict(result).items() if value is not None}
     data["native_outcome"] = "unattempted" if result.state == "requested" else "observed"
     data["runtime_state"] = "unknown" if result.state == "requested" else result.state

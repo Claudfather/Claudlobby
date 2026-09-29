@@ -22,6 +22,40 @@ from tests.test_activation import cold, tmp_path  # noqa: F401 — real short-ro
 from tests.test_releases import installed  # noqa: F401 — cold fixture dependency
 
 
+def test_private_control_uses_one_exact_native_send(tmp_path):
+    """Exercise the shell adapter with fake tmux; no live session is touched."""
+    native = Path(__file__).resolve().parents[1] / "lib/supervisor.sh"
+    private = tmp_path / "native"
+    private.mkdir()
+    (private / "lib-common.sh").write_text("""
+tmux_session_name() { printf 'worker'; }
+bot_tmux() { printf 'tmux %s\\n' "$*" >> "$CONTROL_LOG"; }
+pane_send_verified() {
+    printf 'pane %s %s %s ticks=%s\\n' "$1" "$2" "$3" "$PANE_SEND_VERIFY_TICKS" >> "$CONTROL_LOG"
+}
+""")
+    log = tmp_path / "calls"
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "TMPDIR": str(tmp_path),
+           "_SUPERVISOR_LIB_DIR": str(private), "CONTROL_LOG": str(log),
+           "PLANE_EMIT_DISABLED": "1"}
+    script = '. "$1"; svc_bot_session_observe() { printf "ready\\n"; }; svc_bot_control_exact "$2" "$3" "$4" "$5"'
+    def run(control):
+        return subprocess.run(["/bin/bash", "-c", script, "control", str(native),
+                               str(tmp_path / "bot"), "worker.socket", str(tmp_path), control],
+                              env=env, capture_output=True, text=True, timeout=5)
+
+    interrupt = run("interrupt")
+    assert interrupt.returncode == 0 and interrupt.stdout == "control-submitted\n"
+    assert log.read_text() == "tmux worker.socket send-keys -t worker C-c\n"
+    log.unlink()
+    compact = run("compact")
+    assert compact.returncode == 0 and compact.stdout == "control-submitted\n"
+    assert log.read_text() == "pane worker.socket worker /compact ticks=0\n"
+    log.unlink()
+    refused = run("message")
+    assert refused.returncode == 3 and refused.stdout == "" and not log.exists()
+
+
 @pytest.mark.parametrize("stdout, attempted", [("", False), ("effect-attempted\n", True)])
 def test_disenroll_native_phase_is_reported_honestly(stdout, attempted, tmp_path, monkeypatch):
     from claudlobby.command_result import CommandFailure
@@ -221,6 +255,7 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
             self.actions = []
             self.calls = []
             self.handoff_rc = 0
+            self.control_rc = 0
             self.explicit_handoff = "handoff-skipped:recent"
             self.readiness = "bridge-ready"
             self.fence_args = []
@@ -250,6 +285,11 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
                     handoff.parent.mkdir(exist_ok=True)
                     now = datetime.now(timezone.utc)
                     handoff.write_text(f"---\nlast_updated: {now:%Y-%m-%dT%H:%M:%SZ}\n---\ncontext\n")
+            elif function == "svc_bot_control_exact":
+                assert args[:2] == (root / "runtime/bots/worker", "com.example.worker")
+                assert Path(args[2]).is_absolute()
+                assert args[3] in {"interrupt", "compact"}
+                value = "control-submitted" if self.control_rc == 0 else ""
             elif function == "svc_bot_disenroll_exact":
                 self.actions.append("stop")
                 Path(args[1]).unlink()
@@ -264,7 +304,8 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
             else:
                 raise AssertionError(f"unexpected native call: {function}")
             return subprocess.CompletedProcess([function],
-                                               self.handoff_rc if function == "svc_activation_handoff" else 0,
+                                               self.handoff_rc if function == "svc_activation_handoff" else
+                                               self.control_rc if function == "svc_bot_control_exact" else 0,
                                                value + "\n", "")
 
         def read(self, function, *args):
@@ -297,6 +338,20 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
     skipped = call("bot", "handoff", "worker")["data"]
     assert skipped["handoff"] == "skipped" and skipped["reason"] == "recent"
     assert "svc_activation_handoff" in native.calls and native.actions == []
+    for control in ("interrupt", "compact"):
+        native.calls.clear()
+        submitted = call("bot", control, "worker")["data"]
+        assert submitted["outcome"] == "submitted" and submitted["control"] == control
+        assert native.calls.index("svc_bot_session_observe") < native.calls.index("svc_bot_control_exact")
+        assert native.actions == []
+    native.control_rc = 3
+    unknown_control = call("bot", "compact", "worker", expected=6)
+    assert unknown_control["data"]["outcome"] == "unknown"
+    assert "inspect" in unknown_control["error"]["hint"]
+    native.control_rc = 0
+    before_control = native.calls.count("svc_bot_control_exact")
+    assert call("bot", "interrupt", "other", expected=4)["error"]["code"] == "conflict"
+    assert native.calls.count("svc_bot_control_exact") == before_control
     # The same selected state must resolve identically for a generated manager
     # caller with an implicit fleet and one that spells out --fleet.
     monkeypatch.setenv("FLEET_NAME", "example")
@@ -314,6 +369,8 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
     monkeypatch.setenv("BOT_DIR", str(root / "runtime/bots/worker"))
     assert call("bot", "handoff", "worker", expected=4)["error"]["code"] == "conflict"
     assert native.calls.count("svc_activation_handoff") == before_refusal
+    assert call("bot", "compact", "worker", expected=4)["error"]["code"] == "conflict"
+    assert native.calls.count("svc_bot_control_exact") == before_control
     for key in ("FLEET_NAME", "BOT_ID", "BOT_DIR", "FLEET_ROOT",
                 "CLAUDLOBBY_ROOT", "CLAUDLOBBY_RELEASE_ID"):
         monkeypatch.delenv(key)

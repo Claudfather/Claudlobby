@@ -75,6 +75,16 @@ class BotHandoffResult:
     reason: str
 
 
+@dataclass(frozen=True)
+class BotControlResult:
+    fleet: str
+    bot: str
+    release_id: str
+    target: str
+    control: str
+    outcome: str
+
+
 def _fresh_self_handoff(bot_dir: Path) -> None:
     """Require the handoff this session just wrote, not a touched old resume file."""
     handoff_dir = bot_dir / ".claude"
@@ -394,6 +404,67 @@ def handoff_bot(*, root: Path, fleet: str | None, bot: str,
                                         entry["target"], "saved", "fresh_file_verified")
             return BotHandoffResult(destination.fleet.name, bot, release.release_id,
                                     entry["target"], "skipped", marker[0].split(":", 1)[1])
+
+
+def control_bot(*, root: Path, fleet: str | None, bot: str, control: str,
+                identity: RuntimeIdentity | None = None,
+                adapter: Adapter | None = None) -> BotControlResult:
+    """Submit one explicit control to an exact selected private session."""
+    if control not in {"interrupt", "compact"}:
+        raise BotLifecycleError("unsupported bot control")
+    if not isinstance(bot, str) or not bot or Path(bot).name != bot or bot in {".", ".."}:
+        raise BotLifecycleError("supply one exact bot ID")
+    identity = identity or RuntimeIdentity.current()
+    with mutation_admission(root, identity=identity,
+                            expected_release=os.environ.get("CLAUDLOBBY_RELEASE_ID")) as release:
+        with _operation_lock(root):
+            destination, origin = resolve_operation_scope(root=root, fleet=fleet)
+            if origin is not None and (origin.fleet.name != destination.fleet.name
+                                       or origin.bot_id == bot
+                                       or origin.bot_id != destination.fleet.manager):
+                raise BotLifecycleError("only the selected fleet manager may control another bot")
+            if bot not in destination.fleet.bots:
+                raise BotLifecycleError("bot is not declared in the selected active fleet")
+            selected = read_selection(root)
+            if selected is None or selected["release_id"] != release.release_id:
+                raise BotLifecycleError("active selection changed before bot control")
+            plan = read_plan(root, selected["plan_id"])
+            if plan.release_id != release.release_id or plan.release_seal != release.seal_sha256:
+                raise BotLifecycleError("active bot plan differs from selected release")
+            adapter = adapter or Adapter(destination.paths.package)
+            if adapter.package.native != release.native_path:
+                raise BotLifecycleError("bot native adapter differs from selected release")
+            adapter = _selected_adapter(root, destination.fleet.name, bot, adapter)
+            _, declaration, entry, declarations = _selected_unit(
+                root, plan, release, destination.paths.package, adapter, destination.fleet.name, bot)
+            spec = build_supervision_spec(destination.fleet.bots[bot], destination.fleet,
+                                          destination.paths)
+            if spec.bot_dir != declaration.working_directory or spec.label != declaration.source.stem:
+                raise BotLifecycleError("bot control target differs from frozen supervision")
+            bot_conf = spec.bot_dir / "bot.conf"
+            changes = [change for change in plan.changes if change.target == str(bot_conf)]
+            if len(changes) != 1 or changes[0].after.get("kind") != "file" or path_state(bot_conf)["node"] != changes[0].after:
+                raise BotLifecycleError("generated bot.conf differs from selected frozen configuration")
+            unit = _observed(root, declarations, adapter, entry["target"], Path(entry["installed"]))
+            if not unit.installed:
+                raise BotLifecycleError("bot is not enrolled in its selected native unit")
+            session = _native(adapter, "svc_bot_session_observe", spec.bot_dir, spec.label,
+                              spec.environment["TMUX_TMPDIR"], entry["installed"], entry["target"])
+            if session != "ready":
+                raise BotLifecycleError("private bot session is not ready", unavailable=True)
+            try:
+                outcome = adapter.call("svc_bot_control_exact", spec.bot_dir, spec.label,
+                                       spec.environment["TMUX_TMPDIR"], control, timeout=45)
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise BotLifecycleError("bot control outcome is unknown", effect_attempted=True,
+                                        unavailable=True, release_id=release.release_id,
+                                        target=entry["target"]) from exc
+            if outcome.returncode or outcome.stdout.strip() != "control-submitted":
+                raise BotLifecycleError("bot control outcome is unknown", effect_attempted=True,
+                                        unavailable=True, release_id=release.release_id,
+                                        target=entry["target"])
+            return BotControlResult(destination.fleet.name, bot, release.release_id,
+                                    entry["target"], control, "submitted")
 
 
 def _confirm_stopped(adapter, installed, target, socket_path, *, effect_attempted=False):
