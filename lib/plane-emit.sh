@@ -1,84 +1,27 @@
 #!/bin/bash
-# plane-emit.sh — THE recording shim every door routes through (Phase-2 T2).
+# Private Plane telemetry shim. A socket acknowledgement is the only committed
+# outcome (exit 0). When the daemon cannot answer, the stdlib-only client writes
+# the existing durable raw staged queue and exits pending (6); the daemon replays it
+# later. No full claudlobby CLI is spawned for a telemetry event.
 #
-# Reads one batch ({"events": [...]} or bare array) on stdin and lands it in
-# the plane by the first rung that answers, each fallback DISCLOSED on stderr,
-# never silent:
+# Exit 2: bad input or contract verdict. Exit 3: total failure, including an
+# unwriteable staged queue. Exit 6: durable pending in staged or daemon spool, never
+# queryable yet. Callers that need an immediate receipt must require 0 or use
+# the commit-required Plane API; they cannot treat 6 as success.
 #
-#   rung 1  ingest daemon (unix socket; ~ms — no Python-package spawn)
-#   rung 2  cold `claudlobby emit-batch` (the CLI spools on db failure, which
-#           is rung 3 by construction)
-#
-# EXIT 0 MEANS RECORDED — in the plane, queryable now. It does NOT mean
-# "accepted" (#1711). A batch the db was unavailable for is SPOOLED: durable on
-# disk (fsync'd file AND parent, atomic rename) and invisible to every reader
-# until a drain ingests it. That is exit 6, its own code, because 0 asserted
-# something false about it and a failure code asserts the opposite falsehood —
-# nothing was lost and nothing needs retrying.
-#
-# Idempotent across rungs: lib/plane-socket-client.py mints event_ids into a
-# finalized file BEFORE the first attempt; rung 2 replays that exact file, so
-# a commit whose ack was lost classifies as duplicate, never a second row.
-#
-# Verdicts do not fall back: exits 2 (contract) and 3 (total failure) pass
-# through — the CLI would only repeat them. THAT is the whole test, and
-# `downgrade` fails it (#1485): a downgrade refusal says the db is newer than
-# the DAEMON'S LOADED code, and the daemon is a long-lived process on an
-# editable install, so a pull that carries a migration leaves its modules the
-# only stale thing on the host. The cold rung is a fresh interpreter on the
-# install's CURRENT code and commits, so plane-socket-client.py maps that
-# refusal to 5 and it lands here, in the fallback.
-#
-# So the passthrough arm carries 2 and 3 and NOTHING ELSE: the client returns
-# only 0, 2, 3 or 5, and a 4 in that arm was dead code describing a path that
-# does not exist. A COLD-rung downgrade — where the INSTALL is behind the db
-# and no rung can help — still exits 4, at the tail, where the shim returns
-# the CLI rc verbatim.
-#
-# One consequence worth knowing: a downgrade's rc 5 also ARMS the wedge marker
-# below, so the next PLANE_WEDGE_COOLDOWN_S (60s default) of emissions skip the
-# socket and go straight to the cold rung, then the socket is retried. Nothing
-# is dropped — it is the same records by a slower rung, which is the right
-# trade while the supervisor is relaunching a stale daemon underneath.
-#
-# THE SHIM NEVER BLOCKS A DOOR'S REAL ACTION. Doors call it as
-#   plane_emit <<<"$batch" || log "plane record failed rc=$? (acted, unrecorded)"
-# — the send/report/restart itself must already have happened or still happen.
-#
-# Env:
-#   CLAUDLOBBY_ROOT      explicit absolute mutable data root
-#   CLAUDLOBBY_CLI       composed absolute executable (cold fallback only)
-#   PLANE_SOCKET         socket override (default: $ROOT/state/plane/ingest.sock)
-#   PLANE_EMIT_DISABLED  =1 -> no-op exit 0 (the ruled harness exemption:
-#                        byte-identical legacy behavior, nothing spawned)
-#   PLANE_EMIT_COOLDOWN_STAGE  =1 -> in a wedge cooldown, stage the batch for
-#                        the daemon (rc 6) instead of the cold CLI (#1657). Set
-#                        only by callers that never read the result.
-#   PLANE_EMIT_CLASS     who waits on this emission (#1693), which sets how
-#                        long the socket rung may take: hook (a live Claude
-#                        Code turn), background (nothing reads the result),
-#                        door (a door whose outcome turns on it). Callers set
-#                        it; unset keeps the default deadline.
-#   PLANE_SOCKET_DEADLINE_HOOK_S / _BACKGROUND_S / _DOOR_S
-#                        that class's total socket deadline, in seconds. Each
-#                        is unset by default, which is today's 1.0 s: lib/ is
-#                        read on demand, so a root pull reaches every bot at
-#                        once, and a knob in one bot's bot.conf is how a new
-#                        value is tried on one bot first.
-#   PLANE_EMIT_CLI       fallback command override (tests stub it; default
-#                        uses CLAUDLOBBY_CLI).
-#                        CONTRACT: a command LINE, whitespace-split — the
-#                        systemd ExecStart convention (#969). An executable
-#                        whose PATH contains spaces is not expressible;
-#                        wrap it in a script.
+# PLANE_EMIT_DISABLED=1 is a no-op for isolated harnesses. The socket deadline
+# follows PLANE_EMIT_CLASS (hook/background/door), with optional class-specific
+# PLANE_SOCKET_DEADLINE_*_S settings. Raw events always use the existing
+# staged queue on socket failure, so daemon replay applies capture policy.
+# All paths use explicit
+# CLAUDLOBBY_ROOT, never ambient fleet discovery.
 
 set -euo pipefail
 
 [ "${PLANE_EMIT_DISABLED:-0}" = "1" ] && exit 0
 
 # The invoked adapter supplies its package location, never its data root.
-# Validation is shell-only; a missing cold CLI must not disable a healthy
-# socket daemon. Do not source lib-common or probe Python package imports.
+# Validation is shell-only. Do not source lib-common or import the package.
 case "${BASH_SOURCE[0]}" in
     */*) LIB_DIR="${BASH_SOURCE[0]%/*}" ;;
     *) LIB_DIR="." ;;
@@ -92,20 +35,13 @@ case "${CLAUDLOBBY_ROOT:-}" in
         ;;
 esac
 
-set +e  # the ladder inspects rcs
+set +e  # native client verdicts are inspected below
 
 SOCK="${PLANE_SOCKET:-$ROOT/state/plane/ingest.sock}"
 
-finalized="$(mktemp "${TMPDIR:-/tmp}/plane-emit.XXXXXX")"
-trap 'rm -f "$finalized"' EXIT
-
-# Wedge circuit-breaker (#1372 re-verify blocking residual on F5): the client
-# deadline bounds ONE emission, but doors emit twice (intent + outcome), so a
-# wedged listener still compounded past a door's own latency alarm. On a
-# transport-wedge (rc 5) a cooldown marker is set and every emission — this
-# door's second, and every other door's — skips the socket rung for
-# PLANE_WEDGE_COOLDOWN_S (default 60s, disclosed), going straight to the cold
-# CLI. Cleared by the next successful socket emit; self-heals by expiry.
+# A transport miss arms a bounded cooldown so subsequent hot-path events stage
+# without repeating the socket deadline. A later successful socket ACK clears
+# it; expiry retries the socket automatically.
 WEDGE_MARK="$ROOT/state/plane/.socket-wedged"
 COOLDOWN="${PLANE_WEDGE_COOLDOWN_S:-60}"
 skip_socket=0
@@ -120,8 +56,7 @@ if [ -f "$WEDGE_MARK" ]; then
     # rung 1 matters most. Negative delta = expired.
     if [ "$_delta" -ge 0 ] && [ "$_delta" -lt "$COOLDOWN" ]; then
         skip_socket=1
-        # Not "straight to cold CLI": an opted-in batch may be staged for the
-        # daemon instead (#1657), and the next line says which route it took.
+        # The raw batch will be durably staged for daemon replay.
         printf 'plane-emit: socket in wedge cooldown (%ss) — skipping the socket\n' "$COOLDOWN" >&2
     else
         rm -f "$WEDGE_MARK"
@@ -129,30 +64,18 @@ if [ -f "$WEDGE_MARK" ]; then
 fi
 
 if [ "$skip_socket" = "1" ]; then
-    # Finalize without a send so the CLI rung has its idempotent batch. The
-    # client's own rc carries verdicts (2 = bad stdin, before any finalize)
-    # and 5 on finalize-only success — pass it through, never overwrite: a
-    # hardcoded 5 here turned a contract violation into "daemon unavailable"
-    # + a doomed CLI replay + exit 3, precisely during incident windows.
-    #
-    # #1657: a caller that never reads the result opts in with
-    # PLANE_EMIT_COOLDOWN_STAGE=1, and the client then STAGES the batch for
-    # the daemon to replay (rc 6) instead of this shim spawning the cold CLI,
-    # whose package import per event is what kept a loaded host pegged. The
-    # doors that refuse on a non-zero rc never opt in. The client stages only
-    # when a daemon will replay it, and returns 5 as before otherwise.
-    _stage=""
-    [ "${PLANE_EMIT_COOLDOWN_STAGE:-0}" = "1" ] && _stage="$ROOT/state/plane/staged"
+    # Finalize and persist without contacting the socket. Invalid input still
+    # returns 2; a successful stage returns pending (6).
     python3 -S -E "$LIB_DIR/plane-socket-client.py" \
-        --socket "$SOCK" --finalize-to "$finalized" --finalize-only --stage-to "$_stage"
+        --socket "$SOCK" --finalize-only \
+        --stage-to "$ROOT/state/plane/staged"
     rc=$?
 else
     # The deadline follows WHO WAITS (#1693). On the Pi's SD card an ordinary
     # commit can outlast 1.0 s, and each miss arms the marker for every door on
     # the host, so a caller that can afford to wait longer should. A knob the
     # client would refuse is ignored OUT LOUD, never passed on: the client's
-    # refusal is rc 2, a verdict, and the record would be dropped with no
-    # fallback on every emission, from a typo.
+    # refusal is rc 2, a verdict, so a typo must not drop every emission.
     _knob=""; deadline=""
     case "${PLANE_EMIT_CLASS:-}" in
         hook)       _knob=PLANE_SOCKET_DEADLINE_HOOK_S; deadline="${PLANE_SOCKET_DEADLINE_HOOK_S:-}" ;;
@@ -171,83 +94,28 @@ else
     fi
     # -S -E: skip site/pyvenv machinery — the client is minimal-stdlib by
     # contract (measured: 45ms -> 12ms interpreter spawn on the Pi).
-    # --arm-log: the client names WHO missed and why on every rc 5 it returns
-    # here, which is every arm of the marker below (#1693).
+    # --arm-log names WHO missed and why; rc 7 means that the missed batch is
+    # already in the durable staged queue, so the shim arms its cooldown.
     python3 -S -E "$LIB_DIR/plane-socket-client.py" \
-        --socket "$SOCK" --finalize-to "$finalized" \
+        --socket "$SOCK" \
+        --stage-to "$ROOT/state/plane/staged" \
         --arm-log "$ROOT/state/plane/.socket-arms" ${deadline:+--timeout "$deadline"}
     rc=$?
-    if [ "$rc" -eq 5 ]; then
+    if [ "$rc" -eq 7 ]; then
         { date +%s > "$WEDGE_MARK"; } 2>/dev/null || true
     elif [ "$rc" -eq 0 ]; then
         rm -f "$WEDGE_MARK" 2>/dev/null
     fi
 fi
 case "$rc" in
-    0) exit 0 ;;
-    6) exit 6 ;;         # SPOOLED (#1711): accepted, durable on disk, NOT in
-                         # the plane. A verdict for the same reason 2 and 3 are
-                         # — the batch is already written, so the cold rung
-                         # would only spool it a second time. Deliberately NOT
-                         # 0: rc 0 is the one signal every door reads as
-                         # "recorded", and no reader can see a spooled row.
-    2|3) exit "$rc" ;;   # verdicts: the CLI would only repeat them. 4 is NOT
-                         # listed because the client cannot return it (#1485
-                         # maps a stale daemon to 5); a cold-rung downgrade
-                         # exits 4 at the tail below, where the CLI rc rides
-                         # out verbatim.
+    0) exit 0 ;;  # daemon committed or classified duplicate
+    6) exit 6 ;;  # staged or daemon-spooled: pending, never queryable yet
+    7)
+        # The socket failed and the native client durably staged this batch.
+        # Arm the cooldown for the next hot-path event, but expose only the
+        # public pending result (6), never a false committed receipt (0).
+        exit 6 ;;
+    2|3) exit "$rc" ;;
 esac
-
-# Only rc=5 reaches here, and it means two DISJOINT things depending on which
-# rung produced it (#1657) — the client itself proves this (plane-socket-
-# client.py): the finalize_only branch `return`s 5 unconditionally on a
-# successful write, with no failure path at all; the transport branch
-# returns 5 only from its own except block, printing "transport failed"
-# first. So on skip_socket=1, rc=5 is the client's documented SUCCESS for
-# --finalize-only — the daemon was deliberately never contacted, and calling
-# that "daemon unavailable" is not an inflated failure, it is a wrong one.
-# Measured, 24h journal, one host: 645 of every 719 "daemon unavailable"
-# lines were this branch, not a transport failure (10.3% real, 9.7x
-# inflation) — and the discriminator lived only in the DIFFERENT line
-# printed above this one, invisible to a grep for the error string itself.
-# The two branches below are self-sufficient on their own line for exactly
-# that reason.
-if [ "$skip_socket" = "1" ]; then
-    printf 'plane-emit: cooldown finalize succeeded (rc=%s) — daemon not contacted, replaying cold as planned\n' "$rc" >&2
-else
-    # Deliberately NOT "daemon unavailable" here either (review residual,
-    # #1657): plane-socket-client.py's transport-failed except block catches
-    # connect refusal (genuinely unavailable), a deadline miss (reachable,
-    # too slow — "unavailable" is false), and a garbled reply (reachable,
-    # answered) under the SAME rc=5. Only the first sub-cause makes
-    # "unavailable" true; the genuine-breach mechanism itself is unreproduced
-    # (#1657's own stated bound), so naming a specific cause here would be
-    # exactly the mistake this fix exists to remove, just relocated. State
-    # only what is known: the transport failed and the client already said
-    # why on the line above.
-    printf 'plane-emit: transport failed (rc=%s) — falling back to cold CLI\n' "$rc" >&2
-fi
-if [ -s "$finalized" ]; then
-    # --root is global: before the subcommand.
-    if [ -n "${PLANE_EMIT_CLI:-}" ]; then
-        $PLANE_EMIT_CLI --root "$ROOT" emit-batch --json "$finalized"
-    else
-        # shellcheck source=cli-context.sh
-        . "$LIB_DIR/cli-context.sh" && _claudlobby_require_cli &&
-            "$CLAUDLOBBY_CLI" --root "$ROOT" emit-batch --json "$finalized"
-    fi
-    rc=$?
-    if [ "$rc" -eq 6 ]; then
-        # NOT a failure and must not be worded as one (#1711): the batch is on
-        # disk and lands at the next drain. A door that cries failure for a
-        # non-failure teaches its reader to ignore the line that matters.
-        printf 'plane-emit: SPOOLED by the cold rung — durable on disk, NOT in the plane until a drain\n' >&2
-    elif [ "$rc" -ne 0 ]; then
-        printf 'plane-emit: cold CLI rung failed rc=%s\n' "$rc" >&2
-    fi
-    exit "$rc"
-fi
-# The client died before finalizing (bad stdin never lands here — that is a
-# rung-1 exit 2): nothing safe to replay.
-printf 'plane-emit: no finalized batch to replay — total failure\n' >&2
+printf 'plane-emit: unexpected native client rc=%s — commit unconfirmed\n' "$rc" >&2
 exit 3

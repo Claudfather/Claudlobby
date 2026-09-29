@@ -782,16 +782,16 @@ plane_mint_id() {
 }
 
 # plane_emit_events <door> — stdin {"events":[...]} routed through THE shim
-# (plane-emit.sh: socket -> cold CLI -> spool). stdout discarded; stderr
-# passes through (the fallback disclosure is the contract); rc never
+# (plane-emit.sh: socket -> durable raw staged queue on a miss). stdout
+# discarded; stderr passes through (the pending disclosure is the contract); rc never
 # propagates — a door's real action is never blocked by its record.
 # The wrapper SURFACES the result: PLANE_EMIT_LAST_RC is 0 after a RECORDED
 # emission and the shim rc otherwise, so a door can say LOUDLY that its action
 # was not recorded — since the F18 closure there is no other record.
 # 0 means RECORDED — in the plane, queryable now — and NOT merely "accepted"
-# (#1711). A batch the db was unavailable for is SPOOLED: rc 6, durable on disk
-# and invisible to every reader until a drain. Doors that test `-ne 0` are
-# therefore CORRECT about a spooled batch without changing: it was not
+# (#1711). A batch can be STAGED by the native client or SPOOLED by the
+# daemon: rc 6, durable on disk and invisible to readers until replay/drain.
+# Doors that test `-ne 0` are therefore CORRECT about a pending batch: it was not
 # recorded. What they cannot yet say is that it was not lost either, which is
 # what rc 6 exists to let a door distinguish when one needs to.
 # Feed it through a here-string (`plane_emit_events door <<<"$batch"`), never a
@@ -808,11 +808,11 @@ plane_emit_events() {
     PLANE_EMIT_CLASS="${PLANE_EMIT_CLASS:-}" "${BASH_SOURCE[0]%/*}/plane-emit.sh" >/dev/null || _rc=$?
     PLANE_EMIT_LAST_RC=$_rc
     if [ "$_rc" -eq 6 ]; then
-        # #1711. SPOOLED is not failed and must never be worded as one: the
-        # batch is durable on disk and lands at the next drain. Saying "failed"
+        # #1711. Pending is not failed and must never be worded as one: the
+        # batch is durable on disk and lands at daemon replay/drain. Saying "failed"
         # for something nothing lost is the dead-signal defect — a door that
         # cries failure for a non-failure teaches its reader to skip the line.
-        echo "$door: plane SPOOLED this batch (rc=6) — durable on disk, NOT in the plane until a drain; nothing lost, nothing to retry" >&2
+        echo "$door: plane STAGED or SPOOLED this batch (rc=6) — durable on disk, NOT in the plane until daemon replay/drain; nothing lost, nothing to retry" >&2
     elif [ "$_rc" -ne 0 ]; then
         echo "$door: plane record failed rc=$_rc (door action unaffected)" >&2
     fi
@@ -838,12 +838,9 @@ plane_kill_tree() {
 # CANNOT STATE. A reap qualifies — the batch may have committed before the kill
 # and nothing can tell which. That is the only kind wired today.
 #
-# A COOLDOWN DIVERSION DELIBERATELY DOES NOT QUALIFY, and an earlier version of
-# this comment claimed it did (review). Measured: with the marker armed the shim
-# skips the socket, takes the cold rung, and the batch COMMITS — rc 0, one
-# events row, one ledger row. Its fate is stated, so counting it here would be
-# counting a success as a loss, in a file named for losses, which a reader would
-# then take for a loss series.
+# A COOLDOWN DIVERSION DELIBERATELY DOES NOT QUALIFY: the shim stages the raw
+# batch durably and returns rc 6. Its fate is known pending, not lost; counting
+# it as an unknown-fate loss would make the file misleading.
 #
 # The `kind` field stays because the rule admits other kinds (a spool write that
 # failed has an unstatable fate too) — it is the rule that decides, not this
@@ -943,12 +940,12 @@ plane_emit_bounded() {
     # does not reap early (measured), so the worst case is a bounded burst of
     # CPU rather than an emission killed mid-flight.
     _deadline=$(( SECONDS + bound + 1 ))
-    # Opted in to cooldown staging (#1657): no caller of this door reads the
+    # All native misses now stage raw events. This caller still ignores the
     # result (emit_fleet_event restores PLANE_EMIT_LAST_RC), and it carries
-    # most of the host's traffic, bot-vitals' two per tool call included.
+    # most host traffic, bot-vitals' two per tool call included.
     # For the same reason its class is `background` unless the caller named
     # one (#1693): bot-vitals names `hook`, because a turn waits on it.
-    PLANE_EMIT_CLASS="${PLANE_EMIT_CLASS:-background}" PLANE_EMIT_COOLDOWN_STAGE=1 \
+    PLANE_EMIT_CLASS="${PLANE_EMIT_CLASS:-background}" \
         "${BASH_SOURCE[0]%/*}/plane-emit.sh" <<<"$batch" >/dev/null &
     _pid=$!
     while kill -0 "$_pid" 2>/dev/null && [ "$SECONDS" -lt "$_deadline" ]; do

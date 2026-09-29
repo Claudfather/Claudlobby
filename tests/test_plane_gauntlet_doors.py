@@ -3,7 +3,7 @@
 Remaining tests pin the shim wedge marker and cooldown verdicts, plus
 the tg-post and briefing-trigger armed paths on private Plane storage.
 
-The real shim uses a private cold-CLI fallback; native transport is stubbed.
+The real shim uses the private durable spool when its daemon is down.
 """
 
 from __future__ import annotations
@@ -94,12 +94,12 @@ class TestWedgeMarker:
         """A marker stamped AHEAD of the clock (the RTC-less-Pi boot class)
         must read expired-and-deleted, not pin the socket rung off for the
         whole skew. Probed pre-fix: marker at now+3600 skipped the socket on
-        every emission and survived successful CLI emits."""
+        every emission."""
         libdir, env = armed
         mark = self._marker(tmp_path)
         mark.write_text(str(int(time.time()) + 3600))
         r = _bash(f'"{libdir}/plane-emit.sh"', env, stdin=VALID_BATCH)
-        assert r.returncode == 0, r.stderr
+        assert r.returncode == 6, r.stderr
         # Socket rung was ATTEMPTED (no daemon -> disclosed fallback), never
         # the cooldown skip. The future stamp is GONE — the marker present
         # afterwards is the fresh, legitimately-clocked one this run's own
@@ -125,10 +125,11 @@ class TestWedgeMarker:
         bad = _bash(f'"{libdir}/plane-emit.sh"', env, stdin="not json")
         assert bad.returncode == 2, (bad.returncode, bad.stderr)
         assert "total failure" not in bad.stderr
-        # And the happy path through cooldown still lands via the CLI rung.
+        # A valid cooldown batch is durable pending, never falsely committed.
         ok = _bash(f'"{libdir}/plane-emit.sh"', env, stdin=VALID_BATCH)
-        assert ok.returncode == 0, ok.stderr
+        assert ok.returncode == 6, ok.stderr
         assert "wedge cooldown" in ok.stderr
+        assert len(list((tmp_path / "state" / "plane" / "staged").glob("*.batch"))) == 1
 
 
 # ---------------------------------------------------------------------------

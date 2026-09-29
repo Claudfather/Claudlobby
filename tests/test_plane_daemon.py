@@ -1091,7 +1091,9 @@ def _until(pred, timeout: float = 15.0):
     raise AssertionError(f"not true within {timeout}s")
 
 
-def test_a_cooldown_batch_lands_through_the_daemon_under_the_capture_policy(tmp_path: Path, scratch_plane_env):
+@pytest.mark.parametrize("daemon_at_emit", [True, False])
+def test_a_cooldown_batch_lands_through_the_daemon_under_the_capture_policy(
+        tmp_path: Path, scratch_plane_env, daemon_at_emit: bool):
     """The shim stages a RAW batch, so the daemon must land it through
     emit_batch, the socket path's own call, for the capture policy to apply.
     The spool's drain() ingests entries as-is (they are stored
@@ -1104,11 +1106,13 @@ def test_a_cooldown_batch_lands_through_the_daemon_under_the_capture_policy(tmp_
     sock = sdir / "s"
     daemon = PlaneDaemon(tmp_path, socket_override=sock, drain_interval=9999)
     t = threading.Thread(target=lambda: daemon.serve(install_signals=False), daemon=True)
-    t.start()
+    if daemon_at_emit:
+        t.start()
     try:
-        # The daemon creates the dir: it is the handshake the client stages on.
-        staged = _until(lambda: (plane / "staged").is_dir() and plane / "staged")
-        (plane / ".socket-wedged").write_text(f"{int(time.time())}\n")
+        if daemon_at_emit:
+            _until(lambda: (plane / "staged").is_dir())
+            (plane / ".socket-wedged").write_text(f"{int(time.time())}\n")
+        staged = plane / "staged"
         shim = Path(__file__).resolve().parent.parent / "lib" / "plane-emit.sh"
         r = subprocess.run(
             ["bash", str(shim)],
@@ -1118,7 +1122,10 @@ def test_a_cooldown_batch_lands_through_the_daemon_under_the_capture_policy(tmp_
                  "PLANE_EMIT_COOLDOWN_STAGE": "1",
                  "PLANE_EMIT_CLI": "false"},
         )
-        assert r.returncode == 6, f"rc={r.returncode} (1 means the cold CLI ran): {r.stderr}"
+        assert r.returncode == 6, r.stderr
+        if not daemon_at_emit:
+            assert len(list(staged.glob("*.batch"))) == 1
+            t.start()  # startup/interval replay must apply capture policy
 
         def landed():
             conn = connect(db_path(tmp_path))
@@ -1132,7 +1139,8 @@ def test_a_cooldown_batch_lands_through_the_daemon_under_the_capture_policy(tmp_
         assert not list(staged.glob("*.batch"))
     finally:
         daemon.stop()
-        t.join(timeout=10)
+        if t.ident is not None:
+            t.join(timeout=10)
         shutil.rmtree(sdir, ignore_errors=True)
 
 
