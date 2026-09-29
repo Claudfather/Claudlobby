@@ -3,9 +3,11 @@
 import hashlib
 import os
 from pathlib import Path
+import plistlib
 import signal
 import socket
 import subprocess
+import threading
 import time
 from types import SimpleNamespace
 
@@ -245,6 +247,105 @@ def test_start_keeps_exact_grant_through_readiness_and_leaves_completion_to_owne
         assert not (builder.root / "state/activation-start.sock").exists()
     assert calls == ["svc_activation_bot_fence", "svc_activation_start", "svc_activation_bot_ready"] + (
         [] if fail_ready or ready_kind == "unknown-ready" else ["svc_activation_snapshot"])
+
+
+def test_resident_start_waits_for_delayed_native_admission_before_accepting_pid(proposal, monkeypatch):
+    builder, _, _ = proposal
+    plan = builder.seal()
+    release = read_release(builder.root, plan.release_id)
+    identity = admission.RuntimeIdentity(release.cli_path, release.native_path, release.inputs.artifact_id)
+    env = {"CLAUDLOBBY_ROOT": str(builder.root), "CLAUDLOBBY_RELEASE_ID": release.release_id,
+           "CLAUDLOBBY_CLI": str(release.cli_path), "CLAUDLOBBY_NATIVE_DIR": str(release.native_path),
+           "CLAUDLOBBY_ARTIFACT_ID": release.inputs.artifact_id}
+    argv = admission.wrap_unit_argv(env, unit="claudlobby-plane-view", phase="producers", mode="exec",
+                                    argv=["/bin/true"])
+    unit = admission.parse_unit_argv(argv)
+    file = builder.root / "claudlobby-plane-view.plist"
+    file.write_bytes(plistlib.dumps({"Label": file.stem, "RunAtLoad": True}))
+    digest = hashlib.sha256(file.read_bytes()).hexdigest()
+    admitted = threading.Event()
+    finished = threading.Event()
+    worker = None
+    start_at = None
+
+    class ReachedExec(Exception):
+        pass
+
+    def delayed_start():
+        try:
+            time.sleep(0.15)  # native reports a wrapper PID before that wrapper asks to run
+            try:
+                admission.run_unit(argv, identity=identity, environment=env,
+                                   execer=lambda *_: (_ for _ in ()).throw(ReachedExec()))
+            except ReachedExec:
+                admitted.set()
+        finally:
+            finished.set()
+
+    class Adapter:
+        package = SimpleNamespace(native=release.native_path)
+
+        def call(self, function, *args, timeout=30):
+            nonlocal worker, start_at
+            if function == "svc_activation_start":
+                start_at = time.monotonic()
+                worker = threading.Thread(target=delayed_start)
+                worker.start()
+                return subprocess.CompletedProcess([function], 0, "start-requested\n", "")
+            if function == "svc_activation_snapshot":
+                assert time.monotonic() - start_at >= 0.1, "wrapper PID was counted before exact admission"
+                return subprocess.CompletedProcess([function], 0, "unchanged loaded active\n", "")
+            pytest.fail(f"unexpected native call: {function}")
+
+    try:
+        with state.locked_activation(builder.root) as store:
+            _starting(store, plan, operation="ingest-start")
+            store.complete("candidate", "ingest_started", evidence_digest="0" * 64)
+            store.begin("candidate", "bots_started")
+            store.complete("candidate", "bots_started", evidence_digest="0" * 64)
+            store.begin("candidate", "verified")
+            store.complete("candidate", "verified", evidence_digest="0" * 64)
+            store.begin("candidate", "producers_resumed")
+            result = runtime.start_unit(store, "candidate", installed_file=file,
+                                        target=f"gui/{os.getuid()}/{file.stem}", unit=unit,
+                                        sha256=digest, adapter=Adapter())
+            assert result.details["native"] == "unchanged loaded active"
+            assert not (builder.root / "state/activation-start.sock").exists()
+            original_start = runtime.activation_start
+            monkeypatch.setattr(runtime, "activation_start", lambda *args, **kwargs:
+                                original_start(*args, **kwargs, timeout=0.05))
+
+            class NoProcess(Adapter):
+                def call(self, function, *args, timeout=30):
+                    if function == "svc_activation_start":
+                        return subprocess.CompletedProcess([function], 0, "start-requested\n", "")
+                    pytest.fail("native snapshot accepted a wrapper that never requested admission")
+
+            with pytest.raises(runtime.RuntimeEvidenceError, match="admission was not observed"):
+                runtime.start_unit(store, "candidate", installed_file=file,
+                                   target=f"gui/{os.getuid()}/{file.stem}", unit=unit,
+                                   sha256=digest, adapter=NoProcess())
+            timer_argv = admission.wrap_unit_argv(env, unit="claudlobby-timer", phase="producers",
+                                                  mode="oneshot", argv=["/bin/true"])
+            timer_unit = admission.parse_unit_argv(timer_argv)
+            timer_file = builder.root / "claudlobby-timer.plist"
+            timer_file.write_bytes(plistlib.dumps({"Label": timer_file.stem, "StartInterval": 60}))
+
+            class Scheduled(NoProcess):
+                def call(self, function, *args, timeout=30):
+                    if function == "svc_activation_snapshot":
+                        return subprocess.CompletedProcess([function], 0, "unchanged loaded inactive\n", "")
+                    return super().call(function, *args, timeout=timeout)
+
+            scheduled = runtime.start_unit(store, "candidate", installed_file=timer_file,
+                                           target=f"gui/{os.getuid()}/{timer_file.stem}", unit=timer_unit,
+                                           sha256=hashlib.sha256(timer_file.read_bytes()).hexdigest(),
+                                           adapter=Scheduled())
+            assert scheduled.details["native"] == "unchanged loaded inactive"
+    finally:
+        if worker is not None:
+            worker.join(timeout=3)
+        assert finished.is_set()
 
 
 def test_adapter_timeout_reaps_its_poll_group_without_delayed_effect(tmp_path):

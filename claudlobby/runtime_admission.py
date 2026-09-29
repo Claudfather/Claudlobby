@@ -77,6 +77,15 @@ class UnitStart:
     command: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class _AdmissionNotice:
+    event: threading.Event
+    deadline: float
+
+    def wait(self) -> bool:
+        return self.event.wait(max(0.0, self.deadline - time.monotonic()))
+
+
 def parse_unit_argv(argv) -> UnitStart:
     """One codec used by rendering, frozen-unit validation and the private entry."""
     if (not isinstance(argv, (tuple, list)) or len(argv) < 13
@@ -524,6 +533,7 @@ def activation_start(store: ActivationStore, activation_id: str, *, operation: s
             else:
                 raise ActivationError("another activation start scope is armed")
     stopped = threading.Event()
+    admitted = threading.Event()
     errors = []
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
@@ -561,6 +571,7 @@ def activation_start(store: ActivationStore, activation_id: str, *, operation: s
                             connection.sendall(b'{"refused":true}\n')
                             continue
                         connection.sendall(json.dumps({"admitted": received}).encode() + b"\n")
+                        admitted.set()
                         if target and target.phase == "bots" and continuation_pid is None:
                             continuation_pid = peer_pid or reported_pid
                             pending = _activation_request(store, activation_id, "start-bot",
@@ -573,7 +584,7 @@ def activation_start(store: ActivationStore, activation_id: str, *, operation: s
         worker = threading.Thread(target=serve, name="activation-start", daemon=True)
         worker.start()
         try:
-            yield
+            yield _AdmissionNotice(admitted, deadline)
             store.assert_locked()
         finally:
             stopped.set()

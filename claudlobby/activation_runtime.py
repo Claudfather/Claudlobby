@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import plistlib
 import socket
 import stat
 import subprocess
@@ -135,7 +136,8 @@ def start_unit(store: ActivationStore, activation_id: str, *, installed_file: Pa
     if unit.phase == "ingest" and readiness is None:
         raise RuntimeEvidenceError("start", target, "matching ingest readiness evidence is required")
     try:
-        actual_digest = hashlib.sha256(file.read_bytes()).hexdigest()
+        published_content = file.read_bytes()
+        actual_digest = hashlib.sha256(published_content).hexdigest()
     except OSError as exc:
         raise RuntimeEvidenceError("start", target, "published unit is unreadable") from exc
     if actual_digest != sha256:
@@ -147,7 +149,7 @@ def start_unit(store: ActivationStore, activation_id: str, *, installed_file: Pa
     admission = {"kind": "unit-start-v1", "unit": unit.unit, "argv": list(unit.argv)}
     details = {"release_id": unit.release_id, "sha256": sha256,
                "readiness": "not-observed"}
-    with activation_start(store, activation_id, identity=identity, unit=admission):
+    with activation_start(store, activation_id, identity=identity, unit=admission) as admitted:
         bot = None
         if unit.phase == "bots":
             bot = Path(unit.command[1])
@@ -160,6 +162,19 @@ def start_unit(store: ActivationStore, activation_id: str, *, installed_file: Pa
         response = _call(adapter, "svc_activation_start", target, file, target)
         if response != "start-requested":
             raise RuntimeEvidenceError("start", target, "native start acknowledgement unavailable")
+        # launchctl bootstrap/kickstart acknowledges a request before the
+        # spawned wrapper reaches its release-bound admission. A native PID
+        # snapshot can therefore see that wrapper while it is still doomed to
+        # exit when this one-shot grant closes. Scheduled timers do not run at
+        # enrollment; their later ticks use ordinary selected admission.
+        immediate = unit.mode == "exec" or file.suffix == ".service"
+        if file.suffix == ".plist" and not immediate:
+            try:
+                immediate = plistlib.loads(published_content).get("RunAtLoad") is True
+            except (ValueError, TypeError) as exc:
+                raise RuntimeEvidenceError("start", target, "published launch definition is invalid") from exc
+        if immediate and not admitted.wait():
+            raise RuntimeEvidenceError("start", target, "native unit admission was not observed")
         if bot is not None:
             ready = _call(adapter, "svc_activation_bot_ready", target,
                           store.root, bot, ceiling, token, timeout=ceiling + 10)
