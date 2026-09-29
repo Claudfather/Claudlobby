@@ -395,7 +395,7 @@ def test_interactive_collect_retains_pasted_voice_without_writing(tmp_path, monk
 
 @pytest.mark.parametrize("mode", ["dry-run", "decline", "confirm"])
 def test_new_bot_materializes_pending_voice_only_after_confirmation(
-    tmp_path, monkeypatch, mode
+    tmp_path, monkeypatch, caplog, mode
 ):
     from claudlobby import newbot
     from claudlobby.__main__ import main
@@ -418,11 +418,13 @@ def test_new_bot_materializes_pending_voice_only_after_confirmation(
     if mode == "dry-run":
         argv.append("--dry-run")
 
+    caplog.set_level("INFO", logger="claudlobby")
     assert main(argv) == (1 if mode == "decline" else 0)
 
     voice = root / "voices" / "bot-a.md"
     backup = root / "fleet.yaml.bak"
     if mode == "confirm":
+        assert "--fleet test fleet setup" in caplog.text
         assert "Terse and blunt." in voice.read_text()
         assert "voice: voices/bot-a.md" in (root / "fleet.yaml").read_text()
         assert backup.read_text() == FLEET_WITH_BOTS

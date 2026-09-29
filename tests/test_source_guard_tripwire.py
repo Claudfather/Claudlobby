@@ -82,6 +82,12 @@ _BLESSED_RAW_READS = {
     ("composer.py", "int_path.read_text()"),
     ("composer.py", "env_path.read_text()"),
     ("composer.py", "dotenv.read(env_path)"),
+    # The selected account's settings.json supplies only enabledPlugins keys.
+    # Compose validates it as a string-to-bool map, then sets each key's value
+    # from this bot's selected equipment; the account's bools are not grants,
+    # paths, or commands and cannot enable an unselected plugin.
+    ("composer.py", "source.read_text(encoding='utf-8')"),
+    ("composer.py", "json.loads(source.read_text(encoding='utf-8'))"),
     # composer.py — manifest provenance (#1722). EXEMPT, and narrowly, on the
     # same grounds as the $HOME/.env walk below: `_sha256_file` consumes ONLY a
     # hex digest of the bytes. No value read here crosses into a path, a grant,
