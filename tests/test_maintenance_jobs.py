@@ -188,9 +188,7 @@ class TestReloadFleetNpxPreflight:
     degraded cache warms best-effort (once per episode) and never aborts the
     reload."""
 
-    def _harness(self, tmp_path, npx_rc, plugins_line=None):
-        if plugins_line is None:
-            plugins_line = 'export FLEET_PLUGINS_REQUIRED="somepkg@Somewhere"'
+    def _harness(self, tmp_path, npx_rc, plugins=("somepkg@Somewhere",)):
         root = tmp_path / "root"
         libdir = root / "lib"
         libdir.mkdir(parents=True)
@@ -211,22 +209,27 @@ class TestReloadFleetNpxPreflight:
                 str(bindir / tool),
                 f'#!/bin/bash\necho "{tool} $*" >> "$CALL_LOG"\nexit 0\n',
             )
-        # A bot declaring plugins so the plugin-update leg actually runs.
+        # Plugin scope is supplied by the selected plan, not bot.conf.
         bot = root / "runtime" / "bots" / "tbot"
         bot.mkdir(parents=True)
-        (bot / "bot.conf").write_text(plugins_line + "\n")
+        (bot / "bot.conf").write_text('export BOT_SERVICE="test-tbot"\n')
         env = _scrubbed_env(
             CLAUDLOBBY_ROOT=str(root),
             CLAUDLOBBY_CLI=str(bindir / "claudlobby"),
+            CLAUDLOBBY_NATIVE_DIR=str(libdir),
+            CLAUDLOBBY_RELEASE_ID="selected",
+            CLAUDLOBBY_FLEET="test",
             CALL_LOG=str(tmp_path / "calls.log"),
             PATH=f"{bindir}:{os.environ['PATH']}",
             TMUX_TMPDIR=str(tmp_path / "no-tmux"),
         )
-        return root, env
+        return root, env, plugins
 
-    def _run_reload(self, root, env):
+    def _run_reload(self, root, env, plugins):
         r = subprocess.run(
-            ["bash", str(root / "lib" / "reload-fleet.sh")],
+            ["bash", str(root / "lib" / "reload-fleet.sh"), "--selected-release", "selected",
+             "--fleet", "test", "--bots-dir", str(root / "runtime/bots"), "--bot", "tbot",
+             *(part for plugin in plugins for part in ("--plugin", plugin))],
             env=env,
             capture_output=True,
             text=True,
@@ -238,15 +241,15 @@ class TestReloadFleetNpxPreflight:
         return log.read_text() if log.exists() else ""
 
     def test_preflight_runs_before_plugin_update(self, tmp_path):
-        root, env = self._harness(tmp_path, npx_rc=0)
-        self._run_reload(root, env)
+        root, env, plugins = self._harness(tmp_path, npx_rc=0)
+        self._run_reload(root, env, plugins)
         calls = self._calls(tmp_path)
         assert calls.index("check-npx-cache") < calls.index("claude plugin update")
         assert "warm-cache" not in calls
 
     def test_degraded_cache_warms_and_reload_continues(self, tmp_path):
-        root, env = self._harness(tmp_path, npx_rc=1)
-        self._run_reload(root, env)
+        root, env, plugins = self._harness(tmp_path, npx_rc=1)
+        self._run_reload(root, env, plugins)
         calls = self._calls(tmp_path)
         assert "warm-cache" in calls
         assert calls.index("check-npx-cache") < calls.index("warm-cache")
@@ -256,27 +259,18 @@ class TestReloadFleetNpxPreflight:
         # A permanently-missing package (e.g. a stale MCP fragment) must not
         # become a daily warm loop: one warm attempt per episode, re-armed
         # only after the check passes again.
-        root, env = self._harness(tmp_path, npx_rc=1)
-        self._run_reload(root, env)
-        self._run_reload(root, env)
+        root, env, plugins = self._harness(tmp_path, npx_rc=1)
+        self._run_reload(root, env, plugins)
+        self._run_reload(root, env, plugins)
         assert self._calls(tmp_path).count("warm-cache") == 1
 
-    def test_multi_token_single_quoted_plugins_parse_clean(self, tmp_path):
-        """#658: the composer emits FLEET_PLUGINS_REQUIRED via shlex.quote,
-        which single-quotes any multi-token value. The reader must strip that
-        wrapper so each plugin reaches `claude plugin update` clean — not as
-        "'alpha@Src" with a stray leading quote (the daily plugin-update fail)."""
-        root, env = self._harness(
-            tmp_path,
-            npx_rc=0,
-            plugins_line="export FLEET_PLUGINS_REQUIRED='alpha@Src beta@Src'",
-        )
-        self._run_reload(root, env)
+    def test_selected_plugin_arguments_stay_separate(self, tmp_path):
+        root, env, plugins = self._harness(tmp_path, npx_rc=0,
+                                            plugins=("alpha@Src", "beta@Src"))
+        self._run_reload(root, env, plugins)
         calls = self._calls(tmp_path)
         assert "claude plugin update alpha@Src" in calls
         assert "claude plugin update beta@Src" in calls
-        assert "'alpha@Src" not in calls  # no stray leading quote
-        assert "beta@Src'" not in calls  # no stray trailing quote
 
 
 def _source_lib_common(tmp_path, snippet, path, **extra_env):
@@ -430,14 +424,19 @@ class TestReloadFailureReasonIsTheRealError:
         bot = root / "runtime" / "bots" / "tbot"
         bot.mkdir(parents=True)
         (bot / "bot.conf").write_text(
-            'export FLEET_PLUGINS_REQUIRED="alpha@Src"\n'
+            'export BOT_SERVICE="test-tbot"\n'
             'export TELEGRAM_GROUP_CHAT_ID="-100123"\n'
         )
         r = subprocess.run(
-            ["bash", str(libdir / "reload-fleet.sh")],
+            ["bash", str(libdir / "reload-fleet.sh"), "--selected-release", "selected",
+             "--fleet", "test", "--bots-dir", str(root / "runtime/bots"),
+             "--bot", "tbot", "--plugin", "alpha@Src"],
             env=_scrubbed_env(
                 CLAUDLOBBY_ROOT=str(root),
                 CLAUDLOBBY_CLI=str(bindir / "claudlobby"),
+                CLAUDLOBBY_NATIVE_DIR=str(libdir),
+                CLAUDLOBBY_RELEASE_ID="selected",
+                CLAUDLOBBY_FLEET="test",
                 PATH=f"{bindir}:{sysbin or '/usr/bin:/bin:/usr/sbin:/sbin'}",
                TG_CAPTURE=str(tmp_path / "tg-capture"),
                 TMUX_TMPDIR=str(tmp_path / "no-tmux"),

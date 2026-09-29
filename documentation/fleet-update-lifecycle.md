@@ -6,7 +6,7 @@ Two update classes, two mechanisms:
 
 | Update type | Stays current (download) | Applied to a *running* bot | Restart? | Cadence |
 |---|---|---|---|---|
-| Composed skills + clauDNA marketplace plugin | `claude plugin update` + `claudlobby generate` (`lib/reload-fleet.sh`) | `/reload-plugins` + `/reload-skills` broadcast (live) | **No** | Daily, `03:30`, + on-demand |
+| Selected plugin cache | `claudlobby fleet reload` refreshes plugins through `lib/reload-fleet.sh` | Keepalive sends `/reload-plugins` + `/reload-skills` when idle | **No** | Daily, `03:30`, + on-demand |
 | Claude Code binary | `npm install -g @anthropic-ai/claude-code@latest` (`lib/update-claude-code.sh`) | new `claude` process at next start | **Yes** (binary swap) | Downloaded daily at `04:00`; applied via natural restarts + a weekly worker-only restart, `Sun 05:00` |
 
 The only update that costs a restart is the binary. That restart is made **rare** (weekly, workers only) and **lossless** (resume-on-every-start, below).
@@ -481,28 +481,28 @@ reader go and look instead of trusting a word.
 A durable per-generate trail would close the second row and is **not** built
 here — tracked as #1732.
 
-## Mechanism 1 — daily live reload (plugins + skills)
+## Mechanism 1 — daily selected-fleet plugin refresh
 
-`lib/reload-fleet.sh`, timer job `reload-fleet` (`claudlobby/system.yaml`, `schedule: "*-*-* 03:30:00"`, `type: oneshot`), enrolled by `lib/setup-fleet` (via `lib/install_fleet_timer.sh`, the generic timer enroller).
+The `reload-fleet` timer calls the selected release's `claudlobby fleet reload` at `03:30`. The public command uses the active plan's fleet roster and plugin list, then calls the packaged `lib/reload-fleet.sh` owner.
 
 1. Under a fleet-wide lock (`with_lock`), runs `claude plugin update` for each `FLEET_PLUGINS_REQUIRED` — refreshes the shared host plugin cache (`~/.claude/plugins/cache/`).
-2. Runs `claudlobby generate` to completion — re-links composed skill symlinks.
-3. Runs `lib/setup-fleet --jobs-only` (#1633), non-fatally, so a job this generate composed is enrolled the same day. On launchd it never boots out the job that is running it — reload-fleet's own (#1924): booting that job out stops the run, so an unchanged plist is left loaded, and a changed one is left untouched for the next `setup-fleet` run from a shell, which the log says (`DEFERRED`) and a `job_reenroll_deferred` FLEET NOTICE repeats on every run until it is applied.
-4. Drops `data/.reload-pending` on every **running** bot. It does not send any keystroke itself.
+2. Drops `data/.reload-pending` on each **running bot in the active plan**. It does not send any keystroke itself.
+
+The timer never runs `generate` or `setup-fleet`. Changes to authored configuration, composed skills, or native enrollment require a staged config plan and operator `host activate`.
 
 Every step is announced in `state/reload-fleet.log` before it runs (`reload-fleet[<fleet>] pid N step: …`), and its output streams there as it runs. A run killed or aborted mid-step raises `reload_failed` naming the step: at once on SIGTERM, SIGINT or SIGHUP, from its EXIT trap, and at the next run for a SIGKILL, which runs no trap (each run keeps a record under `state/reload-fleet.inflight/` until it ends).
 
 Activation is consolidated in `lib/keepalive.sh`: on its next idle-classification tick (each watchdog pass), if `data/.reload-pending` exists, keepalive sends `/reload-plugins` then `/reload-skills` and clears the marker. A bot mid-task is never interrupted by *this* path, and there's no separate broadcaster racing the idle check. Convergence lag is bounded by the keepalive tick interval (on the order of a minute), which is immaterial for a daily reload.
 
-> **This idle gate does NOT cover composed skill symlinks, and reading it as though it does is the #1310 defect in its most dangerous form** — here the doc appears to *promise* a deferral that does not exist. Step 2's `generate` re-links symlinks, and a composed skill is live from that moment on every running bot, busy or idle, with no marker and no keystroke. Measured: `data/.reload-pending` is written only by `reload-fleet.sh` (zero hits in `claudlobby/*.py`), and **zero** RELOAD entries appear in any of 21 bots' `keepalive.log` — yet a newly composed skill entered the live skill registry of three bots mid-session. So the marker was never set, keepalive never reached its reload block, and the skills activated anyway.
+> **The idle gate does not cover composed skill symlinks.** A separate operator activation that replaces a skill symlink makes it visible on demand immediately, even while a bot is busy. This timer no longer writes those symlinks.
 >
-> What the idle gate genuinely covers is the **plugin-cache** half — step 1's `claude plugin update`, where `/reload-plugins` is doing real work. **Whether `/reload-skills` is required for anything is not established here**; it was simply never observed to be the thing that made a composed skill live.
+> The idle gate covers the plugin-cache refresh. Whether `/reload-skills` is required for another purpose has not been established.
 
-Runnable **on-demand** (not just on the timer) to push a release immediately — activation still lands at each bot's next idle keepalive tick.
+Runnable **on-demand** as `claudlobby --root DATA --fleet FLEET fleet reload`; it does not deploy a new release.
 
 **Applies to every running bot, managers included** — live reload is free and lossless, so there's no reason to exclude managers here (contrast Mechanism 2).
 
-**Loud-failure contract:** a failed `claude plugin update` or `generate` aborts before any marker is dropped — no half-reload — and raises `emit_failure_alert` (fleet event + manager tmux nudge + Telegram escalation on critical failure).
+**Loud-failure contract:** a failed `claude plugin update` aborts before any marker is dropped and raises `emit_failure_alert` (fleet event + manager tmux nudge + Telegram escalation on critical failure).
 
 ## Mechanism 2 — weekly lossless worker restart (binary)
 
@@ -548,7 +548,7 @@ PR #399 added `lib/update-claude-code.sh` with a daily **fleet-wide bounce** —
 
 | Script | Role |
 |---|---|
-| `lib/reload-fleet.sh` | Mechanism 1: plugin update + generate + mark reload-pending |
+| `lib/reload-fleet.sh` | Mechanism 1: selected plugin update + mark reload-pending |
 | `lib/update-claude-code.sh` | Daily binary download only (no restart) |
 | `lib/weekly-worker-restart.sh` | Mechanism 2: weekly worker-only lossless restart |
 | `lib/keepalive.sh` | Consumes `data/.reload-pending` at each idle tick; also the crash-restart entrypoint |

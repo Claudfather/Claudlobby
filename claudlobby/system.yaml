@@ -510,10 +510,8 @@ defaults:
       # state file + the Telegram API (systemd-only; launchd ignores it).
       randomized_delay: 600
       type: oneshot
-    # Mechanism 1 of the fleet update lifecycle: refresh plugins + composed
-    # skills live every day (claude plugin update + generate, then mark running
-    # bots for a keepalive-driven /reload). No restart, no context loss. Runs
-    # before the binary-update window so the plugin cache is warm.
+    # Refresh selected-fleet plugins and mark live bots for an idle reload.
+    # Configuration and enrollment change only through host activate.
     reload-fleet:
       script: "$CLAUDLOBBY_NATIVE_DIR/reload-fleet.sh"
       schedule: "*-*-* 03:30:00"

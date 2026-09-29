@@ -1,29 +1,25 @@
 #!/bin/bash
-# reload-fleet.sh — Mechanism 1 of the fleet update lifecycle: refresh plugins
-# and composed skills LIVE, with no restart and no context loss.
+# reload-fleet.sh — selected-fleet plugin refresh and idle session reload.
 #
-# Steps (the download + generate run under one fleet-wide lock so a daily-timer
-# run and an on-demand run can never relink .claude/skills symlinks concurrently):
+# Steps (under one fleet-wide lock):
 #   1. claude plugin update <each FLEET_PLUGINS_REQUIRED> — refresh the shared
 #      host plugin cache (~/.claude/plugins/cache, shared fleet-wide).
-#   2. claudlobby generate — re-link composed skills.
-#   3. drop data/.reload-pending on every RUNNING bot. keepalive.sh performs the
+#   2. drop data/.reload-pending on every selected RUNNING bot. keepalive.sh performs the
 #      actual /reload-plugins + /reload-skills at each bot's next idle tick — a
 #      single, idle-gated activation path (fork F2(b) in the update-lifecycle plan).
 #
-# Triggered daily by the reload-fleet systemd timer, and runnable on demand to
-# push a release immediately (activation still lands at each bot's next idle
-# keepalive tick, <=60s).
+# The public fleet reload command supplies the roster and plugin scope from
+# the active sealed plan. Authored config and native enrollment are never changed.
 #
-# A failed download or generate is LOUD, never silent: it emits a reload_failed
-# fleet-observability event AND alerts the manager (tmux nudge + Telegram
-# escalation), and marks NO bot — there is no half-reload.
+# A failed plugin refresh is LOUD, never silent: it emits reload_failed and
+# alerts the manager before any bot is marked. Marker-write failures are also
+# reported; any earlier markers remain visible to the next keepalive tick.
 #
-# Needs `claude` and the claudlobby CLI. A timer environment supplies neither on
-# its minimal PATH, so this script owns tool resolution itself (own_tool_path +
-# claudlobby_cli, lib-common) rather than assuming an interactive PATH.
+# Needs `claude` and the selected claudlobby CLI. Native callers use the public
+# command; this packaged script receives the selected plan scope from it.
 #
-# Usage: reload-fleet.sh [<fleet-name>]
+# Usage: reload-fleet.sh --selected-release ID --fleet NAME --bots-dir DIR
+#                        [--plugin NAME]... [--bot NAME]...
 set -euo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,13 +29,57 @@ install_error_trap ""
 
 own_tool_path   # timer PATH is minimal, and stale units predate #802 (#805)
 
-CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$(cd "$LIB_DIR/.." && pwd)}"
-export CLAUDLOBBY_ROOT
-FLEET="${1:-${CLAUDLOBBY_FLEET:-}}"
-# the doors this script runs anchor their fleet events on it (F18 R1)
-[ -z "$FLEET" ] || export CLAUDLOBBY_FLEET="${CLAUDLOBBY_FLEET:-$FLEET}"
+# Fleet timers append their fleet name to the script command. Route that
+# historical native entry into the public selected-release admission before
+# doing any refresh work; the public adapter re-enters with frozen scope below.
+if [ "$#" -eq 1 ] && [ "${1#--}" = "$1" ]; then
+    [ "$1" = "${CLAUDLOBBY_FLEET:-}" ] || {
+        echo "reload-fleet: timer fleet context differs" >&2; exit 2;
+    }
+    [ "$LIB_DIR" = "${CLAUDLOBBY_NATIVE_DIR:-}" ] || {
+        echo "reload-fleet: timer native owner differs" >&2; exit 2;
+    }
+    [ -n "${CLAUDLOBBY_RELEASE_ID:-}" ] || {
+        echo "reload-fleet: timer has no selected release" >&2; exit 2;
+    }
+    # shellcheck source=cli-context.sh
+    . "$LIB_DIR/cli-context.sh"
+    _claudlobby_require_root || exit $?
+    _claudlobby_require_cli || exit $?
+    exec "$CLAUDLOBBY_CLI" --root "$CLAUDLOBBY_ROOT" --fleet "$1" fleet reload
+fi
 
-BOTS_DIR="$(resolve_bots_dir "$FLEET")"
+FLEET="" BOTS_DIR="" SELECTED_RELEASE=""
+PLUGINS=() BOTS=()
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --selected-release|--fleet|--bots-dir|--plugin|--bot)
+            [ "$#" -ge 2 ] || { echo "reload-fleet: missing $1 value" >&2; exit 2; }
+            case "$1" in
+                --selected-release) SELECTED_RELEASE="$2" ;;
+                --fleet) FLEET="$2" ;;
+                --bots-dir) BOTS_DIR="$2" ;;
+                --plugin) PLUGINS+=("$2") ;;
+                --bot) BOTS+=("$2") ;;
+            esac
+            shift 2 ;;
+        *) echo "reload-fleet: unexpected argument $1" >&2; exit 2 ;;
+    esac
+done
+case "${CLAUDLOBBY_ROOT:-}:${CLAUDLOBBY_NATIVE_DIR:-}:${CLAUDLOBBY_CLI:-}:$BOTS_DIR" in
+    /*:/*:/*:/*) ;;
+    *) echo "reload-fleet: selected root, native owner, CLI and bots directory required" >&2; exit 2 ;;
+esac
+if [ "$LIB_DIR" != "$CLAUDLOBBY_NATIVE_DIR" ] || [ "$SELECTED_RELEASE" != "${CLAUDLOBBY_RELEASE_ID:-}" ] \
+        || [ -z "$SELECTED_RELEASE" ] || [ -z "$FLEET" ] \
+        || [ "$FLEET" != "${CLAUDLOBBY_FLEET:-}" ]; then
+    echo "reload-fleet: selected native or fleet context differs" >&2
+    exit 2
+fi
+for _bot in "${BOTS[@]}"; do
+    case "$_bot" in ''|.|..|*/*) echo "reload-fleet: invalid selected bot" >&2; exit 2 ;; esac
+done
+export CLAUDLOBBY_FLEET="$FLEET"
 mkdir -p "${CLAUDLOBBY_ROOT}/state"
 LOG="${CLAUDLOBBY_ROOT}/state/reload-fleet.log"
 
@@ -135,10 +175,7 @@ _rf_raise_unfinished
 trap '_rf_on_exit' EXIT
 _rf_step "waiting for the reload lock"
 
-# --- 1 + 2. download + generate, serialized under a fleet-wide lock ---
-PLUGINS=""
-_plugin_bot=$(first_bot_with_conf "$BOTS_DIR" FLEET_PLUGINS_REQUIRED || true)
-[ -n "$_plugin_bot" ] && PLUGINS=$(bot_conf_get "$_plugin_bot" FLEET_PLUGINS_REQUIRED "")
+# --- plugin/cache refresh, serialized under the fleet-wide lock ---
 _reason_file=$(safe_mktemp)
 _step_out=$(safe_mktemp)    # reused by every _run_step; one temp, not one per step
 _step_rc=$(safe_mktemp)
@@ -154,13 +191,12 @@ _warm_npx() {
 # last line of output. The previous code discarded both and reported only the
 # last command name, so a PATH failure (exit 127, "claude: command not found")
 # surfaced as "claude plugin update failed: <plugin>" and read as a broken
-# plugin. That misdirection cost the triage, not the outage (#805). Both the
-# plugin loop and generate route through here so the two cannot drift.
+# plugin. That misdirection cost the triage, not the outage (#805). Every
+# plugin update routes through this step so failures retain the actual cause.
 #
 # The output streams into $LOG AS THE STEP RUNS, with a copy in $_step_out for
 # the reason below. It used to be buffered and appended only once the step
-# returned, so a step killed mid-run took all of its output with it: #1924's
-# setup-fleet step, which booted out its own job, left nothing after generate.
+# returned, so a step killed mid-run took all of its output with it.
 # The step now runs inside a pipeline, so its status comes back through a
 # file, and `|| _rc=$?` keeps the ERR trap exactly as quiet as it was.
 _run_step() {
@@ -183,6 +219,25 @@ _run_step() {
 }
 
 _reload_critical() {
+    # The public adapter supplied these exact selected-plan locations. Refuse
+    # missing or redirected targets before refreshing a shared plugin cache.
+    if [ ! -d "$BOTS_DIR" ] || [ -L "$BOTS_DIR" ]; then
+        printf 'selected bots directory is missing or redirected: %s' "$BOTS_DIR" > "$_reason_file"
+        return 1
+    fi
+    local _bot bot_dir
+    for _bot in "${BOTS[@]}"; do
+        bot_dir="$BOTS_DIR/$_bot"
+        if [ ! -d "$bot_dir" ] || [ -L "$bot_dir" ] || [ -L "$bot_dir/data" ] \
+                || [ -L "$bot_dir/data/.reload-pending" ]; then
+            printf 'selected bot reload path is missing or redirected: %s' "$_bot" > "$_reason_file"
+            return 1
+        fi
+        if ! FLEET_NAME="$FLEET" tmux_socket_for_bot "$bot_dir" >/dev/null 2>&1; then
+            printf 'selected bot has no private tmux socket: %s' "$_bot" > "$_reason_file"
+            return 1
+        fi
+    done
     # step 0: npx cache preflight. A cold cache turns MCP startup into an IO
     # storm on SD-card hardware, so verify before touching plugins — inside
     # the lock, because warm-cache mutates the host-shared ~/.npm/_npx.
@@ -204,64 +259,42 @@ _reload_critical() {
     # binary than the bots run is a refresh nobody boots with.
     local _claude
     _claude="$(fleet_claude_bin)"
-    if [ -n "$PLUGINS" ] && ! command -v "$_claude" >/dev/null 2>&1; then
+    if [ "${#PLUGINS[@]}" -gt 0 ] && ! command -v "$_claude" >/dev/null 2>&1; then
         printf '%s not found on PATH=%s — install Claude Code or set CLAUDE_BIN' "$_claude" "$PATH" > "$_reason_file"
         return 1
     fi
     local _p
-    for _p in $PLUGINS; do
+    for _p in "${PLUGINS[@]}"; do
         _run_step "claude plugin update $_p" "$_claude" plugin update "$_p" || return 1
     done
-    _run_step "claudlobby generate" claudlobby_cli ${FLEET:+--fleet "$FLEET"} generate || return 1
-    # #1633: enroll whatever this generate just composed, the same day it
-    # arrives — a default-on job (or one an operator just armed) otherwise
-    # sits composed-but-not-enrolled until a human happens to run
-    # `setup-fleet` by hand, which is exactly how `task-recheck` shipped on
-    # and ran nowhere for hours. Non-fatal (log + continue, no `|| return 1`):
-    # a failed enrollment is not a half-reload. Nothing here raises one, and
-    # no doctor rung sees it (`ignition` reads declared state only):
-    # setup-fleet raises a deferred re-enroll itself, as a FLEET NOTICE
-    # (#1924), while a plain enrollment failure is in this log alone until
-    # something scheduled compares composed units with enrolled ones (#839,
-    # #1651). Touches no live session — `--jobs-only` skips the cache warm,
-    # bot spin-up and reconcile legs.
-    _run_step "lib/setup-fleet --jobs-only" "$LIB_DIR/setup-fleet" ${FLEET:+"$FLEET"} --jobs-only || true
 }
 
 if ! with_lock "${CLAUDLOBBY_ROOT}/state/reload-fleet.lock" _reload_critical; then
     reason=$(cat "$_reason_file" 2>/dev/null || true)
     # An empty reason file is a stop no step explained (the step subshell
     # killed, or an abort inside it): name the step instead of alerting blank.
-    [ -n "$reason" ] || reason="reload download/generate stopped during step: $(_rf_recorded "$INFLIGHT" step)"
+    [ -n "$reason" ] || reason="reload refresh stopped during step: $(_rf_recorded "$INFLIGHT" step)"
     loud_fail "$reason"
     _RF_FINISHED=1    # reported: the EXIT trap must not raise it a second time
     exit 1
 fi
 # $_reason_file lives under lib-common's _LC_TMPDIR, reaped on exit by _rf_on_exit.
 
-# --- 3. mark every RUNNING bot for a keepalive-driven live reload ---
-# fleet.yaml is authoritative for which bots this fleet owns. Filter the runtime
-# glob through it so stale/cross-fleet residue dirs are never marked for reload.
-# BOTS_DIR is resolve_bots_dir's local/<fleet>/runtime/bots (or runtime/bots in
-# root mode), so its grandparent holds fleet.yaml for both. Empty list (no/
-# unreadable fleet.yaml) → bot_in_fleet treats every dir as declared.
-# #1146: over-inclusive, not a no-op — a drifted manifest marks .reload-pending
-# inside every bot dir on the host, other fleets included.
+# --- mark selected RUNNING bots for a keepalive-driven live reload ---
 _rf_step "mark running bots for live reload"
-declared_bots=$(parse_fleet_bots "$(dirname "$(dirname "$BOTS_DIR")")/fleet.yaml")
 marked=0
-if [ -d "$BOTS_DIR" ]; then
-    for bot_dir in "$BOTS_DIR"/*/; do
-        [ -d "$bot_dir" ] || continue
-        bot_in_fleet "$(basename "$bot_dir")" "$declared_bots" || continue   # departed/cross-fleet residue → skip
+for _bot in "${BOTS[@]}"; do
+        bot_dir="$BOTS_DIR/$_bot"
         # "Running" = the bot's session is alive on its OWN per-bot server.
-        if check_tmux_session "$(tmux_session_name "$bot_dir")" "$(tmux_socket_for_bot "$bot_dir" 2>/dev/null || true)"; then
+        socket=$(FLEET_NAME="$FLEET" tmux_socket_for_bot "$bot_dir")
+        if check_tmux_session "$(tmux_session_name "$bot_dir")" "$socket"; then
             mkdir -p "$bot_dir/data"
             touch "$bot_dir/data/.reload-pending"
             marked=$((marked + 1))
+            printf 'marked\t%s\n' "$_bot"
         fi
-    done
-fi
-printf '%s reload-fleet: download + generate OK, marked %d running bot(s) for live reload\n' \
+done
+for _p in "${PLUGINS[@]}"; do printf 'refreshed\t%s\n' "$_p"; done
+printf '%s reload-fleet: plugin refresh OK, marked %d running bot(s) for idle reload\n' \
     "$(ts_iso)" "$marked" >> "$LOG"
 _RF_FINISHED=1

@@ -657,8 +657,7 @@ class TestComposeFleetTimers:
 
     def test_reload_fleet_daily_timer(self, tmp_path):
         # Mechanism 1 of the fleet update lifecycle: a daily, calendar-scheduled
-        # reload-fleet timer that refreshes plugins + composed skills live (no
-        # restart). It must compose as a distinct timer alongside the others.
+        # Selected CLI refreshes plugins without composing or enrolling units.
         from claudlobby.composer import compose_fleet_timers
 
         root = tmp_path / "claudlobby"
@@ -674,6 +673,7 @@ class TestComposeFleetTimers:
         assert svc.is_file()
         assert timer.is_file()
         assert "reload-fleet.sh" in svc.read_text()
+        assert "CLAUDLOBBY_NATIVE_DIR" in svc.read_text()
         # Daily cadence is a systemd OnCalendar expression, not an interval.
         assert "OnCalendar=" in timer.read_text()
 

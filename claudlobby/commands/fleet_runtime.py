@@ -22,7 +22,7 @@ def dispatch(args) -> CommandOutput:
     action = args.public_command.removeprefix("fleet.")
     if args.seed:
         raise CommandFailure("conflict", "fleet runtime requires an active host")
-    if action not in {"start", "stop", "restart", "reconcile"}:
+    if action not in {"start", "stop", "restart", "reconcile", "reload"}:
         raise CommandFailure("invalid_argument", "unsupported fleet runtime action")
     if action == "reconcile" and getattr(args, "workers", False):
         raise CommandFailure("invalid_argument", "reconcile covers every declared bot")
@@ -31,7 +31,21 @@ def dispatch(args) -> CommandOutput:
             "completed": [], "failed_bot": None}
     try:
         root = resolve_paths(root=args.root).root
-        if action == "reconcile":
+        if action == "reload":
+            from ..fleet_reload import FleetReloadError, reload_fleet
+            try:
+                result = reload_fleet(root=root, fleet=args.fleet)
+            except FleetReloadError as exc:
+                data["native_outcome"] = "unknown" if exc.effect_attempted else "unattempted"
+                raise CommandFailure(exc.code, str(exc), data=data) from exc
+            data = {"fleet": result.fleet, "release_id": result.release_id,
+                    "plugins_refreshed": list(result.plugins_refreshed),
+                    "bots_marked": list(result.bots_marked),
+                    "bots_marked_count": len(result.bots_marked),
+                    "configuration_changed": False, "enrollment_changed": False}
+            lines = (f"{result.fleet}: refreshed {len(result.plugins_refreshed)} plugin(s); "
+                     f"marked {len(result.bots_marked)} running bot(s) for idle reload.",)
+        elif action == "reconcile":
             result = reconcile_fleet(root=root, fleet=args.fleet)
             data = {"fleet": result.fleet, "release_id": result.release_id,
                     "bots": [asdict(bot) for bot in result.bots],

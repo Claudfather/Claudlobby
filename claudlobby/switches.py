@@ -596,8 +596,8 @@ SWITCHES: tuple[Switch, ...] = (
         carrier=COMPOSE_BOT,
         config="isolation.shared_config",
         why_opt_in="no deployment gate: a composed deny binds on the bot's next "
-                   "tool call with no restart in between, and the nightly "
-                   "reload-fleet generate would carry a default-on rule set onto "
+                   "tool call with no restart in between, and an unreviewed "
+                   "generate would carry a default-on rule set onto "
                    "every bot of every fleet with nobody choosing to — the "
                    "manifest is the only place one bot can go first",
         what="compose the Layer 0b deny rules (#1665): other bots' transcripts "

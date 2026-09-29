@@ -57,10 +57,10 @@ def register_orientation_subparsers(sub):
         if domain == "fleet":
             from ._setup_parsers import register_fleet_setup
             register_fleet_setup(children)
-            for action in ("start", "stop", "restart", "reconcile"):
+            for action in ("start", "stop", "restart", "reconcile", "reload"):
                 route = children.add_parser(action, help=f"{action.capitalize()} selected fleet supervision")
                 route.add_argument("--json", action="store_true")
-                if action != "reconcile":
+                if action in {"start", "stop", "restart"}:
                     route.add_argument("--workers", action="store_true",
                                        help="Operate workers serially, leaving the manager running")
                 route.set_defaults(func=_fleet_runtime_dispatch, public_command=f"fleet.{action}")
