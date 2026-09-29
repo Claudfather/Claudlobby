@@ -430,6 +430,36 @@ def test_assignment_delivery_records_intent_then_sends_once_even_after_task_clos
     assert b"Private assignment body" not in path.read_bytes()
 
 
+def test_assignment_delivery_retry_across_release_keeps_receipt_and_native_target(estate):
+    ctx, route, package, conn, task, assignment = _manager_delivery(estate)
+    request_id = str(uuid4())
+    calls = []
+    def transport(*args, **kwargs):
+        calls.append(kwargs["body"])
+        return TransportOutcome("unknown") if len(calls) == 1 else TransportOutcome(
+            "submitted", native_returncode=0)
+    body = MessageBody("Private delivery")
+    first = deliveries.deliver(ctx, route, package, request_id, assignment.assignment_id,
+                               body, transport=transport)
+    original = _receipt(route, request_id)
+    changed = replace(route, activation_id="activation-2", plan_id="plan-2", release_id="release-2")
+    replay = deliveries.deliver(ctx, changed, package, request_id, assignment.assignment_id,
+                                body, transport=transport)
+    assert first.delivery == replay.delivery == "unknown"
+    assert replay.replayed and len(calls) == 1 and _receipt(route, request_id) == original
+    retried = deliveries.deliver(ctx, changed, package, request_id, assignment.assignment_id,
+                                 body, retry_uncertain=True, transport=transport)
+    saved = _receipt(route, request_id)
+    assert retried.delivery == "submitted" and len(calls) == 2
+    assert saved.intent == original.intent and len(saved.message_attempts) == 2
+    assert _counts(conn) == (1, 2)
+    with pytest.raises(ReceiptConflict):
+        deliveries.deliver(ctx, replace(changed, peer_destination=replace(
+            changed.peer_destination, socket="other-socket")), package, request_id,
+            assignment.assignment_id, body,
+            transport=lambda *a, **k: pytest.fail("retargeted delivery"))
+
+
 def test_assignment_delivery_refuses_recorder_outage_and_stale_first_send(estate, monkeypatch):
     ctx, route, package, conn, task, assignment = _manager_delivery(estate)
     original = messages.emit_batch

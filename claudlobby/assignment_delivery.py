@@ -22,7 +22,7 @@ from .plane.emit_api import _load_capture_config, validate_item
 from .plane.ids import mint_event_id, mint_msg_id
 from .request_facts import expected_fact, reconcile_facts
 from .request_receipts import (ReceiptConflict, RequestIntent, StagePlan,
-                               locked_request, semantic_digest)
+                               locked_request, same_native_route, semantic_digest)
 from .resources import PackageResources
 from .task_operations import (TaskConflictError, TaskOperationContext,
                               TaskRecordingError, _identities, _locked_task, _reader)
@@ -125,7 +125,7 @@ def deliver(ctx: TaskOperationContext, route: MessageRoute, package: PackageReso
                     or old.host_uid != ctx.host_uid or old.fleet_uid != ctx.fleet_uid
                     or old.caller_uid != ctx.caller.uid or old.recipient_uid != route.peer.uid
                     or old.assignment_id != assignment_id or old.semantic_sha256 != semantic
-                    or old.route != route.receipt_binding()):
+                    or not same_native_route(old.route, route.receipt_binding())):
                 raise ReceiptConflict("request UUID already has different assignment delivery semantics")
         with _reader(ctx) as conn:
             first = show_assignment(conn, assignment_id, fleet_uid=ctx.fleet_uid)
@@ -149,7 +149,8 @@ def deliver(ctx: TaskOperationContext, route: MessageRoute, package: PackageReso
                                        ctx.caller.uid, route.peer.uid, semantic,
                                        (StagePlan("recording", (fact,)), StagePlan("delivery")),
                                        task_id=task_id, assignment_id=assignment_id,
-                                       message_id=message_id, route=route.receipt_binding())
+                                       message_id=message_id,
+                                       route=previous.intent.route if previous else route.receipt_binding())
                 if previous is not None and previous.intent != intent:
                     raise ReceiptConflict("delivery fact or capture policy differs from frozen request")
                 proof = (reconcile_facts(conn, (fact,)).status if previous else "unrecorded")

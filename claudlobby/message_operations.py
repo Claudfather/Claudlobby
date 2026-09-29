@@ -7,7 +7,7 @@ This owner neither resolves a route nor verifies receiver delivery or idle Enter
 from __future__ import annotations
 
 from contextlib import closing, contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import re
@@ -28,7 +28,7 @@ from .recording_alerts import (ChannelOutcome, RecordingAlertOutcome,
                                clear_recording_degraded, notify_recording_degraded)
 from .request_facts import expected_fact, reconcile_facts
 from .request_receipts import (ReceiptConflict, RequestIntent, RequestReceipt, RequestStore, StagePlan,
-                               MessageRouteBinding, TransportObservation, locked_request, semantic_digest)
+                               TransportObservation, locked_request, same_native_route, semantic_digest)
 from .report_payload import ReportPayload, encode_report_facts
 from .resources import PackageResources
 
@@ -80,13 +80,6 @@ class NativeAttemptResult:
     replayed: bool
     attempt_no: int
     event_id: str
-
-
-def _same_native_route(frozen: MessageRouteBinding | None, current: MessageRouteBinding) -> bool:
-    """A selected release may change; the native parties and targets may not."""
-    return (isinstance(frozen, MessageRouteBinding)
-            and replace(frozen, activation_id=current.activation_id,
-                        plan_id=current.plan_id, release_id=current.release_id) == current)
 
 
 def _identity_proof(conn, route: MessageRoute) -> None:
@@ -243,7 +236,7 @@ def transmit_native_attempt(route: MessageRoute, package: PackageResources,
     """
     if (not isinstance(envelope, RenderedNativeEnvelope) or
             envelope.message_id != intent.message_id or not isinstance(envelope.body, str) or
-            not _same_native_route(intent.route, route.receipt_binding())):
+            not same_native_route(intent.route, route.receipt_binding())):
         raise MessageConflict("native envelope or route differs from frozen request")
     prior = reservation.previous
     if reservation.new:
@@ -317,7 +310,8 @@ def send_committed_native_attempt(route: MessageRoute, package: PackageResources
     if store.load() != receipt:
         raise ReceiptConflict("request changed before native notification")
     intent = receipt.intent
-    if (intent.route != route.receipt_binding() or intent.message_id != envelope.message_id
+    if (not same_native_route(intent.route, route.receipt_binding())
+            or intent.message_id != envelope.message_id
             or package != route.selected.paths.package
             or intent.host_uid != route.host_uid or intent.fleet_uid != route.selected_fleet_uid
             or intent.caller_uid != route.caller.uid or intent.recipient_uid != route.peer.uid):
@@ -433,7 +427,7 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
                     or old.host_uid != route.host_uid or old.fleet_uid != route.selected_fleet_uid
                     or old.caller_uid != route.caller.uid or old.recipient_uid != route.peer.uid
                     or old.semantic_sha256 != semantic
-                    or not _same_native_route(old.route, route.receipt_binding())):
+                    or not same_native_route(old.route, route.receipt_binding())):
                 raise ReceiptConflict("request UUID already has different message semantics or route")
             if not existing.message_attempts and not retry_uncertain:
                 # An O1 invocation might have sent after a failed reservation.

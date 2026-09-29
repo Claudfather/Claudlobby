@@ -482,6 +482,53 @@ def test_nudge_commits_queued_and_assigned_asks_without_retargeting_retry(estate
     assert recorded.assignment_id == replacement.assignment_id
 
 
+def test_routed_nudge_recovery_across_release_keeps_original_intent(estate):
+    ctx, conn = estate
+    task = tasks.admit(ctx, str(uuid4()), title="Release-spanning nudge")
+    route = _manager_route(ctx)
+    request_id = str(uuid4())
+    conn.execute("CREATE TRIGGER reject_nudge_release BEFORE INSERT ON events "
+                 "WHEN NEW.event='nudged' BEGIN SELECT RAISE(ABORT, 'private interruption'); END")
+    with pytest.raises(tasks.TaskRecordingError):
+        tasks.nudge(ctx, request_id, task.task_id, reason="Check progress", route=route)
+    original = _receipt(ctx, request_id)
+    conn.execute("DROP TRIGGER reject_nudge_release")
+    changed = replace(route, activation_id="activation-next", plan_id="plan-next",
+                      release_id="release-next")
+    result = tasks.nudge(ctx, request_id, task.task_id, reason="Check progress", route=changed)
+    assert result.recording == "committed" and not result.replayed
+    assert _receipt(ctx, request_id).intent == original.intent
+    before = _counts(conn)
+    replay = tasks.nudge(ctx, request_id, task.task_id, reason="Check progress", route=changed)
+    assert replay.replayed and replay.message_id == result.message_id
+    assert _counts(conn) == before
+    with pytest.raises(ReceiptConflict):
+        tasks.nudge(ctx, request_id, task.task_id, reason="Check progress", route=replace(
+            changed, manager_destination=replace(changed.manager_destination, socket="other-socket")))
+
+
+def test_linked_report_replay_across_release_preserves_original_route(estate):
+    ctx, conn = estate
+    task = tasks.admit(ctx, str(uuid4()), title="Release-spanning report")
+    assigned = tasks.assign(ctx, str(uuid4()), task.task_id, bot_id="worker")
+    worker = replace(ctx, caller=ctx.bots["worker"])
+    route = _manager_route(worker)
+    request_id = str(uuid4())
+    report = ReportPayload("progress", summary="On track")
+    first = tasks.progress(worker, request_id, assigned.assignment_id, report, route=route)
+    original = _receipt(ctx, request_id)
+    before = _counts(conn)
+    changed = replace(route, activation_id="activation-next", plan_id="plan-next",
+                      release_id="release-next")
+    replay = tasks.progress(worker, request_id, assigned.assignment_id, report, route=changed)
+    assert first.recording == "committed" and replay.replayed
+    assert replay.message_id == first.message_id and _counts(conn) == before
+    assert _receipt(ctx, request_id) == original
+    with pytest.raises(ReceiptConflict):
+        tasks.progress(worker, request_id, assigned.assignment_id, report, route=replace(
+            changed, peer_destination=replace(changed.peer_destination, socket="other-socket")))
+
+
 def test_reassign_commit_before_receipt_update_replays_without_retargeting(estate, monkeypatch):
     from claudlobby.request_receipts import RequestStore
     ctx, conn = estate

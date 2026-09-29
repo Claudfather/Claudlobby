@@ -99,6 +99,16 @@ class MessageRouteBinding:
     manager_destination: NativeDestination
 
 
+def same_native_route(frozen: MessageRouteBinding | None,
+                      current: MessageRouteBinding | None) -> bool:
+    """Selection stamps are provenance; every party and native target stays fixed."""
+    if frozen is None or current is None:
+        return frozen is current
+    return (isinstance(frozen, MessageRouteBinding) and isinstance(current, MessageRouteBinding)
+            and replace(frozen, activation_id=current.activation_id,
+                        plan_id=current.plan_id, release_id=current.release_id) == current)
+
+
 @dataclass(frozen=True)
 class RequestIntent:
     operation: str

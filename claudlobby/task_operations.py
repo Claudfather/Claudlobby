@@ -28,7 +28,7 @@ from .plane.schema_state import PendingMigrationError, require_current_schema
 from .report_payload import ReportLink, ReportPayload, encode_report_facts
 from .request_facts import expected_fact, reconcile_facts
 from .request_receipts import (MessageRouteBinding, ReceiptConflict, RequestIntent,
-                               StagePlan, locked_request, semantic_digest)
+                               StagePlan, locked_request, same_native_route, semantic_digest)
 from .task_queries import TaskNotFoundError, TaskQueryError, show_assignment, show_task
 from .task_state import TASK_EMITTER, Task
 
@@ -252,7 +252,8 @@ def _existing(store, ctx, operation, semantic, recipient=None, *, fact_count=1, 
                 != (operation, 1, ctx.host_uid, ctx.fleet_uid, ctx.caller.uid, recipient, semantic)
                 or tuple(stage.kind for stage in intent.stages) != (
                     ("recording", "notification") if notification else ("recording",))
-                or len(intent.stages[0].facts) != fact_count or intent.route != route
+                or len(intent.stages[0].facts) != fact_count
+                or not same_native_route(intent.route, route)
                 or notification and (intent.message_id is None or intent.recipient_uid is None
                                      or intent.stages[1].facts)):
             raise ReceiptConflict("request UUID already has different semantics or identities")
@@ -486,7 +487,8 @@ def _assignment_report(ctx, request_id, assignment_id, report, *, verb, status, 
                         link=ReportLink(task.task_id, assignment_id, transition))
                 receipt = _prepare(store, ctx, operation, semantic, raws, task.task_id, assignment_id,
                                    manager.uid, (manager,), message_id=message_id,
-                                   notification=True, route=route)
+                                   notification=True,
+                                   route=previous.intent.route if previous else route)
                 # Only the recording stage is attempted. The notification
                 # stays prepared for the later messaging owner, never sent here.
                 return _commit(store, ctx, conn, receipt, raws, check)
@@ -635,7 +637,8 @@ def nudge(ctx: TaskOperationContext, request_id: str, task_id: str, *, reason: s
                 raws = (task_raw, ask_raw)
                 receipt = _prepare(store, ctx, "task.nudge", semantic, raws, task_id,
                                    assignment_id, manager.uid, (provenance, manager),
-                                   message_id=message_id, notification=True, route=route)
+                                   message_id=message_id, notification=True,
+                                   route=previous.intent.route if previous else route)
                 return _commit(store, ctx, conn, receipt, raws, check)
 
 
