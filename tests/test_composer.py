@@ -363,6 +363,7 @@ def _expected_default_fleet_ops_allow() -> list[str]:
         "Bash(claudlobby --json workstream unblock *)",
         "Bash(claudlobby --json workstream close *)",
         "Bash(claudlobby --json workstream prune *)",
+        "Bash(claudlobby --json bot restart solo)",
         "Bash(claudlobby --fleet claudlobby brief --bot solo)",
     ]
 
@@ -401,6 +402,21 @@ class TestComposeSettingsLocal:
         # No declared tools still includes the universal fleet-ops skill,
         # manager-only grants, the default boot brief, and reversed BASE_TOOLS.
         assert result["permissions"]["allow"] == _expected_default_fleet_ops_allow()
+
+    def test_self_restart_grant_is_exact_and_worker_gets_no_other_lifecycle_grant(self, tmp_path):
+        paths = self._make_paths_with_runtime(tmp_path)
+        manager = BotConfig(bot_id="lead", name="lead", expertise=["eng"], channels=[])
+        worker = BotConfig(bot_id="worker", name="worker", expertise=["eng"], channels=[])
+        fleet = FleetConfig(manager="lead", name="t", service_prefix="p",
+                            bots={"lead": manager, "worker": worker})
+        lead_grants = compose_settings_local(manager, fleet, paths)["permissions"]["allow"]
+        worker_grants = compose_settings_local(worker, fleet, paths)["permissions"]["allow"]
+        assert "Bash(claudlobby --json bot restart lead)" in lead_grants
+        assert "Bash(claudlobby --json bot restart worker)" in lead_grants
+        assert "Bash(claudlobby --json bot restart worker)" in worker_grants
+        assert not any(g.startswith("Bash(claudlobby --json bot start ") or
+                       g.startswith("Bash(claudlobby --json bot stop ") or
+                       g == "Bash(claudlobby --json bot restart lead)" for g in worker_grants)
 
     def test_headless_ux_defaults_emitted(self, tmp_path):
         """The 3 settings.local headless UX keys are always emitted at their defaults."""

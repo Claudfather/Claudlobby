@@ -345,13 +345,14 @@ class TestGrantUnion:
                     for verb in ("start", "stop", "restart")} <= set(allow)
             if bot_id == "lead":
                 assert lifecycle == {
+                    "Bash(claudlobby --json bot restart lead)",
                     "Bash(claudlobby --json bot start worker-1)",
                     "Bash(claudlobby --json bot stop worker-1)",
                     "Bash(claudlobby --json bot restart worker-1)",
                     "Bash(claudlobby --json bot restart worker-1 --ceiling *)",
                 }
             else:
-                assert lifecycle == set()
+                assert lifecycle == {"Bash(claudlobby --json bot restart worker-1)"}
             assert not [
                 f for f in audit_bot(bot, fleet, paths)
                 if f.kind in {"orphan_grant", "under_grant"}
@@ -697,6 +698,7 @@ def test_a_fleet_with_no_requires_composes_exactly_the_declared_grants(fleet_dir
         "Bash(claudlobby --json bot stop worker-1)",
         "Bash(claudlobby --json bot restart worker-1)",
         "Bash(claudlobby --json bot restart worker-1 --ceiling *)",
+        "Bash(claudlobby --json bot restart lead)",
         # #1633: no custom startup_prompt -> the default read-then-act boot
         # prompt names this exact read, and compose_settings_local grants it.
         "Bash(claudlobby --fleet claudlobby brief --bot lead)",

@@ -2505,14 +2505,15 @@ def _resolve_fleet_ops_grants(bot: BotConfig, fleet: FleetConfig) -> list[str]:
         ))
     if bot.bot_id == fleet.manager:
         # The public lifecycle guard admits only this exact manager operating
-        # another declared bot. Enumerate targets so no self-restart text is
-        # granted while the self-termination protocol remains unsupported.
+        # another declared bot. Enumerate targets to avoid a wildcard mutation.
         for target in fleet.bots:
             if target == bot.bot_id:
                 continue
             for verb in ("start", "stop", "restart"):
                 grants.append(f"Bash(claudlobby --json bot {verb} {target})")
             grants.append(f"Bash(claudlobby --json bot restart {target} --ceiling *)")
+    # Any generated bot can request only its own context-preserving restart.
+    grants.append(f"Bash(claudlobby --json bot restart {bot.bot_id})")
     return grants
 
 

@@ -113,7 +113,8 @@ These commands preserve the host-shared state under its lock; they do not
 deliver a report or Telegram message.
 
 Only the selected fleet manager may operate another declared bot's supervised
-session. Use `claudlobby bot start --help`, `claudlobby bot stop --help`, or
+session. Any bot may request its own restart after saving a fresh handoff;
+use `/restart` for that sequence. Use `claudlobby bot start --help`, `claudlobby bot stop --help`, or
 `claudlobby bot restart --help` for the exact syntax:
 
 ```bash
@@ -131,7 +132,9 @@ per-bot readiness budget with a positive number. Read `data.changed`,
 `data.readiness`, and `data.native_outcome` in the JSON result before claiming
 what happened. If an effect or readiness is unverified, inspect the selected
 native unit and private session before another operation. Workers cannot use
-these mutations, and the manager cannot restart itself through this command.
+another bot's lifecycle. A self restart returns only `requested` with a request
+ID and startup-log path; it does not prove readiness. Read the final log entry
+after the new session starts before claiming completion.
 
 The current manager can use `workstream open/progress/renew/block/unblock/close/prune`
 with a retained `--request-id UUID` for each mutation. `block ID --on

@@ -57,12 +57,15 @@ def dispatch(args) -> CommandOutput:
         raise CommandFailure("conflict", "selected bot configuration or activation is incomplete", data=data) from exc
     except (InventoryError, OSError) as exc:
         raise CommandFailure("unavailable", "bot native state cannot be established", data=data) from exc
-    data = asdict(result)
-    data["native_outcome"] = "observed"
-    data["runtime_state"] = result.state
+    data = {key: value for key, value in asdict(result).items() if value is not None}
+    data["native_outcome"] = "unattempted" if result.state == "requested" else "observed"
+    data["runtime_state"] = "unknown" if result.state == "requested" else result.state
     if result.state == "stopped":
         lines = (f"{result.fleet}/{result.bot}: de-enrolled and stopped; "
                  "the declared bot and retained identity remain selected.",)
+    elif result.state == "requested":
+        lines = (f"{result.fleet}/{result.bot}: self restart requested; "
+                 f"request={result.request_id}; final outcome in {result.log_path}.",)
     elif action == "restart":
         lines = (f"{result.fleet}/{result.bot}: supervised session restarted; "
                  f"readiness={result.readiness}; handoff={result.handoff}.",)

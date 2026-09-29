@@ -2,10 +2,15 @@
 
 from copy import deepcopy
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 import json
+import os
 from pathlib import Path
 import subprocess
 from types import SimpleNamespace
+import time
+
+import pytest
 
 from claudlobby import activation, bot_operations, context
 from claudlobby.__main__ import main
@@ -25,6 +30,81 @@ def test_selected_bot_placement_survives_removal_of_installed_unit(cold):  # noq
     assert installed_unit.is_file() and entry["target"] == "com.example.worker.service"
     installed_unit.unlink()
     assert selected_bot_entry(root, "example", "worker", "Linux") == entry
+
+
+def test_self_restart_requires_fresh_owned_frontmatter(tmp_path):
+    bot_dir = tmp_path / "bot"
+    handoff_dir = bot_dir / ".claude"
+    handoff_dir.mkdir(parents=True)
+    handoff = handoff_dir / "session.md"
+    now = datetime.now(timezone.utc)
+    handoff.write_text(f"---\nlast_updated: {now:%Y-%m-%dT%H:%M:%SZ}\n---\ncontext\n")
+    bot_operations._fresh_self_handoff(bot_dir)
+    offset = now.astimezone(timezone(timedelta(hours=-4))).isoformat(timespec="seconds")
+    handoff.write_text(f'---\nlast_updated: "{offset}"\n---\ncontext\n')
+    bot_operations._fresh_self_handoff(bot_dir)
+    handoff.write_text(f"---\nlast_updated: {now:%Y-%m-%dT%H:%M:%S}\n---\ncontext\n")
+    with pytest.raises(bot_operations.BotLifecycleError, match="fresh owned"):
+        bot_operations._fresh_self_handoff(bot_dir)
+    handoff.write_text("---\nlast_updated: 2020-01-01T00:00:00Z\n---\ncontext\n")
+    with pytest.raises(bot_operations.BotLifecycleError, match="fresh owned"):
+        bot_operations._fresh_self_handoff(bot_dir)
+    handoff.unlink()
+    foreign = tmp_path / "foreign.md"
+    foreign.write_text(f"---\nlast_updated: {now:%Y-%m-%dT%H:%M:%SZ}\n---\ncontext\n")
+    handoff.symlink_to(foreign)
+    with pytest.raises(bot_operations.BotLifecycleError, match="fresh owned"):
+        bot_operations._fresh_self_handoff(bot_dir)
+
+
+@pytest.mark.parametrize("stalled", [False, True])
+def test_self_restart_witness_survives_requesting_process_exit(tmp_path, stalled):
+    """The one-shot witness, not the dying pane, owns the final outcome."""
+    bot_dir = tmp_path / "bot"
+    (bot_dir / ".claude").mkdir(parents=True)
+    (bot_dir / "logs").mkdir()
+    now = datetime.now(timezone.utc)
+    (bot_dir / ".claude/session.md").write_text(
+        f"---\nlast_updated: {now:%Y-%m-%dT%H:%M:%SZ}\n---\ncontext\n")
+    code = """
+import os
+import sys
+import time
+from pathlib import Path
+from claudlobby import bot_operations as b
+root, bot_dir = map(Path, sys.argv[1:3])
+stalled = sys.argv[3] == '1'
+b._SELF_RESPONSE_WAIT_S = 0.05 if stalled else 30
+b.read_selection = lambda _: {'release_id': 'selected'}
+def restart(**kwargs):
+    kwargs['_on_lock']()
+    (bot_dir / 'native-effect').write_text('attempted')
+    return b.BotLifecycleResult('fleet', 'bot', 'selected', 'unit', 'running', True,
+                                'session_ready', 'captured')
+b.set_bot_running = restart
+b._schedule_self_restart(root=root, fleet='fleet', bot='bot', ceiling=None,
+                         bot_dir=bot_dir)
+if stalled:
+    time.sleep(0.15)
+os._exit(0)  # even an abrupt caller death releases the child to finish
+"""
+    process = subprocess.run([os.sys.executable, "-c", code, str(tmp_path), str(bot_dir),
+                              "1" if stalled else "0"],
+                             capture_output=True, text=True, timeout=10)
+    assert process.returncode == 0, process.stderr
+    log = bot_dir / "logs/startup.log"
+    for _ in range(100):
+        if log.exists() and ('"status":"incomplete"' if stalled else '"status":"complete"') in log.read_text():
+            break
+        time.sleep(0.02)
+    rows = [json.loads(line) for line in log.read_text().splitlines()]
+    assert len(rows) == 1 and rows[0]["status"] == ("incomplete" if stalled else "complete")
+    if stalled:
+        assert "requesting CLI did not finish" in rows[0]["reason"]
+        assert not (bot_dir / "native-effect").exists()
+    else:
+        assert rows[0]["readiness"] == "session_ready"
+        assert (bot_dir / "native-effect").read_text() == "attempted"
 
 
 def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatch, capsys):  # noqa: F811
@@ -54,6 +134,7 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
             self.actions = []
             self.calls = []
             self.handoff_rc = 0
+            self.readiness = "bridge-ready"
             self.fence_args = []
             self.target = "com.example.worker.service"
             self.manager = "Linux"
@@ -73,7 +154,7 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
                 self.fence_args.append(args)
                 value = "0\tprivate-fence"
             elif function == "svc_activation_bot_ready":
-                value = "bridge-ready"
+                value = self.readiness
             elif function == "svc_activation_handoff":
                 value = ""
             elif function == "svc_bot_disenroll_exact":
@@ -209,6 +290,18 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
     assert manager_bounce["changed"] is True
     assert native.actions[-2:] == ["start", "start"]
     assert call("bot", "restart", "manager", expected=4)["error"]["code"] == "conflict"
+    with monkeypatch.context() as patch:
+        patch.setattr(bot_operations, "_schedule_self_restart", lambda **kwargs:
+                      bot_operations.BotLifecycleResult("example", "manager", release.release_id,
+                                                       "", "requested", False, "not_checked",
+                                                       "captured", "request-1", "/private/startup.log"))
+        before_self = len(native.actions)
+        requested = call("bot", "restart", "manager")["data"]
+        assert requested["state"] == "requested"
+        assert requested["native_outcome"] == "unattempted"
+        assert requested["runtime_state"] == "unknown"
+        assert requested["request_id"] == "request-1"
+        assert len(native.actions) == before_self
 
     native.handoff_rc = 3
     incomplete_handoff = call("bot", "restart", "worker")["data"]
@@ -231,6 +324,30 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
     timer_bounce = call("bot", "restart", "worker", "--ceiling", "37")["data"]
     assert timer_bounce["readiness"] == "bridge_ready"
     assert len(native.actions) == before + 1 and native.fence_args[-1][-1] == "37"
+    native.readiness = "session-ready"
+    assert call("bot", "restart", "worker")["data"]["readiness"] == "session_ready"
+    native.readiness = "unexpected"
+    assert call("bot", "restart", "worker", expected=6)["error"]["code"] == "unavailable"
+    before_bad_scope = len(native.actions)
     monkeypatch.setenv("FLEET_ROOT", str(root / "other-fleet"))
     assert call("bot", "restart", "worker", expected=4)["error"]["code"] == "conflict"
-    assert len(native.actions) == before + 1
+    assert len(native.actions) == before_bad_scope
+
+    # The admitted one-shot child uses the same selected lifecycle path but
+    # consumes the handoff already written by its own pane. It must never send
+    # another handoff keystroke to the pane it is about to terminate.
+    worker_dir = root / "runtime/bots/worker"
+    (worker_dir / ".claude").mkdir(exist_ok=True)
+    now = datetime.now(timezone.utc)
+    (worker_dir / ".claude/session.md").write_text(
+        f"---\nlast_updated: {now:%Y-%m-%dT%H:%M:%SZ}\n---\ncontext\n")
+    monkeypatch.setenv("FLEET_ROOT", str(root))
+    monkeypatch.setenv("FLEET_NAME", "example")
+    monkeypatch.setenv("BOT_ID", "worker")
+    monkeypatch.setenv("BOT_DIR", str(worker_dir))
+    native.readiness = "bridge-ready"
+    native.calls.clear()
+    self_bounce = bot_operations.set_bot_running(root=root, fleet="example", bot="worker",
+                                                 running=True, restart=True, _self_child=True)
+    assert self_bounce.handoff == "captured" and self_bounce.readiness == "bridge_ready"
+    assert "svc_activation_handoff" not in native.calls

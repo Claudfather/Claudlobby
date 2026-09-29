@@ -10,21 +10,33 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+import atexit
+from datetime import datetime, timezone
 import fcntl
+import json
 import os
 from pathlib import Path
+import re
+import select
+import signal
 import stat
 import subprocess
+import sys
+from uuid import uuid4
 
 from .activation_enrollment import selected_bot_entry, _target
 from .activation_runtime import assert_quiescent
 from .activation_state import ActivationError, read_selection
 from .config_plan import path_state, read_plan
 from .config_units import current_declarations, planned_units
+from .loader import parse_frontmatter
 from .operation_context import resolve_operation_scope
 from .runtime_admission import RuntimeIdentity, mutation_admission, validate_unit_admission
 from .supervision import build_supervision_spec
 from .supervision_inventory import Adapter, InventoryError, _catalog, collect_enrollment
+
+
+_SELF_RESPONSE_WAIT_S = 30
 
 
 class BotLifecycleError(RuntimeError):
@@ -48,6 +60,165 @@ class BotLifecycleResult:
     changed: bool
     readiness: str
     handoff: str = "not_applicable"
+    request_id: str | None = None
+    log_path: str | None = None
+
+
+def _fresh_self_handoff(bot_dir: Path) -> None:
+    """Require the handoff this session just wrote, not a touched old resume file."""
+    handoff_dir = bot_dir / ".claude"
+    try:
+        bot_info = bot_dir.lstat()
+        dir_info = handoff_dir.lstat()
+    except OSError as exc:
+        raise BotLifecycleError("self restart requires an owned handoff directory") from exc
+    if (not stat.S_ISDIR(bot_info.st_mode) or bot_info.st_uid != os.getuid()
+            or not stat.S_ISDIR(dir_info.st_mode) or dir_info.st_uid != os.getuid()):
+        raise BotLifecycleError("self restart requires an owned handoff directory")
+    path = handoff_dir / "session.md"
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+                raise BotLifecycleError("self restart requires an owned handoff file")
+            header = stream.read(8192).decode("utf-8")
+        if not header.startswith("---\n") or "\n---\n" not in header[4:]:
+            raise ValueError("missing handoff frontmatter")
+        frontmatter = header[4:].split("\n---\n", 1)[0]
+        if len(re.findall(r"^last_updated\s*:", frontmatter, re.MULTILINE)) != 1:
+            raise ValueError("missing UTC handoff timestamp")
+        fields, _ = parse_frontmatter(header)
+        value = fields.get("last_updated")
+        if isinstance(value, datetime):
+            stamp = value
+        elif isinstance(value, str):
+            stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        else:
+            raise ValueError("invalid handoff timestamp")
+        if stamp.tzinfo is None or stamp.utcoffset() is None:
+            raise ValueError("naive handoff timestamp")
+        age = datetime.now(timezone.utc).timestamp() - stamp.timestamp()
+        mtime_age = datetime.now(timezone.utc).timestamp() - info.st_mtime
+        if not (-30 <= age <= 300 and -30 <= mtime_age <= 300):
+            raise ValueError("handoff is stale")
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise BotLifecycleError("self restart requires a fresh owned session handoff") from exc
+
+
+def _self_restart_log(bot_dir: Path) -> tuple[int, Path]:
+    log_dir = bot_dir / "logs"
+    try:
+        info = log_dir.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            raise OSError("unowned log directory")
+        path = log_dir / "startup.log"
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            os.close(fd)
+            raise OSError("unowned startup log")
+        return fd, path
+    except OSError as exc:
+        raise BotLifecycleError("self restart outcome log is unavailable") from exc
+
+
+def _log_self_result(fd: int, request_id: str, *, status: str, **fields: object) -> None:
+    row = {"event": "self_restart", "request_id": request_id, "status": status,
+           "at": datetime.now(timezone.utc).isoformat(timespec="seconds"), **fields}
+    os.write(fd, (json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n").encode())
+
+
+def _schedule_self_restart(*, root: Path, fleet: str, bot: str,
+                           ceiling: int | None, bot_dir: Path) -> BotLifecycleResult:
+    _fresh_self_handoff(bot_dir)
+    selection = read_selection(root)
+    if selection is None:
+        raise BotLifecycleError("self restart requires an active selected release")
+    release_id = selection["release_id"]
+    log_fd, log_path = _self_restart_log(bot_dir)
+    request_id = str(uuid4())
+    admitted_read, admitted_write = os.pipe()
+    release_read, release_write = os.pipe()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        for fd in (log_fd, admitted_read, admitted_write, release_read, release_write):
+            os.close(fd)
+        raise BotLifecycleError("self restart could not launch its completion witness") from exc
+    if pid == 0:
+        os.close(admitted_read)
+        os.close(release_write)
+        admitted = False
+        try:
+            os.setsid()  # macOS has no setsid utility; leave the dying tmux group.
+            null_fd = os.open(os.devnull, os.O_RDONLY)
+            os.dup2(null_fd, 0)
+            os.close(null_fd)
+            os.dup2(log_fd, 1)
+            os.dup2(log_fd, 2)
+
+            def after_lock() -> None:
+                nonlocal admitted
+                os.write(admitted_write, b"1")
+                admitted = True
+                os.close(admitted_write)
+                # The caller flushes its requested result before exiting.
+                # Keep both admission locks held while awaiting that exit.
+                ready, _, _ = select.select([release_read], [], [], _SELF_RESPONSE_WAIT_S)
+                if not ready or os.read(release_read, 1) != b"":
+                    raise BotLifecycleError("requesting CLI did not finish its response")
+
+            result = set_bot_running(root=root, fleet=fleet, bot=bot, running=True,
+                                     restart=True, ceiling=ceiling, _self_child=True,
+                                     _on_lock=after_lock)
+            _log_self_result(log_fd, request_id, status="complete",
+                             release_id=result.release_id, target=result.target,
+                             readiness=result.readiness, handoff=result.handoff)
+            os._exit(0)
+        except BaseException as exc:
+            if not admitted:
+                try:
+                    os.write(admitted_write, b"0")
+                except OSError:
+                    pass
+            try:
+                fields = {"error": type(exc).__name__}
+                if isinstance(exc, BotLifecycleError):
+                    fields["effect_attempted"] = exc.effect_attempted
+                    fields["reason"] = str(exc)
+                _log_self_result(log_fd, request_id, status="incomplete", **fields)
+            except OSError:
+                pass
+            os._exit(1)
+    os.close(admitted_write)
+    os.close(release_read)
+    os.close(log_fd)
+    ready, _, _ = select.select([admitted_read], [], [], 5)
+    admitted = os.read(admitted_read, 1) if ready else b""
+    os.close(admitted_read)
+    if admitted != b"1":
+        os.close(release_write)
+        if not ready:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        raise BotLifecycleError("self restart completion witness was not admitted")
+
+    def release_after_response() -> None:
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        finally:
+            os.close(release_write)
+
+    atexit.register(release_after_response)
+    return BotLifecycleResult(fleet, bot, release_id, "",
+                              "requested", False, "not_checked", "captured",
+                              request_id, str(log_path))
 
 
 @contextmanager
@@ -138,7 +309,8 @@ def _confirm_running(adapter, installed, target, manager, *, session_ready=False
 def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                     restart: bool = False, ceiling: int | None = None,
                     identity: RuntimeIdentity | None = None,
-                    adapter: Adapter | None = None) -> BotLifecycleResult:
+                    adapter: Adapter | None = None, _self_child: bool = False,
+                    _on_lock=None) -> BotLifecycleResult:
     """Start, stop or restart one exact selected bot; prove native effects."""
     if restart and not running:
         raise BotLifecycleError("restart requires a running target")
@@ -147,15 +319,27 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
         raise BotLifecycleError("restart ceiling must be a positive integer")
     if not isinstance(bot, str) or not bot or Path(bot).name != bot or bot in {".", ".."}:
         raise BotLifecycleError("supply one exact bot ID")
+    if restart and not _self_child:
+        destination, origin = resolve_operation_scope(root=root, fleet=fleet)
+        if origin is not None and origin.bot_id == bot:
+            if origin.fleet.name != destination.fleet.name or bot not in destination.fleet.bots:
+                raise BotLifecycleError("self restart target differs from generated origin")
+            return _schedule_self_restart(root=root, fleet=destination.fleet.name,
+                                          bot=bot, ceiling=ceiling,
+                                          bot_dir=destination.paths.bot_runtime(bot))
     identity = identity or RuntimeIdentity.current()
     with mutation_admission(root, identity=identity,
                             expected_release=os.environ.get("CLAUDLOBBY_RELEASE_ID")) as release:
         with _operation_lock(root):
+            if _on_lock is not None:
+                _on_lock()
             destination, origin = resolve_operation_scope(root=root, fleet=fleet)
             if origin is not None and (origin.fleet.name != destination.fleet.name
-                                       or origin.bot_id != destination.fleet.manager
-                                       or bot == origin.bot_id):
+                                       or (bot == origin.bot_id and not (restart and _self_child))
+                                       or (bot != origin.bot_id and origin.bot_id != destination.fleet.manager)):
                 raise BotLifecycleError("only the selected fleet manager may operate another bot")
+            if _self_child and (not restart or origin is None or origin.bot_id != bot):
+                raise BotLifecycleError("self restart lost its exact generated origin")
             if bot not in destination.fleet.bots:
                 raise BotLifecycleError("bot is not declared in the selected active fleet")
             selected = read_selection(root)
@@ -218,7 +402,13 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                 if session not in {"ready", "unknown", "absent"}:
                     raise BotLifecycleError("current bot session observation is indeterminate",
                                             unavailable=True)
-                if session != "absent":
+                if _self_child:
+                    if session != "ready":
+                        raise BotLifecycleError("self restart lost its private live session",
+                                                unavailable=True)
+                    _fresh_self_handoff(spec.bot_dir)
+                    handoff = "captured"
+                elif session != "absent":
                     # The existing pre-stop door is best effort: even its rc 0
                     # means attempted, not that a new handoff file was written.
                     # Run it while the old tmux session still exists, before
@@ -264,8 +454,11 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
             try:
                 _native(adapter, "svc_bot_enroll_exact", declaration.source, installed, entry["target"])
                 _observed(root, declarations, adapter, entry["target"], installed)
-                _native(adapter, "svc_activation_bot_ready", root, spec.bot_dir,
-                        fence[0], fence[1], timeout=int(fence[0]) + 30)
+                readiness = _native(adapter, "svc_activation_bot_ready", root, spec.bot_dir,
+                                    fence[0], fence[1], timeout=int(fence[0]) + 30)
+                if readiness not in {"bridge-ready", "session-ready"}:
+                    raise BotLifecycleError("bot native readiness outcome is unknown",
+                                            effect_attempted=True, unavailable=True)
                 session_ready = False
                 if manager == "Darwin":
                     session_ready = _native(adapter, "svc_bot_session_observe", spec.bot_dir,
@@ -282,4 +475,5 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                                         release_id=release.release_id,
                                         target=entry["target"]) from exc
             return BotLifecycleResult(destination.fleet.name, bot, release.release_id,
-                                      entry["target"], "running", True, "bridge_ready", handoff)
+                                      entry["target"], "running", True,
+                                      readiness.replace("-", "_"), handoff)
