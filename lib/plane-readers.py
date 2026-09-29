@@ -477,17 +477,22 @@ def answering_idless(conn: sqlite3.Connection, fleet: str, bot: str, at: Optiona
 # (ravi's #917 row, 2026-09-29). This reads the NOTE instead: the resolver is
 # held while ANY control note sent to the bot has no id-less report from the
 # bot after it, so the newest such note decides (a report after it is after
-# every older one). A report naming a task, and a newer task, leave the hold
-# standing: neither answers a note, and a wrong completion is worse than an
-# open row (the ruling on #1984). The cost is at most one id-less report per
-# note that closes nothing, and an open row pages as overdue.
+# every older one). A report naming one of the bot's own tasks, and a newer
+# task, leave the hold standing: neither answers a note, and a wrong
+# completion is worse than an open row (the ruling on #1984). The cost is at
+# most one id-less report per note that resolves to no task; an id'd row it
+# was really finishing stays open and pages as overdue. The hold is on
+# RESOLUTION only: the report door's id-less closer still closes raw-text rows
+# on that report.
 # The note is selected by the dispatch door's provenance (`dispatch-log:`),
 # never by message class alone, since other doors send classes like `question`
 # too. Two arms, each on an index: the recipient alias the door records
 # whenever it resolves the worker (every dispatch on the live plane,
 # 2026-09-29), and `recipient_raw` in the sender's fleet, the door's disclosed
 # fallback when it cannot. A report is id-less when its communication carries
-# no `assignment_id`, which the report door sets whenever it links one.
+# no `assignment_id`, which the report door sets whenever it links one, so a
+# `--task` that links to none of the bot's tasks counts as id-less and releases
+# the hold (measured on #1984). `--no-task` is the answer that never resolves.
 CONTROL_COMMANDS = ("query", "cancel", "compact", "restart")
 _NEWEST_NOTE_SQL = (
     "SELECT occurred_at, ingest_seq FROM ("

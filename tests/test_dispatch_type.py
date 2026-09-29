@@ -361,8 +361,9 @@ class TestAControlNoteHoldsTheResolverUntilAnswered:
     8, a `completed` report, so that report IS the answer, and it closed live
     work (ravi's #917 row, 2026-09-29). #1981 restores the hold without the
     row: while any control note sent to the bot has no id-less report from
-    the bot after it, the head is blank. The answer closes nothing, and the
-    next id-less report resolves normally. No assignment comes back (#1491's
+    the bot after it, the head is blank. The answer resolves to no task (a
+    terminal one still closes open raw-text rows), and the next id-less report
+    resolves normally. No assignment comes back (#1491's
     point, pinned in test_plane_door_e2e).
 
     RAW TEXT is unchanged — the gate is the TYPE, never id-lessness. A raw-text

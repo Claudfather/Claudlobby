@@ -9,8 +9,10 @@ the worker's id-less answer was stamped with its live task and closed it as
 
 The guard now reads the newest CONTROL NOTE sent to the bot: while it has no
 id-less report from the bot after it, `head()` returns None. A report naming
-a task, and a newer task, leave it standing: neither answers a note, and a
-wrong completion is worse than an open row (the ruling on #1984). The note
+one of the bot's own tasks, and a newer task, leave it standing: neither
+answers a note, and a wrong completion is worse than an open row (the ruling
+on #1984). A `--task` that links to none of the bot's tasks counts as id-less
+and releases it. The note
 fixture is the LIVE shape: the 04:20:32Z note carried a
 `dispatch-log:sha:` ref, message_class `question`, command_type `query`, a
 recipient alias AND `recipient_raw`, and no work item. The door's disclosed
