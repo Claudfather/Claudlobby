@@ -123,7 +123,7 @@ def _selected_sweep(monkeypatch, root, *, dry_run=False):
 
     @contextmanager
     def admitted(*_args, **_kwargs):
-        yield SimpleNamespace(release_id="selected-release")
+        yield SimpleNamespace(release_id="selected-release", seal_sha256="selected-seal")
 
     monkeypatch.setattr(plane_expire, "mutation_admission", admitted)
     monkeypatch.setattr(plane_expire, "resolve_paths", lambda **_kwargs:
@@ -133,7 +133,8 @@ def _selected_sweep(monkeypatch, root, *, dry_run=False):
     monkeypatch.setattr("claudlobby.activation_state.read_selection",
                         lambda _root: {"plan_id": "selected-plan"})
     monkeypatch.setattr("claudlobby.config_plan.read_plan", lambda *_args:
-                        SimpleNamespace(release_id="selected-release", fleets=(F,)))
+                        SimpleNamespace(release_id="selected-release", release_seal="selected-seal",
+                                        fleets=(F,)))
     return plane_expire.dispatch(SimpleNamespace(root=root, fleet=None, seed=False,
                                                   after_days=None, dry_run=dry_run))
 
@@ -171,6 +172,10 @@ def test_completion_between_preview_and_commit_refuses_expiry(tmp_path):
     stale = _dispatch(root, "e", expected_by=NOW - timedelta(days=10))
     with closing(connect(db_path(root))) as conn:
         plan = expirable(conn, now=NOW, after_days=7)
+    with pytest.raises(ValueError, match="precondition requires require_commit"):
+        emit_batch(root, expired_events(plan, now=NOW, after_days=7),
+                   precondition=lambda conn: require_expirable(
+                       conn, plan, now=NOW, after_days=7))
     _complete(root, *stale)
     with pytest.raises(ExpiryChanged):
         emit_batch(root, expired_events(plan, now=NOW, after_days=7),

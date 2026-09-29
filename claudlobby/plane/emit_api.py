@@ -228,7 +228,10 @@ def emit_batch(root: Path, raw_requests: list[dict], *,
     an exception does not prove that a commit did not occur. Callers must
     reconcile their durable event IDs before deciding whether to retry.
     ``precondition`` runs read-only under ingest_many's BEGIN IMMEDIATE lock,
-    before any row in the batch is written."""
+    before any row in the batch is written. It requires ``require_commit``:
+    a spool cannot retain the in-process condition for a later replay."""
+    if precondition is not None and not require_commit:
+        raise ValueError("precondition requires require_commit=True")
     captured: list = []
     items = []
     # Capture config loads AT MOST ONCE per batch (gauntlet round): a report

@@ -35,7 +35,8 @@ def dispatch(args) -> CommandOutput:
             if selected is None:
                 raise ActivationError("active selection is unavailable")
             plan = read_plan(root, selected["plan_id"])
-            if plan.release_id != release.release_id or not plan.fleets:
+            if (plan.release_id != release.release_id
+                    or plan.release_seal != release.seal_sha256 or not plan.fleets):
                 raise PlanError("active plan differs from the admitted release")
             stamp = datetime.now(timezone.utc)
             path = db_file(root)
