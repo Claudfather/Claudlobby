@@ -92,7 +92,8 @@ def _read(args) -> CommandOutput:
             raise CommandFailure("release_mismatch", "selected release differs from this CLI") from exc
         if "unavailable" in message:
             raise CommandFailure("unavailable", "active task scope is unavailable", retryable=True) from exc
-        raise CommandFailure("conflict", "active task scope or identity binding is incomplete") from exc
+        raise CommandFailure("conflict", "active task scope or identity binding is incomplete",
+                             hint=f"{message}; inspect claudlobby host releases") from exc
     except ReleaseError as exc:
         raise CommandFailure("release_mismatch", "selected release is unavailable or mismatched") from exc
     except PlanError as exc:

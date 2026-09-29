@@ -137,6 +137,7 @@ def dispatch(args) -> CommandOutput:
             raise CommandFailure("unavailable", "active brief scope is unavailable",
                                  release_id=release_id) from exc
         raise CommandFailure("conflict", "active brief scope or identities are incomplete",
+                             hint=f"{message}; inspect claudlobby host releases",
                              release_id=release_id) from exc
     except ReleaseError as exc:
         raise CommandFailure("release_mismatch", "selected brief release is unavailable or mismatched",

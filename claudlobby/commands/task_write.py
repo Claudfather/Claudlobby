@@ -358,6 +358,7 @@ def dispatch(args) -> CommandOutput:
     except (ActivationError, PlanError, OperationContextError, MessageContextError, BotNotFoundError,
             TaskStateError) as exc:
         raise CommandFailure("conflict", "active task scope or state is incomplete",
+                             hint=f"{exc}; inspect claudlobby host releases" if isinstance(exc, ActivationError) else None,
                              release_id=release_id) from exc
     except ReleaseError as exc:
         raise CommandFailure("release_mismatch", "selected release is unavailable or mismatched") from exc
