@@ -36,6 +36,7 @@ import pytest
 
 from tests.conftest import _write_exec, constructed_env
 from tests.test_maintenance_jobs import _captured, _native_fixture, _signal_root
+from tests.test_plane_events_door import _serving
 from tests.test_update_claude_code_verify import (
     SUDO_STUB,
     _event_types,
@@ -150,7 +151,7 @@ class StagedHost:
             _write_exec(dest, content)
 
     # --- running --------------------------------------------------------------
-    def env(self, latest="2.1.281", armed=True, **extra):
+    def env(self, latest="2.1.281", armed=True, *, socket=None, **extra):
         base = dict(
             PATH=self.path,
             HOME=self.home,
@@ -162,7 +163,7 @@ class StagedHost:
             CLAUDE_UPDATE_FLEET_PATH=self.sysdir,
             CLAUDE_MIN_BINARY_BYTES=str(FLOOR),
             FLEET_EVENT_EMIT_TIMEOUT_S="120",
-            **self.scratch_plane_env(self.root, initialize=True),
+            **self.scratch_plane_env(self.root, socket=socket, initialize=socket is None),
         )
         if armed:
             base["CLAUDLOBBY_STAGED_CLAUDE_UPDATE_ENABLED"] = "1"
@@ -172,13 +173,16 @@ class StagedHost:
         return constructed_env(**base)
 
     def run(self, latest="2.1.281", armed=True, **extra):
-        return subprocess.run(
-            ["bash", str(self.script)],
-            env=self.env(latest, armed, **extra),
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
+        # The native emitter commits through the socket client, not the
+        # retired cold CLI path. Keep the real daemon alive for this tick.
+        with _serving(self.root, self.scratch_plane_env) as socket:
+            return subprocess.run(
+                ["bash", str(self.script)],
+                env=self.env(latest, armed, socket=socket, **extra),
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
 
     def log(self) -> str:
         p = self.root / "state" / "claude-update.log"
