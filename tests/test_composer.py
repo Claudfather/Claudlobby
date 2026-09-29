@@ -371,6 +371,7 @@ def _expected_default_fleet_ops_allow() -> list[str]:
         "Bash(claudlobby --json event show *)",
         "Bash(claudlobby --json fleet logs)",
         "Bash(claudlobby --json fleet logs --lines *)",
+        "Bash(claudlobby --json fleet notify --level * --event * --message *)",
         "Bash(claudlobby --json fleet start --workers)",
         "Bash(claudlobby --json fleet stop --workers)",
         "Bash(claudlobby --json fleet restart --workers)",
@@ -429,12 +430,14 @@ class TestComposeSettingsLocal:
         assert "Bash(claudlobby --json bot handoff worker)" in lead_grants
         assert "Bash(claudlobby --json bot interrupt worker)" in lead_grants
         assert "Bash(claudlobby --json bot compact worker)" in lead_grants
+        assert "Bash(claudlobby --json fleet notify --level * --event * --message *)" in lead_grants
         assert "Bash(claudlobby --json bot handoff lead)" not in lead_grants
         assert "Bash(claudlobby --json bot restart worker)" in worker_grants
         assert "Bash(claudlobby --json bot handoff lead)" not in worker_grants
         assert "Bash(claudlobby --json bot handoff worker)" not in worker_grants
         assert "Bash(claudlobby --json bot interrupt worker)" not in worker_grants
         assert "Bash(claudlobby --json bot compact worker)" not in worker_grants
+        assert "Bash(claudlobby --json fleet notify --level * --event * --message *)" not in worker_grants
         assert "Bash(claudlobby --json fleet pulse)" in lead_grants
         assert "Bash(claudlobby --json fleet pulse)" not in worker_grants
         assert "Bash(claudlobby --json bot session worker)" in worker_grants

@@ -62,6 +62,7 @@ umask 077
 . "$1" >/dev/null 2>&1 || exit 4
 state="$2"; fleet="$3"; channel="$4"; bots="$5"; socket="$6"; session="$7"
 renotify="$8"; tg_post="$9"
+episode="${10:-recording_degraded}"
 message=''; IFS= read -r -d '' message || :
 _send_manager() { bot_tmux_send "$socket" "=$session" "$1" >/dev/null 2>&1; }
 _send_telegram() {
@@ -107,9 +108,9 @@ available=0
 if [ "${ALERT_DEBOUNCE_DISABLED:-0}" != 1 ] && mkdir -p "$state" 2>/dev/null &&
    probe=$(mktemp "$state/.probe.XXXXXXXX" 2>/dev/null); then
     rm -f "$probe"; available=1
-    debounce_notify "$state" "$fleet" "recording_degraded_${channel}" _notify \
+    debounce_notify "$state" "$fleet" "${episode}_${channel}" _notify \
         "$message" "$recipient" "$renotify" >/dev/null 2>&1 || :
-    marker="$state/${fleet}.recording_degraded_${channel}"
+    marker="$state/${fleet}.${episode}_${channel}"
     if [ "${_DEBOUNCE_FIRED:-0}" = 1 ] && [ "$send_rc" -eq 0 ] && [ ! -f "$marker" ]; then
         available=0
     fi
@@ -172,7 +173,8 @@ def _environment(context: Context, manager: TransportDestination,
     return env
 
 
-def _acquire_episode_lock(state, fleet: str, channel: str, deadline: float) -> tuple[int | None, str]:
+def _acquire_episode_lock(state, fleet: str, channel: str, deadline: float,
+                          episode: str = "recording_degraded") -> tuple[int | None, str]:
     """Hold one kernel lock for the entire native decision and send.
 
     An unavailable lock means persistence is untrustworthy and the caller may
@@ -186,7 +188,7 @@ def _acquire_episode_lock(state, fleet: str, channel: str, deadline: float) -> t
         state.mkdir(mode=0o700, parents=True, exist_ok=True)
         if not state.is_dir():
             raise OSError("alert state is not a directory")
-        path = state / f"{fleet}.recording_degraded_{channel}.lock"
+        path = state / f"{fleet}.{episode}_{channel}.lock"
         fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
         info = os.fstat(fd)
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
@@ -214,7 +216,9 @@ def _run_channel(command: list[str], *, env: dict[str, str], timeout: float,
                  payload: bytes, runner) -> ChannelOutcome:
     try:
         result = (runner or _run)(command, input=payload, env=env, timeout=timeout)
-    except (OSError, subprocess.SubprocessError, _StartedFailure):
+    except _StartedFailure:
+        return ChannelOutcome("failed", None, "outcome_unverified")
+    except (OSError, subprocess.SubprocessError):
         return ChannelOutcome("failed", None)
     if result.returncode != 0:
         return ChannelOutcome("failed", None)
@@ -274,20 +278,54 @@ def notify_recording_degraded(
                f"root={context.paths.root} fleet={context.fleet.name} "
                f"time={at.astimezone(timezone.utc).isoformat(timespec='seconds')} "
                f"component={component} request={request_id}. Inspect the request before retrying.")
+    return _send_channels(context, package, manager, message=message,
+                          trusted_tiers=trusted_tiers, episode="recording_degraded",
+                          at=at, component=component, request_id=request_id,
+                          timeout_per_channel=timeout_per_channel, runner=runner,
+                          label="recording-alert")
+
+
+def _send_channels(context: Context, package: PackageResources,
+                   manager: TransportDestination, *, message: str,
+                   trusted_tiers: Mapping[str, str], episode: str,
+                   at: datetime, component: str, request_id: str,
+                   timeout_per_channel: float, runner=None,
+                   label: str = "fleet-notify") -> RecordingAlertOutcome:
+    """One exact, independent manager/Telegram carrier path for fleet alerts."""
+    env = _environment(context, manager, trusted_tiers)
+    raw_renotify = env.get("FLEET_PULSE_RENOTIFY_AFTER_S", "21600")
+    raw_rearm = env.get("FLEET_PULSE_REARM_WINDOW_S", "1800")
+    if any(not re.fullmatch(r"[0-9]{1,10}", value) or int(value) > 2_147_483_647
+           for value in (raw_renotify, raw_rearm)):
+        raise ValueError("renotify interval must be nonnegative seconds")
+    def disclose(channel: str, outcome: ChannelOutcome) -> None:
+        if outcome.status in ("failed", "unconfigured") or not outcome.debounce_available:
+            print(f"{label}: root={context.paths.root} fleet={context.fleet.name} "
+                  f"time={at.astimezone(timezone.utc).isoformat(timespec='seconds')} "
+                  f"component={component} request={request_id} channel={channel} "
+                  f"status={outcome.status} debounce_available="
+                  f"{int(outcome.debounce_available) if outcome.debounce_available is not None else 'unknown'}"
+                  f" reason={outcome.reason or 'none'}", file=sys.stderr)
+    if not (package.native / "lib-common.sh").is_file():
+        failed = ChannelOutcome("failed", None, "native_unavailable")
+        disclose("manager", failed)
+        disclose("telegram", failed)
+        return RecordingAlertOutcome(failed, failed)
     state = manager.root / "state/recording-alerts"
     base = ["/bin/bash", "--noprofile", "--norc", "-c", _NOTIFY, "recording-alert",
-            str(native), str(state), context.fleet.name]
+            str(package.native / "lib-common.sh"), str(state), context.fleet.name]
     outcomes = []
     for channel in ("manager", "telegram"):
         deadline = time.monotonic() + timeout_per_channel
-        fd, lock_state = _acquire_episode_lock(state, context.fleet.name, channel, deadline)
+        fd, lock_state = _acquire_episode_lock(state, context.fleet.name, channel, deadline,
+                                                episode)
         if lock_state == "contended":
             outcome = ChannelOutcome("failed", None, "lock_timeout")
             disclose(channel, outcome)
             outcomes.append(outcome)
             continue
         command = [*base, channel, str(context.paths.runtime_bots), manager.socket,
-                   manager.session, raw_renotify, str(package.native / "tg-post.sh")]
+                   manager.session, raw_renotify, str(package.native / "tg-post.sh"), episode]
         channel_env = dict(env)
         if lock_state == "unavailable":
             channel_env["ALERT_DEBOUNCE_DISABLED"] = "1"
@@ -306,6 +344,28 @@ def notify_recording_degraded(
         disclose(channel, outcome)
         outcomes.append(outcome)
     return RecordingAlertOutcome(*outcomes)
+
+
+def send_fleet_notification(context: Context, package: PackageResources,
+                            manager: TransportDestination, *, message: str,
+                            event: str, request_id: str, at: datetime,
+                            trusted_tiers: Mapping[str, str], runner=None) -> RecordingAlertOutcome:
+    """Public fleet signal through the same recording-independent carriers."""
+    import hashlib
+
+    _validate(context, package, manager)
+    if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", event):
+        raise ValueError("literal event required")
+    if not isinstance(message, str) or not message or "\0" in message:
+        raise ValueError("nonempty notification required")
+    if not isinstance(at, datetime) or at.tzinfo is None or at.utcoffset() is None:
+        raise ValueError("aware notification time required")
+    _environment(context, manager, trusted_tiers)
+    episode = "fleet_notify_" + hashlib.sha256((event + "\0" + message).encode()).hexdigest()[:20]
+    return _send_channels(context, package, manager, message=message,
+                          trusted_tiers=trusted_tiers, episode=episode, at=at,
+                          component=event, request_id=request_id,
+                          timeout_per_channel=8, runner=runner)
 
 
 def clear_recording_degraded(context: Context, package: PackageResources,

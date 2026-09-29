@@ -38,6 +38,7 @@ tool_grants:
   - "Bash(claudlobby fleet reconcile --help)"
   - "Bash(claudlobby fleet reload --help)"
   - "Bash(claudlobby fleet pulse --help)"
+  - "Bash(claudlobby fleet notify --help)"
   - "Bash(claudlobby event list --help)"
   - "Bash(claudlobby event show --help)"
   - "Bash(claudlobby assignment show --help)"
@@ -223,6 +224,15 @@ Read recorded pulse events with
 `claudlobby --json event list --since 24h --source pulse`. Read
 `data.items`, `data.coverage`, and `data.next_cursor`; use `event show EVENT_ID`
 for one complete recorded event.
+
+The selected manager may send a fleet alert or notice with
+`claudlobby --json fleet notify --level alert --event EVENT --message TEXT`.
+The configured manager pane and Telegram alert channel are attempted
+independently. Inspect `recording`, `manager.status`, and `telegram.status`:
+submission or carrier acceptance does not prove a person read it. A recording
+outage returns `recording_degraded` after the bounded channel attempts; inspect
+the results and do not automatically resend. Ordinary messages use `message
+send` and never imply a fleet alert.
 
 The current manager can use `workstream open/progress/renew/block/unblock/close/prune`
 with a retained `--request-id UUID` for each mutation. `block ID --on

@@ -47,6 +47,12 @@ def _bot_runtime_dispatch(args):
                    json_output=args.json)
 
 
+def _fleet_notify_dispatch(args):
+    return execute(args.public_command,
+                   lambda: import_module(".fleet_notify", __package__).dispatch(args),
+                   json_output=args.json)
+
+
 def _bot_create_dispatch(args):
     return execute(args.public_command,
                    lambda: import_module(".scaffolding", __package__).cmd_new_bot(args),
@@ -73,6 +79,12 @@ def register_orientation_subparsers(sub):
         group = sub.add_parser(domain, help=f"Read {domain} declarations and available evidence")
         children = group.add_subparsers(dest=f"{domain}_command", required=True)
         if domain == "fleet":
+            notify = children.add_parser("notify", help="Notify this fleet through configured alert channels")
+            notify.add_argument("--level", required=True, choices=("alert", "notice"))
+            notify.add_argument("--event", required=True, metavar="EVENT")
+            notify.add_argument("--message", required=True, metavar="TEXT")
+            notify.add_argument("--json", action="store_true")
+            notify.set_defaults(func=_fleet_notify_dispatch, public_command="fleet.notify")
             logs = children.add_parser("logs", help="Read bounded selected-fleet bot log tails")
             logs.add_argument("--lines", type=int, default=20, metavar="N",
                               help="Lines per file (1–200; default 20)")

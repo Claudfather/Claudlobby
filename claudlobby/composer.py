@@ -2521,6 +2521,7 @@ def _resolve_fleet_ops_grants(bot: BotConfig, fleet: FleetConfig) -> list[str]:
         grants.append("Bash(claudlobby --json event show *)")
         grants.append("Bash(claudlobby --json fleet logs)")
         grants.append("Bash(claudlobby --json fleet logs --lines *)")
+        grants.append("Bash(claudlobby --json fleet notify --level * --event * --message *)")
         for verb in ("start", "stop", "restart"):
             grants.append(f"Bash(claudlobby --json fleet {verb} --workers)")
         # The public lifecycle guard admits only this exact manager operating

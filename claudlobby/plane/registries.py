@@ -88,6 +88,8 @@ def cap_for(family: str, field: str) -> int:
 # registry (F19: unknown tokens still INGEST — they just carry NULL severity
 # until the registry learns them).
 SYSTEM_EVENT_SEVERITY: dict[str, str] = {
+    "fleet_alert": "critical",
+    "fleet_notice": "notice",
     "daemon_started": "notice",
     "daemon_stopping": "notice",
     "spool_drain_completed": "notice",
