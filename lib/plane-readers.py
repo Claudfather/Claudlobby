@@ -25,8 +25,8 @@ This module is the stdlib twin of the package definitions — keep them in step
                       is what makes the guard answerable from the plane.
 - ``answering_control_note`` (#1981): the same guard for a CONTROL note, which
                       lands no assignment since #1491 and so is invisible to
-                      ``answering_idless`` -- read off the bot's newest inbound
-                      dispatch COMMUNICATION instead.
+                      ``answering_idless`` -- read off the note's COMMUNICATION
+                      instead, and held until an id-less report answers it.
 
 Read-only (``mode=ro`` + ``query_only``). A missing or unopenable db raises
 ``PlaneUnreachable`` — the caller refuses, it never falls back to the JSONL:
@@ -474,27 +474,37 @@ def answering_idless(conn: sqlite3.Connection, fleet: str, bot: str, at: Optiona
 # could fail to close), and `answering_idless` reads the bot's newest
 # ASSIGNMENT, so a note stopped holding the resolver back: the worker's id-less
 # answer to it was stamped with the live task and closed it as `completed`
-# (ravi's #917 row, 2026-09-29). This reads the bot's newest inbound DISPATCH
-# instead, selected by the dispatch door's provenance (`dispatch-log:`), never
-# by message class alone, since other doors send classes like `question` too.
-# Two arms, each on an index: the recipient alias the door records whenever it
-# resolves the worker (every dispatch on the live plane, 2026-09-29), and
-# `recipient_raw` in the sender's fleet, the door's disclosed fallback when it
-# cannot. A report by the bot after the note, of any status, answers it.
+# (ravi's #917 row, 2026-09-29). This reads the NOTE instead: the resolver is
+# held while ANY control note sent to the bot has no id-less report from the
+# bot after it, so the newest such note decides (a report after it is after
+# every older one). A report naming a task, and a newer task, leave the hold
+# standing: neither answers a note, and a wrong completion is worse than an
+# open row (the ruling on #1984). The cost is at most one id-less report per
+# note that closes nothing, and an open row pages as overdue.
+# The note is selected by the dispatch door's provenance (`dispatch-log:`),
+# never by message class alone, since other doors send classes like `question`
+# too. Two arms, each on an index: the recipient alias the door records
+# whenever it resolves the worker (every dispatch on the live plane,
+# 2026-09-29), and `recipient_raw` in the sender's fleet, the door's disclosed
+# fallback when it cannot. A report is id-less when its communication carries
+# no `assignment_id`, which the report door sets whenever it links one.
 CONTROL_COMMANDS = ("query", "cancel", "compact", "restart")
-_NEWEST_DISPATCH_SQL = (
-    "SELECT occurred_at, ingest_seq, command_type FROM ("
-    "SELECT c.occurred_at, c.ingest_seq, c.command_type FROM communications c"
+_NEWEST_NOTE_SQL = (
+    "SELECT occurred_at, ingest_seq FROM ("
+    "SELECT c.occurred_at, c.ingest_seq FROM communications c"
     " WHERE c.recipient_fleet = ? AND c.recipient_uid IN (%s)"
-    " AND c.source_ref LIKE 'dispatch-log:%%' AND (? IS NULL OR c.occurred_at <= ?)"
+    " AND c.source_ref LIKE 'dispatch-log:%%' AND c.command_type IN (%s)"
+    " AND (? IS NULL OR c.occurred_at <= ?)"
     " UNION ALL"
-    " SELECT c.occurred_at, c.ingest_seq, c.command_type FROM communications c"
+    " SELECT c.occurred_at, c.ingest_seq FROM communications c"
     " WHERE c.fleet_uid = ? AND c.recipient_alias IS NULL AND lower(c.recipient_raw) = ?"
-    " AND c.source_ref LIKE 'dispatch-log:%%' AND (? IS NULL OR c.occurred_at <= ?))"
+    " AND c.source_ref LIKE 'dispatch-log:%%' AND c.command_type IN (%s)"
+    " AND (? IS NULL OR c.occurred_at <= ?))"
     " ORDER BY occurred_at DESC, ingest_seq DESC LIMIT 1"
 )
-_REPORT_SINCE_SQL = (
+_IDLESS_REPORT_SINCE_SQL = (
     "SELECT 1 FROM communications r WHERE r.message_class = 'report' AND r.sender_uid IN (%s)"
+    " AND r.assignment_id IS NULL"
     " AND (r.occurred_at > ? OR (r.occurred_at = ? AND r.ingest_seq > ?))"
     " AND (? IS NULL OR r.occurred_at <= ?) LIMIT 1"
 )
@@ -502,22 +512,23 @@ _REPORT_SINCE_SQL = (
 
 def answering_control_note(conn: sqlite3.Connection, fleet: str, bot: str,
                            at: Optional[str] = None, *, entry: Optional[dict] = None) -> bool:
-    """True while the bot's NEWEST inbound dispatch (as of *at*) is a control
-    note the bot has not reported since: its next terminal report answers
-    THAT note, so the resolver must not hand it an open task (#1981)."""
+    """True while any control note sent to the bot (as of *at*) has no id-less
+    report from the bot after it: the bot's next id-less report answers THAT
+    note, so the resolver must not hand it an open task (#1981)."""
     entry = entry if entry is not None else bot_entry(conn, fleet, bot)
     uids = (entry or {}).get("uids", [])
     if not uids:
         return False
-    marks = ",".join("?" * len(uids))
+    marks, ctl = ",".join("?" * len(uids)), ",".join("?" * len(CONTROL_COMMANDS))
     fleet_row = conn.execute(FLEET_UID_SQL, (fleet,)).fetchone()
-    row = conn.execute(_NEWEST_DISPATCH_SQL % marks,
-                       (fleet, *uids, at, at, fleet_row[0] if fleet_row else None,
-                        bot.lower(), at, at)).fetchone()
-    if row is None or row[2] not in CONTROL_COMMANDS:
+    note = conn.execute(_NEWEST_NOTE_SQL % (marks, ctl, ctl),
+                        (fleet, *uids, *CONTROL_COMMANDS, at, at,
+                         fleet_row[0] if fleet_row else None, bot.lower(),
+                         *CONTROL_COMMANDS, at, at)).fetchone()
+    if note is None:
         return False
-    return conn.execute(_REPORT_SINCE_SQL % marks,
-                        (*uids, row[0], row[0], row[1], at, at)).fetchone() is None
+    return conn.execute(_IDLESS_REPORT_SINCE_SQL % marks,
+                        (*uids, note[0], note[0], note[1], at, at)).fetchone() is None
 
 
 def head(conn: sqlite3.Connection, fleet: str, bot: str, at: Optional[str] = None,

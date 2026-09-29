@@ -277,8 +277,9 @@ class TestVocabularyMatchesTheProtocols:
 # note's assignment entirely, and the note became invisible to the resolver, so
 # that no-id report resolved to the real row and closed live work (ravi's #917
 # row). #1981 restores the hold without the row: the resolver reads the note's
-# COMMUNICATION and holds only until the bot reports. Raw text keeps its
-# assignment and so keeps shielding — the gate is the TYPE, never id-lessness.
+# COMMUNICATION and holds until the bot files an id-less report after it. Raw
+# text keeps its assignment and so keeps shielding — the gate is the TYPE,
+# never id-lessness.
 
 
 def _roundtrip_lib(tmp_path: Path):
@@ -359,10 +360,10 @@ class TestAControlNoteHoldsTheResolverUntilAnswered:
     that a note needs no answer. But worker-lifecycle routes a `query` to Step
     8, a `completed` report, so that report IS the answer, and it closed live
     work (ravi's #917 row, 2026-09-29). #1981 restores the hold without the
-    row: while the note is the bot's newest inbound dispatch and the bot has
-    not reported since, the head is blank. The answer closes nothing, and the
-    next report resolves normally. No assignment comes back (#1491's point,
-    pinned in test_plane_door_e2e).
+    row: while any control note sent to the bot has no id-less report from
+    the bot after it, the head is blank. The answer closes nothing, and the
+    next id-less report resolves normally. No assignment comes back (#1491's
+    point, pinned in test_plane_door_e2e).
 
     RAW TEXT is unchanged — the gate is the TYPE, never id-lessness. A raw-text
     send is id-less too but still mints a deadline-bearing assignment (matched
@@ -372,8 +373,8 @@ class TestAControlNoteHoldsTheResolverUntilAnswered:
     @pytest.mark.parametrize("t", ["query", "cancel", "compact", "restart"])
     def test_a_control_note_holds_the_resolver_head_until_the_bot_reports(self, tmp_path, t):
         # Read straight off the resolver: blank while the note is unanswered,
-        # and back after ONE report of any status, so the hold is never the
-        # permanent blank #1418 was about. On 85e66d6 the first assertion
+        # and back after ONE id-less report of any status, so the hold is
+        # never the permanent blank #1418 was about. On 85e66d6 the first assertion
         # FAILS: the head hands back the real id while the note is unanswered.
         libdir, env = _roundtrip_lib(tmp_path)
         real_id = _seed_open_task(libdir, tmp_path, env)

@@ -14,14 +14,21 @@ newest *assignment*, so a note stopped holding it back. The worker's id-less
 answer to the note was stamped with its live task and closed it as `completed`.
 This happened on the ai-platform fleet at 2026-09-29 04:23:57Z.
 
-- **The guard.** `plane-readers.head()` now also returns nothing while the
-  bot's newest inbound dispatch is a control note it has not reported since
+- **The guard.** `plane-readers.head()` now also returns nothing while any
+  control note sent to the bot has no id-less report from the bot after it
   (`answering_control_note`).
   - The note is found by the dispatch door's provenance (`dispatch-log:`),
     either through its recipient alias or through the door's `recipient_raw`
     fallback.
-  - The bot's next report, of any status, releases the guard, and so does a
-    task sent to the bot. The guard cannot tell which report answers a note.
+  - Only an id-less report releases it. A report naming a task, and a newer
+    task, do not: neither answers a note, and a wrong completion is worse than
+    an open row.
+  - The one cost: the first id-less report after a note closes nothing,
+    whatever it is. If it was really finishing a task, that task stays open and
+    pages as overdue, at most one row per note.
+  - Notes sent before the upgrade count too. Workers mostly report with
+    `--task`, so most bots hold a note with no id-less report after it, and
+    each one's next id-less report closes nothing.
   - #1491's rows are not brought back, and the `answering_idless` rule is
     unchanged.
 - **The opt-out.** `report-back.sh --no-task` (or `--task -`) declares a
@@ -29,13 +36,15 @@ This happened on the ai-platform fleet at 2026-09-29 04:23:57Z.
   - It skips the resolver and the id-less closer, and its status marker records
     `no_task`.
   - It is how a worker answers a note the guard cannot see: a raw `dispatch.sh`
-    send, text typed into the pane, or a note answered after another report or
-    a newer task.
+    send, text typed into the pane, or a note answered after another id-less
+    report.
   - It is refused beside a real `--task` id.
 - **The docs.** `dispatch.md` and `worker-lifecycle.md` now say which notes the
   automatic guard sees, and when to use `--no-task`.
 - **Tests.**
-  - `tests/test_resolver_control_note_guard.py`, 17 tests.
+  - `tests/test_resolver_control_note_guard.py`, 22 tests, including both gap
+    orders: a report naming a task, and a newer task, between a note and its
+    answer.
   - Two of #1491's pins in `tests/test_dispatch_type.py` asserted the defect: a
     no-id report after a control note resolved the real row. Both are inverted
     in place, over all four types. #1491's other property, that a control note

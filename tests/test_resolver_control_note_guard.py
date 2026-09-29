@@ -7,9 +7,11 @@ bot's newest ASSIGNMENT (`answering_idless`), so a note no longer held it back:
 the worker's id-less answer was stamped with its live task and closed it as
 `completed` (ravi's #917 row, 2026-09-29 04:23:57Z).
 
-The guard now also reads the bot's newest inbound DISPATCH communication. While
-that is a control note and the bot has not reported since, `head()` returns
-None. The note fixture is the LIVE shape: the 04:20:32Z note carried a
+The guard now reads the newest CONTROL NOTE sent to the bot: while it has no
+id-less report from the bot after it, `head()` returns None. A report naming
+a task, and a newer task, leave it standing: neither answers a note, and a
+wrong completion is worse than an open row (the ruling on #1984). The note
+fixture is the LIVE shape: the 04:20:32Z note carried a
 `dispatch-log:sha:` ref, message_class `question`, command_type `query`, a
 recipient alias AND `recipient_raw`, and no work item. The door's disclosed
 fallback (no alias when it cannot resolve the worker's bot dir) is pinned too,
@@ -46,6 +48,13 @@ def _control_note(root, n, *, ts, bot="w1", cmd="query", cls="question", alias=T
     assert all(o.status == "committed" for o in out), out
 
 
+def _ids(root, task_id):
+    """(work_item_id, assignment_id) of a dispatched task, read off the plane."""
+    with _ro(root) as conn:
+        return tuple(conn.execute("SELECT work_item_id, assignment_id FROM assignments"
+                                  " WHERE source_ref = ?", (f"dispatch-log:{task_id}",)).fetchone())
+
+
 def _head(root, bot, at=None):
     pr = _stdlib_readers()
     with _ro(root) as conn:
@@ -65,18 +74,40 @@ def test_an_unanswered_control_note_makes_the_resolver_answer_nothing(tmp_path, 
     assert _head(root, "w2") == "t-3-cccc"                       # the guard is per bot
 
 
-def test_a_report_after_the_note_releases_the_guard(tmp_path):
+def test_an_id_less_report_after_the_note_releases_the_guard(tmp_path):
     root, *_ = _scene(tmp_path)
     _control_note(root, 1, ts="2026-09-02T11:00:00Z")
     _report(root, None, None, "2026-09-02T11:30:00Z", event=None, status="progress")
     assert _head(root, "w1") == "t-2-bbbb"
 
 
-def test_a_task_sent_after_the_note_releases_the_guard(tmp_path):
+def test_a_task_sent_after_the_note_does_not_release_the_guard(tmp_path):
+    """Gap order 2 on the resolver: a newer task is not an answer to the note."""
     root, *_ = _scene(tmp_path)
     _control_note(root, 1, ts="2026-09-02T11:00:00Z")
     _live_dispatch(root, "8", "t-8-eeee", ts="2026-09-02T11:30:00Z")
-    assert _head(root, "w1") == "t-2-bbbb"                       # the oldest open id'd row, as before
+    assert _head(root, "w1") is None, "a newer task released the hold"
+
+
+def test_a_report_naming_a_task_does_not_release_the_guard(tmp_path):
+    """Gap order 1 on the resolver: a `--task` report on other work is not an
+    answer to the note either."""
+    root, *_ = _scene(tmp_path)
+    _control_note(root, 1, ts="2026-09-02T11:00:00Z")
+    _report(root, *_ids(root, "t-2-bbbb"), "2026-09-02T11:30:00Z", event="progress")
+    assert _head(root, "w1") is None, "a report naming a task released the hold"
+
+
+def test_a_note_after_an_answered_one_holds_again(tmp_path):
+    """ANY unanswered note holds, so the NEWEST note decides: an id-less report
+    after it is after every older one. The first note's answer does not cover
+    the second."""
+    root, *_ = _scene(tmp_path)
+    _control_note(root, 1, ts="2026-09-02T11:00:00Z")
+    _report(root, None, None, "2026-09-02T11:30:00Z", event=None, status="completed")
+    assert _head(root, "w1") == "t-2-bbbb"                       # answered: the resolver is back
+    _control_note(root, 2, ts="2026-09-02T13:00:00Z")
+    assert _head(root, "w1") is None
 
 
 def test_the_doors_fallback_shape_is_guarded_too(tmp_path):
@@ -129,6 +160,50 @@ def test_answering_a_query_note_no_longer_closes_the_live_task(tmp_path, armed):
     r = _bash(f'"{libdir}/report-back.sh" w1 completed "ack"', env)
     assert r.returncode == 0, r.stderr
     assert _status(tmp_path, task["plane_assignment_id"]) == "open"
+
+
+def test_a_task_report_between_the_note_and_its_answer_does_not_release_the_hold(tmp_path, armed):
+    """Gap order 1, end to end: the note, then a `--task` progress report on the
+    live task, then the id-less answer. The answer must not close the task."""
+    libdir, env = armed
+    assert _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "real work"', env).returncode == 0
+    task = _plane_row(tmp_path)
+    assert _bash(f'"{libdir}/dispatch-task.sh" --type query w1 "a note"', env).returncode == 0
+    r = _bash(f'"{libdir}/report-back.sh" w1 progress "on it" --task {task["task_id"]}', env)
+    assert r.returncode == 0, r.stderr
+    r = _bash(f'"{libdir}/report-back.sh" w1 completed "ack the note"', env)
+    assert r.returncode == 0, r.stderr
+    assert _status(tmp_path, task["plane_assignment_id"]) == "progress"   # never `completed`
+
+
+def test_a_newer_task_between_the_note_and_its_answer_does_not_release_the_hold(tmp_path, armed):
+    """Gap order 2, end to end: the note, then a newer task, then the id-less
+    answer. The answer must close neither task."""
+    libdir, env = armed
+    assert _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "real work"', env).returncode == 0
+    first = _plane_row(tmp_path)
+    assert _bash(f'"{libdir}/dispatch-task.sh" --type query w1 "a note"', env).returncode == 0
+    assert _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "newer work"', env).returncode == 0
+    newer = _plane_row(tmp_path)
+    assert newer["task_id"] != first["task_id"]
+    r = _bash(f'"{libdir}/report-back.sh" w1 completed "ack the note"', env)
+    assert r.returncode == 0, r.stderr
+    assert _status(tmp_path, first["plane_assignment_id"]) == "open"
+    assert _status(tmp_path, newer["plane_assignment_id"]) == "open"
+
+
+def test_the_resolver_fires_again_once_the_note_has_its_id_less_answer(tmp_path, armed):
+    """The positive control for both gap orders: once no note is outstanding,
+    an id-less report resolves as #835 always did. A hold that never released
+    would pass the two tests above and fail this one."""
+    libdir, env = armed
+    assert _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "real work"', env).returncode == 0
+    task = _plane_row(tmp_path)
+    assert _bash(f'"{libdir}/dispatch-task.sh" --type query w1 "a note"', env).returncode == 0
+    assert _bash(f'"{libdir}/report-back.sh" w1 completed "ack the note"', env).returncode == 0
+    assert _status(tmp_path, task["plane_assignment_id"]) == "open"
+    assert _bash(f'"{libdir}/report-back.sh" w1 completed "real work done"', env).returncode == 0
+    assert _status(tmp_path, task["plane_assignment_id"]) == "completed"
 
 
 def test_a_note_answer_still_closes_an_open_idless_row(tmp_path, armed):

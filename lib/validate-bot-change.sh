@@ -3634,7 +3634,9 @@ rm -rf "$SW_ROOT"
 # `dispatch-task.sh --type query`, then the worker's `report-back.sh completed`
 # with NO --task. Before the fix the resolver stamped the live task onto that
 # answer and closed it. Then a note the plane never sees (a raw dispatch.sh
-# send), answered with `report-back.sh --no-task`. Each check carries its own
+# send), answered with `report-back.sh --no-task`. Then a gap order the
+# stricter hold closes (#1984): a note, then a NEWER task, then the id-less
+# answer, which must close neither task. Each check carries its own
 # precondition (the note and the report were recorded), so a door that failed
 # outright cannot pass a check that expects a row to stay open, and each
 # expects-open check is followed by its positive control: the next id-less
@@ -3700,6 +3702,20 @@ harness_check "#1981 a --no-task answer to a raw dispatch.sh note leaves the liv
 _cn report-back.sh cnw completed "more work done" || true
 { [ "${cn_t2#t-}" != "$cn_t2" ] && [ "$(_cn_is_open "$cn_t2")" = no ]; } && r=yes || r=no
 harness_check "#1981 ...and without --no-task the next id-less report closes it: the resolver fires here, so the flag held it" "$r"
+
+_cn dispatch-task.sh --botcommand cnw "third work" || true
+cn_t3="$(_cn_newest_task)"
+_cn dispatch-task.sh --type query cnw "another note" || true
+_cn dispatch-task.sh --botcommand cnw "fourth work" || true
+cn_t4="$(_cn_newest_task)"
+_cn report-back.sh cnw completed "ack the other note" || true
+cn_reports="$(_cn_count "communications WHERE message_class = 'report'")"
+{ [ "${cn_t4#t-}" != "$cn_t4" ] && [ "$cn_t4" != "$cn_t3" ] && [ "${cn_reports:-0}" -eq 5 ] \
+    && [ "$(_cn_is_open "$cn_t3")" = yes ] && [ "$(_cn_is_open "$cn_t4")" = yes ]; } && r=yes || r=no
+harness_check "#1981 a newer task between a note and its id-less answer does not release the hold: both tasks stay OPEN" "$r"
+_cn report-back.sh cnw completed "third work done" || true
+{ [ "${cn_t3#t-}" != "$cn_t3" ] && [ "$(_cn_is_open "$cn_t3")" = no ]; } && r=yes || r=no
+harness_check "#1981 ...and the next id-less report closes the oldest: the hold released after one report" "$r"
 case "$CN_ROOT" in "${TMPDIR:-/tmp}"/vbc1981.*) rm -rf "$CN_ROOT" ;; esac
 # end of the #1981 scenario
 
