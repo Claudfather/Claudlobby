@@ -458,6 +458,16 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
     assert restarted["state"] == "running" and restarted["changed"] is True
     assert native.actions == ["start", "stop", "start"]
 
+    for observed_state in ("activating",):
+        host.states[native.target] = f"enabled loaded {observed_state}"
+        before = len(native.actions)
+        for operation in ("start", "restart"):
+            refused = call("bot", operation, "worker", expected=4)
+            assert observed_state in refused["error"]["message"]
+            assert "bot stop" in refused["error"]["message"]
+        assert len(native.actions) == before
+    host.states[native.target] = "enabled loaded active"
+
     for caller, target in (("worker", "manager"), ("manager", "manager")):
         monkeypatch.setenv("FLEET_NAME", "example")
         monkeypatch.setenv("BOT_ID", caller)
@@ -474,6 +484,8 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
     for key in ("BOT_ID", "FLEET_NAME", "BOT_DIR", "FLEET_ROOT",
                 "CLAUDLOBBY_ROOT", "CLAUDLOBBY_RELEASE_ID"):
         monkeypatch.delenv(key)
+    selected_unit_original = bot_operations._selected_unit
+    selected_adapter_original = bot_operations._selected_adapter
     native.manager = "Darwin"
     native.target = f"gui/501/com.example.worker"
     host.states[native.target] = "unchanged loaded inactive"
@@ -597,3 +609,20 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
                                                  running=True, restart=True, _self_child=True)
     assert self_bounce.handoff == "captured" and self_bounce.readiness == "bridge_ready"
     assert "svc_activation_handoff" not in native.calls
+    for key in ("FLEET_ROOT", "FLEET_NAME", "BOT_ID", "BOT_DIR"):
+        monkeypatch.delenv(key)
+    monkeypatch.setattr(bot_operations, "_selected_unit", selected_unit_original)
+    monkeypatch.setattr(bot_operations, "_selected_adapter", selected_adapter_original)
+    native.manager = "Linux"
+    native.target = "com.example.worker.service"
+    native.readiness = "bridge-ready"
+    host.states[native.target] = "enabled loaded failed"
+    before_failed = len(native.actions)
+    recovered_failed = call("bot", "start", "worker")["data"]
+    assert recovered_failed["state"] == "running" and recovered_failed["changed"] is True
+    assert len(native.actions) == before_failed + 1
+    host.states[native.target] = "enabled loaded failed"
+    refused_restart = call("bot", "restart", "worker", expected=4)
+    assert "failed" in refused_restart["error"]["message"]
+    assert "bot stop" in refused_restart["error"]["message"]
+    assert len(native.actions) == before_failed + 1

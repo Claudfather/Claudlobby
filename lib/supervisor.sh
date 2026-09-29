@@ -703,12 +703,13 @@ _svc_activation_read() {
     local file="$1" target="$2" output key value seen=" " uid manager pid status label extra count=0
     case "$file" in /*) ;; *) _svc_activation_unknown "installed path is not absolute"; return 3 ;; esac
     SVC_ACT_FILE_STATE=""; SVC_ACT_LOAD=""; SVC_ACT_ACTIVE=""; SVC_ACT_SUB=""; SVC_ACT_GROUP=""; SVC_ACT_PID="-"; SVC_ACT_JOB_PIDS=""
+    SVC_ACT_MAIN_PID=""; SVC_ACT_CONTROL_PID=""
     case "$_OS" in
         Linux)
             case "$target" in *[!a-zA-Z0-9_.@-]*|'') return 3 ;; esac
             case "$target" in *.service|*.timer|*.socket|*.path) ;; *) return 3 ;; esac
             [ "${file##*/}" = "$target" ] || return 3
-            output=$(systemctl --user show --property=Id,LoadState,ActiveState,SubState,UnitFileState,FragmentPath,ControlGroup "$target") || return 3
+            output=$(systemctl --user show --property=Id,LoadState,ActiveState,SubState,UnitFileState,FragmentPath,ControlGroup,MainPID,ControlPID "$target") || return 3
             local identity="" fragment=""
             while IFS='=' read -r key value; do
                 case "$seen" in *" $key "*) return 3 ;; esac
@@ -721,6 +722,8 @@ _svc_activation_read() {
                     UnitFileState) SVC_ACT_FILE_STATE="$value" ;;
                     FragmentPath) fragment="$value" ;;
                     ControlGroup) SVC_ACT_GROUP="$value" ;;
+                    MainPID) SVC_ACT_MAIN_PID="$value" ;;
+                    ControlPID) SVC_ACT_CONTROL_PID="$value" ;;
                     *) return 3 ;;
                 esac
             done <<EOF
@@ -731,7 +734,12 @@ EOF
                 case "$seen" in *" $key "*) ;; *) return 3 ;; esac
             done
             if [ "${target##*.}" = service ]; then
-                case "$seen" in *' ControlGroup '*) ;; *) return 3 ;; esac
+                for key in ControlGroup MainPID ControlPID; do
+                    case "$seen" in *" $key "*) ;; *) return 3 ;; esac
+                done
+                case "$SVC_ACT_MAIN_PID:$SVC_ACT_CONTROL_PID" in
+                    *[!0-9:]*|:*|*:) return 3 ;;
+                esac
             fi
             case "$SVC_ACT_LOAD" in
                 loaded) [ "$fragment" = "$file" ] || return 3 ;;
@@ -863,7 +871,12 @@ svc_activation_assert_external() {
             if [ -n "$SVC_ACT_GROUP" ]; then
                 "$python" "$_SUPERVISOR_LIB_DIR/supervisor-caller.py" cgroup "$caller" "$SVC_ACT_GROUP" || rc=$?
             elif [ "${target##*.}" = service ]; then
-                case "$SVC_ACT_ACTIVE" in active|activating|deactivating) rc=3 ;; esac
+                case "$SVC_ACT_ACTIVE:$SVC_ACT_SUB:$SVC_ACT_MAIN_PID:$SVC_ACT_CONTROL_PID" in
+                    activating:auto-restart:0:0|failed:*:0:0)
+                        "$python" "$_SUPERVISOR_LIB_DIR/supervisor-caller.py" unit "$caller" "$target" || rc=$?
+                        ;;
+                    active:*|activating:*|deactivating:*) rc=3 ;;
+                esac
             fi
             ;;
         Darwin)
@@ -1021,7 +1034,13 @@ svc_activation_start() {
 svc_activation_quiet() {
     local file="$1" target="$2" group="${3:-}" tree paths path members
     _svc_activation_read "$file" "$target" || return 3
-    [ "$SVC_ACT_ACTIVE" = inactive ] || { _svc_activation_unknown "$target remains active"; return 3; }
+    if [ "$_OS:$SVC_ACT_ACTIVE" != Linux:failed ]; then
+        [ "$SVC_ACT_ACTIVE" = inactive ] || { _svc_activation_unknown "$target remains active"; return 3; }
+    else
+        [ "$SVC_ACT_MAIN_PID:$SVC_ACT_CONTROL_PID" = 0:0 ] && [ -z "$SVC_ACT_GROUP" ] || {
+            _svc_activation_unknown "$target failed unit still has process witnesses"; return 3;
+        }
+    fi
     if [ "$_OS" = Linux ]; then
         group="${group:-$SVC_ACT_GROUP}"
         if [ -n "$group" ]; then

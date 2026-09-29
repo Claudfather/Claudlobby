@@ -585,8 +585,11 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                 # an already enrolled exact unit; bot start owns re-enrollment.
                 if not unit.installed:
                     raise BotLifecycleError("bot is de-enrolled; use bot start")
-                if dict(unit.properties).get("ActiveState") not in {"active", "inactive"}:
-                    raise BotLifecycleError("bot native active state is indeterminate",
+                native_state = dict(unit.properties).get("ActiveState")
+                if native_state in {"failed", "activating"} and manager == "Linux":
+                    raise BotLifecycleError(f"bot native state is {native_state}; use bot stop, then bot start")
+                if native_state not in {"active", "inactive"}:
+                    raise BotLifecycleError(f"bot native state is {native_state or 'unknown'}; wait or inspect the exact unit",
                                             unavailable=True)
             handoff = "not_applicable"
             if restart:
@@ -629,15 +632,19 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                         raise BotLifecycleError("current bot session readiness is indeterminate; "
                                                 "inspect the session or explicitly restart",
                                                 unavailable=True)
-                elif props.get("ActiveState") == "inactive":
+                elif (props.get("ActiveState") == "inactive"
+                      or manager == "Linux" and props.get("ActiveState") == "failed"):
                     try:
                         assert_quiescent(adapter, installed_file=installed,
                                          target=entry["target"], socket_path=socket)
                     except (ActivationError, OSError) as exc:
-                        raise BotLifecycleError("inactive bot session cannot be proved quiet",
+                        raise BotLifecycleError("stopped bot session cannot be proved quiet",
                                                 unavailable=True) from exc
+                elif manager == "Linux" and props.get("ActiveState") == "activating":
+                    raise BotLifecycleError(f"bot native state is {props['ActiveState']}; use bot stop, then bot start")
                 else:
-                    raise BotLifecycleError("bot native active state is indeterminate", unavailable=True)
+                    raise BotLifecycleError(f"bot native state is {props.get('ActiveState') or 'unknown'}; wait or inspect the exact unit",
+                                            unavailable=True)
             elif not unit.installed:
                 _confirm_stopped(adapter, installed, entry["target"], socket)
             fence_args = (root, spec.bot_dir) if ceiling is None else (root, spec.bot_dir, str(ceiling))

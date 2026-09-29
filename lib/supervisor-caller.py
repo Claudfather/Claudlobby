@@ -2,6 +2,7 @@
 """Kernel membership predicates for supervisor.sh: 0 external, 1 member, 3 unknown."""
 
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -37,9 +38,12 @@ def main(mode: str, caller: str, target: str) -> int:
                 result = False
             else:
                 raise ValueError("no owning launchd job in caller ancestry")
-        elif mode == "cgroup":
-            if not target.startswith("/") or target == "/" or "\n" in target:
-                raise ValueError("invalid unit control group")
+        elif mode in {"cgroup", "unit"}:
+            if mode == "cgroup":
+                if not target.startswith("/") or target == "/" or "\n" in target:
+                    raise ValueError("invalid unit control group")
+            elif not re.fullmatch(r"(?:[A-Za-z0-9_.@:-]|\\x[0-9A-Fa-f]{2})+\.service", target):
+                raise ValueError("invalid exact unit name")
             result = False
             for pid in chain:
                 groups = []
@@ -51,7 +55,18 @@ def main(mode: str, caller: str, target: str) -> int:
                         groups.append(path)
                 if not groups:
                     raise ValueError("systemd control group unavailable")
-                result |= any(path == target or path.startswith(target + "/") for path in groups)
+                if mode == "cgroup":
+                    result |= any(path == target or path.startswith(target + "/") for path in groups)
+                else:
+                    for path in groups:
+                        components = path.split("/")[1:]
+                        if target in components:
+                            result = True
+                        elif any("\\x" in component and component.endswith(".service")
+                                 for component in components):
+                            # A kernel-escaped service name might denote this
+                            # unit; absence of a plain-text match is no proof.
+                            raise ValueError("ambiguous escaped unit cgroup")
         else:
             raise ValueError("unknown membership predicate")
         if ancestry(int(caller)) != chain:

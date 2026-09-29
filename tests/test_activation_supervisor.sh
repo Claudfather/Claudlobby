@@ -23,8 +23,8 @@ systemctl() {
             pending=$((pending - 1)); printf '%s' "$pending" > "$SETTLE_FILE"
             [ "$pending" -gt 0 ] || active=inactive
         fi
-        printf 'Id=%s\nLoadState=%s\nActiveState=%s\nSubState=%s\nUnitFileState=%s\nFragmentPath=%s\nControlGroup=%s\n' \
-            "$target" "$load" "$active" "${sub:-running}" "$enabled" "$fragment" "$group"
+        printf 'Id=%s\nLoadState=%s\nActiveState=%s\nSubState=%s\nUnitFileState=%s\nFragmentPath=%s\nControlGroup=%s\nMainPID=%s\nControlPID=%s\n' \
+            "$target" "$load" "$active" "${sub:-running}" "$enabled" "$fragment" "$group" "${main_pid:-0}" "${control_pid:-0}"
         return
     fi
     printf '%s\n' "$*" >> "$TRACE"
@@ -34,6 +34,9 @@ systemctl() {
         stop) if [ "$STOP_SETTLE" -gt 0 ]; then active=deactivating; else active=inactive; fi ;;
         unmask) load=loaded; enabled="$old_enabled" ;;
         start) active=active ;;
+        disable) active=inactive ;;
+        enable) active=active ;;
+        daemon-reload|reset-failed) ;;
         *) return 98 ;;
     esac
 }
@@ -113,6 +116,38 @@ expect 0 svc_activation_pause "$file" "$target" "$saved"
 expect 0 svc_activation_resume "$file" "$target" "$saved"
 [ "$(cat "$TRACE")" = "$(printf 'mask --runtime worker.timer\nstop worker.timer\nunmask --runtime worker.timer')" ]
 
+# A queued auto-restart has no current process, but caller ancestry still
+# requires a kernel cgroup proof against this exact unit name.
+file="$T/worker.service"; target=worker.service; load=loaded; enabled=enabled
+active=activating; sub=auto-restart; group=""; main_pid=0; control_pid=0
+CALLER_RC=0; expect 0 svc_activation_assert_external "$file" "$target"
+CALLER_RC=1; expect 1 svc_activation_assert_external "$file" "$target"
+CALLER_RC=0; main_pid=42; expect 3 svc_activation_assert_external "$file" "$target"
+main_pid=0; sub=running; expect 3 svc_activation_assert_external "$file" "$target"
+sub=failed; active=failed; expect 0 svc_activation_assert_external "$file" "$target"
+quiet=$(svc_activation_quiet "$file" "$target")
+[ "$quiet" = $'inactive\tno-cgroup-witness' ]
+main_pid=42; expect 3 svc_activation_quiet "$file" "$target"
+main_pid=0
+active=inactive; sub=""
+
+mkdir -p "$T/loop-source" "$T/loop-installed" "$T/loop-bot"
+loop_source="$T/loop-source/worker.service"
+loop_installed="$T/loop-installed/worker.service"
+printf 'owned loop\n' > "$loop_source"; cp "$loop_source" "$loop_installed"
+file="$loop_installed"; target=worker.service; active=activating; sub=auto-restart
+group=""; main_pid=0; control_pid=0; CALLER_RC=1; : > "$TRACE"
+expect 3 svc_bot_disenroll_exact "$loop_source" "$loop_installed" "$target" "$T/loop-bot" worker "$T"
+[ -f "$loop_installed" ] && [ ! -s "$TRACE" ]
+CALLER_RC=0
+loop_result=$(svc_bot_disenroll_exact "$loop_source" "$loop_installed" "$target" "$T/loop-bot" worker "$T")
+[ "$loop_result" = effect-attempted ] && [ ! -e "$loop_installed" ]
+[ "$(cat "$TRACE")" = "$(printf 'disable --now worker.service\ndaemon-reload')" ]
+: > "$TRACE"; active=failed; sub=failed
+expect 0 svc_bot_enroll_exact "$loop_source" "$loop_installed" "$target"
+[ -f "$loop_installed" ]
+[ "$(cat "$TRACE")" = "$(printf 'daemon-reload\nreset-failed worker.service\nenable --now worker.service')" ]
+
 _OS=Darwin; file="$T/fleet.keepalive.plist"; target=gui/501/fleet.keepalive
 : > "$file"; : > "$TRACE"
 saved=$(svc_activation_snapshot "$file" "$target")
@@ -185,6 +220,11 @@ with patch.object(module, 'ancestry', return_value=[100, 600]):
     with patch.object(Path, 'read_text', return_value='0::/user.slice/worker.service/child\n'):
         assert module.main('cgroup', '100', '/user.slice/worker.service') == 1
         assert module.main('cgroup', '100', '/user.slice/work') == 0
+        assert module.main('unit', '100', 'worker.service') == 1
+        assert module.main('unit', '100', 'other.service') == 0
+        assert module.main('unit', '100', '../worker.service') == 3
+    with patch.object(Path, 'read_text', return_value='0::/user.slice/worker\\x2dother.service\n'):
+        assert module.main('unit', '100', 'worker-other.service') == 3
     with patch.object(Path, 'read_text', side_effect=OSError('unreadable')):
         assert module.main('cgroup', '100', '/user.slice/worker.service') == 3
 print('PASS: activation ordering, refusal, restoration and membership contracts')
