@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -330,6 +331,31 @@ class TestSeedPlaceholderContract:
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash required")
+class TestSetupAsksAboutItsOwnBridge:
+    """#1536: `bridge_state <bot_dir>` answers "does a poller hold this bot's
+    Telegram slot", not "does THIS session hold it". During a restart the outgoing
+    session's poller still holds the slot, so the two-argument form reads `up` for
+    a bridge that is going dark (#1530). First-run guidance told operators to trust
+    exactly that form over the log; it must pass the session's pid."""
+
+    def test_every_bridge_state_call_in_the_setup_skill_names_the_session(self):
+        calls = [
+            line
+            for block in _FENCE_RE.findall(SETUP_SKILL.read_text())
+            for line in block.splitlines()
+            if re.search(r"\bbridge_state\s", line.split("#", 1)[0])
+        ]
+        assert calls, "precondition: the skill checks the bridge"
+        for line in calls:
+            # The call runs to the first `;`, a `$( )` quoted inside it included.
+            call = re.search(r"\bbridge_state\s+((?:\"[^\"]*\$\([^)]*\)\"|[^;])*)", line).group(1)
+            args = shlex.split(call)
+            # bridge_state takes ANY second argument as the resolved token, so an
+            # empty one answers `no_token` for a healthy bot; the third is the session.
+            assert len(args) >= 3, line
+            assert args[1] != "" and args[2] != "", line
+
+
 class TestSetupSystemHonesty:
     """`setup-system --dry-run` must not report post-conditions it never took."""
 
