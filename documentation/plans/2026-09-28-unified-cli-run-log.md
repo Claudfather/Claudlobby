@@ -36,8 +36,9 @@ new migration harness.
 1498 remain unchanged. The [published `ddeaa63` Linux 3.11 run](https://github.com/Claudfather/Claudlobby/actions/runs/36586580070/job/109468411198)
 finished with 6,320 passed and three failures: two obsolete setup-command
 expectations and the direct-supervisor-call ratchet. All three exact cases
-pass on this local cleanup (0.43 seconds). Other hosted lanes remain running;
-this checkpoint does not claim current-head CI success.
+pass on this local cleanup (0.43 seconds). Linux 3.10 and macOS 3.11 completed
+with the same three failures; their other 6,321 and 6,300 cases passed,
+respectively. This checkpoint does not claim current-head CI success.
 Remaining work includes the fleet-layout migration decision, remaining Plane
 administration contracts, development-instrument placement, Linux/Pi evidence
 and protected production adoption. The epic is not complete.
