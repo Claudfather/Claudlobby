@@ -37,6 +37,7 @@ from tests.conftest import (
     constructed_env,
     load_lib_module,
     realboot_skip_reason,
+    REALBOOT_HOST_CREDS,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -196,9 +197,29 @@ class TestSummarize:
 _skip = realboot_skip_reason("BOOT_SAMPLER_REALBOOT", extra_bins=("tmux",))
 
 
+@pytest.mark.parametrize("entrypoint", [
+    "test_real_boot_smoke_one_boot",
+    "test_strand_under_load_is_never_reported_as_a_clean_send",
+])
+def test_realboot_wrapper_keeps_checked_auth_path_with_private_home(monkeypatch, tmp_path, entrypoint):
+    class Captured(Exception):
+        pass
+
+    def capture(_argv, **kwargs):
+        assert kwargs["env"]["HOME"] == str(tmp_path)
+        assert kwargs["env"]["CLAUDLOBBY_REALBOOT_HOST_CREDS"] == str(REALBOOT_HOST_CREDS)
+        raise Captured
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(subprocess, "run", capture)
+    with pytest.raises(Captured):
+        globals()[entrypoint]()
+
+
 @pytest.mark.skipif(bool(_skip), reason=_skip)
 def test_real_boot_smoke_one_boot():
-    env = {**os.environ, "CLAUDLOBBY_SRC": str(REPO_ROOT)}
+    env = {**os.environ, "CLAUDLOBBY_SRC": str(REPO_ROOT),
+           "CLAUDLOBBY_REALBOOT_HOST_CREDS": str(REALBOOT_HOST_CREDS)}
     result = subprocess.run(
         ["bash", str(SAMPLER), "-n", "1", "--deadline", "90"],
         capture_output=True,
@@ -243,7 +264,8 @@ _load_skip = _skip or (
 
 @pytest.mark.skipif(bool(_load_skip), reason=_load_skip)
 def test_strand_under_load_is_never_reported_as_a_clean_send():
-    env = {**os.environ, "CLAUDLOBBY_SRC": str(REPO_ROOT)}
+    env = {**os.environ, "CLAUDLOBBY_SRC": str(REPO_ROOT),
+           "CLAUDLOBBY_REALBOOT_HOST_CREDS": str(REALBOOT_HOST_CREDS)}
     burners = os.environ.get("BOOT_SAMPLER_LOAD_BURNERS", "20")
     result = subprocess.run(
         [

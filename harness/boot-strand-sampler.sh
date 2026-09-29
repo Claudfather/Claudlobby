@@ -160,7 +160,7 @@ LIB_DIR="$SRC_ROOT/lib"
 
 CLAUDLOBBY_SRC="${CLAUDLOBBY_SRC:-$SRC_ROOT}"
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"
-HOST_CREDS="${HOME}/.claude/.credentials.json"
+HOST_CREDS="${CLAUDLOBBY_REALBOOT_HOST_CREDS:-${HOME}/.claude/.credentials.json}"
 HOST_PLUGINS="${HOME}/.claude/plugins"
 
 BOOTS=20

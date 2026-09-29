@@ -42,7 +42,7 @@ LIB_DIR="$SRC_ROOT/lib"
 # never a stale global install — overridable for CI.
 CLAUDLOBBY_SRC="${CLAUDLOBBY_SRC:-$SRC_ROOT}"
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"
-HOST_CREDS="${HOME}/.claude/.credentials.json"
+HOST_CREDS="${CLAUDLOBBY_REALBOOT_HOST_CREDS:-${HOME}/.claude/.credentials.json}"
 BOOT_TIMEOUT="${FRESHBOX_BOOT_TIMEOUT:-180}"
 # A token in a NON-auto-loaded file (CLAUDE.md is auto-loaded into context, so a
 # question about it needs no tool). The bot must retrieve it via a GATED tool —

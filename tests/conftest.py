@@ -18,6 +18,7 @@ import pytest
 import claudlobby
 
 _TEST_TREE = Path(__file__).resolve().parent.parent
+REALBOOT_HOST_CREDS = Path.home() / ".claude" / ".credentials.json"
 if Path(claudlobby.__file__).resolve().parent != _TEST_TREE / "claudlobby":
     raise pytest.UsageError("test package origin does not match the tree under test")
 
@@ -505,8 +506,8 @@ def realboot_skip_reason(opt_in_env: str, extra_bins: tuple[str, ...] = ()) -> s
     """Shared gate for the opt-in real-boot harness tests (freshbox idiom):
     returns the pytest skip reason, or '' to run. Base deps are the real-boot
     contract — claude binary, jq, claudron, host auth; extra_bins adds
-    harness-specific binaries. One home, so the dep contract cannot drift
-    between harness wrappers."""
+    harness-specific binaries. The credential path is captured at import,
+    before HOME is isolated, and is the path handed to both harnesses."""
     import shutil
 
     if os.environ.get(opt_in_env) != "1":
@@ -514,9 +515,8 @@ def realboot_skip_reason(opt_in_env: str, extra_bins: tuple[str, ...] = ()) -> s
     missing = [
         b for b in ("claude", "jq", "claudron", *extra_bins) if shutil.which(b) is None
     ]
-    creds = Path.home() / ".claude" / ".credentials.json"
-    if not creds.is_file():
-        missing.append(f"auth {creds}")
+    if not REALBOOT_HOST_CREDS.is_file():
+        missing.append(f"auth {REALBOOT_HOST_CREDS}")
     return f"real-boot harness needs: {', '.join(missing)}" if missing else ""
 
 
