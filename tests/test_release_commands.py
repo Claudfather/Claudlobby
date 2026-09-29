@@ -36,6 +36,7 @@ def test_json_syntax_and_scope_failures_preserve_legacy_help_and_hide_values(tmp
     monkeypatch.delenv("CLAUDLOBBY_ROOT", raising=False)
     monkeypatch.chdir(tmp_path)
     for argv, command in ((["config", "plan", "--json"], "config.plan"),
+                          (["host", "repos", "pull", "--json"], "host.repos.pull"),
                           (["host", "releases", "--json", "--unknown", "SECRET-value"], "host.releases")):
         with pytest.raises(SystemExit) as exit:
             main(argv)
