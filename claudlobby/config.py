@@ -2001,6 +2001,8 @@ def _load_system_defaults(_cache: dict = {}) -> dict:  # noqa: B006
 #: Names a different host override file (the test suite points it at nothing,
 #: so the suite never reads the operator's real one).
 HOST_OVERRIDE_ENV = "CLAUDLOBBY_HOST_SYSTEM_YAML"
+_HOST_UNIT_PREFIX = "claudlobby"
+_HOST_UNIT_PREFIX_RE = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,47}")
 
 
 def host_override_path() -> Path:
@@ -2019,7 +2021,7 @@ def host_override_path() -> Path:
 def load_host_jobs() -> dict:
     """Return ``host.jobs`` from system.yaml, with THIS host's override applied.
 
-    Host jobs are host-global singletons (one instance per host, fixed
+    Host jobs are host-global singletons (one instance per host, default
     ``claudlobby-<name>`` unit identity) and deliberately bypass the fleet
     defaults merge -- a fleet does not override platform equipment. A host
     does, through ``host_override_path()``; every reader of host jobs comes
@@ -2029,6 +2031,55 @@ def load_host_jobs() -> dict:
     """
     packaged = (_load_system_defaults().get("host") or {}).get("jobs") or {}
     return _apply_host_override(packaged, host_override_path())
+
+
+def load_host_unit_prefix() -> str:
+    """Validated native namespace for this host's singleton jobs."""
+    return _read_host_override(host_override_path())[1]
+
+
+def host_unit_name(name: str, *, prefix: str | None = None) -> str:
+    """One native label codec for host jobs, preserving the shipped default."""
+    prefix = load_host_unit_prefix() if prefix is None else prefix
+    if not isinstance(prefix, str) or not _HOST_UNIT_PREFIX_RE.fullmatch(prefix):
+        raise RuntimeError("host.unit_prefix must be 1-48 ASCII letters, digits or hyphens, starting with a letter")
+    if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9-]*", name):
+        raise RuntimeError(f"invalid host job name {name!r}")
+    return f"{prefix}-{name}"
+
+
+def _read_host_override(path: Path) -> tuple[dict, str]:
+    if not path.is_file():
+        return {}, _HOST_UNIT_PREFIX
+    where = f"{path} (this host's override of system.yaml host)"
+    class UniqueLoader(yaml.SafeLoader):
+        pass
+
+    def unique_mapping(loader, node):
+        result = {}
+        for key, value in loader.construct_pairs(node, deep=True):
+            if key in result:
+                raise ValueError(f"duplicate key {key!r}")
+            result[key] = value
+        return result
+
+    UniqueLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, unique_mapping)
+    try:
+        with path.open() as f:
+            override = yaml.load(f, Loader=UniqueLoader) or {}
+    except (yaml.YAMLError, ValueError, TypeError) as exc:
+        raise RuntimeError(f"{where} does not parse: {exc}") from exc
+    host = override.get("host") or {} if isinstance(override, dict) else None
+    if not (isinstance(host, dict) and set(override) <= {"host"}
+            and set(host) <= {"jobs", "unit_prefix"}):
+        raise RuntimeError(f"{where}: only host.jobs and host.unit_prefix are read")
+    prefix = host.get("unit_prefix", _HOST_UNIT_PREFIX)
+    if not isinstance(prefix, str) or not _HOST_UNIT_PREFIX_RE.fullmatch(prefix):
+        raise RuntimeError(f"{where}: host.unit_prefix must be 1-48 ASCII letters, digits or hyphens, starting with a letter")
+    jobs = host.get("jobs") or {}
+    if not isinstance(jobs, dict):
+        raise RuntimeError(f"{where}: host.jobs must map job names to their fields")
+    return jobs, prefix
 
 
 def _apply_host_override(packaged: dict, path: Path) -> dict:
@@ -2050,20 +2101,11 @@ def _apply_host_override(packaged: dict, path: Path) -> dict:
     and ignored, not refused: the file outlives the install it was written
     against, and a pull that retires a job must not stop every host-timers run.
     """
-    if not path.is_file():
-        return packaged
     where = f"{path} (this host's override of system.yaml host.jobs)"
-    try:
-        with path.open() as f:
-            override = yaml.safe_load(f) or {}
-    except yaml.YAMLError as exc:
-        raise RuntimeError(f"{where} does not parse: {exc}") from exc
-    host = override.get("host") or {} if isinstance(override, dict) else None
-    if not (isinstance(host, dict) and set(override) <= {"host"} and set(host) <= {"jobs"}):
-        raise RuntimeError(f"{where}: only host.jobs is read, as host: {{jobs: {{<job>: {{<field>: <value>}}}}}}")
-    jobs = host.get("jobs") or {}
-    if not isinstance(jobs, dict):
-        raise RuntimeError(f"{where}: host.jobs must map job names to their fields")
+    jobs, prefix = _read_host_override(path)
+    names = [host_unit_name(name, prefix=prefix) for name in packaged]
+    if len(set(names)) != len(names):
+        raise RuntimeError(f"{where}: host unit labels collide")
     fields_known = {"enroll"}.union(*(cfg.keys() for cfg in packaged.values()))
     merged = {name: dict(cfg) for name, cfg in packaged.items()}
     for name, fields in jobs.items():

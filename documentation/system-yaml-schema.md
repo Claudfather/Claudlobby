@@ -290,22 +290,34 @@ override instead, outside every tracked tree:
 host: { jobs: { claude-update: { enroll: false } } }
 ```
 
-then `claudlobby generate` (or `claudlobby host-timers`) and `lib/setup-system`.
+then `claudlobby generate` (or `claudlobby host-timers`) and `lib/setup-system`
+for the default host namespace.
 `$CLAUDLOBBY_HOST_SYSTEM_YAML` names another file. `config.load_host_jobs` applies it:
 
 - **Merged per job and per field.** A job the override does not name keeps its
   packaged config, and a field it does not name keeps its packaged value. An
   override that arms one job leaves every other job as shipped.
-- **`host.jobs` only.** Fleet defaults stay in `fleet.yaml`: a host that could
+- **`host.jobs` and `host.unit_prefix` only.** Fleet defaults stay in `fleet.yaml`: a host that could
   rewrite them would compose a fleet differently from its twin, with nothing in
   the fleet to say so.
 - **Refused, not skipped, when it cannot mean what it says** — a file that does not
-  parse, any key but `host.jobs`, a field no host job has (a misspelt `enrol`),
+  parse, any key but `host.jobs` or `host.unit_prefix`, a field no host job has (a misspelt `enrol`),
   or an `enroll` that is not `true`/`false` (the composer enrolls a timer on
   anything but a literal `false`). A skipped pause re-enrolls the job it paused.
 - **A job this install does not ship is logged and ignored**, with the nearest
   name it does ship: the file outlives the install it was written against, and a
   pull that retires a job must not stop every `host-timers` run.
+
+`host.unit_prefix` defaults to `claudlobby`, preserving labels such as
+`claudlobby-plane-daemon`. A private same-user host can set a distinct
+1–48 character ASCII prefix (letter first, then letters, digits or hyphens),
+for example `host: { unit_prefix: canary1747 }`, to give every host job a
+different native label. Set `CLAUDLOBBY_HOST_SYSTEM_YAML` to that private
+override while preparing the candidate; generated host units carry the path
+so later CLI job invocations resolve the same namespace. Custom prefixes
+require the sealed CLI host configuration and activation path. The legacy
+`lib/setup-system` discovery uses `claudlobby-*` and does not enroll custom
+prefixes.
 
 Keep the reason with the change, as a YAML comment beside it: who, why, and what
 ends it (#865).

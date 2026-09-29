@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 
-from .config import load_host_jobs
+from .config import host_unit_name, load_host_jobs
 from .activation_enrollment import selected_phase_entries
 from .context import resolve_paths
 from .env_tiers import resolve as resolve_env_tiers
@@ -45,7 +45,7 @@ def run_host_update(root: Path, action: str, *, dry_run: bool = False,
                 raise HostUpdateError("scheduled host update is not enrolled")
             entries = selected_phase_entries(root, "producers")
             sources = {Path(entry["source"]).name for entry in entries}
-            stem = f"claudlobby-{name}"
+            stem = host_unit_name(name)
             if not (stem + ".plist" in sources or
                     {stem + ".service", stem + ".timer"} <= sources):
                 raise HostUpdateError("scheduled host update has no selected timer")

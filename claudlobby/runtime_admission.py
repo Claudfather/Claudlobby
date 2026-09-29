@@ -27,7 +27,7 @@ from .activation_state import ActivationError, ActivationStore, read_activation,
 from .releases import ReleaseManifest, read_release
 
 
-RESIDENT_UNIT_PHASES = {"claudlobby-plane-daemon": "ingest"}
+RESIDENT_UNIT_PHASES = {"plane-daemon": "ingest"}
 _UNIT_PREFIX = ("-I", "-B", "-m", "claudlobby.runtime_admission", "unit-start")
 
 
@@ -135,8 +135,22 @@ def validate_unit_admission(release, declaration, metadata, generated_bytes) -> 
     if target.phase == "bots" and (declaration.scope != "bot"
             or target.command != (str(release.native_path / "start-bot.sh"), str(declaration.working_directory))):
         raise ActivationError("bot admission does not name its exact native start target")
-    if declaration.scope != "bot" and target.phase != RESIDENT_UNIT_PHASES.get(target.unit, "producers"):
-        raise ActivationError("unit phase differs from its declared resident owner")
+    if declaration.scope != "bot":
+        # Admission reads frozen unit bytes, never the host's mutable override.
+        # The one ingest owner is the exact native daemon command and job
+        # identity; all other host and fleet units remain producers.
+        from .config import host_unit_name
+        daemon_label = False
+        if target.unit.endswith("-plane-daemon"):
+            prefix = target.unit[:-len("-plane-daemon")]
+            try:
+                daemon_label = host_unit_name("plane-daemon", prefix=prefix) == target.unit
+            except RuntimeError:
+                pass
+        ingest_owner = (declaration.scope == "host" and daemon_label
+                        and target.command == (str(release.native_path / "plane-daemon.sh"),))
+        if target.phase != ("ingest" if ingest_owner else "producers"):
+            raise ActivationError("unit phase differs from its declared resident owner")
     if source.suffix == ".plist":
         parsed = _darwin_source(generated_bytes)
         if (parsed["label"] != target.unit or parsed["program"] != target.argv[0]

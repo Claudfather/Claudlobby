@@ -9,7 +9,7 @@ import subprocess
 
 from .activation_enrollment import _target, selected_phase_entries
 from .activation_state import read_selection
-from .config import load_host_jobs
+from .config import host_unit_name, load_host_jobs
 from .config_plan import read_plan
 from .config_units import current_declarations, planned_units
 from .runtime_admission import RuntimeIdentity, mutation_admission, validate_unit_admission
@@ -59,7 +59,7 @@ def run_host_job(root: Path, name: str, *, adapter: Adapter | None = None) -> Ho
             raise HostJobError("host job adapter differs from selected release")
         entries = selected_phase_entries(root, "producers")
         manager, domain, directories, _, _ = _catalog(adapter.read("svc_inventory_catalog"))
-        stem = f"claudlobby-{name}"
+        stem = host_unit_name(name)
         if manager == "Darwin" and domain == f"user/{os.getuid()}":
             selected_gui = [entry["target"] for entry in entries
                             if Path(entry["source"]).name == stem + ".plist"

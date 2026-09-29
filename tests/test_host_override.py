@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from claudlobby import composer as composer_mod
-from claudlobby.config import _load_system_defaults, load_host_jobs
+from claudlobby.config import _load_system_defaults, host_unit_name, load_host_jobs
 from claudlobby import switches as sw
 from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
@@ -45,6 +45,41 @@ def test_the_claude_update_pause_needs_no_edit_to_the_tracked_system_yaml(tmp_pa
     override.write_text(PAUSE)
     assert load_host_jobs()["claude-update"]["enroll"] is False
     assert _units(tmp_path / "paused", "claude-update") == []
+
+
+def test_two_host_roots_compose_distinct_native_labels_and_keep_private_override(tmp_path, override):
+    root_a, root_b = tmp_path / "a", tmp_path / "b"
+    root_a.mkdir()
+    root_b.mkdir()
+    override.write_text("host: { unit_prefix: claudlobby-canary, jobs: { plane-daemon: { enroll: true } } }\n")
+    generated_a = composer_mod.compose_host_timers(Paths(root=root_a, package=source_package()))
+    names_a = {p.name for p in generated_a.iterdir()}
+    assert "claudlobby-canary-plane-daemon.plist" in names_a
+    assert "claudlobby-plane-daemon.plist" not in names_a
+    import plistlib
+    daemon = plistlib.loads((generated_a / "claudlobby-canary-plane-daemon.plist").read_bytes())
+    assert daemon["Label"] == "claudlobby-canary-plane-daemon"
+    assert daemon["EnvironmentVariables"]["CLAUDLOBBY_HOST_SYSTEM_YAML"] == str(override)
+    assert host_unit_name("plane-prune") == "claudlobby-canary-plane-prune"
+
+    override.write_text("host: { jobs: { plane-daemon: { enroll: true } } }\n")
+    generated_b = composer_mod.compose_host_timers(Paths(root=root_b, package=source_package()))
+    names_b = {p.name for p in generated_b.iterdir()}
+    assert "claudlobby-plane-daemon.plist" in names_b
+    assert names_a.isdisjoint(names_b)
+
+
+@pytest.mark.parametrize("prefix", ["", "two words", "../bad", "bad/name", "1bad", "bad\tname", "x" * 49])
+def test_invalid_host_unit_prefix_is_refused(override, prefix):
+    override.write_text("host: { unit_prefix: " + json.dumps(prefix) + " }\n")
+    with pytest.raises(RuntimeError, match="host.unit_prefix"):
+        load_host_jobs()
+
+
+def test_duplicate_host_override_key_is_refused(override):
+    override.write_text("host:\n  unit_prefix: canary1747\n  unit_prefix: claudlobby\n")
+    with pytest.raises(RuntimeError, match="duplicate key"):
+        load_host_jobs()
 
 
 def test_arming_one_job_keeps_every_other_job_and_field_as_packaged(override):

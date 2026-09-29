@@ -151,10 +151,11 @@ def test_exact_armed_bot_unit_has_only_its_matching_start_continuation(proposal)
     assert not (builder.root / "state/activation-start.sock").exists()
 
 
+@pytest.mark.parametrize("unit_prefix", ["claudlobby", "canary1747"])
 def test_real_renderers_bind_every_native_carrier_and_refuse_bypass(installed, monkeypatch, tmp_path,
-                                                                 record_property):
+                                                                 record_property, unit_prefix):
     from claudlobby import composer, supervision
-    from claudlobby.config import BotConfig, FleetConfig
+    from claudlobby.config import BotConfig, FleetConfig, host_unit_name
     from claudlobby.paths import Paths
     from claudlobby.config_units import unit_family
     from claudlobby.supervision_inventory import UnitDeclaration
@@ -179,7 +180,7 @@ def test_real_renderers_bind_every_native_carrier_and_refuse_bypass(installed, m
     destination.mkdir()
     (destination / f"{spec.label}.plist").write_text(supervision.render_launchd_plist(spec))
     (destination / f"{spec.label}.service").write_text(supervision.render_systemd_unit(spec))
-    composer._write_service_units(destination, "claudlobby-plane-daemon", "plane-daemon",
+    composer._write_service_units(destination, host_unit_name("plane-daemon", prefix=unit_prefix), "plane-daemon",
                                   "$CLAUDLOBBY_NATIVE_DIR/plane-daemon.sh", paths)
     composer._write_timer_units(destination, "com.example.maintenance", "maintenance",
                                 {"type": "interval", "seconds": 60},
@@ -189,10 +190,17 @@ def test_real_renderers_bind_every_native_carrier_and_refuse_bypass(installed, m
     for plist_path in sorted(destination.glob("*.plist")):
         files = {p.name: (p.read_bytes(), p.stat().st_mode & 0o777)
                  for p in destination.glob(plist_path.stem + ".*")}
-        phase = "bots" if plist_path.stem == spec.label else r.RESIDENT_UNIT_PHASES.get(plist_path.stem, "producers")
+        resident = {host_unit_name(name, prefix=unit_prefix): phase
+                    for name, phase in r.RESIDENT_UNIT_PHASES.items()}
+        phase = "bots" if plist_path.stem == spec.label else resident.get(plist_path.stem, "producers")
         frozen.extend(unit_family(files, destination=destination,
                                   scope="bot" if phase == "bots" else "host", phase=phase,
                                   release_id=release.release_id))
+    # Admission must use the reviewed unit and exact native target, never a
+    # later change to this process's host override.
+    changed_override = tmp_path / "later-host-system.yaml"
+    changed_override.write_text("host: { unit_prefix: different }\n")
+    monkeypatch.setenv("CLAUDLOBBY_HOST_SYSTEM_YAML", str(changed_override))
     checked = []
     for metadata in frozen:
         source = Path(metadata["source"])

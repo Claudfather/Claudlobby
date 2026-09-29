@@ -14,7 +14,7 @@ from pathlib import Path
 import tempfile
 
 from . import composer as compose
-from .config import host_override_path, load_fleet_snapshot
+from .config import host_override_path, host_unit_name, load_fleet_snapshot
 from .config_plan import ConfigPlan, ConfigPlanBuilder, PlanError
 from .config_units import job_units, unit_family
 from .context import Context
@@ -235,7 +235,8 @@ def stage_configuration(fleet_paths: list[Paths], release: ReleaseManifest,
             release_id=release.release_id,
             # This is the declared host ingest service, not a pattern over
             # installed unit names. It must survive until the controlled drain.
-            resident_phases=RESIDENT_UNIT_PHASES))
+            resident_phases={host_unit_name(name): phase
+                             for name, phase in RESIDENT_UNIT_PHASES.items()}))
         builder.tree(root / "runtime/_host/timers", files)
         for render in (compose.compose_host_bot_handles, compose.compose_host_mention_allowlist):
             result = render(paths, output_dir=host, manifests=sorted(manifests))

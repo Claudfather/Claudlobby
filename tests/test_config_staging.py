@@ -177,6 +177,23 @@ def test_stage_validates_and_renders_retained_bytes_when_authoring_changes_durin
     assert b"export MANAGER_TMUX=primary-manager\n" in worker_conf
 
 
+def test_stage_freezes_prefixed_host_ingest_identity(staging_case, tmp_path, monkeypatch):
+    override = _write(tmp_path / "host-system.yaml",
+                      "host: { unit_prefix: claudlobby-canary, jobs: { plane-daemon: { enroll: true } } }\n")
+    monkeypatch.setenv("CLAUDLOBBY_HOST_SYSTEM_YAML", str(override))
+    plan = config_staging.stage_configuration([staging_case.paths], staging_case.release)
+    host_linux = [(declaration, item) for declaration, item in planned_units(plan, "Linux")
+                  if declaration.scope == "host"]
+    ingest = [(declaration, item) for declaration, item in host_linux if item["phase"] == "ingest"]
+    assert len(ingest) == 1
+    assert ingest[0][0].source.name == "claudlobby-canary-plane-daemon.service"
+    assert not any(declaration.source.name == "claudlobby-plane-daemon.service"
+                   for declaration, _ in host_linux)
+    override.write_text("host: { unit_prefix: claudlobby-changed }\n")
+    with pytest.raises(PlanError, match="input changed"):
+        plan.check_fresh()
+
+
 def test_stage_renders_bots_timers_and_host_guards_without_live_writes(staging_case):
     case = staging_case
     worker = case.paths.bot_runtime("primary-worker")

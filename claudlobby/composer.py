@@ -42,6 +42,10 @@ from .config import (
     load_fleet,
     load_host_boot,
     load_host_jobs,
+    load_host_unit_prefix,
+    host_unit_name,
+    HOST_OVERRIDE_ENV,
+    host_override_path,
 )
 from .known_values import ENV_TIERS, HEADLESS_TRIM_VARS, SHELL_IDENT_RE
 from .loader import (
@@ -3825,6 +3829,8 @@ def _write_service_units(
     script: str,
     paths: Paths,
     *, create_runtime_dirs: bool = True,
+    host_override: str | None = None,
+    phase: str | None = None,
 ) -> None:
     """Write the .service/.plist for a RESIDENT host service — no .timer
     (nothing schedules it; supervision restarts it). systemd Restart=always /
@@ -3865,12 +3871,14 @@ def _write_service_units(
         raise source_findings_error(_svc_id, _svc_findings)
 
     environment = native_environment(paths)
+    if host_override is not None:
+        environment[HOST_OVERRIDE_ENV] = host_override
     script_expanded = script
     for key, value in environment.items():
         script_expanded = script_expanded.replace("${" + key + "}", value)
         script_expanded = re.sub(r"\$" + key + r"(?![A-Za-z0-9_])", lambda _: value, script_expanded)
     argv = wrap_unit_argv(environment, unit=service_name,
-                          phase=RESIDENT_UNIT_PHASES.get(service_name, "producers"), mode="exec",
+                          phase=phase or RESIDENT_UNIT_PHASES.get(name, "producers"), mode="exec",
                           argv=_native_script_argv(script, environment))
     exec_start = unit_systemd_command(argv) if "CLAUDLOBBY_RELEASE_ID" in environment else script_expanded
     tool_path = _scheduler_tool_path()
@@ -5027,15 +5035,18 @@ def _prune_host_units(timers_dir: Path, base: str) -> None:
 def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path:
     """Emit host-global singleton units from system.yaml ``host.jobs``.
 
-    Host jobs are platform equipment with a fixed ``claudlobby-<name>``
-    identity (no fleet prefix): one instance per host, package-owned, NOT
-    layered through the fleet defaults merge. ``generate`` (and the
-    ``host-timers`` subcommand) compose them; ``setup-system`` enrolls them.
+    Host jobs are platform equipment with a default ``claudlobby-<name>``
+    identity (or this host's validated prefix): one instance per host,
+    package-owned and outside the fleet defaults merge. ``generate`` and
+    ``host-timers`` compose them; sealed CLI activation enrolls custom labels.
 
     Returns the host timers dir (``runtime/_host/timers/`` under the repo
     root), only created when host jobs are declared.
     """
     host_jobs = load_host_jobs()
+    prefix = load_host_unit_prefix()
+    host_override = (str(host_override_path().resolve())
+                     if HOST_OVERRIDE_ENV in os.environ else None)
     base_dir = (
         output_dir if output_dir is not None else (paths.root / "runtime" / "_host")
     )
@@ -5046,6 +5057,7 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
     timers_dir.mkdir(parents=True, exist_ok=True)
     _host_cascade: dict = {}      # lazily filled by the first job that asks
     for name, cfg in host_jobs.items():
+        unit = host_unit_name(name, prefix=prefix)
         # COMPOSE-TIME DORMANCY, now for every host job shape (F7). A host
         # timer that is not armed composes NO unit, exactly as a service does
         # — so there is no manifest to keep, nothing for setup-system to skip,
@@ -5083,7 +5095,7 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
                     " unit (a supervised unit that cannot start is a crash"
                     " loop). %s", name, _extra,
                     _switches.extra_install_line(_extra))
-            _prune_host_units(timers_dir, f"claudlobby-{name}")
+            _prune_host_units(timers_dir, unit)
             continue
         if cfg.get("unit") == "service":
             # Resident host services (first tenant: the plane ingest daemon).
@@ -5100,9 +5112,11 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
             # unit keeps running until disabled; the disarm recipe is printed
             # beside the knob in system.yaml.
             _write_service_units(
-                timers_dir, f"claudlobby-{name}", name,
+                timers_dir, unit, name,
                 cfg.get("script", ""), paths,
                 create_runtime_dirs=output_dir is None,
+                host_override=host_override,
+                phase=RESIDENT_UNIT_PHASES.get(name, "producers"),
             )
             continue
         sched = _resolve_timer_schedule(cfg, {})
@@ -5117,10 +5131,12 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
         # that needs it (a resolver subprocess costs ~240ms on a Pi and every
         # host job would otherwise pay it).
         extra_env = _host_job_switch_env(
-            paths, HOST_JOB_ARMING.get(name, ()), _host_cascade)
+            paths, HOST_JOB_ARMING.get(name, ()), _host_cascade) or {}
+        if host_override is not None:
+            extra_env[HOST_OVERRIDE_ENV] = host_override
         _write_timer_units(
             timers_dir,
-            f"claudlobby-{name}",
+            unit,
             name,
             sched,
             cfg.get("script", ""),
