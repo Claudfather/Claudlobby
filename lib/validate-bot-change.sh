@@ -3629,6 +3629,81 @@ harness_check "  ...each with the one line that arms it" "$r"
 rm -rf "$SW_ROOT"
 
 # =============================================================================
+# #1981 — a control note holds the report resolver back again. The
+# 2026-09-29 sequence through the REAL doors: a tracked task, then
+# `dispatch-task.sh --type query`, then the worker's `report-back.sh completed`
+# with NO --task. Before the fix the resolver stamped the live task onto that
+# answer and closed it. Then a note the plane never sees (a raw dispatch.sh
+# send), answered with `report-back.sh --no-task`. Each check carries its own
+# precondition (the note and the report were recorded), so a door that failed
+# outright cannot pass a check that expects a row to stay open, and each
+# expects-open check is followed by its positive control: the next id-less
+# report DOES close the task, so the resolver fires here and the check before
+# it had the power to fail.
+# =============================================================================
+val_scenario "validate #1981: answering a note leaves the live task open; --no-task closes nothing"
+CN_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/vbc1981.XXXXXX")"
+CN_LIB="$CN_ROOT/lib"
+mkdir -p "$CN_LIB"
+for _f in dispatch-task.sh report-back.sh lib-common.sh supervisor.sh plane-emit.sh \
+          plane-socket-client.py dispatch-supersede-hint.py dispatch-overdue.py \
+          plane-readers.py plane-lookup.py; do
+    ln -s "$VAL_REPO/lib/$_f" "$CN_LIB/$_f"
+done
+printf '#!/bin/bash\nexit 0\n' > "$CN_LIB/dispatch.sh"; chmod +x "$CN_LIB/dispatch.sh"
+printf '#!/bin/bash\nexit 0\n' > "$CN_ROOT/tmux"; chmod +x "$CN_ROOT/tmux"
+_cn() {  # _cn <door> <args...>: one door, run as cn-fleet's manager cnmgr would
+    # CLAUDLOBBY_FLEET too: this harness exports its own, and dispatch-overdue.py
+    # reads that carrier before FLEET_NAME, so the resolver in report-back.sh
+    # would ask the wrong fleet, never fire, and leave every task open.
+    local door="$1"; shift
+    env CLAUDLOBBY_ROOT="$CN_ROOT" TMUX_BIN="$CN_ROOT/tmux" BOT_ID=cnmgr BOT_NAME=cnmgr \
+        FLEET_NAME=cn-fleet CLAUDLOBBY_FLEET=cn-fleet MANAGER_TMUX=cnmgr \
+        PLANE_SOCKET="$CN_ROOT/no-daemon.sock" \
+        PLANE_EMIT_CLI="$VAL_CLI" OBSERVABILITY_DISPATCH_DEADLINE=600 PATH="/usr/bin:/bin" \
+        bash "$CN_LIB/$door" "$@" >/dev/null 2>>"$CN_ROOT/err"
+}
+_cn_is_open() {  # yes when task $1 is in the worker's open list, through the watchdog's own door
+    local rows
+    rows="$(val_read "#1981 open rows" python3 "$CN_LIB/dispatch-overdue.py" --open cnw \
+        --fleet cn-fleet --root "$CN_ROOT" | awk '{print $3}' || true)"
+    case "$1" in t-*) ;; *) echo no; return 0 ;; esac
+    case " $(printf '%s ' $rows) " in *" $1 "*) echo yes ;; *) echo no ;; esac
+}
+_cn_newest_task() {
+    val_sql "$CN_ROOT" "SELECT substr(source_ref, 14) FROM assignments ORDER BY ingest_seq DESC LIMIT 1"
+}
+_cn_count() { val_sql "$CN_ROOT" "SELECT COUNT(*) FROM $1"; }
+
+_cn dispatch-task.sh --botcommand cnw "real work" || true
+cn_t1="$(_cn_newest_task)"
+_cn dispatch-task.sh --type query cnw "a note that asks nothing" || true
+_cn report-back.sh cnw completed "ack the note" || true
+cn_notes="$(_cn_count "communications WHERE command_type = 'query'")"
+cn_reports="$(_cn_count "communications WHERE message_class = 'report'")"
+{ [ "${cn_notes:-0}" -eq 1 ] && [ "${cn_reports:-0}" -eq 1 ] \
+    && [ "$(_cn_is_open "$cn_t1")" = yes ]; } && r=yes || r=no
+harness_check "#1981 the answer to a query note (no --task) leaves the live task OPEN" "$r"
+_cn report-back.sh cnw completed "real work done" || true
+cn_reports="$(_cn_count "communications WHERE message_class = 'report'")"
+{ [ "${cn_t1#t-}" != "$cn_t1" ] && [ "${cn_reports:-0}" -eq 2 ] \
+    && [ "$(_cn_is_open "$cn_t1")" = no ]; } && r=yes || r=no
+harness_check "#1981 ...and the next id-less report closes it: the #835 resolve resumes once the note is answered" "$r"
+
+_cn dispatch-task.sh --botcommand cnw "more work" || true
+cn_t2="$(_cn_newest_task)"
+_cn dispatch.sh cnw "a raw note the plane never sees" || true
+_cn report-back.sh cnw completed "ack the raw note" --no-task || true
+cn_marks="$(_cn_count "events WHERE kind = 'system' AND event = 'report_status' AND json_extract(detail, '\$.no_task') = 1")"
+{ [ "${cn_marks:-0}" -eq 1 ] && [ "$(_cn_is_open "$cn_t2")" = yes ]; } && r=yes || r=no
+harness_check "#1981 a --no-task answer to a raw dispatch.sh note leaves the live task OPEN, and its marker says no_task" "$r"
+_cn report-back.sh cnw completed "more work done" || true
+{ [ "${cn_t2#t-}" != "$cn_t2" ] && [ "$(_cn_is_open "$cn_t2")" = no ]; } && r=yes || r=no
+harness_check "#1981 ...and without --no-task the next id-less report closes it: the resolver fires here, so the flag held it" "$r"
+case "$CN_ROOT" in "${TMPDIR:-/tmp}"/vbc1981.*) rm -rf "$CN_ROOT" ;; esac
+# end of the #1981 scenario
+
+# =============================================================================
 # PR-B T9 — the observable-plane dual-write leg: a REAL daemon on a temp root,
 # the REAL dispatch door through the REAL shim, and the ladder's degradation
 # observed rather than claimed. Gated: no venv CLI resolvable -> the leg skips

@@ -23,6 +23,10 @@ This module is the stdlib twin of the package definitions — keep them in step
                       report door closes id-less assignments on the bot's next
                       terminal report (``plane-lookup.py --open-idless``), which
                       is what makes the guard answerable from the plane.
+- ``answering_control_note`` (#1981): the same guard for a CONTROL note, which
+                      lands no assignment since #1491 and so is invisible to
+                      ``answering_idless`` -- read off the bot's newest inbound
+                      dispatch COMMUNICATION instead.
 
 Read-only (``mode=ro`` + ``query_only``). A missing or unopenable db raises
 ``PlaneUnreachable`` — the caller refuses, it never falls back to the JSONL:
@@ -465,12 +469,65 @@ def answering_idless(conn: sqlite3.Connection, fleet: str, bot: str, at: Optiona
     return conn.execute(ASSIGNMENT_TERMINAL_SQL, (row[2], at, at)).fetchone() is None
 
 
+# The control-note guard (#1981). A `query` / `cancel` / `compact` / `restart`
+# note lands its COMMUNICATION alone (#1491: no assignment, so no row a report
+# could fail to close), and `answering_idless` reads the bot's newest
+# ASSIGNMENT, so a note stopped holding the resolver back: the worker's id-less
+# answer to it was stamped with the live task and closed it as `completed`
+# (ravi's #917 row, 2026-09-29). This reads the bot's newest inbound DISPATCH
+# instead, selected by the dispatch door's provenance (`dispatch-log:`), never
+# by message class alone, since other doors send classes like `question` too.
+# Two arms, each on an index: the recipient alias the door records whenever it
+# resolves the worker (every dispatch on the live plane, 2026-09-29), and
+# `recipient_raw` in the sender's fleet, the door's disclosed fallback when it
+# cannot. A report by the bot after the note, of any status, answers it.
+CONTROL_COMMANDS = ("query", "cancel", "compact", "restart")
+_NEWEST_DISPATCH_SQL = (
+    "SELECT occurred_at, ingest_seq, command_type FROM ("
+    "SELECT c.occurred_at, c.ingest_seq, c.command_type FROM communications c"
+    " WHERE c.recipient_fleet = ? AND c.recipient_uid IN (%s)"
+    " AND c.source_ref LIKE 'dispatch-log:%%' AND (? IS NULL OR c.occurred_at <= ?)"
+    " UNION ALL"
+    " SELECT c.occurred_at, c.ingest_seq, c.command_type FROM communications c"
+    " WHERE c.fleet_uid = ? AND c.recipient_alias IS NULL AND lower(c.recipient_raw) = ?"
+    " AND c.source_ref LIKE 'dispatch-log:%%' AND (? IS NULL OR c.occurred_at <= ?))"
+    " ORDER BY occurred_at DESC, ingest_seq DESC LIMIT 1"
+)
+_REPORT_SINCE_SQL = (
+    "SELECT 1 FROM communications r WHERE r.message_class = 'report' AND r.sender_uid IN (%s)"
+    " AND (r.occurred_at > ? OR (r.occurred_at = ? AND r.ingest_seq > ?))"
+    " AND (? IS NULL OR r.occurred_at <= ?) LIMIT 1"
+)
+
+
+def answering_control_note(conn: sqlite3.Connection, fleet: str, bot: str,
+                           at: Optional[str] = None, *, entry: Optional[dict] = None) -> bool:
+    """True while the bot's NEWEST inbound dispatch (as of *at*) is a control
+    note the bot has not reported since: its next terminal report answers
+    THAT note, so the resolver must not hand it an open task (#1981)."""
+    entry = entry if entry is not None else bot_entry(conn, fleet, bot)
+    uids = (entry or {}).get("uids", [])
+    if not uids:
+        return False
+    marks = ",".join("?" * len(uids))
+    fleet_row = conn.execute(FLEET_UID_SQL, (fleet,)).fetchone()
+    row = conn.execute(_NEWEST_DISPATCH_SQL % marks,
+                       (fleet, *uids, at, at, fleet_row[0] if fleet_row else None,
+                        bot.lower(), at, at)).fetchone()
+    if row is None or row[2] not in CONTROL_COMMANDS:
+        return False
+    return conn.execute(_REPORT_SINCE_SQL % marks,
+                        (*uids, row[0], row[0], row[1], at, at)).fetchone() is None
+
+
 def head(conn: sqlite3.Connection, fleet: str, bot: str, at: Optional[str] = None,
          *, entry: Optional[dict] = None) -> Optional[str]:
     """The resolver's answer from the plane: the oldest open id'd dispatch,
-    or None — including None while an id-less dispatch is unanswered."""
+    or None — including None while an id-less dispatch or a control note is
+    unanswered."""
     entry = entry if entry is not None else bot_entry(conn, fleet, bot)
-    if entry is None or answering_idless(conn, fleet, bot, at, entry=entry):
+    if entry is None or answering_idless(conn, fleet, bot, at, entry=entry) \
+            or answering_control_note(conn, fleet, bot, at, entry=entry):
         return None
     rows = open_rows(conn, fleet, bot, at, entry=entry, idd_only=True)
     return rows[0][2] if rows else None

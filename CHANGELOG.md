@@ -6,6 +6,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a control note holds the report resolver back again, and `report-back.sh --no-task` declares a report that answers no dispatch (#1981)
+
+Since #1491 a `query`, `cancel`, `compact` or `restart` note lands its
+communication alone, with no assignment. The resolver's guard read the bot's
+newest *assignment*, so a note stopped holding it back. The worker's id-less
+answer to the note was stamped with its live task and closed it as `completed`.
+This happened on the ai-platform fleet at 2026-09-29 04:23:57Z.
+
+- **The guard.** `plane-readers.head()` now also returns nothing while the
+  bot's newest inbound dispatch is a control note it has not reported since
+  (`answering_control_note`).
+  - The note is found by the dispatch door's provenance (`dispatch-log:`),
+    either through its recipient alias or through the door's `recipient_raw`
+    fallback.
+  - The bot's next report, of any status, releases the guard, and so does a
+    task sent to the bot. The guard cannot tell which report answers a note.
+  - #1491's rows are not brought back, and the `answering_idless` rule is
+    unchanged.
+- **The opt-out.** `report-back.sh --no-task` (or `--task -`) declares a
+  terminal report that answers no dispatch.
+  - It skips the resolver and the id-less closer, and its status marker records
+    `no_task`.
+  - It is how a worker answers a note the guard cannot see: a raw `dispatch.sh`
+    send, text typed into the pane, or a note answered after another report or
+    a newer task.
+  - It is refused beside a real `--task` id.
+- **The docs.** `dispatch.md` and `worker-lifecycle.md` now say which notes the
+  automatic guard sees, and when to use `--no-task`.
+- **Tests.**
+  - `tests/test_resolver_control_note_guard.py`, 17 tests.
+  - Two of #1491's pins in `tests/test_dispatch_type.py` asserted the defect: a
+    no-id report after a control note resolved the real row. Both are inverted
+    in place, over all four types. #1491's other property, that a control note
+    mints no assignment, stays pinned.
+  - A `validate-bot-change.sh` scenario that runs the 2026-09-29 sequence
+    through the real doors.
+
 ### Changed — `[vault]` pin bumped to Claudron v0.5.1; `vault-sync` never leaves a vault mid-rebase (Claudron #193)
 
 The `[vault]` extra now pins `claudron @ …@v0.5.1`. 0.5.1 makes worktree integration

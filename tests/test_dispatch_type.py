@@ -273,10 +273,12 @@ class TestVocabularyMatchesTheProtocols:
 # ancestor fix (#1187) withheld the id; chunk 6a then had a `query` mint an
 # id-less ASSIGNMENT, which blanked the resolver head (#1418) so a compliant
 # worker's no-id terminal report (worker-lifecycle routes `query` to Step 8)
-# was absorbed by the note and the real task stayed open. #1491 removes the
-# note's assignment entirely: the note is now invisible to the resolver, so the
-# no-id report resolves normally to the real row. Raw text keeps its assignment
-# and so keeps shielding — the gate is the TYPE, never id-lessness.
+# was absorbed by the note and the real task stayed open. #1491 removed the
+# note's assignment entirely, and the note became invisible to the resolver, so
+# that no-id report resolved to the real row and closed live work (ravi's #917
+# row). #1981 restores the hold without the row: the resolver reads the note's
+# COMMUNICATION and holds only until the bot reports. Raw text keeps its
+# assignment and so keeps shielding — the gate is the TYPE, never id-lessness.
 
 
 def _roundtrip_lib(tmp_path: Path):
@@ -337,7 +339,8 @@ def _door(libdir: Path, script: str, env: dict) -> subprocess.CompletedProcess:
 def _open_task(libdir: Path, tmp_path: Path, env: dict, bot: str = "w1") -> str:
     # The resolver head straight off the plane — the id `report-back.sh` stamps
     # when a worker omits `--task`, or "" while it is blanked (an unanswered
-    # id-less dispatch is the bot's newest assignment).
+    # id-less dispatch is the bot's newest assignment, or an unanswered control
+    # note its newest dispatch — #1981).
     out = subprocess.run(
         ["python3", str(libdir / "dispatch-overdue.py"), "--open-task", bot,
          "--fleet", FLEET, "--root", str(tmp_path)],
@@ -347,14 +350,19 @@ def _open_task(libdir: Path, tmp_path: Path, env: dict, bot: str = "w1") -> str:
     return out.stdout.strip()
 
 
-class TestAControlNoteIsInvisibleToTheResolver:
-    """#1491 inverts the mechanism this class once tested. A control note used
-    to mint its own id-less assignment, which BLANKED the resolver head (#1418)
-    and so shielded the worker's real task from a no-id report — the review
-    called that "pure harm" for a note that by definition needs no answer.
-    After #1491 a control note mints NO assignment, so it can no longer be the
-    worker's newest open assignment and the head is not blanked: a no-id report
-    resolves normally to the real row, exactly as if the note were never sent.
+class TestAControlNoteHoldsTheResolverUntilAnswered:
+    """A control note holds the resolver back for ONE report, with no row (#1981).
+
+    A control note used to mint its own id-less assignment, which BLANKED the
+    resolver head (#1418). #1491 removed that assignment, and with it the hold:
+    a no-id report after the note resolved to the real row, on the reasoning
+    that a note needs no answer. But worker-lifecycle routes a `query` to Step
+    8, a `completed` report, so that report IS the answer, and it closed live
+    work (ravi's #917 row, 2026-09-29). #1981 restores the hold without the
+    row: while the note is the bot's newest inbound dispatch and the bot has
+    not reported since, the head is blank. The answer closes nothing, and the
+    next report resolves normally. No assignment comes back (#1491's point,
+    pinned in test_plane_door_e2e).
 
     RAW TEXT is unchanged — the gate is the TYPE, never id-lessness. A raw-text
     send is id-less too but still mints a deadline-bearing assignment (matched
@@ -362,31 +370,32 @@ class TestAControlNoteIsInvisibleToTheResolver:
     """
 
     @pytest.mark.parametrize("t", ["query", "cancel", "compact", "restart"])
-    def test_a_control_note_does_not_blank_the_resolver_head(self, tmp_path, t):
-        # The brief's pin, read straight off the resolver: after a control note
-        # the bot's newest OPEN assignment is still the real id'd task, so
-        # `--open-task` hands it back rather than the "" a raw-text note yields.
-        # On main this FAILS — the note's own id-less assignment blanks the head.
+    def test_a_control_note_holds_the_resolver_head_until_the_bot_reports(self, tmp_path, t):
+        # Read straight off the resolver: blank while the note is unanswered,
+        # and back after ONE report of any status, so the hold is never the
+        # permanent blank #1418 was about. On 85e66d6 the first assertion
+        # FAILS: the head hands back the real id while the note is unanswered.
         libdir, env = _roundtrip_lib(tmp_path)
         real_id = _seed_open_task(libdir, tmp_path, env)
         _door(libdir, f'dispatch-task.sh" --type {t} w1 "a peer note"', env)
-        assert _open_task(libdir, tmp_path, env) == real_id, (
-            f"a `{t}` note blanked the resolver head — the #1418 hijack #1491 removes"
+        assert _open_task(libdir, tmp_path, env) == "", (
+            f"a `{t}` note did not hold the resolver back: its answer would close {real_id}"
         )
+        rb = _door(libdir, 'report-back.sh" w1 progress "answered inline"', env)
+        assert rb.returncode == 0, rb.stderr
+        assert _open_task(libdir, tmp_path, env) == real_id
 
     @pytest.mark.parametrize("t", ["query", "cancel", "compact", "restart"])
-    def test_a_no_id_report_after_a_control_note_resolves_the_real_row(self, tmp_path, t):
-        # The end-to-end consequence, all four types. `restart` and `cancel`
-        # route to a terminal report the same way `query` does. Before #1491 the
-        # note's id-less assignment absorbed this report and the real task stayed
-        # open; now the note is invisible, so #835 FIFO closes the real row.
+    def test_a_no_id_answer_to_a_control_note_leaves_the_real_row_open(self, tmp_path, t):
+        # The end-to-end consequence, all four types: the worker's Step-8
+        # `completed` answer to the note must not close the task it holds.
         libdir, env = _roundtrip_lib(tmp_path)
         real_id = _seed_open_task(libdir, tmp_path, env)
         _door(libdir, f'dispatch-task.sh" --type {t} w1 "a peer note"', env)
         rb = _door(libdir, 'report-back.sh" w1 completed "answered inline"', env)
         assert rb.returncode == 0, rb.stderr
-        assert real_id not in _still_open(libdir, tmp_path, env), (
-            f"a `{t}` note shielded the real row from resolving (#1491)"
+        assert real_id in _still_open(libdir, tmp_path, env), (
+            f"the answer to a `{t}` note closed the real row (#1981)"
         )
 
     def test_a_raw_text_note_still_shields_the_real_row(self, tmp_path):
