@@ -1012,8 +1012,6 @@ def workstream_registry(conn: sqlite3.Connection, fleet: str, *, lease_days: int
             e["blocked_at"] = ts
             e["blocked_note"] = data.get("note")
             e["waiting_on"] = data.get("waiting_on")
-            if data.get("note"):
-                e["next"] = data["note"]
         elif event == "unblocked":
             e["status"] = "active"
             e.pop("blocked_at", None)

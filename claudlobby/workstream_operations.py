@@ -161,6 +161,8 @@ def _plan(ctx, verb, args, registry, request_id, now, maximum, days):
         expiry = datetime.fromisoformat(now).astimezone(timezone.utc) + timedelta(days=days)
         payload.update(event="renewed", renewed_until=expiry.isoformat(), note=args["note"])
     elif verb == "block":
+        if status == "blocked":
+            raise WorkstreamError("conflict", "workstream is already blocked; unblock before declaring a new wait")
         payload.update(event="blocked", waiting_on=args["on"], note=args["note"])
     elif verb == "unblock":
         if status != "blocked":
@@ -194,26 +196,30 @@ def apply(ctx, verb: str, args: dict, *, request_id: str) -> WorkstreamResult:
     lock_path = ctx.context.paths.fleet_state / "workstreams.lock"
     try:
         with locked_request(ctx.root, ctx.fleet_uid, request_id) as store:
-            previous = store.load()
-            if previous is not None:
-                intent = previous.intent
-                if (intent.operation != f"workstream.{verb}" or intent.operation_version != 1
-                        or intent.host_uid != ctx.host_uid or intent.fleet_uid != ctx.fleet_uid
-                        or intent.caller_uid != ctx.caller.uid or intent.semantic_sha256 != semantic
-                        or intent.recipient_uid is not None or intent.route is not None
-                        or len(intent.stages) != 1 or intent.stages[0].kind != "recording"):
-                    raise WorkstreamError("conflict", "request UUID has different workstream semantics")
-                facts = intent.stages[0].facts
-                proof = _proof(ctx, facts)
-                if proof.status != "committed":
-                    raise WorkstreamError("unavailable" if proof.status == "unknown" else "conflict",
-                                          "prior workstream attempt cannot be proved committed; inspect request")
-                if previous.stages[0].status == "unknown":
-                    store.outcome(0, "committed")
-                elif previous.stages[0].status != "committed":
-                    raise WorkstreamError("conflict", "workstream fact conflicts with retained request state")
-                return WorkstreamResult(request_id, _ids_from_facts(ctx, facts), "committed", True, True)
             with registry_lock(lock_path):
+                previous = store.load()
+                if previous is not None:
+                    intent = previous.intent
+                    if (intent.operation != f"workstream.{verb}" or intent.operation_version != 1
+                            or intent.host_uid != ctx.host_uid or intent.fleet_uid != ctx.fleet_uid
+                            or intent.caller_uid != ctx.caller.uid or intent.semantic_sha256 != semantic
+                            or intent.recipient_uid is not None or intent.route is not None
+                            or len(intent.stages) != 1 or intent.stages[0].kind != "recording"):
+                        raise WorkstreamError("conflict", "request UUID has different workstream semantics")
+                    facts = intent.stages[0].facts
+                    proof = _proof(ctx, facts)
+                    if proof.status == "committed":
+                        if previous.stages[0].status == "unknown":
+                            store.outcome(0, "committed")
+                        elif previous.stages[0].status != "committed":
+                            raise WorkstreamError("conflict", "workstream fact conflicts with retained request state")
+                        return WorkstreamResult(request_id, _ids_from_facts(ctx, facts), "committed", True, True)
+                    if proof.status == "unknown":
+                        raise WorkstreamError("unavailable", "prior workstream recording proof unavailable; inspect request")
+                    if proof.status == "conflict" or previous.stages[0].status == "committed":
+                        raise WorkstreamError("conflict", "workstream fact conflicts with retained request state")
+                    if previous.stages[0].status == "unknown":
+                        store.outcome(0, "unrecorded")
                 registry = _reader(ctx, days, or_empty=True)
                 now = datetime.now(timezone.utc).isoformat()
                 ids, raws = _plan(ctx, verb, args, registry, request_id, now, maximum, days)
@@ -223,6 +229,10 @@ def apply(ctx, verb: str, args: dict, *, request_id: str) -> WorkstreamResult:
                 facts = tuple(expected_fact(validate_item(raw, modes)[0], host_uid=ctx.host_uid,
                                             fleet_uid=ctx.fleet_uid, parties=parties)
                               for raw in raws)
+                if previous is not None and facts != previous.intent.stages[0].facts:
+                    raise WorkstreamError(
+                        "conflict", "unrecorded workstream request no longer matches current state; "
+                        "inspect workstream and request, then use a new --request-id for a new intent")
                 store.prepare(RequestIntent(f"workstream.{verb}", 1, ctx.host_uid, ctx.fleet_uid,
                                             ctx.caller.uid, None, semantic,
                                             (StagePlan("recording", facts),)))

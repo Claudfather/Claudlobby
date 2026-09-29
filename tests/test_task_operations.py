@@ -65,7 +65,7 @@ def _manager_route(ctx):
 
 def test_workstream_declared_wait_survives_child_completion_until_unblocked(estate):
     from claudlobby.brief import _workstream_section, plane_session
-    from claudlobby.workstream_operations import apply as workstream_apply
+    from claudlobby.workstream_operations import WorkstreamError, _reader, apply as workstream_apply
 
     ctx, _conn = estate
     opened = workstream_apply(ctx, "open", {"title": "Release review", "id": None,
@@ -78,6 +78,11 @@ def test_workstream_declared_wait_survives_child_completion_until_unblocked(esta
     blocked = workstream_apply(ctx, "block", {"id": wid, "on": "human:reviewer",
         "note": "Waiting for signoff"}, request_id=str(uuid4()))
     assert blocked.recording == "committed" and blocked.notification == "not_requested"
+    waiting = _reader(ctx, 14, or_empty=False)["workstreams"][wid]
+    with pytest.raises(WorkstreamError, match="already blocked; unblock"):
+        workstream_apply(ctx, "block", {"id": wid, "on": "human:other",
+            "note": "Replace the wait"}, request_id=str(uuid4()))
+    assert _reader(ctx, 14, or_empty=False)["workstreams"][wid] == waiting
     tasks.complete(worker, str(uuid4()), assigned.assignment_id,
                    ReportPayload("completed", summary="Review finished"))
     workstream_apply(ctx, "progress", {"id": wid, "next": "Evidence prepared"},
@@ -94,6 +99,7 @@ def test_workstream_declared_wait_survives_child_completion_until_unblocked(esta
     unblocked = workstream_apply(ctx, "unblock", {"id": wid, "note": "Signoff received"},
                                  request_id=str(uuid4()))
     assert unblocked.workstream_ids == (wid,)
+    assert _reader(ctx, 14, or_empty=False)["workstreams"][wid]["next"] == "Evidence prepared"
     plane, note = plane_session(ctx.context.paths, ctx.context.fleet.name)
     assert note is None
     with plane:
@@ -130,6 +136,92 @@ def test_workstream_cap_renewal_archived_id_and_request_replay(estate):
     assert set(pruned.workstream_ids) == {wid, second}
     reopened = workstream_apply(ctx, "open", opening, request_id=str(uuid4()))
     assert reopened.workstream_ids == (wid + "-2",)
+
+
+@pytest.mark.parametrize("competing_open", [False, True])
+def test_workstream_outage_retry_reconciles_frozen_facts(estate, monkeypatch, competing_open):
+    from claudlobby.plane import emit_api
+    from claudlobby.workstream_operations import WorkstreamError, apply as workstream_apply
+
+    ctx, conn = estate
+    request = str(uuid4())
+    args = {"title": "One focus", "id": None, "project": None, "owner": None, "next": None}
+    emit = emit_api.emit_batch
+    calls = []
+
+    def recording(root, raws, **kwargs):
+        calls.append(raws)
+        if len(calls) == 1:
+            raise OSError("recording unavailable")
+        return emit(root, raws, **kwargs)
+
+    monkeypatch.setattr(emit_api, "emit_batch", recording)
+    with pytest.raises(WorkstreamError, match="recording unconfirmed"):
+        workstream_apply(ctx, "open", args, request_id=request)
+    frozen = _receipt(ctx, request).intent
+    if competing_open:
+        workstream_apply(ctx, "open", args, request_id=str(uuid4()))
+        with pytest.raises(WorkstreamError, match="new --request-id"):
+            workstream_apply(ctx, "open", args, request_id=request)
+        assert len(calls) == 2  # refuse a changed slug before a recording attempt
+    else:
+        result = workstream_apply(ctx, "open", args, request_id=request)
+        assert result.recording == "committed" and not result.replayed
+        assert calls[1][0]["event_id"] == calls[0][0]["event_id"]
+        assert workstream_apply(ctx, "open", args, request_id=request).replayed
+        assert len(calls) == 2
+    assert _receipt(ctx, request).intent == frozen
+    assert conn.execute("SELECT count(*) FROM workstreams").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("maximum", [1, 2])
+def test_concurrent_workstream_opens_share_cap_and_slug_snapshot(estate, monkeypatch, maximum):
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+    from threading import Event
+    from claudlobby.config import WorkstreamsConfig
+    from claudlobby.plane import emit_api, workstream_import
+    from claudlobby.workstream_operations import WorkstreamError, _reader, apply as workstream_apply
+
+    ctx, _conn = estate
+    fleet = replace(ctx.context.fleet, workstreams=WorkstreamsConfig(max_active=maximum, lease_days=14))
+    ctx = replace(ctx, context=replace(ctx.context, fleet=fleet))
+    args = {"title": "Same focus", "id": None, "project": None, "owner": None, "next": None}
+    recording, contender = Event(), Event()
+    lock, emit = workstream_import.registry_lock, emit_api.emit_batch
+    arrivals = []
+
+    @contextmanager
+    def observed_lock(path):
+        arrivals.append(path)
+        if len(arrivals) == 2:
+            contender.set()
+        with lock(path):
+            yield
+
+    def held_recording(*args, **kwargs):
+        recording.set()
+        assert contender.wait(5), "second writer did not attempt the registry lock"
+        return emit(*args, **kwargs)
+
+    monkeypatch.setattr(workstream_import, "registry_lock", observed_lock)
+    monkeypatch.setattr(emit_api, "emit_batch", held_recording)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(workstream_apply, ctx, "open", args, request_id=str(uuid4()))
+        assert recording.wait(5)
+        second = pool.submit(workstream_apply, ctx, "open", args, request_id=str(uuid4()))
+        assert first.result(timeout=10).workstream_ids == ("ws-same-focus",)
+        if maximum == 1:
+            with pytest.raises(WorkstreamError, match="cap"):
+                second.result(timeout=10)
+        else:
+            assert second.result(timeout=10).workstream_ids == ("ws-same-focus-2",)
+    assert len(_reader(ctx, 14, or_empty=False)["workstreams"]) == maximum
+    monkeypatch.setattr(workstream_import, "registry_lock", lambda path: lock(path, wait_s=0))
+    with lock(ctx.context.paths.fleet_state / "workstreams.lock"):
+        with pytest.raises(WorkstreamError, match="registry is busy"):
+            workstream_apply(ctx, "open", args, request_id=str(uuid4()))
+    assert len(_reader(ctx, 14, or_empty=False)["workstreams"]) == maximum
 
 
 def test_duplicate_admission_is_one_unassigned_task_without_plaintext_receipt(estate):
