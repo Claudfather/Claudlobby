@@ -440,7 +440,7 @@ drift on every bot.
 
 Two rungs read that record:
 
-- `claudlobby --fleet <name> doctor` → `manifest-provenance`: **warns** when the
+- `claudlobby --fleet <name> host doctor` → `manifest-provenance`: **warns** when the
   manifest on disk differs from what the running fleet was composed from, and
   names the restart step above.
 - `claudlobby --fleet <name> diff` prints one line first: `manifest: unchanged
