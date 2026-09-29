@@ -44,7 +44,7 @@ def register_release_subparsers(sub):
     hosts = host.add_subparsers(dest="host_command", required=True)
     from ._setup_parsers import register_host_setup
     register_host_setup(hosts)
-    job = hosts.add_parser("job", help="Read this host's effective packaged jobs and overrides")
+    job = hosts.add_parser("job", help="Inspect or request selected host jobs")
     jobs = job.add_subparsers(dest="job_command", required=True)
     for action in ("list", "show"):
         route = jobs.add_parser(action, help=f"{action.capitalize()} effective host jobs")
@@ -52,6 +52,10 @@ def register_release_subparsers(sub):
         if action == "show":
             route.add_argument("name", help="Packaged host job name, e.g. pull-root")
         route.set_defaults(func=_dispatch_host_job, public_command=f"host.job.{action}")
+    run = jobs.add_parser("run", help="Request one selected, enabled host timer job")
+    run.add_argument("name", help="Packaged host timer job name")
+    run.add_argument("--json", action="store_true", help="One schema-1 result object")
+    run.set_defaults(func=_dispatch_host_job, public_command="host.job.run")
     doctor = _route(hosts, "doctor", "host.doctor", "Diagnose configured fleets on this host")
     doctor.set_defaults(func=_dispatch_doctor)
     doctor.add_argument("--switches", action="store_true", help="Only show resolved opt-in/out switches")

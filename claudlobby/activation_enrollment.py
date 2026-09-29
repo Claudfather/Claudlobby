@@ -438,23 +438,20 @@ def candidate_entries(store: ActivationStore, activation_id: str, phase: str) ->
     return tuple(json.loads(json.dumps(entry)) for entry in entries if entry["phase"] == phase)
 
 
-def selected_bot_entry(root: Path, fleet: str, bot: str, platform: str) -> dict:
-    """Read one active bot's frozen native placement, including after a stop.
-
-    The activation publication journal, rather than the current native search
-    path, is the placement owner: a deliberately stopped bot has no installed
-    file from which a start could rediscover its destination.
-    """
+def _selected_phase(root: Path, phase: str) -> tuple[ConfigPlan, tuple[dict, ...]]:
+    """Read an active activation's frozen native placements for one phase."""
+    if phase not in PHASES:
+        raise ActivationError("unknown selected native phase")
     selected = read_selection(root)
     if selected is None:
-        raise ActivationError("bot lifecycle requires a selected activation")
+        raise ActivationError("native operation requires a selected activation")
     record = read_activation(root, selected["activation_id"])
     if (record.status != "active"
             or record.body["intent"]["release_id"] != selected["release_id"]
             or record.body["intent"]["plan_id"] != selected["plan_id"]):
-        raise ActivationError("selected bot activation is incomplete")
+        raise ActivationError("selected native activation is incomplete")
     candidate = read_plan(root, selected["plan_id"])
-    journal = read_config_install(root, journal_id(selected["activation_id"], "bots"))
+    journal = read_config_install(root, journal_id(selected["activation_id"], phase))
     publication = read_plan(root, journal.plan_id)
     effects = publication.effects
     if (journal.status != "applied" or publication.release_id != selected["release_id"]
@@ -462,21 +459,36 @@ def selected_bot_entry(root: Path, fleet: str, bot: str, platform: str) -> dict:
             or effects.get("owner") != _OWNER
             or effects.get("activation_id") != selected["activation_id"]
             or effects.get("candidate_plan") != candidate.plan_id
-            or effects.get("phase") != "bots"
+            or effects.get("phase") != phase
             or effects.get("enrollment_digest") != record.body["intent"]["enrollment_digest"]):
-        raise ActivationError("selected bot publication differs from its activation")
+        raise ActivationError("selected native publication differs from its activation")
     entries = effects.get("entries")
     if not isinstance(entries, list):
-        raise ActivationError("selected bot publication has no entries")
-    _check_publication_changes(publication, entries, "bots", effects.get("retired_enablement", []))
+        raise ActivationError("selected native publication has no entries")
+    _check_publication_changes(publication, entries, phase, effects.get("retired_enablement", []))
+    return candidate, tuple(json.loads(json.dumps(entry)) for entry in entries if entry.get("phase") == phase)
+
+
+def selected_phase_entries(root: Path, phase: str) -> tuple[dict, ...]:
+    """Return frozen placements after the shared selected-phase validation."""
+    return _selected_phase(root, phase)[1]
+
+
+def selected_bot_entry(root: Path, fleet: str, bot: str, platform: str) -> dict:
+    """Read one active bot's frozen native placement, including after a stop.
+
+    The activation publication journal, rather than the current native search
+    path, is the placement owner: a deliberately stopped bot has no installed
+    file from which a start could rediscover its destination.
+    """
+    candidate, entries = _selected_phase(root, "bots")
     declarations = [(declaration, item) for declaration, item in planned_units(candidate, platform)
                     if declaration.scope == "bot" and declaration.fleet == fleet
                     and declaration.bot == bot and item["enroll"]]
     if len(declarations) != 1:
         raise ActivationError("selected bot has no unique frozen unit")
     declaration, item = declarations[0]
-    selected_entries = [entry for entry in entries if entry.get("phase") == "bots"
-                        and entry.get("source") == str(declaration.source)]
+    selected_entries = [entry for entry in entries if entry.get("source") == str(declaration.source)]
     if len(selected_entries) != 1:
         raise ActivationError("selected bot has no unique native placement")
     entry = selected_entries[0]

@@ -57,6 +57,7 @@ class Adapter:
         "svc_activation_bot_ready", "svc_activation_handoff",
         "svc_activation_stop_private_server",
         "svc_bot_enroll_exact", "svc_bot_disenroll_exact", "svc_bot_session_observe",
+        "svc_host_job_run_exact",
     })
 
     def __init__(self, package: PackageResources | None = None, *, runner=None,

@@ -276,6 +276,30 @@ svc_restart_host() {
     return 2
 }
 
+# Request one already-loaded, inactive host timer's service. The selected
+# publication and inventory owners check its bytes, scope and placement before
+# this call; this final native read refuses a vanished or active unit. Never
+# bootstrap, unmask or restart a resident process to satisfy a manual run.
+svc_host_job_run_exact() {
+    local file="$1" target="$2"
+    [ -f "$file" ] || return 3
+    _svc_activation_read "$file" "$target" || return 3
+    [ "$SVC_ACT_LOAD $SVC_ACT_ACTIVE" = 'loaded inactive' ] || return 3
+    case "$_OS" in
+        Linux)
+            case "$target" in *.service) ;; *) return 3 ;; esac
+            printf 'invoking\n'
+            systemctl --user start "$target" || return $?
+            ;;
+        Darwin)
+            printf 'invoking\n'
+            launchctl kickstart "$target" || return $?
+            ;;
+        *) return 3 ;;
+    esac
+    printf 'run-requested\n'
+}
+
 # svc_enroll <bot_dir>
 # In THIS PR, a thin dispatcher onto the two existing installer scripts —
 # install-bot-systemd.sh's sequence (stale-unit cleanup, copy the composed
