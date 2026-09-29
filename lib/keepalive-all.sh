@@ -113,26 +113,31 @@ done
 
 # Admission happens before keepalive.sh installs its ERR trap. A stale CLI or
 # broken selected release would otherwise fail every bot and leave this timer
-# green. One fleet-level alert is enough; retain the marker only after delivery
-# so an undelivered alert is retried. An activation-lock pause is transient and
-# must not clear a previous fault until a sweep actually admits the bots.
+# green. Use the shared bounded debounce for one fleet-level alert attempt per
+# window, even when both delivery channels fail. An activation-lock pause is
+# transient and must not clear a previous fault until a sweep admits the bots.
 alert_key=$(printf '%s' "$BOTS_DIR" | cksum | awk '{print $1}')
-alert_state="$CLAUDLOBBY_ROOT/state/keepalive-admission-$alert_key.alerted"
+alert_name="keepalive-admission-$alert_key"
+_keepalive_alert() {
+    emit_failure_alert "$BOTS_DIR" "keepalive_failed" "$1" || true
+    if [ "${_ALERT_DELIVERED:-0}" -eq 1 ] || [ "${_ALERT_TMUX_REACHED:-0}" -eq 1 ]; then
+        echo "$TS ALERT — keepalive failure reached a fleet recipient" >>"$LOG"
+    else
+        echo "$TS ALERT-DELIVERY-FAILED — keepalive failure reached no fleet recipient" >>"$LOG"
+    fi
+    return 0 # The debounce limits retries even when delivery is unavailable.
+}
 if [ -n "$failed" ]; then
     message="keepalive admission/runtime failed for $failed; inspect $LOG and the selected release"
     printf '%s ERROR — %s\n' "$TS" "$message" >&2
-    if [ ! -f "$alert_state" ]; then
-        emit_failure_alert "$BOTS_DIR" "keepalive_failed" "$message" || true
-        if [ "${_ALERT_DELIVERED:-0}" -eq 1 ]; then
-            printf '%s\n' "$failed" >"$alert_state"
-        fi
-    fi
+    debounce_notify "$CLAUDLOBBY_ROOT/state" "$alert_name" "failed" \
+        _keepalive_alert "$message" "" 900
     exit 1
 fi
 if [ "$attempted" -eq 0 ]; then
     : # No admitted bot was observed; preserve any previous fault marker.
 elif [ -z "$paused" ]; then
-    rm -f "$alert_state"
+    debounce_clear "$CLAUDLOBBY_ROOT/state" "$alert_name" "failed"
 else
     echo "$TS PAUSED — activation lock held for: $paused" >>"$LOG"
 fi

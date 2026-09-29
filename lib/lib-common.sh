@@ -5380,6 +5380,7 @@ _emit_fleet_signal() {
     # a host with no Telegram from a send the channel rejected (#1825 review).
     _ALERT_DELIVERED=0
     _ALERT_TG_EXIT=""
+    _ALERT_TMUX_REACHED=0
     data=$(printf '{"reason":"%s"}' "$(json_escape "$reason")")
     emit_fleet_event "$event_type" "$ev_source" "$data" "" fleet
 
@@ -5463,6 +5464,7 @@ _emit_fleet_signal() {
         _tg_err="${_alert_refusal:-no alert chat-id resolved for this fleet}"
     fi
     _ALERT_TG_EXIT="$_tg_rc"
+    _ALERT_TMUX_REACHED="$_sig_tmux_ok"
 
     if [ "$_tg_rc" -eq 0 ]; then
         _ALERT_DELIVERED=1

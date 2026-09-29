@@ -183,7 +183,8 @@ class TestKeepaliveAllArgConvention:
         assert r.returncode == 1
 
 
-def test_keepalive_sweep_reports_fault_once_but_not_activation_pause(tmp_path):
+@pytest.mark.parametrize("manager_reached", [False, True])
+def test_keepalive_sweep_reports_fault_once_but_not_activation_pause(tmp_path, manager_reached):
     """A pre-trap admission failure must not look like a successful timer run."""
     root = tmp_path / "root"
     home = tmp_path / "home"
@@ -202,7 +203,9 @@ def test_keepalive_sweep_reports_fault_once_but_not_activation_pause(tmp_path):
         'parse_fleet_bots() { echo worker; }\n'
         'bot_in_fleet() { return 0; }\n'
         'bot_conf_get() { echo worker; }\n'
-        'emit_failure_alert() { echo "$2" >> "$ALERTS"; _ALERT_DELIVERED=1; }\n'
+        'emit_failure_alert() { echo "$2" >> "$ALERTS"; _ALERT_DELIVERED=0; _ALERT_TMUX_REACHED="$STUB_TMUX"; }\n'
+        'debounce_notify() { local marker="$1/$2.$3"; if [ ! -f "$marker" ]; then "$4" "$5"; touch "$marker"; fi; }\n'
+        'debounce_clear() { rm -f "$1/$2.$3"; }\n'
     )
     worker = native / "keepalive.sh"
     worker.write_text('#!/bin/sh\nexit "${STUB_RC:-0}"\n')
@@ -210,7 +213,8 @@ def test_keepalive_sweep_reports_fault_once_but_not_activation_pause(tmp_path):
     shutil.copy2(os.path.join(LIB_DIR, "keepalive-all.sh"), native / "keepalive-all.sh")
     alerts = tmp_path / "alerts"
     env = {**os.environ, "HOME": str(home), "CLAUDLOBBY_ROOT": str(root),
-           "ALERTS": str(alerts), "PLANE_EMIT_DISABLED": "1"}
+           "ALERTS": str(alerts), "STUB_TMUX": str(int(manager_reached)),
+           "PLANE_EMIT_DISABLED": "1"}
 
     def sweep(rc):
         return subprocess.run(["/bin/bash", str(native / "keepalive-all.sh"), "fleet"],

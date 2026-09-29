@@ -72,7 +72,7 @@ while IFS= read -r _r; do
 done < <(discover_framework_checkouts)
 
 log "WATCHING ${#WATCHED[@]} repo(s): ${WATCHED[*]}"
-root_checkout=$(git -C "$CLAUDLOBBY_ROOT" rev-parse --show-toplevel)
+root_checkout=$(git -C "$CLAUDLOBBY_ROOT" rev-parse --show-toplevel 2>/dev/null) || root_checkout="$CLAUDLOBBY_ROOT"
 
 # currency_outcome_phrase
 # Render the verdict notify_currency just recorded, for the audit log.
