@@ -153,9 +153,9 @@ if [ -n "$RETIRED_SERVICE" ]; then
     done <<< "$_catalog"
     if [ "$_OS" = Darwin ]; then
         [ ! -e "$HOME/Library/LaunchAgents/$_unit" ] && [ ! -L "$HOME/Library/LaunchAgents/$_unit" ] || { echo 'retired service is installed' >&2; exit 3; }
-        # A Background operator's `launchctl list` sees user/, not gui/.
+        # A Background operator's current catalog sees user/, not gui/.
         # Check the selected GUI domain too before claiming de-enrollment.
-        _gui_catalog="$(/bin/launchctl asuser "$(id -u)" /bin/launchctl list)" || { echo 'GUI native catalog unavailable' >&2; exit 3; }
+        _gui_catalog="$(svc_inventory_gui_list)" || { echo 'GUI native catalog unavailable' >&2; exit 3; }
         while read -r _pid _status _label _extra; do
             [ "${_label:-}" != "$RETIRED_SERVICE" ] || { echo 'retired service is loaded in GUI domain' >&2; exit 3; }
         done <<< "$_gui_catalog"

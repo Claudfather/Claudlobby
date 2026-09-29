@@ -1086,6 +1086,12 @@ EOF
     esac
 }
 
+# A Background caller's current catalog omits the same user's GUI domain.
+svc_inventory_gui_list() {
+    [ "$_OS" = Darwin ] || return 3
+    /bin/launchctl asuser "$(id -u)" /bin/launchctl list
+}
+
 svc_inventory_properties() {
     case "$_OS" in
         Linux)
