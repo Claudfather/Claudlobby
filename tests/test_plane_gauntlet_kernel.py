@@ -94,15 +94,17 @@ def test_batch_resolves_each_alias_once(tmp_path, monkeypatch):
     calls = []
     real = ingest.resolve_party
 
-    def counting(conn, alias, now):
-        calls.append(alias)
-        return real(conn, alias, now)
+    def counting(conn, alias, now, parent_uid=None):
+        calls.append((alias, parent_uid))
+        return real(conn, alias, now, parent_uid)
 
     monkeypatch.setattr(ingest, "resolve_party", counting)
     emit_batch(tmp_path, _dispatch_triple())
     # 5 resolve sites (created_by, assignee, assigned_by, sender, recipient)
     # over 2 unique aliases -> exactly 2 calls, not 5.
-    assert sorted(set(calls)) == ["bot:f/lead", "bot:f/w1"]
+    assert sorted(alias for alias, _ in calls) == ["bot:f/lead", "bot:f/w1"]
+    assert all(parent_uid is not None for _, parent_uid in calls)
+    assert calls[0][1] == calls[1][1]  # both actors retain the same fleet parent
     assert len(calls) == 2
 
 

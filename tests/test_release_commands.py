@@ -146,8 +146,13 @@ def test_config_plan_covers_declared_and_explicit_fleets_and_diff_never_dumps_by
     assert "SECRET-config-value" not in capture.out + capture.err
     assert all(set(change) == {"path", "before", "after"} for change in diff["data"]["changes"])
     assert all(set(change["after"]) == {"kind", "state_sha256"} for change in diff["data"]["changes"])
-    # Duplicate explicit declarations are refused by the staging owner.
-    _call(capsys, argv[:-1] + ["--fleet-path", str(external), "--json"], 4)
+    # Repeating the same source location is harmless; different sources may
+    # never claim the same fleet name and redirect the planned runtime.
+    repeated, _ = _call(capsys, argv[:-1] + ["--fleet-path", str(external), "--json"])
+    assert repeated["data"]["fleets"] == planned["data"]["fleets"]
+    duplicate = case.root.parent / "duplicate/external-fleet"
+    _fleet(case.root, duplicate, "external-fleet", case.package)
+    _call(capsys, argv[:-1] + ["--fleet-path", str(duplicate), "--json"], 4)
     plan = read_plan(case.root, plan_id)
     secret_target = case.root / "runtime/secret.conf"
     builder = ConfigPlanBuilder(case.root, plan.release_id, plan.release_seal, plan.fleets, effects={})
