@@ -19,6 +19,7 @@ from claudlobby.composer import compose_bot_conf, compose_fleet_timers
 from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 from claudlobby.validator import validate
+from tests.test_plane_events_door import _serving
 
 
 def _make_paths(root: Path) -> Paths:
@@ -317,13 +318,14 @@ class TestSweepSelector:
         env["PATH"] = f"{bindir}:{env['PATH']}"
         env["TMUX_BIN"] = str(tmux)
         env.update(scratch_plane_env(root, initialize=True))
-        proc = subprocess.run(
-            ["bash", str(selector), "tf"],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
+        with _serving(root, scratch_plane_env) as socket:
+            proc = subprocess.run(
+                ["bash", str(selector), "tf"],
+                env={**env, "PLANE_SOCKET": str(socket)},
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
         # F18 R1: the sweep's events land on the plane, never in a per-bot file;
         # rendered back as the legacy rows (or None when nothing was recorded)
         assert not list((owner / "data" / "events").glob("fleet-*.jsonl"))

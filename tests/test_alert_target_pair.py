@@ -23,6 +23,7 @@ from tests.conftest import (
     read_fleet_events,
 )
 from tests.test_maintenance_jobs import _native_fixture
+from tests.test_plane_events_door import _serving
 
 REPO = Path(__file__).resolve().parent.parent
 LIB = REPO / "lib"
@@ -82,15 +83,16 @@ def test_the_refusal_sends_nothing_and_the_row_says_why(tmp_path, *, scratch_pla
         HOME=tmp_path / "home",
         TG_CAPTURE=capture,
         TELEGRAM_GROUP_CHAT_ID=CHAT_A,
-        FLEET_EVENT_EMIT_TIMEOUT_S="120",
         **scratch_plane_env(root, initialize=True),
     )
     driver = (
         f'. "{native}/lib-common.sh"; emit_failure_alert "{bots}" probe_alert "a probe"'
     )
-    r = subprocess.run(
-        ["bash", "-c", driver], env=env, capture_output=True, text=True, timeout=300
-    )
+    with _serving(root, scratch_plane_env) as socket:
+        r = subprocess.run(
+            ["bash", "-c", driver], env={**env, "PLANE_SOCKET": str(socket)},
+            capture_output=True, text=True, timeout=300
+        )
     assert r.returncode == 0, r.stderr
     assert not capture.exists(), "the refused pair must send NOTHING"
     rows = [json.loads(line) for line in read_fleet_events(root).splitlines()]

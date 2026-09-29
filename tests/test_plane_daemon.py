@@ -695,7 +695,7 @@ def _doctor(root: Path):
 
 def test_doctor_daemon_rung_serving_and_never_armed(running, tmp_path: Path):
     """T9: three-state daemon rung. A live daemon reads serving; a root that
-    never started one reads ok-unarmed (doors fall back by design)."""
+    never started one reads ok-unarmed (native events stage for replay)."""
     root, sock, _ = running
     import claudlobby.plane.daemon as dmod
 
@@ -714,7 +714,8 @@ def test_doctor_daemon_rung_serving_and_never_armed(running, tmp_path: Path):
     # STARTED-NOT-SERVING attention branch instead (daemon_started was logged).
     r = _doctor(root)
     assert r.returncode == 1
-    assert "not serving" in r.stdout and "falling back" in r.stdout
+    assert "not serving" in r.stdout and "stage raw input for daemon replay" in r.stdout
+    assert "pending, not committed" in r.stdout
     from claudlobby.plane.emit_api import emit
 
     fresh = tmp_path / "fresh"

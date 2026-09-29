@@ -2,7 +2,7 @@
 the vitals hook go through the one fleet-event door (provenance,
 alias-anchored), no per-bot event file is written any more (the reader-less
 keepalive-<day>.jsonl and the fleet-<day>.jsonl both went with R1), and
-`claudlobby uptime` reads the plane's heartbeat samples + restart transitions
+`claudlobby fleet uptime` reads the plane's heartbeat samples + restart transitions
 and nothing else (F18 closure R2b — no retirement fact, no log; refuses when
 the plane cannot answer). Deleted with the log parser:
 test_uptime_from_the_plane_equals_uptime_from_the_log (its plane half lives on
@@ -167,11 +167,16 @@ def test_cmd_uptime_reads_the_plane_and_refuses_without_it(tmp_path):
                        "occurred_at": (now - timedelta(minutes=m)).isoformat(),
                        "payload": {"subject_kind": "bot_instance", "subject": f"bot:{FLEET}/b1", "metric": "bot.heartbeat",
                                    "value": {"state": "IDLE"}}} for m in (3, 2, 1)])
-    served = _cli(root, "uptime", "--json", "--window", "24h")
+    served = _cli(root, "fleet", "uptime", "--json", "--window", "24h")
     assert served.returncode == 0, served.stderr
-    assert json.loads(served.stdout)["b1"]["24h"]["entries_in_window"] == 3           # the plane, no flag, no fact
+    served_result = json.loads(served.stdout)
+    assert served_result["schema_version"] == 1 and served_result["command"] == "fleet.uptime"
+    assert served_result["ok"] is True
+    assert served_result["data"]["bots"]["b1"]["24h"]["entries_in_window"] == 3  # the plane, no flag, no fact
     for p in (root / "state" / "plane").glob("plane.db*"):
         p.unlink()
-    refused = _cli(root, "uptime", "--json", "--window", "24h")
-    assert refused.returncode == 3 and refused.stdout == "", (refused.returncode, refused.stdout)
-    assert "UNREACHABLE" in refused.stderr and "plane.db" in refused.stderr             # the remedy, never an empty table
+    refused = _cli(root, "fleet", "uptime", "--json", "--window", "24h")
+    refused_result = json.loads(refused.stdout)
+    assert refused.returncode == 6 and refused_result["ok"] is False, (refused.returncode, refused.stdout)
+    assert refused_result["command"] == "fleet.uptime" and refused_result["error"]["code"] == "unavailable"
+    assert refused_result["data"] == {} and "plane.db" in refused_result["error"]["message"]  # never an empty table
