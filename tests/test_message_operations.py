@@ -205,9 +205,38 @@ def test_same_uuid_refuses_changed_route_and_semantics_before_native_effect(esta
         raise AssertionError("must not send")
     with pytest.raises(ReceiptConflict):
         _call(route, package, request_id, body="Changed private body", transport=forbidden)
-    changed = replace(route, release_id="release-2")
-    with pytest.raises(ReceiptConflict):
-        _call(changed, package, request_id, transport=forbidden)
+    for changed in (replace(route, manager=route.peer),
+                    replace(route, peer_destination=replace(route.peer_destination, socket="other-socket"))):
+        with pytest.raises(ReceiptConflict):
+            _call(changed, package, request_id, transport=forbidden)
+    with pytest.raises(messages.MessageConflict):
+        _call(replace(route, peer_destination=replace(route.peer_destination, fleet="other")),
+              package, request_id, transport=forbidden)
+
+
+def test_selected_release_change_preserves_receipt_and_requires_explicit_retry(estate):
+    route, package, conn = estate
+    request_id = str(uuid4())
+    calls = []
+    def transport(*args, **kwargs):
+        calls.append(kwargs["body"])
+        return TransportOutcome("unknown") if len(calls) == 1 else TransportOutcome(
+            "submitted", native_returncode=0)
+    first = _call(route, package, request_id, transport=transport)
+    original = _receipt(route, request_id)
+    assert first.delivery == "unknown" and len(calls) == 1
+    changed = replace(route, activation_id="activation-2", plan_id="plan-2", release_id="release-2")
+    replay = _call(changed, package, request_id, transport=transport)
+    assert replay.replayed and replay.delivery == "unknown" and len(calls) == 1
+    assert _receipt(route, request_id) == original
+    retried = _call(changed, package, request_id, transport=transport, retry_uncertain=True)
+    saved = _receipt(route, request_id)
+    assert retried.delivery == "submitted" and retried.message_id == first.message_id
+    assert len(calls) == 2 and len(saved.message_attempts) == 2
+    assert saved.intent == original.intent
+    assert saved.message_attempts[0].observation.status == "unknown"
+    assert saved.message_attempts[1].observation.status == "submitted"
+    assert _counts(conn) == (1, 2)
 
 
 def test_reply_freezes_parent_answer_and_replays_without_resend(estate):

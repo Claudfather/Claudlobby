@@ -7,7 +7,7 @@ This owner neither resolves a route nor verifies receiver delivery or idle Enter
 from __future__ import annotations
 
 from contextlib import closing, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 import re
@@ -28,7 +28,7 @@ from .recording_alerts import (ChannelOutcome, RecordingAlertOutcome,
                                clear_recording_degraded, notify_recording_degraded)
 from .request_facts import expected_fact, reconcile_facts
 from .request_receipts import (ReceiptConflict, RequestIntent, RequestReceipt, RequestStore, StagePlan,
-                               TransportObservation, locked_request, semantic_digest)
+                               MessageRouteBinding, TransportObservation, locked_request, semantic_digest)
 from .report_payload import ReportPayload, encode_report_facts
 from .resources import PackageResources
 
@@ -80,6 +80,13 @@ class NativeAttemptResult:
     replayed: bool
     attempt_no: int
     event_id: str
+
+
+def _same_native_route(frozen: MessageRouteBinding | None, current: MessageRouteBinding) -> bool:
+    """A selected release may change; the native parties and targets may not."""
+    return (isinstance(frozen, MessageRouteBinding)
+            and replace(frozen, activation_id=current.activation_id,
+                        plan_id=current.plan_id, release_id=current.release_id) == current)
 
 
 def _identity_proof(conn, route: MessageRoute) -> None:
@@ -236,7 +243,7 @@ def transmit_native_attempt(route: MessageRoute, package: PackageResources,
     """
     if (not isinstance(envelope, RenderedNativeEnvelope) or
             envelope.message_id != intent.message_id or not isinstance(envelope.body, str) or
-            intent.route != route.receipt_binding()):
+            not _same_native_route(intent.route, route.receipt_binding())):
         raise MessageConflict("native envelope or route differs from frozen request")
     prior = reservation.previous
     if reservation.new:
@@ -425,7 +432,8 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
             if (old.operation != operation or old.operation_version != 1
                     or old.host_uid != route.host_uid or old.fleet_uid != route.selected_fleet_uid
                     or old.caller_uid != route.caller.uid or old.recipient_uid != route.peer.uid
-                    or old.semantic_sha256 != semantic or old.route != route.receipt_binding()):
+                    or old.semantic_sha256 != semantic
+                    or not _same_native_route(old.route, route.receipt_binding())):
                 raise ReceiptConflict("request UUID already has different message semantics or route")
             if not existing.message_attempts and not retry_uncertain:
                 # An O1 invocation might have sent after a failed reservation.
@@ -438,10 +446,11 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
         else:
             message_id = mint_msg_id()
             event_ids = (mint_event_id(), mint_event_id()) if _report is not None else (mint_event_id(),)
+        frozen_route = existing.intent.route if existing is not None else route.receipt_binding()
         intent = RequestIntent(operation, 1, route.host_uid, route.selected_fleet_uid,
                                route.caller.uid, route.peer.uid, semantic,
                                (StagePlan("recording"), StagePlan("delivery")),
-                               message_id=message_id, route=route.receipt_binding())
+                               message_id=message_id, route=frozen_route)
         if _report is not None:
             raw = encode_report_facts(_report, fleet=route.selected.fleet.name,
                                       sender=route.caller.alias, recipient=route.manager.alias,
@@ -459,11 +468,12 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
         intent = RequestIntent(operation, 1, route.host_uid, route.selected_fleet_uid,
                                route.caller.uid, route.peer.uid, semantic,
                                (StagePlan("recording", facts), StagePlan("delivery")),
-                               message_id=message_id, route=route.receipt_binding())
+                               message_id=message_id, route=frozen_route)
         if existing is not None:
             if existing.intent.stages[0].facts != facts:
                 raise ReceiptConflict("capture policy or communication projection changed")
             receipt = existing
+            intent = existing.intent
         elif store is not None:
             try:
                 receipt = store.prepare(intent)
