@@ -338,6 +338,20 @@ class TestGrantUnion:
             assert "Bash(git push *)" in deny
             assert "Bash" not in allow
             assert not any("systemctl" in grant or "launchctl" in grant for grant in allow)
+            lifecycle = {grant for grant in allow
+                         if grant.startswith("Bash(claudlobby --json bot ")
+                         and any(f" bot {verb} " in grant for verb in ("start", "stop", "restart"))}
+            assert {f"Bash(claudlobby bot {verb} --help)"
+                    for verb in ("start", "stop", "restart")} <= set(allow)
+            if bot_id == "lead":
+                assert lifecycle == {
+                    "Bash(claudlobby --json bot start worker-1)",
+                    "Bash(claudlobby --json bot stop worker-1)",
+                    "Bash(claudlobby --json bot restart worker-1)",
+                    "Bash(claudlobby --json bot restart worker-1 --ceiling *)",
+                }
+            else:
+                assert lifecycle == set()
             assert not [
                 f for f in audit_bot(bot, fleet, paths)
                 if f.kind in {"orphan_grant", "under_grant"}
@@ -607,6 +621,9 @@ def test_a_fleet_with_no_requires_composes_exactly_the_declared_grants(fleet_dir
         "Bash(claudlobby task nudge --help)",
         "Bash(claudlobby workstream --help)",
         "Bash(claudlobby bot usage --help)",
+        "Bash(claudlobby bot start --help)",
+        "Bash(claudlobby bot stop --help)",
+        "Bash(claudlobby bot restart --help)",
         "Bash(claudlobby bot automation --help)",
         "Bash(claudlobby fleet usage --help)",
         "Bash(claudlobby assignment show --help)",
@@ -676,6 +693,10 @@ def test_a_fleet_with_no_requires_composes_exactly_the_declared_grants(fleet_dir
         "Bash(claudlobby --json workstream unblock *)",
         "Bash(claudlobby --json workstream close *)",
         "Bash(claudlobby --json workstream prune *)",
+        "Bash(claudlobby --json bot start worker-1)",
+        "Bash(claudlobby --json bot stop worker-1)",
+        "Bash(claudlobby --json bot restart worker-1)",
+        "Bash(claudlobby --json bot restart worker-1 --ceiling *)",
         # #1633: no custom startup_prompt -> the default read-then-act boot
         # prompt names this exact read, and compose_settings_local grants it.
         "Bash(claudlobby --fleet claudlobby brief --bot lead)",

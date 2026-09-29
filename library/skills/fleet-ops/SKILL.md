@@ -15,6 +15,9 @@ tool_grants:
   - "Bash(claudlobby task nudge --help)"
   - "Bash(claudlobby workstream --help)"
   - "Bash(claudlobby bot usage --help)"
+  - "Bash(claudlobby bot start --help)"
+  - "Bash(claudlobby bot stop --help)"
+  - "Bash(claudlobby bot restart --help)"
   - "Bash(claudlobby bot automation --help)"
   - "Bash(claudlobby fleet usage --help)"
   - "Bash(claudlobby assignment show --help)"
@@ -108,6 +111,27 @@ caller. Each mutation needs a retained `--request-id UUID`; use
 for record, with `--pr URL` or `--issue URL` only for validated target-repo links.
 These commands preserve the host-shared state under its lock; they do not
 deliver a report or Telegram message.
+
+Only the selected fleet manager may operate another declared bot's supervised
+session. Use `claudlobby bot start --help`, `claudlobby bot stop --help`, or
+`claudlobby bot restart --help` for the exact syntax:
+
+```bash
+claudlobby --json bot start WORKER
+claudlobby --json bot restart WORKER
+claudlobby --json bot stop WORKER
+```
+
+`start` is idempotent when the selected bot's session is already ready; use
+`restart` for an intentional bounce, with a best-effort handoff and a fresh
+bridge/session readiness check. `stop` de-enrolls supervision and stops the
+session, so keepalive cannot revive it; a later `start` is explicit re-enrollment.
+For a slow bridge, `bot restart WORKER --ceiling SECONDS` overrides the
+per-bot readiness budget with a positive number. Read `data.changed`,
+`data.readiness`, and `data.native_outcome` in the JSON result before claiming
+what happened. If an effect or readiness is unverified, inspect the selected
+native unit and private session before another operation. Workers cannot use
+these mutations, and the manager cannot restart itself through this command.
 
 The current manager can use `workstream open/progress/renew/block/unblock/close/prune`
 with a retained `--request-id UUID` for each mutation. `block ID --on

@@ -2469,7 +2469,7 @@ def _resolve_skill_grants(skills: list[str], paths: Paths) -> list[str]:
 
 
 def _resolve_fleet_ops_grants(bot: BotConfig, fleet: FleetConfig) -> list[str]:
-    """Narrow task and assignment grants for the selected bot's fleet role.
+    """Narrow work and lifecycle grants for the selected bot's fleet role.
 
     The CLI resolves generated bot origin and task ownership; these exact
     command prefixes do not grant an explicit ``--fleet`` target, a host verb,
@@ -2503,6 +2503,16 @@ def _resolve_fleet_ops_grants(bot: BotConfig, fleet: FleetConfig) -> list[str]:
             "Bash(claudlobby --json workstream close *)",
             "Bash(claudlobby --json workstream prune *)",
         ))
+    if bot.bot_id == fleet.manager:
+        # The public lifecycle guard admits only this exact manager operating
+        # another declared bot. Enumerate targets so no self-restart text is
+        # granted while the self-termination protocol remains unsupported.
+        for target in fleet.bots:
+            if target == bot.bot_id:
+                continue
+            for verb in ("start", "stop", "restart"):
+                grants.append(f"Bash(claudlobby --json bot {verb} {target})")
+            grants.append(f"Bash(claudlobby --json bot restart {target} --ceiling *)")
     return grants
 
 
