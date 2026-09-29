@@ -190,6 +190,9 @@ def test_config_diff_current_reports_drift_without_values_or_retired_routes(stag
 
 
 def test_config_validate_runtime_keeps_audit_severities_and_hides_details(fleet_dir, capsys, monkeypatch):
+    from tests.package_fixtures import source_package
+
+    monkeypatch.setattr(context, "get_resources", source_package)
     monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
     monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
 
