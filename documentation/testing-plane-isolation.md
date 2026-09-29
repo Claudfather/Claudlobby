@@ -6,6 +6,11 @@ stubbed transports; a Plane silencer does not isolate launchd, systemd, tmux,
 notifications, credentials, or network access. Do not run a full suite on a
 live fleet installation merely because the emission sentinels pass.
 
+For editable tests, prepare wheel resources in that disposable checkout using
+`tests/prepare_resources.py --disposable-checkout "$PWD"`. Pytest refuses
+missing or stale prepared resource copies; rerun preparation after changing
+`lib/`, `library/`, `templates/`, `voices/`, or seed inputs.
+
 The shared session and per-test fixtures provide private HOME, XDG config/cache/
 state/data, and temporary directories. Child builders carry those directories unless
 a test explicitly replaces one. Collection must still start in a constructed

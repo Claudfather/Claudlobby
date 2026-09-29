@@ -106,7 +106,7 @@ def _artifact_metadata(sources):
         digest.update((json.dumps(record, separators=(",", ":")) + "\n").encode())
     content_hash = digest.hexdigest()
     frozen = ROOT / "claudlobby/_artifact.json"
-    if frozen.is_file():
+    if frozen.is_file() and not (ROOT / ".git").exists():
         metadata = json.loads(frozen.read_text())
         if metadata.get("content_sha256") != content_hash:
             raise SetupError("sdist contents differ from their frozen artifact identity")

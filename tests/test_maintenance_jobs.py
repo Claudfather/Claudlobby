@@ -156,7 +156,8 @@ class TestDiskMonitor:
 
     def test_ok_usage_is_silent(self, tmp_path, *, scratch_plane_env):
         root = _signal_root(tmp_path)
-        r = _run("disk-monitor.sh", ["--threshold", "100"], root, tmp_path, scratch_plane_env=scratch_plane_env)
+        r = _run("disk-monitor.sh", ["--threshold", "100"], root, tmp_path,
+                 scratch_plane_env=scratch_plane_env, serve=True)
         assert r.returncode == 0, r.stderr
         assert _captured(tmp_path) == ""
         assert "disk_high" not in _events(root)
@@ -187,8 +188,10 @@ class TestFleetMemoryCheck:
 
     def test_ok_is_silent_and_exits_zero(self, tmp_path, *, scratch_plane_env):
         root = _signal_root(tmp_path)
-        r = _run("fleet-memory-check.sh", ["--threshold", "99"], root, tmp_path, scratch_plane_env=scratch_plane_env)
+        r = _run("fleet-memory-check.sh", ["--threshold", "99"], root, tmp_path,
+                 scratch_plane_env=scratch_plane_env, serve=True)
         assert r.returncode == 0, r.stderr
+        assert _captured(tmp_path) == ""
         assert "memory_high" not in _events(root)
 
 

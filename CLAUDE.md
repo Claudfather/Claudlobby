@@ -279,17 +279,11 @@ not at all.
 assume your change caused a failure, and do not assume it didn't because the *count* matched —
 compare the failing test **names**:
 
-```bash
-git stash push -u
-./.venv/bin/pytest --tb=no -ra > /tmp/run_before.txt 2>&1; rc_before=$?
-awk "/short test summary info/,0" /tmp/run_before.txt | grep -E "^(FAILED|ERROR)" | sort > /tmp/before.txt
-git stash pop
-./.venv/bin/pytest --tb=no -ra > /tmp/run_after.txt 2>&1; rc_after=$?
-awk "/short test summary info/,0" /tmp/run_after.txt | grep -E "^(FAILED|ERROR)" | sort > /tmp/after.txt
-comm -13 /tmp/before.txt /tmp/after.txt      # failures YOU introduced
-tail -1 /tmp/run_before.txt                 # and compare the counts —
-tail -1 /tmp/run_after.txt                  # "N failed, M passed"
-```
+Prepare two separate disposable exports, one at the base commit and one with
+the candidate bytes. Give each its own editable-install venv, run
+`tests/prepare_resources.py --disposable-checkout "$PWD"` in each, then compare
+the failing test names and counts. Reusing one tree with `git stash -u` removes
+the prepared assets from the before run and hides regressions.
 
 *An empty diff is not the same as a clean one.* The naive `pytest | grep ^FAILED` this
 recipe used to print was wrong in **two independent directions**, and it could also fail

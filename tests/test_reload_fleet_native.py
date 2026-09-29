@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import signal
 import subprocess
+import time
 
 import pytest
 
@@ -26,7 +28,9 @@ def _script_host(tmp_path: Path):
     tools = tmp_path / "tools"
     tools.mkdir()
     calls = tmp_path / "calls"
-    (tools / "claude").write_text(f'#!/bin/bash\nprintf "%s\\n" "$*" >> "{calls}"\n')
+    (tools / "claude").write_text(
+        f'#!/bin/bash\nprintf "%s\\n" "$*" >> "{calls}"\n'
+        'if [ "${SLOW_PLUGIN:-0}" = 1 ]; then touch "$STEP_MARKER"; sleep 30; fi\n')
     (tools / "claude").chmod(0o755)
     (tools / "tmux").write_text('#!/bin/bash\ncase "$*" in *"-t lead"*) exit 0;; esac\nexit 1\n')
     (tools / "tmux").chmod(0o755)
@@ -86,3 +90,86 @@ def test_reload_refuses_mismatched_selected_context_before_effect(tmp_path, chan
     assert not calls.exists()
     assert not (bots / "lead/data/.reload-pending").exists()
     assert not (root / "state/reload-fleet.log").exists()
+
+
+def test_killed_plugin_refresh_is_raised_once_by_next_selected_run(tmp_path):
+    root, _bots, _calls, env, args = _script_host(tmp_path)
+    marker = tmp_path / "plugin-entered"
+    process = subprocess.Popen(args, env={**env, "SLOW_PLUGIN": "1", "STEP_MARKER": str(marker)},
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               text=True, start_new_session=True)
+    try:
+        deadline = time.monotonic() + 10
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert marker.exists(), "selected reload never reached plugin refresh"
+        os.killpg(process.pid, signal.SIGKILL)
+        process.communicate(timeout=10)
+    finally:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.communicate(timeout=10)
+    inflight = root / "state/reload-fleet.inflight" / f"demo.{process.pid}"
+    log = root / "state/reload-fleet.log"
+    assert inflight.is_file()
+    assert "reload_failed" not in log.read_text()
+    resumed = subprocess.run(args, env=env, capture_output=True, text=True, timeout=20)
+    assert resumed.returncode == 0, resumed.stderr
+    failures = [line for line in log.read_text().splitlines() if "reload_failed:" in line]
+    assert len(failures) == 1 and f"pid {process.pid}" in failures[0]
+    assert "claude plugin update" in failures[0]
+    assert not inflight.exists()
+
+
+def test_next_reload_does_not_claim_live_or_other_fleet_inflight(tmp_path):
+    root, _bots, _calls, env, args = _script_host(tmp_path)
+    inflight = root / "state/reload-fleet.inflight"
+    inflight.mkdir(parents=True)
+    live = subprocess.Popen(["/bin/bash", "-c", "exec -a reload-fleet.sh sleep 30"])
+    try:
+        own = inflight / f"demo.{live.pid}"
+        other = inflight / "demo.x.999999"
+        for path in (own, other):
+            path.write_text("started=fixture\nstep=claude plugin update\n")
+        result = subprocess.run(args, env=env, capture_output=True, text=True, timeout=20)
+        assert result.returncode == 0, result.stderr
+        assert own.exists() and other.exists()
+        assert "reload_failed" not in (root / "state/reload-fleet.log").read_text()
+    finally:
+        live.kill()
+        live.wait(timeout=5)
+
+
+def test_orphaned_reload_lock_child_cannot_start_plugin_step(tmp_path):
+    root, _bots, calls, env, args = _script_host(tmp_path)
+    marker = tmp_path / "preflight-entered"
+    preflight = tmp_path / "native/check-npx-cache.sh"
+    preflight.write_text(f'#!/bin/bash\ntouch "{marker}"\nsleep 2\n')
+    preflight.chmod(0o755)
+    process = subprocess.Popen(args, env=env, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, start_new_session=True)
+    try:
+        deadline = time.monotonic() + 10
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert marker.exists(), "selected reload never reached preflight"
+        os.kill(process.pid, signal.SIGKILL)
+        process.wait(timeout=10)
+        time.sleep(2.2)  # the lock child finishes preflight after its parent is gone
+        log = (root / "state/reload-fleet.log").read_text()
+        assert "npx cache preflight" in log
+        assert "step: claude plugin update" not in log
+        assert not calls.exists()
+        assert (root / "state/reload-fleet.inflight" / f"demo.{process.pid}").exists()
+        resumed = subprocess.run(args, env=env, capture_output=True, text=True, timeout=20)
+        assert resumed.returncode == 0, resumed.stderr
+        assert len([line for line in (root / "state/reload-fleet.log").read_text().splitlines()
+                    if "reload_failed:" in line]) == 1
+    finally:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.communicate(timeout=10)

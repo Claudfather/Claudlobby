@@ -98,9 +98,8 @@ def _run_pulse(root: Path, fleet: str, extra_env: dict) -> subprocess.CompletedP
     resolution) and HOME pointed away from the real ~/.env."""
     env = _scrubbed_env(
         HOME=str(root / "home"),
-        CLAUDLOBBY_ROOT=str(root),
         TMUX_TMPDIR=_tmux_env(root)["TMUX_TMPDIR"],
-        **extra_env,
+        **{"CLAUDLOBBY_ROOT": str(root), **extra_env},
     )
     return subprocess.run(
         ["bash", str(FLEET_PULSE), fleet],
@@ -133,7 +132,7 @@ def _script_errors(root: Path) -> str:
         ),
     ],
 )
-def test_pulse_completes_with_no_events_bot(pulse_fleet, extra_env):
+def test_pulse_completes_with_no_events_bot(pulse_fleet, extra_env, scratch_plane_env):
     """The pulse exits 0 with a full summary and no script_error, through both
     read-back sites (the plane's one read for the escalation window and for
     the summary span). With a chat id resolved, the escalation loop's site runs
@@ -143,7 +142,8 @@ def test_pulse_completes_with_no_events_bot(pulse_fleet, extra_env):
     ever changes.
     """
     root, fleet = pulse_fleet
-    proc = _run_pulse(root, fleet, extra_env)
+    with _serving(root, scratch_plane_env) as socket:
+        proc = _run_pulse(root, fleet, {**extra_env, **scratch_plane_env(root, socket=socket)})
     assert proc.returncode == 0, (
         f"pulse aborted (rc={proc.returncode})\nstdout:\n{proc.stdout}\n"
         f"stderr:\n{proc.stderr}\nscript_error events:\n{_script_errors(root)}"

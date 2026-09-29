@@ -633,6 +633,15 @@ def test_every_derived_slug_passes_the_shipped_validators(fleet_dir):
             (REPO_DIR / "claudlobby" / "checkin_contract.py").read_text(),
         ).group(1)
     )
+    cli_slugs = [
+        _re.compile(_re.search(pattern, (REPO_DIR / path).read_text()).group(1))
+        for path, pattern in (
+            ("claudlobby/commands/task_write.py",
+             r'_optional\(args\.project, "--project", r"([^"]+)"\)'),
+            ("claudlobby/commands/workstream.py",
+             r're\.fullmatch\(r"([^"]+)", data\["project"\]\)'),
+        )
+    ]
     _write_fleet(
         fleet_dir,
         _with_scope(
@@ -645,6 +654,8 @@ def test_every_derived_slug_passes_the_shipped_validators(fleet_dir):
     for key in fleet.projects:
         assert _PROJECT_KEY_RE.match(key), f"validator would reject derived key {key!r}"
         assert contract_slug.match(key), f"checkin-contract would reject derived key {key!r}"
+        for slug in cli_slugs:
+            assert slug.fullmatch(key), f"public CLI would reject derived key {key!r}"
 
 
 def test_no_scope_repos_derives_nothing(fleet_dir):

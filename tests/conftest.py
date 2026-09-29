@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -23,7 +24,46 @@ if Path(claudlobby.__file__).resolve().parent != _TEST_TREE / "claudlobby":
 from claudlobby.config import DEFAULT_GUARDRAILS
 
 
+def _require_prepared_resources():
+    package = _TEST_TREE / "claudlobby"
+    metadata = package / "_artifact.json"
+    guidance = "prepare resources in this disposable checkout with tests/prepare_resources.py"
+    try:
+        manifest = json.loads(metadata.read_text())
+        sources = manifest["resource_sources"]
+        if not isinstance(sources, list) or not sources:
+            raise ValueError("missing source inventory")
+        for name in sources:
+            source = _TEST_TREE / name
+            target = (package / "_native" / name.removeprefix("lib/") if name.startswith("lib/")
+                      else package / "_resources" / "seeds" / name if name in {
+                          "fleet.yaml.seed", "fleet.yaml.example", "projects.yaml.seed",
+                          ".env.seed.example", "missions/fleet.md.seed"}
+                      else package / "_resources" / name)
+            if (not source.is_file() or not target.is_file()
+                    or hashlib.sha256(source.read_bytes()).digest() != hashlib.sha256(target.read_bytes()).digest()
+                    or source.stat().st_mode & 0o111 != target.stat().st_mode & 0o111):
+                raise ValueError(f"stale prepared resource: {name}")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise pytest.UsageError(f"{guidance}: {exc}") from exc
+
+
+_require_prepared_resources()
+
+
 _HOME_KEYS = ("HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "TMPDIR")
+
+
+def _short_test_directory(prefix):
+    candidates = (os.environ.get("CLAUDLOBBY_TEST_TMPDIR"), "/tmp", os.environ.get("TMPDIR"))
+    for candidate in dict.fromkeys(candidates):
+        if not candidate:
+            continue
+        try:
+            return Path(tempfile.mkdtemp(prefix=prefix, dir=candidate)).resolve()
+        except OSError:
+            continue
+    raise pytest.UsageError("no writable short test temp root; set CLAUDLOBBY_TEST_TMPDIR")
 
 
 def _isolate_home(patch, base):
@@ -41,7 +81,7 @@ def _silence_plane(patch):
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _isolate_plane_session(tmp_path_factory):
+def _isolate_plane_session(tmp_path_factory, request):
     """Guard session fixtures too; undo only our changes when pytest exits.
 
     Collection-time subprocesses must use constructed_env themselves: no
@@ -50,14 +90,18 @@ def _isolate_plane_session(tmp_path_factory):
     # Keep Unix socket paths short and environment state outside tests' data
     # directories. A nested pytest tmp_path can exceed sun_path before tmux
     # even opens its socket, and adding children changes directory-scan tests.
-    with tempfile.TemporaryDirectory(prefix="ct-", dir="/tmp") as directory, pytest.MonkeyPatch.context() as patch:
-        base = Path(directory).resolve()
+    base = _short_test_directory("ct-")
+    with pytest.MonkeyPatch.context() as patch:
         _isolate_home(patch, base)
         _silence_plane(patch)
         # Pytest chooses this lazily. Initialize it while TMPDIR belongs to
         # the session, before a function fixture selects a shorter-lived dir.
         tmp_path_factory.getbasetemp()
         yield base
+    if request.session.testsfailed:
+        print(f"retained failed-test files: {base}", file=sys.stderr)
+    else:
+        shutil.rmtree(base)
 
 
 @pytest.fixture(autouse=True)
@@ -69,6 +113,16 @@ def _isolate_claudlobby_root(monkeypatch, _isolate_plane_session):
     base = Path(tempfile.mkdtemp(prefix="t-", dir=_isolate_plane_session)).resolve()
     _isolate_home(monkeypatch, base)
     _silence_plane(monkeypatch)
+    from claudlobby import paths
+    original = paths._is_host_data_root
+
+    def refuse_source_checkout(path):
+        resolved = Path(path).resolve()
+        if resolved == _TEST_TREE or resolved.is_relative_to(_TEST_TREE):
+            raise AssertionError("cwd discovery reached the source checkout; pass a private --root")
+        return original(path)
+
+    monkeypatch.setattr(paths, "_is_host_data_root", refuse_source_checkout)
     yield base
 
 
@@ -91,17 +145,24 @@ TG_STUB = (
 )
 
 
-def read_fleet_events(root):
+def read_fleet_events(root, *, allow_absent=False):
     """Every fleet event on the plane under <root>, rendered as the legacy
     JSONL rows (compact, one per line, oldest first) — or '' when the plane
     was never created. F18 closure R1: the state/events/ file this once
     concatenated is gone; the rows a door lands (bot-, fleet- or
     host-anchored) come back in the exact row shape the file had, so an
     assertion like `'"type":"disk_high"' in read_fleet_events(root)` keeps
-    its meaning."""
-    db = Path(root) / "state" / "plane" / "plane.db"
+    its meaning. Negative reads require a served recording channel: staged
+    batches have not become queryable facts and must not count as silence."""
+    plane = Path(root) / "state" / "plane"
+    staged = tuple((plane / "staged").glob("*.batch"))
+    if staged:
+        raise AssertionError(f"{len(staged)} plane batch(es) staged but not committed")
+    db = plane / "plane.db"
     if not db.exists():
-        return ""
+        if allow_absent:
+            return ""
+        raise AssertionError("plane database is absent; enable fixture recording before reading events")
     from claudlobby.plane.db import connect_ro
     pr = load_lib_module("plane-readers")
     conn = connect_ro(db)
@@ -130,7 +191,7 @@ class ScratchPlaneEnv:
         resolved = Path(path).resolve()
         owners = [self.base]
         if sockets:
-            owners.extend(Path(d.name).resolve() for d in self._socket_dirs)
+            owners.extend(d.resolve() for d in self._socket_dirs)
         if not any(resolved != owner and resolved.is_relative_to(owner) for owner in owners):
             raise ValueError(f"{label} must be inside a fixture-owned directory: {path}")
         return resolved
@@ -141,13 +202,13 @@ class ScratchPlaneEnv:
         macOS sun_path cannot hold pytest's long basetemp paths. This owns
         exactly the mkdtemp directory, never all of /tmp.
         """
-        directory = tempfile.TemporaryDirectory(prefix="pe-", dir="/tmp")
+        directory = _short_test_directory("pe-")
         self._socket_dirs.append(directory)
-        return Path(directory.name)
+        return directory
 
     def close(self):
         for directory in self._socket_dirs:
-            directory.cleanup()
+            shutil.rmtree(directory)
 
     def __call__(self, root: Path, *, socket: Path | None = None,
                  cli: Path | None = None, initialize: bool = False) -> dict[str, str]:

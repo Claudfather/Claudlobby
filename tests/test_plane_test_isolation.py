@@ -13,7 +13,7 @@ import threading
 
 import pytest
 
-from tests.conftest import constructed_env, _scrubbed_env
+from tests.conftest import constructed_env, _scrubbed_env, read_fleet_events
 from tests.test_plane_events_door import _serving
 
 REPO = Path(__file__).resolve().parents[1]
@@ -28,6 +28,25 @@ BATCH = json.dumps({"events": [{
 def _emit(env):
     return subprocess.run(["bash", str(SHIM)], input=BATCH, env=env,
                           capture_output=True, text=True, timeout=30)
+
+
+def test_negative_event_read_refuses_an_unserved_channel(tmp_path):
+    with pytest.raises(AssertionError, match="database is absent"):
+        read_fleet_events(tmp_path)
+    staged = tmp_path / "state/plane/staged"
+    staged.mkdir(parents=True)
+    (staged / "pending.batch").write_bytes(b"uncommitted")
+    with pytest.raises(AssertionError, match="staged but not committed"):
+        read_fleet_events(tmp_path)
+
+
+def test_implicit_root_discovery_refuses_the_checkout(monkeypatch):
+    from claudlobby.paths import Paths
+    from tests.package_fixtures import source_package
+
+    monkeypatch.chdir(REPO)
+    with pytest.raises(AssertionError, match="cwd discovery reached the source checkout"):
+        Paths.detect(package=source_package())
 
 
 def _artifacts(root):

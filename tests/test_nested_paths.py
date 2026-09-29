@@ -15,7 +15,9 @@ the flat assertions guard against regression.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -54,6 +56,29 @@ def test_nested_fleet_resolves_one_level_under_a_system_container(tmp_path: Path
     assert paths.runtime == nested / "runtime"
     assert paths.shared_docs == nested / "shared"
     assert paths.bot_runtime("botA") == nested / "runtime" / "bots" / "botA"
+
+
+def test_native_fleet_resolution_keeps_flat_priority_and_unique_nested_owner(tmp_path: Path):
+    root = _make_root(tmp_path)
+    lib = Path(__file__).resolve().parents[1] / "lib/lib-common.sh"
+
+    def resolve(command):
+        return subprocess.run(["/bin/bash", "-c", '. "$1"; "$2" fleetA', "test", str(lib), command],
+                              env={**os.environ, "CLAUDLOBBY_ROOT": str(root)},
+                              capture_output=True, text=True)
+
+    nested = root / "local/sys1/fleetA"
+    nested.mkdir(parents=True)
+    (nested / "fleet.yaml").write_text("fleet:\n  name: fleetA\n")
+    assert resolve("resolve_fleet_dir").stdout.strip() == str(nested)
+    assert resolve("resolve_bots_dir").stdout == str(nested / "runtime/bots")
+    second = root / "local/sys2/fleetA"
+    second.mkdir(parents=True)
+    (second / "fleet.yaml").write_text("fleet:\n  name: fleetA\n")
+    assert resolve("resolve_fleet_dir").returncode == 1
+    flat = root / "local/fleetA"
+    flat.mkdir()
+    assert resolve("resolve_fleet_dir").stdout.strip() == str(flat)
 
 
 def test_flat_fleet_resolves_at_depth_one(tmp_path: Path):

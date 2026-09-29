@@ -16,7 +16,8 @@ The wheel is built in a separate temporary source tree with ``python -m build
 _resources/, and _native/ are copied back. Python imports continue to resolve to
 the exact checkout, preserving the test_cli origin guard. This is test setup,
 never a runtime resource fallback. Do not add the generated paths to Git or
-copy them into source-build fixtures. Rerun preparation after source changes.
+copy them into source-build fixtures. Rerun preparation after resource source
+changes; pytest checks the prepared copies against those sources before tests.
 """
 
 from __future__ import annotations
