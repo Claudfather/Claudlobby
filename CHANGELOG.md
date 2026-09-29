@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the session digest's model call loads no MCP server, plugin or hook, so it no longer takes Telegram away from every bot on the host (#1972)
+
+`lib/transcript-digest.sh` runs its Haiku pass inside a bot's session end, in the
+bot's directory and with the bot's environment. With default settings, that
+`claude -p` loaded every MCP server and plugin the bot has. The Telegram channel
+plugin found the bot's live poller, deferred to it and exited. Claude Code then
+wrote a **host-global** needs-auth entry, and for the next 15 minutes every bot
+that started on the host skipped its own Telegram server (#1962). On the Pi, the 4
+ai-platform bots run the digest, so each of their session ends set that trap for
+all 21 bots.
+
+The pass now runs with `--strict-mcp-config`, an empty `--mcp-config` and
+`--setting-sources ''`. It loads no MCP server, no plugin and no user, project or
+local settings, so no hook runs either. The prompt, the model and the digest row
+are unchanged.
+
+- `tests/test_transcript_digest.sh` pins that the hook passes all three flags.
+  Each flag has its own assertion, and each was mutated and went red.
+- `tests/test_transcript_digest_isolation.py` runs the real hook with a real
+  `claude` in a throwaway HOME, at zero spend. Two fake plugins exit the way
+  Telegram does, one enabled at the user tier and one at the local tier. The
+  test checks that no needs-auth entry is written, no server starts and no hook
+  runs. A control arm strips only the three flags and must write the entries.
+  It is opt-in (`DIGEST_ISOLATION_REAL=1`), because CI has no `claude` binary.
+- Measured in that fixture on 2.1.281 and 2.1.283:
+  - With the old command line, both plugins wrote an entry. The same pass also
+    ran the directory's own SessionStart and UserPromptSubmit hooks.
+  - With either flag alone, no entry was written. Only `--setting-sources ''`
+    also stopped the hooks.
+
 ### Changed — `[vault]` pin bumped to Claudron v0.5.1; `vault-sync` never leaves a vault mid-rebase (Claudron #193)
 
 The `[vault]` extra now pins `claudron @ …@v0.5.1`. 0.5.1 makes worktree integration
