@@ -12,11 +12,15 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$LIB_DIR/lib-common.sh"
 
 BOT_DIR="${1:?Usage: pre-stop-handoff.sh /path/to/bot/dir}"
+MODE="${2:-}"
+case "$MODE" in ''|--explicit) ;; *) echo "pre-stop-handoff.sh: unsupported mode" >&2; exit 2 ;; esac
 
-# Clean up .tmux-env on ALL exit paths (including early returns and the
-# socket-resolution guard below). This file holds resolved secrets written by
-# start-bot.sh, so install the trap before anything that can exit early.
-trap 'rm -f "$BOT_DIR/.tmux-env"' EXIT
+# On the stop path, clean up .tmux-env on ALL exit paths (including early
+# returns and the socket-resolution guard below). It holds resolved secrets
+# written by start-bot.sh, so install the trap before anything can exit early.
+# A standalone handoff leaves the running session in place; only ExecStop owns
+# deletion of this launch-time secret file.
+if [ -z "$MODE" ]; then trap 'rm -f "$BOT_DIR/.tmux-env"' EXIT; fi
 install_error_trap "$BOT_DIR"
 load_bot_conf "$BOT_DIR"
 TMUX_SESSION="$(tmux_session_name "$BOT_DIR")"
@@ -31,18 +35,28 @@ TMUX_SOCKET="$(tmux_socket_for_bot "$BOT_DIR")" || {
 # clauDNA's /claudna:session handoff writes to <cwd>/.claude/session.md,
 # where cwd is the bot's runtime dir (start-bot.sh `cd "$BOT_DIR"` before tmux).
 HANDOFF_FILE="$BOT_DIR/.claude/session.md"
+if [ "$MODE" = --explicit ]; then
+    [ ! -L "$HANDOFF_FILE" ] || { echo "handoff-unavailable"; exit 3; }
+    _handoff_before=""
+    if [ -e "$HANDOFF_FILE" ]; then
+        _handoff_before=$(cksum < "$HANDOFF_FILE") || { echo "handoff-unavailable"; exit 3; }
+    fi
+fi
 
 # If a fresh handoff was written in the last 5 minutes, skip
 if [ -f "$HANDOFF_FILE" ]; then
     AGE=$(( $(date +%s) - $(stat_mtime "$HANDOFF_FILE" 2>/dev/null || echo 0) ))
     if [ "$AGE" -lt 300 ]; then
-        echo "Recent handoff exists ($AGE seconds old), skipping"
+        if [ "$MODE" = --explicit ]; then echo "handoff-skipped:recent";
+        else echo "Recent handoff exists ($AGE seconds old), skipping"; fi
         exit 0
     fi
 fi
 
 # Try to trigger a handoff via the running session
+_session_was_present=0
 if check_tmux_session "$TMUX_SESSION" "$TMUX_SOCKET"; then
+    _session_was_present=1
     # Through pane_send_verified, not a bare send-keys: a swallowed Enter here
     # presents as the 30s timeout below with the session context silently lost,
     # which is the exact failure the verify-retry exists to catch. Verbatim send
@@ -70,11 +84,24 @@ if check_tmux_session "$TMUX_SESSION" "$TMUX_SOCKET"; then
         *) _handoff_inject=0 ;;
     esac
     if [ "$_handoff_inject" -eq 1 ]; then
-        pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "$_HANDOFF_CMD" || true
+        if [ "$MODE" = --explicit ]; then
+            pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "$_HANDOFF_CMD" || {
+                echo "handoff-unavailable"; exit 3;
+            }
+        else
+            pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "$_HANDOFF_CMD" || true
+        fi
     else
-        echo "HANDOFF SKIP — no session-handoff capability [$_handoff_status]; stopping without a fresh handoff, last one (if any) left at $HANDOFF_FILE" >&2
-        emit_fleet_event "handoff_skipped" "pre-stop" \
-            "{\"reason\":\"$_handoff_status\",\"handoff\":\"$HANDOFF_FILE\"}" || true
+        if [ "$MODE" = --explicit ]; then
+            echo "HANDOFF SKIP — no session-handoff capability [$_handoff_status]" >&2
+        else
+            echo "HANDOFF SKIP — no session-handoff capability [$_handoff_status]; stopping without a fresh handoff, last one (if any) left at $HANDOFF_FILE" >&2
+        fi
+        if [ -z "$MODE" ]; then
+            emit_fleet_event "handoff_skipped" "pre-stop" \
+                "{\"reason\":\"$_handoff_status\",\"handoff\":\"$HANDOFF_FILE\"}" || true
+        fi
+        [ "$MODE" != --explicit ] || echo "handoff-skipped:capability"
         exit 0
     fi
     # Wait up to 30 seconds for handoff to complete
@@ -82,16 +109,32 @@ if check_tmux_session "$TMUX_SESSION" "$TMUX_SOCKET"; then
         if [ -f "$HANDOFF_FILE" ]; then
             AGE=$(( $(date +%s) - $(stat_mtime "$HANDOFF_FILE" 2>/dev/null || echo 0) ))
             if [ "$AGE" -lt 60 ]; then
-                echo "Handoff completed"
-                exit 0
+                if [ "$MODE" = --explicit ]; then
+                    [ ! -L "$HANDOFF_FILE" ] || { echo "handoff-unavailable"; exit 3; }
+                    _handoff_after=$(cksum < "$HANDOFF_FILE") || { echo "handoff-unavailable"; exit 3; }
+                    if [ "$_handoff_after" != "$_handoff_before" ]; then
+                        echo "handoff-saved"
+                        exit 0
+                    fi
+                else
+                    echo "Handoff completed"
+                    exit 0
+                fi
             fi
         fi
         sleep 1
     done
-    echo "Handoff timed out after 30s"
+    if [ -z "$MODE" ]; then echo "Handoff timed out after 30s"; fi
+fi
+if [ "$MODE" = --explicit ]; then
+    if [ "$_session_was_present" -eq 0 ]; then
+        echo "handoff-skipped:no-session"
+        exit 0
+    fi
+    echo "handoff-unavailable"
+    exit 3
 fi
 
-# Best-effort handoff: never block the restart. Explicit exit 0 so the timeout
-# and no-running-session fall-throughs return success — intentional-restart
-# callers (the restart skill, weekly-worker-restart.sh) always proceed.
+# Stop remains best-effort: timeout and absent-session fall-throughs return 0
+# so a restart proceeds. Explicit mode above refuses an unverified save.
 exit 0

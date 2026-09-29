@@ -8,7 +8,7 @@ from ..command_result import CommandFailure, CommandOutput
 
 def dispatch(args) -> CommandOutput:
     from ..activation_state import ActivationError
-    from ..bot_operations import BotLifecycleError, set_bot_running
+    from ..bot_operations import BotLifecycleError, handoff_bot, set_bot_running
     from ..config_plan import PlanError
     from ..context import resolve_paths
     from ..operation_context import OperationContextError
@@ -30,15 +30,19 @@ def dispatch(args) -> CommandOutput:
             "native_outcome": "unattempted", "runtime_state": "unknown"}
     try:
         root = resolve_paths(root=args.root).root
-        result = set_bot_running(root=root, fleet=args.fleet, bot=args.bot_id,
-                                 running=running, restart=action == "restart",
-                                 ceiling=ceiling)
+        if action == "handoff":
+            result = handoff_bot(root=root, fleet=args.fleet, bot=args.bot_id)
+        else:
+            result = set_bot_running(root=root, fleet=args.fleet, bot=args.bot_id,
+                                     running=running, restart=action == "restart",
+                                     ceiling=ceiling)
     except BotLifecycleError as exc:
         if exc.effect_attempted:
             data["native_outcome"] = "unknown"
             data["release_id"] = exc.release_id
             data["target"] = exc.target
-            raise CommandFailure("unavailable", "bot lifecycle effect is unverified; inspect native state",
+            raise CommandFailure("unavailable", "bot handoff outcome is unverified; inspect its private session"
+                                 if action == "handoff" else "bot lifecycle effect is unverified; inspect native state",
                                  data=data, release_id=exc.release_id,
                                  hint="inspect the exact bot's native unit and private session before retrying") from exc
         if exc.unavailable:
@@ -58,6 +62,13 @@ def dispatch(args) -> CommandOutput:
         raise CommandFailure("conflict", "selected bot configuration or activation is incomplete", data=data) from exc
     except (InventoryError, OSError) as exc:
         raise CommandFailure("unavailable", "bot native state cannot be established", data=data) from exc
+    if action == "handoff":
+        data = asdict(result)
+        data["native_outcome"] = "observed" if result.handoff == "saved" else "skipped"
+        lines = (f"{result.fleet}/{result.bot}: handoff saved and verified in the private session."
+                 if result.handoff == "saved" else
+                 f"{result.fleet}/{result.bot}: handoff skipped ({result.reason}); no new handoff verified.",)
+        return CommandOutput(data, release_id=result.release_id, lines=lines)
     data = {key: value for key, value in asdict(result).items() if value is not None}
     data["native_outcome"] = "unattempted" if result.state == "requested" else "observed"
     data["runtime_state"] = "unknown" if result.state == "requested" else result.state

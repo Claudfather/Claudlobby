@@ -27,6 +27,7 @@ tool_grants:
   - "Bash(claudlobby bot start --help)"
   - "Bash(claudlobby bot stop --help)"
   - "Bash(claudlobby bot restart --help)"
+  - "Bash(claudlobby bot handoff --help)"
   - "Bash(claudlobby bot automation --help)"
   - "Bash(claudlobby fleet usage --help)"
   - "Bash(claudlobby fleet start --help)"
@@ -170,7 +171,10 @@ deliver a report or Telegram message.
 Only the selected fleet manager may operate another declared bot's supervised
 session. Any bot may request its own restart after saving a fresh handoff;
 use `/restart` for that sequence. Use `claudlobby bot start --help`, `claudlobby bot stop --help`, or
-`claudlobby bot restart --help` for the exact syntax:
+`claudlobby bot restart --help` for the exact syntax. A manager can request a
+worker's handoff without stopping it with `claudlobby --json bot handoff WORKER`.
+Only `data.handoff=saved` confirms a fresh handoff file; `skipped` and an
+unavailable result do not. The request does not commit a Plane record:
 
 ```bash
 claudlobby --json bot start WORKER

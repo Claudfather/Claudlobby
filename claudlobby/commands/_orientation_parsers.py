@@ -67,7 +67,7 @@ def _move_dispatch(args):
 
 def register_orientation_subparsers(sub):
     for domain, verbs in (("context", ("show",)),
-                          ("bot", ("list", "show", "capabilities", "start", "stop", "restart")),
+                          ("bot", ("list", "show", "capabilities", "start", "stop", "restart", "handoff")),
                           ("fleet", ("show",)),
                           ("project", ("list", "show"))):
         group = sub.add_parser(domain, help=f"Read {domain} declarations and available evidence")
@@ -163,7 +163,7 @@ def register_orientation_subparsers(sub):
         for verb in verbs:
             route = children.add_parser(verb, help=f"{verb.capitalize()} {domain} context")
             route.add_argument("--json", action="store_true", help="One schema-1 result object")
-            route.set_defaults(func=_bot_runtime_dispatch if domain == "bot" and verb in {"start", "stop", "restart"}
+            route.set_defaults(func=_bot_runtime_dispatch if domain == "bot" and verb in {"start", "stop", "restart", "handoff"}
                                else _dispatch, public_command=f"{domain}.{verb}")
             if domain == "bot" and verb != "list":
                 route.add_argument("bot_id", metavar="BOT", help="Exact local bot ID")

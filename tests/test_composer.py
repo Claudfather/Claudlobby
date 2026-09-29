@@ -426,7 +426,11 @@ class TestComposeSettingsLocal:
         worker_grants = compose_settings_local(worker, fleet, paths)["permissions"]["allow"]
         assert "Bash(claudlobby --json bot restart lead)" in lead_grants
         assert "Bash(claudlobby --json bot restart worker)" in lead_grants
+        assert "Bash(claudlobby --json bot handoff worker)" in lead_grants
+        assert "Bash(claudlobby --json bot handoff lead)" not in lead_grants
         assert "Bash(claudlobby --json bot restart worker)" in worker_grants
+        assert "Bash(claudlobby --json bot handoff lead)" not in worker_grants
+        assert "Bash(claudlobby --json bot handoff worker)" not in worker_grants
         assert "Bash(claudlobby --json fleet pulse)" in lead_grants
         assert "Bash(claudlobby --json fleet pulse)" not in worker_grants
         assert "Bash(claudlobby --json bot session worker)" in worker_grants

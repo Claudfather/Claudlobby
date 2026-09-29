@@ -122,6 +122,28 @@ def test_self_restart_requires_fresh_owned_frontmatter(tmp_path):
         bot_operations._fresh_self_handoff(bot_dir)
 
 
+def test_explicit_handoff_keeps_running_session_env_while_stop_cleans_it(tmp_path):
+    bot_dir = tmp_path / "runtime/bots/worker"
+    (bot_dir / ".claude").mkdir(parents=True)
+    (bot_dir / "bot.conf").write_text("BOT_ID=worker\nBOT_NAME=worker\nFLEET_NAME=example\n"
+                                       "BOT_SERVICE=com.example.worker\nTMUX_SOCKET=com.example.worker\n")
+    (bot_dir / ".claude/session.md").write_text("recent checkpoint\n")
+    secret_env = bot_dir / ".tmux-env"
+    secret_env.write_text("private launch values\n")
+    script = Path(__file__).resolve().parents[1] / "lib/pre-stop-handoff.sh"
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "TMPDIR": str(tmp_path),
+           "CLAUDLOBBY_ROOT": str(tmp_path), "PLANE_EMIT_DISABLED": "1"}
+    explicit = subprocess.run(["/bin/bash", str(script), str(bot_dir), "--explicit"],
+                              env=env, capture_output=True, text=True, timeout=10)
+    assert explicit.returncode == 0, explicit.stderr
+    assert explicit.stdout.strip() == "handoff-skipped:recent"
+    assert secret_env.read_text() == "private launch values\n"
+    stopping = subprocess.run(["/bin/bash", str(script), str(bot_dir)],
+                              env=env, capture_output=True, text=True, timeout=10)
+    assert stopping.returncode == 0, stopping.stderr
+    assert not secret_env.exists()
+
+
 @pytest.mark.parametrize("stalled", [False, True])
 def test_self_restart_witness_survives_requesting_process_exit(tmp_path, stalled):
     """The one-shot witness, not the dying pane, owns the final outcome."""
@@ -199,6 +221,7 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
             self.actions = []
             self.calls = []
             self.handoff_rc = 0
+            self.explicit_handoff = "handoff-skipped:recent"
             self.readiness = "bridge-ready"
             self.fence_args = []
             self.target = "com.example.worker.service"
@@ -221,7 +244,12 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
             elif function == "svc_activation_bot_ready":
                 value = self.readiness
             elif function == "svc_activation_handoff":
-                value = ""
+                value = self.explicit_handoff if len(args) == 4 else ""
+                if value == "handoff-saved":
+                    handoff = Path(args[0]) / ".claude/session.md"
+                    handoff.parent.mkdir(exist_ok=True)
+                    now = datetime.now(timezone.utc)
+                    handoff.write_text(f"---\nlast_updated: {now:%Y-%m-%dT%H:%M:%SZ}\n---\ncontext\n")
             elif function == "svc_bot_disenroll_exact":
                 self.actions.append("stop")
                 Path(args[1]).unlink()
@@ -263,6 +291,21 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
     healthy = call("bot", "start", "worker")["data"]
     assert healthy["state"] == "running" and healthy["changed"] is False
     assert healthy["readiness"] == "current_session_ready" and native.actions == []
+
+    native.calls.clear()
+    skipped = call("bot", "handoff", "worker")["data"]
+    assert skipped["handoff"] == "skipped" and skipped["reason"] == "recent"
+    assert "svc_activation_handoff" in native.calls and native.actions == []
+    native.explicit_handoff = ""  # the old native rc0 is not proof of a handoff
+    unknown = call("bot", "handoff", "worker", expected=6)
+    assert unknown["error"]["code"] == "unavailable" and native.actions == []
+    native.explicit_handoff = "handoff-saved"
+    saved = call("bot", "handoff", "worker")["data"]
+    assert saved["handoff"] == "saved" and saved["reason"] == "fresh_file_verified"
+    assert native.actions == []  # a handoff never stops or re-enrolls the bot
+    before_wrong = len(native.calls)
+    assert call("bot", "handoff", "other", expected=4)["error"]["code"] == "conflict"
+    assert len(native.calls) == before_wrong
 
     native.session = "unknown"
     assert call("bot", "start", "worker", expected=6)["error"]["code"] == "unavailable"
