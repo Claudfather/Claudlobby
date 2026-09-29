@@ -16,6 +16,8 @@ operation; it does not publish authored configuration.
 
 ## Sealed release delivery
 
+An existing mutable installation must first satisfy the [conversion prerequisite](existing-host-release-conversion.md), including stopping its old source puller before merging code that timer follows.
+
 Edit source configuration and library inputs, assemble the reviewed release, then
 run `claudlobby config plan --release RELEASE_ID`, inspect `config diff PLAN_ID`,
 and use `host activate PLAN_ID --install-directory PATH`. A plan writes staged

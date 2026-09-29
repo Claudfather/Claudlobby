@@ -21,6 +21,8 @@ Add a 9th bot? Add its stanza to `fleet.yaml`. Update a guardrail? Edit its sour
 
 ## Quick start
 
+Existing checkout-based hosts must follow the [conversion prerequisite](documentation/existing-host-release-conversion.md) before pulling this release. The cold-host sequence below does not retire an old source-pulling timer.
+
 **You need:** a working Python interpreter, `tmux`, a running user manager (launchd or systemd user), [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated, and the Telegram channel plugin if your fleet declares Telegram. `host setup` checks the native manager and required executables; it does not install them.
 
 Build the candidate wheel and its offline, SHA-256-locked dependency wheelhouse as shown in [Getting started](documentation/getting-started.md). Install that wheel into a temporary bootstrap venv, then use its CLI to assemble a sealed release under an **absolute data root outside the checkout**:

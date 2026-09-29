@@ -33,6 +33,11 @@ skills and permissions are staged with `config plan`, inspected with `config dif
 and applied through whole-host `host activate`; immutable releases keep code and
 native assets together. Test changes first in an independent canary data root.
 
+Existing checkout-based hosts must stop and disable their old `pull-root` timer
+before merging this change into the branch it follows. The root-pulling operation
+is removed; build from a separate source checkout and use explicit release
+activation. See the [conversion prerequisite](documentation/existing-host-release-conversion.md).
+
 Breaking replacements (no compatibility aliases or shims):
 
 | Retired entry | Supported entry |

@@ -2,6 +2,8 @@
 
 This is the installed-release path for a new host. Build one candidate wheel and its exact offline dependency inputs, assemble it under a host data root, then use the sealed CLI to install and activate a fleet. The checkout is a build input; running bots use the release's copied interpreter, packaged library, and native scripts.
 
+For an existing checkout-based host, first read the [conversion prerequisite](existing-host-release-conversion.md). Do not pull incompatible framework source into a running installation.
+
 ## Prerequisites
 
 - A working CPython accepted by the candidate wheel (`python3 -c 'import plistlib, ssl, venv'` must succeed), `git` for a source build, and enough disk for a copied Python environment and dependency wheels.
