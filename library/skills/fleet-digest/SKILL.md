@@ -130,7 +130,7 @@ an uncitable theme is unusable downstream.
 ## Step 5 — Join the rollups
 
 ```bash
-claudlobby --fleet "$F" uptime
+claudlobby --fleet "$F" fleet uptime
 claudlobby --fleet "$F" utilization
 claudlobby --fleet "$F" --json fleet reports list --since "${SINCE}T00:00:00Z"
 ```

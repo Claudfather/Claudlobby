@@ -92,10 +92,11 @@ claudlobby host-timers           # compose host-global timer units from system.y
 claudlobby list-library          # show available personas / skills / mcp / etc.
 claudlobby diff [--bot <name>]   # show drift between runtime/ and library/
 claudlobby promote <bot>         # move runtime drift back to library/ (v1: manual)
-claudlobby status [--bot <name>] # fleet health dashboard
+claudlobby fleet status             # fleet health dashboard
+claudlobby bot status <name>        # one bot, including native and Plane observations
 claudlobby host doctor                # pre-flight fleet health diagnostic
 claudlobby --json fleet reports list  # paginated worker reports (--bot, --status, --since RFC3339)
-claudlobby uptime [--bot <name>] # per-bot uptime, MTBR, restart-rate metrics
+claudlobby fleet uptime [--bot <name>] # per-bot uptime, MTBR, restart-rate metrics
 claudlobby events                # fleet events from the plane (--bot, --type, --critical)
 claudlobby new-bot               # interactive bot scaffolding
 claudlobby new-skill             # scaffold a new skill directory

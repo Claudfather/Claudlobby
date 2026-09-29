@@ -33,7 +33,7 @@ def _flat(text: str) -> str:
 DOORS = ['claudlobby --json --fleet "$FLEET_NAME" checkin list --bot "$BOT_ID" --last',
          'claudlobby --json --fleet "$FLEET_NAME" checkin list --bot "$BOT_ID" --since 7d --raised',
          'claudlobby --fleet "$FLEET_NAME" brief --bot $BOT_ID --json',
-         'claudlobby --fleet "$FLEET_NAME" status --json', "claudron lookup --limit 5", "gh issue list",
+         'claudlobby --fleet "$FLEET_NAME" fleet status --json', "claudron lookup --limit 5", "gh issue list",
          'claudlobby --json --fleet "$FLEET_NAME" checkin record --file DECISION_FILE --request-id CHECKIN_UUID',
          'task assign TASK_ID --bot WORKER --checkin CHECKIN_ID',
          'assignment deliver ASSIGNMENT_ID --file FILE',
@@ -172,11 +172,11 @@ def test_the_composer_resolves_the_script_grants_through_tool_grants(fleet_dir):
     )
     for g in ("Bash(claudlobby --json --fleet * checkin record *)", "Bash(*tg-post.sh*)",
               "Bash(claudlobby --json --fleet * checkin list *)", "Bash(claudlobby --fleet * brief *)",
-              "Bash(claudlobby --fleet * status *)", "Bash(claudlobby --json fleet inbox)"):
+              "Bash(claudlobby --fleet * fleet status *)", "Bash(claudlobby --json fleet inbox)"):
         assert g in grants, grants
     assert "Bash(*dispatch-task.sh*)" not in grants
     assert "Bash(claudlobby *)" not in grants
-    for g in ("Bash(claudlobby checkins *)", "Bash(claudlobby brief *)", "Bash(claudlobby status *)"):
+    for g in ("Bash(claudlobby checkins *)", "Bash(claudlobby brief *)", "Bash(claudlobby fleet status *)"):
         assert g not in grants, g
 
 

@@ -259,12 +259,16 @@ for line in open(sys.argv[2]):
     else
         FINDINGS="${FINDINGS}$f: script_error could not be read; "
     fi
-    if claudlobby_cli --fleet "$f" status --json > "$RUN_DIR/status.$f" 2>>"$LOG"; then
+    if claudlobby_cli --fleet "$f" fleet status --json > "$RUN_DIR/status.$f" 2>>"$LOG"; then
         silent=$(python3 -c '
 import datetime as d, json, sys
 at = lambda s: d.datetime.fromisoformat(s.replace("Z", "+00:00"))
 pre, t0 = at(sys.argv[1]), at(sys.argv[2])
-for bot in json.load(open(sys.argv[3])).get("bots", []):
+result = json.load(open(sys.argv[3]))
+if result.get("ok") is not True or result.get("schema_version") != 1:
+    print("!unreadable")
+    sys.exit(0)
+for bot in (result.get("data") or {}).get("bots", []):
     if bot.get("plane_unreachable"):
         print("!unreadable")
         sys.exit(0)

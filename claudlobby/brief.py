@@ -45,7 +45,7 @@ class of untruth it was added to prevent:
       that symbol existing, so it clears when the SSOT lands and not before.
 
   ``#891`` uptime windows
-      OMITTED. ``claudlobby uptime`` counts missing keepalive history as
+      OMITTED. ``claudlobby fleet uptime`` counts missing keepalive history as
       downtime, so its percentages are retention artifacts. The cost/utilization
       section is cut from v1 for that reason and the YAGNI one (nothing
       meaningfully writes the utilization file). Recorded as an explicit

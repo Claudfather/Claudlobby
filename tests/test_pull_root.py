@@ -64,7 +64,7 @@ esac
 CLI_STUB = r"""#!/usr/bin/env bash
 case "$*" in
 *host\ job\ show\ pull-root*) [ -e "$PULL_ROOT_STUB/job_fails" ] && exit 1; cat "$PULL_ROOT_STUB/job.json" ;;
-*status*--json*) [ -e "$PULL_ROOT_STUB/status_fails" ] && exit 3
+*fleet\ status\ --json*) [ -e "$PULL_ROOT_STUB/status_fails" ] && exit 3
     python3 "$PULL_ROOT_STUB/status.py" "$CLAUDLOBBY_ROOT" ;;
 esac
 """
@@ -78,7 +78,7 @@ names = open(os.path.join(os.environ["PULL_ROOT_STUB"], "silent")).read().split(
     if os.path.exists(os.path.join(os.environ["PULL_ROOT_STUB"], "silent")) else []
 bots = [{"name": "healthy", "last_heartbeat": (at + d.timedelta(seconds=1)).isoformat(), "plane_unreachable": None}]
 bots += [{"name": n, "last_heartbeat": (at - d.timedelta(seconds=1)).isoformat(), "plane_unreachable": None} for n in names]
-print(json.dumps({"fleet": "f1", "bots": bots}))
+print(json.dumps({"ok": True, "schema_version": 1, "data": {"fleet": "f1", "bots": bots}}))
 """
 
 
@@ -478,14 +478,14 @@ def test_an_unreadable_hold_holds_and_does_not_pull(inst):
 
 UNREACHABLE_STATUS_PY = """import json
 reason = "the plane could not answer: probe"
-print(json.dumps({"fleet": "f1", "switches_off": [], "bots": [
+print(json.dumps({"ok": True, "schema_version": 1, "data": {"fleet": "f1", "switches_off": [], "bots": [
     {"name": "healthy", "last_heartbeat": None, "plane_unreachable": reason},
-    {"name": "otis", "last_heartbeat": None, "plane_unreachable": reason}]}))
+    {"name": "otis", "last_heartbeat": None, "plane_unreachable": reason}]}}))
 """
 
 
 def test_status_rc0_with_the_plane_unreachable_pages_as_unknown(inst):
-    # status --json exits 0 on an unreachable plane and says so per bot (core.py:503-507).
+    # fleet status --json exits 0 on an unreachable plane and says so per bot.
     (inst.stub / "status.py").write_text(UNREACHABLE_STATUS_PY)
     inst.merge_upstream({"lib/new.sh": "echo new\n"})
     _ok(inst.run())

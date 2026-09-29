@@ -47,7 +47,7 @@ $CLAUDLOBBY_ROOT/state/ironclad-runs/<pr-number>-<YYYYMMDD-HHMMSS>/
 
 ### 1. Select idle workers
 
-Read `claudlobby --fleet "$FLEET_NAME" status --json` for observed worker availability and exclude yourself. A missing or unknown observation is not idle. If zero workers are observed idle, note any prior-cycle results, post a status comment, and stop — do not block.
+Read `claudlobby --fleet "$FLEET_NAME" fleet status --json` and inspect `data.bots[]` for observed worker availability; exclude yourself. A missing or unknown observation is not idle. If zero workers are observed idle, note any prior-cycle results, post a status comment, and stop — do not block.
 
 ### 2. Dispatch each applicable lens
 

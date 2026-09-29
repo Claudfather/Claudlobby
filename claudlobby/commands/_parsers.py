@@ -119,13 +119,6 @@ def register_subparsers(sub) -> None:
     pp.add_argument("bot", help="Bot name")
     pp.set_defaults(func=_command("core", "cmd_promote"))
 
-    ps = sub.add_parser("status", help="Fleet health dashboard")
-    ps.add_argument("--bot", help="Show detailed status for one bot")
-    ps.add_argument(
-        "--json", action="store_true", dest="json", help="JSON output for scripting"
-    )
-    ps.set_defaults(func=_command("core", "cmd_status"))
-
     pb = sub.add_parser(
         "brief",
         help="Read a bot's active fleet mission, canonical work, workstreams, reports and alerts",
@@ -173,19 +166,6 @@ def register_subparsers(sub) -> None:
     register_message_write_subparsers(message_children)
     from ._request_read_parsers import register_request_read_subparsers
     register_request_read_subparsers(sub)
-
-    pu = sub.add_parser(
-        "uptime",
-        help="Per-bot uptime, MTBR, and restart-rate from keepalive logs",
-    )
-    pu.add_argument("--bot", help="Show metrics for one bot only")
-    pu.add_argument(
-        "--window",
-        choices=["24h", "7d", "30d"],
-        help="Time window (default: show all three in JSON, 24h for table)",
-    )
-    pu.add_argument("--json", action="store_true", dest="json", help="JSON output")
-    pu.set_defaults(func=_command("core", "cmd_uptime"))
 
     pe = sub.add_parser(
         "env-migrate",

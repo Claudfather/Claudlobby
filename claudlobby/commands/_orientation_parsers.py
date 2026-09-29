@@ -23,6 +23,12 @@ def _usage_dispatch(args):
                    json_output=args.json)
 
 
+def _status_dispatch(args):
+    return execute(args.public_command,
+                   lambda: import_module(".status_read", __package__).dispatch(args),
+                   json_output=args.json)
+
+
 def _automation_dispatch(args):
     return execute(args.public_command,
                    lambda: import_module(".automation", __package__).dispatch(args),
@@ -55,6 +61,15 @@ def register_orientation_subparsers(sub):
         group = sub.add_parser(domain, help=f"Read {domain} declarations and available evidence")
         children = group.add_subparsers(dest=f"{domain}_command", required=True)
         if domain == "fleet":
+            status = children.add_parser("status", help="Read fleet session, native and recorded status")
+            status.add_argument("--json", action="store_true", help="One schema-1 result object")
+            status.set_defaults(func=_status_dispatch, public_command="fleet.status")
+            uptime = children.add_parser("uptime", help="Read Plane keepalive uptime with coverage")
+            uptime.add_argument("--bot", metavar="BOT", help="Exact declared bot ID")
+            uptime.add_argument("--window", choices=("24h", "7d", "30d"),
+                                help="Window (default: all in JSON, 24h in text)")
+            uptime.add_argument("--json", action="store_true", help="One schema-1 result object")
+            uptime.set_defaults(func=_status_dispatch, public_command="fleet.uptime")
             from ._setup_parsers import register_fleet_setup
             register_fleet_setup(children)
             for action in ("start", "stop", "restart", "reconcile", "reload"):
@@ -82,6 +97,10 @@ def register_orientation_subparsers(sub):
             usage.add_argument("--json", action="store_true", help="One schema-1 result object")
             usage.set_defaults(func=_usage_dispatch, public_command=f"{domain}.usage")
         if domain == "bot":
+            status = children.add_parser("status", help="Read one bot's session, native and recorded status")
+            status.add_argument("bot_id", metavar="BOT", help="Exact declared bot ID")
+            status.add_argument("--json", action="store_true", help="One schema-1 result object")
+            status.set_defaults(func=_status_dispatch, public_command="bot.status")
             move = children.add_parser("move", help="Preview or apply a bot move between fleets")
             move.add_argument("bot", metavar="BOT")
             move.add_argument("--to", required=True, metavar="FLEET")

@@ -97,7 +97,7 @@ The monitor reads **only** pre-aggregated sources:
 |---|---|---|
 | Transcript digests | `claudlobby events --type session_digest` (the plane; #1503 — no longer a file) | one `session_digest` event per finished session |
 | Bot events | `claudlobby events` (the one door for bot events — never open `state/plane/plane.db` by hand; see `fleet-observability`, whose composed recipe this used to duplicate and now defers to) | see `fleet-observability` |
-| Rollups | `claudlobby uptime` · `utilization` · `--json fleet reports list` | fleet-level measures and paginated reports; inspect `ok` and follow `next_cursor` |
+| Rollups | `claudlobby fleet uptime` · `utilization` · `--json fleet reports list` | fleet-level measures and paginated reports; inspect `ok` and follow `next_cursor` |
 
 ### Digest row contract
 

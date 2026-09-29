@@ -6,7 +6,7 @@ tool_grants:
   - "Bash(claudlobby --json --fleet * checkin list *)"
   - "Bash(claudlobby --json --fleet * checkin record *)"
   - "Bash(claudlobby --fleet * brief *)"
-  - "Bash(claudlobby --fleet * status *)"
+  - "Bash(claudlobby --fleet * fleet status *)"
   - "Bash(claudlobby --json fleet inbox)"
   - "Bash(claudron lookup *)"
   - "Bash(gh issue list *)"
@@ -81,8 +81,8 @@ A step that fails is **recorded, never guessed around**: add its name to
    `claudlobby --json fleet inbox`; brief's work section does not claim to include
    every raised question. The standing
    `utilization` entry (#891) is **not an input** of this skill; ignore it.
-1b. **The roster, and who is idle** — `claudlobby --fleet "$FLEET_NAME" status
-   --json`: `bots[]`, each with `name` (the id the ACT line takes as `<worker>`),
+1b. **The roster, and who is idle** — `claudlobby --fleet "$FLEET_NAME" fleet status
+   --json`: `data.bots[]`, each with `name` (the id the ACT line takes as `<worker>`),
    `state`, `pane_state` (`BUSY` / `IDLE`), `tmux_alive`, `current_task`, and
    `plane_unreachable` (non-null when the plane could not be read for that bot). A
    `null` `pane_state` — with or without `plane_unreachable` set (a fleet with no

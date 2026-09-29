@@ -59,7 +59,7 @@ Bots accumulate context; bad context degrades output. Proactively manage:
   --status completed --since <RFC3339 instant>`, tell it to `/compact` first or restart it. Do
   NOT ask a worker for a context percentage — no bot can measure one
   (`context-management`), so asking only invites a fabricated number you would
-  then route on. Note `claudlobby uptime` does not currently give a per-bot
+  then route on. Note `claudlobby fleet uptime` does not currently give a per-bot
   restart anchor, so count over a time window rather than "since last restart".
 
   Use the selected fleet context; name `--fleet FLEET` explicitly when reading

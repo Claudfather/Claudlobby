@@ -875,7 +875,7 @@ def task_texts(conn: sqlite3.Connection, fleet: str, bot: str) -> dict[str, str]
             if _task_id(ref)}
 
 
-# --- keepalive entries (cutover B2): what `claudlobby uptime` reads ---------------
+# --- keepalive entries (cutover B2): what `claudlobby fleet uptime` reads ---------------
 # The keepalive.log's (instant, state) pairs from the plane: the heartbeat
 # samples the tick emits (BUSY / IDLE / UNKNOWN in the sample's value), the
 # dead-session fact (`bot.session_up` = false → DOWN, which counts as no
