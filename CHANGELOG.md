@@ -14,6 +14,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **The page's remedy names the vault too:** `claudron sync --check --vault <path>`. The old remedy, run inside the vault, hit the same walk-up failure. The runbook says the same.
 - **Test:** a stub engine with 0.5.2+ discovery (walk-up needs the identity file; `--vault` does not) and a vault without the file. The job must record `ok=1`, with `--vault` on both calls. It is red on `main` with the live symptom, and a control test pins the stub's model.
 
+### Added — the host probe records what splits load into CPU and IO: swap, swap traffic, runnable and blocked processes, iowait (#1644)
+
+On Linux, load counts tasks waiting on IO as well as tasks waiting for a CPU. So `host.load` alone cannot tell a CPU burst from an SD-card stall, and that is exactly the question every reset on #1644 leaves open. The host probe now records four more facets every minute, read from `/proc`:
+
+- `host.swap_used_mb`: swap in use, SwapTotal minus SwapFree.
+- `host.swap_pages`: pages swapped in and out since boot (vmstat `pswpin`, `pswpout`). A rate is the difference of two samples.
+- `host.procs`: processes runnable, and blocked on IO, right now (`procs_running`, `procs_blocked`).
+- `host.cpu_ticks`: iowait ticks and total CPU ticks since boot, from the aggregate `cpu` line. With the total, the iowait share of any minute is the ratio of two differences, so no tick rate or core count is assumed. The total runs from user through steal; guest time is already counted inside user and nice.
+
+A facet is absent where its file or a field is missing or is not a plain number, never a fabricated 0; on macOS, which has no `/proc`, all four are absent. A host with no swap records a real 0, because its meminfo says so. PSI (`/proc/pressure`), the direct measure of CPU against IO, is not available on the estate's host. It needs `psi=1` on the kernel command line, which is a host decision: it is noted on #1644, not changed here. `HOST_PROBE_PROC` is a test seam that points the probe at a fixture directory instead of `/proc`.
+
 ### Fixed — `vault-sync` records a refused sync as a failure; `[vault]` pin bumped to Claudron v0.5.3 (#1970, Claudron #142)
 
 `lib/vault-sync.sh` decided success from the `--json` envelope's `ok` alone. Before Claudron 0.5.3, `claudron sync --json` printed `"ok": true` even for a refused sync, one that exits 1 with its reason in `data.detail`. So every refusal was recorded as `vault.sync_ok = 1`, and `vault_sync_failed` never paged. That covers the side-branch guard, a live `index.lock`, a stopped rebase and a failed `add`. There are two fixes:
