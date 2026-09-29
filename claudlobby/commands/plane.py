@@ -18,7 +18,7 @@ from pathlib import Path
 from ._helpers import _load_fleet_or_exit, _resolve_paths
 from ..plane.contracts import ContractViolation, export_schemas
 from ..plane.db import connect, connect_ro, db_file, open_ro
-from ..plane.emit_api import _load_capture_config, capture_mode, DEFAULT_CAPTURE
+from ..plane.emit_api import _load_capture_config, capture_mode, DEFAULT_CAPTURE, emit_batch
 from ..plane.identity import provisional_actors
 from ..plane.ids import ensure_host_uid
 from ..plane.migrations import DowngradeError, SCHEMA_USER_VERSION

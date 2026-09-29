@@ -390,7 +390,8 @@ def test_cli_changes_zero_and_exclusive_modes(tmp_path):
     assert BOT not in r.stdout                # the list mode did NOT run
     r2 = _cli(root, "registry", "--show", "x", "--history", "y")
     assert r2.returncode == 2
-    assert "not allowed with" in r2.stderr
+    assert "invalid argument: command syntax" in r2.stderr
+    assert "inspect claudlobby plane --help" in r2.stderr
 
 
 # --- verify (the injectable-assembly seam) ---------------------------------
