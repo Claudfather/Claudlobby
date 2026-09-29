@@ -20,7 +20,7 @@ from .releases import _executing_release, _host_releases, _host_root
 
 def _hint(root):
     return (f"inspect claudlobby --root {shlex.quote(str(root))} host status; "
-            "use host activate PLAN_ID --resume ID only for a recorded quiesced pre-start step; "
+            "use host activate PLAN_ID --resume ID --install-directory PATH only for a recorded quiesced pre-start step; "
             "other steps need their missing handoff or candidate-start evidence repaired first")
 
 
