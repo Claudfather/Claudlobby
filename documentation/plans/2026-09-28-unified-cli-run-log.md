@@ -1,5 +1,43 @@
 # Unified CLI implementation record
 
+### 2026-09-29 15:46 UTC — public diagnostic skill passed on the live canary
+
+**Measured:** source `ceaa249` is active only on the independent Mac canary,
+activation `f66485d5-e8cb-4e25-a07e-1b08d87b90b7`. The manager invoked the
+composed `doctor` skill and ran five literal commands under normal `auto`
+permissions: `context show`, `config validate`, `host doctor --no-delivery`,
+`fleet reconcile` and `plane doctor`, all with `--json`. Actual tool results
+returned `ok=true`; the bot reported no blocking permission prompt. This proves
+these composed grants work, not that unrelated commands are denied. The trace
+retains honest warnings and unknowns: disabled default plugins, npx cache,
+unchecked delivery, unknown running-release observation and unrederived registry
+drift. Evidence: `~/.local/share/claudlobby-canary-live-1747/evidence/doctor-skill/`
+`{doctor-cli-proof.md,trace-tools.json,trace-results.json,grants.json}`;
+[PR #1985](https://github.com/Claudfather/Claudlobby/pull/1985).
+
+**Read from code:** Plane doctor now uses the common result contract and returns
+exit 4 for attention, including failed switch resolution. Selected-release
+admission protects spool mutations and live retention; retention updates both
+lanes and their watermarks in one transaction. Twenty-five existing development
+instruments moved from `lib/` to `harness/` and are excluded from installed runtime
+resources. Their private compose entry reuses the existing compositor and refuses
+selected roots. No new migration or measurement framework was introduced.
+
+**Measured:** the combined focused run passed 49 cases. Six remaining development
+instrument cases failed because their private helper compared a prepared artifact
+with a later fixture Git revision. `86d1305` checks the captured artifact identity
+for prepared trees; those six cases then passed. The initial run with an incorrectly
+bound editable interpreter was rejected by the origin guard and is not product
+acceptance. No full local suite was rerun. All three failures from hosted `ddeaa63`
+are repaired and their exact checks passed; hosted CI for this batch is pending.
+
+**Measured limits:** Lumbergh PID 2598, primary Plane PID 1498 and production
+selection remain unchanged. The latest code includes one private-helper correction
+beyond canary source `ceaa249`; it does not enter the installed runtime. Remaining
+work is fleet-container migration and public `generate` retirement, current-head
+hosted CI, cold Linux/Pi evidence and protected production adoption. The epic is
+not complete.
+
 ### 2026-09-29 15:16 UTC — retired-bot cleanup passed on the live canary
 
 **Measured:** source `0868310` is active only on the independent Mac canary,
