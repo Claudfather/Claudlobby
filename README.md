@@ -111,7 +111,7 @@ claudlobby host cache warm            # pre-download npx + uvx packages for MCP 
 **Gives you:**
 
 - `library/` — 19 expertise profiles (manager, engineer, reviewer, designer, business, data-engineering, …), 55 skills (dispatch, lifecycle, prs, sweep, fleet-status, briefing, status, triage, …), 17 MCP fragments (github, github-app, gws, google-analytics, google-search-console, meta-ads, meta-business, posthog, notion, linear, slack, shopify, printify, homeassistant, docker, spotify, granola), 25 guardrails, 40 protocols
-- `lib/` — 84 bash lifecycle scripts, including private runtime owners and development instruments; operators and agents use the public CLI
+- `lib/` — 82 bash lifecycle scripts, including private runtime owners and development instruments; operators and agents use the public CLI
 - `claudlobby` — the installed Python CLI and compositor
 - `fleet.yaml.example` — a full fleet manifest template you can copy and adapt
 
