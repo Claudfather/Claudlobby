@@ -97,7 +97,7 @@ Full example:
 $CLAUDLOBBY_ROOT/lib/dispatch.sh eng-1 '[BOTCOMMAND] ari | task | Run security audit on repo-a | repo:repo-a | priority:high | ref:https://github.com/org/repo-a/issues/99'
 ```
 
-`dispatch.sh` prepends `set +H; ` itself, which means a message that begins with `/`, such as `/reports is missing`, reaches the worker as text instead of running as a slash command; it leaves the prefix off a bare slash command, which has to run. (`set +H` is bash's switch for history expansion, which never happens at a Claude Code prompt.) It also sanitizes the input, and — on a miss (the worker's session is gone on its socket) — logs a `send_miss` event rather than silently dropping. You never hand-type `tmux send-keys -t`.
+`dispatch.sh` prepends `set +H; ` itself, which means a message that begins with `/`, such as a file path, reaches the worker as text instead of running as a slash command; it leaves the prefix off a message that starts with a command word and has no `!`, which has to run as a command. (`set +H` is bash's switch for history expansion, which never happens at a Claude Code prompt.) It also sanitizes the input, and — on a miss (the worker's session is gone on its socket) — logs a `send_miss` event rather than silently dropping. You never hand-type `tmux send-keys -t`.
 
 ## The plane receipt trailer (framework, not yours to type)
 

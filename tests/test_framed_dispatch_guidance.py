@@ -43,5 +43,5 @@ def test_every_composed_bot_is_told_what_the_set_h_prefix_is(fleet_dir):
         text = compose_claude_md(bot, fleet, paths)
         section = text.split("## Dispatches framed as pasted text", 1)[1].split("\n## ", 1)[0]
         assert "can also start with `set +H; `" in section, bot.name
-        assert "`/reports is missing`" in section, bot.name
+        assert "such as a file path" in section, bot.name
         assert "there is nothing to run" in section, bot.name
