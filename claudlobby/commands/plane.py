@@ -360,7 +360,7 @@ def cmd_plane_doctor(args) -> int:
                 [r for r in _rows if r.switch.plane]))
             lines.append(_sw.format_table(_rows, plane_only=True))
         except Exception as exc:  # noqa: BLE001 — a health command never crashes
-            rung(True, "switches", f"unavailable: {exc}")
+            rung(False, "switches", f"unavailable: {exc}")
         return failing
 
     def operation() -> CommandOutput:

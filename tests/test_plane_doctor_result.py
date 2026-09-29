@@ -85,3 +85,19 @@ def test_plane_doctor_json_storage_refusal_is_unavailable(tmp_path, monkeypatch,
     assert result["error"]["code"] == "unavailable"
     assert result["data"]["status"] == "refused"
     assert "private storage detail" not in stdout
+
+
+def test_plane_doctor_switch_resolution_failure_is_attention(tmp_path, monkeypatch, capsys):
+    from claudlobby import switches
+
+    monkeypatch.setattr("claudlobby.context.get_resources", source_package)
+    monkeypatch.setattr(switches, "resolve", lambda *_: (_ for _ in ()).throw(
+        RuntimeError("switches unavailable")))
+
+    rc = main(["--root", str(tmp_path), "plane", "doctor", "--json"])
+
+    result = json.loads(capsys.readouterr().out)
+    assert rc == 4
+    assert result["data"]["status"] == "attention"
+    assert any(row["name"] == "switches" and row["status"] == "attention"
+               for row in result["data"]["rungs"])

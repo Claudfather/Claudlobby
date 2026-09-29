@@ -319,7 +319,7 @@ def test_doctor_and_registry_survive_a_corrupt_declaration_row(tmp_path):
     c.commit()
     c.close()
     r = _cli(root, "doctor")
-    assert r.returncode == 1
+    assert r.returncode == 4
     assert "registry lane" in r.stdout and "unreadable" in r.stdout
     assert "spool depth" in r.stdout          # later rungs still printed
     assert "Traceback" not in r.stderr
@@ -373,7 +373,7 @@ def test_doctor_survives_valid_json_non_dict_detail(tmp_path):
     c.commit()
     c.close()
     r = _cli(root, "doctor")
-    assert r.returncode == 1
+    assert r.returncode == 4
     assert "registry lane" in r.stdout and "unreadable" in r.stdout
     assert "spool depth" in r.stdout
     assert "Traceback" not in r.stderr
@@ -489,6 +489,6 @@ def test_doctor_surfaces_invalid_tombstones_and_scan_health(tmp_path):
     emit_batch(root, [_snap(BOT, "s1", T1, P1),
                       _tomb(BOT, "s2", T2), _done("s2", T2, complete=False)])
     r = _cli(root, "doctor")
-    assert r.returncode == 1
+    assert r.returncode == 4
     assert "tombstone validity" in r.stdout
     assert "INCOMPLETE" in r.stdout

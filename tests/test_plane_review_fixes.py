@@ -622,7 +622,7 @@ def test_spool_quarantine_json_and_wrong_name_refusal(env):
     assert source.exists() and not (quarantine_dir(root) / name).exists()
 
 
-def test_f11_doctor_healthy_0_quarantine_1(tmp_path: Path):
+def test_f11_doctor_healthy_0_quarantine_attention(tmp_path: Path):
     initialize_plane(tmp_path)
     emit(tmp_path, _comm())
     r = _run(["--root", str(tmp_path), "plane", "doctor"])
@@ -630,14 +630,14 @@ def test_f11_doctor_healthy_0_quarantine_1(tmp_path: Path):
     qname = "ev_" + "d" * 32 + ".json"
     (quarantine_dir(tmp_path) / qname).write_text("{}")
     r = _run(["--root", str(tmp_path), "plane", "doctor"])
-    assert r.returncode == 1
+    assert r.returncode == 4
     assert "quarantine" in r.stdout
 
 
 def test_f11_doctor_flags_broken_capture_config(tmp_path: Path):
     _capture_path(tmp_path).write_text('{"*": "ful"}')
     r = _run(["--root", str(tmp_path), "plane", "doctor"])
-    assert r.returncode == 1
+    assert r.returncode == 4
     assert "capture config" in r.stdout
 
 

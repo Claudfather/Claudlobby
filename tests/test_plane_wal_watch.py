@@ -79,7 +79,7 @@ def test_a_held_reader_is_named_while_the_wal_is_over_the_ceiling(tmp_path):
         assert writer.checkpoint_busy > 0
 
         rc, line = _doctor(root)
-        assert rc == 1 and line.startswith("[ATTENTION] wal"), line
+        assert rc == 4 and line.startswith("[ATTENTION] wal"), line
         assert "over the 4.0 MB ceiling" in line, line
         if Path("/proc/locks").exists():
             assert f"pid {reader.pid}" in line, line  # the holder, by name
