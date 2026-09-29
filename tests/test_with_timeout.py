@@ -23,7 +23,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from conftest import constructed_env
+from tests.conftest import constructed_env
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HARNESS = REPO_ROOT / "tests" / "test_with_timeout.sh"
