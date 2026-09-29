@@ -42,6 +42,10 @@ _TERMINAL = ",".join(f"'{e}'" for e in TERMINAL_TASK_EVENTS)
 NON_TERMINAL_CLAUSE = (
     " NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
     f"   AND t.assignment_id = a.assignment_id AND t.event IN ({_TERMINAL}))"
+    " AND NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
+    "   AND t.emitter='claudlobby.tasks.v1' AND t.event='cancelled'"
+    "   AND t.assignment_id IS NULL AND t.work_item_id=a.work_item_id"
+    "   AND t.ingest_seq>a.ingest_seq)"
 )
 
 # The plane's OPEN SET for one assignee AS OF an instant (cutover chunk 3, the
@@ -124,7 +128,10 @@ OPEN_ASSIGNMENTS_AT_SQL = (
     "      OR (a.source_ref LIKE 'dispatch-log:%' AND a.source_ref NOT LIKE 'dispatch-log:sha:%'"
     "          AND t.assignment_id IN (SELECT s.assignment_id FROM assignments s"
     "            WHERE s.assignee_uid = a.assignee_uid AND s.source_ref = a.source_ref"
-    "              AND (? IS NULL OR s.occurred_at <= ?)))))"
+    "              AND (? IS NULL OR s.occurred_at <= ?)))"
+    "      OR (t.emitter='claudlobby.tasks.v1' AND t.event='cancelled'"
+    "          AND t.assignment_id IS NULL AND t.work_item_id=a.work_item_id"
+    "          AND t.ingest_seq>a.ingest_seq)))"
     " ORDER BY a.occurred_at, a.ingest_seq"
 )
 
@@ -581,9 +588,7 @@ def attention_arms_params(now: str) -> tuple:
     return attention_params(now) * 2
 
 
-_NON_TERMINAL_A = (
-    "NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
-    f"   AND t.assignment_id = a.assignment_id AND t.event IN ({_TERMINAL}))")
+_NON_TERMINAL_A = NON_TERMINAL_CLAUSE.strip()
 
 ATTENTION_SQL = (
     "SELECT a.assignment_id FROM assignments a"

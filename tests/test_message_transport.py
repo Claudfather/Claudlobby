@@ -140,6 +140,14 @@ def test_prelaunch_refusal_differs_from_partial_and_timeout_uncertainty(destinat
     result = transport.send(package, destination, message_id=MSG, body="hi", runner=partial)
     assert result.status == "unknown" and result.wire_sha256 == HASH
     assert len(calls) == 1  # A failed chunk never causes a second payload send.
+    def no_session(command, **kwargs):
+        return subprocess.CompletedProcess(command, 1,
+            b"transport-v1\tinvoked\ntransport-v1\tresult\t1\t\t\n",
+            b"bot_tmux_send: session 'worker' not found on socket 'private'"
+            b" - send dropped (logged)\n")
+    missing_session = transport.send(package, destination, message_id=MSG, body="hi",
+                                     runner=no_session)
+    assert missing_session.status == "failed" and missing_session.wire_sha256 is None
     def timed_out(command, **kwargs):
         raise subprocess.TimeoutExpired(command, kwargs["timeout"], output=b"transport-v1\tinvoked\n")
     result = transport.send(package, destination, message_id=MSG, body="hi", runner=timed_out)

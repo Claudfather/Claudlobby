@@ -19,6 +19,7 @@ from .plane.db import connect_ro, db_file
 from .runtime_versions import SQL_SCHEMA_VERSION
 from .task_state import (
     TASK_EMITTER,
+    event_scope_codes,
     known_task_producer,
     legacy_display_id,
     task_closures,
@@ -125,7 +126,8 @@ def audit_tasks(conn: sqlite3.Connection) -> TaskAudit:
     accepts the actual historical schema range, including an empty version-0
     database. The task-state owner supplies producer and closure semantics;
     unfamiliar future producers are refused. Three bulk row queries retain
-    the whole estate, including unscoped tasks and orphan assignments/events.
+    the whole estate, including unscoped tasks and orphan assignments/events;
+    one identity lookup checks whether a legacy worker belongs to its task fleet.
     """
     own_snapshot = not conn.in_transaction
     if own_snapshot:
@@ -148,25 +150,37 @@ def audit_tasks(conn: sqlite3.Connection) -> TaskAudit:
         if any(not known_task_producer(r["emitter"])
                for r in tasks + assignments + events):
             raise TaskAuditError("unsupported future task producer")
-        return _audit(version, tasks, assignments, events)
+        identities = conn.execute(
+            "SELECT kind, uid, alias FROM identity_registry WHERE kind IN ('actor', 'fleet')")
+        actors, fleets = {}, {}
+        for kind, uid, alias in identities:
+            (actors if kind == "actor" else fleets)[uid] = alias
+        return _audit(version, tasks, assignments, events, actors, fleets)
     finally:
         if own_snapshot:
             conn.rollback()
 
 
 def _audit(version: int, tasks: list[dict], assignments: list[dict],
-           events: list[dict]) -> TaskAudit:
+           events: list[dict], actors=None, fleets=None) -> TaskAudit:
     work = {r["work_item_id"]: r for r in tasks}
     assigned = {r["assignment_id"]: r for r in assignments}
     by_task: dict[str, list[dict]] = defaultdict(list)
-    closures = task_closures(map(task_event_from_row, events), assignments)
+    closures = task_closures(map(task_event_from_row, events), assignments, tasks)
     terminal_assignments, terminal_tasks = closures.assignments, closures.tasks
     issues: list[AuditIssue] = []
+    actors, fleets = actors or {}, fleets or {}
 
     # The semantic owner preserves closure even for malformed historical
     # links; disclose those links rather than silently reopening their rows.
     for event in events:
         tid, aid = event["work_item_id"], event["assignment_id"]
+        task = work.get(tid)
+        if task is not None and task["fleet_uid"]:
+            fact = task_event_from_row(event)
+            for code in event_scope_codes(fact, task["fleet_uid"]):
+                issues.append(AuditIssue(code, (tid,), (aid,) if aid else (),
+                                         tid not in terminal_tasks, event["event_id"]))
         if tid not in work or (aid and aid not in assigned) or (
                 aid in assigned and assigned[aid]["work_item_id"] != tid):
             active = aid not in terminal_assignments if aid else tid not in terminal_tasks
@@ -203,6 +217,13 @@ def _audit(version: int, tasks: list[dict], assignments: list[dict],
             codes.append("current_assignment_on_terminal_task")
         if active and (row["assignee_uid"], row["source_ref"]) in closed_display_groups:
             codes.append("legacy_display_closure_disagreement")
+        # Legacy cross-fleet dispatches were legal, but the canonical worker
+        # verbs are fleet-owned. Block cutover with an exact repair target.
+        assignee = actors.get(row["assignee_uid"])
+        owner_alias = fleets.get(task["fleet_uid"]) if task else None
+        if (active and assignee and assignee.startswith("bot:") and owner_alias
+                and not assignee.startswith(f"bot:{owner_alias}/")):
+            codes.append("foreign_fleet_assignee")
         for code in codes:
             issues.append(AuditIssue(code, (tid,), (aid,), active))
         if task is not None:
@@ -221,7 +242,8 @@ def _audit(version: int, tasks: list[dict], assignments: list[dict],
             issues.append(AuditIssue("multiple_current_assignments", (tid,), current, True))
         if active and not current and any(
                 (closed := terminal_assignments.get(row["assignment_id"]))
-                and closed.emitter == TASK_EMITTER and closed.task_id == tid
+                and (closed.emitter == TASK_EMITTER or task["emitter"] == TASK_EMITTER)
+                and closed.task_id == tid
                 for row in by_task[tid]):
             queued_after_release.add(tid)
         if not by_task[tid] or tid in queued_after_release:

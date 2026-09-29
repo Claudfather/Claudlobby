@@ -125,7 +125,11 @@ def _database(root: Path, initialize_empty: bool) -> tuple[dict, dict | None, li
                 "UNION SELECT emitter FROM events WHERE kind='task'").fetchall()
             state["task_model_versions"] = sorted({1 if row[0] == TASK_EMITTER else 0
                                                    for row in emitters} or {0})
-            blockers.extend(f"task audit: {issue.code}" for issue in report.blockers)
+            for issue in report.blockers:
+                targets = ", ".join((*issue.task_ids, *issue.assignment_ids))
+                remedy = ("; withdraw in the owning fleet and re-admit in the worker fleet"
+                          if issue.code == "foreign_fleet_assignee" else "")
+                blockers.append(f"task audit: {issue.code} ({targets}){remedy}")
         finally:
             conn.close()
     except (OSError, sqlite3.Error, TaskAuditError) as exc:

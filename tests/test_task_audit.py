@@ -183,6 +183,42 @@ def test_terminal_event_with_wrong_task_link_does_not_certify_parent_closed(conn
         "unresolved_task_event",)
 
 
+def test_active_report_event_blockers_match_the_canonical_reducer(conn):
+    _task(conn, "wi_report")
+    _assignment(conn, "asg_report", "wi_report")
+    _event(conn, "wi_report", "asg_report", "progress", emitter="report-back",
+           fleet="fleet_b")
+    _task(conn, "wi_unlinked")
+    _event(conn, "wi_unlinked", None, "progress", emitter="report-back",
+           fleet="fleet_a")
+    _task(conn, "wi_unscoped")
+    _assignment(conn, "asg_unscoped", "wi_unscoped")
+    _event(conn, "wi_unscoped", "asg_unscoped", "accepted", emitter="report-back",
+           fleet=None)
+
+    audit = audit_tasks(conn)
+    expected = {"cross_fleet_task_event", "unlinked_assignment_event",
+                "unscoped_task_event"}
+    assert {issue.code for issue in audit.blockers} == expected
+    assert {issue.code for issue in read_tasks(conn, fleet_uid="fleet_a").blockers} == expected
+    assert all(issue.task_ids and issue.reference for issue in audit.blockers)
+
+
+def test_active_legacy_foreign_assignee_blocks_fleet_owned_cutover(conn):
+    conn.execute("INSERT INTO identity_registry"
+                 " (uid, kind, alias, first_seen, last_seen)"
+                 " VALUES ('fleet_a', 'fleet', 'coord', 't', 't')")
+    conn.execute("INSERT INTO identity_registry"
+                 " (uid, kind, alias, first_seen, last_seen)"
+                 " VALUES ('actor_foreign', 'actor', 'bot:work/dev', 't', 't')")
+    _task(conn, "wi_foreign")
+    _assignment(conn, "asg_foreign", "wi_foreign", worker="actor_foreign")
+    report = audit_tasks(conn)
+    issue = next(issue for issue in report.blockers if issue.code == "foreign_fleet_assignee")
+    assert issue.task_ids == ("wi_foreign",) and issue.assignment_ids == ("asg_foreign",)
+    assert not report.preview("asg_foreign", fleet_uid="fleet_a").mapping.resumable
+
+
 def test_audit_is_repeatable_read_only_and_preserves_caller_transaction(conn):
     _task(conn, "wi_intake")
     _insert(conn, "events", kind="system", event="reports_acked", detail='{"acked_through_seq":17}')
@@ -259,7 +295,7 @@ def test_mixed_producers_share_closure_and_preview_queued_work_without_resuming_
     conn.set_trace_callback(statements.append)
     report = audit_tasks(conn)
     conn.set_trace_callback(None)
-    assert sum(sql.startswith("SELECT") for sql in statements) == 4  # schema + three bulk reads
+    assert sum(sql.startswith("SELECT") for sql in statements) == 5  # schema, three bulk reads, identity map
     assert not report.blockers and report.issues == ()
     assert {key: report.counts[key] for key in ("tasks", "active_tasks", "closed_tasks",
             "unassigned_tasks", "assignments", "current_assignments", "closed_assignments")} == {

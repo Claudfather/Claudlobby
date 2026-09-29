@@ -78,6 +78,7 @@ def _dispatch(args) -> CommandOutput:
         return CommandOutput({"fleet": selected.fleet.name, "manager": selected.fleet.manager,
                               "dry_run": True, "task_ids": [t.task_id for t in selection.rows],
                               "held": selection.held, "uncertain": selection.uncertain,
+                              "uncertain_request_ids": list(selection.uncertain_request_ids),
                               "waiting": selection.waiting, "overflow": selection.overflow,
                               "issues": [asdict(issue) for issue in selection.issues],
                               "digest": body}, release_id=release_id,
@@ -113,6 +114,7 @@ def _dispatch(args) -> CommandOutput:
             "bookkeeping_delivery": "no_individual_proof" if result.message_id else "not_sent",
             "held": None if result.replayed else result.selection.held,
             "uncertain": None if result.replayed else result.selection.uncertain,
+            "uncertain_request_ids": list(result.selection.uncertain_request_ids),
             "waiting": None if result.replayed else result.selection.waiting,
             "overflow": None if result.replayed else result.selection.overflow,
             "issues": [asdict(issue) for issue in result.selection.issues],
@@ -127,7 +129,9 @@ def _dispatch(args) -> CommandOutput:
                                  "recheck asks committed; manager digest is unverified; inspect request and receipt",
                                  data=data, release_id=release_id)
     if result.selection.uncertain:
-        lines = (f"recheck: {result.selection.uncertain} task(s) held for uncertain prior delivery; inspect requests",)
+        ids = ", ".join(result.selection.uncertain_request_ids)
+        lines = (f"recheck: {result.selection.uncertain} task(s) held for uncertain prior delivery;"
+                 f" inspect request {ids}",)
     else:
         lines = (f"recheck: {len(result.task_ids)} task(s) named in one manager digest",)
     return CommandOutput(data, release_id=release_id, lines=lines)

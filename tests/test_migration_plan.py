@@ -95,6 +95,7 @@ def test_old_schema_preview_binds_sql_task_blockers_and_recovery_floor(releases)
     assert plan.database["user_version"] == 1
     assert plan.task_audit["counts"]["closed_tasks"] == 1
     assert any("task audit: unscoped_task" in value for value in plan.blockers)
+    assert any("wi_unscoped" in value for value in plan.blockers)
     assert plan.source["release_id"] == source.release_id
     assert plan.target["seal_sha256"] == target.seal_sha256
     assert [item["version"] for item in plan.migrations if item["proposed"]] == list(
@@ -309,7 +310,8 @@ def test_v1_inventory_preserves_history_and_receipts_and_binds_recovery(releases
     for name, emitter in (("old", "dispatch-task"), ("new", TASK_EMITTER)):
         _task(conn, f"wi_{name}", emitter=emitter)
         _assignment(conn, f"asg_{name}", f"wi_{name}", emitter=emitter)
-        _event(conn, f"wi_{name}", f"asg_{name}", "returned_blocked", emitter=emitter)
+        _event(conn, f"wi_{name}", f"asg_{name}", "returned_blocked", emitter=emitter,
+               fleet="fleet_a" if emitter == TASK_EMITTER else None)
     conn.close()
     with rr.locked_request(root, intent.fleet_uid, request_id) as store:
         store.prepare(intent)

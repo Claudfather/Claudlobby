@@ -1,8 +1,9 @@
 """Fleet-scoped, read-only Task state over the existing Plane storage codec.
 
 Task.task_id is work_items.work_item_id; no identities or history are rewritten.
-Only claudlobby.tasks.v1 changes assignment release into queued work. Historical
-terminal events keep their old closure semantics. This reader confers no actor,
+Work admitted by claudlobby.tasks.v1 stays queued after assignment release,
+including expiry by the separate attention sweep. Historical work keeps its
+old closure semantics. This reader confers no actor,
 manager or worker-membership authority; mutation owners must also hold their
 per-task lock, check capabilities/membership and require a resolved open Task.
 
@@ -210,16 +211,27 @@ def known_task_producer(emitter):
     return not emitter.startswith("claudlobby.tasks.") or emitter == TASK_EMITTER
 
 
+def event_scope_codes(event: TaskEvent, fleet_uid: str) -> tuple[str, ...]:
+    """The event-only active blockers shared by the reducer and A0 audit."""
+    codes = []
+    if event.fleet_uid != fleet_uid:
+        codes.append("cross_fleet_task_event" if event.fleet_uid else "unscoped_task_event")
+    if event.assignment_id is None and (event.event in _ACTIVITY or
+            event.emitter == TASK_EMITTER and event.event in _RELEASE - {"cancelled"}):
+        codes.append("unlinked_assignment_event")
+    return tuple(codes)
+
+
 def _assignment_terminal(event):
     return known_task_producer(event.emitter) and event.event in (
         _RELEASE | {"completed", "failed"} if event.emitter == TASK_EMITTER
         else TERMINAL_TASK_EVENTS)
 
 
-def _work_terminal(event):
+def _work_terminal(event, canonical_tasks: set[str]):
     if not known_task_producer(event.emitter):
         return False
-    if event.emitter != TASK_EMITTER:
+    if event.emitter != TASK_EMITTER and event.task_id not in canonical_tasks:
         return event.event in TERMINAL_TASK_EVENTS
     return event.event in {"completed", "failed"} or (
         event.event == "cancelled" and event.assignment_id is None)
@@ -237,11 +249,17 @@ class TaskClosures:
     assignments: dict[str, TaskEvent]
 
 
-def task_closures(events, assignment_rows) -> TaskClosures:
-    """Reduce closure once in ingest order, including v1 work cancellation."""
+def task_closures(events, assignment_rows, work_rows=()) -> TaskClosures:
+    """Reduce closure once in ingest order, including canonical work releases.
+
+    The attention sweep is a separate producer. Its expiry releases a v1
+    assignment but cannot cancel the work item that owner admitted.
+    """
     tasks, assignments = {}, {}
+    canonical_tasks = {row["work_item_id"] for row in work_rows
+                       if row["emitter"] == TASK_EMITTER}
     for event in sorted(events, key=lambda event: event.ingest_seq):
-        if _work_terminal(event):
+        if _work_terminal(event, canonical_tasks):
             tasks.setdefault(event.task_id, event)
         if event.assignment_id and _assignment_terminal(event):
             assignments.setdefault(event.assignment_id, event)
@@ -361,7 +379,7 @@ def _reduce(version, fleet, rows, assignment_rows, known_assignments,
     assigned = defaultdict(list)
     for row in sorted(assignment_rows, key=lambda row: row["ingest_seq"]):
         assigned[row["work_item_id"]].append(row)
-    closures = task_closures(events, assignment_rows)
+    closures = task_closures(events, assignment_rows, rows)
     terminals, closed_ids = closures.tasks, closures.assignments
 
     def unresolved_link_is_active(event):
@@ -407,9 +425,8 @@ def _reduce(version, fleet, rows, assignment_rows, known_assignments,
                 e for a in assignments for e in a.history)}.values():
             if not known_task_producer(event.emitter):
                 issue("unknown_task_producer", event.assignment_id, event.event_id, blocking=True)
-            if event.fleet_uid != fleet:
-                issue("cross_fleet_task_event" if event.fleet_uid else "unscoped_task_event",
-                      event.assignment_id, event.event_id)
+            for code in event_scope_codes(event, fleet):
+                issue(code, event.assignment_id, event.event_id)
             target = known_assignments.get(event.assignment_id)
             if event.assignment_id and target is None:
                 issue("dangling_task_event", event.assignment_id, event.event_id,
@@ -417,9 +434,6 @@ def _reduce(version, fleet, rows, assignment_rows, known_assignments,
             elif target and target["work_item_id"] != event.task_id:
                 issue("mismatched_task_event", event.assignment_id, event.event_id,
                       blocking=unresolved_link_is_active(event))
-            elif event.assignment_id is None and (event.event in _ACTIVITY or
-                    event.emitter == TASK_EMITTER and event.event in _RELEASE - {"cancelled"}):
-                issue("unlinked_assignment_event", eid=event.event_id)
         current = tuple(a for a in assignments if a.current)
         if len(current) > 1:
             issue("multiple_current_assignments", blocking=True)

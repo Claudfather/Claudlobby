@@ -168,7 +168,10 @@ _SIBLING_CLOSURE = (
     "      OR (a.source_ref LIKE 'dispatch-log:%' AND a.source_ref NOT LIKE 'dispatch-log:sha:%'"
     "          AND t.assignment_id IN (SELECT s.assignment_id FROM assignments s"
     "            WHERE s.assignee_uid = a.assignee_uid AND s.source_ref = a.source_ref"
-    "              AND (? IS NULL OR s.occurred_at <= ?)))))"
+    "              AND (? IS NULL OR s.occurred_at <= ?)))"
+    "      OR (t.emitter='claudlobby.tasks.v1' AND t.event='cancelled'"
+    "          AND t.assignment_id IS NULL AND t.work_item_id=a.work_item_id"
+    "          AND t.ingest_seq>a.ingest_seq)))"
 )
 OPEN_SQL = (
     "SELECT a.occurred_at, a.source_ref, a.assignment_id, a.expected_by FROM assignments a"
@@ -386,6 +389,10 @@ def open_idless_assignments(conn: sqlite3.Connection, fleet: str, bot: str,
 _NT_A = (
     " NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
     "   AND t.assignment_id = a.assignment_id AND t.event IN " + _TERMINAL + ")"
+    " AND NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
+    "   AND t.emitter='claudlobby.tasks.v1' AND t.event='cancelled'"
+    "   AND t.assignment_id IS NULL AND t.work_item_id=a.work_item_id"
+    "   AND t.ingest_seq>a.ingest_seq)"
 )
 # Split into COLUMNS and FROM (chunk M-B) so the fleet-scoped read below can
 # ask for two more columns off the SAME joins rather than carrying a second

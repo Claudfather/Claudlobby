@@ -37,6 +37,7 @@ class RecheckSelection:
     waiting: int
     overflow: int
     issues: tuple[TaskIssue, ...]
+    uncertain_request_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -119,6 +120,7 @@ def select(conn: sqlite3.Connection, *, root, fleet_uid: str, now: datetime,
     asks = _latest_asks(conn, fleet_uid, due)
     receipts = {}
     eligible, held, uncertain, waiting = [], 0, 0, 0
+    uncertain_requests = set()
     for task in due:
         if task.task_id in escalated:
             waiting += 1
@@ -143,18 +145,21 @@ def select(conn: sqlite3.Connection, *, root, fleet_uid: str, now: datetime,
             status = receipts[request_id]
             if status == "unknown":
                 uncertain += 1
+                uncertain_requests.add(request_id)
                 continue
             if status != "failed":
                 at = _instant(ask[1])
                 if at is None:
                     uncertain += 1
+                    uncertain_requests.add(request_id)
                     continue
                 if (now - at).total_seconds() < repeat_h * 3600:
                     held += 1
                     continue
         eligible.append(task)
     return RecheckSelection(tuple(eligible[:MAX_ROWS]), held, uncertain, waiting,
-                            max(0, len(eligible) - MAX_ROWS), snapshot.issues)
+                            max(0, len(eligible) - MAX_ROWS), snapshot.issues,
+                            tuple(sorted(uncertain_requests)))
 
 
 def _clip(value: str, length: int = 80) -> str:

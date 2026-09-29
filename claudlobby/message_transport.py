@@ -5,7 +5,8 @@ This adapter validates literal native targets, not roster membership or runtime
 health. It never records Plane facts, proves receipt, repairs Enter, or retries.
 ``submitted`` means the native payload/Enter call returned successfully; receiver
 receipt plus wire-integrity evidence belong to the messaging operation owner.
-Any started send failure is unknown because some bytes may already be in a pane.
+Any started send failure is unknown unless the native owner explicitly reports
+that its session precheck dropped the send before any pane write.
 """
 
 from __future__ import annotations
@@ -134,9 +135,10 @@ def send(package: PackageResources, destination: TransportDestination, *, messag
     """Attempt exactly one native submission; no automatic payload/Enter retry.
 
     The runner seam has subprocess byte-input semantics. Only pre-call validation
-    and inability to launch are definite failures. A timeout, partial send,
-    malformed response, or interrupted native call is unknown. Wire proof describes
-    prepared native bytes, not delivery, and may be absent even after submission.
+    inability to launch, and native no-session preflight are definite failures.
+    A timeout, partial send, malformed response, or interrupted native call is unknown.
+    Wire proof describes prepared native bytes, not delivery, and may be absent
+    even after submission.
     Null bytes cannot cross Bash's string boundary and are refused before effects.
     PANE_SEND_VERIFY_TICKS=0 disables both post-send Enter and blind-payload
     repairs. Native chunk/settle defaults remain intact; readiness/health admission
@@ -175,5 +177,12 @@ def send(package: PackageResources, destination: TransportDestination, *, messag
     rc, digest, length = _proof(result.stdout)
     if rc == result.returncode == 0:
         return TransportOutcome("submitted", digest, length, 0)
+    stderr = result.stderr or b""
+    if (rc == result.returncode == 1 and digest is None and length is None
+            and b"bot_tmux_send: session '" in stderr
+            and b" not found on socket '" in stderr
+            and b"send dropped (logged)" in stderr):
+        return TransportOutcome("failed", native_returncode=1,
+                                reason="native session precheck dropped the send")
     return TransportOutcome("unknown", digest, length, result.returncode,
                             "native submission did not complete with a valid success result")

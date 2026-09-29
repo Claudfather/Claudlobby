@@ -159,4 +159,5 @@ def test_uncertain_digest_holds_new_uuid_and_escalated_work_is_waiting(active, m
     assert first["data"]["transport"] == "unknown" and len(calls) == 1
     held = _recheck(capsys, root)
     assert held["data"]["task_ids"] == [] and held["data"]["uncertain"] == 1
+    assert held["data"]["uncertain_request_ids"] == [first["request_id"]]
     assert held["data"]["waiting"] == 1 and len(calls) == 1

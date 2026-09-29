@@ -2,6 +2,7 @@
 
 import builtins
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 import json
 import sqlite3
 from uuid import uuid4
@@ -15,6 +16,7 @@ from claudlobby.plane.db import db_file
 from claudlobby.plane.emit_api import emit_batch
 from claudlobby.request_receipts import RequestStore, locked_request
 from tests.package_fixtures import source_package
+from tests.conftest import load_lib_module
 from tests.test_activation import cold, tmp_path  # noqa: F401 — activation and short socket root
 from tests.test_releases import installed  # noqa: F401 — dependency of cold
 
@@ -206,6 +208,21 @@ def test_withdraw_closes_queued_task_and_retains_caller_separate_from_by(active,
     after = _counts(root)
     assert _call(capsys, root, *argv)["data"]["replayed"] is True
     assert _counts(root) == after
+
+
+def test_withdrawn_assignment_is_absent_from_the_pulse_overdue_read(active, capsys):
+    root, _ = active
+    due = datetime.now(timezone.utc) - timedelta(hours=1)
+    task_id = _call(capsys, root, "task", "admit", "--title", "Cancel dispatched work",
+                    "--request-id", str(uuid4()))["data"]["task_id"]
+    _call(capsys, root, "task", "assign", task_id, "--bot", "worker",
+          "--expected-by", due.isoformat(), "--request-id", str(uuid4()))
+    doors = load_lib_module("dispatch-overdue")
+    now = int(datetime.now(timezone.utc).timestamp())
+    assert doors.overdue_all(now, max_age=0, fleet="example", root=str(root)).get("worker")
+    _call(capsys, root, "task", "withdraw", task_id, "--reason", "Cancelled by manager",
+          "--request-id", str(uuid4()))
+    assert not doors.overdue_all(now, max_age=0, fleet="example", root=str(root)).get("worker")
 
 
 def test_escalate_queued_task_is_visible_and_replay_does_not_move_it(active, capsys):

@@ -44,15 +44,15 @@ def _root(tmp_path):
     return plane_root(tmp_path)
 
 
-def _dispatch(root, n, *, expected_by, fleet=F):
+def _dispatch(root, n, *, expected_by, fleet=F, emitter="t"):
     """work_item + assignment — the 6b fixture shape."""
     wi, aid = f"wi_{n:0>32}", f"asg_{n:0>32}"   # ID_PATTERNS: asg_ + 32 hex
     initialize_plane(root)
     emit_batch(root, [
-        {"event_type": "work_item", "emitter": "t", "fleet": fleet,
+        {"event_type": "work_item", "emitter": emitter, "fleet": fleet,
          "payload": {"work_item_id": wi, "title": "t",
                      "created_by": f"bot:{fleet}/mgr"}},
-        {"event_type": "assignment", "emitter": "t", "fleet": fleet,
+        {"event_type": "assignment", "emitter": emitter, "fleet": fleet,
          "payload": {"assignment_id": aid, "work_item_id": wi,
                      "assignee": f"bot:{fleet}/w1", "assigned_by": f"bot:{fleet}/mgr",
                      "expected_by": expected_by.isoformat(),
@@ -110,6 +110,30 @@ def test_expired_event_clears_attention_and_sets_status_idempotently(tmp_path):
     finally:
         conn.close()
     assert again.rows == []                         # idempotent: nothing left
+
+
+def test_sweep_expiry_releases_canonical_work_to_queued(tmp_path):
+    from claudlobby.task_audit import audit_tasks
+    from claudlobby.task_state import TASK_EMITTER, read_tasks
+
+    root = _root(tmp_path)
+    task_id, assignment_id = _dispatch(root, "9", expected_by=NOW - timedelta(days=10),
+                                       emitter=TASK_EMITTER)
+    with closing(connect(db_path(root))) as conn:
+        plan = expirable(conn, now=NOW, after_days=7)
+    assert [row["assignment_id"] for row in plan.rows] == [assignment_id]
+    emit_batch(root, expired_events(plan, now=NOW, after_days=7))
+    with closing(connect(db_path(root))) as conn:
+        fleet_uid = conn.execute(
+            "SELECT uid FROM identity_registry WHERE kind='fleet' AND alias=?", (F,)
+        ).fetchone()[0]
+        task = read_tasks(conn, fleet_uid=fleet_uid).get(task_id)
+        audit = audit_tasks(conn)
+    assert task.state == "queued" and task.current_assignment is None
+    assert task.terminal_event is None and not task.blockers
+    assert task.assignments[0].terminal_event.emitter == "attention-expiry"
+    assert audit.counts["unassigned_tasks"] == 1 and not audit.blockers
+    assert audit.preview(task_id, fleet_uid=fleet_uid, active_only=True).mapping.assignment_id is None
 
 
 def test_negative_horizon_refused():
