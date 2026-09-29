@@ -245,6 +245,7 @@ class Observations:
         self.root.mkdir()
         self.installed = tmp_path / "home/config/systemd/user"
         self.installed.mkdir(parents=True)
+        self.search_dirs = [self.installed]
         self.package = source_package()
         self.declarations, self.properties, self.calls = [], {}, []
         self.manager, self.domain = "Linux", ""
@@ -298,7 +299,7 @@ class Observations:
         return target
 
     def catalog(self):
-        lines = [f"manager\t{self.manager}", f"directory\t{self.installed}"]
+        lines = [f"manager\t{self.manager}", *(f"directory\t{path}" for path in self.search_dirs)]
         if self.manager == "Darwin":
             lines += ["domain\tgui/501", "PID\tStatus\tLabel"]
             lines += [("710" if self.launchd_active.get(name, True) else "-") + "\t0\t" + name[:-6] for name in sorted(self.launchd)]
@@ -357,6 +358,49 @@ def test_explicit_empty_bootstrap_proves_full_catalog_with_foreign_units(tmp_pat
     obs.add("owned.service" if manager == "Linux" else "com.owned.plist", "bot", declared=False)
     if manager == "Darwin":
         obs.launchd.clear()  # no loaded definition to reveal this owned bot
+    with pytest.raises(InventoryError, match="owned consumer"):
+        collect_enrollment(obs.root, (), package=obs.package, runner=obs.runner,
+                           bootstrap_empty=True).require_complete()
+
+
+def test_linux_bootstrap_classifies_stock_alias_mask_and_shadowed_vendor_units(tmp_path):
+    obs = Observations(tmp_path)
+    stock = obs.add("systemd-exit.service", declared=False)
+    stock.write_text("[Unit]\nDescription=stock\n[Service]\nType=oneshot\nExecStart=/usr/bin/true\n")
+    obs.properties[stock.name].update(WorkingDirectory="", Environment="", ExecStart="/usr/bin/true")
+
+    alias = obs.add("exit-alias.service", declared=False)
+    alias.unlink()
+    alias.symlink_to(stock)
+    obs.properties[alias.name].update(Id=stock.name, FragmentPath=str(stock),
+                                      WorkingDirectory="", Environment="", ExecStart="/usr/bin/true")
+
+    masked = obs.add("pulseaudio.service", declared=False)
+    masked.unlink()
+    masked.symlink_to("/dev/null")
+    obs.properties[masked.name].update(LoadState="masked", UnitFileState="masked",
+                                        FragmentPath="/dev/null", WorkingDirectory="",
+                                        Environment="", ExecStart="")
+
+    override = obs.add("desktop.service", declared=False)
+    override.write_text(stock.read_text())
+    vendor = tmp_path / "usr/lib/systemd/user"
+    vendor.mkdir(parents=True)
+    (vendor / override.name).write_text(stock.read_text())
+    obs.search_dirs.append(vendor)
+    obs.properties[override.name].update(WorkingDirectory="", Environment="", ExecStart="/usr/bin/true",
+                                          DropInPaths=str(tmp_path / "override.conf"))
+
+    inventory = collect_enrollment(obs.root, (), package=obs.package, runner=obs.runner,
+                                   bootstrap_empty=True).require_complete()
+    assert set(inventory.foreign) == {str(stock), str(alias), str(masked), str(override),
+                                      str(vendor / override.name)}
+    assert any(item.path == str(masked) and item.link == "/dev/null"
+               for item in inventory.observed_files)
+    inventory.check_files()
+    # A foreign definition that actually names this root still refuses.
+    stock.write_text(stock.read_text().replace("ExecStart=/usr/bin/true",
+                                               f"ExecStart={obs.root}/owned"))
     with pytest.raises(InventoryError, match="owned consumer"):
         collect_enrollment(obs.root, (), package=obs.package, runner=obs.runner,
                            bootstrap_empty=True).require_complete()
@@ -421,6 +465,9 @@ def test_all_scopes_bytes_links_and_exact_candidate_cleanup(tmp_path):
     bot = obs.add("alpha.worker.service", "bot")
     foreign = obs.add("foreign.worker.service", working=tmp_path / "unrelated", declared=False)
     obs.properties[foreign.name]["Environment"] = f"CLAUDLOBBY_ROOT={tmp_path / 'unrelated'}"
+    foreign.write_bytes(foreign.read_bytes().replace(
+        f"Environment=CLAUDLOBBY_ROOT={obs.root}\n".encode(),
+        f"Environment=CLAUDLOBBY_ROOT={tmp_path / 'unrelated'}\n".encode()))
     # Native timer interfaces omit Service-only properties rather than emitting
     # empty values. Do not certify a contract native systemd never supplies.
     for key in ("Environment", "WorkingDirectory", "ExecStart"):
@@ -452,7 +499,7 @@ def test_all_scopes_bytes_links_and_exact_candidate_cleanup(tmp_path):
     ("dropin", "overridden"), ("release", "release identity differs"),
     ("missing", "lacks installed source"), ("extra", "absent from generated manifest"),
     ("timer", "different service"), ("empty", "empty generated manifest"),
-    ("unbound", "no declared data-root binding"), ("query", "missing/unknown native unit properties"),
+    ("unbound", "absent from generated manifest"), ("query", "missing/unknown native unit properties"),
 ])
 def test_incomplete_or_foreign_evidence_never_becomes_cleanup_authority(tmp_path, fault, expected):
     obs = Observations(tmp_path)
@@ -590,6 +637,40 @@ systemctl() {{
         "--user list-units --all --no-legend --no-pager --plain"]
     with pytest.raises(InventoryError, match="unsupported"):
         adapter.call("arbitrary_shell")
+
+
+def test_linux_catalog_keeps_escaped_services_but_skips_non_consumers(tmp_path):
+    text = (f"manager\tLinux\ndirectory\t{tmp_path}\n"
+            "loaded\tdev-disk-by\\x2dpartuuid-02.device\n"
+            "loaded\tapp-browser\\x2dworker.scope\n"
+            "installed\tdesktop-foo\\x2dbar.service\n"
+            "loaded\tdesktop-foo\\x2dbar.service\n")
+    manager, _, _, names, loaded = inventory._catalog(text)
+    assert manager == "Linux"
+    assert names == {r"desktop-foo\x2dbar.service"}
+    assert set(loaded) == names
+    with pytest.raises(InventoryError, match="unknown adapter catalog row"):
+        inventory._catalog(text.replace(r"foo\x2dbar", r"foo\x2gbar"))
+
+
+def test_linux_native_properties_accepts_only_complete_systemd_escapes():
+    prologue = '''
+uname() { printf 'Linux\n'; }
+systemctl() {
+    [ "$2" = show ] || return 99
+    printf 'Id=%s\n' "$4"
+}
+'''
+
+    def recording(command, **kwargs):
+        command[2] = prologue + command[2]
+        return subprocess.run(command, **kwargs)
+
+    adapter = Adapter(source_package(), runner=recording)
+    assert adapter.read("svc_inventory_properties", r"desktop-foo\x2dbar.service") == (
+        "Id=desktop-foo\\x2dbar.service\n")
+    with pytest.raises(InventoryError, match="failed"):
+        adapter.read("svc_inventory_properties", r"desktop-foo\x2gbar.service")
 
 
 def test_selected_adapter_queries_only_same_uid_launchd_domains(tmp_path):

@@ -20,6 +20,10 @@ class _UniqueKeys(dict):
         super().__setitem__(key, value)
 
 
+class _NoWorkingDirectory(ValueError):
+    """A valid systemd service with no directory cannot name a bot owner."""
+
+
 def _systemd_directory(text: str) -> str:
     section = ""
     services = 0
@@ -43,6 +47,8 @@ def _systemd_directory(text: str) -> str:
             if not line.startswith("WorkingDirectory="):
                 raise ValueError("unsupported WorkingDirectory directive")
             directories.append(line.split("=", 1)[1].strip())
+    if services == 1 and not directories:
+        raise _NoWorkingDirectory
     if services != 1 or len(directories) != 1:
         raise ValueError("missing or ambiguous WorkingDirectory")
     value = directories[0]
@@ -75,6 +81,8 @@ def main(unit_file: str, expected_bot_dir: str) -> int:
         else:
             return 3
         return 0 if _canonical_directory(directory) == _canonical_directory(expected_bot_dir) else 1
+    except _NoWorkingDirectory:
+        return 2
     except Exception:
         # Any failed read/parse is unknown. In particular, plist parsers can
         # raise different exception classes for malformed XML and binary data.

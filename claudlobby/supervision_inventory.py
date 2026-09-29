@@ -161,9 +161,11 @@ class FileSnapshot:
         if not (stat.S_ISLNK(node.st_mode) or stat.S_ISREG(node.st_mode)):
             raise InventoryError(f"special installed/generated unit: {path}")
         resolved = path.resolve(strict=True)
-        if not stat.S_ISREG(resolved.stat().st_mode):
+        masked = (stat.S_ISLNK(node.st_mode) and resolved == Path("/dev/null")
+                  and path.suffix in _SUFFIXES[:4])
+        if not masked and not stat.S_ISREG(resolved.stat().st_mode):
             raise InventoryError(f"unit does not resolve to a regular file: {path}")
-        content = path.read_bytes()
+        content = b"" if masked else path.read_bytes()
         return cls(str(path), str(resolved), stat.S_IMODE(node.st_mode),
                    os.readlink(path) if path.is_symlink() else None,
                    content, hashlib.sha256(content).hexdigest())
@@ -247,6 +249,7 @@ class EnrollmentInventory:
 
 
 _NAME = re.compile(r"[A-Za-z0-9_.@:-]+")
+_SYSTEMD_NAME = re.compile(r"(?:[A-Za-z0-9_.@:-]|\\x[0-9a-fA-F]{2})+")
 _SUFFIXES = (".service", ".timer", ".socket", ".path", ".plist")
 
 
@@ -289,7 +292,14 @@ def _catalog(text):
             domain = value
         elif key == "directory" and Path(value).is_absolute():
             directories.append(Path(value))
-        elif key in ("installed", "loaded") and _NAME.fullmatch(value):
+        elif key in ("installed", "loaded"):
+            if manager == "Linux" and not value.endswith(_SUFFIXES[:4]):
+                # systemd lists device, mount, slice and scope units too.
+                # These are not supervised command consumers of this root.
+                continue
+            pattern = _SYSTEMD_NAME if manager == "Linux" else _NAME
+            if not pattern.fullmatch(value):
+                raise InventoryError(f"unknown adapter catalog row: {line}")
             names.add(value)
             if key == "loaded":
                 if value in loaded:
@@ -653,14 +663,19 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
         names &= only_names
         loaded = {name: state for name, state in loaded.items() if name in only_names}
     issues, foreign, installed, units = [], [], {}, []
-    try:
-        for directory in dict.fromkeys(directories):
-            for path in sorted(_directory_files(directory)):
-                if path.name.endswith(_SUFFIXES) and (only_names is None or path.name in only_names):
+    for directory in dict.fromkeys(directories):
+        try:
+            paths = sorted(_directory_files(directory))
+        except (OSError, RuntimeError, InventoryError) as exc:
+            issues.append(f"installed search-path coverage failed: {exc}")
+            continue
+        for path in paths:
+            if path.name.endswith(_SUFFIXES) and (only_names is None or path.name in only_names):
+                try:
                     installed.setdefault(path.name, []).append(FileSnapshot.read(path))
                     names.add(path.name)
-    except (OSError, RuntimeError, InventoryError) as exc:
-        issues.append(f"installed search-path coverage failed: {exc}")
+                except (OSError, RuntimeError, InventoryError) as exc:
+                    issues.append(f"installed search-path coverage failed: {path}: {exc}")
     owners = {data_root, *(item.working_directory.resolve() for item in declarations)}
     anchors = {str(owner) for owner in owners}
     anchors.update(anchor for declaration in declarations for key, anchor in declaration.environment
@@ -673,8 +688,9 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                 continue
             try:
                 props = _properties(adapter.read("svc_inventory_properties", name))
-                if props["Id"] != name:
-                    raise InventoryError("native identity is an alias")
+                if (props["Id"] != name and
+                        (name in expected or not _SYSTEMD_NAME.fullmatch(props["Id"]))):
+                    raise InventoryError("native identity is an unproved alias")
                 properties[name] = props
             except (InventoryError, OSError, subprocess.SubprocessError) as exc:
                 issues.append(f"{name}: cannot observe effective definition: {exc}")
@@ -725,7 +741,8 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
 
     for name in sorted(names - set(expected)):
         props = properties.get(name, {})
-        if bootstrap_empty and manager == "Linux" and name in loaded and props.get("LoadState") != "loaded":
+        if (bootstrap_empty and manager == "Linux" and name in loaded
+                and props.get("LoadState") not in ("loaded", "masked")):
             issues.append(f"{name}: loaded ownership is unknown")
         related = related_properties(props)
         if bootstrap_empty:
@@ -736,17 +753,21 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
         related |= any(unit in expected or related_properties(properties.get(unit, {}))
                        for unit in props.get("Triggers", "").split())
         for saved in installed.get(name, ()):
+            # A shadowed source can become effective on reload. A frozen root
+            # environment declaration is ownership evidence even if current
+            # systemctl properties point at a different vendor source.
+            related |= (f"Environment=CLAUDLOBBY_ROOT={data_root}\n".encode() in saved.content
+                        or f"ExecStart={data_root}/".encode() in saved.content)
             if not name.endswith((".service", ".plist")):
                 # An undeclared activation source cannot be classified by a
                 # filename; its observed Triggers must prove its destination.
                 continue
             if bootstrap_empty and manager == "Linux":
-                # A stale cached definition cannot prove the installed source
-                # foreign. Bind its parsed directory to the effective one with
-                # the existing ownership reader, including nested bot roots.
-                if (props.get("FragmentPath") != saved.path or props.get("NeedDaemonReload") != "no"
-                        or adapter.call("svc_bot_unit_owned_by", saved.path,
-                                        props.get("WorkingDirectory", "")).returncode != 0):
+                # Aliases and lower-priority vendor definitions are not the
+                # effective FragmentPath. Still inspect their source below for
+                # any owned root; only the effective file needs native parity.
+                if saved.link != "/dev/null" and props.get("FragmentPath") in (saved.path, saved.resolved) and (
+                        props.get("LoadState") != "loaded" or props.get("NeedDaemonReload") != "no"):
                     issues.append(f"{name}: installed/effective ownership is unknown")
             if manager == "Darwin":
                 try:
@@ -765,11 +786,20 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                 except InventoryError as exc:
                     issues.append(f"{name}: {exc}")
             else:
+                if saved.link == "/dev/null":
+                    if props.get("LoadState") != "masked" or props.get("FragmentPath") != "/dev/null":
+                        issues.append(f"{name}: masked installed ownership is unknown")
+                    continue
                 results = [adapter.call("svc_bot_unit_owned_by", saved.path, owner).returncode for owner in owners]
                 if 0 in results:
                     related = True
-                elif any(code != 1 for code in results):
+                elif any(code not in (1, 2) for code in results):
                     issues.append(f"{name}: installed ownership is unknown")
+        if (bootstrap_empty and manager == "Linux" and installed.get(name)
+                and props.get("LoadState") == "loaded" and
+                not any(props.get("FragmentPath") in (saved.path, saved.resolved)
+                        for saved in installed[name])):
+            issues.append(f"{name}: effective installed definition is unobserved")
         if related:
             issues.append(f"{name}: owned consumer is absent from generated manifest")
         elif (not _environment(props.get("Environment", "")).get("CLAUDLOBBY_ROOT")
@@ -805,7 +835,7 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                     if (props["FragmentPath"] != sources[0].path or props["LoadState"] != "loaded"
                             or props["DropInPaths"] or props["NeedDaemonReload"] != "no"):
                         raise InventoryError("effective definition is missing, masked, overridden or stale")
-                    if props["ActiveState"] not in ("active", "inactive") or props["UnitFileState"] not in ("enabled", "enabled-runtime", "disabled", "static"):
+                    if props["ActiveState"] not in ("active", "inactive", "failed", "activating", "deactivating") or props["UnitFileState"] not in ("enabled", "enabled-runtime", "disabled", "static"):
                         raise InventoryError("unknown or transitional supervisor state")
                     if declaration.service:
                         if props["Triggers"].split() != [declaration.service] or not installed.get(declaration.service):

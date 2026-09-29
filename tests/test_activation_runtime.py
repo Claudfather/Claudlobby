@@ -67,7 +67,7 @@ systemctl() {
             if [ "$mode" = refuse ]; then fragment=/foreign.service
             elif [ "$phase" = initial ]; then load=masked; enabled=masked-runtime; fragment=/dev/null
             elif [ "$phase" = started ]; then active=active; fi
-            printf 'Id=%s\nLoadState=%s\nActiveState=%s\nUnitFileState=%s\nFragmentPath=%s\nControlGroup=\n' \
+            printf 'Id=%s\nLoadState=%s\nActiveState=%s\nSubState=dead\nUnitFileState=%s\nFragmentPath=%s\nControlGroup=\n' \
                 "$target" "$load" "$active" "$enabled" "$fragment" ;;
         unmask) printf '%s' unmasked > "$native_state" ;;
         start) printf '%s' started > "$native_state" ;;

@@ -174,7 +174,11 @@ def test_unknown_owner_is_preserved(installer, bad):
     assert stale.exists(), f"{bad} ownership authorized removal"
     assert stale.read_bytes() == before
     assert "com.unknown.worker" not in installer.calls()
-    assert "preserving" in result.stderr and stale.name in result.stderr
+    if installer.flavor != "plist" and bad == "missing":
+        # A well-formed service without WorkingDirectory is known foreign.
+        assert result.stderr == ""
+    else:
+        assert "preserving" in result.stderr and stale.name in result.stderr
 
 
 def test_foreign_root_is_preserved(installer, tmp_path):
@@ -248,11 +252,13 @@ def test_unsupported_systemd_ownership_is_preserved(tmp_path, shape):
 
 
 @pytest.mark.parametrize("owner_kind, expected_rc", [
-    ("own", 0), ("foreign", 1), ("missing", 3), ("unreadable", 3),
+    ("own", 0), ("foreign", 1), ("no-directory", 2), ("missing", 3), ("unreadable", 3),
 ])
 def test_reader_return_contract(installer, tmp_path, owner_kind, expected_rc):
     owner = installer.bot if owner_kind == "own" else tmp_path / "other"
     unit = installer.add("com.reader.worker", owner)
+    if owner_kind == "no-directory":
+        unit.write_text("[Unit]\nDescription=stock\n[Service]\nType=oneshot\nExecStart=/usr/bin/true\n")
     if owner_kind in ("missing", "unreadable"):
         unit.unlink()
         if owner_kind == "unreadable":
@@ -262,5 +268,22 @@ def test_reader_return_contract(installer, tmp_path, owner_kind, expected_rc):
          str(unit), str(installer.bot)],
         env=installer.env, cwd=installer.root, capture_output=True, text=True, timeout=5,
     )
-    assert result.returncode == expected_rc
+    assert result.returncode == (3 if installer.flavor == "plist" and owner_kind == "no-directory"
+                                 else expected_rc)
     assert result.stdout == result.stderr == ""
+
+
+def test_foreign_owner_reader_does_not_emit_inherited_bash_error(tmp_path):
+    unit = tmp_path / "foreign.service"
+    unit.write_text(f"[Service]\nWorkingDirectory={tmp_path / 'other'}\n")
+    script = (
+        "set -E; trap 'printf \"SCRIPT_ERROR\\n\" >&2' ERR; "
+        f"_SUPERVISOR_LIB_DIR={shlex.quote(str(REPO / 'lib'))}; "
+        f"CLAUDLOBBY_NATIVE_PYTHON={shlex.quote(sys.executable)}; "
+        ". \"$_SUPERVISOR_LIB_DIR/supervisor.sh\"; "
+        f"if svc_bot_unit_owned_by {shlex.quote(str(unit))} "
+        f"{shlex.quote(str(tmp_path / 'bot'))}; then exit 99; fi"
+    )
+    result = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0
+    assert "SCRIPT_ERROR" not in result.stderr

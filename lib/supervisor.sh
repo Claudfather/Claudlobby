@@ -1,19 +1,12 @@
 #!/bin/bash
-# lib/supervisor.sh — the supervisor adapter: five verbs (svc_is_registered,
-# svc_state, svc_kick, svc_enroll, svc_disenroll) plus svc_unit_name, the
-# shared label resolver, each with a systemd spelling and a launchd
-# spelling, behind the one $_OS switch every lib/ script already
-# re-derives for itself (#1573 boot admission, task 6). Two of the five
-# (svc_is_registered, svc_state) call the resolver; svc_kick and
-# svc_disenroll resolve the label inline, exactly as the code they were
-# moved from did.
+# lib/supervisor.sh — native supervisor adapter for legacy lifecycle callers
+# and selected-release inventory, activation, bot, and host-job operations.
+# Exact selected operations receive frozen installed paths and targets from
+# the Python owner; they never derive identity from mutable bot.conf.
 #
 # Sourced by lib-common.sh immediately after detect_os runs, so every verb
-# below can read $_OS without re-deriving it. Bodies are MOVED from the code
-# that already carries them — keepalive.sh's restart ladder (svc_kick),
-# install-bot-systemd.sh / install-bot.sh (svc_enroll calls them; PR B moves
-# their bodies in and turns them into thin wrappers), and spin-down-bot.sh's
-# supervision leg (svc_disenroll) — not reinvented here.
+# below uses the same OS selection. Exact readers refuse ambiguous ownership;
+# mutation callers additionally enforce selected-release admission.
 #
 # keepalive.sh and spin-up/down-bot.sh use the action verbs below. Readers
 # and installer bodies retain their separate contracts under #1607. The
@@ -89,18 +82,27 @@ esac
 
 # svc_bot_unit_owned_by <unit-file> <bot-dir>
 # A label suffix is only a candidate, never ownership (#1811). Missing or
-# unreadable ownership preserves the installed unit. The reader is stdlib-only
+# unreadable ownership preserves the installed unit. Rc 2 is a parsed service
+# without WorkingDirectory, and is useful only for foreign inventory. The reader is stdlib-only
 # and reads WorkingDirectory; no unit content is sourced or executed.
 svc_bot_unit_owned_by() {
     local unit="${1:?unit file required}" bot_dir="${2:?bot directory required}" rc=0 output=""
     local python="${CLAUDLOBBY_NATIVE_PYTHON-python3}"
     if command -v "$python" >/dev/null 2>&1; then
-        output="$("$python" "$_SUPERVISOR_LIB_DIR/bot-unit-owner.py" "$unit" "$bot_dir" 2>&1)" || rc=$?
+        # Settle the reader's status inside the substitution: Bash 3.2 fires
+        # an inherited ERR trap there even when the outer assignment has ||.
+        output="$(if "$python" "$_SUPERVISOR_LIB_DIR/bot-unit-owner.py" "$unit" "$bot_dir" 2>&1; then
+                     printf '\n0'
+                 else
+                     printf '\n%s' "$?"
+                 fi)"
+        rc="${output##*$'\n'}"
+        output="${output%$'\n'*}"
         # The reader has no output protocol. A traceback from a failed reader
         # must not be mistaken for its rc 1 (a known foreign owner).
         if [ -z "$output" ]; then
             case "$rc" in
-                0|1) return "$rc" ;;
+                0|1|2) return "$rc" ;;
             esac
         fi
     fi
@@ -284,14 +286,20 @@ svc_host_job_run_exact() {
     local file="$1" target="$2"
     [ -f "$file" ] || return 3
     _svc_activation_read "$file" "$target" || return 3
-    [ "$SVC_ACT_LOAD $SVC_ACT_ACTIVE" = 'loaded inactive' ] || return 3
+    [ "$SVC_ACT_LOAD" = loaded ] || return 3
     case "$_OS" in
         Linux)
             case "$target" in *.service) ;; *) return 3 ;; esac
+            case "$SVC_ACT_ACTIVE" in
+                inactive) ;;
+                failed) systemctl --user reset-failed "$target" || return $? ;;
+                *) _svc_activation_unknown "$target ActiveState=$SVC_ACT_ACTIVE SubState=$SVC_ACT_SUB"; return 3 ;;
+            esac
             printf 'invoking\n'
             systemctl --user start "$target" || return $?
             ;;
         Darwin)
+            [ "$SVC_ACT_ACTIVE" = inactive ] || return 3
             printf 'invoking\n'
             launchctl kickstart "$target" || return $?
             ;;
@@ -532,6 +540,10 @@ svc_bot_enroll_exact() {
         Linux:*' loaded inactive')
             systemctl --user enable --now "$target" || return $?
             ;;
+        Linux:*' loaded failed')
+            systemctl --user reset-failed "$target" || return $?
+            systemctl --user enable --now "$target" || return $?
+            ;;
         Darwin:'unchanged unloaded inactive') launchctl bootstrap "${target%/*}" "$installed" || return $? ;;
         Darwin:'unchanged loaded inactive') launchctl kickstart -k "$target" || return $? ;;
         Darwin:'unchanged loaded active') launchctl kickstart -k "$target" || return $? ;;
@@ -575,6 +587,9 @@ svc_bot_disenroll_exact() {
             fi
             printf 'effect-attempted\n'
             systemctl --user disable --now "$target" || return $?
+            if [ "${state##* }" = failed ]; then
+                systemctl --user reset-failed "$target" || return $?
+            fi
             rm -f "$installed" "$link" || return $?
             systemctl --user daemon-reload || return $?
             ;;
@@ -687,13 +702,13 @@ _svc_activation_unknown() {
 _svc_activation_read() {
     local file="$1" target="$2" output key value seen=" " uid manager pid status label extra count=0
     case "$file" in /*) ;; *) _svc_activation_unknown "installed path is not absolute"; return 3 ;; esac
-    SVC_ACT_FILE_STATE=""; SVC_ACT_LOAD=""; SVC_ACT_ACTIVE=""; SVC_ACT_GROUP=""; SVC_ACT_PID="-"; SVC_ACT_JOB_PIDS=""
+    SVC_ACT_FILE_STATE=""; SVC_ACT_LOAD=""; SVC_ACT_ACTIVE=""; SVC_ACT_SUB=""; SVC_ACT_GROUP=""; SVC_ACT_PID="-"; SVC_ACT_JOB_PIDS=""
     case "$_OS" in
         Linux)
             case "$target" in *[!a-zA-Z0-9_.@-]*|'') return 3 ;; esac
             case "$target" in *.service|*.timer|*.socket|*.path) ;; *) return 3 ;; esac
             [ "${file##*/}" = "$target" ] || return 3
-            output=$(systemctl --user show --property=Id,LoadState,ActiveState,UnitFileState,FragmentPath,ControlGroup "$target") || return 3
+            output=$(systemctl --user show --property=Id,LoadState,ActiveState,SubState,UnitFileState,FragmentPath,ControlGroup "$target") || return 3
             local identity="" fragment=""
             while IFS='=' read -r key value; do
                 case "$seen" in *" $key "*) return 3 ;; esac
@@ -702,6 +717,7 @@ _svc_activation_read() {
                     Id) identity="$value" ;;
                     LoadState) SVC_ACT_LOAD="$value" ;;
                     ActiveState) SVC_ACT_ACTIVE="$value" ;;
+                    SubState) SVC_ACT_SUB="$value" ;;
                     UnitFileState) SVC_ACT_FILE_STATE="$value" ;;
                     FragmentPath) fragment="$value" ;;
                     ControlGroup) SVC_ACT_GROUP="$value" ;;
@@ -711,7 +727,7 @@ _svc_activation_read() {
 $output
 EOF
             [ "$identity" = "$target" ] || return 3
-            for key in Id LoadState ActiveState UnitFileState FragmentPath; do
+            for key in Id LoadState ActiveState SubState UnitFileState FragmentPath; do
                 case "$seen" in *" $key "*) ;; *) return 3 ;; esac
             done
             if [ "${target##*.}" = service ]; then
@@ -723,6 +739,7 @@ EOF
                 not-found) [ ! -e "$file" ] || return 3; SVC_ACT_FILE_STATE=not-found ;;
                 *) return 3 ;;
             esac
+            case "$SVC_ACT_SUB" in ''|*[!a-zA-Z0-9_-]*) return 3 ;; esac
             ;;
         Darwin)
             local domain="${target%/*}" name="${target##*/}"
@@ -763,7 +780,11 @@ EOF
             ;;
         *) return 3 ;;
     esac
-    case "$SVC_ACT_ACTIVE" in active|inactive) ;; *) return 3 ;; esac
+    case "$_OS:$SVC_ACT_ACTIVE" in
+        Linux:active|Linux:inactive|Linux:failed|Linux:activating|Linux:deactivating|\
+        Darwin:active|Darwin:inactive) ;;
+        *) _svc_activation_unknown "$target ActiveState=$SVC_ACT_ACTIVE SubState=$SVC_ACT_SUB"; return 3 ;;
+    esac
 }
 
 # First adoption uses the existing session handoff and exact private tmux
@@ -841,7 +862,8 @@ svc_activation_assert_external() {
         Linux)
             if [ -n "$SVC_ACT_GROUP" ]; then
                 "$python" "$_SUPERVISOR_LIB_DIR/supervisor-caller.py" cgroup "$caller" "$SVC_ACT_GROUP" || rc=$?
-            elif [ "$SVC_ACT_ACTIVE" = active ] && [ "${target##*.}" = service ]; then rc=3
+            elif [ "${target##*.}" = service ]; then
+                case "$SVC_ACT_ACTIVE" in active|activating|deactivating) rc=3 ;; esac
             fi
             ;;
         Darwin)
@@ -886,6 +908,19 @@ svc_activation_pause() {
             _svc_activation_read "$file" "$target" || return 3
             [ "$SVC_ACT_LOAD" = masked ] || { _svc_activation_unknown "$target mask did not take precedence"; return 3; }
             systemctl --user stop "$target" || return $?
+            # systemctl may acknowledge a timer stop while the exact unit is
+            # still deactivating. Observe its final state before publication.
+            while :; do
+                _svc_activation_read "$file" "$target" || return 3
+                if [ "$SVC_ACT_LOAD" = masked ] && [ "$SVC_ACT_ACTIVE" = inactive ]; then
+                    break
+                fi
+                [ "$remaining" -gt 0 ] || {
+                    _svc_activation_unknown "$target did not settle after stop"; return 3;
+                }
+                remaining=$((remaining - 1))
+                sleep 0.1 || return 3
+            done
             ;;
         Darwin)
             if [ "$SVC_ACT_LOAD" != unloaded ]; then
@@ -1104,7 +1139,7 @@ svc_inventory_gui_list() {
 svc_inventory_properties() {
     case "$_OS" in
         Linux)
-            case "$1" in ''|*[!a-zA-Z0-9_.@:-]*) return 3 ;; esac
+            [[ "$1" =~ ^([a-zA-Z0-9_.@:-]|\\x[0-9a-fA-F]{2})+$ ]] || return 3
             systemctl --user show --property=Id,LoadState,ActiveState,UnitFileState,FragmentPath,WorkingDirectory,Environment,ExecStart,DropInPaths,NeedDaemonReload,Triggers,TriggeredBy "$1"
             ;;
         Darwin)

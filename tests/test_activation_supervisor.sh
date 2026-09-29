@@ -10,6 +10,7 @@ DELAY_UNLOAD="$T/delay-unload"; DELAY_ON_BOOTOUT=0
 file="$T/worker.service"; target=worker.service; : > "$file"
 CALLER_RC=0; QUERY_FAIL=0; FAIL_ACTION=""; SHADOW=0; TEST_MANAGER=Aqua; JOB_PID=600
 enabled=enabled; load=loaded; active=active; group=/user.slice/worker.service
+STOP_SETTLE=0; SETTLE_FILE="$T/settle-count"
 old_enabled=enabled; launched=1
 systemctl() {
     [ "$1" = --user ]; shift
@@ -17,15 +18,20 @@ systemctl() {
         [ "$QUERY_FAIL" = 0 ] || return 7
         local fragment="$file"
         [ "$load" != masked ] || fragment=/dev/null
-        printf 'Id=%s\nLoadState=%s\nActiveState=%s\nUnitFileState=%s\nFragmentPath=%s\nControlGroup=%s\n' \
-            "$target" "$load" "$active" "$enabled" "$fragment" "$group"
+        if [ "$active" = deactivating ] && [ -f "$SETTLE_FILE" ]; then
+            pending=$(cat "$SETTLE_FILE")
+            pending=$((pending - 1)); printf '%s' "$pending" > "$SETTLE_FILE"
+            [ "$pending" -gt 0 ] || active=inactive
+        fi
+        printf 'Id=%s\nLoadState=%s\nActiveState=%s\nSubState=%s\nUnitFileState=%s\nFragmentPath=%s\nControlGroup=%s\n' \
+            "$target" "$load" "$active" "${sub:-running}" "$enabled" "$fragment" "$group"
         return
     fi
     printf '%s\n' "$*" >> "$TRACE"
     [ "$1" != "$FAIL_ACTION" ] || return 9
     case "$1" in
         mask) if [ "$SHADOW" = 0 ]; then load=masked; enabled=masked-runtime; fi ;;
-        stop) active=inactive ;;
+        stop) if [ "$STOP_SETTLE" -gt 0 ]; then active=deactivating; else active=inactive; fi ;;
         unmask) load=loaded; enabled="$old_enabled" ;;
         start) active=active ;;
         *) return 98 ;;
@@ -89,9 +95,19 @@ mv "$file.parked" "$file"
 expect 0 svc_activation_resume "$file" "$target" "$saved"
 [ "$(cat "$TRACE")" = "$(printf 'mask --runtime worker.service\nstop worker.service\nunmask --runtime worker.service\nstart worker.service')" ]
 [ -f "$file" ]
+# The exact timer may remain deactivating briefly after a successful stop.
+file="$T/settling.timer"; target=settling.timer; : > "$file"; : > "$TRACE"
+enabled=enabled; old_enabled=enabled; load=loaded; active=active; group=""
+saved=$(svc_activation_snapshot "$file" "$target")
+STOP_SETTLE=3
+printf 3 > "$SETTLE_FILE"
+expect 0 svc_activation_pause "$file" "$target" "$saved"
+[ "$(cat "$SETTLE_FILE")" -le 0 ]
+rm "$SETTLE_FILE"
+STOP_SETTLE=0
 # An inactive, disabled timer stays inactive and disabled after restoration.
 file="$T/worker.timer"; target=worker.timer; : > "$file"; : > "$TRACE"
-enabled=disabled; old_enabled=disabled; active=inactive; group=""
+enabled=disabled; old_enabled=disabled; load=loaded; active=inactive; group=""
 saved=$(svc_activation_snapshot "$file" "$target")
 expect 0 svc_activation_pause "$file" "$target" "$saved"
 expect 0 svc_activation_resume "$file" "$target" "$saved"
