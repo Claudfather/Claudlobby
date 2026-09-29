@@ -6,6 +6,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — pinned MCP servers launch without npx's npm wrapper, opt-in per bot (#1604)
+
+`npx -y <pkg>@<version>` keeps an `npm exec` process resident as the parent of every MCP server it starts, with a `sh -c` shim between the two. Measured on the Pi on 2026-09-29, while the host was out of swap: 41 wrappers, 1,173 MB RSS but only 58 MB PSS. What they actually held was 45 MB private and 1,388 MB of swap, a third of the swap file.
+
+- **The key.** `bots.<bot>.mcp_direct_launch: true` (or `defaults.`) composes each exactly pinned npx server as `node <entry point>` from a copy under `state/mcp/npm/<name>@<version>/`.
+  - The entry point is the one npx would choose: the single bin, else the bin named after the package.
+  - Only a plain `#!/usr/bin/env node` script qualifies, so `node <path>` runs what npx ran.
+- **The install.** `claudlobby warm-cache` installs those copies, for armed bots only.
+  - It runs `npm install --prefix` into a temporary sibling and renames it into place only once it holds a launchable entry point.
+  - A failed or torn install leaves nothing behind, and fails the warm.
+- **The fallback.** A server that can't launch directly keeps its npx launch, and `generate` names it with the reason. `doctor` has a matching `mcp-launch` rung that reads the same plan (`composer.mcp_launch_plan`).
+- **A copy removed after `generate` is a `doctor` failure.** The plan cannot see it, because it only describes what `generate` would compose now. So `mcp-launch-composed` reads each bot's composed `.mcp.json`, the file the bot actually launches, for every bot, armed or not. It **fails** for any `node` entry under `state/mcp/npm/` whose script is gone, naming the bot, the server and the path, and saying the server will not start. A `node` entry outside `state/mcp` (the older global-binary swap) is not judged.
+- **Why it's opt-in.** It is registered in `switches.py` as `mcp-direct-launch`. `.mcp.json` is read at session start, but sessions restart without anyone choosing to (keepalive, context restarts), so a default-on change would spread with nobody choosing which bot goes first.
+- **Registry plumbing.**
+  - The `COMPOSE_BOT` carrier's arm line now carries its own steps and timing; `shared-config-isolation` renders unchanged.
+  - Per-bot switch state is read off each switch's own `config` path, replacing the special case for isolation.
+- **Tests.** `tests/test_switches.py`'s table-alone check now looks for the `npx-cache` rung by name, because the table itself now names npx.
+
+### Added — the host probe records what splits load into CPU and IO: swap, swap traffic, runnable and blocked processes, iowait (#1644)
+
+On Linux, load counts tasks waiting on IO as well as tasks waiting for a CPU. So `host.load` alone cannot tell a CPU burst from an SD-card stall, and that is exactly the question every reset on #1644 leaves open. The host probe now records four more facets every minute, read from `/proc`:
+
+- `host.swap_used_mb`: swap in use, SwapTotal minus SwapFree.
+- `host.swap_pages`: pages swapped in and out since boot (vmstat `pswpin`, `pswpout`). A rate is the difference of two samples.
+- `host.procs`: processes runnable, and blocked on IO, right now (`procs_running`, `procs_blocked`).
+- `host.cpu_ticks`: iowait ticks and total CPU ticks since boot, from the aggregate `cpu` line. With the total, the iowait share of any minute is the ratio of two differences, so no tick rate or core count is assumed. The total runs from user through steal; guest time is already counted inside user and nice.
+
+A facet is absent where its file or a field is missing or is not a plain number, never a fabricated 0; on macOS, which has no `/proc`, all four are absent. A host with no swap records a real 0, because its meminfo says so. PSI (`/proc/pressure`), the direct measure of CPU against IO, is not available on the estate's host. It needs `psi=1` on the kernel command line, which is a host decision: it is noted on #1644, not changed here. `HOST_PROBE_PROC` is a test seam that points the probe at a fixture directory instead of `/proc`.
+
+### Fixed — `vault-sync` records a refused sync as a failure; `[vault]` pin bumped to Claudron v0.5.3 (#1970, Claudron #142)
+
+`lib/vault-sync.sh` decided success from the `--json` envelope's `ok` alone. Before Claudron 0.5.3, `claudron sync --json` printed `"ok": true` even for a refused sync, one that exits 1 with its reason in `data.detail`. So every refusal was recorded as `vault.sync_ok = 1`, and `vault_sync_failed` never paged. That covers the side-branch guard, a live `index.lock`, a stopped rebase and a failed `add`. There are two fixes:
+
+- **Claudron v0.5.3** (now pinned): the envelope's `ok` agrees with the exit code. A refused run carries a `G001` error.
+- **This job:** a sync counts as ok only when the exit code is 0 **and** the envelope says `ok`. The exit code is Claudron's own failure signal on every engine version, so a host still running an older CLI is read correctly too.
+
+A regression test feeds the job the old engine's refusal envelope (`"ok": true`, rc 1) and asserts `ok=0`.
+
 ### Changed — `[vault]` pin bumped to Claudron v0.5.2; vaults need the `.claudron-vault` identity file (Claudron #183, #190)
 
 The `[vault]` extra now pins `claudron @ …@v0.5.2`. It carries three changes.

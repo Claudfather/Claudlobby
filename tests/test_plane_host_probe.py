@@ -17,6 +17,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from claudlobby.plane.db import db_path
 from tests.test_plane_events_door import _serving
 
@@ -274,3 +276,71 @@ def test_the_wal_size_is_recorded_once_a_plane_exists(tmp_path, *, scratch_plane
     finally:
         held.close()
     assert values == [0, before]
+
+# --- #1644: the facets that split load into CPU and IO ----------------------
+
+_FACETS_1644 = ("host.swap_used_mb", "host.swap_pages", "host.procs", "host.cpu_ticks")
+_STAT = ("cpu  100 20 30 400 50 6 7 8 9 10\ncpu0 1 2 3 4 5 6 7 8 0 0\n"
+         "btime 1790000000\nprocs_running 3\nprocs_blocked 2\n")
+
+
+def _proc(tmp_path, **files):
+    """A fixture dir standing in for /proc: only the files named are there."""
+    d = tmp_path / "proc"
+    d.mkdir(exist_ok=True)
+    for name, text in files.items():
+        (d / name).write_text(text)
+    return d
+
+
+def test_the_cpu_and_io_facets_read_proc(tmp_path, *, scratch_plane_env):
+    root, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
+    env["HOST_PROBE_PROC"] = str(_proc(
+        tmp_path, meminfo="MemTotal: 8000000 kB\nSwapTotal: 4194304 kB\nSwapFree: 1048576 kB\n",
+        vmstat="pgpgin 5\npswpin 70408\npswpout 337788\n", stat=_STAT))
+    assert _run_committed(root, env, scratch_plane_env).returncode == 0
+    s = _samples(root)
+    assert int(s["host.swap_used_mb"]["value"]) == 3072
+    assert json.loads(s["host.swap_pages"]["value"]) == {"in": 70408, "out": 337788}
+    assert json.loads(s["host.procs"]["value"]) == {"running": 3, "blocked": 2}
+    # the total is user..steal (621); guest and guest_nice are already in user and nice
+    assert json.loads(s["host.cpu_ticks"]["value"]) == {"iowait": 50, "total": 621}
+
+
+def test_no_swap_is_a_recorded_zero_not_an_absence(tmp_path, *, scratch_plane_env):
+    root, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
+    env["HOST_PROBE_PROC"] = str(_proc(tmp_path, meminfo="SwapTotal: 0 kB\nSwapFree: 0 kB\n"))
+    assert _run_committed(root, env, scratch_plane_env).returncode == 0
+    assert int(_samples(root)["host.swap_used_mb"]["value"]) == 0
+
+
+@pytest.mark.parametrize(
+    ("files", "absent"),
+    [
+        ({}, _FACETS_1644),
+        ({"meminfo": "SwapFree: 10 kB\n"}, ("host.swap_used_mb",)),
+        ({"meminfo": "SwapTotal: 10 kB\nSwapFree: 20 kB\n"}, ("host.swap_used_mb",)),
+        ({"vmstat": "pswpin 5\n"}, ("host.swap_pages",)),
+        ({"vmstat": "pswpin 5\npswpout -3\n"}, ("host.swap_pages",)),
+        ({"stat": _STAT.replace("procs_blocked 2", "procs_blocked x")}, ("host.procs",)),
+        ({"stat": _STAT.replace("cpu  100 20", "cpu  100 2O")}, ("host.cpu_ticks",)),
+        ({"stat": "cpu  1 2 3 4\n"}, ("host.cpu_ticks", "host.procs")),
+    ],
+)
+def test_a_missing_or_garbled_field_leaves_its_facet_absent(tmp_path, files, absent,
+                                                           *, scratch_plane_env):
+    root, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
+    env["HOST_PROBE_PROC"] = str(_proc(tmp_path, **files))
+    assert _run_committed(root, env, scratch_plane_env).returncode == 0
+    s = _samples(root)
+    for metric in absent:
+        assert metric not in s, (metric, s.get(metric) and s[metric]["value"])
+    assert s["host.job_ran"]["value"] in ("1", 1)    # the probe itself still ran
+
+
+@pytest.mark.skipif(not Path("/proc/stat").is_file(), reason="Linux /proc only")
+def test_the_real_proc_yields_every_facet(tmp_path, *, scratch_plane_env):
+    root, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
+    assert _run_committed(root, env, scratch_plane_env).returncode == 0
+    s = _samples(root)
+    assert all(m in s for m in _FACETS_1644), sorted(s)

@@ -197,6 +197,19 @@ METRIC_NAMES: dict[str, dict] = {
                              "description": "size of the plane's WAL; over"
                                             " 4 MiB means a reader is holding"
                                             " a snapshot (#1905)"},
+    # #1644: what splits load into CPU and IO (Linux /proc; absent elsewhere)
+    "host.swap_used_mb": {"unit": "MB", "description": "swap in use"},
+    "host.swap_pages": {"unit": "pages",
+                        "description": "pages swapped in and out since boot"
+                                       " ({in, out}; a rate is the difference"
+                                       " of two samples)"},
+    "host.procs": {"unit": "procs",
+                   "description": "processes runnable and blocked on IO now"
+                                  " ({running, blocked})"},
+    "host.cpu_ticks": {"unit": "ticks",
+                       "description": "iowait and total CPU ticks since boot"
+                                      " ({iowait, total}; the iowait share is"
+                                      " the ratio of their differences)"},
     "vault.behind": {"unit": "commits", "description": "behind upstream"},
     "vault.ahead": {"unit": "commits", "description": "ahead of upstream"},
     "vault.last_fetch_age_s": {"unit": "s", "description": "age of last fetch"},

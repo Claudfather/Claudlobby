@@ -147,13 +147,20 @@ def test_exactly_the_categories_that_ship_off():
                       # running bot only at its next restart, which is a gate a
                       # human chooses; a composed DENY binds on the bot's next
                       # tool call with no restart at all (measured, CLAUDE.md's
-                      # runtime-model note), and the nightly reload-fleet
-                      # generate composes onto every bot of every fleet with
-                      # nobody choosing to. So between merge and enforcement
-                      # there is no step at which one bot could go first but
-                      # the manifest, per bot. Nothing from the four list: it
+                      # runtime-model note). Selected activation now provides
+                      # the stage where one bot can go first; the manifest's
+                      # per-bot key is the operator's canary choice. It
                       # only ever narrows what a bot's own tools may touch.
-                      "shared-config-isolation"}
+                      "shared-config-isolation",
+                      # #1604, the same arrival category as the isolation rules
+                      # above and argued the same way: a composed .mcp.json is
+                      # read at SESSION START, so it waits for a restart, but
+                      # restarts happen with nobody choosing them (keepalive,
+                      # context restarts). Selected activation and the manifest
+                      # let one bot go first. Nothing from the four list: it
+                      # deletes nothing, spends nothing, sends nothing, and the
+                      # install it arms writes only under state/mcp.
+                      "mcp-direct-launch"}
     for s in sw.SWITCHES:
         if s.polarity == sw.OPT_IN:
             assert s.why_opt_in, f"{s.key} ships off with no stated reason"
@@ -397,7 +404,9 @@ def test_doctor_switches_prints_the_table_alone(tmp_path):
     # ...and ONLY the table: the shell setup doors call this, and a health
     # command's service probes / credential curls have no business in a
     # setup summary.
-    assert "npx" not in r.stdout and "=== claudlobby host doctor ===" not in r.stdout
+    # The npx-cache RUNG is the probe this guards against. Its name, not the
+    # word: the table itself now names npx (mcp-direct-launch, #1604).
+    assert "npx-cache" not in r.stdout and "=== claudlobby host doctor ===" not in r.stdout
 
 
 def test_the_doctor_rung_exists_and_never_fails(tmp_path):
