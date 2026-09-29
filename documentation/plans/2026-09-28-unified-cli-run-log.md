@@ -1,5 +1,31 @@
 # Unified CLI implementation record
 
+### 2026-09-29 — CI integration repairs; rollout held
+
+**Measured:** the operator's screenshot matches all four job durations from
+[`1667434`](https://github.com/Claudfather/Claudlobby/actions/runs/36561883504).
+Its handoff-grant expectation was corrected in `db1d186`, whose complete
+[test matrix passed](https://github.com/Claudfather/Claudlobby/actions/runs/36564193139).
+That repair is retained; it is not evidence for later revisions.
+
+**Measured:** [`af8b9fe`](https://github.com/Claudfather/Claudlobby/actions/runs/36593143788)
+then failed the same eleven cases on Linux 3.11 and 3.10. Eight were missed
+references to moved development instruments: the boot-summary stub still
+replaced `LIB_DIR`, and Claude-version checks still invoked `lib/` paths.
+Three were obsolete caller/diagnostic expectations. The caller inventory and
+schema-read fixture were already repaired in `4990f72`; both passed when
+rechecked against that exact source. The remaining daemon check reproduced
+exit 4 versus its old expected 1; `ec64a72` updates the assertion to the common
+attention contract, retaining its diagnostic assertions. All three focused
+diagnostic/caller checks then passed in 1.25 seconds.
+
+**Read from code / measured:** `6f75fc7` retargets only the affected test callers,
+uses the existing built-CLI fixture where private composition needs packaged
+resources, and leaves runtime code unchanged. Its nine-case focused selection
+passed in 4.86 seconds after reproducing the failures. No test was removed or
+weakened and no new test framework was added. New feature pushes and further
+rollout are held until the current revision's complete CI matrix passes.
+
 ### 2026-09-29 16:02 UTC — direct generation retired; cold fleet move exercised
 
 **Read from code:** the public `generate` route and the 508-line
