@@ -20,7 +20,7 @@ description: Decision tree for diagnosing fleet issues from logs, events, and CL
 | What work completed? | The plane's fleet reports | `claudlobby --json fleet reports list --status completed --since "$CUTOFF"` (`CUTOFF` must be an offset-bearing RFC3339 instant derived for the intended window; follow `next_cursor`) |
 | What did a manager decide at its last check-in, and why? | The plane (the check-in's `checkin_decision` rows, joined through `checkin_dispatch` to the task's status) | `claudlobby --json --fleet <F> checkin list --bot <b> --last`; inspect `data.items[0]` |
 | How is a manager's check-in window distributed: actions, ask rate, what it could not read, dispatch outcomes — by project? | The plane (the decision rows, rolled up) | `claudlobby --json --fleet <F> checkin list --summary --since 14d` |
-| Fleet-wide log search | Tail all logs | `lib/tail-fleet.sh --fleet <name> --grep ERROR` |
+| Recent fleet or bot logs | Bounded selected log files, with missing sources reported per bot | `claudlobby --fleet <name> fleet logs --lines 20` or `claudlobby --fleet <name> bot logs <bot> --lines 20` |
 | Last pulse snapshot | The fleet's pulse summary file | `cat state/pulse/<fleet>.pulse-summary.txt` |
 | Is the observable-plane kernel healthy? | Plane kernel status (db/spool/quarantine) | `claudlobby plane doctor` |
 

@@ -29,6 +29,12 @@ def _status_dispatch(args):
                    json_output=args.json)
 
 
+def _runtime_read_dispatch(args):
+    return execute(args.public_command,
+                   lambda: import_module(".runtime_read", __package__).dispatch(args),
+                   json_output=args.json)
+
+
 def _automation_dispatch(args):
     return execute(args.public_command,
                    lambda: import_module(".automation", __package__).dispatch(args),
@@ -67,6 +73,11 @@ def register_orientation_subparsers(sub):
         group = sub.add_parser(domain, help=f"Read {domain} declarations and available evidence")
         children = group.add_subparsers(dest=f"{domain}_command", required=True)
         if domain == "fleet":
+            logs = children.add_parser("logs", help="Read bounded selected-fleet bot log tails")
+            logs.add_argument("--lines", type=int, default=20, metavar="N",
+                              help="Lines per file (1–200; default 20)")
+            logs.add_argument("--json", action="store_true", help="One schema-1 result object")
+            logs.set_defaults(func=_runtime_read_dispatch, public_command="fleet.logs")
             status = children.add_parser("status", help="Read fleet session, native and recorded status")
             status.add_argument("--json", action="store_true", help="One schema-1 result object")
             status.set_defaults(func=_status_dispatch, public_command="fleet.status")
@@ -105,6 +116,16 @@ def register_orientation_subparsers(sub):
         if domain == "bot":
             from ._bot_create_parsers import register_bot_create
             register_bot_create(children, _bot_create_dispatch)
+            session = children.add_parser("session", help="Observe one selected private bot session")
+            session.add_argument("bot_id", metavar="BOT", help="Exact declared bot ID")
+            session.add_argument("--json", action="store_true", help="One schema-1 result object")
+            session.set_defaults(func=_runtime_read_dispatch, public_command="bot.session")
+            logs = children.add_parser("logs", help="Read bounded log tails for one declared bot")
+            logs.add_argument("bot_id", metavar="BOT", help="Exact declared bot ID")
+            logs.add_argument("--lines", type=int, default=50, metavar="N",
+                              help="Lines per file (1–200; default 50)")
+            logs.add_argument("--json", action="store_true", help="One schema-1 result object")
+            logs.set_defaults(func=_runtime_read_dispatch, public_command="bot.logs")
             status = children.add_parser("status", help="Read one bot's session, native and recorded status")
             status.add_argument("bot_id", metavar="BOT", help="Exact declared bot ID")
             status.add_argument("--json", action="store_true", help="One schema-1 result object")

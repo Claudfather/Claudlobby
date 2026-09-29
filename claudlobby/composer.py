@@ -2511,6 +2511,8 @@ def _resolve_fleet_ops_grants(bot: BotConfig, fleet: FleetConfig) -> list[str]:
     if bot.bot_id == fleet.manager:
         grants.append("Bash(claudlobby --json fleet reload)")
         grants.append("Bash(claudlobby --json fleet pulse)")
+        grants.append("Bash(claudlobby --json fleet logs)")
+        grants.append("Bash(claudlobby --json fleet logs --lines *)")
         grants.append("Bash(claudlobby events --since 24h --source pulse --json)")
         for verb in ("start", "stop", "restart"):
             grants.append(f"Bash(claudlobby --json fleet {verb} --workers)")
@@ -2519,10 +2521,16 @@ def _resolve_fleet_ops_grants(bot: BotConfig, fleet: FleetConfig) -> list[str]:
         for target in fleet.bots:
             if target == bot.bot_id:
                 continue
+            grants.append(f"Bash(claudlobby --json bot session {target})")
+            grants.append(f"Bash(claudlobby --json bot logs {target})")
+            grants.append(f"Bash(claudlobby --json bot logs {target} --lines *)")
             for verb in ("start", "stop", "restart"):
                 grants.append(f"Bash(claudlobby --json bot {verb} {target})")
             grants.append(f"Bash(claudlobby --json bot restart {target} --ceiling *)")
     # Any generated bot can request only its own context-preserving restart.
+    grants.append(f"Bash(claudlobby --json bot session {bot.bot_id})")
+    grants.append(f"Bash(claudlobby --json bot logs {bot.bot_id})")
+    grants.append(f"Bash(claudlobby --json bot logs {bot.bot_id} --lines *)")
     grants.append(f"Bash(claudlobby --json bot restart {bot.bot_id})")
     return grants
 
