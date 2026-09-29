@@ -443,7 +443,7 @@ Two rungs read that record:
 - `claudlobby --fleet <name> host doctor` → `manifest-provenance`: **warns** when the
   manifest on disk differs from what the running fleet was composed from, and
   names the restart step above.
-- `claudlobby --fleet <name> diff` prints one line first: `manifest: unchanged
+- `claudlobby --fleet <name> config diff` prints one line first: `manifest: unchanged
   since compose (<when>)`, or `manifest: CHANGED`. Without it, a diff body
   cannot say whether the *runtime* drifted or the *inputs* moved — they look
   identical.

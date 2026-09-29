@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from claudlobby.__main__ import main
-from claudlobby import activation_state, migration_apply, resources
+from claudlobby import activation_state, composer, config, context, migration_apply, resources
 from claudlobby.commands import releases as commands
 from claudlobby.config_plan import ConfigPlanBuilder, read_plan
 from claudlobby.migration_plan import build_migration_manifest
@@ -162,6 +162,31 @@ def test_config_plan_covers_declared_and_explicit_fleets_and_diff_never_dumps_by
     secret_plan = builder.seal()
     _, capture = _call(capsys, ["--root", str(case.root), "config", "diff", secret_plan.plan_id, "--json"])
     assert "ACTUAL_STAGED_SECRET" not in capture.out + capture.err and not secret_target.exists()
+
+
+def test_config_diff_current_reports_drift_without_values_or_retired_routes(staging_case, capsys, monkeypatch):
+    case = staging_case
+    monkeypatch.setattr(context, "get_resources", lambda: case.package)
+    fleet, _ = config.load_fleet(case.paths.fleet_yaml)
+    bot = "primary-manager"
+    composer.compose_bot(fleet.bots[bot], fleet, case.paths)
+    conf = case.paths.bot_runtime(bot) / "bot.conf"
+    conf.write_text(conf.read_text() + "\nexport PRIVATE_MARKER=SECRET-current-value\n")
+
+    current, capture = _call(capsys, ["--root", str(case.root), "config", "diff",
+                                       "--bot", bot, "--json"])
+    assert current["command"] == "config.diff"
+    assert current["data"]["mode"] == "current"
+    assert current["data"]["bot"] == bot
+    assert any("bot.conf drift" in line for line in current["data"]["drift"])
+    assert "SECRET-current-value" not in capture.out + capture.err
+    assert "PRIVATE_MARKER" not in capture.out + capture.err
+
+    for retired in ("diff", "promote"):
+        with pytest.raises(SystemExit) as exit:
+            main(["--root", str(case.root), retired])
+        assert exit.value.code == 2
+        capsys.readouterr()
 
 
 def test_migration_cli_preview_is_read_only_and_status_separates_recorded_progress(releases, capsys):

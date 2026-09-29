@@ -1,4 +1,4 @@
-"""Core compositor commands: validate, generate, diff, promote, status, uptime, warm-cache."""
+"""Core compositor commands still used by private composition and fleet operations."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from pathlib import Path
 
 from ..mcp_grammar import GrammarUnavailable, grammar
 from ..composer import compose_bot, compose_fleet
-from ..diff import diff_bot, promote_bot
 from ..source_state import (
     SOURCE_ABSENT,
     probe_source,
@@ -217,36 +216,6 @@ def cmd_host_timers(args) -> int:
         log.info("composed host timers → %s", host_timers_dir)
     else:
         log.info("no host jobs declared — nothing composed")
-    return 0
-
-
-def cmd_diff(args) -> int:
-    from ..diff import diff_fleet_timers
-
-    paths = _resolve_paths(args)
-    _load_env(paths)
-    fleet, merged_defaults = _load_fleet_or_exit(paths)
-    # #1722: the inputs-moved line comes FIRST and exactly once, whether one bot
-    # or the whole fleet is being diffed — it is a fact about the fleet's
-    # manifest, not about any bot.
-    from ..diff import manifest_header
-    sys.stdout.write(manifest_header(fleet, paths))
-    if args.bot:
-        sys.stdout.write(diff_bot(args.bot, fleet, paths))
-    else:
-        for name in fleet.bots:
-            sys.stdout.write(diff_bot(name, fleet, paths))
-        # Fleet-level timer drift
-        timer_drift = diff_fleet_timers(fleet, paths, merged_defaults)
-        if timer_drift:
-            sys.stdout.write(timer_drift)
-    return 0
-
-
-def cmd_promote(args) -> int:
-    paths = _resolve_paths(args)
-    fleet, _md = _load_fleet_or_exit(paths)
-    sys.stdout.write(promote_bot(args.bot, fleet, paths))
     return 0
 
 

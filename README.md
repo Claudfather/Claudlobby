@@ -90,8 +90,8 @@ claudlobby generate              # compose runtime/bots/ from fleet.yaml
 claudlobby generate --bot <name> # compose only one bot
 claudlobby host-timers           # compose host-global timer units from system.yaml
 claudlobby library list          # show available personas / skills / mcp / etc.
-claudlobby diff [--bot <name>]   # show drift between runtime/ and library/
-claudlobby promote <bot>         # move runtime drift back to library/ (v1: manual)
+claudlobby config diff [--bot <name>]  # show current rendered drift without values
+claudlobby config diff <PLAN_ID>       # inspect staged paths and state digests
 claudlobby fleet status             # fleet health dashboard
 claudlobby bot status <name>        # one bot, including native and Plane observations
 claudlobby host doctor                # pre-flight fleet health diagnostic
@@ -129,8 +129,8 @@ Bots can edit themselves at runtime — `runtime/bots/` is gitignored, so an in-
 
 - **Skills** auto-sync because they're symlinks: a bot editing `runtime/bots/X/.claude/skills/foo/SKILL.md` is editing `library/skills/foo/SKILL.md`. The change propagates to every bot using `foo`.
 - **Composed CLAUDE.md** doesn't auto-sync (the next `generate` would overwrite it). Use:
-  - `claudlobby diff <bot>` — show drift vs what `generate` would produce
-  - `claudlobby promote <bot>` — pick which drifted lines belong in `library/expertise/`, `voices/`, or a new guardrail/protocol
+  - `claudlobby config diff --bot <bot>` — identify drifted rendered files without printing values
+  - Review the bot's changes and edit the source in `library/expertise/`, `voices/`, or a guardrail/protocol. Stage and inspect a configuration plan before activation.
 
 Foundation for the future ML layer: when claudlobby has embeddings + a knowledge graph behind `library/`, runtime drift becomes training data for "what if more bots needed this rule?"
 

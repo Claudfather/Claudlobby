@@ -1,13 +1,8 @@
-"""Drift detection between runtime/ and library/.
+"""Current rendered drift against the compositor's authored sources.
 
-A bot may edit its own files in runtime/bots/<name>/ during a session
-(skills auto-sync via symlink; CLAUDE.md does not). `diff` shows what
-would change if `generate` ran now. `promote` (interactive) routes
-drifted content back to library/personas/, library/voices/, or a
-new guardrail/protocol.
-
-v1: diff is unified-diff text output; promote is a stub that points
-the user at the right library/ file based on heuristics.
+Public ``config diff`` emits only changed-file metadata. Private callers can
+still request unified text diffs, and the old manual promotion pointer remains
+an internal helper for their fixtures.
 """
 
 from __future__ import annotations
@@ -52,13 +47,13 @@ def manifest_header(fleet: FleetConfig, paths: Paths) -> str:
     prov = read_manifest_provenance(paths)
     if prov is None:
         return ("manifest: NO PROVENANCE RECORDED — this runtime was composed by a "
-                "claudlobby that did not stamp its inputs; run `generate` to "
+                "claudlobby that did not stamp its inputs; stage and activate a release to "
                 "record them. Nothing below distinguishes an input change from "
                 "runtime drift.\n")
     if prov.get("schema") != MANIFEST_PROVENANCE_SCHEMA_EXPECTED:
         return (f"manifest: provenance schema {prov.get('schema')!r} is not the "
                 f"{MANIFEST_PROVENANCE_SCHEMA_EXPECTED} this build reads — not "
-                "interpreting it. Run `generate` to re-record.\n")
+                "interpreting it. Stage and activate a release to re-record.\n")
     changed = changed_manifest_inputs(fleet, paths, prov)
     if changed:
         how = manifest_change_attribution(fleet, paths)
@@ -70,14 +65,14 @@ def manifest_header(fleet: FleetConfig, paths: Paths) -> str:
     return f"manifest: unchanged since compose ({prov.get('composed_at')})\n"
 
 
-def diff_bot(bot_name: str, fleet: FleetConfig, paths: Paths) -> str:
+def diff_bot(bot_name: str, fleet: FleetConfig, paths: Paths, *, metadata_only: bool = False) -> str:
     bot = fleet.bots.get(bot_name)
     if not bot:
         return f"bot '{bot_name}' not in fleet.yaml\n"
 
     bot_dir = paths.bot_runtime(bot_name)
     if not bot_dir.is_dir():
-        return f"runtime/bots/{bot_name}/ does not exist — run `claudlobby generate` first\n"
+        return f"runtime/bots/{bot_name}/ does not exist — activate a configuration plan first\n"
 
     parts: list[str] = []
 
@@ -87,15 +82,16 @@ def diff_bot(bot_name: str, fleet: FleetConfig, paths: Paths) -> str:
     actual_md = actual_md_path.read_text() if actual_md_path.is_file() else ""
     if expected_md != actual_md:
         parts.append(f"=== CLAUDE.md drift in {bot_name} ===")
-        parts.extend(
-            difflib.unified_diff(
-                expected_md.splitlines(),
-                actual_md.splitlines(),
-                fromfile="library-composed (would be regenerated)",
-                tofile=f"runtime/bots/{bot_name}/CLAUDE.md (current)",
-                lineterm="",
+        if not metadata_only:
+            parts.extend(
+                difflib.unified_diff(
+                    expected_md.splitlines(),
+                    actual_md.splitlines(),
+                    fromfile="library-composed (would be regenerated)",
+                    tofile=f"runtime/bots/{bot_name}/CLAUDE.md (current)",
+                    lineterm="",
+                )
             )
-        )
 
     # .mcp.json
     expected_mcp = compose_mcp_json(bot, paths)
@@ -105,15 +101,16 @@ def diff_bot(bot_name: str, fleet: FleetConfig, paths: Paths) -> str:
     )
     if expected_mcp != actual_mcp:
         parts.append(f"\n=== .mcp.json drift in {bot_name} ===")
-        parts.extend(
-            difflib.unified_diff(
-                json.dumps(expected_mcp, indent=2).splitlines(),
-                json.dumps(actual_mcp, indent=2).splitlines(),
-                fromfile="library-composed",
-                tofile=f"runtime/bots/{bot_name}/.mcp.json",
-                lineterm="",
+        if not metadata_only:
+            parts.extend(
+                difflib.unified_diff(
+                    json.dumps(expected_mcp, indent=2).splitlines(),
+                    json.dumps(actual_mcp, indent=2).splitlines(),
+                    fromfile="library-composed",
+                    tofile=f"runtime/bots/{bot_name}/.mcp.json",
+                    lineterm="",
+                )
             )
-        )
 
     # bot.conf — a generated file (env vars sourced by the bot session AND the
     # supervisor scripts, e.g. keepalive). A fleet.yaml change that adds an env
@@ -124,15 +121,16 @@ def diff_bot(bot_name: str, fleet: FleetConfig, paths: Paths) -> str:
     actual_conf = actual_conf_path.read_text() if actual_conf_path.is_file() else ""
     if expected_conf != actual_conf:
         parts.append(f"\n=== bot.conf drift in {bot_name} ===")
-        parts.extend(
-            difflib.unified_diff(
-                expected_conf.splitlines(),
-                actual_conf.splitlines(),
-                fromfile="library-composed (would be regenerated)",
-                tofile=f"runtime/bots/{bot_name}/bot.conf (current)",
-                lineterm="",
+        if not metadata_only:
+            parts.extend(
+                difflib.unified_diff(
+                    expected_conf.splitlines(),
+                    actual_conf.splitlines(),
+                    fromfile="library-composed (would be regenerated)",
+                    tofile=f"runtime/bots/{bot_name}/bot.conf (current)",
+                    lineterm="",
+                )
             )
-        )
 
     # .gitconfig — per-org git credential routing. Compositor-owned and pointed
     # at by GIT_CONFIG_GLOBAL, which means `git config --global` inside a bot
@@ -146,15 +144,16 @@ def diff_bot(bot_name: str, fleet: FleetConfig, paths: Paths) -> str:
     )
     if expected_gitconfig != actual_gitconfig:
         parts.append(f"\n=== .gitconfig drift in {bot_name} ===")
-        parts.extend(
-            difflib.unified_diff(
-                expected_gitconfig.splitlines(),
-                actual_gitconfig.splitlines(),
-                fromfile="library-composed (would be regenerated)",
-                tofile=f"runtime/bots/{bot_name}/{GITCONFIG_FILENAME} (current)",
-                lineterm="",
+        if not metadata_only:
+            parts.extend(
+                difflib.unified_diff(
+                    expected_gitconfig.splitlines(),
+                    actual_gitconfig.splitlines(),
+                    fromfile="library-composed (would be regenerated)",
+                    tofile=f"runtime/bots/{bot_name}/{GITCONFIG_FILENAME} (current)",
+                    lineterm="",
+                )
             )
-        )
 
     # .gitconfig-github-app-id — the per-org App identity fragment (#1300),
     # compositor-owned like the .gitconfig it is included from.
@@ -165,15 +164,16 @@ def diff_bot(bot_name: str, fleet: FleetConfig, paths: Paths) -> str:
     )
     if expected_appid != actual_appid:
         parts.append(f"\n=== {GH_APP_IDENTITY_FILENAME} drift in {bot_name} ===")
-        parts.extend(
-            difflib.unified_diff(
-                expected_appid.splitlines(),
-                actual_appid.splitlines(),
-                fromfile="library-composed (would be regenerated)",
-                tofile=f"runtime/bots/{bot_name}/{GH_APP_IDENTITY_FILENAME} (current)",
-                lineterm="",
+        if not metadata_only:
+            parts.extend(
+                difflib.unified_diff(
+                    expected_appid.splitlines(),
+                    actual_appid.splitlines(),
+                    fromfile="library-composed (would be regenerated)",
+                    tofile=f"runtime/bots/{bot_name}/{GH_APP_IDENTITY_FILENAME} (current)",
+                    lineterm="",
+                )
             )
-        )
 
     # tools/ — composited scripts. The whole dir is compositor-owned, so a
     # hand-edited, deleted, or stray file is all drift.
@@ -190,22 +190,24 @@ def diff_bot(bot_name: str, fleet: FleetConfig, paths: Paths) -> str:
         if expected_text == actual_text:
             continue
         parts.append(f"\n=== tools/{tool_name} drift in {bot_name} ===")
-        parts.extend(
-            difflib.unified_diff(
-                expected_text.splitlines(),
-                actual_text.splitlines(),
-                fromfile="library-composed (would be regenerated)",
-                tofile=f"runtime/bots/{bot_name}/tools/{tool_name} (current)",
-                lineterm="",
+        if not metadata_only:
+            parts.extend(
+                difflib.unified_diff(
+                    expected_text.splitlines(),
+                    actual_text.splitlines(),
+                    fromfile="library-composed (would be regenerated)",
+                    tofile=f"runtime/bots/{bot_name}/tools/{tool_name} (current)",
+                    lineterm="",
+                )
             )
-        )
 
     if not parts:
         return f"no drift in {bot_name}\n"
     return "\n".join(parts) + "\n"
 
 
-def diff_fleet_timers(fleet: FleetConfig, paths: Paths, merged_defaults: dict) -> str:
+def diff_fleet_timers(fleet: FleetConfig, paths: Paths, merged_defaults: dict,
+                      *, metadata_only: bool = False) -> str:
     """Diff fleet-level timer units against what generate would produce."""
     from .composer import compose_fleet_timers
     import tempfile
@@ -221,7 +223,7 @@ def diff_fleet_timers(fleet: FleetConfig, paths: Paths, merged_defaults: dict) -
 
     timers_dir = paths.runtime_fleet / "timers"
     if not timers_dir.is_dir():
-        return "=== fleet timers: runtime/fleet/timers/ does not exist — run `claudlobby generate`\n"
+        return "=== fleet timers: runtime/fleet/timers/ does not exist — activate a configuration plan first\n"
 
     # Generate expected timers to a temp dir, then compare. Pass the REAL Paths
     # (redirecting output via output_dir) so diff and generate exercise an
@@ -249,15 +251,16 @@ def diff_fleet_timers(fleet: FleetConfig, paths: Paths, merged_defaults: dict) -
 
             if expected_text != actual_text:
                 parts.append(f"\n=== fleet timer drift: {fname} ===")
-                parts.extend(
-                    difflib.unified_diff(
-                        expected_text.splitlines(),
-                        actual_text.splitlines(),
-                        fromfile=f"expected ({fname})",
-                        tofile=f"runtime/fleet/timers/{fname} (current)",
-                        lineterm="",
+                if not metadata_only:
+                    parts.extend(
+                        difflib.unified_diff(
+                            expected_text.splitlines(),
+                            actual_text.splitlines(),
+                            fromfile=f"expected ({fname})",
+                            tofile=f"runtime/fleet/timers/{fname} (current)",
+                            lineterm="",
+                        )
                     )
-                )
 
         if not parts:
             return ""
@@ -284,7 +287,7 @@ def promote_bot(bot_name: str, fleet: FleetConfig, paths: Paths) -> str:
     return (
         f"Promote workflow for '{bot_name}' (v1 — manual):\n"
         f"\n"
-        f"1. Review drift:    claudlobby diff {bot_name}\n"
+        f"1. Review drift:    claudlobby config diff --bot {bot_name}\n"
         f"2. Decide what to keep, then edit the source:\n"
         f"   - Expertise content →\n{expertise_lines}\n"
         + (
@@ -292,16 +295,16 @@ def promote_bot(bot_name: str, fleet: FleetConfig, paths: Paths) -> str:
             if voice_path
             else "   - Voice / personality → create a voices/<name>.md and reference it in fleet.yaml\n"
         )
-        + f"   - Mission (one paragraph) → fleet.yaml `bots.{bot_name}.mission`\n"
-        f"   - Scope override → fleet.yaml `bots.{bot_name}.scope`\n"
-        f"   - Shared resource → new file under {paths.overlay_library / 'resources'}/\n"
-        f"   - Integration / MCP usage doc → new file under {paths.overlay_library / 'integrations'}/ (paired with mcp fragment)\n"
-        f"   - Cross-cutting protocol → new file under {paths.overlay_library / 'protocols'}/\n"
-        f"   - New guardrail → new file under {paths.overlay_library / 'guardrails'}/\n"
-        f"   - Lesson / 'learned the hard way' → new file under {paths.overlay_library / 'lessons'}/\n"
-        f"3. After editing library/, run: claudlobby generate\n"
-        f"   (Runtime CLAUDE.md is overwritten; library/ is now the source of truth.)\n"
-        f"\n"
-        f"Runtime file:  {bot_md}\n"
-        f"Interactive promote (with picker) — coming in v2.\n"
-    )
+    + f"   - Mission (one paragraph) → fleet.yaml `bots.{bot_name}.mission`\n"
+    f"   - Scope override → fleet.yaml `bots.{bot_name}.scope`\n"
+    f"   - Shared resource → new file under {paths.overlay_library / 'resources'}/\n"
+    f"   - Integration / MCP usage doc → new file under {paths.overlay_library / 'integrations'}/ (paired with mcp fragment)\n"
+    f"   - Cross-cutting protocol → new file under {paths.overlay_library / 'protocols'}/\n"
+    f"   - New guardrail → new file under {paths.overlay_library / 'guardrails'}/\n"
+    f"   - Lesson / 'learned the hard way' → new file under {paths.overlay_library / 'lessons'}/\n"
+    f"3. After editing library/, stage with `config plan`, inspect with `config diff PLAN_ID`, then activate.\n"
+    f"   (Runtime CLAUDE.md is overwritten; library/ is now the source of truth.)\n"
+    f"\n"
+    f"Runtime file:  {bot_md}\n"
+    f"Interactive promote (with picker) — coming in v2.\n"
+)

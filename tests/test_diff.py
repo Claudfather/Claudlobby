@@ -123,10 +123,10 @@ class TestPromoteBot:
         result = promote_bot("lead", fleet, paths)
         assert "Promote workflow" in result
         assert "Review drift" in result
-        assert "claudlobby diff lead" in result
+        assert "claudlobby config diff --bot lead" in result
         assert "Expertise content" in result
         assert "orchestration.md" in result
-        assert "claudlobby generate" in result
+        assert "config plan" in result
 
     def test_promote_no_voice(self, fleet_dir):
         paths = Paths(root=fleet_dir, package=source_package())

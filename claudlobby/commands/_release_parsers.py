@@ -192,8 +192,10 @@ def register_release_subparsers(sub):
     plan.add_argument("--release", required=True, metavar="ID")
     plan.add_argument("--fleet-path", action="append", default=[], metavar="PATH",
                       help="Explicit external fleet directory or fleet.yaml; repeatable")
-    diff = _route(configs, "diff", "config.diff", "Inspect proposed paths and state digests without secret bytes")
-    diff.add_argument("plan_id", metavar="PLAN_ID")
+    diff = _route(configs, "diff", "config.diff", "Inspect staged changes or current rendered drift without secret bytes")
+    diff.add_argument("plan_id", nargs="?", metavar="PLAN_ID",
+                      help="Staged plan to inspect; omit for current rendered drift")
+    diff.add_argument("--bot", metavar="BOT", help="Limit current drift to one declared bot")
 
     migration = sub.add_parser("migration", help="Preview data migration and inspect recorded progress")
     migrations = migration.add_subparsers(dest="migration_command", required=True)

@@ -181,9 +181,9 @@ Bots can edit themselves in `runtime/bots/<name>/` during a session. `runtime/bo
 - **Composed CLAUDE.md doesn't auto-sync** — the next `generate` would overwrite it. The flow is:
 
   1. Bot edits its CLAUDE.md mid-session (e.g., learns a new pattern, codifies a rule)
-  2. `claudlobby diff <bot>` shows the drift vs what `generate` would produce
-  3. `claudlobby promote <bot>` — **v1 is a pointer only, not a mover**: it prints which `library/` file each category of drift belongs in (`library/expertise/<role>.md`, `voices/<voice>.md`, a brand-new `library/guardrails/<name>.md` or `library/protocols/<name>.md`, etc.); no content is copied automatically, and the bot's composed `CLAUDE.md` is not read back — you hand-edit the named file yourself. An interactive picker that performs the move is planned for v2.
-  4. After hand-editing `library/` per the pointer, re-running `generate` produces a CLAUDE.md consistent with the new library state.
+  2. `claudlobby config diff --bot <bot>` identifies drifted rendered files without exposing their contents. Review the runtime file and its authored source when deciding what to retain.
+  3. Hand-edit the relevant authored source: `library/expertise/<role>.md`, `voices/<voice>.md`, `library/guardrails/<name>.md`, `library/protocols/<name>.md`, or the bot declaration in `fleet.yaml`.
+  4. Stage with `claudlobby config plan --release <RELEASE_ID>`, inspect `claudlobby config diff <PLAN_ID>`, then activate the plan through `claudlobby host activate <PLAN_ID> --install-directory <PATH>`.
 
 This is the foundation for the future ML / self-learning layer: drift becomes training data. When the same drift shows up across multiple bots, that's a signal a guardrail or protocol should exist.
 

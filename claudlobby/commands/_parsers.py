@@ -54,17 +54,6 @@ def register_subparsers(sub) -> None:
     from ._library_parsers import register_library_subparsers
     register_library_subparsers(sub)
 
-    pd = sub.add_parser(
-        "diff",
-        help="Show drift between runtime/bots/<bot>/ and what generate would produce",
-    )
-    pd.add_argument("--bot", help="Diff only one bot (default: all)")
-    pd.set_defaults(func=_command("core", "cmd_diff"))
-
-    pp = sub.add_parser("promote", help="Promote runtime drift back to library/")
-    pp.add_argument("bot", help="Bot name")
-    pp.set_defaults(func=_command("core", "cmd_promote"))
-
     pb = sub.add_parser(
         "brief",
         help="Read a bot's active fleet mission, canonical work, workstreams, reports and alerts",

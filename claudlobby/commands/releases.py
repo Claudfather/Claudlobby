@@ -244,6 +244,8 @@ def _config_plan(args, root: Path) -> CommandOutput:
 def _config_diff(args, root: Path) -> CommandOutput:
     from ..config_plan import PlanError, read_plan
 
+    if args.bot:
+        raise CommandFailure("invalid_argument", "invalid argument: --bot applies only to current drift")
     if not re.fullmatch(r"p-[0-9a-f]{64}", args.plan_id):
         raise CommandFailure("invalid_argument", "invalid argument: invalid configuration plan ID")
     try:
@@ -256,6 +258,30 @@ def _config_diff(args, root: Path) -> CommandOutput:
     return CommandOutput(data, _executing_release(root), tuple(
         f"{item['path']}: {item['before']['kind']} -> {item['after']['kind']} "
         f"{item['before']['state_sha256']} -> {item['after']['state_sha256']}" for item in data["changes"]))
+
+
+def _config_current_drift(args) -> CommandOutput:
+    from ..context import BotNotFoundError, resolve_context
+    from ..diff import diff_bot, diff_fleet_timers, manifest_header
+
+    try:
+        context = resolve_context(root=args.root, fleet=args.fleet, bot=args.bot, seed=args.seed)
+    except BotNotFoundError as exc:
+        raise CommandFailure("not_found", "bot is not declared in the selected fleet") from exc
+    except (ValueError, RuntimeError, FileNotFoundError) as exc:
+        # Authored configuration errors can carry secret values. Keep the
+        # public diagnostic at the metadata boundary used by staged diff.
+        raise CommandFailure("conflict", "conflict: fleet configuration could not be loaded") from exc
+    paths, fleet = context.paths, context.fleet
+    lines = [manifest_header(fleet, paths).rstrip("\n")]
+    for name in ([args.bot] if args.bot else fleet.bots):
+        lines.extend(diff_bot(name, fleet, paths, metadata_only=True).splitlines())
+    if not args.bot:
+        lines.extend(diff_fleet_timers(fleet, paths, context.merged_defaults,
+                                       metadata_only=True).splitlines())
+    lines = [line for line in lines if line]
+    return CommandOutput({"mode": "current", "fleet": fleet.name, "bot": args.bot,
+                          "drift": lines}, _executing_release(paths.root), tuple(lines))
 
 
 def _migration_plan(args, root: Path) -> CommandOutput:
@@ -337,6 +363,8 @@ def _migration_status(args, root: Path) -> CommandOutput:
 
 
 def dispatch(args) -> CommandOutput:
+    if args.public_command == "config.diff" and args.plan_id is None:
+        return _config_current_drift(args)
     root = _host_root(args)
     return {"host.releases": _host_releases, "config.plan": _config_plan,
             "config.diff": _config_diff, "migration.plan": _migration_plan,

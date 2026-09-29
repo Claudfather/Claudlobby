@@ -574,7 +574,7 @@ used throughout the codebase, and it's worth keeping them distinct:
   `system-defaults-disabled` — none of which were built; see
   [`plans/2026-06-09-system-defaults-tier.md`](plans/2026-06-09-system-defaults-tier.md)
   for the full history and its own re-audit notes.
-- **`claudlobby diff`** *does* cover fleet-level drift: `diff_fleet_timers`
+- **`claudlobby config diff`** *does* cover fleet-level drift: `diff_fleet_timers`
   compares a fleet's composed `defaults.jobs` units against what `generate`
   would produce today. There's no equivalent for `host.jobs` — host timer
   drift isn't part of any fleet's diff.
