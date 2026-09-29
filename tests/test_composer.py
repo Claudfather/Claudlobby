@@ -568,7 +568,9 @@ class TestComposeSettingsLocal:
         fleet = self._make_fleet_with_bots("bot-a", "bot-b", manager="bot-b")
         result = compose_settings_local(fleet.bots["bot-a"], fleet, paths)
         assert "permissions" in result
-        deny = result["permissions"]["deny"]
+        # Operator command denies are independent of sibling file isolation.
+        deny = [rule for rule in result["permissions"]["deny"]
+                if not rule.startswith("Bash(")]
         assert len(deny) == 2
         assert {d.split("(")[0] for d in deny} == {"Read", "Edit"}
         assert all("bot-b" in d for d in deny)
