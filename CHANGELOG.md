@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — `claudlobby doctor` asks `claudron doctor` about each wired vault, and never applies `--fix` (Claudron #190, part C)
+
+Until now nothing in fleet health said a vault had fallen behind its engine. After the 0.5.2 upgrade, walk-up stopped finding a vault that lacked its identity file, and every hook that found the vault that way failed open without a word (Claudron #183). The Claudron section of `claudlobby doctor` now runs `claudron doctor --json --vault <vault>` for each wired vault this host holds, and adds:
+
+- **`claudron-doctor`.** It lists pending migrations (D001) with their ids and titles, and the command a human runs: `claudron doctor --vault <vault> --fix`. On a current vault it is a pass that counts every other finding and names the command that shows them. A vault whose format differs from the engine's while nothing is pending, which is what an unreadable identity file looks like, is a warn, never a pass.
+- **`claudron-doctor: D007`** and **`claudron-doctor: D008`:** the engine's own message, verbatim.
+
+The rules it keeps:
+
+- **It never passes `--fix`.** A test records every call to pin this.
+- **It gates on `"doctor"` in the capability probe's `data.capabilities`, never on `engine_version`.** `_claudron_probe` now hands back its envelope's `data` for that.
+- **The engine is the only source of findings.** Nothing here reads the vault itself.
+- **It waits `CLAUDRON_DOCTOR_TIMEOUT_S` (60 s).** Until Claudron #201 lands, a doctor that walks a vault root holding large ignored trees takes minutes. When it runs out of time, the row says *unknown* and names #201. On the estate's Pi, that is today's answer for the live vault: 65 s end to end, nothing left running, the vault untouched.
+- **`_run` reports a timeout as 124, not 1.** `claudron doctor` exits 1 when it has error findings, so the old code blurred the two.
+- **It is warn-level,** like the rest of the section.
+
 ### Added — pinned MCP servers launch without npx's npm wrapper, opt-in per bot (#1604)
 
 `npx -y <pkg>@<version>` keeps an `npm exec` process resident as the parent of every MCP server it starts, with a `sh -c` shim between the two. Measured on the Pi on 2026-09-29, while the host was out of swap: 41 wrappers, 1,173 MB RSS but only 58 MB PSS. What they actually held was 45 MB private and 1,388 MB of swap, a third of the swap file.
