@@ -14,6 +14,7 @@ import subprocess
 
 from tests.conftest import TG_STUB, _scrubbed_env, _write_exec, read_fleet_events
 from tests.test_maintenance_jobs import _native_fixture
+from tests.test_plane_events_door import _serving
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO_ROOT, "lib", "notify-behind.sh")
@@ -92,14 +93,21 @@ class Harness:
                 'export TELEGRAM_STATE_DIR="$HOME/.claude/channels/telegram-tbot"\n'
             )
 
-    def env(self):
+    def env(self, *, socket=None):
         # a host job: no fleet, so its receipts land on the plane under _host
-        return _scrubbed_env(TG_CAPTURE=self.capture, **self.scratch_plane_env(self.root, initialize=True))
+        return _scrubbed_env(TG_CAPTURE=self.capture,
+                            **self.scratch_plane_env(self.root, socket=socket, initialize=True))
 
-    def run(self):
+    def run(self, *, serve=False):
+        if serve:
+            with _serving(self.root, self.scratch_plane_env) as socket:
+                return self._run(socket=socket)
+        return self._run()
+
+    def _run(self, *, socket=None):
         return subprocess.run(
             ["bash", str(self.native / "notify-behind.sh")],
-            env=self.env(), capture_output=True, text=True
+            env=self.env(socket=socket), capture_output=True, text=True
         )
 
     def head(self):
@@ -158,7 +166,7 @@ class TestNotifyBehind:
 
     def test_behind_writes_notice_event(self, tmp_path, *, scratch_plane_env):
         h = Harness(tmp_path, behind=1, scratch_plane_env=scratch_plane_env)
-        r = h.run()
+        r = h.run(serve=True)
         assert r.returncode == 0, r.stderr
         events = h.events()
         assert '"type":"source_behind"' in events
@@ -172,7 +180,7 @@ class TestNotifyBehind:
         # script_error breadcrumb lands in state/events for later diagnosis.
         h = Harness(tmp_path, behind=1, scratch_plane_env=scratch_plane_env)
         shutil.rmtree(h.origin)
-        r = h.run()
+        r = h.run(serve=True)
         assert r.returncode == 0, r.stderr
         assert h.captured() == []
         assert '"type":"script_error"' in h.events()
@@ -303,16 +311,17 @@ class TestFleetSignalPrimitives:
     def _emit(self, tmp_path, fn, event_type, msg, *, scratch_plane_env):
         h = Harness(tmp_path, behind=0, scratch_plane_env=scratch_plane_env)
         bots_dir = os.path.join(h.root, "runtime", "bots")
-        r = subprocess.run(
-            [
-                "bash",
-                "-c",
-                f'. "{h.native}/lib-common.sh" && {fn} "{bots_dir}" "{event_type}" "{msg}"',
-            ],
-            env=h.env(),
-            capture_output=True,
-            text=True,
-        )
+        with _serving(h.root, scratch_plane_env) as socket:
+            r = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'. "{h.native}/lib-common.sh" && {fn} "{bots_dir}" "{event_type}" "{msg}"',
+                ],
+                env=h.env(socket=socket),
+                capture_output=True,
+                text=True,
+            )
         assert r.returncode == 0, r.stderr
         return h
 
@@ -507,7 +516,7 @@ class TestUndeliveredNoticeIsRetried:
         h = Harness(tmp_path, behind=2, scratch_plane_env=scratch_plane_env)
         with open(os.path.join(h.root, "runtime", "bots", "tbot", "bot.conf"), "w") as f:
             f.write('export TELEGRAM_STATE_DIR="$HOME/.claude/channels/telegram-tbot"\n')
-        assert h.run().returncode == 0
+        assert h.run(serve=True).returncode == 0
         assert '"exit":2' in h.events(), "precondition: no Telegram target resolved"
-        assert h.run().returncode == 0
+        assert h.run(serve=True).returncode == 0
         assert h.events().count('"type":"source_behind"') == 1, "a notice with no target was raised again"

@@ -15,6 +15,7 @@ import time
 import pytest
 
 from tests.conftest import TG_STUB, _scrubbed_env, _write_exec, read_fleet_events
+from tests.test_plane_events_door import _serving
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(REPO_ROOT, "lib")
@@ -43,7 +44,13 @@ def _signal_root(tmp_path, bots_at="runtime/bots"):
     return root
 
 
-def _run(script, args, root, tmp_path, extra_env=None, *, scratch_plane_env):
+def _run(script, args, root, tmp_path, extra_env=None, *, scratch_plane_env,
+         serve=False):
+    if serve:
+        with _serving(root, scratch_plane_env) as socket:
+            return _run(script, args, root, tmp_path,
+                        {**(extra_env or {}), "PLANE_SOCKET": str(socket)},
+                        scratch_plane_env=scratch_plane_env)
     native = _native_fixture(tmp_path, script)
     env = _scrubbed_env(
         TG_CAPTURE=str(tmp_path / "tg-capture"),
@@ -139,7 +146,8 @@ class TestDiskMonitor:
     def test_high_usage_raises_disk_high_signal(self, tmp_path, *, scratch_plane_env):
         # --threshold 1 makes any real disk exceed it deterministically.
         root = _signal_root(tmp_path)
-        r = _run("disk-monitor.sh", ["--threshold", "1"], root, tmp_path, scratch_plane_env=scratch_plane_env)
+        r = _run("disk-monitor.sh", ["--threshold", "1"], root, tmp_path,
+                 scratch_plane_env=scratch_plane_env, serve=True)
         assert r.returncode == 0, r.stderr
         assert '"type":"disk_high"' in _events(root)
         cap = _captured(tmp_path)
@@ -171,7 +179,8 @@ class TestFleetMemoryCheck:
         # --threshold 1 → reserve floor 99% of RAM → any real host is
         # "below reserve" deterministically.
         root = _signal_root(tmp_path)
-        r = _run("fleet-memory-check.sh", ["--threshold", "1"], root, tmp_path, scratch_plane_env=scratch_plane_env)
+        r = _run("fleet-memory-check.sh", ["--threshold", "1"], root, tmp_path,
+                 scratch_plane_env=scratch_plane_env, serve=True)
         assert r.returncode == 0, r.stderr
         assert '"type":"memory_high"' in _events(root)
         assert "FLEET ALERT [memory_high]" in _captured(tmp_path)
