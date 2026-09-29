@@ -140,7 +140,7 @@ def _fleet_scope(conn: sqlite3.Connection, fleet: str | None) -> str | None:
             raise UnknownFleet(
                 f"no fleet '{fleet}' on this plane — it holds: " + ", ".join(held))
         # a plane holding NO fleet yet is not a wrong name: the routes'
-        # own idle states carry the remedy (run `generate`)
+        # own idle states carry the staged-activation remedy
     return fleet
 
 
@@ -1660,8 +1660,11 @@ def create_app(
             return JSONResponse({
                 "state": "idle",
                 "provenance": env.get("provenance", {}),
-                "remediation": f"no current keyframe for {alias} — run"
-                               " `claudlobby --fleet <name> generate` to scan",
+                "remediation": f"no current keyframe for {alias} — stage "
+                               "`claudlobby --root <data-root> config plan --release "
+                               "<sealed-release-id>` and activate the returned plan "
+                               "with `claudlobby --root <data-root> host activate "
+                               "<plan-id> --install-directory <native-user-unit-dir>`",
             })
         return JSONResponse(env)
 
@@ -1673,8 +1676,9 @@ def create_app(
         env = _envelope(root, lambda c: org_tree(c, _fleet_scope(c, fleet)))
         if env.get("state") == SOURCE_OK and env.get("data") is None:
             return JSONResponse({"state": "idle", "provenance": env.get("provenance", {}),
-                                 "remediation": "no fleet keyframe yet — run"
-                                                " `claudlobby --fleet <name> generate`"})
+                                 "remediation": "no fleet keyframe yet — stage a config "
+                                                "plan for a sealed release and activate "
+                                                "the returned plan"})
         return JSONResponse(env)
 
     @app.get("/api/utilization")

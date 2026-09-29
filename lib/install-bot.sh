@@ -42,7 +42,7 @@ PLIST_NAME="$BOT_SERVICE.plist"
 PLIST_SRC="$BOT_DIR/$PLIST_NAME"
 
 if [ ! -f "$PLIST_SRC" ]; then
-    echo "install-bot.sh: expected $PLIST_SRC not found — has 'claudlobby generate' run?" >&2
+    echo "install-bot.sh: expected $PLIST_SRC not found — run 'claudlobby --root <data-root> config plan --release <sealed-release-id>', then 'claudlobby --root <data-root> host activate <plan-id> --install-directory <native-user-unit-dir>'" >&2
     exit 1
 fi
 

@@ -38,7 +38,7 @@ Battery content is **ratified before the run**, not tuned after. A battery edite
 
 ### Baseline
 
-The control arm, run under conditions identical to the treatment in everything except the target. In the #729 harness this is two bots composed by the *real* `claudlobby generate`, differing only by one line in `fleet.yaml`.
+The control arm, run under conditions identical to the treatment in everything except the target. In the #729 harness this is two bots composed by the real private `harness/compose.py` entry through the same compositor owner, differing only by one line in `fleet.yaml`.
 
 **Pair the runs.** Compare treatment against control *within* a task and rep, then aggregate the paired deltas. Unpaired comparison lets task-to-task variance swamp the effect.
 

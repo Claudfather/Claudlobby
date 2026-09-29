@@ -6,7 +6,7 @@
 # and (re)loads it. One enroll implementation for every fleet timer — the
 # composer already emits the plists, so nothing is regenerated here.
 #
-# Run `claudlobby generate` first to produce the units.
+# Stage a config plan for a sealed release and activate it to produce the units.
 #
 # Usage: install_fleet_timer_launchd.sh <timer-name> [<fleet-name>]
 #
@@ -58,7 +58,7 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 # An opt-in timer (e.g. code-audit-sweep) only has units when its fleet.yaml
 # block is enabled — give a clear pointer rather than a bare cp failure.
 if [ ! -f "$SRC_PLIST" ]; then
-    echo "Error: $SRC_PLIST not found — is the '$TIMER' timer enabled in fleet.yaml? Run 'claudlobby generate'." >&2
+    echo "Error: $SRC_PLIST not found — is the '$TIMER' timer enabled in fleet.yaml? Run 'claudlobby --root <data-root> config plan --release <sealed-release-id>', then 'claudlobby --root <data-root> host activate <plan-id> --install-directory <native-user-unit-dir>'." >&2
     exit 1
 fi
 

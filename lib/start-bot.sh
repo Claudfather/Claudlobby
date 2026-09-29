@@ -182,7 +182,7 @@ bot_tmux "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
 SESSION_NAME="$BOT_LABEL-$(date '+%Y%m%d-%H%M')"
 
 # Build claude command. CLAUDE_FLAGS comes from bot.conf (composed by
-# `claudlobby generate` from fleet.yaml). It contains all the per-bot
+# composition from fleet.yaml). It contains all the per-bot
 # CLI flags: --channels, --remote-control, --dangerously-skip-permissions,
 # --model, --effort, plus any extras. We add only --name here since it
 # uses a per-launch timestamp.

@@ -5246,7 +5246,7 @@ resolve_timer_unit() {
         TIMER_DIR="$fleet_dir/runtime/fleet/timers"
     fi
     if [ ! -d "$TIMER_DIR" ]; then
-        echo "Error: $TIMER_DIR not found — run 'claudlobby generate' first." >&2
+        echo "Error: $TIMER_DIR not found — run 'claudlobby --root <data-root> config plan --release <sealed-release-id>', then 'claudlobby --root <data-root> host activate <plan-id> --install-directory <native-user-unit-dir>'." >&2
         return 1
     fi
     if [ -n "${UNIT_NAME:-}" ]; then

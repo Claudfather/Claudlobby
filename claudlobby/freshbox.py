@@ -180,7 +180,7 @@ def _isolation_findings(
     ``settings.local.json``), never a re-derivation, and compares it class by
     class with what this install and today's host roster would compose. A
     missing rule means the file was composed by an older install, or a bot joined
-    the host after it was; either way the fix is a generate, and the finding says
+    the host after it was; either way the fix is staged host activation, and the finding says
     which fleet. WARN, never FAIL: a present rule reduces accidental reads through
     Claude's own tools and is not confidentiality (see isolation.py), so a FAIL
     would overclaim what fixing it buys. Also names each composed file that tells
@@ -199,12 +199,14 @@ def _isolation_findings(
         composed = set(json.loads(target.read_text())["permissions"]["deny"])
     except (OSError, ValueError, KeyError, TypeError):
         composed = None
-    regen = f"claudlobby --fleet {fleet.name} generate --bot {bot.bot_id}"
+    remedy = ("stage `claudlobby --root <data-root> config plan --release <sealed-release-id>`"
+              " and activate the returned plan with `claudlobby --root <data-root>"
+              " host activate <plan-id> --install-directory <native-user-unit-dir>`")
     if composed is None:
         findings.append(Finding(
             bot.bot_id, "isolation_not_composed", WARN,
             f"shared-config isolation is on, but {target} holds no deny list to"
-            f" check — the bot runs without its rules until `{regen}`"))
+            f" check — the bot runs without its rules until you {remedy}"))
     else:
         for cls, what in CLASSES.items():
             rules = [r for r in expected.rules if r.cls == cls]
@@ -219,7 +221,7 @@ def _isolation_findings(
                         f" {missing[0].text} (composed by an older install?)")
             findings.append(Finding(
                 bot.bot_id, "isolation_missing", WARN,
-                f"{cls} — {what}: {why}; run `{regen}`"))
+                f"{cls} — {what}: {why}; {remedy}"))
     for name in sorted(bot.isolation.exempt):
         findings.append(Finding(
             bot.bot_id, "isolation_exempt", INFO,

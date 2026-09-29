@@ -6,7 +6,7 @@
 # enroll implementation for every fleet timer (fleet-pulse, creds-check,
 # code-audit-sweep, ...) — the per-timer installers differ only by <name>.
 #
-# Run `claudlobby generate` first to produce the units.
+# Stage a config plan for a sealed release and activate it to produce the units.
 #
 # Usage: install_fleet_timer.sh <timer-name> [<fleet-name>]
 #
@@ -50,7 +50,7 @@ NAME="$UNIT_BASENAME"
 # An opt-in timer (e.g. code-audit-sweep) only has units when its fleet.yaml
 # block is enabled — give a clear pointer rather than a bare cp failure.
 if [[ ! -f "$TIMER_DIR/$NAME.service" ]] || [[ ! -f "$TIMER_DIR/$NAME.timer" ]]; then
-    echo "Error: $NAME.{service,timer} not found in $TIMER_DIR — is the '$TIMER' timer enabled in fleet.yaml? Run 'claudlobby generate'." >&2
+    echo "Error: $NAME.{service,timer} not found in $TIMER_DIR — is the '$TIMER' timer enabled in fleet.yaml? Run 'claudlobby --root <data-root> config plan --release <sealed-release-id>', then 'claudlobby --root <data-root> host activate <plan-id> --install-directory <native-user-unit-dir>'." >&2
     exit 1
 fi
 

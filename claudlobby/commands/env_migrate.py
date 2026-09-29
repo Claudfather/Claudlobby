@@ -174,7 +174,10 @@ def _apply_env_migration(
         bot_env_path = paths.bot_runtime(fleet_bot_name) / ".env"
         if not bot_env_path.parent.is_dir():
             log.error(
-                "SKIP %s: runtime dir missing — run `claudlobby generate` first",
+                "SKIP %s: runtime dir missing — stage with `claudlobby --root "
+                "<data-root> config plan --release <sealed-release-id>`, then "
+                "activate the returned plan with `claudlobby --root <data-root> "
+                "host activate <plan-id> --install-directory <native-user-unit-dir>`",
                 fleet_bot_name,
             )
             continue

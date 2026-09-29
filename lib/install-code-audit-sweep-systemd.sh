@@ -2,7 +2,7 @@
 # Install the code-audit-sweep timer as a systemd user timer (Linux).
 #
 # Thin caller of install_fleet_timer.sh — all enrollment logic lives there.
-# Run `claudlobby generate` (with a `sweep:` block in fleet.yaml) first.
+# Compose a `sweep:` block in fleet.yaml through staged host activation first.
 #
 # Usage: install-code-audit-sweep-systemd.sh [<fleet-name>]
 set -euo pipefail

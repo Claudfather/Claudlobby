@@ -5,4 +5,4 @@ description: Do claudlobby development in your projects/ checkout — the shared
 
 # Claudlobby dev work uses projects/ checkout
 
-When working on claudlobby code, use your `projects/` checkout — never branch or commit from the shared install at `{{CLAUDLOBBY_ROOT}}`. The shared install is for runtime only (generate, spin-up, lib/ execution).
+When working on claudlobby code, use your `projects/` checkout — never branch or commit from the active data root at `{{CLAUDLOBBY_ROOT}}`. A sealed release supplies runtime code; config changes go through `claudlobby --root <data-root> config plan --release <sealed-release-id>` and then `claudlobby --root <data-root> host activate <plan-id> --install-directory <native-user-unit-dir>`.

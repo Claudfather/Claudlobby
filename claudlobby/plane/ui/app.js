@@ -1306,7 +1306,7 @@ function renderInventory(env, orgEnv) {
   const d = env.data;
   if (!d.bots.length) {
     el.innerHTML = stateBlock("idle", env.provenance,
-      "no bots keyframed yet — run `claudlobby --fleet <name> generate`");
+      "no bots keyframed yet — stage `claudlobby --root <data-root> config plan --release <sealed-release-id>` and activate the returned plan with `claudlobby --root <data-root> host activate <plan-id> --install-directory <native-user-unit-dir>`");
     return;
   }
   const bots = d.bots.map((b) => `

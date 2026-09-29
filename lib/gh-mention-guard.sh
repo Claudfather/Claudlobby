@@ -68,7 +68,7 @@
 # A missing manifest, absent jq/python, or an unparseable payload allows the
 # call and emits a script_error breadcrumb. Blocking every GitHub write across
 # the fleet on a missing file is a worse outage than the bug this guards, and
-# the manifest is absent only if `generate` has not run — already broken.
+# the manifest is absent only if the staged composition was not activated — already broken.
 
 set -uo pipefail
 
@@ -123,7 +123,7 @@ REWRITER="$LIB_DIR/mention-rewrite.py"
 HOST_DIR="${CLAUDLOBBY_ROOT:-}/runtime/_host"
 BOTS_FILE="${GH_MENTION_HANDLES_FILE:-$HOST_DIR/bot-handles}"
 ALLOW_FILE="${GH_MENTION_ALLOWLIST_FILE:-$HOST_DIR/mention-allowlist}"
-[ -r "$BOTS_FILE" ] || _bail "no bot-handles manifest at $BOTS_FILE (run: claudlobby generate)"
+[ -r "$BOTS_FILE" ] || _bail "no bot-handles manifest at $BOTS_FILE (run: claudlobby --root <data-root> config plan --release <sealed-release-id>; then: claudlobby --root <data-root> host activate <plan-id> --install-directory <native-user-unit-dir>)"
 
 # --- step 2: is this tool call GitHub-bound? --------------------------------
 # ONE jq on the common path. The Bash branch does not verify tool_name first:

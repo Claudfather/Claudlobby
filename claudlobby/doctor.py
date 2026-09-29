@@ -1140,21 +1140,20 @@ def check_manifest_provenance(
     # silent for a fleet with no vault-wired bot: there is no runtime whose
     # inputs could have moved, and "regenerate to record what this runtime was
     # composed from" is nonsense addressed to a runtime that does not exist.
-    # doctor already has rungs for "you have not generated yet".
+    # doctor already has rungs for a fleet with no activated runtime yet.
     if not paths.runtime_bots.is_dir() or not any(paths.runtime_bots.iterdir()):
         return
 
     prov = read_manifest_provenance(paths)
     if prov is None:
         report.add("manifest-provenance", "warn",
-                   "composed by a claudlobby without provenance — run `generate` "
-                   "to record what this runtime was composed from")
+                   "composed by a claudlobby without provenance — stage `claudlobby --root <data-root> config plan --release <sealed-release-id>` and activate the returned plan with `claudlobby --root <data-root> host activate <plan-id> --install-directory <native-user-unit-dir>` to record its source")
         return
     if prov.get("schema") != MANIFEST_PROVENANCE_SCHEMA:
         report.add("manifest-provenance", "warn",
                    f"provenance schema {prov.get('schema')!r} is not the "
                    f"{MANIFEST_PROVENANCE_SCHEMA} this build reads — not "
-                   "interpreting it; run `generate` to re-record")
+                   "interpreting it; stage a config plan for a sealed release and activate the returned plan to re-record")
         return
 
     changed = changed_manifest_inputs(fleet, paths, prov)
@@ -1166,8 +1165,7 @@ def check_manifest_provenance(
                    f"manifest changed since the running fleet was composed "
                    f"({', '.join(changed)}; composed {prov.get('composed_at')})"
                    + (f"; {how}" if how else "") +
-                   " — run `generate`, then restart the bots that read it at "
-                   "session start (bot.conf and CLAUDE.md are read once, at startup)")
+                   " — stage `claudlobby --root <data-root> config plan --release <sealed-release-id>` and activate the returned plan with `claudlobby --root <data-root> host activate <plan-id> --install-directory <native-user-unit-dir>`; activation restarts bots that read bot.conf and CLAUDE.md at session start")
         return
 
     # Compose-time conditions are reported even when nothing has changed since:

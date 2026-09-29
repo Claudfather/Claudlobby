@@ -46,7 +46,7 @@ UNIT_NAME="$BOT_SERVICE.service"
 UNIT_SRC="$BOT_DIR/$UNIT_NAME"
 
 if [ ! -f "$UNIT_SRC" ]; then
-    echo "install-bot-systemd.sh: expected $UNIT_SRC not found — has 'claudlobby generate' run?" >&2
+    echo "install-bot-systemd.sh: expected $UNIT_SRC not found — run 'claudlobby --root <data-root> config plan --release <sealed-release-id>', then 'claudlobby --root <data-root> host activate <plan-id> --install-directory <native-user-unit-dir>'" >&2
     exit 1
 fi
 
