@@ -147,7 +147,8 @@ def reconcile_fleet(*, root: Path, fleet: str | None,
             if spec.bot_dir != unit.declaration.working_directory:
                 raise InventoryError("selected bot directory differs from native inventory")
             observation = adapter.call("svc_bot_session_observe", spec.bot_dir, spec.label,
-                                       spec.environment["TMUX_TMPDIR"])
+                                       spec.environment["TMUX_TMPDIR"], entry["installed"],
+                                       entry["target"])
             if observation.returncode or observation.stdout.strip() not in {"ready", "absent", "unknown"}:
                 raise InventoryError("private bot session observation is unavailable")
             session = observation.stdout.strip()

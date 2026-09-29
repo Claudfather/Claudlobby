@@ -92,12 +92,15 @@ def test_reconcile_keeps_enrollment_and_private_session_distinct(tmp_path, monke
         def read(self, function):
             assert function == "svc_inventory_catalog"
             return f"manager\tLinux\ndirectory\t{tmp_path}\n"
-        def call(self, function, bot_dir, label, tmux_dir):
+        def call(self, function, bot_dir, label, tmux_dir, installed, target):
             assert function == "svc_bot_session_observe" and bot_dir == tmp_path
+            assert installed == str(tmp_path / (next(expected_bots) + ".service"))
+            assert target.endswith(".service")
             # The selected fixture's spec is per-bot in production; this seam
             # returns each observation in the same stable sweep order.
             return subprocess.CompletedProcess([], 0, next(sessions) + "\n", "")
     sessions = iter(observed[bot][2] for bot in ("worker-a", "worker-b", "manager"))
+    expected_bots = iter(("worker-a", "worker-b", "manager"))
     result = fleet.reconcile_fleet(root=tmp_path, fleet="example", adapter=Native())
     assert [(row.bot, row.declared, row.enrolled, row.session, row.state)
             for row in result.bots] == [

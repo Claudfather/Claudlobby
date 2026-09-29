@@ -81,6 +81,17 @@ EOF
 cat > "$T/bin/launchctl" <<'EOF'
 #!/bin/bash
 printf '%s\n' "$*" >> "$FAKE_LOG"
+case "$1" in
+    manageruid) id -u; exit 0 ;;
+    managername) printf 'Aqua\n'; exit 0 ;;
+    list)
+        [ "${FAKE_LIST_EXIT:-0}" = 0 ] || exit "$FAKE_LIST_EXIT"
+        printf 'PID\tStatus\tLabel\n'
+        if [ "${FAKE_STATE:-active}" = active ]; then
+            printf '123\t0\tsvc-alpha\n'
+        fi
+        exit 0 ;;
+esac
 if [ "$1" = "print" ]; then
     case "${FAKE_STATE:-active}" in
         active)   printf 'state = running\n'
@@ -575,6 +586,14 @@ assert_eq "Linux unit still starting is indeterminate, not dead" "unknown" \
 as_os Darwin
 assert_eq "launchd active with no socket needs explicit inspection" "unknown" \
     "$(svc_bot_session_observe "$BOT" svc-alpha "$T")"
+target="gui/$(id -u)/svc-alpha"
+installed="$HOME/Library/LaunchAgents/svc-alpha.plist"
+assert_eq "exact inactive launchd job with no private socket is absent" "absent" \
+    "$(FAKE_STATE=inactive svc_bot_session_observe "$BOT" svc-alpha "$T" "$installed" "$target")"
+assert_eq "exact active launchd job without a socket stays unknown" "unknown" \
+    "$(FAKE_STATE=active svc_bot_session_observe "$BOT" svc-alpha "$T" "$installed" "$target")"
+assert_eq "failed exact native read without a socket stays unknown" "unknown" \
+    "$(FAKE_LIST_EXIT=3 svc_bot_session_observe "$BOT" svc-alpha "$T" "$installed" "$target")"
 
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
 # A suite that ran zero assertions and never touched FAIL would otherwise

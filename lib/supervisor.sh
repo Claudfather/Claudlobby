@@ -596,10 +596,15 @@ svc_bot_disenroll_exact() {
 
 # Read-only current-session verdict for an already active exact bot unit.
 # Reuse start-bot's session-scoped bridge readiness predicate; a stale startup
-# marker alone never proves this session is ready. Only a missing private socket
-# proves absence and licenses `bot start` to recover by restarting the unit.
+# marker alone never proves this session is ready. A caller with the frozen
+# installed path and target can also prove the exact native job inactive when
+# its private socket is missing; native read failure remains unknown.
 svc_bot_session_observe() (
-    local bot_dir="$1" expected="$2" tmpdir="$3" actual session socket pane token state declared_tmpdir
+    local bot_dir="$1" expected="$2" tmpdir="$3" installed="${4:-}" target="${5:-}"
+    local actual session socket pane token state declared_tmpdir
+    if [ -n "$installed" ] || [ -n "$target" ]; then
+        [ -n "$installed" ] && [ -n "$target" ] || return 3
+    fi
     case "$bot_dir:$tmpdir" in /*:/*) ;; *) return 3 ;; esac
     case "$expected" in ''|*[!a-zA-Z0-9_.-]*) return 3 ;; esac
     export TMUX_TMPDIR="$tmpdir"
@@ -611,6 +616,13 @@ svc_bot_session_observe() (
     session=$(tmux_session_name "$bot_dir") || return 3
     socket="$tmpdir/tmux-$(id -u)/$expected"
     if [ ! -e "$socket" ] && [ ! -L "$socket" ]; then
+        if [ -n "$installed" ] && [ -n "$target" ]; then
+            _svc_activation_read "$installed" "$target" || { printf 'unknown\n'; return 0; }
+            if [ "$SVC_ACT_ACTIVE" = inactive ]; then
+                printf 'absent\n'; return 0
+            fi
+            printf 'unknown\n'; return 0
+        fi
         # systemd's active/exited is the existing steady-state signal. During
         # active/running start-bot may simply not have created its socket yet;
         # launchd has no equivalent phase proof here, so neither is restarted.
