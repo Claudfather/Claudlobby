@@ -13,7 +13,8 @@
 #   own_tool_path      — prepend this repo's tool prefixes (timer PATH is minimal)
 #   claudlobby_cli     — run the claudlobby CLI across every install shape
 #   session_cli_path   — shim the venv-only CLI onto a bot session PATH
-#   with_timeout       — run a command under timeout(1) if available, else bare
+#   with_timeout       — run a command under timeout(1), else perl (stock macOS), else bare
+#   with_timeout_bounds — true when with_timeout enforces its bound on this host
 #   with_lock          — portable mutex (flock if available, else mkdir spinlock)
 #   setup_log_dir      — mkdir -p for log file's parent directory
 #   safe_mktemp        — mktemp with automatic EXIT cleanup
@@ -40,6 +41,7 @@
 #   _HOMEBREW    — Homebrew prefix (macOS only; empty on Linux)
 #   _TMUX_BIN    — resolved path to tmux binary
 #   _TIMEOUT_BIN — resolved path to timeout/gtimeout (empty if neither exists)
+#   _TIMEOUT_PERL — perl for with_timeout's fallback (set only when _TIMEOUT_BIN is empty)
 #   _FLOCK_BIN   — resolved path to flock (empty on stock macOS)
 
 set -euo pipefail
@@ -354,7 +356,7 @@ measure_claude_version() {
         CLAUDE_VERSION="${BASH_REMATCH[0]}"
         return 0
     fi
-    if [ "$rc" -eq 124 ] && [ -n "$_TIMEOUT_BIN" ]; then
+    if [ "$rc" -eq 124 ] && with_timeout_bounds; then
         CLAUDE_VERSION_WHY="$p --version did not finish within ${secs}s"
         return 1
     fi
@@ -473,17 +475,106 @@ session_cli_path() {
 
 _TIMEOUT_BIN="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
 _FLOCK_BIN="$(command -v flock 2>/dev/null || true)"
+# Neither timeout(1) nor gtimeout (a stock macOS host): with_timeout falls back
+# to perl, which ships with macOS. Resolved only then, so a host that has
+# timeout(1) never runs the fallback.
+_TIMEOUT_PERL=""
+if [ -z "$_TIMEOUT_BIN" ]; then
+    _TIMEOUT_PERL="$(type -P perl 2>/dev/null || true)"
+fi
+
+# The fallback, with timeout(1)'s contract: argv is <duration> <command...>;
+# the duration is N[.N] with an optional s/m/h/d suffix, 0 meaning no bound.
+# rc 124 when the bound expires, 125 for a bad duration, 126/127 when the
+# command cannot run or is not there, otherwise the command's own status.
+_WITH_TIMEOUT_PL='
+use strict;
+use Config;
+my ($dur, @cmd) = @ARGV;
+my %unit = ("" => 1, s => 1, m => 60, h => 3600, d => 86400);
+my ($n, $u) = defined $dur ? $dur =~ /\A(\d+(?:\.\d*)?|\.\d+)([smhd]?)\z/ : ();
+if (!defined $n || !@cmd) {
+    print STDERR "with_timeout: invalid time interval or no command\n";
+    exit 125;
+}
+my $secs = $n * $unit{$u};
+# Lead a process group of our own, as timeout(1) does: the command and every
+# child it forks join it, so one signal reaches the whole tree.
+setpgrp(0, 0);
+my $own = getpgrp() == $$;
+my $pid = fork;
+if (!defined $pid) {
+    print STDERR "with_timeout: fork: $!\n";
+    exit 125;
+}
+if ($pid == 0) {
+    exec { $cmd[0] } @cmd;
+    my $missing = $!{ENOENT};
+    print STDERR "with_timeout: $cmd[0]: $!\n";
+    exit($missing ? 127 : 126);
+}
+$SIG{TTIN} = $SIG{TTOU} = "IGNORE";
+my $expired = 0;
+# The command first, then its group, then SIGCONT so a stopped member can act
+# on the signal: the order timeout(1) sends them in. This process is in the
+# group too, so it ignores the signal it sends there.
+sub relay {
+    my $sig = shift;
+    kill $sig, $pid;
+    if ($own) {
+        $SIG{$sig} = "IGNORE";
+        kill "-$sig", $$;
+    }
+    kill "CONT", $pid;
+    kill "-CONT", $$ if $own;
+}
+$SIG{$_} = \&relay for qw(INT TERM HUP QUIT);
+$SIG{ALRM} = sub { $expired = 1; relay("TERM") };
+my $hires = eval { require Time::HiRes; 1 };
+if ($secs > 0) {
+    if ($hires) { Time::HiRes::alarm($secs) }
+    else { alarm(int($secs) < $secs ? int($secs) + 1 : $secs) }
+}
+my $r;
+do { $r = waitpid($pid, 0) } while ($r == -1 && $!{EINTR});
+my $st = $?;
+if ($hires) { Time::HiRes::alarm(0) } else { alarm(0) }
+exit 125 if $r != $pid;
+exit 124 if $expired;
+my $sig = $st & 127;
+exit($st >> 8) if !$sig;
+# Die of the same signal, as timeout(1) does, where that ends the process
+# without a core dump. The caller sees 128+N either way.
+my $name = (split " ", $Config{sig_name})[$sig];
+if ($name =~ /\A(?:HUP|INT|PIPE|ALRM|TERM|USR1|USR2)\z/) {
+    $SIG{$name} = "DEFAULT";
+    kill $name, $$;
+}
+exit 128 + $sig;
+'
 
 # with_timeout <seconds> <command> [args...]
-# Runs the command under a timeout if a timeout binary exists; otherwise runs
-# it unguarded (better to risk a hang than to fail outright on macOS).
+# Runs the command under timeout(1) or gtimeout. With neither, perl runs it
+# under the same contract (_WITH_TIMEOUT_PL): rc 124 when the bound expires,
+# the command's own status otherwise, and the signal sent to the command's
+# whole process group, since a bounded `claude -p` has children. Only a host
+# with no perl either runs the command unguarded; with_timeout_bounds says which.
 with_timeout() {
     local secs="${1:?Usage: with_timeout <seconds> <command...>}"; shift
     if [ -n "$_TIMEOUT_BIN" ]; then
         "$_TIMEOUT_BIN" "$secs" "$@"
+    elif [ -n "$_TIMEOUT_PERL" ]; then
+        "$_TIMEOUT_PERL" -e "$_WITH_TIMEOUT_PL" -- "$secs" "$@"
     else
         "$@"
     fi
+}
+
+# with_timeout_bounds
+# True when with_timeout enforces its bound on this host, so an rc of 124 from
+# it means the bound expired.
+with_timeout_bounds() {
+    [ -n "$_TIMEOUT_BIN" ] || [ -n "$_TIMEOUT_PERL" ]
 }
 
 # with_lock <lockfile> <command> [args...]

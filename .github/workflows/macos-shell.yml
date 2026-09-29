@@ -1,0 +1,36 @@
+name: macos-shell
+
+# The lib/ shell helpers every macOS bot start runs, tested under the conditions
+# those hosts run them in: /bin/bash 3.2 and the BSD userland. The Linux jobs
+# cannot see a defect that only bash 3.2 or a BSD tool has. Each suite runs under
+# /bin/bash by path, and its inner shells reuse that interpreter, so nothing here
+# falls through to a newer bash on the runner's PATH.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - lib/lib-common.sh
+      - tests/test_with_timeout.sh
+      - .github/workflows/macos-shell.yml
+  pull_request:
+    paths:
+      - lib/lib-common.sh
+      - tests/test_with_timeout.sh
+      - .github/workflows/macos-shell.yml
+
+jobs:
+  with-timeout:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The shell under test
+        # Refuse a /bin/bash that is not 3.x: the suite would pass without
+        # measuring anything this job exists for.
+        run: |
+          /bin/bash -c '[ "${BASH_VERSINFO[0]}" = 3 ] || { echo "/bin/bash is $BASH_VERSION, not 3.x"; exit 1; }; echo "/bin/bash is $BASH_VERSION"'
+          command -v timeout gtimeout perl || true
+      - name: with_timeout bounds its command with no timeout(1) or gtimeout (#917)
+        # The suite masks timeout and gtimeout from PATH itself, the same way on
+        # macOS and on Linux (tests/test_with_timeout.py).
+        run: /bin/bash tests/test_with_timeout.sh

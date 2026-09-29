@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — `with_timeout` bounds its command on a host with no timeout(1) or gtimeout (#917)
+
+A stock macOS host resolves neither binary, and `with_timeout` ran its command
+unguarded there, so every bound `lib/` declares was a no-op: `measure_claude_version`'s
+10 s, the boot's plugin installs and updates, the source-currency `git fetch`es, the
+session digest's `claude -p`. It now falls back to perl, which ships with macOS, under
+timeout(1)'s contract, measured against GNU timeout 9.1: rc 124 when the bound
+expires, the command's own status otherwise, 125/126/127 where timeout(1) returns
+them, and the signal sent to the command's whole process group and then SIGCONT. A
+host with timeout(1) never runs the fallback. `with_timeout_bounds` says whether the
+bound is enforced, and `measure_claude_version` now reads a 124 through it. A hang on
+such a host reports "did not finish within Ns", where it used to report "printed no
+parseable version" after waiting out the hang twice.
+
+On macOS the declared bounds now hold, which changes behaviour there. A
+`claude --version` that hangs fails the nightly update job's measurement after 10 s
+and raises `binary_unrunnable`, where it used to hold the job for hours with no log
+line.
+
+`tests/test_with_timeout.sh` masks timeout and gtimeout from PATH and checks the
+fallback against the expectations the real timeout(1) meets. It runs on Linux
+(`tests/test_with_timeout.py`) and under `/bin/bash` 3.2 on macOS (the new
+`macos-shell` workflow). `with_lock`'s flock half of #917 is unchanged.
+
 ### Changed — `[vault]` pin bumped to Claudron v0.5.1; `vault-sync` never leaves a vault mid-rebase (Claudron #193)
 
 The `[vault]` extra now pins `claudron @ …@v0.5.1`. 0.5.1 makes worktree integration
