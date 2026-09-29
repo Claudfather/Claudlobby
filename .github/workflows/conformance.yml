@@ -34,8 +34,8 @@ jobs:
       - name: Install git (the N-bot contention test drives real vault clones)
         run: sudo apt-get update && sudo apt-get install -y git
       - name: Install package + the pinned [vault] extra (claudron)
-        # The pin lives in pyproject's [vault] extra (F1 lock, currently v0.2.0 —
-        # bump tracked in #680). Parity holds against the pin; the gate fails if
+        # The pin lives in pyproject's [vault] extra (F1 lock, currently v0.5.2 —
+        # bump policy: documentation/integrations/claudron-integration.md). Parity holds against the pin; the gate fails if
         # the composer's rendered copy ever drifts from it.
         run: pip install -e '.[dev,vault]'
       - name: Prepare installed resources in disposable checkout

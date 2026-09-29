@@ -1350,8 +1350,9 @@ def _validate_bots(
                     shared.add(
                         "vault-path",
                         f"claudron_vault_path "
-                        f"'{bot.claudron_vault_path}' does not resolve to a vault — no "
-                        f"'_shared/' (or 'shared/') marker found walking up "
+                        f"'{bot.claudron_vault_path}' does not resolve to a vault — "
+                        f"no '_shared/' (or 'shared/') hub there and no "
+                        f"'.claudron-vault' identity file found walking up "
                         f"(see {CLAUDRON_INTEGRATION_URL})",
                         bot_name,
                     )

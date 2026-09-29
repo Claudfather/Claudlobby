@@ -480,6 +480,9 @@ class TestSessionEndContention:
         _git(seed, "config", "user.name", "fleet")
         (seed / "_shared").mkdir()
         (seed / "_shared" / "CONVENTIONS.md").write_text("# conv\n")
+        # The vault identity file: hooks find this vault by walk-up from each
+        # bot dir, and walk-up binds only a directory carrying it (Claudron #183).
+        (seed / ".claudron-vault").write_text("claudron: 2\nname: seed\nhub: _shared\n")
         # Gitignore .claudron/ exactly like a real vault (claudron.vault
         # _GITIGNORE_CONTENT) — otherwise the hooks' `git add -A` commits each
         # clone's own .claudron/hooks.log, and those divergent per-clone logs
@@ -518,9 +521,8 @@ class TestSessionEndContention:
         end_argv = _claudron_hook_argv("session-end")
         start_argv = _claudron_hook_argv("session-start")
         # Resolve each vault via CWD walk-up (contract row 3), which every engine
-        # version honors — deliberately NOT via CLAUDRON_VAULT_PATH: the pinned
-        # v0.2.0 reads the old CLAUDRON_VAULT spelling, and this test validates
-        # concurrent-sync fail-open + recovery, not the env-address contract (which
+        # version honors — deliberately NOT via CLAUDRON_VAULT_PATH: this test
+        # validates concurrent-sync fail-open + recovery, not the env-address contract (which
         # has its own tests). Each subprocess sets cwd=<clone-i>.
         env = dict(os.environ)
 
@@ -567,19 +569,33 @@ class TestSessionEndContention:
         for i, clone in enumerate(clones):
             assert (clone / "_shared" / "knowledge" / f"note-{i}.md").is_file()
 
-        # (4) Eventual consistency — "unpushed work travels the next session": a
-        #     bounded reconcile (SessionStart pull+rebase, then SessionEnd push over
-        #     each clone) converges the remote to all N notes. Adds never conflict
-        #     (distinct files), so one pass suffices; the loop is bounded and
-        #     version-independent. THIS is the recovery #682 says must actually run
-        #     — and it now does (reconcile_cycles >= 1, asserted below).
+        # (4a) Hooks alone do NOT reconcile divergence — the Claudron >= 0.5.0
+        #      contract (Claudron #156): SessionStart only fast-forwards and never
+        #      rebases the live tree; SessionEnd only pushes. A clone whose push
+        #      lost the race is diverged, so a full hook cycle leaves it stranded.
+        #      Pinned so nobody re-reads the hooks as the recovery path: on a
+        #      multi-host estate, lib/vault-sync.sh (the scheduled `claudron sync`)
+        #      is what carries a raced capture home.
+        for clone in clones:
+            subprocess.run(start_argv, env=env, cwd=str(clone), input="{}", capture_output=True, text=True, timeout=60)
+            subprocess.run(end_argv, env=env, cwd=str(clone), input="{}", capture_output=True, text=True, timeout=60)
+        assert self._notes_on_remote(remote) == burst_landed, (
+            "a hook cycle reconciled a diverged clone — hooks are fast-forward/push "
+            "only since Claudron 0.5.0 (#156); if the engine changed, revisit (4a)/(4b)"
+        )
+
+        # (4b) Eventual consistency via the reconciliation door: a bounded
+        #      `claudron sync` over each clone — the exact command lib/vault-sync.sh
+        #      runs — converges the remote to all N notes. Adds never conflict
+        #      (distinct files), so one pass suffices; the loop is bounded. THIS is
+        #      the recovery #682 says must actually run (reconcile_cycles >= 1).
+        sync_argv = end_argv[: end_argv.index("hook")] + ["sync"]
         cycles = 0
         for _ in range(N_BOTS):
             if self._notes_on_remote(remote) == N_BOTS:
                 break
             for clone in clones:
-                subprocess.run(start_argv, env=env, cwd=str(clone), input="{}", capture_output=True, text=True, timeout=60)
-                subprocess.run(end_argv, env=env, cwd=str(clone), input="{}", capture_output=True, text=True, timeout=60)
+                subprocess.run(sync_argv, env=env, cwd=str(clone), capture_output=True, text=True, timeout=120)
             cycles += 1
         final = self._notes_on_remote(remote)
         assert final == N_BOTS, f"only {final}/{N_BOTS} notes reached the remote after reconcile"

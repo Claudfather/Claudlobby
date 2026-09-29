@@ -117,6 +117,7 @@ mkdir -p "$CONFIG_DIR"
 VAULT="$ROOT/vault"
 RECALL_SENTINEL="RECALL_OK_5C1D9E"
 mkdir -p "$VAULT/_shared/knowledge"
+printf 'claudron: 2\nname: vault\nhub: _shared\n' > "$VAULT/.claudron-vault"  # identity (Claudron #183)
 printf '# Conventions\n\n%s — fleet knowledge marker.\n' "$RECALL_SENTINEL" \
   > "$VAULT/_shared/CONVENTIONS.md"
 cat > "$VAULT/_shared/knowledge/seed.md" <<NOTE
