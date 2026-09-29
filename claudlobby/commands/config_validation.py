@@ -8,7 +8,7 @@ from ..command_result import CommandFailure, CommandOutput
 
 
 def dispatch(args) -> CommandOutput:
-    from ..context import load_context, resolve_paths
+    from ..context import generated_selectors, load_context, resolve_paths
     from ..paths import InvalidPathSelector
     from ..validator import render_warnings, validate, warning_summary
     from ._helpers import _load_env
@@ -19,12 +19,15 @@ def dispatch(args) -> CommandOutput:
     if args.write and not baseline:
         raise CommandFailure("invalid_argument", "--write needs --warn-baseline FILE")
     try:
-        paths = resolve_paths(root=args.root, fleet=args.fleet, seed=args.seed)
+        fleet, _ = generated_selectors(fleet=args.fleet, seed=args.seed)
+        paths = resolve_paths(root=args.root, fleet=fleet, seed=args.seed)
+    except FileNotFoundError as exc:
+        raise CommandFailure("not_found", "selected fleet configuration was not found") from exc
     except (InvalidPathSelector, ValueError) as exc:
         raise CommandFailure("invalid_argument", "invalid root or fleet selector") from exc
     try:
         _load_env(paths)
-        context = load_context(paths, fleet=args.fleet)
+        context = load_context(paths, fleet=fleet)
     except FileNotFoundError as exc:
         raise CommandFailure("not_found", "selected fleet configuration was not found") from exc
     except (ValueError, yaml.YAMLError) as exc:

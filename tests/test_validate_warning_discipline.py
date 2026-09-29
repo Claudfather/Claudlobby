@@ -284,6 +284,27 @@ def _red_fleet(fleet_dir: Path, monkeypatch) -> None:
 
 
 class TestWarnBaseline:
+    def test_public_validate_uses_generated_fleet_context_without_a_flag(
+        self, fleet_dir, monkeypatch, capsys
+    ):
+        overlay = fleet_dir / "local" / "test-fleet"
+        overlay.mkdir(parents=True)
+        (fleet_dir / "fleet.yaml").rename(overlay / "fleet.yaml")
+        monkeypatch.setenv("CLAUDLOBBY_ROOT", str(fleet_dir))
+        monkeypatch.setenv("FLEET_NAME", "test-fleet")
+        monkeypatch.setenv("FLEET_ROOT", str(overlay))
+
+        rc = main(["--json", "config", "validate"])
+        result = json.loads(capsys.readouterr().out)
+        assert rc == 0 and result["ok"] is True, result
+        assert result["command"] == "config.validate"
+        assert result["data"]["fleet"] == "test-fleet"
+
+        # An explicit selector still wins over generated session context.
+        rc = main(["--fleet", "missing", "--json", "config", "validate"])
+        result = json.loads(capsys.readouterr().out)
+        assert rc == 3 and result["error"]["code"] == "not_found"
+
     def test_public_config_validate_keeps_strict_and_baseline_gates(self, fleet_dir, tmp_path, monkeypatch, capsys):
         _red_fleet(fleet_dir, monkeypatch)
         base = tmp_path / "baseline.json"
