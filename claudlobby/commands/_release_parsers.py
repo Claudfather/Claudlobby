@@ -44,6 +44,12 @@ def _dispatch_host_credentials(args):
                    json_output=args.json)
 
 
+def _dispatch_host_github_app(args):
+    return execute(args.public_command,
+                   lambda: import_module(".host_github_app", __package__).dispatch(args),
+                   json_output=args.json)
+
+
 def _route(sub, name, command, help):
     parser = sub.add_parser(name, help=help)
     parser.add_argument("--json", action="store_true", help="One schema-1 result object")
@@ -90,6 +96,18 @@ def register_release_subparsers(sub):
         "check", help="Run the selected fleet's credential probe and transition alerts once")
     check.add_argument("--json", action="store_true", help="One schema-1 result object")
     check.set_defaults(func=_dispatch_host_credentials, public_command="host.credentials.check")
+    github_app = hosts.add_parser("github-app", help="Configure or mint a host GitHub App identity")
+    github_actions = github_app.add_subparsers(dest="github_app_command", required=True)
+    setup = github_actions.add_parser("setup", help="Validate App identity and write its host config")
+    for flag in ("app-id", "installation-id", "private-key", "slug"):
+        setup.add_argument(f"--{flag}", required=True)
+    setup.add_argument("--config-path", metavar="PATH")
+    setup.add_argument("--no-write-config", action="store_true")
+    setup.add_argument("--json", action="store_true", help="One schema-1 result object")
+    setup.set_defaults(func=_dispatch_host_github_app, public_command="host.github-app.setup")
+    token = github_actions.add_parser("token", help="Print one fresh App installation token")
+    token.add_argument("--json", action="store_true", help="One schema-1 result object containing the token")
+    token.set_defaults(func=_dispatch_host_github_app, public_command="host.github-app.token")
     doctor = _route(hosts, "doctor", "host.doctor", "Diagnose configured fleets on this host")
     doctor.set_defaults(func=_dispatch_doctor)
     doctor.add_argument("--switches", action="store_true", help="Only show resolved opt-in/out switches")

@@ -471,7 +471,7 @@ fleet:
   defaults:
     github_app:
       slug: my-fleet-app          # App URL slug — with bot_user_id, commits become <slug>[bot]
-      bot_user_id: 1234567        # the App BOT USER id (not the App id); both from setup-github-app.sh
+      bot_user_id: 1234567        # the App BOT USER id (not the App id); from host github-app setup
       # orgs: [MyOrg]             # optional: route only these orgs via the App
 ```
 

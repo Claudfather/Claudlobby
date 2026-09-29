@@ -14,7 +14,7 @@ re-mints and respawns the server every ~50 minutes — token expiry never requir
 restart, and in-flight MCP requests fail for ~2s during a respawn (retry on transient
 MCP errors).
 
-Setup: run `lib/setup-github-app.sh` once per host (validates the App credentials end
+Setup: run `claudlobby host github-app setup` once per host (validates the App credentials end
 to end and prints the fleet `.env` names), then set `GITHUB_APP_ID`,
 `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY_PATH` in the fleet `.env`.
 
@@ -29,7 +29,9 @@ GH_TOKEN=$("$CLAUDLOBBY_NATIVE_DIR"/mint-github-token.sh) gh pr list
 
 The composed `tools/gh` shim makes this mechanical inside a bot session: `gh` on an
 App bot already mints and runs as the App, so a bare `gh pr list` is enough there. The
-explicit mint above is for skills that build their own env, and for your own shell.
+explicit native mint above is for skills that build their own env. From an
+operator shell, use `GH_TOKEN=$(claudlobby host github-app token) gh pr list`;
+`--json` on the token command deliberately includes the secret in its result.
 
 #### Identity — why the App, not a PAT
 

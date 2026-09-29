@@ -78,7 +78,7 @@ fleet:
     # github_app:                              # OPTIONAL — GitHub App git auth (App-auth P3 #1273).
     #   slug: my-fleet-app                     # BOTH slug + bot_user_id -> commits as <slug>[bot];
     #   bot_user_id: 1234567                   # omit both to keep the operator identity. Values from
-    #   # orgs: [MyOrg]                        # lib/setup-github-app.sh. orgs: scopes the App helper
+    #   # orgs: [MyOrg]                        # host github-app setup. orgs: scopes the App helper
     #                                          # (else all of github.com). Restart-not-reload applies.
     #                                          # Credentials ride GITHUB_APP_* in the fleet .env.
     telegram:                                  # telegram defaults — bot stanza overrides per field

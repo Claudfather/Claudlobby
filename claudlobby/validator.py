@@ -1160,7 +1160,7 @@ def _validate_bots(
                         f"bot '{bot_name}': github_app routing requires {var_name}, "
                         f"not set in any tier of .env — the composed helper will "
                         f"fail loudly (quit=1) at the first git auth; set it, or "
-                        f"run lib/setup-github-app.sh (its config-file fallback "
+                        f"run claudlobby host github-app setup (its config-file fallback "
                         f"covers operator/cron shells only, never bot sessions)"
                     )
                 if var_name in bot.env:
@@ -1182,7 +1182,7 @@ def _validate_bots(
                     f"bot '{bot_name}': github_app declares {have} without {need} — "
                     f"the App commit identity composes only when BOTH are set, so "
                     f"commits will carry the operator identity (get both from "
-                    f"lib/setup-github-app.sh output)"
+                    f"claudlobby host github-app setup output)"
                 )
             if git_identity_problem and not app.composes_identity:
                 shared.add(

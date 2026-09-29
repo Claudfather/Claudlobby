@@ -11,7 +11,7 @@
       "secret": true
     },
     "GITHUB_APP_PRIVATE_KEY_PATH": {
-      "description": "Path to the App private-key .pem on this host (the key file itself must be 0600 and is never composed anywhere). lib/setup-github-app.sh validates all three values end to end and prints these lines for the fleet .env.",
+      "description": "Path to the App private-key .pem on this host (the key file itself must be 0600 and is never composed anywhere). claudlobby host github-app setup validates all three values end to end and prints these lines for the fleet .env.",
       "default_tier": "fleet",
       "secret": true
     }

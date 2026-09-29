@@ -77,7 +77,7 @@ and adjust:
 
 ## Step 3 — private key + config on the host
 
-Copy the `.pem` to the host, tighten it, and run the setup script. The script writes NO git
+Copy the `.pem` to the host, tighten it, and run the setup command. Its packaged script writes NO git
 config and installs nothing on your PATH (the compositor owns per-bot git routing) — it
 **validates the credentials end to end through the real mint path**, writes the operator/cron
 config file, and prints the exact fleet values to wire.
@@ -86,7 +86,7 @@ config file, and prints the exact fleet values to wire.
 # On the host, with the key already copied to e.g. ~/.config/claudlobby/my-app.pem
 chmod 600 ~/.config/claudlobby/my-app.pem
 
-lib/setup-github-app.sh \
+claudlobby host github-app setup \
   --app-id 1234567 \
   --installation-id 7654321 \
   --private-key ~/.config/claudlobby/my-app.pem \
@@ -199,8 +199,8 @@ git push origin HEAD:main
 # Expected: GH013: Repository rule violations found — Cannot push to this protected branch
 
 # 4. The bot cannot merge its own unreviewed PR.
-GH_TOKEN=$(lib/mint-github-token.sh) gh pr create --fill --head app-auth-smoke --base main
-GH_TOKEN=$(lib/mint-github-token.sh) gh pr merge --squash <PR#>
+GH_TOKEN=$(claudlobby host github-app token) gh pr create --fill --head app-auth-smoke --base main
+GH_TOKEN=$(claudlobby host github-app token) gh pr merge --squash <PR#>
 # Expected: HTTP 405 — the PR is not mergeable (lacks a required approval from a non-author)
 ```
 
@@ -221,7 +221,7 @@ Outside a bot session (your own shell, cron), mint per call and never export at 
 token dies in about an hour:
 
 ```bash
-GH_TOKEN=$(lib/mint-github-token.sh) gh pr list
+GH_TOKEN=$(claudlobby host github-app token) gh pr list
 ```
 
 ## Rotation and revocation
@@ -231,7 +231,7 @@ leak). GitHub supports **overlapping keys**, so there is no downtime:
 
 1. Generate a NEW private key in App settings (both are now valid).
 2. Copy it to the host, `chmod 600`, and point `GITHUB_APP_PRIVATE_KEY_PATH` (fleet `.env`
-   and the setup config file) at it; re-run `lib/setup-github-app.sh` to validate.
+   and the setup config file) at it; re-run `claudlobby host github-app setup` to validate.
 3. `generate` + restart the fleet.
 4. **Delete the OLD key** in App settings once every bot is on the new one.
 
@@ -239,7 +239,7 @@ To revoke access entirely, uninstall the App from the org (immediate) or delete 
 
 ## Common issues
 
-- **`setup-github-app.sh` 401 "A JSON web token could not be decoded"** — the `.pem` belongs
+- **`host github-app setup` 401 "A JSON web token could not be decoded"** — the `.pem` belongs
   to a different App than `--app-id`, `--app-id` is wrong (Client ID or Installation ID
   supplied instead), the key was revoked, or the clock is skewed. The script prints the full
   tree with a fingerprint-compare recipe.
@@ -255,9 +255,9 @@ To revoke access entirely, uninstall the App from the org (immediate) or delete 
 
 | File | Role |
 |---|---|
-| `lib/setup-github-app.sh` | one-time validation + config write + prints fleet values |
+| `claudlobby host github-app setup` | one-time validation + config write + prints fleet values via packaged native script |
 | `lib/git-credential-github-app` | the git credential helper (mints the token) |
-| `lib/mint-github-token.sh` | prints a token for skills / per-call `gh` |
+| `claudlobby host github-app token` | prints a token for deliberate per-call `gh` use via the private mint helper |
 | `lib/github-app-mcp-wrapper.py` | keeps the GitHub MCP server on a fresh token |
 | `library/mcp/github-app.json` | the `mcp: [github-app]` fragment |
 | `library/integrations/github-app.md` | App-mode integration guidance |
