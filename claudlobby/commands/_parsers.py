@@ -23,17 +23,6 @@ def register_subparsers(sub) -> None:
     register_release_subparsers(sub)
     from ._orientation_parsers import register_orientation_subparsers
     register_orientation_subparsers(sub)
-
-
-    pg = sub.add_parser(
-        "generate", help="Compose runtime/bots/ from fleet.yaml + library/"
-    )
-    pg.add_argument("--bot", help="Generate only one bot")
-    pg.add_argument(
-        "--strict", action="store_true", help="Refuse to generate on warnings"
-    )
-    pg.set_defaults(func=_command("core", "cmd_generate"))
-
     from ._library_parsers import register_library_subparsers
     register_library_subparsers(sub)
 

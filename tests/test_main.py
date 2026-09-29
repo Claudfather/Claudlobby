@@ -268,6 +268,8 @@ class TestMainArgparse:
             main(["--root", str(fleet_dir), "validate"])
         assert retired.value.code == 2
 
-    def test_generate_subcommand(self, fleet_dir):
-        result = main(["--root", str(fleet_dir), "generate"])
-        assert result == 0
+    def test_generate_is_retired_before_it_can_write_runtime(self, tmp_path):
+        with pytest.raises(SystemExit) as retired:
+            main(["--root", str(tmp_path), "generate"])
+        assert retired.value.code == 2
+        assert list(tmp_path.iterdir()) == []
