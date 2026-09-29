@@ -15,6 +15,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -23,6 +24,7 @@ from pathlib import Path
 
 import pytest
 
+import claudlobby.composer as composer_mod
 from claudlobby.composer import (
     CLAUDRON_LOOP_GRANTS,
     _claudron_hook_entries,
@@ -79,6 +81,26 @@ def _hook_commands(settings: dict) -> list[str]:
         for groups in settings.get("hooks", {}).values()
         for g in groups
         for h in g.get("hooks", [])
+    ]
+
+
+# The engine's dispatch verb per event, written out here rather than read from
+# the composer's own table, so a wrong table cannot pass its own test.
+EVENT_CMD = {
+    "SessionStart": "session-start",
+    "PreCompact": "pre-compact",
+    "SessionEnd": "session-end",
+}
+
+
+def _claudron_commands(settings: dict, event: str) -> list[str]:
+    """The claudron commands composed for one event: its identity is the
+    ``hook <event>`` suffix, whatever sits in front of it."""
+    return [
+        h["command"]
+        for g in settings.get("hooks", {}).get(event, [])
+        for h in g.get("hooks", [])
+        if h["command"].endswith(f"hook {EVENT_CMD[event]}")
     ]
 
 
@@ -182,6 +204,50 @@ class TestHookComposition:
         assert any(c.endswith("hook pre-compact") for c in cmds)
         assert any(c.endswith("hook session-end") for c in cmds)
 
+    def test_every_hook_command_names_the_bots_vault(self, tmp_path):
+        # Claudron #183: walk-up binds only a directory carrying
+        # `.claudron-vault`, so each command names the bot's own vault with the
+        # global `--vault`, ahead of the `hook <event>` identity suffix.
+        settings, _ = _compose(tmp_path, claudron_vault_path="/srv/v")
+        for event, event_cmd in EVENT_CMD.items():
+            (cmd,) = _claudron_commands(settings, event)
+            assert shlex.split(cmd)[-4:] == ["--vault", "/srv/v", "hook", event_cmd], cmd
+
+    def test_a_vault_path_that_needs_quoting_survives_the_shell(self, tmp_path):
+        # Claude Code runs a hook command through a shell.
+        vault = "/srv/My Vault"
+        settings, _ = _compose(tmp_path, claudron_vault_path=vault)
+        for event, event_cmd in EVENT_CMD.items():
+            (cmd,) = _claudron_commands(settings, event)
+            assert shlex.split(cmd)[-4:] == ["--vault", vault, "hook", event_cmd], cmd
+
+    def test_a_tilde_in_the_vault_path_is_expanded(self, tmp_path, monkeypatch):
+        # The engine reads the address as Path(hint).resolve(), which never
+        # expands "~", and a shell does not expand a quoted one: left as it is,
+        # "~/vault" names a directory called "~" under the hook's cwd.
+        home = tmp_path / "home"
+        monkeypatch.setenv("HOME", str(home))
+        settings, _ = _compose(tmp_path, claudron_vault_path="~/vault")
+        (cmd,) = _claudron_commands(settings, "SessionStart")
+        assert shlex.split(cmd)[-3] == str(home / "vault"), cmd
+
+    def test_a_relative_vault_path_is_anchored_at_the_bot_dir(self, tmp_path):
+        # A session runs in its bot dir, which is where the bot's
+        # CLAUDRON_VAULT_PATH export resolves a relative path; the hook names
+        # the same directory, absolutely.
+        settings, bot = _compose(tmp_path, claudron_vault_path="vault")
+        bot_dir = _paths(tmp_path).bot_runtime(bot.bot_id)
+        (cmd,) = _claudron_commands(settings, "SessionStart")
+        assert shlex.split(cmd)[-3] == str(bot_dir / "vault"), cmd
+
+    def test_a_loop_with_no_vault_composes_no_hooks(self, tmp_path):
+        # `claudron_session_loop: true` with no vault: the engine refuses to
+        # install a loop with no address (Claudron #183) and the validator
+        # refuses to generate one, so the composer renders none either.
+        settings, _ = _compose(tmp_path, claudron_session_loop=True)
+        for event in EVENT_CMD:
+            assert not _claudron_commands(settings, event), event
+
     def test_loop_off_installs_no_hooks(self, tmp_path):
         settings, _ = _compose(
             tmp_path, claudron_vault_path="/srv/v", claudron_session_loop=False
@@ -225,11 +291,22 @@ class TestHookComposition:
 
     def test_merge_self_replaces_stale_executable(self):
         # A moved venv/pipx path must REPLACE, not duplicate (suffix identity).
-        old = _merge_claudron_hooks({}, "/old/venv/bin/claudron")
-        new = _merge_claudron_hooks(old, "/new/venv/bin/claudron")
+        old = _merge_claudron_hooks({}, "/old/venv/bin/claudron", "/srv/v")
+        new = _merge_claudron_hooks(old, "/new/venv/bin/claudron", "/srv/v")
         for event in ("SessionStart", "PreCompact", "SessionEnd"):
             assert len(new[event]) == 1
             assert new[event][0]["hooks"][0]["command"].startswith("/new/venv/bin/claudron")
+
+    def test_merge_self_replaces_a_moved_vault(self):
+        # Re-pointing a bot at another vault replaces its entries on the
+        # identity suffix; no entry is left naming the old vault.
+        exe = "/opt/claudron/bin/claudron"
+        old = _merge_claudron_hooks({}, exe, "/srv/old-vault")
+        new = _merge_claudron_hooks(old, exe, "/srv/new-vault")
+        for event, event_cmd in EVENT_CMD.items():
+            (group,) = new[event]
+            assert shlex.split(group["hooks"][0]["command"]) == [
+                exe, "--vault", "/srv/new-vault", "hook", event_cmd]
 
     def test_executable_absolute_when_on_path(self, tmp_path, monkeypatch):
         monkeypatch.setattr(shutil, "which", lambda name: "/abs/bin/claudron")
@@ -374,15 +451,23 @@ class TestValidator:
 @pytest.mark.vault
 class TestSnippetParity:
     EXE = "/opt/claudron/bin/claudron"
+    VAULT = "/srv/vault"
 
-    def test_entries_match_engine_settings_snippet(self):
+    # The second vault needs shell quoting, the case most likely to drift.
+    @pytest.mark.parametrize("vault", ["/srv/vault", "/srv/My Vault"])
+    def test_entries_match_engine_settings_snippet(self, vault):
         hooks = pytest.importorskip("claudron.hooks")
-        assert _claudron_hook_entries(self.EXE) == hooks.settings_snippet(self.EXE)["hooks"]
+        assert (
+            _claudron_hook_entries(self.EXE, vault)
+            == hooks.settings_snippet(self.EXE, vault)["hooks"]
+        )
 
     def test_merge_matches_engine_merge_settings(self):
         hooks = pytest.importorskip("claudron.hooks")
-        composed = _merge_claudron_hooks({}, self.EXE)
-        engine = hooks.merge_settings({}, hooks.settings_snippet(self.EXE))["hooks"]
+        composed = _merge_claudron_hooks({}, self.EXE, self.VAULT)
+        engine = hooks.merge_settings({}, hooks.settings_snippet(self.EXE, self.VAULT))[
+            "hooks"
+        ]
         assert composed == engine
 
     def test_merge_self_replace_matches_engine(self):
@@ -392,24 +477,66 @@ class TestSnippetParity:
         guards. The empty-base case above cannot exercise it."""
         hooks = pytest.importorskip("claudron.hooks")
         old_exe, new_exe = "/old/venv/bin/claudron", "/new/venv/bin/claudron"
+        old_vault, new_vault = "/srv/old-vault", "/srv/new-vault"
         foreign = {"matcher": "", "hooks": [{"type": "command", "command": "fleet-own.sh"}]}
 
         def base():  # a hooks block: stale claudron entries (old exe) + a foreign hook
-            b = _merge_claudron_hooks({}, old_exe)
+            b = _merge_claudron_hooks({}, old_exe, old_vault)
             event = next(iter(b))
             b[event] = b[event] + [foreign]
             return b, event
 
         b_composer, event = base()
         b_engine, _ = base()
-        composed = _merge_claudron_hooks(b_composer, new_exe)
+        composed = _merge_claudron_hooks(b_composer, new_exe, new_vault)
         engine = hooks.merge_settings(
-            {"hooks": b_engine}, hooks.settings_snippet(new_exe)
+            {"hooks": b_engine}, hooks.settings_snippet(new_exe, new_vault)
         )["hooks"]
         assert composed == engine
-        # sanity: foreign hook survived; the stale executable is fully gone
+        # sanity: foreign hook survived; the stale executable and vault are gone
         assert foreign in composed[event]
         assert not any(old_exe in json.dumps(v) for v in composed.values())
+        assert not any(old_vault in json.dumps(v) for v in composed.values())
+
+
+@pytest.mark.vault
+class TestComposedHookFindsTheVault:
+    """Claudron #183 end to end. The composed SessionStart command, run by a
+    shell from outside the vault with no vault in its environment, reaches the
+    bot's own vault. The fixture vault carries no `.claudron-vault`, so walk-up
+    could never bind it: only the composed address can."""
+
+    def test_a_session_started_outside_the_vault_resolves_it(self, tmp_path, monkeypatch):
+        cli = pytest.importorskip("claudron.cli")
+        vault = tmp_path / "vault"
+        (vault / "_shared" / "knowledge").mkdir(parents=True)
+        home, outside, tmp = tmp_path / "home", tmp_path / "elsewhere", tmp_path / "tmp"
+        for d in (home, outside, tmp):
+            d.mkdir()
+        # The engine this interpreter imports, which is the pinned one; a
+        # claudron found on PATH could be another install.
+        exe = f"{sys.executable} -m claudron.cli"
+        monkeypatch.setattr(
+            composer_mod, "_resolve_claudron_executable", lambda: (exe, None)
+        )
+        settings, _ = _compose(tmp_path, claudron_vault_path=str(vault))
+        (command,) = _claudron_commands(settings, "SessionStart")
+        env = {k: v for k, v in os.environ.items() if k not in cli.VAULT_ENV_VARS}
+        env.update(HOME=str(home), TMPDIR=str(tmp))
+
+        def run(cmd: str) -> None:
+            subprocess.run(["sh", "-c", cmd], cwd=outside, env=env, input="{}",
+                           capture_output=True, text=True, check=True, timeout=60)
+
+        # The control: the same hook with no address finds nothing, and says
+        # so where a hook with no vault logs.
+        run(f"{exe} hook session-start")
+        assert "no vault resolvable" in (tmp / "claudron-hooks.log").read_text()
+        (tmp / "claudron-hooks.log").unlink()
+
+        run(command)
+        assert not (tmp / "claudron-hooks.log").exists(), "the composed hook found no vault"
+        assert "[session-start]" in (vault / ".claudron" / "hooks.log").read_text()
 
 
 # ---------------------------------------------------------------------------
