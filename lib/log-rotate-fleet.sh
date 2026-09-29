@@ -45,8 +45,11 @@ fi
 
 LOGS=()
 
-# Package-level logs
-for f in "$CLAUDLOBBY_ROOT"/lib/logs/*.log "$CLAUDLOBBY_ROOT"/lib/logs/*.jsonl "$CLAUDLOBBY_ROOT"/lib/*.log "$CLAUDLOBBY_ROOT"/lib/*.jsonl; do
+# Package-level logs, and each composed launchd timer job's own log (#1965).
+# launchd reopens a timer job's log at every run, so rotating it is safe. The
+# other state/*.log files are left to their writers: a resident service keeps
+# its log open for as long as it runs.
+for f in "$CLAUDLOBBY_ROOT"/lib/logs/*.log "$CLAUDLOBBY_ROOT"/lib/logs/*.jsonl "$CLAUDLOBBY_ROOT"/lib/*.log "$CLAUDLOBBY_ROOT"/lib/*.jsonl "$CLAUDLOBBY_ROOT"/state/*.launchd.log; do
     [ -f "$f" ] && LOGS+=("$f")
 done
 

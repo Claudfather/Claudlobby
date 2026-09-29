@@ -3812,6 +3812,112 @@ def _write_service_units(
     )
 
 
+@dataclass(frozen=True)
+class LaunchdTimerSpec:
+    """One composed launchd timer plist, as data (#1965): built once in
+    ``_write_timer_units`` and rendered by :func:`render_launchd_timer_plist`, so
+    a test can parse the text back and compare it (the ``SupervisionSpec``
+    pattern, #1573). ``environment`` and ``start_calendar`` are ordered pairs,
+    in the order the file lists them."""
+
+    label: str
+    program_arguments: tuple[str, ...]
+    environment: tuple[tuple[str, str], ...]
+    working_directory: str
+    log_path: str
+    start_interval: int | None = None
+    start_calendar: tuple[tuple[str, int], ...] = ()
+    abandon_process_group: bool = False
+
+
+def render_launchd_timer_plist(spec: LaunchdTimerSpec) -> str:
+    """The plist text for *spec*. One log serves both output streams."""
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"'
+        ' "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+        '<plist version="1.0">',
+        "<dict>",
+        "  <key>Label</key>",
+        f"  <string>{spec.label}</string>",
+        "  <key>ProgramArguments</key>",
+        "  <array>",
+    ]
+    lines.extend(f"    <string>{arg}</string>" for arg in spec.program_arguments)
+    lines.extend(["  </array>", "  <key>EnvironmentVariables</key>", "  <dict>"])
+    for var, value in spec.environment:
+        lines.extend([f"    <key>{var}</key>", f"    <string>{value}</string>"])
+    lines.extend(
+        [
+            "  </dict>",
+            "  <key>WorkingDirectory</key>",
+            f"  <string>{spec.working_directory}</string>",
+            "  <key>StandardOutPath</key>",
+            f"  <string>{spec.log_path}</string>",
+            "  <key>StandardErrorPath</key>",
+            f"  <string>{spec.log_path}</string>",
+        ]
+    )
+    if spec.start_interval is not None:
+        lines.extend(
+            ["  <key>StartInterval</key>", f"  <integer>{spec.start_interval}</integer>"]
+        )
+    else:
+        lines.extend(["  <key>StartCalendarInterval</key>", "  <dict>"])
+        for key, value in spec.start_calendar:
+            lines.extend([f"    <key>{key}</key>", f"    <integer>{value}</integer>"])
+        lines.append("  </dict>")
+    if spec.abandon_process_group:
+        lines.extend(["  <key>AbandonProcessGroup</key>", "  <true/>"])
+    lines.extend(["</dict>", "</plist>"])
+    return "\n".join(lines) + "\n"
+
+
+#: How long one composed launchd timer run may last before lib/run-bounded.sh
+#: stops it (#1965, the launchd half of #897). A job's own ``max_runtime`` wins;
+#: a job whose run grows with the fleet takes its budget from the fleet
+#: (``_FLEET_JOB_BUDGETS``); every other job takes it from its schedule: three
+#: intervals but never under ten minutes, or an hour for a calendar job. The
+#: budgets are generous on purpose: the bound is there to end a wedged run, and
+#: stopping a slow but healthy one is the worse failure.
+_TIMER_BUDGET_FLOOR_S = 600
+_TIMER_BUDGET_CALENDAR_S = 3600
+
+
+def _schedule_budget(sched: dict) -> int:
+    if sched["type"] == "interval":
+        return max(3 * int(sched["seconds"]), _TIMER_BUDGET_FLOOR_S)
+    return _TIMER_BUDGET_CALENDAR_S
+
+
+def _weekly_restart_budget(fleet: FleetConfig) -> int:
+    """weekly-worker-restart restarts the fleet's workers one at a time, and
+    each can take its readiness ceiling (RC_READY_TIMEOUT_S, from its boot
+    policy) plus about 150 s: up to 30 s of pre-stop handoff and the 120 s the
+    readiness wait allows past that ceiling."""
+    managers = fleet.manager_bots()
+    total = sum(
+        _bot_boot_policy(bot, fleet).ready_timeout_s + 150
+        for bot_id, bot in fleet.bots.items()
+        if bot_id not in managers
+    )
+    return max(total, _TIMER_BUDGET_FLOOR_S)
+
+
+#: Fleet jobs whose run grows with the fleet: a row derives the budget from it.
+_FLEET_JOB_BUDGETS = {"weekly-worker-restart": _weekly_restart_budget}
+
+
+def _job_max_runtime(name: str, cfg: dict) -> int:
+    """A job's own ``max_runtime`` in seconds, or 0 when it declares none."""
+    value = int(cfg.get("max_runtime") or 0)
+    if value < 0:
+        raise ValueError(
+            f"jobs.{name}.max_runtime must be a positive number of seconds, got {value}"
+        )
+    return value
+
+
 def _write_timer_units(
     timers_dir: Path,
     service_name: str,
@@ -3829,6 +3935,7 @@ def _write_timer_units(
     fleet_pulse_env: dict[str, str] | None = None,
     extra_env: dict[str, str] | None = None,
     abandon_children: bool = False,
+    max_runtime: int = 0,
 ) -> None:
     """Write the .service/.timer/.plist units for a single timer.
 
@@ -3844,6 +3951,12 @@ def _write_timer_units(
     plist ignores them. ``exec_args`` appends extra positional arguments after
     the fleet name on both the systemd ``ExecStart`` and the launchd
     ``ProgramArguments`` (the per-(bot,slot) briefing timers pass ``<bot> <slot>``).
+
+    The plist runs its job through ``lib/run-bounded.sh <budget> <job argv>`` and
+    sends both output streams to ``state/<service_name>.launchd.log`` (#1965).
+    ``max_runtime`` is the budget in seconds; 0 takes it from the schedule
+    (``_schedule_budget``). The systemd units are not bounded yet: that is the
+    systemd half of #897.
     """
     # L1 source guard (#702) — a timer's script is a compose source. A
     # $CLAUDLOBBY_ROOT-anchored script (the shape system.yaml / fleet jobs use)
@@ -3972,17 +4085,6 @@ def _write_timer_units(
     (timers_dir / f"{service_name}.timer").write_text("\n".join(timer_lines) + "\n")
 
     # --- launchd plist ---
-    plist_lines = [
-        '<?xml version="1.0" encoding="UTF-8"?>',
-        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"'
-        ' "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
-        '<plist version="1.0">',
-        "<dict>",
-        "  <key>Label</key>",
-        f"  <string>{service_name}</string>",
-        "  <key>ProgramArguments</key>",
-        "  <array>",
-    ]
     # launchd's ProgramArguments[0] is the executable PATH; systemd's ExecStart=
     # is a command LINE that it splits on whitespace. A job whose `script`
     # carries flags (data-sweep's `--purge`) is therefore valid on Linux and, if
@@ -3990,73 +4092,36 @@ def _write_timer_units(
     # job then silently never execs. Split here so both platforms receive the
     # same argv, flags before the fleet name exactly as systemd would pass them
     # (#969).
-    plist_lines.extend(
-        f"    <string>{part}</string>" for part in shlex.split(script_expanded)
-    )
+    job_argv = shlex.split(script_expanded)
     if fleet_name:
-        plist_lines.append(f"    <string>{fleet_name}</string>")
-    for arg in exec_args or []:
-        plist_lines.append(f"    <string>{arg}</string>")
-    plist_lines.extend(
-        [
-            "  </array>",
-            "  <key>EnvironmentVariables</key>",
-            "  <dict>",
-            "    <key>CLAUDLOBBY_ROOT</key>",
-            f"    <string>{paths.root}</string>",
-            # Carry the fleet tool PATH into the timer env (#798).
-            "    <key>PATH</key>",
-            f"    <string>{tool_path}</string>",
-        ]
-    )
+        job_argv.append(fleet_name)
+    job_argv.extend(exec_args or [])
+    env: list[tuple[str, str]] = [
+        ("CLAUDLOBBY_ROOT", str(paths.root)),
+        # Carry the fleet tool PATH into the timer env (#798).
+        ("PATH", tool_path),
+    ]
     if fleet_name:
-        plist_lines.extend(
-            [
-                "    <key>CLAUDLOBBY_FLEET</key>",
-                f"    <string>{fleet_name}</string>",
-            ]
-        )
+        env.append(("CLAUDLOBBY_FLEET", fleet_name))
     if fleet_name and telegram_group_chat_id:
-        plist_lines.extend(
-            [
-                "    <key>TELEGRAM_GROUP_CHAT_ID</key>",
-                f"    <string>{telegram_group_chat_id}</string>",
-            ]
-        )
+        env.append(("TELEGRAM_GROUP_CHAT_ID", telegram_group_chat_id))
     # #1120 — parity with the systemd half above; the env-parity test compares
     # the two, so emitting on one platform only would fail there rather than in
     # production eight weeks later.
     if fleet_name and name == _FLEET_PULSE_JOB and fleet_pulse_env:
-        for var, value in fleet_pulse_env.items():
-            plist_lines.extend(
-                [f"    <key>{var}</key>", f"    <string>{value}</string>"]
-            )
+        env.extend(fleet_pulse_env.items())
     # Parity with the systemd extra_env block — the env-parity test compares
     # the two platforms, so emitting on one only fails there, not in production.
-    for var, value in (extra_env or {}).items():
-        plist_lines.extend(
-            [f"    <key>{var}</key>", f"    <string>{value}</string>"]
-        )
-    plist_lines.append("  </dict>")
-    plist_lines.extend(
-        [
-            "  <key>WorkingDirectory</key>",
-            f"  <string>{paths.root}</string>",
-        ]
-    )
+    env.extend((extra_env or {}).items())
+    start_interval = None
+    start_calendar: list[tuple[str, int]] = []
     if sched["type"] == "interval":
-        plist_lines.extend(
-            [
-                "  <key>StartInterval</key>",
-                f"  <integer>{sched['seconds']}</integer>",
-            ]
-        )
+        start_interval = int(sched["seconds"])
     else:
         # Parse HH:MM from OnCalendar expression (e.g. "*-*-* 06:00:00").
         cal_match = re.search(r"(\d{1,2}):(\d{2})", sched["expression"])
         hour = int(cal_match.group(1)) if cal_match else 6
         minute = int(cal_match.group(2)) if cal_match else 0
-        cal_interval = ["  <key>StartCalendarInterval</key>", "  <dict>"]
         # A leading systemd weekday (e.g. "Sun *-*-* 05:00:00") maps to a launchd
         # Weekday so a weekly schedule stays weekly on macOS — without it launchd
         # fires daily at the same HH:MM. Only a single weekday is mapped; systemd
@@ -4073,29 +4138,31 @@ def _write_timer_units(
         }
         wd_match = re.match(r"\s*(Sun|Mon|Tue|Wed|Thu|Fri|Sat)\b", sched["expression"])
         if wd_match:
-            cal_interval += [
-                "    <key>Weekday</key>",
-                f"    <integer>{weekdays[wd_match.group(1)]}</integer>",
-            ]
-        cal_interval += [
-            "    <key>Hour</key>",
-            f"    <integer>{hour}</integer>",
-            "    <key>Minute</key>",
-            f"    <integer>{minute}</integer>",
-            "  </dict>",
-        ]
-        plist_lines.extend(cal_interval)
-    if abandon_children:
+            start_calendar.append(("Weekday", weekdays[wd_match.group(1)]))
+        start_calendar += [("Hour", hour), ("Minute", minute)]
+    # The job's output, which launchd sends to /dev/null unless the plist names
+    # a file (#1965). launchd creates the file but not its directory.
+    log_path = paths.root / "state" / f"{service_name}.launchd.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    spec = LaunchdTimerSpec(
+        label=service_name,
+        # launchd has no runtime bound, and it skips a fire while a run is still
+        # going, so one wedged run would silently disable the job (#1965).
+        program_arguments=(
+            f"{paths.root}/lib/run-bounded.sh",
+            str(max_runtime if max_runtime > 0 else _schedule_budget(sched)),
+            *job_argv,
+        ),
+        environment=tuple(env),
+        working_directory=str(paths.root),
+        log_path=str(log_path),
+        start_interval=start_interval,
+        start_calendar=tuple(start_calendar),
         # launchd kills the job's process group at exit unless told to abandon
         # it — see the KillMode=process note above (same live measurement)
-        plist_lines.extend(["  <key>AbandonProcessGroup</key>", "  <true/>"])
-    plist_lines.extend(
-        [
-            "</dict>",
-            "</plist>",
-        ]
+        abandon_process_group=abandon_children,
     )
-    (timers_dir / f"{service_name}.plist").write_text("\n".join(plist_lines) + "\n")
+    (timers_dir / f"{service_name}.plist").write_text(render_launchd_timer_plist(spec))
 
 
 #: The three files one composed unit basename owns. One tuple, because a prune
@@ -4624,6 +4691,10 @@ def compose_fleet_timers(
                 persistent=bool(cfg.get("persistent", False)),
                 abandon_children=bool(cfg.get("abandon_children", False)),
                 randomized_delay=int(cfg.get("randomized_delay") or 0),
+                max_runtime=(
+                    _job_max_runtime(name, cfg)
+                    or (_FLEET_JOB_BUDGETS[name](fleet) if name in _FLEET_JOB_BUDGETS else 0)
+                ),
                 telegram_group_chat_id=fleet.telegram_group_chat_id,
                 fleet_pulse_env=(
                     fleet.fleet_pulse.env() if fleet.fleet_pulse else None
@@ -4948,6 +5019,7 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
             persistent=bool(cfg.get("persistent", False)),
             abandon_children=bool(cfg.get("abandon_children", False)),
             randomized_delay=int(cfg.get("randomized_delay") or 0),
+            max_runtime=_job_max_runtime(name, cfg),
             extra_env=extra_env,
         )
     # No host DORMANT manifest (F7). It existed for ONE job and for a single

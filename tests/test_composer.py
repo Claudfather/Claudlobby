@@ -4971,6 +4971,10 @@ class TestLaunchdArgvSplitting:
     It was also the only job of thirteen carrying a flag, which is why it went
     unnoticed — but the asymmetry is structural, so any future flag-bearing job
     would break the same way.
+
+    Since #1965 the job runs through `lib/run-bounded.sh <budget>`, so the job's
+    own argv starts at index 2; tests/test_launchd_timer_plist.py pins the
+    wrapper and budget in front of it.
     """
 
     def _plist(self, tmp_path, script):
@@ -4993,7 +4997,7 @@ class TestLaunchdArgvSplitting:
 
     def test_flagged_script_splits_into_separate_argv_entries(self, tmp_path):
         pl = self._plist(tmp_path, "$CLAUDLOBBY_ROOT/lib/data-sweep.sh --purge")
-        argv = pl["ProgramArguments"]
+        argv = pl["ProgramArguments"][2:]  # the job, after run-bounded.sh + budget
         assert argv[0].endswith("/lib/data-sweep.sh"), (
             f"argv[0] must be the executable alone, got {argv[0]!r}"
         )
@@ -5004,14 +5008,14 @@ class TestLaunchdArgvSplitting:
         """Order must match the systemd form (`script --purge <fleet>`), or the
         two platforms would pass arguments differently to the same script."""
         pl = self._plist(tmp_path, "$CLAUDLOBBY_ROOT/lib/data-sweep.sh --purge")
-        argv = pl["ProgramArguments"]
+        argv = pl["ProgramArguments"][2:]  # the job, after run-bounded.sh + budget
         assert argv.index("--purge") < argv.index("t"), (
             f"flag must precede the fleet name, got {argv}"
         )
 
     def test_unflagged_script_is_unchanged(self, tmp_path):
         pl = self._plist(tmp_path, "$CLAUDLOBBY_ROOT/lib/plain.sh")
-        argv = pl["ProgramArguments"]
+        argv = pl["ProgramArguments"][2:]  # the job, after run-bounded.sh + budget
         assert argv[0].endswith("/lib/plain.sh")
         assert argv[1] == "t"
 
