@@ -64,7 +64,7 @@ state="$2"; fleet="$3"; channel="$4"; bots="$5"; socket="$6"; session="$7"
 renotify="$8"; tg_post="$9"
 episode="${10:-recording_degraded}"
 message=''; IFS= read -r -d '' message || :
-_send_manager() { bot_tmux_send "$socket" "=$session" "$1" >/dev/null 2>&1; }
+_send_manager() { bot_tmux_send "$socket" "=$session:" "$1" >/dev/null 2>&1; }
 _send_telegram() {
     TELEGRAM_GROUP_CHAT_ID="$_alert_chat_id" TELEGRAM_STATE_DIR="$_alert_state_dir" \
         TELEGRAM_BOT_TOKEN="$_alert_token" "$tg_post" "$1" >/dev/null 2>&1

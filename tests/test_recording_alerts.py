@@ -42,7 +42,7 @@ def private_alert(tmp_path):
         "  printf '%s' '100-200'\n"
         "}\n"
         "bot_tmux_send() {\n"
-        "  [ \"$2\" = =manager ] || return 2\n"
+        "  [ \"$2\" = =manager: ] || return 2\n"
         "  [ ! -e \"$CLAUDLOBBY_ROOT/manager-fails\" ] || { echo 'secret-token' >&2; return 1; }\n"
         "  if [ -e \"$CLAUDLOBBY_ROOT/manager-hold\" ]; then\n"
         "    touch \"$CLAUDLOBBY_ROOT/manager-entered\"\n"
@@ -98,6 +98,17 @@ def test_first_alert_suppresses_repeat_and_confirmed_write_clears_both(private_a
     assert ("request receipt persistence could not be confirmed" in
             (context.paths.root / "telegram-capture").read_text() and
             "request=" + REQUEST in (context.paths.root / "telegram-capture").read_text())
+
+
+def test_manager_alert_uses_pane_target_when_telegram_is_unconfigured(private_alert):
+    context, package, manager, _ = private_alert
+    result = notify_recording_degraded(context, package, manager,
+                                       request_id=REQUEST, component="message_intent", at=AT,
+                                       trusted_tiers={})
+    assert result.manager == ChannelOutcome("submitted", True)
+    assert result.telegram.status == "unconfigured"
+    assert "message intent persistence could not be confirmed" in (
+        context.paths.root / "manager-capture").read_text()
 
 
 def test_each_failed_carrier_retries_without_leaking_native_errors(private_alert, capsys):
