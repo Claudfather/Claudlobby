@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import socket
 import stat
 import subprocess
@@ -54,6 +55,25 @@ def _call(adapter, function, target, *args, timeout=30):
     if result.returncode:
         raise RuntimeEvidenceError(function, target, f"native refusal ({result.returncode})")
     return result.stdout.strip()
+
+
+def _start_budget(unit: UnitStart, file: Path, content: bytes) -> int:
+    """Cover the sealed Linux bot boot rung before its admission continuation."""
+    if unit.phase != "bots" or file.suffix != ".service":
+        return 30
+    try:
+        lines = [line.strip() for line in content.decode("utf-8").splitlines()
+                 if line.strip().startswith("ExecStartPre=")]
+    except UnicodeDecodeError as exc:
+        raise RuntimeEvidenceError("start", file.name, "published unit is not UTF-8") from exc
+    if not lines:
+        return 30
+    if len(lines) != 1 or not re.fullmatch(r"ExecStartPre=/bin/sleep (0|[1-9][0-9]{0,3})", lines[0]):
+        raise RuntimeEvidenceError("start", file.name, "unsupported published boot delay")
+    delay = int(lines[0].rsplit(" ", 1)[-1])
+    if delay > 3600:
+        raise RuntimeEvidenceError("start", file.name, "published boot delay exceeds bound")
+    return 30 + delay
 
 
 def assert_quiescent(adapter: Adapter, *, installed_file: Path, target: str,
@@ -149,7 +169,9 @@ def start_unit(store: ActivationStore, activation_id: str, *, installed_file: Pa
     admission = {"kind": "unit-start-v1", "unit": unit.unit, "argv": list(unit.argv)}
     details = {"release_id": unit.release_id, "sha256": sha256,
                "readiness": "not-observed"}
-    with activation_start(store, activation_id, identity=identity, unit=admission) as admitted:
+    start_budget = _start_budget(unit, file, published_content)
+    with activation_start(store, activation_id, identity=identity, unit=admission,
+                          timeout=start_budget) as admitted:
         bot = None
         if unit.phase == "bots":
             bot = Path(unit.command[1])
@@ -159,7 +181,8 @@ def start_unit(store: ActivationStore, activation_id: str, *, installed_file: Pa
                     or not fields[1].startswith("RR_FENCE_")):
                 raise RuntimeEvidenceError("start", target, "readiness fence evidence unavailable")
             ceiling, token = int(fields[0]), fields[1]
-        response = _call(adapter, "svc_activation_start", target, file, target)
+        response = _call(adapter, "svc_activation_start", target, file, target,
+                         timeout=start_budget)
         if response != "start-requested":
             raise RuntimeEvidenceError("start", target, "native start acknowledgement unavailable")
         # launchctl bootstrap/kickstart acknowledges a request before the

@@ -227,10 +227,10 @@ class ActivationStore:
         return self._save(ActivationRecord(activation_id, self.root, body))
 
     def cancel_prepared(self, activation_id: str) -> ActivationRecord:
-        """End an intent that never prepared a journal or began a step.
+        """End an intent whose prepared journals prove no target effect began.
 
-        This is a recorded cancellation, not rollback of any effect. Once a
-        journal or step exists, the ordinary recovery owners must take over.
+        This is a recorded cancellation, not rollback of any effect. A begun
+        step or changed target remains for explicit recovery.
         """
         self.assert_locked()
         record = read_activation(self.root, activation_id)
@@ -238,21 +238,35 @@ class ActivationStore:
         path = _record_path(self.root, activation_id)
         if (record.status != "prepared" or body["pending"] is not None
                 or body["completed"] or body["evidence"]
-                or read_selection(self.root) != body["previous_selection"]
-                or set(path.parent.iterdir()) != {path}):
+                or read_selection(self.root) != body["previous_selection"]):
             raise ActivationError("prepared activation has effects or changed selection; explicit recovery required")
+        from .config_install import read_config_install
+        from .config_plan import read_plan
         from .activation_units import PHASES, journal_id as unit_journal_id
         from .activation_enrollment import journal_id as enrollment_journal_id
-        siblings = [unit_journal_id(activation_id, phase) for phase in PHASES]
-        siblings += [enrollment_journal_id(activation_id, phase)
-                     for phase in (*PHASES, "directories")]
-        if any((path.parent.parent / name).exists() or (path.parent.parent / name).is_symlink()
-               for name in siblings):
-            raise ActivationError("prepared activation has a unit or enrollment journal; explicit recovery required")
+        siblings = [activation_id, *(unit_journal_id(activation_id, phase) for phase in PHASES),
+                    *(enrollment_journal_id(activation_id, phase)
+                      for phase in (*PHASES, "directories"))]
+        allowed = {path}
+        for identifier in siblings:
+            directory = path.parent.parent / identifier / "config"
+            if directory.exists() or directory.is_symlink():
+                journal = read_config_install(self.root, identifier)
+                if (journal.status != "prepared" or any(row != "pending" for row in journal.progress)):
+                    raise ActivationError("prepared activation has a started configuration effect")
+                read_plan(self.root, journal.plan_id).check_fresh()
+                if identifier == activation_id:
+                    allowed.add(directory)
+            if identifier != activation_id and (path.parent.parent / identifier).exists():
+                if set((path.parent.parent / identifier).iterdir()) != {directory}:
+                    raise ActivationError("prepared activation has an unknown parking journal")
+        if set(path.parent.iterdir()) != allowed:
+            raise ActivationError("prepared activation has unknown journal state")
         body["status"] = "rolled_back"
         body["cancellation"] = {"kind": "prepared-before-effects",
                                 "selection_sha256": _digest(body["previous_selection"]),
-                                "journals": []}
+                                "journals": [identifier for identifier in siblings
+                                             if (path.parent.parent / identifier / "config").exists()]}
         return self._save(record)
 
     def begin(self, activation_id: str, step: str) -> ActivationRecord:

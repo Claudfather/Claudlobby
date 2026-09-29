@@ -23,6 +23,15 @@ from tests.test_runtime_admission import _starting
 NATIVE = Path(__file__).resolve().parents[1] / "lib"
 
 
+def test_high_linux_boot_rung_extends_only_its_exact_start_budget():
+    bot = SimpleNamespace(phase="bots")
+    assert runtime._start_budget(bot, Path("worker.service"),
+            b"[Service]\nExecStartPre=/bin/sleep 33\n") == 63
+    assert runtime._start_budget(bot, Path("worker.service"), b"[Service]\n") == 30
+    with pytest.raises(runtime.RuntimeEvidenceError, match="unsupported published boot delay"):
+        runtime._start_budget(bot, Path("worker.service"), b"ExecStartPre=/bin/sh -c 'sleep 33'\n")
+
+
 @pytest.fixture
 def tmp_path(tmp_path_factory):
     return tmp_path_factory.mktemp("ar")  # AF_UNIX path bound
@@ -313,7 +322,7 @@ def test_resident_start_waits_for_delayed_native_admission_before_accepting_pid(
             assert not (builder.root / "state/activation-start.sock").exists()
             original_start = runtime.activation_start
             monkeypatch.setattr(runtime, "activation_start", lambda *args, **kwargs:
-                                original_start(*args, **kwargs, timeout=0.05))
+                                original_start(*args, **{**kwargs, "timeout": 0.05}))
 
             class NoProcess(Adapter):
                 def call(self, function, *args, timeout=30):

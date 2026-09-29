@@ -39,6 +39,19 @@ def _digest(value) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def _prepare_no_effect_journals(store, activation_id, plan, inventory, phases, adapter):
+    """Cancel a prepared intent only when its journal owners prove zero effects."""
+    try:
+        config_install.prepare_config(plan, activation_id)
+        return units.prepare_unit_pause(store, activation_id, inventory, phases, adapter=adapter)
+    except Exception:
+        try:
+            store.cancel_prepared(activation_id)
+        except Exception:
+            pass  # Preserve the original refusal; an unproven record stays blocking.
+        raise
+
+
 def _empty_plane(root: Path) -> None:
     # Bootstrap intentionally accepts less than upgrade: any existing Plane
     # content (DB, sidecar, socket/lock, spool, raw stage or unknown file) needs
@@ -254,9 +267,8 @@ def bootstrap_activation(root: Path, activation_id: str, plan_id: str,
                 raise ActivationError("bootstrap caller is hosted or cannot be proved external; use an operator shell")
         store.prepare(activation_id, plan, recovery_release_id=release.release_id,
                       source_release_id=release.release_id, enrollment_digest=inventory.digest)
-        config_install.prepare_config(plan, activation_id)
-        units.prepare_unit_pause(store, activation_id, inventory,
-                                 {phase: [] for phase in units.PHASES}, adapter=adapter)
+        _prepare_no_effect_journals(store, activation_id, plan, inventory,
+                                    {phase: [] for phase in units.PHASES}, adapter)
         for step, phase in (("producers_paused", "producers"), ("sessions_handed_off", None),
                             ("sessions_quiesced", "bots"), ("ingest_quiesced", "ingest")):
             store.begin(activation_id, step)
@@ -318,11 +330,9 @@ def bootstrap_activation(root: Path, activation_id: str, plan_id: str,
         store.begin(activation_id, "producers_resumed")
         publication = enrollment.install_candidate_units(store, activation_id, "producers", adapter=adapter)
         entries = enrollment.candidate_entries(store, activation_id, "producers")
-        timer_services = {entry["service"] for entry in entries if entry["service"]}
+        startable, timer_services = _startable_producers(entries)
         results = []
-        for entry in entries:
-            if Path(entry["installed"]).name in timer_services:
-                continue  # publish the service; only its declared timer is started
+        for entry in startable:
             _, _, unit = starts[entry["source"]]
             result = start_unit(store, activation_id, installed_file=Path(entry["installed"]),
                                 target=entry["target"], unit=unit, sha256=entry["after"]["sha256"], adapter=adapter)
@@ -439,6 +449,13 @@ def _legacy_quiet(adapter, pause, phase, sockets):
                          target=unit["target"], socket_path=sockets.get(unit["target"]))
 
 
+def _startable_producers(entries):
+    """Publish paired services, but start only their declared timers."""
+    timer_services = {entry["service"] for entry in entries if entry["service"]}
+    return (tuple(entry for entry in entries
+                  if Path(entry["installed"]).name not in timer_services), timer_services)
+
+
 def _running_activation(root: Path, activation_id: str, plan_id: str,
                         install_directory: Path, *, legacy_source: bool,
                         adapter: Adapter | None = None) -> ActivationRecord:
@@ -539,8 +556,7 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
                       recovery_release_id=source.release_id if source else release.release_id,
                       source_release_id=source.release_id if source else None,
                       enrollment_digest=inventory.digest, legacy_source=legacy_source)
-        config_install.prepare_config(plan, activation_id)
-        pause = units.prepare_unit_pause(store, activation_id, inventory, phases, adapter=adapter)
+        pause = _prepare_no_effect_journals(store, activation_id, plan, inventory, phases, adapter)
         store.begin(activation_id, "producers_paused")
         evidence = units.pause_phase(store, activation_id, "producers", adapter=adapter)
         _legacy_quiet(adapter, pause, "producers", {})
@@ -663,7 +679,9 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
         store.begin(activation_id, "producers_resumed")
         publication = enrollment.install_candidate_units(store, activation_id, "producers", adapter=adapter)
         results = []
-        for entry in enrollment.candidate_entries(store, activation_id, "producers"):
+        entries = enrollment.candidate_entries(store, activation_id, "producers")
+        startable, timer_services = _startable_producers(entries)
+        for entry in startable:
             _, _, unit = starts[entry["source"]]
             result = start_unit(store, activation_id, installed_file=Path(entry["installed"]),
                                 target=entry["target"], unit=unit, sha256=entry["after"]["sha256"], adapter=adapter)
@@ -671,7 +689,8 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
         enabled = enrollment.verify_candidate_enablement(store, activation_id, "producers", adapter=adapter)
         return store.complete(activation_id, "producers_resumed", evidence_digest=_digest({
             "publication": publication.digest, "native_starts": results, "enablement": enabled,
-            "legacy_source": legacy_source, "watchdog_ticks": "admitted only after active"}))
+            "legacy_source": legacy_source, "timer_services": sorted(timer_services),
+            "watchdog_ticks": "admitted only after active"}))
 
 
 def adopt_existing_activation(root: Path, activation_id: str, plan_id: str,

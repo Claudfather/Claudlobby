@@ -165,6 +165,28 @@ class NativeHost:
                     snapshot("bot", alias, uid, "host_" + "f" * 32)
 
 
+def test_timer_paired_service_is_published_but_not_started_by_either_activation_path():
+    entries = ({"installed": "/user/scheduled.service", "service": None},
+               {"installed": "/user/scheduled.timer", "service": "scheduled.service"},
+               {"installed": "/user/added.service", "service": None})
+    startable, paired = activation._startable_producers(entries)
+    assert paired == {"scheduled.service"}
+    assert [Path(entry["installed"]).name for entry in startable] == [
+        "scheduled.timer", "added.service"]
+
+
+def test_pre_effect_prepare_refusal_cancels_intent_without_starting(cold, monkeypatch):
+    root, _, plan, host = cold
+    def refuse(*args, **kwargs):
+        raise state.ActivationError("fixture native snapshot drift")
+    monkeypatch.setattr(activation.units, "prepare_unit_pause", refuse)
+    with pytest.raises(state.ActivationError, match="fixture native snapshot drift"):
+        activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    record = state.read_activation(root, "cold")
+    assert record.status == "rolled_back" and record.body["completed"] == []
+    assert host.starts == []
+
+
 @pytest.fixture
 def cold(installed, monkeypatch, tmp_path):
     root, inputs, paths, _, directory = installed

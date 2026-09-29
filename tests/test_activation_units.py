@@ -133,6 +133,30 @@ def _prepare(store, inventory, phases, plan, adapter):
     return units.prepare_unit_pause(store, "cutover", inventory, phases, adapter=adapter)
 
 
+def test_prepared_snapshot_refusal_can_cancel_only_unstarted_journals(enrollment):
+    inventory, phases, plan, adapter, _, _ = enrollment
+    # A timer tick finished after the inventory: no file or load-state drift.
+    adapter.states["scheduled.service"] = "enabled loaded inactive"
+    with state.locked_activation(inventory.data_root) as store:
+        store.prepare("cutover", plan, recovery_release_id=plan.release_id,
+                      enrollment_digest=inventory.digest)
+        config_install.prepare_config(plan, "cutover")
+        # Another unit still has an actual ownership change, before any pause.
+        adapter.states["member.service"] = "enabled loaded inactive"
+        with pytest.raises(state.ActivationError, match="native enrollment changed"):
+            units.prepare_unit_pause(store, "cutover", inventory, phases, adapter=adapter)
+        assert store.cancel_prepared("cutover").status == "rolled_back"
+    assert all(call[0] != "svc_activation_pause" for call in adapter.calls)
+
+
+def test_producer_tick_churn_does_not_invalidate_frozen_enrollment(enrollment):
+    inventory, phases, plan, adapter, _, _ = enrollment
+    adapter.states["scheduled.service"] = "enabled loaded inactive"
+    with state.locked_activation(inventory.data_root) as store:
+        _prepare(store, inventory, phases, plan, adapter)
+        assert state.read_activation(inventory.data_root, "cutover").status == "prepared"
+
+
 @pytest.fixture
 def empty_enrollment(installed, tmp_path):
     root, inputs, paths, _, _ = installed

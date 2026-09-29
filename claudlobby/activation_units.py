@@ -77,6 +77,17 @@ def _saved(unit: dict) -> str:
         raise ActivationError("incomplete saved native state") from exc
 
 
+def _same_enrollment(saved: str, observed: str, *, producer: bool) -> bool:
+    """A scheduled producer may run or exit between two native snapshots."""
+    if saved == observed:
+        return True
+    before, after = saved.split(), observed.split()
+    return (producer and len(before) == len(after) == 3
+            and before[:2] == after[:2]
+            and before[2] in {"active", "inactive"}
+            and after[2] in {"active", "inactive"})
+
+
 def _file(unit: dict) -> str:
     return unit["installed"][0]["path"]
 
@@ -238,7 +249,9 @@ def prepare_unit_pause(store: ActivationStore, activation_id: str,
     for unit in enrolled:
         _call(adapter, "svc_activation_assert_external", _file(unit), unit["target"], str(os.getpid()))
     for unit in enrolled:
-        if _call(adapter, "svc_activation_snapshot", _file(unit), unit["target"]) != _saved(unit):
+        if not _same_enrollment(_saved(unit),
+                                _call(adapter, "svc_activation_snapshot", _file(unit), unit["target"]),
+                                producer=unit["target"] in membership["producers"]):
             raise ActivationError(f"native enrollment changed: {unit['target']}")
     _darwin_check(adapter, enrollment, original_load=True)
     plans = []
@@ -322,7 +335,9 @@ def pause_phase(store: ActivationStore, activation_id: str, phase: str, *, adapt
         path = Path(_file(unit))
         if path.exists() or path.is_symlink():
             _check_source(unit["installed"][0])
-            if _call(adapter, "svc_activation_snapshot", path, unit["target"]) != _saved(unit):
+            if not _same_enrollment(_saved(unit),
+                                    _call(adapter, "svc_activation_snapshot", path, unit["target"]),
+                                    producer=unit["target"] in pause.phases["producers"]):
                 raise ActivationError(f"native enrollment changed before parking: {unit['target']}")
     identifier = journal_id(activation_id, phase)
     apply_config(store.root, identifier)  # sole filesystem writer; resumes partial swaps
