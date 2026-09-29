@@ -806,6 +806,7 @@ main() {
     # Throwaway vault so the claudron session-loop hooks compose — production
     # bots are vault-wired, and SessionStart hook work is part of boot weight.
     mkdir -p "$VAULT/_shared/knowledge"
+    printf 'claudron: 2\nname: vault\nhub: _shared\n' > "$VAULT/.claudron-vault"  # identity (Claudron #183)
     printf '# Conventions\n\nboot-sampler throwaway vault.\n' > "$VAULT/_shared/CONVENTIONS.md"
 
     # GITHUB_PAT (if the caller env has one) gives the github MCP server a real
