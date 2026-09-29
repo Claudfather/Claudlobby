@@ -48,10 +48,20 @@ cat > "$T/bin/uname" <<'EOF'
 printf '%s\n' Linux
 EOF
 chmod +x "$T/bin/uname"
-printf '#!/bin/bash\nexit 0\n' > "$T/bin/systemctl"
+cat > "$T/bin/systemctl" <<'EOF'
+#!/bin/bash
+if [ "${1:-}" = --user ] && [ "${2:-}" = list-unit-files ] && [ "${NATIVE_OCCUPIED:-0}" = 1 ]; then
+    printf '%s enabled\n' "${NATIVE_UNIT:?}"
+fi
+exit 0
+EOF
+cat > "$T/bin/systemd-analyze" <<'EOF'
+#!/bin/bash
+printf '%s/.config/systemd/user\n' "$HOME"
+EOF
 printf '#!/bin/bash\nexit 0\n' > "$T/bin/tmux"
 printf '#!/bin/bash\nexit 0\n' > "$T/bin/launchctl"
-chmod +x "$T/bin/systemctl" "$T/bin/tmux" "$T/bin/launchctl"
+chmod +x "$T/bin/systemctl" "$T/bin/systemd-analyze" "$T/bin/tmux" "$T/bin/launchctl"
 
 ROOT="$T/root"
 
@@ -67,6 +77,7 @@ spin_down() {
     env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T" CLAUDLOBBY_ROOT="$ROOT" USER=testuser \
         FLEET_NAME=f1 SPINDOWN_ACTOR="${SPINDOWN_ACTOR:-}" \
         SPINDOWN_RECEIPT_ENABLED="${SPINDOWN_RECEIPT_ENABLED-1}" \
+        NATIVE_OCCUPIED="${NATIVE_OCCUPIED:-0}" NATIVE_UNIT="t.p.$bot.service" \
         PLANE_EMIT_DISABLED=0 PLANE_CAPTURE_BATCH="$SCRIPT_DIR/plane_capture_cli.sh" PLANE_CAPTURE="$CAPTURE" PLANE_SOCKET="$T/no.sock" \
         bash "$LIB_DIR/spin-down-bot.sh" "$bdir" "$@" 2>&1 || true
 }
@@ -82,6 +93,19 @@ field() { ROW="$1" K="$2" python3 -c 'import json,os;d=json.loads(os.environ["RO
 reset() { rm -rf "$ROOT"; : > "$CAPTURE"; }
 
 echo "=== spin-down teardown-receipt contract ==="
+
+# A retained bot is eligible only after activation retired its native label.
+# A new occupant of that label is never reaped or recorded as a teardown.
+reset
+NATIVE_OCCUPIED=1 spin_down retired --retired-service t.p.retired --purge >/dev/null
+assert_eq "retired label collision preserves bot directory" "yes" \
+    "$([ -d "$ROOT/local/f1/runtime/bots/retired" ] && echo yes || echo no)"
+assert_eq "retired label collision emits no teardown receipt" "" "$(receipt_row)"
+reset
+spin_down retiredclean --retired-service t.p.retiredclean --expected-return none --purge >/dev/null
+assert_eq "retired cleanup removes only its directory" "no" \
+    "$([ -d "$ROOT/local/f1/runtime/bots/retiredclean" ] && echo yes || echo no)"
+assert_eq "retired cleanup records permanent removal" "none" "$(field "$(receipt_row)" expected_return)"
 
 # --- a plain teardown records actor, action, and explicit absences ------------
 reset

@@ -204,6 +204,14 @@ another bot's lifecycle. A self restart returns only `requested` with a request
 ID and startup-log path; it does not prove readiness. Read the final log entry
 after the new session starts before claiming completion.
 
+Permanent removal is an operator action: remove the bot from authored
+`fleet.yaml`, activate that configuration, then run
+`claudlobby --root ROOT --fleet FLEET bot remove BOT`. It uses the retained
+activated declaration to clean up the retired bot's state and private session;
+the directory stays for review. Add `--purge` only after checking project WIP
+and deciding to delete that directory. `bot stop` keeps the bot declared and
+can be reversed with `bot start`.
+
 The manager can operate its workers serially with one standalone call:
 `claudlobby --json fleet start --workers`,
 `claudlobby --json fleet stop --workers`, or

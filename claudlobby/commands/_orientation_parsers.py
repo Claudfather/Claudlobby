@@ -71,6 +71,12 @@ def _move_dispatch(args):
                    json_output=args.json)
 
 
+def _remove_dispatch(args):
+    return execute(args.public_command,
+                   lambda: import_module(".bot_remove", __package__).dispatch(args),
+                   json_output=args.json)
+
+
 def register_orientation_subparsers(sub):
     for domain, verbs in (("context", ("show",)),
                           ("bot", ("list", "show", "capabilities", "start", "stop", "restart", "handoff", "interrupt", "compact")),
@@ -131,6 +137,11 @@ def register_orientation_subparsers(sub):
         if domain == "bot":
             from ._bot_create_parsers import register_bot_create
             register_bot_create(children, _bot_create_dispatch)
+            remove = children.add_parser("remove", help="Clean up a bot omitted by an activated configuration")
+            remove.add_argument("bot_id", metavar="BOT", help="Exact retired bot ID")
+            remove.add_argument("--purge", action="store_true", help="Delete the retained bot directory after WIP checks")
+            remove.add_argument("--json", action="store_true", help="One schema-1 result object")
+            remove.set_defaults(func=_remove_dispatch, public_command="bot.remove")
             session = children.add_parser("session", help="Observe one selected private bot session")
             session.add_argument("bot_id", metavar="BOT", help="Exact declared bot ID")
             session.add_argument("--json", action="store_true", help="One schema-1 result object")

@@ -43,12 +43,14 @@ Do NOT reach for `systemctl --user stop` to free RAM: under the 60s keepalive a
 stopped bot is walked back up within a minute and the stop frees nothing.
 Spin-down holds because de-enrolment is the one thing keepalive cannot undo.'
 PURGE=0
+RETIRED_SERVICE=""
 BOT_DIR=""
 REASON="unspecified"
 EXPECTED_RETURN="unspecified"
 while [ $# -gt 0 ]; do
     case "$1" in
         --purge) PURGE=1 ;;
+        --retired-service) RETIRED_SERVICE="${2:?--retired-service requires a label}"; shift ;;
         --reason) REASON="${2:?--reason requires a value}"; shift ;;
         --expected-return) EXPECTED_RETURN="${2:?--expected-return requires a value}"; shift ;;
         # The warning prints on --help, not just in the source: an operator
@@ -113,9 +115,55 @@ emit_teardown_receipt() {
 # tmux socket — one value, all three), FLEET_STATE_PATH, TMUX_SOCKET/TMUX_TMPDIR,
 # BOT_NAME. If bot.conf is gone the bot was already reaped (or this is not a bot
 # dir) — a clean no-op keeps the reaper idempotent.
+_selected_cli="${CLAUDLOBBY_CLI-}"
+_selected_release="${CLAUDLOBBY_RELEASE_ID-}"
+_selected_native="${CLAUDLOBBY_NATIVE_DIR-}"
+_selected_artifact="${CLAUDLOBBY_ARTIFACT_ID-}"
+_selected_root="${CLAUDLOBBY_ROOT-}"
+_selected_fleet="${FLEET_NAME-}"
+_selected_plane_disabled="${PLANE_EMIT_DISABLED-}"
+_selected_receipt_enabled="${SPINDOWN_RECEIPT_ENABLED-}"
 if ! load_bot_conf "$BOT_DIR" 2>/dev/null; then
     sd_log "no bot.conf found — already reaped or not a bot dir; nothing to do"
     exit 0
+fi
+if [ -n "$RETIRED_SERVICE" ]; then
+    # The retained bot.conf can name an older sealed release. Its identity is
+    # useful for teardown, but the receipt must use the selected executable.
+    export CLAUDLOBBY_CLI="$_selected_cli" CLAUDLOBBY_RELEASE_ID="$_selected_release"
+    export CLAUDLOBBY_NATIVE_DIR="$_selected_native" CLAUDLOBBY_ARTIFACT_ID="$_selected_artifact"
+    export CLAUDLOBBY_ROOT="$_selected_root" FLEET_NAME="$_selected_fleet"
+    export PLANE_EMIT_DISABLED="$_selected_plane_disabled"
+    export SPINDOWN_RECEIPT_ENABLED="$_selected_receipt_enabled"
+    case "$RETIRED_SERVICE" in *[!A-Za-z0-9_.-]*|'') echo 'invalid retired service' >&2; exit 3 ;; esac
+    [ "${BOT_SERVICE:-}" = "$RETIRED_SERVICE" ] || { echo 'retired service differs from bot.conf' >&2; exit 3; }
+    # Activation has already de-enrolled this unit. Never let the ordinary
+    # spin-down leg remove a new occupant of its label.
+    _unit="$RETIRED_SERVICE.service"
+    [ "$_OS" = Darwin ] && _unit="$RETIRED_SERVICE.plist"
+    _catalog="$(svc_inventory_catalog)" || { echo 'native catalog unavailable' >&2; exit 3; }
+    while IFS= read -r _row; do
+        case "$_row" in
+            "installed"$'\t'"$_unit"|"loaded"$'\t'"$_unit") echo 'retired service is enrolled' >&2; exit 3 ;;
+        esac
+        if [ "$_OS" = Darwin ]; then
+            read -r _pid _status _label _extra <<< "$_row"
+            [ "${_label:-}" != "$RETIRED_SERVICE" ] || { echo 'retired service is loaded' >&2; exit 3; }
+        fi
+    done <<< "$_catalog"
+    if [ "$_OS" = Darwin ]; then
+        [ ! -e "$HOME/Library/LaunchAgents/$_unit" ] && [ ! -L "$HOME/Library/LaunchAgents/$_unit" ] || { echo 'retired service is installed' >&2; exit 3; }
+        # A Background operator's `launchctl list` sees user/, not gui/.
+        # Check the selected GUI domain too before claiming de-enrollment.
+        _gui_catalog="$(/bin/launchctl asuser "$(id -u)" /bin/launchctl list)" || { echo 'GUI native catalog unavailable' >&2; exit 3; }
+        while read -r _pid _status _label _extra; do
+            [ "${_label:-}" != "$RETIRED_SERVICE" ] || { echo 'retired service is loaded in GUI domain' >&2; exit 3; }
+        done <<< "$_gui_catalog"
+    else
+        [ ! -e "$HOME/.config/systemd/user/$_unit" ] && [ ! -L "$HOME/.config/systemd/user/$_unit" ] || { echo 'retired service is installed' >&2; exit 3; }
+    fi
+    _socket="$(tmux_socket_for_bot "$BOT_DIR")" || exit 3
+    [ "$_socket" = "$RETIRED_SERVICE" ] || { echo 'retired socket differs from service' >&2; exit 3; }
 fi
 # Emit a script_error event on an unguarded abort (parity with lifecycle peers).
 install_error_trap "$BOT_DIR"
@@ -140,7 +188,17 @@ reap_fleet_state() {
 # standing. The teardown must not be contingent on the bookkeeping succeeding,
 # so the receipt is allowed to fail loudly and the legs run regardless.
 emit_teardown_receipt || sd_log "receipt: FAILED to record — continuing teardown"
-svc_disenroll "$BOT_DIR" sd_log "${BOT_SERVICE:-}" /bin/launchctl
+if [ -n "$RETIRED_SERVICE" ]; then
+    # Only the retained private server remains; native supervision was retired
+    # by activation and must not be touched by a later cleanup.
+    _tmpdir="${TMUX_TMPDIR:-${TMPDIR:-/tmp}}"
+    if [ -S "$_tmpdir/tmux-$(id -u)/$_socket" ]; then
+        svc_activation_stop_private_server "$BOT_DIR" "$_socket" "$_tmpdir" || exit 3
+    fi
+    rm -f "$BOT_DIR/.tmux-env"
+else
+    svc_disenroll "$BOT_DIR" sd_log "${BOT_SERVICE:-}" /bin/launchctl
+fi
 reap_fleet_state
 
 if [ "$PURGE" -eq 1 ]; then
