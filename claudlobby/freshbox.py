@@ -6,7 +6,7 @@ in its ``settings.local.json`` allow-list traces to an equipped source's contrac
 allow-list (no under-grant / silent reliance on the retired global ``~/.claude``),
 and the Tier-A settings surface (``enabledPlugins`` / skip-flags / ``sandbox``) is
 composed per-bot rather than inherited from the hand-accumulated global. The
-real-boot half of the gate lives in ``lib/freshbox-boot-gate.sh``.
+real-boot half of the gate lives in ``harness/freshbox-boot-gate.sh``.
 
 #703 folds the deny-by-default path guard into the same audit: a source re-check
 (the L1 guard, ``_value_findings``), an externals visibility report

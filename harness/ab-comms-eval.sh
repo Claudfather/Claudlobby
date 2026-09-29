@@ -41,8 +41,9 @@
 # Opt-in cost when real (post-F2): ~36-60 short real sessions per full run.
 set -euo pipefail
 
-LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC="$(cd "$LIB/.." && pwd)"
+HARNESS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SRC="$(cd "$HARNESS/.." && pwd)"
+LIB="$SRC/lib"
 # shellcheck source=lib-common.sh
 . "$LIB/lib-common.sh"
 
@@ -78,7 +79,7 @@ usage: ab-comms-eval.sh [--dry-run] [--experiment NAME] [--tasks N|"T1 T3"]
   --threshold          F2 T: required protocol_sensitive relative reduction.
   --cost-threshold     required cost_weighted_total reduction (default 0.0).
   --keep               keep the throwaway root for inspection.
-The verdict/pass-bar computation lives in lib/ab-comms-verdict.py — run it
+The verdict/pass-bar computation lives in harness/ab-comms-verdict.py — run it
 directly to (re)compute a verdict from a results.jsonl. Real gate is opt-in via
 AB_EVAL_REAL=1 and is refused by this scaffolding.
 USAGE
@@ -140,7 +141,7 @@ _sha256() {
 # under test is the model's report TEXT under composed guardrail content, so
 # headless keeps the real model and the real composed context while removing
 # tmux/dispatch/recovery noise. Divergence from the #729 stage-B interactive
-# recipe is disclosed in #866, in advance. Analysis: lib/ab-coverage-verdict.py
+# recipe is disclosed in #866, in advance. Analysis: harness/ab-coverage-verdict.py
 # (imports the seeded bootstrap from ab-comms-verdict.py).
 # =============================================================================
 
@@ -270,7 +271,7 @@ _link_library_tree() {
 
 # _generate_or_die <root> <label> — the compose-or-fail block, once.
 _generate_or_die() {
-    if ! CLAUDLOBBY_ROOT="$1" claudlobby_cli --root "$1" generate >"$1/generate.out" 2>&1; then
+    if ! CLAUDLOBBY_ROOT="$1" "$(dirname "$CLAUDLOBBY_CLI")/python" "$SRC/harness/compose.py" --root "$1" >"$1/generate.out" 2>&1; then
         cat "$1/generate.out" >&2
         die "claudlobby generate failed for $2"
     fi
@@ -524,9 +525,9 @@ cov_main() {
 
     # Print the artifact paths BEFORE exiting on the analyzer's verdict — its
     # rc=1 (no analyzable pairs) is exactly when the paths matter most.
-    printf '\n=== verdict (lib/ab-coverage-verdict.py, decision rule per #866) ===\n'
+    printf '\n=== verdict (harness/ab-coverage-verdict.py, decision rule per #866) ===\n'
     local vrc=0 verdict_out
-    verdict_out="$(python3 "$LIB/ab-coverage-verdict.py" "$RESULTS" \
+    verdict_out="$(python3 "$HARNESS/ab-coverage-verdict.py" "$RESULTS" \
         --hash-without "$COV_HASH_WITHOUT" --hash-with "$COV_HASH_WITH" \
         --claude-version "$CLAUDE_VER")" || vrc=$?
     printf '%s\n' "$verdict_out" | tee "$ROOT/verdict.txt"
@@ -547,7 +548,7 @@ cov_main() {
 # composed-diff assertion retained: the two composed CLAUDE.mds may differ by
 # EXACTLY the component block, else nothing runs. Shares the #866 corpus
 # fixture (same planted material, different questions) and the freshbox
-# headless-cell mechanic. Analysis: lib/ab-channel-brevity-verdict.py.
+# headless-cell mechanic. Analysis: harness/ab-channel-brevity-verdict.py.
 #
 # The control arm is deliberately NOT "internal reports stay rich" — this
 # component restructures reports too (structured deltas). The control is the
@@ -784,16 +785,16 @@ suc_main() {
         done
     done
 
-    printf '\n=== verdict (lib/ab-channel-brevity-verdict.py, decision rule per the #729 registration) ===\n'
+    printf '\n=== verdict (harness/ab-channel-brevity-verdict.py, decision rule per the #729 registration) ===\n'
     local vrc=0 verdict_out
-    verdict_out="$(python3 "$LIB/ab-channel-brevity-verdict.py" "$RESULTS" \
+    verdict_out="$(python3 "$HARNESS/ab-channel-brevity-verdict.py" "$RESULTS" \
         --hash-with "$SUC_HASH_WITH" --claude-version "$CLAUDE_VER")" || vrc=$?
     printf '%s\n' "$verdict_out" | tee "$ROOT/verdict.txt"
     printf '\nROOT=%s\nRESULTS=%s\n' "$ROOT" "$RESULTS"
     exit "$vrc"
 }
 
-# --- verdict computation: thin wrapper over lib/ab-comms-verdict.py ----------
+# --- verdict computation: thin wrapper over harness/ab-comms-verdict.py ----------
 # The pass-bar / bootstrap / verdict logic is a standalone stdlib module (sibling
 # to the transcript accounting owner, following the dispatch-overdue.py precedent) so it is
 # directly unit-testable and F2 can extend the threshold + scorer there. This
@@ -801,7 +802,7 @@ suc_main() {
 compute_verdict() {  # $1 results.jsonl  $2 out.json  $3 reps_now
     local ph=""
     [ "${PROTO_PLACEHOLDER:-0}" = 1 ] && ph="--proto-placeholder"
-    python3 "$LIB/ab-comms-verdict.py" "$1" \
+    python3 "$HARNESS/ab-comms-verdict.py" "$1" \
         --out "$2" \
         --threshold "$THRESHOLD" \
         --cost-threshold "$COST_THRESHOLD" \

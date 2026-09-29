@@ -11,7 +11,7 @@
 # TWO DESIGN POINTS ARE BINDING (dara, #1693), not advisory:
 #
 #   * THE WITNESS LIVES OUTSIDE THE PLANE. Loss is established from the
-#     CLIENT's own log (lib/plane-durability-driver.py), written the instant a
+#     CLIENT's own log (harness/plane-durability-driver.py), written the instant a
 #     reply arrives. Never a query asking the plane whether the plane lost
 #     something: if the plane is what is lossy, its own answer is worthless.
 #     The ledger is read afterwards, read-only, only to find which acknowledged
@@ -32,7 +32,7 @@
 # the one failure here with no recovery. The `rehearse-env-cascade.sh`
 # convention: assert the isolation HELD, never assume it.
 #
-# Usage: CLAUDLOBBY_ROOT=<checkout> bash lib/rehearse-plane-durability.sh [--seconds N]
+# Usage: CLAUDLOBBY_ROOT=<checkout> bash harness/rehearse-plane-durability.sh [--seconds N]
 #        [--no-reader | --release-after S]   (run it from anywhere: it enters the checkout)
 # Exit:  0 ran · 1 a check FAILED · 2 precondition/dep missing · 3 isolation refused
 set -uo pipefail
@@ -231,7 +231,7 @@ fi
 # 45s where 50Hz wants ~2250 -- it reported a p95 off one busy run and looked
 # like a result. The sampler now reports its ACHIEVED rate so a starved run
 # cannot be read as a measurement.
-"$PY" "$SRC/lib/plane-canary-sampler.py" --pid "$DAEMON_PID" \
+"$PY" "$SRC/harness/plane-canary-sampler.py" --pid "$DAEMON_PID" \
     --wal "${CANARY_DB}-wal" --out "$WORK/samples.json" \
     --hz 50 --seconds "$SECONDS_SOAK" > "$WORK/sampler.json" 2>"$WORK/sampler.err" &
 SYS_PID=$!
@@ -239,7 +239,7 @@ WAL_PID=""
 
 say ""
 say "--- soak: ${SECONDS_SOAK}s of ACCEPTED traffic (refusals cannot pay the checkpoint) ---"
-"$PY" "$SRC/lib/plane-durability-driver.py" --socket "$CANARY_SOCK" \
+"$PY" "$SRC/harness/plane-durability-driver.py" --socket "$CANARY_SOCK" \
     --witness "$WORK/witness.log" --seconds "$SECONDS_SOAK" > "$WORK/driver.json" 2>"$WORK/driver.err" &
 DRIVER_PID=$!
 
@@ -284,7 +284,7 @@ kill ${WAL_PID:+"$WAL_PID"} ${RO_PID:+"$RO_PID"} 2>/dev/null; RO_PID=""
 # --- verdicts ---------------------------------------------------------------
 say ""
 say "--- Check 1: loss witness (client's log vs the ledger, read-only) ---"
-"$PY" "$SRC/lib/plane-canary-compare.py" --db "$CANARY_DB" \
+"$PY" "$SRC/harness/plane-canary-compare.py" --db "$CANARY_DB" \
     --witness "$WORK/witness.log" --samples "$WORK/samples.json" > "$WORK/verdict.json"
 cat "$WORK/verdict.json"
 # The detector is proven to FIRE before anything it reports is believed. Under

@@ -78,7 +78,7 @@ def _root(tmp_path: Path, vaults: dict[str, str]) -> Path:
 # session silently substitutes the CALLING bot's fleet for the shape under test --
 # measured by the reviewer, whose contaminated run anchored the event on their own
 # fleet while the scrubbed run anchored it on the host. A test that inherits them
-# passes by contamination. `lib/rehearse-vault-sync.sh::run_job` scrubs the same
+# passes by contamination. `harness/rehearse-vault-sync.sh::run_job` scrubs the same
 # five; this is the Python half of one rule.
 _BOT_IDENTITY_VARS = (
     "FLEET_NAME",

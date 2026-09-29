@@ -9,8 +9,8 @@ anyway rests on a base rate -- most real invocations are direct. A base rate
 asserted in a PR body expires the moment anyone doubts it, with no way to
 re-derive it. So the number ships with the thing that produces it.
 
-    python3 lib/vault-git-base-rate.py                 # default corpus
-    python3 lib/vault-git-base-rate.py --transcripts DIR --json
+    python3 harness/vault-git-base-rate.py                 # default corpus
+    python3 harness/vault-git-base-rate.py --transcripts DIR --json
 
 WHAT IT MEASURES, AND THE TRAP IT IS BUILT AROUND. An independent reproduction
 of this figure first read 42.6%, and the cause was the harness measuring a
@@ -659,7 +659,7 @@ def main(argv: list[str] | None = None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--transcripts", default=str(DEFAULT_TRANSCRIPTS),
                     help="root holding Claude Code *.jsonl transcripts")
-    ap.add_argument("--lib-dir", default=str(Path(__file__).resolve().parent),
+    ap.add_argument("--lib-dir", default=str(Path(__file__).resolve().parent.parent / "lib"),
                     help="directory holding the shipped vault-git-decide.py")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--samples", action="store_true",

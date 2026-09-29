@@ -33,7 +33,7 @@ import sys
 import time
 from pathlib import Path
 
-LIB = Path(__file__).resolve().parent
+LIB = Path(__file__).resolve().parent.parent / "lib"
 
 
 def _shipped_client():

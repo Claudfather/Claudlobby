@@ -1,4 +1,4 @@
-"""Phase-2 T3: lib/plane-parity.py — fixtures both directions, the mismatch
+"""Phase-2 T3: harness/plane-parity.py — fixtures both directions, the mismatch
 battery, and unreachable-vs-empty per source_state's rule."""
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from claudlobby.plane.db import db_path
 from claudlobby.plane.emit_api import emit
 from tests.plane_setup import initialize_plane
 
-PARITY = Path(__file__).resolve().parent.parent / "lib" / "plane-parity.py"
+PARITY = Path(__file__).resolve().parent.parent / "harness" / "plane-parity.py"
 
 
 def _emit_with_ref(root: Path, legacy_id: str, suffix: str) -> None:

@@ -8,9 +8,9 @@ type's `DEFAULT_*`; this is what those PRs diff against, so a default that lands
 shows up as a delta instead of being argued about in a review thread.
 
 ```bash
-lib/naked-bot-observe.py                                    # human-readable
-lib/naked-bot-observe.py --json                             # the record format
-lib/naked-bot-observe.py --baseline documentation/baselines/naked-bot-2026-08-12.json
+harness/naked-bot-observe.py                                    # human-readable
+harness/naked-bot-observe.py --json                             # the record format
+harness/naked-bot-observe.py --baseline documentation/baselines/naked-bot-2026-08-12.json
 ```
 
 The last form is the gate: exit 1 and a per-(arm, entity type) list of what
@@ -363,7 +363,7 @@ until the probe was added.
 ## Re-running it
 
 ```bash
-lib/naked-bot-observe.py --baseline documentation/baselines/naked-bot-<date>.json
+harness/naked-bot-observe.py --baseline documentation/baselines/naked-bot-<date>.json
 ```
 
 When a Phase 2 PR lands a default, the gate exits 1 and names the type. Record

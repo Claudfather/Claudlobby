@@ -374,12 +374,14 @@ def call_lib_fn(fn: str, value: str) -> str:
     return r.stdout
 
 
-def load_lib_module(name: str):
-    """Import a lib/*.py script as a module (they have no package)."""
+def load_lib_module(name: str, *, directory: str = "lib"):
+    """Import an un-packaged lib or harness script as a module."""
     import importlib.util
 
+    if directory not in {"lib", "harness"}:
+        raise ValueError("unknown source script directory")
     spec = importlib.util.spec_from_file_location(
-        name.replace("-", "_"), Path(__file__).parent.parent / "lib" / f"{name}.py"
+        name.replace("-", "_"), Path(__file__).parent.parent / directory / f"{name}.py"
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

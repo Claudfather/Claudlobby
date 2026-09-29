@@ -1,4 +1,4 @@
-"""Tests for lib/ab-comms-eval.sh — the #729 stage-C A/B comms-eval harness
+"""Tests for harness/ab-comms-eval.sh — the #729 stage-C A/B comms-eval harness
 scaffolding (F2/F4-independent).
 
 Wrapped in Python so CI enforces it (the shell-tests-not-in-CI lesson). Two
@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,20 @@ import pytest
 pytestmark = pytest.mark.usefixtures("selected_test_cli")
 
 REPO_DIR = Path(__file__).resolve().parent.parent
-SCRIPT = REPO_DIR / "lib" / "ab-comms-eval.sh"
+SCRIPT = REPO_DIR / "harness" / "ab-comms-eval.sh"
+
+
+def test_private_compose_refuses_selected_data_root(tmp_path):
+    root = tmp_path / "data"
+    (root / "state").mkdir(parents=True)
+    (root / "state" / "selected-release.json").write_text("{}")
+    result = subprocess.run(
+        [sys.executable, str(REPO_DIR / "harness" / "compose.py"), "--root", str(root)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 2
+    assert "active or unreadable release selection" in result.stderr
+    assert not (root / "local").exists()
 
 
 def _run(*args):
@@ -69,7 +83,7 @@ def _pair(task, rep, ps_wo, ps_wi, cw_wo, cw_wi):
     ]
 
 
-VERDICT_MODULE = REPO_DIR / "lib" / "ab-comms-verdict.py"
+VERDICT_MODULE = REPO_DIR / "harness" / "ab-comms-verdict.py"
 
 
 def _module_verdict(tmp_path, name, rows, *flags):

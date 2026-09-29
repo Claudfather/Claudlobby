@@ -2,7 +2,7 @@
 """Pass-bar / verdict computation for the #729 stage-C A/B comms-eval harness.
 
 Reads a results.jsonl (one row per task x rep x variant, written by
-lib/ab-comms-eval.sh), pairs per-rep deltas by task, computes a SEEDED bootstrap
+harness/ab-comms-eval.sh), pairs per-rep deltas by task, computes a SEEDED bootstrap
 CI on the median paired relative reduction per axis, and applies the pass-bar.
 
 Standalone lib/ Python (stdlib-only, shell-invokable) following the

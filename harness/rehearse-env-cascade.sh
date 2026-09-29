@@ -8,7 +8,7 @@
 # runtime cascaded four tiers while every tool above it read one, and nothing
 # ever compared them.
 #
-#   CLAUDLOBBY_ROOT=<checkout> bash lib/rehearse-env-cascade.sh
+#   CLAUDLOBBY_ROOT=<checkout> bash harness/rehearse-env-cascade.sh
 #
 # What it proves:
 #   1. a var resolves from EACH of the four tiers independently;
@@ -29,7 +29,7 @@
 # BOUNDARY, stated because it bounds the claim: the bot boots with a STUBBED
 # `claude` binary (the validate-bot-change.sh convention). That makes this a
 # proof about env RESOLUTION and LIFECYCLE, not about Claude Code consuming the
-# vars — lib/boot-strand-sampler.sh is the instrument for real boots.
+# vars — harness/boot-strand-sampler.sh is the instrument for real boots.
 set -uo pipefail
 
 CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:?set CLAUDLOBBY_ROOT to the checkout under test}"
@@ -86,11 +86,10 @@ mkdir -p "$FAKE_HOME" "$EXPORT_ROOT/local/$FLEET"
 mkdir -p "$FAKE_HOME/.claude"
 printf '{}\n' > "$FAKE_HOME/.claude/settings.json"
 printf '{"hasCompletedOnboarding":true,"lastOnboardingVersion":"0.0.0"}\n' > "$FAKE_HOME/.claude.json"
-# The compositor under test is the EXPORTED one, never an editable install that
-# might be a different commit — a green run against a stale package is a pass
-# that tested nothing (naked-bot-observe.py's _assert_compositor lesson).
-PYBIN="$SRC_ROOT/.venv/bin/python"
-[ -x "$PYBIN" ] || PYBIN="$(command -v python3)"
+# The private composition entry requires release resources from an explicitly
+# selected candidate; an editable source interpreter cannot supply those.
+[ -x "${CLAUDLOBBY_CLI:-}" ] || { echo "set CLAUDLOBBY_CLI to a private installed wheel CLI" >&2; exit 2; }
+PYBIN="$(dirname "$CLAUDLOBBY_CLI")/python"
 
 cat > "$EXPORT_ROOT/local/$FLEET/fleet.yaml" <<YAML
 fleet:
@@ -125,7 +124,7 @@ BOT_DIR="$EXPORT_ROOT/local/$FLEET/runtime/bots/$BOT"
 
 say "== generate =="
 ( cd "$EXPORT_ROOT" && HOME="$FAKE_HOME" CLAUDLOBBY_ROOT="$EXPORT_ROOT" \
-    "$PYBIN" -m claudlobby --fleet "$FLEET" generate ) >"$WORK/generate.log" 2>&1 \
+    "$PYBIN" "$EXPORT_ROOT/harness/compose.py" --root "$EXPORT_ROOT" --fleet "$FLEET" ) >"$WORK/generate.log" 2>&1 \
     || { echo "generate failed:"; tail -20 "$WORK/generate.log"; exit 2; }
 [ -d "$BOT_DIR" ] || { echo "bot dir not composed at $BOT_DIR" >&2; exit 2; }
 printf 'export CANARY_BOT=from_bot\nexport CANARY_CONTEST=from_bot\n' >> "$BOT_DIR/.env"

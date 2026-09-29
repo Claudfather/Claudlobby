@@ -68,7 +68,7 @@
 #      is recorded so parity is EVIDENCED per boot, not asserted — the summary
 #      prints the tree histogram.
 #
-# Summary statistics (lib/boot-strand-summary.py, stdlib-only): exact
+# Summary statistics (harness/boot-strand-summary.py, stdlib-only): exact
 # Clopper–Pearson 95% interval on the strand rate, printed next to the pre-fix
 # baseline — which is itself only 2 strands in n=4, so the null is poorly
 # estimated and no sample size makes the fix "proven"; the interval is the
@@ -152,8 +152,9 @@
 
 set -euo pipefail
 
-LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC_ROOT="$(dirname "$LIB_DIR")"
+HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SRC_ROOT="$(dirname "$HARNESS_DIR")"
+LIB_DIR="$SRC_ROOT/lib"
 # shellcheck source=/dev/null
 . "$LIB_DIR/lib-common.sh"
 
@@ -351,7 +352,7 @@ count_send_retries() {
 # they are dropped by env -i, and knob_disclosure prints them as SCRUBBED
 # rather than letting the run silently measure defaults. The #1493 chunk knobs
 # join this list deliberately: a boot sample must measure the SHIPPED send, and
-# the instrument for sweeping chunk size is lib/send-size-probe.sh, which drives
+# the instrument for sweeping chunk size is harness/send-size-probe.sh, which drives
 # the primitive directly against the recipient transcript rather than through a
 # whole boot. Forwarding them here would put a second, unpinned arm axis into a
 # design whose arm identity is already pre-registered. PANE_RECEIPT_WAIT_S
@@ -646,7 +647,7 @@ emit_summary() {
     # exactly what it did, correctly, on the first #1236 control attempt.
     local _iv=()
     [ "$ARM_AXIS" = "trace" ] && _iv=(--iv trace)
-    python3 "$LIB_DIR/boot-strand-summary.py" ${_iv[@]+"${_iv[@]}"} "$1" || rc=$?
+    python3 "$HARNESS_DIR/boot-strand-summary.py" ${_iv[@]+"${_iv[@]}"} "$1" || rc=$?
     exit "$rc"
 }
 
@@ -851,7 +852,8 @@ YAML
     # plane db under the probe root BEFORE boot 1 — without it the first boot's
     # send_retry count read no plane and was UNKNOWN on every run (the R2b-2
     # structural lens).
-    CLAUDLOBBY_ROOT="$ROOT" PYTHONPATH="$CLAUDLOBBY_SRC" PLANE_EMIT_ENABLED=1 python3 -m claudlobby generate >> "$LOG" 2>&1
+    [ -x "${CLAUDLOBBY_CLI:-}" ] || { printf 'set CLAUDLOBBY_CLI to a private installed wheel CLI\n' >&2; exit 2; }
+    CLAUDLOBBY_ROOT="$ROOT" PLANE_EMIT_ENABLED=1 "$(dirname "$CLAUDLOBBY_CLI")/python" "$CLAUDLOBBY_SRC/harness/compose.py" --root "$ROOT" --record-plane >> "$LOG" 2>&1
 
     pass=0
     fail=0

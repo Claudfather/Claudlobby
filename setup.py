@@ -31,22 +31,10 @@ RUNTIME_COMPATIBILITY = runpy.run_path(
 ASSET_DIRS = ("library", "voices", "templates")
 SEEDS = ("fleet.yaml.seed", "fleet.yaml.example", "projects.yaml.seed", ".env.seed.example",
          "missions/fleet.md.seed")
-# Unified CLI plan's complete lib inventory: H dispositions are development
-# instruments, not native production dependencies. Move sources with their
-# operation later; the build must not turn them into installed runtime doors.
-NATIVE_EXCLUDED = {
-    "CLAUDE.md", "personal/finance-presync.sh",
-    "ab-channel-brevity-verdict.py", "ab-comms-eval.sh", "ab-comms-verdict.py",
-    "ab-coverage-verdict.py", "ab-recoverability-judge.py",
-    "ab-recoverability-scorer.py", "boot-strand-sampler.sh",
-    "boot-strand-summary.py", "coldstart-harness.sh", "freshbox-boot-gate.sh",
-    "naked-bot-observe.py", "plane-canary-compare.py", "plane-canary-sampler.py",
-    "plane-durability-driver.py", "rehearse-briefing-timer.sh",
-    "rehearse-debounce-recipient.sh", "rehearse-env-cascade.sh",
-    "rehearse-permissions-ladder.sh", "rehearse-plane-durability.sh",
-    "rehearse-staged-claude-update.sh", "rehearse-vault-sync.sh",
-    "send-size-probe.sh", "validate-bot-change.sh", "vault-git-base-rate.py",
-}
+# Development and measurement instruments live in harness/ and never enter
+# the installed native runtime. These two remaining lib sources are likewise
+# not runtime dependencies.
+NATIVE_EXCLUDED = {"CLAUDE.md", "personal/finance-presync.sh"}
 # pull-root.sh remains a production dependency until its explicit P2 retirement.
 
 

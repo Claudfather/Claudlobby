@@ -1,4 +1,4 @@
-"""#831 real-tmux gate — pytest wrapper for lib/rehearse-debounce-recipient.sh.
+"""#831 real-tmux gate — pytest wrapper for harness/rehearse-debounce-recipient.sh.
 
 Unit tests prove the marker re-fires; only this proves the *notification*
 arrives. It drives the real `fleet-pulse.sh` against a throwaway bot with a real
@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-HARNESS = REPO_ROOT / "lib" / "rehearse-debounce-recipient.sh"
+HARNESS = REPO_ROOT / "harness" / "rehearse-debounce-recipient.sh"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("tmux") is None, reason="tmux not installed"

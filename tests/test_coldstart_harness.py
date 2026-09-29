@@ -23,7 +23,7 @@ import pytest
 from tests.conftest import constructed_env
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-HARNESS = REPO_ROOT / "lib" / "coldstart-harness.sh"
+HARNESS = REPO_ROOT / "harness" / "coldstart-harness.sh"
 
 OWNED = "/opt/production-root"
 FOREIGN = "/tmp/cold-arm-tree"

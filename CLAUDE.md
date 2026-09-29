@@ -366,7 +366,7 @@ Any change that affects **how a bot behaves at runtime** (lib/ supervision & obs
 2. **Add config** — set the relevant field(s) in `fleet.yaml`.
 3. **Recompose** — `claudlobby --fleet <fleet> generate`; confirm the change landed in the composed `bot.conf` / `settings.local.json` / `CLAUDE.md`.
 4. **Observe** — run it and watch the real behavior:
-   - For observability/trust-loop behaviors: `bash lib/validate-bot-change.sh` stands up a throwaway bot + tmux sessions and asserts the events fire end-to-end. Extend it when you add a new event/check.
+   - For observability/trust-loop behaviors: `bash harness/validate-bot-change.sh` stands up a throwaway bot + tmux sessions and asserts the events fire end-to-end. Extend it when you add a new event/check.
    - For other behavior: spin a bot (`lib/spin-up-bot.sh`), drive the affected path, and watch `claudlobby events --bot <bot>` / the pane.
 
 **Cite the observation in the PR body** ("ran `validate-bot-change.sh` → activity_stuck + overdue_dispatch fired; manager notified") — claimed evidence is not evidence.

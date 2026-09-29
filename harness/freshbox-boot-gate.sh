@@ -33,8 +33,8 @@
 
 set -euo pipefail
 
-LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC_ROOT="$(dirname "$LIB_DIR")"
+SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LIB_DIR="$SRC_ROOT/lib"
 # shellcheck source=/dev/null
 . "$LIB_DIR/lib-common.sh"
 
@@ -150,7 +150,8 @@ fleet:
 YAML
 
 printf 'composing scoped freshbox bot with %s ...\n' "$CLAUDLOBBY_SRC"
-CLAUDLOBBY_ROOT="$ROOT" PYTHONPATH="$CLAUDLOBBY_SRC" python3 -m claudlobby generate >/dev/null
+[ -x "${CLAUDLOBBY_CLI:-}" ] || { printf 'set CLAUDLOBBY_CLI to a private installed wheel CLI\n' >&2; exit 2; }
+CLAUDLOBBY_ROOT="$ROOT" "$(dirname "$CLAUDLOBBY_CLI")/python" "$CLAUDLOBBY_SRC/harness/compose.py" --root "$ROOT" >/dev/null
 
 SETTINGS="$BOT_DIR/.claude/settings.local.json"
 [ -f "$SETTINGS" ] || { printf 'ERROR: compose produced no %s\n' "$SETTINGS"; exit 1; }

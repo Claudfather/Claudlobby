@@ -5,7 +5,7 @@ description: How to run an evaluation that can change a decision — target, bat
 
 # Eval Workflow
 
-An eval exists to *change a decision*. If no result would change what you ship, do not run it — you are buying a number, not an answer. This protocol is the shape of an eval that earns its cost, generalized from the #716/#729 token-efficiency work and implemented by `lib/ab-comms-eval.sh` + `lib/ab-comms-verdict.py`.
+An eval exists to *change a decision*. If no result would change what you ship, do not run it — you are buying a number, not an answer. This protocol is the shape of an eval that earns its cost, generalized from the #716/#729 token-efficiency work and implemented by `harness/ab-comms-eval.sh` + `harness/ab-comms-verdict.py`.
 
 The discipline in one line: **decide what would convince you before you look.**
 

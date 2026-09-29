@@ -12,7 +12,7 @@ Two layers, and the split is deliberate:
     every type, which is what Phase 2 needs before it populates the other
     eleven.
 
-The real compose sweep is `lib/naked-bot-observe.py` itself, run against a
+The real compose sweep is `harness/naked-bot-observe.py` itself, run against a
 history-free export. It is not invoked here: it shells out to `git archive` and
 runs twelve-plus full `generate` passes, which is a minutes-long job and belongs
 in the gate, not in every suite run.
@@ -35,7 +35,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 def _load_harness():
     """Import the hyphenated standalone module (`dispatch-overdue.py` precedent)."""
-    path = REPO_ROOT / "lib" / "naked-bot-observe.py"
+    path = REPO_ROOT / "harness" / "naked-bot-observe.py"
     spec = importlib.util.spec_from_file_location("naked_bot_observe", path)
     mod = importlib.util.module_from_spec(spec)
     sys.modules["naked_bot_observe"] = mod
@@ -225,7 +225,7 @@ def test_the_opt_out_surface_does_not_exist_for_ten_of_twelve_types():
     Worse, and UNCHANGED by Phase 2 so far: an unrecognised key is accepted
     silently. `_coerce_system_defaults` drops it and `generate` exits 0, so a
     fleet still cannot tell a working opt-out from a typo. Both confirmed on
-    real composes by `lib/naked-bot-observe.py` (`optout:*` and
+    real composes by `harness/naked-bot-observe.py` (`optout:*` and
     `control:unknown-key` arms).
 
     This test FAILS every time Phase 2 adds a key. That is the intent: it is the
@@ -246,7 +246,7 @@ def test_the_opt_out_surface_does_not_exist_for_ten_of_twelve_types():
     ]
     assert len(still_on) == len(nbo.SURFACES) - len(TYPES_WITH_AN_OPT_OUT), (
         "the per-entity-type opt-out surface changed — re-run "
-        "lib/naked-bot-observe.py and update the baseline record"
+        "harness/naked-bot-observe.py and update the baseline record"
     )
     assert still_on and len(still_on) == 10, (
         f"expected ten types without an opt-out, got {len(still_on)}: {sorted(still_on)}"

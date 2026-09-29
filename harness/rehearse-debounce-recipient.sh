@@ -15,11 +15,11 @@
 # posts to Telegram directly and would otherwise page the real operator.
 # Nothing here touches a live fleet, and no live socket is opened.
 #
-# Usage: lib/rehearse-debounce-recipient.sh
+# Usage: harness/rehearse-debounce-recipient.sh
 
 set -uo pipefail
 
-LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)"
 
 command -v tmux >/dev/null 2>&1 || { echo "SKIP: tmux not available"; exit 0; }
 

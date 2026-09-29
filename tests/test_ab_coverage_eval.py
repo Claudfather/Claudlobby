@@ -22,9 +22,9 @@ pytestmark = pytest.mark.usefixtures("selected_test_cli")
 from tests.conftest import load_lib_module
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-HARNESS = REPO_ROOT / "lib" / "ab-comms-eval.sh"
+HARNESS = REPO_ROOT / "harness" / "ab-comms-eval.sh"
 
-verdict = load_lib_module("ab-coverage-verdict")
+verdict = load_lib_module("ab-coverage-verdict", directory="harness")
 
 
 def _sourced(body: str, *args: str) -> str:

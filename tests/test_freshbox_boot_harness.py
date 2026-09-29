@@ -1,4 +1,4 @@
-"""#644 P4 real-boot gate — pytest wrapper for lib/freshbox-boot-gate.sh.
+"""#644 P4 real-boot gate — pytest wrapper for harness/freshbox-boot-gate.sh.
 
 A gated job, not a per-PR blocker (Fork F4(c) / Risk R4). Gating follows the
 repo's in-suite idiom (there is no workflow_dispatch/schedule precedent): the
@@ -21,7 +21,7 @@ import pytest
 from tests.conftest import realboot_skip_reason
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-HARNESS = REPO_ROOT / "lib" / "freshbox-boot-gate.sh"
+HARNESS = REPO_ROOT / "harness" / "freshbox-boot-gate.sh"
 
 # Shared real-boot dep contract (claude, jq, claudron, host auth) lives in
 # conftest.realboot_skip_reason so it cannot drift between harness wrappers.

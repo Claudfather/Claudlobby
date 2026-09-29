@@ -12,11 +12,11 @@
 # worked example of the loop for other bot-behavior changes (see
 # documentation/validating-bot-changes.md).
 #
-# Usage: PLANE_EMIT_CLI=/selected/venv/bin/claudlobby bash lib/validate-bot-change.sh
+# Usage: PLANE_EMIT_CLI=/selected/venv/bin/claudlobby bash harness/validate-bot-change.sh
 #   Exit 0 = all observations matched intent, 1 = a behavior did not fire.
 set -euo pipefail
 
-LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)"
 # shellcheck source=lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 
@@ -53,7 +53,7 @@ unset CLAUDE_FLAGS
 # it timed out this harness at 120s when only the first was compressed.
 # Nothing about the behaviour under test changes; only the wait for a box that
 # will never appear. The real budgets are exercised against real boots in
-# lib/boot-strand-sampler.sh, which is where they belong, and the unit contract
+# harness/boot-strand-sampler.sh, which is where they belong, and the unit contract
 # is pinned in tests/test_pane_send_verified.sh.
 export PANE_READY_POLL_S=0.05 PANE_RECOVER_TICKS=2 PANE_SEND_SETTLE_S=0
 # Pin the escalation chat id for the WHOLE run (#846). fleet-pulse's critical
@@ -2310,7 +2310,7 @@ harness_check "#602 fleet-pulse health-checks a bot in a NESTED fleet (session_m
 # reject the command locally while the box cleared). This is BEHAVIOR a unit
 # test cannot prove. The composed-timer plumbing (compose -> enroll -> journal
 # fire -> reconcile prune, incl. the launchd .plist prune) is the sibling
-# lib/rehearse-briefing-timer.sh (real systemd timer, ~2 min, run separately).
+# harness/rehearse-briefing-timer.sh (real systemd timer, ~2 min, run separately).
 # ===========================================================================
 val_scenario "validate-bot-change: equippable briefing trigger (#627 P6)"
 
@@ -3371,7 +3371,7 @@ sw_generate() {  # $1 = optional .env body ("" = no .env at all)
     [ -n "${1:-}" ] && printf '%s' "$1" > "$SW_ROOT/.env"
     # CI prepares the selected package's assets before this real CLI runs.
     # Mutable data must not provide package resources through source symlinks.
-    ( cd "$SW_ROOT" && PLANE_EMIT_DISABLED=1 "$VAL_CLI" --root "$SW_ROOT" generate ) \
+    ( cd "$SW_ROOT" && PLANE_EMIT_DISABLED=1 "$VAL_PY" "$VAL_REPO/harness/compose.py" --root "$SW_ROOT" ) \
         > "$SW_ROOT/gen.log" 2>&1 || true
 }
 SW_FT="$SW_ROOT/runtime/fleet/timers"

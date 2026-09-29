@@ -480,7 +480,7 @@ esac
 # above confirms the Telegram POLLER is up; it does not confirm the TUI has drawn
 # an input box, and treating it as a proxy for that is what #860 was. Measured:
 # the poller reports ready at 3-9s while a production-shaped bot renders its box
-# at 10-19s (lib/boot-strand-sampler.sh t_glyph), so both sends below were
+# at 10-19s (harness/boot-strand-sampler.sh t_glyph), so both sends below were
 # routinely typed into a pane that could not receive them — and a tokenless bot,
 # whose readiness gate short-circuits, injects earlier still.
 #

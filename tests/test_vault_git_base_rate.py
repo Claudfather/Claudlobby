@@ -18,7 +18,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 
 def _load():
     spec = importlib.util.spec_from_file_location(
-        "vault_git_base_rate", _ROOT / "lib" / "vault-git-base-rate.py")
+        "vault_git_base_rate", _ROOT / "harness" / "vault-git-base-rate.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod

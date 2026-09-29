@@ -237,7 +237,7 @@ assert_eq "normal 1s/probe advance: prints the last state (no_bridge)" "no_bridg
 # every iteration into "started" and the loop never expired -- measured
 # against a 1s ceiling: still polling when it was killed at 130s. It is not
 # hypothetical:
-# lib/validate-bot-change.sh drives the real start-bot.sh with
+# harness/validate-bot-change.sh drives the real start-bot.sh with
 # RC_READY_TIMEOUT_S=1, and a probe there costs seconds under load. A ceiling
 # that cannot expire hangs the harness (start-bot.sh never returns, so the
 # `|| true` after it is never reached) and, for PR B, is a gate holder that

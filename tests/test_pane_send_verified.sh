@@ -484,7 +484,7 @@ echo "=== the payload crosses the pty in chunks, never in one write (#1493) ==="
 #
 # What is asserted is the SHAPE of the crossing, because that is the only half a
 # stub can see. That the shape fixes the loss is measured by
-# lib/send-size-probe.sh against a real `claude` on a real pty; a hermetic suite
+# harness/send-size-probe.sh against a real `claude` on a real pty; a hermetic suite
 # cannot reproduce a tty race and must not pretend to.
 
 # Byte counts under LC_ALL=C throughout: the cap is a BYTE cap, and a character

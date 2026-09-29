@@ -834,7 +834,7 @@ class TestShellCompositionSpellings:
 class TestTheComposedFormsAreATripwireBeforeTheContinuationFix:
     """#1759 review: pinned BEFORE the continuation fix touches anything.
 
-    Measured tonight (lib/vault-git-base-rate.py): command substitution,
+    Measured tonight (harness/vault-git-base-rate.py): command substitution,
     xargs and a pipeline all leave `git` as a bare token, so the guard SEES
     them -- it is stronger than #1725 credited. A continuation fix that
     changes tokenisation could silently lose these. This class is the

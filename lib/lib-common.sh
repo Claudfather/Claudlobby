@@ -1510,7 +1510,7 @@ bridge_fence_write() {
 #
 # That threshold is deliberately NOT the ceiling. It was, and the premise --
 # one 0.5s-interval poll can never legitimately take longer than the whole
-# ceiling -- is false wherever the ceiling is small: lib/validate-bot-change.sh
+# ceiling -- is false wherever the ceiling is small: harness/validate-bot-change.sh
 # drives the real start-bot.sh with RC_READY_TIMEOUT_S=1, so a probe costing
 # 2s there was read as a clock step on EVERY iteration, folded out of elapsed,
 # and the loop never expired (measured against a 1s ceiling: still polling
@@ -2322,7 +2322,7 @@ _PANE_SEND_SETTLE_DEFAULT=0.3
 # fleet's are) it submits the paste inside <pasted_content> tags, which the
 # harness tells the model to treat as text the user may not have written. At
 # 900 the first chunk of every long dispatch, envelope and task id included,
-# arrived framed. Measured by lib/send-size-probe.sh on the Pi (Linux, claude
+# arrived framed. Measured by harness/send-size-probe.sh on the Pi (Linux, claude
 # 2.1.281): 800 bytes in one read never framed and 801 always did; at 400
 # nothing framed at any payload size while the reader kept up. A reader that
 # falls behind merges chunks into one read: two merged chunks total 800 and stay
@@ -2444,7 +2444,7 @@ _pane_split_bytes() {
             # `lim` strictly decreases, so the next candidate is shorter than
             # `prev` and cannot match it. This codes around a `claude` TUI quirk
             # (two byte-identical adjacent chunks lose one), so it is pinned to a
-            # binary that moves: lib/send-size-probe.sh --filler ident2 is the
+            # binary that moves: harness/send-size-probe.sh --filler ident2 is the
             # re-measurement instrument (#1493); re-run it on a claude-major bump.
             [ "$chunk" = "$prev" ] && [ "$len" -gt 1 ] || break
             lim=$((len - 1))
@@ -2634,7 +2634,7 @@ _PANE_PASTE_COLLAPSE_MARKER='[Pasted text'
 # Readiness budget: how long to wait for the TUI to draw its input box before
 # sending into it (#860). Sized off the measured draw, not a guess — a
 # production-shaped bot (plugins + MCP servers + channels) takes 10-19s to
-# render its box (lib/boot-strand-sampler.sh t_glyph), while start-bot injects
+# render its box (harness/boot-strand-sampler.sh t_glyph), while start-bot injects
 # at 3-9s, so the payload was routinely typed into a pane that could not yet
 # receive it. 45s leaves headroom for a loaded host booting several bots at
 # once. A coarser poll than the verify's: this waits out whole seconds of

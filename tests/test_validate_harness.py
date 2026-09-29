@@ -1,6 +1,6 @@
 """Run the empirical validation harness as part of the suite.
 
-lib/validate-bot-change.sh stands up a throwaway bot + tmux sessions and asserts
+harness/validate-bot-change.sh stands up a throwaway bot + tmux sessions and asserts
 that the observability/trust-loop behaviors (activity_stuck, overdue_dispatch,
 manager notification) actually fire end-to-end. Gating it here means "the
 behavior fires" stays under CI, not just "the config composes". Skips when tmux
@@ -19,7 +19,7 @@ import pytest
 from tests.conftest import constructed_env
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-HARNESS = REPO_ROOT / "lib" / "validate-bot-change.sh"
+HARNESS = REPO_ROOT / "harness" / "validate-bot-change.sh"
 
 
 # Its own CI job (test.yml `harness`), beside the rest of the suite: it is the

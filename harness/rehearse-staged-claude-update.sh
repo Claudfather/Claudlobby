@@ -33,7 +33,7 @@
 #   - the live binary (the target of `command -v claude`) and the live fleet
 #     link are fingerprinted before and after; a change FAILS the run.
 #
-# Usage: REHEARSE_STAGED_UPDATE_REAL=1 lib/rehearse-staged-claude-update.sh [A B C]
+# Usage: REHEARSE_STAGED_UPDATE_REAL=1 harness/rehearse-staged-claude-update.sh [A B C]
 #   A, B, C default to three published versions, newest last (C, the stub arm).
 #   REHEARSE_KEEP=1 keeps the base for inspection; REHEARSE_NPM_CACHE=<dir> keeps
 #   npm's download cache across runs.
@@ -42,8 +42,8 @@
 
 set -uo pipefail
 
-LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC_ROOT="$(cd "$LIB_DIR/.." && pwd)"
+SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LIB_DIR="$SRC_ROOT/lib"
 
 if [ "${REHEARSE_STAGED_UPDATE_REAL:-}" != "1" ]; then
     echo "rehearse-staged-claude-update: refused — this downloads ~700 MB through real npm." >&2

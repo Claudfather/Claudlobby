@@ -6,7 +6,7 @@ The CLI is absent on the fleet's primary Pi, where it read as "0 rows" and
 failed 22 checks with no reason given, while CI (whose image has it) passed.
 Worse is the other direction: a check expecting ABSENCE read the same empty
 answer as a pass. These tests run the reader block lifted verbatim from
-`lib/validate-bot-change.sh`, so they exercise the shipped text.
+`harness/validate-bot-change.sh`, so they exercise the shipped text.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import subprocess
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-HARNESS = REPO / "lib" / "validate-bot-change.sh"
+HARNESS = REPO / "harness" / "validate-bot-change.sh"
 LIB_COMMON = REPO / "lib" / "lib-common.sh"
 F = "vf"
 

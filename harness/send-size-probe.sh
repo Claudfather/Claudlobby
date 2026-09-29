@@ -362,7 +362,7 @@ payload_sha256() {
 # rather than a false disagreement. Exercises the real hook, never a copy.
 hook_received_fact() {
     local arrived="$1" msgid="$2" root="$3"
-    local hookp; hookp="$(dirname "${BASH_SOURCE[0]}")/plane-dispatch-in.sh"
+    local hookp; hookp="$(dirname "${BASH_SOURCE[0]}")/../lib/plane-dispatch-in.sh"
     [ -f "$hookp" ] || return 1
     mkdir -p "$root/state/plane" 2>/dev/null || return 1
     printf '{"*": "full"}' > "$root/state/plane/capture.json" 2>/dev/null || return 1

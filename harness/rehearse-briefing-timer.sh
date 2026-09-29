@@ -8,7 +8,7 @@
 # plumbing (validate-bot-change.sh covers the delivery behavior).
 #
 # Run BEFORE trusting the briefing feature on a real fleet:
-#   CLAUDLOBBY_ROOT=<checkout> bash lib/rehearse-briefing-timer.sh
+#   CLAUDLOBBY_ROOT=<checkout> bash harness/rehearse-briefing-timer.sh
 #
 # What it does (~2 min wall clock where user systemd is present):
 #   1. COMPOSES a briefing-equipped throwaway bot's timers via the real

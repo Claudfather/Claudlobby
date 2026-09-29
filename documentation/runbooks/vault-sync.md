@@ -41,7 +41,7 @@ visible rather than merely documented.
 before trusting the quiet.** That is the whole ask; the rest of this block is why.
 
 **The rehearsal has never run the state you will be in.** All five scenarios in
-`lib/rehearse-vault-sync.sh` drive a stub whose `--check` arm exits 2
+`harness/rehearse-vault-sync.sh` drive a stub whose `--check` arm exits 2
 unconditionally, so **every** scenario runs with `state=unknown` and **none has
 ever seen an rc-0 verdict**. That was harmless while no engine had the flag. It
 stops being harmless the moment the engine carrying `sync --check` is pulled here
@@ -159,7 +159,7 @@ does it fail" — the denominator the hook-only path never had.
 
 ## Rehearsing it
 
-`bash lib/rehearse-vault-sync.sh` drives the real job through clean → wedged →
+`bash harness/rehearse-vault-sync.sh` drives the real job through clean → wedged →
 still-wedged → recovered against a real plane in a throwaway root, with a
 stubbed engine and a fake escalation chat. It carries a positive control: a
 *changed* failure state must page again, or the debounce is muting rather than

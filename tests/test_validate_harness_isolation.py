@@ -6,7 +6,7 @@ import subprocess
 from tests.conftest import constructed_env, read_fleet_events
 
 REPO = Path(__file__).resolve().parent.parent
-HARNESS = REPO / "lib/validate-bot-change.sh"
+HARNESS = REPO / "harness/validate-bot-change.sh"
 
 
 def _setup():

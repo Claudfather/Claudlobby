@@ -15,7 +15,7 @@ So any change to how a bot behaves at runtime is validated by an empirical loop,
 
 The first three are cheap and deterministic. The fourth is the one that matters and the one teams skip — so claudlobby ships a harness for it.
 
-## `lib/validate-bot-change.sh` — the Observe step, runnable
+## `harness/validate-bot-change.sh` — the Observe step, runnable
 
 For the observability / trust-loop behaviors, this harness *is* the Observe step. It:
 
@@ -25,7 +25,7 @@ For the observability / trust-loop behaviors, this harness *is* the Observe step
 4. **asserts** that `activity_stuck` and `overdue_dispatch` events land on the plane (`claudlobby event list --bot <bot>`) and that the manager receives a `[FLEET-PULSE]` push.
 
 ```bash
-bash lib/validate-bot-change.sh   # exit 0 = behavior matched intent
+bash harness/validate-bot-change.sh   # exit 0 = behavior matched intent
 ```
 
 When you add a new pulse check or event type, extend the harness with an assertion for it. That keeps "the behavior fires" under test, not just "the config composes."

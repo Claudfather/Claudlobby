@@ -56,14 +56,14 @@ confusing, circular, or missing a step.
 
 ## Level 2 — a real cold run (for any onboarding change)
 
-Driven by the **`simulate-cold-start`** skill, which wraps `lib/coldstart-harness.sh`:
+Driven by the **`simulate-cold-start`** skill, which wraps `harness/coldstart-harness.sh`:
 
 ```bash
-lib/coldstart-harness.sh prepare       # preflight, export, host snapshot, launch command
+harness/coldstart-harness.sh prepare       # preflight, export, host snapshot, launch command
 # ... run the cold arm in a NEW terminal: cd <tree> && claude, then /setup ...
-lib/coldstart-harness.sh status        # what did the run create?
-lib/coldstart-harness.sh reap          # tear down units, sockets, processes, tree
-lib/coldstart-harness.sh transcript    # harvest the session narrative
+harness/coldstart-harness.sh status        # what did the run create?
+harness/coldstart-harness.sh reap          # tear down units, sockets, processes, tree
+harness/coldstart-harness.sh transcript    # harvest the session narrative
 ```
 
 **Export, do not clone.** A `git clone` carries `.git`, and your own commit messages describe the

@@ -257,7 +257,7 @@ def parse_file(path: str, *, since: datetime | None = None,
     """Count each identified assistant message once within this file and window.
 
     Real interactive transcripts repeat flat usage on multiple content-block
-    lines for one message (lib/ab-comms-eval.sh's existing real-run blocker).
+    lines for one message (harness/ab-comms-eval.sh's existing real-run blocker).
     Keys remain file-local and include session ID; unkeyed turns are counted but
     explicitly disclosed by bounded fleet reads rather than guessed together.
     """

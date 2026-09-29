@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A2 semantic judge for the #881 comms-topology eval.
 
-Fills the slot `lib/ab-recoverability-scorer.py` deliberately left open. That
+Fills the slot `harness/ab-recoverability-scorer.py` deliberately left open. That
 module implements the structural tier and consumes semantic verdicts from a
 `--judgements` file; it never calls a model. This module produces that file.
 

@@ -493,7 +493,7 @@ SWITCHES: tuple[Switch, ...] = (
                    "bot on the host launches, and lib/ is read on demand, so a "
                    "root pull would move the whole host at once. Armed per "
                    "host, on the operator's say-so, after the rehearsal "
-                   "(lib/rehearse-staged-claude-update.sh)",
+                   "(harness/rehearse-staged-claude-update.sh)",
         what="stage each Claude Code version into its own npm prefix under "
              "state/claude/versions, run it there, and only then repoint the "
              "one fleet link (state/bin/claude) in a single rename, keeping "

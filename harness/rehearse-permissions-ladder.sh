@@ -41,8 +41,8 @@
 
 set -uo pipefail
 
-LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC_ROOT="$(dirname "$LIB_DIR")"
+SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LIB_DIR="$SRC_ROOT/lib"
 # shellcheck source=/dev/null
 . "$LIB_DIR/lib-common.sh"
 # lib-common sets -e (and -u) at source time and installs its own EXIT trap.
@@ -167,12 +167,9 @@ git -C "$SRC_ROOT" archive --format=tar HEAD 2>/dev/null | tar -x -C "$EXPORT_RO
 # than the one that merely exists. A checkout .venv predating a dependency
 # (pydantic, here) fails at import and the failure reads as "generate failed",
 # which is a harness defect wearing the costume of a real one.
-PYBIN=""
-for cand in "$SRC_ROOT/.venv/bin/python" "$(command -v python3)"; do
-  [ -x "$cand" ] || continue
-  if "$cand" -c 'import pydantic, yaml, jinja2' >/dev/null 2>&1; then PYBIN="$cand"; break; fi
-done
-[ -n "$PYBIN" ] || { say "FATAL: no python3 resolves the compositor deps (pydantic/yaml/jinja2)"; exit 2; }
+[ -x "${CLAUDLOBBY_CLI:-}" ] || { say "FATAL: set CLAUDLOBBY_CLI to a private installed wheel CLI"; exit 2; }
+PYBIN="$(dirname "$CLAUDLOBBY_CLI")/python"
+[ -x "$PYBIN" ] || { say "FATAL: selected CLI has no sibling Python"; exit 2; }
 say "  compositor interpreter: $PYBIN"
 say "  source ref            : $(git -C "$SRC_ROOT" rev-parse --short HEAD 2>/dev/null)"
 say "  arm                   : $ARM"
@@ -269,7 +266,7 @@ YAML
   # — a harness defect wearing the costume of a real one. The isolation claim is
   # carried by the strace assertion over the CELL, which is where it belongs.
   ( cd "$EXPORT_ROOT" && CLAUDLOBBY_ROOT="$EXPORT_ROOT" \
-      "$PYBIN" -m claudlobby --fleet "$FLEET" generate ) >"$WORK/generate.log" 2>&1
+      "$PYBIN" "$EXPORT_ROOT/harness/compose.py" --root "$EXPORT_ROOT" --fleet "$FLEET" ) >"$WORK/generate.log" 2>&1
   local rc=$?
   write_target   # generate owns the bot dir; re-lay the target after every pass
   return $rc

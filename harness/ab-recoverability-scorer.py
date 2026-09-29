@@ -18,7 +18,7 @@ in full — an explicit request is never re-summarized." A2 is the empirical gat
 on that sentence, which until now was unenforced prose.
 
 Standalone lib/ Python (stdlib-only, shell-invokable) following the
-lib/ab-comms-verdict.py and lib/dispatch-overdue.py precedent — unit-testable
+harness/ab-comms-verdict.py and lib/dispatch-overdue.py precedent — unit-testable
 without the harness (tests/test_ab_recoverability_scorer.py), so the follow-up
 that lands the live judge lands it in a tested place.
 

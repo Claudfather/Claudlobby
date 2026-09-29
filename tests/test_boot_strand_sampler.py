@@ -1,4 +1,4 @@
-"""#843 boot-strand sampler — pytest wrapper for lib/boot-strand-sampler.sh.
+"""#843 boot-strand sampler — pytest wrapper for harness/boot-strand-sampler.sh.
 
 Two tiers, mirroring tests/test_freshbox_boot_harness.py:
 
@@ -40,10 +40,10 @@ from tests.conftest import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SAMPLER = REPO_ROOT / "lib" / "boot-strand-sampler.sh"
+SAMPLER = REPO_ROOT / "harness" / "boot-strand-sampler.sh"
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "pane-states"
 
-summary = load_lib_module("boot-strand-summary")
+summary = load_lib_module("boot-strand-summary", directory="harness")
 
 # A stranded STARTUP_PROMPT payload, passed in FULL exactly as pane_send_verified
 # now passes it (#1082). It used to be truncated to 60 chars here, mirroring the
@@ -1432,7 +1432,7 @@ class TestSummaryDisclosesUnknownRetries:
         rows[3]["retry_fired"] = 2
         import importlib.util
 
-        spec = importlib.util.spec_from_file_location("bss_summary", REPO_ROOT / "lib" / "boot-strand-summary.py")
+        spec = importlib.util.spec_from_file_location("bss_summary", REPO_ROOT / "harness" / "boot-strand-summary.py")
         summary_mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(summary_mod)
         lines, _machine, _k, _valid = summary_mod.arm_block(rows, None)

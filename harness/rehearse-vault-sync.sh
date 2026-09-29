@@ -16,15 +16,15 @@
 # answered by observing DELIVERY -- see the long note at that scenario. Without
 # tmux both its arms SKIP loudly and the summary says the run does not cover them.
 #
-#   bash lib/rehearse-vault-sync.sh
+#   bash harness/rehearse-vault-sync.sh
 #
 # exit 0 every scenario that RAN held · 1 an assertion failed · 2 a dependency
 # is missing. A skipped arm does not fail the run, so read the summary line: it
 # names the count.
 set -euo pipefail
 
-LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="$(cd "$LIB_DIR/.." && pwd)"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LIB_DIR="$REPO/lib"
 
 command -v python3 >/dev/null 2>&1 || { echo "rehearse: python3 required" >&2; exit 2; }
 

@@ -20,7 +20,7 @@ NRestarts 3 -> 0); that is accepted rather than carried over (#1801).
 Driven like `test_service_is_starting.py`: `systemctl` stubbed on PATH with the
 properties in a DELIBERATELY SHUFFLED order (real systemd does not answer in
 request order), `_OS` forced after sourcing. The real state machine is covered
-by `lib/validate-bot-change.sh` against a real failing unit.
+by `harness/validate-bot-change.sh` against a real failing unit.
 """
 
 import os

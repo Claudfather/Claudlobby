@@ -7,7 +7,7 @@ mid-start, so an absent tmux session is expected rather than actionable.
 Sibling of `test_service_is_active.py` and driven the same way — `systemctl`
 stubbed on PATH, `_OS` forced after sourcing — because the real state machine
 needs a live systemd user bus, which macOS (the documented baseline host) does
-not have. `lib/validate-bot-change.sh` covers the state machine against a real
+not have. `harness/validate-bot-change.sh` covers the state machine against a real
 unit and SKIPs where the bus is absent; this file covers the parsing, the state
 matching and the grace arithmetic everywhere, always.
 

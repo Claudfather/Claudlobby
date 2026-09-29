@@ -11,7 +11,7 @@ import subprocess
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-REHEARSAL = REPO / "lib" / "rehearse-briefing-timer.sh"
+REHEARSAL = REPO / "harness" / "rehearse-briefing-timer.sh"
 
 
 def _predicate() -> str:

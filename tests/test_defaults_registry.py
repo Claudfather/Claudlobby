@@ -226,7 +226,7 @@ class TestScopeBoundary:
         # exactly as it would from `entries`, and `resolve()` unions the two
         # without distinction. Checking only `entries` is how a role-scoped
         # `checkin` could have landed here already passing, with nothing
-        # short of `lib/naked-bot-observe.py` (which this file does not run)
+        # short of `harness/naked-bot-observe.py` (which this file does not run)
         # ever having looked.
         allowed = set(NEW_INSTRUCT_DEFAULTS_WITH_GATE_EVIDENCE)
         unexplained = {
@@ -241,7 +241,7 @@ class TestScopeBoundary:
         ungrandfathered = {t: e for t, e in unexplained.items() if e}
         assert not ungrandfathered, (
             "a NEW INSTRUCT default is present (global or role-scoped). It "
-            "cannot be justified by unit test: run lib/naked-bot-observe.py "
+            "cannot be justified by unit test: run harness/naked-bot-observe.py "
             f"--baseline and name the delta. {ungrandfathered}"
         )
 
