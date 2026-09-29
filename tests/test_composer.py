@@ -329,7 +329,7 @@ class TestReconcileAccessJson:
         assert result["allowFrom"].count("12345") == 1
 
 
-def _expected_default_fleet_ops_allow() -> list[str]:
+def _expected_default_fleet_ops_allow(paths: Paths) -> list[str]:
     """Exact singleton-manager grants with the shipped skill's declared tools.
 
     The skill frontmatter is independently pinned by test_requires_linking;
@@ -379,6 +379,8 @@ def _expected_default_fleet_ops_allow() -> list[str]:
         "Bash(claudlobby --json bot logs solo)",
         "Bash(claudlobby --json bot logs solo --lines *)",
         "Bash(claudlobby --json bot restart solo)",
+        f"Edit(/{paths.bot_runtime('solo') / '.claude' / 'session.md'})",
+        f"Edit(/{paths.bot_runtime('solo') / '.claude' / 'session.md.tmp'})",
     ]
 
 
@@ -415,7 +417,7 @@ class TestComposeSettingsLocal:
         result = compose_settings_local(bot, fleet, paths)
         # No declared tools still includes the universal fleet-ops skill,
         # manager-only grants, the default boot brief, and reversed BASE_TOOLS.
-        assert result["permissions"]["allow"] == _expected_default_fleet_ops_allow()
+        assert result["permissions"]["allow"] == _expected_default_fleet_ops_allow(paths)
 
     def test_self_restart_grant_is_exact_and_worker_gets_no_other_lifecycle_grant(self, tmp_path):
         paths = self._make_paths_with_runtime(tmp_path)
@@ -575,6 +577,21 @@ class TestComposeSettingsLocal:
         # The prefix is the whole fix, so assert it on EVERY rule rather than
         # trusting that one correct rule implies the rest.
         assert all(d.split("(", 1)[1].startswith("//") for d in deny), deny
+
+    def test_handoff_edits_are_exact_and_owned_by_each_bot(self, tmp_path):
+        paths = self._make_paths_with_runtime(tmp_path)
+        fleet = self._make_fleet_with_bots("bot-a", "bot-b", manager="bot-a")
+        for own, sibling in (("bot-a", "bot-b"), ("bot-b", "bot-a")):
+            permissions = compose_settings_local(fleet.bots[own], fleet, paths)["permissions"]
+            own_dir = paths.bot_runtime(own) / ".claude"
+            sibling_dir = paths.bot_runtime(sibling)
+            expected = {f"Edit(/{own_dir / name})"
+                        for name in ("session.md", "session.md.tmp")}
+            assert expected <= set(permissions["allow"])
+            assert all(f"/{sibling_dir}/" not in grant for grant in permissions["allow"])
+            assert not any(grant.startswith(f"Edit(/{own_dir}/") and grant not in expected
+                           for grant in permissions["allow"])
+            assert f"Edit(/{sibling_dir}/**)" in permissions["deny"]
 
     def test_tool_deny_generates_patterns(self, tmp_path):
         paths = self._make_paths_with_runtime(tmp_path)
@@ -1541,7 +1558,7 @@ class TestChannelSkillInSettingsLocal:
         bot = BotConfig(bot_id="solo", name="solo", expertise=["eng"], channels=[])
         fleet = FleetConfig(manager="solo", name="t", service_prefix="p", bots={"solo": bot})
         result = compose_settings_local(bot, fleet, paths)
-        assert result["permissions"]["allow"] == _expected_default_fleet_ops_allow()
+        assert result["permissions"]["allow"] == _expected_default_fleet_ops_allow(paths)
 
     def test_explicit_allow_merges_with_auto_derived(self, tmp_path):
         paths = self._make_paths_with_runtime(tmp_path)
