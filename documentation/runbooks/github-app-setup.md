@@ -205,7 +205,7 @@ GH_TOKEN=$(lib/mint-github-token.sh) gh pr merge --squash <PR#>
 ```
 
 Then confirm on github.com that the smoke commit shows the **`my-fleet-bot[bot]`** avatar and
-identity, not your personal account. `claudlobby --fleet <fleet> creds-reconcile` and the daily
+identity, not your personal account. `claudlobby --fleet <fleet> host credentials reconcile` and the daily
 `creds-check` also now probe the App token (an `ok` on `/installation/repositories`).
 
 ## The `gh` CLI

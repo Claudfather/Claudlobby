@@ -70,36 +70,6 @@ def cmd_freshbox(args) -> int:
     return 1 if exits_nonzero(findings, strict=args.strict) else 0
 
 
-def cmd_creds_reconcile(args) -> int:
-    """Reconcile declared credentials against values against equipped bots (#1104).
-
-    Answers shape 1 (declared, no value) and shape 2 (value, no equipped
-    consumer). Shape 3 — a declaration and its consumer naming DIFFERENT keys —
-    is deliberately not attempted and reports UNKNOWN by name, because deciding
-    it means reading a sibling plugin's source, which is assertion rather than
-    contract. UNKNOWN is printed and counted; a silent omission would recreate
-    the very defect this exists to remove.
-    """
-    from ..credentials import exits_nonzero, format_report, reconcile
-    from ..env_tiers import ResolverUnavailable
-
-    paths = _resolve_paths(args)
-    _load_env(paths)
-    fleet, _ = _load_fleet_or_exit(paths)
-
-    try:
-        findings, scope = reconcile(paths, fleet)
-    except ResolverUnavailable as exc:
-        # Refuse rather than fall back to a narrower reader. Falling back is how
-        # this command came to report a host-tier credential as "absent from
-        # every tier" — a wrong answer is worse than no answer here, because it
-        # sends someone to provision a credential that already exists.
-        print(f"cannot reconcile: {exc}")
-        return 2
-    print(format_report(findings, scope))
-    return 1 if exits_nonzero(findings) else 0
-
-
 def cmd_env_register(args) -> int:
     """The derived credential register (#1214 F6 / #1226).
 

@@ -134,7 +134,7 @@ env "${UNSET_ARGS[@]}" -u GITHUB_PAT -u TELEGRAM_BOT_TOKEN bash
 Confirmed live on the same reference bot: `RAILWAY_API_TOKEN` survives every name above, because
 this fleet has a Railway integration this recipe doesn't know about. Any fleet-specific credential
 your own `.env` declares needs its own `-u`, or check what's actually resolving with
-`claudlobby creds-reconcile` before trusting the scrub blind.
+`claudlobby host credentials reconcile` before trusting the scrub blind.
 
 **This only applies to running the exercise from inside an existing bot session** — the only
 case where any of this can leak, because it's the only case with a `bot.conf` to leak from. A

@@ -8,6 +8,7 @@ credential VALUE ever reaches the output.
 from __future__ import annotations
 
 import os
+import json
 from dataclasses import replace
 from pathlib import Path
 from textwrap import dedent
@@ -275,6 +276,29 @@ class TestRedaction:
         # ...while still naming the KEY, which is the actionable half.
         assert "ACME_TOKEN" in text
         assert "ORPHAN" in text
+
+    def test_public_reconcile_keeps_failures_and_unknown_without_values(
+        self, estate, monkeypatch, capsys
+    ):
+        from claudlobby import context
+        from claudlobby.__main__ import main
+
+        root, fleet_dir, _fleet, paths = estate
+        monkeypatch.setattr(context, "get_resources", lambda: paths.package)
+        _write_env(root / ".env", ACME_TOKEN="SUPERSECRETVALUE")
+        _write_env(fleet_dir / ".env", ORPHAN="ANOTHERSECRET")
+        assert main(["--root", str(root), "--fleet", "t", "host", "credentials",
+                     "reconcile", "--json"]) == 4
+        output = capsys.readouterr().out
+        result = json.loads(output)
+        assert result["command"] == "host.credentials.reconcile"
+        assert result["data"]["failed"] == 1
+        assert result["data"]["unknown"] == 1
+        assert {row["subject"] for row in result["data"]["findings"]} == {
+            "ACME_TOKEN", "ORPHAN", "acme"}
+        assert "SUPERSECRETVALUE" not in output and "ANOTHERSECRET" not in output
+        with pytest.raises(SystemExit):
+            main(["--root", str(root), "--fleet", "t", "creds-reconcile"])
 
 
 class TestTierResolution:

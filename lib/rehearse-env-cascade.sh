@@ -102,7 +102,7 @@ fleet:
     $BOT:
       expertise: [software-engineering]
       # A REAL contract var, so the shipped credential tooling has something to
-      # answer about. Without it creds-reconcile has no declarations and returns
+      # answer about. Without it host credentials reconcile has no declarations and returns
       # a clean bill about nothing.
       mcp: [github]
 YAML
@@ -313,12 +313,12 @@ RT_PAT="$(HOME="$FAKE_HOME" bash -c 'set -a; . "$1" >/dev/null 2>&1; set +a; pri
     || bad "runtime did not resolve GITHUB_PAT from host (got '$RT_PAT')"
 
 CREDS="$( cd "$EXPORT_ROOT" && HOME="$FAKE_HOME" CLAUDLOBBY_ROOT="$EXPORT_ROOT" \
-    "$PYBIN" -m claudlobby --fleet "$FLEET" creds-reconcile 2>&1 )"
+    "$PYBIN" -m claudlobby --fleet "$FLEET" host credentials reconcile 2>&1 )"
 printf '%s\n' "$CREDS" | grep -i 'GITHUB_PAT' | sed 's/^/    creds: /'
 if printf '%s\n' "$CREDS" | grep -i 'GITHUB_PAT' | grep -qiE 'FAIL|no value|missing'; then
-    bad "TOOLING/RUNTIME SPLIT: creds-reconcile calls GITHUB_PAT missing while the runtime resolves it from the host tier"
+    bad "TOOLING/RUNTIME SPLIT: host credentials reconcile calls GITHUB_PAT missing while the runtime resolves it from the host tier"
 else
-    ok "creds-reconcile agrees the host-tier GITHUB_PAT is present"
+    ok "host credentials reconcile agrees the host-tier GITHUB_PAT is present"
 fi
 
 # ------------------------------------------------- 4: survive down + up

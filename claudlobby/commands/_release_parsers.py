@@ -38,6 +38,12 @@ def _dispatch_host_env_cache(args):
                    json_output=args.json)
 
 
+def _dispatch_host_credentials(args):
+    return execute(args.public_command,
+                   lambda: import_module(".host_credentials", __package__).dispatch(args),
+                   json_output=args.json)
+
+
 def _route(sub, name, command, help):
     parser = sub.add_parser(name, help=help)
     parser.add_argument("--json", action="store_true", help="One schema-1 result object")
@@ -74,6 +80,12 @@ def register_release_subparsers(sub):
     run.add_argument("name", help="Packaged host timer job name")
     run.add_argument("--json", action="store_true", help="One schema-1 result object")
     run.set_defaults(func=_dispatch_host_job, public_command="host.job.run")
+    credentials = hosts.add_parser("credentials", help="Check or reconcile selected-fleet credentials")
+    credential_actions = credentials.add_subparsers(dest="credential_command", required=True)
+    reconcile = credential_actions.add_parser(
+        "reconcile", help="Compare declared credentials, stored tiers and equipped consumers")
+    reconcile.add_argument("--json", action="store_true", help="One schema-1 result object")
+    reconcile.set_defaults(func=_dispatch_host_credentials, public_command="host.credentials.reconcile")
     doctor = _route(hosts, "doctor", "host.doctor", "Diagnose configured fleets on this host")
     doctor.set_defaults(func=_dispatch_doctor)
     doctor.add_argument("--switches", action="store_true", help="Only show resolved opt-in/out switches")

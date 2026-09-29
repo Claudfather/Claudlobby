@@ -60,13 +60,6 @@ def register_subparsers(sub) -> None:
     )
     pv.set_defaults(func=_command("core", "cmd_validate"))
 
-    pcr = sub.add_parser(
-        "creds-reconcile",
-        help="Reconcile declared credentials vs stored values vs equipped bots "
-        "(#1104 shapes 1+2; shape 3 reports UNKNOWN by design)",
-    )
-    pcr.set_defaults(func=_command("core", "cmd_creds_reconcile"))
-
     per = sub.add_parser(
         "env-register",
         help="Derived credential register — every declared var, the tier it "
