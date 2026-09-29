@@ -39,6 +39,43 @@ def test_lock_and_unfinished_intent_prevent_competing_cutovers(proposal):
     assert a.read_selection(builder.root) is None
 
 
+def test_cancel_only_unstarted_prepared_intent_retains_record(proposal):
+    builder, _, _ = proposal
+    plan = builder.seal()
+    with a.locked_activation(builder.root) as store:
+        _prepare(store, plan, "cancelled")
+        record = store.cancel_prepared("cancelled")
+        assert record.status == "rolled_back"
+        assert record.body["cancellation"]["kind"] == "prepared-before-effects"
+        assert record.body["cancellation"]["journals"] == []
+        assert a.read_activation(builder.root, "cancelled") == record
+        _prepare(store, plan, "successor")
+        with pytest.raises(a.ActivationError, match="effects or changed selection"):
+            store.cancel_prepared("cancelled")
+
+
+@pytest.mark.parametrize("change", ["config", "parking", "step", "selection"])
+def test_cancel_prepared_refuses_any_uncertain_effect(proposal, change):
+    builder, _, _ = proposal
+    plan = builder.seal()
+    with a.locked_activation(builder.root) as store:
+        _prepare(store, plan)
+        if change == "config":
+            (builder.root / "state/activations/candidate/config").mkdir()
+        elif change == "parking":
+            from claudlobby.activation_units import journal_id
+            (builder.root / "state/activations" / journal_id("candidate", "producers")).mkdir()
+        elif change == "step":
+            store.begin("candidate", "producers_paused")
+        else:
+            a._write(builder.root / "state/selected-release.json", {
+                "schema": 1, "activation_id": "foreign", "release_id": plan.release_id,
+                "plan_id": plan.plan_id})
+        with pytest.raises(a.ActivationError):
+            store.cancel_prepared("candidate")
+        assert a.read_activation(builder.root, "candidate").status != "rolled_back"
+
+
 def test_first_adoption_records_unsealed_source_without_inventing_release(proposal):
     builder, _, _ = proposal
     plan = builder.seal()

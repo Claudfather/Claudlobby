@@ -214,6 +214,35 @@ class ActivationStore:
         _sync(path.parent.parent)
         return self._save(ActivationRecord(activation_id, self.root, body))
 
+    def cancel_prepared(self, activation_id: str) -> ActivationRecord:
+        """End an intent that never prepared a journal or began a step.
+
+        This is a recorded cancellation, not rollback of any effect. Once a
+        journal or step exists, the ordinary recovery owners must take over.
+        """
+        self.assert_locked()
+        record = read_activation(self.root, activation_id)
+        body = record.body
+        path = _record_path(self.root, activation_id)
+        if (record.status != "prepared" or body["pending"] is not None
+                or body["completed"] or body["evidence"]
+                or read_selection(self.root) != body["previous_selection"]
+                or set(path.parent.iterdir()) != {path}):
+            raise ActivationError("prepared activation has effects or changed selection; explicit recovery required")
+        from .activation_units import PHASES, journal_id as unit_journal_id
+        from .activation_enrollment import journal_id as enrollment_journal_id
+        siblings = [unit_journal_id(activation_id, phase) for phase in PHASES]
+        siblings += [enrollment_journal_id(activation_id, phase)
+                     for phase in (*PHASES, "directories")]
+        if any((path.parent.parent / name).exists() or (path.parent.parent / name).is_symlink()
+               for name in siblings):
+            raise ActivationError("prepared activation has a unit or enrollment journal; explicit recovery required")
+        body["status"] = "rolled_back"
+        body["cancellation"] = {"kind": "prepared-before-effects",
+                                "selection_sha256": _digest(body["previous_selection"]),
+                                "journals": []}
+        return self._save(record)
+
     def begin(self, activation_id: str, step: str) -> ActivationRecord:
         record = read_activation(self.root, activation_id)
         body = record.body
