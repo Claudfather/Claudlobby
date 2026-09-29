@@ -64,6 +64,12 @@ _BLESSED_RAW_READS = {
     # config.py — fleet.yaml / system.yaml parse. The parsed BotConfig feeds
     # audit_bot_sources (the dataclass walk); system.yaml is asserted L1-clean below.
     ("config.py", "yaml.safe_load(f)"),
+    # config explain rereads the already selected, validated fleet manifest
+    # solely to distinguish authored scalar declarations from defaults. The
+    # parsed values never become grants or paths; effective values still come
+    # from load_context's validated FleetConfig. This is read-only metadata, not
+    # a second operational configuration decision.
+    ("config.py", "yaml.safe_load(source)"),
     # The active parser sees only content-addressed inputs retained by staging.
     # Staging now validates and renders the SAME captured bytes before sealing;
     # fleet values pass the existing BotConfig source audit, while projects use
