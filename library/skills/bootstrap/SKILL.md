@@ -100,12 +100,12 @@ TELEGRAM_TOKEN_<BOT_UPPER>=<token>
 
 Patch `fleet.yaml` with the group chat ID, human Telegram ID, and timezone (if collected). The timezone goes in each bot's `env:` block as `TZ: "<value>"`.
 
-## Step 4: Seal and activate
+## Step 4: Seal and hand off activation
 
-If no sealed release exists, run `host setup --json` with the candidate wheel, locked
+If no sealed release exists, ask the operator to run `host setup --json` from their shell with the candidate wheel, locked
 dependency wheelhouse and bootstrap interpreter as shown in
 [`documentation/getting-started.md`](../../../documentation/getting-started.md).
-Read `data.cli` and `data.release_id` from its result; set `RELEASE_CLI` to that
+Have the operator provide `data.cli` and `data.release_id` from its result; set `RELEASE_CLI` to that
 reported path. Do not guess an installed CLI or write generated runtime files
 from the checkout.
 
