@@ -515,7 +515,7 @@ class TestComposeFleetTimers:
 
         svc_text = svc.read_text()
         assert "Type=oneshot" in svc_text
-        assert "fleet-pulse.sh" in svc_text
+        assert '"--fleet" "test-fleet" "fleet" "pulse"' in svc_text
 
         timer_text = timer.read_text()
         assert "OnBootSec=300" in timer_text

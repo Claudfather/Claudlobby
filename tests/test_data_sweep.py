@@ -67,4 +67,4 @@ def test_tail_fleet_events_is_refused_with_the_pointer(tmp_path):
                PATH="/usr/bin:/bin:/usr/sbin:/sbin")
     r = subprocess.run(["bash", str(REPO / "lib" / "tail-fleet.sh"), "--fleet", "f", "--events"],
                        capture_output=True, text=True, env=env, timeout=60)
-    assert r.returncode == 2 and "claudlobby events --bot" in r.stderr, (r.returncode, r.stderr)
+    assert r.returncode == 2 and "claudlobby event list --bot" in r.stderr, (r.returncode, r.stderr)
