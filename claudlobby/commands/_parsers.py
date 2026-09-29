@@ -118,8 +118,9 @@ def register_subparsers(sub) -> None:
                        json_output=args.json)
 
     ps.set_defaults(func=_status_dispatch, public_command="plane.status")
-    pd = psub.add_parser("doctor", help="Kernel health rungs (exit 1 on attention)")
-    pd.set_defaults(func=_command("plane", "cmd_plane_doctor"))
+    pd = psub.add_parser("doctor", help="Kernel health rungs with structured attention")
+    pd.add_argument("--json", action="store_true", help="One schema-1 result with diagnostic rungs")
+    pd.set_defaults(func=_command("plane", "cmd_plane_doctor"), public_command="plane.doctor")
     pv = psub.add_parser("serve", help="Run the ingest daemon (foreground)")
     pv.add_argument("--socket", help="Socket path override (default: state/plane/ingest.sock)")
     pv.add_argument("--drain-interval", default="600",

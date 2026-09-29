@@ -1,6 +1,5 @@
-"""Legacy Plane diagnostics and foreground commands.
+"""Plane diagnostics, registry reads and foreground commands.
 
-Legacy diagnostics map Plane contract and storage failures through one guard.
 Public ingest and maintenance use separate common-result adapters.
 """
 
@@ -73,20 +72,27 @@ def _switch_fleet(paths):
 
 def cmd_plane_doctor(args) -> int:
     """Kernel-scoped health rungs (§10/§17 — the golden-path doctor grows in
-    Phase 2; these are the checks the kernel alone can answer). Exit 0 when
-    every rung passes, 1 when any needs attention; version refusals still
-    exit 4 through the guard."""
-    paths = _resolve_paths(args)
-    root = paths.root
+    Phase 2; these are the checks the kernel alone can answer)."""
+    from ..command_result import CommandFailure, CommandOutput, execute
+    from ..context import resolve_paths
+
+    rungs: list[dict] = []
+    lines: list[str] = []
 
     def run() -> int:
+        paths = resolve_paths(root=getattr(args, "root", None),
+                              fleet=getattr(args, "fleet", None),
+                              seed=getattr(args, "seed", False))
+        root = paths.root
         failing = 0
 
         def rung(ok: bool, label: str, detail: str = "") -> None:
             nonlocal failing
             mark = "ok" if ok else "ATTENTION"
             suffix = f" — {detail}" if detail else ""
-            print(f"[{mark}] {label}{suffix}")
+            rungs.append({"name": label, "status": "ok" if ok else "attention",
+                          "detail": detail})
+            lines.append(f"[{mark}] {label}{suffix}")
             if not ok:
                 failing += 1
 
@@ -352,12 +358,45 @@ def cmd_plane_doctor(args) -> int:
             _rows = _sw.resolve(paths, _switch_fleet(paths))
             rung(True, "switches", _sw.summary_line(
                 [r for r in _rows if r.switch.plane]))
-            print(_sw.format_table(_rows, plane_only=True))
+            lines.append(_sw.format_table(_rows, plane_only=True))
         except Exception as exc:  # noqa: BLE001 — a health command never crashes
             rung(True, "switches", f"unavailable: {exc}")
-        return 0 if failing == 0 else 1
+        return failing
 
-    return _guarded("plane doctor", run)
+    def operation() -> CommandOutput:
+        def refuse(code: str, message: str):
+            if not getattr(args, "json", False):
+                if lines:
+                    print("\n".join(lines))
+            raise CommandFailure(code, message,
+                                 data={"status": "refused", "rungs": rungs,
+                                       "attention_count": sum(row["status"] == "attention" for row in rungs)})
+
+        try:
+            failing = run()
+        except PendingMigrationError:
+            refuse("migration_required", "plane doctor: explicit Plane migration is required")
+        except DowngradeError:
+            refuse("downgrade", "plane doctor: Plane storage is newer than this release")
+        except sqlite3.Error:
+            refuse("unavailable", "plane doctor: Plane storage cannot be read")
+        except (OSError, ImportError):
+            refuse("unavailable", "plane doctor: host data or dependencies are unavailable")
+        except RuntimeError:
+            refuse("unavailable", "plane doctor: installed release resources are unavailable")
+        except ValueError:
+            refuse("invalid_argument", "plane doctor: invalid host or fleet selection")
+        except ContractViolation:
+            refuse("conflict", "plane doctor: Plane contract is invalid")
+        data = {"status": "attention" if failing else "ok", "rungs": rungs,
+                "attention_count": failing}
+        if failing:
+            if not getattr(args, "json", False):
+                print("\n".join(lines))
+            raise CommandFailure("conflict", f"plane doctor: {failing} rung(s) need attention", data=data)
+        return CommandOutput(data, lines=tuple(lines))
+
+    return execute("plane.doctor", operation, json_output=getattr(args, "json", False))
 
 
 def cmd_plane_registry(args) -> int:

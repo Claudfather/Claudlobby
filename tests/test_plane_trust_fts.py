@@ -510,7 +510,6 @@ def test_doctor_and_status_agree_with_trust_on_an_unenumerable_spool(
     from claudlobby import source_state
     from claudlobby.commands.plane import cmd_plane_doctor
     from claudlobby.commands import plane_status
-    from claudlobby.paths import Paths
     from tests.package_fixtures import source_package
 
     _seed(tmp_path)
@@ -522,8 +521,7 @@ def test_doctor_and_status_agree_with_trust_on_an_unenumerable_spool(
 
     import types
     args = types.SimpleNamespace(root=str(tmp_path))
-    monkeypatch.setattr("claudlobby.commands.plane._resolve_paths", lambda _:
-                        Paths(root=tmp_path, package=source_package()))
+    monkeypatch.setattr("claudlobby.context.get_resources", source_package)
     rc = cmd_plane_doctor(args)
     out = capsys.readouterr().out
     assert rc != 0
