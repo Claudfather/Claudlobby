@@ -1,19 +1,21 @@
 """#917 with_timeout with no timeout(1) and no gtimeout -- pytest wrapper for
 tests/test_with_timeout.sh.
 
-CI runs pytest only, so a standalone bash test is not executed by CI at all.
-This wrapper puts the Linux half in front of the gate; the macOS half is the
-`with-timeout` job in .github/workflows/macos-shell.yml, which runs the same
-harness under /bin/bash 3.2. The harness does its own masking of timeout and
-gtimeout from PATH, so both platforms mask them the same way.
+tests/test_sh_suites.py already runs the harness, as it runs every
+tests/test_*.sh, and fails it on a nonzero exit. This wrapper checks the two
+things an exit status cannot show. The macOS half is the `with-timeout` job in
+.github/workflows/macos-shell.yml, which runs the same harness under /bin/bash
+3.2. The harness masks timeout and gtimeout from PATH itself, so both platforms
+mask them the same way.
 
-A Linux host has timeout(1), so the harness must run its oracle arm here: every
+First, the oracle arm ran. A Linux host has timeout(1), so the harness runs every
 case through the real timeout(1) as well as through the fallback. That arm is
-what proves the expected values are timeout(1)'s own, and a run without it would
-check the fallback against nothing but the harness's say-so.
+what proves the expected values are timeout(1)'s own; a run without it checks the
+fallback against nothing but the harness's say-so, and still exits 0.
 
-Asserts the PASS tally rather than rc alone. The harness exits 0 whenever nothing
-failed, which includes a run that never reached its cases.
+Second, every assertion ran. The harness exits 0 whenever nothing failed, which
+includes a run that never reached its cases, so the tally is checked against a
+floor.
 """
 
 from __future__ import annotations
