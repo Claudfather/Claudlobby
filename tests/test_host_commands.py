@@ -89,6 +89,23 @@ def test_activate_freezes_one_id_and_delegates_exact_reviewed_candidate(candidat
     assert result["data"]["activation_id"] == result["request_id"]
     assert result["data"]["recorded_activation"]["status"] == "active"
     assert result["data"]["recording"] == "committed" and result["release_id"] == release.release_id
+    upgrades = []
+
+    def upgrade(selected_root, activation_id, plan_id, install_directory):
+        upgrades.append((selected_root, activation_id, plan_id, install_directory))
+        with state.locked_activation(root) as store:
+            store.prepare(activation_id, plan, recovery_release_id=release.release_id,
+                          source_release_id=release.release_id, enrollment_digest="1" * 64)
+            for step in state.STEPS:
+                store.begin(activation_id, step)
+                record = (store.select(activation_id) if step == "selection_switched" else
+                          store.complete(activation_id, step, evidence_digest="2" * 64))
+        return record
+
+    monkeypatch.setattr(activation, "upgrade_activation", upgrade)
+    second = call(capsys, argv)
+    assert upgrades == [(root, second["request_id"], plan.plan_id, directory)]
+    assert second["data"]["upgrade_supported"] is True
 
 
 def test_explicit_first_adoption_routes_to_legacy_owner_without_changing_cold_default(
@@ -167,6 +184,7 @@ def test_host_status_distinguishes_absent_active_and_interrupted_recorded_state(
     argv = ["--root", str(root), "host", "status", "--json"]
     active = call(capsys, argv)
     assert active["data"]["recorded_status"] == "active" and active["data"]["runtime_observation"] == "unknown"
+    assert active["data"]["upgrade_supported"] is True
     assert active["data"]["activation_errors"] == [] and snapshot(root) == before
     with state.locked_activation(root) as store:
         store.prepare("interrupted", plan, recovery_release_id=release.release_id, enrollment_digest="1" * 64)
@@ -175,6 +193,7 @@ def test_host_status_distinguishes_absent_active_and_interrupted_recorded_state(
     pending = call(capsys, argv, 4)
     assert pending["data"]["recorded_status"] == "incomplete"
     assert pending["data"]["selected_activation"]["status"] == "active"
+    assert pending["data"]["upgrade_supported"] is False
     assert pending["data"]["unfinished_activations"][0]["pending_step"] == "producers_paused"
     assert snapshot(root) == before
     (root / "state/activations/torn").mkdir()

@@ -1,10 +1,12 @@
 """Cold-host activation with real durable owners and a private native manager."""
 
 from copy import deepcopy
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
 import plistlib
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -20,7 +22,8 @@ from claudlobby.migration_apply import read_migration
 from claudlobby.plane.db import db_file
 from claudlobby.plane.identity import resolve
 from claudlobby.plane.ids import ensure_host_uid
-from claudlobby.releases import seal_release
+from claudlobby.releases import MANIFEST, release_path, seal_release
+from claudlobby.supervision_inventory import FileSnapshot
 from tests.test_releases import installed
 from tests.test_task_audit import _insert
 
@@ -189,14 +192,16 @@ def cold(installed, monkeypatch, tmp_path):
                              ("claudlobby-keepalive", "producers", None)):
         working = root / "runtime/bots" / bot if bot else root
         destination = working if bot else root / "runtime/_host/timers"
+        unit_env = {**env, **({"TMUX_TMPDIR": "/tmp"} if bot else {})}
         command = ([str(release.native_path / "start-bot.sh"), str(working)] if bot else
                    [str(release.native_path / "keepalive-all.sh")] if phase == "producers" else
                    [str(release.cli_path), "plane", "daemon"])
-        argv = admission.wrap_unit_argv(env, unit=stem, phase=phase,
+        argv = admission.wrap_unit_argv(unit_env, unit=stem, phase=phase,
                                         mode="oneshot" if phase == "producers" else "exec", argv=command)
         files = {stem + ".plist": (plistlib.dumps({"Label": stem, "WorkingDirectory": str(working),
-                    "EnvironmentVariables": env, "ProgramArguments": list(argv)}), 0o644),
+                    "EnvironmentVariables": unit_env, "ProgramArguments": list(argv)}), 0o644),
                  stem + ".service": ((f"[Service]\nWorkingDirectory={working}\n"
+                    + ("Environment=TMUX_TMPDIR=/tmp\n" if bot else "") +
                     f"ExecStart={admission.unit_systemd_command(argv)}\n" +
                     ("" if phase == "producers" else "[Install]\nWantedBy=default.target\n")).encode(), 0o644)}
         if phase == "producers":
@@ -257,6 +262,66 @@ def test_cold_bootstrap_uses_real_sql_config_and_serial_starts_before_timers(col
     with pytest.raises(state.ActivationError, match="existing release selection"):
         activation.bootstrap_activation(root, "again", plan.plan_id, host.directory, adapter=host)
     assert host.starts == before
+
+
+def test_upgrade_binds_applied_selected_plan_as_exact_source(cold, monkeypatch):
+    root, source, source_plan, host = cold
+    activation.bootstrap_activation(root, "cold", source_plan.plan_id, host.directory, adapter=host)
+    # An active plan's original before-state is stale by construction. Its
+    # retained generated unit bytes are the source enrollment authority.
+    with pytest.raises(ValueError, match="generated destination changed"):
+        source_plan.check_fresh()
+    for platform in ("Darwin", "Linux"):
+        declaration = next(d for d, _ in planned_units(source_plan, platform)
+                           if d.bot == "manager" and d.source.suffix in (".plist", ".service"))
+        assert "TMUX_TMPDIR" not in dict(declaration.environment)
+        installed = FileSnapshot.read(declaration.source)
+        environment = {**dict(declaration.environment), "TMUX_TMPDIR": "/tmp"}
+        unit = SimpleNamespace(declaration=declaration, installed=(installed,),
+                               properties=(("Environment", " ".join(
+                                   f"{key}={shlex.quote(value)}" for key, value in environment.items())),))
+        assert activation._original_bot_tmpdir(unit) == "/tmp"
+
+    inputs = replace(source.inputs, source_revision="c" * 40)
+    directory = release_path(root, inputs.release_id)
+    shutil.copytree(source.directory, directory)
+    (directory / MANIFEST).unlink()
+    (directory / source.paths.cli).write_text(f"#!{directory / source.paths.interpreter}\n")
+    artifact = directory / source.paths.artifact
+    metadata = json.loads(artifact.read_text())
+    metadata["source_revision"] = inputs.source_revision
+    artifact.write_text(json.dumps(metadata))
+    candidate = seal_release(root, inputs, source.paths)
+    plan = ConfigPlanBuilder(root, candidate.release_id, candidate.seal_sha256,
+                             ("example",), effects={}).seal()
+    package = SimpleNamespace(native=candidate.native_path, artifact_id=candidate.inputs.artifact_id)
+    host.package = package
+    monkeypatch.setattr(activation, "get_resources", lambda: package)
+    monkeypatch.setattr(admission.RuntimeIdentity, "current", classmethod(lambda cls:
+        admission.RuntimeIdentity(candidate.cli_path, candidate.native_path, candidate.inputs.artifact_id)))
+    monkeypatch.setattr(activation.sys, "executable", str(directory / candidate.paths.interpreter))
+    observed = []
+
+    class SeenSource(Exception):
+        pass
+
+    def enrollment(root_arg, declarations, **kwargs):
+        observed.append((root_arg, declarations, kwargs))
+        raise SeenSource
+
+    monkeypatch.setattr(activation, "collect_enrollment", enrollment)
+    with pytest.raises(SeenSource):
+        activation.upgrade_activation(root, "upgrade", plan.plan_id, host.directory, adapter=host)
+    assert len(observed) == 1 and observed[0][0] == root
+    assert observed[0][2]["legacy_source"] is False
+    assert {declaration.release_id for declaration in observed[0][1]} == {source.release_id}
+    assert {declaration.source.name for declaration in observed[0][1]} == {
+        "claudlobby-plane-daemon.service", "com.example.manager.service",
+        "com.example.worker.service", "claudlobby-keepalive.service",
+        "claudlobby-keepalive.timer",
+    }
+    assert state.read_selection(root)["release_id"] == source.release_id
+    assert not (root / "state/activations/upgrade").exists()
 
 
 @pytest.mark.parametrize("failure, pending", [("ingest", "ingest_started"), ("worker", "bots_started"),

@@ -1,6 +1,6 @@
-"""Cold-host and explicit first-adoption activation through durable owners.
+"""Cold-host, first-adoption and selected-release activation through durable owners.
 
-No automatic upgrade, retry, rollback or native discovery fallback. A failed
+No automatic retry, rollback or native discovery fallback. A failed
 begun step remains pending for explicit recovery. The supplied root, reviewed
 plan and sealed executing release are mandatory.
 """
@@ -22,7 +22,7 @@ from .activation_identity import identity_bindings_from_registry
 from . import activation_enrollment as enrollment, activation_units as units, config_install
 from .activation_runtime import BOT_READY_KINDS, assert_quiescent, start_unit
 from .config_plan import path_state, read_plan
-from .config_units import planned_units
+from .config_units import current_declarations, planned_units
 from .migration_apply import apply_migration
 from .migration_plan import build_migration_manifest
 from .plane.db import db_file
@@ -30,7 +30,8 @@ from .releases import read_release
 from .resources import get_resources
 from .runtime_admission import RuntimeIdentity, validate_unit_admission
 from .supervision_inventory import (Adapter, InventoryError, UnitDeclaration,
-                                    _catalog, _darwin_source, collect_enrollment)
+                                    _catalog, _darwin_source, _environment,
+                                    collect_enrollment)
 
 
 def _digest(value) -> str:
@@ -299,12 +300,35 @@ def bootstrap_activation(root: Path, activation_id: str, plan_id: str,
             "watchdog_ticks": "admitted only after active", "user_manager_startup": "host prerequisite"}))
 
 
+def _original_bot_tmpdir(unit) -> str:
+    """Read the original bot's private socket directory from its frozen unit."""
+    declaration = unit.declaration
+    if len(unit.installed) != 1:
+        raise ActivationError("original bot has no exact installed launch definition")
+    if declaration.source.suffix == ".plist":
+        original = _darwin_source(unit.installed[0].content)
+        if (original["label"] != declaration.source.stem
+                or original["directory"] != str(declaration.working_directory)):
+            raise ActivationError("original bot launch definition differs from its declared owner")
+        environment = original["environment"]
+    elif declaration.source.suffix == ".service":
+        environment = _environment(dict(unit.properties).get("Environment", ""))
+    else:
+        raise ActivationError("original bot has no supported launch definition")
+    if any(environment.get(key) != value for key, value in declaration.environment):
+        raise ActivationError("original bot launch environment differs from its declared owner")
+    tmpdir = environment.get("TMUX_TMPDIR")
+    if not isinstance(tmpdir, str) or not Path(tmpdir).is_absolute():
+        raise ActivationError("original bot has no absolute private tmux directory")
+    return tmpdir
+
+
 def _legacy_bot_socket(unit, *, require_for_active=True):
     """Observe only the private server selected by this old bot unit."""
-    tmpdir = dict(unit.declaration.environment).get("TMUX_TMPDIR")
-    if (not tmpdir or not Path(tmpdir).is_absolute() or unit.declaration.bot is None
+    tmpdir = _original_bot_tmpdir(unit)
+    if (unit.declaration.bot is None
             or unit.declaration.working_directory.name != unit.declaration.bot):
-        raise ActivationError("legacy bot has no exact private tmux target")
+        raise ActivationError("original bot has no exact private tmux target")
     socket_path = Path(tmpdir) / f"tmux-{os.getuid()}" / unit.declaration.source.stem
     try:
         info = socket_path.lstat()
@@ -357,18 +381,18 @@ def _legacy_quiet(adapter, pause, phase, sockets):
                          target=unit["target"], socket_path=sockets.get(unit["target"]))
 
 
-def adopt_existing_activation(root: Path, activation_id: str, plan_id: str,
-                              install_directory: Path, *, adapter: Adapter | None = None) -> ActivationRecord:
-    """First activation of an already running, unsealed Darwin estate.
+def _running_activation(root: Path, activation_id: str, plan_id: str,
+                        install_directory: Path, *, legacy_source: bool,
+                        adapter: Adapter | None = None) -> ActivationRecord:
+    """Quiesce an enrolled estate, then install one reviewed sealed candidate.
 
-    This is forward-only. Old unit bytes and Plane data are preserved by the
-    existing config/migration journals; no old executable is represented as a
-    sealed release or promised as a rollback target. An interrupted step stays
-    pending, with writers closed until explicit forward repair.
+    First adoption has no sealed recovery floor. An upgrade binds the selected
+    active release and its saved configuration as the original owner. Both use
+    the same durable pause, migration, publication and serial start sequence.
     """
     root = Path(root).expanduser()
     if not root.is_absolute() or not root.is_dir():
-        raise ActivationError("first adoption requires an explicit existing absolute data root")
+        raise ActivationError("activation requires an explicit existing absolute data root")
     root = root.resolve()
     plan = read_plan(root, plan_id)
     release = read_release(root, plan.release_id)
@@ -377,27 +401,52 @@ def adopt_existing_activation(root: Path, activation_id: str, plan_id: str,
             or identity != RuntimeIdentity(release.cli_path, release.native_path, release.inputs.artifact_id)
             or package.native != release.native_path or package.artifact_id != release.inputs.artifact_id
             or Path(sys.executable).absolute() != release.directory / release.paths.interpreter):
-        raise ActivationError("run first adoption using the exact sealed candidate interpreter and package")
+        raise ActivationError("run activation using the exact sealed candidate interpreter and package")
     adapter = adapter if adapter is not None else Adapter(package)
     if adapter.package.native != release.native_path:
-        raise ActivationError("first-adoption adapter differs from the candidate release")
+        raise ActivationError("activation adapter differs from the candidate release")
     with locked_activation(root) as store:
-        if read_selection(root) is not None:
+        selected = read_selection(root)
+        if legacy_source and selected is not None:
             raise ActivationError("first adoption refuses an existing release selection")
+        if not legacy_source and selected is None:
+            raise ActivationError("upgrade requires an active selected release")
         for prior in (root / "state/activations").glob("*/activation.json"):
             record = read_activation(root, prior.parent.name)
-            raise ActivationError(f"existing activation {record.activation_id} requires explicit repair")
+            if record.status not in {"active", "rolled_back"}:
+                raise ActivationError(f"existing activation {record.activation_id} requires explicit repair")
+            if legacy_source:
+                raise ActivationError(f"existing activation {record.activation_id} requires explicit repair")
         plan.check_fresh()
-        declarations = _legacy_declarations(plan)
-        inventory = collect_enrollment(root, declarations, legacy_source=True,
+        source = None
+        if legacy_source:
+            declarations = _legacy_declarations(plan)
+        else:
+            previous = read_activation(root, selected["activation_id"])
+            if (previous.status != "active"
+                    or previous.body["intent"]["release_id"] != selected["release_id"]
+                    or previous.body["intent"]["plan_id"] != selected["plan_id"]
+                    or selected["release_id"] == release.release_id):
+                raise ActivationError("selected activation is incomplete or is already the candidate release")
+            source = read_release(root, selected["release_id"])
+            source_plan = read_plan(root, selected["plan_id"])
+            if (source_plan.release_id != source.release_id
+                    or source_plan.release_seal != source.seal_sha256):
+                raise ActivationError("selected configuration differs from its sealed release")
+            # A completed plan's before-state is necessarily stale after its
+            # own apply. Bind its retained unit bytes to current generated
+            # files instead; enrollment checks installed and loaded state.
+            observed_manager = _catalog(adapter.read("svc_inventory_catalog"))[0]
+            declarations = current_declarations(source_plan, observed_manager)
+        inventory = collect_enrollment(root, declarations, legacy_source=legacy_source,
                                        adapter=adapter).require_complete()
-        if inventory.manager != "Darwin":
+        if legacy_source and inventory.manager != "Darwin":
             raise ActivationError("unsealed first adoption currently supports the observed Darwin host only")
         manager, domain, directories, _, _ = _catalog(inventory.catalog)
         install_directory = Path(install_directory)
         if (not install_directory.is_absolute() or install_directory.resolve() != install_directory
                 or install_directory not in directories):
-            raise ActivationError("first-adoption install directory is not an observed native search path")
+            raise ActivationError("install directory is not an observed native search path")
         candidates = planned_units(plan, manager)
         starts = {}
         for declaration, item in candidates:
@@ -406,12 +455,16 @@ def adopt_existing_activation(root: Path, activation_id: str, plan_id: str,
                     validate_unit_admission(release, declaration, item, plan.blob(item["sha256"])))
         rank, contexts = _roster(plan, candidates, package)
         phases = _legacy_phase_membership(plan, inventory)
+        tmpdirs = {unit.target: _original_bot_tmpdir(unit) for unit in inventory.units
+                   if unit.installed and unit.declaration.scope == "bot"}
         for unit in inventory.units:
             if unit.installed and adapter.call("svc_activation_assert_external",
                     unit.installed[0].path, unit.target, str(os.getpid())).returncode:
-                raise ActivationError("first-adoption caller is hosted or native ownership is unknown")
-        store.prepare(activation_id, plan, recovery_release_id=release.release_id,
-                      enrollment_digest=inventory.digest, legacy_source=True)
+                raise ActivationError("activation caller is hosted or native ownership is unknown")
+        store.prepare(activation_id, plan,
+                      recovery_release_id=source.release_id if source else release.release_id,
+                      source_release_id=source.release_id if source else None,
+                      enrollment_digest=inventory.digest, legacy_source=legacy_source)
         config_install.prepare_config(plan, activation_id)
         pause = units.prepare_unit_pause(store, activation_id, inventory, phases, adapter=adapter)
         store.begin(activation_id, "producers_paused")
@@ -431,7 +484,7 @@ def adopt_existing_activation(root: Path, activation_id: str, plan_id: str,
             if present and adapter.call("svc_activation_handoff",
                                         unit.declaration.working_directory,
                                         unit.declaration.source.stem,
-                                        dict(unit.declaration.environment)["TMUX_TMPDIR"], timeout=45).returncode:
+                                        tmpdirs[unit.target], timeout=45).returncode:
                 raise ActivationError("legacy bot handoff did not complete")
         store.complete(activation_id, "sessions_handed_off", evidence_digest=_digest(
             {"old_bots": sorted(sockets), "handoff": "existing-door-attempted-or-private-server-absent"}))
@@ -453,7 +506,7 @@ def adopt_existing_activation(root: Path, activation_id: str, plan_id: str,
                 response = adapter.call("svc_activation_stop_private_server",
                                         declaration["working_directory"],
                                         Path(declaration["source"]).stem,
-                                        dict(declaration["environment"])["TMUX_TMPDIR"])
+                                        tmpdirs[unit["target"]])
                 if response.returncode:
                     raise ActivationError("legacy private bot server did not stop")
         _legacy_quiet(adapter, pause, "bots", sockets)
@@ -465,9 +518,9 @@ def adopt_existing_activation(root: Path, activation_id: str, plan_id: str,
             raise ActivationError("old ingest still answers after native pause")
         store.complete(activation_id, "ingest_quiesced", evidence_digest=evidence.digest)
         store.begin(activation_id, "queues_classified")
-        migration = build_migration_manifest(root, None, release)
+        migration = build_migration_manifest(root, source, release)
         if migration.blockers:
-            raise ActivationError("legacy data or pending queues block first adoption: " + "; ".join(migration.blockers))
+            raise ActivationError("data or pending queues block activation: " + "; ".join(migration.blockers))
         from .activation_handoffs import persist_canonical_handoffs
         bot_dirs = {(unit.declaration.fleet, unit.declaration.bot): unit.declaration.working_directory
                     for unit in inventory.units if unit.installed and unit.declaration.scope == "bot"}
@@ -538,4 +591,18 @@ def adopt_existing_activation(root: Path, activation_id: str, plan_id: str,
         enabled = enrollment.verify_candidate_enablement(store, activation_id, "producers", adapter=adapter)
         return store.complete(activation_id, "producers_resumed", evidence_digest=_digest({
             "publication": publication.digest, "native_starts": results, "enablement": enabled,
-            "legacy_source": True, "watchdog_ticks": "admitted only after active"}))
+            "legacy_source": legacy_source, "watchdog_ticks": "admitted only after active"}))
+
+
+def adopt_existing_activation(root: Path, activation_id: str, plan_id: str,
+                              install_directory: Path, *, adapter: Adapter | None = None) -> ActivationRecord:
+    """First activation of an already running, unsealed Darwin estate."""
+    return _running_activation(root, activation_id, plan_id, install_directory,
+                               legacy_source=True, adapter=adapter)
+
+
+def upgrade_activation(root: Path, activation_id: str, plan_id: str,
+                       install_directory: Path, *, adapter: Adapter | None = None) -> ActivationRecord:
+    """Upgrade an active selected release with that seal as the recovery floor."""
+    return _running_activation(root, activation_id, plan_id, install_directory,
+                               legacy_source=False, adapter=adapter)

@@ -1,4 +1,4 @@
-"""Operator first activation and read-only recorded-state orientation.
+"""Operator activation and read-only recorded-state orientation.
 
 The activation owner holds the lock and owns every effect. This adapter neither
 retries nor recovers an interrupted activation.
@@ -39,7 +39,7 @@ def _status(args, root):
             "selected_activation": selected, "unfinished_activations": evidence["unfinished_activations"],
             "activation_errors": evidence["activation_errors"], "selection_error": evidence["selection_error"],
             "releases": evidence["items"], "runtime_observation": "unknown",
-            "bootstrap_eligibility": "not_checked", "upgrade_supported": False, "recovery_supported": False}
+            "bootstrap_eligibility": "not_checked", "upgrade_supported": state == "active", "recovery_supported": False}
     if problem:
         raise CommandFailure(problem.code, f"{problem.code}: recorded host state is {state}",
                              data=data, release_id=executing, hint=_hint(root))
@@ -94,8 +94,10 @@ def _activate(args, root):
             data=data, release_id=executing,
             hint=f"use this plan's sealed candidate CLI; inspect claudlobby --root {shlex.quote(str(root))} host releases")
     try:
-        from ..activation import adopt_existing_activation, bootstrap_activation
-        activate = adopt_existing_activation if args.adopt_existing else bootstrap_activation
+        from ..activation import adopt_existing_activation, bootstrap_activation, upgrade_activation
+        from ..activation_state import read_selection
+        activate = (adopt_existing_activation if args.adopt_existing else
+                    upgrade_activation if read_selection(root) is not None else bootstrap_activation)
         record = activate(root, args.activation_id, plan.plan_id, directory)
     except Exception as exc:
         from ..activation_state import ActivationError
@@ -107,9 +109,9 @@ def _activate(args, root):
             # operation and rc from the product-owned refusal envelope.
             refusal = re.match(r"\A(svc_activation_[a-z_]+) refused \(([0-9]{1,3})\):", str(exc))
             code, message = "conflict", (f"conflict: {refusal[1]} refused ({refusal[2]})"
-                                         if refusal else "conflict: first activation did not complete; inspect its pending step")
+                                         if refusal else "conflict: activation did not complete; inspect its pending step")
         elif isinstance(exc, (ValueError, RuntimeError)):
-            code, message = "conflict", "conflict: first activation did not complete; inspect its pending step"
+            code, message = "conflict", "conflict: activation did not complete; inspect its pending step"
         else:
             diagnostic = str(uuid4())
             print(f"diagnostic {diagnostic}: {type(exc).__name__}", file=sys.stderr)
@@ -124,7 +126,7 @@ def _activate(args, root):
                              release_id=executing, hint=_hint(root))
     data.update(recorded_activation=saved, recording="committed",
                 runtime_observation="readiness_checked_during_activation",
-                user_manager_startup="host_prerequisite", upgrade_supported=False, recovery_supported=False)
+                user_manager_startup="host_prerequisite", upgrade_supported=True, recovery_supported=False)
     return CommandOutput(data, executing,
         (f"Activation {args.activation_id}: recorded active; release {executing}; plan {plan.plan_id}.",))
 
