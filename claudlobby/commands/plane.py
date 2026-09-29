@@ -406,7 +406,7 @@ def cmd_plane_doctor(args) -> int:
             rung(False, "capture config", str(errors[0] if errors else exc))
         # Daemon rung (PR-B T9): three-state, evidence-based — never assume a
         # daemon SHOULD run. Serving = ok. Never-started + no socket = ok
-        # (unarmed; doors fall back to the cold CLI by design). Started
+        # (unarmed; doors stage raw input until it can be replayed). Started
         # historically but not serving = ATTENTION with the corrective command
         # (§17 direction: symptom -> exact command).
         from ..plane.daemon import probe_daemon, socket_path
@@ -439,9 +439,9 @@ def cmd_plane_doctor(args) -> int:
                  f"started {started}x historically but not serving — check:"
                  " systemctl --user status claudlobby-plane-daemon.service"
                  " (macOS: launchctl print gui/$UID/claudlobby-plane-daemon);"
-                 " doors are falling back to the cold CLI meanwhile")
+                 " doors stage raw input for daemon replay meanwhile (pending, not committed)")
         else:
-            rung(True, "daemon", "never armed (doors fall back to cold CLI)")
+            rung(True, "daemon", "never armed (doors stage raw input for daemon replay)")
         rung(True, "last ingest", str(last_ingest or "none yet"))
         # scan_spool — the same shared definition the trust panel and
         # status consume; an unreadable enumeration is a FAILING rung and a
@@ -508,8 +508,8 @@ def cmd_plane_doctor(args) -> int:
             try:
                 age = int(time.time() - wedged.stat().st_mtime)
                 rung(True, "socket breaker",
-                     f"ARMED {age}s ago — doors take the cold CLI until it"
-                     " expires. Recorded, not lost; see #1693 for the cause")
+                     f"ARMED {age}s ago — doors stage raw input until it"
+                     " expires. Pending, not committed; see #1693 for the cause")
             except OSError as exc:
                 rung(False, "socket breaker", f"UNREADABLE — {exc}")
         # The WAL (#1905). A reader holding a snapshot keeps the daemon's

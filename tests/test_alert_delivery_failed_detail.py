@@ -26,6 +26,7 @@ from tests.conftest import (
     constructed_env,
     read_fleet_events,
 )
+from tests.test_plane_events_door import _serving
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -55,9 +56,6 @@ def _host(tmp_path, *, scratch_plane_env):
     env = constructed_env(
         PATH=f"{stubs}{os.pathsep}{os.environ['PATH']}",
         HOME=tmp_path / "home",
-        # Every event is a cold emit with no daemon; a loaded host can outrun
-        # the 10s production bound and reap the row this test reads.
-        FLEET_EVENT_EMIT_TIMEOUT_S="120",
         **scratch_plane_env(root, initialize=True),
     )
     return root, env
@@ -75,7 +73,8 @@ def _fire(root, env):
 
 def test_the_rejection_leads_the_recorded_detail(tmp_path, *, scratch_plane_env):
     root, env = _host(tmp_path, scratch_plane_env=scratch_plane_env)
-    r = _fire(root, env)
+    with _serving(root, scratch_plane_env) as socket:
+        r = _fire(root, {**env, "PLANE_SOCKET": str(socket)})
     assert r.returncode == 0, r.stderr
 
     rows = [json.loads(line) for line in read_fleet_events(root).splitlines()]
@@ -107,7 +106,8 @@ def test_an_unreadable_token_file_is_a_verdict_not_a_script_error(tmp_path, *, s
     token_file = tmp_path / "chan" / ".env"
     token_file.chmod(0)
     try:
-        _fire(root, env)
+        with _serving(root, scratch_plane_env) as socket:
+            _fire(root, {**env, "PLANE_SOCKET": str(socket)})
     finally:
         token_file.chmod(0o600)
     rows, data = _failed_row(root)

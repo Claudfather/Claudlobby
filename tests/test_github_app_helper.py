@@ -30,6 +30,7 @@ from tests.conftest import (
     constructed_env,
     read_fleet_events,
 )
+from tests.test_plane_events_door import _serving
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HELPER = REPO_ROOT / "lib" / "git-credential-github-app"
@@ -216,9 +217,11 @@ class TestHelperGet:
         assert r.returncode == 0
         assert r.stdout == ""
 
-    def test_http_401_is_loud_quit_plus_event(self, app_env):
-        env = dict(app_env["env"], GITHUB_APP_STUB_MODE="http401")
-        r = _run(HELPER, env)
+    def test_http_401_is_loud_quit_plus_event(self, app_env, scratch_plane_env):
+        with _serving(app_env["root"], scratch_plane_env) as socket:
+            env = dict(app_env["env"], GITHUB_APP_STUB_MODE="http401",
+                       PLANE_SOCKET=str(socket))
+            r = _run(HELPER, env)
         assert r.returncode != 0
         assert "quit=1" in r.stdout, "hard failure must stop the helper chain (D11)"
         assert "password=" not in r.stdout
