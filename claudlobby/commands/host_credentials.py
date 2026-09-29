@@ -67,7 +67,7 @@ def _check(args) -> CommandOutput:
                           "credential_health": result.health,
                           "state_path": str(result.state_path)}, result.release_id,
                          (f"{result.fleet}: credential probe tick completed; inspect "
-                          "state/creds-check-state.json for provider status.",))
+                          f"{result.state_path} for provider status.",))
 
 
 def dispatch(args) -> CommandOutput:

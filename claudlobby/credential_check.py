@@ -52,10 +52,11 @@ def check_credentials(*, root: Path, fleet: str | None) -> CredentialCheckResult
         if destination.paths.runtime_bots.resolve() != destination.paths.runtime_bots:
             raise CredentialCheckError("fleet bot runtime is redirected")
 
+        state_path = root / "state/creds-check" / f"{destination.fleet.name}.json"
         env = {**os.environ, **native_environment(destination.paths),
                "CLAUDLOBBY_FLEET": destination.fleet.name,
                "CLAUDLOBBY_CREDS_LOG": str(root / "state/logs/creds-check.log"),
-               "CLAUDLOBBY_CREDS_STATE": str(root / "state/creds-check-state.json")}
+               "CLAUDLOBBY_CREDS_STATE": str(state_path)}
         if destination.fleet.telegram_group_chat_id:
             env["TELEGRAM_GROUP_CHAT_ID"] = str(destination.fleet.telegram_group_chat_id)
         else:
@@ -77,5 +78,4 @@ def check_credentials(*, root: Path, fleet: str | None) -> CredentialCheckResult
             # happened. Never auto-retry a possibly delivered alert.
             raise CredentialCheckError("credential probe outcome is unverified; inspect its state and log",
                                        effect_attempted=True)
-        return CredentialCheckResult(destination.fleet.name, release.release_id,
-                                     root / "state/creds-check-state.json")
+        return CredentialCheckResult(destination.fleet.name, release.release_id, state_path)

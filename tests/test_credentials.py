@@ -318,17 +318,29 @@ def test_selected_credential_check_passes_exact_fleet_and_refuses_foreign_bot(
     fleet_root.mkdir(parents=True)
     manifest = fleet_root / "fleet.yaml"
     manifest.write_text("fleet: {name: f}\n")
+    other_root = root / "local" / "g"
+    other_root.mkdir(parents=True)
+    other_manifest = other_root / "fleet.yaml"
+    other_manifest.write_text("fleet: {name: g}\n")
     paths = Paths(root=root, fleet_dir=fleet_root, package=source_package())
+    other_paths = Paths(root=root, fleet_dir=other_root, package=source_package())
     fleet = FleetConfig(name="f", manager="manager", service_prefix="test",
                         bots={name: BotConfig(bot_id=name, name=name, expertise=["x"])
                               for name in ("manager", "worker")})
     destination = SimpleNamespace(paths=paths, fleet=fleet)
+    other_fleet = FleetConfig(name="g", manager="manager", service_prefix="test",
+                              bots={"manager": BotConfig(bot_id="manager", name="manager",
+                                                         expertise=["x"])})
+    other_destination = SimpleNamespace(paths=other_paths, fleet=other_fleet)
     release_id = "r-" + "a" * 64
     release = SimpleNamespace(release_id=release_id, native_path=paths.lib)
     plan = SimpleNamespace(
-        effects={"fleet_sources": {"f": {"fleet": {"path": str(manifest)}}}},
-        inputs={str(manifest): {"state": path_state(manifest, source=True)}},
-        frozen_input=lambda source, required: (manifest, manifest.read_bytes()))
+        effects={"fleet_sources": {"f": {"fleet": {"path": str(manifest)}},
+                                   "g": {"fleet": {"path": str(other_manifest)}}}},
+        inputs={str(path): {"state": path_state(path, source=True)}
+                for path in (manifest, other_manifest)},
+        frozen_input=lambda source, required: (
+            Path(source["path"]), Path(source["path"]).read_bytes()))
 
     @contextmanager
     def admitted(root, expected_release=None):
@@ -339,7 +351,7 @@ def test_selected_credential_check_passes_exact_fleet_and_refuses_foreign_bot(
         "release_id": release_id, "plan_id": "p"})
     monkeypatch.setattr(check, "read_plan", lambda root, plan_id: plan)
     monkeypatch.setattr(check, "native_environment", lambda paths: {
-        "CLAUDLOBBY_ROOT": str(root), "FLEET_ROOT": str(fleet_root),
+        "CLAUDLOBBY_ROOT": str(root), "FLEET_ROOT": str(paths.fleet_config_dir),
         "CLAUDLOBBY_NATIVE_DIR": str(paths.lib),
         "CLAUDLOBBY_CLI": str(tmp_path / "selected-cli"),
         "CLAUDLOBBY_RELEASE_ID": release_id})
@@ -366,10 +378,20 @@ def test_selected_credential_check_passes_exact_fleet_and_refuses_foreign_bot(
                     "--bots-dir", str(paths.runtime_bots),
                     "--bot", "manager", "--bot", "worker"]
     assert kwargs["env"]["FLEET_ROOT"] == str(fleet_root)
+    assert result.state_path == root / "state/creds-check/f.json"
+    assert kwargs["env"]["CLAUDLOBBY_CREDS_STATE"] == str(result.state_path)
+    monkeypatch.setattr(check, "resolve_operation_scope", lambda **kwargs: (
+        other_destination, SimpleNamespace(bot_id="manager")) if kwargs["fleet"] == "g" else (
+        destination, SimpleNamespace(bot_id="manager")))
+    other_result = check.check_credentials(root=root, fleet="g")
+    assert other_result.state_path == root / "state/creds-check/g.json"
+    assert calls[1][1]["env"]["CLAUDLOBBY_CREDS_STATE"] == str(other_result.state_path)
+    assert calls[1][1]["env"]["FLEET_ROOT"] == str(other_root)
+    assert other_result.state_path != result.state_path
     manifest.write_text("fleet: {name: other}\n")
     with pytest.raises(check.CredentialCheckError, match="source changed"):
         check.check_credentials(root=root, fleet="f")
-    assert len(calls) == 1, "a changed source must be refused before another probe"
+    assert len(calls) == 2, "a changed source must be refused before another probe"
 
 
 def test_public_credential_check_reports_tick_not_health(estate, monkeypatch, capsys):
@@ -382,12 +404,16 @@ def test_public_credential_check_reports_tick_not_health(estate, monkeypatch, ca
     monkeypatch.setattr(credential_check, "check_credentials", lambda **kwargs:
                         SimpleNamespace(fleet="t", release_id="r-selected",
                                         checks="tick_completed", health="unobserved",
-                                        state_path=root / "state/creds-check-state.json"))
+                                        state_path=root / "state/creds-check/t.json"))
     assert main(["--root", str(root), "--fleet", "t", "host", "credentials",
                  "check", "--json"]) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["command"] == "host.credentials.check"
     assert result["data"]["credential_health"] == "unobserved"
+    assert result["data"]["state_path"] == str(root / "state/creds-check/t.json")
+    assert main(["--root", str(root), "--fleet", "t", "host", "credentials",
+                 "check"]) == 0
+    assert str(root / "state/creds-check/t.json") in capsys.readouterr().out
 
 
 class TestTierResolution:
