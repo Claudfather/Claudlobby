@@ -87,6 +87,24 @@ def _selection(root: Path):
         raise CommandFailure("conflict", "conflict: host release selection cannot be verified") from exc
 
 
+def _verified_activation_journal(root: Path, path: Path) -> bool:
+    """Only the two retained ConfigInstall journal owners are not root records."""
+    record = path / "activation.json"
+    if (record.exists() or record.is_symlink()
+            or not re.fullmatch(r"(?:units|enrollment)-[0-9a-f]{64}", path.name)):
+        return False
+    from ..config_install import read_config_install
+    from ..config_plan import PlanError, read_plan
+
+    try:
+        journal = read_config_install(root, path.name)
+        plan = read_plan(root, journal.plan_id)
+        owner = "activation-units-v1" if path.name.startswith("units-") else "activation-enrollment-v1"
+        return plan.effects.get("owner") == owner
+    except (PlanError, OSError, ValueError):
+        return False  # Corrupt or unrelated directories remain visible blockers.
+
+
 def _host_releases(args, root: Path) -> CommandOutput:
     from ..activation_state import ActivationError, read_activation
     from ..releases import ReleaseError, read_release
@@ -128,21 +146,9 @@ def _host_releases(args, root: Path) -> CommandOutput:
         for path in activation_dir.iterdir() if activation_dir.exists() else ():
             if not path.is_dir():
                 continue
-            # Parking/publication journals share this store, but are not root
-            # activation records. Only a verified known owner may be excluded;
-            # a missing/torn activation.json at any other name stays visible.
-            if (not (path / "activation.json").exists() and not (path / "activation.json").is_symlink()
-                    and re.fullmatch(r"(?:units|enrollment)-[0-9a-f]{64}", path.name)):
-                from ..config_install import read_config_install
-                from ..config_plan import PlanError, read_plan
-                try:
-                    journal = read_config_install(root, path.name)
-                    plan = read_plan(root, journal.plan_id)
-                    owner = "activation-units-v1" if path.name.startswith("units-") else "activation-enrollment-v1"
-                    if plan.effects.get("owner") == owner:
-                        continue
-                except (PlanError, OSError, ValueError):
-                    pass
+            # Parking/publication journals share this store with root records.
+            if _verified_activation_journal(root, path):
+                continue
             names.add(path.name)
     except OSError:
         names = set()
@@ -333,7 +339,8 @@ def _migration_status(args, root: Path) -> CommandOutput:
             raise CommandFailure("not_found", f"activation not found: {args.activation}")
         names = [args.activation]
     else:
-        names = [p.name for p in sorted(directory.iterdir()) if p.is_dir()] if directory.exists() else []
+        names = [p.name for p in sorted(directory.iterdir())
+                 if p.is_dir() and not _verified_activation_journal(root, p)] if directory.exists() else []
     for name in names:
         try:
             activation = read_activation(root, name)

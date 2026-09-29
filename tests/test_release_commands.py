@@ -285,6 +285,8 @@ def test_converter_copy_failure_keeps_item_status_without_exception_text(monkeyp
 
 
 def test_migration_cli_preview_is_read_only_and_status_separates_recorded_progress(releases, capsys):
+    from claudlobby import activation_enrollment, activation_units, config_install
+
     root, _, release = releases
     _database(root).close()
     argv = ["--root", str(root), "migration", "plan", "--source-release", release.release_id,
@@ -310,6 +312,14 @@ def test_migration_cli_preview_is_read_only_and_status_separates_recorded_progre
             store.complete("upgrade", step, evidence_digest=(
                 manifest.manifest_id[2:] if step == "queues_classified" else "2" * 64))
         migration_apply.apply_migration(store, "upgrade", manifest)
+        for name, owner, phase in (
+            (activation_units.journal_id("upgrade", "producers"), "activation-units-v1", "producers"),
+            (activation_enrollment.journal_id("upgrade", "directories"),
+             "activation-enrollment-v1", "directories"),
+        ):
+            journal_plan = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, (),
+                effects={"owner": owner, "activation_id": "upgrade", "phase": phase}).seal()
+            config_install.prepare_config(journal_plan, name)
     before = _snapshot(root)
     complete, _ = _call(capsys, status_argv)
     assert complete["data"]["database"]["user_version"] == SCHEMA_USER_VERSION
@@ -324,3 +334,9 @@ def test_migration_cli_preview_is_read_only_and_status_separates_recorded_progre
     assert extra <= {"state/plane/plane.db-wal", "state/plane/plane.db-shm"}
     if "state/plane/plane.db-wal" in extra:
         assert after["state/plane/plane.db-wal"] == b""
+    broken = root / "state/activations" / ("units-" + "f" * 64)
+    broken.mkdir()
+    blocked, _ = _call(capsys, status_argv, 4)
+    assert {item["activation_id"] for item in blocked["data"]["items"]} == {"upgrade", broken.name}
+    assert blocked["data"]["blockers"] == [
+        f"activation migration evidence cannot be verified: {broken.name}"]
