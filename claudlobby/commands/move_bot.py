@@ -1,497 +1,312 @@
-"""Move-bot command: move a bot between fleets — copy state, re-enroll service."""
+"""Cold bot relocation through the selected configuration and activation owners."""
 
 from __future__ import annotations
 
-import json as _json
-import logging
+from dataclasses import dataclass
+import json
 import os
-import platform
-import re
-import shutil
-import subprocess
 from pathlib import Path
+import shutil
+import stat
+import subprocess
+from uuid import uuid4
 
-from ..composer import compose_bot
-from ..context import native_environment, resolve_paths
-from ..paths import Paths, _find_fleet_dir, _iter_fleet_dirs, tmux_socket_for_bot
-from ._helpers import _load_env, _load_fleet_or_exit, _validation_gate
-
-log = logging.getLogger("claudlobby")
+from ..command_result import CommandFailure, CommandOutput
 
 
-def cmd_move_bot(args) -> int:
-    """Move a bot between fleets — copies state, re-enrolls service."""
-    target_fleet_name: str = args.to
-    bot_name: str = args.bot
-    apply: bool = args.apply
-    cleanup: bool = args.cleanup_source
-    force: bool = args.force
+@dataclass(frozen=True)
+class Move:
+    root: Path
+    source: object
+    target: object
+    source_dir: Path
+    target_dir: Path
+    release_id: str
+    install_directory: Path
 
-    # --- Resolve claudlobby root ---
-    host_paths = resolve_paths(root=Path(args.root) if args.root else None)
-    package = host_paths.package
-    root = host_paths.root
-    local_dir = root / "local"
-    if not local_dir.is_dir():
-        log.error("no local/ directory at %s — nothing to scan", root)
-        return 1
 
-    # --- Auto-detect source fleet ---
-    # Fleets resolve at flat (local/<fleet>/) OR nested
-    # (local/<system>/<fleet>/) depth throughout.
-    source_fleet_name = getattr(args, "from_fleet", None)
-    if source_fleet_name:
+def declared_paths(root, package):
+    from ..paths import Paths, _iter_fleet_dirs
+
+    directories = ([root] if (root / "fleet.yaml").is_file() else [])
+    directories.extend(path for path in _iter_fleet_dirs(root / "local")
+                       if (path / "fleet.yaml").is_file())
+    return [Paths(root, package=package,
+                  fleet_dir=None if directory == root else directory)
+            for directory in directories]
+
+
+def source_wip(directory):
+    projects = directory / "projects"
+    if not projects.is_dir():
+        return
+    for repo in sorted(projects.iterdir()):
+        if not (repo / ".git").exists():
+            continue
         try:
-            src_fleet_dir = _find_fleet_dir(local_dir, source_fleet_name)
-        except ValueError as e:
-            log.error("%s", e)
-            return 1
-        src_bot_dir = (
-            src_fleet_dir / "runtime" / "bots" / bot_name if src_fleet_dir else None
-        )
-        if src_bot_dir is None or not src_bot_dir.is_dir():
-            log.error(
-                "bot '%s' not found in fleet '%s' at %s",
-                bot_name,
-                source_fleet_name,
-                src_bot_dir or local_dir / source_fleet_name / "runtime" / "bots" / bot_name,
-            )
-            return 1
-    else:
-        candidates = []
-        for fleet_dir in _iter_fleet_dirs(local_dir):
-            bot_dir = fleet_dir / "runtime" / "bots" / bot_name
-            if bot_dir.is_dir() and (bot_dir / "bot.conf").is_file():
-                candidates.append((fleet_dir.name, fleet_dir, bot_dir))
-        if not candidates:
-            log.error("bot '%s' not found in any fleet under %s", bot_name, local_dir)
-            return 1
-        if len(candidates) > 1:
-            fleets = ", ".join(c[0] for c in candidates)
-            log.error(
-                "bot '%s' exists in multiple fleets (%s) — use --from to disambiguate",
-                bot_name,
-                fleets,
-            )
-            return 1
-        source_fleet_name, src_fleet_dir, src_bot_dir = candidates[0]
+            result = subprocess.run(["git", "status", "--porcelain"], cwd=repo,
+                                    capture_output=True, text=True, timeout=20)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise CommandFailure("unavailable", "source project WIP cannot be checked") from exc
+        if result.returncode or result.stdout.strip():
+            raise CommandFailure("conflict", f"source project has uncommitted or unknown WIP: {repo}")
 
-    if source_fleet_name == target_fleet_name:
-        log.error("source and target fleet are the same (%s)", source_fleet_name)
-        return 1
 
-    # A move never chooses a successor. Load the source through the same
-    # context/config owner as the target before stopping or copying anything.
-    # The operator may already have removed this bot's source stanza, but the
-    # remaining manifest must explicitly name a valid local manager.
-    source_fleet, _source_md = _load_fleet_or_exit(
-        Paths(root=root, fleet_dir=src_fleet_dir, package=package)
-    )
-    if source_fleet.manager == bot_name:
-        log.error(
-            "bot '%s' is the declared manager of source fleet '%s' — explicitly "
-            "update fleet.manager and any teams to another existing local bot "
-            "in %s before retrying; move-bot cannot choose a replacement",
-            bot_name,
-            source_fleet_name,
-            src_fleet_dir / "fleet.yaml",
-        )
-        return 1
+def preflight(args):
+    from ..active_config import context_from_plan
+    from ..activation_enrollment import selected_bot_entry
+    from ..activation_state import read_selection
+    from ..config_plan import read_plan
+    from ..context import load_context, resolve_paths
+    from ..releases import read_release
+    from ..supervision_inventory import Adapter, _catalog
+    from ..validator import validate
 
-    # --- Verify target fleet has the bot stanza ---
+    if args.root is None or getattr(args, "seed", False):
+        raise CommandFailure("invalid_argument", "bot move requires an explicit active host --root")
+    if (not isinstance(args.bot, str) or not args.bot or Path(args.bot).name != args.bot
+            or args.bot in {".", ".."}):
+        raise CommandFailure("invalid_argument", "supply one exact bot ID")
+    host = resolve_paths(root=args.root)
+    root, package = host.root, host.package
+    selected = read_selection(root)
+    if selected is None:
+        raise CommandFailure("conflict", "bot move requires an active selected release")
+    plan = read_plan(root, selected["plan_id"])
+    release = read_release(root, selected["release_id"])
+    if (plan.release_id != release.release_id or plan.release_seal != release.seal_sha256
+            or package.native != release.native_path
+            or package.artifact_id != release.inputs.artifact_id):
+        raise CommandFailure("release_mismatch", "selected bot move release or plan differs")
+
+    active = []
+    for name in plan.fleets:
+        context = context_from_plan(plan, name, package=package)
+        if args.bot in context.fleet.bots:
+            active.append(context)
+    sources = active
+    if args.from_fleet:
+        sources = [item for item in sources if item.fleet.name == args.from_fleet]
+    if len(sources) != 1:
+        raise CommandFailure("conflict", "select one active source fleet with --from"
+                             if sources else "bot is not in the active source roster")
+    source = sources[0]
+    if len(active) != 1:
+        raise CommandFailure("conflict", "bot is active in more than one fleet")
+    if source.fleet.name == args.to:
+        raise CommandFailure("invalid_argument", "source and target fleets are the same")
+    authored_source = load_context(source.paths).fleet
+    if args.bot in authored_source.bots or authored_source.manager == args.bot:
+        raise CommandFailure("conflict", "remove bot from source fleet.yaml and declare a replacement manager first")
+
+    candidates = [load_context(paths) for paths in declared_paths(root, package)]
+    targets = [context for context in candidates if context.fleet.name == args.to]
+    if len(targets) != 1:
+        raise CommandFailure("not_found" if not targets else "conflict",
+                             "target fleet declaration is missing or ambiguous")
+    target = targets[0]
+    if args.bot not in target.fleet.bots:
+        raise CommandFailure("conflict", "declare bot in target fleet.yaml before moving it")
+    if any(args.bot in context.fleet.bots for context in candidates
+           if context.fleet.name not in {source.fleet.name, target.fleet.name}):
+        raise CommandFailure("conflict", "bot is declared in another authored fleet")
+    for context in candidates:
+        if validate(context.fleet, context.paths).has_errors:
+            raise CommandFailure("conflict", "authored fleet validation failed")
+
+    source_dir = source.paths.bot_runtime(args.bot)
+    target_dir = target.paths.bot_runtime(args.bot)
+    if (not source_dir.is_dir() or source_dir.is_symlink()
+            or not (source_dir / "bot.conf").is_file()
+            or target_dir.is_symlink() or target_dir == source_dir):
+        raise CommandFailure("conflict", "source or target bot directory is missing or redirected")
+    source_wip(source_dir)
+    if getattr(args, "apply", False):
+        from .releases import _executing_release
+        if _executing_release(root) != release.release_id:
+            raise CommandFailure("release_mismatch", "run bot move with the selected sealed release CLI")
+        check_copy_destinations(source_dir, target_dir)
+    manager, *_ = _catalog(Adapter(package).read("svc_inventory_catalog"))
+    entry = selected_bot_entry(root, source.fleet.name, args.bot, manager)
+    move = Move(root, source, target, source_dir, target_dir,
+                release.release_id, Path(entry["installed"]).parent)
+    if getattr(args, "apply", False):
+        update_access(move, args.bot, dry_run=True)
+    return move
+
+
+def no_active_assignment(move, bot):
+    from ..activation_identity import read_selected_identity_bindings
+    from ..plane.db import connect_ro, db_file
+    from ..task_queries import list_tasks
+
+    bindings = read_selected_identity_bindings(move.root, move.source.fleet.name,
+                                               package=move.source.paths.package)
+    with connect_ro(db_file(move.root)) as conn:
+        page = list_tasks(conn, fleet_uid=bindings["fleet_uid"],
+                          bot_uid=bindings["bots"][bot], state="open", limit=1)
+    if page.issues:
+        raise CommandFailure("conflict", "source assignment history is unresolved")
+    if page.items:
+        raise CommandFailure("conflict", "source bot has an open assignment; close or reassign it before moving")
+
+
+def source_session(move, bot, *, force):
+    from ..supervision import build_supervision_spec
+    from ..supervision_inventory import Adapter
+
+    spec = build_supervision_spec(move.source.fleet.bots[bot], move.source.fleet,
+                                  move.source.paths)
+    state = Adapter(move.source.paths.package).read(
+        "svc_bot_session_observe", spec.bot_dir, spec.label, spec.environment["TMUX_TMPDIR"]
+    ).strip()
+    if state not in {"ready", "absent"}:
+        raise CommandFailure("unavailable", "source private session state is unknown")
+    if state == "ready" and not force:
+        raise CommandFailure("conflict", "source bot has a live session; use --force after capturing its work")
+
+
+def check_copy_destinations(source_dir, target_dir):
+    if (target_dir / ".env").is_symlink() or (target_dir / "memory").is_symlink():
+        raise CommandFailure("conflict", "target retained data is redirected")
+    temporary = target_dir / ".memory_tmp"
+    if temporary.exists() or temporary.is_symlink():
+        raise CommandFailure("conflict", "a prior memory copy is incomplete")
+    if (source_dir / ".env").is_symlink() or (source_dir / "memory").is_symlink():
+        raise CommandFailure("conflict", "source retained data is redirected")
+
+
+def copy_retained(move):
+    copied = []
+    source_env = move.source_dir / ".env"
+    source_memory = move.source_dir / "memory"
+    move.target_dir.mkdir(parents=True, exist_ok=True)
+    if source_env.is_file():
+        destination = move.target_dir / ".env"
+        if destination.is_symlink():
+            raise CommandFailure("conflict", "target .env is redirected")
+        shutil.copy2(source_env, destination)
+        destination.chmod(0o600)
+        copied.append(str(destination))
+    if source_memory.is_dir() and any(source_memory.iterdir()):
+        destination = move.target_dir / "memory"
+        temporary = move.target_dir / ".memory_tmp"
+        if destination.is_symlink() or temporary.exists() or temporary.is_symlink():
+            raise CommandFailure("conflict", "target memory is redirected or a prior copy is incomplete")
+        shutil.copytree(source_memory, temporary, symlinks=True)
+        if destination.exists():
+            shutil.rmtree(destination)
+        temporary.rename(destination)
+        copied.append(str(destination))
+    return copied
+
+
+def update_access(move, bot, *, dry_run=False):
+    from ..composer import telegram_channel_rel, telegram_handle
+
+    source_handle = telegram_handle(move.source.fleet.bots[bot])
+    target_handle = telegram_handle(move.target.fleet.bots[bot])
+    if source_handle != target_handle:
+        raise CommandFailure("conflict", "moving between Telegram handles requires explicit channel repair")
+    if source_handle is None or not move.target.fleet.telegram_group_chat_id:
+        return None
+    path = Path.home() / telegram_channel_rel(source_handle) / "access.json"
+    if not path.exists() and not path.is_symlink():
+        return None
+    info = path.lstat()
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+            or path.parent.is_symlink()):
+        raise CommandFailure("conflict", "source Telegram access file is not owned or ordinary")
     try:
-        target_fleet_dir = _find_fleet_dir(local_dir, target_fleet_name)
-    except ValueError as e:
-        log.error("%s", e)
-        return 1
-    if target_fleet_dir is None:
-        log.error(
-            "target fleet '%s' not found at %s",
-            target_fleet_name,
-            local_dir / target_fleet_name,
-        )
-        return 1
-    target_fleet_yaml = target_fleet_dir / "fleet.yaml"
-    if not target_fleet_yaml.is_file():
-        log.error("no fleet.yaml in target fleet '%s'", target_fleet_name)
-        return 1
-    target_fleet, _md = _load_fleet_or_exit(
-        Paths(root=root, fleet_dir=target_fleet_dir, package=package)
-    )
-    if bot_name not in target_fleet.bots:
-        log.error(
-            "bot '%s' not in target fleet.yaml — add the stanza first, then retry",
-            bot_name,
-        )
-        return 1
+        access = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CommandFailure("conflict", "source Telegram access file cannot be read") from exc
+    if not isinstance(access, dict) or not isinstance(access.get("groups", {}), dict):
+        raise CommandFailure("conflict", "source Telegram access groups are malformed")
+    groups = access.get("groups", {})
+    source_chat = move.source.fleet.telegram_group_chat_id
+    target_chat = move.target.fleet.telegram_group_chat_id
+    if set(groups) - {source_chat, target_chat}:
+        raise CommandFailure("conflict", "Telegram access contains another group; resolve it explicitly")
+    prior = groups.get(source_chat, groups.get(target_chat, {}))
+    if not isinstance(prior, dict):
+        raise CommandFailure("conflict", "source Telegram group access is malformed")
+    access["groups"] = {target_chat: {
+        "requireMention": prior.get("requireMention", True),
+        "allowFrom": prior.get("allowFrom", []),
+    }}
+    if not dry_run:
+        path.write_text(json.dumps(access, indent=2) + "\n")
+    return str(path)
 
-    # --- Pre-flight: check for WIP ---
-    projects_dir = src_bot_dir / "projects"
-    if projects_dir.is_dir():
-        for repo in sorted(projects_dir.iterdir()):
-            if not (repo / ".git").is_dir():
-                continue
-            result = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=repo,
-                capture_output=True,
-                text=True,
-            )
-            if result.stdout.strip():
-                log.error(
-                    "bot '%s' has uncommitted WIP in %s — commit or stash first",
-                    bot_name,
-                    repo,
-                )
-                return 1
 
-    # The bot runs on its OWN per-bot tmux server (-L <socket>); resolve it once
-    # from the source bot.conf via the SSOT resolver (honors TMUX_SOCKET, then
-    # BOT_SERVICE). Reused for the pre-flight session check, the plan, and the
-    # post-stop server teardown. Empty for an un-regenerated bot that predates
-    # per-bot sockets — the pre-flight falls back to the default socket and the
-    # teardown skips.
+def apply_move(move, bot, *, force, cleanup):
+    from ..activation import upgrade_activation
+    from ..activation_state import read_selection
+    from ..bot_operations import set_bot_running
+    from ..config_staging import stage_configuration
+    from ..releases import read_release
+
+    no_active_assignment(move, bot)
+    source_session(move, bot, force=force)
+    data = {"source_fleet": move.source.fleet.name, "target_fleet": move.target.fleet.name,
+            "bot": bot, "release_id": move.release_id, "source_stopped": False,
+            "source_retained": True, "state": "incomplete", "plan_id": None,
+            "activation_id": None, "copied": []}
     try:
-        src_socket = tmux_socket_for_bot(src_bot_dir)
-    except ValueError:
-        # Un-regenerated/misconfigured source bot: the SSOT resolver fail-fasts
-        # under FLEET_NAME. Preserve the tolerant pre-flight (empty → default
-        # socket, teardown skipped) rather than aborting the move here.
-        src_socket = ""
+        stopped = set_bot_running(root=move.root, fleet=move.source.fleet.name,
+                                  bot=bot, running=False)
+        data["source_stopped"] = stopped.state == "stopped"
+        data["copied"] = copy_retained(move)
+        access = update_access(move, bot)
+        if access is not None:
+            data["access_updated"] = access
+        release = read_release(move.root, move.release_id)
+        plan = stage_configuration(declared_paths(move.root, move.source.paths.package), release)
+        data["plan_id"] = plan.plan_id
+        activation_id = str(uuid4())
+        data["activation_id"] = activation_id
+        record = upgrade_activation(move.root, activation_id, plan.plan_id,
+                                    move.install_directory)
+        selected = read_selection(move.root)
+        if (record.status != "active" or selected is None
+                or selected["activation_id"] != activation_id
+                or selected["plan_id"] != plan.plan_id):
+            raise RuntimeError("move activation did not select its completed target plan")
+        if cleanup:
+            shutil.rmtree(move.source_dir)
+            data["source_retained"] = False
+    except Exception as exc:
+        raise CommandFailure("unavailable", "bot move incomplete; inspect its plan and activation before retrying",
+                             data=data, release_id=move.release_id) from exc
+    data.update(state="moved", readiness="checked_during_activation", changed=True)
+    return CommandOutput(data, release_id=move.release_id,
+                         lines=(f"{move.source.fleet.name}/{bot} moved to {move.target.fleet.name}; "
+                                f"activation {data['activation_id']} recorded active.",))
 
-    # --- Pre-flight: check tmux session activity ---
-    if apply and not force:
-        _tmux = ["tmux", "-L", src_socket] if src_socket else ["tmux"]
-        tmux_check = subprocess.run(
-            [*_tmux, "has-session", "-t", bot_name],
-            capture_output=True,
-        )
-        if tmux_check.returncode == 0:
-            # Session exists — capture what it's doing
-            pane_content = subprocess.run(
-                [*_tmux, "capture-pane", "-t", bot_name, "-p", "-l", "5"],
-                capture_output=True,
-                text=True,
-            )
-            session_info = (
-                pane_content.stdout.strip()
-                if pane_content.returncode == 0
-                else "(could not read pane)"
-            )
-            log.warning(
-                "bot '%s' has an active tmux session — stopping it "
-                "mid-task will lose in-flight context",
-                bot_name,
-            )
-            print(f"\n  ⚠ Active tmux session for '{bot_name}':")
-            for line in session_info.splitlines()[-5:]:
-                print(f"    {line}")
-            print("\n  Pass --force to override.\n")
-            return 1
 
-    # --- Determine service file paths ---
-    is_linux = platform.system() == "Linux"
-    is_macos = platform.system() == "Darwin"
-    systemd_dir = Path.home() / ".config" / "systemd" / "user"
-    launchd_dir = Path.home() / "Library" / "LaunchAgents"
+def dispatch(args):
+    from .host import _operator_shell
 
-    # Read source service_prefix from bot.conf
-    src_bot_service_label = None
-    for line in (src_bot_dir / "bot.conf").read_text().splitlines():
-        if line.startswith("BOT_SERVICE="):
-            src_bot_service_label = line.split("=", 1)[1].strip().strip("'\"")
-            break
-    if not src_bot_service_label:
-        src_bot_service_label = f"claudlobby.{bot_name}"
-
-    if is_linux:
-        old_unit = systemd_dir / f"{bot_name}.service"
-    elif is_macos:
-        old_unit = launchd_dir / f"{src_bot_service_label}.plist"
-    else:
-        old_unit = None
-
-    # --- Collect what will be moved ---
-    src_env = src_bot_dir / ".env"
-    src_memory = src_bot_dir / "memory"
-    target_bot_dir = target_fleet_dir / "runtime" / "bots" / bot_name
-
-    # Telegram access.json
-    tg_handle = bot_name
-    for line in (src_bot_dir / "bot.conf").read_text().splitlines():
-        stripped = line.strip()
-        if stripped.startswith("TELEGRAM_STATE_DIR="):
-            # Extract handle from path like $HOME/.claude/channels/telegram-<handle>
-            m = re.search(r"telegram-([a-zA-Z0-9_-]+)", stripped)
-            if m:
-                tg_handle = m.group(1)
-            break
-    access_json_path = (
-        Path.home() / ".claude" / "channels" / f"telegram-{tg_handle}" / "access.json"
-    )
-
-    # --- Print plan ---
-    print(f"\n=== Move bot '{bot_name}' ===\n")
-    print(f"  Source fleet:  {source_fleet_name}")
-    print(f"  Target fleet:  {target_fleet_name}")
-    print(f"  Source dir:    {src_bot_dir}")
-    print(f"  Target dir:    {target_bot_dir}")
-    print()
-
-    steps = []
-    if src_env.is_file():
-        steps.append(f"Copy .env secrets → {target_bot_dir / '.env'}")
-    if src_memory.is_dir() and any(src_memory.iterdir()):
-        steps.append(
-            f"Copy memory/ ({sum(1 for _ in src_memory.rglob('*') if _.is_file())} files)"
-        )
-    if old_unit and old_unit.is_file():
-        steps.append(f"Stop + disable service ({old_unit.name})")
-        steps.append(f"Delete old service file: {old_unit}")
-    if src_socket:
-        steps.append(f"Kill source tmux server (tmux -L {src_socket} kill-server)")
-    steps.append(f"Regenerate target bot (claudlobby generate --bot {bot_name})")
-    if access_json_path.is_file() and target_fleet.telegram_group_chat_id:
-        steps.append(
-            f"Update access.json group chat → {target_fleet.telegram_group_chat_id}"
-        )
-    steps.append(f"Re-enroll via spin-up-bot.sh from {target_bot_dir}")
-    if cleanup:
-        steps.append(f"Remove source bot dir: {src_bot_dir}")
-
-    for i, step in enumerate(steps, 1):
-        print(f"  {i}. {step}")
-    # Not a step this command takes: the target fleet's other bots name a
-    # sibling by its DIR (Layer 0), so they deny the arriving bot only after
-    # their own generate; the nightly reload-fleet runs it within a day.
-    # Layer 0b's host-wide rules are keyed on the name, which a move keeps.
-    print(
-        f"\n  Then, by hand: claudlobby --fleet {target_fleet_name} generate,"
-        f" so {target_fleet_name}'s other bots deny '{bot_name}' at its new"
-        " home (until then, or the nightly reload-fleet, they do not)."
-    )
-    print()
-
-    if not apply:
-        # Dry-run only: preview the orphan up front so the operator can add
-        # --cleanup-source before applying. On a real --apply the post-apply
-        # warning owns this message instead — printing it here too would both
-        # duplicate it and fire prematurely if validation later aborts the move.
-        if not cleanup:
-            print(
-                f"  Note: source dir will be LEFT in place (orphaned): {src_bot_dir}"
-                "\n        Pass --cleanup-source to remove it after the move.\n"
-            )
-        print("Dry run — pass --apply to execute.\n")
-        return 0
-
-    # --- Pre-apply validation (before any mutation) ---
-    target_paths = Paths(root=root, fleet_dir=target_fleet_dir, package=package)
-    _load_env(target_paths)
-    if not _validation_gate(target_fleet, target_paths, context="re-run move-bot"):
-        log.error("target fleet has validation errors — aborted before any changes")
-        return 1
-    target_env = {
-        **os.environ,
-        **native_environment(target_paths),
-        "FLEET_NAME": target_fleet.name,
-        "BOT_DIR": str(target_bot_dir),
-    }
-
-    # --- Execute ---
-
-    # 1. Copy .env
-    if src_env.is_file():
-        target_bot_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src_env, target_bot_dir / ".env")
-        # Preserve restrictive permissions
-        (target_bot_dir / ".env").chmod(0o600)
-        log.info("copied .env → %s", target_bot_dir / ".env")
-
-    # 2. Copy memory/ (temp-dir-then-rename for rollback safety)
-    if src_memory.is_dir() and any(src_memory.iterdir()):
-        target_bot_dir.mkdir(parents=True, exist_ok=True)
-        target_memory = target_bot_dir / "memory"
-        tmp_memory = target_bot_dir / ".memory_tmp"
-        if tmp_memory.exists():
-            shutil.rmtree(tmp_memory)
-        shutil.copytree(src_memory, tmp_memory)
-        if target_memory.exists():
-            shutil.rmtree(target_memory)
-        tmp_memory.rename(target_memory)
-        log.info(
-            "copied memory/ (%d files)",
-            sum(1 for _ in target_memory.rglob("*") if _.is_file()),
-        )
-
-    # Step 3 ends supervision of the source (unit unlinked, tmux server
-    # killed) — from there on the source dir is an orphan on disk, so every
-    # exit, incomplete or done, states its disposition. --cleanup-source
-    # removal only happens after full success (step 7).
-    def _print_source_disposition(*, complete: bool) -> None:
-        if not cleanup:
-            print(
-                f"  ⚠ Source dir left in place (orphaned): {src_bot_dir}"
-                f"\n    '{bot_name}' is no longer in '{source_fleet_name}' — supervision "
-                "skips it, but it lingers on disk."
-                f"\n    Remove when ready:  rm -rf {src_bot_dir}\n"
-            )
-        elif not complete:
-            print(
-                f"  Note: --cleanup-source deferred — migration incomplete; "
-                f"source dir kept: {src_bot_dir}"
-                f"\n        Complete the migration, then remove:  rm -rf {src_bot_dir}\n"
-            )
-
-    # 3. Stop + disable old service
-    if old_unit and old_unit.is_file():
-        if is_linux:
-            for cmd in [
-                ["systemctl", "--user", "stop", f"{bot_name}.service"],
-                ["systemctl", "--user", "disable", f"{bot_name}.service"],
-            ]:
-                r = subprocess.run(cmd, capture_output=True, text=True)
-                if r.returncode != 0:
-                    log.warning(
-                        "%s exited %d: %s",
-                        " ".join(cmd),
-                        r.returncode,
-                        r.stderr.strip(),
-                    )
-            old_unit.unlink()
-            r = subprocess.run(
-                ["systemctl", "--user", "daemon-reload"],
-                capture_output=True,
-                text=True,
-            )
-            if r.returncode != 0:
-                log.warning(
-                    "daemon-reload exited %d: %s", r.returncode, r.stderr.strip()
-                )
-            log.info("stopped + removed systemd unit %s", old_unit.name)
-        elif is_macos:
-            r = subprocess.run(
-                [
-                    "launchctl",
-                    "bootout",
-                    f"gui/{os.getuid()}/{src_bot_service_label}",
-                ],
-                capture_output=True,
-                text=True,
-            )
-            if r.returncode != 0:
-                log.warning(
-                    "launchctl bootout exited %d: %s", r.returncode, r.stderr.strip()
-                )
-            old_unit.unlink()
-            log.info("stopped + removed launchd plist %s", old_unit.name)
-
-    # Tear down the source tmux server explicitly. The bot runs on its OWN
-    # per-bot server (-L <socket>); we can't rely on the service's ExecStop to
-    # reap it — the source may have no unit at all, or an ExecStop that only
-    # kills the session. Best-effort: a missing server (non-zero rc) or an
-    # absent tmux binary is benign.
-    if src_socket:
-        try:
-            r = subprocess.run(
-                ["tmux", "-L", src_socket, "kill-server"],
-                capture_output=True,
-                text=True,
-            )
-            if r.returncode == 0:
-                log.info("killed source tmux server (-L %s)", src_socket)
-        except FileNotFoundError:
-            pass
-
-    # 4. Regenerate target bot (validation already passed above)
-    compose_bot(target_fleet.bots[bot_name], target_fleet, target_paths)
-    log.info("regenerated bot → %s", target_bot_dir)
-
-    # 5. Update access.json group chat
-    if access_json_path.is_file() and target_fleet.telegram_group_chat_id:
-        try:
-            access = _json.loads(access_json_path.read_text())
-            old_groups = access.get("groups", {})
-            # Replace all group entries with the target fleet's group
-            new_groups = {
-                target_fleet.telegram_group_chat_id: {
-                    "requireMention": True,
-                    "allowFrom": [],
-                }
-            }
-            # Preserve allowFrom from old group if there was exactly one
-            if len(old_groups) == 1:
-                old_entry = next(iter(old_groups.values()))
-                if isinstance(old_entry, dict):
-                    new_groups[target_fleet.telegram_group_chat_id][
-                        "requireMention"
-                    ] = old_entry.get("requireMention", True)
-                    new_groups[target_fleet.telegram_group_chat_id]["allowFrom"] = (
-                        old_entry.get("allowFrom", [])
-                    )
-            access["groups"] = new_groups
-            access_json_path.write_text(_json.dumps(access, indent=2) + "\n")
-            log.info(
-                "updated access.json group → %s", target_fleet.telegram_group_chat_id
-            )
-        except (_json.JSONDecodeError, OSError) as e:
-            log.error("could not update access.json: %s", e)
-            print(
-                "\nINCOMPLETE MIGRATION: access.json update failed."
-                "\nThe bot will boot but Telegram routing "
-                "may point to the wrong group."
-                f"\nFix manually: {access_json_path}\n"
-            )
-            _print_source_disposition(complete=False)
-            return 1
-
-    # 6. Re-enroll via spin-up-bot
-    spin_up = target_paths.lib / "spin-up-bot.sh"
-    if spin_up.is_file():
-        result = subprocess.run(
-            [str(spin_up), str(target_bot_dir)],
-            capture_output=True,
-            text=True,
-            env=target_env,
-        )
-        if result.returncode == 0:
-            log.info("re-enrolled via spin-up-bot.sh")
-        else:
-            log.error(
-                "spin-up-bot.sh exited %d — enroll manually:\n  %s %s",
-                result.returncode,
-                spin_up,
-                target_bot_dir,
-            )
-            if result.stderr.strip():
-                log.error("  stderr: %s", result.stderr.strip())
-            print(
-                f"\nINCOMPLETE MIGRATION: bot '{bot_name}' moved "
-                "but enrollment failed."
-                f"\nRun manually:  {spin_up} {target_bot_dir}\n"
-            )
-            _print_source_disposition(complete=False)
-            return 1
-    else:
-        log.error("spin-up-bot.sh not found at %s — enroll manually", spin_up)
-        print(
-            f"\nINCOMPLETE MIGRATION: bot '{bot_name}' moved "
-            "but not enrolled."
-            f"\nExpected: {spin_up}\n"
-        )
-        _print_source_disposition(complete=False)
-        return 1
-
-    # 7. Cleanup source (opt-in). When skipped, the source dir survives on disk
-    # but is no longer in the source fleet's roster — an orphan stub that
-    # supervision skips and audits flag. Make that outcome loud so operators
-    # don't discover stale bot dirs weeks later.
-    if cleanup:
-        shutil.rmtree(src_bot_dir)
-        log.info("removed source bot dir: %s", src_bot_dir)
-
-    print(
-        f"\nDone. Bot '{bot_name}' moved from '{source_fleet_name}' → '{target_fleet_name}'.\n"
-    )
-    _print_source_disposition(complete=True)
-    return 0
+    _operator_shell()
+    try:
+        move = preflight(args)
+        data = {"source_fleet": move.source.fleet.name, "target_fleet": move.target.fleet.name,
+                "bot": args.bot, "release_id": move.release_id,
+                "source_dir": str(move.source_dir), "target_dir": str(move.target_dir),
+                "copy": [name for name in (".env", "memory")
+                         if (move.source_dir / name).exists()],
+                "native_install_directory": str(move.install_directory),
+                "host_restart_scope": "all_declared_fleets",
+                "cleanup_source": bool(args.cleanup_source)}
+        if not args.apply:
+            return CommandOutput({**data, "state": "preview", "changed": False},
+                                 release_id=move.release_id,
+                                 lines=(f"Preview: move {args.bot} from {move.source.fleet.name} "
+                                        f"to {move.target.fleet.name}; activation restarts the host fleet roster.",))
+        result = apply_move(move, args.bot, force=args.force, cleanup=args.cleanup_source)
+        return CommandOutput({**data, **result.data}, result.release_id, result.lines)
+    except CommandFailure:
+        raise
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise CommandFailure("conflict", "bot move preflight could not establish selected ownership") from exc
