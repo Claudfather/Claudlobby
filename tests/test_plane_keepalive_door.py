@@ -60,6 +60,23 @@ def _rig(tmp_path: Path, *, pane: str = "> ", has_session: bool = True,
     (bot / "data").mkdir(parents=True)
     (bot / "bot.conf").write_text(
         'BOT_NAME="b1"\nFLEET_NAME="kfleet"\nBOT_SERVICE="com.k.b1"\n')
+    # A supervised watchdog only restarts enrolled bots. Model the selected
+    # unit and its native restart, rather than relying on the retired direct
+    # start fallback (which would undo an explicit bot stop).
+    for relative in (".config/systemd/user/com.k.b1.service",
+                     "Library/LaunchAgents/com.k.b1.plist"):
+        unit = tmp_path / relative
+        unit.parent.mkdir(parents=True, exist_ok=True)
+        unit.touch()
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name in ("systemctl", "launchctl"):
+        native = bindir / name
+        native.write_text(
+            '#!/bin/bash\ncase " $* " in\n'
+            f'  *" restart "*|*" kickstart "*) echo started >> "{bot}/start-stub.log" ;;\n'
+            'esac\nexit 0\n')
+        native.chmod(0o755)
     if fresh_marker:
         (bot / "data" / ".last-tool-call").touch()
     (tmp_path / "state" / "plane").mkdir(parents=True)
@@ -70,7 +87,7 @@ def _rig(tmp_path: Path, *, pane: str = "> ", has_session: bool = True,
         "HOME": str(tmp_path),
 
 
-        "PATH": "/usr/bin:/bin",
+        "PATH": f"{bindir}:/usr/bin:/bin",
     }
     if armed:
         env["PLANE_EMIT_ENABLED"] = "1"     # ignored since R1; kept for the shape
