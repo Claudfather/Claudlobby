@@ -44,22 +44,6 @@ def register_subparsers(sub) -> None:
     from ._orientation_parsers import register_orientation_subparsers
     register_orientation_subparsers(sub)
 
-    pv = sub.add_parser("validate", help="Validate fleet.yaml against library/")
-    pv.add_argument("--strict", action="store_true", help="Fail on warnings")
-    pv.add_argument(
-        "--warn-baseline",
-        metavar="FILE",
-        help="Fail (rc 1) only on a warning category that is new or has grown"
-        " since FILE was written; rc 2 when FILE cannot be read. For a fleet"
-        " that has accepted some warnings and so cannot use --strict",
-    )
-    pv.add_argument(
-        "--write",
-        action="store_true",
-        help="With --warn-baseline: record this run's warning categories to FILE",
-    )
-    pv.set_defaults(func=_command("core", "cmd_validate"))
-
     per = sub.add_parser(
         "env-register",
         help="Derived credential register — every declared var, the tier it "

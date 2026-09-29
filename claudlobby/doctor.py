@@ -1198,7 +1198,7 @@ def check_fleet_validation(
         report.add(
             "fleet-yaml",
             "warn",
-            f"{warning_summary(val_report)} — `claudlobby validate` prints each",
+            f"{warning_summary(val_report)} — `claudlobby config validate` prints each",
         )
     else:
         report.add("fleet-yaml", "pass", "fleet.yaml valid")

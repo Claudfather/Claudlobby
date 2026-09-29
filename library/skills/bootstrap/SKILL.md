@@ -97,7 +97,7 @@ Patch `fleet.yaml` with the group chat ID, human Telegram ID, and timezone (if c
 ## Step 4: Validate + Generate
 
 ```bash
-claudlobby --fleet <fleet-name> validate
+claudlobby --fleet <fleet-name> config validate
 claudlobby --fleet <fleet-name> generate
 ```
 

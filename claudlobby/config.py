@@ -1272,7 +1272,7 @@ def is_pos_int(v: object) -> bool:
 
 def _coerce_workstreams(raw: dict | None) -> WorkstreamsConfig:
     """Parse fleet.workstreams. Tolerant: a bad value falls back to the default
-    so `generate` never crashes — `claudlobby validate` surfaces the error."""
+    so `generate` never crashes — `claudlobby config validate` surfaces the error."""
     if not raw:
         return WorkstreamsConfig()
 
@@ -1356,7 +1356,7 @@ def _merge_tool_permissions(
 # reaper); the F18 closure (#1467) removed the files and the reapers with them,
 # and the plane's `plane prune` retention took over. A manifest that still sets
 # one is not refused (the loader must not crash on an old fleet.yaml) — it is
-# RECORDED here and `claudlobby validate` warns, naming the key.
+# RECORDED here and `claudlobby config validate` warns, naming the key.
 _RETIRED_OBSERVABILITY_KEYS: dict[str, str] = {
     "reap_days": "no reader since the F18 closure (#1467) — the event files it aged are gone;"
                  " the plane's `plane prune` retention replaced them",

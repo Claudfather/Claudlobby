@@ -136,7 +136,7 @@ fleet:
 
 Cosmetic + service-unit naming + default Telegram chat. Bots may override `chat_id` per-bot.
 
-The fleet chat is also where fleet timers' alerts go. It is stamped into their units, and the runtime sends **as a bot in it** (#1771): the first declared channel bot, by name, whose own chat IS the fleet chat (a bot that overrides `chat_id` is not in it). When no bot is in the fleet chat, those alerts are **refused** and `claudlobby validate` warns — a chat paired with a token that cannot reach it is what silenced one fleet's alerts for two months.
+The fleet chat is also where fleet timers' alerts go. It is stamped into their units, and the runtime sends **as a bot in it** (#1771): the first declared channel bot, by name, whose own chat IS the fleet chat (a bot that overrides `chat_id` is not in it). When no bot is in the fleet chat, those alerts are **refused** and `claudlobby config validate` warns — a chat paired with a token that cannot reach it is what silenced one fleet's alerts for two months.
 
 ### `fleet.accounts`
 
@@ -606,7 +606,7 @@ observability:
   unassigned_max_age: 86400     # stop reporting a strand past this age (default: 86400; <= 0 never stops)
 ```
 
-`observability.reap_days` is retired (F18 closure, #1467): the event files it aged are gone and the plane's `plane prune` retention replaced them — a manifest that still sets it loads, and `claudlobby validate` warns, naming the key.
+`observability.reap_days` is retired (F18 closure, #1467): the event files it aged are gone and the plane's `plane prune` retention replaced them — a manifest that still sets it loads, and `claudlobby config validate` warns, naming the key.
 
 **dispatch_deadline remains composed for every bot.** The default is 86400 seconds (24 hours), and a fleet override still reaches bot.conf for historical native watchdog rows. Canonical task assign takes an explicit --expected-by timestamp; it does not read this env value to manufacture a deadline. A value of 0 disables the legacy dispatch clock.
 
@@ -656,7 +656,7 @@ The composed env vars, and what each does:
 | Env var | Default | Purpose |
 |---------|---------|---------|
 | `FLEET_PULSE_ESCALATION_CHAT_ID` | _(unset)_ | Operator override for where fleet-pulse escalations go, read by every env-less alert path through the shared `resolve_alert_target`. That resolver returns the chat **and its sender** (the channel state dir tg-post reads the token from) as ONE pair from ONE source (#1771): this override pairs **only** with `FLEET_PULSE_ESCALATION_STATE_DIR` below, and without it the escalation is **refused** — a WARNING that names the variable, and a debounced `alert_target_refused` alert to the manager's pane and the plane — never sent with a guessed token. `creds-check` refuses the same pair, but its own `alert_target_refused` notice **does** reach Telegram: it unsets the refused chat, so the alert resolves afresh onto the scanned bot's own chat — a consistent pair, never the refused one — while its per-credential alerts reach only its log, its state and that notice. With no override, the composed `TELEGRAM_GROUP_CHAT_ID` pairs with a channel bot in this fleet whose own chat it is (none is refused); with neither, one bot's own chat and state dir are used together. |
-| `FLEET_PULSE_ESCALATION_STATE_DIR` | _(unset)_ | From `escalation_state_dir`: the escalation chat's declared sender — the channel state dir of a bot that is a **member** of that chat (`~` and `$HOME/` are expanded at generate time, because a unit does not expand them). An escalation chat is by design nobody's own group chat, so no bot can be matched to it; this is its only partner. `claudlobby validate` warns when the chat is set without it. |
+| `FLEET_PULSE_ESCALATION_STATE_DIR` | _(unset)_ | From `escalation_state_dir`: the escalation chat's declared sender — the channel state dir of a bot that is a **member** of that chat (`~` and `$HOME/` are expanded at generate time, because a unit does not expand them). An escalation chat is by design nobody's own group chat, so no bot can be matched to it; this is its only partner. `claudlobby config validate` warns when the chat is set without it. |
 | `FLEET_PULSE_ESCALATION_THRESHOLD` | `2` | Number of distinct bots that must hit the same critical event within the window to trigger escalation. |
 | `FLEET_PULSE_ESCALATION_WINDOW` | `10` | Lookback window, in minutes, for counting affected bots. |
 | `FLEET_PULSE_RENOTIFY_AFTER_S` | `21600` (6h) | Age at which a debounce marker re-fires, so an unresolved episode is not announced once and then silent forever (#831). `0` disables the re-fire. |
@@ -829,7 +829,7 @@ Ecosystem-aware fields connecting bots to clauDNA, Claudron, and Claudosseum. Al
 |-------|---------|---------|
 | `claudna_version` | `CLAUDNA_VERSION` | Pin the clauDNA plugin version (e.g., `"0.2.0"`). Skills/hooks can read this to gate behavior by version. |
 | `claudron_vault_path` | `CLAUDRON_VAULT_PATH` | Pointer to the Claudron **vault root** (e.g., `"vaults/my-fleet"`) — not a per-bot sub-path; one vault is one tenant. The bot's `claudron` CLI resolves the vault from this env var (Claudron `docs/CLI_CONTRACT.md` §Environment). |
-| `claudron_session_loop` | _(none — gates hook/grant composition, not an env var)_ | Wires the Claudron session loop: composed SessionStart/PreCompact/SessionEnd hooks plus a narrow allowlist of `claudron` CLI verb grants. Tri-state boolean — unset defaults to `true` exactly when `claudron_vault_path` is set, `false` otherwise; set explicitly only to override (e.g. `false` on a vault-wired bot meant to reach the vault by hand-run CLI alone). `true` with no `claudron_vault_path` is a `claudlobby validate` error. See `documentation/integrations/claudron-integration.md`. |
+| `claudron_session_loop` | _(none — gates hook/grant composition, not an env var)_ | Wires the Claudron session loop: composed SessionStart/PreCompact/SessionEnd hooks plus a narrow allowlist of `claudron` CLI verb grants. Tri-state boolean — unset defaults to `true` exactly when `claudron_vault_path` is set, `false` otherwise; set explicitly only to override (e.g. `false` on a vault-wired bot meant to reach the vault by hand-run CLI alone). `true` with no `claudron_vault_path` is a `claudlobby config validate` error. See `documentation/integrations/claudron-integration.md`. |
 | `claudosseum_tenant_id` | `CLAUDOSSEUM_TENANT_ID` | Tenant identifier for Claudosseum telemetry (e.g., `"tenant_abc123"`). Bots emit structured signal to this tenant when configured. |
 
 Can be set in `defaults:` (fleet-wide) or per-bot (bot overrides default). The validator warns if `claudron_vault_path` is set but the **`claudron` CLI is not reachable**, or the path does not resolve to a vault — the CLI is the fleet-consumption door (Claudron `docs/INTEGRATION.md`). It does *not* check for an MCP server: that door is demand-gated and unbuilt (decision C).
@@ -912,7 +912,7 @@ defaults:            # or bots.<bot>:, which wins over defaults
 
 **What turning it off gives up:** nothing a running bot had before #1665. Off is the shipped default; `claudlobby freshbox` prints one line per fleet naming what the bots' deny lists do not cover.
 
-**Rolling it out.** A composed deny binds on the bot's next tool call, with no restart in between, and the nightly `reload-fleet` composes every fleet, so arm **one** bot, run `claudlobby --fleet <fleet> generate --bot <bot>`, drive a real turn, then widen. Before arming, `claudlobby validate` names every composed file (skill, resource, protocol, expertise) that tells the bot to `source ~/.env` or `. ~/.env`, the read the `env` class denies; the variables are already in the session env, so drop the line. After arming, `claudlobby freshbox` compares the bot's composed deny list with what the current install would compose and names any class that falls short, including a bot that joined the host after the last generate. Backout is `shared_config: false` and a generate, in force on the next tool call.
+**Rolling it out.** A composed deny binds on the bot's next tool call, with no restart in between, and the nightly `reload-fleet` composes every fleet, so arm **one** bot, run `claudlobby --fleet <fleet> generate --bot <bot>`, drive a real turn, then widen. Before arming, `claudlobby config validate` names every composed file (skill, resource, protocol, expertise) that tells the bot to `source ~/.env` or `. ~/.env`, the read the `env` class denies; the variables are already in the session env, so drop the line. After arming, `claudlobby freshbox` compares the bot's composed deny list with what the current install would compose and names any class that falls short, including a bot that joined the host after the last generate. Backout is `shared_config: false` and a generate, in force on the next tool call.
 
 ## Composition order (per bot)
 
@@ -970,7 +970,7 @@ does not own.
 
 ## Validation rules
 
-`claudlobby validate` checks:
+`claudlobby config validate` checks:
 
 - **Hard fail** — bot's `expertise:` list is empty or references missing files
 - **Hard fail** — `fleet.yaml` itself is invalid YAML or missing required keys
@@ -993,8 +993,8 @@ Warnings are advisory: `validate` and `generate` exit 0 on warnings alone, by de
 - **`--warn-baseline FILE` is the gate for a fleet that has accepted some warnings.** Record the current categories once, then check later runs against them:
 
   ```bash
-  claudlobby --fleet <fleet> validate --warn-baseline <fleet-dir>/validate-baseline.json --write
-  claudlobby --fleet <fleet> validate --warn-baseline <fleet-dir>/validate-baseline.json
+  claudlobby --fleet <fleet> config validate --warn-baseline <fleet-dir>/validate-baseline.json --write
+  claudlobby --fleet <fleet> config validate --warn-baseline <fleet-dir>/validate-baseline.json
   ```
 
   The check exits 1 only when a category is new, or has more warnings than the baseline recorded, and it names that category: `new warning category: skill-missing (0 → 1)`. A category that shrinks or disappears never fails the check; rerun with `--write` to keep the lower count. An absent or unreadable baseline exits 2, because an unreadable baseline is not an unchanged one. The file is a plain `{category: count}` JSON map.

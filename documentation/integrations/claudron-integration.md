@@ -31,7 +31,7 @@ Hooks **fail open**: any error (unresolvable vault, missing git, a stalled netwo
 
 **Known gap: no vault-hygiene guardrail yet (#745, open).** The grants above give every session-loop bot real write access to the tenant vault (`Bash(claudron capture *)`), but `library/guardrails/` has no rule yet governing what belongs in a capture — secrets, `runtime/` paths, operator PII. Bad captures can still be retrieved through a later lookup. Not this doc's to close; tracked at #745.
 
-**Enable / disable.** `claudron_session_loop` is tri-state: default **on** when `claudron_vault_path` is set, **off** otherwise; set it explicitly only to override (e.g. `false` on a vault-wired bot meant to reach the vault by hand-run CLI alone — it then composes neither hooks nor verb grants). `claudron_session_loop: true` with no vault path is a `claudlobby validate` error.
+**Enable / disable.** `claudron_session_loop` is tri-state: default **on** when `claudron_vault_path` is set, **off** otherwise; set it explicitly only to override (e.g. `false` on a vault-wired bot meant to reach the vault by hand-run CLI alone — it then composes neither hooks nor verb grants). `claudron_session_loop: true` with no vault path is a `claudlobby config validate` error.
 
 **The composed hook block is a rendered copy of an owned surface** (register rule R3): its shape is fixed by the contract's normative snippet, and `tests/test_claudron_loop.py` carries the drift gate comparing the composer's output against the pinned engine's `claudron.hooks.settings_snippet()` (the L4 parity gate, runnable here).
 

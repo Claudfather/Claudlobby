@@ -19,7 +19,7 @@ fleet-independent `claudlobby host-timers` subcommand. Enrolled by
 `lib/setup-system` (the `host:` tier, once per host) and `lib/setup-fleet`
 (the `defaults:` tier's jobs, per fleet) — composing and enrolling are
 separate steps, and getting that split right matters for the dormancy
-semantics below. There is **no dedicated `claudlobby validate` or
+semantics below. There is **no dedicated `claudlobby config validate` or
 `claudlobby host doctor` coverage of this file** — see
 [Validation & visibility](#validation--visibility).
 
@@ -137,7 +137,7 @@ Every knob is declared once, in `claudlobby/switches.py`, and each surface
 derives from it: the composer's `Environment=` arming tables, the validator's
 dead-flag warning, the three rendered tables. **A `*_ENABLED` key in one of
 claudlobby's own namespaces that no switch claims is reported as a DEAD flag
-by `claudlobby validate`** — so a door deleted tomorrow warns about its
+by `claudlobby config validate`** — so a door deleted tomorrow warns about its
 leftover flag without anyone maintaining a list.
 
 <!-- BEGIN GENERATED: switches -->
@@ -546,7 +546,7 @@ used throughout the codebase, and it's worth keeping them distinct:
 
 ## Validation & visibility
 
-- **`claudlobby validate`** has exactly one gate that touches
+- **`claudlobby config validate`** has exactly one gate that touches
   `system.yaml`-sourced content: `_validate_timers` (`validator.py`)
   re-checks the **merged** `fleet.defaults.jobs.*.script` values for
   un-anchored absolute paths — the same L1 source guard `generate` itself

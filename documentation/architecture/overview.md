@@ -216,7 +216,7 @@ writer, moved every reader onto the plane, and deleted the transition machinery.
 
 ## Validation
 
-`claudlobby validate` is permissive by default:
+`claudlobby config validate` is permissive by default:
 
 - **Hard error** — bot references an `expertise` that doesn't exist (can't generate without a base)
 - **Hard error** — `fleet.yaml` is invalid YAML or missing required keys

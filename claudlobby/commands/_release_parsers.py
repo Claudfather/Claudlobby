@@ -62,6 +62,12 @@ def _dispatch_host_supervision(args):
                    json_output=args.json)
 
 
+def _dispatch_config_validate(args):
+    return execute(args.public_command,
+                   lambda: import_module(".config_validation", __package__).dispatch(args),
+                   json_output=args.json)
+
+
 def _route(sub, name, command, help):
     parser = sub.add_parser(name, help=help)
     parser.add_argument("--json", action="store_true", help="One schema-1 result object")
@@ -160,6 +166,14 @@ def register_release_subparsers(sub):
 
     config = sub.add_parser("config", help="Stage and inspect configuration proposals")
     configs = config.add_subparsers(dest="config_command", required=True)
+    validate = configs.add_parser("validate", help="Validate the selected fleet without composing it")
+    validate.add_argument("--strict", action="store_true", help="Fail on warnings")
+    validate.add_argument("--warn-baseline", metavar="FILE",
+                          help="Fail when a warning category is new or has grown since FILE was written")
+    validate.add_argument("--write", action="store_true",
+                          help="With --warn-baseline, record warning categories to FILE")
+    validate.add_argument("--json", action="store_true", help="One schema-1 result object")
+    validate.set_defaults(func=_dispatch_config_validate, public_command="config.validate")
     plan = _route(configs, "plan", "config.plan", "Stage all declared host fleets using a sealed candidate")
     plan.add_argument("--release", required=True, metavar="ID")
     plan.add_argument("--fleet-path", action="append", default=[], metavar="PATH",

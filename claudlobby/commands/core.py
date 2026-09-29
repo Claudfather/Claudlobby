@@ -133,7 +133,7 @@ def _warn_baseline_gate(report, path: Path, *, write: bool) -> int:
         return 0
     probe = probe_source(path)
     if probe.unreachable:
-        remedy = (f"record one with `claudlobby validate --warn-baseline {path} --write`"
+        remedy = (f"record one with `claudlobby config validate --warn-baseline {path} --write`"
                   if probe.state == SOURCE_ABSENT else "")
         log.error("%s", unreachable_line("the warning baseline", probe, remedy=remedy))
         return 2
