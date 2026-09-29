@@ -301,7 +301,7 @@ say "== 5b: does the SHIPPED credential tooling agree too? =="
 # TOOLING, not just the door this change happens to have added. The first
 # version of this harness compared env_resolved() only — which, since that door
 # had no other callers, meant the canary was the sole thing exercising it while
-# creds-reconcile went untouched. A harness that reaches for the new API instead
+# the shipped credential reconciler went untouched. A harness that reaches for the new API instead
 # of the shipped one always reads clean: it is testing what it just built.
 #
 # GITHUB_PAT exists ONLY at the host tier here. The runtime resolves it (asserted

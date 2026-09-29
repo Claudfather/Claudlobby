@@ -197,7 +197,7 @@ def format_report(reg: Register) -> str:
 def exits_nonzero(reg: Register) -> bool:
     """Only BLANKED. UNSET is an ordinary un-filled credential and failing on it
     would train an operator to ignore the command, taking the real signal with
-    it — the same reasoning that keeps creds-reconcile's UNKNOWN at rc 0."""
+    it — the same reasoning that keeps host credentials reconcile's UNKNOWN at rc 0."""
     return any(r.state == BLANKED for r in reg.rows)
 
 

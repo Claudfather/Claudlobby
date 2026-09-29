@@ -21,7 +21,8 @@
 # (skip = required env var missing — no transition alert, but re-surfaces
 # once it has persisted past day 3; see next_alert_day).
 #
-# Env vars consulted (sourced from $CLAUDLOBBY_ROOT/.env):
+# Env vars consulted (selected mode reads host/root/fleet tiers; a direct
+# source-only call reads its chosen .env file):
 #   GITHUB_PERSONAL_ACCESS_TOKEN   — fleet GitHub PAT
 #   RAILWAY_PERSONAL_TOKEN         — Railway ACCOUNT token; answers `me`
 #   RAILWAY_PERSONAL_PROJECT_TOKEN — Railway WORKSPACE token; answers
@@ -40,7 +41,7 @@
 # 14 of the 15 MCP fragments in library/mcp are stdio, which has no URL to probe
 # at all. Fully configured it would have covered one server of fifteen.
 #
-# Note this is NOT covered by `claudlobby creds-reconcile`, which is static: it
+# Note this is NOT covered by `claudlobby host credentials reconcile`, which is static: it
 # answers whether a credential is declared, has a value, and has an equipped
 # consumer, and never contacts a provider. Nothing here validates that an MCP
 # server's credential actually WORKS. That gap is real and predates this
@@ -49,18 +50,80 @@
 
 set -euo pipefail
 
+# An activated timer enters the selected CLI first. The CLI holds mutation
+# admission and supplies the reviewed fleet path and roster on re-entry below;
+# a direct source-only invocation retains the historical private probe path.
+if [ -n "${CLAUDLOBBY_RELEASE_ID:-}" ] && [ -z "${CLAUDLOBBY_ROOT:-}" ]; then
+    echo "creds-check: selected timer has no data root" >&2
+    exit 2
+fi
+CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ "${1:-}" != "--selected-release" ] && [ -n "${CLAUDLOBBY_RELEASE_ID:-}" ]; then
+    _cc_timer_fleet="${1:-${CLAUDLOBBY_FLEET:-}}"
+    [ -n "$_cc_timer_fleet" ] && [ "$LIB_DIR" = "${CLAUDLOBBY_NATIVE_DIR:-}" ] \
+        && [ -n "${CLAUDLOBBY_CLI:-}" ] && [ -n "${FLEET_ROOT:-}" ] || {
+        echo "creds-check: selected timer context is incomplete" >&2
+        exit 2
+    }
+    exec "$CLAUDLOBBY_CLI" --root "$CLAUDLOBBY_ROOT" --fleet "$_cc_timer_fleet" \
+        host credentials check
+fi
+
 # Composed fleet timers pass the fleet name positionally on ExecStart
 # (composer contract — same as fleet-pulse/log-rotate-fleet); the composed
 # unit env also carries CLAUDLOBBY_FLEET, the fallback for argless runs.
 # Used by the per-bot Telegram check to enumerate + namespace the right
 # fleet; other checks are fleet-agnostic.
 FLEET_ARG="${1:-${CLAUDLOBBY_FLEET:-}}"
+SELECTED_BOTS=""
+if [ "${1:-}" = "--selected-release" ]; then
+    FLEET_ARG=""
+    _cc_release="" _cc_fleet_root="" _cc_bots_dir=""
+    while [ "$#" -gt 0 ]; do
+        [ "$#" -ge 2 ] || { echo "creds-check: incomplete selected scope" >&2; exit 2; }
+        case "$1" in
+            --selected-release) _cc_release="$2" ;;
+            --fleet) FLEET_ARG="$2" ;;
+            --fleet-root) _cc_fleet_root="$2" ;;
+            --bots-dir) _cc_bots_dir="$2" ;;
+            --bot)
+                [[ "$2" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || {
+                    echo "creds-check: invalid selected bot" >&2; exit 2;
+                }
+                SELECTED_BOTS="${SELECTED_BOTS}${SELECTED_BOTS:+$'\n'}$2" ;;
+            *) echo "creds-check: unknown selected scope field" >&2; exit 2 ;;
+        esac
+        shift 2
+    done
+    [ -n "$FLEET_ARG" ] && [ -n "$SELECTED_BOTS" ] && [ -n "$_cc_release" ] \
+        && [[ "$_cc_fleet_root" = /* ]] && [[ "$_cc_bots_dir" = /* ]] \
+        && [ "$_cc_release" = "${CLAUDLOBBY_RELEASE_ID:-}" ] \
+        && [ "$LIB_DIR" = "${CLAUDLOBBY_NATIVE_DIR:-}" ] \
+        && [ "$_cc_fleet_root" = "${FLEET_ROOT:-}" ] \
+        && [ "$_cc_bots_dir" = "$_cc_fleet_root/runtime/bots" ] || {
+        echo "creds-check: selected scope differs from its release context" >&2
+        exit 2
+    }
+fi
 
-CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
-LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 install_error_trap ""
+check_fleet_dir() {
+    if [ -n "${_cc_fleet_root:-}" ]; then
+        printf '%s\n' "$_cc_fleet_root"
+    else
+        resolve_fleet_dir "$FLEET_ARG"
+    fi
+}
+check_bots_dir() {
+    if [ -n "${_cc_bots_dir:-}" ]; then
+        printf '%s\n' "$_cc_bots_dir"
+    else
+        resolve_bots_dir "$FLEET_ARG"
+    fi
+}
 # Resolve the .env tier THIS FLEET ACTUALLY READS (#1104).
 #
 # This line used to be `${CLAUDLOBBY_ENV:-$CLAUDLOBBY_ROOT/.env}` — always the
@@ -71,15 +134,12 @@ install_error_trap ""
 # check never opened while the check FAILed against a stale ambient one, and an
 # operator learned to disbelieve the checker.
 #
-# The tier rule is the Python side's `Paths.env_file`, deliberately mirrored
-# rather than reinvented: the fleet .env when one exists, the root .env
-# otherwise — one or the other, never merged. Matching it is what keeps this
-# check and `claudlobby creds-reconcile` describing the same reality; a private
-# rule here is how the two would drift into disagreeing about which credential
-# is live.
+# The legacy direct entry keeps its one-file source. Selected timer/operator
+# entry instead reads env_tier_present_files, the same cascade a bot starts
+# with, so the public check and reconcile agree on host/root/fleet precedence.
 ENV_FILE="${CLAUDLOBBY_ENV:-}"
 if [ -z "$ENV_FILE" ] && [ -n "$FLEET_ARG" ]; then
-    _cc_fleet_dir="$(resolve_fleet_dir "$FLEET_ARG" 2>/dev/null || true)"
+    _cc_fleet_dir="$(check_fleet_dir 2>/dev/null || true)"
     if [ -n "$_cc_fleet_dir" ] && [ -f "$_cc_fleet_dir/.env" ]; then
         ENV_FILE="$_cc_fleet_dir/.env"
     fi
@@ -92,7 +152,34 @@ TG_POST="$LIB_DIR/tg-post.sh"
 
 # Schedulers (launchd / systemd timer) start with a minimal PATH; .env is
 # the source of truth for runtime credentials. Parse it safely before any check.
-parse_env_file "$ENV_FILE"
+if [ -n "${_cc_release:-}" ]; then
+    # A tier cannot redirect a selected probe after its paths were checked.
+    readonly CLAUDLOBBY_ROOT FLEET_ROOT FLEET_ARG LIB_DIR \
+        CLAUDLOBBY_RELEASE_ID CLAUDLOBBY_NATIVE_DIR CLAUDLOBBY_CLI \
+        CLAUDLOBBY_CREDS_LOG CLAUDLOBBY_CREDS_STATE \
+        _cc_release _cc_fleet_root _cc_bots_dir SELECTED_BOTS LOG STATE
+    # A selected check must see the same tier cascade as a boot, never an
+    # ambient token from the operator shell that a bot would not receive.
+    unset BOT_ID BOT_NAME BOT_DIR BOT_SERVICE TELEGRAM_BOT_TOKEN TELEGRAM_STATE_DIR
+    unset GITHUB_PERSONAL_ACCESS_TOKEN GITHUB_TOKEN GITHUB_PAT \
+        RAILWAY_PERSONAL_TOKEN RAILWAY_PERSONAL_PROJECT_TOKEN \
+        GITHUB_APP_ID GITHUB_APP_INSTALLATION_ID GITHUB_APP_PRIVATE_KEY_PATH
+    _cc_alert_chat="${TELEGRAM_GROUP_CHAT_ID:-}"
+    readonly _cc_alert_chat
+    while IFS= read -r _cc_env_tier; do
+        parse_env_file "$_cc_env_tier"
+    done < <(env_tier_present_files "" "$FLEET_ARG")
+    # Escalation and sender hints are unrelated to this selected fleet check.
+    unset FLEET_PULSE_ESCALATION_CHAT_ID FLEET_PULSE_ESCALATION_STATE_DIR \
+        TELEGRAM_BOT_TOKEN TELEGRAM_STATE_DIR
+    if [ -n "$_cc_alert_chat" ]; then
+        export TELEGRAM_GROUP_CHAT_ID="$_cc_alert_chat"
+    else
+        unset TELEGRAM_GROUP_CHAT_ID
+    fi
+else
+    parse_env_file "$ENV_FILE"
+fi
 
 JQ="$(command -v jq || echo "${_HOMEBREW:-/usr/local}/bin/jq")"
 CURL="$(command -v curl || echo /usr/bin/curl)"
@@ -448,14 +535,14 @@ check_telegram_tokens() {
     # channel bot per daily tick; the token rides a curl config file,
     # never argv; only ok/error_code is ever recorded.
     local bots_dir fleet_dir
-    bots_dir="$(resolve_bots_dir "$FLEET_ARG")"
+    bots_dir="$(check_bots_dir)"
     [ -d "$bots_dir" ] || return 0
 
     # Filter through the declared-bots SSOT (same as fleet-pulse/keepalive-all)
     # so stale/cross-fleet residue dirs never fire false token alerts.
     local declared_bots
-    fleet_dir="$(resolve_fleet_dir "$FLEET_ARG")" || fleet_dir="$CLAUDLOBBY_ROOT/local/$FLEET_ARG"
-    declared_bots=$(parse_fleet_bots "$fleet_dir/fleet.yaml")
+    fleet_dir="$(check_fleet_dir)" || fleet_dir="$CLAUDLOBBY_ROOT/local/$FLEET_ARG"
+    declared_bots="${SELECTED_BOTS:-$(parse_fleet_bots "$fleet_dir/fleet.yaml")}"
 
     local d bot key handle token resp okflag username errcode declared_username
     for d in "$bots_dir"/*/; do
@@ -551,7 +638,7 @@ _telegram_api() {
 # IN it. Fleet-scoped, so a fleet's creds alert never routes to another fleet's
 # channel. A refused pair exports NOTHING -- not even the unit's own chat -- so
 # no alert goes out on a split pair; check_alert_pair reports the refusal.
-resolve_alert_target "$(resolve_bots_dir "$FLEET_ARG")" fleet
+resolve_alert_target "$(check_bots_dir)" fleet
 # shellcheck disable=SC2154  # set by resolve_alert_target (sourced lib-common)
 if [ -n "$_alert_chat_id" ]; then
     export TELEGRAM_GROUP_CHAT_ID="$_alert_chat_id"
@@ -575,10 +662,10 @@ resolve_delivery_token() {
     _delivery_bot=""
     local _dir _declared _d _tok _fdir
     [ -n "${_alert_chat_id:-}" ] || return 0
-    _dir="$(resolve_bots_dir "$FLEET_ARG")"
+    _dir="$(check_bots_dir)"
     [ -d "$_dir" ] || return 0
-    _fdir="$(resolve_fleet_dir "$FLEET_ARG")" || _fdir="$CLAUDLOBBY_ROOT/local/$FLEET_ARG"
-    _declared="$(parse_fleet_bots "$_fdir/fleet.yaml")"
+    _fdir="$(check_fleet_dir)" || _fdir="$CLAUDLOBBY_ROOT/local/$FLEET_ARG"
+    _declared="${SELECTED_BOTS:-$(parse_fleet_bots "$_fdir/fleet.yaml")}"
     for _d in "$_dir"/*/; do
         [ -f "$_d/bot.conf" ] || continue
         bot_in_fleet "$(basename "$_d")" "$_declared" || continue
@@ -626,7 +713,7 @@ check_alert_pair() {
     local key="telegram_alert_pair${FLEET_ARG:+_${FLEET_ARG}}" token resp okflag errcode desc
     if [ -n "${_alert_refusal:-}" ]; then
         record_and_alert "$key" "fail" "alert target REFUSED: ${_alert_refusal}"
-        emit_failure_alert "$(resolve_bots_dir "$FLEET_ARG")" "alert_target_refused" "creds-check: ${_alert_refusal}"
+        emit_failure_alert "$(check_bots_dir)" "alert_target_refused" "creds-check: ${_alert_refusal}"
         return 0
     fi
     # No chat declared anywhere: nothing to pair (the per-bot checks still run).
@@ -635,7 +722,7 @@ check_alert_pair() {
     [ -n "$token" ] || token="$(channel_state_token "${_alert_state_dir:-}")"
     if [ -z "$token" ]; then
         record_and_alert "$key" "fail" "the alert pair's sender holds no token (sender: ${_alert_target_src})"
-        emit_failure_alert "$(resolve_bots_dir "$FLEET_ARG")" "alert_pair_unreachable" "creds-check: the alert pair's sender holds no token (sender: ${_alert_target_src})"
+        emit_failure_alert "$(check_bots_dir)" "alert_pair_unreachable" "creds-check: the alert pair's sender holds no token (sender: ${_alert_target_src})"
         return 0
     fi
     resp="$(_telegram_api "$token" getChat "$_alert_chat_id")"
@@ -647,7 +734,7 @@ check_alert_pair() {
     errcode="$(printf '%s' "$resp" | "$JQ" -r '.error_code // "none"' 2>/dev/null)" || errcode="none"
     desc="$(printf '%s' "$resp" | "$JQ" -r '.description // empty' 2>/dev/null | cut -c1-120)" || desc=""
     record_and_alert "$key" "fail" "getChat error_code=${errcode}${desc:+ ($desc)} (sender: ${_alert_target_src})"
-    emit_failure_alert "$(resolve_bots_dir "$FLEET_ARG")" "alert_pair_unreachable" \
+    emit_failure_alert "$(check_bots_dir)" "alert_pair_unreachable" \
         "creds-check: the fleet alert chat is not reachable by its sender -- getChat error_code=${errcode}${desc:+ ($desc)} (sender: ${_alert_target_src})"
 }
 
@@ -662,3 +749,4 @@ for fn in "${CHECKS[@]}"; do
 done
 
 log "tick complete (${#CHECKS[@]} checks)"
+[ -z "${_cc_release:-}" ] || printf 'tick-complete\n'

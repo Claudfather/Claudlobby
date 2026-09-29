@@ -33,10 +33,12 @@ PASS if all bots are healthy (0 orphan, 0 missing, 0 unbound). WARN if unbound s
 ### 3. Credential check
 
 ```bash
-{{CLAUDLOBBY_NATIVE_DIR}}/creds-check.sh
+claudlobby --fleet "$FLEET" host credentials reconcile
+# A fleet manager or operator can also run the provider probe and alerts:
+claudlobby --fleet "$FLEET" host credentials check
 ```
 
-PASS if all tokens are valid. WARN if any token is nearing expiry. FAIL if any token is invalid or missing.
+Reconcile reports declared, stored, and equipped state; UNKNOWN consumer contracts stay visible. The check command completes a probe tick, not a health verdict: inspect `state/creds-check-state.json` for each provider's recorded `ok`, `fail`, or `skip`. It can contact providers and send transition alerts, so a non-manager bot should ask its manager or operator to run it.
 
 ### 4. Disk usage
 

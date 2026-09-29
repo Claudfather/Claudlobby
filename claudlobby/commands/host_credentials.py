@@ -7,7 +7,7 @@ from dataclasses import asdict
 from ..command_result import CommandFailure, CommandOutput
 
 
-def dispatch(args) -> CommandOutput:
+def _reconcile(args) -> CommandOutput:
     from ..context import resolve_context
     from ..credentials import exits_nonzero, format_report, reconcile
     from ..env_tiers import ResolverUnavailable
@@ -36,3 +36,43 @@ def dispatch(args) -> CommandOutput:
         raise CommandFailure("conflict", f"credential reconciliation found {failures} failure(s)",
                              data=data, hint=report)
     return CommandOutput(data, lines=(report,))
+
+
+def _check(args) -> CommandOutput:
+    from ..activation_state import ActivationError
+    from ..config_plan import PlanError
+    from ..context import resolve_paths
+    from ..credential_check import CredentialCheckError, check_credentials
+    from ..operation_context import OperationContextError
+    from ..paths import InvalidPathSelector
+    from ..releases import ReleaseError
+    from ..runtime_admission import ReleaseMismatch
+
+    if args.seed:
+        raise CommandFailure("invalid_argument", "selected credential check cannot use the seed fleet")
+    try:
+        root = resolve_paths(root=args.root).root
+        result = check_credentials(root=root, fleet=args.fleet)
+    except CredentialCheckError as exc:
+        raise CommandFailure("unavailable" if exc.effect_attempted else "conflict", str(exc),
+                             data={"fleet": args.fleet, "native_outcome":
+                                   "unknown" if exc.effect_attempted else "unattempted"}) from exc
+    except InvalidPathSelector as exc:
+        raise CommandFailure("invalid_argument", "invalid fleet or root selector") from exc
+    except ReleaseMismatch as exc:
+        raise CommandFailure("release_mismatch", "credential check requires the selected executable") from exc
+    except (ActivationError, PlanError, ReleaseError, OperationContextError) as exc:
+        raise CommandFailure("conflict", "selected credential scope cannot be verified") from exc
+    return CommandOutput({"fleet": result.fleet, "native_outcome": result.checks,
+                          "credential_health": result.health,
+                          "state_path": str(result.state_path)}, result.release_id,
+                         (f"{result.fleet}: credential probe tick completed; inspect "
+                          "state/creds-check-state.json for provider status.",))
+
+
+def dispatch(args) -> CommandOutput:
+    if args.public_command == "host.credentials.reconcile":
+        return _reconcile(args)
+    if args.public_command == "host.credentials.check":
+        return _check(args)
+    raise CommandFailure("invalid_argument", "unsupported credential command")

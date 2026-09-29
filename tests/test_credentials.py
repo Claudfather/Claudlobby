@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import os
 import json
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from textwrap import dedent
+from types import SimpleNamespace
+import subprocess
 
 import pytest
 
@@ -299,6 +302,92 @@ class TestRedaction:
         assert "SUPERSECRETVALUE" not in output and "ANOTHERSECRET" not in output
         with pytest.raises(SystemExit):
             main(["--root", str(root), "--fleet", "t", "creds-reconcile"])
+
+
+def test_selected_credential_check_passes_exact_fleet_and_refuses_foreign_bot(
+    tmp_path, monkeypatch
+):
+    from claudlobby import credential_check as check
+    from claudlobby.config import BotConfig, FleetConfig
+    from claudlobby.config_plan import path_state
+    from claudlobby.paths import Paths
+    from tests.package_fixtures import source_package
+
+    root = tmp_path / "root"
+    fleet_root = root / "local" / "f"
+    fleet_root.mkdir(parents=True)
+    manifest = fleet_root / "fleet.yaml"
+    manifest.write_text("fleet: {name: f}\n")
+    paths = Paths(root=root, fleet_dir=fleet_root, package=source_package())
+    fleet = FleetConfig(name="f", manager="manager", service_prefix="test",
+                        bots={name: BotConfig(bot_id=name, name=name, expertise=["x"])
+                              for name in ("manager", "worker")})
+    destination = SimpleNamespace(paths=paths, fleet=fleet)
+    release_id = "r-" + "a" * 64
+    release = SimpleNamespace(release_id=release_id, native_path=paths.lib)
+    plan = SimpleNamespace(
+        effects={"fleet_sources": {"f": {"fleet": {"path": str(manifest)}}}},
+        inputs={str(manifest): {"state": path_state(manifest, source=True)}},
+        frozen_input=lambda source, required: (manifest, manifest.read_bytes()))
+
+    @contextmanager
+    def admitted(root, expected_release=None):
+        yield release
+
+    monkeypatch.setattr(check, "mutation_admission", admitted)
+    monkeypatch.setattr(check, "read_selection", lambda root: {
+        "release_id": release_id, "plan_id": "p"})
+    monkeypatch.setattr(check, "read_plan", lambda root, plan_id: plan)
+    monkeypatch.setattr(check, "native_environment", lambda paths: {
+        "CLAUDLOBBY_ROOT": str(root), "FLEET_ROOT": str(fleet_root),
+        "CLAUDLOBBY_NATIVE_DIR": str(paths.lib),
+        "CLAUDLOBBY_CLI": str(tmp_path / "selected-cli"),
+        "CLAUDLOBBY_RELEASE_ID": release_id})
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, "tick-complete\n", "")
+
+    monkeypatch.setattr(check.subprocess, "run", run)
+    monkeypatch.setattr(check, "resolve_operation_scope", lambda **kwargs: (
+        destination, SimpleNamespace(bot_id="worker")))
+    with pytest.raises(check.CredentialCheckError, match="only the selected fleet manager"):
+        check.check_credentials(root=root, fleet="f")
+    assert not calls
+
+    monkeypatch.setattr(check, "resolve_operation_scope", lambda **kwargs: (
+        destination, SimpleNamespace(bot_id="manager")))
+    result = check.check_credentials(root=root, fleet="f")
+    assert result.fleet == "f" and result.release_id == release_id
+    argv, kwargs = calls[0]
+    assert argv == [str(paths.lib / "creds-check.sh"), "--selected-release", release_id,
+                    "--fleet", "f", "--fleet-root", str(fleet_root),
+                    "--bots-dir", str(paths.runtime_bots),
+                    "--bot", "manager", "--bot", "worker"]
+    assert kwargs["env"]["FLEET_ROOT"] == str(fleet_root)
+    manifest.write_text("fleet: {name: other}\n")
+    with pytest.raises(check.CredentialCheckError, match="source changed"):
+        check.check_credentials(root=root, fleet="f")
+    assert len(calls) == 1, "a changed source must be refused before another probe"
+
+
+def test_public_credential_check_reports_tick_not_health(estate, monkeypatch, capsys):
+    from claudlobby import context
+    from claudlobby.__main__ import main
+    from claudlobby import credential_check
+
+    root, _fleet_dir, _fleet, paths = estate
+    monkeypatch.setattr(context, "get_resources", lambda: paths.package)
+    monkeypatch.setattr(credential_check, "check_credentials", lambda **kwargs:
+                        SimpleNamespace(fleet="t", release_id="r-selected",
+                                        checks="tick_completed", health="unobserved",
+                                        state_path=root / "state/creds-check-state.json"))
+    assert main(["--root", str(root), "--fleet", "t", "host", "credentials",
+                 "check", "--json"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["command"] == "host.credentials.check"
+    assert result["data"]["credential_health"] == "unobserved"
 
 
 class TestTierResolution:

@@ -214,6 +214,55 @@ def _run(f: dict) -> dict:
     return json.loads(f["state"].read_text())
 
 
+def test_selected_check_uses_reviewed_roster_not_mutable_manifest(tmp_path):
+    f = _fleet(tmp_path)
+    fleet_root = f["root"] / "local" / "f"
+    # The selected CLI supplies the frozen roster. A later source edit cannot
+    # make this one-shot probe a residue bot or another declared bot.
+    (fleet_root / "fleet.yaml").write_text(
+        "fleet:\n  name: f\n  bots:\n    bot2:\n      expertise: [x]\n")
+    release_id = "r-" + "a" * 64
+    env = {**f["env"], "CLAUDLOBBY_RELEASE_ID": release_id,
+           "CLAUDLOBBY_NATIVE_DIR": str(f["native"]),
+           "CLAUDLOBBY_CLI": str(tmp_path / "selected-cli"),
+           "FLEET_ROOT": str(fleet_root), "CLAUDLOBBY_FLEET": "f"}
+    result = subprocess.run(
+        ["bash", str(f["native"] / "creds-check.sh"),
+         "--selected-release", release_id, "--fleet", "f",
+         "--fleet-root", str(fleet_root),
+         "--bots-dir", str(fleet_root / "runtime" / "bots"), "--bot", "bot1"],
+        capture_output=True, text=True, env=env, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "tick-complete\n"
+    state = json.loads(f["state"].read_text())
+    assert "telegram_f_bot1" in state
+    assert "telegram_f_bot2" not in state
+
+
+def test_selected_timer_delegates_to_selected_cli_before_probing(tmp_path):
+    f = _fleet(tmp_path)
+    called = tmp_path / "called"
+    cli = tmp_path / "selected-cli"
+    _write_exec(cli, f'#!/bin/bash\nprintf "%s\\n" "$@" > "{called}"\n')
+    env = {**f["env"], "CLAUDLOBBY_RELEASE_ID": "r-" + "a" * 64,
+           "CLAUDLOBBY_NATIVE_DIR": str(f["native"]),
+           "CLAUDLOBBY_CLI": str(cli),
+           "FLEET_ROOT": str(f["root"] / "local" / "f")}
+    result = subprocess.run(["bash", str(f["native"] / "creds-check.sh"), "f"],
+                            capture_output=True, text=True, env=env, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert called.read_text().splitlines() == [
+        "--root", str(f["root"]), "--fleet", "f", "host", "credentials", "check"]
+    assert not f["state"].exists(), "the timer must not probe before selected admission"
+    called.unlink()
+    bad = dict(env)
+    bad.pop("FLEET_ROOT")
+    result = subprocess.run(["bash", str(f["native"] / "creds-check.sh"), "f"],
+                            capture_output=True, text=True, env=bad, timeout=10)
+    assert result.returncode == 2
+    assert not called.exists() and not f["state"].exists()
+
+
 def test_valid_token_matching_handle_ok(tmp_path):
     state = _run(_fleet(tmp_path))
     assert state["telegram_f_bot1"]["status"] == "ok"

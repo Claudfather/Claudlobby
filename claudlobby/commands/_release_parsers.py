@@ -86,6 +86,10 @@ def register_release_subparsers(sub):
         "reconcile", help="Compare declared credentials, stored tiers and equipped consumers")
     reconcile.add_argument("--json", action="store_true", help="One schema-1 result object")
     reconcile.set_defaults(func=_dispatch_host_credentials, public_command="host.credentials.reconcile")
+    check = credential_actions.add_parser(
+        "check", help="Run the selected fleet's credential probe and transition alerts once")
+    check.add_argument("--json", action="store_true", help="One schema-1 result object")
+    check.set_defaults(func=_dispatch_host_credentials, public_command="host.credentials.check")
     doctor = _route(hosts, "doctor", "host.doctor", "Diagnose configured fleets on this host")
     doctor.set_defaults(func=_dispatch_doctor)
     doctor.add_argument("--switches", action="store_true", help="Only show resolved opt-in/out switches")
