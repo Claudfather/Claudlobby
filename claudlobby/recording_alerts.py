@@ -71,7 +71,7 @@ _send_telegram() {
 }
 recipient=''; sender=''
 if [ "$channel" = manager ]; then
-    instance=$(bot_tmux "$socket" display-message -p -t "=$session" \
+    instance=$(bot_tmux "$socket" display-message -p -t "=$session:" \
         '#{session_created}-#{pane_pid}' 2>/dev/null) || instance=''
     if [ -n "$instance" ]; then
         recipient="${socket}:${session}:${instance}"

@@ -37,7 +37,7 @@ def private_alert(tmp_path):
         f". {shlex.quote(str(source.native / 'lib-common.sh'))}\n"
         "bot_tmux() {\n"
         "  [ \"$1\" = svc.manager ] && [ \"$2\" = display-message ] &&\n"
-        "    [ \"$3\" = -p ] && [ \"$4\" = -t ] && [ \"$5\" = =manager ] || return 2\n"
+        "    [ \"$3\" = -p ] && [ \"$4\" = -t ] && [ \"$5\" = =manager: ] || return 2\n"
         "  mktemp \"$CLAUDLOBBY_ROOT/fingerprint.XXXXXXXX\" >/dev/null\n"
         "  printf '%s' '100-200'\n"
         "}\n"
