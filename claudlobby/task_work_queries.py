@@ -54,12 +54,11 @@ def read_fleet_work(conn: sqlite3.Connection, *, fleet_uid: str, fleet: str,
             conn.rollback()
     uids: dict[str, set[str]] = {name.lower(): set() for name in bot_names}
     prefix = f"bot:{fleet}/"
-    for row in aliases:
-        alias = row["alias"]
+    for uid, alias in aliases:
         if alias.startswith(prefix):
             name = alias[len(prefix):].lower()
             if name in uids:
-                uids[name].add(row["uid"])
+                uids[name].add(uid)
     current: dict[str, list[CurrentWork]] = {name: [] for name in bot_names}
     completed: dict[str, list[tuple[int, str, str]]] = {name: [] for name in bot_names}
     for task in snapshot.tasks:

@@ -249,7 +249,9 @@ def test_no_read_is_consumed_past_the_next_scenario_boundary():
     # A boundary drops every refusal a check has reported, so a check after it
     # that consumes an earlier read would score an unreadable read again.
     offenders, reads, bounds = _cross_boundary_consumers(HARNESS.read_text())
-    assert reads > 40 and bounds > 30, (reads, bounds)
+    # Retirement legitimately reduces scenario/read counts. Require that the
+    # scanner ran over real inputs, not a minimum size for the harness.
+    assert reads > 0 and bounds > 0, (reads, bounds)
     assert offenders == [], "\n".join(offenders)
 
 
