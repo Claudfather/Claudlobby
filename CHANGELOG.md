@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the README quickstart stops at a failed validate, and the install step says how long it takes (#1681)
+
+- **The manual quickstart ran `lib/setup-fleet` even after `validate` failed.** It printed `claudlobby validate && claudlobby generate` and then `lib/setup-fleet` on a line of its own. On a first run with placeholders still in place, `validate` correctly fails, and `setup-fleet` then ran anyway and failed twice more. The line now continues the chain (`… && lib/setup-fleet`), under a comment saying `validate` stops it until every `REPLACE_ME` is filled in.
+- **The install step now states a duration**, in both README and getting-started.
+  - On a Raspberry Pi 5 it takes about 1 minute: 45 s measured from an empty pip cache.
+  - Where a dependency has to be compiled, one cold host ran past 8 minutes.
+  - pip prints each package as it goes. `lib/setup-system` installs with `--quiet`, so it now says to expect the same wait with no output.
+- **`tests/test_cold_start_contract.py`** fails if an onboarding page runs `lib/setup-fleet` on its own line after a `validate` chain, or if the install section states no duration.
+
 ### Added — `claudlobby doctor` asks `claudron doctor` about each wired vault, and never applies `--fix` (Claudron #190, part C)
 
 Until now nothing in fleet health said a vault had fallen behind its engine. After the 0.5.2 upgrade, walk-up stopped finding a vault that lacked its identity file, and every hook that found the vault that way failed open without a word (Claudron #183). The Claudron section of `claudlobby doctor` now runs `claudron doctor --json --vault <vault>` for each wired vault this host holds, and adds:

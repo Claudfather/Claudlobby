@@ -29,6 +29,11 @@ python3 -m pip install -e '.[plane-ui]'
 composes **no** unit for it rather than supervising a process that cannot start; `claudlobby
 doctor --switches` then lists `plane-view` as off, with this pip line as the way to arm it.
 
+**How long it takes.** On a Raspberry Pi 5 the install takes about 1 minute (45 s from an empty
+pip cache). Where a dependency has no prebuilt wheel for your platform, pip compiles it, and one
+cold host ran past 8 minutes. pip prints each package as it goes, so a long quiet stretch at
+`Building wheel for …` means compiling, not stuck.
+
 **The virtualenv is required, not a style preference.** Homebrew python (macOS) and Debian /
 Raspberry Pi OS system python are both marked externally-managed under
 [PEP 668](https://peps.python.org/pep-0668/); installing into them fails with
@@ -37,7 +42,8 @@ Also note `python3 -m pip` rather than `pip` — Homebrew ships `pip3` only, so 
 a command on a stock Mac.
 
 Rather not do it by hand? `lib/setup-system` creates the venv, installs claudlobby, and checks
-every other host prerequisite in one idempotent pass:
+every other host prerequisite in one idempotent pass. Its install runs quietly, so expect the same
+wait with no output:
 
 ```bash
 lib/setup-system --dry-run     # preview: reports what is present and what it would do

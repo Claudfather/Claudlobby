@@ -161,6 +161,37 @@ class TestDocumentedInstallPath:
         )
 
 
+class TestQuickstartStopsAtAFailedValidate:
+    """#1681: the README printed `claudlobby validate && claudlobby generate` and then
+    `lib/setup-fleet` on a line of its own. On a first run, with placeholders still in
+    place, validate correctly fails, and setup-fleet then ran anyway and failed twice
+    more. The conditional has to be written, not implied."""
+
+    @pytest.mark.parametrize("doc", [README, GETTING_STARTED, SETUP_SKILL], ids=lambda p: p.name)
+    def test_setup_fleet_never_runs_on_its_own_line_after_a_validate_chain(self, doc: Path):
+        for block in _FENCE_RE.findall(doc.read_text()):
+            lines = [raw.split("#", 1)[0].rstrip() for raw in block.splitlines()]
+            lines = [line for line in lines if line.strip()]
+            for prev, line in zip(lines, lines[1:]):
+                if "claudlobby validate" in prev and not prev.endswith("\\"):
+                    assert not line.lstrip().startswith("lib/setup-fleet"), (doc.name, prev, line)
+
+
+class TestTheInstallStepSaysHowLongItTakes:
+    """#1681: on a cold host the install ran past eight minutes with no stated
+    duration, and `lib/setup-system` installs with `--quiet`. A stranger cannot tell
+    slow from stopped, which decides whether they wait or press Ctrl-C."""
+
+    @pytest.mark.parametrize("doc", [README, GETTING_STARTED], ids=lambda p: p.name)
+    def test_the_install_section_states_a_duration(self, doc: Path):
+        text = doc.read_text()
+        start = text.find("python3 -m pip install -e '.[plane-ui]'")
+        assert start != -1, doc.name
+        end = text.find("\n## ", start)
+        section = text[start : end if end != -1 else len(text)]
+        assert re.search(r"\b\d+\s*(?:(?:–|-|to)\s*\d+\s*)?minutes?\b", section), section[:600]
+
+
 class TestCliResolutionProbe:
     """`claudlobby_cli` must not mistake an importable package for a usable one."""
 
