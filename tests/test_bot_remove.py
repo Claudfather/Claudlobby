@@ -61,6 +61,7 @@ def test_teardown_timeout_kills_private_process_group_and_reports_unknown(monkey
 def test_native_effect_marker_distinguishes_preflight_refusal():
     assert not bot_remove._effect_attempted("spin-down[worker]: receipt: submitted\n")
     assert bot_remove._effect_attempted("spin-down[worker]: effect-attempted\n")
+    assert bot_remove._effect_attempted("effect-attempted\n")
 
 
 @pytest.mark.parametrize("declared_in", ("active", "authored"))

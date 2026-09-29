@@ -59,7 +59,14 @@ cat > "$T/bin/systemd-analyze" <<'EOF'
 #!/bin/bash
 printf '%s/.config/systemd/user\n' "$HOME"
 EOF
-printf '#!/bin/bash\nexit 0\n' > "$T/bin/tmux"
+cat > "$T/bin/tmux" <<'EOF'
+#!/bin/bash
+if [ "${TMUX_STALE:-0}" = 1 ] && [ "${3:-}" = list-sessions ]; then
+    printf 'no server running on %s/tmux-%s/%s\n' "$TMUX_TMPDIR" "$(id -u)" "$2" >&2
+    exit 1
+fi
+exit 0
+EOF
 printf '#!/bin/bash\nexit 0\n' > "$T/bin/launchctl"
 chmod +x "$T/bin/systemctl" "$T/bin/systemd-analyze" "$T/bin/tmux" "$T/bin/launchctl"
 
@@ -74,10 +81,10 @@ spin_down() {
     mkdir -p "$bdir"
     printf 'export BOT_NAME=%s\nexport BOT_SERVICE=t.p.%s\nexport TMUX_SOCKET=t.p.%s\nexport FLEET_STATE_PATH=%s\n' \
         "$bot" "$bot" "$bot" "$ROOT/state/fleet-state.json" > "$bdir/bot.conf"
-    env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T" CLAUDLOBBY_ROOT="$ROOT" USER=testuser \
+    env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T" TMPDIR="$T" CLAUDLOBBY_ROOT="$ROOT" USER=testuser \
         FLEET_NAME=f1 SPINDOWN_ACTOR="${SPINDOWN_ACTOR:-}" \
         SPINDOWN_RECEIPT_ENABLED="${SPINDOWN_RECEIPT_ENABLED-1}" \
-        NATIVE_OCCUPIED="${NATIVE_OCCUPIED:-0}" NATIVE_UNIT="t.p.$bot.service" \
+        NATIVE_OCCUPIED="${NATIVE_OCCUPIED:-0}" NATIVE_UNIT="t.p.$bot.service" TMUX_STALE="${TMUX_STALE:-0}" \
         PLANE_EMIT_DISABLED=0 PLANE_CAPTURE_BATCH="$SCRIPT_DIR/plane_capture_cli.sh" PLANE_CAPTURE="$CAPTURE" PLANE_SOCKET="$T/no.sock" \
         bash "$LIB_DIR/spin-down-bot.sh" "$bdir" "$@" 2>&1 || true
 }
@@ -106,6 +113,22 @@ spin_down retiredclean --retired-service t.p.retiredclean --expected-return none
 assert_eq "retired cleanup removes only its directory" "no" \
     "$([ -d "$ROOT/local/f1/runtime/bots/retiredclean" ] && echo yes || echo no)"
 assert_eq "retired cleanup records permanent removal" "none" "$(field "$(receipt_row)" expected_return)"
+
+# A socket file plus tmux's exact no-server text can also mean a live server
+# with a full backlog. Retain the directory on explicit purge for inspection.
+reset
+mkdir -p "$T/tmux-$(id -u)"
+python3 - "$T/tmux-$(id -u)/t.p.stale" <<'PY'
+import socket, sys
+sock = socket.socket(socket.AF_UNIX)
+sock.bind(sys.argv[1])
+sock.close()
+PY
+out="$(TMUX_STALE=1 spin_down stale --retired-service t.p.stale --purge)"
+assert_eq "ambiguous retired socket refuses purge with inspection hint" yes \
+    "$(printf '%s\n' "$out" | grep -q 'liveness is unverified; inspect' && echo yes || echo no)"
+assert_eq "ambiguous retired socket retains the bot directory" yes \
+    "$([ -d "$ROOT/local/f1/runtime/bots/stale" ] && echo yes || echo no)"
 
 # --- a plain teardown records actor, action, and explicit absences ------------
 reset

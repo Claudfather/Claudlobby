@@ -37,7 +37,8 @@ def _diagnostic(stderr: str) -> str:
 
 
 def _effect_attempted(stdout: str) -> bool:
-    return any(line.endswith(": effect-attempted") for line in stdout.splitlines())
+    return any(line == "effect-attempted" or line.endswith(": effect-attempted")
+               for line in stdout.splitlines())
 
 
 def _last_declaration(root, selected, fleet, bot, package):

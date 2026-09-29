@@ -224,8 +224,9 @@ if [ -n "$RETIRED_SERVICE" ]; then
     # by activation and must not be touched by a later cleanup.
     _tmpdir="${TMUX_TMPDIR:-${TMPDIR:-/tmp}}"
     if [ -S "$_tmpdir/tmux-$(id -u)/$_socket" ]; then
-        sd_log "effect-attempted"
-        svc_activation_stop_private_server "$BOT_DIR" "$_socket" "$_tmpdir" retired || exit 3
+        _stop_mode=retired
+        [ "$PURGE" -eq 1 ] && _stop_mode=retired-purge
+        svc_activation_stop_private_server "$BOT_DIR" "$_socket" "$_tmpdir" "$_stop_mode" || exit 3
     fi
     sd_log "effect-attempted"
     rm -f "$BOT_DIR/.tmux-env"

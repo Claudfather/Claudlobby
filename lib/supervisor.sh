@@ -791,7 +791,7 @@ svc_activation_handoff() (
 
 svc_activation_stop_private_server() (
     local bot_dir="$1" expected="$2" tmpdir="$3" sessions session physical_tmpdir absent="${4:-refuse}"
-    case "$absent" in refuse|retired) ;; *) return 3 ;; esac
+    case "$absent" in refuse|retired|retired-purge) ;; *) return 3 ;; esac
     case "$bot_dir" in /*) ;; *) return 3 ;; esac
     case "$expected" in ''|*[!a-zA-Z0-9_.-]*) return 3 ;; esac
     case "$tmpdir" in /*) ;; *) return 3 ;; esac
@@ -800,18 +800,25 @@ svc_activation_stop_private_server() (
     . "$_SUPERVISOR_LIB_DIR/lib-common.sh" || return 3
     session=$(tmux_session_name "$bot_dir") || return 3
     if ! sessions=$(LC_ALL=C bot_tmux "$expected" list-sessions -F '#{session_name}' 2>&1); then
-        # tmux leaves its socket file after a clean server exit. A retired
-        # unit cannot restart it; this exact no-server result needs no kill.
-        # Permission/connection/other failures remain unknown, never absent.
-        [ "$absent" = retired ] || return 3
+        # tmux leaves its socket file after a clean server exit, but a full
+        # live-server backlog can print the same no-server text. Ordinary
+        # retired cleanup may leave the directory; purge must refuse it.
+        # Permission/connection/other failures remain unknown.
+        case "$absent" in retired|retired-purge) ;; *) return 3 ;; esac
         physical_tmpdir=$(cd "$tmpdir" && pwd -P) || return 3
         case "$sessions" in
             "no server running on $tmpdir/tmux-$(id -u)/$expected"|\
-            "no server running on $physical_tmpdir/tmux-$(id -u)/$expected") return 0 ;;
+            "no server running on $physical_tmpdir/tmux-$(id -u)/$expected")
+                if [ "$absent" = retired-purge ]; then
+                    echo 'retired private server liveness is unverified; inspect the retained socket and bot session, then clean up manually before purge' >&2
+                    return 3
+                fi
+                return 0 ;;
             *) return 3 ;;
         esac
     fi
     [ "$sessions" = "$session" ] || return 3
+    printf 'effect-attempted\n'
     bot_tmux "$expected" kill-server || return 3
 )
 

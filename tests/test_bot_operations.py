@@ -56,8 +56,13 @@ pane_send_verified() {
     assert refused.returncode == 3 and refused.stdout == "" and not log.exists()
 
 
-@pytest.mark.parametrize("message, expected_rc", [("no server running on", 0), ("permission denied on", 3), ("wrong socket", 3)])
-def test_retired_private_server_handles_stale_socket_without_hiding_errors(tmp_path, message, expected_rc):
+@pytest.mark.parametrize("message, mode, expected_rc", [
+    ("no server running on", "retired", 0),
+    ("no server running on", "retired-purge", 3),
+    ("permission denied on", "retired", 3),
+    ("wrong socket", "retired", 3),
+])
+def test_retired_private_server_handles_stale_socket_without_hiding_errors(tmp_path, message, mode, expected_rc):
     native = Path(__file__).resolve().parents[1] / "lib/supervisor.sh"
     private = tmp_path / "native"
     private.mkdir()
@@ -74,10 +79,12 @@ bot_tmux() {
            "SOCKET_ROOT": str(tmp_path)}
     if message == "wrong socket":
         env.update(FAILURE="no server running on", SOCKET_ROOT=str(tmp_path / "other"))
-    result = subprocess.run(["/bin/bash", "-c", '. "$1"; svc_activation_stop_private_server "$2" worker.socket "$3" retired',
-                             "stop", str(native), str(tmp_path / "bot"), str(tmp_path)],
+    result = subprocess.run(["/bin/bash", "-c", '. "$1"; svc_activation_stop_private_server "$2" worker.socket "$3" "$4"',
+                             "stop", str(native), str(tmp_path / "bot"), str(tmp_path), mode],
                             env=env, capture_output=True, text=True, timeout=5)
     assert result.returncode == expected_rc
+    if mode == "retired-purge":
+        assert "liveness is unverified" in result.stderr
 
 
 @pytest.mark.parametrize("stdout, attempted", [("", False), ("effect-attempted\n", True)])
