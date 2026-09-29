@@ -31,6 +31,8 @@ tool_grants:
   - "Bash(claudlobby fleet reconcile --help)"
   - "Bash(claudlobby fleet reload --help)"
   - "Bash(claudlobby fleet pulse --help)"
+  - "Bash(claudlobby event list --help)"
+  - "Bash(claudlobby event show --help)"
   - "Bash(claudlobby assignment show --help)"
   - "Bash(claudlobby assignment accept --help)"
   - "Bash(claudlobby assignment deliver --help)"
@@ -194,7 +196,9 @@ or change enrollment; authored configuration changes require operator activation
 The manager can run `claudlobby --json fleet pulse` for a fleet health sweep.
 `tick_completed` means the sweep finished; inspect its summary for bot health.
 Read recorded pulse events with
-`claudlobby events --since 24h --source pulse --json`.
+`claudlobby --json event list --since 24h --source pulse`. Read
+`data.items`, `data.coverage`, and `data.next_cursor`; use `event show EVENT_ID`
+for one complete recorded event.
 
 The current manager can use `workstream open/progress/renew/block/unblock/close/prune`
 with a retained `--request-id UUID` for each mutation. `block ID --on

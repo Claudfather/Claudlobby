@@ -298,7 +298,7 @@ fleet:
     enabled: true                  # default true when the block is present
 ```
 
-After `claudlobby generate`, enroll the timer once per host: `lib/install-code-audit-sweep-systemd.sh <fleet>` (Linux) or `lib/install-code-audit-sweep.sh <fleet>` (macOS). The owner bot needs the `code-audit-sweep` skill (add `code-audit-sweep` to its `skills:`). Audit events (`audit_selected`, `audit_dispatched`, `audit_completed`, …) land on the plane; read them with `claudlobby events --bot <owner> --source audit`.
+After `claudlobby generate`, enroll the timer once per host: `lib/install-code-audit-sweep-systemd.sh <fleet>` (Linux) or `lib/install-code-audit-sweep.sh <fleet>` (macOS). The owner bot needs the `code-audit-sweep` skill (add `code-audit-sweep` to its `skills:`). Audit events (`audit_selected`, `audit_dispatched`, `audit_completed`, …) land on the plane; read them with `claudlobby --json event list --bot <owner> --source audit` and follow `data.next_cursor` when present.
 
 ### `bots.<bot>.briefing`
 

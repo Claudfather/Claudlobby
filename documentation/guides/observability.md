@@ -10,10 +10,10 @@ description: Decision tree for diagnosing fleet issues from logs, events, and CL
 | Question | Where to look | Command |
 |----------|---------------|---------|
 | Is the fleet healthy? | Fleet status dashboard | `claudlobby fleet status` |
-| What happened recently? | The plane (`state/plane/plane.db`) | `claudlobby events --critical --tail 20` |
-| Is a specific bot stuck? | The plane's heartbeat samples | `claudlobby fleet status` (the newest heartbeat) / `claudlobby fleet uptime --bot <bot>` (the history) / `claudlobby events --bot <bot> --source keepalive` (the transitions) |
-| Why did a bot restart? | Keepalive events + journal | `claudlobby events --bot <bot> --type keepalive` |
-| Did a script fail? | Script error events | `claudlobby events --type script_error` |
+| What happened recently? | The plane (`state/plane/plane.db`) | `claudlobby event list --critical --limit 20` |
+| Is a specific bot stuck? | The plane's heartbeat samples | `claudlobby fleet status` (the newest heartbeat) / `claudlobby fleet uptime --bot <bot>` (the history) / `claudlobby event list --bot <bot> --source keepalive` (the transitions) |
+| Why did a bot restart? | Keepalive events + journal | `claudlobby event list --bot <bot> --type keepalive` |
+| Did a script fail? | Script error events | `claudlobby event list --type script_error` |
 | Is a service down? | systemd journal | `journalctl --user -u <BOT_SERVICE> -n 30` |
 | What's the bot doing right now? | tmux pane | `tmux -L "$(tmux_socket_for_bot runtime/bots/<bot>)" capture-pane -t <bot> -p \| tail -10` |
 | How long has the fleet been up? | Uptime metrics | `claudlobby fleet uptime` |
@@ -26,7 +26,7 @@ description: Decision tree for diagnosing fleet issues from logs, events, and CL
 
 > Every bot runs its own private tmux server (`-L <socket>`, the socket name is the bot's `BOT_SERVICE`/`TMUX_SOCKET`) since per-bot-tmux-socket isolation shipped. A bare `tmux -t <bot>` targets the shared *default* server, which has none of your bots on it, and silently reports no session instead of erroring. The commands above resolve the socket via `tmux_socket_for_bot <bot-dir>` — `source lib/lib-common.sh` first (from the claudlobby repo root) to get it in scope — or skip raw tmux entirely and dispatch through `lib/dispatch.sh` / the `bot_tmux`/`bot_tmux_send` wrappers. See [advanced-patterns.md](../advanced-patterns.md) for the full model.
 
-> **The plane is the fleet's only record.** `emit_fleet_event` and fleet doors land on `state/plane/plane.db`; `claudlobby events` / `fleet reports list` / `fleet uptime` / `fleet status` / `brief` read it; `plane prune` ages its metric samples. Health: `claudlobby plane status` / `plane doctor`.
+> **The plane is the fleet's only record.** `emit_fleet_event` and fleet doors land on `state/plane/plane.db`; `claudlobby event list` / `fleet reports list` / `fleet uptime` / `fleet status` / `brief` read it; `plane prune` ages its metric samples. Health: `claudlobby plane status` / `plane doctor`.
 
 ## Event Data Flow
 
@@ -39,7 +39,7 @@ Bot activity
                                 ──► [FLEET-PULSE] notification to manager tmux
   └─► emit_failure_alert / emit_fleet_notice ──► emit_fleet_event ──► the plane (anchored on the fleet, source: alert/notice)
       (start-bot.sh, reload-fleet.sh, …)      ──► [FLEET-ALERT]/[FLEET-NOTICE] nudge to manager tmux
-Readers: claudlobby events / fleet reports list / fleet uptime / fleet status / brief; the plane's samples age under `plane prune`.
+Readers: claudlobby event list / fleet reports list / fleet uptime / fleet status / brief; the plane's samples age under `plane prune`.
 ```
 
 ## Event Types
@@ -60,7 +60,7 @@ Readers: claudlobby events / fleet reports list / fleet uptime / fleet status / 
 | `rc_timeout` | startup / alert | `start-bot.sh`'s readiness poll (the Telegram poller's `bridge_state=up`, session-scoped) hit its `RC_READY_TIMEOUT_S` ceiling before the poller came up, so channel replies drop while inbound still arrives (the #533 outage class). Emitted once per (re)start; `fleet-pulse.sh` escalates it like its other crit types, so a fleet-wide TIMEOUT pages instead of sitting silent in every `startup.log` |
 | `crash_loop` | pulse | The bot's unit fails EVERY start and systemd keeps restarting it: it is mid-start (`activating/*`, `active/running`) with at least 2 automatic restarts in this streak (`NRestarts`; #1769). Data: `unit`, `restarts`, `state`. Critical: `fleet-pulse.sh` escalates it and pushes the manager a note naming `logs/startup.log`, and for that bot raises no `session_missing` or `service_down`, whose remedies (re-enroll, restart) are wrong while systemd is already retrying; keepalive skips it rather than restarting. Both hold except in the few-millisecond `deactivating/stop-post` window between two attempts, which reads no verdict. **Its severity is stamped at ingest by the resident plane daemon, from the registry it loaded at start: a daemon started before a type was registered stores it with no severity until restarted, so it never reaches the escalation, `brief` or `events --critical` (the manager push still fires)** |
 
-> **One plane, one reader:** `reload_failed`, `restart_failed`, and `bridge_down` raised at bot bring-up are anchored on the FLEET's identity (a fleet-level receipt), the pulse-sourced `bridge_down` on the bot's; `claudlobby events` reads both from the plane, so a type can appear from either. `bot_teardown_started` is deliberately **not** in `CRITICAL_TYPES` — `spin-down-bot.sh` is also the throwaway-canary reaper, so `--critical` would fill with expected noise. Query it explicitly (`claudlobby events --type bot_teardown_started`).
+> **One plane, one reader:** `reload_failed`, `restart_failed`, and `bridge_down` raised at bot bring-up are anchored on the FLEET's identity (a fleet-level receipt), the pulse-sourced `bridge_down` on the bot's; `claudlobby event list` reads both from the plane, so a type can appear from either. `bot_teardown_started` is deliberately **not** in `CRITICAL_TYPES` — `spin-down-bot.sh` is also the throwaway-canary reaper, so `--critical` would fill with expected noise. Query it explicitly (`claudlobby event list --type bot_teardown_started`).
 
 ### Informational
 
@@ -86,20 +86,20 @@ Readers: claudlobby events / fleet reports list / fleet uptime / fleet status / 
 **Bot is "stuck" (session alive, not making progress):**
 
 1. `tmux -L "$(tmux_socket_for_bot <bot-dir>)" capture-pane -t <bot> -p | tail -20` — what's on screen?
-2. `claudlobby events --bot <bot> --type activity_stuck` — has fleet-pulse flagged it?
+2. `claudlobby event list --bot <bot> --type activity_stuck` — has fleet-pulse flagged it?
 3. If at a permission prompt → the bot needs input
 4. If spinner but no tool calls → restart: `systemctl --user restart <BOT_SERVICE>`
 
 **Multiple bots down simultaneously:**
 
-1. `claudlobby events --critical` — fleet-wide critical events
+1. `claudlobby event list --critical` — fleet-wide critical events
 2. `lib/reconcile-fleet.sh <fleet>` — audit supervision state
 3. `lib/reconcile-fleet.sh <fleet> --enroll` — re-enroll orphans
 4. Check if a recent `claudlobby generate` changed unit file names without re-enrolling
 
 **Script failures:**
 
-1. `claudlobby events --type script_error --tail 10` — recent errors
+1. `claudlobby event list --type script_error --limit 10` — recent errors
 2. Check the `data` field for `script` name, `exit_code`, and `message`
 3. Run the failing script manually with `bash -x` for debug trace
 
@@ -108,7 +108,7 @@ Readers: claudlobby events / fleet reports list / fleet uptime / fleet status / 
 | Path | Content | Retention |
 |------|---------|-----------|
 | `runtime/bots/<bot>/keepalive.log` | Plaintext keepalive state log | Rotated by log-rotate.sh (500 lines) |
-| `state/plane/plane.db` | The plane: every event, dispatch, report and heartbeat sample (F18 closure — the per-bot and fleet-root event files are gone); read with `claudlobby events` / `fleet reports list` / `fleet uptime` / `brief` | Append-only; metric samples aged by `plane prune` (30d) |
+| `state/plane/plane.db` | The plane: every event, dispatch, report and heartbeat sample (F18 closure — the per-bot and fleet-root event files are gone); read with `claudlobby event list` / `fleet reports list` / `fleet uptime` / `brief` | Append-only; metric samples aged by `plane prune` (30d) |
 | `runtime/bots/<bot>/data/.idle` | Idle marker — touched by keepalive.sh on IDLE, cleared on BUSY. Fleet-pulse reads mtime. | Transient (current state only) |
 | `runtime/bots/<bot>/data/.last-tool-call` | Tool-call marker — touched by bot-vitals.sh on every hook. Stale mtime + no `.idle` = activity_stuck candidate. | Transient (current state only) |
 | `state/fleet-state.json` | Per-bot current status + task | Persistent |

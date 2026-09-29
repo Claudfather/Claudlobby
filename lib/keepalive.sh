@@ -40,7 +40,7 @@ LOG="$BOT_DIR/keepalive.log"
 
 # Emit a keepalive event: a TRANSITION (RESTART, BRIDGE_HEAL, SKIP, RELOAD) is
 # a FLEET EVENT on the plane through the one door (emit_fleet_event:
-# provenance, alias-anchored), so `claudlobby events` and `uptime` see it; the
+# provenance, alias-anchored), so `claudlobby event list` and `uptime` see it; the
 # per-tick verdicts BUSY / IDLE / UNKNOWN ride the heartbeat sample the same
 # tick emits (plane_presence_samples) and are not fleet events. (The
 # keepalive-<day>.jsonl file this once wrote had no reader in the estate —

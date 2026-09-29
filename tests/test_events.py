@@ -21,6 +21,9 @@ the plane is one source, reachable or not.
 from __future__ import annotations
 
 import sqlite3
+import json
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -35,6 +38,7 @@ from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 from claudlobby.plane.registries import SYSTEM_EVENT_SEVERITY
 from tests.plane_fixtures import F, _scene
+from tests.plane_fixtures import _env as plane_env
 from tests.test_plane_events_door import _drop_plane, _events_cmd, _land, _rows
 
 
@@ -234,10 +238,10 @@ class TestTheCommandRefuses:
         assert _rows(_events_cmd(root, "--json"))                          # reachable: rows
         _drop_plane(root)
         gone = _events_cmd(root, "--json")
-        assert gone.returncode == 3 and gone.stdout == ""
-        assert "UNREACHABLE" in gone.stderr and "no plane db" in gone.stderr
+        assert gone.returncode == 6 and gone.stdout
+        assert "no plane db" in gone.stdout
         table = _events_cmd(root)
-        assert table.returncode == 3 and table.stdout == ""                # the table mode refuses the same way
+        assert table.returncode == 6 and table.stdout == ""                # the table mode refuses the same way
 
     def test_a_missing_bots_dir_is_not_a_gate_any_more(self, tmp_path):
         """The files' first gate ("No bots directory", rc 1) guarded a walk
@@ -262,4 +266,82 @@ def test_the_window_the_docs_print_is_served(tmp_path):
     _land(root, "w1", "service_down", (now - timedelta(minutes=10)).isoformat(), {"unit": "w1"})
     r = _events_cmd(root, "--since", "24h", "--json")
     assert [e["type"] for e in _rows(r)] == ["service_down"]
-    assert "24h window" in r.stderr
+    assert "24h window" in json.loads(r.stdout)["data"]["coverage"]
+
+
+def test_event_list_pages_stable_ids_and_rejects_changed_filter_cursor(scene):
+    root, _paths = scene
+    first = json.loads(_events_cmd(root, "--json", "--limit", "2").stdout)
+    assert first["schema_version"] == 1 and first["command"] == "event.list"
+    assert len(first["data"]["items"]) == 2 and first["data"]["next_cursor"]
+    assert all(item["event_id"] and item["fleet"] == F for item in first["data"]["items"])
+    second = json.loads(_events_cmd(root, "--json", "--limit", "2", "--cursor",
+                                    first["data"]["next_cursor"]).stdout)
+    assert len(second["data"]["items"]) == 2 and second["data"]["next_cursor"] is None
+    assert {item["event_id"] for item in first["data"]["items"]}.isdisjoint(
+        item["event_id"] for item in second["data"]["items"])
+    wrong = _events_cmd(root, "--json", "--type", "service_down", "--cursor",
+                        first["data"]["next_cursor"])
+    assert wrong.returncode == 2 and json.loads(wrong.stdout)["error"]["code"] == "invalid_argument"
+
+    # The reader must bound the SQL result before rendering, including its
+    # qualifying filters; a Python slice after a full history scan is not a page.
+    from claudlobby.paths import load_lib_module
+    reader = load_lib_module(_paths.lib, "plane-readers.py")
+    conn, note = plane_events_conn(_paths)
+    assert conn is not None, note
+    statements = []
+    try:
+        conn.set_trace_callback(statements.append)
+        page = reader.fleet_events(conn, F, source="pulse", critical_only=True,
+                                   descending=True, limit=2)
+    finally:
+        conn.close()
+    assert len(page) == 2
+    query = next(sql for sql in statements if "fleet-events:%" in sql)
+    assert "e.severity = 'critical'" in query
+    assert "json_extract(e.detail, '$.source')" in query
+    assert "ORDER BY e.occurred_at DESC, e.ingest_seq DESC LIMIT 2" in query
+
+
+def test_event_list_invalid_root_is_one_schema_result(tmp_path):
+    bad_root = tmp_path / "not-a-directory"
+    bad_root.write_text("not a root")
+    result = subprocess.run([sys.executable, "-m", "claudlobby", "--root", str(bad_root),
+                             "--fleet", F, "--json", "event", "list"],
+                            capture_output=True, text=True, env=plane_env(tmp_path), timeout=60)
+    assert result.returncode == 2
+    body = json.loads(result.stdout)
+    assert body["schema_version"] == 1 and body["command"] == "event.list"
+    assert body["error"]["code"] == "invalid_argument"
+    assert "Traceback" not in result.stderr
+
+
+def test_event_show_uses_stable_id_and_exact_fleet_scope(scene):
+    from claudlobby.plane.emit_api import emit_batch
+
+    root, _paths = scene
+    foreign = emit_batch(root, [{"event_type": "system", "emitter": "test", "fleet": "other-fleet",
+                                 "source_ref": "fleet-events:sha:" + "f" * 32,
+                                 "payload": {"event": "session_missing", "subject_kind": "fleet",
+                                             "subject": "other-fleet",
+                                             "data": {"source": "test", "legacy_ts": "2026-06-10T11:00:00Z",
+                                                      "data": {"reason": "foreign"}}}}])[0].event_id
+
+    def show(event_id):
+        return subprocess.run([sys.executable, "-m", "claudlobby", "--root", str(root),
+                               "--fleet", F, "--json", "event", "show", event_id],
+                              capture_output=True, text=True, env=plane_env(root), timeout=60)
+
+    own = _collect(_paths, event_type="service_down")[0]
+    with plane_events_conn(_paths)[0] as conn:
+        from claudlobby.paths import load_lib_module
+        reader = load_lib_module(_paths.lib, "plane-readers.py")
+        own_id = reader.fleet_events(conn, F, event_type="service_down")[0]["_event_id"]
+    result = show(own_id)
+    assert result.returncode == 0 and json.loads(result.stdout)["data"]["event"] == {
+        "event_id": own_id, "fleet": F, "occurred_at": own["ts"], "bot": "alpha",
+        "type": "service_down", "source": "pulse", "severity": "critical",
+        "data": own["data"], "detail_truncated": False}
+    denied = show(foreign)
+    assert denied.returncode == 3 and json.loads(denied.stdout)["error"]["code"] == "not_found"

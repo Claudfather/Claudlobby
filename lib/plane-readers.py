@@ -1077,12 +1077,12 @@ FLEET_UID_SQL = "SELECT uid FROM identity_registry WHERE kind = 'fleet' AND alia
 FLEET_EVENTS_PREFIX = "fleet-events:"
 FLEET_EVENTS_SQL = (
     "SELECT e.occurred_at, e.event, e.severity, e.subject_kind, e.subject_alias,"
-    " e.detail, e.detail_truncated FROM events e"
+    " e.detail, e.detail_truncated, e.event_id, e.ingest_seq FROM events e"
     " WHERE e.kind = 'system' AND e.fleet_uid = ? AND e.source_ref LIKE ?"
     " AND (? IS NULL OR e.occurred_at >= ?)"
     " AND (? IS NULL OR e.event = ?)"
     " AND (? IS NULL OR lower(e.subject_alias) = lower(?))"
-    " ORDER BY e.occurred_at, e.ingest_seq"
+    " AND (? IS NULL OR e.event_id = ?)"
 )
 # fleet-pulse's escalation, answered for EVERY critical type in one read (a
 # sweep used to spawn this once per bot per type): which bots carry which
@@ -1158,17 +1158,46 @@ def public(row: dict) -> dict:
 
 
 def fleet_events(conn: sqlite3.Connection, fleet: str, *, since: Optional[str] = None,
-                 bot: Optional[str] = None, event_type: Optional[str] = None) -> list[dict]:
-    """The fleet's events as legacy rows, oldest first (`--critical` and
-    `--source` are the reader's own vocabulary, filtered on the rows)."""
+                 bot: Optional[str] = None, event_type: Optional[str] = None,
+                 event_id: Optional[str] = None, source: Optional[str] = None,
+                 critical_only: bool = False, descending: bool = False,
+                 after: Optional[tuple[str, int]] = None,
+                 limit: Optional[int] = None) -> list[dict]:
+    """One fleet event reader and renderer. Private callers retain oldest-first
+    unbounded rows; the public page pushes every filter, cursor and limit into
+    this query before rendering so a growing fleet cannot fill Python memory."""
     uid = fleet_uid(conn, fleet)
     alias = f"bot:{fleet}/{bot}" if bot and bot != "fleet" else None
     since = since_form(since)
-    rows = [legacy_event_row(*row, fleet) for row in conn.execute(
-        FLEET_EVENTS_SQL, (uid, FLEET_EVENTS_PREFIX + "%", since, since,
-                           event_type, event_type, alias, alias))]
+    sql = FLEET_EVENTS_SQL
+    params = [uid, FLEET_EVENTS_PREFIX + "%", since, since,
+              event_type, event_type, alias, alias, event_id, event_id]
     if bot == "fleet":
-        rows = [r for r in rows if r["bot"] == "fleet"]
+        sql += " AND e.subject_kind = 'fleet'"
+    if source is not None:
+        # legacy_event_row treats truncated/malformed detail or an empty source
+        # as 'plane'. Match that renderer before applying the SQL page bound.
+        sql += (" AND (CASE WHEN e.detail_truncated OR NOT json_valid(e.detail)"
+                " THEN 'plane' ELSE COALESCE(NULLIF(json_extract(e.detail, '$.source'), ''),"
+                " 'plane') END) = ?")
+        params.append(source)
+    if critical_only:
+        sql += " AND e.severity = 'critical'"
+    if after is not None:
+        sql += " AND (e.occurred_at, e.ingest_seq) < (?, ?)"
+        params.extend(after)
+    sql += (" ORDER BY e.occurred_at DESC, e.ingest_seq DESC" if descending
+            else " ORDER BY e.occurred_at, e.ingest_seq")
+    if limit is not None:
+        if type(limit) is not int or limit < 1:
+            raise ValueError("event limit must be a positive integer")
+        sql += " LIMIT ?"
+        params.append(limit)
+    rows = []
+    for row in conn.execute(sql, params):
+        rendered = legacy_event_row(*row[:7], fleet)
+        rendered.update(_event_id=row[7], _ingest_seq=row[8], _occurred_at=row[0])
+        rows.append(rendered)
     return rows
 
 

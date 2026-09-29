@@ -12,7 +12,7 @@
 #   --lines N         Lines per log file (default: 20)
 #   --grep PATTERN    Filter output lines matching this pattern
 #   --bot BOT         Show logs for a single bot only
-#   (events are not files: `claudlobby events --bot <bot> --tail N` reads them from the plane)
+#   (events are not files: `claudlobby event list --bot <bot> --limit N` reads them from the plane)
 #
 # Examples:
 #   tail-fleet.sh --fleet my-fleet
@@ -36,7 +36,7 @@ while [ $# -gt 0 ]; do
         --lines)  LINES="$2"; shift 2 ;;
         --grep)   GREP_PATTERN="$2"; shift 2 ;;
         --bot)    BOT_FILTER="$2"; shift 2 ;;
-        --events) echo "tail-fleet: --events is gone -- the fleet's events are on the plane: claudlobby events --bot <bot> --tail N" >&2; exit 2 ;;
+        --events) echo "tail-fleet: --events is gone -- the fleet's events are on the plane: claudlobby event list --bot <bot> --limit N" >&2; exit 2 ;;
         -h|--help) show_help; exit 0 ;;
         *) echo "tail-fleet: unknown option '$1'" >&2; exit 2 ;;
     esac

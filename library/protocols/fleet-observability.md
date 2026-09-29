@@ -15,15 +15,16 @@ Pull-based observability for fleet managers. Two writers produce events; manager
 | Fleet pulse | `claudlobby fleet pulse` (private `lib/fleet-pulse.sh` sweep) | Cron (every 5 min) | `pulse` |
 | Keepalive | `lib/keepalive.sh` | Every keepalive run (60s timer) | `keepalive` — `bot.heartbeat` / `bot.session_up` samples and `keepalive_*` and `bridge_heal` events on the plane, plus the `data/.idle` marker |
 
-Every writer lands on the plane through `emit_fleet_event`; managers read one door, `claudlobby events`, regardless of writer. The idle marker is a special case: keepalive touches `data/.idle` when it classifies a pane as IDLE and removes it on BUSY. Fleet-pulse compares `.idle` mtime vs `.last-tool-call` mtime to determine idle state without parsing panes.
+Every writer lands on the plane through `emit_fleet_event`; managers read one door, `claudlobby event list`, regardless of writer. The idle marker is a special case: keepalive touches `data/.idle` when it classifies a pane as IDLE and removes it on BUSY. Fleet-pulse compares `.idle` mtime vs `.last-tool-call` mtime to determine idle state without parsing panes.
 
 ## Where to Read
 
 Every bot's events are recorded on the plane — the host's flight recorder,
 `$CLAUDLOBBY_ROOT/state/plane/plane.db` — and nowhere else (F18 closure: the
 per-bot `data/events/*.jsonl` files are gone). Read them through
-`claudlobby events` (`--fleet <fleet> events --since 24h [--bot <bot>] [--json]`),
-which renders the same `{ts, bot, type, source, data}` rows the ledgers had.
+`claudlobby --json event list --since 24h` with the fleet selected. Its single
+schema-1 result has bounded `data.items`, `data.next_cursor`, and `data.coverage`;
+each item names an `event_id`, `occurred_at`, `bot`, `type`, `source`, and `data`.
 Never open the database by hand from a session; `resolve_bots_dir` stays the
 right tool for cases that only need bot *names* (e.g. enumerating who exists).
 
@@ -138,7 +139,7 @@ that trips; treat everything else as a sighting.
 
 ## Reading Events
 
-Use `claudlobby events` — never a hand-rolled loop over bot directories. This is **not** a fix
+Use `claudlobby event list` — never a hand-rolled loop over bot directories. This is **not** a fix
 for a live break: run verbatim on an armed bot, the loop below still works, including for denied
 siblings — confirmed directly, independently, by two different bots on two different sessions.
 The mechanism (otis, `shared/planning/active/2026-08-27-deny-bypass-probe.md`): the permission
@@ -155,46 +156,44 @@ That is exactly the problem. **It works by accident**, on some permission-matche
 by design — and the same evasion is why it's silent in the reassuring direction if the matcher
 is ever tightened: an event sweep that stops resolving would return no events, indistinguishable
 from a healthy fleet, with no warning that anything changed. Separately from permissions entirely,
-`claudlobby events` is also just the better tool for this: it's the same door `brief.py`'s alerts
+`claudlobby event list` is also just the better tool for this: it's the same door `brief.py`'s alerts
 section already consumes, and it adds type/critical filtering and coverage-honesty disclosure a
 hand-rolled loop doesn't have.
 
 Tail today's events across the fleet:
 
 ```bash
-claudlobby --fleet "$FLEET_NAME" events --tail 50
+claudlobby --fleet "$FLEET_NAME" --json event list --limit 50
 ```
 
 Scope to one bot — e.g. before dispatch, or cross-referencing a `[BOTREPORT]`:
 
 ```bash
-claudlobby --fleet "$FLEET_NAME" events --bot "$BOT_NAME" --tail 20
+claudlobby --fleet "$FLEET_NAME" --json event list --bot "$BOT_NAME" --limit 20
 ```
 
 Filter for actionable events:
 
 ```bash
-claudlobby --fleet "$FLEET_NAME" events --critical --tail 200
+claudlobby --fleet "$FLEET_NAME" --json event list --critical --limit 200
 ```
 
-**Always pass an explicit `--tail` with `--critical`.** `--tail` defaults to 50 and `--critical`
-inherits that default silently — the output states no bound and gives no hint that anything was
-dropped. Measured: the same query returned 50 rows at the default and 500 at `--tail 500`, with
-no disclosure either way. That is the exact silent-cap shape this codebase's own coverage-honesty
-discipline forbids, sitting in a shipped door; treat the default as unsafe until it's fixed
-upstream and always size `--tail` explicitly instead of relying on it.
+**Always inspect `data.next_cursor` before claiming a complete sweep.** `--limit`
+defaults to 50; a nonempty cursor means more matching events remain. Continue
+with `--cursor TOKEN` and the same filters. Set an explicit limit when scanning
+a large window.
 
-**`--critical` also does not cover every actionable type in the decision table above.** It matches a
-fixed, hand-maintained set (`session_missing`, `service_down`, `activity_stuck`, `script_error`,
+**`--critical` also does not cover every actionable type in the decision table above.** It follows
+the Plane severity registry (`session_missing`, `service_down`, `activity_stuck`, `script_error`,
 `overdue_dispatch`, `bridge_down`, `reload_failed`, `restart_failed`, `rc_timeout`, `crash_loop`) that omits
 `pane_stuck`, `wip_uncommitted`, `sweep_repo_unreachable`, and `audit_failed` — all actionable per
 the table above. Same hand-maintained-list gap `brief.py`'s alerts section already discloses
 (#903); this protocol inherits it rather than reintroducing it. Until #903 closes, pair
-`--critical` with either a periodic unfiltered `--tail N` sweep, or explicit per-type calls:
+`--critical` with either a periodic unfiltered `--limit N` sweep, or explicit per-type calls:
 
 ```bash
 for t in pane_stuck wip_uncommitted sweep_repo_unreachable audit_failed; do
-    claudlobby --fleet "$FLEET_NAME" events --type "$t" --tail 10
+    claudlobby --fleet "$FLEET_NAME" --json event list --type "$t" --limit 10
 done
 ```
 
@@ -203,13 +202,13 @@ so it is unaffected by path-scoped deny rules regardless of arming.)
 
 ## Cross-Fleet Reads
 
-A top-level manager can read any bot's events across sub-fleets. Use `claudlobby events` with
+A top-level manager can read any bot's events across sub-fleets. Use `claudlobby event list` with
 `--fleet` rather than reading the sibling fleet's bot directories directly — same reasoning as
 above, and it works the same way whether or not the target fleet has armed.
 
 ```bash
 # Read events for a bot in a different fleet
-claudlobby --fleet "other-fleet" events --bot "some-bot" --tail 20
+claudlobby --fleet "other-fleet" --json event list --bot "some-bot" --limit 20
 ```
 
 ## Retention

@@ -5,6 +5,7 @@ argument-hint: "[days] [fleet]"
 tool_grants:
   - "Bash(jq *)"
   - "Bash(python3 *)"
+  - "Bash(claudlobby --fleet * --json event list *)"
 ---
 
 # Fleet Digest
@@ -22,7 +23,7 @@ token-discipline sections before changing anything here.
 ## Step 1 — Enumerate the fleets in scope
 
 The digest is a `session_digest` **system event on the plane** (#1503 — there is
-no `transcript-digest` file any more). `claudlobby events` reads the plane one
+no `transcript-digest` file any more). `claudlobby event list` reads the plane one
 fleet at a time, so first fix the set of fleets to sweep: `$2` if given,
 otherwise every fleet declared on the host (the same discovery `setup-fleets`
 uses).
@@ -40,11 +41,12 @@ fi
 
 ## Step 2 — Assemble the window from the plane
 
-`claudlobby events` has no day filter, so bound the window on the row `ts`. For
+`claudlobby event list --since` bounds the window at the Plane reader. For
 each fleet, pull its `session_digest` events and reshape each plane row back to
 the flat shape the rest of this skill reads: the pre-aggregated digest rides
-`.data`, while `bot` and `ts` sit on the row — lift `.data` up and carry `bot`,
-`ts` and the fleet.
+`.data`, while `bot` and `occurred_at` sit on each `data.items[]` entry — lift
+`.data` up and carry `bot`, `ts` and the fleet. Follow `data.next_cursor` until
+empty before claiming complete coverage.
 
 ```bash
 DAYS="${1:-7}"
@@ -54,17 +56,29 @@ SINCE="$(date -u -d "-$((DAYS - 1)) day" +%Y-%m-%d 2>/dev/null \
 : > /tmp/window.jsonl
 : > /tmp/coverage.txt
 for F in $FLEETS; do
-  out="$(claudlobby --fleet "$F" events --type session_digest --json)"; rc=$?
-  if [ "$rc" -eq 3 ]; then
-    # rc 3 is the plane REFUSING (unreachable), which is NOT "no rows". Coverage
-    # for this fleet is UNKNOWN — record it and never infer health from it.
-    printf '%s\tUNREACHABLE\n' "$F" >> /tmp/coverage.txt; continue
+  cursor=""; n=0; failed=0
+  while :; do
+    if [ -n "$cursor" ]; then
+      out="$(claudlobby --fleet "$F" --json event list --type session_digest --since "${DAYS}d" --limit 1000 --cursor "$cursor")"; rc=$?
+    else
+      out="$(claudlobby --fleet "$F" --json event list --type session_digest --since "${DAYS}d" --limit 1000)"; rc=$?
+    fi
+    if [ "$rc" -ne 0 ]; then failed=1; break; fi
+    page="$(printf '%s\n' "$out" | jq -c --arg fleet "$F" --arg since "$SINCE" \
+      '.data.items[] | select((.occurred_at // "")[0:10] >= $since) | .data + {fleet: $fleet, bot: .bot, ts: .occurred_at}')"
+    if [ -n "$page" ]; then
+      printf '%s\n' "$page" >> /tmp/window.jsonl
+      n=$((n + $(printf '%s\n' "$page" | wc -l)))
+    fi
+    cursor="$(printf '%s\n' "$out" | jq -r '.data.next_cursor // empty')"
+    [ -n "$cursor" ] || break
+  done
+  if [ "$failed" -eq 1 ]; then
+    # A failed Plane read is NOT "no rows"; even a partial page is unknown.
+    printf '%s\tUNREACHABLE\n' "$F" >> /tmp/coverage.txt
+  else
+    printf '%s\t%s\n' "$F" "$n" >> /tmp/coverage.txt
   fi
-  n="$(printf '%s\n' "$out" \
-    | jq -c --arg fleet "$F" --arg since "$SINCE" \
-        'select((.ts // "")[0:10] >= $since) | .data + {fleet: $fleet, bot: .bot, ts: .ts}' \
-    | tee -a /tmp/window.jsonl | wc -l | tr -d " ")"
-  printf '%s\t%s\n' "$F" "$n" >> /tmp/coverage.txt
 done
 ```
 

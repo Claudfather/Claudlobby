@@ -116,25 +116,26 @@ def test_main_passes_namespace_to_only_selected_handler_and_returns_its_result(t
         def handler(args):
             assert len(captured) == 1 and args is captured[0][0]
             assert vars(args) == captured[0][1]
-            assert args.cmd == 'events' and args.tail == 7
+            assert args.cmd == 'event' and args.event_action == 'list' and args.limit == 7
             assert args.root == 'example' and args.fleet == 'test-fleet'
-            return 23
-        fake.cmd_events = handler
+            from claudlobby.command_result import CommandOutput
+            return CommandOutput({'items': [], 'next_cursor': None}, lines=('selected',))
+        fake.dispatch = handler
         sys.modules[fake.__name__] = fake
-        rc = main(['--root', 'example', '--fleet', 'test-fleet', 'events', '--tail', '7'])
+        rc = main(['--root', 'example', '--fleet', 'test-fleet', 'event', 'list', '--limit', '7'])
         assert not blocked, blocked
         sys.exit(rc)
     """, tmp_path=tmp_path)
-    assert result.returncode == 23, result.stderr
+    assert result.returncode == 0 and result.stdout == 'selected\n', result.stderr
 
 
-def test_selected_import_failure_is_not_masked(tmp_path):
+def test_selected_import_failure_is_reported_by_common_result(tmp_path):
     result = _run("""
         from claudlobby.__main__ import main
-        main(['events'])
+        sys.exit(main(['event', 'list']))
     """, tmp_path=tmp_path)
-    assert result.returncode == 1, result.stderr
-    assert "ModuleNotFoundError: blocked CLI dependency: claudlobby.commands.events" in result.stderr
+    assert result.returncode == 6, result.stderr
+    assert result.stderr == "unavailable: application dependencies\n"
 
 
 @pytest.mark.parametrize(("argv", "module"), [

@@ -50,7 +50,8 @@ _PUBLIC.update({(domain, verb): f"{domain}.{verb}" for domain, verbs in (
     ("assignment", ("show", "deliver", "accept", "progress", "block", "return", "complete", "fail")),
     ("message", ("show", "receipt", "wait", "send", "reply")),
     ("request", ("show",)),
-    ("workstream", ("list", "show", "open", "progress", "renew", "block", "unblock", "close", "prune"))) for verb in verbs})
+    ("workstream", ("list", "show", "open", "progress", "renew", "block", "unblock", "close", "prune")),
+    ("event", ("list", "show"))) for verb in verbs})
 _PUBLIC.update({("bot", "automation", action): f"bot.automation.{action}"
                 for action in ("status", "pause", "resume", "record")})
 _invocation = ContextVar("public_cli_invocation", default=(None, False))

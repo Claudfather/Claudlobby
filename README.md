@@ -97,7 +97,7 @@ claudlobby bot status <name>        # one bot, including native and Plane observ
 claudlobby host doctor                # pre-flight fleet health diagnostic
 claudlobby --json fleet reports list  # paginated worker reports (--bot, --status, --since RFC3339)
 claudlobby fleet uptime [--bot <name>] # per-bot uptime, MTBR, restart-rate metrics
-claudlobby events                # fleet events from the plane (--bot, --type, --critical)
+claudlobby event list                # fleet events from the plane (--bot, --type, --critical)
 claudlobby bot create --interactive               # author a bot; stage and activate separately
 claudlobby library create --kind skill             # scaffold a new skill directory
 claudlobby library create --kind guardrail         # scaffold a new guardrail file
