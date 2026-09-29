@@ -55,6 +55,76 @@ def test_operator_update_uses_selected_native_and_host_switch(tmp_path, monkeypa
     assert "CLAUDLOBBY_FLEET" not in kwargs["env"]
 
 
+def test_repo_pull_requires_declared_bot_and_selected_native(tmp_path, monkeypatch):
+    from claudlobby import repo_pull_operations as repos
+
+    root = tmp_path / "root"
+    native = tmp_path / "selected/lib"
+    native.mkdir(parents=True)
+    (native / "git-pull-all.sh").write_text("# selected native fixture\n")
+    bot_dir = root / "local/demo/runtime/bots/alex"
+    (bot_dir / "projects").mkdir(parents=True)
+    release = SimpleNamespace(release_id="r-selected", native_path=native,
+                              cli_path=tmp_path / "selected/claudlobby")
+
+    @contextmanager
+    def admitted(selected_root, *, expected_release):
+        assert selected_root == root and expected_release is None
+        yield release
+
+    paths = SimpleNamespace(lib=native, bot_runtime=lambda bot: bot_dir)
+    context = SimpleNamespace(paths=paths, fleet=SimpleNamespace(name="demo", bots={"alex": object()}))
+    monkeypatch.setattr(repos, "mutation_admission", admitted)
+    monkeypatch.setattr(repos, "resolve_active_context", lambda **kwargs: context)
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0,
+            b"git-pull-all-v1\0one\0updated\0two\0unchanged\0", b"")
+
+    monkeypatch.setattr(repos.subprocess, "run", run)
+    result = repos.pull_repositories(root, "demo", "alex")
+    assert result.repositories == (("one", "updated"), ("two", "unchanged"))
+    argv, kwargs = calls.pop()
+    assert argv == [str(native / "git-pull-all.sh"), str(bot_dir / "projects"), "--status-nul"]
+    assert kwargs["env"]["CLAUDLOBBY_NATIVE_DIR"] == str(native)
+    assert kwargs["env"]["FLEET_NAME"] == "demo"
+    with pytest.raises(repos.RepositoryPullError, match="not declared"):
+        repos.pull_repositories(root, "demo", "departed")
+    assert calls == []
+
+
+def test_repo_pull_public_gate_rejects_bot_origin_before_native_effect(monkeypatch, tmp_path):
+    from claudlobby.commands import host_repos
+    from claudlobby.command_result import CommandFailure
+
+    monkeypatch.setenv("BOT_ID", "alex")
+    args = SimpleNamespace(root=str(tmp_path), fleet="demo", bot="alex", seed=False)
+    with pytest.raises(CommandFailure) as raised:
+        host_repos.dispatch(args)
+    assert raised.value.error.code == "conflict"
+
+
+def test_repo_pull_discloses_partial_outcomes_without_claiming_all_updated(monkeypatch, tmp_path):
+    from claudlobby import repo_pull_operations as repos
+    from claudlobby.commands import host_repos
+    from claudlobby.command_result import CommandFailure
+
+    for key in ("BOT_ID", "BOT_NAME", "BOT_DIR", "BOT_SERVICE"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(repos, "pull_repositories", lambda *args: repos.RepositoryPullResult(
+        "demo", "alex", "r-selected", (("one", "updated"), ("two", "skipped_dirty"))))
+    args = SimpleNamespace(root=str(tmp_path), fleet="demo", bot="alex", seed=False)
+    with pytest.raises(CommandFailure) as raised:
+        host_repos.dispatch(args)
+    assert raised.value.error.code == "conflict"
+    assert raised.value.data["native_outcome"] == "partial"
+    assert raised.value.data["repositories"] == [
+        {"repository": "one", "status": "updated"},
+        {"repository": "two", "status": "skipped_dirty"}]
+
+
 def test_scheduled_siblings_require_effective_and_selected_enrollment(tmp_path, monkeypatch):
     from claudlobby import host_update_operations as updates
 

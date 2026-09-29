@@ -176,11 +176,17 @@ Keep cloned repos fresh across all bots so they aren't creating PRs against stal
 
 ### What the script does
 
+For an explicit operator request against one declared bot, run
+`claudlobby --fleet FLEET host repos pull --bot BOT`. The result names each
+repository as updated, unchanged, skipped (dirty or redirected), or failed. It never chooses a
+generic directory or grants this source mutation to a bot by default. The
+private script remains the scheduled callback:
+
 ```bash
 $CLAUDLOBBY_ROOT/lib/git-pull-all.sh /path/to/projects/dir
 ```
 
-It runs `git pull --ff-only` on every immediate subdirectory that is a git repo, logging results to `git-pull.log` **one level above** the target dir. `--ff-only` is the entire safety mechanism: if a repo has uncommitted local changes, or is on a branch that has diverged from its upstream, the pull fails harmlessly for that repo (logged as a failure) rather than creating a merge commit. It does **not** inspect the branch name or skip non-`main` repos — it attempts a fast-forward on every repo and lets `--ff-only` be the guard.
+It checks for local changes, then runs `git pull --ff-only` on each clean immediate Git repository, logging results to `git-pull.log` **one level above** the target dir. A dirty repo is skipped; a branch that diverged from upstream fails without a merge commit. It does **not** inspect the branch name or skip non-`main` repos.
 
 When the target path is a fleet runtime projects dir (`.../runtime/bots/<bot>/projects`), the script consults the fleet's `fleet.yaml` roster and no-ops for a bot no longer declared in that fleet — so a stale scheduled entry can't resurrect a departed bot's runtime directory (which fleet supervision would then flag as an orphan). For any other directory of repos it behaves generically.
 

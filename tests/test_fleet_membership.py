@@ -150,3 +150,41 @@ class TestGitPullAllFleetGuard:
         proc = self._run_script(tmp_path, repos)
         assert proc.returncode == 0
         assert (tmp_path / "git-pull.log").exists()  # LOG = dirname(repos)/git-pull.log
+
+    def test_selected_status_distinguishes_updated_unchanged_dirty_and_failed(self, tmp_path):
+        _make_fleet(tmp_path, "demo", declared=["alex"], present=["alex"])
+        projects = tmp_path / "local/demo/runtime/bots/alex/projects"
+        for name in ("updated", "unchanged", "dirty", "failed"):
+            (projects / name / ".git").mkdir(parents=True)
+        outside = tmp_path / "outside"
+        (outside / ".git").mkdir(parents=True)
+        (projects / "redirected").symlink_to(outside, target_is_directory=True)
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        git = bindir / "git"
+        git.write_text("""#!/bin/bash
+if [ "$1" = -C ]; then repo=$2; shift 2; else repo=$PWD; fi
+name=$(basename "$repo")
+case "$1" in
+  rev-parse) [ -e "$repo/.pulled" ] && echo after || echo before ;;
+  status) if [ "$name" = dirty ]; then echo ' M local-file'; fi ;;
+  pull) [ "$2" = --ff-only ] || exit 9
+        [ "$name" = failed ] && exit 1
+        [ "$name" = updated ] && : > "$repo/.pulled"
+        echo ok ;;
+  *) exit 9 ;;
+esac
+""")
+        git.chmod(0o755)
+        env = {**os.environ, "CLAUDLOBBY_ROOT": str(tmp_path),
+               "PATH": f"{bindir}:{os.environ['PATH']}"}
+        result = subprocess.run([str(GIT_PULL_ALL), str(projects), "--status-nul"],
+                                capture_output=True, env=env, timeout=30)
+        assert result.returncode == 1, result.stderr
+        assert result.stdout.split(b"\0") == [
+            b"git-pull-all-v1", b"dirty", b"skipped_dirty", b"failed", b"failed",
+            b"redirected", b"skipped_redirected",
+            b"unchanged", b"unchanged", b"updated", b"updated", b""]
+        assert (projects / "updated/.pulled").exists()
+        assert not (projects / "dirty/.pulled").exists()
+        assert not (outside / ".pulled").exists()
