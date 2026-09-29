@@ -713,7 +713,7 @@ def test_doctor_daemon_rung_serving_and_never_armed(running, tmp_path: Path):
     # override socket means the default path is absent, so this root reads the
     # STARTED-NOT-SERVING attention branch instead (daemon_started was logged).
     r = _doctor(root)
-    assert r.returncode == 1
+    assert r.returncode == 4  # Common CLI conflict/attention result.
     assert "not serving" in r.stdout and "stage raw input for daemon replay" in r.stdout
     assert "pending, not committed" in r.stdout
     from claudlobby.plane.emit_api import emit
