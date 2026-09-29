@@ -373,11 +373,11 @@ reconcile() {
 # because that is where an operator is already looking, and because the whole
 # reason the defaults flipped is that a door nobody can see is a door nobody
 # has. ONE renderer (claudlobby/switches.py) serves this, setup-system and
-# `claudlobby doctor`, so the three cannot disagree. Non-fatal by design: an
+# `claudlobby host doctor`, so the three cannot disagree. Non-fatal by design: an
 # older install without the flag prints nothing and setup still succeeds.
 print_switches() {
     # shellcheck disable=SC2086
-    claudlobby_cli ${FLEET:+--fleet "$FLEET"} doctor --switches 2>/dev/null || true
+    claudlobby_cli ${FLEET:+--fleet "$FLEET"} host doctor --switches 2>/dev/null || true
 }
 
 reconcile_briefing_timers

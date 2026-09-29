@@ -42,7 +42,7 @@ only.
 
 **It needs the `[plane-ui]` extra, and the compositor checks.** Where fastapi
 and uvicorn do not import in the install's venv, `generate` composes **no**
-view unit at all and `claudlobby doctor --switches` renders `plane-view` off
+view unit at all and `claudlobby host doctor --switches` renders `plane-view` off
 with `pip install -e '.[plane-ui]'` as its arm line. That is the fold's F1:
 "the unit exits saying so" is an honest failure for a hand run and a **crash
 loop every 5s, forever** under `Restart=always` — and enrolling by default is

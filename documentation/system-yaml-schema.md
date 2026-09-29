@@ -20,7 +20,7 @@ fleet-independent `claudlobby host-timers` subcommand. Enrolled by
 (the `defaults:` tier's jobs, per fleet) — composing and enrolling are
 separate steps, and getting that split right matters for the dormancy
 semantics below. There is **no dedicated `claudlobby validate` or
-`claudlobby doctor` coverage of this file** — see
+`claudlobby host doctor` coverage of this file** — see
 [Validation & visibility](#validation--visibility).
 
 ## Top-level shape
@@ -120,7 +120,7 @@ knowing before you write a `schedule:`:
 
 **A job or door is ON by default unless it deletes data, spends money,
 mutates operator source, or sends outbound to people at scale.** Whatever
-stays opt-in is NAMED where the operator looks — `claudlobby doctor`'s
+stays opt-in is NAMED where the operator looks — `claudlobby host doctor`'s
 `switches` rung, `claudlobby plane doctor`'s plane-scoped subset, and the
 closing table of `lib/setup-fleet` / `lib/setup-system` — each with the one
 line that arms it.
@@ -141,7 +141,7 @@ by `claudlobby validate`** — so a door deleted tomorrow warns about its
 leftover flag without anyone maintaining a list.
 
 <!-- BEGIN GENERATED: switches -->
-<!-- Generated from claudlobby/switches.py — do not hand-edit. Regenerate: claudlobby doctor --switches --markdown -->
+<!-- Generated from claudlobby/switches.py — do not hand-edit. Regenerate: claudlobby host doctor --switches --markdown -->
 
 | Switch | Ships | Scope | Carrier | Flip it with |
 |---|---|---|---|---|
@@ -173,7 +173,7 @@ leftover flag without anyone maintaining a list.
 
 <!-- END GENERATED: switches -->
 
-Run `claudlobby doctor --switches` for the live version of this table with
+Run `claudlobby host doctor --switches` for the live version of this table with
 each row's current state and the tier that set it.
 
 **Two flips are worth their own sentence.** `plane-prune` DELETES, which the
@@ -547,7 +547,7 @@ used throughout the codebase, and it's worth keeping them distinct:
   is **no validation of `host.jobs` at all** — host jobs bypass `fleet.yaml`
   (and therefore `validate`) entirely, by the same `load_host_jobs()`
   property that makes them un-armable from a fleet.
-- **`claudlobby doctor`** has **zero system-defaults awareness** as of this
+- **`claudlobby host doctor`** has **zero system-defaults awareness** as of this
   writing (`grep -c "system.default" claudlobby/doctor.py` returns 0). A
   2026-06-09 plan proposed four checks — `system-defaults-loaded`,
   `fleet-timers-installed`, `system-defaults-overrides`,

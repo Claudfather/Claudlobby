@@ -230,10 +230,10 @@ Opt a fleet **out** of an on-by-default job the same way, with `enroll: false`.
 
 #### Defaults: what a fleet gets without asking
 
-**A job or door is ON by default unless it states a reason to ship off** — most often that it deletes data, spends money, mutates operator source, or sends outbound to people at scale; a few rows state a different reason of their own, and each says which. A fleet that declares nothing gets the whole reaction loop — the dispatch deadline, the manager's scheduled re-check, expiry, the plane's own recording and equipment — running. What stays opt-in is listed below with the one line that arms it, and `claudlobby doctor --switches` prints the live version of the table for a given fleet, with each row's current state and the tier that set it. `claudlobby status`'s header names any reaction door turned off, so a disabled reaction is never silent.
+**A job or door is ON by default unless it states a reason to ship off** — most often that it deletes data, spends money, mutates operator source, or sends outbound to people at scale; a few rows state a different reason of their own, and each says which. A fleet that declares nothing gets the whole reaction loop — the dispatch deadline, the manager's scheduled re-check, expiry, the plane's own recording and equipment — running. What stays opt-in is listed below with the one line that arms it, and `claudlobby host doctor --switches` prints the live version of the table for a given fleet, with each row's current state and the tier that set it. `claudlobby status`'s header names any reaction door turned off, so a disabled reaction is never silent.
 
 <!-- BEGIN GENERATED: switches -->
-<!-- Generated from claudlobby/switches.py — do not hand-edit. Regenerate: claudlobby doctor --switches --markdown -->
+<!-- Generated from claudlobby/switches.py — do not hand-edit. Regenerate: claudlobby host doctor --switches --markdown -->
 
 | Switch | Ships | Scope | Carrier | Flip it with |
 |---|---|---|---|---|
@@ -987,7 +987,7 @@ Generate proceeds through warnings. Pass `--strict` to make warnings errors (CI 
 
 Warnings are advisory: `validate` and `generate` exit 0 on warnings alone, by design.
 
-- **Every warning carries a category**, printed in front of it: `[env-empty] mcp/github requires GITHUB_PAT but it is SET BUT EMPTY …`. A category is a stable slug for a kind of finding. It is passed where the warning is raised, never derived from the message text, so rewording a warning never moves it to another category. The full list, each slug with a one-line meaning, is `WARNING_CATEGORIES` in `claudlobby/validator.py`. `validate` ends with a count by category, and `claudlobby doctor`'s `fleet-yaml` rung prints that same line instead of a bare total.
+- **Every warning carries a category**, printed in front of it: `[env-empty] mcp/github requires GITHUB_PAT but it is SET BUT EMPTY …`. A category is a stable slug for a kind of finding. It is passed where the warning is raised, never derived from the message text, so rewording a warning never moves it to another category. The full list, each slug with a one-line meaning, is `WARNING_CATEGORIES` in `claudlobby/validator.py`. `validate` ends with a count by category, and `claudlobby host doctor`'s `fleet-yaml` rung prints that same line instead of a bare total.
 - **A finding with one cause is one line.** Some causes reach every bot that inherits them: a key set under `defaults:`, a variable assigned (or missing) above the bot tier, or a fact about the host such as the `claudron` CLI, a vault path, or the operator gitconfig. Each is reported once, as `… — affects N bot(s): a, b, c, d (+K more)`. A finding caused by one bot's own declaration (its grants, its own stanza, its own `.env`) stays on that bot. Fixing a shared cause therefore cannot hide a separate one.
 - **`--strict` is all-or-nothing**: any warning fails the run. It suits a fleet with no warnings at all.
 - **`--warn-baseline FILE` is the gate for a fleet that has accepted some warnings.** Record the current categories once, then check later runs against them:

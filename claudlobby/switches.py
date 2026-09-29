@@ -839,7 +839,7 @@ def _enroll_state(sw: Switch, host_jobs: dict, fleet_jobs: dict,
 #: reported these as "shipped default", which is an assertion about a fleet
 #: nobody named — the same class as an unreachable reader answering "nothing".
 NO_FLEET_DETAIL = ("no fleet named — fleet-tier switches not read; run"
-                   " `claudlobby --fleet <name> doctor --switches`")
+                   " `claudlobby --fleet <name> host doctor --switches`")
 RESOLVER_DETAIL = "env resolver unreachable — showing the shipped default"
 
 
@@ -978,7 +978,7 @@ def target_workflow_off(states: list[SwitchState]) -> list[SwitchState]:
 
 # ---------------------------------------------------------------------------
 # rendering — ONE definition, called by doctor, plane doctor and both shell
-# setup doors (through `claudlobby doctor --switches`). A second copy in bash
+# setup doors (through `claudlobby host doctor --switches`). A second copy in bash
 # is how the table and the truth drift apart.
 # ---------------------------------------------------------------------------
 
@@ -1066,7 +1066,7 @@ def summary_line(states: list[SwitchState]) -> str:
 
 #: The three hand-written tables the fold replaced. Each doc carries the block
 #: between these markers; `tests/test_switches.py` asserts the file's block
-#: equals this render, and `claudlobby doctor --switches --markdown` prints
+#: equals this render, and `claudlobby host doctor --switches --markdown` prints
 #: them for regeneration. A doc table is a copy of the registry like any other,
 #: and the estate's recurring defect is a copy drifting (#892/#1143).
 DOC_BEGIN = "<!-- BEGIN GENERATED: switches -->"
@@ -1089,7 +1089,7 @@ def format_markdown(*, plane_only: bool = False,
             if (s.plane or not plane_only) and (s.fleet_scoped or not fleet_only)]
     out = [DOC_BEGIN,
            "<!-- Generated from claudlobby/switches.py — do not hand-edit."
-           " Regenerate: claudlobby doctor --switches --markdown -->",
+           " Regenerate: claudlobby host doctor --switches --markdown -->",
            "",
            "| Switch | Ships | Scope | Carrier | Flip it with |",
            "|---|---|---|---|---|"]

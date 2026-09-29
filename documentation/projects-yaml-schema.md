@@ -37,7 +37,7 @@ breaks a shipped door:
   rather than emitted broken or silently dropped.
 
 Write this file when a project's real closure bar is **not** `review` — that
-is the whole reason to declare one. `claudlobby doctor`'s `goal-binding` rung
+is the whole reason to declare one. `claudlobby host doctor`'s `goal-binding` rung
 reports which of the two a fleet is running on.
 
 ## What composition emits

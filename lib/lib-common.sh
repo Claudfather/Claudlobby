@@ -2339,7 +2339,7 @@ _PANE_SEND_SETTLE_DEFAULT=0.3
 # reaches a bot through `fleet.yaml env:` -> bot.conf like every other session
 # knob, so "nobody would set this" is a hope rather than a mechanism. It is
 # registered in claudlobby/switches.py as the opt-out `pane-send-chunking`, so
-# `claudlobby doctor --switches`, `claudlobby status`'s off-note and the schema
+# `claudlobby host doctor --switches`, `claudlobby status`'s off-note and the schema
 # docs all name it — and the door says so on stderr each time it runs
 # unchunked, because a silent restoration of a send that loses data is the
 # shape this whole chunk exists to end.

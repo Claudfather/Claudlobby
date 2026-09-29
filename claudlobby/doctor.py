@@ -1,4 +1,4 @@
-"""claudlobby doctor — pre-flight fleet health diagnostic.
+"""claudlobby host doctor — pre-flight fleet health diagnostic.
 
 Consolidates checks from creds-check.sh, check-npx-cache.sh, and
 reconcile-fleet.sh into a single Python entry point with structured output.
@@ -166,7 +166,7 @@ def check_mcp_packages(fleet: FleetConfig, paths: Paths, report: DoctorReport) -
     The offline half of the package check, and the half worth a doctor rung:
     it costs no network call, and on the shared library every declaration found
     dead so far was an unpinned one. Deliberately does NOT probe the registry —
-    `claudlobby doctor` is run to answer a question quickly, and the network
+    `claudlobby host doctor` is run to answer a question quickly, and the network
     signal is opt-in at compose time where its cost is a considered choice.
 
     WARN, never fail. An unpinned package is unverified, not broken: measured
@@ -1303,7 +1303,7 @@ def run_doctor(fleet: FleetConfig, paths: Paths, *,
 
 def format_report(report: DoctorReport) -> str:
     """Format the doctor report for terminal output."""
-    lines = ["", "=== claudlobby doctor ===", ""]
+    lines = ["", "=== claudlobby host doctor ===", ""]
     for check in report.checks:
         if check.status == "pass":
             icon = "PASS"

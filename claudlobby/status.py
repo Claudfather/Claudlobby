@@ -586,7 +586,7 @@ def switches_off_note(fleet_name: str, switch_states: list | None) -> str:
         return ""
     return ", ".join(
         f"{s.switch.key} off on {fleet_name}" for s in off
-    ) + " — this reaction will not happen (claudlobby doctor --switches)"
+    ) + " — this reaction will not happen (claudlobby host doctor --switches)"
 
 
 def format_table(statuses: list[BotStatus], fleet_name: str,

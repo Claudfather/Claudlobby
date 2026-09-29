@@ -253,30 +253,10 @@ def cmd_new_bot(args) -> int:
         else:
             log.info("  2. Add %s=<your-token> to %s", inp.token_env, paths.env_file)
     log.info("  3. Run: claudlobby validate")
-    if not args.auto_generate:
-        log.info("  4. Run: claudlobby generate --bot %s", inp.name)
-    log.info("  5. Install service:")
-    log.info(
-        "     # Linux: sudo ln -sf %s/%s.service /etc/systemd/system/",
-        paths.bot_runtime(inp.name),
-        inp.name,
-    )
-    log.info(
-        "     #        sudo systemctl daemon-reload && sudo systemctl enable --now %s.service",
-        inp.name,
-    )
-    log.info(
-        "     # macOS: ln -sf %s/%s.plist ~/Library/LaunchAgents/",
-        paths.bot_runtime(inp.name),
-        inp.name,
-    )
-    # The other bots' composed deny rules name this one only once THEIR fleet
-    # regenerates: Layer 0 for this fleet, Layer 0b's host roster for every
-    # fleet that arms it (#1665). The nightly reload-fleet does it within a day.
-    log.info(
-        "  6. Run: claudlobby generate (this fleet), and generate each other"
-        " fleet that arms isolation.shared_config, so their bots' deny rules"
-        " name '%s'",
-        inp.name,
-    )
+    log.info("  4. From the sealed CLI, run: claudlobby --root %s --fleet %s fleet setup"
+             " --config %s --install-directory <user-unit-directory>",
+             paths.root, fleet.name, paths.fleet_yaml)
+    log.info("     This stages all host fleets, updates sibling isolation rules, and activates supervision.")
+    log.info("  5. Inspect: claudlobby --root %s --fleet %s --json fleet reconcile",
+             paths.root, fleet.name)
     return 0

@@ -207,7 +207,7 @@ Two properties matter at this altitude. **The plane ships ON** (chunk N — it w
 default until then, and a behavior nobody can see is a behavior nobody has): every runtime door
 records, `generate` scans the registry, and the ingest daemon, the view daemon and the sweeps are
 enrolled host jobs. Nothing it does reaches the four categories the defaults rule reserves for
-opt-in. Turning any of it off is one line, named where the operator looks — `claudlobby doctor
+opt-in. Turning any of it off is one line, named where the operator looks — `claudlobby host doctor
 --switches` (`system.yaml`, see
 [`system-yaml-schema.md`](../system-yaml-schema.md#defaults-the-rule)). And
 **nothing in `fleet.yaml` or `runtime/bots/` changes shape because of it** — the plane records what

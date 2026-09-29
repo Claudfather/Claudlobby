@@ -1,7 +1,7 @@
 """Claudron compatibility floor — machine-readable SSOT.
 
 Maps each claudlobby integration surface to the minimum Claudron capability
-it needs. ``claudlobby doctor``'s claudron check (``doctor.check_claudron``)
+it needs. ``claudlobby host doctor``'s claudron check (``doctor.check_claudron``)
 reads this table; ``documentation/integrations/claudron-integration.md`` is the
 human-readable rendering and must be updated when this table changes (a unit
 test asserts the doc stays in sync).

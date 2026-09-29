@@ -149,7 +149,7 @@ if [ "${1:-}" = "prune" ]; then
 
     # Every bot declared by ANY fleet on this host. A row named here is live
     # somewhere, so it is never this fleet's to reap -- and this is the guard
-    # that survives `claudlobby move-bot`, where a row's stamped .fleet still
+    # that survives `claudlobby bot move`, where a row's stamped .fleet still
     # says the OLD fleet while the manifest already says the new one. Attribution
     # alone would delete a bot that had just moved away.
     JQ_HOST=$(printf '%s\n' "$ATTR" | cut -f1 | sort -u | awk 'NF{printf "\"%s\": 1, ", $0}' | sed 's/, $//')

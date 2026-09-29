@@ -361,7 +361,7 @@ does is any of those — it records, it reads, and its one DELETE is family-scop
 metric-sample retention.
 
 <!-- BEGIN GENERATED: switches -->
-<!-- Generated from claudlobby/switches.py — do not hand-edit. Regenerate: claudlobby doctor --switches --markdown -->
+<!-- Generated from claudlobby/switches.py — do not hand-edit. Regenerate: claudlobby host doctor --switches --markdown -->
 
 | Switch | Ships | Scope | Carrier | Flip it with |
 |---|---|---|---|---|
@@ -383,7 +383,7 @@ spending job that merely reports through the plane, not a plane door
 declining to record. `claudlobby plane doctor` prints this table
 with each row's live state and the tier that set it — for the fleet it was
 given; without a `--fleet` the fleet-scoped rows read `unknown` and say so
-rather than reporting a scope nobody read. `claudlobby doctor --switches`
+rather than reporting a scope nobody read. `claudlobby host doctor --switches`
 prints the whole estate's. `plane-view` needs the `[plane-ui]` extra: where it
 does not import, no unit is composed at all and the table's arm line is the
 `pip install` — a supervised unit that cannot start is a crash loop, not an

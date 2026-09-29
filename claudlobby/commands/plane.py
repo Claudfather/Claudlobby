@@ -548,7 +548,7 @@ def cmd_plane_doctor(args) -> int:
              " the read-only estate-vs-scan check (doctor stays lightweight;"
              " re-derivation is that door's job)")
         # The plane-scoped switch subset — the same registry and the same
-        # renderer `claudlobby doctor` uses, filtered to the plane's own doors.
+        # renderer `claudlobby host doctor` uses, filtered to the plane's own doors.
         # A plane whose daemon, probe, retention or expiry sweep is off is not
         # BROKEN, so this is never a failing rung: it is the answer to "why is
         # the Host card empty / why does nothing expire", which is otherwise a
@@ -778,7 +778,7 @@ def cmd_plane_prune(args) -> int:
             # rest of this estate is held to.
             print("system events: lane OFF — arm with"
                   " PLANE_PRUNE_SYSTEM_EVENTS_ENABLED=1 in this host's .env"
-                  " (it deletes data; see claudlobby doctor --switches)")
+                  " (it deletes data; see claudlobby host doctor --switches)")
         else:
             print(f"system events: {verb} {sys_deleted} row(s) older than"
                   f" {days}d, of {sorted(PRUNABLE_SYSTEM_EVENTS)}"

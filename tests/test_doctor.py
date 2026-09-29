@@ -1,4 +1,4 @@
-"""Tests for claudlobby doctor — pre-flight fleet health diagnostic."""
+"""Tests for claudlobby host doctor — pre-flight fleet health diagnostic."""
 
 from __future__ import annotations
 
@@ -554,7 +554,7 @@ class TestCheckWorkstreamResidual:
 
 
 class TestDoctorTimerScriptParity:
-    """`claudlobby doctor` mirrors `generate` for the L1 deny-by-default timer
+    """`claudlobby host doctor` mirrors `generate` for the L1 deny-by-default timer
     rule: a fleet job whose ``script`` is a foreign absolute fails the rollout
     `generate` (compose_fleet_timers), so doctor's fleet-yaml check must fail too.
     validate reads the jobs off ``fleet.defaults``, so every surface that runs it —

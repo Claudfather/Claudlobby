@@ -347,7 +347,7 @@ def test_sibling_rows_are_byte_identical_after_a_prune(tmp_path: Path) -> None:
 
 
 def test_a_row_that_moved_fleets_is_not_reaped_by_its_old_one(tmp_path: Path) -> None:
-    """`claudlobby move-bot` leaves a window where the row still carries the OLD
+    """`claudlobby bot move` leaves a window where the row still carries the OLD
     fleet while the manifests already say the new one. Attribution alone would
     delete a live bot that had just moved away; the host-wide declaration check
     is what closes it."""

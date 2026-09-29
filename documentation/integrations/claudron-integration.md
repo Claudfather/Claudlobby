@@ -45,7 +45,7 @@ The MCP *server* install is deliberately **not** coupled to this extra: bots don
 
 ## Compatibility floor
 
-SSOT: `claudlobby/claudron_compat.py` — `claudlobby doctor`'s `check_claudron` reads it and renders one row per entry; a unit test keeps this table in sync. Claudron's release numbers are **ordinal** — if their Gate G1 re-orders epics, version numbers follow ship order — so every gate below is the *capability*, with the release number only an annotation. Doctor honors that: it decides met/unmet by **probing the capability** (the `[vault]` import seam, or `claudron <verb> --help` on the host CLI), never by comparing version strings. `engine_version` from Claudron's capability probe is reported as engine *health*, not used as a floor trigger.
+SSOT: `claudlobby/claudron_compat.py` — `claudlobby host doctor`'s `check_claudron` reads it and renders one row per entry; a unit test keeps this table in sync. Claudron's release numbers are **ordinal** — if their Gate G1 re-orders epics, version numbers follow ship order — so every gate below is the *capability*, with the release number only an annotation. Doctor honors that: it decides met/unmet by **probing the capability** (the `[vault]` import seam, or `claudron <verb> --help` on the host CLI), never by comparing version strings. `engine_version` from Claudron's capability probe is reported as engine *health*, not used as a floor trigger.
 
 | Claudlobby surface | Requires (capability) | Slated release | Doctor state |
 |---|---|---|---|

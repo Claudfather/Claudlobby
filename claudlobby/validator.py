@@ -2422,7 +2422,7 @@ def _warn_dead_flags(fleet_env: dict, paths: Paths, report: ValidationReport) ->
                 "dead-flag",
                 f"{paths.env_file}: {key} is a DEAD flag — no shipped door"
                 " reads it (every switch claudlobby ships is listed by"
-                " `claudlobby doctor --switches`); remove the line, or fix the"
+                " `claudlobby host doctor --switches`); remove the line, or fix the"
                 " spelling if you meant one of those"
             )
 

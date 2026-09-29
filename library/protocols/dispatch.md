@@ -103,7 +103,7 @@ to remove only when **all three** hold:
 
 1. your `fleet.yaml` no longer declares it — the reason to prune at all;
 2. **no** fleet on this host declares it — so a sibling's live bot is never
-   touched, and a bot that just moved via `claudlobby move-bot` survives even
+   touched, and a bot that just moved via `claudlobby bot move` survives even
    though its stamp still names the old fleet;
 3. it is **stamped as yours** — a sibling's *departed* bot is still theirs.
 

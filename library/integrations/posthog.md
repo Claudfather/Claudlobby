@@ -214,4 +214,4 @@ POSTHOG_PROJECT_ID=12345
 
 Then `claudlobby generate`. The 13 read-only tools compose in as auto-allowed
 `mcp__posthog__*` reads (no write tools, so nothing prompts unattended).
-`claudlobby doctor` flags any of the three `.env` vars if missing.
+`claudlobby host doctor` flags any of the three `.env` vars if missing.

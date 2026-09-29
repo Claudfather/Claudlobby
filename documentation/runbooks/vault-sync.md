@@ -33,7 +33,7 @@ systemctl --user list-timers | grep vault-sync      # Linux
 ```
 
 Arm **one** host, watch `vault.sync_ok` for a week, then arm the second.
-`claudlobby doctor --switches` lists the job either way, so the off state is
+`claudlobby host doctor --switches` lists the job either way, so the off state is
 visible rather than merely documented.
 
 **Backout:** `enroll: false` + `lib/setup-system` — the unit disappears.

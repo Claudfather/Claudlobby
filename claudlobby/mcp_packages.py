@@ -129,7 +129,7 @@ def declared_fragments(fleet: "FleetConfig", paths: "Paths") -> list[str]:
     Scoped to declared fragments rather than the whole library on purpose: the
     warning exists for the fleet that would actually get the dead server, and a
     fleet is not served by warnings about a fragment it never names. The library
-    as a whole is the operator's question, which `claudlobby doctor` answers.
+    as a whole is the operator's question, which `claudlobby host doctor` answers.
     """
     wanted: list[str] = []
     for bot in fleet.bots.values():

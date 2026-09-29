@@ -774,12 +774,12 @@ phase_report() {
     fi
     # The switches table -- the no-silent-switches surface for a HOST run.
     # One renderer (claudlobby/switches.py), called by both shell setup doors
-    # and by `claudlobby doctor`, so what setup prints and what doctor prints
+    # and by `claudlobby host doctor`, so what setup prints and what doctor prints
     # cannot drift. Non-fatal and non-blocking: an install too old for the
     # flag, or no importable package, simply prints nothing extra -- a summary
     # is not worth failing a setup run over.
     if [ "$DRY_RUN" != 1 ]; then
-        claudlobby_cli doctor --switches 2>/dev/null || true
+        claudlobby_cli host doctor --switches 2>/dev/null || true
     fi
     echo
     if [ "$DRY_RUN" = 1 ]; then

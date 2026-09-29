@@ -54,7 +54,7 @@
 # for a defensible local reason, and the composite was a system whose
 # advertised workflow ran nowhere unless an operator had read a dozen source
 # comments. What DOES stay opt-in is named where the operator looks --
-# `claudlobby doctor` (the `switches` rung), `claudlobby plane doctor`, and
+# `claudlobby host doctor` (the `switches` rung), `claudlobby plane doctor`, and
 # the closing table of lib/setup-fleet and lib/setup-system -- each with the
 # one line that arms it. The registry behind those surfaces is
 # claudlobby/switches.py; a knob with no row there is reported as a DEAD flag

@@ -306,5 +306,5 @@ GSC_SA_KEY_PATH=/abs/path/to/local/<fleet>/.secrets/<name>.json
 
 Then `claudlobby generate`. The 15 read-only tools compose in as auto-allowed
 `mcp__google-search-console__*` reads (the five write tools stay prompt-gated, so
-nothing mutating runs unattended). `claudlobby doctor` flags the `.env` var if
+nothing mutating runs unattended). `claudlobby host doctor` flags the `.env` var if
 missing.

@@ -226,4 +226,4 @@ GA4_PROPERTY_ID=123456789
 
 Then `claudlobby generate`. The 6 read-only tools compose in as auto-allowed
 `mcp__google-analytics__*` reads (no write tools, so nothing prompts unattended).
-`claudlobby doctor` flags either `.env` var if missing.
+`claudlobby host doctor` flags either `.env` var if missing.

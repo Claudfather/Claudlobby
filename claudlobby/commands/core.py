@@ -1,4 +1,4 @@
-"""Core compositor commands: validate, generate, list-library, diff, promote, status, doctor, uptime, warm-cache."""
+"""Core compositor commands: validate, generate, list-library, diff, promote, status, uptime, warm-cache."""
 
 from __future__ import annotations
 

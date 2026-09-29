@@ -283,5 +283,5 @@ META_ACCESS_TOKEN=<your-long-lived-ads_read-token>
 
 Then `claudlobby generate`. The 35 read-only tools compose in as auto-allowed
 `mcp__meta-ads__*` reads (the 19 write tools stay unregistered and prompt-gated, so
-nothing mutating runs unattended). `claudlobby doctor` flags the `.env` var if
+nothing mutating runs unattended). `claudlobby host doctor` flags the `.env` var if
 missing.
