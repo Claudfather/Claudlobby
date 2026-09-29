@@ -1,0 +1,45 @@
+name: macos-shell
+
+# The lib/ shell helpers every macOS bot start runs, tested under the conditions
+# those hosts run them in: /bin/bash 3.2 and the BSD userland. The Linux jobs
+# cannot see a defect that only bash 3.2 or a BSD tool has. Each suite runs under
+# /bin/bash by path, and its inner shells reuse that interpreter, so nothing here
+# falls through to a newer bash on the runner's PATH.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - lib/lib-common.sh
+      - lib/supervisor.sh
+      - lib/run-bounded.sh
+      - tests/test_run_bounded.sh
+      - .github/workflows/macos-shell.yml
+  pull_request:
+    paths:
+      - lib/lib-common.sh
+      - lib/supervisor.sh
+      - lib/run-bounded.sh
+      - tests/test_run_bounded.sh
+      - .github/workflows/macos-shell.yml
+
+jobs:
+  timer-bound:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The shell under test
+        # Refuse a /bin/bash that is not 3.x: the suite would pass without
+        # measuring anything this job exists for.
+        run: |
+          /bin/bash -c '[ "${BASH_VERSINFO[0]}" = 3 ] || { echo "/bin/bash is $BASH_VERSION, not 3.x"; exit 1; }; echo "/bin/bash is $BASH_VERSION"'
+      # This runner, like a stock Mac, has neither timeout(1) nor gtimeout, and
+      # main's with_timeout runs a command unbounded there until #1978 adds its
+      # perl fallback. gtimeout stands in for it until then. Drop this step once
+      # #1978 is on main, so the job bounds the run the way a stock Mac does.
+      - name: A timeout(1) for with_timeout
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: brew install coreutils && command -v gtimeout
+      - name: A launchd timer job runs bounded, logs its start and end, and stops on TERM (#1965)
+        run: /bin/bash tests/test_run_bounded.sh

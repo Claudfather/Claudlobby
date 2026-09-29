@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — launchd timer jobs capture their output and stop at a budget (#1965, the launchd half of #897)
+
+A composed launchd timer plist had no `StandardOutPath` or `StandardErrorPath`
+and no runtime bound. launchd sent the job's output to /dev/null, and it skips
+every fire while a run is still going, so a wedged run disabled its job and left
+no record: `weekly-worker-restart` hung twice on a macOS host that way. Every
+composed timer plist now does two things:
+
+- It runs its job through `lib/run-bounded.sh <budget> <job argv>`. The wrapper
+  bounds the run with `with_timeout`, and writes a start line before lib-common
+  is sourced and an end line with the exit status and elapsed time. It also
+  relays a stop from launchd (`bootout`, `kickstart -k`) to the job, which
+  `with_timeout` runs in a process group of its own.
+- It sends both output streams to `state/<label>.launchd.log`, which
+  `log-rotate-fleet.sh` now rotates.
+
+A job's budget is its `max_runtime` if it sets one. Otherwise an interval job
+gets three intervals (at least 600 s), a calendar job 3600 s, and
+`weekly-worker-restart` gets each worker's readiness ceiling plus 150 s, summed.
+On a host with neither timeout(1) nor gtimeout the bound holds once #1978's perl
+fallback is in lib-common. systemd units are unchanged (the systemd half of
+#897). A `LaunchdTimerSpec` round trip, `tests/test_launchd_timer_plist.py`,
+checks every composed plist byte for byte.
+
 ### Changed — `[vault]` pin bumped to Claudron v0.5.1; `vault-sync` never leaves a vault mid-rebase (Claudron #193)
 
 The `[vault]` extra now pins `claudron @ …@v0.5.1`. 0.5.1 makes worktree integration

@@ -83,3 +83,22 @@ class TestLogRotateFleet:
             text=True,
         )
         assert r.returncode == 0, r.stderr
+
+
+class TestLaunchdTimerLogs:
+    """#1965: a composed launchd timer job logs to state/<label>.launchd.log,
+    which launchd reopens at every run, so rotating it is safe. Other state/
+    logs belong to their writers (a resident service keeps its own open), so
+    they are left alone."""
+
+    def test_rotates_timer_logs_and_leaves_other_state_logs(self, tmp_path):
+        root, _ = _fleet_root(tmp_path)
+        state = root / "state"
+        state.mkdir()
+        body = "line\n" * 600
+        (state / "com.f.keepalive.launchd.log").write_text(body)
+        (state / "plane-daemon.log").write_text(body)
+        r = _run(root)
+        assert r.returncode == 0, r.stderr + r.stdout
+        assert _lines(state / "com.f.keepalive.launchd.log") == 100
+        assert _lines(state / "plane-daemon.log") == 600

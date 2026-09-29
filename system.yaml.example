@@ -47,6 +47,13 @@
 # (catch up missed runs) and `randomized_delay: <seconds>` (start jitter);
 # launchd has no equivalent, so plists ignore them.
 #
+# `max_runtime: <seconds>` bounds one run on launchd, where every composed timer
+# plist runs its job through lib/run-bounded.sh and writes the job's output to
+# state/<label>.launchd.log (#1965). Without it the budget is three intervals
+# (at least 600 s) for an interval job, 3600 s for a calendar job, and, for
+# weekly-worker-restart, each worker's readiness ceiling plus 150 s, summed.
+# systemd units carry no bound yet (the systemd half of #897).
+#
 # DEFAULTS RULE (ruled 2026-09-07). A job or door is ON by default unless it
 # DELETES DATA, SPENDS MONEY, MUTATES OPERATOR SOURCE, or SENDS OUTBOUND TO
 # PEOPLE AT SCALE. Everything else ships enrolled, because a behavior nobody
