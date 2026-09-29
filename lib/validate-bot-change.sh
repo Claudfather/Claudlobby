@@ -24,6 +24,10 @@ if ! command -v tmux >/dev/null 2>&1; then
     echo "validate-bot-change: tmux required (it backs the observe step)" >&2
     exit 2
 fi
+if ! command -v node >/dev/null 2>&1; then
+    echo "validate-bot-change: node required for native bridge process fixtures" >&2
+    exit 2
+fi
 
 # --- Per-bot socket isolation (mirror production) ----------------------------
 # Each bot now runs its OWN tmux server. The scripts under test resolve a bot's
@@ -1908,30 +1912,31 @@ val_scenario "validate-bot-change: session-scoped readiness (#1530)"
 _scope_fail_before=$fail
 _SC_BIN="$RB_ROOT/scopebin"
 mkdir -p "$_SC_BIN"
-# The selected private interpreter is visible to macOS `ps eww`, including its
-# launch environment; system /bin/bash did not expose that environment on this
-# host. Preserve the claude -> bun -> bun ancestry and server.ts argv that
-# bridge_state classifies, while the fake poller holds this throwaway bot's slot.
-ln -s "$VAL_PY" "$_SC_BIN/bun"
-ln -s "$VAL_PY" "$_SC_BIN/claude"
-cat > "$_SC_BIN/leaf.py" <<'LEAF'
+# Reuse the native stand-in from test_bridge_state: framework Python re-execs
+# as Python on macOS, so a symlink named bun cannot satisfy the real classifier.
+# Node retains the copied executable's name and exposes its launch environment.
+# Preserve Homebrew's executable-relative libnode dependency when present.
+"$VAL_PY" -I -B - "$(command -v node)" "$_SC_BIN" <<'BINS'
 import os
-import time
 from pathlib import Path
-Path(os.environ["TELEGRAM_STATE_DIR"], "bot.pid").write_text(str(os.getpid()))
-time.sleep(45)
+import shutil
+import sys
+source, target = Path(sys.argv[1]).resolve(), Path(sys.argv[2])
+for name in ("bun", "claude"):
+    shutil.copy(source, target / name)
+    os.chmod(target / name, 0o755)
+for library in (source.parent.parent / "lib").glob("libnode*.dylib"):
+    (target / library.name).symlink_to(library)
+BINS
+cat > "$_SC_BIN/leaf.js" <<'LEAF'
+require('fs').writeFileSync(require('path').join(process.env.TELEGRAM_STATE_DIR, 'bot.pid'), String(process.pid));
+setTimeout(() => {}, 45000);
 LEAF
-cat > "$_SC_BIN/wrapper.py" <<'WRAPPER'
-import subprocess
-from pathlib import Path
-here = Path(__file__).parent
-subprocess.run([str(here / "bun"), str(here / "leaf.py"), "server.ts"])
+cat > "$_SC_BIN/wrapper.js" <<'WRAPPER'
+require('child_process').spawnSync(__dirname + '/bun', [__dirname + '/leaf.js', 'server.ts'], {stdio: 'inherit'});
 WRAPPER
-cat > "$_SC_BIN/tree.py" <<'TREE'
-import subprocess
-from pathlib import Path
-here = Path(__file__).parent
-subprocess.run([str(here / "bun"), str(here / "wrapper.py"), "start"])
+cat > "$_SC_BIN/tree.js" <<'TREE'
+require('child_process').spawnSync(__dirname + '/bun', [__dirname + '/wrapper.js', 'start'], {stdio: 'inherit'});
 TREE
 rm -f "$RB_DIR/state/bot.pid"
 # macOS has no `setsid` utility. The selected test interpreter creates the
@@ -1942,7 +1947,7 @@ rm -f "$RB_DIR/state/bot.pid"
 # variables are not part of the poller fixture.
 env -i PATH="/usr/bin:/bin" TELEGRAM_STATE_DIR="$RB_DIR/state" "$VAL_PY" -I -B -c \
     'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
-    "$_SC_BIN/claude" "$_SC_BIN/tree.py" >/dev/null 2>&1 &
+    "$_SC_BIN/claude" "$_SC_BIN/tree.js" >/dev/null 2>&1 &
 _SC_ROOT_PID=$!
 # Wait for the foreign poller to actually hold the slot; without this the run can
 # race and assert against a bot.pid that does not exist yet, which would PASS for
