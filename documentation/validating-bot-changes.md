@@ -22,7 +22,7 @@ For the observability / trust-loop behaviors, this harness *is* the Observe step
 1. stands up a throwaway bot + a manager session in a temp root (no Claude auth, no real fleet),
 2. seeds a stale tool-call marker and a past-deadline dispatch,
 3. runs the real `fleet-pulse.sh` sweep against it, and
-4. **asserts** that `activity_stuck` and `overdue_dispatch` events land on the plane (`claudlobby events --bot <bot>`) and that the manager receives a `[FLEET-PULSE]` push.
+4. **asserts** that `activity_stuck` and `overdue_dispatch` events land on the plane (`claudlobby event list --bot <bot>`) and that the manager receives a `[FLEET-PULSE]` push.
 
 ```bash
 bash lib/validate-bot-change.sh   # exit 0 = behavior matched intent
@@ -40,7 +40,7 @@ Some changes (a skill's actual output, a guardrail's enforcement, a protocol's w
 claudlobby --fleet <fleet> generate
 lib/spin-up-bot.sh <bot-dir>           # or restart the affected bot
 # drive the affected path, then observe:
-claudlobby events --bot <bot> --tail 20      # the plane's rows for the bot
+claudlobby event list --bot <bot> --limit 20      # the plane's rows for the bot
 claudlobby fleet uptime --bot <bot>                 # heartbeat history, from the plane
 tmux attach -t <bot>                   # watch the pane
 ```

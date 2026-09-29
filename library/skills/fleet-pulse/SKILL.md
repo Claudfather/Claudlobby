@@ -23,8 +23,8 @@ Run external liveness checks against the fleet, summarize findings, and take cor
 2. **Read today's events**
 
    The events live on the plane, not in a file (F18 closure). Read them through the CLI:
-   - `claudlobby events --since 24h --source pulse --json`; when an argument was given, inspect only that bot's rows
-   - Parse each line as JSON: `{"ts": "...", "bot": "...", "type": "...", "source": "pulse", "data": {...}}` — the same row shape the ledgers had
+   - `claudlobby --json event list --since 24h --source pulse`; when an argument was given, add `--bot BOT_ID`
+   - Read the single schema-1 result's `data.items`, `data.coverage`, and `data.next_cursor`. Each item names its stable `event_id`, `occurred_at`, `bot`, `type`, `source`, `severity`, and `data`; continue a nonempty cursor before claiming the window was fully inspected.
 
 3. **Summarize findings**
 

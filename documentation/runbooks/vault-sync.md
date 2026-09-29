@@ -121,7 +121,7 @@ It is **recorded, not lost**: every tick writes a `vault.state` sample, so the
 change is on the plane and queryable —
 
 ```
-claudlobby --fleet <name> events --type vault_sync --tail 50   # the failures
+claudlobby --fleet <name> event list --type vault_sync --limit 50   # the failures
 ```
 
 — and the samples themselves (`vault.state`) carry the verdict per run. If you
@@ -153,7 +153,7 @@ verdict will be a real one.
 ## Reading the history
 
 ```
-claudlobby --fleet <name> events --type vault_sync --tail 50
+claudlobby --fleet <name> event list --type vault_sync --limit 50
 ```
 
 The samples answer "when did this vault last sync successfully, and how often

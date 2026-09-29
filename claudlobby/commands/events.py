@@ -1,12 +1,12 @@
-"""claudlobby events — the fleet's events, from the plane and nothing else.
+"""Fleet event reads from the Plane, including the canonical public event door.
 
 Every fleet event lands on the plane as a system event anchored on the bot's
 actor (or the fleet, or the host) with a ``fleet-events:`` provenance and a
 detail carrying ``{source, legacy_ts, data}`` (F18 R1: the plane is the only
 recorder). The stdlib readers the bash doors ship (``lib/plane-readers.py``)
-render each one back as the row the retired ledgers used to hold, so the
-table and the ``--json`` rows are the shapes they were — ONE rendering,
-shared with ``plane-lookup.py --events`` and fleet-pulse. ``--critical`` is
+render each one back as the row the retired ledgers used to hold. Private
+legacy rows keep that shape through one renderer shared with
+``plane-lookup.py --events`` and fleet-pulse. ``--critical`` is
 the severity the registry stamped at ingest (``SYSTEM_EVENT_SEVERITY``), one
 definition; ``CRITICAL_TYPES`` below is the file-era vocabulary, kept so the
 registry is pinned to agree with it.
@@ -14,17 +14,20 @@ registry is pinned to agree with it.
 There is no file to read (F18 closure, R2b): R1 removed every writer, and a
 reader that could still open one would read nothing at best and the archive
 at worst. There is no flag and no declaration either — the plane is the only
-source. An unreachable plane REFUSES (rc 3, the remedy on stderr): "No events
+source. An unreachable plane returns a schema-1 unavailable result: "No events
 found." from an instrument that could not be reached is a claim about the
 estate drawn from nothing, the #1216 class. A reachable plane holding no
-event for the fleet prints that line honestly, at rc 0.
+event for the fleet prints that line honestly.
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import sqlite3
-import sys
+
+from ..command_result import CommandFailure, CommandOutput
 
 # Critical event types — fleet health problems that need attention. The
 # file-era hand list; the plane path filters on the registry's severity, and
@@ -164,54 +167,101 @@ def _window_seconds(since) -> float | None:
         return None
 
 
-def cmd_events(args) -> int:
-    """CLI entry point for ``claudlobby events``."""
+def _cursor(scope: dict, after: tuple[str, int], since_instant: str | None) -> str:
+    raw = json.dumps({"v": 1, "scope": scope, "after": after, "since_instant": since_instant},
+                     sort_keys=True, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _after(token: str | None, scope: dict) -> tuple[tuple[str, int], str | None] | None:
+    if token is None:
+        return None
+    try:
+        if not 1 <= len(token) <= 4096:
+            raise ValueError
+        raw = base64.b64decode(token + "=" * (-len(token) % 4), altchars=b"-_", validate=True)
+        value = json.loads(raw)
+        if (not isinstance(value, dict) or set(value) != {"v", "scope", "after", "since_instant"}
+                or type(value["v"]) is not int or value["v"] != 1
+                or value["scope"] != scope):
+            raise ValueError
+        key = value["after"]
+        if (not isinstance(key, list) or len(key) != 2 or not isinstance(key[0], str)
+                or type(key[1]) is not int or key[1] < 1
+                or value["since_instant"] is not None
+                and not isinstance(value["since_instant"], str)):
+            raise ValueError
+        return (key[0], key[1]), value["since_instant"]
+    except (ValueError, TypeError, UnicodeError, binascii.Error) as exc:
+        raise CommandFailure("invalid_argument", "invalid event cursor or changed fleet or filters") from exc
+
+
+def _item(row: dict, fleet: str) -> dict:
+    return {"event_id": row["_event_id"], "fleet": fleet, "occurred_at": row["ts"],
+            "bot": row["bot"], "type": row["type"], "source": row["source"],
+            "severity": row["_severity"], "data": row["data"],
+            "detail_truncated": row["_truncated"]}
+
+
+def dispatch(args) -> CommandOutput:
+    """Canonical ``event list/show`` over the existing Plane renderer."""
     from ._helpers import _resolve_paths
+    from ..brief import resolve_fleet_name
     from .checkins import _since
 
-    # #1896: the reader compares instants, so the window crosses as one. A bare
-    # `24h` handed on as text came back as UNREACHABLE (rc 3), a refusal that
-    # blamed the plane for the caller's input. The coverage line keeps the text
-    # as typed: measured against the instant a few ms later, `24h` reads "1.0d".
+    if args.seed:
+        raise CommandFailure("conflict", "seed configuration has no fleet event history")
+    if args.event_action == "list" and not 1 <= args.limit <= 1000:
+        raise CommandFailure("invalid_argument", "--limit must be from 1 to 1000")
     typed = getattr(args, "since", None)
     since = None
     if typed:
         try:
             since = _since(typed).isoformat()
         except ValueError as exc:
-            print(f"claudlobby events: {exc}", file=sys.stderr)
-            return 2
+            raise CommandFailure("invalid_argument", str(exc)) from exc
 
     paths = _resolve_paths(args)
+    fleet = resolve_fleet_name(paths)
     conn, note = plane_events_conn(paths)
     if conn is None:
-        # rc 3, the unreachable-is-not-empty code every plane reader uses:
-        # nothing is printed on stdout, so a caller cannot read the refusal
-        # as a quiet fleet.
-        print(f"claudlobby events: UNREACHABLE — {note}; restore the plane db"
-              f" (state/plane/plane.db) under {paths.root} or name the right root — no"
-              " event is served rather than a wrong count", file=sys.stderr)
-        return 3
+        raise CommandFailure("unavailable", f"Plane events are unreachable: {note}", retryable=True)
     try:
-        events = collect_plane_events(conn, paths, bot=args.bot, event_type=args.type,
-                                      source=args.source, critical_only=args.critical,
-                                      since=since)
-        # #1658: same connection that served the events, so the line cannot
-        # describe a different plane than the rows above it.
-        cov = _events_coverage_line(conn, paths, typed)
-    except RuntimeError as exc:
-        print(f"claudlobby events: UNREACHABLE — {exc}", file=sys.stderr)
-        return 3
+        from ..paths import load_lib_module
+        pr = load_lib_module(paths.lib, "plane-readers.py")
+        if pr is None:
+            raise RuntimeError("selected Plane reader is unavailable")
+        if args.event_action == "show":
+            rows = pr.fleet_events(conn, fleet, event_id=args.event_id)
+            if not rows:
+                raise CommandFailure("not_found", "event ID is not recorded in the selected fleet")
+            item = _item(rows[0], fleet)
+            return CommandOutput({"event": item}, lines=(f"{item['event_id']}\t{item['type']}\t{item['bot']}\t{item['occurred_at']}",))
+        scope = {"root": str(paths.root), "fleet": fleet, "bot": args.bot,
+                 "type": args.type, "source": args.source, "critical": args.critical,
+                 "since": typed}
+        cursor = _after(args.cursor, scope)
+        after = cursor[0] if cursor else None
+        if cursor:
+            since = cursor[1]
+        rows = pr.fleet_events(conn, fleet, since=since, bot=args.bot, event_type=args.type)
+        rows = [row for row in rows if (not args.source or row["source"] == args.source)
+                and (not args.critical or row["_severity"] == "critical")]
+        rows.reverse()  # newest event first, with ingest sequence breaking timestamp ties
+        if after is not None:
+            rows = [row for row in rows if (row["_occurred_at"], row["_ingest_seq"]) < after]
+        page = rows[:args.limit]
+        next_cursor = (_cursor(scope, (page[-1]["_occurred_at"], page[-1]["_ingest_seq"]), since)
+                       if len(rows) > args.limit else None)
+        coverage = _events_coverage_line(conn, paths, typed)
+        items = [_item(row, fleet) for row in page]
+        lines = tuple(f"{item['event_id']}\t{item['occurred_at']}\t{item['bot']}\t{item['type']}\t{item['source']}"
+                      for item in items) or ("No events found.",)
+        if next_cursor:
+            lines += (f"next_cursor: {next_cursor}",)
+        lines += (coverage,)
+        return CommandOutput({"items": items, "next_cursor": next_cursor, "coverage": coverage}, lines=lines)
+    except (sqlite3.Error, RuntimeError, ValueError) as exc:
+        raise CommandFailure("unavailable", f"Plane events are unreachable: {exc}", retryable=True) from exc
     finally:
         conn.close()
-
-    if args.json:
-        for ev in events:
-            print(json.dumps(ev, separators=(",", ":")))
-        print(cov, file=sys.stderr)      # stdout stays a JSONL stream
-    else:
-        if args.tail:
-            events = events[-args.tail :]
-        print(format_event_table(events))
-        print(cov)
-    return 0

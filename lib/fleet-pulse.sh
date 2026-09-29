@@ -291,7 +291,7 @@ _int_or() {  # _int_or <value> <default>
 #   5,284 rows in the 2.4 days the plane retains (read at --tail 40000, so the
 #   figure is a count and not the ceiling -- a first read of this population at
 #   the door default returned exactly 500 for two different fleets, and
-#   `claudlobby events` discloses no truncation).
+#   `claudlobby event list` discloses no truncation).
 #   95.2% of them -- 5,033 -- from EIGHT (bot,repo) pairs whose dirty_files count
 #   NEVER CHANGED across the whole window. The other 4.8% is the handful of bots
 #   doing real edits, and their counts move.

@@ -40,7 +40,7 @@ bot="${BOT_ID:-unknown}"
 # fleet-event door (cutover B2: emit_fleet_event lands it on the plane with
 # provenance, alias-anchored, and the JSONL append retires with the family —
 # this script printed straight into fleet-<day>.jsonl before, so its rows were
-# invisible to `claudlobby events` from the flip on). Values passed via env to
+# invisible to `claudlobby event list` from the flip on). Values passed via env to
 # avoid shell injection.
 python3 -c "
 import json, sys

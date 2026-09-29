@@ -361,13 +361,15 @@ def test_a_host_job_with_no_fleet_anywhere_anchors_on_the_host(tmp_path, *, scra
 
 def _events_cmd(root, *args, **extra):
     return subprocess.run([sys.executable, "-m", "claudlobby", "--root", str(root), "--fleet", F,
-                           "events", *args], capture_output=True, text=True, timeout=180,
+                           "event", "list", *args], capture_output=True, text=True, timeout=180,
                           env=_env(root, **extra))
 
 
 def _rows(r):
     assert r.returncode == 0, r.stdout + r.stderr
-    return [json.loads(line) for line in r.stdout.splitlines()]
+    result = json.loads(r.stdout)
+    assert result["schema_version"] == 1 and result["command"] == "event.list"
+    return result["data"]["items"]
 
 
 def _drop_plane(root):
@@ -389,8 +391,8 @@ def test_claudlobby_events_serves_the_plane_and_nothing_else(tmp_path):
           source="report-back", provenance=False)                  # a report door's marker: NOT a fleet event
     rows = _rows(_events_cmd(root, "--json"))                      # nothing set: the plane
     assert [(r["bot"], r["type"], r["source"]) for r in rows] == [
-        ("w1", "session_missing", "pulse"), ("w2", "keepalive", "keepalive"), ("fleet", "fleet_rescue", "pulse")]
-    assert rows[0]["ts"] == "2026-09-03T10:00:00Z" and rows[0]["data"] == {"session": "w1"}
+        ("fleet", "fleet_rescue", "pulse"), ("w2", "keepalive", "keepalive"), ("w1", "session_missing", "pulse")]
+    assert rows[-1]["occurred_at"] == "2026-09-03T10:00:00Z" and rows[-1]["data"] == {"session": "w1"}
     assert {"cutover_declared", "report_status"}.isdisjoint({r["type"] for r in rows})   # provenance, not a name list
     assert [r["bot"] for r in _rows(_events_cmd(root, "--json", "--critical"))] == ["w1"]
     assert [r["bot"] for r in _rows(_events_cmd(root, "--json", "--bot", "W2"))] == ["w2"]
@@ -401,7 +403,7 @@ def test_claudlobby_events_serves_the_plane_and_nothing_else(tmp_path):
     assert table.returncode == 0 and "session_missing" in table.stdout
     _drop_plane(root)
     gone = _events_cmd(root, "--json")
-    assert gone.returncode == 3 and "UNREACHABLE" in gone.stderr and gone.stdout == ""
+    assert gone.returncode == 6 and json.loads(gone.stdout)["error"]["code"] == "unavailable"
 
 
 def test_brief_alerts_read_the_plane_and_omit_when_it_is_unreachable(tmp_path, monkeypatch):

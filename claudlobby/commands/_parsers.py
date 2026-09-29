@@ -228,35 +228,8 @@ def register_subparsers(sub) -> None:
     )
     plm.set_defaults(func=_command("lessons_migrate", "cmd_lessons_migrate"))
 
-    pev = sub.add_parser(
-        "events",
-        help="Tail/filter the fleet's events on the plane",
-    )
-    pev.add_argument("--bot", help="Filter by bot name")
-    pev.add_argument(
-        "--type", help="Filter by event type (e.g. service_down, tool_call)"
-    )
-    pev.add_argument(
-        "--source", help="Filter by the emitting script (vitals, pulse, keepalive, lib)"
-    )
-    pev.add_argument(
-        "--critical",
-        action="store_true",
-        help="Show only critical events (service_down, session_missing, etc.)",
-    )
-    pev.add_argument(
-        "--tail",
-        type=int,
-        default=50,
-        help="Show last N events (default: 50)",
-    )
-    pev.add_argument(
-        "--since",
-        help="Only events since a window or instant: 24h, 7d, 30m, or an ISO instant",
-    )
-    pev.add_argument("--json", action="store_true", help="Output raw JSONL")
-
-    pev.set_defaults(func=_command("events", "cmd_events"))
+    from ._event_read_parsers import register_event_read_subparsers
+    register_event_read_subparsers(sub)
 
     # --- observable plane (Phase 1 kernel) ---
     pe = sub.add_parser("emit", help="Validated event ingest into the plane db")
