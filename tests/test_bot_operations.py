@@ -291,7 +291,9 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
                 if value == "handoff-saved":
                     handoff = Path(args[0]) / ".claude/session.md"
                     handoff.parent.mkdir(exist_ok=True)
-                    now = datetime.now(timezone.utc)
+                    # The real provider saved promptly but invented a future
+                    # timestamp. Explicit native capture witnessed this write.
+                    now = datetime.now(timezone.utc) + timedelta(minutes=7)
                     handoff.write_text(f"---\nlast_updated: {now:%Y-%m-%dT%H:%M:%SZ}\n---\ncontext\n")
             elif function == "svc_bot_control_exact":
                 assert args[:2] == (root / "runtime/bots/worker", "com.example.worker")

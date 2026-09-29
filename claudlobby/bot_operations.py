@@ -85,8 +85,8 @@ class BotControlResult:
     outcome: str
 
 
-def _fresh_self_handoff(bot_dir: Path) -> None:
-    """Require the handoff this session just wrote, not a touched old resume file."""
+def _fresh_self_handoff(bot_dir: Path, *, observed_capture: bool = False) -> None:
+    """Require a fresh owned handoff; explicit capture already witnessed its write."""
     handoff_dir = bot_dir / ".claude"
     try:
         bot_info = bot_dir.lstat()
@@ -121,7 +121,10 @@ def _fresh_self_handoff(bot_dir: Path) -> None:
             raise ValueError("naive handoff timestamp")
         age = datetime.now(timezone.utc).timestamp() - stamp.timestamp()
         mtime_age = datetime.now(timezone.utc).timestamp() - info.st_mtime
-        if not (-30 <= age <= 300 and -30 <= mtime_age <= 300):
+        # Explicit native capture witnessed a changed checksum during this call.
+        # Its filesystem clock is stronger evidence than a model-authored date
+        # (the live canary wrote last_updated seven minutes into the future).
+        if not (-30 <= mtime_age <= 300) or (not observed_capture and not -30 <= age <= 300):
             raise ValueError("handoff is stale")
     except (OSError, UnicodeError, ValueError) as exc:
         raise BotLifecycleError("self restart requires a fresh owned session handoff") from exc
@@ -395,7 +398,7 @@ def handoff_bot(*, root: Path, fleet: str | None, bot: str,
                                         target=entry["target"])
             if marker == ["handoff-saved"]:
                 try:
-                    _fresh_self_handoff(spec.bot_dir)
+                    _fresh_self_handoff(spec.bot_dir, observed_capture=True)
                 except BotLifecycleError as exc:
                     raise BotLifecycleError("fresh bot handoff file is unverified", effect_attempted=True,
                                             unavailable=True, release_id=release.release_id,
