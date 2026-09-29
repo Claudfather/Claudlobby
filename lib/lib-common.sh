@@ -707,7 +707,11 @@ seed_checkout_mcp_trust() {
 seed_all_checkouts() {
     local bot_dir="$1" repo allowlist
     [ -d "$bot_dir/projects" ] || return 0
-    allowlist="$(_home_mcp_allowlist "$bot_dir")" || return 0
+    # Bash 3.2 can fire the inherited ERR trap inside a substitution even
+    # though the assignment is guarded. A missing allowlist is an expected
+    # verdict, so guard the helper at the point where it returns that verdict.
+    allowlist="$(_home_mcp_allowlist "$bot_dir" || true)"
+    [ -n "$allowlist" ] || return 0
     for repo in "$bot_dir"/projects/*/; do
         [ -d "$repo/.git" ] || continue
         seed_checkout_mcp_trust "$repo" "$allowlist" || true
