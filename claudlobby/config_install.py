@@ -191,8 +191,11 @@ def prepare_config(plan: ConfigPlan, activation_id: str) -> ConfigInstall:
                 for name in ("activations", "config-plans", "releases", "plane")]
     for change in plan.changes:
         target = Path(change.target)
-        resolved = target.resolve()
-        if any(resolved.is_relative_to(p) or p.is_relative_to(resolved) for p in reserved):
+        # The leaf itself may be an owned symlink into the old selected
+        # release. Replacement renames that leaf; it does not write through
+        # it. Resolve only its parent so redirected ancestry stays protected.
+        leaf = target.parent.resolve() / target.name
+        if any(leaf.is_relative_to(p) or p.is_relative_to(leaf) for p in reserved):
             raise ConfigInstallError(f"configuration output overlaps protected state: {target}")
         # Access.json and other file outputs may need parents not explicitly
         # emitted by the compositor. Record each ensure, including its rollback.

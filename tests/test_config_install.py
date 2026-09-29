@@ -183,3 +183,26 @@ def test_stale_plan_or_wrong_activation_identity_never_prepares_or_overwrites(pr
     with pytest.raises(install.ConfigInstallError, match="identity changed"):
         install.apply_config(plan.data_root, "bound")
     assert (_tree(runtime), _tree(external)) == before
+
+
+def test_replaces_leaf_symlink_into_old_release_but_refuses_redirected_parent(installed):
+    root, inputs, paths, _, _ = installed
+    release = r.seal_release(root, inputs, paths)
+    link = root / "runtime/bots/lead/.cli/bin/claudlobby"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(release.directory / paths.interpreter)
+    builder = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, (), effects={})
+    builder.symlink(link, release.cli_path)
+    plan = builder.seal()
+    assert install.prepare_config(plan, "replace-cli").status == "prepared"
+    assert install.apply_config(root, "replace-cli").status == "applied"
+    assert link.readlink() == release.cli_path
+    assert install.rollback_config(root, "replace-cli").status == "rolled_back"
+    assert link.readlink() == release.directory / paths.interpreter
+
+    redirected = root / "runtime/redirected"
+    redirected.symlink_to(release.directory, target_is_directory=True)
+    unsafe = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, (), effects={})
+    unsafe.file(redirected / "unexpected", b"should never reach the release")
+    with pytest.raises(install.ConfigInstallError, match="overlaps protected state"):
+        install.prepare_config(unsafe.seal(), "redirected-parent")
