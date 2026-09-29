@@ -28,14 +28,6 @@ from ..plane.spool import (
     quarantine_entry, scan_spool, spool_dir, spool_entries,
 )
 
-_FAMILY_COUNTS = {
-    "communication": ("communications", None),
-    "transmission": ("events", "transmission"),
-    "work_item": ("work_items", None),
-    "assignment": ("assignments", None),
-    "task": ("events", "task"),
-}
-
 _SPOOL_NAME_RE = re.compile(r"ev_[0-9a-f]{32}\.json")
 
 
@@ -69,57 +61,6 @@ def _guarded(label: str, fn) -> int:
         # not transient infrastructure — retrying it forever helps no one.
         print(f"{label}: REFUSED — {exc}", file=sys.stderr)
         return 4
-
-
-def cmd_plane_status(args) -> int:
-    root = _resolve_paths(args).root
-
-    def run() -> int:
-        path = db_file(root)
-        print(f"db: {path} ({'present' if path.exists() else 'absent'})")
-        if path.exists():
-            conn = connect_ro(path)
-            try:
-                require_current_schema(conn)
-                version = conn.execute("PRAGMA user_version").fetchone()[0]
-                print(f"schema user_version: {version}")
-                top = conn.execute(
-                    "SELECT COALESCE(MAX(ingest_seq), 0) FROM ingest_ledger"
-                ).fetchone()[0]
-                print(f"ingest_seq high-water: {top}")
-                for family, (table, kind) in _FAMILY_COUNTS.items():
-                    if kind is None:
-                        n = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                    else:
-                        n = conn.execute(
-                            "SELECT COUNT(*) FROM events WHERE kind = ?", (kind,)
-                        ).fetchone()[0]
-                    print(f"  {family}: {n}")
-                prov = provisional_actors(conn)
-                print(f"provisional actors: {len(prov)}")
-            finally:
-                conn.close()
-        # scan_spool — THE shared spool definition (external round 4: this
-        # command printed 'spool: 0 pending' for a tree /api/trust called
-        # unreadable; a numeric zero from an unenumerable dir is the lie).
-        sc = scan_spool(root)
-        if sc.spool_state == "unreadable":
-            print("spool: unreadable — cannot count (a gap, not a zero)")
-        else:
-            oldest_at = oldest_spooled_at(sc.pending)
-            oldest = ""
-            if oldest_at:
-                age = (datetime.now(timezone.utc)
-                       - datetime.fromisoformat(oldest_at))
-                oldest = f", oldest {int(age.total_seconds())}s"
-            print(f"spool: {len(sc.pending)} pending{oldest}")
-        if sc.quarantine_state == "unreadable":
-            print("quarantine: unreadable — cannot count")
-        else:
-            print(f"quarantine: {len(sc.quarantined)}")
-        return 0
-
-    return _guarded("plane status", run)
 
 
 def cmd_plane_spool(args) -> int:

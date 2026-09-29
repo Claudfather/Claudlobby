@@ -99,9 +99,11 @@ def test_current_schema_check_preserves_the_callers_transaction(tmp_path):
 def test_diagnostic_doors_refuse_pending_schema_without_advancing_it(tmp_path, monkeypatch, capsys):
     """The old status/doctor/registry doors each called migrate on a read."""
     from types import SimpleNamespace
-    from claudlobby.commands import plane
+    from claudlobby.commands import plane, plane_status
+    from claudlobby.command_result import CommandFailure
 
     monkeypatch.setattr(plane, "_resolve_paths", lambda _: SimpleNamespace(root=tmp_path))
+    monkeypatch.setattr(plane_status, "resolve_paths", lambda **_: SimpleNamespace(root=tmp_path))
     path = db_file(tmp_path)
     path.parent.mkdir(parents=True)
     with closing(sqlite3.connect(path)) as conn:
@@ -109,7 +111,12 @@ def test_diagnostic_doors_refuse_pending_schema_without_advancing_it(tmp_path, m
             if version < SCHEMA_USER_VERSION:
                 conn.executescript(sql)
     before = path.read_bytes()
-    for door in (plane.cmd_plane_status, plane.cmd_plane_doctor, plane.cmd_plane_registry):
+    with pytest.raises(CommandFailure) as status_error:
+        plane_status.dispatch(SimpleNamespace(root=tmp_path, fleet=None, seed=False))
+    assert status_error.value.error.code == "migration_required"
+    assert "explicit migration apply" in status_error.value.error.message
+    assert path.read_bytes() == before
+    for door in (plane.cmd_plane_doctor, plane.cmd_plane_registry):
         assert door(SimpleNamespace()) == 7
         assert "explicit migration apply" in capsys.readouterr().err
         assert path.read_bytes() == before
@@ -117,13 +124,20 @@ def test_diagnostic_doors_refuse_pending_schema_without_advancing_it(tmp_path, m
 
 
 def test_status_on_absent_root_remains_read_only(tmp_path, monkeypatch, capsys):
+    import json
     from types import SimpleNamespace
-    from claudlobby.commands import plane
+    from claudlobby.commands import plane_status
+    from claudlobby.command_result import execute
 
     root = tmp_path / "absent"
-    monkeypatch.setattr(plane, "_resolve_paths", lambda _: SimpleNamespace(root=root))
-    assert plane.cmd_plane_status(SimpleNamespace()) == 0
-    assert "absent" in capsys.readouterr().out
+    monkeypatch.setattr(plane_status, "resolve_paths", lambda **_: SimpleNamespace(root=root))
+    out = plane_status.dispatch(SimpleNamespace(root=root, fleet=None, seed=False))
+    assert out.data["database"]["state"] == "absent"
+    assert "absent" in out.lines[0]
+    assert execute("plane.status", lambda: out, json_output=True) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["command"] == "plane.status" and result["ok"] is True
+    assert result["data"]["spool"]["pending"] == 0
     assert not root.exists()
 
 

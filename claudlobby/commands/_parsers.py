@@ -110,7 +110,14 @@ def register_subparsers(sub) -> None:
 
         pe.set_defaults(func=_emit_dispatch, public_command=f"plane.{action}")
     ps = psub.add_parser("status", help="Kernel health: db, counts, spool")
-    ps.set_defaults(func=_command("plane", "cmd_plane_status"))
+    ps.add_argument("--json", action="store_true", help="Schema-1 result")
+
+    def _status_dispatch(args):
+        from ..command_result import execute
+        return execute("plane.status", lambda: _command("plane_status", "dispatch")(args),
+                       json_output=args.json)
+
+    ps.set_defaults(func=_status_dispatch, public_command="plane.status")
     pd = psub.add_parser("doctor", help="Kernel health rungs (exit 1 on attention)")
     pd.set_defaults(func=_command("plane", "cmd_plane_doctor"))
     pv = psub.add_parser("serve", help="Run the ingest daemon (foreground)")

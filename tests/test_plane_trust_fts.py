@@ -508,7 +508,10 @@ def test_doctor_and_status_agree_with_trust_on_an_unenumerable_spool(
     three now consume spool.scan_spool: doctor fails the rung and exits
     nonzero; status discloses instead of a numeric zero."""
     from claudlobby import source_state
-    from claudlobby.commands.plane import cmd_plane_doctor, cmd_plane_status
+    from claudlobby.commands.plane import cmd_plane_doctor
+    from claudlobby.commands import plane_status
+    from claudlobby.paths import Paths
+    from tests.package_fixtures import source_package
 
     _seed(tmp_path)
     spool = tmp_path / "state" / "plane" / "spool"
@@ -519,13 +522,16 @@ def test_doctor_and_status_agree_with_trust_on_an_unenumerable_spool(
 
     import types
     args = types.SimpleNamespace(root=str(tmp_path))
+    monkeypatch.setattr("claudlobby.commands.plane._resolve_paths", lambda _:
+                        Paths(root=tmp_path, package=source_package()))
     rc = cmd_plane_doctor(args)
     out = capsys.readouterr().out
     assert rc != 0
     assert "UNREADABLE" in out and "spool depth" in out
     assert "0 pending" not in out                    # never the green zero
 
-    rc = cmd_plane_status(args)
-    out = capsys.readouterr().out
-    assert "unreadable" in out
-    assert "spool: 0 pending" not in out
+    monkeypatch.setattr(plane_status, "resolve_paths", lambda **_: types.SimpleNamespace(root=tmp_path))
+    status = plane_status.dispatch(types.SimpleNamespace(root=tmp_path, fleet=None, seed=False))
+    assert status.data["spool"]["state"] == "unreadable"
+    assert status.data["spool"]["pending"] is None
+    assert any(line.startswith("spool: unreadable") for line in status.lines)
