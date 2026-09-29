@@ -8,12 +8,14 @@ import re
 import sqlite3
 
 from ..command_result import CommandFailure, CommandOutput
+from ..activation_state import ActivationError
 from ..context import resolve_paths
 from ..plane.db import connect, connect_ro, db_file
 from ..plane.ids import ensure_host_uid
 from ..plane.migrations import DowngradeError
 from ..plane.schema_state import PendingMigrationError, preflight_schema, require_current_schema
 from ..plane.spool import drain, quarantine_dir, quarantine_entry, spool_dir, spool_entries
+from ..runtime_admission import RuntimeIdentity, mutation_admission
 
 
 _SPOOL_NAME = re.compile(r"ev_[0-9a-f]{32}\.json")
@@ -47,12 +49,12 @@ def spool(args) -> CommandOutput:
         name = args.name or ""
         if not _SPOOL_NAME.fullmatch(name):
             raise CommandFailure("invalid_argument", "invalid spool entry name")
-        source = spool_dir(root) / name
-        if action == "inspect" and not source.exists():
-            source = quarantine_dir(root) / name
-        if not source.exists():
-            raise CommandFailure("not_found", f"no such spool entry: {name}")
         if action == "inspect":
+            source = spool_dir(root) / name
+            if not source.exists():
+                source = quarantine_dir(root) / name
+            if not source.exists():
+                raise CommandFailure("not_found", f"no such spool entry: {name}")
             try:
                 entry = json.loads(source.read_text())
                 reason_file = source.with_name(source.name + ".reason")
@@ -63,24 +65,38 @@ def spool(args) -> CommandOutput:
                                  lines=tuple(filter(None, (f"quarantined: {reason}" if reason else "",
                                                      json.dumps(entry, indent=2, sort_keys=True, default=str)))))
         try:
-            quarantine_entry(root, source, "operator")
-        except OSError as exc:
-            # The reason sidecar may already have been written. The move is
-            # unproved; an operator must inspect before attempting it again.
-            raise CommandFailure("commit_unknown", "quarantine outcome unknown; inspect the entry before retrying",
-                                 data={"name": name, "quarantined": "unknown"}) from exc
-        return CommandOutput({"name": name, "quarantined": True}, lines=(f"quarantined {name}",))
+            with mutation_admission(root, identity=RuntimeIdentity.current(),
+                                    expected_release=os.environ.get("CLAUDLOBBY_RELEASE_ID")) as release:
+                source = spool_dir(root) / name
+                if not source.exists():
+                    raise CommandFailure("not_found", f"no such spool entry: {name}")
+                try:
+                    quarantine_entry(root, source, "operator")
+                except OSError as exc:
+                    # The reason sidecar may already have been written. The
+                    # move is unproved; inspect before any explicit retry.
+                    raise CommandFailure("commit_unknown", "quarantine outcome unknown; inspect the entry before retrying",
+                                         data={"name": name, "quarantined": "unknown"},
+                                         release_id=release.release_id) from exc
+                return CommandOutput({"name": name, "quarantined": True},
+                                     release_id=release.release_id, lines=(f"quarantined {name}",))
+        except ActivationError as exc:
+            raise CommandFailure("release_mismatch", f"spool quarantine refused: {exc}") from exc
     if action != "retry":
         raise CommandFailure("invalid_argument", "unknown spool action")
     try:
-        preflight_schema(root)
-        conn = connect(db_file(root))
-        try:
-            require_current_schema(conn)
-            host = ensure_host_uid(root / "state")
-            report = drain(root, conn, host)
-        finally:
-            conn.close()
+        with mutation_admission(root, identity=RuntimeIdentity.current(),
+                                expected_release=os.environ.get("CLAUDLOBBY_RELEASE_ID")) as release:
+            preflight_schema(root)
+            conn = connect(db_file(root))
+            try:
+                require_current_schema(conn)
+                host = ensure_host_uid(root / "state")
+                report = drain(root, conn, host)
+            finally:
+                conn.close()
+    except ActivationError as exc:
+        raise CommandFailure("release_mismatch", f"spool retry refused: {exc}") from exc
     except (PendingMigrationError, DowngradeError) as exc:
         raise _schema_failure(exc) from exc
     except (sqlite3.Error, OSError) as exc:
@@ -98,21 +114,35 @@ def spool(args) -> CommandOutput:
                              data=data)
     if report.remaining or report.limited:
         raise CommandFailure("spooled", "spool entries remain pending; inspect before retrying", data=data)
-    return CommandOutput(data, lines=(line,))
+    return CommandOutput(data, release_id=release.release_id, lines=(line,))
 
 
 def prune(args) -> CommandOutput:
-    from ..plane.retention import (DEFAULT_RETENTION_DAYS, PRUNABLE_SYSTEM_EVENTS,
-                                   prune_metric_samples, prune_system_events)
+    from ..plane.retention import DEFAULT_RETENTION_DAYS
 
     root = _root(args)
     days = args.days if args.days is not None else DEFAULT_RETENTION_DAYS
     if days < 0:
         raise CommandFailure("invalid_argument", "retention days cannot be negative")
+    if args.dry_run:
+        return _prune_under_scope(root, args, days, None)
+    try:
+        with mutation_admission(root, identity=RuntimeIdentity.current(),
+                                expected_release=os.environ.get("CLAUDLOBBY_RELEASE_ID")) as release:
+            return _prune_under_scope(root, args, days, release.release_id)
+    except ActivationError as exc:
+        raise CommandFailure("release_mismatch", f"prune refused: {exc}") from exc
+
+
+def _prune_under_scope(root, args, days: int, release_id: str | None) -> CommandOutput:
+    from ..plane.retention import (PRUNABLE_SYSTEM_EVENTS, prune_metric_samples,
+                                   prune_system_events)
+
     path = db_file(root)
     if not path.exists():
         return CommandOutput({"dry_run": args.dry_run, "days": days, "db": "absent",
                               "metric_samples": 0, "system_events": None},
+                             release_id=release_id,
                              lines=(f"prune: no plane db at {path} — nothing to age out",))
     system_on = os.environ.get("PLANE_PRUNE_SYSTEM_EVENTS_ENABLED", "").strip() == "1"
     try:
@@ -160,4 +190,5 @@ def prune(args) -> CommandOutput:
                      f" of {sorted(PRUNABLE_SYSTEM_EVENTS)} — every other event type is kept")
     return CommandOutput({"dry_run": args.dry_run, "days": days, "cutoff": res.cutoff,
                           "metric_samples": count, "system_events": system_count,
-                          "system_events_enabled": system_on}, lines=tuple(lines))
+                          "system_events_enabled": system_on},
+                         release_id=release_id, lines=tuple(lines))

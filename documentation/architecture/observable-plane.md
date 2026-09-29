@@ -251,7 +251,9 @@ disagree on the same fleet. Details: `documentation/runbooks/plane-view.md`.
   maintenance mutations; a newer db refuses them (`DowngradeError`, rc 4).
   Both support `--json` with the common command result. A spool retry reports
   committed, duplicate, quarantined and still-pending entries separately;
-  quarantine or pending entries do not return a clean success.
+  quarantine or pending entries do not return a clean success. Spool retry,
+  operator quarantine and live prune require selected-release mutation
+  admission; spool inspection and prune dry runs remain diagnostic reads.
 - **The stdlib readers** (`lib/plane-readers.py`, `lib/plane-lookup.py`) — the
   plane answered from bash doors without paying the package import: the open
   list and the overdue set (SQL pinned byte-identical to

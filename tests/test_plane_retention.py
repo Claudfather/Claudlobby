@@ -25,6 +25,8 @@ from claudlobby.plane.emit_api import emit_batch
 from claudlobby.plane.retention import prune_metric_samples
 from tests.conftest import constructed_env
 from tests.plane_setup import initialize_plane
+from tests.test_config_plan import proposal  # noqa: F401 — selected release fixture
+from tests.test_releases import installed  # noqa: F401 — dependency of proposal
 
 REPO = Path(__file__).resolve().parent.parent
 NOW = datetime(2026, 9, 2, 12, 0, 0, tzinfo=timezone.utc)
@@ -177,7 +179,7 @@ def _cli(root: Path, *argv, cli, armed=True):
          "plane", *argv], capture_output=True, text=True, timeout=120, env=env)
 
 
-def test_cli_prune_ages_out_and_dry_run_is_safe(tmp_path, test_cli):
+def test_cli_prune_dry_run_and_unselected_live_refusal(tmp_path, test_cli):
     root = _root(tmp_path)
     _sample(root)
     _backdate_all(root, days_old=40)
@@ -186,20 +188,28 @@ def test_cli_prune_ages_out_and_dry_run_is_safe(tmp_path, test_cli):
     assert "would delete 1" in dry.stdout
     assert _counts(root)[0] == 1              # dry run kept it
     live = _cli(root, "prune", cli=test_cli)
-    assert live.returncode == 0
-    assert "deleted 1" in live.stdout
-    assert _counts(root)[0] == 0
-    # a db that never existed is a no-op, not an error
+    assert live.returncode == 7
+    assert "prune refused" in live.stderr
+    assert _counts(root)[0] == 1
+    # Even the no-db live route requires an active selected release.
     empty = _cli(tmp_path / "nope", "prune", cli=test_cli)
-    assert empty.returncode == 0
+    assert empty.returncode == 7
 
 
-def test_prune_json_and_two_lane_failure_do_not_claim_partial_success(tmp_path, test_cli, monkeypatch):
+def test_selected_maintenance_refuses_stale_release_and_prune_rolls_back(proposal, test_cli, monkeypatch):
     from claudlobby.command_result import CommandFailure
-    from claudlobby.commands.plane_maintenance import prune
+    from claudlobby.commands.plane_maintenance import prune, spool
     from claudlobby.plane import retention
+    from claudlobby.plane.spool import spool_dir
+    from claudlobby.runtime_admission import RuntimeIdentity
+    from tests.test_runtime_admission import _active, _identity
 
-    root = _root(tmp_path)
+    builder, _, _ = proposal
+    plan = builder.seal()
+    _active(plan)
+    root = builder.root
+    (root / "state" / "plane").mkdir(parents=True, exist_ok=True)
+    (root / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
     _sample(root)
     _backdate_all(root, days_old=40)
     dry = _cli(root, "prune", "--dry-run", "--json", cli=test_cli)
@@ -208,14 +218,48 @@ def test_prune_json_and_two_lane_failure_do_not_claim_partial_success(tmp_path, 
     assert body["data"]["dry_run"] is True and _counts(root)[0] == 1
 
     monkeypatch.setenv("PLANE_PRUNE_SYSTEM_EVENTS_ENABLED", "1")
+    monkeypatch.setattr(RuntimeIdentity, "current", classmethod(lambda cls: _identity(builder)))
+    stale = "r-stale"
+    monkeypatch.setenv("CLAUDLOBBY_RELEASE_ID", stale)
+    name = "ev_" + "c" * 32 + ".json"
+    entry = spool_dir(root) / name
+    entry.write_text("[]")
+    for action in ("retry", "quarantine"):
+        with pytest.raises(CommandFailure) as refused:
+            spool(SimpleNamespace(root=root, fleet=None, seed=False,
+                                  spool_action=action, name=name))
+        assert refused.value.error.code == "release_mismatch"
+        assert entry.exists()
+    args = SimpleNamespace(root=root, fleet=None, seed=False, days=None, dry_run=False)
+    with pytest.raises(CommandFailure) as refused:
+        prune(args)
+    assert refused.value.error.code == "release_mismatch"
+    assert _counts(root)[0] == 1
+    monkeypatch.delenv("CLAUDLOBBY_RELEASE_ID")
+
+    with pytest.raises(CommandFailure) as drained:
+        spool(SimpleNamespace(root=root, fleet=None, seed=False,
+                              spool_action="retry", name=None))
+    assert drained.value.error.code == "conflict"
+    assert drained.value.data["quarantined"] == 1 and not entry.exists()
+    next_name = "ev_" + "d" * 32 + ".json"
+    next_entry = spool_dir(root) / next_name
+    next_entry.write_text("{}")
+    quarantined = spool(SimpleNamespace(root=root, fleet=None, seed=False,
+                                        spool_action="quarantine", name=next_name))
+    assert quarantined.data["quarantined"] is True and not next_entry.exists()
+
+    original_system_lane = retention.prune_system_events
     def fail_system_lane(*_args, **_kwargs):
         raise sqlite3.OperationalError("forced second lane failure")
     monkeypatch.setattr(retention, "prune_system_events", fail_system_lane)
-    args = SimpleNamespace(root=root, fleet=None, seed=False, days=None, dry_run=False)
     with pytest.raises(CommandFailure) as failure:
         prune(args)
     assert failure.value.error.code == "commit_unknown"
     assert _counts(root)[0] == 1  # metric deletion rolled back with the failed lane
+    monkeypatch.setattr(retention, "prune_system_events", original_system_lane)
+    committed = prune(args)
+    assert committed.data["metric_samples"] == 1 and _counts(root)[0] == 0
 
 
 def test_prune_job_ships_enrolled_and_reads_root():
@@ -258,8 +302,9 @@ def test_launcher_runs_by_default_and_its_off_switch_is_LOUD(tmp_path, test_cli)
     assert "accumulate without bound" in off.stderr
     assert _counts(root)[0] == 1              # off touched nothing
     on = _launcher(root, cli=test_cli, armed=True)
-    assert on.returncode == 0
-    assert _counts(root)[0] == 0              # on pruned
+    assert on.returncode == 7
+    assert "prune refused" in on.stderr
+    assert _counts(root)[0] == 1              # unselected host is untouched
 
 
 def test_launcher_prunes_with_no_flag_at_all(tmp_path, test_cli):
@@ -270,8 +315,9 @@ def test_launcher_prunes_with_no_flag_at_all(tmp_path, test_cli):
     env = constructed_env(CLAUDLOBBY_ROOT=root, CLAUDLOBBY_CLI=test_cli)
     r = subprocess.run(["bash", str(REPO / "lib" / "plane-prune.sh")],
                        capture_output=True, text=True, timeout=120, env=env)
-    assert r.returncode == 0, r.stderr
-    assert _counts(root)[0] == 0
+    assert r.returncode == 7, r.stderr
+    assert "prune refused" in r.stderr
+    assert _counts(root)[0] == 1
 
 
 def test_cli_negative_window_is_a_clean_refusal(tmp_path, test_cli):

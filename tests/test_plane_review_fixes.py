@@ -501,12 +501,12 @@ def _make_newer_db(root: Path) -> None:
     conn.close()
 
 
-def test_f9_status_and_retry_exit_4_on_newer_db(tmp_path: Path):
+def test_f9_status_refuses_newer_db_and_retry_requires_selection(tmp_path: Path):
     _make_newer_db(tmp_path)
-    for cmd in (["plane", "status"], ["plane", "spool", "retry"]):
-        r = _run(["--root", str(tmp_path), *cmd])
-        assert r.returncode == 4, (cmd, r.returncode, r.stderr)
-        assert "Traceback" not in r.stderr
+    status = _run(["--root", str(tmp_path), "plane", "status"])
+    assert status.returncode == 4 and "Traceback" not in status.stderr
+    retry = _run(["--root", str(tmp_path), "plane", "spool", "retry"])
+    assert retry.returncode == 7 and "spool retry refused" in retry.stderr
 
 
 # --- F10: raced migration downgrade bypass ---------------------------------
@@ -597,16 +597,15 @@ def test_f11_spool_inspect_prints_entry_with_history(env):
     assert "history" in r.stdout and "locked" in r.stdout
 
 
-def test_spool_retry_reports_quarantine_in_common_result(env):
+def test_spool_retry_requires_selected_release_before_drain(env):
     root, _conn, _host = env
     name = "ev_" + "a" * 32 + ".json"
     (spool_dir(root) / name).write_text("[]")
     r = _run(["--root", str(root), "plane", "spool", "retry", "--json"])
     body = json.loads(r.stdout)
-    assert r.returncode == 4
-    assert body["command"] == "plane.spool" and body["error"]["code"] == "conflict"
-    assert body["data"]["quarantined"] == 1 and body["data"]["remaining"] == 0
-    assert (quarantine_dir(root) / name).exists()
+    assert r.returncode == 7
+    assert body["command"] == "plane.spool" and body["error"]["code"] == "release_mismatch"
+    assert (spool_dir(root) / name).exists() and not (quarantine_dir(root) / name).exists()
 
 
 def test_spool_quarantine_json_and_wrong_name_refusal(env):
@@ -619,8 +618,8 @@ def test_spool_quarantine_json_and_wrong_name_refusal(env):
     assert refused.returncode == 2 and json.loads(refused.stdout)["error"]["code"] == "invalid_argument"
     assert source.exists()
     moved = _run(["--root", str(root), "plane", "spool", "quarantine", name, "--json"])
-    assert moved.returncode == 0 and json.loads(moved.stdout)["data"]["quarantined"] is True
-    assert not source.exists() and (quarantine_dir(root) / name).exists()
+    assert moved.returncode == 7 and json.loads(moved.stdout)["error"]["code"] == "release_mismatch"
+    assert source.exists() and not (quarantine_dir(root) / name).exists()
 
 
 def test_f11_doctor_healthy_0_quarantine_1(tmp_path: Path):
