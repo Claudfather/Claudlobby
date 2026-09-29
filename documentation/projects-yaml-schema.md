@@ -6,7 +6,7 @@ the platform runs, `fleet.yaml` = WHO the bots are). It is optional and sits bes
 `fleet.yaml`: overlay mode `local/<fleet>/projects.yaml`, root mode
 `<root>/projects.yaml`. Copy `projects.yaml.example` to get started.
 
-Validated by `claudlobby validate` (bad tiers, empty repos, unknown keys —
+Validated by `claudlobby config validate` (bad tiers, empty repos, unknown keys —
 all with did-you-mean suggestions). Composed by `claudlobby generate`.
 
 ## It is the override, not the prerequisite

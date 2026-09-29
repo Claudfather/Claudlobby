@@ -15,9 +15,9 @@ Run these in sequence. Each check depends on environment setup from earlier step
 ### 1. Config validation
 
 ```bash
-claudlobby validate
+claudlobby config validate
 # Or with fleet overlay:
-claudlobby --fleet $FLEET validate
+claudlobby --fleet $FLEET config validate
 ```
 
 PASS if exit 0. FAIL if validation errors. WARN if warnings but no errors.

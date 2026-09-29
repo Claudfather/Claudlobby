@@ -85,7 +85,7 @@ See [`documentation/architecture/overview.md`](documentation/architecture/overvi
 ## CLI
 
 ```
-claudlobby validate              # check fleet.yaml against library/
+claudlobby config validate              # check fleet.yaml against library/
 claudlobby generate              # compose runtime/bots/ from fleet.yaml
 claudlobby generate --bot <name> # compose only one bot
 claudlobby host-timers           # compose host-global timer units from system.yaml

@@ -3,7 +3,7 @@
 Four properties, each pinned here: a finding with ONE cause is one line however
 many bots it reaches (the fold); every warning carries a category slug passed at
 the site that raises it; doctor's ``fleet-yaml`` rung names those categories
-instead of a bare count; and ``validate --warn-baseline`` fails only on a
+instead of a bare count; and ``config validate --warn-baseline`` fails only on a
 category that is new or has grown, so a fleet with accepted warnings still has a
 gate. ``--strict`` is untouched and checked here too.
 """
@@ -14,10 +14,9 @@ import json
 import logging
 import re
 from pathlib import Path
-from types import SimpleNamespace
 
 from claudlobby import validator as validator_module
-from claudlobby.commands.core import cmd_validate
+from claudlobby.__main__ import main
 from claudlobby.config import GithubAppConfig, load_fleet
 from claudlobby.doctor import DoctorReport, check_fleet_validation
 from tests.package_fixtures import source_package
@@ -263,11 +262,16 @@ def test_fleet_yaml_rung_names_warning_categories(fleet_dir, monkeypatch):
 # ── the baseline gate ───────────────────────────────────────────────────────
 
 
-def _args(root: Path, **kw) -> SimpleNamespace:
-    ns = dict(root=str(root), fleet=None, seed=False, strict=False, verbose=False,
-              warn_baseline=None, write=False)
-    ns.update(kw)
-    return SimpleNamespace(**ns)
+def _public_rc(root: Path, *, warn_baseline: str | None = None,
+               write: bool = False, strict: bool = False) -> int:
+    argv = ["--root", str(root), "--json", "config", "validate"]
+    if warn_baseline:
+        argv.extend(("--warn-baseline", warn_baseline))
+    if write:
+        argv.append("--write")
+    if strict:
+        argv.append("--strict")
+    return main(argv)
 
 
 def _red_fleet(fleet_dir: Path, monkeypatch) -> None:
@@ -280,52 +284,80 @@ def _red_fleet(fleet_dir: Path, monkeypatch) -> None:
 
 
 class TestWarnBaseline:
+    def test_public_config_validate_keeps_strict_and_baseline_gates(self, fleet_dir, tmp_path, monkeypatch, capsys):
+        _red_fleet(fleet_dir, monkeypatch)
+        base = tmp_path / "baseline.json"
+
+        def call(*options):
+            rc = main(["--root", str(fleet_dir), "--json", "config", "validate", *options])
+            return rc, json.loads(capsys.readouterr().out)
+
+        rc, written = call("--warn-baseline", str(base), "--write")
+        assert rc == 0 and written["command"] == "config.validate"
+        assert written["data"]["baseline_written"] is True
+        assert written["data"]["warning_categories"] == json.loads(base.read_text())
+        rc, accepted = call("--warn-baseline", str(base))
+        assert rc == 0 and accepted["ok"] is True and accepted["data"]["warning_count"] > 0
+        counts = json.loads(base.read_text())
+        grown = next(kind for kind, count in counts.items() if count > 0)
+        base.write_text(json.dumps({**counts, grown: counts[grown] - 1}))
+        rc, rejected = call("--warn-baseline", str(base))
+        assert rc == 4 and rejected["error"]["code"] == "conflict"
+        rc, strict = call("--strict", "--warn-baseline", str(base))
+        assert rc == 4 and strict["error"]["code"] == "conflict"
+        rc, missing = call("--warn-baseline", str(tmp_path / "missing.json"))
+        assert rc == 6 and missing["error"]["code"] == "unavailable"
+        rc, invalid = call("--write")
+        assert rc == 2 and invalid["error"]["code"] == "invalid_argument"
+
     def test_warn_baseline_passes_on_an_unchanged_red_baseline(self, fleet_dir, tmp_path, monkeypatch):
         _red_fleet(fleet_dir, monkeypatch)
         base = tmp_path / "baseline.json"
-        assert cmd_validate(_args(fleet_dir, warn_baseline=str(base), write=True)) == 0
+        assert _public_rc(fleet_dir, warn_baseline=str(base), write=True) == 0
         recorded = json.loads(base.read_text())
         assert recorded.get("retired-key") == 1 and recorded.get("env-unset") == 2, recorded
-        assert cmd_validate(_args(fleet_dir, warn_baseline=str(base))) == 0
+        assert _public_rc(fleet_dir, warn_baseline=str(base)) == 0
 
-    def test_warn_baseline_fails_on_a_new_category_only(self, fleet_dir, tmp_path, monkeypatch, caplog):
+    def test_warn_baseline_fails_on_a_new_category_only(self, fleet_dir, tmp_path, monkeypatch, caplog, capsys):
         _red_fleet(fleet_dir, monkeypatch)
         base = tmp_path / "baseline.json"
-        assert cmd_validate(_args(fleet_dir, warn_baseline=str(base), write=True)) == 0
+        assert _public_rc(fleet_dir, warn_baseline=str(base), write=True) == 0
+        capsys.readouterr()
         path = fleet_dir / "fleet.yaml"
         path.write_text(path.read_text() + "      skills: [no-such-skill]\n")  # onto w5
         with caplog.at_level(logging.INFO, logger="claudlobby"):
-            assert cmd_validate(_args(fleet_dir, warn_baseline=str(base))) == 1
+            assert _public_rc(fleet_dir, warn_baseline=str(base)) == 4
         assert "new warning category: skill-missing (0 → 1)" in caplog.text
-        assert "[skill-missing] bot 'w5'" in caplog.text  # the line it points at
+        result = json.loads(capsys.readouterr().out)
+        assert any("[skill-missing] bot 'w5'" in line for line in result["data"]["warnings"])
 
     def test_a_grown_category_fails_and_a_shrunk_one_does_not(self, fleet_dir, tmp_path, monkeypatch, caplog):
         _red_fleet(fleet_dir, monkeypatch)
         base = tmp_path / "baseline.json"
-        assert cmd_validate(_args(fleet_dir, warn_baseline=str(base), write=True)) == 0
+        assert _public_rc(fleet_dir, warn_baseline=str(base), write=True) == 0
         counts = json.loads(base.read_text())
         base.write_text(json.dumps({**counts, "retired-key": 3, "topology": 2}))
-        assert cmd_validate(_args(fleet_dir, warn_baseline=str(base))) == 0
+        assert _public_rc(fleet_dir, warn_baseline=str(base)) == 0
         base.write_text(json.dumps({**counts, "env-unset": 1}))
         with caplog.at_level(logging.INFO, logger="claudlobby"):
-            assert cmd_validate(_args(fleet_dir, warn_baseline=str(base))) == 1
+            assert _public_rc(fleet_dir, warn_baseline=str(base)) == 4
         assert "warning category grew: env-unset (1 → 2)" in caplog.text
 
     def test_a_baseline_that_cannot_be_read_refuses_rather_than_passing(self, fleet_dir, tmp_path, monkeypatch):
         _red_fleet(fleet_dir, monkeypatch)
         base = tmp_path / "baseline.json"
-        assert cmd_validate(_args(fleet_dir, warn_baseline=str(base))) == 2  # absent
+        assert _public_rc(fleet_dir, warn_baseline=str(base)) == 6  # absent
         for bad in ("{not json", "[1, 2]", '{"topology": -1}', '{"topology": true}'):
             base.write_text(bad)
-            assert cmd_validate(_args(fleet_dir, warn_baseline=str(base))) == 2, bad
+            assert _public_rc(fleet_dir, warn_baseline=str(base)) == 6, bad
 
     def test_write_without_a_baseline_file_is_refused(self, fleet_dir, monkeypatch):
         _red_fleet(fleet_dir, monkeypatch)
-        assert cmd_validate(_args(fleet_dir, write=True)) == 2
+        assert _public_rc(fleet_dir, write=True) == 2
 
     def test_strict_still_fails_on_any_warning_whatever_the_baseline_says(self, fleet_dir, tmp_path, monkeypatch):
         _red_fleet(fleet_dir, monkeypatch)
         base = tmp_path / "baseline.json"
-        assert cmd_validate(_args(fleet_dir, warn_baseline=str(base), write=True)) == 0
-        assert cmd_validate(_args(fleet_dir, warn_baseline=str(base), strict=True)) == 1
-        assert cmd_validate(_args(fleet_dir, strict=True)) == 1
+        assert _public_rc(fleet_dir, warn_baseline=str(base), write=True) == 0
+        assert _public_rc(fleet_dir, warn_baseline=str(base), strict=True) == 4
+        assert _public_rc(fleet_dir, strict=True) == 4

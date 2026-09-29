@@ -62,7 +62,7 @@ def cmd_freshbox(args) -> int:
 
 
 def _warn_baseline_gate(report, path: Path, *, write: bool) -> int:
-    """``validate --warn-baseline``: fail only on a warning category that is
+    """``config validate --warn-baseline``: fail only on a warning category that is
     new, or has more warnings than the baseline recorded (#1663).
 
     ``--strict`` fails on every warning, so a fleet that has accepted some can
@@ -84,7 +84,7 @@ def _warn_baseline_gate(report, path: Path, *, write: bool) -> int:
         return 0
     probe = probe_source(path)
     if probe.unreachable:
-        remedy = (f"record one with `claudlobby validate --warn-baseline {path} --write`"
+        remedy = (f"record one with `claudlobby config validate --warn-baseline {path} --write`"
                   if probe.state == SOURCE_ABSENT else "")
         log.error("%s", unreachable_line("the warning baseline", probe, remedy=remedy))
         return 2
@@ -114,37 +114,6 @@ def _warn_baseline_gate(report, path: Path, *, write: bool) -> int:
     if grew:
         return 1
     log.info("warning baseline %s: no category is new or grew", path)
-    return 0
-
-
-def cmd_validate(args) -> int:
-    paths = _resolve_paths(args)
-    baseline = getattr(args, "warn_baseline", None)
-    write = getattr(args, "write", False)
-    if write and not baseline:
-        log.error("--write needs --warn-baseline FILE — it names the file to write")
-        return 2
-    _load_env(paths)
-    fleet, _ = _load_fleet_or_exit(paths)
-    report = validate(fleet, paths)
-
-    for e in report.errors:
-        log.error("%s", e)
-    for line in render_warnings(report):
-        log.warning("%s", line)
-    if report.warnings:
-        log.info("%s", warning_summary(report))
-    gate = _warn_baseline_gate(report, Path(baseline), write=write) if baseline else 0
-
-    if args.strict and report.has_issues:
-        log.error("--strict: warnings count as errors")
-        return 1
-    if report.has_errors:
-        return 1
-    if gate:
-        return gate
-    if not report.has_issues:
-        log.info("fleet.yaml OK (%d bots, %d teams)", len(fleet.bots), len(fleet.teams))
     return 0
 
 

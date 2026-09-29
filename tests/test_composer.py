@@ -343,6 +343,7 @@ def _expected_default_fleet_ops_allow() -> list[str]:
         "Glob", "Grep", "Read",
         "Skill(fleet-ops)", "Skill(fleet-ops:*)",
         *skill_grants,
+        "Bash(claudlobby --json config validate)",
         "Bash(claudlobby --json task admit *)",
         "Bash(claudlobby --json assignment accept *)",
         "Bash(claudlobby --json assignment progress *)",

@@ -1182,7 +1182,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
             if not _SHELL_IDENT_RE.match(tier_var):
                 raise ValueError(
                     f"project key '{key}' does not yield a valid env name "
-                    f"(run claudlobby validate)"
+                    f"(run claudlobby config validate)"
                 )
             for repo in project.repos:
                 # Emit-time corruption backstop (mirrors the slug raise
@@ -1191,7 +1191,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
                 if any(c.isspace() for c in repo):
                     raise ValueError(
                         f"project '{key}': repos entry '{repo}' contains "
-                        f"whitespace (run claudlobby validate)"
+                        f"whitespace (run claudlobby config validate)"
                     )
             lines.append(f"export {tier_var}={_shq(project.validation.tier)}")
             lines.append(
@@ -2097,7 +2097,7 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         if "\n" in p.title or "|" in p.title:
             raise ValueError(
                 f"project '{p.key}': title contains newline or '|' — refusing "
-                f"to render it into CLAUDE.md (run claudlobby validate)"
+                f"to render it into CLAUDE.md (run claudlobby config validate)"
             )
 
     # Fleet-mission extra content under the paragraph, decided in ONE place:
@@ -2112,7 +2112,7 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         # composed instructions.
         raise ValueError(
             "fleet.mission contains newlines — refusing to render it into "
-            "CLAUDE.md (run claudlobby validate)"
+            "CLAUDE.md (run claudlobby config validate)"
         )
     if fleet.mission_file:
         charter = paths.fleet_config_dir / fleet.mission_file
@@ -2482,6 +2482,7 @@ def _resolve_fleet_ops_grants(bot: BotConfig, fleet: FleetConfig) -> list[str]:
     independent source audit, rather than adding grants only at compose time.
     """
     grants = [
+        "Bash(claudlobby --json config validate)",
         "Bash(claudlobby --json task admit *)",
         "Bash(claudlobby --json assignment accept *)",
         "Bash(claudlobby --json assignment progress *)",

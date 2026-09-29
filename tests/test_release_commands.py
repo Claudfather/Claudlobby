@@ -50,8 +50,9 @@ def test_json_syntax_and_scope_failures_preserve_legacy_help_and_hide_values(tmp
         result, _ = _call(capsys, ["--root", str(tmp_path), *scope, "host", "releases", "--json"], 2)
         assert result["error"]["code"] == "invalid_argument"
     with pytest.raises(SystemExit) as exit:
-        main(["validate", "--unknown"])
-    assert exit.value.code == 2 and "usage:" in capsys.readouterr().err
+        main(["config", "validate", "--json", "--unknown"])
+    assert exit.value.code == 2
+    assert json.loads(capsys.readouterr().out)["command"] == "config.validate"
     with pytest.raises(SystemExit) as exit:
         main(["config", "plan", "--help"])
     assert exit.value.code == 0 and "--fleet-path" in capsys.readouterr().out
