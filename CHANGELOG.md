@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a failed access.json write during `generate` is a named warning, not a traceback (#1683)
+
+`compose_bot` writes each Telegram bot's `access.json` into the host-global `~/.claude/channels/telegram-<handle>/`, outside the tree being composed. The invalid-handle branch beside it already warned and skipped, but this branch had no error handling. So a failed write aborted `generate` part-way with a raw traceback, and the fleet's later bots never composed. Causes include an unwritable or non-directory channel root, or a full disk.
+
+- **Now:** each affected bot gets one warning naming the path and the reason. Composition continues, and the next `generate` retries the write.
+- **Tests:** one bot, and a whole-fleet `compose_fleet` (the path `claudlobby generate` takes). In both, the channel root is replaced by a regular file, so the write fails even when the suite runs as root.
+- **Unchanged:** where the file lands (#1683 step 2). That remains a separate decision.
+
 ### Added — `claudlobby doctor` asks `claudron doctor` about each wired vault, and never applies `--fix` (Claudron #190, part C)
 
 Until now nothing in fleet health said a vault had fallen behind its engine. After the 0.5.2 upgrade, walk-up stopped finding a vault that lacked its identity file, and every hook that found the vault that way failed open without a word (Claudron #183). The Claudron section of `claudlobby doctor` now runs `claudron doctor --json --vault <vault>` for each wired vault this host holds, and adds:
