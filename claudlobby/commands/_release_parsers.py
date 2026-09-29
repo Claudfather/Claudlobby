@@ -44,6 +44,12 @@ def _dispatch_host_credentials(args):
                    json_output=args.json)
 
 
+def _dispatch_host_channels(args):
+    return execute(args.public_command,
+                   lambda: import_module(".host_channels", __package__).dispatch(args),
+                   json_output=args.json)
+
+
 def _dispatch_host_github_app(args):
     return execute(args.public_command,
                    lambda: import_module(".host_github_app", __package__).dispatch(args),
@@ -131,6 +137,14 @@ def register_release_subparsers(sub):
         "check", help="Run the selected fleet's credential probe and transition alerts once")
     check.add_argument("--json", action="store_true", help="One schema-1 result object")
     check.set_defaults(func=_dispatch_host_credentials, public_command="host.credentials.check")
+    channels = hosts.add_parser("channels", help="Inspect or explicitly approve managed channel plugins")
+    channel_actions = channels.add_subparsers(dest="channel_command", required=True)
+    for action in ("check", "approve"):
+        route = channel_actions.add_parser(action, help=(
+            "Inspect managed Telegram channel approvals" if action == "check" else
+            "Add official and fork Telegram approvals to managed settings"))
+        route.add_argument("--json", action="store_true", help="One schema-1 result object")
+        route.set_defaults(func=_dispatch_host_channels, public_command=f"host.channels.{action}")
     github_app = hosts.add_parser("github-app", help="Configure or mint a host GitHub App identity")
     github_actions = github_app.add_subparsers(dest="github_app_command", required=True)
     setup = github_actions.add_parser("setup", help="Validate App identity and write its host config")

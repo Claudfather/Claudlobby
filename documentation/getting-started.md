@@ -11,6 +11,12 @@ This is the installed-release path for a new host. Build one candidate wheel and
 
 The copied interpreter still uses the host's standard library and system libraries. A wheelhouse prepared for another platform or Python version may be unusable here.
 
+### Telegram channel approval on managed Claude Code accounts
+
+The official Telegram plugin and the `claudfather-plugins` fork need distinct channel approvals. After assembling the release below, run `"$RELEASE_CLI" host channels check --json` from an operator shell. If either approval is missing, a host administrator can run `"$RELEASE_CLI" host channels approve` with permission to write the OS managed settings file. The command never invokes `sudo` or writes user/project settings; it preserves existing managed keys and approvals. On macOS the file is `/Library/Application Support/ClaudeCode/managed-settings.json`; on Linux it is `/etc/claude-code/managed-settings.json`. An administrator must provision the directory and grant write access before approval. A malformed or unreadable existing file is left untouched.
+
+Approval does not change the separate `channelsEnabled` master policy. If the check reports it is not true, the organization's administrator must enable channels through its normal managed policy before inbound messages can arrive. Claude Code's [channel policy](https://code.claude.com/docs/en/channels#enterprise-controls) and [managed file locations](https://code.claude.com/docs/en/managed-settings#deploy-a-managed-settings-file) describe these controls.
+
 ## 1. Prepare the release inputs
 
 Use a committed Claudlobby source checkout for this example. A history-free test export needs a local build inventory **and commit** first: `git init --quiet && git add --all && git commit -m 'Record release source'`. Configure a local Git author if needed; no remote is required. An uncommitted export can build a wheel, but release assembly refuses its missing source revision. There is no hosted release bundle or built-in lock-generation command. These commands follow the repository's [offline assembly CI rehearsal](../.github/workflows/test.yml) and its [hash-lock construction](../tests/release_assembly_smoke.py): network access prepares inputs; assembly itself uses only local wheels.

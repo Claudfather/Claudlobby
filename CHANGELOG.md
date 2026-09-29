@@ -40,6 +40,8 @@ predicate. Log reads are bounded (1–200 lines, 64 KiB per file) and disclose p
 sources. `host.unit_prefix` isolates canary host units. Source-only instruments
 live in `harness/` and do not ship in release wheels.
 
+- Restored explicit `host channels check` and `host channels approve` operator commands for official and fork Telegram approvals in Claude Code's OS managed settings; approval preserves existing policy and requires administrator write access.
+
 ### Changed — `[vault]` pin bumped to Claudron v0.5.2; vaults need the `.claudron-vault` identity file (Claudron #183, #190)
 
 The `[vault]` extra now pins `claudron @ …@v0.5.2`. It carries three changes.
