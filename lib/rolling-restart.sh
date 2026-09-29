@@ -178,10 +178,12 @@ rr_process_fleet() {
             # likely cause was already on disk and unnamed (#1358). Worse, the
             # advice an operator actually reads here comes from start-bot via
             # spin-up-bot (redirected into THIS log): "BRIDGE_MISSING ...
-            # keepalive owns heal". For this one cause that is precisely wrong --
-            # keepalive restarts the bot, the restart re-reads the same
-            # host-global cache, the poller is skipped again, and the gate waits
-            # out a BRIDGE_READY that can never arrive. That is what another
+            # keepalive owns heal". Before #1962 that was precisely wrong for this
+            # one cause -- the restart re-read the same host-global cache, the
+            # poller was skipped again, and the gate waited out a BRIDGE_READY
+            # that could never arrive. Every start now empties the cache first, so
+            # an armed cache here means it could not be emptied or another bot
+            # re-armed it after this one's last clear. That is what another
             # fleet reports stalled their fleet-wide restart on 2026-09-19 --
             # their report, relayed onto #1358, not verified on this host. It is
             # also the report that widened the trigger past a credential-less
@@ -200,7 +202,7 @@ rr_process_fleet() {
             case "$auth_note" in
                 AUTH_CACHE_ARMED*)
                     echo "$(ts_iso) $auth_note" >> "$LOG"
-                    why="$why — host-global MCP auth cache is ARMED, so a restart re-reads it and skips the poller again; keepalive cannot heal this. Detail + remedy: $LOG"
+                    why="$why — host-global MCP auth cache is ARMED although every start empties it, so keepalive cannot heal this unless the entry was recorded after this bot's last clear. Detail + remedy: $LOG"
                     ;;
                 AUTH_CACHE_UNKNOWN*)
                     echo "$(ts_iso) $auth_note" >> "$LOG"

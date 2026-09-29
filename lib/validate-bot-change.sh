@@ -450,7 +450,12 @@ OBSERVABILITY_BRIDGE_DOWN_GRACE=0
 CONF
 
 # --- Run: stand up a non-idle worker pane + a manager session to receive alerts ---
-tmux new-session -d -s "$MGR" "sleep 600"
+# The manager pane DRAINS what it is sent. Under `sleep` nothing reads the tty,
+# so every push stays queued in it, and once about 4 KB is queued the kernel
+# drops the rest: a later scenario's push then never reaches the pane, and its
+# check fails for want of capacity rather than for a defect. The display is
+# the same either way, because the tty echoes a push as it arrives.
+tmux new-session -d -s "$MGR" "cat >/dev/null"
 tmux new-session -d -s "$BOT" 'printf "\n⠹ Cogitating (esc to interrupt)\n"; sleep 600'
 sleep 1  # let panes render
 
@@ -1742,21 +1747,78 @@ harness_check "rc_timeout event is valid JSON with ts+type (fleet-pulse-readable
 grep -q 'AUTH_CACHE_ARMED —' "$RB_DIR/logs/startup.log" 2>/dev/null && r=no || r=yes
 harness_check "#1358 unarmed cache -> no AUTH_CACHE_ARMED line (the silence is the control)" "$r"
 
-# Arm it. HOME is pinned to $RB_HOME for every start-bot call in this scenario,
-# so this exercises the PRODUCTION resolution ($HOME/.claude) rather than a
-# per-bot CLAUDE_CONFIG_DIR override, and cannot reach the operator cache. The
-# payload is a real recorded entry, copied byte-for-byte from a live armed host
-# cache (2026-09-20T09:49:01-04:00) rather than invented, so the parse is
-# exercised against the shape the defect actually produces.
-printf '{"plugin:telegram:telegram":{"timestamp":1789912141541,"id":"3eaf116ce58465c5"}}' \
-    > "$RB_HOME/.claude/mcp-needs-auth-cache.json"
-tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
-sleep 0.3
-TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=1 \
-    CLAUDE_BIN="$RB_ROOT/bin/claude" CLAUDE_CONFIG_DIR='' \
-    HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
-    "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.authcache.out" 2>&1 || true
-sleep 1
+# --- #1962: every start EMPTIES the cache before its session spawns anything --
+# Before #1962 one bot's failed channel start left every bot started after it
+# with no poller, restart-immune, until a human emptied the file (7 of 17 bots on
+# the 2026-09-28 macOS boot). start-bot now empties it before launch and on every
+# readiness-poll tick. The stub records what its session would read: the cache
+# at launch, and again at its spawn attempt 1.5 s later, the moment Claude Code
+# consults it (#1358 measured the spawn at 4-19 s after launch).
+#
+# HOME is pinned to $RB_HOME for every start-bot call in this scenario, so this
+# exercises the PRODUCTION resolution ($HOME/.claude) rather than a per-bot
+# CLAUDE_CONFIG_DIR override, and cannot reach the operator cache. The payload is
+# a real recorded entry, copied byte-for-byte from a live armed host cache
+# (2026-09-20T09:49:01-04:00) rather than invented, so the parse is exercised
+# against the shape the defect actually produces.
+_ac_file="$RB_HOME/.claude/mcp-needs-auth-cache.json"
+_ac_armed='{"plugin:telegram:telegram":{"timestamp":1789912141541,"id":"3eaf116ce58465c5"}}'
+cat > "$RB_ROOT/bin/claude" <<STUB
+#!/bin/bash
+cat "$_ac_file" > "$RB_ROOT/seen.launch" 2>/dev/null || echo absent > "$RB_ROOT/seen.launch"
+[ ! -f "$RB_ROOT/arm-after-launch" ] || cp "$RB_ROOT/arm-after-launch" "$_ac_file"
+sleep 1.5
+cat "$_ac_file" > "$RB_ROOT/seen.spawn" 2>/dev/null || echo absent > "$RB_ROOT/seen.spawn"
+exec cat
+STUB
+chmod +x "$RB_ROOT/bin/claude"
+_ac_start() {   # <out-suffix> <readiness ceiling s>
+    rm -f "$RB_ROOT/seen.launch" "$RB_ROOT/seen.spawn"
+    tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
+    sleep 0.3
+    TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S="$2" \
+        CLAUDE_BIN="$RB_ROOT/bin/claude" CLAUDE_CONFIG_DIR='' \
+        HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
+        "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.$1.out" 2>&1 || true
+    for _ in 1 2 3 4 5 6 7 8 9 10; do [ -f "$RB_ROOT/seen.spawn" ] && break; sleep 0.5; done
+}
+_ac_seen() { tr -d ' \n' < "$RB_ROOT/seen.$1" 2>/dev/null || true; }
+
+# A. Armed before this bot starts: the state a failed start elsewhere leaves.
+printf '%s' "$_ac_armed" > "$_ac_file"
+_ac_start armed 1
+_accl="$(grep 'AUTH_CACHE_CLEARED —' "$RB_DIR/logs/startup.log" 2>/dev/null | tail -1 || true)"
+case "$_accl" in *"plugin:telegram:telegram (recorded 2026-"*"Cache: $_ac_file"*) r=yes ;; *) r=no ;; esac
+harness_check "#1962 an armed cache is emptied before launch, and the line names what it held" "$r"
+[ "$(tr -d ' \n' < "$_ac_file" 2>/dev/null || true)" = "{}" ] && r=yes || r=no
+harness_check "#1962   ...the cache is {} afterwards" "$r"
+[ "$(_ac_seen launch)" = "{}" ] && r=yes || r=no
+harness_check "#1962   ...so the session never read the entry (the stub saw {} at launch)" "$r"
+val_events "$RB_ROOT" "$FLEET" valrb auth_cache_cleared | grep -q 'plugin:telegram:telegram' && r=yes || r=no
+harness_check "#1962   ...and an auth_cache_cleared event records what was removed" "$r"
+
+# B. Armed AFTER launch, the way one bot's failure lands mid-boot while others
+# are still waiting on their pollers: the stub writes the entry just after it
+# starts. A poll tick must remove it before this session's spawn attempt.
+_accl_n="$(grep -c 'AUTH_CACHE_CLEARED —' "$RB_DIR/logs/startup.log" 2>/dev/null || true)"
+printf '{}' > "$_ac_file"
+printf '%s' "$_ac_armed" > "$RB_ROOT/arm-after-launch"
+_ac_start rearmed 5
+rm -f "$RB_ROOT/arm-after-launch"
+[ "$(_ac_seen spawn)" = "{}" ] && r=yes || r=no
+harness_check "#1962 an entry recorded after launch is gone by the spawn attempt (one bot's failure cannot reach another)" "$r"
+[ "$(grep -c 'AUTH_CACHE_CLEARED —' "$RB_DIR/logs/startup.log" 2>/dev/null || true)" -gt "${_accl_n:-0}" ] && r=yes || r=no
+harness_check "#1962   ...removed by a readiness-poll tick, which logs it" "$r"
+
+# C. A cache that CANNOT be emptied (its directory read-only): the one case left
+# where #1358's restart-immunity holds, so it keeps #1358's full diagnosis. The
+# checks below read this run: the note at TIMEOUT and the heal advice after it.
+printf '%s' "$_ac_armed" > "$_ac_file"
+chmod 555 "$RB_HOME/.claude"
+_ac_start stuck 1
+chmod 755 "$RB_HOME/.claude"
+grep -q 'AUTH_CACHE_NOT_CLEARED —' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
+harness_check "#1962 a cache that cannot be emptied says so at launch" "$r"
 # Select on "AUTH_CACHE_ARMED —", not the bare token: the BRIDGE_MISSING line
 # below deliberately POINTS at this one by name ("see the AUTH_CACHE_ARMED line
 # above"), so a bare-token `tail -1` picks the pointer instead of the note. That
@@ -1765,7 +1827,7 @@ sleep 1
 # correct. The em dash is what the helper emits directly after the token.
 _acline="$(grep 'AUTH_CACHE_ARMED —' "$RB_DIR/logs/startup.log" 2>/dev/null | tail -1 || true)"
 [ -n "$_acline" ] && r=yes || r=no
-harness_check "#1358 armed cache -> AUTH_CACHE_ARMED recorded at TIMEOUT" "$r"
+harness_check "#1358 a cache that stays armed -> AUTH_CACHE_ARMED recorded at TIMEOUT" "$r"
 # Isolation asserted from the artifact itself, not merely arranged above: a run
 # that silently fell back to the operator cache would otherwise pass here by
 # coincidence on any host that happened to be armed.
@@ -1783,10 +1845,10 @@ case "$_acline" in *"printf '{}' > $RB_HOME/"*) r=yes ;; *) r=no ;; esac
 harness_check "#1358 the line carries the remedy, addressed at the file it read" "$r"
 # The heal advice further down the same boot must not contradict the line above
 # it. "keepalive owns heal" is right for every other cause and precisely wrong
-# for this one, because the restart it prescribes re-reads the same cache.
+# for this one, because the restart it prescribes cannot empty the cache either.
 _bmline="$(grep 'BRIDGE_MISSING' "$RB_DIR/logs/startup.log" 2>/dev/null | tail -1 || true)"
 case "$_bmline" in *"keepalive CANNOT heal this one"*) r=yes ;; *) r=no ;; esac
-harness_check "#1358 armed cache -> BRIDGE_MISSING withdraws the keepalive remedy" "$r"
+harness_check "#1358 a cache that cannot be emptied -> BRIDGE_MISSING withdraws the keepalive remedy" "$r"
 # ...and the unarmed boot earlier in this same log still carries it, so the
 # withdrawal is conditional rather than a blanket rewrite of the advice.
 case "$(grep 'BRIDGE_MISSING' "$RB_DIR/logs/startup.log" | head -1)" in
@@ -1808,15 +1870,12 @@ harness_check "#1358 rc_timeout event carries auth_cache_armed (escalation sees 
 #
 # Malformed JSON is the likeliest real trigger rather than an exotic one: the
 # cache is host-global and written by Claude Code at arbitrary moments, so a read
-# concurrent with a write lands exactly here.
-printf 'not json {{{' > "$RB_HOME/.claude/mcp-needs-auth-cache.json"
-tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
-sleep 0.3
-TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=1 \
-    CLAUDE_BIN="$RB_ROOT/bin/claude" CLAUDE_CONFIG_DIR='' \
-    HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
-    "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.authunknown.out" 2>&1 || true
-sleep 1
+# concurrent with a write lands exactly here. Since #1962 a start empties such a
+# cache too, so this is only reached when it also cannot be emptied (D).
+printf 'not json {{{' > "$_ac_file"
+chmod 555 "$RB_HOME/.claude"
+_ac_start authunknown 1
+chmod 755 "$RB_HOME/.claude"
 _acunk="$(grep 'AUTH_CACHE_UNKNOWN —' "$RB_DIR/logs/startup.log" 2>/dev/null | tail -1 || true)"
 [ -n "$_acunk" ] && r=yes || r=no
 harness_check "#1358 an unreadable cache -> AUTH_CACHE_UNKNOWN, never silence" "$r"
@@ -2527,7 +2586,7 @@ tmux new-session -d -s "$BRIEFWAIT" "sleep 600"
 touch "$BRIEFWAIT_DIR/data/.last-tool-call"
 # Every bot here names $MGR, so the FLEET NOTICE must land in its pane, which
 # must be alive to take the push: the first scenario's sleep 600 may have ended.
-tmux has-session -t "$MGR" 2>/dev/null || tmux new-session -d -s "$MGR" "sleep 600"
+tmux has-session -t "$MGR" 2>/dev/null || tmux new-session -d -s "$MGR" "cat >/dev/null"
 # Idle briefing bot with no composed skill: the trigger must refuse it.
 tmux new-session -d -s "$BRIEFNOSKILL" "sleep 600"
 # Classifier sink: an idle pane that receives direct dispatch.sh sends, so the

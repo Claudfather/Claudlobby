@@ -1581,6 +1581,9 @@ bridge_fence_write() {
 # tmux_session/tmux_socket are optional: a caller with no session to police
 # (this file's own test suite, driving bridge_state's state machine directly)
 # omits them and the crash check is simply skipped.
+# on_tick is optional too: a function called at the top of every poll, with its
+# stdout sent to stderr so the one state printed stays the only stdout.
+# start-bot keeps the MCP auth cache clear with it while it waits (#1962).
 #
 # Prints exactly one state on stdout -- up, no_handle, no_token, not_mine,
 # no_bridge, unknown, or crashed -- and nothing else: no timestamps, no log
@@ -1591,7 +1594,7 @@ wait_bridge_ready_state() {
     local bot_dir="${1:?Usage: wait_bridge_ready_state <bot_dir> <timeout_s> <session_pid> <pretoken> [tmux_session] [tmux_socket]}"
     local timeout_s="${2:?wait_bridge_ready_state needs a timeout in seconds}"
     local session_pid="${3:-}" pretoken="${4:-}"
-    local tmux_session="${5:-}" tmux_socket="${6:-}"
+    local tmux_session="${5:-}" tmux_socket="${6:-}" on_tick="${7:-}"
     local state="" started last now delta
     # The clock-step fold threshold, decoupled from the ceiling (see header):
     # max(timeout_s, 60). Digits-only guard so a malformed ceiling falls back
@@ -1604,6 +1607,7 @@ wait_bridge_ready_state() {
     started=$(date +%s)
     last="$started"
     while :; do
+        if [ -n "$on_tick" ]; then "$on_tick" >&2 || true; fi
         if [ -n "$tmux_session" ] && ! check_tmux_session "$tmux_session" "$tmux_socket"; then
             printf '%s' "crashed"
             return 2
@@ -1696,6 +1700,13 @@ wait_bridge_ready() {
 # Every time, every instrument said "poller dead" and none said "poller never
 # attempted" -- which is the whole cost, and the gap these helpers close.
 #
+# The cache is also CLEARED, not only read (#1962): start-bot empties it before a
+# session starts its MCP servers and on every readiness-poll tick until the bot's
+# own poller is up (mcp_auth_cache_clear). A failed channel start in one bot then
+# reaches no other bot, and a restart heals a skipped bot instead of re-reading
+# the same entry. The 2026-09-28 macOS boot is why: 7 of 17 bots came up with no
+# bridge, each after a 201 s wait, until a human emptied the file.
+#
 # A PLAIN FILE READ and deliberately nothing more:
 #
 #   - NO key matching. Every entry is listed, never only a channel-plugin key we
@@ -1758,8 +1769,15 @@ mcp_auth_cache_path() {
 # key. A note withheld because the FILE did not parse is that same silence, one
 # level up, on the path that feeds escalation.
 mcp_auth_cache_note() {
-    local f out rc
-    f="$(mcp_auth_cache_path "${1:-}")"
+    _mcp_auth_cache_read "$(mcp_auth_cache_path "${1:-}")" note
+}
+
+# _mcp_auth_cache_read <cache_file> <note|listing>
+# The note's plain file read, for a path already resolved. `listing` prints only
+# the entries ("<key> (recorded <when>), ..."), for mcp_auth_cache_clear to say
+# what it removed; the AUTH_CACHE_UNKNOWN lines are the same in both modes.
+_mcp_auth_cache_read() {
+    local f="$1" mode="${2:-note}" out rc
     # ABSENT is the only shape that means "nothing armed". Present-but-unreadable
     # is a different fact with a different remedy, so it must not share absent's
     # answer.
@@ -1772,10 +1790,11 @@ mcp_auth_cache_note() {
         printf 'AUTH_CACHE_UNKNOWN — could not read %s: no python3 to parse it. This is NOT evidence the cache is clear.\n' "$f"
         return 0
     fi
-    out="$(python3 - "$f" 2>/dev/null <<'PY'
+    out="$(python3 - "$f" "$mode" 2>/dev/null <<'PY'
 import json, os, sys, datetime
 
 path = sys.argv[1]
+mode = sys.argv[2] if len(sys.argv) > 2 else "note"
 
 # Exit 3 = "could not look"; exit 0 with no output = "looked, nothing armed".
 # The caller renders the first as AUTH_CACHE_UNKNOWN and the second as silence.
@@ -1840,6 +1859,9 @@ listed = ", ".join(
     "%s (recorded %s)" % (label(k), when(v) or "unknown")
     for k, v in sorted(entries.items())
 )
+if mode == "listing":
+    print(listed)
+    sys.exit(0)
 try:
     mtime = datetime.datetime.fromtimestamp(os.stat(path).st_mtime).astimezone().isoformat(timespec="seconds")
 except OSError:
@@ -1847,7 +1869,8 @@ except OSError:
 
 print(
     "AUTH_CACHE_ARMED — a server listed in the host-global MCP auth cache is SKIPPED at spawn, "
-    "not started, and a restart re-reads the same cache and skips again. Listed: %s. "
+    "not started. Every bot start empties this cache first, so an entry still here was recorded "
+    "after that or could not be removed. Listed: %s. "
     "HOST-GLOBAL — any bot on this host can write it and every bot reads it, so this is NOT "
     "evidence about this bot's own credential. Cache: %s (mtime %s). "
     "Remedy: printf '{}' > %s" % (listed, path, mtime, path)
@@ -1859,6 +1882,49 @@ PY
         return 0
     fi
     [ -z "$out" ] || printf '%s\n' "$out"
+    return 0
+}
+
+# mcp_auth_cache_clear [bot_dir] [cache_file]
+# EMPTIES the needs-auth cache the bot's session consults (#1962) and prints ONE
+# line, or nothing:
+#   AUTH_CACHE_CLEARED      -- it listed something; it is now {} and the line
+#                              says what it listed
+#   AUTH_CACHE_NOT_CLEARED  -- it listed something and could not be emptied;
+#                              the line carries the manual remedy
+#   (nothing)               -- absent, empty or {}: nothing to clear, and the
+#                              file is not touched
+# Every entry goes, never only a channel key we recognise, for the note's
+# reason: a key matcher goes silent the day Claude Code renames the key. That
+# costs a session nothing it needs. An entry only makes a session SKIP a
+# server, so an emptied cache costs at most one more connection attempt.
+# The {} is written beside the cache and renamed over it, so a concurrent reader,
+# or a second bot clearing at the same moment, never sees a torn file.
+# cache_file skips re-resolving the path: start-bot calls this on every
+# readiness-poll tick. Returns 0 on every path: a boot must never abort on it.
+mcp_auth_cache_clear() {
+    local f="${2:-}" content listing tmp
+    [ -n "$f" ] || f="$(mcp_auth_cache_path "${1:-}")"
+    [ -e "$f" ] || return 0
+    # Only a cache READ as empty is left alone. One this cannot read is replaced
+    # too: nothing that could make a session skip is ever kept on a guess.
+    if [ -r "$f" ]; then
+        content=""
+        IFS= read -r -d '' content 2>/dev/null < "$f" || true
+        content="${content//[[:space:]]/}"
+        case "$content" in '' | '{}') return 0 ;; esac
+    fi
+    listing="$(_mcp_auth_cache_read "$f" listing 2>/dev/null || true)"
+    case "$listing" in
+        '' | AUTH_CACHE_UNKNOWN*) listing="content that could not be read" ;;
+    esac
+    tmp="$(mktemp "${f%/*}/.mcp-needs-auth-cache.XXXXXX" 2>/dev/null)" || tmp=""
+    if [ -n "$tmp" ] && printf '{}' > "$tmp" 2>/dev/null && mv -f "$tmp" "$f" 2>/dev/null; then
+        printf 'AUTH_CACHE_CLEARED — emptied the host-global MCP auth cache that every session on this host consults before it spawns an MCP server (#1962). It listed: %s. Cache: %s\n' "$listing" "$f"
+    else
+        [ -z "$tmp" ] || rm -f "$tmp" 2>/dev/null || true
+        printf "AUTH_CACHE_NOT_CLEARED — the host-global MCP auth cache lists servers every session on this host will SKIP, and it could not be emptied. It listed: %s. Cache: %s. Remedy: printf '{}' > %s\n" "$listing" "$f" "$f"
+    fi
     return 0
 }
 
