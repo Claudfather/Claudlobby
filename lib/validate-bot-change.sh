@@ -3703,7 +3703,7 @@ PLPY
     PL_DPID=""
     rm -f "$PL_SOCK"
 
-    PLANE_SOCKET="$PL_SOCK" "$PL_CLI" --root "$PL_ROOT" plane doctor +        > "$PL_ROOT/doctor.txt" 2>&1 && r=no || r=yes
+    PLANE_SOCKET="$PL_SOCK" "$PL_CLI" --root "$PL_ROOT" plane doctor > "$PL_ROOT/doctor.txt" 2>&1 && r=no || r=yes
     harness_check "doctor flags ATTENTION: daemon started historically, not serving" "$r"
     grep -q "not serving" "$PL_ROOT/doctor.txt" && r=yes || r=no
     harness_check "  ...naming the condition and the corrective command" "$r"
