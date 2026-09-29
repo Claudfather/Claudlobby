@@ -227,7 +227,7 @@ def resolved_view(paths) -> tuple[str, dict, dict]:
     cannot disagree, which is the property the whole workstream exists to
     establish. NOTE the bot tier is not included: reconciliation is fleet-scoped
     and there is no single bot to name, so a var overridden only inside one bot
-    is deliberately out of view here and ``claudlobby env-register --bot`` is
+    is deliberately out of view here and ``claudlobby config explain --bot`` is
     the door that answers per-bot.
     """
     resolutions = paths.env_resolved()

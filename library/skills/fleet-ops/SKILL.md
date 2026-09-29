@@ -5,6 +5,7 @@ tool_grants:
   - "Bash(claudlobby --help)"
   - "Bash(claudlobby brief --help)"
   - "Bash(claudlobby library list --help)"
+  - "Bash(claudlobby config explain --help)"
   - "Bash(claudlobby task list --help)"
   - "Bash(claudlobby task show --help)"
   - "Bash(claudlobby task reviews --help)"
@@ -50,6 +51,7 @@ tool_grants:
   - "Bash(claudlobby request show --help)"
   - "Bash(claudlobby --json context show)"
   - "Bash(claudlobby --json library list)"
+  - "Bash(claudlobby --json config explain)"
   - "Bash(claudlobby --json brief)"
   - "Bash(claudlobby --json brief *)"
   - "Bash(claudlobby --json task list)"
@@ -86,6 +88,11 @@ tool_grants:
 ---
 
 # Fleet operations
+
+Use `claudlobby --json config explain` to inspect environment declarations and
+which tier supplies or blanks each variable. `config explain KEY --bot BOT`
+narrows that read. Values are never printed; this describes source configuration,
+not proof that a running session has reloaded it.
 
 Use `claudlobby --json library list` to discover available skills, guardrails,
 expertise and other composition components. Source authoring with `bot create`

@@ -15,7 +15,7 @@
 #   2. most-specific-wins where two tiers both hold a value;
 #   3. an EMPTY assignment at a more specific tier wins — the #1213 shape;
 #   4. the bot SURVIVES spin-down + spin-up with resolution intact;
-#   5. `claudlobby env-register` agrees with the runtime on every case above.
+#   5. `claudlobby config explain` agrees with the runtime on every case above.
 #
 # SAFETY, and it is structural rather than careful:
 #   * everything happens inside a disposable EXPORTED tree (git archive), never
@@ -256,14 +256,14 @@ check CANARY_GUARDED real_value_at_host
 
 say "== 5: does the COMPOSITOR agree with the runtime? =="
 REG="$( cd "$EXPORT_ROOT" && HOME="$FAKE_HOME" CLAUDLOBBY_ROOT="$EXPORT_ROOT" \
-        "$PYBIN" -m claudlobby --fleet "$FLEET" env-register --bot "$BOT" --json 2>"$WORK/reg.err" )"
+        "$PYBIN" -m claudlobby --fleet "$FLEET" config explain --bot "$BOT" --json 2>"$WORK/reg.err" )"
 if [ -z "$REG" ]; then
-    bad "env-register produced nothing"; tail -5 "$WORK/reg.err"
+    bad "config explain produced nothing"; tail -5 "$WORK/reg.err"
 else
     printf '%s' "$REG" > "$WORK/reg.json"
     TOOL="$(HOME="$FAKE_HOME" "$PYBIN" - "$WORK/reg.json" <<'PY'
 import json, sys
-d = json.load(open(sys.argv[1]))
+d = json.load(open(sys.argv[1]))["data"]
 for t in d["tiers"]:
     print(f'tier {t["tier"]}={t["state"]}')
 PY

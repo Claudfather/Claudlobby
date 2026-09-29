@@ -62,6 +62,12 @@ def _dispatch_host_supervision(args):
                    json_output=args.json)
 
 
+def _dispatch_config_explain(args):
+    return execute(args.public_command,
+                   lambda: import_module(".config_explain", __package__).dispatch(args),
+                   json_output=args.json)
+
+
 def _route(sub, name, command, help):
     parser = sub.add_parser(name, help=help)
     parser.add_argument("--json", action="store_true", help="One schema-1 result object")
@@ -160,6 +166,12 @@ def register_release_subparsers(sub):
 
     config = sub.add_parser("config", help="Stage and inspect configuration proposals")
     configs = config.add_subparsers(dest="config_command", required=True)
+    explain = configs.add_parser("explain", help="Explain environment keys and tier shadowing without values")
+    explain.add_argument("key", nargs="?", metavar="KEY",
+                         help="Environment variable; omit to list declared variables")
+    explain.add_argument("--bot", metavar="BOT", help="Include a declared bot's environment tier")
+    explain.add_argument("--json", action="store_true", help="One schema-1 result object")
+    explain.set_defaults(func=_dispatch_config_explain, public_command="config.explain")
     plan = _route(configs, "plan", "config.plan", "Stage all declared host fleets using a sealed candidate")
     plan.add_argument("--release", required=True, metavar="ID")
     plan.add_argument("--fleet-path", action="append", default=[], metavar="PATH",

@@ -95,6 +95,43 @@ def test_public_host_env_tiers_uses_runtime_order_without_values(world, capsys, 
     assert "secret" not in json.dumps(result)
 
 
+def test_public_config_explain_names_blanked_source_without_values(world, capsys, monkeypatch):
+    _fleet, paths, fleet_dir, home = world
+    monkeypatch.setattr("claudlobby.context.resolve_paths", lambda **_kwargs: paths)
+    (home / ".env").write_text("export GITHUB_PAT=upstream-secret\n")
+    (fleet_dir / ".env").write_text("export GITHUB_PAT=\n")
+    argv = ["--root", str(paths.root), "--fleet", "acme", "--json",
+            "config", "explain", "GITHUB_PAT", "--bot", "solo"]
+    assert main(argv) == 4
+    output = capsys.readouterr()
+    result = json.loads(output.out)
+    assert result["command"] == "config.explain" and result["schema_version"] == 1
+    assert result["data"]["items"][0]["blanked"] == ["host"]
+    assert result["data"]["items"][0]["tier"] == "fleet"
+    assert "upstream-secret" not in output.out + output.err
+    (fleet_dir / ".env").write_text("export GITHUB_PAT=corrected-secret\n")
+    assert main(argv) == 0
+    output = capsys.readouterr()
+    assert json.loads(output.out)["data"]["items"][0]["state"] == "SET"
+    assert "corrected-secret" not in output.out + output.err
+
+
+def test_public_config_explain_resolves_undeclared_key_and_refuses_unknown_bot(world, capsys, monkeypatch):
+    _fleet, paths, fleet_dir, _home = world
+    monkeypatch.setattr("claudlobby.context.resolve_paths", lambda **_kwargs: paths)
+    (fleet_dir / ".env").write_text("export LOCAL_SETTING=private-value\n")
+    argv = ["--root", str(paths.root), "--fleet", "acme", "--json", "config", "explain"]
+    assert main([*argv, "LOCAL_SETTING"]) == 0
+    output = capsys.readouterr()
+    row = json.loads(output.out)["data"]["items"][0]
+    assert row["declared_by"] == "operator (undeclared)" and row["tier"] == "fleet"
+    assert "private-value" not in output.out + output.err
+    assert main([*argv, "UNKNOWN_SETTING"]) == 3
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "not_found"
+    assert main([*argv, "LOCAL_SETTING", "--bot", "not-a-bot"]) == 3
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "not_found"
+
+
 def test_a_var_set_once_reports_set(world) -> None:
     fleet, paths, root, _ = world
     (root / ".env").write_text("export GITHUB_PAT=real\n")

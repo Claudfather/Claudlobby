@@ -60,17 +60,6 @@ def register_subparsers(sub) -> None:
     )
     pv.set_defaults(func=_command("core", "cmd_validate"))
 
-    per = sub.add_parser(
-        "env-register",
-        help="Derived credential register — every declared var, the tier it "
-        "resolves from, and what it shadowed (#1226)",
-    )
-    per.add_argument(
-        "--bot", help="Include this bot's .env tier (the most specific one)"
-    )
-    per.add_argument("--json", action="store_true", help="Machine-readable output")
-    per.set_defaults(func=_command("core", "cmd_env_register"))
-
     pfb = sub.add_parser(
         "freshbox",
         help="Fresh-box self-containment audit — grants trace to sources, "
