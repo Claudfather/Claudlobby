@@ -205,8 +205,9 @@ def _item(row: dict, fleet: str) -> dict:
 
 def dispatch(args) -> CommandOutput:
     """Canonical ``event list/show`` over the existing Plane renderer."""
-    from ._helpers import _resolve_paths
     from ..brief import resolve_fleet_name
+    from ..context import resolve_paths
+    from ..paths import InvalidPathSelector
     from .checkins import _since
 
     if args.seed:
@@ -221,7 +222,15 @@ def dispatch(args) -> CommandOutput:
         except ValueError as exc:
             raise CommandFailure("invalid_argument", str(exc)) from exc
 
-    paths = _resolve_paths(args)
+    try:
+        paths = resolve_paths(root=args.root, fleet=args.fleet, seed=args.seed)
+    except InvalidPathSelector as exc:
+        raise CommandFailure("invalid_argument", str(exc)) from exc
+    except ValueError as exc:
+        raise CommandFailure("invalid_argument", "invalid event root or fleet selector") from exc
+    except (FileNotFoundError, OSError, RuntimeError) as exc:
+        raise CommandFailure("unavailable", "event root or installed package is unavailable",
+                             retryable=True) from exc
     fleet = resolve_fleet_name(paths)
     conn, note = plane_events_conn(paths)
     if conn is None:
@@ -244,12 +253,10 @@ def dispatch(args) -> CommandOutput:
         after = cursor[0] if cursor else None
         if cursor:
             since = cursor[1]
-        rows = pr.fleet_events(conn, fleet, since=since, bot=args.bot, event_type=args.type)
-        rows = [row for row in rows if (not args.source or row["source"] == args.source)
-                and (not args.critical or row["_severity"] == "critical")]
-        rows.reverse()  # newest event first, with ingest sequence breaking timestamp ties
-        if after is not None:
-            rows = [row for row in rows if (row["_occurred_at"], row["_ingest_seq"]) < after]
+        rows = pr.fleet_events(conn, fleet, since=since, bot=args.bot,
+                               event_type=args.type, source=args.source,
+                               critical_only=args.critical, descending=True,
+                               after=after, limit=args.limit + 1)
         page = rows[:args.limit]
         next_cursor = (_cursor(scope, (page[-1]["_occurred_at"], page[-1]["_ingest_seq"]), since)
                        if len(rows) > args.limit else None)

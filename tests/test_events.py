@@ -284,6 +284,38 @@ def test_event_list_pages_stable_ids_and_rejects_changed_filter_cursor(scene):
                         first["data"]["next_cursor"])
     assert wrong.returncode == 2 and json.loads(wrong.stdout)["error"]["code"] == "invalid_argument"
 
+    # The reader must bound the SQL result before rendering, including its
+    # qualifying filters; a Python slice after a full history scan is not a page.
+    from claudlobby.paths import load_lib_module
+    reader = load_lib_module(_paths.lib, "plane-readers.py")
+    conn, note = plane_events_conn(_paths)
+    assert conn is not None, note
+    statements = []
+    try:
+        conn.set_trace_callback(statements.append)
+        page = reader.fleet_events(conn, F, source="pulse", critical_only=True,
+                                   descending=True, limit=2)
+    finally:
+        conn.close()
+    assert len(page) == 2
+    query = next(sql for sql in statements if "fleet-events:%" in sql)
+    assert "e.severity = 'critical'" in query
+    assert "json_extract(e.detail, '$.source')" in query
+    assert "ORDER BY e.occurred_at DESC, e.ingest_seq DESC LIMIT 2" in query
+
+
+def test_event_list_invalid_root_is_one_schema_result(tmp_path):
+    bad_root = tmp_path / "not-a-directory"
+    bad_root.write_text("not a root")
+    result = subprocess.run([sys.executable, "-m", "claudlobby", "--root", str(bad_root),
+                             "--fleet", F, "--json", "event", "list"],
+                            capture_output=True, text=True, env=plane_env(tmp_path), timeout=60)
+    assert result.returncode == 2
+    body = json.loads(result.stdout)
+    assert body["schema_version"] == 1 and body["command"] == "event.list"
+    assert body["error"]["code"] == "invalid_argument"
+    assert "Traceback" not in result.stderr
+
 
 def test_event_show_uses_stable_id_and_exact_fleet_scope(scene):
     from claudlobby.plane.emit_api import emit_batch
