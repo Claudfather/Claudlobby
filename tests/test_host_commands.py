@@ -165,6 +165,38 @@ def test_explicit_first_adoption_routes_to_legacy_owner_without_changing_cold_de
     assert record.body["intent"]["source_release_id"] is None
 
 
+def test_activate_resume_reuses_recorded_id_and_reports_unsupported_start_stage(candidate, monkeypatch, capsys):
+    root, release, plan, directory = candidate
+    with state.locked_activation(root) as store:
+        store.prepare("interrupted", plan, recovery_release_id=release.release_id,
+                      enrollment_digest="1" * 64)
+        for step in state.STEPS[:state.STEPS.index("bots_started")]:
+            store.begin("interrupted", step)
+            if step == "selection_switched":
+                store.select("interrupted")
+            else:
+                store.complete("interrupted", step, evidence_digest="2" * 64)
+        store.begin("interrupted", "bots_started")
+    before = snapshot(root)
+    argv = ["--root", str(root), "--json", "host", "activate", plan.plan_id,
+            "--install-directory", str(directory), "--resume", "interrupted"]
+    refusal = call(capsys, argv, 4)
+    assert refusal["request_id"] == "interrupted"
+    assert refusal["data"]["activation_id"] == "interrupted"
+    assert "cannot safely resume" in refusal["error"]["message"]
+    assert snapshot(root) == before
+
+    calls = []
+    def resumed(selected_root, activation_id, plan_id, install_directory):
+        calls.append((selected_root, activation_id, plan_id, install_directory))
+        raise state.ActivationError("kept pending")
+    monkeypatch.setattr(activation, "resumable_running_step", lambda _: "queues_classified")
+    monkeypatch.setattr(activation, "resume_activation", resumed)
+    refusal = call(capsys, argv, 4)
+    assert calls == [(root, "interrupted", plan.plan_id, directory)]
+    assert refusal["request_id"] == "interrupted"
+
+
 def test_generated_context_and_existing_estate_refuse_with_inspection_guidance(candidate, monkeypatch, capsys):
     root, release, plan, directory = candidate
     calls = []
@@ -181,7 +213,7 @@ def test_generated_context_and_existing_estate_refuse_with_inspection_guidance(c
     monkeypatch.delenv("BOT_ID")
     denied = call(capsys, argv, 4)
     assert len(calls) == 1 and denied["data"]["activation_id"] == calls[0][1]
-    assert "host status" in denied["error"]["hint"] and "does not recover an interrupted activation" in denied["error"]["hint"]
+    assert "host status" in denied["error"]["hint"] and "--resume ID" in denied["error"]["hint"]
     assert "SECRET-value" not in json.dumps(denied) and snapshot(root) == before
     def native_refuse(*_):
         raise state.ActivationError("svc_activation_pause refused (3): SECRET-value")
@@ -248,6 +280,7 @@ def test_host_status_distinguishes_absent_active_and_interrupted_recorded_state(
     assert pending["data"]["selected_activation"]["status"] == "active"
     assert pending["data"]["upgrade_supported"] is False
     assert pending["data"]["unfinished_activations"][0]["pending_step"] == "producers_paused"
+    assert pending["data"]["recovery_supported"] is False
     assert snapshot(root) == before
     (root / "state/activations/torn").mkdir()
     torn = call(capsys, argv, 4)

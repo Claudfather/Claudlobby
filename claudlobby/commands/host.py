@@ -1,7 +1,7 @@
 """Operator activation and read-only recorded-state orientation.
 
-The activation owner holds the lock and owns every effect. This adapter neither
-retries nor recovers an interrupted activation.
+The activation owner holds the lock and owns every effect. This adapter binds
+an explicit resume ID to that owner; it never retries an operation automatically.
 Imports stay stdlib-only until the selected command needs its backend.
 """
 
@@ -20,7 +20,8 @@ from .releases import _executing_release, _host_releases, _host_root
 
 def _hint(root):
     return (f"inspect claudlobby --root {shlex.quote(str(root))} host status; "
-            "this route does not recover an interrupted activation; inspect its recorded pending step")
+            "use host activate PLAN_ID --resume ID only for a recorded quiesced pre-start step; "
+            "other steps need their missing handoff or candidate-start evidence repaired first")
 
 
 def _status(args, root):
@@ -35,11 +36,24 @@ def _status(args, root):
     selected = evidence["selected_activation"]
     state = ("incomplete" if evidence["unfinished_activations"] else
              "indeterminate" if problem else "active" if selected else "unselected")
+    from ..activation import resumable_running_step
+    from ..activation_state import read_activation
+    recovery = []
+    if not evidence["activation_errors"]:
+        for item in evidence["unfinished_activations"]:
+            try:
+                record = read_activation(root, item["activation_id"])
+                step = resumable_running_step(record)
+            except Exception:
+                step = None
+            recovery.append({"activation_id": item["activation_id"], "supported_step": step})
     data = {"root": str(root), "recorded_status": state, "selection": evidence["selection"],
             "selected_activation": selected, "unfinished_activations": evidence["unfinished_activations"],
             "activation_errors": evidence["activation_errors"], "selection_error": evidence["selection_error"],
             "releases": evidence["items"], "runtime_observation": "unknown",
-            "bootstrap_eligibility": "not_checked", "upgrade_supported": state == "active", "recovery_supported": False}
+            "bootstrap_eligibility": "not_checked", "upgrade_supported": state == "active",
+            "recovery_supported": len(recovery) == 1 and recovery[0]["supported_step"] is not None,
+            "recovery": recovery}
     if problem:
         raise CommandFailure(problem.code, f"{problem.code}: recorded host state is {state}",
                              data=data, release_id=executing, hint=_hint(root))
@@ -73,6 +87,10 @@ def _activate(args, root):
 
     if not re.fullmatch(r"p-[0-9a-f]{64}", args.plan_id):
         raise CommandFailure("invalid_argument", "invalid argument: invalid configuration plan ID")
+    if getattr(args, "resume", None) and args.adopt_existing:
+        raise CommandFailure("invalid_argument", "invalid argument: --resume and --adopt-existing are exclusive")
+    if getattr(args, "resume", None) and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}", args.resume):
+        raise CommandFailure("invalid_argument", "invalid argument: invalid activation resume ID")
     directory = Path(args.install_directory).expanduser()
     if not directory.is_absolute():
         raise CommandFailure("invalid_argument", "invalid argument: --install-directory must be absolute")
@@ -90,10 +108,29 @@ def _activate(args, root):
             f"release mismatch: expected {plan.release_id}, found {executing or 'unsealed executable'}; no mutation performed",
             data=data, release_id=executing,
             hint=f"use this plan's sealed candidate CLI; inspect claudlobby --root {shlex.quote(str(root))} host releases")
+    if getattr(args, "resume", None):
+        from ..activation import resumable_running_step
+        from ..activation_state import ActivationError, read_activation
+        try:
+            prior = read_activation(root, args.resume)
+        except ActivationError as exc:
+            raise CommandFailure("not_found", "activation resume record is unavailable or invalid",
+                                 data=data, release_id=executing, hint=_hint(root)) from exc
+        if prior.body["intent"]["plan_id"] != plan.plan_id:
+            raise CommandFailure("conflict", "resume ID belongs to a different frozen plan",
+                                 data={**data, "recorded_activation": _recorded(root, args.resume)},
+                                 release_id=executing, hint=_hint(root))
+        if resumable_running_step(prior) is None:
+            raise CommandFailure("conflict", "recorded activation step cannot safely resume; "
+                                 "handoff or candidate-start evidence is missing",
+                                 data={**data, "recorded_activation": _recorded(root, args.resume)},
+                                 release_id=executing,
+                                 hint="inspect the pending step and repair its native/journal witness before retrying")
     try:
-        from ..activation import adopt_existing_activation, bootstrap_activation, upgrade_activation
+        from ..activation import adopt_existing_activation, bootstrap_activation, upgrade_activation, resume_activation
         from ..activation_state import read_selection
-        activate = (adopt_existing_activation if args.adopt_existing else
+        activate = (resume_activation if getattr(args, "resume", None) else
+                    adopt_existing_activation if args.adopt_existing else
                     upgrade_activation if read_selection(root) is not None else bootstrap_activation)
         record = activate(root, args.activation_id, plan.plan_id, directory)
     except Exception as exc:
@@ -115,6 +152,18 @@ def _activate(args, root):
             refusal = re.match(r"\A(svc_activation_[a-z_]+) refused \(([0-9]{1,3})\):", str(exc))
             code, message = "conflict", (f"conflict: {refusal[1]} refused ({refusal[2]})"
                                          if refusal else "conflict: activation did not complete; inspect its pending step")
+            if getattr(args, "resume", None) and data["recorded_activation"]:
+                from ..activation import resumable_running_step
+                from ..activation_state import read_activation
+                try:
+                    supported = resumable_running_step(read_activation(root, args.activation_id)) is not None
+                except ActivationError:
+                    supported = False
+                if not supported:
+                    message = ("conflict: recorded activation step cannot safely resume; "
+                               "handoff or candidate-start evidence is missing")
+                    hint = ("inspect the exact pending step and repair its native/journal witness "
+                            "before retrying the same activation ID")
             if data["recorded_activation"] is None and str(exc) == "another host activation holds the lock":
                 message = "conflict: host activation lock is held; no activation record was created"
                 hint = "inspect running host operations and activation.lock holders before retrying"

@@ -182,7 +182,8 @@ class ActivationStore:
     def prepare(self, activation_id: str, plan: ConfigPlan, *,
                 recovery_release_id: str, enrollment_digest: str,
                 source_release_id: str | None = None,
-                legacy_source: bool = False) -> ActivationRecord:
+                legacy_source: bool = False,
+                install_directory: Path | None = None) -> ActivationRecord:
         self.assert_locked()
         path = _record_path(self.root, activation_id)
         if plan.data_root != self.root or read_plan(self.root, plan.plan_id) != plan:
@@ -204,6 +205,11 @@ class ActivationStore:
                   "source_release_id": source_release_id,
                   "recovery_release_id": recovery_release_id,
                   "enrollment_digest": enrollment_digest}
+        if install_directory is not None:
+            directory = Path(install_directory)
+            if not directory.is_absolute() or directory.resolve() != directory:
+                raise ActivationError("activation install directory must be absolute and resolved")
+            intent["install_directory"] = str(directory)
         if legacy_source:
             intent["source_kind"] = "legacy-unsealed"
         if existing is not None:
@@ -240,7 +246,7 @@ class ActivationStore:
                 or body["completed"] or body["evidence"]
                 or read_selection(self.root) != body["previous_selection"]):
             raise ActivationError("prepared activation has effects or changed selection; explicit recovery required")
-        from .config_install import read_config_install
+        from .config_install import ConfigInstallError, read_config_install
         from .config_plan import read_plan
         from .activation_units import PHASES, journal_id as unit_journal_id
         from .activation_enrollment import journal_id as enrollment_journal_id
@@ -251,7 +257,10 @@ class ActivationStore:
         for identifier in siblings:
             directory = path.parent.parent / identifier / "config"
             if directory.exists() or directory.is_symlink():
-                journal = read_config_install(self.root, identifier)
+                try:
+                    journal = read_config_install(self.root, identifier)
+                except ConfigInstallError as exc:
+                    raise ActivationError("prepared activation has an incomplete configuration journal") from exc
                 if (journal.status != "prepared" or any(row != "pending" for row in journal.progress)):
                     raise ActivationError("prepared activation has a started configuration effect")
                 read_plan(self.root, journal.plan_id).check_fresh()

@@ -8,6 +8,7 @@ import sqlite3
 import pytest
 
 from claudlobby import activation_state as activation
+from claudlobby import activation as coordinator, config_install
 from claudlobby import migration_apply as apply
 from claudlobby.config_plan import ConfigPlanBuilder
 from claudlobby.migration_plan import build_migration_manifest
@@ -51,6 +52,30 @@ def _preview(candidate, *, initialize_empty=False):
 def _version(path):
     with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
         return conn.execute("PRAGMA user_version").fetchone()[0]
+
+
+def test_quiesced_resume_replays_existing_migration_owner_before_candidate_start(candidate, monkeypatch):
+    root, release, plan = candidate
+    connection = _database(root)
+    _insert(connection, "events", kind="system", event="historical_notice")
+    connection.close()
+    manifest = _preview(candidate)
+    assert not manifest.blockers
+    with activation.locked_activation(root) as store:
+        _quiesce(store, plan, manifest)
+        store.begin("upgrade", "backup_saved")
+        config_install.prepare_config(plan, "upgrade")
+        class CandidateStartReached(Exception):
+            pass
+        monkeypatch.setattr(coordinator.enrollment, "prepare_candidate_enrollment",
+                            lambda *_args, **_kwargs: (_ for _ in ()).throw(CandidateStartReached))
+        with pytest.raises(CandidateStartReached):
+            coordinator._finish_running_activation(root, store, "upgrade", plan, release, release, None,
+                (), (), {}, {}, (), (), {}, root, object(), object(), legacy_source=False)
+    record = activation.read_activation(root, "upgrade")
+    assert record.body["completed"][-3:] == ["migration_applied", "selection_switched", "configuration_applied"]
+    assert apply.read_migration(root, "upgrade")["result"] is not None
+    assert _version(db_file(root)) == SCHEMA_USER_VERSION
 
 
 def test_wal_backup_preserves_ids_cursor_and_retry_is_read_only(candidate):

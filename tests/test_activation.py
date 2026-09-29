@@ -177,6 +177,20 @@ def test_timer_paired_service_is_published_but_not_started_by_either_activation_
         "scheduled.timer", "added.service"]
 
 
+def test_resume_stage_boundary_excludes_handoff_bootstrap_and_candidate_start():
+    def record(step, *, source="selected"):
+        completed = list(state.STEPS[:state.STEPS.index(step)])
+        return SimpleNamespace(status="activating", body={"completed": completed, "pending": step,
+            "previous_selection": {"activation_id": "prior"} if source == "selected" else None,
+            "intent": {"source_kind": "legacy-unsealed" if source == "legacy" else None,
+                       "install_directory": "/private/native"}})
+    assert activation.resumable_running_step(record("queues_classified")) == "queues_classified"
+    assert activation.resumable_running_step(record("backup_saved", source="legacy")) == "backup_saved"
+    assert activation.resumable_running_step(record("queues_classified", source="bootstrap")) is None
+    assert activation.resumable_running_step(record("sessions_handed_off")) is None
+    assert activation.resumable_running_step(record("ingest_started")) is None
+
+
 def test_pre_effect_prepare_refusal_cancels_intent_without_starting(cold, monkeypatch):
     root, _, plan, host = cold
     def refuse(*args, **kwargs):

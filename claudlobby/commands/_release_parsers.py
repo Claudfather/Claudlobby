@@ -14,7 +14,7 @@ def _dispatch(args):
 
 
 def _dispatch_host(args):
-    args.activation_id = str(uuid4()) if args.public_command == "host.activate" else None
+    args.activation_id = (getattr(args, "resume", None) or str(uuid4())) if args.public_command == "host.activate" else None
     return execute(args.public_command,
                    lambda: import_module(".host", __package__).dispatch(args),
                    json_output=args.json, request_id=args.activation_id)
@@ -177,14 +177,17 @@ def register_release_subparsers(sub):
     status.set_defaults(func=_dispatch_host)
     activate = _route(hosts, "activate", "host.activate", "Activate PLAN_ID from an operator shell")
     activate.description = ("First activation requires explicit global --root. "
-                            "Use --adopt-existing only for an unsealed, already running Darwin estate; "
-                            "interrupted activations require explicit forward repair.")
+                            "Use --adopt-existing only for an unsealed, already running estate. "
+                            "--resume ID can fix forward recorded, quiesced pre-start stages; "
+                            "handoff and candidate-start stages still require manual recovery evidence.")
     activate.set_defaults(func=_dispatch_host)
     activate.add_argument("plan_id", metavar="PLAN_ID")
     activate.add_argument("--install-directory", required=True, metavar="PATH",
                           help="Absolute native user-unit directory; verified against the OS adapter's search paths")
     activate.add_argument("--adopt-existing", action="store_true",
-                          help="First, forward-only adoption of a reviewed unsealed Darwin estate and its existing Plane")
+                          help="First, forward-only adoption of a reviewed unsealed estate and its existing Plane")
+    activate.add_argument("--resume", metavar="ACTIVATION_ID",
+                          help="Fix forward the same recorded activation at a supported quiesced pre-start step")
 
     config = sub.add_parser("config", help="Stage and inspect configuration proposals")
     configs = config.add_subparsers(dest="config_command", required=True)

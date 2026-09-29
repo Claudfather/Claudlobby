@@ -7,6 +7,7 @@ import subprocess
 
 import pytest
 
+from claudlobby import activation
 from claudlobby import activation_state as state
 from claudlobby import activation_units as units
 from claudlobby import config_install
@@ -127,9 +128,10 @@ def enrollment(installed, tmp_path):
     return inventory, phases, plan, RecordedAdapter(inventory), foreign, wants
 
 
-def _prepare(store, inventory, phases, plan, adapter):
+def _prepare(store, inventory, phases, plan, adapter, *, install_directory=None):
     store.prepare("cutover", plan, recovery_release_id=plan.release_id,
-                  enrollment_digest=inventory.digest, legacy_source=inventory.legacy_source)
+                  enrollment_digest=inventory.digest, legacy_source=inventory.legacy_source,
+                  install_directory=install_directory)
     return units.prepare_unit_pause(store, "cutover", inventory, phases, adapter=adapter)
 
 
@@ -189,6 +191,57 @@ def _pause_all(store, adapter):
         assert state.read_activation(store.root, "cutover").body["pending"] == step
         store.complete("cutover", step, evidence_digest=result.digest)
     _complete(store, "queues_classified")
+
+
+def test_resume_same_id_reloads_frozen_pause_before_forward_work(enrollment, monkeypatch):
+    inventory, phases, plan, adapter, _, _ = enrollment
+    root = inventory.data_root
+    directory = Path(inventory.catalog.split("directory\t", 1)[1].splitlines()[0])
+    release = state.read_release(root, plan.release_id)
+    package = type("Package", (), {"native": release.native_path,
+                                    "artifact_id": release.inputs.artifact_id})()
+    adapter.package = package
+    monkeypatch.setattr(activation, "get_resources", lambda: package)
+    monkeypatch.setattr(activation.RuntimeIdentity, "current", classmethod(lambda cls:
+        activation.RuntimeIdentity(release.cli_path, release.native_path, release.inputs.artifact_id)))
+    monkeypatch.setattr(activation.sys, "executable", str(release.directory / release.paths.interpreter))
+    # The previous selected activation is a recorded source. The interrupted
+    # activation's parking plans and original snapshots are real journal owners.
+    with state.locked_activation(root) as store:
+        store.prepare("previous", plan, recovery_release_id=release.release_id,
+                      enrollment_digest=inventory.digest)
+        for step in state.STEPS:
+            store.begin("previous", step)
+            if step == "selection_switched":
+                store.select("previous")
+            else:
+                store.complete("previous", step, evidence_digest="a" * 64)
+        _prepare(store, inventory, phases, plan, adapter, install_directory=directory)
+        _pause_all(store, adapter)
+    observed = []
+    monkeypatch.setattr(activation, "_legacy_bot_socket", lambda *_args, **_kwargs: (root / "absent.sock", False))
+    monkeypatch.setattr(activation, "_legacy_quiet", lambda _adapter, _pause, phase, _sockets:
+                        observed.append(("quiet", phase)))
+    monkeypatch.setattr(activation, "_probe", lambda _root: None)
+    monkeypatch.setattr(activation, "planned_units", lambda _plan, _manager: ())
+    monkeypatch.setattr(activation, "_roster", lambda *_args: ({}, ()))
+    def finish(_root, _store, identifier, _plan, _release, _source, _source_plan,
+               old_units, *_args, **_kwargs):
+        observed.append(("finish", identifier, len(old_units)))
+        return state.read_activation(root, identifier)
+    monkeypatch.setattr(activation, "_finish_running_activation", finish)
+    before = list(adapter.calls)
+    other = ConfigPlanBuilder(root, release.release_id, release.seal_sha256,
+                              ("alpha",), effects={"different": True}).seal()
+    with pytest.raises(state.ActivationError, match="different frozen plan"):
+        activation.resume_activation(root, "cutover", other.plan_id,
+                                     directory,
+                                     adapter=adapter)
+    assert adapter.calls == before and observed == []
+    result = activation.resume_activation(root, "cutover", plan.plan_id, directory, adapter=adapter)
+    assert result.body["completed"][-1] == "queues_classified"
+    assert observed == [("quiet", phase) for phase in units.PHASES] + [("finish", "cutover", 4)]
+    assert adapter.calls == before
 
 
 def test_phases_park_exact_nodes_then_restore_original_state_and_links(enrollment):
