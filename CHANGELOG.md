@@ -23,6 +23,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - Per-bot switch state is read off each switch's own `config` path, replacing the special case for isolation.
 - **Tests.** `tests/test_switches.py`'s table-alone check now looks for the `npx-cache` rung by name, because the table itself now names npx.
 
+### Fixed — `vault-sync` records a refused sync as a failure; `[vault]` pin bumped to Claudron v0.5.3 (#1970, Claudron #142)
+
+`lib/vault-sync.sh` decided success from the `--json` envelope's `ok` alone. Before Claudron 0.5.3, `claudron sync --json` printed `"ok": true` even for a refused sync, one that exits 1 with its reason in `data.detail`. So every refusal was recorded as `vault.sync_ok = 1`, and `vault_sync_failed` never paged. That covers the side-branch guard, a live `index.lock`, a stopped rebase and a failed `add`. There are two fixes:
+
+- **Claudron v0.5.3** (now pinned): the envelope's `ok` agrees with the exit code. A refused run carries a `G001` error.
+- **This job:** a sync counts as ok only when the exit code is 0 **and** the envelope says `ok`. The exit code is Claudron's own failure signal on every engine version, so a host still running an older CLI is read correctly too.
+
+A regression test feeds the job the old engine's refusal envelope (`"ok": true`, rc 1) and asserts `ok=0`.
+
 ### Changed — `[vault]` pin bumped to Claudron v0.5.2; vaults need the `.claudron-vault` identity file (Claudron #183, #190)
 
 The `[vault]` extra now pins `claudron @ …@v0.5.2`. It carries three changes.
