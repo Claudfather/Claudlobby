@@ -298,7 +298,7 @@ fleet:
     enabled: true                  # default true when the block is present
 ```
 
-After `claudlobby generate`, enroll the timer once per host: `lib/install-code-audit-sweep-systemd.sh <fleet>` (Linux) or `lib/install-code-audit-sweep.sh <fleet>` (macOS). The owner bot needs the `code-audit-sweep` skill (add `code-audit-sweep` to its `skills:`). Audit events (`audit_selected`, `audit_dispatched`, `audit_completed`, …) land on the plane; read them with `claudlobby --json event list --bot <owner> --source audit` and follow `data.next_cursor` when present.
+After editing `fleet.sweep`, stage the source with `claudlobby config plan --release RELEASE_ID`, review `config diff PLAN_ID`, and activate it with `claudlobby host activate PLAN_ID --install-directory INSTALL_DIR` from an operator shell. Activation enrolls the declared timer on Linux or macOS. The owner bot needs the `code-audit-sweep` skill (add `code-audit-sweep` to its `skills:`). Audit events (`audit_selected`, `audit_dispatched`, `audit_completed`, …) land on the plane; read them with `claudlobby --json event list --bot <owner> --source audit` and follow `data.next_cursor` when present.
 
 ### `bots.<bot>.briefing`
 
@@ -344,7 +344,7 @@ fleet:
     lease_days: 14    # lease length in days before a workstream needs renewal (default: 14)
 ```
 
-Both values emit into every bot's `bot.conf` (`WORKSTREAM_MAX_ACTIVE`, `WORKSTREAM_LEASE_DAYS`) and are read by the single-writer helper `lib/workstream-update.sh` at open/renew time. Parsed by `config.py` (`_coerce_workstreams`); the validator warns on non-positive values or unknown keys. Reads go through the read-only `claudlobby workstreams` CLI; see `advanced-patterns.md` for the workstream lifecycle.
+Both values emit into every bot's `bot.conf` (`WORKSTREAM_MAX_ACTIVE`, `WORKSTREAM_LEASE_DAYS`) and govern the `claudlobby workstreams` operation's open/renew checks. Parsed by `config.py` (`_coerce_workstreams`); the validator warns on non-positive values or unknown keys. See `advanced-patterns.md` for the workstream lifecycle.
 
 ### `bots.<name>.expertise`
 

@@ -8,7 +8,7 @@ Two mechanics run through most of these patterns. Read them once here:
 
 - **Every bot runs on its own tmux server.** A bot's session lives on a *private* tmux server addressed by `-L <socket>`, where the socket name is the bot's `BOT_SERVICE` (also written to `bot.conf` as `TMUX_SOCKET`). One server's death drops only that bot, never the fleet. Use the canonical task, assignment, message, and report commands for work; Section 5 covers that model. Legacy lifecycle scripts that inspect or restart a pane must address its private socket.
 
-- **Several patterns below ship as library skills, not recipes.** Where a pattern is a real skill, you enable it by adding its name to a bot's `skills:` list in `fleet.yaml` and running `claudlobby generate` — the compositor symlinks `library/skills/<name>/` into that bot's `.claude/skills/<name>/`. Because the symlink points at the shared library file, edits to `library/skills/<name>/SKILL.md` propagate live to every bot using it. Never hand-author a `SKILL.md` into a generated bot directory: the next `generate` overwrites it, and it defeats the whole point of composition. For those patterns, this doc gives you the *why*, the one-line wiring, and how to schedule it — the skill file itself is the source of truth for the steps, so we point at it rather than copy it.
+- **Several patterns below ship as library skills, not recipes.** Where a pattern is a real skill, add its name to a bot's `skills:` list in `fleet.yaml`, stage the source with `config plan`, and activate the reviewed plan. The compositor links `library/skills/<name>/` into that bot's `.claude/skills/<name>/`. Never hand-author a skill in a generated bot directory. For those patterns, this doc gives the *why*, the wiring and scheduling; the skill file itself owns the steps.
 
 ---
 
@@ -24,7 +24,7 @@ Without this, you manually dispatch the engineer, wait, dispatch the reviewer, w
 
 ### Enable it
 
-Add `lifecycle` to the manager bot's `skills:` and run `claudlobby generate`:
+Add `lifecycle` to the manager bot's `skills:`, then stage and activate the reviewed configuration:
 
 ```yaml
 bots:
@@ -57,11 +57,11 @@ Monitoring channels (Slack, Datadog, etc.) accumulate alerts faster than anyone 
 
 ### Enable it
 
-Add `data-alert-sweep` to the bot that owns the monitoring integrations (typically the manager, or a business bot with Slack + GitHub MCP) and run `claudlobby generate`. The skill's core principle — *always investigate independently; existing PRs and team comments are inputs, not conclusions; never open a competing PR* — is defined in the skill file.
+Add `data-alert-sweep` to the bot that owns the monitoring integrations (typically the manager, or a business bot with Slack + GitHub MCP), then stage the source with `config plan` and activate the reviewed plan with `host activate`. The skill's core principle — *always investigate independently; existing PRs and team comments are inputs, not conclusions; never open a competing PR* — is defined in the skill file.
 
 ### Scheduling
 
-To run it on a cadence, use the socket-aware sweep dispatcher rather than a raw tmux keystroke: `lib/bot-sweep-cron.sh <bot-session> "/data-alert-sweep recent"` resolves the bot's private socket, skips the tick if the pane looks busy, and does the race-safe send. Wire that as a fleet job (a `jobs:` entry composed into a systemd/launchd timer — the same mechanism behind `data-sweep` and `disk-monitor`; see [fleet-yaml-schema](fleet-yaml-schema.md)) so enrollment is managed rather than living in a personal crontab.
+To run it on a cadence, declare the fleet job in `fleet.yaml`, stage it with `config plan`, and activate it with `host activate` (see [fleet-yaml-schema](fleet-yaml-schema.md)). The private scheduled dispatcher handles the bot's socket and busy-pane check; do not call it as a public operation or add a personal crontab.
 
 ### Gotchas
 
@@ -82,11 +82,11 @@ Action items hide in inboxes and meeting notes and never become tracked tasks. T
 
 ### Enable it
 
-Add `triage` to a bot with the right integrations — the manager, or a business bot with Gmail + Notion + Shopify MCP — and run `claudlobby generate`. The source-to-enrichment mapping and the dedup-before-create rule are in the skill file.
+Add `triage` to a bot with the right integrations — the manager, or a business bot with Gmail + Notion + Shopify MCP — then stage and activate the reviewed source configuration. The source-to-enrichment mapping and the dedup-before-create rule are in the skill file.
 
 ### Scheduling
 
-Same as the alert sweep: dispatch it on a cadence via `lib/bot-sweep-cron.sh <bot-session> "/triage email"` wired as a fleet job, so the send is socket-aware and the schedule is managed by a composed timer rather than a hand-edited crontab.
+Same as the alert sweep: declare and activate the fleet job so its composed timer owns the schedule and private delivery path.
 
 ### Gotchas
 
@@ -107,7 +107,7 @@ A blunt `systemctl restart` (or `launchctl kickstart -k`) kills the bot mid-thou
 
 Which path runs the handoff depends on *who* is restarting the bot:
 
-- **In-session restart (the `restart` skill).** When a bot restarts itself — `/restart`, or `/restart --auto` from an automated caller — the `restart` skill captures the handoff **directly** in that session — it names the requirement (a handoff at `<cwd>/.claude/session.md`) rather than a provider, so a bot with a session-handoff skill uses it and a bot without one writes the file itself, notifies the channel, then delegates the actual bounce to `lib/spin-up-bot.sh` (which picks systemd vs launchd for you). It deliberately does *not* shell out to `pre-stop-handoff.sh`: that script sends the handoff as a tmux keystroke and waits for it, so from inside the very session being restarted it would queue the handoff *behind* the restart and lose it. See `library/skills/restart/SKILL.md`.
+- **In-session restart (the `restart` skill).** When a bot restarts itself — `/restart`, or `/restart --auto` from an automated caller — the skill captures the handoff in that session before requesting the supervised restart. The public lifecycle route is `claudlobby bot restart BOT`; the skill owns the in-session sequence. See `library/skills/restart/SKILL.md`.
 
 - **External restarter (`lib/pre-stop-handoff.sh`).** When something *outside* the session bounces the bot and can't invoke a skill directly, it calls `lib/pre-stop-handoff.sh <bot-dir>` first. The canonical caller is `lib/weekly-worker-restart.sh`, which bounces worker bots weekly to pick up a staged Claude Code binary; it runs the handoff, then `spin-up-bot.sh`.
 
@@ -126,7 +126,7 @@ Resume needs no separate wiring in the common case. `lib/start-bot.sh` injects t
 
 ### Gotchas
 
-- **Don't add `ExecStop=.../pre-stop-handoff.sh` to a bot's `.service` file.** Bot units are generated by `claudlobby generate` (the file header says *do not hand-edit*), and the generated `ExecStop` simply tears down the bot's tmux server. Hand-edits are overwritten on the next generate. The handoff belongs at the *restarter*, per the two entry points above.
+- **Don't add `ExecStop=.../pre-stop-handoff.sh` to a bot's `.service` file.** Bot units are generated by reviewed configuration activation (the file header says *do not hand-edit*). The handoff belongs at the restarter, per the two entry points above.
 - Best-effort by design: if a bot is deeply stuck (unresponsive MCP, tight loop), the handoff times out and the restart proceeds anyway. That's the intended behavior.
 - The `--auto` flag matters — it runs the handoff non-interactively so the bot doesn't stop to ask for confirmation.
 
@@ -172,32 +172,24 @@ resends an uncertain message.
 
 ## 6. Git Pull Scheduler
 
-Keep cloned repos fresh across all bots so they aren't creating PRs against stale code. `lib/git-pull-all.sh` handles it.
+Keep cloned repos fresh so bots aren't creating PRs against stale code. The selected bot's public one-shot route is `claudlobby --fleet FLEET host repos pull --bot BOT`.
 
-### What the script does
+### What the operation does
 
 For an explicit operator request against one declared bot, run
 `claudlobby --fleet FLEET host repos pull --bot BOT`. The result names each
 repository as updated, unchanged, skipped (dirty or redirected), or failed. It never chooses a
-generic directory or grants this source mutation to a bot by default. The
-private script remains the scheduled callback:
-
-```bash
-$CLAUDLOBBY_ROOT/lib/git-pull-all.sh /path/to/projects/dir
-```
+generic directory or grants this source mutation to a bot by default.
 
 It checks for local changes, then runs `git pull --ff-only` on each clean immediate Git repository, logging results to `git-pull.log` **one level above** the target dir. A dirty repo is skipped; a branch that diverged from upstream fails without a merge commit. It does **not** inspect the branch name or skip non-`main` repos.
 
-When the target path is a fleet runtime projects dir (`.../runtime/bots/<bot>/projects`), the script consults the fleet's `fleet.yaml` roster and no-ops for a bot no longer declared in that fleet — so a stale scheduled entry can't resurrect a departed bot's runtime directory (which fleet supervision would then flag as an orphan). For any other directory of repos it behaves generically.
+The CLI targets a selected bot's projects directory and refuses an undeclared bot. The private owner may have other callers; those are not a public generic-directory API.
 
 ### Scheduling
 
-```crontab
-# Daily, staggered so pulls don't collide with active work:
-30 6 * * *  /path/to/claudlobby/lib/git-pull-all.sh /path/to/projects
-```
-
-Cron is fine here — the script is plain bash with no tmux involved. If you'd rather have enrollment managed alongside the rest of the fleet's timers, wire it as a `jobs:` entry instead of a personal crontab.
+The old arbitrary-directory cron recipe has no public CLI equivalent. For a
+one-shot selected bot, use `host repos pull --bot BOT`; configure scheduled
+work through the supported authored job and activation path.
 
 ### Gotchas
 
@@ -231,7 +223,7 @@ On a timer, the no-LLM selector `lib/code-audit-sweep.sh` asks GitHub for the mo
 
 The design's key property: **GitHub is the only ledger.** The labelled issues *are* the staleness record — an audit's own filed issues make its repo look "fresh" for the next run — so there's no local tracker file to maintain and nothing to drift out of sync. (Earlier guidance here described a hand-built `next-audit-target.py` + `audit-tracker.json`; that approach was replaced precisely because a local tracker drifts.)
 
-After `claudlobby generate`, enroll the timer once per host: `lib/install-code-audit-sweep-systemd.sh <fleet>` (Linux) or `lib/install-code-audit-sweep.sh <fleet>` (macOS). Full field reference and the emitted observability events (`audit_selected`, `audit_dispatched`, `audit_completed`, …) are in [fleet-yaml-schema](fleet-yaml-schema.md).
+Stage the `fleet.sweep` source with `config plan` and activate the reviewed plan with `host activate`; activation owns timer enrollment on Linux and macOS. Full field reference and the emitted observability events (`audit_selected`, `audit_dispatched`, `audit_completed`, …) are in [fleet-yaml-schema](fleet-yaml-schema.md).
 
 ### Gotchas
 
@@ -278,7 +270,7 @@ Frontend QA is tedious and gets skipped. A designer bot checks every page at eve
 
 ### Enable it
 
-Add `visual-crawl` to a designer/QA bot and run `claudlobby generate`. The skill takes `[--url <base-url>] [--auto] [--output github|session]`. The [Designer / Visual QA Bot archetype](bot-archetypes.md) describes a good persona for the bot that runs it (typically an Opus bot doing visual QA across the fleet's frontends).
+Add `visual-crawl` to a designer/QA bot, then stage and activate the reviewed configuration. The skill takes `[--url <base-url>] [--auto] [--output github|session]`. The [Designer / Visual QA Bot archetype](bot-archetypes.md) describes a good persona for the bot that runs it (typically an Opus bot doing visual QA across the fleet's frontends).
 
 ### Browser automation
 
@@ -286,7 +278,7 @@ The skill needs a way to drive a browser. There is no `library/mcp/` fragment fo
 
 ### Scheduling
 
-For a nightly or post-deploy run, dispatch through the socket-aware sweep dispatcher (`lib/bot-sweep-cron.sh <designer-session> "/visual-crawl --url https://staging.example.com --auto"`) wired as a fleet job — not a raw tmux keystroke, which would target the wrong server.
+For a nightly or post-deploy run, declare the selected bot's fleet job and activate the reviewed plan. The private dispatcher handles its socket; it is not a public scheduling command.
 
 ### Gotchas
 

@@ -251,8 +251,8 @@ rm -rf ~/.npm/_npx/        # instant fleet-wide cold start regression
 **Health check:**
 
 ```bash
-lib/check-npx-cache.sh --fleet <name>   # verify all MCP packages are cached
-claudlobby host cache warm                    # pre-download any missing packages
+claudlobby --fleet <name> host cache warm --dry-run  # inspect missing packages
+claudlobby --fleet <name> host cache warm            # download missing packages
 ```
 
 **Recovery if cache is cleared:**
@@ -428,9 +428,9 @@ assemble a release and run `fleet setup` with
 
 Each bot becomes a `systemd --user` unit with `Restart=on-failure`. View with `systemctl --user list-timers` and `journalctl --user -u <name> -f`.
 
-### Generic helpers
+### Selected operations
 
-- `lib/keepalive.sh <bot-dir>` — restart a dead session, nudge idle panes
-- `lib/log-rotate.sh [--keep N] <log>...` — tail each log to last N lines
-- `lib/disk-monitor.sh [--threshold N]` — warn if disk usage > threshold
-- `lib/bot-sweep-cron.sh <bot> <trigger>` — periodic dispatch (e.g. `bot-sweep-cron.sh assistant "briefing morning"`)
+- `claudlobby --fleet FLEET bot restart BOT` — supervised bot restart
+- `claudlobby --fleet FLEET fleet logs` — bounded bot log tails
+- `claudlobby host job run disk-monitor` — request the selected, enabled disk check
+- Declare periodic bot prompts in fleet configuration and activate the reviewed plan; the private scheduled dispatcher is not a public command.
