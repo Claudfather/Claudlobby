@@ -104,6 +104,9 @@ def _isolate_plane_session(tmp_path_factory, request):
     with pytest.MonkeyPatch.context() as patch:
         _isolate_home(patch, base)
         _silence_plane(patch)
+        # Installed-wheel subprocesses must import their own package, not a
+        # source tree inherited from the parent validation environment (#1316).
+        patch.delenv("PYTHONPATH", raising=False)
         # Pytest chooses this lazily. Initialize it while TMPDIR belongs to
         # the session, before a function fixture selects a shorter-lived dir.
         tmp_path_factory.getbasetemp()
@@ -271,13 +274,22 @@ def selected_test_cli(test_cli, monkeypatch, _isolate_claudlobby_root):
 @pytest.fixture(scope="session")
 def built_test_cli(tmp_path_factory):
     """A private wheel CLI for source instruments that need built resources."""
+    from tests.prepare_resources import _copy_indexed_source
     from tests.test_package_resources import _copy_installed_dependencies
 
     owned = tmp_path_factory.mktemp("built-cli")
+    source = owned / "source"
+    source.mkdir()
+    env = constructed_env(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
+                          GIT_TERMINAL_PROMPT="0")
+    # Use the same history-free source snapshot as prepare_resources. Building
+    # the checkout directly adds its HEAD to the artifact ID in CI, so its wheel
+    # correctly fails the harness's prepared-artifact identity check.
+    _copy_indexed_source(_TEST_TREE, source, env)
     dist = owned / "dist"
     subprocess.run([sys.executable, "-m", "build", "--no-isolation", "--wheel",
-                    "--outdir", str(dist), str(_TEST_TREE)], check=True,
-                   capture_output=True, text=True)
+                    "--outdir", str(dist), str(source)], check=True,
+                   capture_output=True, text=True, env=env)
     wheel, = dist.glob("*.whl")
     venv = owned / "venv"
     subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)

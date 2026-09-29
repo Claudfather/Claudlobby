@@ -143,6 +143,7 @@ from pathlib import Path
 
 @pytest.fixture(scope="session")
 def incidental_session(_isolate_plane_session):
+    assert "PYTHONPATH" not in os.environ
     result = subprocess.run(["bash", os.environ["ISOLATION_SHIM"]],
                             input=os.environ["ISOLATION_BATCH"], text=True,
                             capture_output=True, timeout=30)
@@ -170,7 +171,7 @@ def test_function(tmp_path, tmp_path_factory):
     assert "CLAUDLOBBY_ROOT" not in os.environ
     assert "PLANE_SOCKET" not in os.environ and "PLANE_EMIT_CLI" not in os.environ
 ''')
-        env = constructed_env(HOME=tmp_path / "home", ISOLATION_SHIM=SHIM,
+        env = constructed_env(HOME=tmp_path / "home", PYTHONPATH=REPO, ISOLATION_SHIM=SHIM,
                               ISOLATION_BATCH=BATCH, CLAUDLOBBY_ROOT=sentinel["root"],
                               PLANE_SOCKET=sentinel["socket"], PLANE_EMIT_CLI=sentinel["cli"])
         if initial_guard is None:

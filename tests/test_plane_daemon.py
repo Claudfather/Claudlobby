@@ -94,7 +94,7 @@ def running(tmp_path: Path, scratch_plane_env):
     yield tmp_path, sock, daemon
     daemon.stop()
     t.join(timeout=10)
-    shutil.rmtree(sdir, ignore_errors=True)
+    assert not t.is_alive(), "daemon did not stop"
 
 
 def test_commit_roundtrip_and_row_lands(running):
@@ -385,7 +385,7 @@ def test_drain_on_start_ingests_preexisting_spool(tmp_path: Path, *, scratch_pla
     finally:
         daemon.stop()
         t.join(timeout=10)
-        shutil.rmtree(sdir, ignore_errors=True)
+        assert not t.is_alive(), "daemon did not stop"
 
 
 def test_lifecycle_events_recorded(tmp_path: Path, *, scratch_plane_env):
@@ -403,7 +403,7 @@ def test_lifecycle_events_recorded(tmp_path: Path, *, scratch_plane_env):
         time.sleep(0.02)
     daemon.stop()
     t.join(timeout=10)
-    shutil.rmtree(sdir, ignore_errors=True)
+    assert not t.is_alive(), "daemon did not stop"
     conn = connect(db_path(tmp_path))
     events = [r[0] for r in conn.execute(
         "SELECT event FROM events WHERE kind='system' ORDER BY ingest_seq"
@@ -452,7 +452,7 @@ def test_opted_out_root_drops_body_with_proof_triple(tmp_path: Path, *, scratch_
     finally:
         daemon.stop()
         t.join(timeout=10)
-        shutil.rmtree(sdir, ignore_errors=True)
+        assert not t.is_alive(), "daemon did not stop"
 
 
 def test_unconfigured_root_keeps_the_body_through_the_daemon(tmp_path: Path, *, scratch_plane_env):
@@ -480,7 +480,7 @@ def test_unconfigured_root_keeps_the_body_through_the_daemon(tmp_path: Path, *, 
     finally:
         daemon.stop()
         t.join(timeout=10)
-        shutil.rmtree(sdir, ignore_errors=True)
+        assert not t.is_alive(), "daemon did not stop"
 
 
 def test_socket_file_mode_is_0600(running):
@@ -1142,7 +1142,7 @@ def test_a_cooldown_batch_lands_through_the_daemon_under_the_capture_policy(
         daemon.stop()
         if t.ident is not None:
             t.join(timeout=10)
-        shutil.rmtree(sdir, ignore_errors=True)
+            assert not t.is_alive(), "daemon did not stop"
 
 
 def test_a_staged_batch_replayed_twice_lands_once(running):
