@@ -31,6 +31,7 @@ import pytest
 from claudlobby.plane.emit_api import emit_batch
 from claudlobby.task_state import TASK_EMITTER
 from tests.plane_fixtures import F, REPO, _live_dispatch, _paths, plane_root
+from tests.test_plane_events_door import _serving
 
 LIB = REPO / "lib"
 needs_tmux = pytest.mark.skipif(shutil.which("tmux") is None,
@@ -54,8 +55,17 @@ def _pulse_lib(tmp_path, capture, *, lookup_stub=None):
     return libdir
 
 
-def _pulse(root, libdir, *, fleet=F, scratch_plane_env, **extra):
-    env = {**scratch_plane_env(root), "HOME": str(root / "home"), "FLEET_NAME": fleet,
+def _pulse(root, libdir, *, fleet=F, scratch_plane_env, serve=True, **extra):
+    if not serve:
+        return _pulse_with_socket(root, libdir, fleet=fleet, scratch_plane_env=scratch_plane_env,
+                                  socket=None, **extra)
+    with _serving(root, scratch_plane_env) as socket:
+        return _pulse_with_socket(root, libdir, fleet=fleet, scratch_plane_env=scratch_plane_env,
+                                  socket=socket, **extra)
+
+
+def _pulse_with_socket(root, libdir, *, fleet, scratch_plane_env, socket, **extra):
+    env = {**scratch_plane_env(root, socket=socket), "HOME": str(root / "home"), "FLEET_NAME": fleet,
            "PLANE_EMIT_ENABLED": "1",
 
            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -264,19 +274,21 @@ def test_two_fleets_hit_at_once_each_page_their_own(tmp_path, *, scratch_plane_e
     _live_dispatch(root, "9", "t-1903-g001", ts="2026-09-01T10:00:00Z", bot="w1", fleet=g)
     # f alone also carries a bridge_down burst, through the real door
     f_w1 = paths.runtime_bots / "w1"
-    seed = subprocess.run(
-        ["bash", "-c", f'. "{LIB}/lib-common.sh"; emit_fleet_event bridge_down pulse "{{}}" "{f_w1}" w1'],
-        capture_output=True, text=True, timeout=180,
-        env={**scratch_plane_env(root), "HOME": str(root / "home"), "FLEET_NAME": F,
-             "PATH": os.environ.get("PATH", "/usr/bin:/bin")})
+    with _serving(root, scratch_plane_env) as socket:
+        seed = subprocess.run(
+            ["bash", "-c", f'. "{LIB}/lib-common.sh"; emit_fleet_event bridge_down pulse "{{}}" "{f_w1}" w1'],
+            capture_output=True, text=True, timeout=180,
+            env={**scratch_plane_env(root, socket=socket), "HOME": str(root / "home"),
+                 "FLEET_NAME": F, "PATH": os.environ.get("PATH", "/usr/bin:/bin")})
     assert seed.returncode == 0, seed.stderr[-1000:]
 
     capture = tmp_path / "tg.log"
     libdir = _pulse_lib(tmp_path, capture)
 
-    def sweep(fleet, threshold="1"):
+    def sweep(fleet, threshold="1", *, serve=True):
         n = len(_pages(capture))
-        r = _pulse(root, libdir, fleet=fleet, FLEET_PULSE_ESCALATION_THRESHOLD=threshold,
+        r = _pulse(root, libdir, fleet=fleet, serve=serve,
+                   FLEET_PULSE_ESCALATION_THRESHOLD=threshold,
                    FLEET_EVENT_EMIT_TIMEOUT_S="120", scratch_plane_env=scratch_plane_env)
         assert r.returncode == 0, r.stderr[-2000:]
         return sorted(_pages(capture)[n:])
@@ -301,6 +313,6 @@ def test_two_fleets_hit_at_once_each_page_their_own(tmp_path, *, scratch_plane_e
         p.unlink()
     (root / "state" / "plane" / "plane.db").mkdir()
     for fleet in (F, g):
-        paged = sweep(fleet)
+        paged = sweep(fleet, serve=False)
         for reader in ("overdue reader", "escalated-task reader", "events reader"):
             assert any(f"the {reader} for {fleet} is UNREACHABLE" in x for x in paged), (fleet, reader, paged)

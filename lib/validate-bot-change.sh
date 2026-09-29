@@ -3563,7 +3563,7 @@ PLPY
     harness_check "  ...and does not claim the event committed" "$r"
     grep -q 'batch STAGED' "$PL_ROOT/err" && r=yes || r=no
     harness_check "  ...with pending status disclosed" "$r"
-    grep -q "older code than the db it opened" "$PL_ROOT/err" && r=yes || r=no
+    grep -q "daemon code is older than its database" "$PL_ROOT/err" && r=yes || r=no
     harness_check "  ...naming the stale daemon rather than a dead socket" "$r"
     kill "$PL_STALE_PID" 2>/dev/null || true; wait "$PL_STALE_PID" 2>/dev/null || true
     PL_STALE_PID=""
@@ -3703,7 +3703,7 @@ PLPY
     PL_DPID=""
     rm -f "$PL_SOCK"
 
-    "$PL_CLI" --root "$PL_ROOT" plane doctor > "$PL_ROOT/doctor.txt" 2>&1 && r=no || r=yes
+    PLANE_SOCKET="$PL_SOCK" "$PL_CLI" --root "$PL_ROOT" plane doctor +        > "$PL_ROOT/doctor.txt" 2>&1 && r=no || r=yes
     harness_check "doctor flags ATTENTION: daemon started historically, not serving" "$r"
     grep -q "not serving" "$PL_ROOT/doctor.txt" && r=yes || r=no
     harness_check "  ...naming the condition and the corrective command" "$r"
