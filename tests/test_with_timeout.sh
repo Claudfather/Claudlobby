@@ -116,6 +116,21 @@ for arm in $ARMS; do
     check "a command that exits 0 on TERM still reports expiry" "124" \
         "$(run "$P" 'with_timeout 1 sh -c "trap \"exit 0\" TERM; sleep 10 & wait"; echo $?')"
 
+    # A stopped command acts on the signal only once continued: timeout(1)
+    # follows the signal with SIGCONT. A command in its own process group that
+    # reads the terminal is stopped by SIGTTIN, so this is not hypothetical.
+    # Bounded here, so a wrapper that never ends it reports "hung", not a hang.
+    rm -f "$WORK/rc"
+    check "a stopped command is still ended at the bound" "124" "$(run "$P" '
+        ( with_timeout 1 sh -c "kill -STOP \$\$"; echo $? >"$W/rc" ) &
+        sub=$!; i=0
+        while kill -0 "$sub" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+        if kill -0 "$sub" 2>/dev/null; then
+            pkill -KILL -P "$sub"; kill -KILL "$sub"; echo hung
+        else
+            cat "$W/rc"
+        fi')"
+
     # A TERM sent to the wrapper itself, not the group, is relayed to the group.
     rm -f "$WORK/gc" "$WORK/rc"
     check "a TERM to the wrapper reaches the command's group" "143 dead" "$(run "$P" '

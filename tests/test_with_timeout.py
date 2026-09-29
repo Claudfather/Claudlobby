@@ -30,7 +30,7 @@ HARNESS = REPO_ROOT / "tests" / "test_with_timeout.sh"
 
 # Both arms. Raise this when cases are added; never lower it to make a red
 # wrapper green.
-MIN_ASSERTIONS = 37
+MIN_ASSERTIONS = 39
 
 
 def test_with_timeout_fallback_matches_timeout1() -> None:
