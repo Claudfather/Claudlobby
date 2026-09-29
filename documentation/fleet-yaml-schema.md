@@ -548,6 +548,8 @@ Any server that can't launch directly keeps today's npx launch. That launch can'
 | `entry point is not a plain node script` | none. `node <path>` would drop a shebang's flags, and a non-node bin is not node at all |
 | `cannot tell which bin npx would run` | none. npx itself refuses an ambiguous bin |
 
+A copy removed *after* `generate` is different. The bot's composed file still points at it, so that server will not start at the bot's next session, while a fresh plan would quietly fall back to npx. `doctor`'s `mcp-launch-composed` rung reads every bot's composed `.mcp.json`, armed or not, and **fails** naming each such bot, server and path. The fix is the same: run `warm-cache`, then `generate` (or `generate` alone to go back to npx).
+
 The copy installs the fragment's exact pin. npm resolves the rest of its dependency tree from its own cache first (`--prefer-offline`). uvx servers are untouched. `lib/fleet-memory-check.sh` does not show the saving (#862): its fleet total never matched an `npm exec` line, and its per-bot figure counts only the pane process and its direct children.
 
 ### `bots.<name>.guardrails` / `protocols` / `resources` / `lessons` / `principles` / `permissions` / `post_actions`

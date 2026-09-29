@@ -17,6 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - It runs `npm install --prefix` into a temporary sibling and renames it into place only once it holds a launchable entry point.
   - A failed or torn install leaves nothing behind, and fails the warm.
 - **The fallback.** A server that can't launch directly keeps its npx launch, and `generate` names it with the reason. `doctor` has a matching `mcp-launch` rung that reads the same plan (`composer.mcp_launch_plan`).
+- **A copy removed after `generate` is a `doctor` failure.** The plan cannot see it, because it only describes what `generate` would compose now. So `mcp-launch-composed` reads each bot's composed `.mcp.json`, the file the bot actually launches, for every bot, armed or not. It **fails** for any `node` entry under `state/mcp/npm/` whose script is gone, naming the bot, the server and the path, and saying the server will not start. A `node` entry outside `state/mcp` (the older global-binary swap) is not judged.
 - **Why it's opt-in.** It is registered in `switches.py` as `mcp-direct-launch`. `.mcp.json` is read at session start, but sessions restart without anyone choosing to (keepalive, context restarts), so a default-on change would spread with nobody choosing which bot goes first.
 - **Registry plumbing.**
   - The `COMPOSE_BOT` carrier's arm line now carries its own steps and timing; `shared-config-isolation` renders unchanged.

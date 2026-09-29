@@ -511,3 +511,86 @@ class TestDoctorNamesTheFallbacks:
         from claudlobby import doctor
 
         assert "check_mcp_launch(fleet, paths, report)" in inspect.getsource(doctor.run_doctor)
+
+
+# --- doctor reads the file the bot will launch (ravi, #1991 review) ---------
+
+class TestDoctorReadsTheComposedFile:
+    """The plan is what `generate` WOULD compose now; a bot launches what its
+    `.mcp.json` says. A copy removed after compose leaves a composed `node`
+    entry whose script is gone: that server will not start, and the plan
+    alone reads it as a harmless npx fallback."""
+
+    def _compose(self, fleet_dir: Path, bot: str = "lead") -> Path:
+        from claudlobby.composer import compose_bot
+
+        fleet = load_test_fleet(fleet_dir)
+        return compose_bot(fleet.bots[bot], fleet, make_paths(fleet_dir), log=lambda m: None)
+
+    def _checks(self, fleet_dir: Path) -> dict:
+        from claudlobby.doctor import DoctorReport, check_mcp_launch
+
+        report = DoctorReport()
+        check_mcp_launch(load_test_fleet(fleet_dir), make_paths(fleet_dir), report)
+        return {c.name: c for c in report.checks}
+
+    def test_a_copy_removed_after_generate_fails_naming_bot_server_and_path(self, fleet_dir: Path):
+        import shutil
+
+        equip_bot_with_mcp(fleet_dir, {"demo": NPX})
+        _arm(fleet_dir)
+        entry = _write_package(_package_dir(fleet_dir))
+        bot_dir = self._compose(fleet_dir)
+        composed = json.loads((bot_dir / ".mcp.json").read_text())["mcpServers"]["demo"]
+        assert composed["args"][0] == str(entry), "precondition: the file launches the copy"
+        shutil.rmtree(fleet_dir / "state" / "mcp" / "npm" / SPEC)
+        checks = self._checks(fleet_dir)
+        dead = checks["mcp-launch-composed"]
+        assert dead.status == "fail"
+        assert "lead/demo" in dead.detail and str(entry) in dead.detail
+        assert "will not start" in dead.detail and "warm-cache" in dead.detail
+        # ...and the plan rung keeps its own reading: what generate would compose now.
+        assert checks["mcp-launch"].status == "warn"
+
+    def test_a_composed_copy_that_exists_passes(self, fleet_dir: Path):
+        equip_bot_with_mcp(fleet_dir, {"demo": NPX})
+        _arm(fleet_dir)
+        _write_package(_package_dir(fleet_dir))
+        self._compose(fleet_dir)
+        checks = self._checks(fleet_dir)
+        assert checks["mcp-launch-composed"].status == "pass"
+        assert checks["mcp-launch"].status == "pass"
+
+    def test_a_disarmed_bot_whose_file_still_launches_a_copy_is_checked(self, fleet_dir: Path):
+        # Disarmed in the manifest but not regenerated: the file still names the
+        # copy, and the file is what the bot runs.
+        import shutil
+
+        equip_bot_with_mcp(fleet_dir, {"demo": NPX})
+        _arm(fleet_dir)
+        _write_package(_package_dir(fleet_dir))
+        self._compose(fleet_dir)
+        fy = fleet_dir / "fleet.yaml"
+        fy.write_text(fy.read_text().replace("      mcp_direct_launch: true\n", ""))
+        shutil.rmtree(fleet_dir / "state" / "mcp" / "npm" / SPEC)
+        checks = self._checks(fleet_dir)
+        assert checks["mcp-launch-composed"].status == "fail"
+        assert "mcp-launch" not in checks, "no armed bot: the plan rung stays silent"
+
+    def test_an_npx_only_fleet_adds_no_composed_line(self, fleet_dir: Path):
+        equip_bot_with_mcp(fleet_dir, {"demo": NPX})
+        self._compose(fleet_dir)
+        assert "mcp-launch-composed" not in self._checks(fleet_dir)
+
+    def test_a_node_entry_outside_state_mcp_is_not_judged(self, fleet_dir: Path, monkeypatch):
+        # The older global-binary swap also composes `node <path>`, pointing at
+        # a PATH binary the fleet does not own. That is not a copy this check
+        # vouches for, so a missing one is not reported as a dead copy.
+        import shutil as _shutil
+
+        _equip_with_global_binary(fleet_dir)
+        monkeypatch.setattr(_shutil, "which", lambda _n: "/nonexistent/bin/demo-mcp")
+        bot_dir = self._compose(fleet_dir)
+        composed = json.loads((bot_dir / ".mcp.json").read_text())["mcpServers"]["demo"]
+        assert composed["command"] == "node", "precondition: the global-binary swap ran"
+        assert "mcp-launch-composed" not in self._checks(fleet_dir)
