@@ -197,7 +197,8 @@ def test_inventory_and_equipment_endpoints(tmp_path):
     miss = client.get("/api/equipment",
                       params={"alias": f"bot:{FLEET}/nobody"}).json()
     assert miss["state"] == "idle"
-    assert "generate" in miss["remediation"]
+    assert "config plan --release" in miss["remediation"]
+    assert "host activate <plan-id> --install-directory" in miss["remediation"]
     assert "data" not in miss
 
 
