@@ -812,8 +812,8 @@ harness_check "#1024 the manager is actually pushed the strand via [FLEET-PULSE]
 
 # ===========================================================================
 # Mechanism 1 (fleet update lifecycle) — daily plugin/skill live reload.
-# Stubs claude on PATH and selects a CLI stub explicitly, so this needs no
-# Claude auth or real composition.
+# Drive the selected native callback with the frozen scope a public fleet
+# reload supplies. Stubs claude on PATH, so this needs no auth or composition.
 # ===========================================================================
 val_scenario "validate reload-fleet (Mechanism 1: daily live reload)"
 
@@ -822,13 +822,18 @@ mkdir -p "$STUB_BIN"
 printf '#!/bin/bash\nexit 0\n' > "$STUB_BIN/claude"
 printf '#!/bin/bash\nexit 0\n' > "$STUB_BIN/claudlobby"
 chmod +x "$STUB_BIN/claude" "$STUB_BIN/claudlobby"
-# reload-fleet reads the plugin list from a bot.conf (fleet-global value).
-echo 'FLEET_PLUGINS_REQUIRED="claudna@Claudfather"' >> "$BOT_DIR/bot.conf"
+cp "$BOT_DIR/bot.conf" "$ROOT/reload-original-bot.conf"
+echo "BOT_SERVICE=\"tmux-$BOT\"" >> "$BOT_DIR/bot.conf"
+RF_ARGS=(--selected-release harness-selected --fleet "$FLEET"
+         --bots-dir "$ROOT/local/$FLEET/runtime/bots" --bot "$BOT"
+         --plugin claudna@Claudfather)
 
-# Happy path: download + generate succeed -> .reload-pending dropped on the running bot.
+# Happy path: plugin refresh succeeds -> .reload-pending marks the running bot.
 rm -f "$BOT_DIR/data/.reload-pending"
-CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_CLI="$STUB_BIN/claudlobby" PATH="$STUB_BIN:$PATH" \
-    "$LIB_DIR/reload-fleet.sh" "$FLEET" >/dev/null 2>&1 || true
+CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_NATIVE_DIR="$LIB_DIR" \
+    CLAUDLOBBY_CLI="$STUB_BIN/claudlobby" CLAUDLOBBY_RELEASE_ID=harness-selected \
+    CLAUDLOBBY_FLEET="$FLEET" PATH="$STUB_BIN:$PATH" \
+    "$LIB_DIR/reload-fleet.sh" "${RF_ARGS[@]}" >/dev/null 2>&1 || true
 [ -f "$BOT_DIR/data/.reload-pending" ] && r=yes || r=no
 harness_check "reload-fleet marks a running bot with .reload-pending (happy path)" "$r"
 
@@ -836,8 +841,10 @@ harness_check "reload-fleet marks a running bot with .reload-pending (happy path
 printf '#!/bin/bash\necho boom >&2; exit 1\n' > "$STUB_BIN/claude"
 chmod +x "$STUB_BIN/claude"
 rm -f "$BOT_DIR/data/.reload-pending"
-CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_CLI="$STUB_BIN/claudlobby" PATH="$STUB_BIN:$PATH" \
-    "$LIB_DIR/reload-fleet.sh" "$FLEET" >/dev/null 2>&1 || true
+CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_NATIVE_DIR="$LIB_DIR" \
+    CLAUDLOBBY_CLI="$STUB_BIN/claudlobby" CLAUDLOBBY_RELEASE_ID=harness-selected \
+    CLAUDLOBBY_FLEET="$FLEET" PATH="$STUB_BIN:$PATH" \
+    "$LIB_DIR/reload-fleet.sh" "${RF_ARGS[@]}" >/dev/null 2>&1 || true
 val_events "$ROOT" "$FLEET" fleet reload_failed | grep -q '"type":"reload_failed"' && r=yes || r=no
 harness_check "reload-fleet emits reload_failed event on failure (loud, not silent)" "$r"
 mgr_pane=$(tmux capture-pane -t "$MGR" -p 2>/dev/null || true)
@@ -851,25 +858,29 @@ harness_check "reload-fleet does not half-reload (no marker when download fails)
 # step is still going. The Python launcher gives the run its own group, so
 # the step it orphans is reaped as one afterwards on both macOS and Linux.
 printf '#!/bin/bash\nexit 0\n' > "$STUB_BIN/claude"
-printf '#!/bin/bash\ncase " $* " in *" generate "*) echo "generate: composing"; exec sleep 30 ;; esac\nexit 0\n' > "$STUB_BIN/claudlobby"
+printf '#!/bin/bash\ncase " $* " in *" plugin update "*) echo "plugin update: refreshing"; exec sleep 30 ;; esac\nexit 0\n' > "$STUB_BIN/claude"
 chmod +x "$STUB_BIN/claude" "$STUB_BIN/claudlobby"
-CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_CLI="$STUB_BIN/claudlobby" PATH="$STUB_BIN:$PATH" \
+CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_NATIVE_DIR="$LIB_DIR" \
+    CLAUDLOBBY_CLI="$STUB_BIN/claudlobby" CLAUDLOBBY_RELEASE_ID=harness-selected \
+    CLAUDLOBBY_FLEET="$FLEET" PATH="$STUB_BIN:$PATH" \
     "$VAL_PY" -I -B -c 'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
-    "$LIB_DIR/reload-fleet.sh" "$FLEET" >/dev/null 2>&1 &
+    "$LIB_DIR/reload-fleet.sh" "${RF_ARGS[@]}" >/dev/null 2>&1 &
 RF_PID=$!
 for _i in $(seq 1 150); do
-    grep -q 'generate: composing' "$ROOT/state/reload-fleet.log" 2>/dev/null && break
+    grep -q 'plugin update: refreshing' "$ROOT/state/reload-fleet.log" 2>/dev/null && break
     sleep 0.2
 done
 kill -TERM "$RF_PID" 2>/dev/null || true
 wait "$RF_PID" 2>/dev/null || true
 kill -KILL -- "-$RF_PID" 2>/dev/null || true
-val_events "$ROOT" "$FLEET" fleet reload_failed | grep -q 'killed during step: claudlobby generate' && r=yes || r=no
+val_events "$ROOT" "$FLEET" fleet reload_failed | grep -q 'killed during step: claude plugin update' && r=yes || r=no
 harness_check "#1924 reload-fleet killed mid-step raises reload_failed naming the step" "$r"
 mgr_pane=$(tmux capture-pane -J -t "$MGR" -p 2>/dev/null || true)
 printf '%s' "$mgr_pane" | grep -q 'killed during step' && r=yes || r=no
 harness_check "#1924 reload-fleet killed mid-step alerts the manager" "$r"
 printf '#!/bin/bash\nexit 0\n' > "$STUB_BIN/claudlobby"
+printf '#!/bin/bash\nexit 0\n' > "$STUB_BIN/claude"
+mv "$ROOT/reload-original-bot.conf" "$BOT_DIR/bot.conf"
 
 # ===========================================================================
 # F2(b) consolidated activation — keepalive performs the live reload at idle.
