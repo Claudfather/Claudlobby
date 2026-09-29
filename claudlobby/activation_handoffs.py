@@ -143,8 +143,8 @@ def persist_canonical_handoffs(root: Path, *, roster: dict[str, tuple[str, tuple
     """Write exact current IDs after old writers stop and before any new bot starts.
 
     ``roster`` comes from the frozen selected source fleet contexts; ``bot_dirs``
-    comes from reviewed, installed old bot declarations. An actor may receive
-    an assignment owned by a different fleet; the task retains its own fleet.
+    comes from reviewed, installed old bot declarations. Active assignments
+    must remain inside their owning fleet; legacy cross-fleet work blocks adoption.
     The caller holds the activation lock and owns the stopped-writer proof.
     """
     root = Path(root).resolve()

@@ -59,10 +59,10 @@ def _fixture(root: Path):
         conn.execute("INSERT INTO identity_registry"
                      " (uid, kind, alias, parent_uid, provisional, first_seen, last_seen)"
                      " VALUES (?, ?, ?, ?, 0, 't', 't')", (uid, kind, alias, parent))
-    _row(conn, "work_items", fleet_uid=ENG, work_item_id=TASK,
-         title="Cross-fleet historical assignment", created_by_uid=ENG_MANAGER)
-    _row(conn, "assignments", fleet_uid=ENG, assignment_id=ASSIGNMENT,
-         work_item_id=TASK, assignee_uid=DATA_WORKER, assigned_by_uid=ENG_MANAGER)
+    _row(conn, "work_items", fleet_uid=DATA, work_item_id=TASK,
+         title="Fleet-owned historical assignment", created_by_uid=DATA_MANAGER)
+    _row(conn, "assignments", fleet_uid=DATA, assignment_id=ASSIGNMENT,
+         work_item_id=TASK, assignee_uid=DATA_WORKER, assigned_by_uid=DATA_MANAGER)
     _row(conn, "work_items", fleet_uid=ENG, work_item_id=QUEUED,
          title="Queued intake", created_by_uid=ENG_MANAGER)
     expected = asdict(audit_tasks(conn))
@@ -92,7 +92,7 @@ def _resume_gate(path: Path) -> int:
     return result.returncode
 
 
-def test_first_adoption_persists_current_cross_fleet_ids_and_missing_status(tmp_path):
+def test_first_adoption_persists_current_fleet_owned_ids_and_missing_status(tmp_path):
     conn, roster, dirs, expected, worker_handoff = _fixture(tmp_path)
     try:
         assert _resume_gate(worker_handoff) == 1
@@ -108,12 +108,14 @@ def test_first_adoption_persists_current_cross_fleet_ids_and_missing_status(tmp_
         worker = _section(worker_handoff)
         assert worker["previous_handoff"] == "existing file present (fresh capture unverified)"
         assert worker["assigned_to_this_bot"] == [{
-            "task_id": TASK, "assignment_id": ASSIGNMENT, "owning_fleet": "eng",
+            "task_id": TASK, "assignment_id": ASSIGNMENT, "owning_fleet": "data",
             "state": "assigned", "current_assignee": "bot:data/worker"}]
         manager_path = dirs["eng", "manager"] / ".claude/session.md"
         manager = _section(manager_path)
         assert manager["previous_handoff"].startswith("unavailable")
-        assert {row["task_id"] for row in manager["manager_owned_work"]} == {TASK, QUEUED}
+        assert {row["task_id"] for row in manager["manager_owned_work"]} == {QUEUED}
+        data_manager = _section(dirs["data", "manager"] / ".claude/session.md")
+        assert {row["task_id"] for row in data_manager["manager_owned_work"]} == {TASK}
         first = worker_handoff.read_bytes()
         manager_first = manager_path.read_bytes()
         persist_canonical_handoffs(tmp_path, roster=roster, bot_dirs=dirs,
@@ -146,6 +148,22 @@ def test_retiring_bot_with_current_assignment_refuses_before_handoff_write(tmp_p
         with pytest.raises(ActivationError, match="retired bot still owns open work"):
             persist_canonical_handoffs(tmp_path, roster=roster, bot_dirs=dirs,
                                        expected_audit=expected, candidate_bots=retained)
+        assert worker_handoff.read_bytes() == STALE_HANDOFF
+        assert not (dirs["eng", "manager"] / ".claude/session.md").exists()
+    finally:
+        conn.close()
+
+
+def test_cross_fleet_legacy_assignment_refuses_before_handoff_write(tmp_path):
+    conn, roster, dirs, _expected, worker_handoff = _fixture(tmp_path)
+    try:
+        conn.execute("UPDATE work_items SET fleet_uid=? WHERE work_item_id=?", (ENG, TASK))
+        conn.execute("UPDATE assignments SET fleet_uid=? WHERE assignment_id=?", (ENG, ASSIGNMENT))
+        audit = audit_tasks(conn)
+        assert audit.blockers
+        with pytest.raises(ActivationError, match="unresolved active links"):
+            persist_canonical_handoffs(tmp_path, roster=roster, bot_dirs=dirs,
+                                       expected_audit=asdict(audit))
         assert worker_handoff.read_bytes() == STALE_HANDOFF
         assert not (dirs["eng", "manager"] / ".claude/session.md").exists()
     finally:
