@@ -100,8 +100,7 @@ def _activate(args, root):
                     upgrade_activation if read_selection(root) is not None else bootstrap_activation)
         record = activate(root, args.activation_id, plan.plan_id, directory)
     except Exception as exc:
-        from ..activation import CandidateDisabledOverride
-        from ..activation_state import ActivationError
+        from ..activation_state import ActivationError, CandidateDisabledOverride
         data.update(recorded_activation=_recorded(root, args.activation_id), recording="unknown")
         hint = _hint(root)
         if isinstance(exc, CandidateDisabledOverride):

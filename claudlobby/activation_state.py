@@ -43,6 +43,18 @@ class ActivationError(RuntimeError):
     """Another activation or an unproven recovery state; keep the host paused."""
 
 
+class CandidateDisabledOverride(ActivationError):
+    """Exact candidate launchd targets blocked before any activation effect."""
+
+    def __init__(self, targets: tuple[str, ...]):
+        if not targets or any(not re.fullmatch(r"(?:gui|user)/[0-9]+/[A-Za-z0-9_.@:-]+", target)
+                              for target in targets):
+            raise ValueError("invalid candidate launchd target")
+        self.targets = tuple(sorted(set(targets)))
+        super().__init__("candidate launchd unit has a persistent disabled override: "
+                         + ", ".join(self.targets))
+
+
 def _json(value) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 

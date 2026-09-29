@@ -12,13 +12,13 @@ import json
 import os
 from dataclasses import replace
 from pathlib import Path
-import re
 import socket
 import stat
 import sys
 import time
 
-from .activation_state import ActivationError, ActivationRecord, locked_activation, read_activation, read_selection
+from .activation_state import (ActivationError, ActivationRecord, CandidateDisabledOverride,
+                               locked_activation, read_activation, read_selection)
 from .activation_identity import identity_bindings_from_registry
 from . import activation_enrollment as enrollment, activation_units as units, config_install
 from .activation_runtime import BOT_READY_KINDS, assert_quiescent, start_unit
@@ -33,18 +33,6 @@ from .runtime_admission import RuntimeIdentity, validate_unit_admission
 from .supervision_inventory import (Adapter, InventoryError, UnitDeclaration,
                                     _catalog, _darwin_disabled, _darwin_source, _environment,
                                     collect_enrollment)
-
-
-class CandidateDisabledOverride(ActivationError):
-    """Exact candidate launchd targets blocked before any activation effect."""
-
-    def __init__(self, targets: tuple[str, ...]):
-        if not targets or any(not re.fullmatch(r"(?:gui|user)/[0-9]+/[A-Za-z0-9_.@:-]+", target)
-                              for target in targets):
-            raise ValueError("invalid candidate launchd target")
-        self.targets = tuple(sorted(set(targets)))
-        super().__init__("candidate launchd unit has a persistent disabled override: "
-                         + ", ".join(self.targets))
 
 
 def _digest(value) -> str:
