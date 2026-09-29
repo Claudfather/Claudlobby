@@ -27,6 +27,7 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import _scrubbed_env, read_fleet_events
+from tests.test_plane_events_door import _serving
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FLEET_PULSE = REPO_ROOT / "lib" / "fleet-pulse.sh"
@@ -179,22 +180,19 @@ def test_a_healthy_bridge_check_fires_no_phantom_script_error(tmp_path, *, scrat
         root = tmp_path / shape
         (root / "bot" / "data").mkdir(parents=True)
         (root / "state").mkdir()
-        # the fleet event the trap emits goes through the shim; a counting CLI
-        # stub records each batch's event name (no plane needed — R1 writes no file)
-        seen = root / "emitted"
-        stub = root / "cli"
-        stub.write_text("#!/bin/bash\nf=\"${@: -1}\"; cat \"$f\" >> \"" + str(seen) + "\"; echo >> \"" + str(seen) + "\"\n")
-        stub.chmod(0o755)
-        env = {"PATH": "/usr/bin:/bin", "HOME": str(root), **scratch_plane_env(root, cli=stub),
-               "BOT_DIR": str(root / "bot"), "BOT_ID": "b", "FLEET_NAME": "f",
-                }
-        r = subprocess.run(["/bin/bash", "-c",
-                            f'. "{REPO_ROOT}/lib/lib-common.sh"; install_error_trap "";'
-                            f' healthy() {{ return 1; }}; {body}; echo done'],
-                           capture_output=True, text=True, env=env, timeout=60)
+        # The native shim sends directly to the daemon. Keep the real trap
+        # shape and observe committed rows rather than a retired CLI callback.
+        with _serving(root, scratch_plane_env) as socket:
+            env = {"PATH": "/usr/bin:/bin", "HOME": str(root),
+                   **scratch_plane_env(root, socket=socket),
+                   "BOT_DIR": str(root / "bot"), "BOT_ID": "b", "FLEET_NAME": "f"}
+            r = subprocess.run(["/bin/bash", "-c",
+                                f'. "{REPO_ROOT}/lib/lib-common.sh"; install_error_trap "";'
+                                f' healthy() {{ return 1; }}; {body}; echo done'],
+                               capture_output=True, text=True, env=env, timeout=60)
         assert r.returncode == 0 and "done" in r.stdout, (shape, r.stderr)
-        rows = seen.read_text() if seen.exists() else ""
-        assert rows.count('"event": "script_error"') + rows.count('"event":"script_error"') == want, (shape, rows)
+        rows = read_fleet_events(root)
+        assert rows.count('"type":"script_error"') == want, (shape, rows, r.stderr)
 
 
 def test_the_handoff_status_is_captured_without_firing_the_trap():
