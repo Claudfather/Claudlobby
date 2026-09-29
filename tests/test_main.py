@@ -276,8 +276,11 @@ class TestMainArgparse:
         assert exc.value.code != 0
 
     def test_validate_subcommand(self, fleet_dir):
-        result = main(["--root", str(fleet_dir), "validate"])
+        result = main(["--root", str(fleet_dir), "config", "validate"])
         assert result == 0
+        with pytest.raises(SystemExit) as retired:
+            main(["--root", str(fleet_dir), "validate"])
+        assert retired.value.code == 2
 
     def test_generate_subcommand(self, fleet_dir):
         result = main(["--root", str(fleet_dir), "generate"])

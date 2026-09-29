@@ -360,8 +360,8 @@ def test_end_to_end_root_flag_own_name_runs_like_bare_call(fleet_dir, monkeypatc
     local/<fleet>/ overlay) named 'test-fleet'."""
     _prime_tokens(monkeypatch)
 
-    bare_rc = main(["--root", str(fleet_dir), "validate"])
-    named_rc = main(["--root", str(fleet_dir), "--fleet", "test-fleet", "validate"])
+    bare_rc = main(["--root", str(fleet_dir), "config", "validate"])
+    named_rc = main(["--root", str(fleet_dir), "--fleet", "test-fleet", "config", "validate"])
 
     assert bare_rc == 0
     assert named_rc == 0

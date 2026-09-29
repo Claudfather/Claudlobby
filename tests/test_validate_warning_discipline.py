@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 from claudlobby import validator as validator_module
 from claudlobby.commands.core import cmd_validate
+from claudlobby.__main__ import main
 from claudlobby.config import GithubAppConfig, load_fleet
 from claudlobby.doctor import DoctorReport, check_fleet_validation
 from tests.package_fixtures import source_package
@@ -280,6 +281,32 @@ def _red_fleet(fleet_dir: Path, monkeypatch) -> None:
 
 
 class TestWarnBaseline:
+    def test_public_config_validate_keeps_strict_and_baseline_gates(self, fleet_dir, tmp_path, monkeypatch, capsys):
+        _red_fleet(fleet_dir, monkeypatch)
+        base = tmp_path / "baseline.json"
+
+        def call(*options):
+            rc = main(["--root", str(fleet_dir), "--json", "config", "validate", *options])
+            return rc, json.loads(capsys.readouterr().out)
+
+        rc, written = call("--warn-baseline", str(base), "--write")
+        assert rc == 0 and written["command"] == "config.validate"
+        assert written["data"]["baseline_written"] is True
+        assert written["data"]["warning_categories"] == json.loads(base.read_text())
+        rc, accepted = call("--warn-baseline", str(base))
+        assert rc == 0 and accepted["ok"] is True and accepted["data"]["warning_count"] > 0
+        counts = json.loads(base.read_text())
+        grown = next(kind for kind, count in counts.items() if count > 0)
+        base.write_text(json.dumps({**counts, grown: counts[grown] - 1}))
+        rc, rejected = call("--warn-baseline", str(base))
+        assert rc == 4 and rejected["error"]["code"] == "conflict"
+        rc, strict = call("--strict", "--warn-baseline", str(base))
+        assert rc == 4 and strict["error"]["code"] == "conflict"
+        rc, missing = call("--warn-baseline", str(tmp_path / "missing.json"))
+        assert rc == 6 and missing["error"]["code"] == "unavailable"
+        rc, invalid = call("--write")
+        assert rc == 2 and invalid["error"]["code"] == "invalid_argument"
+
     def test_warn_baseline_passes_on_an_unchanged_red_baseline(self, fleet_dir, tmp_path, monkeypatch):
         _red_fleet(fleet_dir, monkeypatch)
         base = tmp_path / "baseline.json"
