@@ -49,7 +49,10 @@ def test_validation_setup_uses_owned_transport_and_preflighted_cli(tmp_path, scr
     result = _run(root, socket_dir, env)
     assert result.returncode == 0, result.stdout + result.stderr
     assert (REPO / "lib/runtime-admission.sh").read_bytes() == native_guard
-    assert (root / "lib/runtime-admission.sh").read_text() == "native_admission() { return 0; }\n"
+    assert (root / "lib/runtime-admission.sh").read_text() == (
+        'native_admission() { _NATIVE_ADMISSION_PYTHON="${PLANE_EMIT_CLI%/*}/python"; '
+        '[ -x "$_NATIVE_ADMISSION_PYTHON" ]; }\n'
+    )
     assert (root / "claudlobby").resolve() == REPO / "claudlobby"
     assert cli_calls.is_file(), "harness ignored the preflighted CLI"
     assert '"type":"validate_started"' in read_fleet_events(root)
