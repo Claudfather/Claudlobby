@@ -1,0 +1,43 @@
+name: macos-shell
+
+# The lib/ shell helpers every macOS bot start runs, tested under the conditions
+# those hosts run them in: /bin/bash 3.2 and the BSD userland. The Linux jobs
+# cannot see a defect that only bash 3.2 or a BSD tool has. Each suite runs under
+# /bin/bash by path, and its inner shells reuse that interpreter, so nothing here
+# falls through to a newer bash on the runner's PATH.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - lib/lib-common.sh
+      - lib/start-bot.sh
+      - lib/plane-emit.sh
+      - tests/test_err_trap_errtrace.sh
+      - tests/test_boot_epoch.sh
+      - tests/plane_capture_cli.sh
+      - .github/workflows/macos-shell.yml
+  pull_request:
+    paths:
+      - lib/lib-common.sh
+      - lib/start-bot.sh
+      - lib/plane-emit.sh
+      - tests/test_err_trap_errtrace.sh
+      - tests/test_boot_epoch.sh
+      - tests/plane_capture_cli.sh
+      - .github/workflows/macos-shell.yml
+
+jobs:
+  boot-errtrace:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The shell under test
+        # Refuse a /bin/bash that is not 3.x: the suite would skip its bash 3.2
+        # controls and pass without measuring anything this job exists for.
+        run: |
+          /bin/bash -c '[ "${BASH_VERSINFO[0]}" = 3 ] || { echo "/bin/bash is $BASH_VERSION, not 3.x"; exit 1; }; echo "/bin/bash is $BASH_VERSION"'
+      - name: The boot path files no script_error for a failure it handles (#1963)
+        run: /bin/bash tests/test_err_trap_errtrace.sh
+      - name: The boot epoch ladder
+        run: /bin/bash tests/test_boot_epoch.sh

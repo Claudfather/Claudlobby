@@ -55,6 +55,9 @@ CAPTURE="$T/plane-capture.jsonl"; : > "$CAPTURE"
 # `tr -d '\n'` guards a multi-line stdout no current body produces. Both are
 # assumptions rather than guarantees — a body that prints `|` needs a new
 # delimiter, not a workaround.
+# Each case runs under "$BASH", the interpreter running this suite, never a
+# `bash` looked up on PATH, which can be a newer bash than the one under test:
+# `/bin/bash tests/test_err_trap_errtrace.sh` measures bash 3.2 all the way down.
 run_case() {
     local opts="$1" body="$2" out rows
     : > "$CAPTURE"
@@ -62,7 +65,7 @@ run_case() {
         env -i PATH="$PATH" HOME="$T" \
             CLAUDLOBBY_ROOT="$T" BOT_DIR="$BOTDIR" BOT_ID=canary FLEET_NAME=f \
             PLANE_EMIT_CLI="$SCRIPT_DIR/plane_capture_cli.sh" PLANE_CAPTURE="$CAPTURE" PLANE_SOCKET="$T/no.sock" \
-            bash -c "
+            "$BASH" -c "
                 set $opts
                 . '$LIB_COMMON'
                 install_error_trap '$BOTDIR'
@@ -159,7 +162,106 @@ assert_eq "…while still writing its row" "1" "$(rows_of "$r")"
 r=$(run_case "-euo pipefail" 'f() { echo "$(boom)"; }; f')
 assert_eq "failing substitution emits at both frames" "2" "$(rows_of "$r")"
 r=$(run_case "-euo pipefail" 'f() { echo "$(boom)"; }; f || true')
-assert_eq "…and stays silent when the caller tolerates it" "0" "$(rows_of "$r")"
+case "${BASH_VERSINFO[0]}" in
+    # bash 3.2 does not carry a caller's suppression into a substitution; the
+    # next section is what that costs and what the boot path does about it.
+    3) assert_eq "…and on bash 3.2 a tolerant caller does not reach into it" "2" "$(rows_of "$r")" ;;
+    *) assert_eq "…and stays silent when the caller tolerates it" "0" "$(rows_of "$r")" ;;
+esac
+
+# --- the boot path on bash 3.2 (#1963) ----------------------------------------
+# bash 3.2 is /bin/bash on macOS, and every bot there boots under it. On 3.2 a
+# command substitution starts with no suppression: a failing command inside it
+# reaches the trap however the statement around it is guarded, so
+# `x="$(f)" || true` and `if x="$(f)"; then` both file a row, and so does a
+# failing substitution inside a function whose caller tolerates it. bash 5.2
+# carries the caller's suppression into the substitution, so none of this shows
+# there. A macOS boot filed ~120 critical script_error rows this way, every one
+# for a failure the code already handled. So the boot path settles an expected
+# failure INSIDE its substitution: `x="$(f || true)"`, or `x="$(f || exit $?)"`
+# where the status still decides.
+#
+# Run as `/bin/bash tests/test_err_trap_errtrace.sh` on macOS to measure 3.2
+# (.github/workflows/macos-shell.yml does). Under bash 5 the controls below say
+# they cannot run, and the cases after them can only fail on their values.
+case "${BASH_VERSINFO[0]}" in
+    3)
+        # Two rows each: one for the command that fails inside boom, one for
+        # boom's own status, both inside the substitution.
+        r=$(run_case "-euo pipefail" 's="$(boom)" || true; echo SURVIVED')
+        assert_eq "control: on bash 3.2 a guard outside the substitution does not reach in" "2" "$(rows_of "$r")"
+        r=$(run_case "-euo pipefail" 'if v="$(boom)"; then :; fi; echo SURVIVED')
+        assert_eq "control: nor does an if around the assignment" "2" "$(rows_of "$r")"
+        ;;
+    *)
+        echo "  SKIP: the bash 3.2 controls: bash $BASH_VERSION carries the caller's suppression into a substitution"
+        ;;
+esac
+r=$(run_case "-euo pipefail" 's="$(boom || true)"; echo SURVIVED')
+assert_eq "an expected failure settled inside its substitution files nothing" "0" "$(rows_of "$r")"
+r=$(run_case "-euo pipefail" 'if v="$(boom || exit $?)"; then echo YES; else echo "NO:$?"; fi')
+assert_eq "…and '|| exit \$?' inside it keeps the status the if decides on" "NO:127" "$(out_of "$r")"
+assert_eq "…silently" "0" "$(rows_of "$r")"
+
+# The macOS host's shape: uptime refuses -s, and sysctl answers kern.boottime.
+# The uptime stub records each call, so a case can see whether it was asked.
+mkdir -p "$T/stub"
+cat > "$T/stub/uptime" <<'STUB'
+#!/bin/sh
+printf x >> "$HOME/uptime.called"
+echo "uptime: illegal option -- s" >&2
+exit 1
+STUB
+cat > "$T/stub/sysctl" <<'STUB'
+#!/bin/sh
+[ "$1" = "-n" ] && [ "$2" = "kern.boottime" ] || exit 1
+echo '{ sec = 1700000000, usec = 164678 } Tue Nov 14 22:13:20 2023'
+STUB
+chmod +x "$T/stub/uptime" "$T/stub/sysctl"
+
+# plugin_ensure's call, the one that filed 58 rows on one macOS boot.
+r=$(run_case "-euo pipefail" 'PATH="$HOME/stub:$PATH"; e="$(resolve_boot_epoch 2>/dev/null || true)"; printf "%s" "$e"')
+assert_eq "resolve_boot_epoch answers from kern.boottime when uptime refuses -s" "1700000000" "$(out_of "$r")"
+assert_eq "…and files no row" "0" "$(rows_of "$r")"
+rm -f "$T/uptime.called"
+r=$(run_case "-euo pipefail" 'PATH="$HOME/stub:$PATH"; _OS=Darwin; e="$(resolve_boot_epoch 2>/dev/null || true)"; if [ -e "$HOME/uptime.called" ]; then printf "asked uptime -s"; else printf "%s" "$e"; fi')
+assert_eq "on Darwin resolve_boot_epoch never asks the GNU uptime -s" "1700000000" "$(out_of "$r")"
+
+# should_resume_session, as start-bot.sh calls it, on a handoff with no
+# last_updated field and on one whose field does not parse: both fall back to
+# the file's mtime (#1568).
+mkdir -p "$T/sess"
+printf -- '---\ntitle: handoff\n---\nnext steps\n' > "$T/sess/no-field.md"
+printf -- '---\nlast_updated: not-a-date\n---\nnext steps\n' > "$T/sess/bad-field.md"
+r=$(run_case "-euo pipefail" 'if should_resume_session "$HOME/sess/no-field.md" 86400; then echo RESUME; else echo SKIP; fi')
+assert_eq "a handoff with no last_updated resumes on its mtime" "RESUME" "$(out_of "$r")"
+assert_eq "…and files no row" "0" "$(rows_of "$r")"
+r=$(run_case "-euo pipefail" 'if should_resume_session "$HOME/sess/bad-field.md" 86400; then echo RESUME; else echo SKIP; fi')
+assert_eq "a handoff whose last_updated does not parse resumes on its mtime" "RESUME" "$(out_of "$r")"
+assert_eq "…and files no row" "0" "$(rows_of "$r")"
+
+# bridge_state polled while bot.pid still names the previous boot's poller,
+# which is dead: ps finding nothing is the answer, not an error (#1594).
+mkdir -p "$T/bots/tg" "$T/tgstate"
+printf 'export TELEGRAM_BOT_HANDLE=canary_bot\nexport TELEGRAM_STATE_DIR=%s\n' "$T/tgstate" > "$T/bots/tg/bot.conf"
+r=$(run_case "-euo pipefail" 'sleep 0 & dead=$!; wait "$dead"; printf "%s" "$dead" > "$HOME/tgstate/bot.pid"; state="$(bridge_state "$HOME/bots/tg" tok "" 2>/dev/null || true)"; printf "%s" "$state"')
+assert_eq "bridge_state on a stale bot.pid answers no_bridge" "no_bridge" "$(out_of "$r")"
+assert_eq "…and files no row" "0" "$(rows_of "$r")"
+
+# start-bot.sh's two `if x="$(f)"` sites are top-level lines of a script that
+# boots a real session, so no case above can run them; their shape is pinned
+# instead. So is the shape of every function fixed here, because under bash 5,
+# which the Linux lanes run, the cases above cannot see the class at all.
+sb_sites=$(grep -cE '^[[:space:]]*if [A-Za-z_]+="\$\(' "$SCRIPT_DIR/../lib/start-bot.sh" || true)
+sb_settled=$(grep -E '^[[:space:]]*if [A-Za-z_]+="\$\(' "$SCRIPT_DIR/../lib/start-bot.sh" | grep -c '|| exit \$?)"; then' || true)
+assert_eq "start-bot.sh has if x=\"\$(f)\" sites for this pin to hold" "yes" "$([ "$sb_sites" -gt 0 ] && echo yes || echo no)"
+assert_eq "every one of them settles its status inside the substitution" "$sb_sites" "$sb_settled"
+for fn in resolve_boot_epoch boot_epoch_from_sysctl session_md_handoff_epoch should_resume_session bridge_state; do
+    code=$(awk -v f="$fn" '$0 == f "() {" {p = 1} p {print} p && /^}/ {exit}' "$LIB_COMMON" | grep -v '^[[:space:]]*#')
+    assert_eq "$fn is in lib-common.sh for this pin to hold" "yes" "$([ -n "$code" ] && echo yes || echo no)"
+    assert_eq "$fn guards no substitution from outside it" "0" "$(printf '%s\n' "$code" | grep -cE '\)"?[[:space:]]*\|\|' || true)"
+    assert_eq "$fn has no if x=\"\$(f)\"" "0" "$(printf '%s\n' "$code" | grep -cE 'if [A-Za-z_]+="?\$\(' || true)"
+done
 
 echo
 echo "  $PASS/$TOTAL passed"
