@@ -185,3 +185,84 @@ class TestReapRestoresCapturedUnits:
         assert born.read_text() == _host_unit(FOREIGN, "brand-new"), (
             "restore touched a unit it never snapshotted"
         )
+
+
+# --- #2002: the launch line, the root fence, and an honest status -----------------
+
+
+def _settings(host, body: str) -> None:
+    d = host["home"] / ".claude"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "settings.json").write_text(body)
+
+
+def _stub(host, tool: str, body: str) -> None:
+    p = Path(host["path"].split(":")[0]) / tool
+    p.write_text("#!/bin/bash\n" + body + "\n")
+    p.chmod(0o755)
+
+
+class TestTheLaunchLineLoadsNoUserSettings:
+    """A plain `claude` loads the user's settings. On the #2002 host those held a
+    bare `Bash` allow rule and `defaultMode: auto`, beside passwordless sudo, so a
+    blind run could have changed the host as root without a single prompt."""
+
+    def test_prepare_prints_the_safe_launch_line(self, host):
+        r = _call(host, 'print_launch /tmp/some-tree')
+        assert r.returncode == 0, r.stderr
+        assert "claude --setting-sources project,local --strict-mcp-config" in r.stdout
+        assert 'cd /tmp/some-tree && PATH="' in r.stdout
+        assert f'{host["state"]}/fence:$PATH' in r.stdout
+
+    def test_the_fence_refuses_sudo_loudly(self, host):
+        # The harness runs under `set -e`, so capture the refusal's code with `||`.
+        r = _call(host, 'write_fence; "$COLDSTART_STATE_DIR/fence/sudo" true || echo "rc=$?"')
+        assert "rc=1" in r.stdout
+        assert "refused by the cold-start fence" in r.stderr
+
+
+class TestPreflightNamesWhatALaunchWouldInherit:
+    def test_a_bare_bash_allow_rule_is_warned(self, host):
+        _settings(host, '{"permissions": {"allow": ["Bash(git *)", "Bash"]}}')
+        r = _call(host, "preflight")
+        assert "allow every shell command" in r.stdout
+
+    def test_bypass_permissions_as_the_default_mode_is_warned(self, host):
+        _settings(host, '{"permissions": {"defaultMode": "bypassPermissions"}}')
+        r = _call(host, "preflight")
+        assert "allow every shell command" in r.stdout
+
+    def test_narrow_allow_rules_are_not_warned(self, host):
+        _settings(host, '{"permissions": {"allow": ["Bash(git *)", "Bash(ls *)"]}}')
+        r = _call(host, "preflight")
+        assert "allow every shell command" not in r.stdout
+
+    def test_passwordless_sudo_is_warned(self, host):
+        _stub(host, "sudo", '[ "$1" = "-n" ] && exit 0; exit 1')
+        r = _call(host, "preflight")
+        assert "sudo runs here without a password" in r.stdout
+
+    def test_sudo_that_needs_a_password_is_not_warned(self, host):
+        _stub(host, "sudo", "exit 1")
+        r = _call(host, "preflight")
+        assert "sudo runs here without a password" not in r.stdout
+
+
+class TestStatusDoesNotTripTheErrorTrap:
+    """`pgrep` exits 1 when nothing matches; under `pipefail` the unguarded count
+    failed its substitution, and the inherited ERR trap recorded a false
+    `script_error` ("non-zero exit at line 286") on every clean run."""
+
+    def test_no_process_referencing_the_tree_is_a_zero_not_a_script_error(self, host, tmp_path):
+        _stub(host, "pgrep", "exit 1")
+        snap = host["state"] / "snapshot"
+        snap.mkdir(parents=True)
+        for kind in ("units", "unitfiles", "sockets"):
+            (snap / f"{kind}.txt").write_text("")
+        (host["state"] / "run.env").write_text(f"tree={tmp_path / 'gone-tree'}\n")
+        r = _call(
+            host,
+            'emit_script_error() { printf "SCRIPT_ERROR %s\\n" "$4" >&2; }; cmd_status',
+        )
+        assert "processes referencing the tree: 0" in r.stdout, r.stdout + r.stderr
+        assert "SCRIPT_ERROR" not in r.stderr, r.stderr

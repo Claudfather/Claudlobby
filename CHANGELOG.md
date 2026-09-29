@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the cold-start harness launches the cold arm without the operator's settings, and fences root (#2002)
+
+The documented launch was a bare `claude` in the exported tree, and a bare `claude` loads the user's settings. On the #2002 host those held three things at once:
+- a bare `Bash` allow rule, which approves every shell command;
+- `defaultMode: auto`, which Claude Code now uses by default anyway;
+- passwordless sudo, beside those settings.
+
+So a blind run could have run `sudo`, or `lib/setup-system` (which calls sudo itself), without a single prompt. The skill's fence, "tell the human to decline `sudo`", assumed a prompt that need not appear.
+
+- **The launch line.** `prepare` now prints `cd <tree> && PATH="<state>/fence:$PATH" claude --setting-sources project,local --strict-mcp-config`.
+  - It loads no user settings and none of the user's MCP servers.
+  - The fence is a refusing `sudo`, first on `PATH`, so a script that calls sudo fails loudly instead of acting as root.
+  - Credentials still come from the Claude Code login.
+- **The preflight** now warns when user settings approve every shell command (a bare `Bash` allow rule, or `bypassPermissions`), and when `sudo -n true` succeeds.
+- **`status` no longer records a false `script_error`.** Its process count was `$(pgrep -f "$tree" | wc -l)`. `pgrep` exits 1 when nothing matches, so under `pipefail` the substitution failed, and the inherited ERR trap recorded `non-zero exit at line 286` on every clean run. That landed in the plane of whatever root the harness resolved, which is the production plane when run from an install.
+- **Docs.** The skill, `validating-cold-start.md` and the `CLAUDE.md` row describe the new launch.
+
 ### Added — `claudlobby doctor` asks `claudron doctor` about each wired vault, and never applies `--fix` (Claudron #190, part C)
 
 Until now nothing in fleet health said a vault had fallen behind its engine. After the 0.5.2 upgrade, walk-up stopped finding a vault that lacked its identity file, and every hook that found the vault that way failed open without a word (Claudron #183). The Claudron section of `claudlobby doctor` now runs `claudron doctor --json --vault <vault>` for each wired vault this host holds, and adds:
