@@ -77,7 +77,7 @@ trap _transport_result EXIT
 body=''
 IFS= read -r -d '' body || :
 printf 'transport-v1\tinvoked\n'
-bot_tmux_send "$2" "=$3" "$body" >&2
+bot_tmux_send "$2" "=$3:" "$body" >&2
 '''
 
 

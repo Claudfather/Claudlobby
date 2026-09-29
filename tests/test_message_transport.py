@@ -2,9 +2,12 @@
 
 from dataclasses import replace
 import io
+from pathlib import Path
 import shlex
+import shutil
 import signal
 import subprocess
+from tempfile import TemporaryDirectory
 
 import pytest
 
@@ -71,8 +74,42 @@ def test_private_bash_wrapper_passes_hostile_text_as_data_once(destination, tmp_
     result = transport.send(replace(source_package(), native=native), destination,
                             message_id=MSG, body=body, timeout=5)
     assert result.status == "submitted"
-    assert captured.read_bytes().split(b"\0") == [destination.socket.encode(), b"=worker", body.encode(), b""]
+    assert captured.read_bytes().split(b"\0") == [destination.socket.encode(), b"=worker:", body.encode(), b""]
     assert not forbidden.exists()
+
+
+def test_real_native_send_uses_exact_session_and_pane_target():
+    tmux = shutil.which("tmux")
+    assert tmux, "native transport requires tmux"
+    # A short, private socket path stays under macOS's Unix-socket path limit.
+    with TemporaryDirectory(prefix="cl-msg-", dir="/tmp") as scratch:
+        root = Path(scratch)
+        sockets = root / "s"
+        home = root / "h"
+        sockets.mkdir()
+        home.mkdir()
+        env = {"PATH": "/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin",
+               "HOME": str(home), "TMUX_TMPDIR": str(sockets), "TMPDIR": str(sockets)}
+        socket = "private-worker"
+        subprocess.run([tmux, "-L", socket, "-f", "/dev/null", "new-session",
+                        "-d", "-s", "worker-extra", "cat"], env=env, check=True)
+        try:
+            subprocess.run([tmux, "-L", socket, "new-session", "-d", "-s", "worker", "cat"],
+                           env=env, check=True)
+            destination = transport.TransportDestination(root, "fleet", socket, "worker", sockets)
+            package = replace(source_package(), native=Path(__file__).resolve().parents[1] / "lib")
+            body = "X" * 1450 + "END_OF_PRIVATE_MESSAGE"
+            result = transport.send(package, destination, message_id=MSG, body=body, timeout=10)
+            assert result.status == "submitted" and result.native_returncode == 0, result
+            assert result.wire_sha256 and result.wire_bytes == len(body)
+            worker = subprocess.run([tmux, "-L", socket, "capture-pane", "-t", "worker",
+                                     "-p", "-S", "-"], env=env, capture_output=True, text=True, check=True)
+            other = subprocess.run([tmux, "-L", socket, "capture-pane", "-t", "worker-extra",
+                                    "-p", "-S", "-"], env=env, capture_output=True, text=True, check=True)
+            assert "XXXX" in worker.stdout and "XXXX" not in other.stdout
+        finally:
+            subprocess.run([tmux, "-L", socket, "kill-server"], env=env,
+                           capture_output=True, timeout=5)
 
 
 @pytest.mark.parametrize(("field", "value"), [("socket", "../foreign"), ("socket", ""),
