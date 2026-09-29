@@ -114,7 +114,7 @@ if TYPE_CHECKING:  # pragma: no cover — typing only
 HOST_JOB = "host job"
 HOST_SERVICE = "host service"
 FLEET_JOB = "fleet job"
-GENERATE = "generate"
+GENERATE = "composition"
 DOOR = "door"
 
 # --- polarities -------------------------------------------------------------
@@ -132,7 +132,7 @@ ENROLL_FLEET = "fleet.yaml"
 #: setup run. What it composes takes effect with no restart (a composed deny
 #: binds on the bot's next tool call), which is why its arm line says to stage
 #: one bot first.
-COMPOSE_BOT = "fleet.yaml bots.<bot> → generate"
+COMPOSE_BOT = "fleet.yaml bots.<bot> → activated composition"
 
 #: Carriers whose scope is a FLEET. A host-wide run (``host doctor``,
 #: ``plane doctor`` without ``--fleet``) has not read these, and saying so is
@@ -143,7 +143,7 @@ FLEET_SCOPED_CARRIERS = frozenset({ENV_FLEET, BOT_CONF, ENROLL_FLEET, COMPOSE_BO
 _ENV_WHERE = {
     ENV_FLEET: "the fleet-tier .env",
     ENV_HOST: "the host or root .env",
-    BOT_CONF: ("fleet.yaml bots.NAME.env: (then generate; the bot reads it at"
+    BOT_CONF: ("fleet.yaml bots.NAME.env: (then config plan and host activate; the bot reads it at"
                " its next start — a .env tier does NOT reach a session)"),
 }
 
@@ -212,11 +212,11 @@ def _carrier_lines(sw: Switch) -> tuple[str, str]:
     if sw.carrier == COMPOSE_BOT:
         return (
             f"bots.<bot>.{sw.config}: true in fleet.yaml for ONE bot first, then"
-            " claudlobby --fleet <fleet> generate --bot <bot> (it binds on that"
+            " config plan, config diff PLAN_ID, and host activate PLAN_ID (it binds on that"
             f" bot's next tool call, no restart); widen to defaults.{sw.config}"
             " once it has run clean",
             f"{sw.config}: false at bots.<bot> or defaults in fleet.yaml, then"
-            " generate (off on the next tool call, no restart)",
+            " config plan and host activate PLAN_ID (off on the next tool call, no restart)",
         )
     if sw.carrier == ENROLL_HOST:
         key = sw.config or f"host.jobs.{sw.job}.enroll"
@@ -229,8 +229,10 @@ def _carrier_lines(sw: Switch) -> tuple[str, str]:
         )
     key = sw.config or f"defaults.jobs.{sw.job}.enroll"
     extra = f" (plus {sw.config_extra})" if sw.config_extra else ""
-    return (f"{key}: true in fleet.yaml{extra}, then generate + lib/setup-fleet",
-            f"{key}: false in fleet.yaml, then generate + lib/setup-fleet")
+    return (f"{key}: true in fleet.yaml{extra}, then config plan, config diff PLAN_ID,"
+            " and host activate PLAN_ID",
+            f"{key}: false in fleet.yaml, then config plan, config diff PLAN_ID,"
+            " and host activate PLAN_ID")
 
 
 #: Every switch the shipped system has. Adding a door with a knob means adding
@@ -377,7 +379,7 @@ SWITCHES: tuple[Switch, ...] = (
         carrier=ENV_FLEET,
         env="PLANE_EMIT_ENABLED",
         plane=True,
-        what="one registry keyframe scan per `generate` — what the fleet IS, "
+        what="one registry keyframe scan per activated configuration — what the fleet IS, "
              "so every metric sample has something to join to",
     ),
     # ---------------- other doors, on --------------------------------------
@@ -427,7 +429,7 @@ SWITCHES: tuple[Switch, ...] = (
         polarity=OPT_IN,
         carrier=ENV_FLEET,
         env="CLAUDLOBBY_MCP_PROBE_ENABLED",
-        why_opt_in="reaches the NETWORK on a compose. A generate must stay "
+        why_opt_in="reaches the NETWORK on a compose. Planning must stay "
                    "offline and fast by default, and a registry outage must "
                    "never be the reason a fleet cannot compose. The offline "
                    "half of the check (is the package pinned?) is unconditional "
@@ -595,11 +597,10 @@ SWITCHES: tuple[Switch, ...] = (
         polarity=OPT_IN,
         carrier=COMPOSE_BOT,
         config="isolation.shared_config",
-        why_opt_in="no deployment gate: a composed deny binds on the bot's next "
-                   "tool call with no restart in between, and an unreviewed "
-                   "generate would carry a default-on rule set onto "
-                   "every bot of every fleet with nobody choosing to — the "
-                   "manifest is the only place one bot can go first",
+        why_opt_in="no restart gate: a composed deny binds on the bot's next "
+                   "tool call after activation, so a fleet-wide default "
+                   "would reach every bot at once — the manifest is where "
+                   "one bot can go first",
         what="compose the Layer 0b deny rules (#1665): other bots' transcripts "
              "and Telegram dirs, the shared history, credential and account "
              "config, every .env tier, and Edit on the install's code and the "

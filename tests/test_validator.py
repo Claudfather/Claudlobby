@@ -1660,7 +1660,7 @@ class TestManagerCheckinUnarmedLeafWarning:
             "defaults: { jobs: { manager-checkin: { enroll: true } } }"
             in matches[0]
         )
-        assert "lib/setup-fleet" in matches[0]
+        assert "host activate PLAN_ID" in matches[0]
 
     def test_leaf_manager_and_armed_stays_silent(self, fleet_dir, monkeypatch):
         fleet, paths = self._load(fleet_dir, monkeypatch)
@@ -2649,7 +2649,7 @@ class TestGoalBindingAndIgnitionNameEachOther:
     ):
         ignition = self._ignition(self._report(fleet_dir, monkeypatch))
         assert ignition.index("co-requisite") < ignition.index("Cheapest to arm:")
-        assert ignition.rstrip().endswith("generate + lib/setup-fleet"), ignition
+        assert ignition.rstrip().endswith("host activate PLAN_ID"), ignition
 
 
 class TestTheValidatorFixtureRefusesDeadWiring:

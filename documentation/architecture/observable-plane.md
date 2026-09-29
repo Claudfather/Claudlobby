@@ -368,7 +368,7 @@ metric-sample retention.
 
 | Switch | Ships | Scope | Carrier | Flip it with |
 |---|---|---|---|---|
-| `manager-checkin` | **off** — model spend — one manager turn per idle beat — and it injects into a live session | fleet job | fleet.yaml | defaults.jobs.manager-checkin.enroll: true in fleet.yaml, then generate + lib/setup-fleet |
+| `manager-checkin` | **off** — model spend — one manager turn per idle beat — and it injects into a live session | fleet job | fleet.yaml | defaults.jobs.manager-checkin.enroll: true in fleet.yaml, then config plan, config diff PLAN_ID, and host activate PLAN_ID |
 | `plane-prune-system-events` | **off** — deletes data — and unlike the sample lane beside it, this one could delete a RECORD rather than a sample, which is why it is an allowlist: a wrongly-pruned type breaks selfstart-snapshot.sh's boot gate, which fails closed on an unreachable receipt read but reads an ABSENT receipt as a certain no-receipt | door | host/root .env | PLANE_PRUNE_SYSTEM_EVENTS_ENABLED=1 in the host or root .env |
 | `plane-daemon` | **on** | host service | system.yaml enroll | host.jobs.plane-daemon.enroll: false in this host's override, ~/.config/claudlobby/system.yaml, then config plan + config diff + host activate (removes the installed unit) |
 | `plane-expire` | **on** | host job | host/root .env | PLANE_EXPIRE_ENABLED=0 in the host or root .env |
@@ -376,7 +376,7 @@ metric-sample retention.
 | `plane-prune` | **on** | host job | host/root .env | PLANE_PRUNE_ENABLED=0 in the host or root .env |
 | `plane-recording` | **on** | door | fleet .env | PLANE_EMIT_DISABLED=1 in the fleet-tier .env — the ruled harness exemption; silences EVERY door at once |
 | `plane-view` | **on** | host service | system.yaml enroll | host.jobs.plane-view.enroll: false in this host's override, ~/.config/claudlobby/system.yaml, then config plan + config diff + host activate (removes the installed unit) |
-| `registry-scan` | **on** | generate | fleet .env | PLANE_EMIT_ENABLED=0 in the fleet-tier .env |
+| `registry-scan` | **on** | composition | fleet .env | PLANE_EMIT_ENABLED=0 in the fleet-tier .env |
 | `task-recheck` | **on** | fleet job | fleet .env | TASK_RECHECK_ENABLED=0 in the fleet-tier .env |
 
 <!-- END GENERATED: switches -->

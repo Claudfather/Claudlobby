@@ -82,7 +82,7 @@ def ignition_doors(fleet: "FleetConfig", paths: "Paths") -> list["Door"]:
         Door(
             "briefing.slots",
             briefing_armed,
-            "bots.<bot>.briefing.slots in fleet.yaml, then generate + lib/setup-fleet",
+            "bots.<bot>.briefing.slots in fleet.yaml, then config plan, config diff PLAN_ID, and host activate PLAN_ID",
         )
     )
 
@@ -94,7 +94,7 @@ def ignition_doors(fleet: "FleetConfig", paths: "Paths") -> list["Door"]:
             boot_brief_armed,
             boot_brief_switch.arm
             if boot_brief_switch is not None
-            else "bots.<bot>.brief.on_start: true in fleet.yaml, then generate",
+            else "bots.<bot>.brief.on_start: true in fleet.yaml, then config plan, config diff PLAN_ID, and host activate PLAN_ID",
         )
     )
 

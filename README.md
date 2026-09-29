@@ -15,9 +15,9 @@ Runs anywhere Claude Code does: Mac mini, Linux box, Raspberry Pi 5.
 
 The early "one directory per bot" pattern duplicated the same persona scaffolding, MCP boilerplate, lifecycle protocol, and guardrail rules across every bot. Adding a 9th bot meant copy-pasting a CLAUDE.md and editing it. Updating a guardrail meant editing 8 files.
 
-claudlobby flips that: every cross-cutting concern (a guardrail, a protocol, an MCP server config, a skill, a persona) lives **once** in `library/`. `fleet.yaml` declares which bot uses which pieces. `claudlobby generate` produces self-contained bot directories under `runtime/bots/<name>/` that Claude Code can run directly.
+claudlobby flips that: every cross-cutting concern (a guardrail, a protocol, an MCP server config, a skill, a persona) lives **once** in `library/`. `fleet.yaml` declares which bot uses which pieces. A configuration plan composes self-contained bot directories under `runtime/bots/<name>/`; host activation applies the reviewed plan and enrolls their native units.
 
-Add a 9th bot? Add 10 lines to `fleet.yaml`. Update a guardrail? Edit one file in `library/guardrails/`. Re-run `claudlobby generate`. Done.
+Add a 9th bot? Add its stanza to `fleet.yaml`. Update a guardrail? Edit its source in `library/guardrails/`. Stage and review a configuration plan, then activate it.
 
 ## Quick start
 
@@ -56,7 +56,7 @@ The result names the sealed release CLI. Edit a copy of its packaged `fleet.yaml
                          ▼
                     fleet.yaml ← which bots, which pieces
                          │
-                         ▼ claudlobby generate
+                         ▼ config plan → host activate
                          │
 ┌────────────────────────────────────────────────────────────┐
 │  runtime/bots/<name>/     ← gitignored, regeneratable       │
@@ -85,14 +85,14 @@ See [`documentation/architecture/overview.md`](documentation/architecture/overvi
 ## CLI
 
 ```
-claudlobby config validate              # check fleet.yaml against library/
-claudlobby generate              # compose runtime/bots/ from fleet.yaml
-claudlobby generate --bot <name> # compose only one bot
-claudlobby host setup            # assemble a sealed cold-host release (wheel, lock, wheelhouse)
-claudlobby --fleet <name> fleet setup  # stage and activate fleet and host jobs
+claudlobby --fleet <name> config validate  # check authored fleet.yaml
+claudlobby host setup                      # assemble a sealed cold-host release
+claudlobby --fleet <name> fleet setup       # copy initial source, stage and activate
+claudlobby config plan --release <ID>      # stage all declared host fleets
+claudlobby config diff <PLAN_ID>           # inspect staged paths and state digests
+claudlobby host activate <PLAN_ID> --install-directory <PATH>  # apply the plan
 claudlobby library list          # show available personas / skills / mcp / etc.
 claudlobby config diff [--bot <name>]  # show current rendered drift without values
-claudlobby config diff <PLAN_ID>       # inspect staged paths and state digests
 claudlobby fleet status             # fleet health dashboard
 claudlobby bot status <name>        # one bot, including native and Plane observations
 claudlobby host doctor                # pre-flight fleet health diagnostic
@@ -129,7 +129,7 @@ See [`documentation/getting-started.md`](documentation/getting-started.md) for t
 Bots can edit themselves at runtime — `runtime/bots/` is gitignored, so an in-session edit to a skill, a CLAUDE.md, or a protocol won't pollute git. Two patterns:
 
 - **Skills** auto-sync because they're symlinks: a bot editing `runtime/bots/X/.claude/skills/foo/SKILL.md` is editing `library/skills/foo/SKILL.md`. The change propagates to every bot using `foo`.
-- **Composed CLAUDE.md** doesn't auto-sync (the next `generate` would overwrite it). Use:
+- **Composed CLAUDE.md** doesn't auto-sync (the next activation would overwrite it). Use:
   - `claudlobby config diff --bot <bot>` — identify drifted rendered files without printing values
   - Review the bot's changes and edit the source in `library/expertise/`, `voices/`, or a guardrail/protocol. Stage and inspect a configuration plan before activation.
 

@@ -2119,7 +2119,8 @@ def _validate_timers(fleet: FleetConfig, report: ValidationReport) -> None:
             "default — no beat runs, and a check-in happens only when the "
             "operator sends /checkin by hand. Arm it with `defaults: { "
             "jobs: { manager-checkin: { enroll: true } } }` in fleet.yaml, "
-            "then `lib/setup-fleet <fleet>`."
+            "then stage with `config plan --release RELEASE_ID`, review with "
+            "`config diff PLAN_ID`, and apply with `host activate PLAN_ID`."
         )
 
 

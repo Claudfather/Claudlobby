@@ -110,7 +110,7 @@ echo "Fleet: $FLEET"
 echo "  ✓ healthy:  ${healthy:-(none)}"
 echo "  ⚠ orphan:   ${orphan:-(none)}"
 echo "  ⚠ missing:  ${missing:-(none)}"
-echo "  ⚠ unsupervised-down: ${unsup_down:-(none)}   ← neither supervised nor running; keepalive cannot revive it (fix: claudlobby generate, then lib/spin-up-bot.sh <bot-dir>)"
+echo "  ⚠ unsupervised-down: ${unsup_down:-(none)}   ← neither supervised nor running; keepalive cannot revive it (for a declared, deliberately stopped bot: claudlobby --fleet $FLEET bot start <bot>; for source changes: config plan, config diff PLAN_ID, host activate PLAN_ID)"
 echo "  🚨 unbound: ${unbound:-(none)}   ← if non-empty, investigate before killing"
 
 # --- Default-job drift --------------------------------------------------------
@@ -143,7 +143,7 @@ if [ -d "$_timers_dir" ]; then
         done
         ;;
     esac
-    echo "  ⚠ job-drift: ${job_drift:-(none)}   ← composed timers not enrolled (fix: lib/setup-fleet $FLEET)"
+    echo "  ⚠ job-drift: ${job_drift:-(none)}   ← composed timers not enrolled (inspect selected activation; stage with config plan, review config diff PLAN_ID, then host activate PLAN_ID)"
 fi
 
 # --- Root-cause diagnostics for missing bots ---------------------------------
@@ -251,7 +251,7 @@ if [ "$ENROLL" = "--enroll" ] && [ -n "${orphan// /}" ]; then
             bot_tmux "$_osock" kill-session -t "$b" 2>/dev/null || true
             "$LIB_DIR/spin-up-bot.sh" "$bot_dir"
         else
-            echo "→ $b SKIPPED (no runtime dir at $bot_dir; run 'claudlobby generate' first)"
+            echo "→ $b SKIPPED (no runtime dir at $bot_dir; stage with config plan, review config diff PLAN_ID, then host activate PLAN_ID)"
         fi
     done
 fi
