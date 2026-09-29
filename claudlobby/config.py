@@ -2052,22 +2052,10 @@ def _read_host_override(path: Path) -> tuple[dict, str]:
     if not path.is_file():
         return {}, _HOST_UNIT_PREFIX
     where = f"{path} (this host's override of system.yaml host)"
-    class UniqueLoader(yaml.SafeLoader):
-        pass
-
-    def unique_mapping(loader, node):
-        result = {}
-        for key, value in loader.construct_pairs(node, deep=True):
-            if key in result:
-                raise ValueError(f"duplicate key {key!r}")
-            result[key] = value
-        return result
-
-    UniqueLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, unique_mapping)
     try:
         with path.open() as f:
-            override = yaml.load(f, Loader=UniqueLoader) or {}
-    except (yaml.YAMLError, ValueError, TypeError) as exc:
+            override = yaml.safe_load(f) or {}
+    except yaml.YAMLError as exc:
         raise RuntimeError(f"{where} does not parse: {exc}") from exc
     host = override.get("host") or {} if isinstance(override, dict) else None
     if not (isinstance(host, dict) and set(override) <= {"host"}

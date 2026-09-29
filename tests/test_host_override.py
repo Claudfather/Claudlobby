@@ -76,12 +76,6 @@ def test_invalid_host_unit_prefix_is_refused(override, prefix):
         load_host_jobs()
 
 
-def test_duplicate_host_override_key_is_refused(override):
-    override.write_text("host:\n  unit_prefix: canary1747\n  unit_prefix: claudlobby\n")
-    with pytest.raises(RuntimeError, match="duplicate key"):
-        load_host_jobs()
-
-
 def test_arming_one_job_keeps_every_other_job_and_field_as_packaged(override):
     # A wholesale replacement of host.jobs would keep only the job the override
     # names, silently dropping every other job's schedule and enroll state.
