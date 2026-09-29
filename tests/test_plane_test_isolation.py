@@ -14,6 +14,7 @@ import threading
 import pytest
 
 from tests.conftest import constructed_env, _scrubbed_env
+from tests.test_plane_events_door import _serving
 
 REPO = Path(__file__).resolve().parents[1]
 SHIM = REPO / "lib" / "plane-emit.sh"
@@ -171,7 +172,7 @@ def test_function(tmp_path, tmp_path_factory):
 
 
 @pytest.mark.parametrize("default_on", [False, True])
-def test_owned_recording_reaches_real_cold_cli(tmp_path, scratch_plane_env, sentinel, monkeypatch, default_on):
+def test_owned_recording_reaches_selected_daemon(tmp_path, scratch_plane_env, sentinel, monkeypatch, default_on):
     monkeypatch.setenv("PLANE_SOCKET", str(sentinel["socket"]))
     monkeypatch.setenv("PLANE_EMIT_CLI", str(sentinel["cli"]))
     root = tmp_path / "recording"
@@ -179,11 +180,13 @@ def test_owned_recording_reaches_real_cold_cli(tmp_path, scratch_plane_env, sent
     stale = tmp_path / "stale-bin"
     stale.mkdir()
     (stale / "claudlobby").symlink_to(sentinel["cli"])
-    env = constructed_env(PATH=f"{stale}:{os.environ['PATH']}", **scratch_plane_env(root, initialize=True))
-    assert shutil.which("claudlobby", path=env["PATH"]) == str(stale / "claudlobby")
-    if default_on:
-        env.pop("PLANE_EMIT_DISABLED")
-    result = _emit(env)
+    with _serving(root, scratch_plane_env) as socket:
+        env = constructed_env(PATH=f"{stale}:{os.environ['PATH']}",
+                              **scratch_plane_env(root, socket=socket))
+        assert shutil.which("claudlobby", path=env["PATH"]) == str(stale / "claudlobby")
+        if default_on:
+            env.pop("PLANE_EMIT_DISABLED")
+        result = _emit(env)
     assert result.returncode == 0, result.stderr
     from claudlobby.plane.db import connect_ro, db_path
     assert db_path(root).is_file(), "explicitly initialized recording database disappeared"
