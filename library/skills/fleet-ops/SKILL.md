@@ -52,6 +52,7 @@ tool_grants:
   - "Bash(claudlobby --json context show)"
   - "Bash(claudlobby --json library list)"
   - "Bash(claudlobby --json config explain)"
+  - "Bash(claudlobby --json config explain *)"
   - "Bash(claudlobby --json brief)"
   - "Bash(claudlobby --json brief *)"
   - "Bash(claudlobby --json task list)"

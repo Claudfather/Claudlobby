@@ -666,6 +666,7 @@ def test_a_fleet_with_no_requires_composes_exactly_the_declared_grants(fleet_dir
         "Bash(claudlobby --json context show)",
         "Bash(claudlobby --json library list)",
         "Bash(claudlobby --json config explain)",
+        "Bash(claudlobby --json config explain *)",
         "Bash(claudlobby --json brief)",
         "Bash(claudlobby --json brief *)",
         "Bash(claudlobby --json task list)",
