@@ -41,9 +41,9 @@ DOORS = ("emit_failure_alert", "emit_fleet_notice", "notify_currency")
 # Scripts that can reach the signal door. Update deliberately, never to go green.
 SCRIPTS_REACHING_DOOR = {
     "disk-monitor", "fleet-memory-check", "host-health-check", "keepalive",
-    "migrate-fleet-to-system", "notify-behind", "orphan-browser-reaper",
+    "notify-behind", "orphan-browser-reaper",
     "reload-fleet", "rolling-restart", "start-bot", "update-claude-code",
-    "update-siblings", "validate-bot-change", "weekly-worker-restart",
+    "update-siblings", "weekly-worker-restart",
     "vault-sync",
     # #1251: pull-root pages a watch regression, a blocked pull, a held host.
     "pull-root",
@@ -78,8 +78,8 @@ LATENT = {"update-siblings", "vault-sync", "pull-root"}
 # Pass a fleet, resolve at step 1, and must stay untouched. Over-reaching into
 # this set is the realistic failure mode of a fix aimed at the other one.
 CORRECT = {
-    "keepalive", "migrate-fleet-to-system", "reload-fleet", "rolling-restart",
-    "start-bot", "weekly-worker-restart", "validate-bot-change",
+    "keepalive", "reload-fleet", "rolling-restart",
+    "start-bot", "weekly-worker-restart",
     # fleet jobs: each takes its fleet positionally and resolves in its own bots dir
     "fleet-pulse", "creds-check", "briefing-trigger",
 }

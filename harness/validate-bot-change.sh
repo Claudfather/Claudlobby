@@ -4081,9 +4081,8 @@ fi
 # something a test gets to do. The isolation is ASSERTED, not assumed: a
 # harness that silently fell back to the real HOME would pass by coincidence.
 #
-# Post-P3: STRANDREC moves to a new `stranded:` bucket and healthy: keeps its
-# single-line shape for the migrate-fleet-to-system.sh consumer (pinned
-# separately and purely in tests/test_migrate_fleet_fileops.sh).
+# Post-P3: STRANDREC moves to a new `stranded:` bucket and healthy: retains
+# its single-line shape for existing reconcile readers.
 # ===========================================================================
 val_scenario "validate #934 S3: reconcile-fleet calls a stranded bot healthy"
 

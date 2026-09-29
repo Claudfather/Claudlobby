@@ -77,6 +77,12 @@ def _remove_dispatch(args):
                    json_output=args.json)
 
 
+def _fleet_move_dispatch(args):
+    return execute(args.public_command,
+                   lambda: import_module(".fleet_move", __package__).dispatch(args),
+                   json_output=args.json)
+
+
 def register_orientation_subparsers(sub):
     for domain, verbs in (("context", ("show",)),
                           ("bot", ("list", "show", "capabilities", "start", "stop", "restart", "handoff", "interrupt", "compact")),
@@ -110,6 +116,11 @@ def register_orientation_subparsers(sub):
             uptime.set_defaults(func=_status_dispatch, public_command="fleet.uptime")
             from ._setup_parsers import register_fleet_setup
             register_fleet_setup(children)
+            move = children.add_parser("move", help="Move an unselected cold fleet into a system container")
+            move.add_argument("--system", required=True, metavar="SYSTEM",
+                              help="Destination local/SYSTEM/FLEET container")
+            move.add_argument("--json", action="store_true", help="One schema-1 result object")
+            move.set_defaults(func=_fleet_move_dispatch, public_command="fleet.move")
             for action in ("start", "stop", "restart", "reconcile", "reload", "pulse"):
                 route = children.add_parser(action, help=f"{action.capitalize()} selected fleet supervision")
                 route.add_argument("--json", action="store_true")

@@ -58,7 +58,7 @@ defined=$(parse_fleet_bots "$FLEET_YAML" | sort -u)
 #    Buckets are space-separated single-line word accumulators — consumers
 #    iterate unquoted (for b in $bucket), never a line-oriented read. Names are
 #    word-safe by construction (fleet.yaml keys); single-line is an external
-#    contract (migrate-fleet-to-system.sh parses the healthy: line, head -1).
+#    contract for existing reconcile readers.
 healthy=""; orphan=""; missing=""; unsup_down=""; unbound=""
 
 while IFS= read -r b; do
