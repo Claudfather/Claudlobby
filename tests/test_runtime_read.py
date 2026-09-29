@@ -26,7 +26,23 @@ def _context(tmp_path):
 
 
 def _args(command, bot=None, lines=10):
-    return SimpleNamespace(public_command=command, bot_id=bot, lines=lines, seed=False)
+    return SimpleNamespace(public_command=command, bot_id=bot, lines=lines, seed=False,
+                           root=None, fleet=None)
+
+
+def test_runtime_scope_uses_frozen_selection_not_authored_overlay(monkeypatch, tmp_path):
+    from claudlobby import operation_context
+    from claudlobby.commands import orientation
+
+    selected = _context(tmp_path)
+    monkeypatch.setattr(operation_context, "resolve_operation_scope",
+                        lambda **kwargs: (selected, None))
+    monkeypatch.setattr(orientation, "_context", lambda _args:
+                        pytest.fail("authored fleet context was consulted"))
+    assert runtime_read._context(_args("bot.logs", "lead")) is selected
+    with pytest.raises(CommandFailure) as missing:
+        runtime_read._context(_args("bot.logs", "authored-only"))
+    assert missing.value.error.code == "not_found"
 
 
 def test_session_reports_selected_native_absence_and_unknown_without_pid_scan(monkeypatch, tmp_path):
@@ -97,6 +113,22 @@ def test_log_source_symlink_refuses_and_lines_are_bounded(monkeypatch, tmp_path)
     with pytest.raises(CommandFailure) as bounded:
         runtime_read.dispatch(_args("bot.logs", "lead"))
     assert bounded.value.error.code == "unavailable"
+
+
+def test_large_line_refuses_without_returning_a_partial_tail(monkeypatch, tmp_path):
+    context = _context(tmp_path)
+    monkeypatch.setattr(runtime_read, "_context", lambda _args: context)
+    monkeypatch.setattr(runtime_read, "_log_release", lambda _context: "selected-release")
+    bot_dir = context.paths.source_dir / "runtime/bots/lead/logs"
+    bot_dir.mkdir(parents=True)
+    log = bot_dir / "startup.log"
+    log.write_text("x" * (2 * 1024 * 1024) + "\n")
+    with pytest.raises(CommandFailure) as refused:
+        runtime_read.dispatch(_args("bot.logs", "lead", lines=1))
+    assert refused.value.error.code == "unavailable"
+    assert "x" * 100 not in str(refused.value.data)
+    log.write_text("x" * (2 * 1024 * 1024) + "\nshort\n")
+    assert runtime_read.dispatch(_args("bot.logs", "lead", lines=1)).data["items"][0]["text"].endswith("short")
 
 
 def test_logs_refuse_a_different_executing_release_before_reading(monkeypatch, tmp_path):

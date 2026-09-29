@@ -105,7 +105,22 @@ for fleet_dir in "${FLEET_DIRS[@]}"; do
             _has_files=1
             if [ -L "$logfile" ]; then _read_failed=1; continue; fi
             _relpath="${logfile#"$CLAUDLOBBY_ROOT"/}"
-            _output=$(tail -n "$LINES" "$logfile" 2>/dev/null) || { _read_failed=1; continue; }
+            # A line can be arbitrarily long. Limit the bytes BEFORE Bash's
+            # command substitution, then refuse a suffix that could begin in
+            # one of the requested lines instead of printing a partial line.
+            _max_bytes=65536
+            case "$(uname -s)" in
+                Darwin) _size=$(stat -f %z "$logfile" 2>/dev/null) ;;
+                *) _size=$(stat -c %s "$logfile" 2>/dev/null) ;;
+            esac || { _read_failed=1; continue; }
+            # The sentinel keeps trailing newlines intact in command substitution.
+            _suffix=$(tail -c "$_max_bytes" "$logfile" 2>/dev/null && printf '\034') || { _read_failed=1; continue; }
+            _suffix="${_suffix%$'\034'}"
+            if [ "$_size" -gt "$_max_bytes" ]; then
+                _breaks=$(printf '%s' "$_suffix" | tr -cd '\n' | wc -c)
+                if [ "$_breaks" -le "$LINES" ]; then _read_failed=1; continue; fi
+            fi
+            _output=$(printf '%s' "$_suffix" | tail -n "$LINES") || { _read_failed=1; continue; }
             [ -z "$_output" ] && continue
 
             if [ -n "$GREP_PATTERN" ]; then

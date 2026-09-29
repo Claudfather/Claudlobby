@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import os
+import selectors
+import signal
 import subprocess
 import time
 
@@ -16,11 +18,27 @@ _EMPTY_LOGS = "tail-fleet: log files contain no lines"
 
 
 def _context(args):
-    from .orientation import _context as resolve
+    from ..activation_state import ActivationError
+    from ..config_plan import PlanError
+    from ..context import BotNotFoundError
+    from ..operation_context import OperationContextError, resolve_operation_scope
+    from ..paths import InvalidPathSelector
+    from ..releases import ReleaseError
 
     if args.seed:
         raise CommandFailure("conflict", "runtime reads require a selected host, not seed configuration")
-    context = resolve(args)
+    try:
+        context, _ = resolve_operation_scope(root=args.root, fleet=args.fleet)
+    except BotNotFoundError as exc:
+        raise CommandFailure("not_found", "generated bot is not declared in the selected fleet") from exc
+    except InvalidPathSelector as exc:
+        raise CommandFailure("invalid_argument", "invalid root or fleet selector") from exc
+    except ReleaseError as exc:
+        raise CommandFailure("release_mismatch", "selected release or executing package differs") from exc
+    except (ActivationError, PlanError, OperationContextError, ValueError) as exc:
+        raise CommandFailure("conflict", "selected fleet configuration or caller origin is incomplete") from exc
+    except OSError as exc:
+        raise CommandFailure("unavailable", "selected fleet configuration cannot be read") from exc
     bot = getattr(args, "bot_id", None)
     if bot is not None and bot not in context.fleet.bots:
         raise CommandFailure("not_found", "bot is not declared in the selected fleet")
@@ -88,13 +106,40 @@ def _tail(context, bot: str, lines: int, timeout: float) -> dict:
                "--bot", bot, "--lines", str(lines)]
     env = {**os.environ, "CLAUDLOBBY_ROOT": str(context.paths.root)}
     try:
-        result = subprocess.run(command, env=env, capture_output=True, text=True,
-                                timeout=timeout, check=False)
-    except (OSError, subprocess.TimeoutExpired, UnicodeError):
+        with subprocess.Popen(command, env=env, stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL, start_new_session=True) as process:
+            output = bytearray()
+            deadline = time.monotonic() + timeout
+            try:
+                with selectors.DefaultSelector() as selector:
+                    selector.register(process.stdout, selectors.EVENT_READ)
+                    while True:
+                        ready = selector.select(max(0, deadline - time.monotonic()))
+                        if not ready:
+                            raise TimeoutError
+                        chunk = os.read(process.stdout.fileno(), min(65536, _MAX_LOG_BYTES + 1 - len(output)))
+                        if not chunk:
+                            break
+                        output.extend(chunk)
+                        if len(output) > _MAX_LOG_BYTES:
+                            raise ValueError("selected log output exceeds bound")
+                process.wait(timeout=max(0, deadline - time.monotonic()))
+            except (OSError, TimeoutError, ValueError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+                return {"bot": bot, "status": "unavailable", "text": None}
+            returncode = process.returncode
+    except (OSError, UnicodeError):
         return {"bot": bot, "status": "unavailable", "text": None}
-    if result.returncode or len(result.stdout.encode("utf-8")) > _MAX_LOG_BYTES:
+    if returncode:
         return {"bot": bot, "status": "unavailable", "text": None}
-    text = result.stdout.rstrip("\n")
+    try:
+        text = output.decode("utf-8").rstrip("\n")
+    except UnicodeError:
+        return {"bot": bot, "status": "unavailable", "text": None}
     status = ("missing" if text == _NO_LOGS else
               "empty" if text == _EMPTY_LOGS else "read")
     return {"bot": bot, "status": status, "text": text if status == "read" else None}
