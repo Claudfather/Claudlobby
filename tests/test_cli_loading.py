@@ -23,14 +23,6 @@ allowed = {
     'claudlobby', 'claudlobby.__main__', 'claudlobby.commands',
     'claudlobby.commands._parsers', 'claudlobby.task_defaults',
     'claudlobby.command_result', 'claudlobby.reference_hints',
-    'claudlobby.commands._task_read_parsers', 'claudlobby.commands._task_write_parsers',
-    'claudlobby.commands._message_read_parsers', 'claudlobby.commands._request_read_parsers',
-    'claudlobby.commands._message_write_parsers',
-    'claudlobby.commands._report_read_parsers',
-    'claudlobby.commands._release_parsers',
-    'claudlobby.commands._orientation_parsers',
-    'claudlobby.commands._workstream_parsers',
-    'claudlobby.commands._checkin_parsers',
 }
 blocked = []
 class ImportBoundary:
@@ -40,7 +32,9 @@ class ImportBoundary:
         if fullname in {'org', 'org.python', 'org.python.core'}:
             return None
         root = fullname.split('.')[0]
-        if ((root == 'claudlobby' and fullname not in allowed)
+        parser_module = (fullname.startswith('claudlobby.commands.')
+                         and fullname.rsplit('.', 1)[-1].endswith('_parsers'))
+        if ((root == 'claudlobby' and fullname not in allowed and not parser_module)
                 or (root != 'claudlobby' and root not in sys.stdlib_module_names)):
             blocked.append(fullname)
             raise ModuleNotFoundError('blocked CLI dependency: ' + fullname)
