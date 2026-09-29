@@ -279,7 +279,8 @@ def _selected_adapter(root: Path, fleet: str, bot: str, adapter):
 
 
 def _observed(root, declarations, adapter, target, installed):
-    inventory = collect_enrollment(root, declarations, adapter=adapter).require_complete()
+    inventory = collect_enrollment(root, declarations, adapter=adapter,
+                                   only_names=frozenset({installed.name})).require_complete()
     matches = [unit for unit in inventory.units if unit.target == target]
     if len(matches) != 1:
         raise BotLifecycleError("bot has no unique native inventory observation")

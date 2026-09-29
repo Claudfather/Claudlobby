@@ -112,6 +112,35 @@ def test_foreign_launchd_jobs_use_bounded_identity_and_ignore_pid_churn(tmp_path
                            runner=runner).require_complete()
 
 
+def test_exact_bot_inventory_ignores_unrelated_timer_activity_but_refuses_target_drift(tmp_path):
+    obs = Observations(tmp_path)
+    obs.manager = "Darwin"
+    bot_name = "com.fixture.worker.plist"
+    timer_name = "com.fixture.keepalive.plist"
+    bot_installed = obs.add(bot_name, scope="bot")
+    obs.add(timer_name, scope="host")
+    timer_source = plistlib.loads((obs.installed / timer_name).read_bytes())
+    obs.launchd[timer_name] = observed_print("gui/501/com.fixture.keepalive", timer_source,
+                                             obs.installed / timer_name, active=False)
+    # The catalog saw an active watchdog; its print saw the tick finish.
+    with pytest.raises(InventoryError, match="launchd list/print activity changed"):
+        obs.collect().require_complete()
+    before = len(obs.calls)
+    exact = frozenset({bot_name})
+    observed = collect_enrollment(obs.root, tuple(obs.declarations), package=obs.package,
+                                  runner=obs.runner, only_names=exact).require_complete()
+    assert len(observed.units) == 1 and observed.units[0].installed[0].path == str(bot_installed)
+    assert not any(function == "svc_inventory_properties" and "keepalive" in " ".join(args)
+                   for function, args in obs.calls[before:])
+
+    bot_source = plistlib.loads(bot_installed.read_bytes())
+    obs.launchd[bot_name] = observed_print("gui/501/com.fixture.worker", bot_source,
+                                           bot_installed, active=False)
+    with pytest.raises(InventoryError, match="launchd list/print activity changed"):
+        collect_enrollment(obs.root, tuple(obs.declarations), package=obs.package,
+                           runner=obs.runner, only_names=exact).require_complete()
+
+
 def test_transient_foreign_names_need_fresh_absence_or_bounded_new_identity(tmp_path):
     obs = Observations(tmp_path)
     obs.manager = "Darwin"

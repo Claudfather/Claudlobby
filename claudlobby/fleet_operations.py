@@ -125,8 +125,11 @@ def reconcile_fleet(*, root: Path, fleet: str | None,
     catalog = adapter.read("svc_inventory_catalog")
     from .supervision_inventory import _catalog
     platform, _, _, _, _ = _catalog(catalog)
-    inventory = collect_enrollment(destination.paths.root,
-                                   current_declarations(plan, platform), adapter=adapter).require_complete()
+    declarations = current_declarations(plan, platform)
+    bot_names = frozenset(declaration.source.name for declaration in declarations
+                          if declaration.scope == "bot" and declaration.fleet == destination.fleet.name)
+    inventory = collect_enrollment(destination.paths.root, declarations, adapter=adapter,
+                                   only_names=bot_names).require_complete()
     completed = []
     for bot in _targets(destination, workers_only=False):
         try:

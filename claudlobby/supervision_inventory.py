@@ -228,11 +228,11 @@ class EnrollmentInventory:
         targets = {unit.target for unit in recovery.units}
         return tuple(unit for unit in self.units if unit.target not in targets and unit.installed)
 
-    def check_files(self) -> None:
+    def check_files(self, *, only_names: frozenset[str] | None = None) -> None:
         """Recheck immediately before parking; file bytes alone are not liveness."""
         _, _, directories, _, _ = _catalog(self.catalog)
         present = {str(path) for directory in directories for path in _directory_files(directory)
-                   if path.name.endswith(_SUFFIXES)}
+                   if path.name.endswith(_SUFFIXES) and (only_names is None or path.name in only_names)}
         if present != {saved.path for saved in self.observed_files}:
             raise InventoryError("installed search-path contents changed")
         for saved in self.observed_files:
@@ -587,7 +587,7 @@ def validate_darwin_unit(adapter, target: str, *, source: bytes, installed_path:
 def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...], *,
                        package: PackageResources | None = None, runner=None,
                        bootstrap_empty: bool = False, legacy_source: bool = False,
-                       adapter=None) -> EnrollmentInventory:
+                       adapter=None, only_names: frozenset[str] | None = None) -> EnrollmentInventory:
     """Observe every installed/loaded candidate, preserving incomplete evidence.
 
     This accepts the current manifest, including intentionally uninstalled units;
@@ -599,11 +599,18 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
     must be empty and the release selector absent. The same full catalog and
     installed-file checks must classify every observation before it is complete.
     Candidate declarations never stand in for a previous installed release.
+    ``only_names`` is for exact selected bot/fleet reads, not activation: it
+    still proves each named unit's source, installed shadows, effective native
+    binding and stability without unrelated host timer activity vetoing it.
     """
     data_root = data_root.resolve(strict=True)
     if (type(bootstrap_empty) is not bool or type(legacy_source) is not bool
             or bootstrap_empty and (declarations or legacy_source)):
         raise InventoryError("bootstrap inventory must have no original declarations")
+    if only_names is not None and (bootstrap_empty or not only_names
+                                  or not all(isinstance(name, str) and _NAME.fullmatch(name)
+                                             for name in only_names)):
+        raise InventoryError("exact inventory requires named declarations")
     if not declarations and not bootstrap_empty:
         raise InventoryError("empty generated manifest is not deletion authority")
     if bootstrap_empty:
@@ -633,13 +640,21 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                     or (service.scope, service.fleet, service.bot, service.environment, service.release_id)
                     != (declaration.scope, declaration.fleet, declaration.bot, declaration.environment, declaration.release_id)):
                 raise InventoryError("timer has no matching declared service binding")
+    if only_names is not None:
+        if not only_names <= expected.keys():
+            raise InventoryError("exact inventory target is absent from generated manifest")
+        expected = {name: declaration for name, declaration in expected.items()
+                    if name in only_names}
     catalog = adapter.read("svc_inventory_catalog")
     manager, domain, directories, names, loaded = _catalog(catalog)
+    if only_names is not None:
+        names &= only_names
+        loaded = {name: state for name, state in loaded.items() if name in only_names}
     issues, foreign, installed, units = [], [], {}, []
     try:
         for directory in dict.fromkeys(directories):
             for path in sorted(_directory_files(directory)):
-                if path.name.endswith(_SUFFIXES):
+                if path.name.endswith(_SUFFIXES) and (only_names is None or path.name in only_names):
                     installed.setdefault(path.name, []).append(FileSnapshot.read(path))
                     names.add(path.name)
     except (OSError, RuntimeError, InventoryError) as exc:
@@ -812,12 +827,14 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
     result = EnrollmentInventory(data_root, manager, catalog, tuple(units), observed_files,
                                  tuple(sorted(foreign)), tuple(issues), bootstrap_empty, legacy_source)
     try:
-        result.check_files()
+        result.check_files(only_names=only_names)
         updated = adapter.read("svc_inventory_catalog")
         if manager == "Darwin":
             next_manager, next_domain, next_directories, next_names, next_loaded = _catalog(updated)
             if (next_manager, next_domain, next_directories) != (manager, domain, directories):
                 raise InventoryError("installed/loaded catalog changed during inventory")
+            if only_names is not None:
+                next_loaded = {name: state for name, state in next_loaded.items() if name in only_names}
             for name in sorted(missing_foreign):
                 if name in next_loaded:
                     issues.append(f"{name}: loaded ownership remained unobservable")
@@ -832,10 +849,22 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                             raise InventoryError("new loaded ownership is unobservable")
                 except (InventoryError, OSError, subprocess.SubprocessError) as exc:
                     issues.append(f"{name}: new loaded ownership is unknown: {exc}")
-        elif updated != catalog:
+        elif only_names is None and updated != catalog:
             raise InventoryError("installed/loaded catalog changed during inventory")
-        if manager == "Darwin" and _darwin_disabled(adapter.read("svc_inventory_disabled", domain)) != disabled:
-            raise InventoryError("launchd disabled overrides changed during inventory")
+        elif only_names is not None:
+            next_manager, next_domain, next_directories, next_names, next_loaded = _catalog(updated)
+            if ((next_manager, next_domain, next_directories) != (manager, domain, directories)
+                    or (next_names & only_names) != names
+                    or {name: state for name, state in next_loaded.items() if name in only_names} != loaded):
+                raise InventoryError("selected installed/loaded catalog changed during inventory")
+        if manager == "Darwin":
+            next_disabled = _darwin_disabled(adapter.read("svc_inventory_disabled", domain))
+            if only_names is not None:
+                labels = {name.removesuffix(".plist") for name in only_names}
+                next_disabled = {name: state for name, state in next_disabled.items() if name in labels}
+                disabled = {name: state for name, state in disabled.items() if name in labels}
+            if next_disabled != disabled:
+                raise InventoryError("launchd disabled overrides changed during inventory")
         if bootstrap_empty:
             _require_no_selection(data_root)
     except (InventoryError, OSError, subprocess.SubprocessError) as exc:
