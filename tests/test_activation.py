@@ -329,6 +329,44 @@ def test_upgrade_binds_applied_selected_plan_as_exact_source(cold, monkeypatch, 
     assert not (root / "state/activations/upgrade").exists()
 
 
+def test_upgrade_refuses_candidate_persistent_disabled_override_before_pause(cold, monkeypatch):
+    root, release, source_plan, host = cold
+    activation.bootstrap_activation(root, "cold", source_plan.plan_id, host.directory, adapter=host)
+    item = next(item for item in source_plan.effects["units"]
+                if Path(item["source"]).name == "claudlobby-plane-daemon.plist")
+    builder = ConfigPlanBuilder(root, release.release_id, release.seal_sha256,
+                                ("example",), effects={"units": [item]})
+    builder.file(Path(item["source"]), source_plan.blob(item["sha256"]), mode=item["mode"])
+    candidate = builder.seal()
+    catalog = (f"manager\tDarwin\ndomain\tgui/{os.getuid()}\ndirectory\t{host.directory}\n"
+               "PID\tStatus\tLabel\n")
+    target = f"gui/{os.getuid()}/claudlobby-plane-daemon"
+    original_call = host.call
+
+    def call(function, *args, timeout=30):
+        if function == "svc_inventory_catalog":
+            return subprocess.CompletedProcess([function], 0, catalog, "")
+        if function == "svc_inventory_disabled":
+            assert args == (f"gui/{os.getuid()}",)
+            return subprocess.CompletedProcess([function], 0,
+                '\n\tdisabled services = {\n\t\t"claudlobby-plane-daemon" => disabled\n\t}\n', "")
+        return original_call(function, *args, timeout=timeout)
+
+    monkeypatch.setattr(host, "call", call)
+    inventory = SimpleNamespace(manager="Darwin", catalog=catalog, units=())
+    inventory.require_complete = lambda: inventory
+    monkeypatch.setattr(activation, "collect_enrollment", lambda *_, **__: inventory)
+    before = state.read_selection(root)
+    calls_before = len(host.calls)
+    with pytest.raises(state.ActivationError, match="persistent disabled override") as failure:
+        activation.upgrade_activation(root, "upgrade", candidate.plan_id, host.directory, adapter=host)
+    assert target in str(failure.value)
+    assert "explicitly enable" in str(failure.value)
+    assert state.read_selection(root) == before
+    assert not (root / "state/activations/upgrade").exists()
+    assert not any(name == "svc_activation_pause" for name, _ in host.calls[calls_before:])
+
+
 def test_upgrade_handoff_roster_uses_frozen_selected_bots_after_authoring_change(cold):
     root, _, selected_plan, host = cold
     manifest = root / "fleet.yaml"
