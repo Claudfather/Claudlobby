@@ -40,16 +40,20 @@ def dispatch(args) -> CommandOutput:
     lines = (*report.errors, *warnings)
     if report.warnings:
         lines += (warning_summary(report),)
+    findings = "\n".join(lines)
     gate = _warn_baseline_gate(report, Path(baseline), write=args.write) if baseline else 0
     data["baseline_written"] = bool(baseline and args.write and gate == 0)
     if args.strict and report.has_issues:
-        raise CommandFailure("conflict", "strict validation found errors or warnings", data=data)
+        raise CommandFailure("conflict", "strict validation found errors or warnings",
+                             data=data, hint=findings)
     if report.has_errors:
-        raise CommandFailure("conflict", "fleet configuration has validation errors", data=data)
+        raise CommandFailure("conflict", "fleet configuration has validation errors",
+                             data=data, hint=findings)
     if gate == 2:
         raise CommandFailure("unavailable", "warning baseline could not be read or written", data=data)
     if gate == 1:
-        raise CommandFailure("conflict", "warning baseline has new or grown categories", data=data)
+        raise CommandFailure("conflict", "warning baseline has new or grown categories",
+                             data=data, hint=findings)
     if not report.has_issues:
         lines += (f"fleet.yaml OK ({len(context.fleet.bots)} bots, {len(context.fleet.teams)} teams)",)
     return CommandOutput(data, lines=lines)
