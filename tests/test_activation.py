@@ -264,7 +264,8 @@ def test_cold_bootstrap_uses_real_sql_config_and_serial_starts_before_timers(col
     assert host.starts == before
 
 
-def test_upgrade_binds_applied_selected_plan_as_exact_source(cold, monkeypatch):
+@pytest.mark.parametrize("same_release", [False, True])
+def test_upgrade_binds_applied_selected_plan_as_exact_source(cold, monkeypatch, same_release):
     root, source, source_plan, host = cold
     activation.bootstrap_activation(root, "cold", source_plan.plan_id, host.directory, adapter=host)
     # An active plan's original before-state is stale by construction. Its
@@ -282,16 +283,20 @@ def test_upgrade_binds_applied_selected_plan_as_exact_source(cold, monkeypatch):
                                    f"{key}={shlex.quote(value)}" for key, value in environment.items())),))
         assert activation._original_bot_tmpdir(unit) == "/tmp"
 
-    inputs = replace(source.inputs, source_revision="c" * 40)
-    directory = release_path(root, inputs.release_id)
-    shutil.copytree(source.directory, directory)
-    (directory / MANIFEST).unlink()
-    (directory / source.paths.cli).write_text(f"#!{directory / source.paths.interpreter}\n")
-    artifact = directory / source.paths.artifact
-    metadata = json.loads(artifact.read_text())
-    metadata["source_revision"] = inputs.source_revision
-    artifact.write_text(json.dumps(metadata))
-    candidate = seal_release(root, inputs, source.paths)
+    if same_release:
+        candidate = source
+        directory = source.directory
+    else:
+        inputs = replace(source.inputs, source_revision="c" * 40)
+        directory = release_path(root, inputs.release_id)
+        shutil.copytree(source.directory, directory)
+        (directory / MANIFEST).unlink()
+        (directory / source.paths.cli).write_text(f"#!{directory / source.paths.interpreter}\n")
+        artifact = directory / source.paths.artifact
+        metadata = json.loads(artifact.read_text())
+        metadata["source_revision"] = inputs.source_revision
+        artifact.write_text(json.dumps(metadata))
+        candidate = seal_release(root, inputs, source.paths)
     plan = ConfigPlanBuilder(root, candidate.release_id, candidate.seal_sha256,
                              ("example",), effects={}).seal()
     package = SimpleNamespace(native=candidate.native_path, artifact_id=candidate.inputs.artifact_id)

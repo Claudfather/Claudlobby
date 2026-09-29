@@ -426,8 +426,9 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
             if (previous.status != "active"
                     or previous.body["intent"]["release_id"] != selected["release_id"]
                     or previous.body["intent"]["plan_id"] != selected["plan_id"]
-                    or selected["release_id"] == release.release_id):
-                raise ActivationError("selected activation is incomplete or is already the candidate release")
+                    or (selected["release_id"] == release.release_id
+                        and selected["plan_id"] == plan.plan_id)):
+                raise ActivationError("selected activation is incomplete or candidate plan is already active")
             source = read_release(root, selected["release_id"])
             source_plan = read_plan(root, selected["plan_id"])
             if (source_plan.release_id != source.release_id
