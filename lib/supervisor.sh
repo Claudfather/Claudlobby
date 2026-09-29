@@ -555,8 +555,17 @@ svc_bot_disenroll_exact() {
         Darwin) [ "${target##*/}.plist" = "${source##*/}" ] || return 3 ;;
         *) return 3 ;;
     esac
-    svc_activation_assert_external "$installed" "$target" || return 3
     state=$(svc_inventory_state "$installed" "$target") || return 3
+    # A launchd job can finish its start-bot wrapper while its private tmux
+    # server remains live. With no job PID, caller ancestry cannot identify a
+    # detached manager as external. Bootout of this exact inactive job has no
+    # running launchd process to stop; public bot-stop admission separately
+    # refuses the caller's own bot before reaching this adapter. Keep ancestry
+    # proof for every active target and for Linux.
+    case "$_OS:$state" in
+        Darwin:'unchanged loaded inactive'|Darwin:'unchanged unloaded inactive') ;;
+        *) svc_activation_assert_external "$installed" "$target" || return 3 ;;
+    esac
     case "$_OS:$state" in
         Linux:*' loaded '*)
             link="${installed%/*}/default.target.wants/${installed##*/}"
@@ -564,15 +573,19 @@ svc_bot_disenroll_exact() {
                 [ -L "$link" ] || return 3
                 case "$(readlink "$link")" in "$installed"|"../${installed##*/}") ;; *) return 3 ;; esac
             fi
+            printf 'effect-attempted\n'
             systemctl --user disable --now "$target" || return $?
             rm -f "$installed" "$link" || return $?
             systemctl --user daemon-reload || return $?
             ;;
         Darwin:'unchanged loaded '*)
+            printf 'effect-attempted\n'
             launchctl bootout "$target" || return $?
             rm -f "$installed" || return $?
             ;;
-        Darwin:'unchanged unloaded inactive') rm -f "$installed" || return $? ;;
+        Darwin:'unchanged unloaded inactive')
+            printf 'effect-attempted\n'
+            rm -f "$installed" || return $? ;;
         *) return 3 ;;
     esac
     if [ -S "$tmpdir/tmux-$(id -u)/$socket" ]; then

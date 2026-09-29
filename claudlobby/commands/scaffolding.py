@@ -221,15 +221,20 @@ def cmd_new_bot(args) -> int:
     paths.fleet_yaml.write_text(new_text)
     log.info("  ✓ Updated %s", paths.fleet_yaml)
 
+    # The next-step commands need the declared fleet name even when the caller
+    # chooses to generate later.
+    from ._helpers import _load_fleet_or_exit
+
+    fleet, _md = _load_fleet_or_exit(paths)
+
     # Auto-generate — gate on validate() like `claudlobby generate` does;
     # composing past validation errors writes bad config (e.g. an invalid
     # project tier) verbatim into bot.conf.
     if args.auto_generate:
         log.info("=== Running `claudlobby generate --bot %s` ===", inp.name)
         from ..composer import compose_bot
-        from ._helpers import _load_fleet_or_exit, _validation_gate
+        from ._helpers import _validation_gate
 
-        fleet, _md = _load_fleet_or_exit(paths)
         if not _validation_gate(
             fleet, paths, context=f"run `claudlobby generate --bot {inp.name}`"
         ):

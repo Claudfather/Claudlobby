@@ -773,24 +773,34 @@ def test_fleet_with_its_own_vault_never_tombstones_a_siblings(tmp_path, *, scrat
 
 
 def test_lost_host_uid_skips_the_diff_loudly_never_a_false_clean(
-    tmp_path, caplog
-, *, scratch_plane_env):
+    tmp_path, caplog, *, scratch_plane_env):
     """r2, probed: the 'read path' MINTED a fresh uid on absence, the
     filter dropped every row, and the scan reported a CLEAN zero. Now: the
-    uid file is READ in the diff path (the later emit legitimately re-mints
-    for new envelopes — that is the write path's job); absent-at-diff-time
-    -> the diff is skipped with a WARNING and the scan discloses
-    complete=False, never a silent tombstoned=0 that reads as clean."""
+    uid file is READ in the diff path. A new emitter host UID cannot silently
+    re-parent the existing fleet: the scan warns about the skipped diff, then
+    refuses at the identity binding, leaving the old row intact."""
     import logging
 
     root = _fleet_root(tmp_path)
     _scan(root, scratch_plane_env=scratch_plane_env)
+    conn = _db(root)
+    before = conn.execute(
+        "SELECT uid, parent_uid FROM identity_registry WHERE kind='fleet' AND alias='test-fleet'"
+    ).fetchone()
+    conn.close()
     (root / "state" / "host-uid").unlink()
     root2 = _fleet_root(tmp_path, workers="[]", worker_stanza=False)
     with caplog.at_level(logging.WARNING, logger="claudlobby.plane.registry"):
-        s = _scan(root2, scratch_plane_env=scratch_plane_env)
-    assert s["tombstoned"] == 0
-    assert s["complete"] is False          # cannot-diff is disclosed, not clean
+        with pytest.raises(ValueError, match="conflicting parent for fleet identity"):
+            _scan(root2, scratch_plane_env=scratch_plane_env)
+    conn = _db(root)
+    after = conn.execute(
+        "SELECT uid, parent_uid FROM identity_registry WHERE kind='fleet' AND alias='test-fleet'"
+    ).fetchone()
+    tombstones = conn.execute("SELECT COUNT(*) FROM registry_snapshots WHERE tombstone=1").fetchone()[0]
+    conn.close()
+    assert tuple(after) == tuple(before)  # the old host still owns this fleet
+    assert tombstones == 0
     assert any("host-uid" in r.message for r in caplog.records)
 
 

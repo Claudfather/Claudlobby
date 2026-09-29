@@ -54,7 +54,7 @@ def preflight(args):
     from ..context import load_context, resolve_paths
     from ..releases import read_release
     from ..supervision_inventory import Adapter, _catalog
-    from ..validator import validate
+    from ._helpers import _validation_gate
 
     if args.root is None or getattr(args, "seed", False):
         raise CommandFailure("invalid_argument", "bot move requires an explicit active host --root")
@@ -106,7 +106,7 @@ def preflight(args):
            if context.fleet.name not in {source.fleet.name, target.fleet.name}):
         raise CommandFailure("conflict", "bot is declared in another authored fleet")
     for context in candidates:
-        if validate(context.fleet, context.paths).has_errors:
+        if not _validation_gate(context.fleet, context.paths, context="retry bot move"):
             raise CommandFailure("conflict", "authored fleet validation failed")
 
     source_dir = source.paths.bot_runtime(args.bot)

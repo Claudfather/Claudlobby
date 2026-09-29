@@ -363,6 +363,10 @@ def _expected_default_fleet_ops_allow() -> list[str]:
         "Bash(claudlobby --json workstream unblock *)",
         "Bash(claudlobby --json workstream close *)",
         "Bash(claudlobby --json workstream prune *)",
+        "Bash(claudlobby --json fleet reload)",
+        "Bash(claudlobby --json fleet start --workers)",
+        "Bash(claudlobby --json fleet stop --workers)",
+        "Bash(claudlobby --json fleet restart --workers)",
         "Bash(claudlobby --json bot restart solo)",
     ]
 

@@ -182,7 +182,12 @@ val_initialize_plane "$ROOT"
 cp -R "$LIB_DIR" "$ROOT/lib"
 ln -s "$VAL_REPO/claudlobby" "$ROOT/claudlobby"
 LIB_DIR="$ROOT/lib"
-printf 'native_admission() { return 0; }\n' > "$LIB_DIR/runtime-admission.sh"
+# The private admission collaborator still supplies the selected interpreter
+# that start-bot's boot timer uses after admission. The real adapter binds the
+# same variable after proving its sealed CLI; this source fixture already
+# preflighted PLANE_EMIT_CLI and deliberately bypasses only that release gate.
+printf '%s\n' 'native_admission() { _NATIVE_ADMISSION_PYTHON="${PLANE_EMIT_CLI%/*}/python"; [ -x "$_NATIVE_ADMISSION_PYTHON" ]; }' \
+    > "$LIB_DIR/runtime-admission.sh"
 export CLAUDLOBBY_NATIVE_DIR="$LIB_DIR"
 
 # Every plane read below goes through the shipped stdlib doors, and a read that

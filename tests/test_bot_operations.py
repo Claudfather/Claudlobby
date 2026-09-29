@@ -22,6 +22,35 @@ from tests.test_activation import cold, tmp_path  # noqa: F401 — real short-ro
 from tests.test_releases import installed  # noqa: F401 — cold fixture dependency
 
 
+@pytest.mark.parametrize("stdout, attempted", [("", False), ("effect-attempted\n", True)])
+def test_disenroll_native_phase_is_reported_honestly(stdout, attempted, tmp_path, monkeypatch):
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.commands import bot_runtime
+
+    class Native:
+        def call(self, function, *args, timeout=30):
+            assert function == "svc_bot_disenroll_exact"
+            return subprocess.CompletedProcess([function], 3, stdout,
+                                               "activation supervision unknown: caller ancestry")
+
+    with pytest.raises(bot_operations.BotLifecycleError) as error:
+        bot_operations._native(Native(), "svc_bot_disenroll_exact", "source", "installed")
+    assert error.value.effect_attempted is attempted
+    assert ("after beginning" if attempted else "before a native effect") in str(error.value)
+
+    monkeypatch.setattr(context, "resolve_paths", lambda **kwargs: SimpleNamespace(root=tmp_path))
+    monkeypatch.setattr(bot_operations, "set_bot_running", lambda **kwargs: (_ for _ in ()).throw(
+        bot_operations.BotLifecycleError(str(error.value), effect_attempted=attempted,
+                                         unavailable=True, release_id="selected", target="gui/501/worker")))
+    args = SimpleNamespace(seed=False, bot_id="worker", public_command="bot.stop",
+                           ceiling=None, fleet="example", root=tmp_path)
+    with pytest.raises(CommandFailure) as public:
+        bot_runtime.dispatch(args)
+    assert public.value.data["native_outcome"] == ("unknown" if attempted else "unattempted")
+    if not attempted:
+        assert "before a native effect" in public.value.error.message
+
+
 def test_selected_bot_placement_survives_removal_of_installed_unit(cold):  # noqa: F811
     root, _, plan, host = cold
     activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
