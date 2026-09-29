@@ -93,7 +93,7 @@ def preflight(args):
     if args.bot in authored_source.bots or authored_source.manager == args.bot:
         raise CommandFailure("conflict", "remove bot from source fleet.yaml and declare a replacement manager first")
 
-    external = tuple(item["fleet"] for item in plan.effects.get("fleet_sources", {}).values())
+    external = tuple(plan.effects.get("fleet_manifests", {}).values())
     candidates = [load_context(paths) for paths in declared_paths(root, package, external=external)]
     targets = [context for context in candidates if context.fleet.name == args.to]
     if len(targets) != 1:

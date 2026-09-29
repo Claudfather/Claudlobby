@@ -147,3 +147,52 @@ def test_preview_discloses_host_scope_without_effect(tmp_path, monkeypatch):
     assert result.data["state"] == "preview"
     assert result.data["host_restart_scope"] == "all_declared_fleets"
     assert result.data["changed"] is False
+
+
+def test_preview_preflight_reads_frozen_manifest_paths_not_source_records(tmp_path, monkeypatch):
+    from claudlobby import activation_enrollment, activation_state, active_config
+    from claudlobby import config_plan, context, releases, supervision_inventory
+    from claudlobby.commands import _helpers
+    from claudlobby.commands import host
+    from claudlobby.paths import Paths
+
+    root = tmp_path / "host"
+    source_dir = root / "local/source"
+    target_dir = tmp_path / "external/target"
+    source_dir.mkdir(parents=True)
+    target_dir.mkdir(parents=True)
+    (source_dir / "fleet.yaml").write_text("name: source\n")
+    (target_dir / "fleet.yaml").write_text("name: target\n")
+    package = SimpleNamespace(native=tmp_path / "sealed-native", artifact_id="artifact")
+    source_paths = Paths(root, package=package, fleet_dir=source_dir)
+    target_paths = Paths(root, package=package, fleet_dir=target_dir)
+    bot_dir = source_paths.bot_runtime("worker")
+    bot_dir.mkdir(parents=True)
+    (bot_dir / "bot.conf").write_text("BOT_ID=worker\n")
+    bot = SimpleNamespace(bot_id="worker")
+    source = SimpleNamespace(paths=source_paths, fleet=SimpleNamespace(name="source", bots={"worker": bot}))
+    authored_source = SimpleNamespace(paths=source_paths, fleet=SimpleNamespace(name="source", manager="lead", bots={}))
+    target = SimpleNamespace(paths=target_paths, fleet=SimpleNamespace(name="target", bots={"worker": bot}))
+    effects = {"fleet_manifests": {"source": str(source_paths.fleet_yaml), "target": str(target_paths.fleet_yaml)},
+               "fleet_sources": {"source": {"fleet": {"path": str(source_paths.fleet_yaml), "sha256": "source-hash"}},
+                                 "target": {"fleet": {"path": str(target_paths.fleet_yaml), "sha256": "target-hash"}}}}
+    plan = SimpleNamespace(fleets=("source",), release_id="selected", release_seal="seal", effects=effects)
+    release = SimpleNamespace(release_id="selected", seal_sha256="seal", native_path=package.native,
+                              inputs=SimpleNamespace(artifact_id="artifact"))
+    monkeypatch.setattr(context, "resolve_paths", lambda **_: SimpleNamespace(root=root, package=package))
+    monkeypatch.setattr(activation_state, "read_selection", lambda *_: {"plan_id": "plan", "release_id": "selected"})
+    monkeypatch.setattr(config_plan, "read_plan", lambda *_: plan)
+    monkeypatch.setattr(releases, "read_release", lambda *_: release)
+    monkeypatch.setattr(active_config, "context_from_plan", lambda *_args, **_kwargs: source)
+    monkeypatch.setattr(context, "load_context", lambda paths: authored_source if paths.fleet_yaml == source_paths.fleet_yaml else target)
+    monkeypatch.setattr(_helpers, "_validation_gate", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(host, "_operator_shell", lambda *_: None)
+    monkeypatch.setattr(supervision_inventory, "Adapter", lambda *_: SimpleNamespace(read=lambda *_: ""))
+    monkeypatch.setattr(supervision_inventory, "_catalog", lambda *_: ("Linux", "", (), set(), {}))
+    monkeypatch.setattr(activation_enrollment, "selected_bot_entry", lambda *_: {"installed": str(root / "units/worker.service")})
+    args = Namespace(root=str(root), bot="worker", to="target", from_fleet="source",
+                     apply=False, cleanup_source=False, force=False)
+    preview = move_bot.dispatch(args)
+    assert preview.data["state"] == "preview"
+    assert preview.data["target_fleet"] == "target"
+    assert preview.data["changed"] is False
