@@ -479,6 +479,9 @@ class TestSessionEndContention:
         _git(seed, "config", "user.name", "fleet")
         (seed / "_shared").mkdir()
         (seed / "_shared" / "CONVENTIONS.md").write_text("# conv\n")
+        # The vault identity file: hooks find this vault by walk-up from each
+        # bot dir, and walk-up binds only a directory carrying it (Claudron #183).
+        (seed / ".claudron-vault").write_text("claudron: 2\nname: seed\nhub: _shared\n")
         # Gitignore .claudron/ exactly like a real vault (claudron.vault
         # _GITIGNORE_CONTENT) — otherwise the hooks' `git add -A` commits each
         # clone's own .claudron/hooks.log, and those divergent per-clone logs

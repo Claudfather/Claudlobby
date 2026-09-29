@@ -12,6 +12,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 **What the prefix does, checked against `lib/dispatch.sh` rather than inferred from its name:** a message that begins with `/`, such as a file path, arrives as text instead of running as a slash command, which is why `dispatch.sh` leaves the prefix off a message that starts with a command word and has no `!`: that one has to run. The code still calls it a history-expansion guard; it does not state this effect as a purpose, so the new text states it as an effect. `lib/start-bot.sh` puts the same prefix in front of the startup prompt, and the new text says so. `set +H` is bash's switch for history expansion, but nothing on this path expands history: `dispatch.sh` is a non-interactive script, where expansion is already off; the send types the bytes literally (`tmux send-keys -l`); and a Claude Code prompt is not a shell. So the dispatch protocol's "disabling bash history expansion, which silently mangles `!` in prompts" described nothing that happens here, and it now says what the prefix does. The history-expansion lesson (`library/lessons/tmux-dispatch-shell-expansion.md`), which most bots compose, gains one clause: it concerns the shell you type a send into, and it points at the new text for the receiving end, so the two no longer contradict each other.
 
+### Changed — `[vault]` pin bumped to Claudron v0.5.2; vaults need the `.claudron-vault` identity file (Claudron #183, #190)
+
+The `[vault]` extra now pins `claudron @ …@v0.5.2`. It carries three changes.
+
+**Walk-up detection is strict (breaking, Claudron #183).** Claudron now finds a vault by walk-up only when the directory carries the committed `.claudron-vault` identity file. A bare `_shared/` no longer binds.
+- A bot whose `claudron_vault_path` is set is addressed explicitly, so it keeps working even before the file exists.
+- A bot that relies on walk-up from inside the vault sees no vault until the file is there. Its hooks fail open.
+
+**Upgrade order on a host:**
+1. Install v0.5.2.
+2. Run `claudron doctor --vault <vault> --fix` immediately. It creates `.claudron-vault` and appends the F9 `.gitignore` rules (#182) in one commit.
+3. Push, so every other clone picks the file up on its next pull.
+
+**`claudron doctor`** (Claudron #190) diagnoses a vault and applies versioned migrations.
+
+Changes on the Claudlobby side:
+- `paths.detect_vault()`'s no-Claudron fallback follows the same rule: the identity file on walk-up, plus the addressed path itself when it has a hub.
+- The validator message now names the identity file.
+- The freshbox and boot-sampler scratch vaults, and the N-bot contention test's seed vault, now carry `.claudron-vault`.
+
 ### Changed — `[vault]` pin bumped to Claudron v0.5.1; `vault-sync` never leaves a vault mid-rebase (Claudron #193)
 
 The `[vault]` extra now pins `claudron @ …@v0.5.1`. 0.5.1 makes worktree integration
