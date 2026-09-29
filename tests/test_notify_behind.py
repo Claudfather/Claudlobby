@@ -160,7 +160,7 @@ class TestNotifyBehind:
 
     def test_in_sync_is_silent(self, tmp_path, *, scratch_plane_env):
         h = Harness(tmp_path, behind=0, scratch_plane_env=scratch_plane_env)
-        r = h.run()
+        r = h.run(serve=True)
         assert r.returncode == 0, r.stderr
         assert h.captured() == []
         assert "source_behind" not in h.events()

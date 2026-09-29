@@ -33,6 +33,15 @@ def _require_prepared_resources():
         sources = manifest["resource_sources"]
         if not isinstance(sources, list) or not sources:
             raise ValueError("missing source inventory")
+        indexed = subprocess.check_output(
+            ["git", "ls-files", "-z", "--", "lib", "library", "templates", "voices",
+             "fleet.yaml.seed", "fleet.yaml.example", "projects.yaml.seed",
+             ".env.seed.example", "missions/fleet.md.seed"],
+            cwd=_TEST_TREE, timeout=10).decode().split("\0")
+        indexed = {name for name in indexed if name and name not in {
+            "lib/CLAUDE.md", "lib/personal/finance-presync.sh"}}
+        if indexed != set(sources):
+            raise ValueError("prepared resource inventory differs from the source index")
         for name in sources:
             source = _TEST_TREE / name
             target = (package / "_native" / name.removeprefix("lib/") if name.startswith("lib/")
@@ -44,7 +53,7 @@ def _require_prepared_resources():
                     or hashlib.sha256(source.read_bytes()).digest() != hashlib.sha256(target.read_bytes()).digest()
                     or source.stat().st_mode & 0o111 != target.stat().st_mode & 0o111):
                 raise ValueError(f"stale prepared resource: {name}")
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as exc:
         raise pytest.UsageError(f"{guidance}: {exc}") from exc
 
 
@@ -147,8 +156,9 @@ TG_STUB = (
 
 def read_fleet_events(root, *, allow_absent=False):
     """Every fleet event on the plane under <root>, rendered as the legacy
-    JSONL rows (compact, one per line, oldest first) — or '' when the plane
-    was never created. F18 closure R1: the state/events/ file this once
+    JSONL rows (compact, one per line, oldest first). An absent or staged-only
+    plane is a test setup error unless the caller explicitly allows it.
+    F18 closure R1: the state/events/ file this once
     concatenated is gone; the rows a door lands (bot-, fleet- or
     host-anchored) come back in the exact row shape the file had, so an
     assertion like `'"type":"disk_high"' in read_fleet_events(root)` keeps
