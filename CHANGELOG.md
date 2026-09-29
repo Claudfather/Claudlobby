@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — `/setup` Step 0 proves this tree is installed, not only that its dependencies import (#2002)
+
+**The old check could pass with nothing installed.** It ran `python3 -c 'import claudlobby.composer'` from the repo root. Any Python imports the repo's own `claudlobby/` from the current directory, so that proved only that PyYAML and Jinja2 were importable. On the Linux cold run for #2002, a fresh export with no venv printed `INSTALLED`: the host had both packages in its user site, and its `claudlobby` command belonged to a different checkout. The cold session noticed on its own and checked where the module came from, and the skill now does the same.
+
+- **How the check works now.** It asks the repo venv's Python, from `/`, where `claudlobby.composer` comes from, and passes only when the answer is this tree's `claudlobby/composer.py`.
+- **How it is tested.** `tests/test_cold_start_contract.py` runs the skill's own command against three fixture trees:
+  - no venv, while the current directory's import succeeds: `MISSING`;
+  - a venv that resolves to this tree: `INSTALLED`;
+  - a venv that resolves to another tree: `MISSING`.
+  A variant that runs from the repo root instead of `/` fails the third.
+- **The basic-group example ID** at `SKILL.md:158` is now the obviously fake `-1234567890`, per the PII rule. A new test holds every ID-shaped number in README, getting-started and the setup skill to an obviously fake form: an ascending run, or a single repeated digit.
+
 ### Added — `claudlobby doctor` asks `claudron doctor` about each wired vault, and never applies `--fix` (Claudron #190, part C)
 
 Until now nothing in fleet health said a vault had fallen behind its engine. After the 0.5.2 upgrade, walk-up stopped finding a vault that lacked its identity file, and every hook that found the vault that way failed open without a word (Claudron #183). The Claudron section of `claudlobby doctor` now runs `claudron doctor --json --vault <vault>` for each wired vault this host holds, and adds:

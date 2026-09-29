@@ -14,7 +14,7 @@ Before each step, check filesystem state. Skip completed steps:
 
 | Check | Skip to |
 |-------|---------|
-| `claudlobby.composer` imports | Step 1 |
+| Step 0's check prints `INSTALLED` | Step 1 |
 | All host deps present | Step 2 |
 | `.env` exists with `TELEGRAM_TOKEN_CLAUDFATHER` filled in | Step 4 |
 | `fleet.yaml` exists | Step 4 (validate + generate) |
@@ -30,13 +30,17 @@ missing package makes the whole flow fail in confusing ways — and the user may
 well be here *because* the documented install did not work for them.
 
 ```bash
-python3 -c 'import claudlobby.composer' 2>/dev/null && echo INSTALLED || echo MISSING
+( R="$(pwd -P)"; cd / && [ "$("$R/.venv/bin/python" -c 'import claudlobby.composer as c, os; print(os.path.realpath(c.__file__))' 2>/dev/null)" = "$R/claudlobby/composer.py" ] ) && echo INSTALLED || echo MISSING
 ```
 
-Import `claudlobby.composer`, **not** `claudlobby`. The bare package is a plain
-directory at the repo root, so it imports from cwd even when nothing is
-installed — a false positive that reports success on a host with no
-dependencies at all.
+It asks the repo venv's Python, from outside the tree, where `claudlobby.composer`
+comes from, and passes only when the answer is **this** tree. Run from the repo
+root instead, any Python imports the repo's own `claudlobby/` from the current
+directory, so an import there proves only that its dependencies (PyYAML, Jinja2)
+are importable. A host that has them anywhere, from distro packages or a user-site
+install, then reads as installed with nothing installed. Measured on a cold run
+(#2002): a fresh export with no venv printed `INSTALLED` under the old check, and
+that host's `claudlobby` command belonged to a different checkout.
 
 If MISSING, create the repo-local venv and install into it:
 
@@ -52,8 +56,9 @@ only, so bare `pip` is not a command. `lib/setup-system` does exactly this, and
 `claudlobby_cli` prefers `$CLAUDLOBBY_ROOT/.venv`, which is what lets supervised
 launchd/systemd runs resolve the CLI without an activated shell.
 
-Then re-check the import before continuing. If it still fails, stop and show the
-user the real error — do not proceed into Step 1 on a broken install.
+Then re-run the check above before continuing. If it still prints `MISSING`, stop
+and show the user the real error, which `./.venv/bin/python -c 'import claudlobby.composer'`
+prints — do not proceed into Step 1 on a broken install.
 
 **For the rest of this skill:** if the venv exists but is not activated, invoke
 the CLI as `./.venv/bin/claudlobby ...` rather than bare `claudlobby`.
@@ -155,7 +160,7 @@ Tell the user:
 3. Add @RawDataBot to the group — it will print a message containing the chat ID
 4. The chat ID is **negative**. Two valid shapes, both fine:
    - **supergroup / channel** — `-100` prefix, e.g. `-1001234567890`
-   - **basic group** — plain negative, e.g. `-5556622542`
+   - **basic group** — plain negative, e.g. `-1234567890`
 5. You can remove @RawDataBot after getting the ID
 
 Validate: a negative integer. **Do not require the `-100` prefix** — that rejects every basic
