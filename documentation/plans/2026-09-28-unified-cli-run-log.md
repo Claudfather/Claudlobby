@@ -1,5 +1,31 @@
 # Unified CLI implementation record
 
+### 2026-09-29 16:56 UTC — CI green; real outage canary found manager alert defect
+
+**Measured:** all seven hosted checks passed at `a780a96`, including Linux 3.11
+(6,279 passed), Linux 3.10 (6,280 passed) and macOS 3.11 (6,259 passed):
+[run 36596333003](https://github.com/Claudfather/Claudlobby/actions/runs/36596333003).
+The sealed wheel then activated on the independent Mac canary. Its real manager
+used composed `fleet-ops`, read context/brief/the retained completed task, and
+received exit 4 for an operator-only host-job probe. That proves CLI authority
+refusal, not a provider permission denial. Production remained untouched.
+
+**Measured:** a bounded write lock on only the canary Plane refused task admission
+(exit 6, no task event), while one ordinary message arrived with its degraded
+label (exit 11, unrecorded, request persisted, submitted once). The independent
+manager alert failed. No database rows were changed by the fault injection;
+the lock was released in `finally`, the Plane recovered with empty spool and
+quarantine, and neither uncertain request was resent. Evidence:
+`~/.local/share/claudlobby-candidates/20260929-cli-a780a96/evidence/o1/`.
+
+**Read from code / measured:** `recording_alerts.py` passed `=session` to a pane
+helper; real `capture-pane` refused that target while `=session:` succeeded.
+`8bae16e` changes the target to the existing message transport's spelling. Three
+focused recording-alert checks passed, including manager delivery with no
+Telegram channel configured. Fresh hosted CI and a repeat of this one outage
+check remain required. This is one observed failure and one targeted repair;
+no new migration harness or full local suite was added.
+
 ### 2026-09-29 — CI integration repairs; rollout held
 
 **Measured:** the operator's screenshot matches all four job durations from
