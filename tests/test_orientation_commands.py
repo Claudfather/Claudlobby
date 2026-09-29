@@ -59,6 +59,9 @@ def test_composed_manager_worker_project_orientation_never_claims_running_permis
     assert shown["composition"]["equipment_freshness"] == "not_checked"
     assert shown["release"]["running_release"] == "unknown"
     assert shown["registry"]["state"] == "unavailable"
+    assert shown["registry"]["entity_count"] is None
+    assert shown["registry"]["entity_counts_by_type"] is None
+    assert "items" not in shown["registry"]
 
     listed = _call(capsys, case.root, "bot", "list")
     assert [(item["bot_id"], item["role"]) for item in listed["items"]] == [
@@ -156,6 +159,7 @@ def test_orientation_help_is_lazy_and_syntax_errors_do_not_echo_values(monkeypat
 
 
 def test_registry_freshness_names_selected_fleet_and_incomplete_scan(staging_case, monkeypatch, capsys):
+    from claudlobby.plane import registry_read
     from claudlobby.plane.registry_read import last_scan
     from tests.plane_setup import initialize_plane
 
@@ -184,5 +188,24 @@ def test_registry_freshness_names_selected_fleet_and_incomplete_scan(staging_cas
     shown = _call(capsys, case.root, "context", "show")["context"]["registry"]
     assert shown["state"] == "read"
     assert shown["last_scan_at"] == "2026-09-28T00:00:02+00:00"
+    assert shown["last_scan_id"] == "scan-2"
     assert shown["last_scan_scope"] == "host+shared+fleet:primary"
     assert shown["last_scan_complete"] is False
+    assert shown["entity_count"] == 0 and shown["entity_counts_by_type"] == {}
+    assert "items" not in shown
+
+    rows = ([{"entity_type": "bot", "entity_alias": f"SECRET-orientation-{n}"}
+             for n in range(100)] + [{"entity_type": "fleet", "entity_alias": "primary"}])
+    monkeypatch.setattr(registry_read, "current_entities", lambda *_args, **_kwargs: rows)
+    summary = _call(capsys, case.root, "context", "show")["context"]["registry"]
+    assert summary["entity_count"] == 101
+    assert summary["entity_counts_by_type"] == {"bot": 100, "fleet": 1}
+    assert "items" not in summary and "SECRET-orientation" not in json.dumps(summary)
+
+    def unreadable(*_args, **_kwargs):
+        raise ValueError("cannot read registry")
+
+    monkeypatch.setattr(registry_read, "current_entities", unreadable)
+    unknown = _call(capsys, case.root, "context", "show")["context"]["registry"]
+    assert unknown["state"] == "unreadable"
+    assert unknown["entity_count"] is None and unknown["entity_counts_by_type"] is None

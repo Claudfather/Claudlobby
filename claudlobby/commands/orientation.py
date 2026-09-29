@@ -9,6 +9,7 @@ written, and missing storage is never provisioned.
 
 from __future__ import annotations
 
+from collections import Counter
 import hashlib
 import json
 import os
@@ -105,8 +106,10 @@ def _registry(context):
     from ..plane.registry_read import current_entities, last_scan
 
     result = {"state": "unavailable", "source": "plane.registry_snapshots",
-              "last_scan_at": None, "last_scan_scope": None, "last_scan_complete": None,
-              "items": [], "meaning": "recorded declarations, not live execution"}
+              "last_scan_at": None, "last_scan_id": None,
+              "last_scan_scope": None, "last_scan_complete": None,
+              "entity_count": None, "entity_counts_by_type": None,
+              "meaning": "recorded declarations, not live execution"}
     conn, _ = open_ro(context.paths.root)
     if conn is None:
         return result
@@ -115,11 +118,12 @@ def _registry(context):
             rows = current_entities(conn, fleet=context.fleet.name)
             scan = last_scan(conn, fleet=context.fleet.name)
             result.update(state="read", last_scan_at=scan.get("occurred_at") if scan else None,
+                          last_scan_id=scan.get("scan_id") if scan else None,
                           last_scan_scope=scan.get("scope") if scan else None,
                           last_scan_complete=scan.get("complete") if scan else None,
-                          items=[{key: row[key] for key in (
-                              "entity_type", "entity_alias", "entity_uid", "host_uid",
-                              "occurred_at", "payload_hash")} for row in rows])
+                          entity_count=len(rows),
+                          entity_counts_by_type=dict(sorted(Counter(
+                              row["entity_type"] for row in rows).items())))
     except (sqlite3.Error, ValueError, TypeError, KeyError):
         result["state"] = "unreadable"
     finally:
