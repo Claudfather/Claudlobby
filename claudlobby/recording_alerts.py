@@ -252,27 +252,6 @@ def notify_recording_degraded(
         raise ValueError("aware alert time required")
     if isinstance(timeout_per_channel, bool) or not 0 < timeout_per_channel <= 30:
         raise ValueError("channel timeout must be in (0, 30]")
-    env = _environment(context, manager, trusted_tiers)
-    raw_renotify = env.get("FLEET_PULSE_RENOTIFY_AFTER_S", "21600")
-    raw_rearm = env.get("FLEET_PULSE_REARM_WINDOW_S", "1800")
-    if any(not re.fullmatch(r"[0-9]{1,10}", value) or int(value) > 2_147_483_647
-           for value in (raw_renotify, raw_rearm)):
-        raise ValueError("renotify interval must be nonnegative seconds")
-    def disclose(channel: str, outcome: ChannelOutcome) -> None:
-        if outcome.status in ("failed", "unconfigured") or not outcome.debounce_available:
-            print(f"recording-alert: root={context.paths.root} fleet={context.fleet.name} "
-                  f"time={at.astimezone(timezone.utc).isoformat(timespec='seconds')} "
-                  f"component={component} request={request_id} channel={channel} "
-                  f"status={outcome.status} debounce_available="
-                  f"{int(outcome.debounce_available) if outcome.debounce_available is not None else 'unknown'}"
-                  f" reason={outcome.reason or 'none'}",
-                  file=sys.stderr)
-    native = package.native / "lib-common.sh"
-    if not native.is_file():
-        failed = ChannelOutcome("failed", None)
-        disclose("manager", failed)
-        disclose("telegram", failed)
-        return RecordingAlertOutcome(failed, failed)
     component_label = component.replace("_", " ").replace("-", " ")
     message = (f"FLEET ALERT: {component_label} persistence could not be confirmed; "
                f"root={context.paths.root} fleet={context.fleet.name} "
@@ -307,7 +286,7 @@ def _send_channels(context: Context, package: PackageResources,
                   f"{int(outcome.debounce_available) if outcome.debounce_available is not None else 'unknown'}"
                   f" reason={outcome.reason or 'none'}", file=sys.stderr)
     if not (package.native / "lib-common.sh").is_file():
-        failed = ChannelOutcome("failed", None, "native_unavailable")
+        failed = ChannelOutcome("failed", None)
         disclose("manager", failed)
         disclose("telegram", failed)
         return RecordingAlertOutcome(failed, failed)

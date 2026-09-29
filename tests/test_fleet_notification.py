@@ -16,9 +16,21 @@ from tests.test_recording_alerts import AT, REQUEST, private_alert  # noqa: F401
 def test_public_notification_refuses_worker_and_foreign_fleet_before_effect(
         private_alert, monkeypatch):  # noqa: F811
     context, package, manager, _ = private_alert
+    monkeypatch.setattr(operation, "resolve_paths", lambda **_: SimpleNamespace(root=context.paths.root))
     origin = SimpleNamespace(fleet=context.fleet, bot_id="worker")
-    monkeypatch.setattr(operation, "resolve_operation_scope", lambda **_: (context, origin))
-    monkeypatch.setattr(operation, "mutation_admission", lambda *a, **k: pytest.fail("admitted wrong caller"))
+    admitted_now = [False]
+    @contextmanager
+    def admitted(*args, **kwargs):
+        admitted_now[0] = True
+        try:
+            yield SimpleNamespace(release_id="selected", native_path=package.native)
+        finally:
+            admitted_now[0] = False
+    monkeypatch.setattr(operation, "mutation_admission", admitted)
+    def scope(**kwargs):
+        assert admitted_now[0], "selected fleet and manager must be read under admission"
+        return context, origin
+    monkeypatch.setattr(operation, "resolve_operation_scope", scope)
     with pytest.raises(operation.FleetNotificationError, match="manager"):
         operation.notify_fleet(root=context.paths.root, fleet="fleet", level="alert",
                                event="disk_high", message="Disk nearly full", identity=object())
@@ -37,6 +49,7 @@ def test_public_notification_refuses_worker_and_foreign_fleet_before_effect(
 
 def test_recording_outage_still_uses_exact_configured_carriers(private_alert, monkeypatch):  # noqa: F811
     context, package, manager, tier = private_alert
+    monkeypatch.setattr(operation, "resolve_paths", lambda **_: SimpleNamespace(root=context.paths.root))
     monkeypatch.setattr(operation, "resolve_operation_scope", lambda **_: (context, None))
     @contextmanager
     def admitted(*args, **kwargs):

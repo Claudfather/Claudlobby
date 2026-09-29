@@ -11,6 +11,7 @@ import sqlite3
 from uuid import uuid4
 
 from .activation_state import read_selection
+from .context import resolve_paths
 from .env_tiers import resolve as resolve_tiers
 from .message_context import _transport
 from .operation_context import resolve_operation_scope
@@ -60,16 +61,17 @@ def notify_fleet(*, root: Path | None, fleet: str | None, level: str,
     if (not isinstance(message, str) or not message.strip() or not message.isprintable()
             or len(message.encode("utf-8")) > 2000):
         raise FleetNotificationInputError("--message must be printable text of at most 2000 UTF-8 bytes")
-    selected, origin = resolve_operation_scope(root=root, fleet=fleet)
-    if origin is not None and (origin.fleet.name != selected.fleet.name
-                               or origin.bot_id != selected.fleet.manager):
-        raise FleetNotificationError("only the selected fleet manager may notify its fleet")
-    bound_release = os.environ.get("CLAUDLOBBY_RELEASE_ID") if origin is not None else None
-    if origin is not None and (not bound_release
-                               or not re.fullmatch(r"r-[0-9a-f]{64}", bound_release)):
-        raise FleetNotificationError("generated manager lacks a bound selected release")
-    with mutation_admission(selected.paths.root, identity=identity or RuntimeIdentity.current(),
+    selected_root = resolve_paths(root=root).root
+    bound_release = os.environ.get("CLAUDLOBBY_RELEASE_ID")
+    with mutation_admission(selected_root, identity=identity or RuntimeIdentity.current(),
                             expected_release=bound_release) as release:
+        selected, origin = resolve_operation_scope(root=selected_root, fleet=fleet)
+        if origin is not None and (origin.fleet.name != selected.fleet.name
+                                   or origin.bot_id != selected.fleet.manager):
+            raise FleetNotificationError("only the selected fleet manager may notify its fleet")
+        if origin is not None and (not bound_release
+                                   or not re.fullmatch(r"r-[0-9a-f]{64}", bound_release)):
+            raise FleetNotificationError("generated manager lacks a bound selected release")
         selection = read_selection(selected.paths.root)
         if (selection is None or selection["release_id"] != release.release_id
                 or selected.paths.package.native != release.native_path):
