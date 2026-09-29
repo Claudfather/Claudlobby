@@ -3,14 +3,18 @@
 # task that spawned them. Runs as the orphan-browser-reaper host job
 # (system.yaml host.jobs, enrolled by setup-system).
 #
-# A browser-automation task (Playwright, visual-crawl, a research browse) that
-# dies without tearing its browser down leaves the browser re-parented to init.
+# On Linux, a browser-automation task (Playwright, visual-crawl, a research
+# browse) that dies without tearing its browser down leaves the browser
+# re-parented to init or a systemd subreaper.
 # Nothing then owns it and nothing reclaims it: #807 traced an 11-day ~490 MB/day
 # headroom drift on the Pi to one such instance -- 18 processes, ~1.4 GB, 51h old.
 # This is the catch-all; a teardown guard in the spawning path is the complement,
 # not a substitute, because it only covers the paths someone remembered to guard.
 #
-# A process is reaped only when ALL of these hold:
+# Darwin is a diagnostic no-op: launchd also adopts healthy desktop Chrome,
+# ChatGPT for Chrome and crashpad helpers, so PPID 1 cannot establish that a
+# browser is abandoned. --pattern cannot override that safety boundary.
+# On Linux, a process is reaped only when ALL of these hold:
 #   1. orphaned         — its parent is init/launchd, or a subreaper that adopted
 #                         it. "ppid == 1" alone is NOT the test: systemd --user
 #                         sets itself a subreaper, so a browser orphaned by a bot
@@ -95,6 +99,12 @@ MAX_AGE_SECS=$(( MAX_AGE_HOURS * 3600 ))
 LOG="$CLAUDLOBBY_ROOT/state/logs/orphan-browser-reaper.log"
 setup_log_dir "$LOG"
 TS=$(ts_iso)
+
+if [ "$(uname -s)" = Darwin ]; then
+    printf '%s Darwin automatic browser reaping disabled — launchd ancestry cannot prove a browser is orphaned; no processes inspected or signaled\n' \
+        "$TS" | tee -a "$LOG" >&2
+    exit 0
+fi
 
 # --- Never-kill set ----------------------------------------------------------
 # This script's own pid and every ancestor up to init. A reaper that can kill its
