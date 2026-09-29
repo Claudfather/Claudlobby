@@ -2,6 +2,20 @@
 
 `fleet.yaml` is the recipe. It tells `claudlobby generate` which bots to compose, which library pieces to assemble, and how to wire them up. One file at the repo root, hand-edited or `claudlobby new-bot`-driven.
 
+Unknown fields at the document, `fleet`, `fleet.defaults`, `fleet.system_defaults`,
+and individual bot levels produce a qualified **unknown key (ignored)** warning,
+with a spelling suggestion when available. The loader never renames the field or
+includes its value in that diagnostic. Ordinary validation and generation retain
+warning-level compatibility; `validate --strict` and `generate --strict` refuse
+these warnings, and strict generation stops before writing runtime artifacts.
+A defaults typo is reported once at its source, not once per inheriting bot.
+
+Dynamic dictionaries retain their existing contracts: environment names, hook
+payloads, scope/model-strategy extensions, MCP instances and tool parameters are
+not recursively interpreted as bot option names. Supported aliases such as
+`persona` remain accepted with their existing deprecation warnings. Known-field
+type and enum errors remain errors.
+
 ## Top-level shape
 
 ```yaml
