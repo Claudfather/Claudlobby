@@ -54,7 +54,9 @@ def _version(path):
         return conn.execute("PRAGMA user_version").fetchone()[0]
 
 
-def test_quiesced_resume_replays_existing_migration_owner_before_candidate_start(candidate, monkeypatch):
+@pytest.mark.parametrize("migration_preapplied", [False, True])
+def test_quiesced_resume_replays_existing_migration_owner_before_candidate_start(
+        candidate, monkeypatch, migration_preapplied):
     root, release, plan = candidate
     connection = _database(root)
     _insert(connection, "events", kind="system", event="historical_notice")
@@ -64,6 +66,8 @@ def test_quiesced_resume_replays_existing_migration_owner_before_candidate_start
     with activation.locked_activation(root) as store:
         _quiesce(store, plan, manifest)
         store.begin("upgrade", "backup_saved")
+        if migration_preapplied:
+            apply.apply_migration(store, "upgrade", manifest)
         config_install.prepare_config(plan, "upgrade")
         class CandidateStartReached(Exception):
             pass
