@@ -15,6 +15,7 @@ from ..plane.ids import ensure_host_uid
 from ..plane.migrations import DowngradeError
 from ..plane.schema_state import PendingMigrationError, preflight_schema, require_current_schema
 from ..plane.spool import drain, quarantine_dir, quarantine_entry, spool_dir, spool_entries
+from ..plane.queue_paths import scan_spool, spool_path
 from ..runtime_admission import RuntimeIdentity, mutation_admission
 
 
@@ -38,7 +39,15 @@ def spool(args) -> CommandOutput:
     root = _root(args)
     action = args.spool_action
     if action == "list":
-        entries = spool_entries(root)
+        scan = scan_spool(root)
+        if scan.spool_state == "unreadable" or scan.quarantine_state == "unreadable":
+            raise CommandFailure("unavailable", "Plane spool cannot be enumerated")
+        if not spool_path(root).exists() and not db_file(root).exists():
+            raise CommandFailure("unavailable", "Plane storage is absent at this root")
+        try:
+            entries = spool_entries(root)
+        except OSError as exc:
+            raise CommandFailure("unavailable", "Plane spool cannot be read") from exc
         summary = [{"name": entry["_file"], "event_ids": entry.get("event_ids"),
                     "attempts": entry.get("attempts"), "spooled_at": entry.get("spooled_at")}
                    for entry in entries]
@@ -50,9 +59,14 @@ def spool(args) -> CommandOutput:
         if not _SPOOL_NAME.fullmatch(name):
             raise CommandFailure("invalid_argument", "invalid spool entry name")
         if action == "inspect":
-            source = spool_dir(root) / name
+            scan = scan_spool(root)
+            if scan.spool_state == "unreadable" or scan.quarantine_state == "unreadable":
+                raise CommandFailure("unavailable", "Plane spool cannot be enumerated")
+            if not spool_path(root).exists() and not db_file(root).exists():
+                raise CommandFailure("unavailable", "Plane storage is absent at this root")
+            source = spool_path(root) / name
             if not source.exists():
-                source = quarantine_dir(root) / name
+                source = spool_path(root) / "quarantine" / name
             if not source.exists():
                 raise CommandFailure("not_found", f"no such spool entry: {name}")
             try:
@@ -122,8 +136,8 @@ def prune(args) -> CommandOutput:
 
     root = _root(args)
     days = args.days if args.days is not None else DEFAULT_RETENTION_DAYS
-    if days < 0:
-        raise CommandFailure("invalid_argument", "retention days cannot be negative")
+    if days < 0 or days > 36500:
+        raise CommandFailure("invalid_argument", "retention days must be between 0 and 36500")
     if args.dry_run:
         return _prune_under_scope(root, args, days, None)
     try:

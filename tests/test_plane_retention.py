@@ -320,15 +320,28 @@ def test_launcher_prunes_with_no_flag_at_all(tmp_path, test_cli):
     assert _counts(root)[0] == 1
 
 
-def test_cli_negative_window_is_a_clean_refusal(tmp_path, test_cli):
+@pytest.mark.parametrize("days", ["-1", "1000000"])
+def test_cli_negative_window_is_a_clean_refusal(tmp_path, test_cli, days):
     """r-gauntlet: --days -1 (a future cutoff that would delete
     EVERYTHING) is a ContractViolation → rc 2, never a raw traceback."""
     root = _root(tmp_path)
     _sample(root)
-    r = _cli(root, "prune", "--days", "-1", cli=test_cli)
+    r = _cli(root, "prune", "--days", days, cli=test_cli)
     assert r.returncode == 2
     assert "Traceback" not in r.stderr
     assert _counts(root)[0] == 1              # nothing deleted
+
+
+def test_prune_huge_window_refuses_before_any_storage_effect(tmp_path, monkeypatch):
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.commands import plane_maintenance
+
+    monkeypatch.setattr(plane_maintenance, "_root", lambda _args: tmp_path)
+    args = SimpleNamespace(days=1000000, dry_run=True)
+    with pytest.raises(CommandFailure) as failure:
+        plane_maintenance.prune(args)
+    assert failure.value.error.code == "invalid_argument"
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_prune_launcher_is_thin_and_root_flag_precedes_subcommand():

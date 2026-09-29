@@ -597,6 +597,23 @@ def test_f11_spool_inspect_prints_entry_with_history(env):
     assert "history" in r.stdout and "locked" in r.stdout
 
 
+def test_spool_reads_do_not_create_storage_at_wrong_root(tmp_path):
+    from types import SimpleNamespace
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.commands import plane_maintenance
+
+    for args in (("list",), ("inspect", "ev_" + "a" * 32 + ".json")):
+        call = SimpleNamespace(spool_action=args[0], name=args[1] if len(args) > 1 else None)
+        with pytest.raises(CommandFailure) as failure:
+            # Resolve the explicit, valid host root without invoking a different
+            # tree's installed package through subprocess test setup.
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(plane_maintenance, "_root", lambda _args: tmp_path)
+                plane_maintenance.spool(call)
+        assert failure.value.error.code == "unavailable"
+        assert not (tmp_path / "state").exists()
+
+
 def test_spool_retry_requires_selected_release_before_drain(env):
     root, _conn, _host = env
     name = "ev_" + "a" * 32 + ".json"

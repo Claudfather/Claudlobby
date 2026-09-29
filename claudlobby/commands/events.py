@@ -219,7 +219,7 @@ def dispatch(args) -> CommandOutput:
     if typed:
         try:
             since = _since(typed).isoformat()
-        except ValueError as exc:
+        except (ValueError, OverflowError) as exc:
             raise CommandFailure("invalid_argument", str(exc)) from exc
 
     try:
@@ -237,6 +237,14 @@ def dispatch(args) -> CommandOutput:
     if conn is None:
         raise CommandFailure("unavailable", f"Plane events are unreachable: {note}", retryable=True)
     try:
+        from ..plane.schema_state import require_current_schema, PendingMigrationError
+        from ..plane.migrations import DowngradeError
+        try:
+            require_current_schema(conn)
+        except PendingMigrationError as exc:
+            raise CommandFailure("migration_required", f"Plane events require migration: {exc}") from exc
+        except DowngradeError as exc:
+            raise CommandFailure("downgrade", f"Plane events refuse a newer database: {exc}") from exc
         from ..paths import load_lib_module
         pr = load_lib_module(paths.lib, "plane-readers.py")
         if pr is None:

@@ -364,3 +364,22 @@ def test_event_show_uses_stable_id_and_exact_fleet_scope(scene):
         "data": own["data"], "detail_truncated": False}
     denied = show(foreign)
     assert denied.returncode == 3 and json.loads(denied.stdout)["error"]["code"] == "not_found"
+
+
+def test_event_list_refuses_newer_plane_schema(scene, monkeypatch):
+    from types import SimpleNamespace
+    from claudlobby import context
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.commands import events
+    from claudlobby.plane.migrations import SCHEMA_USER_VERSION
+
+    root, paths = scene
+    with sqlite3.connect(root / "state/plane/plane.db") as conn:
+        conn.execute(f"PRAGMA user_version={SCHEMA_USER_VERSION + 1}")
+    monkeypatch.setattr(context, "resolve_paths", lambda **_: paths)
+    args = SimpleNamespace(seed=False, event_action="list", limit=10, since=None,
+                           root=root, fleet=F, bot=None, type=None, source=None,
+                           critical=False, cursor=None)
+    with pytest.raises(CommandFailure) as failure:
+        events.dispatch(args)
+    assert failure.value.error.code == "downgrade"

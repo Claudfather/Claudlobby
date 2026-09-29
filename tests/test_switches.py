@@ -688,6 +688,8 @@ def test_doctor_switches_works_with_NO_fleet_at_all(tmp_path):
     r = _cli(root, "host", "doctor", "--switches")
     assert r.returncode == 0, r.stderr
     assert "plane-daemon" in r.stdout and "update-siblings" in r.stdout
+    if sys.platform == "darwin":
+        assert "orphan-browser-reaper: OFF on macOS" in r.stdout
 
 
 # ---------------------------------------------------------------------------

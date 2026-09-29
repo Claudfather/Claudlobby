@@ -40,9 +40,10 @@ def dispatch(args) -> CommandOutput:
                 raise CommandFailure(exc.code, str(exc), data=data) from exc
             data = {"fleet": result.fleet, "release_id": result.release_id,
                     "tick": "completed", "bot_health": "not_asserted",
-                    "summary_path": str(result.summary_path), "summary": result.summary}
+                    "summary_path": str(result.summary_path), "summary": result.summary,
+                    "stderr_tail": result.stderr_tail}
             lines = (f"{result.fleet}: pulse tick completed; inspect the summary and events "
-                     "for bot health.",)
+                     "for bot health.", result.summary.rstrip())
         elif action == "reload":
             from ..fleet_reload import FleetReloadError, reload_fleet
             try:

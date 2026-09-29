@@ -195,7 +195,7 @@ def cold(installed, monkeypatch, tmp_path):
         unit_env = {**env, **({"TMUX_TMPDIR": "/tmp"} if bot else {})}
         command = ([str(release.native_path / "start-bot.sh"), str(working)] if bot else
                    [str(release.native_path / "keepalive-all.sh")] if phase == "producers" else
-                   [str(release.cli_path), "plane", "daemon"])
+                   [str(release.native_path / "plane-daemon.sh")])
         argv = admission.wrap_unit_argv(unit_env, unit=stem, phase=phase,
                                         mode="oneshot" if phase == "producers" else "exec", argv=command)
         files = {stem + ".plist": (plistlib.dumps({"Label": stem, "WorkingDirectory": str(working),

@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -26,6 +27,24 @@ def call(capsys, argv, expected=0):
 
 def snapshot(root):
     return {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+
+def test_host_doctor_discloses_macos_reaper_native_limit(tmp_path, monkeypatch):
+    from claudlobby import activation_state, context, switches
+    from claudlobby.commands import _helpers, host_doctor
+
+    paths = SimpleNamespace(root=tmp_path, fleet_yaml=tmp_path / "fleet.yaml", package=object())
+    monkeypatch.setattr(context, "resolve_paths", lambda **_: paths)
+    monkeypatch.setattr(context, "declared_paths", lambda *a, **k: [])
+    monkeypatch.setattr(activation_state, "read_selection", lambda _: None)
+    monkeypatch.setattr(_helpers, "_load_env", lambda _: None)
+    monkeypatch.setattr(switches, "resolve", lambda *_: [])
+    monkeypatch.setattr(switches, "format_table", lambda _: "switch table")
+    monkeypatch.setattr(host_doctor.sys, "platform", "darwin")
+    result = host_doctor.dispatch(SimpleNamespace(seed=False, root=tmp_path, fleet=None,
+                                                  markdown=False, switches=True, delivery=False))
+    assert result.data["platform_limitations"][0]["state"] == "native_reaping_disabled"
+    assert "orphan-browser-reaper: OFF on macOS" in result.lines[-1]
 
 
 @pytest.fixture

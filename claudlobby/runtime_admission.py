@@ -149,7 +149,6 @@ def validate_unit_admission(release, declaration, metadata, generated_bytes) -> 
                 pass
         ingest_commands = {
             (str(release.native_path / "plane-daemon.sh"),),
-            (str(release.cli_path), "plane", "daemon"),
         }
         ingest_owner = (declaration.scope == "host" and daemon_label
                         and target.command in ingest_commands)

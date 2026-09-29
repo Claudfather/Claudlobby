@@ -9,7 +9,11 @@ from claudlobby import fleet_notification as operation
 from claudlobby.command_result import CommandFailure
 from claudlobby.commands import fleet_notify
 from claudlobby.plane.emit_api import validate_item
+from claudlobby.plane.migrations import DowngradeError
+from claudlobby.plane.schema_state import PendingMigrationError
 from claudlobby.recording_alerts import send_fleet_notification
+from tests.plane_setup import initialize_plane
+from tests.package_fixtures import source_package
 from tests.test_recording_alerts import AT, REQUEST, private_alert  # noqa: F401
 
 
@@ -47,7 +51,8 @@ def test_public_notification_refuses_worker_and_foreign_fleet_before_effect(
                                event="disk_high", message="Disk nearly full", identity=object())
 
 
-def test_recording_outage_still_uses_exact_configured_carriers(private_alert, monkeypatch):  # noqa: F811
+@pytest.mark.parametrize("failure", [OSError, PendingMigrationError, DowngradeError])
+def test_recording_outage_still_uses_exact_configured_carriers(private_alert, monkeypatch, failure):  # noqa: F811
     context, package, manager, tier = private_alert
     monkeypatch.setattr(operation, "resolve_paths", lambda **_: SimpleNamespace(root=context.paths.root))
     monkeypatch.setattr(operation, "resolve_operation_scope", lambda **_: (context, None))
@@ -63,8 +68,10 @@ def test_recording_outage_still_uses_exact_configured_carriers(private_alert, mo
         validate_item(args[1][0], {})
         assert args[1][0]["fleet"] == "fleet"
         assert args[1][0]["payload"]["event"] == "fleet_alert"
+        assert args[1][0]["source_ref"].startswith("fleet-events:sha:")
+        assert args[1][0]["payload"]["data"]["data"]["message"] == "Disk nearly full"
         assert kwargs["require_commit"] is True
-        raise OSError("recorder unavailable")
+        raise failure("recorder unavailable")
     result = operation.notify_fleet(root=context.paths.root, fleet="fleet", level="alert",
                                     event="disk_high", message="Disk nearly full", identity=object(),
                                     emit=recorder)
@@ -84,6 +91,35 @@ def test_unconfigured_telegram_is_disclosed_without_ambient_fallback(private_ale
     assert result.manager.status == "submitted"
     assert result.telegram.status == "unconfigured"
     assert not (context.paths.root / "telegram-capture").exists()
+
+
+def test_committed_notify_event_is_visible_to_selected_fleet_reader(private_alert, monkeypatch):  # noqa: F811
+    from claudlobby.paths import load_lib_module
+    from claudlobby.plane.db import connect_ro, db_file
+    from claudlobby.recording_alerts import ChannelOutcome, RecordingAlertOutcome
+
+    context, package, manager, _ = private_alert
+    initialize_plane(context.paths.root)
+    monkeypatch.setattr(operation, "resolve_paths", lambda **_: SimpleNamespace(root=context.paths.root))
+    monkeypatch.setattr(operation, "resolve_operation_scope", lambda **_: (context, None))
+    monkeypatch.setattr(operation, "read_selection", lambda _: {"release_id": "selected"})
+    monkeypatch.setattr(operation, "_transport", lambda *_: manager)
+    monkeypatch.setattr(operation, "resolve_tiers", lambda *a, **k: {})
+    @contextmanager
+    def admitted(*args, **kwargs):
+        yield SimpleNamespace(release_id="selected", native_path=package.native)
+    monkeypatch.setattr(operation, "mutation_admission", admitted)
+    sent = RecordingAlertOutcome(ChannelOutcome("submitted", True),
+                                 ChannelOutcome("unconfigured", None))
+    result = operation.notify_fleet(root=context.paths.root, fleet="fleet", level="alert",
+                                    event="disk_high", message="Disk nearly full",
+                                    identity=object(), send=lambda *a, **k: sent)
+    assert result.recording == "committed"
+    reader = load_lib_module(source_package().native, "plane-readers.py")
+    with connect_ro(db_file(context.paths.root)) as conn:
+        rows = reader.fleet_events(conn, "fleet", event_id=result.event_id)
+    assert len(rows) == 1
+    assert reader.public(rows[0])["data"]["message"] == "Disk nearly full"
 
 
 def test_no_channel_and_unverified_recording_are_distinct_results(private_alert, monkeypatch):  # noqa: F811

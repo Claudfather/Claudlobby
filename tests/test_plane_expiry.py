@@ -12,6 +12,7 @@ from __future__ import annotations
 from tests.plane_setup import initialize_plane
 
 import subprocess
+import shlex
 import sqlite3
 from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
@@ -118,6 +119,19 @@ def test_negative_horizon_refused():
         expirable(sqlite3.connect(":memory:"), now=NOW, after_days=-1)
 
 
+def test_public_huge_horizon_refuses_before_native_or_storage(tmp_path):
+    import pytest
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.commands import plane_expire
+
+    args = SimpleNamespace(fleet=None, seed=False, after_days=1000000,
+                           root=tmp_path, dry_run=True)
+    with pytest.raises(CommandFailure) as failure:
+        plane_expire.dispatch(args)
+    assert failure.value.error.code == "invalid_argument"
+    assert list(tmp_path.iterdir()) == []
+
+
 def _selected_sweep(monkeypatch, root, *, dry_run=False):
     from claudlobby.commands import plane_expire
 
@@ -213,14 +227,26 @@ def _launcher(root, *argv, cli, armed):
                           capture_output=True, text=True, timeout=120, env=env)
 
 
+def _recording_cli(tmp_path):
+    cli = tmp_path / "record-cli.sh"
+    argv = tmp_path / "recorded-argv"
+    cli.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$@\" > {shlex.quote(str(argv))}\nexit 7\n")
+    cli.chmod(0o755)
+    return cli, argv
+
+
 def test_launcher_runs_by_default_and_the_off_switch_is_LOUD(tmp_path):
     """The ON arm reaches its CLI; the OFF arm reports the disabled sweep."""
     root = _root(tmp_path)
     _seed(root)
-    on = _launcher(root, "--dry-run", cli=Path("/bin/false"), armed=True)
-    assert on.returncode != 0  # switch let the selected CLI run
-    off = _launcher(root, "--dry-run", cli=Path("/bin/false"), armed=False)
+    cli, argv = _recording_cli(tmp_path)
+    on = _launcher(root, "--dry-run", cli=cli, armed=True)
+    assert on.returncode == 7
+    assert argv.read_text().splitlines() == ["--root", str(root), "plane", "expire", "--dry-run"]
+    argv.unlink()
+    off = _launcher(root, "--dry-run", cli=cli, armed=False)
     assert off.returncode == 0
+    assert not argv.exists()
     # REWRITTEN by the fold (F6): the loud line is now the SHARED gate's
     # (lib-common `switch_is_on`), not this door's own copy — four launchers
     # had four spellings of one comparison. What is pinned is unchanged: the
@@ -235,10 +261,12 @@ def test_launcher_runs_with_no_flag_at_all(tmp_path):
     """Absence is ON — the launcher still reaches its CLI."""
     root = _root(tmp_path)
     _seed(root)
-    env = constructed_env(CLAUDLOBBY_ROOT=root, CLAUDLOBBY_CLI=Path("/bin/false"))
+    cli, argv = _recording_cli(tmp_path)
+    env = constructed_env(CLAUDLOBBY_ROOT=root, CLAUDLOBBY_CLI=cli)
     r = subprocess.run(["bash", str(REPO / "lib" / "plane-expire.sh"), "--dry-run"],
                        capture_output=True, text=True, timeout=120, env=env)
-    assert r.returncode != 0  # absence does not disarm the launcher
+    assert r.returncode == 7
+    assert argv.read_text().splitlines() == ["--root", str(root), "plane", "expire", "--dry-run"]
 
 
 def test_job_composes_and_carries_its_own_flag(tmp_path, monkeypatch):

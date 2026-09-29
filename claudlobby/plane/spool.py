@@ -210,7 +210,10 @@ def oldest_spooled_at(paths: list[Path]) -> str | None:
 
 def spool_entries(root: Path) -> list[dict]:
     out = []
-    for f in sorted(spool_dir(root).glob("*.json")):
+    scan = scan_spool(root)
+    if scan.spool_state == "unreadable":
+        raise OSError("spool directory is unreadable")
+    for f in scan.pending:
         try:
             data = json.loads(f.read_text())
         except (json.JSONDecodeError, OSError):

@@ -2,6 +2,7 @@
 
 from dataclasses import asdict
 import os
+import sys
 
 from ..command_result import CommandFailure, CommandOutput
 
@@ -52,7 +53,17 @@ def dispatch(args):
         finally:
             os.environ.clear()
             os.environ.update(previous)
-    data = {"root": str(paths.root), "fleets": items, "has_failures": failed}
+    platform_limitations = []
+    if sys.platform == "darwin":
+        platform_limitations.append({
+            "job": "orphan-browser-reaper", "state": "native_reaping_disabled",
+            "reason": ("macOS launchd adopts ordinary desktop browsers; parent PID alone"
+                       " cannot prove a browser belongs to a dead bot, so native reaping is disabled"),
+        })
+        lines.append("orphan-browser-reaper: OFF on macOS — launchd parentage cannot prove"
+                     " bot ownership; inspect browser usage separately")
+    data = {"root": str(paths.root), "fleets": items, "has_failures": failed,
+            "platform_limitations": platform_limitations}
     if failed:
         raise CommandFailure("unavailable", "host doctor found failed checks", data=data,
                              hint="\n".join(lines))

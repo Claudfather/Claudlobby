@@ -25,8 +25,8 @@ def dispatch(args) -> CommandOutput:
     if args.fleet or args.seed:
         raise CommandFailure("invalid_argument", "plane expire is a host-wide selected-fleet sweep")
     days = args.after_days if args.after_days is not None else DEFAULT_AFTER_DAYS
-    if days < 0:
-        raise CommandFailure("invalid_argument", "expiry horizon cannot be negative")
+    if days < 0 or days > 36500:
+        raise CommandFailure("invalid_argument", "expiry horizon must be between 0 and 36500 days")
     try:
         root = resolve_paths(root=args.root).root
         with mutation_admission(root, identity=RuntimeIdentity.current(),

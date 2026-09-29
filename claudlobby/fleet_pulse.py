@@ -5,7 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import shutil
+import signal
 import subprocess
+import sys
+import tempfile
 
 from .context import native_environment
 from .operation_context import resolve_operation_scope
@@ -25,6 +29,41 @@ class FleetPulseResult:
     release_id: str
     summary_path: Path
     summary: str
+    stderr_tail: str
+
+
+def _sweep(command: list[str], env: dict[str, str]) -> tuple[str, str, int]:
+    """Bound the private sweep and preserve its journal warnings."""
+    def forward(warnings):
+        stream = getattr(sys.stderr, "buffer", None)
+        if stream is not None:
+            shutil.copyfileobj(warnings, stream)
+        else:
+            for chunk in iter(lambda: warnings.read(8192), b""):
+                sys.stderr.write(chunk.decode("utf-8", "replace"))
+
+    with tempfile.TemporaryFile() as warnings:
+        child = subprocess.Popen(command, env=env, stdout=subprocess.PIPE,
+                                 stderr=warnings, start_new_session=True)
+        try:
+            stdout, _ = child.communicate(timeout=120)
+        except subprocess.TimeoutExpired as exc:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            child.communicate()
+            warnings.seek(0)
+            forward(warnings)
+            raise FleetPulseError("private fleet pulse timed out after 120 seconds; inspect its events and state/pulse summary",
+                                  code="timeout", effect_attempted=True) from exc
+        warnings.seek(0, os.SEEK_END)
+        size = warnings.tell()
+        warnings.seek(max(size - 4096, 0))
+        tail = warnings.read().decode("utf-8", "replace")
+        warnings.seek(0)
+        forward(warnings)
+    return stdout.decode("utf-8", "replace"), tail, child.returncode
 
 
 def pulse_fleet(*, root: Path, fleet: str | None) -> FleetPulseResult:
@@ -41,12 +80,14 @@ def pulse_fleet(*, root: Path, fleet: str | None) -> FleetPulseResult:
                "CLAUDLOBBY_FLEET": destination.fleet.name,
                "CLAUDLOBBY_NATIVE_PYTHON": str(release.cli_path.parent / "python"),
                "CLAUDLOBBY_PRIVATE_PULSE_RELEASE": release.release_id}
-        completed = subprocess.run([str(native), destination.fleet.name], env=env,
-                                   capture_output=True, text=True, check=False)
-        if completed.returncode:
+        try:
+            summary, stderr_tail, returncode = _sweep([str(native), destination.fleet.name], env)
+        except OSError as exc:
+            raise FleetPulseError("private fleet pulse could not start", effect_attempted=False) from exc
+        if returncode:
             raise FleetPulseError("private fleet pulse failed; inspect its events and state/pulse summary",
                                   effect_attempted=True)
         return FleetPulseResult(destination.fleet.name, release.release_id,
                                 destination.paths.root / "state/pulse" /
                                 f"{destination.fleet.name}.pulse-summary.txt",
-                                completed.stdout)
+                                summary, stderr_tail)

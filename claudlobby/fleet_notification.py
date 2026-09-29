@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from hashlib import sha256
 import os
 from pathlib import Path
 import re
-import sqlite3
 from uuid import uuid4
 
 from .activation_state import read_selection
@@ -90,14 +90,16 @@ def notify_fleet(*, root: Path | None, fleet: str | None, level: str,
         at = datetime.now(timezone.utc)
         raw = {"event_id": event_id, "event_type": "system", "emitter": "fleet-notify",
                "fleet": selected.fleet.name,
+               "source_ref": "fleet-events:sha:" + sha256(request_id.encode("ascii")).hexdigest(),
                "payload": {"event": "fleet_alert" if level == "alert" else "fleet_notice",
                            "subject_kind": "fleet", "subject": selected.fleet.name,
-                           "data": {"event": event, "message": message,
-                                    "request_id": request_id, "at": at.isoformat()}}}
+                           "data": {"source": "fleet-notify", "legacy_ts": at.isoformat(),
+                                    "data": {"event": event, "message": message,
+                                             "request_id": request_id, "at": at.isoformat()}}}}
         try:
             recorded = emit(selected.paths.root, [raw], require_commit=True)[0]
             recording = "committed" if recorded.status in {"committed", "duplicate"} else "unknown"
-        except (OSError, sqlite3.Error):
+        except Exception:
             # O1: a recording outage cannot block an independently configured alert.
             recording = "unknown"
         text = f"FLEET {level.upper()} [{event}]: {message}"

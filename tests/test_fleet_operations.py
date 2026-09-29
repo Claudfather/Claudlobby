@@ -92,14 +92,15 @@ def test_pulse_uses_selected_native_once_and_reports_tick_not_health(tmp_path, m
                         lambda **_kwargs: (destination, None))
     called = []
 
-    def run(command, **kwargs):
-        called.append((command, kwargs["env"]["CLAUDLOBBY_PRIVATE_PULSE_RELEASE"]))
-        return subprocess.CompletedProcess(command, 0, "worker DOWN\n", "")
+    def run(command, env):
+        called.append((command, env["CLAUDLOBBY_PRIVATE_PULSE_RELEASE"]))
+        return "worker DOWN\n", "watchdog dark\n", 0
 
-    monkeypatch.setattr(fleet_pulse.subprocess, "run", run)
+    monkeypatch.setattr(fleet_pulse, "_sweep", run)
     result = fleet_pulse.pulse_fleet(root=tmp_path, fleet="example")
     assert called == [([str(native / "fleet-pulse.sh"), "example"], "selected-release")]
     assert result.summary == "worker DOWN\n"
+    assert result.stderr_tail == "watchdog dark\n"
     assert result.summary_path == tmp_path / "state/pulse/example.pulse-summary.txt"
 
     worker = SimpleNamespace(fleet=destination.fleet, bot_id="worker")
@@ -108,6 +109,32 @@ def test_pulse_uses_selected_native_once_and_reports_tick_not_health(tmp_path, m
     with pytest.raises(fleet_pulse.FleetPulseError, match="manager"):
         fleet_pulse.pulse_fleet(root=tmp_path, fleet="example")
     assert len(called) == 1
+
+
+def test_pulse_preserves_native_warning_and_summary(capfd):
+    summary, tail, code = fleet_pulse._sweep(
+        ["/bin/sh", "-c", "printf 'worker DOWN\\n'; printf 'watchdog dark\\n' >&2"],
+        dict(os.environ))
+    assert (summary, tail, code) == ("worker DOWN\n", "watchdog dark\n", 0)
+    assert "watchdog dark" in capfd.readouterr().err
+
+
+def test_pulse_timeout_kills_its_private_process_group(monkeypatch):
+    child = SimpleNamespace(pid=731, calls=0)
+    def communicate(*, timeout=None):
+        child.calls += 1
+        if timeout is not None:
+            raise subprocess.TimeoutExpired("pulse", timeout)
+        return b"", None
+    child.communicate = communicate
+    child.returncode = -9
+    monkeypatch.setattr(fleet_pulse.subprocess, "Popen", lambda *a, **k: child)
+    killed = []
+    monkeypatch.setattr(fleet_pulse.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
+    with pytest.raises(fleet_pulse.FleetPulseError) as failure:
+        fleet_pulse._sweep(["private-pulse"], {})
+    assert failure.value.code == "timeout" and failure.value.effect_attempted
+    assert killed == [(731, fleet_pulse.signal.SIGKILL)]
 
 
 def test_selected_private_pulse_refuses_direct_entry(tmp_path):

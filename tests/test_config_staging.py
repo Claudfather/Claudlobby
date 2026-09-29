@@ -194,6 +194,19 @@ def test_stage_freezes_prefixed_host_ingest_identity(staging_case, tmp_path, mon
         plan.check_fresh()
 
 
+def test_staged_fleet_job_declared_dormant_is_not_enrollment_authority(staging_case):
+    manifest = staging_case.paths.fleet_yaml
+    source = manifest.read_text()
+    source = source.replace("observability: false", "observability: false\n    timers: true")
+    source = source.replace("channels: []", "channels: []\n    jobs:\n      weekly-worker-restart: {enroll: false}")
+    manifest.write_text(source)
+    plan = config_staging.stage_configuration([staging_case.paths], staging_case.release)
+    for platform in ("Linux", "Darwin"):
+        jobs = [item for _declaration, item in planned_units(plan, platform)
+                if "weekly-worker-restart" in item["source"]]
+        assert jobs and all(item["enroll"] is False for item in jobs)
+
+
 def test_stage_renders_bots_timers_and_host_guards_without_live_writes(staging_case):
     case = staging_case
     worker = case.paths.bot_runtime("primary-worker")
