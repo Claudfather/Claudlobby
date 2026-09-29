@@ -29,6 +29,7 @@ import pytest
 
 from tests.conftest import constructed_env
 from tests.fixtures.native_admission import admit_watchdog_fixture
+from tests.test_plane_events_door import _serving
 
 from claudlobby.composer import (
     compose_bot_conf,
@@ -261,11 +262,13 @@ class TestSocketWrappers:
         event (observable) and return non-zero — never a silent drop."""
         from tests.conftest import read_fleet_events
         d = _write_bot_conf(tmp_path / "alpha")
-        out, err, rc = _run_bash(
-            _src('bot_tmux_send "" lead "hello there"'),
-            env={"BOT_DIR": str(d), "BOT_ID": "alpha", "FLEET_NAME": "fleet-a",
-                 "CLAUDLOBBY_ROOT": str(tmp_path), **scratch_plane_env(tmp_path, initialize=True)},
-        )
+        with _serving(tmp_path, scratch_plane_env) as socket:
+            out, err, rc = _run_bash(
+                _src('bot_tmux_send "" lead "hello there"'),
+                env={"BOT_DIR": str(d), "BOT_ID": "alpha", "FLEET_NAME": "fleet-a",
+                     "CLAUDLOBBY_ROOT": str(tmp_path),
+                     **scratch_plane_env(tmp_path, socket=socket)},
+            )
         assert rc != 0
         assert "dropped" in err.lower()
         # The send_miss event landed on the plane (F18 R1: no ledger file),

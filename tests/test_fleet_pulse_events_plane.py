@@ -21,6 +21,7 @@ import time
 import pytest
 
 from tests.plane_fixtures import F, REPO, _live_dispatch, _scene, ro
+from tests.test_plane_events_door import _serving
 
 LIB = REPO / "lib"
 needs_tmux = pytest.mark.skipif(shutil.which("tmux") is None, reason="fleet-pulse needs tmux")
@@ -44,8 +45,12 @@ def _pulse_lib(tmp_path, capture, *, matcher_stub=None):
     return libdir
 
 
-def _pulse(root, libdir, *, scratch_plane_env, **extra):
-    env = {**scratch_plane_env(root), "HOME": str(root / "home"), "FLEET_NAME": F,
+def _pulse(root, libdir, *, scratch_plane_env, serve=True, socket=None, **extra):
+    if serve:
+        with _serving(root, scratch_plane_env) as bound:
+            return _pulse(root, libdir, scratch_plane_env=scratch_plane_env,
+                          serve=False, socket=bound, **extra)
+    env = {**scratch_plane_env(root, socket=socket), "HOME": str(root / "home"), "FLEET_NAME": F,
            "PLANE_EMIT_ENABLED": "1",
 
            "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "TMUX_TMPDIR": str(root / "tmux"),
@@ -107,7 +112,7 @@ def test_an_unreachable_plane_is_unknown_per_bot_and_paged_never_none(tmp_path, 
     for p in (root / "state" / "plane").glob("plane.db*"):
         p.unlink()
     (root / "state" / "plane" / "plane.db").mkdir()
-    r = _pulse(root, libdir, scratch_plane_env=scratch_plane_env)
+    r = _pulse(root, libdir, scratch_plane_env=scratch_plane_env, serve=False)
     assert r.returncode == 0, r.stderr[-2000:]
     assert "UNREACHABLE" in r.stderr and "cannot be judged this pass" in r.stderr
     # a MISSING SCRIPT would say "No such file" too — but so does Linux's socket
@@ -220,28 +225,28 @@ def test_two_fleets_passes_at_once_never_read_or_delete_each_others_window(
     f's pass ended is the pin that f's cleanup never deleted g's."""
     root, paths = _two_dead_bots(tmp_path)
     _second_fleet_beside(root)
-    env = {**scratch_plane_env(root), "HOME": str(root / "home"), "FLEET_NAME": F,
-           "PLANE_EMIT_ENABLED": "1", "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
-    for b in ("w1", "w2"):
-        seed = subprocess.run(
-            ["bash", "-c", f'. "{LIB}/lib-common.sh"; emit_fleet_event bridge_down pulse "{{}}" "{paths.runtime_bots / b}" {b}'],
-            capture_output=True, text=True, timeout=180, env=env)
-        assert seed.returncode == 0, seed.stderr[-1000:]
-    assert _await(root, "SELECT COUNT(*) FROM events WHERE event = 'bridge_down'", 2) == 2
+    with _serving(root, scratch_plane_env) as socket:
+        env = {**scratch_plane_env(root, socket=socket), "HOME": str(root / "home"), "FLEET_NAME": F,
+               "PLANE_EMIT_ENABLED": "1", "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+        for b in ("w1", "w2"):
+            seed = subprocess.run(
+                ["bash", "-c", f'. "{LIB}/lib-common.sh"; emit_fleet_event bridge_down pulse "{{}}" "{paths.runtime_bots / b}" {b}'],
+                capture_output=True, text=True, timeout=180, env=env)
+            assert seed.returncode == 0, seed.stderr[-1000:]
+        assert _await(root, "SELECT COUNT(*) FROM events WHERE event = 'bridge_down'", 2) == 2
 
-    capture, sync = tmp_path / "tg.log", tmp_path / "sync"
-    sync.mkdir()
-    libdir = _pulse_lib(tmp_path, capture)
-    (libdir / "tg-post.sh").write_text(_INTERLEAVE_STUB.format(capture=capture, lib=libdir, sync=sync))
-    try:
-        # a cold emit reaped under two concurrent passes would starve g of its rows
-        r_f = _pulse(root, libdir, FLEET_EVENT_EMIT_TIMEOUT_S="120",
-                     scratch_plane_env=scratch_plane_env)
-    finally:
-        (sync / "f.done").touch()
-    deadline = time.monotonic() + 300
-    while not (sync / "g.rc").exists() and time.monotonic() < deadline:
-        time.sleep(0.5)
+        capture, sync = tmp_path / "tg.log", tmp_path / "sync"
+        sync.mkdir()
+        libdir = _pulse_lib(tmp_path, capture)
+        (libdir / "tg-post.sh").write_text(_INTERLEAVE_STUB.format(capture=capture, lib=libdir, sync=sync))
+        try:
+            r_f = _pulse(root, libdir, socket=socket, serve=False,
+                         scratch_plane_env=scratch_plane_env)
+        finally:
+            (sync / "f.done").touch()
+        deadline = time.monotonic() + 300
+        while not (sync / "g.rc").exists() and time.monotonic() < deadline:
+            time.sleep(0.5)
     g_err = (sync / "g.err").read_text() if (sync / "g.err").exists() else "(g never started)"
     assert (sync / "g.parked").exists(), "no interleave: g never reached its first page\n" + g_err[-2000:]
     assert r_f.returncode == 0, r_f.stderr[-2000:]

@@ -106,46 +106,44 @@ def test_bench_negative_shim_is_a_usage_error():
 def test_wedge_cooldown_marker_short_circuits_the_socket(tmp_path, *, scratch_plane_env):
     """Re-verify F5 blocking residual: doors emit twice, so the per-emission
     deadline compounded. A fresh wedge marker sends the SECOND emission
-    straight to the CLI rung with disclosure."""
+    straight to the raw staged queue with disclosure."""
     root = tmp_path / "root"
     (root / "state" / "plane").mkdir(parents=True)
     (root / "state" / "plane" / ".socket-wedged").write_text(
         str(int(time.time())))
-    recorder = tmp_path / "rec.sh"
-    recorder.write_text("#!/bin/bash\nexit 0\n")
-    recorder.chmod(0o755)
     t0 = time.monotonic()
     r = subprocess.run(
         ["bash", str(LIB / "plane-emit.sh")],
         input='{"events": [{"event_type": "task", "emitter": "t",'
               ' "fleet": "f", "payload": {}}]}',
         capture_output=True, text=True, timeout=30,
-        env={"PATH": "/usr/bin:/bin", **scratch_plane_env(root, cli=recorder),
+        env={"PATH": "/usr/bin:/bin", **scratch_plane_env(root),
 
              },
     )
     elapsed = time.monotonic() - t0
-    assert r.returncode == 0, r.stderr
+    assert r.returncode == 6, r.stderr
     assert "wedge cooldown" in r.stderr
+    assert list((root / "state/plane/staged").glob("*.batch"))
     assert elapsed < 1.5, f"cooldown path must not touch the socket ({elapsed:.1f}s)"
 
 
-def test_expired_wedge_marker_is_cleared(tmp_path, *, scratch_plane_env):
+def test_expired_wedge_marker_retries_socket_then_rearms_on_miss(tmp_path, *, scratch_plane_env):
     root = tmp_path / "root"
     (root / "state" / "plane").mkdir(parents=True)
     mark = root / "state" / "plane" / ".socket-wedged"
-    mark.write_text(str(int(time.time()) - 3600))
-    recorder = tmp_path / "rec.sh"
-    recorder.write_text("#!/bin/bash\nexit 0\n")
-    recorder.chmod(0o755)
+    stale = int(time.time()) - 3600
+    mark.write_text(str(stale))
     r = subprocess.run(
         ["bash", str(LIB / "plane-emit.sh")],
         input='{"events": [{"event_type": "task", "emitter": "t",'
               ' "fleet": "f", "payload": {}}]}',
         capture_output=True, text=True, timeout=30,
-        env={"PATH": "/usr/bin:/bin", **scratch_plane_env(root, cli=recorder),
+        env={"PATH": "/usr/bin:/bin", **scratch_plane_env(root),
 
              },
     )
-    assert r.returncode == 0, r.stderr
+    assert r.returncode == 6, r.stderr
     assert "wedge cooldown" not in r.stderr, "expired marker must not gate"
+    assert int(mark.read_text()) > stale, "the missed retry re-arms a fresh cooldown"
+    assert list((root / "state/plane/staged").glob("*.batch"))

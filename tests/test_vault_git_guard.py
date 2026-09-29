@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import constructed_env, read_fleet_events
+from tests.test_plane_events_door import _serving
 
 REPO = Path(__file__).resolve().parent.parent
 GUARD = REPO / "lib" / "vault-git-guard.sh"
@@ -177,18 +178,17 @@ class TestTheDecisionIsRecordedAsData:
             BOT_ID="tbot",
             BOT_DIR=bot,
             CLAUDRON_VAULT_PATH=vault,
-            # A cold emit with no daemon; a loaded host can outrun the 10s
-            # production bound and reap the row this test reads.
-            FLEET_EVENT_EMIT_TIMEOUT_S="120",
             **scratch_plane_env(root, initialize=True),
         )
         cmd = "git '--some\"flag' checkout main"
         verdict, detail = D.decide(cmd, vault, vault)
         assert (verdict, '"' in detail) == ("deny", True), detail
-        p = subprocess.run(["bash", str(GUARD)], env=env, capture_output=True,
-                           text=True, timeout=300,
-                           input=json.dumps({"tool_name": "Bash", "cwd": vault,
-                                             "tool_input": {"command": cmd}}))
+        with _serving(root, scratch_plane_env) as socket:
+            p = subprocess.run(["bash", str(GUARD)],
+                               env={**env, "PLANE_SOCKET": str(socket)},
+                               capture_output=True, text=True, timeout=300,
+                               input=json.dumps({"tool_name": "Bash", "cwd": vault,
+                                                 "tool_input": {"command": cmd}}))
         assert _decision(p.stdout) == "deny", p.stderr
         rows = [json.loads(line) for line in read_fleet_events(root).splitlines()]
         denied = [r for r in rows if r["type"] == "vault_guard_denied"]
