@@ -8,6 +8,7 @@ remains commands.core.cmd_generate.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 from pathlib import Path
@@ -49,10 +50,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.installed:
         if not origin.is_relative_to(root / ".probe-release"):
             parser.error("private installed compositor does not belong to this probe root")
+    elif (tree / "claudlobby/_artifact.json").is_file():
+        # Prepared exports retain a content-bound artifact without a Git
+        # revision. Compare that existing identity, not the export's new HEAD.
+        captured = json.loads((tree / "claudlobby/_artifact.json").read_text())
+        if resources.artifact_id != captured["artifact_id"]:
+            parser.error("selected wheel differs from this prepared artifact")
     elif (tree / ".git").exists():
         revision = subprocess.run(["git", "-C", str(tree), "rev-parse", "HEAD"],
-                                  capture_output=True, text=True, check=True).stdout.strip()
-        if resources.source_revision != revision:
+                                  capture_output=True, text=True)
+        clean = subprocess.run(["git", "-C", str(tree), "diff", "--quiet", "HEAD"],
+                               capture_output=True)
+        if revision.returncode or clean.returncode:
+            parser.error("use a prepared disposable export or a clean committed harness tree")
+        if resources.source_revision != revision.stdout.strip():
             parser.error("selected wheel was not built from this harness tree revision")
     args.seed = False
     logging.basicConfig(level=logging.INFO,
