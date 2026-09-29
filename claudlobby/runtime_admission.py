@@ -147,8 +147,12 @@ def validate_unit_admission(release, declaration, metadata, generated_bytes) -> 
                 daemon_label = host_unit_name("plane-daemon", prefix=prefix) == target.unit
             except RuntimeError:
                 pass
+        ingest_commands = {
+            (str(release.native_path / "plane-daemon.sh"),),
+            (str(release.cli_path), "plane", "daemon"),
+        }
         ingest_owner = (declaration.scope == "host" and daemon_label
-                        and target.command == (str(release.native_path / "plane-daemon.sh"),))
+                        and target.command in ingest_commands)
         if target.phase != ("ingest" if ingest_owner else "producers"):
             raise ActivationError("unit phase differs from its declared resident owner")
     if source.suffix == ".plist":
