@@ -1,11 +1,11 @@
-"""Tests for claudlobby/diff.py — drift detection and promote guidance."""
+"""Tests for claudlobby/diff.py — rendered drift detection."""
 
 from __future__ import annotations
 
 import json
 
 from claudlobby.config import load_fleet
-from claudlobby.diff import diff_bot, diff_fleet_timers, promote_bot
+from claudlobby.diff import diff_bot, diff_fleet_timers
 from claudlobby.composer import compose_bot
 from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
@@ -103,65 +103,6 @@ class TestDiffBot:
 
         result = diff_bot("lead", fleet, paths)
         assert ".mcp.json drift" in result
-
-
-# ---------------------------------------------------------------------------
-# promote_bot
-# ---------------------------------------------------------------------------
-
-
-class TestPromoteBot:
-    def test_unknown_bot(self, fleet_dir):
-        paths = Paths(root=fleet_dir, package=source_package())
-        fleet, _md = load_fleet(paths.fleet_yaml)
-        result = promote_bot("nonexistent", fleet, paths)
-        assert "not in fleet.yaml" in result
-
-    def test_promote_output_structure(self, fleet_dir):
-        paths = Paths(root=fleet_dir, package=source_package())
-        fleet, _md = load_fleet(paths.fleet_yaml)
-        result = promote_bot("lead", fleet, paths)
-        assert "Promote workflow" in result
-        assert "Review drift" in result
-        assert "claudlobby config diff --bot lead" in result
-        assert "Expertise content" in result
-        assert "orchestration.md" in result
-        assert "config plan" in result
-
-    def test_promote_no_voice(self, fleet_dir):
-        paths = Paths(root=fleet_dir, package=source_package())
-        fleet, _md = load_fleet(paths.fleet_yaml)
-        result = promote_bot("lead", fleet, paths)
-        assert "create a voices/" in result
-
-    def test_promote_with_voice(self, fleet_dir):
-        from textwrap import dedent
-
-        fleet_yaml = fleet_dir / "fleet.yaml"
-        fleet_yaml.write_text(
-            dedent("""\
-            fleet:
-              manager: lead
-              name: test-fleet
-              service_prefix: com.test
-              telegram_group_chat_id: "-100999"
-              accounts:
-                default: ~/.claude
-              defaults:
-                model: opus
-              bots:
-                lead:
-                  expertise: [orchestration]
-                  voice: voices/erlich.md
-                  telegram:
-                    handle: lead_bot
-                    token_env: TELEGRAM_TOKEN_LEAD
-        """)
-        )
-        paths = Paths(root=fleet_dir, package=source_package())
-        fleet, _md = load_fleet(paths.fleet_yaml)
-        result = promote_bot("lead", fleet, paths)
-        assert "erlich.md" in result
 
 
 # ---------------------------------------------------------------------------

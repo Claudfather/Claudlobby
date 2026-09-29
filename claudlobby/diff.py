@@ -1,8 +1,7 @@
 """Current rendered drift against the compositor's authored sources.
 
 Public ``config diff`` emits only changed-file metadata. Private callers can
-still request unified text diffs, and the old manual promotion pointer remains
-an internal helper for their fixtures.
+still request unified text diffs.
 """
 
 from __future__ import annotations
@@ -265,46 +264,3 @@ def diff_fleet_timers(fleet: FleetConfig, paths: Paths, merged_defaults: dict,
         if not parts:
             return ""
         return "\n".join(parts) + "\n"
-
-
-def promote_bot(bot_name: str, fleet: FleetConfig, paths: Paths) -> str:
-    """Interactive promote — v1: report intent, point user at files."""
-    bot = fleet.bots.get(bot_name)
-    if not bot:
-        return f"bot '{bot_name}' not in fleet.yaml\n"
-
-    expertise_paths = [paths.overlay_library / "expertise" / f"{a}.md" for a in bot.expertise]
-    voice_path = (paths.overlay_voices / bot.voice.removeprefix("voices/")
-                  if bot.voice else None)
-    bot_md = paths.bot_runtime(bot_name) / "CLAUDE.md"
-
-    expertise_lines = (
-        "\n".join(f"     • {p}" for p in expertise_paths)
-        if expertise_paths
-        else "     (none — set expertise in fleet.yaml)"
-    )
-
-    return (
-        f"Promote workflow for '{bot_name}' (v1 — manual):\n"
-        f"\n"
-        f"1. Review drift:    claudlobby config diff --bot {bot_name}\n"
-        f"2. Decide what to keep, then edit the source:\n"
-        f"   - Expertise content →\n{expertise_lines}\n"
-        + (
-            f"   - Voice / personality → {voice_path}\n"
-            if voice_path
-            else "   - Voice / personality → create a voices/<name>.md and reference it in fleet.yaml\n"
-        )
-    + f"   - Mission (one paragraph) → fleet.yaml `bots.{bot_name}.mission`\n"
-    f"   - Scope override → fleet.yaml `bots.{bot_name}.scope`\n"
-    f"   - Shared resource → new file under {paths.overlay_library / 'resources'}/\n"
-    f"   - Integration / MCP usage doc → new file under {paths.overlay_library / 'integrations'}/ (paired with mcp fragment)\n"
-    f"   - Cross-cutting protocol → new file under {paths.overlay_library / 'protocols'}/\n"
-    f"   - New guardrail → new file under {paths.overlay_library / 'guardrails'}/\n"
-    f"   - Lesson / 'learned the hard way' → new file under {paths.overlay_library / 'lessons'}/\n"
-    f"3. After editing library/, stage with `config plan`, inspect with `config diff PLAN_ID`, then activate.\n"
-    f"   (Runtime CLAUDE.md is overwritten; library/ is now the source of truth.)\n"
-    f"\n"
-    f"Runtime file:  {bot_md}\n"
-    f"Interactive promote (with picker) — coming in v2.\n"
-)

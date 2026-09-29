@@ -5,8 +5,6 @@ from __future__ import annotations
 import json as _json
 import logging
 import subprocess
-import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 from ..mcp_grammar import GrammarUnavailable, grammar
@@ -14,12 +12,10 @@ from ..composer import compose_bot, compose_fleet
 from ..source_state import (
     SOURCE_ABSENT,
     probe_source,
-    scan_dir,
     unreachable_line,
 )
 from ..validator import WARNING_CATEGORIES, render_warnings, validate, warning_summary
 from ._helpers import _load_env, _load_fleet_or_exit, _resolve_paths
-from ._helpers import refuse_unreachable
 
 log = logging.getLogger("claudlobby")
 
@@ -160,142 +156,6 @@ def cmd_generate(args) -> int:
     except Exception as exc:  # noqa: BLE001 — non-blocking by contract
         log.warning("registry scan failed (generate unaffected): %s", exc)
 
-    return 0
-
-
-def cmd_status(args) -> int:
-    """Fleet health dashboard — live snapshot from tmux, systemd, fleet-state."""
-    from ..status import (
-        collect_fleet_status,
-        format_bot_detail,
-        format_json,
-        format_table,
-    )
-
-    paths = _resolve_paths(args)
-    _load_env(paths)
-    fleet, _md = _load_fleet_or_exit(paths)
-
-    bot_filter = getattr(args, "bot", None)
-    use_json = getattr(args, "json", False)
-
-    statuses = collect_fleet_status(fleet, paths)
-    # A disabled reaction must never be silent (the defaults ruling). Resolving
-    # the switches shells the env-tier resolver once; a failure leaves the
-    # header unchanged rather than taking the dashboard down with it.
-    try:
-        from .. import switches as _sw
-        switch_states = _sw.resolve(paths, fleet)
-    except Exception:  # noqa: BLE001 — status must render regardless
-        switch_states = None
-
-    if bot_filter:
-        matches = [bs for bs in statuses if bs.name == bot_filter]
-        if not matches:
-            log.error("bot %r not found in fleet %r", bot_filter, fleet.name)
-            return 1
-        if use_json:
-            sys.stdout.write(format_json(matches, fleet.name, switch_states))
-        else:
-            sys.stdout.write(format_bot_detail(matches[0]))
-        return 0
-
-    if use_json:
-        sys.stdout.write(format_json(statuses, fleet.name, switch_states))
-    else:
-        sys.stdout.write(format_table(statuses, fleet.name, switch_states))
-    return 0
-
-
-def _coverage_line(plane, window_s, family=None) -> str:
-    """The coverage statement for an OPEN plane session (#1658).
-
-    The uptime door routes through here so the wording and derivation live in
-    `lib/plane-readers.py`, beside the plane's other SQL.
-
-    Degrades to a plain note rather than raising: a door must not lose its
-    answer because the sentence describing that answer could not be built. An
-    install whose readers predate `coverage()` says so, which is the same
-    shape `brief` uses for a matcher older than its caller.
-    """
-    try:
-        first, last, rows = plane.pr.coverage(plane.conn, family)
-        return plane.pr.coverage_line(first, last, rows, window_s)
-    except AttributeError:
-        return ("coverage: unknown — the readers installed at this root predate"
-                " the coverage derivation (#1658)")
-    except Exception as exc:                       # pragma: no cover - defensive
-        return f"coverage: unknown — {exc}"
-
-
-def cmd_uptime(args) -> int:
-    """Per-bot uptime, MTBR, and restart-rate metrics from the plane's
-    heartbeat samples and restart transitions (F18 closure R2b)."""
-    from ..uptime import WINDOWS, aggregate_fleet, format_json, format_table
-
-    paths = _resolve_paths(args)
-    bots_dir = paths.runtime_bots
-    # probe_dir, never is_dir()+glob: an unreadable bots dir (or ancestor)
-    # made a live fleet render as successful emptiness — "No bots found" at
-    # rc 0, the unreachable-vs-empty collapse this module exists to kill
-    # (external round 2, probed; source_state named this caller and the
-    # audit found it had never been wired).
-    # scan_dir, and the returned list IS what aggregate_fleet consumes — a
-    # probe followed by aggregate_fleet's own glob re-opened the directory,
-    # and glob swallows a mid-iteration OSError: a LIVE bot behind a benign
-    # entry vanished at rc 0 (external round 4, probed).
-    probe, bot_dirs = scan_dir(bots_dir)
-    if not probe.reachable:
-        line = unreachable_line("the runtime bots dir", probe)
-        print(line, file=sys.stderr if args.json else sys.stdout)
-        return 1
-
-    windows = [args.window] if args.window else list(WINDOWS.keys())
-    # F18 closure R2b: the plane is the ONLY source — the heartbeat samples,
-    # the dead-session fact and the restart transitions keepalive lands
-    # there; no keepalive.log, no retirement fact. A plane that cannot
-    # answer REFUSES (rc 3): an empty table would read as a fleet that never
-    # ran. The readers are the install's own stdlib script, like the bash
-    # doors' (never this checkout's copy).
-    import sqlite3
-
-    from ..brief import plane_session
-    from ..uptime import entries_from_plane
-    plane, note = plane_session(paths)
-    if plane is None:
-        return refuse_unreachable("uptime", note)
-    since = (datetime.now(timezone.utc) - max(WINDOWS.values())).isoformat()
-
-    def entries_for(bot_dir):
-        return entries_from_plane(plane.pr, plane.conn, plane.fleet, bot_dir.name, since)
-    # #1658: the coverage line is per RENDERED window, not per widest window.
-    # `uptime` reads back to the widest of 24h/7d/30d and then renders one of
-    # them, so a single line derived from `since` above would describe a window
-    # the table is not showing -- the same confusion the line exists to remove.
-    covs: dict[str, str] = {}
-    try:
-        results = aggregate_fleet(bots_dir, windows=windows, bot_filter=args.bot,
-                                  bot_dirs=bot_dirs, entries_for=entries_for)
-        for w in windows:
-            covs[w] = _coverage_line(plane, WINDOWS[w].total_seconds())
-    except (plane.pr.PlaneUnreachable, sqlite3.Error) as exc:
-        return refuse_unreachable("uptime", f"the plane could not answer ({exc})")
-    finally:
-        plane.close()
-
-    if not results:
-        log.info("No bots found in %s", bots_dir)
-        return 0
-
-    if args.json:
-        sys.stdout.write(format_json(results) + "\n")
-        # one per window rendered, on stderr so stdout stays parseable JSON
-        for w in windows:
-            print(f"{w}: {covs.get(w, 'coverage: unknown')}", file=sys.stderr)
-    else:
-        display_window = args.window or "24h"
-        sys.stdout.write(format_table(results, window=display_window) + "\n")
-        sys.stdout.write(covs.get(display_window, "coverage: unknown") + "\n")
     return 0
 
 

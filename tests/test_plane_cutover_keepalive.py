@@ -4,10 +4,9 @@ alias-anchored), no per-bot event file is written any more (the reader-less
 keepalive-<day>.jsonl and the fleet-<day>.jsonl both went with R1), and
 `claudlobby fleet uptime` reads the plane's heartbeat samples + restart transitions
 and nothing else (F18 closure R2b — no retirement fact, no log; refuses when
-the plane cannot answer). Deleted with the log parser:
-test_uptime_from_the_plane_equals_uptime_from_the_log (its plane half lives on
-as test_uptime_metrics_from_the_plane); test_cmd_uptime_reads_the_plane_once_the
-_events_write_is_retired became test_cmd_uptime_reads_the_plane_and_refuses_without_it.
+the plane cannot answer). The old log parser's plane half remains in
+test_uptime_metrics_from_the_plane; the public operation is checked by
+test_fleet_uptime_reads_the_plane_and_refuses_without_it.
 """
 from __future__ import annotations
 
@@ -155,7 +154,7 @@ def test_uptime_metrics_from_the_plane(tmp_path):
     assert with_down["uptime_pct"] <= expected["uptime_pct"] and with_down["restart_count"] == 1   # DOWN adds no uptime
 
 
-def test_cmd_uptime_reads_the_plane_and_refuses_without_it(tmp_path):
+def test_fleet_uptime_reads_the_plane_and_refuses_without_it(tmp_path):
     root = tmp_path
     _manifest(root)
     (root / "state" / "plane").mkdir(parents=True, exist_ok=True)
