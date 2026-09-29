@@ -227,7 +227,8 @@ class ActivationStore:
         read_release(self.root, recovery_release_id)
         body = {"schema": 1, "activation_id": activation_id, "root": str(self.root),
                 "intent": intent, "previous_selection": previous, "status": "prepared",
-                "completed": [], "pending": None, "evidence": {}}
+                "completed": [], "pending": None, "evidence": {}, "start_effects": {},
+                "start_phases": {}}
         path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         _sync(path.parent.parent)
         return self._save(ActivationRecord(activation_id, self.root, body))
@@ -289,6 +290,82 @@ class ActivationStore:
             raise ActivationError("activation step is out of order")
         body["status"] = "rolling_back" if steps is ROLLBACK_STEPS else "activating"
         body["pending"] = step
+        return self._save(record)
+
+    def record_start_intent(self, activation_id: str, *, phase: str, source: str,
+                            target: str, sha256: str, fence: dict | None) -> ActivationRecord:
+        """Durably fence one exact native start before invoking the native owner."""
+        self.assert_locked()
+        record = read_activation(self.root, activation_id)
+        step = {"ingest": "ingest_started", "bots": "bots_started",
+                "producers": "producers_resumed"}.get(phase)
+        if (record.status != "activating" or record.body["pending"] != step
+                or not isinstance(record.body.get("start_effects"), dict)
+                or phase not in record.body.get("start_phases", {})
+                or not Path(source).is_absolute() or not target
+                or not re.fullmatch(r"[0-9a-f]{64}", sha256)
+                or source in record.body["start_effects"]):
+            raise ActivationError("native start intent is not the admitted new effect")
+        if (phase == "bots") != (fence is not None):
+            raise ActivationError("native start fence differs from its phase")
+        if fence is not None and (type(fence.get("ceiling")) is not int or fence["ceiling"] <= 0
+                                  or not isinstance(fence.get("fence"), str)
+                                  or not fence["fence"].startswith("RR_FENCE_")):
+            raise ActivationError("native bot start lacks exact readiness fence")
+        record.body["start_effects"][source] = {"phase": phase, "target": target,
+            "sha256": sha256, "fence": fence, "result": None}
+        return self._save(record)
+
+    def record_start_phase(self, activation_id: str, *, phase: str,
+                           publication_digest: str, registry: list) -> ActivationRecord:
+        """Freeze the scan/publication inputs before this phase's first start."""
+        self.assert_locked()
+        record = read_activation(self.root, activation_id)
+        step = {"ingest": "ingest_started", "bots": "bots_started",
+                "producers": "producers_resumed"}.get(phase)
+        if (record.status != "activating" or record.body["pending"] != step
+                or not isinstance(record.body.get("start_phases"), dict)
+                or not re.fullmatch(r"[0-9a-f]{64}", publication_digest)
+                or not isinstance(registry, list)):
+            raise ActivationError("candidate phase evidence is not admitted")
+        value = {"publication": publication_digest, "registry": registry}
+        prior = record.body["start_phases"].get(phase)
+        if prior is not None:
+            if prior != value:
+                raise ActivationError("candidate phase evidence changed")
+            return record
+        if any(effect["phase"] == phase for effect in record.body.get("start_effects", {}).values()):
+            raise ActivationError("candidate start preceded its phase evidence")
+        record.body["start_phases"][phase] = value
+        return self._save(record)
+
+    def arm_start_evidence(self, activation_id: str) -> ActivationRecord:
+        """Upgrade a pre-start old record before any native candidate effect."""
+        self.assert_locked()
+        record = read_activation(self.root, activation_id)
+        if (record.status != "activating" or record.body["pending"] is not None
+                or record.body["completed"] != list(STEPS[:STEPS.index("ingest_started")])):
+            raise ActivationError("start evidence must be armed before candidate start")
+        if "start_effects" not in record.body and "start_phases" not in record.body:
+            record.body["start_effects"] = {}
+            record.body["start_phases"] = {}
+            return self._save(record)
+        if record.body.get("start_effects") != {} or record.body.get("start_phases") != {}:
+            raise ActivationError("candidate start evidence is inconsistent")
+        return record
+
+    def record_start_result(self, activation_id: str, *, source: str, target: str,
+                            details: dict, digest: str) -> ActivationRecord:
+        """Retain full verified result so a later phase can recheck, never resend."""
+        self.assert_locked()
+        record = read_activation(self.root, activation_id)
+        effect = record.body.get("start_effects", {}).get(source)
+        if (effect is None or effect["target"] != target or effect["result"] is not None
+                or record.body["pending"] != {"ingest": "ingest_started", "bots": "bots_started",
+                                                   "producers": "producers_resumed"}[effect["phase"]]
+                or _digest({"operation": "started", "target": target, "details": details}) != digest):
+            raise ActivationError("native start result differs from its durable intent")
+        effect["result"] = {"details": details, "digest": digest}
         return self._save(record)
 
     def record_identity_bindings(self, activation_id: str, bindings: dict, *, package) -> ActivationRecord:

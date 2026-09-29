@@ -177,7 +177,7 @@ def test_timer_paired_service_is_published_but_not_started_by_either_activation_
         "scheduled.timer", "added.service"]
 
 
-def test_resume_stage_boundary_excludes_handoff_bootstrap_and_candidate_start():
+def test_resume_stage_boundary_requires_start_receipts_and_running_handoff_witness():
     def record(step, *, source="selected"):
         completed = list(state.STEPS[:state.STEPS.index(step)])
         return SimpleNamespace(status="activating", body={"completed": completed, "pending": step,
@@ -186,7 +186,8 @@ def test_resume_stage_boundary_excludes_handoff_bootstrap_and_candidate_start():
                        "install_directory": "/private/native"}})
     assert activation.resumable_running_step(record("queues_classified")) == "queues_classified"
     assert activation.resumable_running_step(record("backup_saved", source="legacy")) == "backup_saved"
-    assert activation.resumable_running_step(record("queues_classified", source="bootstrap")) is None
+    assert activation.resumable_running_step(record("queues_classified", source="bootstrap")) == "queues_classified"
+    assert activation.resumable_running_step(record("sessions_handed_off", source="bootstrap")) == "sessions_handed_off"
     assert activation.resumable_running_step(record("sessions_handed_off")) is None
     assert activation.resumable_running_step(record("ingest_started")) is None
 
@@ -201,6 +202,21 @@ def test_pre_effect_prepare_refusal_cancels_intent_without_starting(cold, monkey
     record = state.read_activation(root, "cold")
     assert record.status == "rolled_back" and record.body["completed"] == []
     assert host.starts == []
+
+
+def test_bootstrap_resume_from_quiesced_queue_reuses_same_id(cold, monkeypatch):
+    root, _, plan, host = cold
+    original = activation.build_migration_manifest
+    def interrupted(*_args, **_kwargs):
+        raise state.ActivationError("fixture interrupted after empty native pause")
+    monkeypatch.setattr(activation, "build_migration_manifest", interrupted)
+    with pytest.raises(state.ActivationError, match="fixture interrupted"):
+        activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    record = state.read_activation(root, "cold")
+    assert record.body["pending"] == "queues_classified" and host.starts == []
+    monkeypatch.setattr(activation, "build_migration_manifest", original)
+    resumed = activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    assert resumed.status == "active" and resumed.activation_id == "cold"
 
 
 def test_legacy_pending_queue_blocks_before_activation_record_or_native_pause(cold):
@@ -519,6 +535,29 @@ def test_failed_readiness_keeps_candidate_pending_and_never_starts_producers(col
         assert host.starts == ["claudlobby-plane-daemon.service"]
     else:
         assert host.starts == ["claudlobby-plane-daemon.service", "com.example.manager.service", "com.example.worker.service"]
+
+
+@pytest.mark.parametrize("failing", ["ingest", "worker"])
+def test_bootstrap_resume_reconciles_started_unit_without_native_resend(cold, failing):
+    root, _, plan, host = cold
+    host.bad_probe = failing == "ingest"
+    host.fail_bot = "worker" if failing == "worker" else None
+    with pytest.raises(state.ActivationError):
+        activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    before = list(host.starts)
+    pending = state.read_activation(root, "cold")
+    assert pending.body["pending"] == ("ingest_started" if failing == "ingest" else "bots_started")
+    assert any(effect["result"] is None for effect in pending.body["start_effects"].values())
+    with pytest.raises(state.ActivationError):
+        activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    assert host.starts == before  # An unready issued bot is never sent a second start.
+    host.bad_probe = False
+    host.fail_bot = None
+    resumed = activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    assert resumed.status == "active"
+    assert host.starts == ["claudlobby-plane-daemon.service", "com.example.manager.service",
+                           "com.example.worker.service", "claudlobby-keepalive.timer"]
+    assert tuple(resumed.body["completed"]) == state.STEPS
 
 
 def test_selected_bindings_refuse_loss_foreign_scope_and_ambiguous_actors(cold):

@@ -178,8 +178,9 @@ def register_release_subparsers(sub):
     activate = _route(hosts, "activate", "host.activate", "Activate PLAN_ID from an operator shell")
     activate.description = ("First activation requires explicit global --root. "
                             "Use --adopt-existing only for an unsealed, already running estate. "
-                            "--resume ID can fix forward recorded, quiesced pre-start stages; "
-                            "handoff and candidate-start stages still require manual recovery evidence.")
+                            "--resume ID can fix forward supported recorded bootstrap, quiesced, and "
+                            "candidate-start stages with durable receipts; running-session handoff "
+                            "and starts without receipts require manual recovery evidence.")
     activate.set_defaults(func=_dispatch_host)
     activate.add_argument("plan_id", metavar="PLAN_ID")
     activate.add_argument("--install-directory", required=True, metavar="PATH",
@@ -187,7 +188,7 @@ def register_release_subparsers(sub):
     activate.add_argument("--adopt-existing", action="store_true",
                           help="First, forward-only adoption of a reviewed unsealed estate and its existing Plane")
     activate.add_argument("--resume", metavar="ACTIVATION_ID",
-                          help="Fix forward the same recorded activation at a supported quiesced pre-start step")
+                          help="Fix forward the same recorded activation at a supported step with required evidence")
 
     config = sub.add_parser("config", help="Stage and inspect configuration proposals")
     configs = config.add_subparsers(dest="config_command", required=True)

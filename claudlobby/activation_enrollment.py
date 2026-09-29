@@ -520,7 +520,8 @@ def verify_candidate_enablement(store: ActivationStore, activation_id: str, phas
     return _digest(observations)
 
 
-def install_candidate_units(store: ActivationStore, activation_id: str, phase: str, *, adapter=None) -> EnrollmentPublication:
+def install_candidate_units(store: ActivationStore, activation_id: str, phase: str, *,
+                            adapter=None, already_started=False) -> EnrollmentPublication:
     """Publish one phase's guarded bytes; caller still owns native activation."""
     record = _record(store, activation_id)
     if phase not in PHASES or record.body["pending"] != _START[phase]:
@@ -529,7 +530,15 @@ def install_candidate_units(store: ActivationStore, activation_id: str, phase: s
     adapter = adapter or Adapter()
     plan = plans[PHASES.index(phase)]
     entries = [entry for entry in plan.effects["entries"] if entry["phase"] == phase]
-    _check_targets(adapter, enrollment, entries, allow_candidate=True)
+    if already_started:
+        # A successful exact start can be active now. The journal must prove
+        # publication finished before that effect; apply_config rechecks every
+        # installed byte/link without requiring the native target inactive.
+        if read_config_install(store.root, journal_id(activation_id, phase)).status != "applied":
+            raise ActivationError("started candidate lacks completed publication evidence")
+        _catalog_now(adapter, enrollment)
+    else:
+        _check_targets(adapter, enrollment, entries, allow_candidate=True)
     apply_config(store.root, journal_id(activation_id, phase))
     # No daemon-reload here. Native state reconciliation/start is a separate
     # coordinator effect; this evidence claims exact installed files/links only.

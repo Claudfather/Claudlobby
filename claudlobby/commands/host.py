@@ -20,8 +20,8 @@ from .releases import _executing_release, _host_releases, _host_root
 
 def _hint(root):
     return (f"inspect claudlobby --root {shlex.quote(str(root))} host status; "
-            "use host activate PLAN_ID --resume ID --install-directory PATH only for a recorded quiesced pre-start step; "
-            "other steps need their missing handoff or candidate-start evidence repaired first")
+            "use host activate PLAN_ID --resume ID --install-directory PATH for a supported recorded step; "
+            "running-session handoff and starts without durable receipts need their missing witness repaired first")
 
 
 def _status(args, root):
@@ -122,7 +122,7 @@ def _activate(args, root):
                                  release_id=executing, hint=_hint(root))
         if resumable_running_step(prior) is None:
             raise CommandFailure("conflict", "recorded activation step cannot safely resume; "
-                                 "handoff or candidate-start evidence is missing",
+                                 "required handoff or start evidence is missing",
                                  data={**data, "recorded_activation": _recorded(root, args.resume)},
                                  release_id=executing,
                                  hint="inspect the pending step and repair its native/journal witness before retrying")
@@ -161,7 +161,7 @@ def _activate(args, root):
                     supported = False
                 if not supported:
                     message = ("conflict: recorded activation step cannot safely resume; "
-                               "handoff or candidate-start evidence is missing")
+                               "required handoff or start evidence is missing")
                     hint = ("inspect the exact pending step and repair its native/journal witness "
                             "before retrying the same activation ID")
             if data["recorded_activation"] is None and str(exc) == "another host activation holds the lock":

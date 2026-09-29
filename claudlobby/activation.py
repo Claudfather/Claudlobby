@@ -22,7 +22,7 @@ from .activation_state import (ActivationError, ActivationRecord, CandidateDisab
                                locked_activation, read_activation, read_selection)
 from .activation_identity import identity_bindings_from_registry
 from . import activation_enrollment as enrollment, activation_units as units, config_install
-from .activation_runtime import BOT_READY_KINDS, assert_quiescent, start_unit
+from .activation_runtime import RuntimeEvidence, assert_quiescent, observe_started_unit, start_unit
 from .config_plan import path_state, read_plan
 from .config_units import current_declarations, planned_units
 from .migration_apply import apply_migration, read_migration
@@ -287,72 +287,47 @@ def bootstrap_activation(root: Path, activation_id: str, plan_id: str,
             evidence = (units.pause_phase(store, activation_id, phase, adapter=adapter).digest if phase else
                         _digest({"bootstrap_empty": True, "sessions": [], "handoffs": []}))
             store.complete(activation_id, step, evidence_digest=evidence)
+        return _finish_bootstrap_activation(root, store, activation_id, plan, release,
+            declarations, starts, rank, install_directory, adapter, package)
+
+
+def _finish_bootstrap_activation(root, store, activation_id, plan, release,
+                                 declarations, starts, rank, install_directory, adapter, package):
+    record = read_activation(root, activation_id)
+    completed = set(record.body["completed"])
+    if "queues_classified" not in completed:
         store.begin(activation_id, "queues_classified")
         _empty_plane(root)
         migration = build_migration_manifest(root, release, release, initialize_empty=True)
         if migration.blockers or any(row["file_count"] != 0 for row in migration.queues.values()):
             raise ActivationError("bootstrap migration/queue proof is blocked")
         store.complete(activation_id, "queues_classified", evidence_digest=migration.manifest_id[2:])
-        store.begin(activation_id, "backup_saved")
-        apply_migration(store, activation_id, migration)  # owns backup + migration completion
+    else:
+        journal = read_migration(root, activation_id)
+        if journal is not None:
+            payload = dict(journal["manifest"])
+            if payload.pop("schema", None) != 1:
+                raise ActivationError("saved bootstrap migration manifest has an unknown schema")
+            migration = MigrationManifest(**payload)
+        else:
+            _empty_plane(root)
+            migration = build_migration_manifest(root, release, release, initialize_empty=True)
+        if migration.manifest_id[2:] != record.body["evidence"]["queues_classified"]:
+            raise ActivationError("bootstrap queues differ from their recorded migration manifest")
+    if "migration_applied" not in completed:
+        if "backup_saved" not in completed:
+            store.begin(activation_id, "backup_saved")
+        apply_migration(store, activation_id, migration)
+    if "selection_switched" not in completed:
         store.begin(activation_id, "selection_switched")
         store.select(activation_id)
+    if "configuration_applied" not in completed:
         store.begin(activation_id, "configuration_applied")
         applied = config_install.apply_config(root, activation_id)
         store.complete(activation_id, "configuration_applied", evidence_digest=_digest({
             "plan_id": applied.plan_id, "status": applied.status, "progress": applied.progress}))
-        enrollment.prepare_candidate_enrollment(store, activation_id, configuration_journal=activation_id,
-                                               install_directory=install_directory, adapter=adapter)
-        observations = {}
-        for phase, step in (("ingest", "ingest_started"), ("bots", "bots_started")):
-            store.begin(activation_id, step)
-            registry = _registry_ready(plan, declarations, package) if phase == "bots" else []
-            if phase == "bots":
-                bindings = identity_bindings_from_registry(plan, registry, package=package)
-                store.record_identity_bindings(activation_id, bindings, package=package)
-            publication = enrollment.install_candidate_units(store, activation_id, phase, adapter=adapter)
-            entries = enrollment.candidate_entries(store, activation_id, phase)
-            if phase == "bots":
-                entries = sorted(entries, key=lambda entry: rank[(starts[entry["source"]][0].fleet,
-                                                                  starts[entry["source"]][0].bot)])
-            results = []
-            for entry in entries:
-                _, _, unit = starts[entry["source"]]
-                result = start_unit(store, activation_id, installed_file=Path(entry["installed"]),
-                                    target=entry["target"], unit=unit, sha256=entry["after"]["sha256"],
-                                    adapter=adapter, readiness=(lambda: _ingest_ready(root, release))
-                                    if phase == "ingest" else None)
-                observations[entry["source"]] = result
-                results.append(result.digest)
-            enabled = enrollment.verify_candidate_enablement(store, activation_id, phase, adapter=adapter)
-            store.complete(activation_id, step, evidence_digest=_digest([publication.digest, results, enabled, registry]))
-        store.begin(activation_id, "verified")
-        verified = {"ingest": _ingest_ready(root, release), "bots": []}
-        for source, result in observations.items():
-            declaration, _, unit = starts[source]
-            if unit.phase == "bots":
-                fence = result.details["readiness"]["fence"]
-                kind = result.details["readiness"]["kind"]
-                if (kind not in BOT_READY_KINDS or adapter.read("svc_activation_bot_ready", root,
-                        declaration.working_directory, "0", fence).strip() != kind):
-                    raise ActivationError("bot lost readiness before producer admission")
-                verified["bots"].append(result.digest)
-        store.complete(activation_id, "verified", evidence_digest=_digest(verified))
-        store.begin(activation_id, "producers_resumed")
-        publication = enrollment.install_candidate_units(store, activation_id, "producers", adapter=adapter)
-        entries = enrollment.candidate_entries(store, activation_id, "producers")
-        startable, timer_services = _startable_producers(entries)
-        results = []
-        for entry in startable:
-            _, _, unit = starts[entry["source"]]
-            result = start_unit(store, activation_id, installed_file=Path(entry["installed"]),
-                                target=entry["target"], unit=unit, sha256=entry["after"]["sha256"], adapter=adapter)
-            results.append(result.digest)
-        enabled = enrollment.verify_candidate_enablement(store, activation_id, "producers", adapter=adapter)
-        return store.complete(activation_id, "producers_resumed", evidence_digest=_digest({
-            "publication": publication.digest, "native_starts": results,
-            "enablement": enabled, "timer_services": sorted(timer_services),
-            "watchdog_ticks": "admitted only after active", "user_manager_startup": "host prerequisite"}))
+    return _candidate_startup(root, store, activation_id, plan, release, declarations,
+        starts, rank, install_directory, adapter, package, bootstrap=True)
 
 
 def _original_bot_tmpdir(unit) -> str:
@@ -690,80 +665,172 @@ def _finish_running_activation(root, store, activation_id, plan, release, source
         applied = config_install.apply_config(root, activation_id)
         store.complete(activation_id, "configuration_applied", evidence_digest=_digest({
             "plan_id": applied.plan_id, "status": applied.status, "progress": applied.progress}))
+    return _candidate_startup(root, store, activation_id, plan, release, candidates,
+        starts, rank, install_directory, adapter, package, bootstrap=False,
+        retired_units=retired_units, sockets=sockets, legacy_source=legacy_source)
+
+
+def _candidate_startup(root, store, activation_id, plan, release, candidates, starts,
+                       rank, install_directory, adapter, package, *, bootstrap,
+                       retired_units=(), sockets=None, legacy_source=False):
+    """Serial candidate starts with durable per-unit intent and read-only replay."""
+    sockets = sockets or {}
     enrollment.prepare_candidate_enrollment(store, activation_id,
-            configuration_journal=activation_id, install_directory=install_directory, adapter=adapter)
+        configuration_journal=activation_id, install_directory=install_directory, adapter=adapter)
+    record = read_activation(root, activation_id)
+    if record.body["completed"] == list(STEPS[:STEPS.index("ingest_started")]) and record.body["pending"] is None:
+        store.arm_start_evidence(activation_id)
     observations = {}
-    for phase, step in (("ingest", "ingest_started"), ("bots", "bots_started")):
-        store.begin(activation_id, step)
-        registry = _registry_ready(plan, candidates, package) if phase == "bots" else []
-        if phase == "bots":
-            store.record_identity_bindings(activation_id,
-                identity_bindings_from_registry(plan, registry, package=package), package=package)
-        publication = enrollment.install_candidate_units(store, activation_id, phase, adapter=adapter)
+    for phase, step in (("ingest", "ingest_started"), ("bots", "bots_started"),
+                        ("producers", "producers_resumed")):
+        record = read_activation(root, activation_id)
+        completed = step in record.body["completed"]
+        if phase == "producers":
+            _verify_candidate_startup(root, store, activation_id, release, starts,
+                                      observations, retired_units, sockets, adapter)
+            record = read_activation(root, activation_id)
+        if not completed:
+            store.begin(activation_id, step)
+        record = read_activation(root, activation_id)
+        phases = record.body.get("start_phases")
+        effects = record.body.get("start_effects")
+        if not isinstance(phases, dict) or not isinstance(effects, dict):
+            raise ActivationError("candidate start lacks durable phase/effect evidence")
+        context = phases.get(phase)
+        prior_effects = {source: effect for source, effect in effects.items() if effect["phase"] == phase}
+        if context is None:
+            if completed or prior_effects:
+                raise ActivationError("candidate start preceded its durable phase evidence")
+            registry = _registry_ready(plan, candidates, package) if phase == "bots" else []
+            if phase == "bots":
+                store.record_identity_bindings(activation_id,
+                    identity_bindings_from_registry(plan, registry, package=package), package=package)
+            publication = enrollment.install_candidate_units(store, activation_id, phase, adapter=adapter)
+            store.record_start_phase(activation_id, phase=phase,
+                                     publication_digest=publication.digest, registry=registry)
+            publication_digest = publication.digest
+        else:
+            registry = context["registry"]
+            publication_digest = context["publication"]
+            if phase == "bots" and "identity_bindings" not in record.body:
+                raise ActivationError("candidate bots lack recorded identity bindings")
+            if not completed:
+                publication = enrollment.install_candidate_units(store, activation_id, phase,
+                    adapter=adapter, already_started=bool(prior_effects))
+                if publication.digest != publication_digest:
+                    raise ActivationError("candidate publication evidence changed")
         entries = enrollment.candidate_entries(store, activation_id, phase)
         if phase == "bots":
             entries = sorted(entries, key=lambda entry: rank[(starts[entry["source"]][0].fleet,
                                                               starts[entry["source"]][0].bot)])
+        startable, timer_services = _startable_producers(entries) if phase == "producers" else (entries, set())
+        if set(prior_effects) - {entry["source"] for entry in startable}:
+            raise ActivationError("candidate start receipt names a foreign unit")
         results = []
-        for entry in entries:
-            _, _, unit = starts[entry["source"]]
-            result = start_unit(store, activation_id, installed_file=Path(entry["installed"]),
-                                target=entry["target"], unit=unit, sha256=entry["after"]["sha256"],
-                                adapter=adapter, readiness=(lambda: _ingest_ready(root, release))
-                                if phase == "ingest" else None)
-            observations[entry["source"]] = result
+        for entry in startable:
+            source = entry["source"]
+            _, _, unit = starts[source]
+            fence = prior_effects[source]["fence"] if source in prior_effects else None
+            readiness = (lambda: _ingest_ready(root, release)) if phase == "ingest" else None
+            if source in prior_effects:
+                effect = prior_effects[source]
+                if effect["target"] != entry["target"] or effect["sha256"] != entry["after"]["sha256"]:
+                    raise ActivationError("candidate start receipt differs from frozen publication")
+                observed = observe_started_unit(store, installed_file=Path(entry["installed"]),
+                    target=entry["target"], unit=unit, sha256=entry["after"]["sha256"],
+                    adapter=adapter, fence=fence, readiness=readiness)
+                saved = effect["result"]
+                if saved is None:
+                    if phase == "producers" and Path(entry["installed"]).suffix == ".service":
+                        raise ActivationError("one-shot producer start has unknown effect; inspect its native/journal witness")
+                    store.record_start_result(activation_id, source=source, target=entry["target"],
+                                              details=observed.details, digest=observed.digest)
+                    result = observed
+                else:
+                    result = RuntimeEvidence("started", entry["target"], saved["details"])
+                    if (result.digest != saved["digest"]
+                            or result.details.get("readiness") != observed.details.get("readiness")):
+                        raise ActivationError("candidate start result digest changed")
+            else:
+                if completed:
+                    raise ActivationError("completed candidate phase lacks a start receipt")
+                result = start_unit(store, activation_id, installed_file=Path(entry["installed"]),
+                    target=entry["target"], unit=unit, sha256=entry["after"]["sha256"],
+                    adapter=adapter, readiness=readiness,
+                    before_start=lambda saved_fence, entry=entry, source=source:
+                        store.record_start_intent(activation_id, phase=phase, source=source,
+                            target=entry["target"], sha256=entry["after"]["sha256"], fence=saved_fence))
+                store.record_start_result(activation_id, source=source, target=entry["target"],
+                                          details=result.details, digest=result.digest)
+            observations[source] = result
             results.append(result.digest)
         enabled = enrollment.verify_candidate_enablement(store, activation_id, phase, adapter=adapter)
-        store.complete(activation_id, step, evidence_digest=_digest([publication.digest, results, enabled, registry]))
-    store.begin(activation_id, "verified")
+        phase_digest = _digest([publication_digest, results, enabled, registry]) if phase != "producers" else _digest({
+            "publication": publication_digest, "native_starts": results,
+            "enablement": enabled, "timer_services": sorted(timer_services),
+            "watchdog_ticks": "admitted only after active", **(
+                {"user_manager_startup": "host prerequisite"} if bootstrap else {"legacy_source": legacy_source})})
+        if completed:
+            if record.body["evidence"][step] != phase_digest:
+                raise ActivationError("completed candidate phase evidence changed")
+        elif phase == "producers":
+            return store.complete(activation_id, step, evidence_digest=phase_digest)
+        else:
+            store.complete(activation_id, step, evidence_digest=phase_digest)
+    raise ActivationError("candidate startup did not reach producer completion")
+
+
+def _verify_candidate_startup(root, store, activation_id, release, starts,
+                              observations, retired_units, sockets, adapter):
+    record = read_activation(root, activation_id)
+    if "bots_started" not in record.body["completed"]:
+        raise ActivationError("candidate bots have not completed startup")
     verified = {"ingest": _ingest_ready(root, release), "bots": []}
-    for unit in retired_units:
-        assert_quiescent(adapter, installed_file=Path(unit.installed[0].path),
-                         target=unit.target, socket_path=sockets.get(unit.target))
+    for original in retired_units:
+        assert_quiescent(adapter, installed_file=Path(original.installed[0].path),
+                         target=original.target, socket_path=sockets.get(original.target))
     for source, result in observations.items():
         declaration, _, unit = starts[source]
         if unit.phase == "bots":
             fence = result.details["readiness"]["fence"]
             kind = result.details["readiness"]["kind"]
-            if (kind not in BOT_READY_KINDS or adapter.read("svc_activation_bot_ready", root,
-                    declaration.working_directory, "0", fence).strip() != kind):
+            if adapter.read("svc_activation_bot_ready", root,
+                    declaration.working_directory, "0", fence).strip() != kind:
                 raise ActivationError("candidate bot lost readiness before producer admission")
             verified["bots"].append(result.digest)
-    store.complete(activation_id, "verified", evidence_digest=_digest(verified))
-    store.begin(activation_id, "producers_resumed")
-    publication = enrollment.install_candidate_units(store, activation_id, "producers", adapter=adapter)
-    results = []
-    entries = enrollment.candidate_entries(store, activation_id, "producers")
-    startable, timer_services = _startable_producers(entries)
-    for entry in startable:
-        _, _, unit = starts[entry["source"]]
-        result = start_unit(store, activation_id, installed_file=Path(entry["installed"]),
-                            target=entry["target"], unit=unit, sha256=entry["after"]["sha256"], adapter=adapter)
-        results.append(result.digest)
-    enabled = enrollment.verify_candidate_enablement(store, activation_id, "producers", adapter=adapter)
-    return store.complete(activation_id, "producers_resumed", evidence_digest=_digest({
-            "publication": publication.digest, "native_starts": results, "enablement": enabled,
-            "legacy_source": legacy_source, "timer_services": sorted(timer_services),
-            "watchdog_ticks": "admitted only after active"}))
+    digest = _digest(verified)
+    if "verified" in record.body["completed"]:
+        if record.body["evidence"]["verified"] != digest:
+            raise ActivationError("candidate verification evidence changed")
+    else:
+        store.begin(activation_id, "verified")
+        store.complete(activation_id, "verified", evidence_digest=digest)
 
 
 _RESUMABLE_RUNNING_STEPS = frozenset({
     "queues_classified", "backup_saved", "migration_applied",
     "selection_switched", "configuration_applied",
 })
+_RESUMABLE_START_STEPS = frozenset({"ingest_started", "bots_started", "verified", "producers_resumed"})
+_BOOTSTRAP_EMPTY_STEPS = frozenset({"producers_paused", "sessions_handed_off",
+                                    "sessions_quiesced", "ingest_quiesced"})
 
 
 def resumable_running_step(record: ActivationRecord) -> str | None:
-    """Only stages before any candidate publication/start have replayable owners."""
+    """Return a supported same-ID stage; a missing start journal never implies no effect."""
     completed = record.body["completed"]
     if (record.status != "activating" or completed != list(STEPS[:len(completed)])
             or not isinstance(record.body["intent"].get("install_directory"), str)
-            or (record.body["previous_selection"] is None
-                and record.body["intent"].get("source_kind") != "legacy-unsealed")
             or len(completed) >= len(STEPS)):
         return None
     step = STEPS[len(completed)]
-    return step if step in _RESUMABLE_RUNNING_STEPS and record.body["pending"] in (None, step) else None
+    bootstrap = (record.body["previous_selection"] is None
+                 and record.body["intent"].get("source_kind") != "legacy-unsealed")
+    supported = step in _RESUMABLE_RUNNING_STEPS or bootstrap and step in _BOOTSTRAP_EMPTY_STEPS
+    if step in _RESUMABLE_START_STEPS:
+        supported = (isinstance(record.body.get("start_effects"), dict)
+                     and isinstance(record.body.get("start_phases"), dict))
+    return step if supported and record.body["pending"] in (None, step) else None
 
 
 def _frozen_unit(row: dict) -> EnrolledUnit:
@@ -785,11 +852,7 @@ def _frozen_unit(row: dict) -> EnrolledUnit:
 
 def resume_activation(root: Path, activation_id: str, plan_id: str,
                       install_directory: Path, *, adapter: Adapter | None = None) -> ActivationRecord:
-    """Fix forward one recorded, quiesced running-estate activation by its ID.
-
-    A prior candidate start has no durable readiness fence, and earlier bot
-    handoff has no retained private-server presence witness. Both refuse.
-    """
+    """Fix forward one recorded activation, without replaying uncertain sends."""
     root = Path(root).expanduser()
     if not root.is_absolute() or not root.is_dir():
         raise ActivationError("resume requires an explicit existing absolute data root")
@@ -820,10 +883,12 @@ def resume_activation(root: Path, activation_id: str, plan_id: str,
                 raise ActivationError("another unfinished activation owns this host")
         pause = units.load_unit_pause(store, activation_id)
         frozen = pause.enrollment
-        if (frozen["data_root"] != str(root) or frozen.get("bootstrap_empty")
+        bootstrap = frozen.get("bootstrap_empty") is True
+        if (frozen["data_root"] != str(root)
                 or frozen.get("legacy_source") is not
-                (record.body["intent"].get("source_kind") == "legacy-unsealed")):
-            raise ActivationError("resume requires a frozen running-estate enrollment")
+                (record.body["intent"].get("source_kind") == "legacy-unsealed")
+                or bootstrap and (frozen["units"] or record.body["previous_selection"] is not None)):
+            raise ActivationError("resume enrollment differs from frozen activation source")
         manager, domain, directories, _, _ = _catalog(frozen["catalog"])
         if frozen["manager"] != manager:
             raise ActivationError("frozen native manager differs from its catalog")
@@ -842,12 +907,14 @@ def resume_activation(root: Path, activation_id: str, plan_id: str,
                 raise ActivationError("current selection differs from this activation's frozen intent")
         source_id = record.body["intent"]["source_release_id"]
         legacy_source = record.body["intent"].get("source_kind") == "legacy-unsealed"
-        if legacy_source != (source_id is None):
+        if (legacy_source != (source_id is None)
+                or bootstrap and source_id != release.release_id):
             raise ActivationError("resume source identity differs from frozen enrollment")
-        source = read_release(root, source_id) if source_id else None
-        if source_id and record.body["previous_selection"] is None:
+        source = read_release(root, source_id) if source_id and not bootstrap else None
+        if source_id and not bootstrap and record.body["previous_selection"] is None:
             raise ActivationError("resume source selection is missing")
-        source_plan = read_plan(root, record.body["previous_selection"]["plan_id"]) if source_id else None
+        source_plan = (read_plan(root, record.body["previous_selection"]["plan_id"])
+                       if source_id and not bootstrap else None)
         if source_plan is not None and (source_plan.release_id != source.release_id
                                         or source_plan.release_seal != source.seal_sha256):
             raise ActivationError("resume source plan differs from its selected release")
@@ -859,9 +926,22 @@ def resume_activation(root: Path, activation_id: str, plan_id: str,
                 if present:
                     raise ActivationError("old private bot server is present after recorded quiescence")
                 sockets[unit.target] = socket_path
-        for phase in units.PHASES:
-            _legacy_quiet(adapter, pause, phase, sockets)
-        if _probe(root) is not None:
+        if bootstrap:
+            for next_step, phase in (("producers_paused", "producers"),
+                                     ("sessions_handed_off", None),
+                                     ("sessions_quiesced", "bots"),
+                                     ("ingest_quiesced", "ingest")):
+                if next_step in record.body["completed"]:
+                    continue
+                store.begin(activation_id, next_step)
+                _empty_plane(root)
+                evidence = (units.pause_phase(store, activation_id, phase, adapter=adapter).digest if phase else
+                            _digest({"bootstrap_empty": True, "sessions": [], "handoffs": []}))
+                store.complete(activation_id, next_step, evidence_digest=evidence)
+        else:
+            for phase in units.PHASES:
+                _legacy_quiet(adapter, pause, phase, sockets)
+        if not bootstrap and STEPS.index(step) < STEPS.index("ingest_started") and _probe(root) is not None:
             raise ActivationError("old ingest still answers; resume requires a quiesced writer")
         candidates = planned_units(plan, manager)
         starts = {}
@@ -873,6 +953,9 @@ def resume_activation(root: Path, activation_id: str, plan_id: str,
         targets = {enrollment._target(manager, domain, declaration.source)
                    for declaration, item in candidates if item["enroll"]}
         retired = tuple(unit for unit in old_units if unit.installed and unit.target not in targets)
+        if bootstrap:
+            return _finish_bootstrap_activation(root, store, activation_id, plan, release,
+                candidates, starts, rank, install_directory, adapter, package)
         return _finish_running_activation(
             root, store, activation_id, plan, release, source, source_plan,
             old_units, candidates, starts, rank, contexts, retired, sockets,
