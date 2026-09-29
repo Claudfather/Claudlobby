@@ -1,10 +1,10 @@
 # Seed fleet — ships with claudlobby. One bot: claudfather (the setup assistant).
 # This file is committed to git. User fleets go in local/<name>/fleet.yaml.
 #
-# Usage:
-#   claudlobby --seed validate
-#   claudlobby --seed generate
-#   lib/spin-up-bot.sh runtime/seed/bots/claudfather
+# Usage: copy the packaged seed to an authored fleet.yaml, edit placeholders,
+# then use the sealed release CLI from documentation/getting-started.md:
+#   claudlobby --root "$DATA" --fleet seed config validate
+#   claudlobby --root "$DATA" --fleet seed fleet setup --config "$WORK/fleet.yaml" --install-directory "$USER_UNIT_DIR"
 
 fleet:
   name: seed

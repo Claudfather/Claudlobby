@@ -89,8 +89,7 @@ official server instead.
      domain.
 7. **Set the two `.env` vars** (fleet `.env`, gitignored): `GA4_SA_KEY_PATH`,
    `GA4_PROPERTY_ID`.
-8. **Wire the MCP** — add `google-analytics` to a bot's `mcp:` list, `claudlobby
-   generate` (see *Equipping a bot*). The first `uvx` run downloads the package into
+8. **Wire the MCP** — add `google-analytics` to a bot's `mcp:` list, the operator's `config plan` / `host activate` flow (see *Equipping a bot*). The first `uvx` run downloads the package into
    the uv cache — warm it once so first bot use isn't slow.
 
 ## Navigating the GCP Console (service-account setup)

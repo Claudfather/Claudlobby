@@ -52,7 +52,7 @@ def bench_cold(root: Path, n: int) -> list[float]:
         t0 = time.perf_counter()
         r = subprocess.run(
             [sys.executable, "-m", "claudlobby", "--root", str(root),
-             "emit", "task", "--json", "-"],
+             "plane", "emit", "task", "--file", "-"],
             input=payload, capture_output=True, text=True, cwd=REPO,
         )
         dt = time.perf_counter() - t0

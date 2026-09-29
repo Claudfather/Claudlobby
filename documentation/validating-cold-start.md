@@ -203,7 +203,7 @@ about whether your changes caused the success.
 
 Seven defects, two of them blockers at the first command; six further findings from the blind
 arms, **two of which were defects the fix itself had just introduced** — a doc promoting
-`lib/setup-system` without disclosing that it needs `sudo`, and prose ambiguous enough that a
+`claudlobby host setup` without disclosing that it needs `sudo`, and prose ambiguous enough that a
 fresh reader ran `generate` to test it.
 
 That last pair is the argument for Level 3 in one line: **the person fixing the docs is the

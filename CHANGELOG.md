@@ -6,6 +6,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — unified public CLI and selected releases (#1747, #1989)
+
+Operators and agents use one public `claudlobby` command surface. Configuration,
+skills and permissions are staged with `config plan`, inspected with `config diff`,
+and applied through whole-host `host activate`; immutable releases keep code and
+native assets together. Test changes first in an independent canary data root.
+
+Breaking replacements (no compatibility aliases or shims):
+
+| Retired entry | Supported entry |
+|---|---|
+| `generate`, `host-timers` | `config plan` → `config diff` → operator `host activate` |
+| `validate`, `freshbox` | `config validate`, `config validate --runtime` |
+| `promote` | inspect `config diff`, edit authored source, then stage and activate |
+| `status`, `uptime`, `events`, `report-back` | `fleet status`, `fleet uptime`, `event list/show`, `fleet reports list` |
+| top-level `emit`, `emit-batch` | `plane emit`, `plane emit-batch` (private hot paths use the daemon/spool) |
+| old converter/scaffolder names | `migration …`, `library create`, `bot create` |
+| `lib/setup-system`, `lib/setup-fleet`, `lib/setup-fleets` | `host setup`, `fleet setup` |
+| `lib/migrate-fleet-to-system.sh` | `fleet move` for cold, unselected authoring only; active flat fleets stay flat |
+| `lib/fleet-utilization.sh` | `fleet utilization` |
+
+Tasks are fleet-owned with separate admission, assignment and delivery; only the
+assigned bot accepts. Ordinary messages and unlinked reports may send with an
+explicit degraded recording result and an independent fleet alert. Task changes
+and linked reports still require committed recording; uncertain sends are not
+silently retried. Default fleet-ops coaching and grants accompany the CLI.
+
+`--warn-baseline` differences now exit 4, unavailable input exits 6; Plane doctor
+and registry attention exit 4. Scheduled repo pulls skip dirty/untracked or
+symlinked checkouts. macOS browser reaping is disabled pending an ownership-safe
+predicate. Log reads are bounded (1–200 lines, 64 KiB per file) and disclose partial
+sources. `host.unit_prefix` isolates canary host units. Source-only instruments
+live in `harness/` and do not ship in release wheels.
+
 ### Changed — `[vault]` pin bumped to Claudron v0.5.2; vaults need the `.claudron-vault` identity file (Claudron #183, #190)
 
 The `[vault]` extra now pins `claudron @ …@v0.5.2`. It carries three changes.

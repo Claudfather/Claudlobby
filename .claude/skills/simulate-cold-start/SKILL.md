@@ -1,6 +1,6 @@
 ---
 name: simulate-cold-start
-description: "Run the onboarding path exactly as a brand-new user would — export a history-free tree, drive /setup from a blind session, then reap everything it created. Use before merging any change to README, getting-started, the setup skill, setup-system/setup-fleet, fleet.yaml.seed, or .env.seed.example."
+description: "Run the onboarding path exactly as a brand-new user would — export a history-free tree, drive /setup from a blind session, then reap everything it created. Use before merging any change to README, getting-started, the setup skill, host setup / fleet setup, fleet.yaml.seed, or .env.seed.example."
 argument-hint: "[prepare|reap|report] [--ref REF]"
 ---
 
@@ -11,7 +11,7 @@ root `CLAUDE.md`. Rationale and the three validation levels live in
 [`documentation/validating-cold-start.md`](../../../documentation/validating-cold-start.md); this
 skill is the runnable procedure.
 
-Mechanical work is delegated to `lib/coldstart-harness.sh`, which is deterministic and
+Mechanical work is delegated to `harness/coldstart-harness.sh`, which is deterministic and
 idempotent. What stays here is the part that needs judgment: who runs the cold arm, what counts
 as a finding, and when to stop.
 
@@ -56,7 +56,7 @@ Fence only the genuinely irreversible. Tell the human to decline if the cold ses
 ### 1. Prepare
 
 ```bash
-lib/coldstart-harness.sh prepare            # or: --ref <branch>  --dir <path>
+harness/coldstart-harness.sh prepare            # or: --ref <branch>  --dir <path>
 ```
 
 This runs a contamination preflight (inherited `CLAUDLOBBY_ROOT` / `CLAUDRON_VAULT_PATH`, a
@@ -86,9 +86,9 @@ skill itself asks for. If it asks for credentials, decide in advance:
 ### 3. Reap
 
 ```bash
-lib/coldstart-harness.sh status             # what did the run create?
-lib/coldstart-harness.sh reap --dry-run     # confirm the plan
-lib/coldstart-harness.sh reap               # bootout units, kill sockets, delete the tree
+harness/coldstart-harness.sh status             # what did the run create?
+harness/coldstart-harness.sh reap --dry-run     # confirm the plan
+harness/coldstart-harness.sh reap               # bootout units, kill sockets, delete the tree
 ```
 
 Watchdogs are stopped before the things they watch — a 60s keepalive otherwise walks the bot
@@ -101,7 +101,7 @@ deleted.
 ### 4. Harvest
 
 ```bash
-lib/coldstart-harness.sh transcript
+harness/coldstart-harness.sh transcript
 ```
 
 Transcripts survive the reap (they live under `~/.claude/projects/<cwd-with-slashes-as-dashes>/`),

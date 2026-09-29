@@ -13,7 +13,7 @@ comment) so the three-tier story is readable without installing anything;
 `projects.yaml.example` — editing it means editing `claudlobby/system.yaml`
 in the shared install itself, which affects every fleet that install serves.
 
-Composed by `claudlobby generate` — unconditionally, on every run, for any
+Composed by `claudlobby config plan --release RELEASE_ID` — unconditionally, on every run, for any
 fleet (see [Composition & enrollment](#composition--enrollment)) — and by the
 sealed `config plan` composition. The selected `host activate` step enrolls
 those host and fleet units together; `fleet setup` performs both staging and
@@ -240,8 +240,8 @@ timer plist.
 
 **Arm/disarm is asymmetric, and the source comment states the recipe
 precisely — worth quoting rather than paraphrasing.** Arming
-(`enroll: true`, then `generate` + `setup-system`) is one clean cycle. To
-disarm: flip `enroll` back to `false` and re-run `generate` — this **prunes**
+(`enroll: true`, then `config plan`, `config diff PLAN_ID`, and operator `host activate PLAN_ID --install-directory PATH`) is one clean cycle. To
+disarm: flip `enroll` back to `false` and stage and activate the replacement plan — this **prunes**
 the composed unit files, so no future setup run can re-enroll it — then
 **stop the already-installed unit yourself**, since pruning composed files on
 disk cannot reach a unit that is already loaded into systemd/launchd:

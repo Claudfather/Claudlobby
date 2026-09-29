@@ -232,7 +232,7 @@ fleet:
 #     # as the same user (a script, `python3 -c "open(...)"`, a `$HOME/...` path
 #     # the matcher cannot resolve) is not stopped. A composed deny binds on the
 #     # bot's NEXT tool call with no restart, so arm one bot, run a real turn,
-#     # then widen to `defaults:`. `claudlobby freshbox` and `validate` name
+#     # then widen to `defaults:`. `claudlobby config validate --runtime` and `config validate` name
 #     # every composed file that still tells the bot to `source ~/.env`.
 #     # `exempt` restores a READ only: account_config | env_host.
 #     isolation:

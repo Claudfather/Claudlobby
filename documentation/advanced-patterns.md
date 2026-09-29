@@ -306,7 +306,7 @@ fleet:
       account: work        # → compositor writes CLAUDE_CONFIG_DIR into this bot's bot.conf
 ```
 
-When a bot's `account` is not `default`, `claudlobby generate` writes `CLAUDE_CONFIG_DIR=<that dir>` into its `bot.conf`; `lib/start-bot.sh` exports it before launching Claude Code, so the bot authenticates, installs plugins, and stores channel state under that directory. You do **not** hand-write `CLAUDE_CONFIG_DIR` into `bot.conf` — that file is generated and the `accounts:` mechanism manages the value. (`TELEGRAM_STATE_DIR` is likewise always derived and emitted for every bot, multi-account or not; it isn't a separate thing you toggle for multi-account setups.)
+When a bot's `account` is not `default`, configuration staging and activation writes `CLAUDE_CONFIG_DIR=<that dir>` into its `bot.conf`; `lib/start-bot.sh` exports it before launching Claude Code, so the bot authenticates, installs plugins, and stores channel state under that directory. You do **not** hand-write `CLAUDE_CONFIG_DIR` into `bot.conf` — that file is generated and the `accounts:` mechanism manages the value. (`TELEGRAM_STATE_DIR` is likewise always derived and emitted for every bot, multi-account or not; it isn't a separate thing you toggle for multi-account setups.)
 
 ### The host side (one-time, per account)
 
@@ -330,7 +330,7 @@ ln -s ~/.claude/skills ~/.claude-work/skills
 
 - Auth, plugins, and (if not symlinked) skills are all per-config-dir. If auth expires or you add a plugin on the default account, repeat the step with `CLAUDE_CONFIG_DIR` set for the other account.
 - Symlinked skills are shared both ways — edits to one are seen by both. If you need account-specific skills, use a real directory instead of a symlink.
-- Everything else (which bot uses which account, service naming, Telegram state) is driven by `fleet.yaml` + `claudlobby generate`. Keep account membership there, not in hand-edited runtime files.
+- Everything else (which bot uses which account, service naming, Telegram state) is driven by `fleet.yaml` + configuration staging and activation. Keep account membership there, not in hand-edited runtime files.
 
 ---
 

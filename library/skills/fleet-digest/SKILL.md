@@ -144,7 +144,7 @@ an uncitable theme is unusable downstream.
 
 ```bash
 claudlobby --fleet "$F" fleet uptime
-claudlobby --fleet "$F" utilization
+claudlobby --fleet "$F" fleet utilization
 claudlobby --fleet "$F" --json fleet reports list --since "${SINCE}T00:00:00Z"
 ```
 

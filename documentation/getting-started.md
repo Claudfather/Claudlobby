@@ -13,7 +13,7 @@ The copied interpreter still uses the host's standard library and system librari
 
 ## 1. Prepare the release inputs
 
-Use a committed Claudlobby source checkout for this example. There is no hosted release bundle or built-in lock-generation command. These commands follow the repository's [offline assembly CI rehearsal](../.github/workflows/test.yml) and its [hash-lock construction](../tests/release_assembly_smoke.py): network access prepares inputs; assembly itself uses only local wheels.
+Use a committed Claudlobby source checkout for this example. A history-free test export needs a local build inventory first: `git init --quiet && git add --all`; no commit or remote is required. There is no hosted release bundle or built-in lock-generation command. These commands follow the repository's [offline assembly CI rehearsal](../.github/workflows/test.yml) and its [hash-lock construction](../tests/release_assembly_smoke.py): network access prepares inputs; assembly itself uses only local wheels.
 
 ```bash
 git clone https://github.com/Claudfather/Claudlobby.git
@@ -86,7 +86,7 @@ Use the exact CLI reported by setup for the remaining commands. If setup refuses
 The wheel ships `fleet.yaml.seed` and `.env.seed.example`. Copy them to **authoring locations**, then edit the placeholders. The seed's declared fleet name is `seed` and its manager bot is `claudfather`. `fleet.yaml.example` is a field reference, not a minimal first fleet.
 
 ```bash
-SEEDS=$("$WORK/bootstrap/bin/python" -c \
+SEEDS=$("$WORK/bootstrap/bin/python" -I -c \
   'from claudlobby.resources import get_resources; print(get_resources().seeds)')
 cp "$SEEDS/fleet.yaml.seed" "$WORK/fleet.yaml"
 mkdir -p "$DATA/local/seed"
@@ -96,7 +96,7 @@ chmod 600 "$DATA/local/seed/.env"
 "${EDITOR:-vi}" "$DATA/local/seed/.env"
 ```
 
-Replace every `REPLACE_ME` in the manifest, including the Telegram handle and user/group IDs. Put the matching `TELEGRAM_TOKEN_CLAUDFATHER` in the fleet `.env`; a GitHub token is optional. The `.env` stays in the data overlay and is never passed as a CLI argument.
+Replace every `REPLACE_ME` in the manifest, including the Telegram handle and user/group IDs. Put the matching `TELEGRAM_TOKEN_CLAUDFATHER` in the fleet `.env`; a GitHub token is optional. The `.env` stays in the data overlay and is never passed as a CLI argument. Setup does not prewarm MCP packages; the first boot may download them. After authoring the manifest in the data root, `"$RELEASE_CLI" --root "$DATA" --fleet seed host cache warm` can prepare the declared caches explicitly.
 
 ## 4. Activate and diagnose
 
@@ -119,4 +119,4 @@ mkdir -p "$USER_UNIT_DIR"
 
 For later config changes, edit an authoring file and stage and activate through the sealed CLI. The retired checkout `generate`/fleet setup sequence is outside the selected activation journal. The [fleet schema](fleet-yaml-schema.md) documents each manifest field.
 
-To reorganize a cold, unselected fleet's authored files before first activation, run `claudlobby --root "$DATA" --fleet seed fleet move --system SYSTEM`. This moves the complete flat `local/seed/` directory to `local/SYSTEM/seed/` in one same-filesystem rename. It refuses any selected release, activation history, fleet runtime directory, or owned native consumer; it never stops or reenrolls a running fleet. If `local/` is Git-tracked, review and stage the resulting rename yourself. Then stage the new source with `config plan` and activate that reviewed plan through `host activate`. Active fleet relocation requires a separate operation and is not provided by `fleet move`.
+To reorganize a cold, unselected fleet before first activation, first place its edited manifest at `$DATA/local/seed/fleet.yaml` (step 3 leaves it under `WORK`). Then run `"$RELEASE_CLI" --root "$DATA" --fleet seed fleet move --system SYSTEM`. This moves the complete flat `local/seed/` directory to `local/SYSTEM/seed/` in one same-filesystem rename. It refuses any selected release, activation history, fleet runtime directory, or owned native consumer; it never stops or reenrolls a running fleet. If `local/` is Git-tracked, review and stage the resulting rename yourself. Then stage the new source with `config plan` and activate that reviewed plan through `host activate`. Active flat fleets currently have no supported nesting operation; keep them flat. Do not remove selection or activation history to bypass this refusal. A refused move may retain the empty `state/activation.lock` coordination file; it does not indicate activation.

@@ -121,7 +121,7 @@ revoked key vs clock skew) with a key-fingerprint recipe.
 3. **MCP** — the App-token GitHub server: add `github-app` to a bot's `mcp:` list
    (`mcp: [github-app]`). See [`../../library/integrations/github-app.md`](../../library/integrations/github-app.md).
 
-4. `claudlobby --fleet <fleet> generate`, then restart the bots (composed `.gitconfig`,
+4. stage `config plan --release RELEASE_ID`, inspect `config diff PLAN_ID`, then have the operator run `host activate PLAN_ID --install-directory PATH` (composed `.gitconfig`,
    `bot.conf`, and the `tools/gh` shim reach a running bot only at its next restart).
 
 ## Choosing the identity: App, operator, or both

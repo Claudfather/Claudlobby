@@ -18,7 +18,7 @@ Each Notion workspace needs its own integration token. Bots only see workspaces 
 
 ### 2. Wire It Up via fleet.yaml
 
-`.mcp.json` is **generated output** — `claudlobby generate` produces it from `fleet.yaml` plus `library/mcp/notion.json`. Never hand-edit `.mcp.json` directly; the next `generate` overwrites hand edits. Instead:
+`.mcp.json` is **generated output** — configuration staging produces it from `fleet.yaml` plus `library/mcp/notion.json`. Never hand-edit `.mcp.json` directly; the next activation overwrites hand edits. Instead:
 
 1. Add `notion` to the bot's `mcp:` list in `fleet.yaml`:
 
@@ -29,9 +29,9 @@ Each Notion workspace needs its own integration token. Bots only see workspaces 
          mcp: [notion]
    ```
 
-2. Run `claudlobby generate --bot my-bot` (root mode) or `claudlobby --fleet <name> generate --bot my-bot` (overlay mode); drop `--bot` to regenerate the whole fleet. This scaffolds a `NOTION_TOKEN=` stub into the fleet's `.env` — idempotent, won't clobber a value you've already set — and writes the resolved `notion` server entry into the bot's `.mcp.json`.
+2. Stage `claudlobby config plan --release RELEASE_ID` and inspect `config diff PLAN_ID`. This prepares the fleet environment stub and resolved MCP entry; generated files are not applied yet.
 3. Fill in the real token in `local/<fleet>/.env` (or the root `.env` in root-mode): `NOTION_TOKEN=ntn_your_token_here`.
-4. Run `claudlobby generate` again so the compositor resolves the token into `.mcp.json`.
+4. Stage a new plan after setting the token, inspect it, and have the operator run `host activate PLAN_ID --install-directory PATH`. This applies the resolved `.mcp.json` and restarts through the coordinated host owner.
 
 For bots that access multiple Notion workspaces, use the `instances:` form instead of hand-picking separate server names — the compositor derives the server names and the canonical env var names for you:
 
@@ -44,7 +44,7 @@ fleet:
             instances: [personal, work]
 ```
 
-This produces two `.mcp.json` entries (`notion-personal`, `notion-work`) and expects two distinct env vars: `NOTION_PERSONAL_TOKEN` and `NOTION_WORK_TOKEN`. (`library/mcp/notion.json`'s `${TOKEN}` placeholder is instance-scoped, so it's namespaced per instance — see `claudlobby/mcp_resolve.py`.) Set both in `.env`, then `claudlobby generate`.
+This produces two `.mcp.json` entries (`notion-personal`, `notion-work`) and expects two distinct env vars: `NOTION_PERSONAL_TOKEN` and `NOTION_WORK_TOKEN`. (`library/mcp/notion.json`'s `${TOKEN}` placeholder is instance-scoped, so it's namespaced per instance — see `claudlobby/mcp_resolve.py`.) Set both in `.env`, then stage, inspect and activate a new configuration plan.
 
 ### 3. Share Pages with the Integration
 

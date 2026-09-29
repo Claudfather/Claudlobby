@@ -23,7 +23,7 @@
 # "mutates operator source" category the defaults rule reserves for opt-in.
 # One knob arms it, in that host's own system.yaml:
 #     host: { jobs: { vault-sync: { enroll: true } } }
-# then `lib/setup-system`.
+# then stage a configuration plan and have the operator activate it.
 set -euo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
