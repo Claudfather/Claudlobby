@@ -13,6 +13,14 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 install_error_trap ""
 
 DIR="${1:?Usage: git-pull-all.sh /path/to/projects/dir}"
+shift
+STATUS_NUL=0
+if [ "${1:-}" = "--status-nul" ] && [ "$#" -eq 1 ]; then
+    STATUS_NUL=1
+elif [ "$#" -ne 0 ]; then
+    echo "git-pull-all: unexpected argument" >&2
+    exit 2
+fi
 
 # When DIR is a fleet runtime projects path (.../runtime/bots/<bot>/projects), a
 # stale per-bot cron entry for a bot no longer declared in that fleet would — via
@@ -41,6 +49,13 @@ LOG="$(dirname "$DIR")/git-pull.log"
 setup_log_dir "$LOG"
 FAILURES=0
 
+# Private selected-CLI protocol. The existing cron call emits no stdout; the
+# explicit host operation needs one unambiguous result per repository.
+if [ "$STATUS_NUL" -eq 1 ]; then printf 'git-pull-all-v1\0'; fi
+report_status() {
+    if [ "$STATUS_NUL" -eq 1 ]; then printf '%s\0%s\0' "$1" "$2"; fi
+}
+
 echo "$(ts_iso) Starting git pull for repos in $DIR" >> "$LOG"
 
 # Derive this bot composed MCP-trust allowlist once, to pre-trust the same
@@ -51,10 +66,35 @@ MCP_ALLOWLIST="$(_home_mcp_allowlist "$(dirname "$_gpa_dir")" 2>/dev/null || tru
 for repo in "$DIR"/*/; do
     if [ -d "$repo/.git" ]; then
         REPO_NAME=$(basename "$repo")
-        if RESULT=$(cd "$repo" && git pull --ff-only 2>&1); then
-            echo "$(ts_iso) $REPO_NAME: $RESULT" >> "$LOG"
+        # A fast-forward pull is still allowed to move a dirty checkout when
+        # its changes do not overlap. Refuse before fetch for operator work.
+        if ! BEFORE=$(git -C "$repo" rev-parse HEAD 2>&1); then
+            echo "$(ts_iso) $REPO_NAME: FAILED — $BEFORE" >> "$LOG"
+            report_status "$REPO_NAME" failed
+            FAILURES=$((FAILURES + 1))
+        elif ! DIRTY=$(git -C "$repo" status --porcelain 2>&1); then
+            echo "$(ts_iso) $REPO_NAME: FAILED — $DIRTY" >> "$LOG"
+            report_status "$REPO_NAME" failed
+            FAILURES=$((FAILURES + 1))
+        elif [ -n "$DIRTY" ]; then
+            echo "$(ts_iso) $REPO_NAME: SKIPPED — dirty checkout" >> "$LOG"
+            report_status "$REPO_NAME" skipped_dirty
+        elif RESULT=$(cd "$repo" && git pull --ff-only 2>&1); then
+            if AFTER=$(git -C "$repo" rev-parse HEAD 2>&1); then
+                if [ "$AFTER" = "$BEFORE" ]; then
+                    report_status "$REPO_NAME" unchanged
+                else
+                    report_status "$REPO_NAME" updated
+                fi
+                echo "$(ts_iso) $REPO_NAME: $RESULT" >> "$LOG"
+            else
+                echo "$(ts_iso) $REPO_NAME: FAILED — cannot read HEAD after pull: $AFTER" >> "$LOG"
+                report_status "$REPO_NAME" failed
+                FAILURES=$((FAILURES + 1))
+            fi
         else
             echo "$(ts_iso) $REPO_NAME: FAILED — $RESULT" >> "$LOG"
+            report_status "$REPO_NAME" failed
             FAILURES=$((FAILURES + 1))
         fi
         # Pre-trust the bot MCP servers for sessions rooted in this checkout so
