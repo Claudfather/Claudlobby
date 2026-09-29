@@ -488,7 +488,7 @@ The `reload-fleet` timer calls the selected release's `claudlobby fleet reload` 
 1. Under a fleet-wide lock (`with_lock`), runs `claude plugin update` for each `FLEET_PLUGINS_REQUIRED` — refreshes the shared host plugin cache (`~/.claude/plugins/cache/`).
 2. Drops `data/.reload-pending` on each **running bot in the active plan**. It does not send any keystroke itself.
 
-The timer never runs `generate` or `setup-fleet`. Changes to authored configuration, composed skills, or native enrollment require a staged config plan and operator `host activate`.
+The timer never composes or enrolls native units. Changes to authored configuration, composed skills, or native enrollment require a staged config plan and operator `host activate`.
 
 Every step is announced in `state/reload-fleet.log` before it runs (`reload-fleet[<fleet>] pid N step: …`), and its output streams there as it runs. A run killed or aborted mid-step raises `reload_failed` naming the step: at once on SIGTERM, SIGINT or SIGHUP, from its EXIT trap, and at the next run for a SIGKILL, which runs no trap (each run keeps a record under `state/reload-fleet.inflight/` until it ends).
 

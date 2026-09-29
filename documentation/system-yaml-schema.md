@@ -120,7 +120,7 @@ knowing before you write a `schedule:`:
 mutates operator source, or sends outbound to people at scale.** Whatever
 stays opt-in is NAMED where the operator looks — `claudlobby host doctor`'s
 `switches` rung, `claudlobby plane doctor`'s plane-scoped subset, and the
-closing table of `lib/setup-fleet` / `host activate` — each with the one
+switch table in `claudlobby host doctor` — each with the one
 line that arms it.
 
 The rule is not caution about defaults; it is that **a behavior nobody can
@@ -328,7 +328,7 @@ enforcement mechanism — and even which value counts as the default — is
 
 | Scope / shape | Default when `enroll` is absent | Where the dormancy is enforced | Mechanism |
 |---|---|---|---|
-| Fleet job (`defaults.jobs`, e.g. `weekly-worker-restart`) | enrolled (`enroll` defaults to `True`) | compose-time listing **and** enroll-time skip | The unit files ARE written; the job's basename is additionally added to a `DORMANT` manifest sidecar in the fleet's `runtime/fleet/timers/`. `lib/setup-fleet` and `reconcile-fleet.sh`'s job-drift audit both call the shared `unit_is_dormant()` helper (`lib-common.sh`) against that manifest and skip enrolling/flagging anything listed in it. A fleet opts a dormant job in with `defaults: { jobs: { <name>: { enroll: true } } }` in its own `fleet.yaml` — see [`fleet-yaml-schema.md`'s `fleet.defaults.jobs.<name>.enroll`](fleet-yaml-schema.md#fleetdefaultsjobsnameenroll). |
+| Fleet job (`defaults.jobs`, e.g. `weekly-worker-restart`) | enrolled (`enroll` defaults to `True`) | compose-time listing **and** activation skip | The unit files ARE written; the job's basename is additionally added to a `DORMANT` manifest sidecar in the fleet's `runtime/fleet/timers/`. Sealed activation skips enrollment of a dormant job, and `reconcile-fleet.sh`'s job-drift audit uses `unit_is_dormant()` (`lib-common.sh`) to avoid flagging it. A fleet opts a dormant job in with `defaults: { jobs: { <name>: { enroll: true } } }` in its own `fleet.yaml` — see [`fleet-yaml-schema.md`'s `fleet.defaults.jobs.<name>.enroll`](fleet-yaml-schema.md#fleetdefaultsjobsnameenroll). |
 | Host service (`host.jobs`, `unit: service`, e.g. `plane-daemon`) | **dormant** (`cfg.get("enroll") is True` — a strict identity check, so absence or any non-`True` value is dormant) | compose-time only | If `enroll` is not exactly `true`, **zero files are written** — there is nothing for `setup-system` to find, let alone enroll. Note the default direction is the *opposite* of a plain timer job: a service is dormant unless explicitly armed; a timer is enrolled unless explicitly parked. |
 | Host timer (`host.jobs`, no `unit: service`, e.g. `update-siblings`) | enrolled | compose-time only, **plus a walk-back** | Same shape as a host SERVICE since the chunk-N fold: if `enroll` is `false`, **zero files are written** (and any previously composed unit is pruned), so there is nothing for `setup-system` to find. It is not the fleet-job shape because the enrollers differ — `setup-system` enrols every composed `claudlobby-*` unit it finds, so not composing is the only gate that cannot be forgotten, and a manifest describing units nobody composed is a second mechanism that can only disagree with the first. What compose-time dormancy cannot reach — a unit an EARLIER release already installed — `host activate` disables and removes on its next run (`walk_back_uncomposed_host_units`), out loud. A host opts one in through **its own `system.yaml`** — `host: { jobs: { <name>: { enroll: true } } }` — never through `fleet.yaml`, which cannot reach a host job at all. |
 
@@ -490,15 +490,11 @@ Output locations:
   `config plan`, inspect `config diff`, then apply `host activate`; that
   activation owns both composition and native enrollment. See
   [Getting started](getting-started.md#4-activate-and-diagnose).
-- **A `defaults:` edit** (hooks/observability/jobs) flows through the normal
-  per-fleet `generate` cycle like any other system-tier-sourced default, and
-  is subject to the same carrier-dependent canary-window rules as everything
-  else the compositor writes — see the root `CLAUDE.md`'s "Changing a running
-  fleet" paragraph and [`fleet-update-lifecycle.md`](fleet-update-lifecycle.md)
-  for what that means for a hook script vs. a composed `bot.conf` value vs. a
-  timer unit specifically (a changed timer unit additionally needs
-  `lib/setup-fleet` to re-enroll it — systemd/launchd don't pick up an edited
-  unit file on their own).
+- **A `defaults:` edit** (hooks/observability/jobs) follows the same staged
+  `config plan` and `host activate` path. Activation applies the composed
+  artifacts and owns native enrollment. See
+  [`fleet-update-lifecycle.md`](fleet-update-lifecycle.md) for when a running
+  bot observes each carrier.
 
 ## Two dormancy patterns: composed vs. enrolled
 

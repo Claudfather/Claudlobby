@@ -276,6 +276,30 @@ def test_phase_publication_retry_and_owned_cleanup_preserve_foreign(case, monkey
         assert not any(call[0] in ("svc_activation_resume", "svc_enroll") for call in adapter.calls)
 
 
+def test_omitted_fleet_timer_retires_only_its_owned_enablement(case):
+    inventory, _, _, adapter, _, _, _, _ = case
+    timer_link = adapter.directory / "timers.target.wants/clock.timer"
+    foreign_link = timer_link.parent / "foreign.timer"
+    foreign_link.symlink_to("../foreign.timer")
+    with state.locked_activation(inventory.data_root) as store:
+        prepared(case, store)
+        plans = publish.prepare_candidate_enrollment(
+            store, "cutover", configuration_journal="generated-config",
+            install_directory=adapter.directory, adapter=adapter)
+        assert timer_link.is_symlink()
+        assert any(change.target == str(timer_link) and change.after == {"kind": "absent"}
+                   for change in plans[0].changes)
+        for phase, step in (("ingest", "ingest_started"), ("bots", "bots_started")):
+            store.begin("cutover", step)
+            publish.install_candidate_units(store, "cutover", phase, adapter=adapter)
+            _complete_pending(store, step)
+        _complete(store, "verified")
+        store.begin("cutover", "producers_resumed")
+        publish.install_candidate_units(store, "cutover", "producers", adapter=adapter)
+        assert not timer_link.exists() and not timer_link.is_symlink()
+        assert foreign_link.readlink() == Path("../foreign.timer")
+
+
 def test_guard_and_foreign_loaded_collision_refuse_before_publication(case, monkeypatch):
     inventory, _, _, adapter, foreign, wants, _, _ = case
     with state.locked_activation(inventory.data_root) as store:

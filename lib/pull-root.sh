@@ -185,7 +185,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
     exit 0
 fi
 
-# The fleets on this host (setup-fleets' discovery), and the critical event
+# The fleets declared on this host, and the critical event
 # types each already had in the window before the pull: a type that was firing
 # before is not the pull's.
 FLEETS=()

@@ -25,8 +25,7 @@ token-discipline sections before changing anything here.
 The digest is a `session_digest` **system event on the plane** (#1503 — there is
 no `transcript-digest` file any more). `claudlobby event list` reads the plane one
 fleet at a time, so first fix the set of fleets to sweep: `$2` if given,
-otherwise every fleet declared on the host (the same discovery `setup-fleets`
-uses).
+otherwise every fleet declared by the flat and nested `local/` manifests.
 
 ```bash
 if [ -n "${2:-}" ]; then

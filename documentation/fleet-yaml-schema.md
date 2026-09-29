@@ -217,7 +217,7 @@ Applied to every bot. Merge rules by type:
 
 #### `fleet.defaults.jobs.<name>.enroll`
 
-System jobs flagged `enroll: false` are **composed-but-dormant**: their units are generated and listed in the timers/ `DORMANT` manifest, but `setup-fleet` does not enroll them and reconcile's job-drift audit ignores them. Opt a fleet in per job:
+System jobs flagged `enroll: false` are **composed-but-dormant**: their units are listed in the timers/ `DORMANT` manifest, but sealed host activation does not enroll them and reconcile's job-drift audit ignores them. Opt a fleet in per job:
 
 ```yaml
 fleet:
@@ -330,7 +330,7 @@ fleet:
 - **Slot names must be shell identifiers** (`[A-Za-z_][A-Za-z0-9_]*`) — they become the `BRIEFING_SECTIONS_<SLOT>` env-var suffix. A non-identifier name (`week-end`, `9am`) is a **hard parse error**.
 - **Slot values are systemd `OnCalendar`**, the same dialect as `fleet.sweep.schedule` — not 5-field cron. A 5-field cron value (`30 8 * * *`) is a **hard parse error** (the chain has no cron-translation layer).
 - Composed into the equipped bot's `bot.conf`: `BRIEFING_SLOTS` (space-separated slot names), `BRIEFING_SOURCES`, and one `BRIEFING_SECTIONS_<SLOT>` per slot that declares sections — **`<SLOT>` is upper-cased** (shell-var convention; the skill upper-cases the dispatched slot to read it). The `/briefing` skill falls back to sensible per-slot defaults when a var is unset, so equipping with zero personalization works.
-- **Enrollment** is automatic: `setup-fleet`'s generic `install_fleet_timer[_launchd].sh` glob picks up the composed `<prefix>.briefing-*` units — no per-timer installer. `setup-fleet` also **reconciles** the dynamic family: `reconcile_briefing_timers` disables live enrolled briefing timers with no composed counterpart (a renamed/removed slot), glob-bounded to `<prefix>.briefing-*` and dry-run-logged first; `generate` prunes the corresponding unit files. Both sides carry an **abort-on-degenerate guard** — a composition that yields an empty briefing set while units exist is refused rather than allowed to wholesale-delete live timers.
+- **Enrollment** is owned by sealed host activation. The staged unit set includes each declared `<prefix>.briefing-*` timer; activation retires the exact owned enablement link for a removed slot. The composer also prunes obsolete generated unit files in its output. Activation refuses a missing or foreign installed link instead of disabling an unrelated timer.
 - The validator **warns** when a briefing-equipped bot has no `integrations`/`mcp` source coverage (sections that read external data would be empty).
 
 ### `fleet.workstreams`

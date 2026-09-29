@@ -1206,7 +1206,7 @@ class TestDormantManifest:
 # fleet with NO leaf manager (`fleet.leaf_manager_bots()` empty) — not even a
 # dormant unit, because its manager has no local workers to route. A fleet
 # whose leaf manager disappears between generates must not leave a STALE
-# unit on disk that a later `enroll: true` or a naive setup-fleet run would
+# unit on disk that a later `enroll: true` activation would
 # enroll for real.
 # ---------------------------------------------------------------------------
 

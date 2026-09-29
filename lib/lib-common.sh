@@ -4557,9 +4557,7 @@ fleet_service_prefix() {
 # bot_unit_present <bot-name> <bot_dir>
 # True when the bot's host service unit exists (systemd unit file / launchd
 # plist), under BOT_SERVICE from bot.conf or the bare bot name (pre-generate
-# fallback). The unit-presence half of the fleet's "healthy" definition —
-# reconcile-fleet (audit) and setup-fleet (skip-healthy) share this ONE
-# predicate so the two can never drift.
+# fallback). The unit-presence half of reconcile-fleet's "healthy" definition.
 bot_unit_present() {
     local bot="$1" bot_dir="$2" svc
     svc=$(bot_conf_get "$bot_dir" BOT_SERVICE "$bot")
@@ -5125,8 +5123,8 @@ EOF
 
 # unit_is_dormant <timers-dir> <unit-basename>
 # True when the composed DORMANT manifest lists the unit (an enroll: false
-# job — composed-but-dormant, opt-in via fleet.yaml). One predicate shared by
-# setup-fleet and reconcile-fleet so enrollment and audit can never drift.
+# job — composed-but-dormant, opt-in via fleet.yaml). Reconcile-fleet uses this
+# to omit intentionally dormant jobs from its drift report.
 # Missing manifest → nothing is dormant; -x keeps comment lines inert.
 # FLEET jobs only since the chunk-N fold: an unarmed HOST job composes no unit
 # at all, so there is nothing to list and nothing to skip (walk_back_
@@ -5256,8 +5254,8 @@ resolve_timer_unit() {
         return 0
     fi
     # Derive service prefix from bot.conf (all bots share the same
-    # SERVICE_PREFIX). setup-fleet passes SERVICE_PREFIX from fleet.yaml
-    # instead, so a cold start (no bot.conf composed yet) still enrolls.
+    # SERVICE_PREFIX). The explicit SERVICE_PREFIX override supports callers
+    # before any bot.conf has been composed.
     if [ -z "${SERVICE_PREFIX:-}" ] && [ -n "$fleet_dir" ]; then
         local _first_conf
         _first_conf="$(find "$fleet_dir/runtime/bots" -name bot.conf -print -quit 2>/dev/null)"

@@ -72,7 +72,7 @@ Readers: claudlobby event list / fleet reports list / fleet uptime / fleet statu
 | `wip_uncommitted` | pulse | Bot has uncommitted changes in a project repo |
 | `session_event` | vitals | Session lifecycle (start, stop) |
 | `send_miss` | dispatch | A cross-socket tmux send (dispatch, cross-bot nudge) found no live session on the resolved socket — logged breadcrumb, not escalated |
-| `job_reenroll_deferred` | notice | `setup-fleet` could not apply a launchd job's changed plist, because that job was the one running the enrollment (the nightly reload-fleet's own, #1924). The job keeps its old definition, and the notice repeats on every run until someone runs `lib/setup-fleet <fleet> --jobs-only` from a shell. Sent as a FLEET NOTICE: the only signal a deferral gets |
+| `job_reenroll_deferred` | notice | Historical notice from the retired fleet setup path: a launchd job could not apply its changed plist while it was running its own enrollment. Kept readable for older Plane records; sealed host activation now owns enrollment. |
 
 ## Diagnosis Decision Tree
 

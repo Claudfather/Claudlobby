@@ -7,7 +7,7 @@
 #   not to wake is not a failure. rc 2 is the ONE refusal: a malformed call.
 #
 # ARMING is enrollment, not a flag: `defaults.jobs.manager-checkin.enroll: true`
-# in fleet.yaml, then generate + lib/setup-fleet. The PER-BOT gate is the
+# in fleet.yaml, then config plan, config diff PLAN_ID, and host activate PLAN_ID. The PER-BOT gate is the
 # composed `checkin` skill symlink -- that excludes a worker and an
 # opted-out manager outright (bot_is_manager is false for the worker; the
 # opted-out manager was never equipped). A coordinator is excluded only by

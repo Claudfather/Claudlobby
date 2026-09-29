@@ -375,7 +375,7 @@ class TestBriefingReconcile:
 
     def test_generate_writes_briefing_expected_manifest(self, tmp_path):
         # generate emits a config-truth BRIEFING_EXPECTED manifest (DORMANT
-        # precedent) listing every declared (bot,slot) unit, so setup-fleet's
+        # precedent) listing every declared (bot,slot) unit, so composition's
         # reconcile has an independent count to catch a partial/torn timers dir.
         fleet, md = load_fleet(_write(tmp_path / "f", _BRIEFING_FLEET))
         paths = _make_paths(tmp_path / "f")
@@ -393,7 +393,7 @@ class TestBriefingReconcile:
 
     def test_briefing_manifest_removed_when_stanza_gone(self, tmp_path):
         # A fleet that once equipped briefing but no longer declares any: the
-        # manifest must report zero expected units so setup-fleet allows the
+        # manifest must report zero expected units so composition allows the
         # full teardown (composed 0 == expected 0 → prune, not abort).
         fleet, md = load_fleet(
             _write(

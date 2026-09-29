@@ -55,15 +55,15 @@
 # advertised workflow ran nowhere unless an operator had read a dozen source
 # comments. What DOES stay opt-in is named where the operator looks --
 # `claudlobby host doctor` (the `switches` rung), `claudlobby plane doctor`, and
-# the closing table of lib/setup-fleet and `host doctor --switches` -- each with the
+# `host doctor --switches` table -- each with the
 # one line that arms it. The registry behind those surfaces is
 # claudlobby/switches.py; a knob with no row there is reported as a DEAD flag
 # by the validator, so this file and that one cannot drift apart quietly.
 #
 # `enroll: false` means DORMANT, and the two scopes enforce it differently
 # because their enrollers differ. A FLEET job is composed-but-dormant: the
-# units are emitted and listed in a DORMANT manifest beside them, which
-# setup-fleet skips. A HOST job composes NO UNIT AT ALL (compose-time
+# units are emitted and listed in a DORMANT manifest beside them; sealed
+# activation skips their enrollment. A HOST job composes NO UNIT AT ALL (compose-time
 # dormancy, chunk-N fold): the retired setup-system enrolled every composed
 # claudlobby-* unit it finds, so not composing is the only gate that cannot
 # be forgotten, and an armed->unarmed flip PRUNES the composed units. Units

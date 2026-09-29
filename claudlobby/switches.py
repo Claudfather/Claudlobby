@@ -21,17 +21,16 @@ one fleet IS the canary. It is deliberately narrow, and the test is DELIBERATENE
 rather than mechanism: a gate is something a human has to CHOOSE, never
 something that happens on the next scheduled run. A restart, a per-fleet
 compose, or an enrollment that is ALREADY opt-in all count. Automatic
-enrollment does not — ``lib/setup-fleet`` skips only the jobs in the composed
-DORMANT manifest, so a job that is not opt-in is enrolled on the next setup run
-with nobody deciding to. Naming enrollment itself as a gate would therefore
+enrollment does not — host activation skips jobs declared dormant, but enrolls
+a default-on job in its candidate unit set. Naming enrollment itself as a gate would therefore
 disqualify ``boot-capture``, whose enrollment is automatic *precisely absent
 this flag*: the flag is what creates the gate, so it cannot also be the reason
 the category does not apply. A door claiming the category must additionally do
 nothing from the four above.
 
 Whatever stays opt-in must be NAMED where the operator looks — ``claudlobby
-doctor``, ``claudlobby plane doctor``, and the closing summary of
-``lib/setup-fleet`` / ``host doctor --switches`` — with the one line that arms it.
+host doctor --switches`` and ``claudlobby plane doctor`` — with the one line
+that arms it.
 
 The reason the rule exists is not caution about defaults; it is that a
 behavior nobody can SEE is a behavior nobody has. A dozen doors shipped dormant
@@ -53,7 +52,7 @@ consumer DERIVES from it:
   which ``Environment=`` line (a scheduler env is closed; #1383).
 * ``validator`` — a ``*_ENABLED`` key in a claudlobby namespace that no
   switch claims is a DEAD flag, warned without anyone maintaining a list.
-* ``doctor`` / ``plane doctor`` / ``setup-fleet`` — the
+* ``host doctor`` / ``plane doctor`` — the
   table the operator reads.
 * ``status`` — the header line that names a target-workflow door turned off.
 * the three schema/architecture docs — a GENERATED block rendered by

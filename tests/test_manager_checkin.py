@@ -673,4 +673,4 @@ def test_the_arm_line_is_the_enroll_carrier():
 
     s = sw.by_key("manager-checkin")
     assert "defaults.jobs.manager-checkin.enroll: true" in s.arm
-    assert "lib/setup-fleet" in s.arm
+    assert "host activate PLAN_ID" in s.arm

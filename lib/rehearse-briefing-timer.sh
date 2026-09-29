@@ -2,9 +2,8 @@
 # rehearse-briefing-timer.sh — #627 P6 gate 2: rehearse the equippable briefing
 # timer chain on a THROWAWAY fleet and assert the composed
 # <prefix>.briefing-<bot>-<slot> unit FIRES (journal + a real trigger event) and
-# that removing the slot PRUNES its units on BOTH platforms (systemd
-# .service/.timer AND the launchd .plist), then DISABLES the live orphan via the
-# enroll-side reconcile. The empirical
+# that removing the slot PRUNES its composed units on BOTH platforms (systemd
+# .service/.timer AND the launchd .plist). The empirical
 # pre-deploy harness in the validate-bot-change.sh mold for the composed-timer
 # plumbing (validate-bot-change.sh covers the delivery behavior).
 #
@@ -18,15 +17,12 @@
 #   2. enrolls the composed .service under a real 60s .timer, waits for one
 #      journal-verified activation, and confirms the fire ran the trigger
 #      end-to-end (briefing-trigger.sh emits a briefing event). [systemd]
-#   3. removes the slot, RECOMPOSES, and asserts the generate-side reconcile
+#   3. removes the slot, RECOMPOSES, and asserts the composer reconcile
 #      pruned the unit files on BOTH platforms — the launchd .plist half runs
 #      here regardless of host OS. [no systemd]
-#   4. runs the enroll-side reconcile (setup-fleet on the now-botless fleet —
-#      no bot spin-up) so the live orphan
-#      timer is disabled, and asserts it is gone. [systemd]
 #
 # Steps 1 + 3 (compose + both-platform prune) need no systemd and always run;
-# steps 2 + 4 (live fire + enroll-side disable) gate on a `systemctl --user`
+# step 2 (live fire) gates on a `systemctl --user`
 # probe and SKIP with a notice where it is unavailable (CI container, no user
 # session). Exit 0 iff every attempted assertion passed. Cleans up all throwaway
 # units + the throwaway fleet dir on any exit. Linux for the live-fire half; the
@@ -41,9 +37,7 @@ SLOT=morning
 UNIT="$PREFIX.briefing-$BOT-$SLOT"
 UD="$HOME/.config/systemd/user"
 FLEET_DIR="$CLAUDLOBBY_ROOT/local/$FLEET"
-BOT_DIR="$FLEET_DIR/runtime/bots/$BOT"
 TIMERS_DIR="$FLEET_DIR/runtime/fleet/timers"
-WORK="$(mktemp -d)"
 
 # briefing_event_landed <root> <fleet> <bot> — the trigger rides emit_fleet_event, so
 # its briefing_dispatched / briefing_deferred lands on the PLANE under the
@@ -79,13 +73,13 @@ cleanup() {
     rm -f "$UD/$UNIT.timer" "$UD/$UNIT.service"
     systemctl --user daemon-reload >/dev/null 2>&1 || true
     systemctl --user reset-failed >/dev/null 2>&1 || true
-    rm -rf "$FLEET_DIR" "$WORK"
+    rm -rf "$FLEET_DIR"
 }
 trap cleanup EXIT
 
 # fleet.yaml WITH ($1 = yes) the equipped slot, or a BOTLESS fleet ($1 = no) so
-# the recompose prunes and setup-fleet spins up nothing (rehearse-keepalive
-# recipe). A non-shell-ident free var name is avoided — BOT/SLOT are idents.
+# the recompose prunes the composed files. A non-shell-ident free var name
+# is avoided — BOT/SLOT are idents.
 write_fleet_yaml() {
     cat >"$FLEET_DIR/fleet.yaml" <<YML
 fleet:
@@ -183,34 +177,12 @@ else
 fi
 
 # --- 3. remove the slot + recompose -> generate-side prune on BOTH platforms ---
-log "removing the slot (botless fleet) + recomposing — generate-side reconcile"
+log "removing the slot (botless fleet) + recomposing — composer reconcile"
 write_fleet_yaml no
 compose_timers
 { [ ! -f "$TIMERS_DIR/$UNIT.service" ] && [ ! -f "$TIMERS_DIR/$UNIT.timer" ] &&
     [ ! -f "$TIMERS_DIR/$UNIT.plist" ]; } && r=yes || r=no
 check "generate reconcile prunes the removed slot on BOTH platforms (.service + .timer + launchd .plist)" "$r"
-
-# --- 4. enroll-side reconcile disables the now-orphaned LIVE systemd timer -----
-if [ "$HAVE_SYSTEMD" = yes ]; then
-    # The composed dir no longer has the unit, but the timer is still enrolled +
-    # live from step 2 — the exact stale orphan reconcile_briefing_timers exists
-    # to disable. Drive it via setup-fleet on the botless fleet (no bot spin-up),
-    # the recipe the keepalive swap was rehearsed with. Bot dir removed first so
-    # the audit has nothing on-disk to reconcile.
-    rm -rf "$BOT_DIR"
-    log "running setup-fleet $FLEET (enroll-side reconcile — disable the live orphan)"
-    env -i HOME="$HOME" PATH="$PATH" USER="${USER:-$(id -un)}" \
-        XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" \
-        DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}" \
-        CLAUDLOBBY_ROOT="$CLAUDLOBBY_ROOT" \
-        "$CLAUDLOBBY_ROOT/lib/setup-fleet" "$FLEET" >"$WORK/setup-fleet.out" 2>&1 || true
-    grep -iE 'briefing (orphan|reconcile)' "$WORK/setup-fleet.out" || true
-    systemctl --user list-unit-files --no-legend "$UNIT.timer" 2>/dev/null |
-        grep -q "$UNIT" && r=no || r=yes
-    check "enroll-side reconcile disables the orphaned live briefing timer ($UNIT)" "$r"
-else
-    log "SKIP enroll-side reconcile assertion — no user systemd"
-fi
 
 echo ""
 echo "=== rehearse-briefing-timer: $pass passed, $fail failed ==="

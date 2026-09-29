@@ -86,9 +86,9 @@ def test_exactly_the_categories_that_ship_off():
     is no other gate between merge and every host.
 
     A GATE IS SOMETHING A HUMAN CHOOSES, not a mechanism that exists. Automatic
-    enrollment is not a gate: `lib/setup-fleet:22-24` skips only what the
-    composed DORMANT manifest lists, so a job that is not opt-in is enrolled on
-    the next setup run with nobody deciding to. Reading "it has an enrollment
+    enrollment is not a gate: host activation enrolls the declared jobs unless
+    they are marked dormant, so a default-on job is enrolled on the next
+    operator activation. Reading "it has an enrollment
     step" as disqualifying would rule out `boot-capture`, whose enrollment is
     automatic *precisely absent this flag* — the flag is what creates its gate.
     A restart, a per-fleet compose, or an already-opt-in enrollment do qualify.
@@ -428,11 +428,6 @@ def test_status_header_names_a_disabled_reaction(tmp_path):
     assert "task-recheck off on artemis-data" in note
     assert "doctor --switches" in note
     assert switches_off_note("artemis-data", _resolve(tmp_path / "b")) == ""
-
-
-def test_legacy_fleet_setup_prints_the_switch_table():
-    body = (REPO / "lib/setup-fleet").read_text()
-    assert "doctor --switches" in body
 
 
 # ---------------------------------------------------------------------------

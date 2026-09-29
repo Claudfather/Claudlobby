@@ -69,7 +69,7 @@ while IFS= read -r b; do
     bot_socket=$(tmux_socket_for_bot "$bot_dir" 2>/dev/null || true)
     check_tmux_session "$b" "$bot_socket" 2>/dev/null && has_tmux=1
     # Unit presence via the shared predicate (bot_unit_present) — the same
-    # check setup-fleet's skip-healthy uses, so audit and apply never drift.
+    # check for the same supervised-session evidence, so audit stays honest.
     bot_unit_present "$b" "$bot_dir" && has_unit=1
 
     # Exhaustive by construction: an else, not a fourth condition. A defined bot

@@ -168,7 +168,8 @@ def test_installed_resources_match_direct_and_sdist_wheels(tmp_path):
     native = {name.removeprefix("claudlobby/_native/") for name in payload
               if name.startswith("claudlobby/_native/")}
     assert {"keepalive.sh", "lib-common.sh", "supervisor.sh", "git-credential-github-app",
-            "env-tiers.sh", "setup-fleet", "plane-socket-client.py"} <= native
+            "env-tiers.sh", "plane-socket-client.py"} <= native
+    assert not native.intersection({"setup-fleet", "setup-fleets"})
     assert not any(name.startswith(("rehearse-", "ab-", "boot-strand-", "plane-canary-"))
                    for name in native)
     assert not native.intersection({
