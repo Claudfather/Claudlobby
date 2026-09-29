@@ -999,8 +999,8 @@ CONF
     fi
 }
 
-# Stub lib dir: real keepalive/native code. A fake user manager records only
-# the selected restart; no real systemd unit or bot process is started.
+# Stub lib dir: real keepalive/native code. Fake user managers record only
+# the selected restart; no real systemd or launchd unit is started.
 HLIB="$ROOT/stublib"
 mkdir -p "$HLIB"
 ln -sf "$LIB_DIR/keepalive.sh" "$HLIB/keepalive.sh"
@@ -1010,6 +1010,8 @@ ln -sf "$LIB_DIR/runtime-admission.sh" "$HLIB/runtime-admission.sh"
 val_link_plane_shim "$HLIB"
 mkdir -p "$HOME/.config/systemd/user"
 : > "$HOME/.config/systemd/user/tmux-$HBOT.service"
+mkdir -p "$HOME/Library/LaunchAgents"
+: > "$HOME/Library/LaunchAgents/tmux-$HBOT.plist"
 cat > "$STUB_BIN/systemctl" <<'REC'
 #!/bin/bash
 if [ "$1" = --user ] && [ "$2" = restart ]; then
@@ -1020,6 +1022,16 @@ fi
 exit 0
 REC
 chmod +x "$STUB_BIN/systemctl"
+cat > "$STUB_BIN/launchctl" <<'REC'
+#!/bin/bash
+if [ "$1" = kickstart ] && [ "$2" = -k ]; then
+    c=0
+    [ -f "$VAL_KEEPALIVE_RESTART_COUNT" ] && c=$(cat "$VAL_KEEPALIVE_RESTART_COUNT")
+    printf '%s' "$((c + 1))" > "$VAL_KEEPALIVE_RESTART_COUNT"
+fi
+exit 0
+REC
+chmod +x "$STUB_BIN/launchctl"
 
 # Idle pane (bare prompt glyph) so keepalive reaches the IDLE branch where the heal
 # runs — the BUSY-gate is implicit in that placement.
@@ -1182,6 +1194,7 @@ CONF
 # branch. The RESTART log line is echoed before the restart action fires, so it
 # lands regardless of the (stubbed) restart.
 : > "$HOME/.config/systemd/user/com.val.$DBOT.service"
+: > "$HOME/Library/LaunchAgents/com.val.$DBOT.plist"
 CLAUDLOBBY_ROOT="$ROOT" VAL_KEEPALIVE_RESTART_COUNT="$HREC" PATH="$STUB_BIN:$PATH" \
     "$HLIB/keepalive.sh" "$DDIR" >/dev/null 2>&1 || true
 grep -qE 'RESTART.*session dead' "$DDIR/keepalive.log" 2>/dev/null && r=yes || r=no
@@ -1817,27 +1830,36 @@ if [ "$fail" -gt "$_mp_fail_before" ]; then
 fi
 
 # === Scenario 3: weekly worker-only restart — manager skip + loud failure ===
-# Run weekly-worker-restart.sh from a stub lib dir (stub spin-up-bot FAILS, so
-# the loud emit_failure_alert path is exercised too). The manager (MANAGER_TMUX==BOT_ID)
+# Run weekly-worker-restart.sh from a stub lib dir (selected bot restart FAILS,
+# so the loud emit_failure_alert path is exercised too). The manager (MANAGER_TMUX==BOT_ID)
 # must be skipped; the worker must be processed.
 val_scenario "validate-bot-change: weekly worker-only restart"
 WR_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-wr.XXXXXX")"
-val_initialize_plane "$WR_ROOT"
+val_plane_ready "$WR_ROOT" "$FLEET"
 WR_LIB="$WR_ROOT/lib"
 mkdir -p "$WR_LIB"
-cp "$LIB_DIR/lib-common.sh" "$LIB_DIR/supervisor.sh" "$LIB_DIR/weekly-worker-restart.sh" "$WR_LIB/"
+cp "$LIB_DIR/lib-common.sh" "$LIB_DIR/supervisor.sh" "$LIB_DIR/cli-context.sh" \
+    "$LIB_DIR/weekly-worker-restart.sh" "$WR_LIB/"
 val_link_plane_shim "$WR_LIB"
-printf '#!/bin/bash\nexit 0\n' > "$WR_LIB/pre-stop-handoff.sh"
-printf '#!/bin/bash\necho "stub spin-up: $1" >&2\nexit 7\n' > "$WR_LIB/spin-up-bot.sh"
-chmod +x "$WR_LIB/pre-stop-handoff.sh" "$WR_LIB/spin-up-bot.sh"
+WR_CLI="$WR_ROOT/selected-claudlobby"
+WR_CALLS="$WR_ROOT/restart-calls"
+cat > "$WR_CLI" <<'REC'
+#!/bin/bash
+printf '%s\n' "$*" >> "$WR_CALLS"
+exit 7
+REC
+chmod +x "$WR_CLI"
+export WR_CALLS
 WR_BOTS="$WR_ROOT/local/$FLEET/runtime/bots"
 mkdir -p "$WR_BOTS/wmgr/data" "$WR_BOTS/wworker/data"
+printf 'fleet:\n  name: %s\n  manager: wmgr\n  bots:\n    wmgr: {}\n    wworker: {}\n' "$FLEET" > "$WR_ROOT/local/$FLEET/fleet.yaml"
 printf 'BOT_ID=wmgr\nMANAGER_TMUX=wmgr  # this bot is a manager\n' > "$WR_BOTS/wmgr/bot.conf"
 printf 'BOT_ID=wworker\nBOT_SERVICE=wr-wworker\nMANAGER_TMUX=wmgr\n' > "$WR_BOTS/wworker/bot.conf"
 WR_HOME="$WR_ROOT/home"
 mkdir -p "$WR_HOME/.config/systemd/user" "$WR_HOME/Library/LaunchAgents"
 touch "$WR_HOME/.config/systemd/user/wr-wworker.service" "$WR_HOME/Library/LaunchAgents/wr-wworker.plist"
-HOME="$WR_HOME" CLAUDLOBBY_ROOT="$WR_ROOT" "$WR_LIB/weekly-worker-restart.sh" "$FLEET" >/dev/null 2>&1 || true
+HOME="$WR_HOME" CLAUDLOBBY_ROOT="$WR_ROOT" CLAUDLOBBY_CLI="$WR_CLI" \
+    "$WR_LIB/weekly-worker-restart.sh" "$FLEET" >/dev/null 2>&1 || true
 wr_log="$WR_ROOT/state/weekly-worker-restart.log"
 wr_events="$(val_events "$WR_ROOT" "$FLEET" fleet restart_failed || true)"
 
@@ -1847,12 +1869,15 @@ grep -q 'worker: wworker' "$wr_log" 2>/dev/null && r=yes || r=no
 harness_check "weekly restart PROCESSES the worker" "$r"
 grep -q 'worker: wmgr' "$wr_log" 2>/dev/null && r=no || r=yes
 harness_check "manager never entered the worker restart path" "$r"
+grep -q ' bot restart wworker --ceiling ' "$WR_CALLS" 2>/dev/null && r=yes || r=no
+harness_check "weekly restart uses selected bot restart for the worker" "$r"
 printf '%s' "$wr_events" | grep -q '"type":"restart_failed"' && r=yes || r=no
 harness_check "worker restart failure raises a restart_failed alert (shared emit_failure_alert)" "$r"
 
 # The next automatic tick must leave a deliberately de-enrolled worker down.
 rm -f "$WR_HOME/.config/systemd/user/wr-wworker.service" "$WR_HOME/Library/LaunchAgents/wr-wworker.plist"
-HOME="$WR_HOME" CLAUDLOBBY_ROOT="$WR_ROOT" "$WR_LIB/weekly-worker-restart.sh" "$FLEET" >/dev/null 2>&1 || true
+HOME="$WR_HOME" CLAUDLOBBY_ROOT="$WR_ROOT" CLAUDLOBBY_CLI="$WR_CLI" \
+    "$WR_LIB/weekly-worker-restart.sh" "$FLEET" >/dev/null 2>&1 || true
 grep -q 'skip (de-enrolled): wworker' "$wr_log" 2>/dev/null && r=yes || r=no
 harness_check "weekly restart skips a de-enrolled worker" "$r"
 
