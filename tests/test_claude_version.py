@@ -36,6 +36,7 @@ from tests.test_update_claude_code_verify import broken_stub, healthy
 
 REPO = Path(__file__).resolve().parent.parent
 LIB = REPO / "lib"
+HARNESS = REPO / "harness"
 DOOR = LIB / "claude-version.sh"
 
 #: Every binary shape the reader has to classify: name -> (script, verdict).
@@ -115,10 +116,10 @@ def _bash_verdict(tmp_path: Path, binary: str) -> tuple[str | None, str | None]:
 
 
 def _shell_function(script: str, name: str) -> str:
-    """lib/<script>'s function `name`, from its definition line through its closing
+    """A native or measurement script's function `name`, through its closing
     brace: to run one function of a script that cannot be sourced, or to scope a
     search to one function."""
-    text = (LIB / script).read_text()
+    text = ((LIB if script == "lib-common.sh" else HARNESS) / script).read_text()
     start = text.index(f"\n{name}() {{")
     return text[start : text.index("\n}\n", start) + 3]
 
@@ -387,7 +388,7 @@ def test_every_seed_caller_stops_on_the_refusal():
     """A refusal a caller ignores is a stand-in by another route: the ladder runs
     without `set -e`, and would boot on with no onboarding seeded."""
     callers = {}
-    for script in sorted(LIB.glob("*.sh")):
+    for script in sorted(HARNESS.glob("*.sh")):
         if stops := _seed_calls_stop(script.read_text()):
             callers[script.name] = stops
     ignoring = sorted(name for name, stops in callers.items() if not all(stops))
@@ -462,7 +463,7 @@ def test_the_send_size_probe_refuses_before_building_anything(tmp_path):
     tmp = tmp_path / "tmp"
     tmp.mkdir()
     r = subprocess.run(
-        ["bash", str(LIB / "send-size-probe.sh"), "--n", "1"],
+        ["bash", str(HARNESS / "send-size-probe.sh"), "--n", "1"],
         capture_output=True,
         text=True,
         timeout=120,
@@ -484,7 +485,7 @@ def _eval(tmp_path, claude: str, *args, **env):
     bindir.mkdir(exist_ok=True)
     _write_exec(bindir / "claude", claude)
     return subprocess.run(
-        ["bash", str(LIB / "ab-comms-eval.sh"), *args],
+        ["bash", str(HARNESS / "ab-comms-eval.sh"), *args],
         capture_output=True,
         text=True,
         timeout=300,
@@ -507,12 +508,12 @@ def test_a_real_eval_refuses_when_its_claude_cannot_run(tmp_path):
     assert "COVERAGE_AB_RESULT" not in r.stdout
 
 
-def test_a_dry_run_pins_dry_run_whatever_binary_is_installed(tmp_path, test_cli):
+def test_a_dry_run_pins_dry_run_whatever_binary_is_installed(tmp_path, built_test_cli):
     """A dry run makes no model call, so a runnable claude on PATH is not part of
     its evidence and must not become its pin."""
     r = _eval(
         tmp_path, healthy("2.1.281"), "--dry-run", "--experiment", "coverage-honesty",
-        "--reps", "1", CLAUDLOBBY_CLI=test_cli,
+        "--reps", "1", CLAUDLOBBY_CLI=built_test_cli,
     )
     out = r.stdout + r.stderr
     assert r.returncode == 0, out[-1500:]

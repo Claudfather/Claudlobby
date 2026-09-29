@@ -1232,7 +1232,7 @@ class TestSummaryExitPropagation:
     def _run(tmp_path: Path, exit_code: int) -> subprocess.CompletedProcess:
         """Drive emit_summary against a stub summarizer that exits `exit_code`.
 
-        LIB_DIR is overridden AFTER sourcing so the real python3 still runs the
+        HARNESS_DIR is overridden AFTER sourcing so the real python3 still runs the
         stub — the exit path under test is the shell's, not python's.
         """
         (tmp_path / "boot-strand-summary.py").write_text(
@@ -1245,7 +1245,7 @@ class TestSummaryExitPropagation:
             [
                 "bash",
                 "-c",
-                f'. "{SAMPLER}"; LIB_DIR="{tmp_path}"; emit_summary "$1"',
+                f'. "{SAMPLER}"; HARNESS_DIR="{tmp_path}"; emit_summary "$1"',
                 "_",
                 str(rows),
             ],
