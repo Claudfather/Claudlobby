@@ -204,6 +204,7 @@ LOCK_RETRY_BACKOFF_S = 0.15
 def emit_batch(root: Path, raw_requests: list[dict], *,
                conn_factory: "Callable[[], sqlite3.Connection] | None" = None,
                require_commit: bool = False,
+               precondition: "Callable[[sqlite3.Connection], None] | None" = None,
                ) -> list[EmitOutcome]:
     """One atomic unit of work: validate ALL, then ONE transaction (F4).
     The dispatch door commits work_item + assignment + communication here.
@@ -225,7 +226,9 @@ def emit_batch(root: Path, raw_requests: list[dict], *,
     not be replayed later. It preserves in-process lock retries but never
     writes a spool or staging entry. Storage failures propagate unchanged;
     an exception does not prove that a commit did not occur. Callers must
-    reconcile their durable event IDs before deciding whether to retry."""
+    reconcile their durable event IDs before deciding whether to retry.
+    ``precondition`` runs read-only under ingest_many's BEGIN IMMEDIATE lock,
+    before any row in the batch is written."""
     captured: list = []
     items = []
     # Capture config loads AT MOST ONCE per batch (gauntlet round): a report
@@ -293,7 +296,11 @@ def emit_batch(root: Path, raw_requests: list[dict], *,
             try:
                 require_current_schema(own)
                 host = ensure_host_uid(Path(root) / "state")
-                results = ingest_many(own, items, host_uid=host)
+                if precondition is None:
+                    results = ingest_many(own, items, host_uid=host)
+                else:
+                    results = ingest_many(own, items, host_uid=host,
+                                          precondition=precondition)
             finally:
                 if not borrowed:
                     try:

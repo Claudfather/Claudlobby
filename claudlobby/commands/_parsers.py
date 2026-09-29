@@ -148,7 +148,14 @@ def register_subparsers(sub) -> None:
                      " and silent right now — sharp)")
     pex.add_argument("--dry-run", action="store_true",
                      help="Report the count without emitting")
-    pex.set_defaults(func=_command("plane", "cmd_plane_expire"))
+    pex.add_argument("--json", action="store_true", help="Schema-1 result")
+
+    def _expire_dispatch(args):
+        from ..command_result import execute
+        return execute("plane.expire", lambda: _command("plane_expire", "dispatch")(args),
+                       json_output=args.json)
+
+    pex.set_defaults(func=_expire_dispatch, public_command="plane.expire")
     prg = psub.add_parser(
         "registry",
         help="Registry lane reads: current state, history, changes, verify")

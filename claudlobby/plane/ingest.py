@@ -475,8 +475,12 @@ def _declaration_row(payload, entity):
     }
 
 
-def ingest_many(conn, items, *, host_uid) -> list[IngestResult]:
-    """items: [(EmitRequest, payload)] — ONE transaction, all-or-nothing."""
+def ingest_many(conn, items, *, host_uid, precondition=None) -> list[IngestResult]:
+    """items: [(EmitRequest, payload)] — ONE transaction, all-or-nothing.
+
+    An optional read-only precondition runs after BEGIN IMMEDIATE; failure
+    rolls back before any ledger or family insert.
+    """
     now = now_iso()
     prepared = [
         (env.event_id or mint_event_id(), env, payload)
@@ -500,6 +504,8 @@ def ingest_many(conn, items, *, host_uid) -> list[IngestResult]:
     party, fleet, entity = _batch_resolver(conn, now, host_uid)
     try:
         conn.execute("BEGIN IMMEDIATE")
+        if precondition is not None:
+            precondition(conn)
         results = []
         for event_id, env, payload in prepared:
             fam_override = None
