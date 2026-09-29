@@ -67,6 +67,21 @@ def _data(route, outcome, *, parent_message_id=None) -> dict:
     return data
 
 
+def _effect_failure(code, message, *, data, request_id, release_id):
+    """Keep native-effect evidence visible in human output as well as JSON."""
+    detail = (f"message {data.get('message_id') or 'unknown'}: "
+              f"recording {data.get('recording', 'unknown')}; "
+              f"request persisted {str(data.get('request_persisted', False)).lower()}; "
+              f"delivery {data.get('delivery', 'unknown')}")
+    if data.get("alert") is not None:
+        channels = data["alert"]
+        detail += "; fleet alert " + ", ".join(
+            f"{name}={channels[name]['status']}" for name in ("manager", "telegram"))
+    return CommandFailure(code, f"{detail}. {message}", data=data, release_id=release_id,
+                          hint=f"Inspect claudlobby --json request show {request_id}; "
+                               "do not automatically resend.")
+
+
 def _alert_tiers(route):
     # Ask the runtime's existing tier-order owner for the selected fleet.
     # A caller's ambient bot env can belong to another fleet under --fleet.
@@ -190,13 +205,13 @@ def dispatch(args) -> CommandOutput:
                     print(f"recording-alert: fleet={route.selected.fleet.name} request={request_id} "
                           "channel=telegram status=failed reason=selected_tiers_unavailable",
                           file=sys.stderr)
-                raise CommandFailure("recording_degraded",
+                raise _effect_failure("recording_degraded",
                                      "message recording is degraded; inspect the request before retrying",
-                                     data=data, release_id=release_id)
+                                     data=data, request_id=request_id, release_id=release_id)
             if outcome.delivery != "submitted":
                 code = "delivery_failed" if outcome.delivery == "failed" else "delivery_unknown"
-                raise CommandFailure(code, "message transport was not confirmed; inspect the request",
-                                     data=data, release_id=release_id)
+                raise _effect_failure(code, "message transport was not confirmed; inspect the request",
+                                     data=data, request_id=request_id, release_id=release_id)
             # A tmux success is only submission. This read owns the final byte
             # integrity verdict and never repairs or resends the native payload.
             try:
@@ -209,9 +224,9 @@ def dispatch(args) -> CommandOutput:
                     OSError, sqlite3.Error) as exc:
                 data["receipt_observation"] = "unavailable"
                 data["integrity_verdict"] = "unknown"
-                raise CommandFailure("delivery_unknown",
+                raise _effect_failure("delivery_unknown",
                                      "message was submitted; final receipt proof is unavailable",
-                                     data=data, release_id=release_id) from exc
+                                     data=data, request_id=request_id, release_id=release_id) from exc
             if (observed.sender is None or observed.destination is None
                     or observed.sender.uid != route.caller.uid
                     or observed.sender.alias != route.caller.alias
@@ -219,22 +234,22 @@ def dispatch(args) -> CommandOutput:
                     or observed.destination.alias != route.peer.alias):
                 data["receipt_observation"] = observed.receipt_observation
                 data["integrity_verdict"] = "unknown"
-                raise CommandFailure("delivery_unknown",
+                raise _effect_failure("delivery_unknown",
                                      "message was submitted; receipt identities differ from the frozen route",
-                                     data=data, release_id=release_id)
+                                     data=data, request_id=request_id, release_id=release_id)
             data["receipt_observation"] = observed.receipt_observation
             data["integrity_verdict"] = observed.integrity_verdict
             if observed.integrity_verdict == "delivered":
                 data["delivery"] = "received"
             elif observed.integrity_verdict in {"truncated", "altered"}:
                 data["delivery"] = "failed"
-                raise CommandFailure("delivery_failed",
+                raise _effect_failure("delivery_failed",
                                      "message receiver proof shows a byte mismatch; inspect the request",
-                                     data=data, release_id=release_id)
+                                     data=data, request_id=request_id, release_id=release_id)
             else:
-                raise CommandFailure("delivery_unknown",
+                raise _effect_failure("delivery_unknown",
                                      "message was submitted; final receiver proof is incomplete",
-                                     data=data, release_id=release_id)
+                                     data=data, request_id=request_id, release_id=release_id)
         return CommandOutput(data, release_id=release_id,
                              lines=(f"{outcome.message_id}\trecording={outcome.recording}\t"
                                     "delivery=received",))
@@ -246,7 +261,11 @@ def dispatch(args) -> CommandOutput:
     except ReleaseMismatch as exc:
         raise CommandFailure("release_mismatch", "selected release differs from this caller",
                              hint=exc.hint, release_id=release_id) from exc
-    except (ReceiptConflict, ReceiptBusy, MessageConflict) as exc:
+    except ReceiptBusy as exc:
+        raise CommandFailure("conflict", "another invocation holds this request",
+                             hint=f"Retry the same request UUID {request_id} after it exits.",
+                             retryable=True, release_id=release_id) from exc
+    except (ReceiptConflict, MessageConflict) as exc:
         raise CommandFailure("conflict", "message request conflicts with recorded history or another caller",
                              release_id=release_id) from exc
     except ReceiptError as exc:
@@ -263,10 +282,10 @@ def dispatch(args) -> CommandOutput:
                              release_id=release_id) from exc
     except OperationContextUnavailableError as exc:
         raise CommandFailure("unavailable", "message identity registry is unavailable",
-                             release_id=release_id) from exc
+                             retryable=True, release_id=release_id) from exc
     except MessageIdentityUnavailable as exc:
         raise CommandFailure("unavailable", "local human identity proof is unavailable",
-                             release_id=release_id) from exc
+                             retryable=True, release_id=release_id) from exc
     except (MessageContextError, OperationContextError, BotNotFoundError,
             ActivationError, PlanError) as exc:
         raise CommandFailure("conflict", "active message scope or destination is invalid",

@@ -197,6 +197,26 @@ def test_unknown_result_needs_explicit_retry_and_preserves_first_attempt(estate)
     assert saved.message_attempts[1].observation.status == "submitted"
 
 
+def test_interrupted_send_replay_is_delivery_unknown_without_false_outage(estate):
+    route, package, conn = estate
+    request_id = str(uuid4())
+
+    class Interrupted(BaseException):
+        pass
+
+    def interrupted(*args, **kwargs):
+        raise Interrupted()
+
+    with pytest.raises(Interrupted):
+        _call(route, package, request_id, transport=interrupted)
+    assert _receipt(route, request_id).message_attempts[0].observation is None
+    result = _call(route, package, request_id,
+                   transport=lambda *a, **k: pytest.fail("must not resend"))
+    assert (result.delivery, result.recording, result.exit_code) == ("unknown", "committed", 5)
+    assert result.replayed and result.request_persisted and result.alert is None
+    assert _counts(conn) == (1, 0)
+
+
 def test_same_uuid_refuses_changed_route_and_semantics_before_native_effect(estate):
     route, package, _ = estate
     request_id = str(uuid4())
@@ -481,3 +501,37 @@ def test_assignment_delivery_refuses_recorder_outage_and_stale_first_send(estate
         deliveries.deliver(ctx, route, package, request_id, assignment.assignment_id,
                            MessageBody("Private delivery"),
                            transport=lambda *a, **k: pytest.fail("stale assignment must not send"))
+
+
+@pytest.mark.parametrize("record_transmission", [True, False])
+def test_lost_delivery_observation_preserves_proof_and_refuses_received_retry(
+        estate, monkeypatch, record_transmission):
+    ctx, route, package, conn, task, assignment = _manager_delivery(estate)
+    request_id, body = str(uuid4()), MessageBody("Private delivery")
+    original_save, original_emit = RequestStore._save, messages.emit_batch
+
+    def fail_observation(self, receipt):
+        if receipt.message_attempts and receipt.message_attempts[-1].observation is not None:
+            raise OSError("receipt disk full after send")
+        return original_save(self, receipt)
+
+    def emit(root, raws, **kwargs):
+        if raws[0]["event_type"] == "transmission" and not record_transmission:
+            raise sqlite3.OperationalError("sender recording unavailable")
+        return original_emit(root, raws, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(RequestStore, "_save", fail_observation)
+        patch.setattr(messages, "emit_batch", emit)
+        result = deliveries.deliver(ctx, route, package, request_id, assignment.assignment_id,
+            body, transport=lambda *a, **k: TransportOutcome("submitted", "sha256:" + "a" * 64, 99, 0))
+    assert not result.request_persisted and result.delivery == "submitted"
+    assert result.transmission_recording == ("committed" if record_transmission else "unrecorded")
+    assert _receipt(route, request_id).message_attempts[-1].observation is None
+    original_emit(ctx.root, [{"event_type": "transmission", "fleet": "example",
+        "emitter": "receiver", "payload": {"msg_id": result.message_id, "attempt_no": 1,
+        "carrier": "tmux", "destination": "worker", "state": "received",
+        "received_sha256": "sha256:" + "a" * 64, "received_bytes": 99}}], require_commit=True)
+    with pytest.raises(ReceiptConflict, match="recorded submission"):
+        deliveries.deliver(ctx, route, package, request_id, assignment.assignment_id, body,
+            retry_uncertain=True, transport=lambda *a, **k: pytest.fail("receiver already proved delivery"))

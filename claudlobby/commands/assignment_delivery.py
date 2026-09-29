@@ -45,7 +45,7 @@ def dispatch(args) -> CommandOutput:
     from ..task_operations import TaskRecordingError, _reader
     from ..task_queries import TaskQueryError, show_assignment
     from ..task_state import TaskStateError
-    from .message_write import _body, _request_id
+    from .message_write import _body, _request_id, _effect_failure
 
     release_id = None
     try:
@@ -91,9 +91,9 @@ def dispatch(args) -> CommandOutput:
             data = _data(route, result)
             if result.delivery != "submitted":
                 code = "delivery_failed" if result.delivery == "failed" else "delivery_unknown"
-                raise CommandFailure(code,
+                raise _effect_failure(code,
                                      "assignment intent recorded; native delivery was not confirmed; inspect request",
-                                     data=data, release_id=release_id)
+                                     data=data, request_id=request_id, release_id=release_id)
             try:
                 observed = receipt(ctx, result.message_id, destination=route.peer.alias,
                                    wait=_RECEIPT_WAIT_S)
@@ -102,9 +102,9 @@ def dispatch(args) -> CommandOutput:
                     OSError, sqlite3.Error) as exc:
                 data["receipt_observation"] = "unavailable"
                 data["integrity_verdict"] = "unknown"
-                raise CommandFailure("delivery_unknown",
+                raise _effect_failure("delivery_unknown",
                                      "assignment was submitted; final receipt proof is unavailable",
-                                     data=data, release_id=release_id) from exc
+                                     data=data, request_id=request_id, release_id=release_id) from exc
             data["receipt_observation"] = observed.receipt_observation
             data["integrity_verdict"] = observed.integrity_verdict
             if (observed.sender is None or observed.destination is None
@@ -113,25 +113,25 @@ def dispatch(args) -> CommandOutput:
                     or observed.destination.uid != route.peer.uid
                     or observed.destination.alias != route.peer.alias):
                 data["integrity_verdict"] = "unknown"
-                raise CommandFailure("delivery_unknown",
+                raise _effect_failure("delivery_unknown",
                                      "assignment was submitted; receipt identities differ from the frozen route",
-                                     data=data, release_id=release_id)
+                                     data=data, request_id=request_id, release_id=release_id)
             if (observed.exit_code == 0 and observed.receipt_observation == "received"
                     and observed.integrity_verdict == "delivered"):
                 data["delivery"] = "received"
             elif observed.integrity_verdict in {"truncated", "altered"}:
                 data["delivery"] = "failed"
-                raise CommandFailure("delivery_failed",
+                raise _effect_failure("delivery_failed",
                                      "assignment receiver proof shows a byte mismatch; inspect request",
-                                     data=data, release_id=release_id)
+                                     data=data, request_id=request_id, release_id=release_id)
             else:
-                raise CommandFailure("delivery_unknown",
+                raise _effect_failure("delivery_unknown",
                                      "assignment was submitted; final receiver proof is incomplete",
-                                     data=data, release_id=release_id)
+                                     data=data, request_id=request_id, release_id=release_id)
             if result.request_persisted is not True:
-                raise CommandFailure("delivery_unknown",
+                raise _effect_failure("delivery_unknown",
                                      "assignment received; request history was not retained reliably; inspect request",
-                                     data=data, release_id=release_id)
+                                     data=data, request_id=request_id, release_id=release_id)
         return CommandOutput(data, release_id=release_id,
                              lines=(f"{result.task_id}\t{result.assignment_id}\t{result.message_id}\t"
                                     "recording=committed\tdelivery=received",))
@@ -148,11 +148,15 @@ def dispatch(args) -> CommandOutput:
         message = ("assignment intent committed; native delivery was not attempted; inspect the request"
                    if exc.recording == "committed" else
                    "assignment recording is unconfirmed; inspect the request")
-        raise CommandFailure(code, message, data=data, release_id=release_id) from exc
+        raise _effect_failure(code, message, data=data, request_id=request_id, release_id=release_id) from exc
     except ReleaseMismatch as exc:
         raise CommandFailure("release_mismatch", "selected release differs from this caller",
                              hint=exc.hint, release_id=release_id) from exc
-    except (ReceiptConflict, ReceiptBusy, MessageConflict) as exc:
+    except ReceiptBusy as exc:
+        raise CommandFailure("conflict", "another invocation holds this request",
+                             hint=f"Retry the same request UUID {request_id} after it exits.",
+                             retryable=True, release_id=release_id) from exc
+    except (ReceiptConflict, MessageConflict) as exc:
         raise CommandFailure("conflict", "assignment request conflicts with recorded history or route",
                              release_id=release_id) from exc
     except ReceiptError as exc:
@@ -169,7 +173,7 @@ def dispatch(args) -> CommandOutput:
                              release_id=release_id) from exc
     except OperationContextUnavailableError as exc:
         raise CommandFailure("unavailable", "assignment identity registry is unavailable",
-                             release_id=release_id) from exc
+                             retryable=True, release_id=release_id) from exc
     except (MessageContextError, OperationContextError, BotNotFoundError,
             ActivationError, PlanError, TaskStateError) as exc:
         raise CommandFailure("conflict", "active assignment scope or state is invalid",

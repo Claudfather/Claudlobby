@@ -46,6 +46,7 @@ class MessageNotFoundError(MessageQueryError):
 class MessageUnavailableError(MessageQueryError):
     code = "unavailable"
     exit_code = 6
+    retryable = True
 
 
 @dataclass(frozen=True)

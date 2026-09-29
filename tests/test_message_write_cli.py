@@ -170,6 +170,30 @@ def test_recording_outage_keeps_submitted_effect_and_alert_truth(active, monkeyp
     assert output["data"]["alert"]["manager"]["status"] == "submitted"
     assert len(calls) == 1 and "Recording degraded" in calls[0]
     assert "Private O1 body" not in json.dumps(output)
+    assert request_id in output["error"]["hint"]
+    assert main(["--root", str(root), "message", "send", "--to", "worker",
+                 "--text", "Private O1 body", "--request-id", request_id]) == 11
+    error = capsys.readouterr().err
+    assert output["data"]["message_id"] in error and request_id in error
+    assert "recording unrecorded" in error and "delivery submitted" in error
+    assert "manager=submitted" in error and "do not automatically resend" in error
+    assert "Private O1 body" not in error and len(calls) == 1
+
+
+def test_busy_send_request_is_retryable_with_same_uuid(active, monkeypatch, capsys):
+    from claudlobby.request_receipts import ReceiptBusy
+    root, host = active
+    _generated(monkeypatch, root, host.release)
+    request_id = str(uuid4())
+
+    def busy(*args, **kwargs):
+        raise ReceiptBusy("request lock held")
+
+    monkeypatch.setattr(message_operations, "send_message", busy)
+    result = _call(capsys, root, "--to", "worker", "--text", "private",
+                   "--request-id", request_id, expected=4)
+    assert result["error"]["retryable"] and request_id in result["error"]["hint"]
+    assert _facts(root) == (0, 0)
 
 
 def test_local_human_sends_and_replies_only_to_a_bot_sender(active, monkeypatch, capsys):  # noqa: F811

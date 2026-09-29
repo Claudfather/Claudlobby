@@ -164,17 +164,28 @@ def _observation(result: TransportOutcome) -> TransportObservation:
                                 result.native_returncode)
 
 
-def _unobserved_attempt_has_no_fact(root: Path, route: MessageRoute, event_id: str) -> bool:
-    """A retained reservation without a result may have a submitted Plane fact.
+def _retry_has_no_submission_proof(root: Path, route: MessageRoute,
+                                   message_id: str, prior) -> bool:
+    """Receiver proof or a recorded submission forbids another native send.
 
-    The receipt has no expected projection yet, so exact reconciliation is not
-    possible. Any row at that event ID, or unavailable proof, forbids retry.
-    Definite absence leaves the usual explicit-uncertain-retry choice.
+    For an unobserved reservation, any row at its event ID also forbids retry:
+    there is no expected projection with which to reconcile it. Unavailable
+    proof never permits a retry. Recorded unknown/failed outcomes alone do not
+    establish submission, so an explicit uncertain retry can still proceed.
     """
     with _reader(root, route) as conn:
         if conn is None:
             return False
         try:
+            submitted = conn.execute(
+                "SELECT 1 FROM events WHERE host_uid=? AND msg_id=? AND kind='transmission' "
+                "AND event IN ('received', 'pane_submitted') LIMIT 1",
+                (route.host_uid, message_id)).fetchone()
+            if submitted is not None:
+                return False
+            if prior is None or prior.observation is not None:
+                return True
+            event_id = prior.transmission_event_id
             ledger = conn.execute("SELECT 1 FROM ingest_ledger WHERE event_id=?", (event_id,)).fetchone()
             row = conn.execute("SELECT 1 FROM events WHERE event_id=?", (event_id,)).fetchone()
         except sqlite3.Error:
@@ -193,9 +204,9 @@ def reserve_native_attempt(store: RequestStore | None, route: MessageRoute, rece
     if strict and (store is None or receipt is None or not persistence[0]):
         raise ReceiptConflict("strict native delivery requires a durable request receipt")
     prior = receipt.message_attempts[-1] if receipt and receipt.message_attempts else None
-    if (prior is not None and retry_uncertain and prior.observation is None
-            and not _unobserved_attempt_has_no_fact(route.selected.paths.root, route,
-                                                    prior.transmission_event_id)):
+    if (receipt is not None and retry_uncertain
+            and not _retry_has_no_submission_proof(route.selected.paths.root, route,
+                                                   receipt.intent.message_id, prior)):
         raise ReceiptConflict("reserved native attempt may already have a recorded submission; "
                               "inspect request before retry")
     if prior is not None and not retry_uncertain:
@@ -259,7 +270,7 @@ def transmit_native_attempt(route: MessageRoute, package: PackageResources,
         observation = prior.observation
         observation_retained = observation is not None
     tx_status = "unknown"
-    if observation is not None and (not strict or observation_retained):
+    if observation is not None:
         try:
             tx_raw = encode_transmission(intent, observation, request_id=request_id,
                                          attempt_no=reservation.attempt_no,
@@ -501,7 +512,12 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
                                                 modes=modes, parties=parties, persistence=persistence,
                                                 store=store, at=at, transport=transport)
         delivery, tx_status = native_result.delivery, native_result.transmission_recording
-        recording = ("committed" if comm_status == tx_status == "committed" else
+        # A process killed during transport left no observation to record. That
+        # is unknown delivery, not evidence of a recording outage. Do not invent
+        # a transmission fact or page the fleet merely because of this replay.
+        unobserved_replay = native_result.replayed and native_result.observation is None
+        recording = (comm_status if unobserved_replay else
+                     "committed" if comm_status == tx_status == "committed" else
                      "unrecorded" if "unrecorded" in (comm_status, tx_status) and
                      "unknown" not in (comm_status, tx_status) else "unknown")
         degraded = recording != "committed" or not persistence[0]

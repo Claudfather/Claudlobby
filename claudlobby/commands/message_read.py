@@ -75,7 +75,8 @@ def _read(args) -> CommandOutput:
             raise CommandFailure("conflict", "active message selection changed during read",
                                  release_id=release_id)
         if failure is not None:
-            raise CommandFailure(*failure, data=data, release_id=release_id)
+            raise CommandFailure(*failure, data=data, release_id=release_id,
+                                 retryable=failure[0] in {"unavailable", "timeout"})
         return CommandOutput(data, release_id=release_id, lines=lines)
     except CommandFailure:
         raise

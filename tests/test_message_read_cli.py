@@ -196,6 +196,7 @@ def test_cross_fleet_participant_capture_and_receipt_proof(active, monkeypatch, 
 
     _transmission(root, parent, fleet="example", state="received")
     pending = _call(capsys, root, "receipt", parent, expected=8)
+    assert pending["error"]["retryable"] is True
     assert (pending["data"]["receipt_observation"], pending["data"]["integrity_verdict"]) == (
         "received", "unconfirmed")
     _transmission(root, parent, fleet="other", state="pane_submitted")
@@ -221,6 +222,7 @@ def test_reply_wait_facade_and_read_only_context_refusal(active, monkeypatch, ca
         timed = _call(capsys, root, "wait", parent, "--for", "reply", "--timeout", "1", expected=8)
     assert timed["release_id"] == host.release.release_id
     assert timed["data"] == {"message_id": parent, "reply": None}
+    assert timed["error"]["retryable"] is True
     reply = _communication(root, 3, sender="bot:example/worker", recipient="bot:other/worker",
                            reply_to=parent)
     observed = _call(capsys, root, "wait", parent, "--for", "reply", "--timeout", "1")
@@ -237,7 +239,10 @@ def test_reply_wait_facade_and_read_only_context_refusal(active, monkeypatch, ca
     _generated(monkeypatch, root, "worker")
     offline = root / "plane-db-offline"
     db_file(root).rename(offline)
-    assert _call(capsys, root, "show", parent, expected=6)["error"]["code"] == "unavailable"
+    for args in (("show", parent), ("receipt", parent)):
+        unavailable = _call(capsys, root, *args, expected=6)
+        assert unavailable["error"]["code"] == "unavailable"
+        assert unavailable["error"]["retryable"] is True
     assert not db_file(root).exists()
 
 
