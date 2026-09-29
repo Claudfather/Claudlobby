@@ -202,7 +202,7 @@ rr_process_fleet() {
             case "$auth_note" in
                 AUTH_CACHE_ARMED*)
                     echo "$(ts_iso) $auth_note" >> "$LOG"
-                    why="$why — host-global MCP auth cache is ARMED although every start empties it, so it could not be emptied or another bot re-armed it. Detail + remedy: $LOG"
+                    why="$why — host-global MCP auth cache is ARMED although every start empties it, so keepalive cannot heal this unless the entry was recorded after this bot's last clear. Detail + remedy: $LOG"
                     ;;
                 AUTH_CACHE_UNKNOWN*)
                     echo "$(ts_iso) $auth_note" >> "$LOG"
