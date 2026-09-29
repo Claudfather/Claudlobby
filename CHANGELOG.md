@@ -35,6 +35,14 @@ file. #1358 had made the cause visible, not stoppable.
   PATH. `validate-bot-change.sh` drives the start-bot path end to end on Linux.
   The final proof is a boot of the macOS host.
 
+### Changed — `[vault]` pin bumped to Claudron v0.5.1; `vault-sync` never leaves a vault mid-rebase (Claudron #193)
+
+The `[vault]` extra now pins `claudron @ …@v0.5.1`. 0.5.1 makes worktree integration
+the only way `claudron sync` reconciles a diverged clone: a conflict or a timeout leaves
+the live vault byte-identical and is reported by path, with no conflict markers written.
+`CLAUDRON_SYNC_WORKTREE` no longer exists. Drop it from any `vault-sync` environment
+once this pin is installed; leaving it set does nothing.
+
 ### Changed — `[vault]` pin bumped to Claudron v0.5.0; hooks no longer reconcile a diverged vault clone (Claudron #185, #156)
 
 The `[vault]` extra now pins `claudron @ …@v0.5.0`. 0.5.0 carries two months of
