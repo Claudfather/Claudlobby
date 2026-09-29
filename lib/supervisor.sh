@@ -777,7 +777,7 @@ EOF
 }
 
 svc_activation_pause() {
-    local file="$1" target="$2" saved="$3"
+    local file="$1" target="$2" saved="$3" remaining=20
     _svc_activation_saved "$saved" || return 3
     svc_activation_assert_external "$file" "$target" "${4:-$$}" || return $?
     case "$_OS" in
@@ -792,7 +792,26 @@ svc_activation_pause() {
             systemctl --user stop "$target" || return $?
             ;;
         Darwin)
-            [ "$SVC_ACT_LOAD" = unloaded ] || launchctl bootout "$target" || return $?
+            if [ "$SVC_ACT_LOAD" != unloaded ]; then
+                launchctl bootout "$target" || return $?
+                # launchctl can acknowledge bootout before the exact job leaves
+                # its domain. A first snapshot in that interval is not failure.
+                while :; do
+                    _svc_activation_read "$file" "$target" || {
+                        _svc_activation_unknown "$target state after bootout"; return 3;
+                    }
+                    if [ "$SVC_ACT_LOAD" = unloaded ] && [ "$SVC_ACT_ACTIVE" = inactive ]; then
+                        break
+                    fi
+                    [ "$remaining" -gt 0 ] || {
+                        _svc_activation_unknown "$target did not unload after bootout"; return 3;
+                    }
+                    remaining=$((remaining - 1))
+                    sleep 0.1 || {
+                        _svc_activation_unknown "$target post-bootout wait interrupted"; return 3;
+                    }
+                done
+            fi
             ;;
     esac
     _svc_activation_read "$file" "$target" || return 3

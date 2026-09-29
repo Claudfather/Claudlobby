@@ -6,6 +6,7 @@ TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$TEST_DIR/../lib/supervisor.sh"
 T="$(mktemp -d "${TMPDIR:?}/activation-supervisor.XXXXXX")"; trap 'rm -rf "$T"' EXIT
 TRACE="$T/trace"; : > "$TRACE"
+DELAY_UNLOAD="$T/delay-unload"; DELAY_ON_BOOTOUT=0
 file="$T/worker.service"; target=worker.service; : > "$file"
 CALLER_RC=0; QUERY_FAIL=0; FAIL_ACTION=""; SHADOW=0; TEST_MANAGER=Aqua
 enabled=enabled; load=loaded; active=active; group=/user.slice/worker.service
@@ -37,12 +38,26 @@ launchctl() {
         list)
             [ "$QUERY_FAIL" = 0 ] || return 7
             printf 'PID\tStatus\tLabel\n799\t0\tcom.apple.Terminal\n'
+            if [ -f "$DELAY_UNLOAD" ]; then
+                local pending
+                pending=$(cat "$DELAY_UNLOAD")
+                if [ "$pending" -gt 0 ]; then
+                    printf '%s' "$((pending - 1))" > "$DELAY_UNLOAD"
+                    printf '600\t0\t%s\n' "${target##*/}"
+                    return
+                fi
+            fi
             [ "$launched" = 0 ] || printf '600\t0\t%s\n' "${target##*/}"
             ;;
         bootout|bootstrap)
             printf '%s\n' "$*" >> "$TRACE"
             [ "$1" != "$FAIL_ACTION" ] || return 9
-            if [ "$1" = bootout ]; then launched=0; else launched=1; fi
+            if [ "$1" = bootout ]; then
+                launched=0
+                if [ "$DELAY_ON_BOOTOUT" -gt 0 ]; then
+                    printf '%s' "$DELAY_ON_BOOTOUT" > "$DELAY_UNLOAD"
+                fi
+            else launched=1; fi
             ;;
         *) return 98 ;;
     esac
@@ -97,6 +112,20 @@ expect 0 svc_activation_pause "$file" "$target" "$saved"
 expect 0 svc_activation_resume "$file" "$target" "$saved"
 [ "$(cat "$TRACE")" = "$(printf 'bootout %s\nbootstrap gui/501 %s' "$target" "$file")" ]
 [ -f "$file" ]
+# A successful bootout can remain visible briefly; wait for the exact target.
+launched=1; : > "$TRACE"; DELAY_ON_BOOTOUT=2
+saved=$(svc_activation_snapshot "$file" "$target")
+expect 0 svc_activation_pause "$file" "$target" "$saved"
+[ "$(cat "$DELAY_UNLOAD")" = 0 ]
+[ "$(cat "$TRACE")" = "bootout $target" ]
+# A job that never unloads still refuses, with the target named on stderr.
+launched=1; : > "$TRACE"; DELAY_ON_BOOTOUT=99
+saved=$(svc_activation_snapshot "$file" "$target")
+if svc_activation_pause "$file" "$target" "$saved" 2> "$T/pause.err"; then
+    echo 'FAIL: persistent loaded job passed pause' >&2; exit 1
+fi
+grep -Fq "$target did not unload after bootout" "$T/pause.err"
+rm "$DELAY_UNLOAD"; DELAY_ON_BOOTOUT=0
 launched=0; : > "$TRACE"; saved=$(svc_activation_snapshot "$file" "$target")
 expect 0 svc_activation_pause "$file" "$target" "$saved"
 expect 0 svc_activation_resume "$file" "$target" "$saved"; unchanged
