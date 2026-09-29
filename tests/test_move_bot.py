@@ -29,23 +29,34 @@ def _move(tmp_path: Path, *, channel: bool = False) -> move_bot.Move:
                          "r-selected", tmp_path / "units")
 
 
-def test_retained_copy_replaces_memory_and_keeps_source(tmp_path):
+def test_retained_copy_preserves_durable_paths_and_keeps_source(tmp_path):
     move = _move(tmp_path)
     (move.source_dir / ".env").write_text("TOKEN=private\n")
     (move.source_dir / "memory").mkdir()
     (move.source_dir / "memory" / "fact.md").write_text("remember")
+    (move.source_dir / "data").mkdir()
+    (move.source_dir / "data" / "record.json").write_text('{"kept":true}')
+    (move.source_dir / "projects" / "repo").mkdir(parents=True)
+    (move.source_dir / "projects" / "repo" / "README").write_text("project")
+    (move.source_dir / "projects" / "repo" / "linked").symlink_to("README")
+    (move.source_dir / ".claude").mkdir()
+    (move.source_dir / ".claude" / "session.md").write_text("handoff")
     (move.target_dir / "memory").mkdir(parents=True)
-    (move.target_dir / "memory" / "old.md").write_text("obsolete")
+    (move.target_dir / "data" / "events").mkdir(parents=True)
 
     move_bot.check_copy_destinations(move.source_dir, move.target_dir)
     copied = move_bot.copy_retained(move)
 
-    assert copied == [str(move.target_dir / ".env"), str(move.target_dir / "memory")]
+    assert copied == [str(move.target_dir / name) for name in move_bot._RETAINED]
     assert (move.target_dir / ".env").read_text() == "TOKEN=private\n"
     assert (move.target_dir / ".env").stat().st_mode & 0o777 == 0o600
     assert (move.target_dir / "memory" / "fact.md").read_text() == "remember"
-    assert not (move.target_dir / "memory" / "old.md").exists()
-    assert not (move.target_dir / ".memory_tmp").exists()
+    assert (move.target_dir / "data" / "record.json").read_text() == '{"kept":true}'
+    assert (move.target_dir / "data" / "events").is_dir()
+    assert (move.target_dir / "projects" / "repo" / "README").read_text() == "project"
+    assert (move.target_dir / "projects" / "repo" / "linked").is_symlink()
+    assert (move.target_dir / "projects" / "repo" / "linked").readlink() == Path("README")
+    assert (move.target_dir / ".claude" / "session.md").read_text() == "handoff"
     assert (move.source_dir / "memory" / "fact.md").read_text() == "remember"
 
 
@@ -56,6 +67,25 @@ def test_retained_copy_refuses_redirect_before_mutation(tmp_path):
     with pytest.raises(CommandFailure, match="redirected"):
         move_bot.check_copy_destinations(move.source_dir, move.target_dir)
     assert not (tmp_path / "outside").exists()
+
+
+def test_nonempty_target_retained_path_refuses_before_source_stop(tmp_path, monkeypatch):
+    from claudlobby import bot_operations
+
+    move = _move(tmp_path)
+    (move.source_dir / "data").mkdir()
+    (move.source_dir / "data" / "fact.md").write_text("source")
+    (move.target_dir / "data").mkdir(parents=True)
+    (move.target_dir / "data" / "fact.md").write_text("target")
+    monkeypatch.setattr(move_bot, "no_active_assignment", lambda *_: None)
+    monkeypatch.setattr(move_bot, "source_session", lambda *_, **__: None)
+    monkeypatch.setattr(bot_operations, "set_bot_running",
+                        lambda **_: pytest.fail("source stopped before retained conflict refusal"))
+
+    with pytest.raises(CommandFailure, match="target retained path is not empty"):
+        move_bot.apply_move(move, "worker", force=False, cleanup=True)
+    assert (move.target_dir / "data" / "fact.md").read_text() == "target"
+    assert (move.source_dir / "data" / "fact.md").read_text() == "source"
 
 
 def test_access_replaces_only_owned_source_group(tmp_path, monkeypatch):
@@ -95,7 +125,7 @@ def test_apply_stages_after_copy_and_reports_failed_activation(tmp_path, monkeyp
         return SimpleNamespace(plan_id="p-staged")
 
     monkeypatch.setattr(config_staging, "stage_configuration", stage)
-    monkeypatch.setattr(move_bot, "declared_paths", lambda *_: [object()])
+    monkeypatch.setattr(move_bot, "declared_paths", lambda *_, **__: [object()])
     monkeypatch.setattr(activation, "upgrade_activation", lambda *_: (events.append("activate") or (_ for _ in ()).throw(RuntimeError("failed"))))
     monkeypatch.setattr(activation_state, "read_selection", lambda *_: None)
     with pytest.raises(CommandFailure, match="incomplete") as caught:

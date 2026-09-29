@@ -12,6 +12,10 @@ import subprocess
 from uuid import uuid4
 
 from ..command_result import CommandFailure, CommandOutput
+from ..context import declared_paths
+
+
+_RETAINED = (".env", "memory", "data", "projects", ".claude/session.md")
 
 
 @dataclass(frozen=True)
@@ -23,17 +27,7 @@ class Move:
     target_dir: Path
     release_id: str
     install_directory: Path
-
-
-def declared_paths(root, package):
-    from ..paths import Paths, _iter_fleet_dirs
-
-    directories = ([root] if (root / "fleet.yaml").is_file() else [])
-    directories.extend(path for path in _iter_fleet_dirs(root / "local")
-                       if (path / "fleet.yaml").is_file())
-    return [Paths(root, package=package,
-                  fleet_dir=None if directory == root else directory)
-            for directory in directories]
+    external: tuple[str, ...] = ()
 
 
 def source_wip(directory):
@@ -99,7 +93,8 @@ def preflight(args):
     if args.bot in authored_source.bots or authored_source.manager == args.bot:
         raise CommandFailure("conflict", "remove bot from source fleet.yaml and declare a replacement manager first")
 
-    candidates = [load_context(paths) for paths in declared_paths(root, package)]
+    external = tuple(item["fleet"] for item in plan.effects.get("fleet_sources", {}).values())
+    candidates = [load_context(paths) for paths in declared_paths(root, package, external=external)]
     targets = [context for context in candidates if context.fleet.name == args.to]
     if len(targets) != 1:
         raise CommandFailure("not_found" if not targets else "conflict",
@@ -121,15 +116,15 @@ def preflight(args):
             or target_dir.is_symlink() or target_dir == source_dir):
         raise CommandFailure("conflict", "source or target bot directory is missing or redirected")
     source_wip(source_dir)
+    check_copy_destinations(source_dir, target_dir)
     if getattr(args, "apply", False):
         from .releases import _executing_release
         if _executing_release(root) != release.release_id:
             raise CommandFailure("release_mismatch", "run bot move with the selected sealed release CLI")
-        check_copy_destinations(source_dir, target_dir)
     manager, *_ = _catalog(Adapter(package).read("svc_inventory_catalog"))
     entry = selected_bot_entry(root, source.fleet.name, args.bot, manager)
     move = Move(root, source, target, source_dir, target_dir,
-                release.release_id, Path(entry["installed"]).parent)
+                release.release_id, Path(entry["installed"]).parent, external)
     if getattr(args, "apply", False):
         update_access(move, args.bot, dry_run=True)
     return move
@@ -167,36 +162,44 @@ def source_session(move, bot, *, force):
 
 
 def check_copy_destinations(source_dir, target_dir):
-    if (target_dir / ".env").is_symlink() or (target_dir / "memory").is_symlink():
-        raise CommandFailure("conflict", "target retained data is redirected")
-    temporary = target_dir / ".memory_tmp"
-    if temporary.exists() or temporary.is_symlink():
-        raise CommandFailure("conflict", "a prior memory copy is incomplete")
-    if (source_dir / ".env").is_symlink() or (source_dir / "memory").is_symlink():
-        raise CommandFailure("conflict", "source retained data is redirected")
+    for directory in (source_dir / ".claude", target_dir / ".claude"):
+        if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+            raise CommandFailure("conflict", "bot handoff directory is not an ordinary directory")
+    for name in _RETAINED:
+        source, target = source_dir / name, target_dir / name
+        if source.exists() or source.is_symlink():
+            mode = source.lstat().st_mode
+            if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode) or stat.S_ISLNK(mode)):
+                raise CommandFailure("conflict", f"source retained path has unsupported type: {name}")
+        if target.is_symlink():
+            raise CommandFailure("conflict", f"target retained path is redirected: {name}")
+        if target.exists():
+            if not target.is_dir():
+                raise CommandFailure("conflict", f"target retained path already exists: {name}")
+            for parent, directories, files in os.walk(target, followlinks=False):
+                if files or any((Path(parent) / child).is_symlink() for child in directories):
+                    raise CommandFailure("conflict", f"target retained path is not empty: {name}")
+            if source.is_symlink() or (source.exists() and not source.is_dir()):
+                raise CommandFailure("conflict", f"target retained path already exists: {name}")
 
 
 def copy_retained(move):
+    check_copy_destinations(move.source_dir, move.target_dir)
     copied = []
-    source_env = move.source_dir / ".env"
-    source_memory = move.source_dir / "memory"
     move.target_dir.mkdir(parents=True, exist_ok=True)
-    if source_env.is_file():
-        destination = move.target_dir / ".env"
-        if destination.is_symlink():
-            raise CommandFailure("conflict", "target .env is redirected")
-        shutil.copy2(source_env, destination)
-        destination.chmod(0o600)
-        copied.append(str(destination))
-    if source_memory.is_dir() and any(source_memory.iterdir()):
-        destination = move.target_dir / "memory"
-        temporary = move.target_dir / ".memory_tmp"
-        if destination.is_symlink() or temporary.exists() or temporary.is_symlink():
-            raise CommandFailure("conflict", "target memory is redirected or a prior copy is incomplete")
-        shutil.copytree(source_memory, temporary, symlinks=True)
-        if destination.exists():
-            shutil.rmtree(destination)
-        temporary.rename(destination)
+    for name in _RETAINED:
+        source, destination = move.source_dir / name, move.target_dir / name
+        if not source.exists() and not source.is_symlink():
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_symlink():
+            destination.symlink_to(os.readlink(source))
+        elif source.is_dir():
+            shutil.copytree(source, destination, symlinks=True, dirs_exist_ok=True)
+        else:
+            shutil.copy2(source, destination, follow_symlinks=False)
+            if name == ".env":
+                destination.chmod(0o600)
         copied.append(str(destination))
     return copied
 
@@ -249,6 +252,7 @@ def apply_move(move, bot, *, force, cleanup):
 
     no_active_assignment(move, bot)
     source_session(move, bot, force=force)
+    check_copy_destinations(move.source_dir, move.target_dir)
     data = {"source_fleet": move.source.fleet.name, "target_fleet": move.target.fleet.name,
             "bot": bot, "release_id": move.release_id, "source_stopped": False,
             "source_retained": True, "state": "incomplete", "plan_id": None,
@@ -262,7 +266,8 @@ def apply_move(move, bot, *, force, cleanup):
         if access is not None:
             data["access_updated"] = access
         release = read_release(move.root, move.release_id)
-        plan = stage_configuration(declared_paths(move.root, move.source.paths.package), release)
+        plan = stage_configuration(declared_paths(move.root, move.source.paths.package,
+                                                  external=move.external), release)
         data["plan_id"] = plan.plan_id
         activation_id = str(uuid4())
         data["activation_id"] = activation_id
@@ -294,8 +299,8 @@ def dispatch(args):
         data = {"source_fleet": move.source.fleet.name, "target_fleet": move.target.fleet.name,
                 "bot": args.bot, "release_id": move.release_id,
                 "source_dir": str(move.source_dir), "target_dir": str(move.target_dir),
-                "copy": [name for name in (".env", "memory")
-                         if (move.source_dir / name).exists()],
+                "copy": [name for name in _RETAINED
+                         if (move.source_dir / name).exists() or (move.source_dir / name).is_symlink()],
                 "native_install_directory": str(move.install_directory),
                 "host_restart_scope": "all_declared_fleets",
                 "cleanup_source": bool(args.cleanup_source)}
