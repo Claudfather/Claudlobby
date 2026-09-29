@@ -24,6 +24,7 @@ tool_grants:
   - "Bash(claudlobby fleet stop --help)"
   - "Bash(claudlobby fleet restart --help)"
   - "Bash(claudlobby fleet reconcile --help)"
+  - "Bash(claudlobby fleet reload --help)"
   - "Bash(claudlobby assignment show --help)"
   - "Bash(claudlobby assignment accept --help)"
   - "Bash(claudlobby assignment deliver --help)"
@@ -156,6 +157,11 @@ the sweep cannot stop its own caller midway; whole-fleet sweeps belong to an
 operator outside the fleet. `claudlobby --json fleet reconcile` reads declared,
 enrolled, and session state separately without repairing it. A partial sweep
 reports completed bots and the failed bot; inspect those outcomes before retrying.
+
+The manager can run `claudlobby --json fleet reload` to refresh the selected
+plugins and mark running bots for reload when idle. Read `plugins_refreshed`
+and `bots_marked` in the result. This command does not compose configuration
+or change enrollment; authored configuration changes require operator activation.
 
 The current manager can use `workstream open/progress/renew/block/unblock/close/prune`
 with a retained `--request-id UUID` for each mutation. `block ID --on

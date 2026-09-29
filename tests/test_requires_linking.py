@@ -344,6 +344,7 @@ class TestGrantUnion:
             assert {f"Bash(claudlobby bot {verb} --help)"
                     for verb in ("start", "stop", "restart")} <= set(allow)
             if bot_id == "lead":
+                assert "Bash(claudlobby --json fleet reload)" in allow
                 assert lifecycle == {
                     "Bash(claudlobby --json bot restart lead)",
                     "Bash(claudlobby --json bot start worker-1)",
@@ -352,6 +353,7 @@ class TestGrantUnion:
                     "Bash(claudlobby --json bot restart worker-1 --ceiling *)",
                 }
             else:
+                assert "Bash(claudlobby --json fleet reload)" not in allow
                 assert lifecycle == {"Bash(claudlobby --json bot restart worker-1)"}
             assert not [
                 f for f in audit_bot(bot, fleet, paths)
@@ -631,6 +633,7 @@ def test_a_fleet_with_no_requires_composes_exactly_the_declared_grants(fleet_dir
         "Bash(claudlobby fleet stop --help)",
         "Bash(claudlobby fleet restart --help)",
         "Bash(claudlobby fleet reconcile --help)",
+        "Bash(claudlobby fleet reload --help)",
         "Bash(claudlobby assignment show --help)",
         "Bash(claudlobby assignment accept --help)",
         "Bash(claudlobby assignment deliver --help)",
@@ -699,6 +702,7 @@ def test_a_fleet_with_no_requires_composes_exactly_the_declared_grants(fleet_dir
         "Bash(claudlobby --json workstream unblock *)",
         "Bash(claudlobby --json workstream close *)",
         "Bash(claudlobby --json workstream prune *)",
+        "Bash(claudlobby --json fleet reload)",
         "Bash(claudlobby --json fleet start --workers)",
         "Bash(claudlobby --json fleet stop --workers)",
         "Bash(claudlobby --json fleet restart --workers)",
