@@ -56,6 +56,30 @@ pane_send_verified() {
     assert refused.returncode == 3 and refused.stdout == "" and not log.exists()
 
 
+@pytest.mark.parametrize("message, expected_rc", [("no server running on", 0), ("permission denied on", 3), ("wrong socket", 3)])
+def test_retired_private_server_handles_stale_socket_without_hiding_errors(tmp_path, message, expected_rc):
+    native = Path(__file__).resolve().parents[1] / "lib/supervisor.sh"
+    private = tmp_path / "native"
+    private.mkdir()
+    (private / "lib-common.sh").write_text('''
+tmux_session_name() { printf 'worker'; }
+bot_tmux() {
+    [ "$2" = list-sessions ] || exit 99
+    printf '%s %s/tmux-%s/worker.socket\\n' "$FAILURE" "$SOCKET_ROOT" "$(id -u)" >&2
+    return 1
+}
+''')
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "TMPDIR": str(tmp_path),
+           "_SUPERVISOR_LIB_DIR": str(private), "FAILURE": message, "PLANE_EMIT_DISABLED": "1",
+           "SOCKET_ROOT": str(tmp_path)}
+    if message == "wrong socket":
+        env.update(FAILURE="no server running on", SOCKET_ROOT=str(tmp_path / "other"))
+    result = subprocess.run(["/bin/bash", "-c", '. "$1"; svc_activation_stop_private_server "$2" worker.socket "$3" retired',
+                             "stop", str(native), str(tmp_path / "bot"), str(tmp_path)],
+                            env=env, capture_output=True, text=True, timeout=5)
+    assert result.returncode == expected_rc
+
+
 @pytest.mark.parametrize("stdout, attempted", [("", False), ("effect-attempted\n", True)])
 def test_disenroll_native_phase_is_reported_honestly(stdout, attempted, tmp_path, monkeypatch):
     from claudlobby.command_result import CommandFailure

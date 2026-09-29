@@ -193,7 +193,7 @@ if [ -n "$RETIRED_SERVICE" ]; then
     # by activation and must not be touched by a later cleanup.
     _tmpdir="${TMUX_TMPDIR:-${TMPDIR:-/tmp}}"
     if [ -S "$_tmpdir/tmux-$(id -u)/$_socket" ]; then
-        svc_activation_stop_private_server "$BOT_DIR" "$_socket" "$_tmpdir" || exit 3
+        svc_activation_stop_private_server "$BOT_DIR" "$_socket" "$_tmpdir" retired || exit 3
     fi
     rm -f "$BOT_DIR/.tmux-env"
 else

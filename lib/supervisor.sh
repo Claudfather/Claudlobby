@@ -790,7 +790,8 @@ svc_activation_handoff() (
 )
 
 svc_activation_stop_private_server() (
-    local bot_dir="$1" expected="$2" tmpdir="$3" sessions session
+    local bot_dir="$1" expected="$2" tmpdir="$3" sessions session physical_tmpdir absent="${4:-refuse}"
+    case "$absent" in refuse|retired) ;; *) return 3 ;; esac
     case "$bot_dir" in /*) ;; *) return 3 ;; esac
     case "$expected" in ''|*[!a-zA-Z0-9_.-]*) return 3 ;; esac
     case "$tmpdir" in /*) ;; *) return 3 ;; esac
@@ -798,7 +799,18 @@ svc_activation_stop_private_server() (
     export TMUX_TMPDIR="$tmpdir"
     . "$_SUPERVISOR_LIB_DIR/lib-common.sh" || return 3
     session=$(tmux_session_name "$bot_dir") || return 3
-    sessions=$(bot_tmux "$expected" list-sessions -F '#{session_name}' 2>/dev/null) || return 3
+    if ! sessions=$(LC_ALL=C bot_tmux "$expected" list-sessions -F '#{session_name}' 2>&1); then
+        # tmux leaves its socket file after a clean server exit. A retired
+        # unit cannot restart it; this exact no-server result needs no kill.
+        # Permission/connection/other failures remain unknown, never absent.
+        [ "$absent" = retired ] || return 3
+        physical_tmpdir=$(cd "$tmpdir" && pwd -P) || return 3
+        case "$sessions" in
+            "no server running on $tmpdir/tmux-$(id -u)/$expected"|\
+            "no server running on $physical_tmpdir/tmux-$(id -u)/$expected") return 0 ;;
+            *) return 3 ;;
+        esac
+    fi
     [ "$sessions" = "$session" ] || return 3
     bot_tmux "$expected" kill-server || return 3
 )
