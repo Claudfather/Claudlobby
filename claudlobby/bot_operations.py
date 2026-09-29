@@ -260,6 +260,24 @@ def _selected_unit(root, plan, release, package, adapter, fleet, bot):
     return manager, declaration, entry, declarations
 
 
+def _selected_adapter(root: Path, fleet: str, bot: str, adapter):
+    """Enter the reviewed GUI bootstrap from a same-UID Background caller.
+
+    The initial catalog only identifies this caller's context. The activation
+    journal supplies the target; the wrapped catalog and every later native
+    check must then prove the selected GUI domain before any effect.
+    """
+    manager, domain, _, _, _ = _catalog(adapter.read("svc_inventory_catalog"))
+    uid = os.getuid()
+    if manager == "Darwin" and domain == f"user/{uid}":
+        entry = selected_bot_entry(root, fleet, bot, manager)
+        if entry["target"].startswith(f"gui/{uid}/"):
+            if not hasattr(adapter, "in_selected_gui"):
+                raise BotLifecycleError("selected GUI native adapter is unavailable", unavailable=True)
+            adapter = adapter.in_selected_gui(entry["target"])
+    return adapter
+
+
 def _observed(root, declarations, adapter, target, installed):
     inventory = collect_enrollment(root, declarations, adapter=adapter).require_complete()
     matches = [unit for unit in inventory.units if unit.target == target]
@@ -351,6 +369,7 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
             adapter = adapter or Adapter(destination.paths.package)
             if adapter.package.native != release.native_path:
                 raise BotLifecycleError("bot native adapter differs from selected release")
+            adapter = _selected_adapter(root, destination.fleet.name, bot, adapter)
             manager, declaration, entry, declarations = _selected_unit(
                 root, plan, release, destination.paths.package, adapter, destination.fleet.name, bot)
             spec = build_supervision_spec(destination.fleet.bots[bot], destination.fleet,

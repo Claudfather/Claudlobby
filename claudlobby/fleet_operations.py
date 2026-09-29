@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .activation_enrollment import selected_bot_entry
 from .activation_state import ActivationError, read_selection
-from .bot_operations import BotLifecycleError, BotLifecycleResult, set_bot_running
+from .bot_operations import BotLifecycleError, BotLifecycleResult, _selected_adapter, set_bot_running
 from .config_plan import read_plan
 from .config_units import current_declarations
 from .operation_context import resolve_operation_scope
@@ -120,6 +120,8 @@ def reconcile_fleet(*, root: Path, fleet: str | None,
     adapter = adapter or Adapter(destination.paths.package)
     if adapter.package.native != destination.paths.package.native:
         raise FleetLifecycleError("fleet native adapter differs from selected release")
+    adapter = _selected_adapter(destination.paths.root, destination.fleet.name,
+                                destination.fleet.manager, adapter)
     catalog = adapter.read("svc_inventory_catalog")
     from .supervision_inventory import _catalog
     platform, _, _, _, _ = _catalog(catalog)

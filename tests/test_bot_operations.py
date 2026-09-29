@@ -32,6 +32,42 @@ def test_selected_bot_placement_survives_removal_of_installed_unit(cold):  # noq
     assert selected_bot_entry(root, "example", "worker", "Linux") == entry
 
 
+def test_background_caller_uses_selected_same_uid_gui_domain(tmp_path, monkeypatch):
+    from claudlobby.supervision_inventory import Adapter, InventoryError
+
+    source = tmp_path / "generated" / "com.example.worker.plist"
+    source.parent.mkdir()
+    source.write_text("private reviewed unit")
+    installed = tmp_path / "LaunchAgents" / source.name
+    installed.parent.mkdir()
+    target = f"gui/{os.getuid()}/com.example.worker"
+    entry = {"target": target, "source": str(source), "installed": str(installed)}
+    monkeypatch.setattr(bot_operations, "selected_bot_entry", lambda *_: entry)
+    declaration = SimpleNamespace(scope="bot", fleet="example", bot="worker", source=source)
+    monkeypatch.setattr(bot_operations, "current_declarations", lambda *_: (declaration,))
+    monkeypatch.setattr(bot_operations, "planned_units", lambda *_: ((declaration, {"enroll": True,
+                                                                                   "sha256": "private"}),))
+    monkeypatch.setattr(bot_operations, "validate_unit_admission", lambda *_: None)
+    calls = []
+    def runner(command, **kwargs):
+        calls.append(command)
+        domain = f"gui/{os.getuid()}" if command[0] == "/bin/launchctl" else f"user/{os.getuid()}"
+        return subprocess.CompletedProcess(command, 0,
+            f"manager\tDarwin\ndomain\t{domain}\ndirectory\t{installed.parent}\nPID Status Label\n", "")
+    adapter = Adapter(source_package(), runner=runner)
+    wrapped = bot_operations._selected_adapter(tmp_path, "example", "worker", adapter)
+    manager, got, selected, _ = bot_operations._selected_unit(
+        tmp_path, SimpleNamespace(blob=lambda _: b"private"), object(), adapter.package,
+        wrapped, "example", "worker")
+    assert manager == "Darwin" and got is declaration and selected == entry
+    assert calls[0][0] == "/bin/bash"
+    assert calls[1][:3] == ["/bin/launchctl", "asuser", str(os.getuid())]
+    wrapped.call("svc_bot_enroll_exact", source, installed, target)
+    assert calls[-1][:3] == ["/bin/launchctl", "asuser", str(os.getuid())]
+    with pytest.raises(InventoryError, match="not owned"):
+        adapter.in_selected_gui(f"gui/{os.getuid() + 1}/com.example.worker")
+
+
 def test_self_restart_requires_fresh_owned_frontmatter(tmp_path):
     bot_dir = tmp_path / "bot"
     handoff_dir = bot_dir / ".claude"
@@ -239,7 +275,10 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
     entry = dict(selected_bot_entry(root, "example", "worker", "Linux"))
     entry["target"] = native.target
     monkeypatch.setattr(bot_operations, "_selected_unit",
-                        lambda *_: ("Darwin", declaration, entry, (declaration,)))
+                            lambda *_: ("Darwin", declaration, entry, (declaration,)))
+    # This branch simulates Darwin over the Linux host catalog; its selected
+    # domain binding is covered by the separate Background-to-GUI test.
+    monkeypatch.setattr(bot_operations, "_selected_adapter", lambda _r, _f, _b, adapter: adapter)
     native.session = "ready"
     current = call("bot", "start", "worker")["data"]
     assert current["state"] == "running" and current["changed"] is False

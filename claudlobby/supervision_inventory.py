@@ -59,9 +59,20 @@ class Adapter:
         "svc_bot_enroll_exact", "svc_bot_disenroll_exact", "svc_bot_session_observe",
     })
 
-    def __init__(self, package: PackageResources | None = None, *, runner=None):
+    def __init__(self, package: PackageResources | None = None, *, runner=None,
+                 _selected_gui_uid: int | None = None):
         self.package = package if package is not None else get_resources()
         self.runner = runner if runner is not None else self._run
+        if _selected_gui_uid is not None and _selected_gui_uid != os.getuid():
+            raise InventoryError("selected GUI domain belongs to another user")
+        self._selected_gui_uid = _selected_gui_uid
+
+    def in_selected_gui(self, target: str):
+        """Run the same native owner in this UID's reviewed GUI bootstrap."""
+        if (not isinstance(target, str)
+                or not re.fullmatch(rf"gui/{os.getuid()}/[A-Za-z0-9_.-]+", target)):
+            raise InventoryError("selected GUI target is not owned by this user")
+        return Adapter(self.package, runner=self.runner, _selected_gui_uid=os.getuid())
 
     @staticmethod
     def _run(command, *, timeout, env, capture_output, text):
@@ -99,8 +110,11 @@ class Adapter:
         env = {key: value for key, value in env.items() if not key.startswith("BASH_FUNC_")}
         command = ['_SUPERVISOR_LIB_DIR="$1"; shift; _OS=$(uname -s) || exit 3;',
                    '. "$_SUPERVISOR_LIB_DIR/supervisor.sh" || exit 3; "$@"']
-        return self.runner(["/bin/bash", "-c", " ".join(command), "supervision-inventory",
-                            str(native), function, *(str(arg) for arg in args)],
+        argv = ["/bin/bash", "-c", " ".join(command), "supervision-inventory",
+                str(native), function, *(str(arg) for arg in args)]
+        if self._selected_gui_uid is not None:
+            argv = ["/bin/launchctl", "asuser", str(self._selected_gui_uid), *argv]
+        return self.runner(argv,
                            capture_output=True, text=True, timeout=timeout, env=env)
 
     def read(self, function, *args) -> str:
