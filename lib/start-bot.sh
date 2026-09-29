@@ -29,6 +29,7 @@ install_error_trap "$BOT_DIR"
 BOOT_LOCK_DIR="${TMPDIR:-/tmp}/.claudlobby-fleet-boot.lock"
 BOOT_LOCK_HOLD_S="${BOOT_LOCK_HOLD_S:-8}"
 _bl_waited=0
+_bl_claimed=1
 while ! mkdir "$BOOT_LOCK_DIR" 2>/dev/null; do
     # Stale lock cleanup: if lock dir is older than 60s, force-claim
     if [ -d "$BOOT_LOCK_DIR" ]; then
@@ -42,12 +43,49 @@ while ! mkdir "$BOOT_LOCK_DIR" 2>/dev/null; do
     _bl_waited=$((_bl_waited + 1))
     if [ "$_bl_waited" -gt 120 ]; then
         echo "start-bot.sh: boot lock contended >120s, proceeding without it" >&2
+        _bl_claimed=0
         break
     fi
 done
-# Release the lock after BOOT_LOCK_HOLD_S so the next bot can proceed.
-( sleep "$BOOT_LOCK_HOLD_S"; rmdir "$BOOT_LOCK_DIR" 2>/dev/null || true ) &
-disown
+# launchd may reap the launcher's process group when it exits, including a
+# disowned Bash subshell. The selected Python starts the short timer in its own
+# session before returning; the timer removes only the directory we claimed.
+if [ "$_bl_claimed" -eq 1 ]; then
+    "$_NATIVE_ADMISSION_PYTHON" -I -B - "$BOOT_LOCK_DIR" "$BOOT_LOCK_HOLD_S" 9<&- <<'PY'
+import os
+import stat
+import subprocess
+import sys
+
+path, hold = sys.argv[1:]
+claimed = os.stat(path, follow_symlinks=False)
+if not stat.S_ISDIR(claimed.st_mode):
+    raise RuntimeError("boot lock is no longer a directory")
+timer = '''import os, stat, sys, time
+path, hold, device, inode = sys.argv[1:]
+time.sleep(float(hold))
+try:
+    current = os.stat(path, follow_symlinks=False)
+    if stat.S_ISDIR(current.st_mode) and (current.st_dev, current.st_ino) == (int(device), int(inode)):
+        os.rmdir(path)
+except OSError:
+    pass
+'''
+try:
+    subprocess.Popen([sys.executable, "-I", "-B", "-c", timer, path, hold,
+                      str(claimed.st_dev), str(claimed.st_ino)],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)
+except OSError:
+    try:
+        current = os.stat(path, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) == (claimed.st_dev, claimed.st_ino):
+            os.rmdir(path)
+    except OSError:
+        pass
+    raise
+PY
+fi
 # --- end boot-mass mitigation -------------------------------------------------
 
 # The launch PATH is defined once, in lib-common, because the update job has to
