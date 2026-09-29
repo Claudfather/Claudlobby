@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — one bot's failed Telegram start no longer leaves every bot started after it without a bridge (#1962)
+
+Claude Code skips any MCP server listed in the host-global
+`~/.claude/mcp-needs-auth-cache.json`, and any bot on the host can write that
+file. So one failed channel start left every bot started after it without a
+Telegram poller, each waiting out its 201 s readiness ceiling, and restarting a
+bot did not help, because the restart read the same entry. On the 2026-09-28
+macOS boot, 7 of 17 bots came up without a bridge until a human emptied the
+file. #1358 had made the cause visible, not stoppable.
+
+- Every bot start empties the cache before its session starts its MCP servers,
+  and again on every readiness-poll tick until the bot's own poller is up. An
+  entry another bot records mid-boot is gone within half a second, and a
+  restart now heals a bot whose poller was skipped.
+- Every entry goes, not only the Telegram key: a matcher on Claude Code's key
+  names goes silent when a key is renamed. An entry only makes a session skip a
+  server, so emptying the cache costs at most one more connection attempt.
+- The cache is replaced by a rename, never truncated in place, so a concurrent
+  reader, or a second bot clearing at the same moment, never sees a torn file.
+  A clear logs `AUTH_CACHE_CLEARED` with what it removed and records an
+  `auth_cache_cleared` notice. The file keeps no history; the plane now does.
+- A cache that cannot be emptied keeps #1358's diagnosis. It is logged as
+  `AUTH_CACHE_NOT_CLEARED` at launch, and only then does the bridge line say
+  `keepalive CANNOT heal this one`.
+- A new `macos-shell` CI job runs the new tests on a macOS runner under
+  `/bin/bash` 3.2 and the BSD userland, with no `timeout` or `gtimeout` on
+  PATH. `validate-bot-change.sh` drives the start-bot path end to end on Linux.
+  The final proof is a boot of the macOS host.
+
 ### Changed — `[vault]` pin bumped to Claudron v0.5.0; hooks no longer reconcile a diverged vault clone (Claudron #185, #156)
 
 The `[vault]` extra now pins `claudron @ …@v0.5.0`. 0.5.0 carries two months of

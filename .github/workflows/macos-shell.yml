@@ -1,0 +1,42 @@
+name: macos-shell
+
+# The lib/ shell helpers the macOS hosts run at every bot start, tested under the
+# conditions those hosts run them in: /bin/bash 3.2, the BSD userland, and no
+# timeout or gtimeout on PATH. The Linux jobs cannot see a defect that only
+# bash 3.2 or a BSD tool has. tests/test_mcp_auth_cache_clear.py runs every
+# snippet with /bin/bash and asserts the missing timeout itself. The note's tests
+# run under whichever bash is first on the runner's PATH, on the BSD userland.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - lib/lib-common.sh
+      - lib/start-bot.sh
+      - tests/test_mcp_auth_cache_clear.py
+      - tests/test_mcp_auth_cache_note.py
+      - .github/workflows/macos-shell.yml
+  pull_request:
+    paths:
+      - lib/lib-common.sh
+      - lib/start-bot.sh
+      - tests/test_mcp_auth_cache_clear.py
+      - tests/test_mcp_auth_cache_note.py
+      - .github/workflows/macos-shell.yml
+
+jobs:
+  auth-cache:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install package
+        run: pip install -e '.[dev]'
+      - name: The shell under test
+        run: |
+          /bin/bash -c 'echo "/bin/bash is $BASH_VERSION"'
+          command -v timeout gtimeout || echo "no timeout or gtimeout on the runner PATH"
+      - name: Run the auth-cache tests
+        run: pytest -v -m "not quarantine" tests/test_mcp_auth_cache_clear.py tests/test_mcp_auth_cache_note.py

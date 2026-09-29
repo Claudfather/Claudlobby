@@ -280,6 +280,34 @@ if command -v "$CLAUDE" >/dev/null 2>&1 && [ -n "${FLEET_PLUGINS_REQUIRED:-}" ];
     done
 fi
 
+# Empty the host-global MCP needs-auth cache before this session starts its MCP
+# servers, and on every readiness-poll tick below until this bot's own poller is
+# up (#1962). Claude Code SKIPS any server that cache lists, and any bot on the
+# host can write it: one bot's failed channel start left every bot started after
+# it without a Telegram poller, and a restart re-read the same entry, until a
+# human emptied the file. A tick that removes something logs what it removed and
+# records one auth_cache_cleared event: the file keeps no history, the plane does.
+LOG="$BOT_DIR/logs/startup.log"
+setup_log_dir "$LOG"
+_auth_cache_file="$(mcp_auth_cache_path "$BOT_DIR")"
+_auth_cache_last=""
+_auth_cache_tick() {
+    local _listed
+    _auth_cache_last="$(mcp_auth_cache_clear "$BOT_DIR" "$_auth_cache_file")"
+    [ -n "$_auth_cache_last" ] || return 0
+    echo "$(ts_iso) $_auth_cache_last" >> "$LOG"
+    case "$_auth_cache_last" in
+        AUTH_CACHE_CLEARED*)
+            _listed="${_auth_cache_last#*It listed: }"
+            _listed="${_listed%. Cache: *}"
+            emit_fleet_event "auth_cache_cleared" "startup" \
+                "{\"cache\":\"$(json_escape "$_auth_cache_file")\",\"listed\":\"$(json_escape "$_listed")\"}"
+            ;;
+    esac
+    return 0
+}
+_auth_cache_tick
+
 bot_tmux "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" "$CLAUDE_CMD"
 
 # Spawn marker — its mtime is this bot's last session (re)start. fleet-pulse
@@ -359,7 +387,7 @@ fi
 # stretching the ceiling itself (a "90s" wait once ran five minutes this way).
 # It logs nothing and never exits — every line below and the exit on a crashed
 # session are this script's own, exactly as they were when the loop was inline.
-if _bstate="$(wait_bridge_ready_state "$BOT_DIR" "$_rc_timeout_s" "$_session_pid" "$_pretoken" "$TMUX_SESSION" "$TMUX_SOCKET")"; then
+if _bstate="$(wait_bridge_ready_state "$BOT_DIR" "$_rc_timeout_s" "$_session_pid" "$_pretoken" "$TMUX_SESSION" "$TMUX_SOCKET" _auth_cache_tick)"; then
     _wait_rc=0
 else
     _wait_rc=$?
@@ -422,6 +450,15 @@ case "$_wait_rc" in
             AUTH_CACHE_UNKNOWN*) _auth_cache_armed=null ;;
             *)                   _auth_cache_armed=false ;;
         esac
+        # The ticks kept the cache empty, so an entry here was either recorded
+        # after the last tick or could not be removed (#1962). One more clear
+        # tells them apart. Only the second defeats a restart, because every
+        # start empties the cache before its session spawns anything.
+        _auth_cache_stuck=false
+        if [ "$_auth_cache_armed" = true ]; then
+            _auth_cache_tick
+            case "$_auth_cache_last" in AUTH_CACHE_NOT_CLEARED*) _auth_cache_stuck=true ;; esac
+        fi
         # Emit a fleet event so a genuine readiness regression reaches fleet-pulse's
         # escalation instead of just appending to a log. Now gated on bridge ground
         # truth, so this fires only when the poller really never came up — a true
@@ -534,19 +571,24 @@ case "$_bridge_verdict" in
     expected:no_token) echo "$(ts_iso) BRIDGE_SKIP — no token by design (EXPECT_NO_TOKEN); canary/throwaway, no alert" >> "$LOG" ;;
     missing:*)
         # "keepalive owns heal" is right for every cause of a missing bridge but
-        # one. With the host-global MCP auth cache armed, keepalive restarts the
-        # bot, the restart re-reads the SAME cache, the poller is skipped again,
-        # and the ladder cannot converge -- the restart-immunity in #1358. An
-        # operator reading this line during a stall is being pointed at the one
-        # remedy that provably cannot work, which is worse than saying nothing.
+        # one: an MCP auth cache that could not be emptied. Every start empties it
+        # before spawning anything (#1962), so a restart heals a poller skipped
+        # by an entry that is gone now, and cannot heal one skipped by an entry
+        # that could not be removed. The restart-immunity of #1358 survives only
+        # in that second case, and pointing an operator at a restart there is
+        # pointing them at the one remedy that provably cannot work.
         #
-        # Reuses the verdict already taken on the TIMEOUT path rather than
-        # re-reading the file: one read per boot, and unset (a bridge that went
-        # missing without a TIMEOUT) correctly means "not established", so the
-        # unqualified line stands.
+        # Reuses the verdicts already taken on the TIMEOUT path rather than
+        # re-reading the file: unset (a bridge that went missing without a
+        # TIMEOUT) correctly means "not established", so the unqualified line
+        # stands.
         case "${_auth_cache_armed:-false}" in
             true)
-                echo "$(ts_iso) BRIDGE_MISSING ${_bridge_verdict#missing:} — escalated tmux-first; keepalive CANNOT heal this one: see the AUTH_CACHE_ARMED line above" >> "$LOG"
+                if [ "${_auth_cache_stuck:-false}" = true ]; then
+                    echo "$(ts_iso) BRIDGE_MISSING ${_bridge_verdict#missing:} — escalated tmux-first; keepalive CANNOT heal this one: the MCP auth cache could not be emptied, see the AUTH_CACHE_NOT_CLEARED line above" >> "$LOG"
+                else
+                    echo "$(ts_iso) BRIDGE_MISSING ${_bridge_verdict#missing:} — escalated tmux-first; keepalive owns heal" >> "$LOG"
+                fi
                 ;;
             null)
                 # Undetermined is not clear. Promising the keepalive remedy here

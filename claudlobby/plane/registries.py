@@ -109,6 +109,9 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # gate had been reading as "boot in flight" forever. Critical so the
     # escalation read (severity = 'critical') can page it.
     "crash_loop": "critical",
+    # #1962: a bot start emptied the host-global MCP needs-auth cache. A notice:
+    # the record of what was in it, which the file itself never keeps.
+    "auth_cache_cleared": "notice",
     # #1924: a launchd job whose changed plist setup-fleet could not apply,
     # because the job itself was running the enrollment. A notice: nothing is
     # broken yet, the job runs its old definition until someone applies it.
