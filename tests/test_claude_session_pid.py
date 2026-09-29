@@ -9,9 +9,9 @@ ancestry, and (b) an unresolvable answer is loud rather than plausible.
 """
 
 import os
+import shutil
 import signal
 import subprocess
-import sys
 import textwrap
 from pathlib import Path
 
@@ -42,29 +42,33 @@ def test_parses_under_bash():
 def _fake_tree(tmp_path, script):
     """Run `script` under a process genuinely named `claude`.
 
-    The selected private Python executable is reached through a `claude`
-    symlink. It stays alive as Bash's parent while the door walks upward; a
-    copied /bin/bash can stall at startup on macOS. The process group and
-    bounded wait ensure a broken fixture cannot hang the entire suite.
+    A native Node copy keeps its own executable name on macOS, where framework
+    Python re-execs as Python.app even through a `claude` symlink. The process
+    group and bounded wait keep a broken fixture from hanging the suite.
     """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("native ancestry fixture needs node (a claudlobby prerequisite)")
     fake = tmp_path / "claude"
-    fake.symlink_to(sys.executable)
+    shutil.copy2(node, fake)
+    # Homebrew Node may load libnode relative to the copied executable.
+    source_lib = Path(node).resolve().parent.parent / "lib"
+    for library in source_lib.glob("libnode*.dylib"):
+        (tmp_path / library.name).symlink_to(library)
     runner = textwrap.dedent("""
-        import ctypes
-        import os
-        import subprocess
-        import sys
-
-        if sys.platform.startswith("linux"):
-            ctypes.CDLL(None).prctl(15, b"claude", 0, 0, 0)
-        print(f"ANCESTOR={os.getpid()}", flush=True)
-        comm = subprocess.check_output(
-            ["ps", "-o", "comm=", "-p", str(os.getpid())], text=True).strip()
-        print(f"COMM={comm}", flush=True)
-        result = subprocess.run(["bash", "-c", sys.argv[1]])
-        raise SystemExit(result.returncode)
+        const {spawnSync, execFileSync} = require('child_process');
+        console.log(`ANCESTOR=${process.pid}`);
+        const comm = execFileSync('ps', ['-o', 'comm=', '-p', String(process.pid)],
+                                  {encoding: 'utf8'}).trim();
+        console.log(`COMM=${comm}`);
+        const result = spawnSync('bash', ['-c', process.argv[2]], {encoding: 'utf8'});
+        process.stdout.write(result.stdout || '');
+        process.stderr.write(result.stderr || '');
+        process.exit(result.status === null ? 1 : result.status);
     """)
-    process = subprocess.Popen([str(fake), "-c", runner, script],
+    runner_path = tmp_path / "ancestor.js"
+    runner_path.write_text(runner)
+    process = subprocess.Popen([str(fake), str(runner_path), script],
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                text=True, start_new_session=True)
     try:
