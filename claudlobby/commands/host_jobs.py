@@ -15,7 +15,7 @@ def dispatch(args) -> CommandOutput:
         items = [{"name": name, "enroll": cfg.get("enroll", True)}
                  for name, cfg in sorted(jobs.items())]
         return CommandOutput({"jobs": items}, lines=tuple(
-            f"{item['name']}\t{'enrolled' if item['enroll'] else 'dormant'}" for item in items))
+            f"{item['name']}\tenroll={'true' if item['enroll'] else 'false'}" for item in items))
 
     if args.name not in jobs:
         raise CommandFailure("not_found", f"host job {args.name!r} is not packaged in this release",
