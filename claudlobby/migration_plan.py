@@ -132,9 +132,21 @@ def _database(root: Path, initialize_empty: bool) -> tuple[dict, dict | None, li
         blockers.append(f"historical task audit unavailable: {exc}")
         state["state"] = "uninterpretable"
     after = [_file(Path(item["path"]))[0] for item in files]
-    if after != files:
+    # On a quiesced WAL-mode database, SQLite's first read can create an empty
+    # WAL sidecar. It contains no durable pages, but it must be bound as the
+    # observed file state. Every other byte or state change remains a blocker.
+    empty_wal_created = (
+        after[0] == files[0]
+        and files[1]["state"] == "absent"
+        and after[1]["state"] == "ok"
+        and after[1]["bytes"] == 0
+        and after[1]["sha256"] == _digest(b"")
+    )
+    if after != files and not empty_wal_created:
         blockers.append("database bytes changed during preview; repeat under quiescence")
         state["state"] = "changing"
+    elif empty_wal_created:
+        state["files"] = after
     if any(item["state"] == "unreadable" for item in after):
         blockers.append("database/WAL inventory is unreadable")
     return state, audit, blockers

@@ -10,7 +10,8 @@ import sqlite3
 import pytest
 
 from claudlobby.migration_plan import build_migration_manifest, verify_pending_queues
-from claudlobby.plane.db import db_file
+from claudlobby import migration_plan
+from claudlobby.plane.db import connect_ro, db_file
 from claudlobby.plane.migrations import SCHEMA_USER_VERSION, _migration_files, migrate
 from claudlobby.plane.queue_paths import spool_path, staged_dir
 from claudlobby.releases import ReleaseError
@@ -140,6 +141,46 @@ def test_unsealed_first_adoption_binds_real_database_and_refuses_pending_queue(r
     assert any("empty pending" in reason for reason in blocked.blockers)
     with pytest.raises(ValueError, match="pending queue inventory changed"):
         verify_pending_queues(root, plan)
+
+
+def test_wal_mode_read_only_preview_binds_only_sqlites_empty_sidecar(releases, monkeypatch):
+    root, _, target = releases
+    conn = _database(root, version=11)
+    assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+    conn.close()
+    path = db_file(root)
+    wal = Path(str(path) + "-wal")
+    before = path.read_bytes()
+    assert not wal.exists()
+    # Keep one unopened reader alive so SQLite retains its empty sidecar on
+    # platforms that unlink it when the preview's own connection closes.
+    keeper = connect_ro(path)
+    try:
+        assert not wal.exists()
+        plan = build_migration_manifest(root, None, target)
+        assert not plan.blockers
+        assert path.read_bytes() == before
+        assert wal.is_file() and wal.stat().st_size == 0
+        assert plan.database["files"][1]["state"] == "ok"
+        assert plan.database["files"][1]["bytes"] == 0
+        assert build_migration_manifest(root, None, target).manifest_id == plan.manifest_id
+
+        # A real writer during the audited snapshot adds WAL pages. The empty
+        # sidecar exception must not turn that into an apparent stable preview.
+        original_audit = migration_plan.audit_tasks
+
+        def write_during_audit(reader):
+            report = original_audit(reader)
+            with sqlite3.connect(path) as writer:
+                writer.execute("PRAGMA user_version=12")
+            return report
+
+        monkeypatch.setattr(migration_plan, "audit_tasks", write_during_audit)
+        changed = build_migration_manifest(root, None, target)
+        assert changed.database["state"] == "changing"
+        assert "database bytes changed during preview; repeat under quiescence" in changed.blockers
+    finally:
+        keeper.close()
 
 
 def test_absent_and_empty_databases_are_distinct_and_never_initialized(releases):
