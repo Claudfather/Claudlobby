@@ -46,7 +46,7 @@ pane_send_verified() {
 
     interrupt = run("interrupt")
     assert interrupt.returncode == 0 and interrupt.stdout == "control-submitted\n"
-    assert log.read_text() == "tmux worker.socket send-keys -t worker C-c\n"
+    assert log.read_text() == "tmux worker.socket send-keys -t worker Escape\n"
     log.unlink()
     compact = run("compact")
     assert compact.returncode == 0 and compact.stdout == "control-submitted\n"

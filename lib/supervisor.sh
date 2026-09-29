@@ -659,7 +659,9 @@ svc_bot_control_exact() (
     . "$_SUPERVISOR_LIB_DIR/lib-common.sh" || return 3
     session=$(tmux_session_name "$bot_dir") || return 3
     if [ "$control" = interrupt ]; then
-        bot_tmux "$expected" send-keys -t "$session" C-c || return 3
+        # Esc requests one turn/tool cancellation without Ctrl-C's idle-prompt
+        # exit behavior. Tmux submission does not verify Claude cancelled it.
+        bot_tmux "$expected" send-keys -t "$session" Escape || return 3
     else
         # Keep the existing chunked pane primitive, but disable its optional
         # Enter repair: this explicit control is never automatically resent.
