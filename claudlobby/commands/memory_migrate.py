@@ -77,9 +77,10 @@ def cmd_memory_migrate(args) -> int:
             )
             continue
 
-        # Copy memory files to bot's memory dir
+        # Preview the same candidates that an explicit apply would copy.
         dest_memory = paths.bot_runtime(target_bot) / "memory"
-        dest_memory.mkdir(parents=True, exist_ok=True)
+        if args.apply:
+            dest_memory.mkdir(parents=True, exist_ok=True)
 
         file_count = 0
         for src_file in memory_dir.glob("*.md"):
@@ -91,21 +92,23 @@ def cmd_memory_migrate(args) -> int:
                     src_file.name,
                 )
                 continue
-            shutil.copy2(src_file, dest_file)
+            if args.apply:
+                shutil.copy2(src_file, dest_file)
             file_count += 1
 
         if file_count > 0:
             log.info(
-                "%s → %s: %d memory files", project_dir.name, target_bot, file_count
+                "%s → %s: %d memory files %s", project_dir.name, target_bot,
+                file_count, "copied" if args.apply else "to copy"
             )
             migrated += 1
 
     if migrated == 0:
         log.warning(
-            "No memory files migrated. Check --map mappings or run with --force."
+            "No memory files selected. Check --map mappings or run with --force."
         )
         return 1
 
-    log.info("Migrated memory for %d bot(s).", migrated)
+    log.info("%s memory for %d bot(s).", "Migrated" if args.apply else "Would migrate", migrated)
     log.info("Memories are now in local/<fleet>/runtime/bots/<bot>/memory/")
     return 0

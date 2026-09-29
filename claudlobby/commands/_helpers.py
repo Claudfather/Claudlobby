@@ -27,7 +27,7 @@ def _resolve_paths(args) -> Paths:
 def _load_env(paths: Paths) -> None:
     """Load .env file into os.environ (without overriding existing vars).
     Handles both `VAR=value` and `export VAR=value` formats — the latter is
-    what env-migrate writes and what hand-edited .env files commonly use."""
+    what migration env writes and what hand-edited .env files commonly use."""
     for k, v in dotenv.read(paths.env_file).items():
         if k not in os.environ:
             os.environ[k] = v

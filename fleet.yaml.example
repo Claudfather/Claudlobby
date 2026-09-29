@@ -176,7 +176,7 @@ fleet:
 #     # lessons — library/lessons/ is FROZEN (L3). Existing referential lessons still
 #     # compose for non-vault fleets; a vault-wired fleet reaches them via `claudron recall`
 #     # instead. New behavior rules → protocols/guardrails; new referential findings → the
-#     # vault (`claudlobby lessons-migrate`, /claudna:capture). See library/lessons/README.md.
+#     # vault (`claudlobby migration lessons`, /claudna:capture). See library/lessons/README.md.
 #     lessons:
 #       - review/empirical-verification
 #       - telegram/mcp-drops

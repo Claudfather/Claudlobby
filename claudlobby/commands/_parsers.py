@@ -16,26 +16,6 @@ def _command(module: str, name: str):
     return dispatch
 
 
-def _add_migration_args(parser) -> None:
-    """Add the common --source, --map, --apply args shared by all migration commands."""
-    parser.add_argument(
-        "--source",
-        required=True,
-        help="Path to existing bot fleet dir (e.g. ~/my-bots)",
-    )
-    parser.add_argument(
-        "--map",
-        action="append",
-        default=[],
-        help="Rename a fleet bot to its legacy dir (e.g. --map clog=assistant). Repeatable.",
-    )
-    parser.add_argument(
-        "--apply",
-        action="store_true",
-        help="Write changes (default: dry-run preview only)",
-    )
-
-
 def register_subparsers(sub) -> None:
     """Register all CLI subcommands on the given subparsers action."""
 
@@ -133,75 +113,6 @@ def register_subparsers(sub) -> None:
     from ._request_read_parsers import register_request_read_subparsers
     register_request_read_subparsers(sub)
 
-    pe = sub.add_parser(
-        "env-migrate",
-        help="Extract secrets from an existing bot setup into tiered .env files (dry-run by default)",
-    )
-    _add_migration_args(pe)
-    pe.set_defaults(func=_command("env_migrate", "cmd_env_migrate"))
-
-    pdm = sub.add_parser(
-        "data-migrate",
-        help="Copy bot data dirs from a legacy bot setup into per-bot runtime data/ (dry-run by default)",
-    )
-    _add_migration_args(pdm)
-    pdm.add_argument(
-        "--include",
-        help="Comma-separated subdir names to include (overrides auto-discovery — useful to force-copy a default-skipped dir like 'logs')",
-    )
-    pdm.add_argument(
-        "--exclude",
-        help="Comma-separated subdir names to skip (e.g. 'personal-projects,work-projects' to keep big git checkouts in place)",
-    )
-    pdm.set_defaults(func=_command("data_migrate", "cmd_data_migrate"))
-
-    pcm = sub.add_parser(
-        "cron-migrate",
-        help="Rewrite cron entries from a legacy bot-fleet path layout to claudlobby's (dry-run by default)",
-    )
-    _add_migration_args(pcm)
-    pcm.set_defaults(func=_command("cron_migrate", "cmd_cron_migrate"))
-
-    pm = sub.add_parser(
-        "memory-migrate",
-        help="Copy memory files from ~/.claude/projects/ to per-bot memory dirs",
-    )
-    pm.add_argument(
-        "--map",
-        nargs="*",
-        help="Source-to-bot mappings (e.g. 'project-name-pattern:bot-name')",
-    )
-    pm.add_argument(
-        "--force", action="store_true", help="Overwrite existing memory files"
-    )
-    pm.set_defaults(func=_command("memory_migrate", "cmd_memory_migrate"))
-
-    plm = sub.add_parser(
-        "lessons-migrate",
-        help="Migrate referential library/lessons/ into the Claudron vault via "
-        "`claudron capture` (dry-run by default; behavior-class lessons stay put)",
-    )
-    plm.add_argument(
-        "--apply",
-        action="store_true",
-        help="Write to the vault via `claudron capture` (default: dry-run plan)",
-    )
-    plm.add_argument(
-        "--vault",
-        help="Target vault path for --apply (falls back to CLAUDRON_VAULT_PATH)",
-    )
-    plm.add_argument(
-        "--vault-fleet",
-        dest="fleet_scope",
-        help="Capture into a fleet tier instead of the default _shared/ hub",
-    )
-    plm.add_argument(
-        "--claudron-bin",
-        dest="claudron_bin",
-        help="Path to the claudron executable (default: `claudron` on PATH)",
-    )
-    plm.set_defaults(func=_command("lessons_migrate", "cmd_lessons_migrate"))
-
     from ._event_read_parsers import register_event_read_subparsers
     register_event_read_subparsers(sub)
 
@@ -257,24 +168,6 @@ def register_subparsers(sub) -> None:
     pex.add_argument("--dry-run", action="store_true",
                      help="Report the count without emitting")
     pex.set_defaults(func=_command("plane", "cmd_plane_expire"))
-    piw = psub.add_parser(
-        "import-workstreams",
-        help="#1635: one-shot import of a pre-cutover workstreams.json into"
-        " the plane, with original instants (never the import instant)",
-    )
-    piw.add_argument(
-        "--file", default=None,
-        help="Path to the residual registry file (default: <fleet runtime>/workstreams.json)",
-    )
-    piw.add_argument(
-        "--dry-run", action="store_true",
-        help="Print the full envelope plan and emit nothing",
-    )
-    piw.add_argument(
-        "--archive", action="store_true",
-        help="Rename the source file to <name>.imported-<batch> on success",
-    )
-    piw.set_defaults(func=_command("plane", "cmd_plane_import_workstreams"))
     prg = psub.add_parser(
         "registry",
         help="Registry lane reads: current state, history, changes, verify")

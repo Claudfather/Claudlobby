@@ -204,3 +204,5 @@ def register_release_subparsers(sub):
                       help="Record explicit initialization intent only when both DB and WAL are absent")
     status = _route(migrations, "status", "migration.status", "Actual SQL version and recorded activation evidence")
     status.add_argument("--activation", metavar="ID", help="Inspect one named host activation")
+    from ._migration_parsers import register_converter_subparsers
+    register_converter_subparsers(migrations)

@@ -862,24 +862,24 @@ def cmd_plane_import_workstreams(args) -> int:
     root = paths.root
     fleet = resolve_fleet_name(paths)
     if not fleet:
-        print("import-workstreams: no fleet named -- pass --fleet or run from"
+        print("migration workstreams: no fleet named -- pass --fleet or run from"
               " a fleet-scoped root", file=sys.stderr)
         return 2
     src = Path(args.file) if args.file else (paths.fleet_state / "workstreams.json")
 
     probe = probe_source(src)
     if probe.state == SOURCE_ABSENT:
-        print(f"import-workstreams: no residual file at {src} -- nothing to import", file=sys.stderr)
+        print(f"migration workstreams: no residual file at {src} -- nothing to import", file=sys.stderr)
         return 0
     if probe.state == SOURCE_UNREADABLE:
-        print(f"import-workstreams: {src} exists but could not be opened -- refusing"
+        print(f"migration workstreams: {src} exists but could not be opened -- refusing"
               " rather than reporting nothing to import", file=sys.stderr)
         return 3
 
     try:
         file_doc = json.loads(src.read_text())
     except (OSError, json.JSONDecodeError) as exc:
-        print(f"import-workstreams: {src} is present but unreadable: {exc}", file=sys.stderr)
+        print(f"migration workstreams: {src} is present but unreadable: {exc}", file=sys.stderr)
         return 3
 
     from ..workstreams import lease_days_env
@@ -887,13 +887,13 @@ def cmd_plane_import_workstreams(args) -> int:
 
     pr = load_lib_module(paths.lib, "plane-readers.py")
     if pr is None:
-        print(f"import-workstreams: lib/plane-readers.py is not readable under {paths.lib}",
+        print(f"migration workstreams: lib/plane-readers.py is not readable under {paths.lib}",
               file=sys.stderr)
         return 3
 
     mode = capture_mode(_load_capture_config(root), fleet)
     if mode != "full":
-        print(f"import-workstreams: this fleet's capture mode is {mode!r} -- the"
+        print(f"migration workstreams: this fleet's capture mode is {mode!r} -- the"
               " imported note/next_step text on progressed/renewed/blocked events"
               " will be STRIPPED at the door (workstream_event.note,"
               " workstream_event.next_step are CONTENT fields); the construct's"
@@ -927,20 +927,20 @@ def cmd_plane_import_workstreams(args) -> int:
             the_plan = plan(file_doc, existing, fleet=fleet, import_batch=batch, lease_days=lease_days)
 
             for w in the_plan.warnings:
-                print(f"import-workstreams: {w.workstream_id}: {w.detail}", file=sys.stderr)
+                print(f"migration workstreams: {w.workstream_id}: {w.detail}", file=sys.stderr)
             for s in the_plan.skipped:
-                print(f"import-workstreams: skipped {s.workstream_id} -- {s.reason}", file=sys.stderr)
+                print(f"migration workstreams: skipped {s.workstream_id} -- {s.reason}", file=sys.stderr)
 
-            if args.dry_run:
+            if not args.apply:
                 for ev in the_plan.events:
                     print(json.dumps(ev, separators=(",", ":")))
-                print(f"import-workstreams: would emit {len(the_plan.events)} event(s)"
+                print(f"migration workstreams: would emit {len(the_plan.events)} event(s)"
                       f" for {len(file_doc.get('workstreams', {})) - len(the_plan.skipped)}"
                       f" row(s), batch {batch}", file=sys.stderr)
                 return 0
 
             if not the_plan.events:
-                print("import-workstreams: nothing new to import (every row already"
+                print("migration workstreams: nothing new to import (every row already"
                       " on the plane, or the file holds none)")
                 return 0
 
@@ -949,21 +949,21 @@ def cmd_plane_import_workstreams(args) -> int:
             duplicate = sum(1 for o in outcomes if o.status == "duplicate")
             spooled = [o for o in outcomes if o.status == "spooled"]
             if spooled:
-                print(f"import-workstreams: {len(spooled)} event(s) SPOOLED -- durable"
+                print(f"migration workstreams: {len(spooled)} event(s) SPOOLED -- durable"
                       " on disk, not yet in the plane; retry with `claudlobby plane"
                       " spool retry` before archiving the source file", file=sys.stderr)
                 return RC_SPOOLED
 
-            print(f"import-workstreams: {committed} event(s) committed,"
+            print(f"migration workstreams: {committed} event(s) committed,"
                   f" {duplicate} already present, batch {batch}")
 
             if args.archive:
                 dest = src.with_name(f"{src.name}.imported-{batch}")
                 src.rename(dest)
-                print(f"import-workstreams: archived {src.name} -> {dest.name}")
+                print(f"migration workstreams: archived {src.name} -> {dest.name}")
             return 0
 
-    return _guarded("import-workstreams", run)
+    return _guarded("migration workstreams", run)
 
 
 def cmd_plane_view(args) -> int:

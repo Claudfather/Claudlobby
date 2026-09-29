@@ -451,11 +451,12 @@ claudlobby library create --kind skill                   # scaffold a new skill 
 claudlobby library create --kind guardrail               # scaffold a new guardrail file
 
 # Migration (from legacy layouts)
-claudlobby env-migrate                 # migrate .env files into fleet structure
-claudlobby data-migrate                # migrate bot data directories
-claudlobby cron-migrate                # migrate crontab entries to new paths
-claudlobby memory-migrate              # copy memory files from ~/.claude/projects/ to per-bot dirs
-claudlobby lessons-migrate             # migrate referential library/lessons/ into the Claudron vault (dry-run by default)
+claudlobby migration env                 # migrate .env files into fleet structure
+claudlobby migration data                # migrate bot data directories
+claudlobby migration cron                # migrate crontab entries to new paths
+claudlobby migration memory              # copy memory files from ~/.claude/projects/ to per-bot dirs
+claudlobby migration lessons             # migrate referential library/lessons/ into the Claudron vault (dry-run by default)
+claudlobby migration workstreams          # preview residual workstreams.json import; --apply writes
 
 # Testing (the venv is required — PEP 668 refuses a bare install on Homebrew/Debian)
 python3 -m venv .venv

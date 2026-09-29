@@ -63,7 +63,7 @@ def _run(code, *argv, tmp_path):
     (("bot", "create", "--help"), "--expertise"),
     (("bot", "handoff", "--help"), "BOT"),
     (("plane", "view", "--help"), "--host"),
-    (("data-migrate", "--help"), "--source"),
+    (("migration", "data", "--help"), "--source"),
     (("message", "show", "--help"), "MESSAGE_ID"),
     (("message", "send", "--help"), "--request-id"),
     (("message", "reply", "--help"), "MESSAGE_ID"),
@@ -131,6 +131,23 @@ def test_main_passes_namespace_to_only_selected_handler_and_returns_its_result(t
         sys.exit(rc)
     """, tmp_path=tmp_path)
     assert result.returncode == 0 and result.stdout == 'selected\n', result.stderr
+
+
+@pytest.mark.parametrize("old", (
+    "env-migrate", "data-migrate", "cron-migrate", "memory-migrate",
+    "lessons-migrate", "plane import-workstreams",
+))
+def test_retired_converter_spellings_are_not_aliases(old, tmp_path):
+    result = _run(PARSE, *old.split(), "--help", tmp_path=tmp_path)
+    assert result.returncode == 2
+
+
+def test_converter_syntax_error_uses_public_result_without_echoing_values(tmp_path):
+    result = _run(PARSE, "--json", "migration", "env", "--source", "private-value",
+                  "--map", "bad", "--unexpected", tmp_path=tmp_path)
+    assert result.returncode == 2
+    assert '"command":"migration.env"' in result.stdout
+    assert "private-value" not in result.stdout + result.stderr
 
 
 def test_selected_import_failure_is_reported_by_common_result(tmp_path):

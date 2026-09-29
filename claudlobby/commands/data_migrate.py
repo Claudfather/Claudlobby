@@ -220,7 +220,7 @@ def cmd_data_migrate(args) -> int:
                 _DataMigratePlanItem(fleet_bot_name, child, dst, "copy", size_mb)
             )
 
-    log.info("=== data-migrate plan ===")
+    log.info("=== migration data plan ===")
     log.info("source: %s", source_dir)
     log.info("fleet:  %s", fleet.name)
     if rename_map:

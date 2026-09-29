@@ -835,7 +835,7 @@ def check_workstream_residual(fleet: FleetConfig, paths: Paths, report: DoctorRe
     empty answer for this fleet's workstreams is LEGITIMATE on its own --
     nothing downstream can raise it from inside that read -- only a
     comparison against the file can. Outlives the importer
-    (`claudlobby plane import-workstreams`): once every fleet is imported
+    (`claudlobby migration workstreams`): once every fleet is imported
     this rung goes quiet, and it is what catches the NEXT stranded file
     from the next store that moves without its data.
 
@@ -889,7 +889,7 @@ def check_workstream_residual(fleet: FleetConfig, paths: Paths, report: DoctorRe
             "fail",
             f"{len(missing)} row(s) in {resid.name} the plane does not hold"
             f" ({', '.join(missing[:3])}{', ...' if len(missing) > 3 else ''})"
-            f" -- run `claudlobby --fleet {fleet.name} plane import-workstreams`",
+            f" -- run `claudlobby --fleet {fleet.name} migration workstreams --apply`",
         )
     else:
         report.add(

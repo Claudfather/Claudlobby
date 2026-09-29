@@ -585,7 +585,7 @@ Log verbs are per-script conventions (`OK/WARN/ERROR/SKIP/DISPATCH/RESTART/READY
 - Readers: start-bot.sh:367-375 — `should_resume_session` (fresh < `RESUME_MAX_AGE_S`=24h) gates injecting `/claudna:session resume --auto` as first keystroke. A real agent-write → agent-read state loop across restarts (schema owned by clauDNA, out of scope here).
 
 **D5. per-bot `memory/` (+ harness MEMORY.md)**
-- Composer sets `autoMemoryDirectory` to `<bot_dir>/memory` (composer.py:1757-1760, dir created :2031). Written/read by the Claude Code harness (auto-memory) inside the bot's own sessions; `claudlobby memory-migrate` moves legacy copies. Fleet tooling neither writes nor reads it.
+- Composer sets `autoMemoryDirectory` to `<bot_dir>/memory` (composer.py:1757-1760, dir created :2031). Written/read by the Claude Code harness (auto-memory) inside the bot's own sessions; `claudlobby migration memory` moves legacy copies. Fleet tooling neither writes nor reads it.
 
 **D6. Experiment/benchmark artifacts (transient, opt-in)**
 - `ab-comms-eval.sh`: per-cell `cells/<task>-<variant>-r<rep>.jsonl` + results.jsonl in a throwaway root; readers `ab-comms-verdict.py` / `ab-coverage-verdict.py` (seeded bootstrap verdicts). `boot-strand-sampler.sh`: `rows.jsonl` in an artifact dir; reader `boot-strand-summary.py`. `transcript-usage.py` and `claudlobby freshbox`/`doctor` are stdout-only instruments; `validate-bot-change.sh` builds a throwaway fleet and reads events/state as assertions.

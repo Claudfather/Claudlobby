@@ -12,9 +12,15 @@ import pytest
 
 from claudlobby.brief import _workstream_section
 from claudlobby.config import load_fleet
-from tests.plane_fixtures import F, REPO, _cli, _scene, _stdlib_readers, ro as _ro
+from tests.plane_fixtures import F, REPO, _env, _scene, _stdlib_readers, ro as _ro
 
 LIB = REPO / "lib"
+
+
+def _cli(root, *args):
+    return subprocess.run([sys.executable, "-m", "claudlobby", "--root", str(root),
+                           "--fleet", F, "migration", "workstreams", *args],
+                          capture_output=True, text=True, timeout=180, env=_env(root))
 
 
 def test_the_lookup_and_the_reader_refuse_an_unknown_fleet(tmp_path):
@@ -85,7 +91,7 @@ def test_import_preserves_the_original_lease_and_progress_instants(tmp_path):
     doc, expected_lease = _stale_file()
     _write_residual(paths, doc)
 
-    r = _cli(root, "import-workstreams")
+    r = _cli(root, "--apply")
     assert r.returncode == 0, r.stdout + r.stderr
 
     pr = _stdlib_readers()
@@ -161,7 +167,7 @@ def test_import_is_idempotent_on_a_second_run(tmp_path):
     doc, _ = _stale_file()
     _write_residual(paths, doc)
 
-    first = _cli(root, "import-workstreams")
+    first = _cli(root, "--apply")
     assert first.returncode == 0, first.stdout + first.stderr
 
     def _counts():
@@ -176,9 +182,9 @@ def test_import_is_idempotent_on_a_second_run(tmp_path):
     before = _counts()
     assert before[0] == 1
 
-    second = _cli(root, "import-workstreams")
+    second = _cli(root, "--apply")
     assert second.returncode == 0, second.stdout + second.stderr
-    assert "skipped ws-stale-one" in second.stderr
+    assert "skipped ws-stale-one" in second.stdout
     after = _counts()
     assert after == before, (before, after)
 
@@ -199,9 +205,9 @@ def test_dedup_skips_an_id_already_live_or_archived(tmp_path):
     doc["workstreams"]["ws-collides"]["id"] = "ws-collides"
     _write_residual(paths, doc)
 
-    r = _cli(root, "import-workstreams")
+    r = _cli(root, "--apply")
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "skipped ws-collides" in r.stderr
+    assert "skipped ws-collides" in r.stdout
 
     with _ro(root) as conn:
         n = conn.execute(
@@ -249,7 +255,7 @@ def test_renewals_reconstruct_their_own_lease_target(tmp_path):
     }
     _write_residual(paths, doc)
 
-    r = _cli(root, "import-workstreams")
+    r = _cli(root, "--apply")
     assert r.returncode == 0, r.stdout + r.stderr
 
     pr = _stdlib_readers()
@@ -269,7 +275,7 @@ def test_dry_run_touches_neither_file_nor_plane(tmp_path):
     _write_residual(paths, doc)
     before = (paths.fleet_state / "workstreams.json").read_text()
 
-    r = _cli(root, "import-workstreams", "--dry-run")
+    r = _cli(root, "--dry-run")
     assert r.returncode == 0, r.stdout + r.stderr
     assert '"event_id"' in r.stdout  # the full envelope plan, not a summary
 
@@ -279,18 +285,18 @@ def test_dry_run_touches_neither_file_nor_plane(tmp_path):
     assert n == 0
 
 
-def test_absent_file_exits_0_and_unreadable_file_exits_3(tmp_path):
+def test_absent_file_exits_0_and_unreadable_file_is_unavailable(tmp_path):
     root, paths, _, _ = _scene(tmp_path)
-    absent = _cli(root, "import-workstreams")
-    assert absent.returncode == 0 and "nothing to import" in absent.stderr
+    absent = _cli(root, "--apply")
+    assert absent.returncode == 0 and "nothing to import" in absent.stdout
 
     resid = paths.fleet_state / "workstreams.json"
     resid.parent.mkdir(parents=True, exist_ok=True)
     resid.write_text("{}")
     resid.chmod(0o000)
     try:
-        unreadable = _cli(root, "import-workstreams")
-        assert unreadable.returncode == 3, unreadable.stdout + unreadable.stderr
+        unreadable = _cli(root, "--apply")
+        assert unreadable.returncode == 6, unreadable.stdout + unreadable.stderr
     finally:
         resid.chmod(0o644)  # restore so tmp_path teardown can remove it
 
@@ -300,15 +306,15 @@ def test_archive_renames_and_a_second_run_finds_nothing(tmp_path):
     doc, _ = _stale_file()
     _write_residual(paths, doc)
 
-    r = _cli(root, "import-workstreams", "--archive")
+    r = _cli(root, "--apply", "--archive")
     assert r.returncode == 0, r.stdout + r.stderr
     assert "archived" in r.stdout
     assert not (paths.fleet_state / "workstreams.json").exists()
     archived = list(paths.fleet_state.glob("workstreams.json.imported-*"))
     assert len(archived) == 1
 
-    again = _cli(root, "import-workstreams")
-    assert again.returncode == 0 and "nothing to import" in again.stderr
+    again = _cli(root, "--apply")
+    assert again.returncode == 0 and "nothing to import" in again.stdout
 
 
 def test_capture_mode_metadata_warns_and_goal_survives_the_strip(tmp_path):
@@ -322,10 +328,10 @@ def test_capture_mode_metadata_warns_and_goal_survives_the_strip(tmp_path):
     doc, _ = _stale_file()
     _write_residual(paths, doc)
 
-    r = _cli(root, "import-workstreams")
+    r = _cli(root, "--apply")
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "capture mode is 'metadata'" in r.stderr
-    assert "STRIPPED" in r.stderr
+    assert "capture mode is 'metadata'" in r.stdout
+    assert "STRIPPED" in r.stdout
 
     pr = _stdlib_readers()
     with _ro(root) as conn:
@@ -347,7 +353,7 @@ def test_dry_run_against_a_fresh_root_creates_no_plane_db(tmp_path):
     _write_residual(paths, doc)
     assert not (root / "state" / "plane" / "plane.db").exists()
 
-    r = _cli(root, "import-workstreams", "--dry-run")
+    r = _cli(root, "--dry-run")
     assert r.returncode == 0, r.stdout + r.stderr
     assert '"event_id"' in r.stdout
 

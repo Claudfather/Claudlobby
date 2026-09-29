@@ -468,7 +468,7 @@ class TestCheckWorkstreamResidual:
         assert check.status == "fail"
         assert "2 row(s)" in check.detail
         assert "ws-one" in check.detail and "ws-two" in check.detail
-        assert "plane import-workstreams" in check.detail
+        assert "migration workstreams" in check.detail
 
     def test_passes_once_every_row_is_on_the_plane(self, tmp_path):
         from tests.plane_fixtures import F
