@@ -231,12 +231,9 @@ gets `RunAtLoad` + `KeepAlive`, plus `StandardOutPath`/`StandardErrorPath` at
 `<root>/state/<job>.log` — launchd sends an unredirected service's stdio to
 `/dev/null`, and the ingest daemon's stale-exit line (#1485) is the only
 record that exit leaves, so on macOS a relaunch loop was otherwise invisible;
-systemd needs no equivalent because the journal already has it. On Linux it is enrolled through a dedicated
-installer, `lib/install-host-service-systemd.sh`, distinct from the generic
-timer enroller — `setup-system` tells the two apart by whether a `.timer`
-sibling exists next to the `.service` file. On macOS there is no separate
-leg: launchd's plist glob enrolls a service plist the same way it enrolls a
-timer plist.
+systemd needs no equivalent because the journal already has it. Selected host
+activation enrolls the service through the native supervisor adapter; it has
+no `.timer` sibling. On macOS the same activation enrolls the service plist.
 
 **Arm/disarm is asymmetric, and the source comment states the recipe
 precisely — worth quoting rather than paraphrasing.** Arming

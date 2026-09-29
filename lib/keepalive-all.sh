@@ -3,8 +3,7 @@
 # directory and runs keepalive.sh against each.
 #
 # Designed to be invoked every 60s by a launchd LaunchAgent (macOS) or
-# a systemd timer (Linux). Enrolled by sealed host activation via the generic
-# enrollers (install_fleet_timer.sh / install_fleet_timer_launchd.sh).
+# a systemd timer (Linux). Enrolled by sealed host activation.
 #
 # Usage: keepalive-all.sh [<fleet-name> | <fleet-runtime-bots-dir>]
 #   Composed fleet units pass the fleet NAME (the uniform fleet-job arg

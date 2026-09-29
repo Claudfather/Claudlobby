@@ -388,7 +388,7 @@ EOF
 
 # svc_enroll_agent <label> <src_plist>
 # Install a composed launchd plist into ~/Library/LaunchAgents and load it:
-# copy, bootout, bootstrap -- the sequence install_fleet_timer_launchd.sh ran
+# copy, bootout, bootstrap -- the sequence the legacy timer installer ran
 # inline with an absolute /bin/launchctl, moved here so the refusal below
 # guards every caller, and resolved through PATH like every verb in this file
 # so the whole sequence is fakeable (tests/test_supervisor_adapter.sh).

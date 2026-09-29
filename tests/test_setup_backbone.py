@@ -1,9 +1,4 @@
-"""Private native timer installer, fleet prefix, and reconcile checks.
-
-The real scripts exercise their Linux/systemd contract against a throwaway
-CLAUDLOBBY_ROOT with PATH-first service stubs and private files. The installer
-and reconciliation checks never touch the host's systemd or tmux state.
-"""
+"""Fleet prefix and reconcile checks against a private systemd model."""
 
 import os
 import shutil
@@ -23,7 +18,6 @@ REAL_SCRIPTS = [
     "lib-common.sh",
     "cli-context.sh",
     "supervisor.sh",
-    "install_fleet_timer.sh",
 ]
 # Replaced with invocation-logging stubs — their behavior is not under test.
 STUB_SCRIPTS = ["spin-up-bot.sh", "reconcile-fleet.sh"]
@@ -42,7 +36,7 @@ class Harness:
         self.log.write_text("")
 
         # This fixture models systemd units and their registry, not launchd.
-        # Child installers source lib-common.sh and detect the OS afresh, so
+        # Child scripts source lib-common.sh and detect the OS afresh, so
         # select Linux through their inherited PATH rather than setting _OS.
         _write_exec(self.bin / "uname", '#!/bin/bash\nprintf "Linux\\n"\n')
 
@@ -227,35 +221,6 @@ class TestHarnessEnvIsConstructed:
         )
         assert r.returncode == 0, r.stderr
         assert r.stdout == "|"
-
-
-class TestInstallFleetTimerEnvOverrides:
-    def test_timer_dir_and_unit_name_bypass_fleet_resolution(self, h):
-        # Host-job mode (setup-system's phase 8): no fleet arg, no bot.conf —
-        # TIMER_DIR + UNIT_NAME fully determine the enrollment.
-        hostdir = h.root / "runtime" / "_host" / "timers"
-        hostdir.mkdir(parents=True)
-        (hostdir / "claudlobby-claude-update.service").write_text("[Service]\n")
-        (hostdir / "claudlobby-claude-update.timer").write_text("[Timer]\n")
-        r = h.run(
-            str(h.root / "lib" / "install_fleet_timer.sh"),
-            "claude-update",
-            env_extra={
-                "TIMER_DIR": str(hostdir),
-                "UNIT_NAME": "claudlobby-claude-update",
-            },
-        )
-        assert r.returncode == 0, r.stdout + r.stderr
-        assert "enable --now claudlobby-claude-update.timer" in h.stub_log()
-        unit_dir = h.home / ".config" / "systemd" / "user"
-        assert (unit_dir / "claudlobby-claude-update.timer").is_file()
-
-    def test_fleet_arg_path_unchanged_without_overrides(self, h):
-        f = h.fleet("f1", bots=("bota",), timers=("fleet-pulse",))
-        h.bot(f, "bota")
-        r = h.run(str(h.root / "lib" / "install_fleet_timer.sh"), "fleet-pulse", "f1")
-        assert r.returncode == 0, r.stdout + r.stderr
-        assert "enable --now test.prefix.fleet-pulse.timer" in h.stub_log()
 
 
 class TestFleetServicePrefixHelper:
