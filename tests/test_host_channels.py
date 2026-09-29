@@ -6,16 +6,7 @@ import json
 import os
 import stat
 
-import pytest
-
 from claudlobby.__main__ import main
-
-
-@pytest.fixture(autouse=True)
-def _operator(monkeypatch):
-    from claudlobby.commands import operator_context
-
-    monkeypatch.setattr(operator_context, "require_operator_context", lambda _root: None)
 
 
 def _call(tmp_path, capsys, action):
@@ -88,4 +79,4 @@ def test_approve_requires_admin_writable_directory_and_operator(tmp_path, monkey
     assert stat.S_IMODE(target.stat().st_mode) == 0o644
     monkeypatch.setenv("BOT_ID", "worker")
     code, result = _call(tmp_path, capsys, "check")
-    assert code == 4 and "operator shell" in result["error"]["hint"]
+    assert code == 4 and "operator shell" in result["error"]["message"]

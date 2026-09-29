@@ -48,11 +48,31 @@ def dispatch(args) -> CommandOutput:
     return CommandOutput(data, release_id=release_id, lines=lines)
 
 
+def _coverage_line(plane, window_s, family=None) -> str:
+    """The coverage statement for an OPEN plane session (#1658).
+
+    The uptime door routes through here so the wording and derivation live in
+    `lib/plane-readers.py`, beside the plane's other SQL.
+
+    Degrades to a plain note rather than raising: a door must not lose its
+    answer because the sentence describing that answer could not be built. An
+    install whose readers predate `coverage()` says so, which is the same
+    shape `brief` uses for a matcher older than its caller.
+    """
+    try:
+        first, last, rows = plane.pr.coverage(plane.conn, family)
+        return plane.pr.coverage_line(first, last, rows, window_s)
+    except AttributeError:
+        return ("coverage: unknown — the readers installed at this root predate"
+                " the coverage derivation (#1658)")
+    except Exception as exc:                       # pragma: no cover - defensive
+        return f"coverage: unknown — {exc}"
+
+
 def _uptime(args, context, release_id: str | None) -> CommandOutput:
     from ..brief import plane_session
     from ..source_state import scan_dir, unreachable_line
     from ..uptime import WINDOWS, aggregate_fleet, entries_from_plane, format_table
-    from .core import _coverage_line
 
     if args.bot is not None and args.bot not in context.fleet.bots:
         raise CommandFailure("not_found", "bot is not declared in the selected fleet")
