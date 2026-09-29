@@ -49,12 +49,19 @@ def _script_host(tmp_path: Path):
     return root, bots, calls, env, args
 
 
-def test_selected_reload_only_marks_running_selected_bot(tmp_path):
+@pytest.mark.parametrize("with_plugin", [True, False])
+def test_selected_reload_only_marks_running_selected_bot(tmp_path, with_plugin):
     root, bots, calls, env, args = _script_host(tmp_path)
+    if not with_plugin:
+        # Live macOS canary: Bash 3.2 nounset rejects an empty array expansion.
+        index = args.index("--plugin")
+        args = args[:index] + args[index + 2:]
     result = subprocess.run(args, env=env, capture_output=True, text=True, timeout=20)
     assert result.returncode == 0, result.stderr + (root / "state/reload-fleet.log").read_text()
-    assert result.stdout.splitlines() == ["marked\tlead", "refreshed\tclaudna@Claudfather"]
-    assert calls.read_text().splitlines() == ["plugin update claudna@Claudfather"]
+    assert result.stdout.splitlines() == ["marked\tlead"] + (
+        ["refreshed\tclaudna@Claudfather"] if with_plugin else [])
+    assert (calls.read_text().splitlines() if calls.exists() else []) == (
+        ["plugin update claudna@Claudfather"] if with_plugin else [])
     assert (bots / "lead/data/.reload-pending").exists()
     assert not (bots / "worker/data/.reload-pending").exists()
     assert not (bots / "residue/data/.reload-pending").exists()

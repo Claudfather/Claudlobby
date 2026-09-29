@@ -76,7 +76,7 @@ if [ "$LIB_DIR" != "$CLAUDLOBBY_NATIVE_DIR" ] || [ "$SELECTED_RELEASE" != "${CLA
     echo "reload-fleet: selected native or fleet context differs" >&2
     exit 2
 fi
-for _bot in "${BOTS[@]}"; do
+for _bot in ${BOTS[@]+"${BOTS[@]}"}; do
     case "$_bot" in ''|.|..|*/*) echo "reload-fleet: invalid selected bot" >&2; exit 2 ;; esac
 done
 export CLAUDLOBBY_FLEET="$FLEET"
@@ -226,7 +226,7 @@ _reload_critical() {
         return 1
     fi
     local _bot bot_dir
-    for _bot in "${BOTS[@]}"; do
+    for _bot in ${BOTS[@]+"${BOTS[@]}"}; do
         bot_dir="$BOTS_DIR/$_bot"
         if [ ! -d "$bot_dir" ] || [ -L "$bot_dir" ] || [ -L "$bot_dir/data" ] \
                 || [ -L "$bot_dir/data/.reload-pending" ]; then
@@ -264,7 +264,7 @@ _reload_critical() {
         return 1
     fi
     local _p
-    for _p in "${PLUGINS[@]}"; do
+    for _p in ${PLUGINS[@]+"${PLUGINS[@]}"}; do
         _run_step "claude plugin update $_p" "$_claude" plugin update "$_p" || return 1
     done
 }
@@ -283,7 +283,7 @@ fi
 # --- mark selected RUNNING bots for a keepalive-driven live reload ---
 _rf_step "mark running bots for live reload"
 marked=0
-for _bot in "${BOTS[@]}"; do
+for _bot in ${BOTS[@]+"${BOTS[@]}"}; do
         bot_dir="$BOTS_DIR/$_bot"
         # "Running" = the bot's session is alive on its OWN per-bot server.
         socket=$(FLEET_NAME="$FLEET" tmux_socket_for_bot "$bot_dir")
@@ -294,7 +294,7 @@ for _bot in "${BOTS[@]}"; do
             printf 'marked\t%s\n' "$_bot"
         fi
 done
-for _p in "${PLUGINS[@]}"; do printf 'refreshed\t%s\n' "$_p"; done
+for _p in ${PLUGINS[@]+"${PLUGINS[@]}"}; do printf 'refreshed\t%s\n' "$_p"; done
 printf '%s reload-fleet: plugin refresh OK, marked %d running bot(s) for idle reload\n' \
     "$(ts_iso)" "$marked" >> "$LOG"
 _RF_FINISHED=1
