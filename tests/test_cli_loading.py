@@ -63,6 +63,8 @@ def _run(code, *argv, tmp_path):
     (("bot", "create", "--help"), "--expertise"),
     (("bot", "handoff", "--help"), "BOT"),
     (("plane", "view", "--help"), "--host"),
+    (("host", "setup", "--help"), "--wheel"),
+    (("fleet", "setup", "--help"), "--install-directory"),
     (("migration", "data", "--help"), "--source"),
     (("message", "show", "--help"), "MESSAGE_ID"),
     (("message", "send", "--help"), "--request-id"),
@@ -100,6 +102,12 @@ def test_invalid_arguments_refuse_before_loading_commands(tmp_path):
     brief = _run(PARSE, "--json", "brief", "--unexpected=private-value", tmp_path=tmp_path)
     assert brief.returncode == 2 and '"command":"brief"' in brief.stdout
     assert "private-value" not in brief.stdout + brief.stderr
+
+
+def test_retired_host_timers_is_not_a_public_route(tmp_path):
+    result = _run(PARSE, "host-timers", tmp_path=tmp_path)
+    assert result.returncode == 2
+    assert "invalid choice" in result.stderr
 
 
 def test_main_passes_namespace_to_only_selected_handler_and_returns_its_result(tmp_path):

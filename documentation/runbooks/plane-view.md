@@ -19,9 +19,8 @@ touch nothing: no non-GET route exists (pinned by
 ## Run it
 
 ```bash
-python3 -m pip install -e '.[plane-ui]'   # FastAPI/uvicorn — part of the documented install
-claudlobby plane view                     # binds 127.0.0.1:8899
-claudlobby plane open                     # print/launch the URL (§17's open verb)
+claudlobby plane view  # use the sealed release CLI with the [plane-ui] extra
+claudlobby plane open  # print/launch the URL (§17's open verb)
 ```
 
 `/healthz` is a **data-freshness probe**: it answers 503 whenever the plane
@@ -30,8 +29,8 @@ recorder simply has not written yet — so wire monitors accordingly. The
 header's recorder pill is a live daemon PROBE (typed handshake), never
 socket-file presence.
 
-Supervised: **enrolled by default since chunk N** — `plane-view` composes
-its units and `lib/setup-system` enrolls them, because a read-only localhost
+Supervised: **enrolled by default since chunk N** — activation composes and
+enrolls its units, because a read-only localhost
 UI reaches none of the four categories the defaults rule reserves for opt-in.
 Exposing it beyond the host (Tailscale Serve, below) stays deliberately your
 step. To turn it off, set `plane-view.enroll: false` under `host.jobs` in
@@ -43,12 +42,12 @@ only.
 **It needs the `[plane-ui]` extra, and the compositor checks.** Where fastapi
 and uvicorn do not import in the install's venv, `generate` composes **no**
 view unit at all and `claudlobby host doctor --switches` renders `plane-view` off
-with `pip install -e '.[plane-ui]'` as its arm line. That is the fold's F1:
+with the `[plane-ui]` release extra as its arm line. That is the fold's F1:
 "the unit exits saying so" is an honest failure for a hand run and a **crash
 loop every 5s, forever** under `Restart=always` — and enrolling by default is
-what turns the first into the second. `lib/setup-system` installs the extra
-(first install and upgrade both), so a host that followed the documented path
-has it.
+what turns the first into the second. Build the wheel with the `[plane-ui]`
+extra in its offline dependency wheelhouse before `host setup`; the
+[cold-host walkthrough](../getting-started.md) shows that preparation.
 
 ## Front it with Tailscale Serve (the ruled exposure)
 

@@ -31,7 +31,7 @@ nothing from the four above.
 
 Whatever stays opt-in must be NAMED where the operator looks — ``claudlobby
 doctor``, ``claudlobby plane doctor``, and the closing summary of
-``lib/setup-fleet`` / ``lib/setup-system`` — with the one line that arms it.
+``lib/setup-fleet`` / ``host doctor --switches`` — with the one line that arms it.
 
 The reason the rule exists is not caution about defaults; it is that a
 behavior nobody can SEE is a behavior nobody has. A dozen doors shipped dormant
@@ -53,7 +53,7 @@ consumer DERIVES from it:
   which ``Environment=`` line (a scheduler env is closed; #1383).
 * ``validator`` — a ``*_ENABLED`` key in a claudlobby namespace that no
   switch claims is a DEAD flag, warned without anyone maintaining a list.
-* ``doctor`` / ``plane doctor`` / ``setup-fleet`` / ``setup-system`` — the
+* ``doctor`` / ``plane doctor`` / ``setup-fleet`` — the
   table the operator reads.
 * ``status`` — the header line that names a target-workflow door turned off.
 * the three schema/architecture docs — a GENERATED block rendered by
@@ -134,7 +134,7 @@ ENROLL_FLEET = "fleet.yaml"
 #: one bot first.
 COMPOSE_BOT = "fleet.yaml bots.<bot> → generate"
 
-#: Carriers whose scope is a FLEET. A host-wide run (``lib/setup-system``,
+#: Carriers whose scope is a FLEET. A host-wide run (``host doctor``,
 #: ``plane doctor`` without ``--fleet``) has not read these, and saying so is
 #: the whole of F5: an unread scope reported as "shipped default" is an
 #: assertion about something nobody looked at.
@@ -222,10 +222,10 @@ def _carrier_lines(sw: Switch) -> tuple[str, str]:
         key = sw.config or f"host.jobs.{sw.job}.enroll"
         return (
             f"{key}: true in this host's override, ~/.config/claudlobby/system.yaml"
-            " (host jobs bypass the fleet merge), then generate + lib/setup-system",
+            " (host jobs bypass the fleet merge), then config plan + config diff + host activate",
             f"{key}: false in this host's override, ~/.config/claudlobby/system.yaml,"
-            " then generate (composes no unit) + lib/setup-system (walks back"
-            " the installed one)",
+            " then config plan + config diff + host activate (removes the"
+            " installed unit)",
         )
     key = sw.config or f"defaults.jobs.{sw.job}.enroll"
     extra = f" (plus {sw.config_extra})" if sw.config_extra else ""
@@ -731,7 +731,7 @@ def missing_extra(job: str) -> str:
 
 
 def extra_install_line(extra: str) -> str:
-    return f"pip install -e '.[{extra}]' in the install's venv, then generate"
+    return f"assemble a sealed release with the [{extra}] extra in its offline wheelhouse"
 
 
 # ---------------------------------------------------------------------------
@@ -855,7 +855,7 @@ def resolve(
     and a table that buries the four off switches under the nine on ones has
     named them without surfacing them.
 
-    ``fleet=None`` is a HOST run (``lib/setup-system``, ``plane doctor`` with
+    ``fleet=None`` is a HOST run (``host doctor``, ``plane doctor`` with
     no ``--fleet``). Its host rows are true; its fleet-scoped rows are UNKNOWN
     and say so, because the fleet tier was never read.
     """
@@ -957,7 +957,7 @@ def resolve(
             detail = (f"{extra} does not import in this install — no unit is"
                       " composed (a supervised unit that cannot start is a"
                       " crash loop, not an honest failure)")
-            arm_override = extra_install_line(extra) + " + lib/setup-system"
+            arm_override = extra_install_line(extra) + ", then config plan + config diff + host activate"
 
         rows.append(
             SwitchState(

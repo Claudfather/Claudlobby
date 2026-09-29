@@ -8,7 +8,7 @@
 #   host:      Host-global singletons -- one instance per host, NOT layered,
 #              fixed `claudlobby-<name>` unit identity (no fleet prefix).
 #              Composed into runtime/_host/timers/ and enrolled once per host
-#              by `setup-system`. Opt-in host jobs ship DORMANT here
+#              by sealed `host activate`. Opt-in host jobs ship DORMANT here
 #              (`enroll: false`) and are armed per host (see below).
 #   defaults:  Per-fleet defaults, mirroring fleet.yaml's `defaults:` shape and
 #              deep-merged down into every bot. `jobs:` drives fleet timer units
@@ -27,7 +27,7 @@
 # advertised workflow ran nowhere unless an operator had read a dozen source
 # comments. What DOES stay opt-in is named where the operator looks --
 # `claudlobby host doctor` (the `switches` rung), `claudlobby plane doctor`, and
-# the closing table of lib/setup-fleet and lib/setup-system -- each with the
+# the closing table of lib/setup-fleet and `host doctor --switches` -- each with the
 # one line that arms it. The registry behind those surfaces is
 # claudlobby/switches.py; a knob with no row there is reported as a DEAD flag
 # by the validator, so this file and that one cannot drift apart quietly.
@@ -36,10 +36,10 @@
 # because their enrollers differ. A FLEET job is composed-but-dormant: the
 # units are emitted and listed in a DORMANT manifest beside them, which
 # setup-fleet skips. A HOST job composes NO UNIT AT ALL (compose-time
-# dormancy, chunk-N fold): setup-system enrolls every composed
+# dormancy, chunk-N fold): the retired setup-system enrolled every composed
 # claudlobby-* unit it finds, so not composing is the only gate that cannot
 # be forgotten, and an armed->unarmed flip PRUNES the composed units. Units
-# an EARLIER release installed are walked back by setup-system on its next
+# an EARLIER release installed are removed by sealed activation on its next
 # run, out loud -- dormancy that only ever applied forward left the one job
 # that mutates operator source enabled on every host that had run the
 # installer. A fleet opts a FLEET job in via fleet.yaml:
@@ -149,10 +149,10 @@ host:
     # opt-in and a root pull must never arrive with it switched on.
     #
     # Its dormancy is now ENFORCED rather than merely declared. Before the
-    # defaults flip this flag had NO code effect at all (#1385): setup-system
+    # defaults flip this flag had NO code effect at all (#1385): the old installer
     # enrolled every composed unit it found, so every host running the
     # installer enrolled this job regardless of the false below. An unarmed
-    # host job now composes NO unit, and setup-system additionally WALKS BACK
+    # host job now composes NO unit, and sealed activation removes
     # any unit an earlier release installed -- which is what makes "stays
     # opt-in" a fact rather than a comment, on a host that already ran.
     #
@@ -185,7 +185,7 @@ host:
     # event per run. OPT-IN: it mutates operator source. Arm it in THIS host's
     # override, ~/.config/claudlobby/system.yaml:
     #   host: { jobs: { pull-root: { enroll: true } } }
-    # then generate + lib/setup-system. Pin the host at a commit with a hold in
+    # then stage with config plan, inspect config diff, and host activate. Pin the host at a commit with a hold in
     # the same file -- who, why and until, or the job still holds and pages:
     #   host: { jobs: { pull-root: { enroll: true, hold: { sha: <sha>,
     #     by: <who>, reason: <why>, until: <YYYY-MM-DD> } } } }
@@ -214,7 +214,7 @@ host:
     # Arm it in THAT host's override, ~/.config/claudlobby/system.yaml, which host jobs
     # read directly (fleet.yaml cannot reach them):
     #   host: { jobs: { vault-sync: { enroll: true } } }
-    # then run lib/setup-system. Ship dormant, arm one host, watch
+    # then stage with config plan, inspect config diff, and host activate. Ship dormant, arm one host, watch
     # vault.sync_ok for a week, then arm the second.
     #
     # 15min: the cadence IS the deliverable -- it bounds how long a wedge can
@@ -262,9 +262,8 @@ host:
     # the Tailscale Serve step -- stays deliberately the operator's, and is
     # the only part of this that could send anything anywhere.
     #
-    # Needs the [plane-ui] extra (fastapi + uvicorn), which lib/setup-system
-    # installs. Where it does not import, generate composes NO unit and the
-    # switch table prints the pip line as this row's arm: an enrolled
+    # Needs the [plane-ui] extra (fastapi + uvicorn) in the sealed release. Where it does not import, generate composes NO unit and the
+    # switch table names the release extra as this row's arm: an enrolled
     # Restart=always unit whose process exits 1 is a crash loop every 5s
     # forever, not an honest failure (see documentation/runbooks/plane-view.md).
     plane-view:
@@ -345,7 +344,7 @@ host:
     #   host:
     #     jobs:
     #       boot-capture: { enroll: true }
-    # then `claudlobby generate` + `lib/setup-system`.
+    # then stage with `config plan`, inspect `config diff`, and apply `host activate`.
     #
     # The stamp half of #1265 (inject_stamp, called from start-bot.sh) has no
     # enrollment step at all -- it runs on every bot start the instant lib/ moves

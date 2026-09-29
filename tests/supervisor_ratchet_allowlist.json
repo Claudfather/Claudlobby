@@ -14,7 +14,6 @@
   "lib/rehearse-briefing-timer.sh": 9,
   "lib/rehearse-env-cascade.sh": 3,
   "lib/setup-fleet": 11,
-  "lib/setup-system": 2,
   "lib/spin-down-bot.sh": 2,
   "lib/spin-up-bot.sh": 1,
   "lib/validate-bot-change.sh": 6

@@ -88,7 +88,8 @@ See [`documentation/architecture/overview.md`](documentation/architecture/overvi
 claudlobby config validate              # check fleet.yaml against library/
 claudlobby generate              # compose runtime/bots/ from fleet.yaml
 claudlobby generate --bot <name> # compose only one bot
-claudlobby host-timers           # compose host-global timer units from system.yaml
+claudlobby host setup            # assemble a sealed cold-host release (wheel, lock, wheelhouse)
+claudlobby --fleet <name> fleet setup  # stage and activate fleet and host jobs
 claudlobby library list          # show available personas / skills / mcp / etc.
 claudlobby config diff [--bot <name>]  # show current rendered drift without values
 claudlobby config diff <PLAN_ID>       # inspect staged paths and state digests

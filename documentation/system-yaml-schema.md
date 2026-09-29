@@ -15,11 +15,9 @@ in the shared install itself, which affects every fleet that install serves.
 
 Composed by `claudlobby generate` — unconditionally, on every run, for any
 fleet (see [Composition & enrollment](#composition--enrollment)) — and by the
-fleet-independent `claudlobby host-timers` subcommand. Enrolled by
-`lib/setup-system` (the `host:` tier, once per host) and `lib/setup-fleet`
-(the `defaults:` tier's jobs, per fleet) — composing and enrolling are
-separate steps, and getting that split right matters for the dormancy
-semantics below. There is **no dedicated `claudlobby config validate` or
+sealed `config plan` composition. The selected `host activate` step enrolls
+those host and fleet units together; `fleet setup` performs both staging and
+activation for a first fleet. See [Getting started](getting-started.md). There is **no dedicated `claudlobby config validate` or
 `claudlobby host doctor` coverage of this file** — see
 [Validation & visibility](#validation--visibility).
 
@@ -122,7 +120,7 @@ knowing before you write a `schedule:`:
 mutates operator source, or sends outbound to people at scale.** Whatever
 stays opt-in is NAMED where the operator looks — `claudlobby host doctor`'s
 `switches` rung, `claudlobby plane doctor`'s plane-scoped subset, and the
-closing table of `lib/setup-fleet` / `lib/setup-system` — each with the one
+closing table of `lib/setup-fleet` / `host activate` — each with the one
 line that arms it.
 
 The rule is not caution about defaults; it is that **a behavior nobody can
@@ -146,27 +144,27 @@ leftover flag without anyone maintaining a list.
 | Switch | Ships | Scope | Carrier | Flip it with |
 |---|---|---|---|---|
 | `boot-brief` | **off** — standing context per session; rollout operator-held pending ratified cost | door | fleet.yaml | bots.<bot>.brief.on_start: true in fleet.yaml, then generate + lib/setup-fleet |
-| `boot-capture` | **off** — no deployment gate — lib/ is read on demand per use, so the pull that delivers it is in force on every bot at once and nothing can be staged ahead. Enrollment is the only canary available; flip it on once one host has run it through a real boot | host job | system.yaml enroll | host.jobs.boot-capture.enroll: true in this host's override, ~/.config/claudlobby/system.yaml (host jobs bypass the fleet merge), then generate + lib/setup-system |
+| `boot-capture` | **off** — no deployment gate — lib/ is read on demand per use, so the pull that delivers it is in force on every bot at once and nothing can be staged ahead. Enrollment is the only canary available; flip it on once one host has run it through a real boot | host job | system.yaml enroll | host.jobs.boot-capture.enroll: true in this host's override, ~/.config/claudlobby/system.yaml (host jobs bypass the fleet merge), then config plan + config diff + host activate |
 | `boot-capture-stamp` | **off** — no deployment gate, and more sharply than boot-capture: this half has no enrollment step at all, so a root pull reaches every bot start immediately | door | fleet.yaml env: → bot.conf | BOOT_CAPTURE_ENABLED=1 in fleet.yaml bots.NAME.env: (then generate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `claude-staged-update` | **off** — no deployment gate — it changes which claude binary every bot on the host launches, and lib/ is read on demand, so a root pull would move the whole host at once. Armed per host, on the operator's say-so, after the rehearsal (lib/rehearse-staged-claude-update.sh) | door | host/root .env | CLAUDLOBBY_STAGED_CLAUDE_UPDATE_ENABLED=1 in the host or root .env |
 | `code-audit-sweep` | **off** — model spend + outbound GitHub issues | fleet job | fleet.yaml | sweep.enabled: true in fleet.yaml (plus owner_bot and repos), then generate + lib/setup-fleet |
 | `manager-checkin` | **off** — model spend — one manager turn per idle beat — and it injects into a live session | fleet job | fleet.yaml | defaults.jobs.manager-checkin.enroll: true in fleet.yaml, then generate + lib/setup-fleet |
 | `mcp-package-probe` | **off** — reaches the NETWORK on a compose. A generate must stay offline and fast by default, and a registry outage must never be the reason a fleet cannot compose. The offline half of the check (is the package pinned?) is unconditional and needs no flag | generate | fleet .env | CLAUDLOBBY_MCP_PROBE_ENABLED=1 in the fleet-tier .env |
 | `plane-prune-system-events` | **off** — deletes data — and unlike the sample lane beside it, this one could delete a RECORD rather than a sample, which is why it is an allowlist: a wrongly-pruned type breaks selfstart-snapshot.sh's boot gate, which fails closed on an unreachable receipt read but reads an ABSENT receipt as a certain no-receipt | door | host/root .env | PLANE_PRUNE_SYSTEM_EVENTS_ENABLED=1 in the host or root .env |
-| `pull-root` | **off** — mutates operator source: it fast-forwards the install every bot on the host runs | host job | system.yaml enroll | host.jobs.pull-root.enroll: true in this host's override, ~/.config/claudlobby/system.yaml (host jobs bypass the fleet merge), then generate + lib/setup-system |
+| `pull-root` | **off** — mutates operator source: it fast-forwards the install every bot on the host runs | host job | system.yaml enroll | host.jobs.pull-root.enroll: true in this host's override, ~/.config/claudlobby/system.yaml (host jobs bypass the fleet merge), then config plan + config diff + host activate |
 | `session-digest` | **off** — model spend (a Haiku pass per finished session) | door | fleet.yaml env: → bot.conf | SESSION_DIGEST_ENABLED=1 in fleet.yaml bots.NAME.env: (then generate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `shared-config-isolation` | **off** — no deployment gate: a composed deny binds on the bot's next tool call with no restart in between, and an unreviewed generate would carry a default-on rule set onto every bot of every fleet with nobody choosing to — the manifest is the only place one bot can go first | generate | fleet.yaml bots.<bot> → generate | bots.<bot>.isolation.shared_config: true in fleet.yaml for ONE bot first, then claudlobby --fleet <fleet> generate --bot <bot> (it binds on that bot's next tool call, no restart); widen to defaults.isolation.shared_config once it has run clean |
-| `update-siblings` | **off** — mutates operator source | host job | system.yaml enroll | host.jobs.update-siblings.enroll: true in this host's override, ~/.config/claudlobby/system.yaml (host jobs bypass the fleet merge), then generate + lib/setup-system |
-| `vault-sync` | **off** — commits and pushes the vault on every host it runs on — mutates operator source, and a second host arming it before the first has run a week doubles the blast radius of a bad sync rather than halving the risk | host job | system.yaml enroll | host.jobs.vault-sync.enroll: true in this host's override, ~/.config/claudlobby/system.yaml (host jobs bypass the fleet merge), then generate + lib/setup-system |
+| `update-siblings` | **off** — mutates operator source | host job | system.yaml enroll | host.jobs.update-siblings.enroll: true in this host's override, ~/.config/claudlobby/system.yaml (host jobs bypass the fleet merge), then config plan + config diff + host activate |
+| `vault-sync` | **off** — commits and pushes the vault on every host it runs on — mutates operator source, and a second host arming it before the first has run a week doubles the blast radius of a bad sync rather than halving the risk | host job | system.yaml enroll | host.jobs.vault-sync.enroll: true in this host's override, ~/.config/claudlobby/system.yaml (host jobs bypass the fleet merge), then config plan + config diff + host activate |
 | `weekly-worker-restart` | **off** — bounces live worker sessions (context is the thing this system exists to keep) | fleet job | fleet.yaml | defaults.jobs.weekly-worker-restart.enroll: true in fleet.yaml, then generate + lib/setup-fleet |
 | `worker-unassigned` | **off** — pages the manager about the assignment loop and has no rate guard beyond the debounce | door | fleet.yaml env: → bot.conf | OBSERVABILITY_UNASSIGNED_CHECK=1 in fleet.yaml bots.NAME.env: (then generate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `pane-send-chunking` | **on** | door | fleet.yaml env: → bot.conf | PANE_SEND_CHUNK_BYTES=0 in fleet.yaml bots.NAME.env: (then generate; the bot reads it at its next start — a .env tier does NOT reach a session) |
-| `plane-daemon` | **on** | host service | system.yaml enroll | host.jobs.plane-daemon.enroll: false in this host's override, ~/.config/claudlobby/system.yaml, then generate (composes no unit) + lib/setup-system (walks back the installed one) |
+| `plane-daemon` | **on** | host service | system.yaml enroll | host.jobs.plane-daemon.enroll: false in this host's override, ~/.config/claudlobby/system.yaml, then config plan + config diff + host activate (removes the installed unit) |
 | `plane-expire` | **on** | host job | host/root .env | PLANE_EXPIRE_ENABLED=0 in the host or root .env |
-| `plane-host-probe` | **on** | host job | system.yaml enroll | host.jobs.plane-host-probe.enroll: false in this host's override, ~/.config/claudlobby/system.yaml, then generate (composes no unit) + lib/setup-system (walks back the installed one) |
+| `plane-host-probe` | **on** | host job | system.yaml enroll | host.jobs.plane-host-probe.enroll: false in this host's override, ~/.config/claudlobby/system.yaml, then config plan + config diff + host activate (removes the installed unit) |
 | `plane-prune` | **on** | host job | host/root .env | PLANE_PRUNE_ENABLED=0 in the host or root .env |
 | `plane-recording` | **on** | door | fleet .env | PLANE_EMIT_DISABLED=1 in the fleet-tier .env — the ruled harness exemption; silences EVERY door at once |
-| `plane-view` | **on** | host service | system.yaml enroll | host.jobs.plane-view.enroll: false in this host's override, ~/.config/claudlobby/system.yaml, then generate (composes no unit) + lib/setup-system (walks back the installed one) |
+| `plane-view` | **on** | host service | system.yaml enroll | host.jobs.plane-view.enroll: false in this host's override, ~/.config/claudlobby/system.yaml, then config plan + config diff + host activate (removes the installed unit) |
 | `registry-scan` | **on** | generate | fleet .env | PLANE_EMIT_ENABLED=0 in the fleet-tier .env |
 | `spindown-receipt` | **on** | door | fleet.yaml env: → bot.conf | SPINDOWN_RECEIPT_ENABLED=0 in fleet.yaml bots.NAME.env: (then generate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `task-recheck` | **on** | fleet job | fleet .env | TASK_RECHECK_ENABLED=0 in the fleet-tier .env |
@@ -290,8 +288,8 @@ override instead, outside every tracked tree:
 host: { jobs: { claude-update: { enroll: false } } }
 ```
 
-then `claudlobby generate` (or `claudlobby host-timers`) and `lib/setup-system`
-for the default host namespace.
+then stage with `config plan`, inspect with `config diff`, and apply with
+`host activate` from the sealed release.
 `$CLAUDLOBBY_HOST_SYSTEM_YAML` names another file. `config.load_host_jobs` applies it:
 
 - **Merged per job and per field.** A job the override does not name keeps its
@@ -316,7 +314,7 @@ different native label. Set `CLAUDLOBBY_HOST_SYSTEM_YAML` to that private
 override while preparing the candidate; generated host units carry the path
 so later CLI job invocations resolve the same namespace. Custom prefixes
 require the sealed CLI host configuration and activation path. The legacy
-`lib/setup-system` discovery uses `claudlobby-*` and does not enroll custom
+`host activate` discovery uses `claudlobby-*` and does not enroll custom
 prefixes.
 
 Keep the reason with the change, as a YAML comment beside it: who, why, and what
@@ -332,7 +330,7 @@ enforcement mechanism — and even which value counts as the default — is
 |---|---|---|---|
 | Fleet job (`defaults.jobs`, e.g. `weekly-worker-restart`) | enrolled (`enroll` defaults to `True`) | compose-time listing **and** enroll-time skip | The unit files ARE written; the job's basename is additionally added to a `DORMANT` manifest sidecar in the fleet's `runtime/fleet/timers/`. `lib/setup-fleet` and `reconcile-fleet.sh`'s job-drift audit both call the shared `unit_is_dormant()` helper (`lib-common.sh`) against that manifest and skip enrolling/flagging anything listed in it. A fleet opts a dormant job in with `defaults: { jobs: { <name>: { enroll: true } } }` in its own `fleet.yaml` — see [`fleet-yaml-schema.md`'s `fleet.defaults.jobs.<name>.enroll`](fleet-yaml-schema.md#fleetdefaultsjobsnameenroll). |
 | Host service (`host.jobs`, `unit: service`, e.g. `plane-daemon`) | **dormant** (`cfg.get("enroll") is True` — a strict identity check, so absence or any non-`True` value is dormant) | compose-time only | If `enroll` is not exactly `true`, **zero files are written** — there is nothing for `setup-system` to find, let alone enroll. Note the default direction is the *opposite* of a plain timer job: a service is dormant unless explicitly armed; a timer is enrolled unless explicitly parked. |
-| Host timer (`host.jobs`, no `unit: service`, e.g. `update-siblings`) | enrolled | compose-time only, **plus a walk-back** | Same shape as a host SERVICE since the chunk-N fold: if `enroll` is `false`, **zero files are written** (and any previously composed unit is pruned), so there is nothing for `setup-system` to find. It is not the fleet-job shape because the enrollers differ — `setup-system` enrols every composed `claudlobby-*` unit it finds, so not composing is the only gate that cannot be forgotten, and a manifest describing units nobody composed is a second mechanism that can only disagree with the first. What compose-time dormancy cannot reach — a unit an EARLIER release already installed — `lib/setup-system` disables and removes on its next run (`walk_back_uncomposed_host_units`), out loud. A host opts one in through **its own `system.yaml`** — `host: { jobs: { <name>: { enroll: true } } }` — never through `fleet.yaml`, which cannot reach a host job at all. |
+| Host timer (`host.jobs`, no `unit: service`, e.g. `update-siblings`) | enrolled | compose-time only, **plus a walk-back** | Same shape as a host SERVICE since the chunk-N fold: if `enroll` is `false`, **zero files are written** (and any previously composed unit is pruned), so there is nothing for `setup-system` to find. It is not the fleet-job shape because the enrollers differ — `setup-system` enrols every composed `claudlobby-*` unit it finds, so not composing is the only gate that cannot be forgotten, and a manifest describing units nobody composed is a second mechanism that can only disagree with the first. What compose-time dormancy cannot reach — a unit an EARLIER release already installed — `host activate` disables and removes on its next run (`walk_back_uncomposed_host_units`), out loud. A host opts one in through **its own `system.yaml`** — `host: { jobs: { <name>: { enroll: true } } }` — never through `fleet.yaml`, which cannot reach a host job at all. |
 
 ### History: `update-siblings`'s `enroll: false` used to do nothing
 
@@ -340,11 +338,11 @@ enforcement mechanism — and even which value counts as the default — is
 the defaults flip.** For most of this file's life the flag above had no code
 effect at all. `compose_host_timers` read `enroll` only inside the
 `cfg.get("unit") == "service"` branch, so a plain host timer's units were
-written every `generate` regardless; and `lib/setup-system`'s `phase_host_jobs`
+written every `generate` regardless; and `host activate`'s `phase_host_jobs`
 globbed `claudlobby-*.timer` / `claudlobby-*.plist` and enrolled **every file
 it found**, never calling `unit_is_dormant()` — which had exactly two callers,
 both fleet-scoped — because `compose_host_timers` wrote no host manifest for
-it to check. So a plain `lib/setup-system` run enrolled `update-siblings`, the
+it to check. So a plain `host activate` run enrolled `update-siblings`, the
 one host job that **mutates operator source**, on every host, with a comment
 beside it claiming the opposite.
 
@@ -479,45 +477,19 @@ that registry, not this file.
 
 Output locations:
 
-- **Host jobs** compose to `runtime/_host/timers/` under the **install
-  root** (`paths.root`) — never under a fleet directory, since host jobs are
-  host-global. `claudlobby generate` composes this directory **on every run,
-  for any fleet** (`compose_host_timers(paths)` is called unconditionally
-  from `cmd_generate`, right after the fleet-level timers, with a comment
-  explicitly noting host jobs are "platform equipment, not fleet config"),
-  and the fleet-independent `claudlobby host-timers` subcommand composes the
-  same thing without needing a `fleet.yaml` at all — useful on a cold host
-  before any fleet has been set up.
-- **Fleet jobs** (`defaults.jobs`) compose to `<fleet-runtime>/fleet/timers/`
-  — `local/<fleet>/runtime/fleet/timers/` in overlay mode, `runtime/fleet/timers/`
-  in root mode — alongside a `DORMANT` manifest and, independently, a
-  `BRIEFING_EXPECTED` manifest for the unrelated per-(bot,slot) briefing
-  timer family.
-
-Enrollment is a **separate step** from composition in both cases —
-`generate` never touches systemd/launchd directly:
-
-- `lib/setup-system` enrolls the `host:` tier — once per host, not per fleet.
-  Its `phase_host_jobs` phase first runs `claudlobby host-timers` to
-  (re-)compose, then enrolls through the same generic installer scripts
-  fleet timers use (`install_fleet_timer.sh` / `install_fleet_timer_launchd.sh`,
-  pointed at the host timers dir via `TIMER_DIR`/`UNIT_NAME` overrides), plus
-  the service-specific `install-host-service-systemd.sh` for a `.service`
-  with no `.timer` sibling.
-- `lib/setup-fleet` enrolls the `defaults.jobs` tier — per fleet. It skips
-  anything the `DORMANT` manifest lists (`unit_is_dormant()`), and
-  `reconcile-fleet.sh`'s job-drift audit applies the same skip so a
-  composed-but-dormant job never reads as "missing" in a health check.
+- **Host jobs** compose to the selected release's staged host-unit set, one per
+  host. **Fleet jobs** compose with their selected fleet. A `config plan`
+  records both; `config diff` shows the proposed effect; `host activate`
+  enrolls or removes units through the native owner. Initial `fleet setup`
+  performs these stages and activation together. Neither a standalone
+  compose-only host command nor a checkout installer is part of this path.
 
 ## Changing a running fleet or host
 
-- **A `host:` edit** means hand-editing `claudlobby/system.yaml` in the
-  shared install — there's no per-host overlay to edit instead. It reaches a
-  host in two steps: `claudlobby generate` (any fleet) or
-  `claudlobby host-timers` recomposes `runtime/_host/timers/`, then
-  `lib/setup-system` re-enrolls. Because the install is shared, the change is
-  **host-wide**: every fleet running out of that install picks it up, not
-  just the one whose `generate` happened to trigger the recompose.
+- **A `host:` override** is host-wide. Stage it with the sealed release's
+  `config plan`, inspect `config diff`, then apply `host activate`; that
+  activation owns both composition and native enrollment. See
+  [Getting started](getting-started.md#4-activate-and-diagnose).
 - **A `defaults:` edit** (hooks/observability/jobs) flows through the normal
   per-fleet `generate` cycle like any other system-tier-sourced default, and
   is subject to the same carrier-dependent canary-window rules as everything

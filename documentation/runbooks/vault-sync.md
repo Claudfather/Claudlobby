@@ -25,18 +25,16 @@ host:
       enroll: true
 ```
 
-then:
-
-```
-lib/setup-system
-systemctl --user list-timers | grep vault-sync      # Linux
-```
+then stage with `config plan`, inspect `config diff`, and apply with
+`host activate` from the sealed release. On Linux, inspect the enrolled
+timer with `systemctl --user list-timers | grep vault-sync`.
 
 Arm **one** host, watch `vault.sync_ok` for a week, then arm the second.
 `claudlobby host doctor --switches` lists the job either way, so the off state is
 visible rather than merely documented.
 
-**Backout:** `enroll: false` + `lib/setup-system` — the unit disappears.
+**Backout:** set `enroll: false`, stage and inspect a new plan, then
+`host activate` removes the unit.
 
 **If you arm this once the engine carries `sync --check`, read the first few
 `vault.state` samples yourself and confirm they carry the verdict you expect

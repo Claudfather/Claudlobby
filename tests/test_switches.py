@@ -430,11 +430,8 @@ def test_status_header_names_a_disabled_reaction(tmp_path):
     assert switches_off_note("artemis-data", _resolve(tmp_path / "b")) == ""
 
 
-@pytest.mark.parametrize("door", ["lib/setup-fleet", "lib/setup-system"])
-def test_both_setup_doors_end_by_printing_the_table(door):
-    """One renderer, called by both — never a bash copy. A second table in
-    shell is how the printed truth and the actual truth drift."""
-    body = (REPO / door).read_text()
+def test_legacy_fleet_setup_prints_the_switch_table():
+    body = (REPO / "lib/setup-fleet").read_text()
     assert "doctor --switches" in body
 
 
@@ -625,11 +622,11 @@ def test_extra_available_reads_the_REAL_interpreter_both_ways():
         mp.undo()
 
 
-def test_the_table_arms_the_view_with_PIP_when_the_extra_is_missing(
+def test_the_table_names_the_release_extra_when_it_is_missing(
         tmp_path, monkeypatch):
     """The other half of F1: the switch table stops saying "on". A row that
     claims a service is running when no unit exists sends a reader to debug
-    supervision instead of installing two wheels."""
+    supervision instead of assembling a release with the required extra."""
     from claudlobby import switches as _sw
 
     monkeypatch.setattr(_sw, "extra_available", lambda extra: False)
@@ -637,8 +634,8 @@ def test_the_table_arms_the_view_with_PIP_when_the_extra_is_missing(
     st = _state(rows, "plane-view")
     assert st.on is False and st.unknown is False
     assert "plane-ui" in st.source
-    assert "pip install -e '.[plane-ui]'" in st.arm
-    assert "pip install -e '.[plane-ui]'" in _sw.format_table(rows)
+    assert "[plane-ui] extra in its offline wheelhouse" in st.arm
+    assert "[plane-ui] extra in its offline wheelhouse" in _sw.format_table(rows)
 
 
 def test_the_composer_arming_tables_are_derived_not_listed():

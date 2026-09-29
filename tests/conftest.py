@@ -310,23 +310,6 @@ def booby_trap_git(bindir):
     return Path(bindir) / "git-was-called"
 
 
-SETUP_SYSTEM = Path(__file__).resolve().parent.parent / "lib" / "setup-system"
-
-
-@pytest.fixture(scope="session")
-def setup_system_dry_run(_isolate_plane_session):
-    """One real `setup-system --dry-run` for the whole suite.
-
-    The 10-phase script probes real tools (dpkg/brew/node/python3/claude/jq), so
-    it costs ~0.6s per invocation and is worth running exactly once. Session
-    scope rather than module scope because more than one module now asserts
-    against this output; a per-module fixture ran it again for each.
-    """
-    return subprocess.run(
-        [str(SETUP_SYSTEM), "--dry-run"], capture_output=True, text=True, timeout=120
-    )
-
-
 _SYSTEM_BIN_DIRS = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
 
 

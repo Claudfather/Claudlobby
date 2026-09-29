@@ -34,12 +34,6 @@ def register_subparsers(sub) -> None:
     )
     pg.set_defaults(func=_command("core", "cmd_generate"))
 
-    pht = sub.add_parser(
-        "host-timers",
-        help="Compose host-global timer units from system.yaml host.jobs",
-    )
-    pht.set_defaults(func=_command("core", "cmd_host_timers"))
-
     from ._library_parsers import register_library_subparsers
     register_library_subparsers(sub)
 
