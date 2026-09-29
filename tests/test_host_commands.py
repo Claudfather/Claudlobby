@@ -172,6 +172,18 @@ def test_generated_context_and_existing_estate_refuse_with_inspection_guidance(c
     assert "SECRET-value" not in json.dumps(native) and snapshot(root) == before
 
 
+def test_activate_discloses_lock_preflight_without_claiming_a_pending_step(candidate, monkeypatch, capsys):
+    root, _, plan, directory = candidate
+    monkeypatch.setattr(activation, "bootstrap_activation", lambda *_:
+                        (_ for _ in ()).throw(state.ActivationError("another host activation holds the lock")))
+    result = call(capsys, ["--root", str(root), "--json", "host", "activate", plan.plan_id,
+                           "--install-directory", str(directory)], 4)
+    assert result["data"]["recorded_activation"] is None
+    assert result["error"]["message"] == (
+        "conflict: host activation lock is held; no activation record was created")
+    assert "pending step" not in result["error"]["hint"]
+
+
 def test_host_status_distinguishes_absent_active_and_interrupted_recorded_state(candidate, capsys, tmp_path):
     root, release, plan, _ = candidate
     empty = tmp_path / "empty"

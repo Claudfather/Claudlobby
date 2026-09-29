@@ -2070,6 +2070,9 @@ resolve_peer_socket() {
 # bot_tmux <socket> <tmux-args...>
 # The single chokepoint for socket-targeted tmux calls: runs a subcommand
 # against the per-bot server identified by <socket> (`tmux -L <socket> ...`).
+# A native start keeps admission FD 9 in its parent shell. The tmux client can
+# spawn a persistent server, so close that descriptor only for this child:
+# a killed start shell must not leave its shared activation lock in the server.
 #
 # Unset-socket contract: an empty <socket> while FLEET_NAME is set is refused
 # (never `tmux -L ""`, which would silently fall back to the shared default
@@ -2083,10 +2086,10 @@ bot_tmux() {
             echo "bot_tmux: empty socket while FLEET_NAME is set — refusing 'tmux -L \"\"' (would defeat per-bot isolation)" >&2
             return 2
         fi
-        "$_TMUX_BIN" "$@"
+        "$_TMUX_BIN" "$@" 9<&-
         return $?
     fi
-    "$_TMUX_BIN" -L "$socket" "$@"
+    "$_TMUX_BIN" -L "$socket" "$@" 9<&-
 }
 
 # emit_fleet_event <type> <source> [data_json] [bot_dir] [bot_id]

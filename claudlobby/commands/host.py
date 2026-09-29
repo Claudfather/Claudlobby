@@ -102,6 +102,7 @@ def _activate(args, root):
     except Exception as exc:
         from ..activation_state import ActivationError
         data.update(recorded_activation=_recorded(root, args.activation_id), recording="unknown")
+        hint = _hint(root)
         if isinstance(exc, (ImportError, OSError)):
             code, message = "unavailable", "unavailable: cold-host activation dependency or native access"
         elif isinstance(exc, ActivationError):
@@ -110,13 +111,16 @@ def _activate(args, root):
             refusal = re.match(r"\A(svc_activation_[a-z_]+) refused \(([0-9]{1,3})\):", str(exc))
             code, message = "conflict", (f"conflict: {refusal[1]} refused ({refusal[2]})"
                                          if refusal else "conflict: activation did not complete; inspect its pending step")
+            if data["recorded_activation"] is None and str(exc) == "another host activation holds the lock":
+                message = "conflict: host activation lock is held; no activation record was created"
+                hint = "inspect native starter and private tmux lock holders before retrying"
         elif isinstance(exc, (ValueError, RuntimeError)):
             code, message = "conflict", "conflict: activation did not complete; inspect its pending step"
         else:
             diagnostic = str(uuid4())
             print(f"diagnostic {diagnostic}: {type(exc).__name__}", file=sys.stderr)
             code, message = "internal_error", f"internal error; see {diagnostic}"
-        raise CommandFailure(code, message, data=data, release_id=executing, hint=_hint(root)) from exc
+        raise CommandFailure(code, message, data=data, release_id=executing, hint=hint) from exc
     saved = _recorded(root, args.activation_id)
     if (record.status != "active" or record.activation_id != args.activation_id or saved is None
             or saved["verification"] != "verified" or saved["status"] != "active"

@@ -1,8 +1,12 @@
 """Guard placement and refusal use real entry scripts; no lifecycle is reached."""
 
 from pathlib import Path
+import fcntl
+import os
 import shlex
+import signal
 import subprocess
+import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,3 +44,48 @@ def test_guard_is_only_at_native_start_and_watchdog_boundary():
         assert source.index(f"native_admission {operation}") < source.index('install_error_trap "$BOT_DIR"')
     for name in ("lib-common.sh", "spin-down-bot.sh", "pre-stop-handoff.sh"):
         assert "runtime-admission.sh" not in (ROOT / "lib" / name).read_text()
+
+
+def test_private_tmux_child_cannot_retain_native_activation_descriptor(tmp_path):
+    """A reaped starter cannot leave its admission lease in a surviving server."""
+    lock = tmp_path / "activation.lock"
+    lock.write_text("")
+    child_pid = tmp_path / "server.pid"
+    fake_tmux = tmp_path / "tmux"
+    fake_tmux.write_text("#!/bin/bash\n"
+                         "sleep 5 >/dev/null 2>&1 &\n"
+                         f"echo $! > {shlex.quote(str(child_pid))}\n")
+    fake_tmux.chmod(0o755)
+    script = f"""
+set -eu
+TMUX_BIN={shlex.quote(str(fake_tmux))}
+. {shlex.quote(str(ROOT / 'lib/lib-common.sh'))}
+exec 9<{shlex.quote(str(lock))}
+{shlex.quote(sys.executable)} -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_SH)'
+bot_tmux private new-session
+echo ready
+read -r finish
+"""
+    process = subprocess.Popen(["/bin/bash", "-c", script], stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               text=True, start_new_session=True)
+    server = None
+    try:
+        assert process.stdout.readline().strip() == "ready"
+        server = int(child_pid.read_text())
+        os.kill(server, 0)  # The detached server is still alive.
+        os.kill(process.pid, signal.SIGKILL)  # EXIT cleanup cannot run.
+        process.wait(timeout=5)
+        os.kill(server, 0)
+        with lock.open("rb") as stream:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+    finally:
+        if process.poll() is None:
+            os.kill(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+        if server is not None:
+            try:
+                os.kill(server, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
