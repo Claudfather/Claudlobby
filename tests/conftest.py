@@ -196,6 +196,30 @@ def selected_test_cli(test_cli, monkeypatch, _isolate_claudlobby_root):
     return test_cli
 
 
+@pytest.fixture(scope="session")
+def built_test_cli(tmp_path_factory):
+    """A private wheel CLI for source instruments that need built resources."""
+    from tests.test_package_resources import _copy_installed_dependencies
+
+    owned = tmp_path_factory.mktemp("built-cli")
+    dist = owned / "dist"
+    subprocess.run([sys.executable, "-m", "build", "--no-isolation", "--wheel",
+                    "--outdir", str(dist), str(_TEST_TREE)], check=True,
+                   capture_output=True, text=True)
+    wheel, = dist.glob("*.whl")
+    venv = owned / "venv"
+    subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
+    python = venv / "bin/python"
+    subprocess.run([python, "-m", "pip", "install", "--no-index", "--no-deps",
+                    "--no-compile", str(wheel)], check=True,
+                   capture_output=True, text=True)
+    installed = Path(subprocess.check_output(
+        [python, "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+        text=True).strip())
+    _copy_installed_dependencies(wheel, installed)
+    return venv / "bin/claudlobby"
+
+
 @pytest.fixture
 def scratch_plane_env(tmp_path_factory, test_cli):
     """Explicit opt-in for intentional recording; use with constructed_env."""

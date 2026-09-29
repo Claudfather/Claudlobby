@@ -22,10 +22,15 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.usefixtures("selected_test_cli")
+pytestmark = pytest.mark.usefixtures("_selected_built_cli")
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_DIR / "harness" / "ab-comms-eval.sh"
+
+
+@pytest.fixture
+def _selected_built_cli(built_test_cli, monkeypatch):
+    monkeypatch.setenv("CLAUDLOBBY_CLI", str(built_test_cli))
 
 
 def test_private_compose_refuses_selected_data_root(tmp_path):

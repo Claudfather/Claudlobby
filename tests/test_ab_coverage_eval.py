@@ -16,7 +16,9 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.usefixtures("selected_test_cli")
+from tests.test_ab_comms_eval import _selected_built_cli  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures("_selected_built_cli")
 
 
 from tests.conftest import load_lib_module

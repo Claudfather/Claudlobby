@@ -33,7 +33,9 @@ def _run(root, socket_dir, env):
     )
 
 
-def test_validation_setup_uses_owned_transport_and_preflighted_cli(tmp_path, scratch_plane_env):
+def test_validation_setup_uses_owned_transport_and_preflighted_cli(
+    tmp_path, scratch_plane_env, built_test_cli
+):
     root = tmp_path / "root"
     root.mkdir()
     socket_dir = scratch_plane_env.socket_dir()
@@ -42,15 +44,18 @@ def test_validation_setup_uses_owned_transport_and_preflighted_cli(tmp_path, scr
     cli.write_text(
         '#!/bin/bash\n'
         f'printf "called\\n" >> {shlex.quote(str(cli_calls))}\n'
-        f'exec {shlex.quote(str(scratch_plane_env.cli))} "$@"\n'
+        f'exec {shlex.quote(str(built_test_cli))} "$@"\n'
     )
     cli.chmod(0o755)
-    (tmp_path / "python").symlink_to(Path(scratch_plane_env.cli).parent / "python")
+    (tmp_path / "python").symlink_to(built_test_cli.parent / "python")
     env = constructed_env(HOME=tmp_path, TMPDIR=tmp_path,
                           **scratch_plane_env(root, socket=socket_dir / "plane.sock", cli=cli))
     native_guard = (REPO / "lib/runtime-admission.sh").read_bytes()
     result = _run(root, socket_dir, env)
-    assert result.returncode == 0, result.stdout + result.stderr
+    daemon_log = root / "state/plane/fixture-daemon.log"
+    assert result.returncode == 0, result.stdout + result.stderr + (
+        daemon_log.read_text() if daemon_log.exists() else ""
+    )
     assert (REPO / "lib/runtime-admission.sh").read_bytes() == native_guard
     assert (root / "lib/runtime-admission.sh").read_text() == (
         'native_admission() { _NATIVE_ADMISSION_PYTHON="${PLANE_EMIT_CLI%/*}/python"; '
