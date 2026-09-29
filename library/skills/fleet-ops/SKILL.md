@@ -14,6 +14,9 @@ tool_grants:
   - "Bash(claudlobby task escalate --help)"
   - "Bash(claudlobby task nudge --help)"
   - "Bash(claudlobby workstream --help)"
+  - "Bash(claudlobby bot status --help)"
+  - "Bash(claudlobby fleet status --help)"
+  - "Bash(claudlobby fleet uptime --help)"
   - "Bash(claudlobby bot usage --help)"
   - "Bash(claudlobby bot start --help)"
   - "Bash(claudlobby bot stop --help)"
@@ -65,6 +68,10 @@ tool_grants:
   - "Bash(claudlobby --json request show *)"
   - "Bash(claudlobby --json workstream list)"
   - "Bash(claudlobby --json workstream show *)"
+  - "Bash(claudlobby --json bot status *)"
+  - "Bash(claudlobby --json fleet status)"
+  - "Bash(claudlobby --json fleet uptime)"
+  - "Bash(claudlobby --json fleet uptime *)"
   - "Bash(claudlobby --json bot usage *)"
   - "Bash(claudlobby --json bot automation status *)"
   - "Bash(claudlobby --json bot automation pause *)"
@@ -106,6 +113,11 @@ The brief defaults to your bot and combines mission, open work, workstreams,
 reports and recent alerts. Its `data.brief.work` uses canonical task IDs; inspect
 `data.brief.degraded` and `data.brief.work.issues` before treating an empty view as clear.
 `--bot BOT` changes only the view. It does not change your caller identity.
+For current session and supervision evidence, use `claudlobby --json fleet status`
+or `claudlobby --json bot status BOT`. Native state and recorded activity are
+separate observations. `claudlobby --json fleet uptime --window 24h` reports
+recorded keepalive coverage; missing evidence does not prove downtime or health.
+
 When token counts are needed, run `claudlobby --json bot usage BOT --since 24h`,
 `claudlobby --json fleet usage --since 24h`, or
 `claudlobby --json brief --usage-since 24h` for the brief viewer's concise
