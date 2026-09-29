@@ -36,14 +36,18 @@ fi
 # so this authoritative-roster check is the durable line of defense for that case,
 # not a stopgap.
 _gpa_dir=${DIR%/}
-case "$_gpa_dir" in
-    */runtime/bots/*/projects)
-        _gpa_bot=$(basename "$(dirname "$_gpa_dir")")
-        _gpa_fleet_root=${_gpa_dir%/runtime/bots/*/projects}
-        bot_in_fleet "$_gpa_bot" "$(parse_fleet_bots "$_gpa_fleet_root/fleet.yaml")" \
-            || exit 0
-        ;;
-esac
+# The selected CLI mode has already checked the bot against the sealed active
+# plan. Its source may intentionally differ from an unactivated fleet.yaml edit.
+if [ "$STATUS_NUL" -eq 0 ]; then
+    case "$_gpa_dir" in
+        */runtime/bots/*/projects)
+            _gpa_bot=$(basename "$(dirname "$_gpa_dir")")
+            _gpa_fleet_root=${_gpa_dir%/runtime/bots/*/projects}
+            bot_in_fleet "$_gpa_bot" "$(parse_fleet_bots "$_gpa_fleet_root/fleet.yaml")" \
+                || exit 0
+            ;;
+    esac
+fi
 
 LOG="$(dirname "$DIR")/git-pull.log"
 setup_log_dir "$LOG"
@@ -64,6 +68,12 @@ echo "$(ts_iso) Starting git pull for repos in $DIR" >> "$LOG"
 MCP_ALLOWLIST="$(_home_mcp_allowlist "$(dirname "$_gpa_dir")" 2>/dev/null || true)"
 
 for repo in "$DIR"/*/; do
+    if [ -L "${repo%/}" ] || [ -L "$repo/.git" ]; then
+        REPO_NAME=$(basename "$repo")
+        echo "$(ts_iso) $REPO_NAME: SKIPPED — redirected checkout" >> "$LOG"
+        report_status "$REPO_NAME" skipped_redirected
+        continue
+    fi
     if [ -d "$repo/.git" ]; then
         REPO_NAME=$(basename "$repo")
         # A fast-forward pull is still allowed to move a dirty checkout when
