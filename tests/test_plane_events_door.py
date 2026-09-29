@@ -557,7 +557,10 @@ def test_fleet_pulse_escalates_from_the_plane_once_the_files_are_retired(tmp_pat
     # the escalation loop never reaches for a cache no read produced (a read
     # regardless of the verdict would be a bash redirect error on a missing file)
     # (the cache is the pass's own temp file, so the check is on the error, not its name)
-    assert "No such file" not in dark.stderr
+    # C3's missing socket is an expected transport error, not a shell read of
+    # the absent critical-events cache. Preserve the latter failure check.
+    assert not any("No such file" in line for line in dark.stderr.splitlines()
+                   if not line.startswith("plane-socket-client: transport failed:"))
     paged = capture.read_text()
     assert "events reader for f is UNREACHABLE" in paged and page not in paged, paged
     summary = (root / "state" / "pulse" / f"{F}.pulse-summary.txt").read_text()
