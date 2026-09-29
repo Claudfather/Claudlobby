@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — `vault-sync` names its vault with `--vault` instead of finding it by walk-up (#1993)
+
+`lib/vault-sync.sh` ran `cd "$vault" && claudron sync …`, so Claudron found the vault by walk-up. Since 0.5.2, walk-up binds a vault only once its committed `.claudron-vault` identity file exists (Claudron #183). During the v0.5.3 Pi rollout, the CLI was upgraded 30 minutes before the migration wrote that file. The job failed on every run in between (`ok=0 … no envelope (rc=3)`) and paged at 19:01Z, while `claudron sync --check --vault <path>` returned clean the whole time.
+
+- **Both calls now pass `--vault "$vault"`:** the `--check` verdict and the sync itself. The job already holds the path it read from bot.conf. It no longer depends on walk-up, on the identity file, or on the order of a rollout's steps.
+- **The page's remedy names the vault too:** `claudron sync --check --vault <path>`. The old remedy, run inside the vault, hit the same walk-up failure. The runbook says the same.
+- **Test:** a stub engine with 0.5.2+ discovery (walk-up needs the identity file; `--vault` does not) and a vault without the file. The job must record `ok=1`, with `--vault` on both calls. It is red on `main` with the live symptom, and a control test pins the stub's model.
+
 ### Added — pinned MCP servers launch without npx's npm wrapper, opt-in per bot (#1604)
 
 `npx -y <pkg>@<version>` keeps an `npm exec` process resident as the parent of every MCP server it starts, with a `sh -c` shim between the two. Measured on the Pi on 2026-09-29, while the host was out of swap: 41 wrappers, 1,173 MB RSS but only 58 MB PSS. What they actually held was 45 MB private and 1,388 MB of swap, a third of the swap file.
