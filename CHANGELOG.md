@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — `claudlobby plane samples`: one metric family for one subject over a window, read-only (#1644)
+
+The host probe records `host.load`, `host.mem_available_mb` and the other `host.*` facets every minute, but nothing read a window of them back. After a reset, the load and memory trajectory into it could only be read by opening the plane db by hand. `claudlobby plane samples <metric> [--subject ALIAS] [--kind KIND] [--since W] [--until W] [--json]` prints one family for one subject over a window, as text or JSON. In text, `host.load`'s one, five and fifteen print as pairs. The subject defaults to the only one of its kind, which on a host's own plane is the host.
+
+- **Read-only by construction, and the plane is released before anything prints.** It opens through `open_ro` (`mode=ro` plus `query_only`) and never runs `migrate()`. It fetches every row and closes the connection before the first line prints, so it never holds a snapshot that keeps the daemon's checkpoint from resetting the WAL (#1905, #1912). A test fails if anything prints while the connection is open.
+- **The window compares times, not text.** Ingest keeps the offset an emitter gave: a `-04:00` instant is stored as `-04:00`. A text compare against UTC bounds would drop in-window samples, so the query goes through `julianday()`, and a mixed-offset test pins that.
+- **Refusals name the fix.** An unknown family lists the known ones, an unknown subject lists the recorded ones, and two subjects of one kind with no `--subject` names both. An unreachable plane refuses at rc 3 and creates nothing. An empty window is an answer (rc 0).
+- `plane.identity` gains `lookup()`, the read half of `resolve()`, which now calls it: a read door must not mint an identity.
+
 ### Changed — `[vault]` pin bumped to Claudron v0.5.2; vaults need the `.claudron-vault` identity file (Claudron #183, #190)
 
 The `[vault]` extra now pins `claudron @ …@v0.5.2`. It carries three changes.

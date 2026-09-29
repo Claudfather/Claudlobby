@@ -837,6 +837,108 @@ def cmd_plane_expire(args) -> int:
     return _guarded("plane expire", run)
 
 
+def _sample_value(raw: str) -> str:
+    """A stored sample value for a line of text: an object reads as
+    `key=value` pairs (host.load's one/five/fifteen), anything else as is."""
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return raw
+    if isinstance(value, dict):
+        return " ".join(f"{k}={v}" for k, v in value.items())
+    return json.dumps(value) if isinstance(value, (list, str)) else str(value)
+
+
+def cmd_plane_samples(args) -> int:
+    """#1644: one metric_samples family for one subject over a window.
+
+    Read-only by construction: the package's `open_ro` connection (mode=ro
+    plus query_only), and no migrate(), so it can run against a live plane.
+    Every row is fetched and the connection closed before anything is
+    printed, because a reader that keeps its snapshot keeps the daemon's
+    checkpoint from resetting the WAL (#1905, #1912). An unreachable plane
+    refuses at rc 3; an empty window is an answer (rc 0), and says so."""
+    from ..plane.identity import aliases_of_kind, lookup
+    from ..plane.queries import METRIC_SERIES_SQL
+    from ..plane.registries import METRIC_NAMES
+    from .checkins import _since   # the read doors' one --since grammar
+
+    root = _resolve_paths(args).root
+    metric = args.metric
+    if metric not in METRIC_NAMES:
+        print(f"samples: unknown metric {metric!r}; known: {', '.join(sorted(METRIC_NAMES))}",
+              file=sys.stderr)
+        return 2
+    kind = args.kind or ("host" if metric.startswith("host.") else None)
+    if kind not in _SAMPLE_SUBJECT_KINDS:
+        print(f"samples: name the subject's --kind for {metric!r}"
+              f" (one of: {', '.join(_SAMPLE_SUBJECT_KINDS)})", file=sys.stderr)
+        return 2
+    window = {}
+    for flag, raw in (("--since", args.since), ("--until", args.until)):
+        try:
+            window[flag] = _since(raw) if raw else datetime.now(timezone.utc)
+        except ValueError:
+            print(f"samples: cannot parse {flag} {raw!r} (use e.g. 24h, 30m, or an ISO"
+                  " instant; a naive one is UTC)", file=sys.stderr)
+            return 2
+    since, until = window["--since"], window["--until"]
+    if since > until:
+        print(f"samples: --since ({since.isoformat()}) is after --until ({until.isoformat()})",
+              file=sys.stderr)
+        return 2
+
+    conn, why = open_ro(root)
+    if conn is None:
+        print(f"samples: the plane cannot answer: {why}", file=sys.stderr)
+        return 3
+    try:
+        known = aliases_of_kind(conn, kind)
+        subject = args.subject
+        if subject is None and len(known) == 1:
+            subject = known[0]
+        uid = lookup(conn, kind, subject) if subject is not None else None
+        rows = (conn.execute(METRIC_SERIES_SQL, (uid, metric, since.isoformat(),
+                                                 until.isoformat())).fetchall()
+                if uid else [])
+    except sqlite3.Error as exc:
+        print(f"samples: the plane cannot answer: {exc}", file=sys.stderr)
+        return 3
+    finally:
+        conn.close()
+    # Everything below runs with the plane released.
+    if not known:
+        print(f"samples: no {kind} subject is recorded on this plane, so it holds no"
+              f" {metric} samples")
+        return 0
+    if subject is None:
+        print(f"samples: {len(known)} {kind} subjects are recorded; name one with --subject:"
+              f" {', '.join(known)}", file=sys.stderr)
+        return 2
+    if uid is None:
+        print(f"samples: no {kind} subject named {subject!r}; recorded: {', '.join(known)}",
+              file=sys.stderr)
+        return 2
+    samples = [{"occurred_at": r["occurred_at"], "value": json.loads(r["value"]),
+                "status": r["status"]} for r in rows]
+    if args.json:
+        print(json.dumps({"metric": metric, "unit": METRIC_NAMES[metric].get("unit"),
+                          "kind": kind, "subject": subject, "since": since.isoformat(),
+                          "until": until.isoformat(), "samples": samples}))
+        return 0
+    unit = METRIC_NAMES[metric].get("unit", "")
+    print(f"{metric} ({unit}) for {kind} {subject}, {since.isoformat()} to {until.isoformat()}:"
+          f" {len(rows)} sample(s)")
+    for r in rows:
+        at = datetime.fromisoformat(r["occurred_at"]).astimezone(timezone.utc)
+        flag = f"  [{r['status']}]" if r["status"] else ""
+        print(f"  {at.strftime('%Y-%m-%dT%H:%M:%SZ')}  {_sample_value(r['value'])}{flag}")
+    return 0
+
+
+_SAMPLE_SUBJECT_KINDS = ("host", "vault", "fleet", "actor", "bot_instance", "session")
+
+
 def cmd_plane_import_workstreams(args) -> int:
     """#1635: one-shot import of a pre-cutover `workstreams.json` into the
     plane -- the registry's write side moved with the F18 closure, the DATA
