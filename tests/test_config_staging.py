@@ -131,6 +131,19 @@ def _files(plan, change):
             for name, entry in change.after["files"].items()}
 
 
+def test_selected_account_plugins_are_frozen_as_plan_input(staging_case):
+    account = Path.home() / ".claude" / "settings.json"
+    _write(account, json.dumps({"enabledPlugins": {"telegram@claude-plugins-official": True}}))
+    plan = config_staging.stage_configuration([staging_case.paths], staging_case.release)
+    assert str(account) in plan.inputs
+    generated = staging_case.paths.bot_runtime("primary-manager") / ".claude/settings.local.json"
+    settings = json.loads(plan.content(_changes(plan)[generated]))
+    assert settings["enabledPlugins"]["telegram@claude-plugins-official"] is False
+    account.write_text(json.dumps({"enabledPlugins": {}}))
+    with pytest.raises(PlanError, match="input changed"):
+        plan.check_fresh()
+
+
 def test_stage_validates_and_renders_retained_bytes_when_authoring_changes_during_parse(
         staging_case, monkeypatch):
     manifest = staging_case.paths.fleet_yaml

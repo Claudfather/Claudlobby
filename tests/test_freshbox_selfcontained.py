@@ -124,7 +124,7 @@ def test_enabledplugins_absent_is_flagged_missing_tier_a(tmp_path):
     root = tmp_path / "claudlobby"
     _build_library(root)
     paths = Paths(root=root, fleet_dir=root, package=source_package())
-    bot = BotConfig(bot_id="w", name="w", expertise=["eng"])
+    bot = BotConfig(bot_id="w", name="w", expertise=["eng"], channels=[])
     fleet = FleetConfig(
         name="t",
         service_prefix="p",

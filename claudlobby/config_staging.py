@@ -169,6 +169,8 @@ def stage_configuration(fleet_paths: list[Paths], release: ReleaseManifest,
             for tier in paths.env_tiers(bot_id):
                 if tier.path is not None:
                     builder.input(tier.path)
+            bot = context.fleet.bots[bot_id]
+            builder.input(compose.account_settings_path(bot, context.fleet, paths))
         report = validate(context.fleet, paths)
         if report.has_errors:
             raise PlanError("invalid fleet configuration: " + "; ".join(map(str, report.errors)))

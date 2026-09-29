@@ -2869,18 +2869,37 @@ class TestPluginsSettingsLocal:
         assert "enabledPlugins" in result
         assert "extraKnownMarketplaces" not in result
 
+    def test_unselected_account_plugins_are_explicitly_disabled(self, tmp_path):
+        from claudlobby.config import PluginsConfig
+
+        paths = self._make_paths_with_runtime(tmp_path)
+        selected_dir = tmp_path / "canary-account"
+        selected_dir.mkdir()
+        (selected_dir / "settings.json").write_text(json.dumps({
+            "enabledPlugins": {
+                "telegram@claude-plugins-official": True,
+                "selected@market": False,
+            }
+        }))
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"],
+                        account="canary", channels=[])
+        fleet = FleetConfig(
+            manager="worker", name="t", service_prefix="p", bots={"worker": bot},
+            accounts={"default": str(tmp_path / "other-account"),
+                      "canary": str(selected_dir)},
+            plugins=PluginsConfig(required=["selected@market"], include_defaults=False),
+        )
+        result = compose_settings_local(bot, fleet, paths)
+        assert result["enabledPlugins"] == {
+            "selected@market": True,
+            "telegram@claude-plugins-official": False,
+        }
+
 
 class TestChannelPluginInstallEnableCarveout:
-    """G3/G5 contract: a channel plugin is INSTALLED but not ambiently ENABLED.
+    """A selected channel plugin is installed and explicitly enabled per bot."""
 
-    enabledPlugins is the equipped NON-channel set (fleet.plugins.required =
-    claudna + superpowers + additional). A channel plugin (derived from
-    ``channels``) is unioned into FLEET_PLUGINS_REQUIRED so a cold box installs
-    it, then activated by the ``--channels`` flag — NOT by ambient settings.local
-    enablement. This locks PR #646's ratified carve-out against future drift.
-    """
-
-    def test_channel_plugin_installed_but_not_enabled(self, tmp_path):
+    def test_channel_plugin_installed_and_enabled_for_selected_bot(self, tmp_path):
         from claudlobby.config import PluginsConfig
 
         root = tmp_path / "claudlobby"
@@ -2923,14 +2942,13 @@ class TestChannelPluginInstallEnableCarveout:
         assert "claudna@Claudfather" in required_line
         assert "superpowers@claude-plugins-official" in required_line
 
-        # Enable side: enabledPlugins is the equipped NON-channel set only. The
-        # channel plugin must NOT be ambiently enabled (it is activated by
-        # --channels, not settings.local).
+        # Enable side: explicit per-bot settings bind selected channel equipment
+        # even when the account has an inherited value for this plugin.
         enabled = settings["enabledPlugins"]
-        assert "telegram@claudfather-plugins" not in enabled
         assert enabled == {
             "claudna@Claudfather": True,
             "superpowers@claude-plugins-official": True,
+            "telegram@claudfather-plugins": True,
         }
 
 

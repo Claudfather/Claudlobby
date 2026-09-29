@@ -544,6 +544,34 @@ def account_dir(bot: BotConfig, fleet: FleetConfig) -> str:
     return fleet.accounts.get(bot.account, fleet.accounts.get("default", "~/.claude"))
 
 
+def account_settings_path(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> Path:
+    """The selected Claude account settings read by this bot at session start."""
+    directory = Path(account_dir(bot, fleet)).expanduser()
+    if not directory.is_absolute():
+        directory = paths.bot_runtime(bot.bot_id) / directory
+    return directory / "settings.json"
+
+
+def _account_enabled_plugins(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> set[str]:
+    """Plugin keys inherited from the selected account, never another account."""
+    source = account_settings_path(bot, fleet, paths)
+    try:
+        settings = json.loads(source.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return set()
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read selected account settings at {source}: {exc}") from exc
+    if not isinstance(settings, dict):
+        raise ValueError(f"selected account settings at {source} must be an object")
+    enabled = settings.get("enabledPlugins", {})
+    if not isinstance(enabled, dict) or any(
+        not isinstance(key, str) or not isinstance(value, bool)
+        for key, value in enabled.items()
+    ):
+        raise ValueError(f"selected account enabledPlugins at {source} must map names to booleans")
+    return set(enabled)
+
+
 def telegram_channel_rel(handle: str) -> str:
     """A channel bot's Telegram state dir, relative to the home dir: the ONE
     definition behind its three consumers (#1786), which need it in two forms.
@@ -2890,9 +2918,15 @@ def compose_settings_local(
     if hooks:
         settings["hooks"] = hooks
 
-    # Plugins — enabledPlugins + extraKnownMarketplaces from fleet config
-    if fleet.plugins.required:
-        settings["enabledPlugins"] = {plugin: True for plugin in fleet.plugins.required}
+    # A local settings file inherits account-level plugin enablement. Bind every
+    # inherited key to this bot's selected equipment instead of allowing a
+    # channel-less bot to load a host-enabled channel plugin.
+    selected_plugins = set(fleet.plugins.required) | set(_channel_plugins(bot.channels))
+    inherited_plugins = _account_enabled_plugins(bot, fleet, paths)
+    settings["enabledPlugins"] = {
+        plugin: plugin in selected_plugins
+        for plugin in sorted(inherited_plugins | selected_plugins)
+    }
     if fleet.plugins.marketplaces:
         settings["extraKnownMarketplaces"] = dict(fleet.plugins.marketplaces)
 

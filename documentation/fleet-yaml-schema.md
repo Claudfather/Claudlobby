@@ -178,6 +178,8 @@ plugins:
 
 **`include_defaults`** — Boolean (default `true`). Set to `false` to disable the built-in default plugins and marketplaces. Unusual — the validator warns when this is set.
 
+Each bot's generated `settings.local.json` explicitly enables its selected fleet plugins and channel plugins. Plugin keys already present in that bot's selected account `settings.json` are set to `false` when the bot did not select them, so a channel-less bot does not inherit a host-enabled Telegram plugin. `channels: []` still removes the channel flag; `isolation.shared_config` controls tool access rather than Claude's plugin settings.
+
 ### `fleet.system_defaults`
 
 Gates how much of the package's [`system.yaml`](system-yaml-schema.md) (shared hooks, observability defaults, and job timers merged into every fleet) gets folded into this fleet's `defaults`. A value set directly in `fleet.defaults` always wins over the system tier for the same key — this field only controls whether the system tier is consulted at all.
