@@ -28,3 +28,19 @@ def test_every_composed_bot_carries_the_verify_then_trust_check(fleet_dir):
         # #1946: msg_ is part of the id, not a separator to strip.
         assert "the id is everything between" in text, bot.name
         assert "never the hex alone" in text, bot.name
+
+
+def test_every_composed_bot_is_told_what_the_set_h_prefix_is(fleet_dir):
+    # lib/dispatch.sh puts `set +H; ` in front of every non-slash-command
+    # message, and receivers flagged it as unexplained: only the dispatch
+    # protocol said what it was, and only managers compose that. The note
+    # sits in the pasted-text section every bot carries.
+    install_real_template(fleet_dir)
+    fleet = load_test_fleet(fleet_dir)
+    paths = make_paths(fleet_dir)
+    assert len(fleet.bots) >= 2
+    for bot in fleet.bots.values():
+        text = compose_claude_md(bot, fleet, paths)
+        section = text.split("## Dispatches framed as pasted text", 1)[1].split("\n## ", 1)[0]
+        assert "A dispatch's first line can also start with `set +H; `" in section, bot.name
+        assert "there is nothing to run" in section, bot.name

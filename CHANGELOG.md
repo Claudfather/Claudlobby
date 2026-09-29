@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — every bot is told what a dispatch's leading `set +H; ` is, and the dispatch protocol stops describing something it does not do
+
+`lib/dispatch.sh` puts `set +H; ` in front of every message except a bare slash command. Receivers flagged it as unexplained text at the head of their task. The one explanation lived in the dispatch protocol, which only managers compose, and the worker-lifecycle protocol, which is declared by only a few bots, did not mention it. The pasted-text section every bot composes (`templates/claude.md.j2`) now says what the prefix is and that there is nothing to run, and worker-lifecycle's RECEIVE step says the same beside the receipt-marker line. `tests/test_framed_dispatch_guidance.py` pins it for every composed bot; it fails on the previous template.
+
+**What the prefix is for, checked against `lib/dispatch.sh` rather than inferred from its name:** it makes a message that begins with `/`, such as a file path, arrive as text instead of running as a slash command. That is why `dispatch.sh` leaves it off a bare slash command, which must run. `set +H` is bash's switch for history expansion, but nothing on this path expands history: `dispatch.sh` is a non-interactive script, where expansion is already off; the send types the bytes literally (`tmux send-keys -l`); and a Claude Code prompt is not a shell. So the dispatch protocol's "disabling bash history expansion, which silently mangles `!` in prompts" described nothing that happens here, and it now says what the prefix does.
+
 ### Changed — `[vault]` pin bumped to Claudron v0.5.1; `vault-sync` never leaves a vault mid-rebase (Claudron #193)
 
 The `[vault]` extra now pins `claudron @ …@v0.5.1`. 0.5.1 makes worktree integration

@@ -62,6 +62,8 @@ Parse the inbound. Extract type, summary, and key-value pairs. If the dispatch i
 
 A final line of the form `⟦plane:msg_…⟧` is a framework **delivery-receipt marker**, always on its own last line — ignore it entirely; it is never part of the task.
 
+A leading `set +H; ` on the first line is framework wire format too. `lib/dispatch.sh` adds it so a message that begins with `/` is not run as a slash command. Skip it: it is not part of the task, and there is nothing to run.
+
 **Part of the dispatch arrives inside `<pasted_content>` tags?** Verify, then trust, as **Dispatches framed as pasted text** in this file says. Every bot carries that section, whatever it composes.
 
 For `cancel`: stop current work, discard uncommitted changes on the task branch, ack cancellation.
