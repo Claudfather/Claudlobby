@@ -857,7 +857,9 @@ def cmd_plane_samples(args) -> int:
     Every row is fetched and the connection closed before anything is
     printed, because a reader that keeps its snapshot keeps the daemon's
     checkpoint from resetting the WAL (#1905, #1912). An unreachable plane
-    refuses at rc 3; an empty window is an answer (rc 0), and says so."""
+    refuses at rc 3, and so does one that records no subject of the kind,
+    because a wrong root is not an empty window. An empty window is an
+    answer (rc 0), and says so."""
     from ..plane.identity import aliases_of_kind, lookup
     from ..plane.queries import METRIC_SERIES_SQL
     from ..plane.registries import METRIC_NAMES
@@ -877,7 +879,9 @@ def cmd_plane_samples(args) -> int:
     window = {}
     for flag, raw in (("--since", args.since), ("--until", args.until)):
         try:
-            window[flag] = _since(raw) if raw else datetime.now(timezone.utc)
+            # None is "not given" (--until's default, now); "" is a malformed
+            # bound, which _since refuses like any other.
+            window[flag] = _since(raw) if raw is not None else datetime.now(timezone.utc)
         except ValueError:
             print(f"samples: cannot parse {flag} {raw!r} (use e.g. 24h, 30m, or an ISO"
                   " instant; a naive one is UTC)", file=sys.stderr)
@@ -902,15 +906,18 @@ def cmd_plane_samples(args) -> int:
                                                  until.isoformat())).fetchall()
                 if uid else [])
     except sqlite3.Error as exc:
-        print(f"samples: the plane cannot answer: {exc}", file=sys.stderr)
-        return 3
+        why = str(exc)
     finally:
         conn.close()
-    # Everything below runs with the plane released.
-    if not known:
-        print(f"samples: no {kind} subject is recorded on this plane, so it holds no"
-              f" {metric} samples")
-        return 0
+    # Everything below runs with the plane released, a refusal included.
+    if why is None and not known:
+        # No subject of the kind at all is a wrong root or an emitter that never
+        # ran, not an empty window, so it refuses like an unreachable plane.
+        why = (f"it records no {kind} subject, so it holds no {metric} samples"
+               " (a wrong --root, or nothing has emitted one here)")
+    if why is not None:
+        print(f"samples: the plane cannot answer: {why}", file=sys.stderr)
+        return 3
     if subject is None:
         print(f"samples: {len(known)} {kind} subjects are recorded; name one with --subject:"
               f" {', '.join(known)}", file=sys.stderr)

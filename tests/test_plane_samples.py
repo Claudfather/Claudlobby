@@ -9,6 +9,7 @@ import hashlib
 import io
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -94,11 +95,15 @@ def test_instants_are_compared_as_times_across_offsets(tmp_path: Path) -> None:
         (("host.load", "--since", "2026-09-29T12:00:00Z", "--until", "2026-09-29T11:00:00Z"), 2, "is after --until"),
         (("host.load", "--until", "yesterday"), 2, "cannot parse --until 'yesterday'"),
         (("bot.heartbeat", *WINDOW), 2, "name the subject's --kind"),
+        # An unset shell variable hands over "" (`--since "$START"`): a malformed
+        # bound, refused like any other, never read as "now".
+        (("host.load", "--since", ""), 2, "cannot parse --since ''"),
+        (("host.load", "--since", "2026-09-29T11:00:00Z", "--until", ""), 2, "cannot parse --until ''"),
     ],
 )
 def test_a_bad_request_is_refused_with_a_reason(plane: Path, argv, rc, says) -> None:
     run = _cli(plane, *argv)
-    assert run.returncode == rc and says in run.stderr, (run.returncode, run.stderr)
+    assert run.returncode == rc and says in run.stderr and run.stdout == "", (run.returncode, run.stderr, run.stdout)
 
 
 def test_two_hosts_and_no_subject_names_both(plane: Path) -> None:
@@ -106,6 +111,23 @@ def test_two_hosts_and_no_subject_names_both(plane: Path) -> None:
     run = _cli(plane, "host.load", *WINDOW)
     assert run.returncode == 2 and "name one with --subject: b-host, probe-host" in run.stderr
     assert _cli(plane, "host.load", "--subject", "b-host", *WINDOW).stdout.rstrip().endswith("11:31:00Z  one=1.0 five=1.0 fifteen=1.0")
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_a_plane_with_no_subject_of_the_kind_refuses_rather_than_answering_empty(tmp_path: Path, as_json) -> None:
+    # A plane that never recorded a host is a wrong root or an emitter that never
+    # ran, not a quiet window: rc 3 with stdout empty, so neither a script that
+    # reads rc nor one that parses --json can take it for "no samples".
+    root = _root(tmp_path)
+    emit_batch(root, [{
+        "event_type": "metric_sample", "emitter": "vault-sync", "fleet": "_host",
+        "occurred_at": "2026-09-29T11:35:00+00:00",
+        "payload": {"subject_kind": "vault", "subject": "vault:probe", "metric": "vault.behind", "value": 0}}])
+    control = _cli(root, "vault.behind", "--kind", "vault", *WINDOW)   # the plane itself answers
+    assert control.returncode == 0 and control.stdout.rstrip().endswith("11:35:00Z  0"), control.stdout
+    run = _cli(root, "host.load", *WINDOW, *(("--json",) if as_json else ()))
+    assert run.returncode == 3 and run.stdout == "", (run.returncode, run.stdout)
+    assert "the plane cannot answer: it records no host subject" in run.stderr, run.stderr
 
 
 def test_an_unreachable_plane_refuses_and_creates_nothing(tmp_path: Path) -> None:
@@ -121,7 +143,9 @@ def test_the_read_changes_nothing_in_the_plane(plane: Path) -> None:
     assert hashlib.sha256(db_file(plane).read_bytes()).hexdigest() == before
 
 
-def test_the_plane_is_released_before_anything_prints(plane: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("fails", [False, True])
+def test_the_plane_is_released_before_anything_prints(plane: Path, monkeypatch, fails) -> None:
+    # Both streams, and the refusal a failed read prints as well as the rows.
     import claudlobby.commands.plane as plane_cmd
 
     real_open_ro = plane_cmd.open_ro
@@ -132,6 +156,8 @@ def test_the_plane_is_released_before_anything_prints(plane: Path, monkeypatch) 
             self._conn = conn
 
         def execute(self, *args):
+            if fails:
+                raise sqlite3.OperationalError("disk I/O error")
             return self._conn.execute(*args)
 
         def close(self):
@@ -142,17 +168,21 @@ def test_the_plane_is_released_before_anything_prints(plane: Path, monkeypatch) 
         conn, why = real_open_ro(root, **kwargs)
         return (Watched(conn) if conn is not None else None), why
 
-    class Stdout(io.StringIO):
+    class Watching(io.StringIO):
         def write(self, text):
             if text and not state["closed"]:
                 state["writes_while_open"] += 1
             return super().write(text)
 
-    out = Stdout()
+    out, err = Watching(), Watching()
     monkeypatch.setattr(plane_cmd, "open_ro", watched_open_ro)
     monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", err)
     args = argparse.Namespace(root=str(plane), fleet=None, seed=False, metric="host.mem_available_mb", subject=None,
                               kind=None, since="2026-09-29T11:00:00Z", until="2026-09-29T12:00:00Z", json=False)
-    assert plane_cmd.cmd_plane_samples(args) == 0
+    assert plane_cmd.cmd_plane_samples(args) == (3 if fails else 0)
     assert state["closed"] and state["writes_while_open"] == 0
-    assert out.getvalue().splitlines()[0].endswith(": 5 sample(s)")
+    if fails:
+        assert out.getvalue() == "" and "the plane cannot answer: disk I/O error" in err.getvalue()
+    else:
+        assert out.getvalue().splitlines()[0].endswith(": 5 sample(s)")
