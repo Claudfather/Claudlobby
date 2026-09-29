@@ -113,7 +113,7 @@ def _activate(args, root):
                                          if refusal else "conflict: activation did not complete; inspect its pending step")
             if data["recorded_activation"] is None and str(exc) == "another host activation holds the lock":
                 message = "conflict: host activation lock is held; no activation record was created"
-                hint = "inspect native starter and private tmux lock holders before retrying"
+                hint = "inspect running host operations and activation.lock holders before retrying"
         elif isinstance(exc, (ValueError, RuntimeError)):
             code, message = "conflict", "conflict: activation did not complete; inspect its pending step"
         else:
