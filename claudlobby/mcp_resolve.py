@@ -24,6 +24,42 @@ _log = logging.getLogger(__name__)
 _VAR_RE = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)\}")
 
 
+class ExpandedMcp(NamedTuple):
+    """One immutable runtime identity, retaining both source labels."""
+
+    name: str
+    instance: str
+    output_name: str
+
+
+def expand_mcp_entries(entries: list[McpEntry]) -> list[ExpandedMcp]:
+    """Expand the merged declarations, refusing ambiguous server identities.
+
+    Repeated fragment names keep the loader's first-seen declaration; repeated
+    instances within that declaration are collisions. An explicit empty
+    instance list contributes no identities. Naming remains McpEntry's contract.
+    """
+    expanded: list[ExpandedMcp] = []
+    fragments: set[str] = set()
+    identities: dict[str, ExpandedMcp] = {}
+    for entry in entries:
+        if entry.name in fragments:
+            continue
+        fragments.add(entry.name)
+        for instance in entry.instances:
+            current = ExpandedMcp(entry.name, instance, entry.output_name(instance))
+            previous = identities.get(current.output_name)
+            if previous is not None:
+                raise ValueError(
+                    f"MCP identity collision for server {current.output_name!r}: "
+                    f"fragment {previous.name!r} instance {previous.instance!r} and "
+                    f"fragment {current.name!r} instance {current.instance!r}"
+                )
+            identities[current.output_name] = current
+            expanded.append(current)
+    return expanded
+
+
 def canonical_var_name(var: str, contract: dict, entry: McpEntry, instance: str) -> str:
     """Return the canonical env-var name for *var* given its contract scope.
 
