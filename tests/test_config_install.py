@@ -52,7 +52,14 @@ def proposal(installed, tmp_path):
     builder.tree(external, {"new/SKILL.md": (b"frozen candidate skill\n", 0o644),
                             "new/run.sh": (b"#!/bin/sh\nexit 0\n", 0o755)})
     plan = builder.seal()
-    return plan, runtime, external, manifest, settings
+    try:
+        yield plan, runtime, external, manifest, settings
+    finally:
+        # Preserve the original read-only mode through each test's assertions.
+        # Teardown also covers retained renamed backup trees in this fixture.
+        for directory in external.parent.rglob("*"):
+            if not directory.is_symlink() and directory.is_dir():
+                directory.chmod(directory.stat().st_mode | 0o700)
 
 
 def test_partial_config_activation_rolls_back_exact_before_and_candidate_only_assets(proposal, monkeypatch):
