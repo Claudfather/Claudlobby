@@ -2841,9 +2841,8 @@ def compose_settings_local(
     # violation (it dangles the moment the fleet runs elsewhere). Deny grants are
     # restrictions, not wiring-to-a-path, so they are not classified — which also
     # sidesteps the composer-derived sibling-isolation denies above (a resolved
-    # absolute the composer emits, never a source). The handoff allows below
-    # are also derived, but are appended only AFTER this source-value audit.
-    # Every flagged allow here therefore traces to a real source. Fires
+    # absolute the composer emits, never a source). No composer-derived allow layer
+    # emits an absolute, so every flagged allow traces to a real source. Fires
     # before the settings file is written; the whole-bot no-partial-output
     # guarantee is the dataclass+fragment gate before mkdir, and generate is
     # idempotent (mkdir exist_ok, writes overwrite) with compose_fleet surfacing
@@ -2868,16 +2867,6 @@ def compose_settings_local(
             )
     if grant_findings:
         raise source_findings_error(bot.bot_id, grant_findings)
-
-    # Native pre-stop handoff and the session plugin share this exact artifact.
-    # Claude checks Edit for both Edit and Write; Write(path) is ignored (#873).
-    # `//` anchors at the filesystem root (#1312). Grant only this bot's final
-    # file and its atomic-write temporary file, never its whole .claude dir.
-    handoff_dir = bot_dir / ".claude"
-    _append_unique(allow_patterns, (
-        f"Edit(/{handoff_dir / 'session.md'})",
-        f"Edit(/{handoff_dir / 'session.md.tmp'})",
-    ))
 
     if deny_patterns:
         permissions: dict = {"deny": deny_patterns}
