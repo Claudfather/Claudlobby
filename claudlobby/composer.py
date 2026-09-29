@@ -2510,6 +2510,8 @@ def _resolve_fleet_ops_grants(bot: BotConfig, fleet: FleetConfig) -> list[str]:
         ))
     if bot.bot_id == fleet.manager:
         grants.append("Bash(claudlobby --json fleet reload)")
+        grants.append("Bash(claudlobby --json fleet pulse)")
+        grants.append("Bash(claudlobby events --since 24h --source pulse --json)")
         for verb in ("start", "stop", "restart"):
             grants.append(f"Bash(claudlobby --json fleet {verb} --workers)")
         # The public lifecycle guard admits only this exact manager operating
@@ -4002,12 +4004,18 @@ def _write_timer_units(
     exec_start = f"{script_expanded} {fleet_name}" if fleet_name else script_expanded
     if exec_args:
         exec_start = f"{exec_start} {' '.join(exec_args)}"
-    argv = _native_script_argv(script, environment)
-    if fleet_name:
-        argv.append(fleet_name)
-    argv.extend(exec_args or [])
+    if fleet_name and name == _FLEET_PULSE_JOB:
+        # The scheduler enters the same selected command as a manager/operator;
+        # the command alone releases the private native sweep.
+        argv = [environment["CLAUDLOBBY_CLI"], "--root", environment["CLAUDLOBBY_ROOT"],
+                "--fleet", fleet_name, "fleet", "pulse"]
+    else:
+        argv = _native_script_argv(script, environment)
+        if fleet_name:
+            argv.append(fleet_name)
+        argv.extend(exec_args or [])
     argv = wrap_unit_argv(environment, unit=service_name, phase="producers", mode="oneshot", argv=argv)
-    if "CLAUDLOBBY_RELEASE_ID" in environment:
+    if "CLAUDLOBBY_RELEASE_ID" in environment or (fleet_name and name == _FLEET_PULSE_JOB):
         exec_start = unit_systemd_command(argv)
 
     # Compute the tool PATH once so systemd and launchd emit an identical value

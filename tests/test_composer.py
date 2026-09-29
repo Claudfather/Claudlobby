@@ -364,6 +364,8 @@ def _expected_default_fleet_ops_allow() -> list[str]:
         "Bash(claudlobby --json workstream close *)",
         "Bash(claudlobby --json workstream prune *)",
         "Bash(claudlobby --json fleet reload)",
+        "Bash(claudlobby --json fleet pulse)",
+        "Bash(claudlobby events --since 24h --source pulse --json)",
         "Bash(claudlobby --json fleet start --workers)",
         "Bash(claudlobby --json fleet stop --workers)",
         "Bash(claudlobby --json fleet restart --workers)",
@@ -417,6 +419,8 @@ class TestComposeSettingsLocal:
         assert "Bash(claudlobby --json bot restart lead)" in lead_grants
         assert "Bash(claudlobby --json bot restart worker)" in lead_grants
         assert "Bash(claudlobby --json bot restart worker)" in worker_grants
+        assert "Bash(claudlobby --json fleet pulse)" in lead_grants
+        assert "Bash(claudlobby --json fleet pulse)" not in worker_grants
         assert not any(g.startswith("Bash(claudlobby --json bot start ") or
                        g.startswith("Bash(claudlobby --json bot stop ") or
                        g == "Bash(claudlobby --json bot restart lead)" for g in worker_grants)

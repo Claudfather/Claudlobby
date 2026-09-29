@@ -78,7 +78,7 @@ def register_orientation_subparsers(sub):
             uptime.set_defaults(func=_status_dispatch, public_command="fleet.uptime")
             from ._setup_parsers import register_fleet_setup
             register_fleet_setup(children)
-            for action in ("start", "stop", "restart", "reconcile", "reload"):
+            for action in ("start", "stop", "restart", "reconcile", "reload", "pulse"):
                 route = children.add_parser(action, help=f"{action.capitalize()} selected fleet supervision")
                 route.add_argument("--json", action="store_true")
                 if action in {"start", "stop", "restart"}:

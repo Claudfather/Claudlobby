@@ -28,6 +28,7 @@ tool_grants:
   - "Bash(claudlobby fleet restart --help)"
   - "Bash(claudlobby fleet reconcile --help)"
   - "Bash(claudlobby fleet reload --help)"
+  - "Bash(claudlobby fleet pulse --help)"
   - "Bash(claudlobby assignment show --help)"
   - "Bash(claudlobby assignment accept --help)"
   - "Bash(claudlobby assignment deliver --help)"

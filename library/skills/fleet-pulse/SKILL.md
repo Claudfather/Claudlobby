@@ -1,6 +1,6 @@
 ---
 name: fleet-pulse
-description: "Run fleet-pulse.sh and act on findings — restart dead workers, flag stuck panes, protect WIP. Actionable fleet health in one command."
+description: "Run the selected fleet pulse and act on findings — restart dead workers, flag stuck panes, protect WIP."
 argument-hint: "[<bot-name>]"
 ---
 
@@ -10,20 +10,20 @@ Run external liveness checks against the fleet, summarize findings, and take cor
 
 ## How it works
 
-`fleet-pulse.sh` runs outside the LLM — it checks tmux sessions, systemd services, pane freshness, and git WIP for every bot in the fleet. Results are recorded on the plane as fleet events (nothing lives in a file any more). This skill reads them through `claudlobby events`, presents a summary, and acts on them.
+`claudlobby fleet pulse` admits the selected fleet and runs its private sweep. The sweep checks tmux sessions, supervised services, pane freshness, and git WIP. Its completed result means the tick finished, not that all bots are healthy. Findings are recorded on the plane as fleet events. Read those events and the returned summary before acting.
 
 ## Steps
 
 1. **Generate fresh pulse data**
 
    ```bash
-   $CLAUDLOBBY_NATIVE_DIR/fleet-pulse.sh $FLEET_NAME
+   claudlobby --json fleet pulse
    ```
 
 2. **Read today's events**
 
    The events live on the plane, not in a file (F18 closure). Read them through the CLI:
-   - `claudlobby --fleet $FLEET_NAME events --since 24h --json` (add `--bot <bot-name>` when an argument was given)
+   - `claudlobby events --since 24h --source pulse --json`; when an argument was given, inspect only that bot's rows
    - Parse each line as JSON: `{"ts": "...", "bot": "...", "type": "...", "source": "pulse", "data": {...}}` — the same row shape the ledgers had
 
 3. **Summarize findings**
@@ -41,7 +41,7 @@ Run external liveness checks against the fleet, summarize findings, and take cor
    All clear: <list of healthy bots>
    ```
 
-   If no events were emitted, report "All bots healthy" and stop.
+   If no events were emitted, report the observed summary and say that no new pulse events were found. Do not infer that every bot is healthy from an empty event list.
 
 4. **Take action per the decision table**
 
@@ -79,10 +79,10 @@ If scoped to a single bot, only report that bot's status.
 ## Rules
 
 - Manager-only skill. Workers never read event logs or run pulse checks.
-- Always run the bash script first to get fresh data. Never rely on stale event files alone.
+- Run the public pulse command first and require `ok: true` with `data.tick: completed`. Never treat that result alone as a healthy-fleet verdict.
 - **This rule has to stay followable, which is why it names a test you can apply.** It was once "never restart a bot with uncommitted WIP" against an event that fired thousands of times a week, so it forbade restarting anyone — and managers stopped obeying it without ever deciding to (#1728). An instruction nobody can follow is an instruction nobody follows.
 - Never restart a bot whose `wip_uncommitted` paths include anything you cannot name as a build artifact. The event is a protection signal — and judge it on its `paths`, never its count. **`dirty_untracked > 0` does not mean "just build artifacts":** an unadded new source file is untracked and is the case where losing the work is unrecoverable, since no copy of it exists anywhere.
 - `unchanged_for_s` is a FLOOR: it counts from when the sweep first saw that exact status, not from when the edit landed. A small number is not evidence the WIP is fresh.
 - For `pane_stuck`, always inspect pane content before restarting — a long-running test or build is not stuck.
 - Post findings to Telegram so the human has visibility, even when taking autonomous action.
-- If the bash script fails (non-zero exit), report the error and stop. Do not act on stale data.
+- If the pulse command fails, report the error and stop. Do not act on stale data.

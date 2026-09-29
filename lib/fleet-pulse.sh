@@ -16,6 +16,14 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 
+# A selected release enters this private sweep only through `fleet pulse`.
+# Source-tree fixture calls have no release binding and remain testable.
+if [ -n "${CLAUDLOBBY_RELEASE_ID:-}" ] && \
+    [ "${CLAUDLOBBY_PRIVATE_PULSE_RELEASE:-}" != "$CLAUDLOBBY_RELEASE_ID" ]; then
+    echo "fleet-pulse: use claudlobby fleet pulse for the selected release" >&2
+    exit 3
+fi
+
 fleet="${1:?Usage: fleet-pulse.sh <fleet-name>}"
 # The fleet is this sweep's carrier for every door it runs (emit_fleet_event
 # anchors on it): the timer unit stamps CLAUDLOBBY_FLEET, a hand run does not.

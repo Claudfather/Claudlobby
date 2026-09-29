@@ -22,7 +22,7 @@ def dispatch(args) -> CommandOutput:
     action = args.public_command.removeprefix("fleet.")
     if args.seed:
         raise CommandFailure("conflict", "fleet runtime requires an active host")
-    if action not in {"start", "stop", "restart", "reconcile", "reload"}:
+    if action not in {"start", "stop", "restart", "reconcile", "reload", "pulse"}:
         raise CommandFailure("invalid_argument", "unsupported fleet runtime action")
     if action == "reconcile" and getattr(args, "workers", False):
         raise CommandFailure("invalid_argument", "reconcile covers every declared bot")
@@ -31,7 +31,19 @@ def dispatch(args) -> CommandOutput:
             "completed": [], "failed_bot": None}
     try:
         root = resolve_paths(root=args.root).root
-        if action == "reload":
+        if action == "pulse":
+            from ..fleet_pulse import FleetPulseError, pulse_fleet
+            try:
+                result = pulse_fleet(root=root, fleet=args.fleet)
+            except FleetPulseError as exc:
+                data["native_outcome"] = "unknown" if exc.effect_attempted else "unattempted"
+                raise CommandFailure(exc.code, str(exc), data=data) from exc
+            data = {"fleet": result.fleet, "release_id": result.release_id,
+                    "tick": "completed", "bot_health": "not_asserted",
+                    "summary_path": str(result.summary_path), "summary": result.summary}
+            lines = (f"{result.fleet}: pulse tick completed; inspect the summary and events "
+                     "for bot health.",)
+        elif action == "reload":
             from ..fleet_reload import FleetReloadError, reload_fleet
             try:
                 result = reload_fleet(root=root, fleet=args.fleet)

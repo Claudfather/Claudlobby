@@ -2,11 +2,13 @@
 
 from pathlib import Path
 from types import SimpleNamespace
+import os
 import subprocess
 
 import pytest
 
 from claudlobby import fleet_operations as fleet
+from claudlobby import fleet_pulse
 from claudlobby.bot_operations import BotLifecycleError, BotLifecycleResult
 
 
@@ -66,6 +68,58 @@ def test_generated_worker_cannot_mutate_selected_fleet(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet, "read_selection", lambda _root: selected)
     with pytest.raises(fleet.FleetLifecycleError, match="manager"):
         fleet.set_fleet_running(root=tmp_path, fleet="example", action="start", workers_only=True)
+
+
+def test_pulse_uses_selected_native_once_and_reports_tick_not_health(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    native = tmp_path / "native"
+    (native / "fleet-pulse.sh").parent.mkdir()
+    (native / "fleet-pulse.sh").touch()
+    release = SimpleNamespace(native_path=native, cli_path=tmp_path / "bin/claudlobby",
+                              release_id="selected-release")
+    destination = SimpleNamespace(fleet=SimpleNamespace(name="example", manager="manager"),
+                                  paths=SimpleNamespace(root=tmp_path, lib=native))
+
+    @contextmanager
+    def admitted(root, **kwargs):
+        assert root == tmp_path
+        yield release
+
+    monkeypatch.setattr(fleet_pulse, "mutation_admission", admitted)
+    monkeypatch.setattr(fleet_pulse, "native_environment", lambda _paths: {})
+    monkeypatch.setattr(fleet_pulse, "resolve_operation_scope",
+                        lambda **_kwargs: (destination, None))
+    called = []
+
+    def run(command, **kwargs):
+        called.append((command, kwargs["env"]["CLAUDLOBBY_PRIVATE_PULSE_RELEASE"]))
+        return subprocess.CompletedProcess(command, 0, "worker DOWN\n", "")
+
+    monkeypatch.setattr(fleet_pulse.subprocess, "run", run)
+    result = fleet_pulse.pulse_fleet(root=tmp_path, fleet="example")
+    assert called == [([str(native / "fleet-pulse.sh"), "example"], "selected-release")]
+    assert result.summary == "worker DOWN\n"
+    assert result.summary_path == tmp_path / "state/pulse/example.pulse-summary.txt"
+
+    worker = SimpleNamespace(fleet=destination.fleet, bot_id="worker")
+    monkeypatch.setattr(fleet_pulse, "resolve_operation_scope",
+                        lambda **_kwargs: (destination, worker))
+    with pytest.raises(fleet_pulse.FleetPulseError, match="manager"):
+        fleet_pulse.pulse_fleet(root=tmp_path, fleet="example")
+    assert len(called) == 1
+
+
+def test_selected_private_pulse_refuses_direct_entry(tmp_path):
+    script = Path(__file__).resolve().parent.parent / "lib/fleet-pulse.sh"
+    env = {**os.environ, "CLAUDLOBBY_RELEASE_ID": "selected-release",
+           "CLAUDLOBBY_ROOT": str(tmp_path)}
+    env.pop("CLAUDLOBBY_PRIVATE_PULSE_RELEASE", None)
+    result = subprocess.run(["bash", str(script), "example"], env=env,
+                            capture_output=True, text=True, check=False)
+    assert result.returncode == 3
+    assert "use claudlobby fleet pulse" in result.stderr
+    assert not (tmp_path / "state/pulse").exists()
 
 
 def test_reconcile_keeps_enrollment_and_private_session_distinct(tmp_path, monkeypatch):
