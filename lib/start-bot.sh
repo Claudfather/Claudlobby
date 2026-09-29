@@ -523,7 +523,12 @@ _RESUME_MAX_AGE_S="${RESUME_MAX_AGE_S:-86400}"
 # fleet saying "no resume injection", and must not fall back to the default.
 _RESUME_CMD="${SESSION_RESUME_COMMAND-$_SESSION_RESUME_COMMAND_DEFAULT}"
 if should_resume_session "$_SESSION_MD" "$_RESUME_MAX_AGE_S"; then
-    if _resume_status="$(session_command_status "$_RESUME_CMD" "$BOT_DIR")"; then
+    # Bash 3.2 can fire ERR inside a command substitution even when the
+    # assignment is an if condition. Capture the status verdict with its
+    # expected negative guarded inside, then decide by the explicit values.
+    _resume_status="$(session_command_status "$_RESUME_CMD" "$BOT_DIR" || true)"
+    case "$_resume_status" in
+    available|unverifiable)
         echo "$(ts_iso) RESUME — injecting resume command [$_resume_status]: $_RESUME_CMD" >> "$LOG"
         # #1265: stamp the send instant. Written before the call and again
         # after, so a send that never returns leaves state=sending on disk.
@@ -531,11 +536,13 @@ if should_resume_session "$_SESSION_MD" "$_RESUME_MAX_AGE_S"; then
         PANE_READY_TICKS="$_PANE_READY_TICKS_BOOT" \
             pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "$_RESUME_CMD"
         inject_stamp "$BOT_DIR" resume "done" 0 "$_inject_t0" >/dev/null
-    else
+        ;;
+    *)
         echo "$(ts_iso) RESUME SKIP — fresh checkpoint present but no resume capability [$_resume_status]; starting clean, handoff left at $_SESSION_MD" >> "$LOG"
         emit_fleet_event "resume_skipped" "startup" \
             "{\"reason\":\"$_resume_status\",\"handoff\":\"$_SESSION_MD\"}" || true
-    fi
+        ;;
+    esac
 elif [ -f "$_SESSION_MD" ]; then
     echo "$(ts_iso) RESUME SKIP — checkpoint older than ${_RESUME_MAX_AGE_S}s, clean-starting" >> "$LOG"
 fi
