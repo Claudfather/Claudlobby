@@ -82,6 +82,31 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$LIB_DIR/lib-common.sh"
 install_error_trap ""
 
+if [ -n "${CLAUDLOBBY_RELEASE_ID:-}" ]; then
+    if [ "${1:-}" = "--selected-release" ]; then
+        [ "$#" -ge 2 ] && [ "$#" -le 3 ] \
+            && [ "$2" = "$CLAUDLOBBY_RELEASE_ID" ] \
+            && [ "$LIB_DIR" = "${CLAUDLOBBY_NATIVE_DIR:-}" ] || {
+            echo "update-siblings: selected release context differs" >&2
+            exit 2
+        }
+        shift 2
+        [ "$#" -eq 0 ] || [ "$1" = "--dry-run" ] || {
+            echo "update-siblings: invalid selected option" >&2
+            exit 2
+        }
+    else
+        [ "$#" -eq 0 ] && [ -n "${CLAUDLOBBY_CLI:-}" ] \
+            && [ -n "${CLAUDLOBBY_ROOT:-}" ] \
+            && [ "$LIB_DIR" = "${CLAUDLOBBY_NATIVE_DIR:-}" ] || {
+            echo "update-siblings: selected timer context is incomplete" >&2
+            exit 2
+        }
+        exec env CLAUDLOBBY_UPDATE_SCHEDULED=1 "$CLAUDLOBBY_CLI" \
+            --root "$CLAUDLOBBY_ROOT" host update siblings
+    fi
+fi
+
 DRY_RUN=0
 FLEET=""
 for arg in "$@"; do

@@ -50,6 +50,12 @@ def _dispatch_host_github_app(args):
                    json_output=args.json)
 
 
+def _dispatch_host_update(args):
+    return execute(args.public_command,
+                   lambda: import_module(".host_update", __package__).dispatch(args),
+                   json_output=args.json)
+
+
 def _route(sub, name, command, help):
     parser = sub.add_parser(name, help=help)
     parser.add_argument("--json", action="store_true", help="One schema-1 result object")
@@ -108,6 +114,15 @@ def register_release_subparsers(sub):
     token = github_actions.add_parser("token", help="Print one fresh App installation token")
     token.add_argument("--json", action="store_true", help="One schema-1 result object containing the token")
     token.set_defaults(func=_dispatch_host_github_app, public_command="host.github-app.token")
+    update = hosts.add_parser("update", help="Run selected host runtime or sibling update owners")
+    updates = update.add_subparsers(dest="update_command", required=True)
+    runtime = updates.add_parser("runtime", help="Run the configured Claude Code binary update once")
+    runtime.add_argument("--json", action="store_true", help="One schema-1 result object")
+    runtime.set_defaults(func=_dispatch_host_update, public_command="host.update.runtime")
+    siblings = updates.add_parser("siblings", help="Fast-forward guarded sibling release checkouts")
+    siblings.add_argument("--dry-run", action="store_true", help="Report without a checkout merge or notices")
+    siblings.add_argument("--json", action="store_true", help="One schema-1 result object")
+    siblings.set_defaults(func=_dispatch_host_update, public_command="host.update.siblings")
     doctor = _route(hosts, "doctor", "host.doctor", "Diagnose configured fleets on this host")
     doctor.set_defaults(func=_dispatch_doctor)
     doctor.add_argument("--switches", action="store_true", help="Only show resolved opt-in/out switches")

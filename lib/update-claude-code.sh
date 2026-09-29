@@ -35,6 +35,29 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$LIB_DIR/lib-common.sh"
 install_error_trap ""
 
+# A selected timer enters the same public operation as an operator request.
+# The operation admits the selected release, then re-enters this exact native
+# owner with a private release marker. No download happens before that check.
+if [ -n "${CLAUDLOBBY_RELEASE_ID:-}" ]; then
+    if [ "${1:-}" = "--selected-release" ]; then
+        [ "$#" -eq 2 ] && [ "$2" = "$CLAUDLOBBY_RELEASE_ID" ] \
+            && [ "$LIB_DIR" = "${CLAUDLOBBY_NATIVE_DIR:-}" ] || {
+            echo "update-claude-code: selected release context differs" >&2
+            exit 2
+        }
+        shift 2
+    else
+        [ "$#" -eq 0 ] && [ -n "${CLAUDLOBBY_CLI:-}" ] \
+            && [ -n "${CLAUDLOBBY_ROOT:-}" ] \
+            && [ "$LIB_DIR" = "${CLAUDLOBBY_NATIVE_DIR:-}" ] || {
+            echo "update-claude-code: selected timer context is incomplete" >&2
+            exit 2
+        }
+        exec env CLAUDLOBBY_UPDATE_SCHEDULED=1 "$CLAUDLOBBY_CLI" \
+            --root "$CLAUDLOBBY_ROOT" host update runtime
+    fi
+fi
+
 # Timer environments carry a minimal PATH; own tool resolution here so npm /
 # claude resolve identically under systemd, launchd, cron, or a shell.
 # _HOMEBREW (lib-common) covers brew-installed node on macOS.
