@@ -7,7 +7,7 @@ The job runs inside a scratch INSTALL: a bare origin and a clone of it whose
 lib/ is the real lib/, so it pulls the tree it runs from, exactly as on a host.
 Only plane-lookup.py is a stub (committed, so the tree stays clean); the
 `claudlobby` CLI and `systemctl` are stubs on PATH; the run's record lands on a
-REAL plane under the scratch root through the shim's cold CLI rung.
+REAL plane under the scratch root through a private daemon socket.
 The installed units and restart-state model are explicitly Linux/systemd on
 every test host.
 """
@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import constructed_env, read_fleet_events
+from tests.test_plane_events_door import _serving
 
 REPO = Path(__file__).resolve().parent.parent
 GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com"]
@@ -109,6 +110,7 @@ def template_origin(tmp_path_factory):
 
 class Install:
     def __init__(self, tmp_path: Path, template: Path, scratch_plane_env):
+        self.scratch_plane_env = scratch_plane_env
         self.origin = tmp_path / "origin.git"
         shutil.copytree(template, self.origin)
         self.root = tmp_path / "root"
@@ -168,13 +170,15 @@ class Install:
             FLEET_EVENT_EMIT_TIMEOUT_S="60",
             **self.plane_env,
         )
-        return subprocess.run(
-            ["bash", str(self.root / "lib" / "pull-root.sh")],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
+        with _serving(self.root, self.scratch_plane_env) as sock:
+            env["PLANE_SOCKET"] = str(sock)
+            return subprocess.run(
+                ["bash", str(self.root / "lib" / "pull-root.sh")],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
 
     def events(self, etype: str) -> list[dict]:
         rows = [json.loads(line) for line in read_fleet_events(self.root).splitlines()]

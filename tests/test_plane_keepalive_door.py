@@ -1,7 +1,7 @@
 """Keepalive-as-a-door: presence's RECORDED half (#1361, harvest item 1).
 
 Every pin drives the REAL lib/keepalive.sh tick (real lib-common, real
-shim, real cold-CLI ingest into a scratch plane db; tmux and start-bot.sh
+shim, real staged replay into a scratch plane db; tmux and start-bot.sh
 stubbed) — the door-test pattern from test_plane_gauntlet_doors. The
 load-bearing laws: the tick's ALREADY-COMPUTED verdict is what gets
 recorded (the sampler classifies nothing); the dead-session path records
@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 from claudlobby.plane.db import db_path
+from claudlobby.plane.daemon import PlaneDaemon
 from claudlobby.plane.emit_api import emit_batch
 from tests.fixtures.native_admission import admit_watchdog_fixture
 
@@ -109,6 +110,7 @@ def _tick(libdir: Path, bot: Path, env: dict):
 
 
 def _samples(root: Path):
+    _replay_pending(root)
     db = db_path(root)
     if not db.is_file():
         return []
@@ -124,10 +126,20 @@ def _samples(root: Path):
         conn.close()
 
 
+def _replay_pending(root: Path) -> None:
+    """Use the daemon's existing raw replay owner before committed-row reads."""
+    if not list((root / "state/plane/staged").glob("*.batch")):
+        return
+    daemon = PlaneDaemon(root)
+    try:
+        report = daemon._replay_staged()
+        assert not report.error and not report.quarantined and not report.spooled, report
+    finally:
+        daemon.writer.close()
+
+
 def _wait_samples(root: Path, n: int = 1, timeout: float = 20.0):
-    """The emit is BACKGROUNDED (r2 fold: a wedged rung must never stall
-    the watchdog sweep) — the tick returns before the row lands, so pins
-    poll instead of asserting instantly."""
+    """The emit is backgrounded; poll staging and replay before asserting."""
     deadline = time.monotonic() + timeout
     rows = _samples(root)
     while len(rows) < n and time.monotonic() < deadline:
@@ -250,15 +262,14 @@ def test_future_marker_age_clamps_at_zero(tmp_path, *, scratch_plane_env):
 
 def test_wedged_emit_never_stalls_the_tick(tmp_path, *, scratch_plane_env):
     """The fold's load-bearing property, pinned by TIME: with the emit
-    rung wedged (a 60s-sleeping CLI, no daemon), the tick must return
+    rung wedged (a 60s-sleeping native client, no daemon), the tick must return
     promptly — the watchdog can never wait on a record. The row pins
     cannot see this (a synchronous emit passes them too — caught when the
     unbackground mutation came back green)."""
     libdir, bot, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
-    wedge = tmp_path / "wedge-cli"
-    wedge.write_text("#!/bin/bash\nsleep 60\n")
+    wedge = tmp_path / "bin/python3"
+    wedge.write_text(f'#!/bin/bash\nsleep 60\nexec "{sys.executable}" "$@"\n')
     wedge.chmod(0o755)
-    env["PLANE_EMIT_CLI"] = str(wedge)
     t0 = time.monotonic()
     r = _tick(libdir, bot, env)
     elapsed = time.monotonic() - t0
@@ -298,12 +309,11 @@ def test_wedged_emit_is_reaped_at_the_timeout(tmp_path, *, scratch_plane_env):
     KEEPALIVE_EMIT_TIMEOUT_S; the pin runs a 3s bound against a 300s
     wedge and asserts the wedge process is GONE shortly after."""
     libdir, bot, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
-    wedge = tmp_path / "wedge-cli"
-    wedge.write_text("#!/bin/bash\nsleep 300\n")
+    wedge = tmp_path / "bin/python3"
+    wedge.write_text(f'#!/bin/bash\nsleep 300\nexec "{sys.executable}" "$@"\n')
     wedge.chmod(0o755)
-    env["PLANE_EMIT_CLI"] = str(wedge)
     # 8s, not 3: under battery load the reaper can win the race against
-    # the wedge SPAWN itself (cold rung ~1-2s, worse loaded), failing
+    # the native-client SPAWN itself, failing
     # phase 1 vacuously — measured as a battery-only flake
     env["KEEPALIVE_EMIT_TIMEOUT_S"] = "8"
     r = _tick(libdir, bot, env)
@@ -315,7 +325,7 @@ def test_wedged_emit_is_reaped_at_the_timeout(tmp_path, *, scratch_plane_env):
         return bool(p.stdout.strip())
 
     # phase 1: the wedge must APPEAR first — asserting absence from t=0
-    # passes vacuously before the cold-CLI rung has spawned it (caught
+    # passes vacuously before the native client has spawned it (caught
     # when the remove-the-reaper mutation came back green)
     deadline = time.monotonic() + 15
     while not _wedge_alive() and time.monotonic() < deadline:

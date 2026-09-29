@@ -29,7 +29,7 @@ Hermetic by construction, because this module FIRES the alert path:
     not found) instead of reaching a real, passwordless `sudo npm install -g`
     on whatever host runs the suite; the fleet PATH is pinned at an empty dir,
     so a regression in CLAUDE_BIN resolution finds no binary either;
-  - the plane is the throwaway root's own (cold CLI rung, no daemon), read back
+  - the plane is the throwaway root's own private daemon, read back
     through read_fleet_events.
 """
 
@@ -50,6 +50,7 @@ from tests.conftest import (
     read_fleet_events,
 )
 from tests.test_maintenance_jobs import _captured, _native_fixture, _signal_root
+from tests.test_plane_events_door import _serving
 
 # The live capture's text, verbatim: the package's generic message, no host
 # identifiers in it.
@@ -162,17 +163,14 @@ class Host:
             NPM_CALLS=self.calls,
             CLAUDE_BIN=self.bin,
             CLAUDE_UPDATE_FLEET_PATH=self.tmp / "empty",
-            # These tests assert on the plane, and with no daemon each event is a
-            # cold `emit-batch` spawn: on a loaded host that outruns the 10s
-            # production bound and the event is reaped (forced at 1s, it drops
-            # binary_unrunnable). Give the cold rung room.
-            FLEET_EVENT_EMIT_TIMEOUT_S="120",
             **self.scratch_plane_env(self.root, initialize=True),
             **self.extra,
         )
-        return subprocess.run(
-            ["bash", str(self.script)], env=env, capture_output=True, text=True, timeout=300
-        )
+        with _serving(self.root, self.scratch_plane_env) as sock:
+            env["PLANE_SOCKET"] = str(sock)
+            return subprocess.run(
+                ["bash", str(self.script)], env=env, capture_output=True, text=True, timeout=300
+            )
 
     def log(self) -> str:
         p = self.root / "state" / "claude-update.log"

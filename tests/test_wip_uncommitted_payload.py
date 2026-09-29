@@ -35,6 +35,7 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import constructed_env, read_fleet_events
+from tests.test_plane_events_door import _serving
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FLEET_PULSE = REPO_ROOT / "lib" / "fleet-pulse.sh"
@@ -69,12 +70,13 @@ def wip_root(tmp_path):
 
 
 def _run(root: Path, *, scratch_plane_env, **extra) -> subprocess.CompletedProcess:
-    """A CONSTRUCTED child env (conftest's ratified default) plus the two keys
-    that make the shim record into this root's own plane via its cold rung."""
+    """A constructed child env and private daemon for committed event reads."""
     env = constructed_env(HOME=str(root / "home"),
                           **scratch_plane_env(root, initialize=True), **extra)
-    return subprocess.run(["bash", str(FLEET_PULSE), FLEET],
-                          capture_output=True, text=True, env=env, timeout=180)
+    with _serving(root, scratch_plane_env) as sock:
+        env["PLANE_SOCKET"] = str(sock)
+        return subprocess.run(["bash", str(FLEET_PULSE), FLEET],
+                              capture_output=True, text=True, env=env, timeout=180)
 
 
 def _wip_rows(root: Path) -> list[dict]:

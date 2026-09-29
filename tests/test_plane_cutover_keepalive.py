@@ -24,7 +24,7 @@ from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import emit_batch
 from claudlobby.uptime import compute_metrics, entries_from_plane
 from tests.plane_fixtures import _stdlib_readers
-from tests.test_plane_keepalive_door import CLI, LIB, _rig, _tick
+from tests.test_plane_keepalive_door import CLI, LIB, _replay_pending, _rig, _tick
 
 FLEET = "kfleet"
 TODAY = datetime.now().strftime("%Y-%m-%d")
@@ -45,14 +45,12 @@ def _cli(root: Path, *args, env=None):
 
 
 def _await(root: Path, sql: str, want, *, timeout=30):
-    """The tick's plane emission is DETACHED (the cold CLI lands the row in the
-    background), so the db may not even exist when the tick returns: poll
-    without creating it (a `connect` would mint an empty, schema-less file
-    ahead of the CLI) and read a missing table as nothing yet."""
+    """The tick's emission is detached; replay its raw stage before reading."""
     import sqlite3
     deadline = time.monotonic() + timeout
     while True:
         got = None
+        _replay_pending(root)
         if db_path(root).exists():
             try:
                 with connect(db_path(root)) as conn:

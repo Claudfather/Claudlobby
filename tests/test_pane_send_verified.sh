@@ -64,25 +64,27 @@ SYNTH_ID="synthetic.paneprobe"
 export BOT_DIR="$TMPD/synth-bot" BOT_ID="$SYNTH_ID"
 export CLAUDLOBBY_ROOT="$TMPD/synth-root"
 mkdir -p "$BOT_DIR/data"
+mkdir -p "$CLAUDLOBBY_ROOT/state"
 # F18 closure R1: emit_fleet_event writes no per-bot event file any more — every
 # fleet event goes through lib/plane-emit.sh to the plane. The suite stays
-# hermetic (no plane, no daemon) by pointing the shim at a CAPTURING cold rung:
-# the socket rung fails on a path nothing listens on, the stub below receives
-# the finalized batch file as the shim's LAST argument and appends its contents
-# to CAPTURE, and the assertions grep that file exactly as they grepped the
-# ledger. FLEET_NAME anchors the rows on the synthetic bot (a door records
-# nothing without a fleet).
+# hermetic (no plane, no daemon): the dead socket causes the native shim to
+# stage raw batches under the scratch root. The assertions read those batches.
+# FLEET_NAME anchors the rows on the synthetic bot.
 export FLEET_NAME="synthetic-fleet"
 export PLANE_SOCKET="$TMPD/no-daemon.sock"
 CAPTURE="$TMPD/plane-capture.jsonl"
 : > "$CAPTURE"
-PLANE_EMIT_CLI="$TMPD/capture-cli"
-export PLANE_EMIT_CLI
-printf '%s\n' '#!/bin/bash' 'f="${@: -1}"' 'cat "$f" >> "'"$CAPTURE"'"' 'echo >> "'"$CAPTURE"'"' > "$PLANE_EMIT_CLI"
 export PLANE_EMIT_DISABLED=0
-chmod +x "$PLANE_EMIT_CLI"
-# The finalized batch is re-serialized by the shim (json.dumps: a space after
-# each colon), so every reason/event match below tolerates either spacing.
+cap_reset() { rm -f "$CLAUDLOBBY_ROOT/state/plane/staged/"*.batch; : > "$CAPTURE"; }
+cap_refresh() {
+    python3 - "$CLAUDLOBBY_ROOT/state/plane/staged" "$CAPTURE" <<'PY'
+import json, pathlib, sys
+with open(sys.argv[2], "w") as out:
+    for path in sorted(pathlib.Path(sys.argv[1]).glob("*.batch")):
+        for event in json.loads(path.read_text())["events"]:
+            out.write(json.dumps(event) + "\n")
+PY
+}
 
 # Stub the single tmux chokepoint. send-keys appends its payload to SENT_LOG;
 # capture-pane pops the next fixture from PANE_SCRIPT (repeating the last one),
@@ -161,6 +163,7 @@ run_send() {
     rm -f "$CHUNK_DIR"/*; CHUNK_N=0
     printf '%s\n' "$@" > "$PANE_SCRIPT"
     pane_send_verified sock "$SYNTH_ID" "$text"
+    cap_refresh
     wc -l < "$SENT_LOG" | tr -d ' '
 }
 
@@ -248,7 +251,7 @@ assert_eq "already-drawn pane: still exactly two sends" "2" "$r"
 # the payload rather than hanging start-bot or silently dropping it.
 # Zero the capture first — earlier glyph-less cases in this file exhaust the same
 # budget and emit too, and this assertion counts an exact total.
-: > "$CAPTURE"
+cap_reset
 r=$(run_send 'NEVERDRAWN860' "$FIXTURES/predraw-empty.txt")
 assert_eq "box never drawn: payload is still sent (best-effort, not dropped)" "2" "$r"
 r=$(grep -cE '"reason": ?"input-box-never-drawn"' "$CAPTURE" || true)
@@ -335,12 +338,12 @@ assert_eq "drawn box then glyph-less verify -> submitted, no resend" "2" "$r"
 # typed at a TUI that did not exist and are gone. Resending Enter repairs nothing
 # (there is no text in the box to submit), so the PAYLOAD goes again.
 # Pre-fix this returned success on tick 1 and the prompt was lost silently.
-: > "$CAPTURE"
+cap_reset
 r=$(run_send 'LOSTPAYLOAD860' \
     $(rep "$PANE_READY_TICKS" "$FIXTURES/predraw-empty.txt") "$FIXTURES/idle-prompt.txt")
 assert_eq "never-drawn then a box appears empty -> full payload resent" "4" "$r"
 r=$(grep -cE '"reason": ?"resent-after-box-drew"' "$CAPTURE" || true)
-assert_eq "the recovery is on the plane (an invisible repair is how this hid)" "1" "$r"
+assert_eq "the recovery is staged for Plane replay (an invisible repair is how this hid)" "1" "$r"
 
 # The resend must be the payload, not a bare Enter: a lost send has nothing in the
 # box for an Enter to submit. Distinguishes this repair from #837's.
@@ -376,7 +379,7 @@ assert_eq "the collapsed payload is sent exactly once (no double-delivery)" "1" 
 # post-budget Enter must NOT fire — it would spend a send on a pane that cannot
 # receive it and file a send_retry, misattributing a pre-draw loss as a post-draw
 # swallow. fleet-pulse reads those rows; the two must not blur.
-: > "$CAPTURE"
+cap_reset
 r=$(run_send 'NEVERAPPEARS860' "$FIXTURES/predraw-empty.txt")
 assert_eq "box never appears -> no phantom Enter retry" "2" "$r"
 r=$(grep -cE '"reason": ?"enter-swallowed"' "$CAPTURE" || true)
@@ -404,15 +407,15 @@ export PANE_SEND_VERIFY_TICKS=1
 
 echo "=== the retry is observable (a silent retry is how the old one hid) ==="
 
-# emit_fleet_event lands every event on the plane through the shim, whose cold
-# rung is the capturing stub above. Count without a zero-match grep aborting the
+# emit_fleet_event stages raw events through the real shim while the daemon is
+# down. Count without a zero-match grep aborting the
 # suite under pipefail — a missing event must report FAIL, not kill the run.
 # The batch carries the event name as payload.event and the caller's data
 # verbatim inside payload.data.data, spacing per the re-serialization.
-count_events() { grep -cE "$1" "$CAPTURE" || true; }
+count_events() { cap_refresh; grep -cE "$1" "$CAPTURE" || true; }
 # Zero the capture: earlier run_send calls already emitted retries into it and
 # the counts below assert exact totals.
-: > "$CAPTURE"
+cap_reset
 run_send '/claudna:session resume --auto' "$FIXTURES/input-stuck-literal.txt" >/dev/null
 r=$(count_events '"event": ?"send_retry"')
 assert_eq "a fired retry emits a send_retry event" "1" "$r"
@@ -612,7 +615,7 @@ echo "=== the pre-draw repair resends CHUNKED too (#1493) ==="
 # never confirmed and appears empty. Sending that one unchunked would repair a
 # pre-draw loss by committing a 1 KB one — and it is the path that carries the
 # BIGGEST payloads, since start-bot's STARTUP_PROMPT is what arms the wait.
-: > "$CAPTURE"
+cap_reset
 r=$(PANE_SEND_CHUNK_BYTES=900 run_send "$payload2500" \
     $(rep "$PANE_READY_TICKS" "$FIXTURES/predraw-empty.txt") "$FIXTURES/idle-prompt.txt")
 assert_eq "repair path: 3 chunks + Enter, twice over" "8" "$r"
@@ -620,7 +623,7 @@ assert_eq "repair path: six keystroke chunks in total, all -l" "6" "$(chunk_coun
 r=$(grep -c '^Enter$' "$SENT_LOG" || true)
 assert_eq "repair path: one Enter per send, never per chunk" "2" "$r"
 r=$(grep -cE '"reason": ?"resent-after-box-drew"' "$CAPTURE" || true)
-assert_eq "repair path: still recorded on the plane" "1" "$r"
+assert_eq "repair path: still staged for Plane replay" "1" "$r"
 
 echo "=== a trailing ';' survives tmux (chunk O fold, F1) ==="
 
@@ -796,10 +799,11 @@ run_send_failing() {
     printf '%s\n' "$@" > "$PANE_SCRIPT"
     local rc=0
     pane_send_verified sock "$SYNTH_ID" "$text" 2>"$TMPD/send-stderr.log" || rc=$?
+    cap_refresh
     printf '%s' "$rc"
 }
 
-: > "$CAPTURE"
+cap_reset
 r=$(PANE_SEND_CHUNK_BYTES=900 FAIL_ON_CHUNK=2 run_send_failing "$payload2500" "$FIXTURES/input-clean-submit.txt")
 assert_eq "a chunk that fails mid-payload fails the send (never a silent partial)" "1" "$r"
 r=$(grep -c 'chunk 2 of 3 failed' "$TMPD/send-stderr.log" || true)
@@ -807,7 +811,7 @@ assert_eq "the door says WHICH chunk failed" "1" "$r"
 r=$(grep -c '900 bytes left unsubmitted in the box' "$TMPD/send-stderr.log" || true)
 assert_eq "...and how many bytes it left in the box for the next send to run into" "1" "$r"
 r=$(grep -cE '"event": ?"send_miss"' "$CAPTURE" || true)
-assert_eq "the partial is on the plane as a send_miss (the send did NOT land)" "1" "$r"
+assert_eq "the partial is staged as a send_miss (the send did NOT land)" "1" "$r"
 r=$(grep -cE '"partial": ?"2/3"' "$CAPTURE" || true)
 assert_eq "the event carries which chunk of how many" "1" "$r"
 r=$(grep -cE '"reason": ?"chunk-send-failed"' "$CAPTURE" || true)

@@ -13,15 +13,18 @@ def _setup():
     source = HARNESS.read_text()
     start = source.index('VAL_REPO="')
     end = source.index('# Every plane read below', start)
-    return source[start:end]
+    daemon = source.index('val_start_fixture_daemon()')
+    started = source.index('val_start_fixture_daemon "$ROOT" "$PLANE_SOCKET"', daemon)
+    return source[start:end] + '\n' + source[daemon:started + len('val_start_fixture_daemon "$ROOT" "$PLANE_SOCKET"')]
 
 
 def _run(root, socket_dir, env):
     body = '\n'.join([
         'set -euo pipefail', '. "$1/lib-common.sh"',
         'LIB_DIR="$1"; ROOT="$2"; TMUX_TMPDIR="$3"; FLEET=isolated-validation',
+        'trap \'for p in ${VAL_PRIVATE_PLANE_PIDS:-}; do kill "$p" 2>/dev/null || true; wait "$p" 2>/dev/null || true; done\' EXIT',
         _setup(),
-        '[ "$PLANE_SOCKET" = "$TMUX_TMPDIR/no-plane.sock" ]',
+        '[ "$PLANE_SOCKET" = "$TMUX_TMPDIR/plane.sock" ]',
         'emit_fleet_event validate_started harness \'{}\' ""',
     ])
     return subprocess.run(
@@ -44,7 +47,7 @@ def test_validation_setup_uses_owned_transport_and_preflighted_cli(tmp_path, scr
     cli.chmod(0o755)
     (tmp_path / "python").symlink_to(Path(scratch_plane_env.cli).parent / "python")
     env = constructed_env(HOME=tmp_path, TMPDIR=tmp_path,
-                          **scratch_plane_env(root, socket=socket_dir / "no-plane.sock", cli=cli))
+                          **scratch_plane_env(root, socket=socket_dir / "plane.sock", cli=cli))
     native_guard = (REPO / "lib/runtime-admission.sh").read_bytes()
     result = _run(root, socket_dir, env)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -63,7 +66,7 @@ def test_validation_setup_refuses_unexecutable_explicit_cli(tmp_path, scratch_pl
     root.mkdir()
     socket_dir = scratch_plane_env.socket_dir()
     env = constructed_env(HOME=tmp_path, TMPDIR=tmp_path,
-                          **scratch_plane_env(root, socket=socket_dir / "no-plane.sock",
+                          **scratch_plane_env(root, socket=socket_dir / "plane.sock",
                                               cli=tmp_path / "missing-cli"))
     result = _run(root, socket_dir, env)
     assert result.returncode == 2, result.stdout + result.stderr

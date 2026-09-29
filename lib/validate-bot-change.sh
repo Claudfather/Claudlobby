@@ -121,11 +121,9 @@ EVENTS="$BOT_DIR/data/events"   # the marker/idle files still live under data/; 
 # of a fleet event, a dispatch or a report is read back FROM THE PLANE, and
 # every ledger row it used to seed is seeded AS PLANE ROWS instead.
 #
-# Every door emits through lib/plane-emit.sh; with no daemon here the shim
-# takes its cold-CLI rung, so the CLI is a prerequisite of the whole harness
-# (as tmux is) rather than a leg that may skip. Each throwaway root gets its
-# own plane db at <root>/state/plane/plane.db. PLANE_SOCKET names a socket
-# that does not exist, at a SHORT path (sun_path is 104 bytes on macOS).
+# Every door emits through lib/plane-emit.sh to its root's private daemon.
+# Each throwaway root gets its own db and short socket (sun_path is 104 bytes
+# on macOS). The CLI remains selected for fixture seeding and Plane reads.
 # ---------------------------------------------------------------------------
 VAL_REPO="$(cd "$LIB_DIR/.." && pwd)"
 # The pytest wrapper supplies its preflighted CLI. Hand callers must also select
@@ -145,7 +143,7 @@ export PLANE_EMIT_CLI="$VAL_CLI" CLAUDLOBBY_CLI="$VAL_CLI"
 export CLAUDLOBBY_NATIVE_DIR="$LIB_DIR" CLAUDLOBBY_LIBRARY_DIR="$VAL_REPO/library"
 # This directory was just allocated by mktemp and belongs to this run. A
 # PID-derived name directly under /tmp could already name another listener.
-export PLANE_SOCKET="$TMUX_TMPDIR/no-plane.sock"
+export PLANE_SOCKET="$TMUX_TMPDIR/plane.sock"
 [ ! -e "$PLANE_SOCKET" ] || { echo "validate-bot-change: scratch Plane socket already exists" >&2; exit 2; }
 # Every door reads its root from the environment (the shim defaults to its own
 # parent dir otherwise — a stub lib dir sourced from this shell would land rows
@@ -475,11 +473,34 @@ cleanup() {
     if [ -n "${PL_STALE_PID:-}" ]; then
         kill "$PL_STALE_PID" 2>/dev/null || true
     fi
+    for _p in ${VAL_PRIVATE_PLANE_PIDS:-}; do kill "$_p" 2>/dev/null || true; wait "$_p" 2>/dev/null || true; done
+    for _d in ${VAL_PRIVATE_PLANE_SOCKDIRS:-}; do rm -rf "$_d" 2>/dev/null || true; done
     [ -n "${PL_ROOT:-}" ] && rm -rf "$PL_ROOT" 2>/dev/null
     [ -n "${PL_SOCKDIR:-}" ] && rm -rf "$PL_SOCKDIR" 2>/dev/null
     rm -rf "$ROOT" "${RB_ROOT:-}" "${WR_ROOT:-}" "${BP_ROOT:-}" "${SC_ROOT:-}" "${CK2_ROOT2:-}" "$TMUX_TMPDIR"
 }
 trap cleanup EXIT
+
+# One real daemon per fixture root. Keep the process IDs in this shell for the
+# existing EXIT trap; no root may accidentally send to another root's Plane.
+val_start_fixture_daemon() {  # <initialized-root> [already-owned-short-socket]
+    local _root="$1" _sock="${2:-}" _dir="" _pid _i=0
+    if [ -z "$_sock" ]; then
+        _dir="$(mktemp -d /tmp/vbc-fixture-plane.XXXXXX)"
+        _sock="$_dir/s"
+        VAL_PRIVATE_PLANE_SOCKDIRS="${VAL_PRIVATE_PLANE_SOCKDIRS:-} $_dir"
+    fi
+    "$VAL_CLI" --root "$_root" plane serve --socket "$_sock" \
+        >> "$_root/state/plane/fixture-daemon.log" 2>&1 &
+    _pid=$!
+    VAL_PRIVATE_PLANE_PIDS="${VAL_PRIVATE_PLANE_PIDS:-} $_pid"
+    while [ "$_i" -lt 100 ] && [ ! -S "$_sock" ] && kill -0 "$_pid" 2>/dev/null; do
+        sleep 0.1; _i=$((_i + 1))
+    done
+    [ -S "$_sock" ] || { echo "validate-bot-change: private Plane daemon did not bind for $_root" >&2; return 1; }
+    VAL_LAST_PLANE_SOCKET="$_sock"
+}
+val_start_fixture_daemon "$ROOT" "$PLANE_SOCKET"
 
 mkdir -p "$BOT_DIR/data" "$ROOT/state"
 
@@ -1190,7 +1211,7 @@ harness_check "keepalive dead-session path emits a RESTART … session dead log 
 # F18 closure R2b: the keepalive.log parser is gone with the file; `claudlobby
 # uptime` reads the plane's keepalive entries — the RESTART is the
 # keepalive_restart fleet event the real tick landed. The tick's emission is
-# detached (the cold CLI lands it in the background), so poll, bounded.
+# detached (the native shim reaches the private daemon in the background), so poll, bounded.
 dead_restarts=$(val_poll 40 0.5 val_restarts "$ROOT" "$FLEET" "$DBOT")
 [ "${dead_restarts:-0}" -ge 1 ] && r=yes || r=no
 harness_check "the plane's keepalive entries yield the RESTART the real tick landed (#579, F18 R2b)" "$r"
@@ -1253,6 +1274,8 @@ harness_check "send_reload_command fires no spurious Enter on clean submit (veri
 # stale one -> resume skipped (clean start).
 RB_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-rb.XXXXXX")"
 val_initialize_plane "$RB_ROOT"
+val_start_fixture_daemon "$RB_ROOT"
+RB_PLANE_SOCKET="$VAL_LAST_PLANE_SOCKET"
 RB_DIR="$RB_ROOT/local/$FLEET/runtime/bots/valrb"
 mkdir -p "$RB_DIR/.claude" "$RB_DIR/logs" "$RB_ROOT/bin" "$RB_ROOT/tmp"
 # Controlled HOME with consent pre-accepted. start-bot.sh's consent block runs
@@ -1297,7 +1320,7 @@ _run_startbot() {  # $1 = fresh|stale -> echo the resulting pane
     tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
     sleep 0.3
     TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 CLAUDE_BIN="$RB_ROOT/bin/claude" \
-        HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
+        HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" PLANE_SOCKET="$RB_PLANE_SOCKET" \
         "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.$1.out" 2>&1 || true
     sleep 1
     tmux capture-pane -t "$RB_SESSION" -p 2>/dev/null || true
@@ -1380,7 +1403,7 @@ rm -f "$RB_ROOT/staged-plugin-argv.log"
 tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
 sleep 0.3
 TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 \
-    HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
+    HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" PLANE_SOCKET="$RB_PLANE_SOCKET" \
     env -u CLAUDE_BIN "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.staged.out" 2>&1 || true
 sleep 1
 pane_staged="$(tmux capture-pane -t "$RB_SESSION" -p 2>/dev/null || true)"
@@ -1438,7 +1461,7 @@ printf -- '---\ncwd: %s\nlast_updated: %s\nschema_version: 2\n---\n' "$RB_DIR" "
 # the same thing to the ${VAR:-default} the helper uses, and says so explicitly.
 TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=1 \
     CLAUDE_BIN="$RB_ROOT/bin/claude" CLAUDE_CONFIG_DIR='' \
-    HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
+    HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" PLANE_SOCKET="$RB_PLANE_SOCKET" \
     "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.timeout.out" 2>&1 || true
 sleep 1
 grep -q 'TIMEOUT' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
@@ -1480,7 +1503,7 @@ tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
 sleep 0.3
 TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=1 \
     CLAUDE_BIN="$RB_ROOT/bin/claude" CLAUDE_CONFIG_DIR='' \
-    HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
+    HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" PLANE_SOCKET="$RB_PLANE_SOCKET" \
     "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.authcache.out" 2>&1 || true
 sleep 1
 # Select on "AUTH_CACHE_ARMED —", not the bare token: the BRIDGE_MISSING line
@@ -1540,7 +1563,7 @@ tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
 sleep 0.3
 TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=1 \
     CLAUDE_BIN="$RB_ROOT/bin/claude" CLAUDE_CONFIG_DIR='' \
-    HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
+    HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" PLANE_SOCKET="$RB_PLANE_SOCKET" \
     "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.authunknown.out" 2>&1 || true
 sleep 1
 _acunk="$(grep 'AUTH_CACHE_UNKNOWN —' "$RB_DIR/logs/startup.log" 2>/dev/null | tail -1 || true)"
@@ -1641,7 +1664,7 @@ tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
 sleep 0.3
 TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=1 \
     CLAUDE_BIN="$RB_ROOT/bin/claude" \
-    HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
+    HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" PLANE_SOCKET="$RB_PLANE_SOCKET" \
     "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.scope.out" 2>&1 || true
 sleep 1
 
@@ -1791,7 +1814,7 @@ exec cat
 STUB
 chmod +x "$RB_ROOT/bin/claude"
 TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=10 CLAUDE_BIN="$RB_ROOT/bin/claude" \
-    HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
+    HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" PLANE_SOCKET="$RB_PLANE_SOCKET" \
     "$LIB_DIR/start-bot.sh" "$MP_DIR" >"$RB_ROOT/startbot.mp.out" 2>&1 || true
 grep -qx 'plugin marketplace add ExampleOrg/example-plugins' "$RB_ROOT/plugin-argv.log" 2>/dev/null && r=yes || r=no
 harness_check "marketplace add uses the positional owner/repo form (no dead flags)" "$r"
@@ -1823,6 +1846,8 @@ fi
 val_scenario "validate-bot-change: weekly worker-only restart"
 WR_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-wr.XXXXXX")"
 val_initialize_plane "$WR_ROOT"
+val_start_fixture_daemon "$WR_ROOT"
+WR_PLANE_SOCKET="$VAL_LAST_PLANE_SOCKET"
 WR_LIB="$WR_ROOT/lib"
 mkdir -p "$WR_LIB"
 cp "$LIB_DIR/lib-common.sh" "$LIB_DIR/supervisor.sh" "$LIB_DIR/weekly-worker-restart.sh" "$WR_LIB/"
@@ -1837,7 +1862,7 @@ printf 'BOT_ID=wworker\nBOT_SERVICE=wr-wworker\nMANAGER_TMUX=wmgr\n' > "$WR_BOTS
 WR_HOME="$WR_ROOT/home"
 mkdir -p "$WR_HOME/.config/systemd/user" "$WR_HOME/Library/LaunchAgents"
 touch "$WR_HOME/.config/systemd/user/wr-wworker.service" "$WR_HOME/Library/LaunchAgents/wr-wworker.plist"
-HOME="$WR_HOME" CLAUDLOBBY_ROOT="$WR_ROOT" "$WR_LIB/weekly-worker-restart.sh" "$FLEET" >/dev/null 2>&1 || true
+HOME="$WR_HOME" CLAUDLOBBY_ROOT="$WR_ROOT" PLANE_SOCKET="$WR_PLANE_SOCKET" "$WR_LIB/weekly-worker-restart.sh" "$FLEET" >/dev/null 2>&1 || true
 wr_log="$WR_ROOT/state/weekly-worker-restart.log"
 wr_events="$(val_events "$WR_ROOT" "$FLEET" fleet restart_failed || true)"
 
@@ -1852,7 +1877,7 @@ harness_check "worker restart failure raises a restart_failed alert (shared emit
 
 # The next automatic tick must leave a deliberately de-enrolled worker down.
 rm -f "$WR_HOME/.config/systemd/user/wr-wworker.service" "$WR_HOME/Library/LaunchAgents/wr-wworker.plist"
-HOME="$WR_HOME" CLAUDLOBBY_ROOT="$WR_ROOT" "$WR_LIB/weekly-worker-restart.sh" "$FLEET" >/dev/null 2>&1 || true
+HOME="$WR_HOME" CLAUDLOBBY_ROOT="$WR_ROOT" PLANE_SOCKET="$WR_PLANE_SOCKET" "$WR_LIB/weekly-worker-restart.sh" "$FLEET" >/dev/null 2>&1 || true
 grep -q 'skip (de-enrolled): wworker' "$wr_log" 2>/dev/null && r=yes || r=no
 harness_check "weekly restart skips a de-enrolled worker" "$r"
 
@@ -2452,6 +2477,9 @@ if ! systemd_user_bus_available; then
 else
     BP_SVC="claudlobby-vbc-bootprobe-$$"
     BP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-bp.XXXXXX")"
+    val_initialize_plane "$BP_ROOT"
+    val_start_fixture_daemon "$BP_ROOT"
+    BP_PLANE_SOCKET="$VAL_LAST_PLANE_SOCKET"
     BP_FLEET="bpfleet"
     BP_BOT="bootprobe"
     BP_DIR="$BP_ROOT/local/$BP_FLEET/runtime/bots/$BP_BOT"
@@ -2559,8 +2587,8 @@ LBUNIT
     # The plane setup (five reader declarations through the CLI: seconds) must
     # run BEFORE the units start — placed after, it would outlast the crash
     # probe's 1s first attempt, which is sampled below.
-    val_plane_ready "$BP_ROOT" "$BP_FLEET"
-    val_plane_ready "$BP_ROOT" "$CL_FLEET"
+    PLANE_SOCKET="$BP_PLANE_SOCKET" val_plane_ready "$BP_ROOT" "$BP_FLEET"
+    PLANE_SOCKET="$BP_PLANE_SOCKET" val_plane_ready "$BP_ROOT" "$CL_FLEET"
     systemctl --user daemon-reload >/dev/null 2>&1 || true
     # shellcheck disable=SC2086
     systemctl --user start --no-block "$BP_SVC" $BP_LOOP_SVCS >/dev/null 2>&1 || true
@@ -2600,7 +2628,7 @@ LBUNIT
     # (bounded at 150s): epoch state NRestarts starting? loop?
     LB_SAMPLES="$BP_ROOT/longboot-samples.txt"
     cl_pulse() {
-        CLAUDLOBBY_ROOT="$BP_ROOT" CLAUDLOBBY_FLEET="$CL_FLEET" FLEET_PULSE_ESCALATE_CHAT_ID="" \
+        CLAUDLOBBY_ROOT="$BP_ROOT" PLANE_SOCKET="$BP_PLANE_SOCKET" CLAUDLOBBY_FLEET="$CL_FLEET" FLEET_PULSE_ESCALATE_CHAT_ID="" \
             "$LIB_DIR/fleet-pulse.sh" "$CL_FLEET" >/dev/null 2>&1 || true
     }
     # The loop fleet's ONE pulse runs from this sampler, at >=20s: late enough
@@ -2631,7 +2659,7 @@ LBUNIT
     LB_SAMPLER_PID=$!
 
     bp_pulse() {
-        CLAUDLOBBY_ROOT="$BP_ROOT" CLAUDLOBBY_FLEET="$BP_FLEET" FLEET_PULSE_ESCALATE_CHAT_ID="" \
+        CLAUDLOBBY_ROOT="$BP_ROOT" PLANE_SOCKET="$BP_PLANE_SOCKET" CLAUDLOBBY_FLEET="$BP_FLEET" FLEET_PULSE_ESCALATE_CHAT_ID="" \
             "$LIB_DIR/fleet-pulse.sh" "$BP_FLEET" >/dev/null 2>&1 || true
     }
 
@@ -2663,7 +2691,7 @@ LBUNIT
     harness_check "  ...and service_is_starting still reads mid-start there" "$r"
 
     # Consumer C: the real keepalive must NOT restart this boot.
-    CLAUDLOBBY_ROOT="$BP_ROOT" "$LIB_DIR/keepalive.sh" "$BP_DIR" >/dev/null 2>&1 || true
+    CLAUDLOBBY_ROOT="$BP_ROOT" PLANE_SOCKET="$BP_PLANE_SOCKET" "$LIB_DIR/keepalive.sh" "$BP_DIR" >/dev/null 2>&1 || true
     _kl="$BP_DIR/keepalive.log"
     grep -q 'boot in flight' "$_kl" 2>/dev/null && r=yes || r=no
     harness_check "keepalive SKIPs a boot in flight instead of restarting it" "$r"
@@ -2704,7 +2732,7 @@ LBUNIT
     _sess3=no; bp_session && _sess3=yes
     command tmux -L "$BP_SVC" kill-server 2>/dev/null || true
     : > "$_kl"
-    CLAUDLOBBY_ROOT="$BP_ROOT" "$LIB_DIR/keepalive.sh" "$BP_DIR" >/dev/null 2>&1 || true
+    CLAUDLOBBY_ROOT="$BP_ROOT" PLANE_SOCKET="$BP_PLANE_SOCKET" "$LIB_DIR/keepalive.sh" "$BP_DIR" >/dev/null 2>&1 || true
     grep -q 'RESTART' "$_kl" 2>/dev/null && [ "$_sess3" = yes ] && r=yes || r=no
     harness_check "CONTROL: a genuinely dead session on a settled unit still restarts (session up before the kill: $_sess3)" "$r"
 
@@ -2743,7 +2771,7 @@ LBUNIT
     harness_check "  ...and service_is_crash_looping reads it as a loop (verdict ${CRASH_LOOP_VERDICT:-?}, ${CRASH_LOOP_RESTARTS:-?} automatic restarts)" "$r"
 
     # Consumer: keepalive -- a distinct SKIP, and still no restart of its own.
-    CLAUDLOBBY_ROOT="$BP_ROOT" "$LIB_DIR/keepalive.sh" "$CL_DIR" >/dev/null 2>&1 || true
+    CLAUDLOBBY_ROOT="$BP_ROOT" PLANE_SOCKET="$BP_PLANE_SOCKET" "$LIB_DIR/keepalive.sh" "$CL_DIR" >/dev/null 2>&1 || true
     _clkl="$CL_DIR/keepalive.log"
     grep -q 'SKIP — crash loop' "$_clkl" 2>/dev/null && r=yes || r=no
     harness_check "keepalive names the crash loop instead of calling it a boot in flight" "$r"
@@ -2983,6 +3011,8 @@ SC_HOME=$(sc_mkrepo "claudlobby" "testorg")
 # source tree's dirty-work guard as well.
 printf '\n/state/\n' >> "$SC_HOME/.git/info/exclude"
 val_initialize_plane "$SC_HOME"
+val_start_fixture_daemon "$SC_HOME"
+SC_PLANE_SOCKET="$VAL_LAST_PLANE_SOCKET"
 SC_SIB=$(sc_mkrepo "sibling" "testorg")     # framework — must be watched
 SC_PROD=$(sc_mkrepo "productrepo" "otherorg") # product — must NOT be watched
 SC_DIRTY=$(sc_mkrepo "dirtysib" "testorg")  # framework, but someone is mid-work
@@ -2997,7 +3027,7 @@ SCCONF
 # operation are the real code. $_SC_LOCS is what pip would have reported.
 sc_run() {  # sc_run <script.sh> [args...]     ($_SC_LOCS = discovered locations)
     local script="$1"; shift
-    CLAUDLOBBY_ROOT="$SC_HOME" \
+    CLAUDLOBBY_ROOT="$SC_HOME" PLANE_SOCKET="$SC_PLANE_SOCKET" \
     CLAUDLOBBY_FLEET="$SC_FLEET" \
     _SC_LOCS="$_SC_LOCS" \
     _SC_BOTS="$SC_ROOT/local/$SC_FLEET/runtime/bots" \
@@ -3010,7 +3040,7 @@ sc_run() {  # sc_run <script.sh> [args...]     ($_SC_LOCS = discovered locations
 }
 
 sc_discover() {
-    CLAUDLOBBY_ROOT="$SC_HOME" _SC_LOCS="$_SC_LOCS" bash -c '
+    CLAUDLOBBY_ROOT="$SC_HOME" PLANE_SOCKET="$SC_PLANE_SOCKET" _SC_LOCS="$_SC_LOCS" bash -c '
         . "'"$LIB_DIR"'/lib-common.sh"
         _editable_project_locations() { printf "%s\n" "$_SC_LOCS"; }
         discover_framework_checkouts' 2>/dev/null
@@ -3452,33 +3482,45 @@ else
                 PLANE_EMIT_CLI="$PL_CLI" PLANE_EMIT_CLASS=door FLEET_NAME=vbc-fleet BOT_ID=vbc PATH="/usr/bin:/bin" $1 \
                 bash "$PL_LIB/plane-emit.sh" 2> "$PL_ROOT/err"
     }
-    _pl_count() { val_sql "$PL_ROOT" "SELECT COUNT(*) FROM events WHERE event='daemon_started'"; }
+    _pl_count() { val_sql "$PL_ROOT" "SELECT COUNT(*) FROM events WHERE event='daemon_started' AND emitter='validate-bot-change'"; }
+    _pl_start_count() { val_sql "$PL_ROOT" "SELECT COUNT(*) FROM events WHERE event='daemon_started' AND emitter!='validate-bot-change'"; }
+    _pl_wait_count() {  # $1 = expected minimum; the older val_poll stops at any positive count
+        local _want="$1" _seen=0 _n=0
+        while [ "$_n" -lt 100 ]; do
+            _seen=$(_pl_count)
+            [ "${_seen:-0}" -ge "$_want" ] && { printf '%s\n' "$_seen"; return 0; }
+            sleep 0.2
+            _n=$((_n + 1))
+        done
+        printf '%s\n' "$_seen"
+    }
     # Binding the socket precedes the daemon's own start receipt. Wait for that
     # positive control, then count each shim emission relative to it.
-    PL_BASE=$(val_poll 100 0.1 _pl_count)
-    [ "${PL_BASE:-0}" -ge 1 ] && r=yes || r=no
+    _pl_started=$(val_poll 100 0.1 _pl_start_count)
+    [ "${_pl_started:-0}" -ge 1 ] && r=yes || r=no
     harness_check "the daemon's own start row landed before shim emissions" "$r"
+    PL_BASE=$(_pl_count)
 
     _pl_emit "" "socket" >/dev/null && r=yes || r=no
     harness_check "Plane shim records with daemon up and no flag" "$r"
     [ "$(_pl_count)" = "$((PL_BASE + 1))" ] && r=yes || r=no
     harness_check "the event row LANDED (real db, real shim)" "$r"
-    grep -Eq 'falling back to cold CLI|cooldown finalize succeeded.*replaying cold as planned' "$PL_ROOT/err" && r=no || r=yes
-    harness_check "  ...via rung 1 (no fallback disclosure on stderr)" "$r"
+    grep -q 'batch STAGED' "$PL_ROOT/err" && r=no || r=yes
+    harness_check "  ...through the socket (no pending-stage disclosure)" "$r"
 
     kill "$PL_DPID" 2>/dev/null || true; wait "$PL_DPID" 2>/dev/null || true
-    # A leg-one miss (#1693: a freshly started daemon can answer late on a
-    # loaded host) arms the marker, and this leg would then take the cooldown
-    # path, which never says "falling back": the check would test the
-    # cooldown while claiming the fallback. Cleared as before leg four.
+    # Clear a possible earlier arm so this leg tests a fresh socket miss.
     rm -f "$PL_ROOT/state/plane/.socket-wedged"
-    _pl_emit "PLANE_EMIT_ENABLED=0" "cold" >/dev/null && r=yes || r=no
-    harness_check "Plane shim records with daemon down (legacy flag ignored)" "$r"
-    [ "$(_pl_count)" = "$((PL_BASE + 2))" ] && r=yes || r=no
-    harness_check "the event row LANDED through the cold rung" "$r"
-    grep -Eq 'falling back to cold CLI|cooldown finalize succeeded.*replaying cold as planned' "$PL_ROOT/err" && r=yes || r=no
-    harness_check "  ...and the fallback was DISCLOSED, not silent" "$r"
-    [ "$r" = yes ] || { echo "  --- DIAGNOSTIC: cold-rung stderr ---"; sed 's/^/    /' "$PL_ROOT/err"; }
+    _pl_rc=0
+    _pl_emit "PLANE_EMIT_ENABLED=0" "down" >/dev/null || _pl_rc=$?
+    [ "$_pl_rc" = 6 ] && r=yes || r=no
+    harness_check "Plane shim stages with daemon down (legacy flag ignored)" "$r"
+    [ "$(_pl_count)" = "$((PL_BASE + 1))" ] && r=yes || r=no
+    harness_check "the raw staged event is NOT yet a committed row" "$r"
+    ls "$PL_ROOT/state/plane/staged/"*.batch >/dev/null 2>&1 && r=yes || r=no
+    harness_check "  ...and a durable raw batch awaits daemon replay" "$r"
+    grep -q 'batch STAGED' "$PL_ROOT/err" && r=yes || r=no
+    harness_check "  ...with pending status disclosed, not a false commit" "$r"
     tail -1 "$PL_ROOT/state/plane/.socket-arms" 2>/dev/null \
         | awk -F'\t' '$2 == "door" && $5 == "bot:vbc-fleet/vbc" && $6 == "unreachable" { ok = 1 } END { exit !ok }' \
         && r=yes || r=no
@@ -3486,10 +3528,10 @@ else
 
     _pl_emit "PLANE_EMIT_DISABLED=1" "disabled" >/dev/null && r=yes || r=no
     harness_check "PLANE_EMIT_DISABLED shim returns successfully" "$r"
-    [ "$(_pl_count)" = "$((PL_BASE + 2))" ] && r=yes || r=no
+    [ "$(_pl_count)" = "$((PL_BASE + 1))" ] && r=yes || r=no
     harness_check "  ...and writes NOTHING" "$r"
 
-    # A stale daemon refusal must reach the current cold-CLI rung.
+    # A stale daemon refusal must also stage raw input for the selected replay owner.
     cat > "$PL_ROOT/stale-daemon.py" <<'PLPY'
 import socket, sys
 srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -3513,17 +3555,30 @@ PLPY
     _pl_i=0
     while [ "$_pl_i" -lt 100 ] && [ ! -e "$PL_SOCK.ready" ]; do sleep 0.1; _pl_i=$((_pl_i + 1)); done
     _pl_before=$(_pl_count)
-    _pl_emit "PLANE_WEDGE_COOLDOWN_S=0" "downgrade" >/dev/null && r=yes || r=no
-    harness_check "#1485 shim records against a daemon that refuses [downgrade]" "$r"
-    [ "$(_pl_count)" = "$((_pl_before + 1))" ] && r=yes || r=no
-    harness_check "  ...and the event LANDED through the cold rung" "$r"
-    grep -q "falling back to cold CLI" "$PL_ROOT/err" && r=yes || r=no
-    harness_check "  ...with fallback DISCLOSED" "$r"
+    _pl_rc=0
+    _pl_emit "PLANE_WEDGE_COOLDOWN_S=0" "downgrade" >/dev/null || _pl_rc=$?
+    [ "$_pl_rc" = 6 ] && r=yes || r=no
+    harness_check "#1485 shim stages against a daemon that refuses [downgrade]" "$r"
+    [ "$(_pl_count)" = "$_pl_before" ] && r=yes || r=no
+    harness_check "  ...and does not claim the event committed" "$r"
+    grep -q 'batch STAGED' "$PL_ROOT/err" && r=yes || r=no
+    harness_check "  ...with pending status disclosed" "$r"
     grep -q "older code than the db it opened" "$PL_ROOT/err" && r=yes || r=no
     harness_check "  ...naming the stale daemon rather than a dead socket" "$r"
     kill "$PL_STALE_PID" 2>/dev/null || true; wait "$PL_STALE_PID" 2>/dev/null || true
     PL_STALE_PID=""
     rm -f "$PL_SOCK" "$PL_SOCK.ready" "$PL_ROOT/state/plane/.socket-wedged"
+
+    "$PL_CLI" --root "$PL_ROOT" plane serve --socket "$PL_SOCK" \
+        >> "$PL_ROOT/daemon.log" 2>&1 &
+    PL_DPID=$!
+    _pl_replayed=$(_pl_wait_count "$((PL_BASE + 3))")
+    [ "${_pl_replayed:-0}" = "$((PL_BASE + 3))" ] && r=yes || r=no
+    harness_check "selected daemon replays both raw staged events through capture and ingest" "$r"
+    ls "$PL_ROOT/state/plane/staged/"*.batch >/dev/null 2>&1 && r=no || r=yes
+    harness_check "  ...and clears the staged queue only after replay" "$r"
+    kill "$PL_DPID" 2>/dev/null || true; wait "$PL_DPID" 2>/dev/null || true
+    rm -f "$PL_SOCK" "$PL_ROOT/state/plane/.socket-wedged"
 
     # -- #1693: the socket deadline follows the caller's class ---------------
     # A REAL daemon, stopped (SIGSTOP) while the shim's
@@ -3531,7 +3586,7 @@ PLPY
     # starts before the door runs and ends 1.5 s after the door's socket
     # client appears, so the client has waited that long whatever load did to
     # the door's own start. With no knob the door keeps today's 1.0 s: it
-    # misses, falls to the cold rung, arms the marker, and the arm log names
+    # misses, stages the raw batch, arms the marker, and the arm log names
     # it. With its class knob at 6 s it waits, and the socket records it
     # (6, not 4: the Pi's SD card has stalled past 3 s on its own).
     PL_ARMS="$PL_ROOT/state/plane/.socket-arms"
@@ -3558,12 +3613,15 @@ PLPY
     _pl_arms() { if [ -f "$PL_ARMS" ]; then wc -l < "$PL_ARMS" | tr -d ' '; else echo 0; fi; }
 
     _pl_before=$(_pl_count)
-    _pl_stalled "" "leg five: a stalled daemon, no knob" && r=yes || r=no
-    harness_check "#1693 an emission succeeds against a daemon stalled 1.5 s" "$r"
-    [ "$(_pl_count)" = "$((_pl_before + 1))" ] && r=yes || r=no
-    harness_check "  ...and its row LANDED once (the late socket commit is a duplicate)" "$r"
-    grep -qE 'falling back to cold CLI|cooldown finalize succeeded.*replaying cold as planned' "$PL_ROOT/err" && r=yes || r=no
-    harness_check "  ...with no knob the door kept today's 1.0 s: it missed and fell back" "$r"
+    _pl_rc=0
+    _pl_stalled "" "leg five: a stalled daemon, no knob" || _pl_rc=$?
+    [ "$_pl_rc" = 6 ] && r=yes || r=no
+    harness_check "#1693 a 1.5 s daemon stall returns durable pending at the 1.0 s deadline" "$r"
+    _pl_landed=$(_pl_wait_count "$((_pl_before + 1))")
+    [ "${_pl_landed:-0}" = "$((_pl_before + 1))" ] && r=yes || r=no
+    harness_check "  ...and its row LANDED once after the daemon resumed" "$r"
+    grep -q 'batch STAGED' "$PL_ROOT/err" && r=yes || r=no
+    harness_check "  ...with the pending result disclosed, never a false socket commit" "$r"
     [ -f "$PL_ROOT/state/plane/.socket-wedged" ] && r=yes || r=no
     harness_check "  ...and the miss ARMED the marker" "$r"
     tail -1 "$PL_ARMS" 2>/dev/null \
@@ -3577,8 +3635,8 @@ PLPY
     harness_check "#1693 with PLANE_SOCKET_DEADLINE_DOOR_S=6 the same emission succeeds" "$r"
     [ "$(_pl_count)" = "$((_pl_before + 1))" ] && r=yes || r=no
     harness_check "  ...and its row LANDED" "$r"
-    grep -qE "falling back|wedge cooldown" "$PL_ROOT/err" && r=no || r=yes
-    harness_check "  ...through the socket: it waited out the stall, no fallback" "$r"
+    grep -qE 'batch STAGED|wedge cooldown' "$PL_ROOT/err" && r=no || r=yes
+    harness_check "  ...through the socket: it waited out the stall, no staging" "$r"
     [ -f "$PL_ROOT/state/plane/.socket-wedged" ] && r=no || r=yes
     harness_check "  ...and armed nothing" "$r"
     [ "$(_pl_arms)" = "$_pl_arms_before" ] && r=yes || r=no
@@ -3624,6 +3682,11 @@ PLPY
     printf '#!/bin/bash\ncase "$*" in *capture-pane*) printf ">\\n" ;; *) exit 0 ;; esac\n' \
         > "$PL_ROOT/ktmux"
     chmod +x "$PL_ROOT/ktmux"
+    "$PL_CLI" --root "$PL_ROOT" plane serve --socket "$PL_SOCK" \
+        >> "$PL_ROOT/daemon.log" 2>&1 &
+    PL_DPID=$!
+    _pl_i=0
+    while [ "$_pl_i" -lt 100 ] && [ ! -S "$PL_SOCK" ]; do sleep 0.1; _pl_i=$((_pl_i + 1)); done
     env CLAUDLOBBY_ROOT="$PL_ROOT" TMUX_BIN="$PL_ROOT/ktmux" \
         PLANE_SOCKET="$PL_SOCK" PLANE_EMIT_CLI="$PL_CLI" \
         PATH="/usr/bin:/bin" \
@@ -3635,6 +3698,10 @@ PLPY
     harness_check "keepalive tick records the heartbeat sample (no flag needed: always-on)" "$r"
     ls "$KAB/data/events"/*.jsonl >/dev/null 2>&1 && r=no || r=yes
     harness_check "  ...and writes no keepalive-<day>.jsonl (the reader-less file is gone, F18 R1)" "$r"
+
+    kill "$PL_DPID" 2>/dev/null || true; wait "$PL_DPID" 2>/dev/null || true
+    PL_DPID=""
+    rm -f "$PL_SOCK"
 
     "$PL_CLI" --root "$PL_ROOT" plane doctor > "$PL_ROOT/doctor.txt" 2>&1 && r=no || r=yes
     harness_check "doctor flags ATTENTION: daemon started historically, not serving" "$r"
@@ -3684,9 +3751,9 @@ c.commit()' "$PL_ROOT/state/plane/plane.db"
         # the check after bind so a refused serve cannot migrate the db). What
         # matters to a door is that nothing is left sitting there refusing:
         # past the exit the path is gone, so every emit meets ENOENT and the
-        # shim goes cold.
+        # shim stages raw input for a later selected daemon replay.
         [ -S "$PL_SOCK" ] && r=no || r=yes
-        harness_check "  ...and left no socket behind, so every door meets ENOENT and goes cold" "$r"
+        harness_check "  ...and left no socket behind, so every door meets ENOENT and stages" "$r"
     fi
 
     rm -rf "$PL_ROOT" "$PL_SOCKDIR"

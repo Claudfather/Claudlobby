@@ -975,7 +975,7 @@ plane_emit_bounded() {
     fi
     PLANE_EMIT_LAST_RC=$_rc
     if [ "$_rc" -eq 6 ]; then
-        echo "$door: plane SPOOLED this batch (rc=6) — durable on disk, NOT in the plane until a drain; nothing lost, nothing to retry" >&2
+        echo "$door: plane STAGED or SPOOLED this batch (rc=6) — durable on disk, NOT in the plane until daemon replay/drain; nothing lost, nothing to retry" >&2
     elif [ "$_rc" -ne 0 ] && [ "$_rc" -ne 143 ]; then
         echo "$door: plane record failed rc=$_rc (door action unaffected)" >&2
     fi

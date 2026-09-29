@@ -23,8 +23,8 @@
 # Hermetic: every case runs under `env -i` with a scratch CLAUDLOBBY_ROOT and a
 # scratch bot dir, so rows land in a throwaway ledger and never in a real one.
 # emit_script_error reaches only emit_fleet_event, whose record is the plane —
-# captured here by tests/plane_capture_cli.sh standing in for the CLI rung (no
-# daemon, no db, no tmux, no network). Runs under macOS /bin/bash (3.2).
+# staged as raw batches under the scratch root (no daemon, no db, no tmux,
+# no network). Runs under macOS /bin/bash (3.2).
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,7 +43,6 @@ assert_eq() {
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 BOTDIR="$T/bots/canary"
 mkdir -p "$BOTDIR/data"
-CAPTURE="$T/plane-capture.jsonl"; : > "$CAPTURE"
 
 # Run <body> in a pristine shell with the real trap installed, then report both
 # the body's stdout and how many script_error rows it produced, so a case can
@@ -58,11 +57,11 @@ CAPTURE="$T/plane-capture.jsonl"; : > "$CAPTURE"
 # delimiter, not a workaround.
 run_case() {
     local opts="$1" body="$2" out rows
-    : > "$CAPTURE"
+    rm -f "$T/state/plane/staged/"*.batch
     out=$(
         env -i PATH="$PATH" HOME="$T" \
             CLAUDLOBBY_ROOT="$T" BOT_DIR="$BOTDIR" BOT_ID=canary FLEET_NAME=f \
-            PLANE_EMIT_DISABLED=0 PLANE_EMIT_CLI="$SCRIPT_DIR/plane_capture_cli.sh" PLANE_CAPTURE="$CAPTURE" PLANE_SOCKET="$T/no.sock" \
+            PLANE_EMIT_DISABLED=0 PLANE_SOCKET="$T/no.sock" \
             "$BASH" -c "
                 set $opts
                 . '$LIB_COMMON'
@@ -71,7 +70,13 @@ run_case() {
                 $body
             " 2>/dev/null
     )
-    rows=$(grep -c '"type":"script_error"' "$CAPTURE" 2>/dev/null || true)
+    rows=$(python3 - "$T/state/plane/staged" <<'PY'
+import json, pathlib, sys
+print(sum(event["payload"].get("event") == "script_error"
+          for path in pathlib.Path(sys.argv[1]).glob("*.batch")
+          for event in json.loads(path.read_text())["events"]))
+PY
+    )
     printf '%s|%s' "$(printf '%s' "$out" | tr -d '\n')" "$rows"
 }
 
