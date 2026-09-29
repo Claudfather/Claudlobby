@@ -352,6 +352,7 @@ a known flake, so rerun it on both arms before attributing it.
 4. Test on both Linux and macOS where applicable (use `lib-common.sh` OS detection helpers)
 5. Never hardcode fleet names, user home dirs, or Homebrew paths — use env vars and detection
 6. No apostrophes in comments inside `$( )` — bash 3.2 (macOS `/bin/bash`, the shebang target) does not strip comments while scanning a command substitution, so a stray apostrophe corrupts quoting for the rest of the file (gate: `tests/test_bash_parse.py`, which covers `lib/` and every `library/**/*.sh`)
+7. Settle an expected failure INSIDE its command substitution: `x="$(f || true)"`, or `x="$(f || exit $?)"` where the status still decides — never `x="$(f)" || true` or `if x="$(f)"; then`. On bash 3.2 `install_error_trap`'s ERR trap fires inside a failing substitution however it is guarded outside, and files a critical `script_error` for a failure the code handles (#1707, #1963; `/bin/bash tests/test_err_trap_errtrace.sh` measures it)
 
 ### Validating changes to how a bot behaves — MANDATORY
 

@@ -359,7 +359,10 @@ fi
 # stretching the ceiling itself (a "90s" wait once ran five minutes this way).
 # It logs nothing and never exits — every line below and the exit on a crashed
 # session are this script's own, exactly as they were when the loop was inline.
-if _bstate="$(wait_bridge_ready_state "$BOT_DIR" "$_rc_timeout_s" "$_session_pid" "$_pretoken" "$TMUX_SESSION" "$TMUX_SOCKET")"; then
+# Its status is settled inside the substitution (|| exit $?): on bash 3.2 the
+# `if` does not reach in, and a timeout, already raised as rc_timeout below,
+# also filed a critical script_error (#1963).
+if _bstate="$(wait_bridge_ready_state "$BOT_DIR" "$_rc_timeout_s" "$_session_pid" "$_pretoken" "$TMUX_SESSION" "$TMUX_SOCKET" || exit $?)"; then
     _wait_rc=0
 else
     _wait_rc=$?
@@ -481,7 +484,9 @@ _RESUME_MAX_AGE_S="${RESUME_MAX_AGE_S:-86400}"
 # fleet saying "no resume injection", and must not fall back to the default.
 _RESUME_CMD="${SESSION_RESUME_COMMAND-$_SESSION_RESUME_COMMAND_DEFAULT}"
 if should_resume_session "$_SESSION_MD" "$_RESUME_MAX_AGE_S"; then
-    if _resume_status="$(session_command_status "$_RESUME_CMD" "$BOT_DIR")"; then
+    # Settled inside the substitution, like the readiness poll above: a skip is
+    # handled by the else branch, and bash 3.2 would also file it as an error.
+    if _resume_status="$(session_command_status "$_RESUME_CMD" "$BOT_DIR" || exit $?)"; then
         echo "$(ts_iso) RESUME — injecting resume command [$_resume_status]: $_RESUME_CMD" >> "$LOG"
         # #1265: stamp the send instant. Written before the call and again
         # after, so a send that never returns leaves state=sending on disk.

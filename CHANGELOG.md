@@ -6,6 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a macOS boot no longer files critical `script_error` rows for failures it already handles (#1963)
+
+Every macOS bot start filed `severity=critical` `script_error` rows for failures
+the code already handled: 123 rows in 11 minutes across 17 bots on one macOS
+host's reboot, which the bots then quoted in their briefs as errors. The cause
+is bash 3.2, `/bin/bash` on macOS. There, `install_error_trap`'s ERR trap fires
+inside a failing command substitution however the statement around it is
+guarded, so `x="$(f)" || true` and `if x="$(f)"; then` both file a row, and so
+does a failing substitution inside a function whose caller tolerates it. bash
+5.2 carries the caller's suppression into the substitution, so none of this
+shows on Linux (#1707 is the class).
+
+- `resolve_boot_epoch` asks the GNU `uptime -s` and `date -d` on Linux only.
+  macOS has neither and answers from `kern.boottime`, as it already did. This
+  was the largest source, 58 of those 123 rows.
+- `start-bot.sh`'s readiness poll and resume check settle their status inside
+  the substitution (`|| exit $?`). A bridge timeout, already raised as
+  `rc_timeout`, and a skipped resume, already logged and evented, no longer
+  file an error as well.
+- `session_md_handoff_epoch` and `should_resume_session` settle a missing or
+  unparseable `last_updated:` inside the substitution (#1568).
+- `bridge_state` settles each of its probes inside the substitution, so a
+  stale `bot.pid` from the previous boot no longer files a row on every tick
+  of the readiness poll (#1594). `boot_epoch_from_sysctl` does the same.
+
+`tests/test_err_trap_errtrace.sh` covers each of these against the real trap
+and counts the rows. Each case now runs under the interpreter that runs the
+suite, so `/bin/bash tests/test_err_trap_errtrace.sh` on macOS measures 3.2 all
+the way down. Under 3.2 it also asserts that the outside-guarded shapes DO
+fire, so a pass there means the fixes worked, not that the trap went unseen.
+The suite's tolerant-caller case asserted silence on every bash, which could
+never pass on 3.2, where it files two rows; it now states what 3.2 does. A new `macos-shell`
+workflow runs the suite and `tests/test_boot_epoch.sh` under `/bin/bash` on
+`macos-latest`, and fails if that `/bin/bash` is not 3.x. The rule is added to
+CLAUDE.md's `lib/` authoring rules.
+
 ### Changed — `[vault]` pin bumped to Claudron v0.5.1; `vault-sync` never leaves a vault mid-rebase (Claudron #193)
 
 The `[vault]` extra now pins `claudron @ …@v0.5.1`. 0.5.1 makes worktree integration

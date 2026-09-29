@@ -1242,17 +1242,21 @@ bridge_state() {
     local handle state_dir token pidfile pid comm ppid pcomm environ environ_lines args psline _anc _hop _exe
     local want_owner="${3:-}" _claude_pid=""
 
-    handle="$(bot_conf_get "$bot_dir" TELEGRAM_BOT_HANDLE "")" || true
+    # Every probe below settles its own failure inside its substitution. This
+    # runs in the readiness poll at every bot start, and on bash 3.2 a guard
+    # outside the substitution does not stop the ERR trap: a stale bot.pid
+    # filed a critical script_error on each poll tick (#1594, #1963).
+    handle="$(bot_conf_get "$bot_dir" TELEGRAM_BOT_HANDLE "" || true)"
     if [ -z "$handle" ]; then printf '%s' "no_handle"; return 1; fi
 
     # A hot-loop caller (start-bot readiness) may pass a pre-resolved token as $2
     # to skip re-sourcing the .env chain on every poll (#756); every other caller
     # omits it and resolves here. The token is static .env config, so resolving it
     # once in the caller and threading it in is safe.
-    if [ "$#" -ge 2 ]; then token="$2"; else token="$(resolve_bot_telegram_token "$bot_dir")" || true; fi
+    if [ "$#" -ge 2 ]; then token="$2"; else token="$(resolve_bot_telegram_token "$bot_dir" || true)"; fi
     if [ -z "$token" ]; then printf '%s' "no_token"; return 1; fi
 
-    state_dir="$(bot_conf_get "$bot_dir" TELEGRAM_STATE_DIR "")" || true
+    state_dir="$(bot_conf_get "$bot_dir" TELEGRAM_STATE_DIR "" || true)"
     # shellcheck disable=SC2016  # literal "$HOME" is intended: bot.conf stores it unexpanded
     case "$state_dir" in
         '$HOME'/*) state_dir="$HOME/${state_dir#\$HOME/}" ;;
@@ -1260,12 +1264,12 @@ bridge_state() {
     pidfile="$state_dir/bot.pid"
     if [ -z "$state_dir" ] || [ ! -f "$pidfile" ]; then printf '%s' "no_bridge"; return 1; fi
 
-    pid="$(tr -cd '0-9' < "$pidfile" 2>/dev/null)" || true
+    pid="$(tr -cd '0-9' < "$pidfile" 2>/dev/null || true)"
     if [ -z "$pid" ]; then printf '%s' "no_bridge"; return 1; fi
 
     # One ps for the target pid (-ww: no arg truncation). A non-empty line proves
     # the pid is alive and yields comm + ppid + full args in a single call.
-    psline="$(ps -ww -o comm=,ppid=,args= -p "$pid" 2>/dev/null)" || true
+    psline="$(ps -ww -o comm=,ppid=,args= -p "$pid" 2>/dev/null || true)"
     if [ -z "$psline" ]; then printf '%s' "no_bridge"; return 1; fi
     read -r comm ppid args <<<"$psline"
 
@@ -1313,7 +1317,7 @@ bridge_state() {
         # so each KEY=VALUE is its own line for the exact match (mirrors the Linux
         # NUL split). A space-bearing value would split — macOS home dirs carry
         # none. Empty (a ps with no env support, or the pid gone) → unknown.
-        environ_lines="$(ps eww -p "$pid" 2>/dev/null | tr '[:space:]' '\n')"
+        environ_lines="$(ps eww -p "$pid" 2>/dev/null | tr '[:space:]' '\n' || true)"
         if [ -z "$environ_lines" ]; then printf '%s' "unknown"; return 1; fi
     fi
     if ! grep -qxF "TELEGRAM_STATE_DIR=$state_dir" <<<"$environ_lines"; then
@@ -1338,7 +1342,7 @@ bridge_state() {
     pcomm=""
     for _hop in 1 2 3 4 5 6 7 8; do
         [ -n "$_anc" ] && [ "$_anc" -gt 1 ] || break
-        psline="$(ps -o ppid=,comm= -p "$_anc" 2>/dev/null)" || true
+        psline="$(ps -o ppid=,comm= -p "$_anc" 2>/dev/null || true)"
         [ -n "$psline" ] || break
         _claude_pid="$_anc"                              # the pid we are ABOUT to describe
         read -r _anc pcomm <<<"$psline"                  # _anc advances to the parent
@@ -3672,12 +3676,14 @@ session_md_handoff_epoch() {
     # `last_updated:` ISO-8601 UTC frontmatter field (written by /claudna:session handoff
     # and robust to file touches the way mtime is not); falls back to the file
     # mtime for legacy artifacts that predate the field. Returns 1 if absent.
+    # A missing or unparseable field is settled inside its substitution: on
+    # bash 3.2 a guard outside it does not stop the ERR trap (#1568, #1963).
     local file="${1:?Usage: session_md_handoff_epoch <file>}" iso epoch
     [ -f "$file" ] || return 1
     iso=$(grep -m1 '^last_updated:' "$file" 2>/dev/null \
-        | sed -E 's/^last_updated:[[:space:]]*//; s/[[:space:]]*$//')
+        | sed -E 's/^last_updated:[[:space:]]*//; s/[[:space:]]*$//' || true)
     if [ -n "$iso" ]; then
-        epoch=$(iso_to_epoch "$iso") && [ -n "$epoch" ] && { printf '%s' "$epoch"; return 0; }
+        epoch=$(iso_to_epoch "$iso" || exit $?) && [ -n "$epoch" ] && { printf '%s' "$epoch"; return 0; }
     fi
     stat_mtime "$file" 2>/dev/null
 }
@@ -3770,7 +3776,7 @@ should_resume_session() {
     local max_age="${2:?Usage: should_resume_session <file> <max_age_seconds>}"
     local epoch now age
     [ -f "$file" ] || return 1
-    epoch=$(session_md_handoff_epoch "$file") || return 1
+    epoch=$(session_md_handoff_epoch "$file" || true)
     [ -n "$epoch" ] || return 1
     now=$(date +%s)
     age=$(( now - epoch ))
@@ -4312,8 +4318,9 @@ sysctl_bin() {
 # is the usec class or a stub and is refused rather than believed.
 boot_epoch_from_sysctl() {
     local bin s e
-    bin="$(sysctl_bin 2>/dev/null)" || return 1
-    s="$("$bin" -n kern.boottime 2>/dev/null)" || true
+    bin="$(sysctl_bin 2>/dev/null || true)"
+    [ -n "$bin" ] || return 1
+    s="$("$bin" -n kern.boottime 2>/dev/null || true)"
     [ -n "$s" ] || return 1
     e="$(printf '%s\n' "$s" | sed -n 's/[^0-9]*\([0-9][0-9]*\).*/\1/p' | head -1)"
     case "$e" in ''|*[!0-9]*) return 1 ;; esac
@@ -4328,19 +4335,28 @@ boot_epoch_from_sysctl() {
 # time; -u makes date re-read that local string AS UTC, landing one offset off —
 # silently wrong rather than obviously wrong. Parse local -> epoch first, then
 # format FROM the epoch with -u.
+#
+# `uptime -s` and `date -d` are GNU, so only Linux asks them; macOS has neither
+# and answers from kern.boottime. Every rung settles its own failure inside its
+# substitution: on bash 3.2 a guard outside it does not stop the ERR trap, and
+# asking the GNU rung on macOS filed a critical script_error at every bot start
+# while this function returned the right epoch (#1963).
 resolve_boot_epoch() {
     if [ -n "${CLAUDLOBBY_BOOT_EPOCH:-}" ]; then
         printf '%s\n' "$CLAUDLOBBY_BOOT_EPOCH"; return 0
     fi
     local s e
-    s="$(uptime -s 2>/dev/null)" || true
-    if [ -n "$s" ]; then
-        e="$(date -d "$s" +%s 2>/dev/null)" || true
-        case "$e" in ''|*[!0-9]*) e="" ;; esac
-        if [ -n "$e" ] && [ "$e" -ge 1000000000 ]; then printf '%s\n' "$e"; return 0; fi
+    if [ "$_OS" = "Linux" ]; then
+        s="$(uptime -s 2>/dev/null || true)"
+        if [ -n "$s" ]; then
+            e="$(date -d "$s" +%s 2>/dev/null || true)"
+            case "$e" in ''|*[!0-9]*) e="" ;; esac
+            if [ -n "$e" ] && [ "$e" -ge 1000000000 ]; then printf '%s\n' "$e"; return 0; fi
+        fi
     fi
-    # macOS has no `uptime -s`; kern.boottime through the one parser above.
-    if e="$(boot_epoch_from_sysctl 2>/dev/null)"; then printf '%s\n' "$e"; return 0; fi
+    # kern.boottime, the macOS answer, through the one parser above.
+    e="$(boot_epoch_from_sysctl 2>/dev/null || true)"
+    if [ -n "$e" ]; then printf '%s\n' "$e"; return 0; fi
     # Linux without uptime(1): /proc/uptime is monotonic seconds since boot.
     if [ -r /proc/uptime ]; then
         local up now
