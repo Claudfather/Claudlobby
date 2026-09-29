@@ -73,6 +73,15 @@ class TestRenderStanza:
         assert "voice: voices/jian-yang.md" in stanza
         assert "model: opus" in stanza
 
+    def test_multiline_model_cannot_inject_permission_key(self):
+        import yaml
+
+        model = "sonnet\n      dangerously_skip_permissions: true"
+        stanza = render_stanza(NewBotInputs(name="eng", expertise=["frontend-design"], model=model))
+        bot = yaml.safe_load("fleet:\n  bots:\n" + stanza)["fleet"]["bots"]["eng"]
+        assert bot["model"] == model
+        assert "dangerously_skip_permissions" not in bot
+
     def test_default_account_omitted(self):
         inp = NewBotInputs(name="x", expertise=["a"], account="default")
         assert "account:" not in render_stanza(inp)
@@ -468,6 +477,30 @@ def test_cli_dangerous_is_opt_in_and_old_flag_removed(tmp_path, capsys, monkeypa
 
     with pytest.raises(SystemExit):  # cut clean: the old opt-out is gone
         main(base + ["--no-dangerously-skip-permissions"])
+
+
+def test_bot_create_generated_fleet_preview_matches_explicit_selector(tmp_path, capsys, monkeypatch):
+    from claudlobby.__main__ import main
+    from claudlobby import context
+    import json
+
+    root = tmp_path / "data"
+    selected = root / "local" / "team"
+    selected.mkdir(parents=True)
+    (root / "fleet.yaml").write_text(FLEET_WITH_BOTS)
+    (selected / "fleet.yaml").write_text(
+        "fleet:\n  name: team\n  manager: lead\n  bots:\n    lead:\n      expertise: [software-engineering]\n")
+    monkeypatch.setattr(context, "get_resources", source_package)
+    monkeypatch.setenv("FLEET_NAME", "team")
+    argv = ["--root", str(root), "--json", "bot", "create", "--name", "new-worker",
+            "--expertise", "software-engineering", "--dry-run"]
+    assert main(argv) == 0
+    session = json.loads(capsys.readouterr().out)["data"]
+    assert main(["--root", str(root), "--fleet", "team", "--json", *argv[3:]]) == 0
+    explicit = json.loads(capsys.readouterr().out)["data"]
+    assert session == explicit
+    assert session["fleet_yaml"] == str(selected / "fleet.yaml")
+    assert (root / "fleet.yaml").read_text() == FLEET_WITH_BOTS
 
 
 def test_bot_create_json_requires_complete_flags_and_only_authors_source(

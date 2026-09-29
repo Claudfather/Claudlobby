@@ -206,7 +206,7 @@ def _item(row: dict, fleet: str) -> dict:
 def dispatch(args) -> CommandOutput:
     """Canonical ``event list/show`` over the existing Plane renderer."""
     from ..brief import resolve_fleet_name
-    from ..context import resolve_paths
+    from ..context import generated_selectors, resolve_paths
     from ..paths import InvalidPathSelector
     from .checkins import _since
 
@@ -223,7 +223,8 @@ def dispatch(args) -> CommandOutput:
             raise CommandFailure("invalid_argument", str(exc)) from exc
 
     try:
-        paths = resolve_paths(root=args.root, fleet=args.fleet, seed=args.seed)
+        selected_fleet, _ = generated_selectors(fleet=args.fleet, seed=args.seed)
+        paths = resolve_paths(root=args.root, fleet=selected_fleet, seed=args.seed)
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", str(exc)) from exc
     except ValueError as exc:
@@ -231,7 +232,7 @@ def dispatch(args) -> CommandOutput:
     except (FileNotFoundError, OSError, RuntimeError) as exc:
         raise CommandFailure("unavailable", "event root or installed package is unavailable",
                              retryable=True) from exc
-    fleet = resolve_fleet_name(paths)
+    fleet = selected_fleet or resolve_fleet_name(paths)
     conn, note = plane_events_conn(paths)
     if conn is None:
         raise CommandFailure("unavailable", f"Plane events are unreachable: {note}", retryable=True)

@@ -286,6 +286,7 @@ def cmd_data_migrate(args) -> int:
         return 0
 
     copied = 0
+    failed = 0
     for item in plan:
         if item.action != "copy":
             continue
@@ -299,6 +300,7 @@ def cmd_data_migrate(args) -> int:
             copied += 1
         except (OSError, shutil.Error) as e:
             log.error("FAILED  %s: %s", item.src, e)
+            failed += 1
 
-    log.info("Applied: %d item(s) copied", copied)
-    return 0
+    log.info("Applied: %d item(s) copied, %d failed", copied, failed)
+    return 1 if failed else 0

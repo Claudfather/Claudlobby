@@ -17,14 +17,17 @@ _MARKDOWN = (
 
 
 def _paths(args):
-    from ..context import resolve_paths
+    from ..context import generated_selectors, resolve_paths
     from ..paths import InvalidPathSelector
 
     try:
-        return resolve_paths(root=args.root, fleet=args.fleet, seed=args.seed)
+        fleet, _ = generated_selectors(fleet=args.fleet, seed=args.seed)
+        return resolve_paths(root=args.root, fleet=fleet, seed=args.seed)
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "library root or fleet selector is invalid") from exc
-    except (OSError, ValueError, RuntimeError) as exc:
+    except ValueError as exc:
+        raise CommandFailure("invalid_argument", "library root or fleet selector is invalid") from exc
+    except (OSError, RuntimeError) as exc:
         raise CommandFailure("unavailable", "library package or data root is unavailable") from exc
 
 
@@ -129,6 +132,10 @@ def _create(args, paths) -> CommandOutput:
         raise CommandFailure("conflict", "library destination escapes the writable overlay") from exc
     if target.exists() or (args.kind == "skill" and target.parent.exists()):
         raise CommandFailure("conflict", "library item already exists in this overlay")
+    base_item = ((paths.base_skills / name / "SKILL.md") if args.kind == "skill" else
+                 (paths.base_guardrails / f"{name}.md"))
+    if base_item.exists():
+        raise CommandFailure("conflict", "library item already exists in the sealed base")
     if not args.dry_run:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)

@@ -72,29 +72,33 @@ class NewBotInputs:
 
 def _yaml_list(items: list[str]) -> str:
     """`['a','b']` → `[a, b]` for compact YAML."""
-    return "[" + ", ".join(items) + "]"
+    return "[" + ", ".join(_yaml_str(item) for item in items) + "]"
 
 
 def _yaml_str(s: str) -> str:
     """Quote a string for YAML if it contains chars that would confuse the parser."""
-    if any(c in s for c in ":#&*!|>'%@`,{}[]"):
-        return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    import json
+
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_./-]*", s) or s.lower() in (
+        "true", "false", "null", "yes", "no", "on", "off",
+    ):
+        return json.dumps(s, ensure_ascii=False)
     return s
 
 
 def render_stanza(inp: NewBotInputs) -> str:
     """Render a bot stanza as 4-space-indented YAML text."""
     lines: list[str] = []
-    lines.append(f"    {inp.name}:")
+    lines.append(f"    {_yaml_str(inp.name)}:")
     lines.append(f"      expertise: {_yaml_list(inp.expertise)}")
     if inp.voice:
-        lines.append(f"      voice: {inp.voice}")
+        lines.append(f"      voice: {_yaml_str(inp.voice)}")
     if inp.mission:
         lines.append(f"      mission: {_yaml_str(inp.mission)}")
     if inp.scope_org or inp.scope_repos or inp.scope_snowflake_targets:
         lines.append("      scope:")
         if inp.scope_org:
-            lines.append(f"        org: {inp.scope_org}")
+            lines.append(f"        org: {_yaml_str(inp.scope_org)}")
         if inp.scope_repos:
             lines.append(f"        repos: {_yaml_list(inp.scope_repos)}")
         if inp.scope_snowflake_targets:
@@ -102,11 +106,11 @@ def render_stanza(inp: NewBotInputs) -> str:
                 f"        snowflake_targets: {_yaml_list(inp.scope_snowflake_targets)}"
             )
     if inp.account and inp.account != "default":
-        lines.append(f"      account: {inp.account}")
+        lines.append(f"      account: {_yaml_str(inp.account)}")
     if inp.model:
-        lines.append(f"      model: {inp.model}")
+        lines.append(f"      model: {_yaml_str(inp.model)}")
     if inp.effort:
-        lines.append(f"      effort: {inp.effort}")
+        lines.append(f"      effort: {_yaml_str(inp.effort)}")
     if inp.remote_control is False:
         lines.append("      remote_control: false")
     # dangerously_skip_permissions is opt-IN: an omitted field composes to the
@@ -136,13 +140,13 @@ def render_stanza(inp: NewBotInputs) -> str:
     ):
         lines.append("      telegram:")
         if inp.telegram_handle:
-            lines.append(f"        handle: {inp.telegram_handle}")
+            lines.append(f"        handle: {_yaml_str(inp.telegram_handle)}")
         if inp.token_env:
-            lines.append(f"        token_env: {inp.token_env}")
+            lines.append(f"        token_env: {_yaml_str(inp.token_env)}")
         if inp.require_mention is not None:
             lines.append(f"        require_mention: {str(inp.require_mention).lower()}")
         if inp.chat_id:
-            lines.append(f'        chat_id: "{inp.chat_id}"')
+            lines.append(f"        chat_id: {_yaml_str(inp.chat_id)}")
     if inp.startup_prompt:
         lines.append(f"      startup_prompt: {_yaml_str(inp.startup_prompt)}")
     return "\n".join(lines) + "\n"

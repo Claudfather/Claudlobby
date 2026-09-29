@@ -163,19 +163,19 @@ hand-rolled loop doesn't have.
 Tail today's events across the fleet:
 
 ```bash
-claudlobby --fleet "$FLEET_NAME" --json event list --limit 50
+claudlobby --json event list --limit 50
 ```
 
 Scope to one bot — e.g. before dispatch, or cross-referencing a `[BOTREPORT]`:
 
 ```bash
-claudlobby --fleet "$FLEET_NAME" --json event list --bot "$BOT_NAME" --limit 20
+claudlobby --json event list --bot "$BOT_NAME" --limit 20
 ```
 
 Filter for actionable events:
 
 ```bash
-claudlobby --fleet "$FLEET_NAME" --json event list --critical --limit 200
+claudlobby --json event list --critical --limit 200
 ```
 
 **Always inspect `data.next_cursor` before claiming a complete sweep.** `--limit`
@@ -193,7 +193,7 @@ the table above. Same hand-maintained-list gap `brief.py`'s alerts section alrea
 
 ```bash
 for t in pane_stuck wip_uncommitted sweep_repo_unreachable audit_failed; do
-    claudlobby --fleet "$FLEET_NAME" --json event list --type "$t" --limit 10
+    claudlobby --json event list --type "$t" --limit 10
 done
 ```
 
@@ -202,12 +202,12 @@ so it is unaffected by path-scoped deny rules regardless of arming.)
 
 ## Cross-Fleet Reads
 
-A top-level manager can read any bot's events across sub-fleets. Use `claudlobby event list` with
-`--fleet` rather than reading the sibling fleet's bot directories directly — same reasoning as
-above, and it works the same way whether or not the target fleet has armed.
+A cross-fleet event read requires an operator shell with an explicit `--fleet` selector;
+the generated manager grant is scoped to its own fleet. Use `claudlobby event list` rather
+than reading the sibling fleet's bot directories directly.
 
 ```bash
-# Read events for a bot in a different fleet
+# Operator shell: read events for a bot in a different fleet
 claudlobby --fleet "other-fleet" --json event list --bot "some-bot" --limit 20
 ```
 

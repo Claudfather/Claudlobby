@@ -8,13 +8,14 @@ from ..command_result import CommandFailure, CommandOutput
 
 
 def _reconcile(args) -> CommandOutput:
-    from ..context import resolve_context
+    from ..context import generated_selectors, resolve_context
     from ..credentials import exits_nonzero, format_report, reconcile
     from ..env_tiers import ResolverUnavailable
     from ..paths import InvalidPathSelector
 
     try:
-        context = resolve_context(root=args.root, fleet=args.fleet, seed=args.seed)
+        fleet, _ = generated_selectors(fleet=args.fleet, seed=args.seed)
+        context = resolve_context(root=args.root, fleet=fleet, seed=args.seed)
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid fleet selector") from exc
     except FileNotFoundError as exc:

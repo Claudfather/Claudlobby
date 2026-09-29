@@ -51,6 +51,9 @@ def dispatch(args) -> CommandOutput:
         raise CommandFailure("not_found", "bot is not declared in the selected fleet") from exc
     except FileNotFoundError as exc:
         raise CommandFailure("not_found", "selected fleet configuration was not found") from exc
+    except RuntimeError as exc:
+        raise CommandFailure("unavailable", "installed library package is unavailable",
+                             hint="build and select a sealed release with packaged resources") from exc
     except (ValueError, yaml.YAMLError) as exc:
         raise CommandFailure("conflict", "configuration or requested scope is invalid") from exc
     config_field = _config_field(args.key, bot) if args.key else None

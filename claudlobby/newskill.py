@@ -13,6 +13,7 @@ and placeholder content.
 from __future__ import annotations
 import logging
 import re
+import json
 
 from .prompts import ask as _ask
 
@@ -24,9 +25,9 @@ def render_skill(name: str, description: str, argument_hint: str | None) -> str:
     lines: list[str] = []
     lines.append("---")
     lines.append(f"name: {name}")
-    lines.append(f'description: "{description}"')
+    lines.append(f"description: {json.dumps(description, ensure_ascii=False)}")
     if argument_hint:
-        lines.append(f'argument-hint: "{argument_hint}"')
+        lines.append(f"argument-hint: {json.dumps(argument_hint, ensure_ascii=False)}")
     lines.append("---")
     lines.append("")
     # H1 heading — title-cased from the slug

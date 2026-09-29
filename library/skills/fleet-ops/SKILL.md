@@ -227,7 +227,7 @@ and `bots_marked` in the result. This command does not compose configuration
 or change enrollment; authored configuration changes require operator activation.
 
 The manager can run `claudlobby --json fleet pulse` for a fleet health sweep.
-`tick_completed` means the sweep finished; inspect its summary for bot health.
+`data.tick == "completed"` means the sweep finished; inspect its summary for bot health.
 Read recorded pulse events with
 `claudlobby --json event list --since 24h --source pulse`. Read
 `data.items`, `data.coverage`, and `data.next_cursor`; use `event show EVENT_ID`

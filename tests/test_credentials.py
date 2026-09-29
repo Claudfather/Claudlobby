@@ -33,6 +33,29 @@ FLEET_YAML = dedent("""\
           integrations: [acme]
 """)
 
+
+def test_generated_credentials_reconcile_selects_own_fleet(tmp_path, monkeypatch):
+    from claudlobby import context
+    from claudlobby.commands import host_credentials
+    from tests.package_fixtures import source_package
+
+    root = tmp_path / "data"
+    own = root / "local" / "own"
+    own.mkdir(parents=True)
+    (root / "fleet.yaml").write_text(FLEET_YAML)
+    (own / "fleet.yaml").write_text(FLEET_YAML.replace("name: t", "name: own"))
+    monkeypatch.setattr(context, "get_resources", source_package)
+    monkeypatch.setenv("FLEET_NAME", "own")
+    checked = []
+    monkeypatch.setattr(creds, "reconcile", lambda paths, fleet:
+                        (checked.append(fleet.name) or [], {}))
+    monkeypatch.setattr(creds, "format_report", lambda findings, scope: "checked")
+    args = SimpleNamespace(root=root, fleet=None, seed=False,
+                           public_command="host.credentials.reconcile")
+    result = host_credentials.dispatch(args)
+    assert checked == ["own"]
+    assert result.data["fleet"] == "own"
+
 INTEGRATION = dedent("""\
     ---
     title: Acme

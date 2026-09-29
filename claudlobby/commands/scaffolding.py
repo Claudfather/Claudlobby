@@ -17,7 +17,7 @@ def cmd_new_bot(args):
     import sys
     import yaml
     from ..command_result import CommandFailure, CommandOutput
-    from ..context import load_context, resolve_paths
+    from ..context import generated_selectors, load_context, resolve_paths
     from ..newbot import (FleetYamlEditError, NewBotInputs, insert_bot_stanza,
                           interactive_collect, materialize_voice, render_stanza,
                           write_token_to_env)
@@ -39,8 +39,9 @@ def cmd_new_bot(args):
             raise CommandFailure("invalid_argument", "noninteractive creation requires --yes or --dry-run")
 
     try:
-        paths = resolve_paths(root=args.root, fleet=args.fleet, seed=False)
-        context = load_context(paths)
+        fleet, _ = generated_selectors(fleet=args.fleet, seed=False)
+        paths = resolve_paths(root=args.root, fleet=fleet, seed=False)
+        context = load_context(paths, fleet=fleet)
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid root or fleet selector") from exc
     except (OSError, ValueError, yaml.YAMLError) as exc:
@@ -107,7 +108,8 @@ def cmd_new_bot(args):
 
     guidance = (f"Review {paths.fleet_yaml}, then stage with `claudlobby --root {paths.root} "
                 f"config plan --release <release-id>` and activate the reviewed plan with "
-                "`claudlobby host activate <plan-id>`.")
+                f"`claudlobby --root {paths.root} host activate <plan-id> "
+                "--install-directory <native-user-unit-dir>` from an operator shell.")
     data = {"fleet": context.fleet.name, "bot": inp.name, "fleet_yaml": str(paths.fleet_yaml),
             "stanza": stanza, "dry_run": args.dry_run, "written": False,
             "voice_path": str(paths.overlay_voices / f"{inp.name}.md") if inp.voice_text else None,

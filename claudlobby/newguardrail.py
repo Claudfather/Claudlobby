@@ -12,6 +12,7 @@ frontmatter (title, description), H1 heading, and placeholder content.
 from __future__ import annotations
 import logging
 import re
+import json
 
 from .prompts import ask as _ask
 
@@ -22,8 +23,8 @@ def render_guardrail(name: str, title: str, description: str) -> str:
     """Render guardrail markdown content."""
     lines: list[str] = []
     lines.append("---")
-    lines.append(f"title: {title}")
-    lines.append(f'description: "{description}"')
+    lines.append(f"title: {json.dumps(title, ensure_ascii=False)}")
+    lines.append(f"description: {json.dumps(description, ensure_ascii=False)}")
     lines.append("---")
     lines.append("")
     lines.append(f"# {title}")

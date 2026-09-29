@@ -109,7 +109,7 @@ Read `data.cli` and `data.release_id` from its result; set `RELEASE_CLI` to that
 reported path. Do not guess an installed CLI or write generated runtime files
 from the checkout.
 
-For a first fleet, run the sealed CLI from the operator's user-manager domain:
+For a first fleet, give the operator the sealed CLI path and this command to run from their shell outside the generated bot session:
 
 ```bash
 "$RELEASE_CLI" --root "$DATA" --fleet <fleet-name> fleet setup \
@@ -122,12 +122,17 @@ manifest needs an explicit `--replace-config` decision. If activation reports
 a pending step, diagnose that journal before another attempt.
 
 For later edits to `$DATA/local/<fleet-name>/fleet.yaml`, use the selected
-release ID and review the staged host-wide plan before activation:
+release ID and review the staged host-wide plan:
 
 ```bash
 "$RELEASE_CLI" --root "$DATA" --fleet <fleet-name> config validate
 "$RELEASE_CLI" --root "$DATA" config plan --release <RELEASE_ID>
 "$RELEASE_CLI" --root "$DATA" config diff <PLAN_ID>
+```
+
+Give the operator the reviewed plan ID and this command to run from their shell outside the generated bot session:
+
+```bash
 "$RELEASE_CLI" --root "$DATA" host activate <PLAN_ID> --install-directory "$USER_UNIT_DIR"
 ```
 

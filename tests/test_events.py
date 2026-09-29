@@ -304,6 +304,25 @@ def test_event_list_pages_stable_ids_and_rejects_changed_filter_cursor(scene):
     assert "ORDER BY e.occurred_at DESC, e.ingest_seq DESC LIMIT 2" in query
 
 
+def test_generated_fleet_event_scope_matches_explicit_with_root_manifest(scene, monkeypatch, capsys):
+    from claudlobby import context
+    from claudlobby.__main__ import main
+
+    root, _paths = scene
+    (root / "fleet.yaml").write_text("fleet:\n  name: rootfleet\n  bots: {}\n")
+    monkeypatch.setattr(context, "get_resources", source_package)
+    monkeypatch.setenv("FLEET_NAME", F)
+
+    def call(*selector):
+        assert main(["--root", str(root), *selector, "--json", "event", "list", "--limit", "2"]) == 0
+        return json.loads(capsys.readouterr().out)["data"]
+
+    session = call()
+    explicit = call("--fleet", F)
+    assert session == explicit
+    assert session["items"] and all(row["fleet"] == F for row in session["items"])
+
+
 def test_event_list_invalid_root_is_one_schema_result(tmp_path):
     bad_root = tmp_path / "not-a-directory"
     bad_root.write_text("not a root")

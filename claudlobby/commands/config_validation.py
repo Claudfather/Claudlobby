@@ -3,8 +3,51 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 from ..command_result import CommandFailure, CommandOutput
+
+
+_REMEDIES = {
+    "orphan_unit": "Review the stale unit, then use host supervision reap-orphans --dry-run before --apply.",
+    "orphan_grant": "Remove the unowned allow rule or equip the declaring source, then stage a plan.",
+    "unsourced_grant": "Review the fleet tools.allow override and its declared source.",
+    "under_grant": "Stage a plan so the equipped source's permission is composed.",
+    "missing_external": "Restore the declared host dependency or remove its declaration.",
+    "isolation_not_composed": "Stage and review a plan, then ask the operator to activate it.",
+    "isolation_missing": "Stage and review a plan, then ask the operator to activate it.",
+    "isolation_gap": "Review the bot's shared-config isolation and authored exemptions.",
+    "isolation_env_read": "Remove the composed instruction that reads host-shared environment files.",
+    "improper_path": "Review the emitted path guard and move the reference into the owned bot directory.",
+    "denied_value": "Remove the denied value from authored configuration before staging.",
+    "env_denied_value": "Remove the denied value from the environment tier before staging.",
+    "env_bot_secret_leaked": "Move the bot secret out of the host-shared environment tier.",
+    "unused_declaration": "Remove the unused declaration or equip its consumer.",
+    "missing_tier_a": "Stage and review a plan to compose the missing setting.",
+    "fleet_pulse_env_inert": "Review the fleet-pulse environment declaration and its switch carrier.",
+}
+
+_AREAS = {"improper_path": "composed_bot", "denied_value": "composed_bot",
+          "env_denied_value": "environment_tier", "env_bot_secret_leaked": "host_shared_env"}
+
+
+def _safe_finding(f):
+    from ..freshbox import _GRANT_KINDS
+
+    row = {"bot": f.bot_id, "kind": f.kind, "severity": f.severity}
+    if f.kind in _GRANT_KINDS:
+        suffix = " " + _GRANT_KINDS[f.kind][1]
+        if f.detail.endswith(suffix):
+            row["grant"] = f.detail[:-len(suffix)]
+    elif f.kind == "orphan_unit":
+        unit = f.detail.partition(" —")[0]
+        if re.fullmatch(r"[A-Za-z0-9_.-]+\.(?:plist|service)", unit):
+            row["unit"] = unit
+    if f.kind in _AREAS:
+        row["area"] = _AREAS[f.kind]
+    if f.kind in _REMEDIES:
+        row["remedy"] = _REMEDIES[f.kind]
+    return row
 
 
 def _runtime_audit(args, context) -> CommandOutput:
@@ -20,13 +63,17 @@ def _runtime_audit(args, context) -> CommandOutput:
     counts = {severity: sum(f.severity == severity for f in findings)
               for severity in (FAIL, WARN, INFO)}
     data = {"mode": "runtime", "fleet": context.fleet.name, "bot": args.bot,
-            "strict": args.strict, "findings": [
-                {"bot": f.bot_id, "kind": f.kind, "severity": f.severity}
-                for f in findings],
+            "strict": args.strict, "findings": [_safe_finding(f) for f in findings],
             "fail_count": counts[FAIL], "warning_count": counts[WARN],
             "info_count": counts[INFO]}
     # Finding details can contain paths resolved from secret env values.
-    lines = tuple(f"runtime {f.bot_id}: [{f.severity}] {f.kind}" for f in findings)
+    def finding_line(row):
+        subject = row.get("unit") or row.get("grant")
+        return (f"runtime {row['bot']}: [{row['severity']}] {row['kind']}"
+                + (f" ({subject})" if subject else "")
+                + (f": {row['remedy']}" if row.get("remedy") else ""))
+
+    lines = tuple(finding_line(row) for row in data["findings"])
     lines += (f"runtime audit: {counts[FAIL]} fail, {counts[WARN]} warn, {counts[INFO]} info",)
     if exits_nonzero(findings, strict=args.strict):
         raise CommandFailure("conflict", "runtime self-containment audit has blocking findings",
@@ -54,6 +101,9 @@ def dispatch(args) -> CommandOutput:
         paths = resolve_paths(root=args.root, fleet=fleet, seed=args.seed)
     except FileNotFoundError as exc:
         raise CommandFailure("not_found", "selected fleet configuration was not found") from exc
+    except RuntimeError as exc:
+        raise CommandFailure("unavailable", "installed library package is unavailable",
+                             hint="build and select a sealed release with packaged resources") from exc
     except (InvalidPathSelector, ValueError) as exc:
         raise CommandFailure("invalid_argument", "invalid root or fleet selector") from exc
     try:
@@ -61,6 +111,9 @@ def dispatch(args) -> CommandOutput:
         context = load_context(paths, fleet=fleet)
     except FileNotFoundError as exc:
         raise CommandFailure("not_found", "selected fleet configuration was not found") from exc
+    except RuntimeError as exc:
+        raise CommandFailure("unavailable", "installed library package is unavailable",
+                             hint="build and select a sealed release with packaged resources") from exc
     except (ValueError, yaml.YAMLError) as exc:
         raise CommandFailure("conflict", "selected fleet configuration is invalid") from exc
 

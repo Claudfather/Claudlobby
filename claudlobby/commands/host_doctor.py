@@ -10,13 +10,17 @@ def dispatch(args):
     from .. import switches
     from ..activation_state import read_selection
     from ..config_plan import read_plan
-    from ..context import declared_paths, load_context, resolve_paths
+    from ..context import declared_paths, generated_selectors, load_context, resolve_paths
     from ..doctor import format_report, run_doctor
     from ._helpers import _load_env
 
     if args.seed:
         raise CommandFailure("invalid_argument", "host doctor requires host data, not the seed")
-    paths = resolve_paths(root=args.root, fleet=args.fleet)
+    try:
+        fleet_selector, _ = generated_selectors(fleet=args.fleet)
+        paths = resolve_paths(root=args.root, fleet=fleet_selector)
+    except ValueError as exc:
+        raise CommandFailure("invalid_argument", "invalid host doctor fleet selector") from exc
     if args.markdown:
         if not args.switches:
             raise CommandFailure("invalid_argument", "--markdown requires --switches")
@@ -26,7 +30,7 @@ def dispatch(args):
     selected = read_selection(paths.root)
     external = (read_plan(paths.root, selected["plan_id"]).effects["fleet_manifests"].values()
                 if selected else ())
-    scopes = [paths] if args.fleet else declared_paths(paths.root, paths.package, external=external)
+    scopes = [paths] if fleet_selector else declared_paths(paths.root, paths.package, external=external)
     if not scopes and not args.switches:
         raise CommandFailure("not_found", "no fleet declarations; run fleet setup first")
     items, lines, failed = [], [], False

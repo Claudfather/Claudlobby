@@ -216,6 +216,13 @@ def test_config_validate_runtime_keeps_audit_severities_and_hides_details(fleet_
     monkeypatch.setattr(freshbox, "audit_fleet", lambda *_args, **_kwargs: [
         freshbox.Finding("lead", "orphan_grant", freshbox.FAIL, "SECRET-fail-value")])
     assert call(expected=4)["data"]["fail_count"] == 1
+    monkeypatch.setattr(freshbox, "audit_fleet", lambda *_args, **_kwargs: [
+        freshbox.Finding("lead", "orphan_unit", freshbox.WARN,
+                         "worker.plist — stale supervision unit; SECRET-path")])
+    orphan = call()
+    assert orphan["data"]["findings"][0]["unit"] == "worker.plist"
+    assert "reap-orphans" in orphan["data"]["findings"][0]["remedy"]
+    assert "SECRET-path" not in json.dumps(orphan)
     selected = []
     monkeypatch.setattr(freshbox, "audit_bot", lambda bot, *_args, **_kwargs:
                         selected.append(bot.bot_id) or [])
@@ -227,6 +234,54 @@ def test_config_validate_runtime_keeps_audit_severities_and_hides_details(fleet_
         main(["--root", str(fleet_dir), "freshbox"])
     assert exit.value.code == 2
     capsys.readouterr()
+
+
+def test_config_reads_report_unbuilt_resources_as_unavailable(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(context, "get_resources", lambda: (_ for _ in ()).throw(
+        RuntimeError("private build detail")))
+    for command in (["config", "validate"], ["config", "explain", "fleet.name"]):
+        result, capture = _call(capsys, ["--root", str(tmp_path), *command, "--json"], 6)
+        assert result["error"]["code"] == "unavailable"
+        assert "sealed release" in result["error"]["hint"]
+        assert "private build detail" not in capture.out + capture.err
+
+
+def test_converter_failure_preserves_cron_backup_without_provider_stderr(monkeypatch):
+    import logging
+    from types import SimpleNamespace
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.commands import migration_converters
+
+    def owner(_args):
+        logging.getLogger("claudlobby").error(
+            "your old crontab is preserved as /tmp/crontab-backup-123.txt")
+        logging.getLogger("claudlobby").error("`crontab -` install failed: SECRET-provider-error")
+        return 4
+
+    monkeypatch.setattr(migration_converters, "import_module", lambda *_: SimpleNamespace(cmd_cron_migrate=owner))
+    args = SimpleNamespace(migration_command="cron", archive=False, apply=True)
+    with pytest.raises(CommandFailure) as failure:
+        migration_converters.dispatch(args)
+    assert failure.value.data["backup_path"] == "/tmp/crontab-backup-123.txt"
+    assert "SECRET-provider-error" not in str(failure.value.data) + str(failure.value.error)
+
+
+def test_converter_copy_failure_keeps_item_status_without_exception_text(monkeypatch):
+    import logging
+    from types import SimpleNamespace
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.commands import migration_converters
+
+    def owner(_args):
+        logging.getLogger("claudlobby").error("FAILED  /private/old/notes.txt: SECRET-copy-error")
+        return 1
+
+    monkeypatch.setattr(migration_converters, "import_module", lambda *_: SimpleNamespace(cmd_data_migrate=owner))
+    with pytest.raises(CommandFailure) as failure:
+        migration_converters.dispatch(SimpleNamespace(migration_command="data", apply=True))
+    assert failure.value.data["diagnostics"] == [
+        {"status": "failed", "source": "/private/old/notes.txt"}]
+    assert "SECRET-copy-error" not in str(failure.value.data) + str(failure.value.error)
 
 
 def test_migration_cli_preview_is_read_only_and_status_separates_recorded_progress(releases, capsys):

@@ -211,11 +211,11 @@ def _carrier_lines(sw: Switch) -> tuple[str, str]:
     if sw.carrier == COMPOSE_BOT:
         return (
             f"bots.<bot>.{sw.config}: true in fleet.yaml for ONE bot first, then"
-            " config plan, config diff PLAN_ID, and host activate PLAN_ID (activation"
+            " config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> (activation"
             f" can restart selected bots); widen to defaults.{sw.config}"
             " once it has run clean",
             f"{sw.config}: false at bots.<bot> or defaults in fleet.yaml, then"
-            " config plan and host activate PLAN_ID (activation can restart selected bots)",
+            " config plan and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> (activation can restart selected bots)",
         )
     if sw.carrier == ENROLL_HOST:
         key = sw.config or f"host.jobs.{sw.job}.enroll"
@@ -229,9 +229,9 @@ def _carrier_lines(sw: Switch) -> tuple[str, str]:
     key = sw.config or f"defaults.jobs.{sw.job}.enroll"
     extra = f" (plus {sw.config_extra})" if sw.config_extra else ""
     return (f"{key}: true in fleet.yaml{extra}, then config plan, config diff PLAN_ID,"
-            " and host activate PLAN_ID",
+            " and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir>",
             f"{key}: false in fleet.yaml, then config plan, config diff PLAN_ID,"
-            " and host activate PLAN_ID")
+            " and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir>")
 
 
 #: Every switch the shipped system has. Adding a door with a knob means adding

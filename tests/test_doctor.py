@@ -33,6 +33,30 @@ from claudlobby.paths import Paths
 REPO = Path(__file__).resolve().parent.parent
 
 
+def test_generated_host_doctor_only_checks_its_fleet(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from claudlobby import context, doctor
+    from claudlobby.commands import host_doctor
+
+    root = tmp_path / "data"
+    own = root / "local" / "own"
+    own.mkdir(parents=True)
+    (root / "fleet.yaml").write_text(
+        "fleet:\n  name: rootfleet\n  manager: rootbot\n  bots:\n    rootbot:\n      expertise: [software-engineering]\n")
+    (own / "fleet.yaml").write_text(
+        "fleet:\n  name: own\n  manager: worker\n  bots:\n    worker:\n      expertise: [software-engineering]\n")
+    monkeypatch.setattr(context, "get_resources", source_package)
+    monkeypatch.setenv("FLEET_NAME", "own")
+    checked = []
+    monkeypatch.setattr(doctor, "run_doctor", lambda fleet, paths, **_:
+                        checked.append(fleet.name) or DoctorReport())
+    args = SimpleNamespace(root=root, fleet=None, seed=False, markdown=False,
+                           switches=False, delivery=False)
+    result = host_doctor.dispatch(args)
+    assert checked == ["own"]
+    assert [row["fleet"] for row in result.data["fleets"]] == ["own"]
+
+
 @pytest.fixture
 def doctor_fleet(tmp_path: Path) -> tuple[Path, "FleetConfig", Paths]:
     """Minimal fleet layout for doctor tests."""

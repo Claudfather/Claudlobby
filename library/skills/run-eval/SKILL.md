@@ -46,13 +46,15 @@ If the number is uncomfortable, cut reps or battery *before* running and record 
 
 ## Step 3: Run
 
+These developer instruments live in a Claudlobby source checkout, not in a sealed release. Locate that checkout before running them; its A/B fixture uses the private `harness/compose.py` composition helper. If the checkout is unavailable, ask the operator to run the evaluation there.
+
 Existing assets — use them, do not rebuild:
 
 | Asset | Role |
 |-------|------|
-| `harness/ab-comms-eval.sh` | Two-variant fixture composed by real `generate`; paired task x rep x variant matrix |
+| `<source-checkout>/harness/ab-comms-eval.sh` | Two-variant fixture composed in an isolated checkout; paired task x rep x variant matrix |
 | `claudlobby.transcript_usage` | The evaluator's private measurement — `protocol_sensitive` + labeled weighted-estimate axes |
-| `harness/ab-comms-verdict.py` | Paired deltas, seeded bootstrap CI, the pass-bar |
+| `<source-checkout>/harness/ab-comms-verdict.py` | Paired deltas, seeded bootstrap CI, the pass-bar |
 
 Run control and treatment **paired** — compare within a task and rep, then aggregate the paired deltas. Unpaired comparison lets task variance swamp the effect.
 

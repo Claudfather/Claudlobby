@@ -6,6 +6,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from importlib import import_module
 from io import StringIO
 import logging
+import re
 
 from ..command_result import CommandFailure, CommandOutput
 
@@ -58,6 +59,27 @@ def dispatch(args) -> CommandOutput:
 
     if rc:
         code = {2: "invalid_argument", 3: "unavailable", 6: "recording_degraded"}.get(rc, "conflict")
-        raise CommandFailure(code, f"{code}: migration {name} could not complete")
+        # Converter stderr may contain source bytes or provider responses. Only
+        # pass through fields with a known, value-free owner format.
+        diagnostics: list[dict] = []
+        backup_path = None
+        if name == "cron":
+            for line in capture.lines:
+                marker = "your old crontab is preserved as "
+                if marker in line:
+                    backup_path = line.split(marker, 1)[1].strip()
+        elif name == "data":
+            diagnostics = [{"status": "failed", "source": match.group(1)}
+                           for line in capture.lines
+                           if (match := re.fullmatch(r"FAILED  (.+?): .+", line))]
+        elif name == "lessons":
+            diagnostics = [{"status": match.group(1), "source": match.group(2)}
+                           for line in capture.lines
+                           if (match := re.fullmatch(r"\s*(rejected|error)\s+(.+?) — .+", line))]
+        data = {"mode": "apply" if args.apply else "preview", "converter": name,
+                "backup_path": backup_path, "diagnostics": diagnostics,
+                "failure_count": len(diagnostics)}
+        hint = f"old crontab preserved as {backup_path}" if backup_path else None
+        raise CommandFailure(code, f"migration {name} could not complete", data=data, hint=hint)
     lines = tuple(capture.lines + output.getvalue().splitlines() + errors.getvalue().splitlines())
     return CommandOutput({"mode": "apply" if args.apply else "preview", "messages": list(lines)}, lines=lines)

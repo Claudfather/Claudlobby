@@ -116,6 +116,17 @@ class TestDataMigrateTopLevelFiles:
         # Dir should also be copied
         assert (data_dir / "scripts").is_dir()
 
+    def test_apply_copy_failure_is_nonzero(self, tmp_path):
+        fleet, paths = _make_fleet(tmp_path, ["bot1"], manager="bot1")
+        source = _make_source(tmp_path, "bot1", dirs=[], files={"notes.txt": "data"})
+        args = _make_args(source, apply=True)
+        with (
+            patch("claudlobby.commands._helpers._resolve_paths", return_value=paths),
+            patch("claudlobby.commands._helpers._load_fleet_or_exit", return_value=(fleet, {})),
+            patch("claudlobby.commands.data_migrate.shutil.copy2", side_effect=OSError("copy failed")),
+        ):
+            assert cmd_data_migrate(args) == 1
+
     def test_dotfiles_skipped_by_default(self, tmp_path):
         fleet, paths = _make_fleet(tmp_path, ["bot1"], manager="bot1")
         source = _make_source(

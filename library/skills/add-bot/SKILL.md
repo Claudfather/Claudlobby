@@ -55,14 +55,20 @@ Guide the user through creating a Telegram bot:
 
 If the user does not have a Telegram token yet, that is fine. The bot can be started without Telegram and configured later.
 
-### Step 4: Stage and activate
+### Step 4: Stage and hand off activation
 
 ```bash
 claudlobby --root <data-root> config plan --release <release-id>
+claudlobby --root <data-root> config diff <plan-id>
+```
+
+Review the plan, then give the operator the plan ID and this exact command to run from an operator shell outside the generated bot session:
+
+```bash
 claudlobby --root <data-root> host activate <plan-id> --install-directory <user-unit-directory>
 ```
 
-Review the plan before activation. Activation owns composition and native enrollment; `bot create` only writes source. Verify the selected bot through `claudlobby --fleet <name> bot status <bot-name>` afterward.
+Activation owns composition and native enrollment; `bot create` only writes source. Verify the selected bot through `claudlobby --fleet <name> bot status <bot-name>` afterward.
 
 ### Step 5: Verify
 

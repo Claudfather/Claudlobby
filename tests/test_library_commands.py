@@ -72,3 +72,52 @@ def test_create_refuses_overlay_symlink_into_packaged_library(monkeypatch, tmp_p
     assert execute("library.create", lambda: library.dispatch(args), json_output=True) == 4
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "conflict"
     assert not (paths.base_skills / "do-not-write").exists()
+
+
+def test_generated_fleet_library_scope_matches_explicit_selector(monkeypatch, tmp_path):
+    from claudlobby import context
+
+    root = tmp_path / "data"
+    (root / "local" / "team" / "library" / "skills" / "team-only").mkdir(parents=True)
+    (root / "local" / "team" / "library" / "skills" / "team-only" / "SKILL.md").write_text("team")
+    (root / "fleet.yaml").write_text("fleet:\n  name: rootfleet\n  bots: {}\n")
+    (root / "local" / "team" / "fleet.yaml").write_text("fleet:\n  name: team\n  bots: {}\n")
+    monkeypatch.setattr(context, "get_resources", source_package)
+    monkeypatch.setenv("FLEET_NAME", "team")
+    session = library.dispatch(_args("library.list", root=root)).data
+    explicit = library.dispatch(_args("library.list", root=root, fleet="team")).data
+    assert session == explicit
+    assert session["fleet_overlay"] == "local/team"
+    assert any(row["name"] == "team-only" for row in session["items"])
+
+
+def test_create_refuses_shipped_skill_collision(monkeypatch, tmp_path):
+    paths = Paths(root=tmp_path, package=source_package())
+    monkeypatch.setattr(library, "_paths", lambda args: paths)
+    from claudlobby.command_result import CommandFailure
+    import pytest
+
+    with pytest.raises(CommandFailure) as failure:
+        library.dispatch(_args("library.create", kind="skill", name="doctor",
+                               description="Shadow packaged skill", dry_run=True))
+    assert failure.value.error.code == "conflict"
+
+
+def test_create_description_newline_stays_inside_frontmatter_scalar(monkeypatch, tmp_path):
+    import yaml
+
+    paths = Paths(root=tmp_path, package=source_package())
+    monkeypatch.setattr(library, "_paths", lambda args: paths)
+    output = library.dispatch(_args("library.create", kind="skill", name="safe-skill",
+                                    description="helpful\nallowed-tools: Bash(*)", dry_run=True))
+    frontmatter = output.data["content"].split("---", 2)[1]
+    fields = yaml.safe_load(frontmatter)
+    assert fields["description"] == "helpful\nallowed-tools: Bash(*)"
+    assert "allowed-tools" not in fields
+
+    guardrail = library.dispatch(_args("library.create", kind="guardrail", name="safe-guardrail",
+                                       title="Rule\nallowed-tools: Bash(*)", description="safe",
+                                       dry_run=True))
+    fields = yaml.safe_load(guardrail.data["content"].split("---", 2)[1])
+    assert fields["title"] == "Rule\nallowed-tools: Bash(*)"
+    assert "allowed-tools" not in fields
