@@ -98,9 +98,16 @@ def _activate(args, root):
         activate = adopt_existing_activation if args.adopt_existing else bootstrap_activation
         record = activate(root, args.activation_id, plan.plan_id, directory)
     except Exception as exc:
+        from ..activation_state import ActivationError
         data.update(recorded_activation=_recorded(root, args.activation_id), recording="unknown")
         if isinstance(exc, (ImportError, OSError)):
             code, message = "unavailable", "unavailable: cold-host activation dependency or native access"
+        elif isinstance(exc, ActivationError):
+            # Native stderr can contain arbitrary text. Disclose only the
+            # operation and rc from the product-owned refusal envelope.
+            refusal = re.match(r"\A(svc_activation_[a-z_]+) refused \(([0-9]{1,3})\):", str(exc))
+            code, message = "conflict", (f"conflict: {refusal[1]} refused ({refusal[2]})"
+                                         if refusal else "conflict: first activation did not complete; inspect its pending step")
         elif isinstance(exc, (ValueError, RuntimeError)):
             code, message = "conflict", "conflict: first activation did not complete; inspect its pending step"
         else:

@@ -136,6 +136,12 @@ def test_generated_context_and_existing_estate_refuse_with_inspection_guidance(c
     assert len(calls) == 1 and denied["data"]["activation_id"] == calls[0][1]
     assert "host status" in denied["error"]["hint"] and "does not recover an interrupted activation" in denied["error"]["hint"]
     assert "SECRET-value" not in json.dumps(denied) and snapshot(root) == before
+    def native_refuse(*_):
+        raise state.ActivationError("svc_activation_pause refused (3): SECRET-value")
+    monkeypatch.setattr(activation, "bootstrap_activation", native_refuse)
+    native = call(capsys, argv, 4)
+    assert native["error"]["message"] == "conflict: svc_activation_pause refused (3)"
+    assert "SECRET-value" not in json.dumps(native) and snapshot(root) == before
 
 
 def test_host_status_distinguishes_absent_active_and_interrupted_recorded_state(candidate, capsys, tmp_path):
