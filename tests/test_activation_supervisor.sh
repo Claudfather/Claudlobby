@@ -8,7 +8,7 @@ T="$(mktemp -d "${TMPDIR:?}/activation-supervisor.XXXXXX")"; trap 'rm -rf "$T"' 
 TRACE="$T/trace"; : > "$TRACE"
 DELAY_UNLOAD="$T/delay-unload"; DELAY_ON_BOOTOUT=0
 file="$T/worker.service"; target=worker.service; : > "$file"
-CALLER_RC=0; QUERY_FAIL=0; FAIL_ACTION=""; SHADOW=0; TEST_MANAGER=Aqua
+CALLER_RC=0; QUERY_FAIL=0; FAIL_ACTION=""; SHADOW=0; TEST_MANAGER=Aqua; JOB_PID=600
 enabled=enabled; load=loaded; active=active; group=/user.slice/worker.service
 old_enabled=enabled; launched=1
 systemctl() {
@@ -43,11 +43,11 @@ launchctl() {
                 pending=$(cat "$DELAY_UNLOAD")
                 if [ "$pending" -gt 0 ]; then
                     printf '%s' "$((pending - 1))" > "$DELAY_UNLOAD"
-                    printf '600\t0\t%s\n' "${target##*/}"
+                    printf '%s\t0\t%s\n' "$JOB_PID" "${target##*/}"
                     return
                 fi
             fi
-            [ "$launched" = 0 ] || printf '600\t0\t%s\n' "${target##*/}"
+            [ "$launched" = 0 ] || printf '%s\t0\t%s\n' "$JOB_PID" "${target##*/}"
             ;;
         bootout|bootstrap)
             printf '%s\n' "$*" >> "$TRACE"
@@ -129,6 +129,28 @@ rm "$DELAY_UNLOAD"; DELAY_ON_BOOTOUT=0
 launched=0; : > "$TRACE"; saved=$(svc_activation_snapshot "$file" "$target")
 expect 0 svc_activation_pause "$file" "$target" "$saved"
 expect 0 svc_activation_resume "$file" "$target" "$saved"; unchanged
+
+# A detached manager has no loaded-job PID in launchctl's list. The exact
+# inactive bot unit can be removed without booting out a running process,
+# while the general activation ancestry guard remains strict.
+mkdir -p "$T/generated" "$T/installed" "$T/bot"
+source_unit="$T/generated/worker.plist"
+installed_unit="$T/installed/worker.plist"
+printf 'selected worker\n' > "$source_unit"
+cp "$source_unit" "$installed_unit"
+file="$installed_unit"; target=gui/501/worker; launched=1; JOB_PID=600; CALLER_RC=1
+: > "$TRACE"
+expect 3 svc_bot_disenroll_exact "$source_unit" "$installed_unit" "$target" "$T/bot" worker "$T"
+[ -f "$installed_unit" ]; unchanged
+JOB_PID=-; CALLER_RC=3
+: > "$TRACE"
+expect 3 svc_activation_assert_external "$installed_unit" "$target"
+unchanged
+stop_output=$(svc_bot_disenroll_exact "$source_unit" "$installed_unit" "$target" "$T/bot" worker "$T")
+[ "$stop_output" = effect-attempted ]
+[ ! -e "$installed_unit" ]
+[ "$(cat "$TRACE")" = "bootout $target" ]
+JOB_PID=600; CALLER_RC=0
 
 # Exercise the actual membership predicates with observed-data fixtures; only
 # kernel reads are replaced. No real process ownership or service is queried.

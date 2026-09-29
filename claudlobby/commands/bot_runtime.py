@@ -42,7 +42,8 @@ def dispatch(args) -> CommandOutput:
                                  data=data, release_id=exc.release_id,
                                  hint="inspect the exact bot's native unit and private session before retrying") from exc
         if exc.unavailable:
-            raise CommandFailure("unavailable", "bot native or session readiness cannot be established",
+            message = str(exc) if action == "stop" else "bot native or session readiness cannot be established"
+            raise CommandFailure("unavailable", message,
                                  data=data,
                                  hint="inspect the exact private session; use bot restart for an intentional bounce") from exc
         raise CommandFailure("conflict", str(exc), data=data) from exc

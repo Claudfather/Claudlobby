@@ -298,7 +298,11 @@ def _native(adapter, function, *args, timeout=30):
         raise BotLifecycleError(f"{function} native observation is unavailable",
                                 effect_attempted=effect, unavailable=True) from exc
     if result.returncode:
-        raise BotLifecycleError(f"{function} refused or native state is unknown ({result.returncode})",
+        if function == "svc_bot_disenroll_exact":
+            effect = result.stdout.startswith("effect-attempted\n")
+        detail = (f"{function} failed after beginning a native effect"
+                  if effect else f"{function} refused before a native effect")
+        raise BotLifecycleError(f"{detail} (rc {result.returncode})",
                                 effect_attempted=effect, unavailable=True)
     return result.stdout.strip()
 
@@ -385,18 +389,24 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
             unit = _observed(root, declarations, adapter, entry["target"], installed)
             if not running:
                 if unit.installed:
+                    effect_begun = False
                     try:
                         _native(adapter, "svc_bot_disenroll_exact", declaration.source, installed,
                                 entry["target"], spec.bot_dir, spec.label,
                                 spec.environment["TMUX_TMPDIR"])
+                        effect_begun = True
                         _confirm_stopped(adapter, installed, entry["target"], socket,
                                          effect_attempted=True)
                         after = _observed(root, declarations, adapter, entry["target"], installed)
                         if after.installed:
                             raise BotLifecycleError("bot unit remains installed")
                     except (BotLifecycleError, ActivationError, InventoryError, OSError) as exc:
-                        raise BotLifecycleError("bot stop effect or proof is incomplete",
-                                                effect_attempted=True,
+                        attempted = effect_begun or (isinstance(exc, BotLifecycleError)
+                                                     and exc.effect_attempted)
+                        stage = str(exc) if isinstance(exc, BotLifecycleError) else type(exc).__name__
+                        raise BotLifecycleError(f"bot stop refused or proof is incomplete: {stage}",
+                                                effect_attempted=attempted,
+                                                unavailable=True,
                                                 release_id=release.release_id,
                                                 target=entry["target"]) from exc
                 else:
