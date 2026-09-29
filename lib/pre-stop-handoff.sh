@@ -124,7 +124,11 @@ if check_tmux_session "$TMUX_SESSION" "$TMUX_SOCKET"; then
         fi
         sleep 1
     done
-    if [ -z "$MODE" ]; then echo "Handoff timed out after 30s"; fi
+    if [ "$MODE" = --explicit ]; then
+        echo "handoff-timeout"
+        exit 3
+    fi
+    echo "Handoff timed out after 30s"
 fi
 if [ "$MODE" = --explicit ]; then
     if [ "$_session_was_present" -eq 0 ]; then

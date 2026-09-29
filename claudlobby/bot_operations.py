@@ -42,11 +42,12 @@ _SELF_RESPONSE_WAIT_S = 30
 class BotLifecycleError(RuntimeError):
     def __init__(self, reason: str, *, effect_attempted: bool = False,
                  unavailable: bool = False, release_id: str | None = None,
-                 target: str | None = None):
+                 target: str | None = None, handoff_reason: str | None = None):
         self.effect_attempted = effect_attempted
         self.unavailable = unavailable
         self.release_id = release_id
         self.target = target
+        self.handoff_reason = handoff_reason
         super().__init__(reason)
 
 
@@ -372,6 +373,10 @@ def handoff_bot(*, root: Path, fleet: str | None, bot: str,
                                         unavailable=True, release_id=release.release_id,
                                         target=entry["target"]) from exc
             marker = outcome.stdout.strip().splitlines()[-1:] if outcome.stdout else []
+            if marker == ["handoff-timeout"]:
+                raise BotLifecycleError("bot handoff timed out after 30 seconds", effect_attempted=True,
+                                        unavailable=True, release_id=release.release_id,
+                                        target=entry["target"], handoff_reason="timeout")
             if outcome.returncode or marker not in (["handoff-saved"], ["handoff-skipped:recent"],
                                                     ["handoff-skipped:capability"],
                                                     ["handoff-skipped:no-session"]):

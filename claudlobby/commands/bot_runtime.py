@@ -41,10 +41,16 @@ def dispatch(args) -> CommandOutput:
             data["native_outcome"] = "unknown"
             data["release_id"] = exc.release_id
             data["target"] = exc.target
-            raise CommandFailure("unavailable", "bot handoff outcome is unverified; inspect its private session"
-                                 if action == "handoff" else "bot lifecycle effect is unverified; inspect native state",
-                                 data=data, release_id=exc.release_id,
-                                 hint="inspect the exact bot's native unit and private session before retrying") from exc
+            if action == "handoff":
+                data["handoff"] = "unknown"
+                data["reason"] = exc.handoff_reason or "unverified"
+                message = str(exc) if exc.handoff_reason else "bot handoff outcome is unverified; inspect its private session"
+                hint = "inspect the private session and handoff file; do not automatically resend the handoff"
+            else:
+                message = "bot lifecycle effect is unverified; inspect native state"
+                hint = "inspect the exact bot's native unit and private session before retrying"
+            raise CommandFailure("unavailable", message, data=data, release_id=exc.release_id,
+                                 hint=hint) from exc
         if exc.unavailable:
             message = str(exc) if action == "stop" else "bot native or session readiness cannot be established"
             raise CommandFailure("unavailable", message,

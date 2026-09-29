@@ -282,8 +282,9 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
     monkeypatch.setattr(bot_operations, "_observed", observed)
     monkeypatch.setattr(bot_operations, "assert_quiescent", lambda *a, **kw: None)
 
-    def call(*argv, expected=0):
-        assert main(["--root", str(root), "--json", *argv]) == expected
+    def call(*argv, expected=0, use_root=True):
+        root_flag = ["--root", str(root)] if use_root else []
+        assert main([*root_flag, "--json", *argv]) == expected
         result = json.loads(capsys.readouterr().out)
         assert result["ok"] is (expected == 0)
         return result
@@ -296,9 +297,40 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
     skipped = call("bot", "handoff", "worker")["data"]
     assert skipped["handoff"] == "skipped" and skipped["reason"] == "recent"
     assert "svc_activation_handoff" in native.calls and native.actions == []
+    # The same selected state must resolve identically for a generated manager
+    # caller with an implicit fleet and one that spells out --fleet.
+    monkeypatch.setenv("FLEET_NAME", "example")
+    monkeypatch.setenv("BOT_ID", "manager")
+    monkeypatch.setenv("BOT_DIR", str(root / "runtime/bots/manager"))
+    monkeypatch.setenv("FLEET_ROOT", str(root))
+    monkeypatch.setenv("CLAUDLOBBY_ROOT", str(root))
+    monkeypatch.setenv("CLAUDLOBBY_RELEASE_ID", release.release_id)
+    implicit = call("bot", "handoff", "worker", use_root=False)["data"]
+    explicit = call("--fleet", "example", "bot", "handoff", "worker", use_root=False)["data"]
+    assert implicit == explicit == skipped
+    before_refusal = native.calls.count("svc_activation_handoff")
+    assert call("bot", "handoff", "manager", expected=4)["error"]["code"] == "conflict"
+    monkeypatch.setenv("BOT_ID", "worker")
+    monkeypatch.setenv("BOT_DIR", str(root / "runtime/bots/worker"))
+    assert call("bot", "handoff", "worker", expected=4)["error"]["code"] == "conflict"
+    assert native.calls.count("svc_activation_handoff") == before_refusal
+    for key in ("FLEET_NAME", "BOT_ID", "BOT_DIR", "FLEET_ROOT",
+                "CLAUDLOBBY_ROOT", "CLAUDLOBBY_RELEASE_ID"):
+        monkeypatch.delenv(key)
     native.explicit_handoff = ""  # the old native rc0 is not proof of a handoff
     unknown = call("bot", "handoff", "worker", expected=6)
     assert unknown["error"]["code"] == "unavailable" and native.actions == []
+    assert unknown["data"]["handoff"] == "unknown"
+    assert unknown["data"]["reason"] == "unverified"
+    native.explicit_handoff = "handoff-timeout"
+    native.handoff_rc = 3
+    timed_out = call("bot", "handoff", "worker", expected=6)
+    assert timed_out["error"]["code"] == "unavailable"
+    assert timed_out["data"]["handoff"] == "unknown"
+    assert timed_out["data"]["reason"] == "timeout"
+    assert "do not automatically resend" in timed_out["error"]["hint"]
+    assert native.actions == []
+    native.handoff_rc = 0
     native.explicit_handoff = "handoff-saved"
     saved = call("bot", "handoff", "worker")["data"]
     assert saved["handoff"] == "saved" and saved["reason"] == "fresh_file_verified"
