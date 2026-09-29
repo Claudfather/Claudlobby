@@ -103,7 +103,10 @@ for fleet_dir in "${FLEET_DIRS[@]}"; do
 
         for logfile in "${_logs[@]}"; do
             _has_files=1
-            if [ -L "$logfile" ]; then _read_failed=1; continue; fi
+            if [ -L "$logfile" ]; then
+                printf 'tail-fleet: skipped redirected log: %s\n' "$logfile" >&2
+                _read_failed=1; continue
+            fi
             _relpath="${logfile#"$CLAUDLOBBY_ROOT"/}"
             # A line can be arbitrarily long. Limit the bytes BEFORE Bash's
             # command substitution, then refuse a suffix that could begin in
@@ -118,7 +121,10 @@ for fleet_dir in "${FLEET_DIRS[@]}"; do
             _suffix="${_suffix%$'\034'}"
             if [ "$_size" -gt "$_max_bytes" ]; then
                 _breaks=$(printf '%s' "$_suffix" | tr -cd '\n' | wc -c)
-                if [ "$_breaks" -le "$LINES" ]; then _read_failed=1; continue; fi
+                if [ "$_breaks" -le "$LINES" ]; then
+                    printf 'tail-fleet: skipped truncated_line: %s\n' "$logfile" >&2
+                    _read_failed=1; continue
+                fi
             fi
             _output=$(printf '%s' "$_suffix" | tail -n "$LINES") || { _read_failed=1; continue; }
             [ -z "$_output" ] && continue

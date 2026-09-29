@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from claudlobby.__main__ import main
 from claudlobby.supervision_inventory import Adapter
 from tests.test_supervision_inventory import Observations
@@ -64,3 +66,32 @@ def test_cold_move_refuses_retained_activation_history(tmp_path, monkeypatch, ca
     assert _move(obs.root) == 4
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "conflict"
     assert source.is_dir()
+
+
+@pytest.mark.parametrize("hazard", ["runtime", "selection", "redirected", "collision", "container-fleet", "root-fleet"])
+def test_cold_move_refuses_unsafe_layout_without_rename(tmp_path, monkeypatch, capsys, hazard):
+    obs, source = _cold(tmp_path, monkeypatch)
+    destination = obs.root / "local/sys1/alpha"
+    if hazard == "runtime":
+        (source / "runtime").mkdir()
+    elif hazard == "selection":
+        from claudlobby import activation_state
+        monkeypatch.setattr(activation_state, "read_selection", lambda root: {"release_id": "selected"})
+    elif hazard == "redirected":
+        real = tmp_path / "elsewhere"
+        source.rename(real)
+        source.symlink_to(real, target_is_directory=True)
+    elif hazard == "collision":
+        destination.mkdir(parents=True)
+        (destination / "fleet.yaml").write_text((source / "fleet.yaml").read_text())
+        (destination.parent / ".claudron-system").write_text("container\n")
+    elif hazard == "container-fleet":
+        destination.parent.mkdir()
+        (destination.parent / "fleet.yaml").write_text("fleet:\n  name: sys1\n")
+    else:
+        (obs.root / "fleet.yaml").write_text((source / "fleet.yaml").read_text())
+    from claudlobby.commands import fleet_move
+    monkeypatch.setattr(fleet_move.os, "rename", lambda *args: pytest.fail("unsafe move attempted a rename"))
+    assert _move(obs.root) == 4
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "conflict"
+    assert (source / "fleet.yaml").is_file()

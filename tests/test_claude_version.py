@@ -388,7 +388,8 @@ def test_every_seed_caller_stops_on_the_refusal():
     """A refusal a caller ignores is a stand-in by another route: the ladder runs
     without `set -e`, and would boot on with no onboarding seeded."""
     callers = {}
-    for script in sorted(HARNESS.glob("*.sh")):
+    for script in sorted(path for directory in (LIB, HARNESS)
+                         for path in directory.glob("*.sh")):
         if stops := _seed_calls_stop(script.read_text()):
             callers[script.name] = stops
     ignoring = sorted(name for name, stops in callers.items() if not all(stops))
@@ -560,7 +561,8 @@ def test_start_bot_and_the_update_job_take_the_launch_path_from_the_one_helper()
     order = re.compile(r"/usr/local/bin:/usr/bin:/bin:\$HOME/\.local/bin")
     spelled = sorted(
         p.name
-        for p in LIB.iterdir()
+        for directory in (LIB, HARNESS)
+        for p in directory.iterdir()
         if p.is_file() and order.search(p.read_text(errors="replace"))
     )
     assert spelled == ["lib-common.sh"], spelled
@@ -638,7 +640,8 @@ def test_no_other_script_reads_a_claude_version():
     read = re.compile(r'(?:"\$\{?\w+\}?"|(?:^|(?<=[\s(|;&`]))claude)\s+--version\b', re.M)
     offenders = {
         p.name
-        for p in LIB.iterdir()
+        for directory in (LIB, HARNESS)
+        for p in directory.iterdir()
         if p.is_file()
         and p.suffix in {".sh", ""}
         and read.search(p.read_text(errors="replace"))

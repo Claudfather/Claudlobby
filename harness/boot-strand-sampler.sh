@@ -750,6 +750,7 @@ main() {
     fi
 
     ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-bsampler.XXXXXX")"
+    (cd "$ROOT" && pwd -P) > "$ROOT/.claudlobby-harness-root"
     CONFIG_DIR="$ROOT/config"
     BOT="bsprobe"
     BOT_DIR="$ROOT/runtime/bots/$BOT"
@@ -823,6 +824,7 @@ main() {
     cat > "$ROOT/fleet.yaml" <<YAML
 fleet:
   name: $PROBE_FLEET
+  manager: $BOT
   service_prefix: bsampler
   accounts:
     default: ~/.claude

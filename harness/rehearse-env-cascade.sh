@@ -77,6 +77,7 @@ say "== exporting a disposable tree from the checkout (git archive) =="
 git -C "$SRC_ROOT" archive --format=tar HEAD 2>/dev/null | (mkdir -p "$EXPORT_ROOT" && tar -x -C "$EXPORT_ROOT") \
     || { echo "git archive failed" >&2; exit 2; }
 mkdir -p "$FAKE_HOME" "$EXPORT_ROOT/local/$FLEET"
+(cd "$EXPORT_ROOT" && pwd -P) > "$EXPORT_ROOT/.claudlobby-harness-root"
 # start-bot.sh takes a lock under $HOME/.claude before it does anything else, so
 # a bare fake home makes the unit die at status=1 before writing .tmux-env — and
 # the failure surfaces only in the journal, not in the harness output. Seed the
@@ -94,6 +95,7 @@ PYBIN="$(dirname "$CLAUDLOBBY_CLI")/python"
 cat > "$EXPORT_ROOT/local/$FLEET/fleet.yaml" <<YAML
 fleet:
   name: $FLEET
+  manager: $BOT
   service_prefix: $PREFIX
   defaults:
     expertise: [software-engineering]
@@ -124,7 +126,7 @@ BOT_DIR="$EXPORT_ROOT/local/$FLEET/runtime/bots/$BOT"
 
 say "== generate =="
 ( cd "$EXPORT_ROOT" && HOME="$FAKE_HOME" CLAUDLOBBY_ROOT="$EXPORT_ROOT" \
-    "$PYBIN" "$EXPORT_ROOT/harness/compose.py" --root "$EXPORT_ROOT" --fleet "$FLEET" ) >"$WORK/generate.log" 2>&1 \
+    "$PYBIN" "$SRC_ROOT/harness/compose.py" --root "$EXPORT_ROOT" --fleet "$FLEET" ) >"$WORK/generate.log" 2>&1 \
     || { echo "generate failed:"; tail -20 "$WORK/generate.log"; exit 2; }
 [ -d "$BOT_DIR" ] || { echo "bot dir not composed at $BOT_DIR" >&2; exit 2; }
 printf 'export CANARY_BOT=from_bot\nexport CANARY_CONTEST=from_bot\n' >> "$BOT_DIR/.env"
@@ -255,7 +257,7 @@ check CANARY_GUARDED real_value_at_host
 
 say "== 5: does the COMPOSITOR agree with the runtime? =="
 REG="$( cd "$EXPORT_ROOT" && HOME="$FAKE_HOME" CLAUDLOBBY_ROOT="$EXPORT_ROOT" \
-        "$PYBIN" -m claudlobby --fleet "$FLEET" config explain --bot "$BOT" --json 2>"$WORK/reg.err" )"
+        "$PYBIN" -I -m claudlobby --fleet "$FLEET" config explain --bot "$BOT" --json 2>"$WORK/reg.err" )"
 if [ -z "$REG" ]; then
     bad "config explain produced nothing"; tail -5 "$WORK/reg.err"
 else
@@ -312,7 +314,7 @@ RT_PAT="$(HOME="$FAKE_HOME" bash -c 'set -a; . "$1" >/dev/null 2>&1; set +a; pri
     || bad "runtime did not resolve GITHUB_PAT from host (got '$RT_PAT')"
 
 CREDS="$( cd "$EXPORT_ROOT" && HOME="$FAKE_HOME" CLAUDLOBBY_ROOT="$EXPORT_ROOT" \
-    "$PYBIN" -m claudlobby --fleet "$FLEET" host credentials reconcile 2>&1 )"
+    "$PYBIN" -I -m claudlobby --fleet "$FLEET" host credentials reconcile 2>&1 )"
 printf '%s\n' "$CREDS" | grep -i 'GITHUB_PAT' | sed 's/^/    creds: /'
 if printf '%s\n' "$CREDS" | grep -i 'GITHUB_PAT' | grep -qiE 'FAIL|no value|missing'; then
     bad "TOOLING/RUNTIME SPLIT: host credentials reconcile calls GITHUB_PAT missing while the runtime resolves it from the host tier"

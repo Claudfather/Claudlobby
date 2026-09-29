@@ -77,19 +77,21 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# fleet.yaml WITH ($1 = yes) the equipped slot, or a BOTLESS fleet ($1 = no) so
+# fleet.yaml WITH ($1 = yes) or WITHOUT ($1 = no) the equipped slot, so
 # the recompose prunes the composed files. A non-shell-ident free var name
 # is avoided — BOT/SLOT are idents.
 write_fleet_yaml() {
+    mkdir -p "$FLEET_DIR"
     cat >"$FLEET_DIR/fleet.yaml" <<YML
 fleet:
   name: $FLEET
+  manager: $BOT
   service_prefix: $PREFIX
   bots:
-YML
-    [ "$1" = yes ] && cat >>"$FLEET_DIR/fleet.yaml" <<YML
     $BOT:
       expertise: [software-engineering]
+YML
+    [ "$1" = yes ] && cat >>"$FLEET_DIR/fleet.yaml" <<YML
       briefing:
         slots:
           $SLOT: "*-*-* 08:30:00"
@@ -109,9 +111,10 @@ sys.path.insert(0, checkout)
 from claudlobby.config import load_fleet
 from claudlobby.composer import compose_fleet_timers
 from claudlobby.paths import Paths
+from claudlobby.resources import get_resources
 
 fleet, _ = load_fleet(Path(fleet_dir) / "fleet.yaml")
-paths = Paths(root=Path(checkout), fleet_dir=Path(fleet_dir))
+paths = Paths(root=Path(checkout), fleet_dir=Path(fleet_dir), package=get_resources())
 tdir = compose_fleet_timers(fleet, paths, {})
 print("composed:", sorted(p.name for p in tdir.iterdir()))
 PY

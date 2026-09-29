@@ -153,6 +153,7 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$FAKE_CFG" "$EXPORT_ROOT/local/$FLEET"
+(cd "$EXPORT_ROOT" && pwd -P) > "$EXPORT_ROOT/.claudlobby-harness-root"
 # The target now lives under the bot dir, which generate owns, so it is written
 # after EVERY compose (below) rather than once here.
 write_target() { mkdir -p "$TARGET_DIR" && printf '%s\n' "$SENTINEL" > "$TARGET"; }
@@ -235,6 +236,7 @@ compose() {  # compose <bare_bash:0|1> <path_deny:0|1> <bare_tool_denies:0|1>
   cat > "$EXPORT_ROOT/local/$FLEET/fleet.yaml" <<YAML
 fleet:
   name: $FLEET
+  manager: $BOT
   service_prefix: $PREFIX
   plugins:
     include_defaults: false
@@ -266,7 +268,7 @@ YAML
   # — a harness defect wearing the costume of a real one. The isolation claim is
   # carried by the strace assertion over the CELL, which is where it belongs.
   ( cd "$EXPORT_ROOT" && CLAUDLOBBY_ROOT="$EXPORT_ROOT" \
-      "$PYBIN" "$EXPORT_ROOT/harness/compose.py" --root "$EXPORT_ROOT" --fleet "$FLEET" ) >"$WORK/generate.log" 2>&1
+      "$PYBIN" "$SRC_ROOT/harness/compose.py" --root "$EXPORT_ROOT" --fleet "$FLEET" ) >"$WORK/generate.log" 2>&1
   local rc=$?
   write_target   # generate owns the bot dir; re-lay the target after every pass
   return $rc

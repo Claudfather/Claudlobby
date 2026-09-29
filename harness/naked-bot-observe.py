@@ -501,6 +501,7 @@ def prepare_candidate(root: Path) -> Candidate:
     root = root.resolve()
     if (root / ".git").exists() or (root / ".probe-release").exists():
         raise RuntimeError("Probe candidate needs a fresh history-free export")
+    (root / ".claudlobby-harness-root").write_text(str(root) + "\n")
     release = root / ".probe-release"
     with tempfile.TemporaryDirectory(prefix="naked-bot-build-", dir=root.parent) as tmp:
         source = Path(tmp) / "source"

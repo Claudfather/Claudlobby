@@ -143,3 +143,26 @@ def test_logs_refuse_a_different_executing_release_before_reading(monkeypatch, t
     with pytest.raises(CommandFailure) as mismatch:
         runtime_read.dispatch(_args("bot.logs", "lead"))
     assert mismatch.value.error.code == "release_mismatch"
+
+
+def test_incomplete_log_preserves_other_files_and_discloses_decode_replacement(monkeypatch, tmp_path):
+    context = _context(tmp_path)
+    monkeypatch.setattr(runtime_read, "_context", lambda _args: context)
+    monkeypatch.setattr(runtime_read, "_log_release", lambda _context: "selected-release")
+    logs = context.paths.source_dir / "runtime/bots/lead/logs"
+    logs.mkdir(parents=True)
+    (logs / "large.jsonl").write_text("x" * 170000 + "\n")
+    good = logs / "bot.log"
+    good.write_text("readable output\n")
+    with pytest.raises(CommandFailure) as partial:
+        runtime_read.dispatch(_args("bot.logs", "lead", lines=200))
+    item = partial.value.data["items"][0]
+    assert item["status"] == "partial"
+    assert "readable output" in item["text"] and "truncated_line" in item["text"]
+    (logs / "large.jsonl").unlink()
+    good.write_bytes(b"readable \xff output\n")
+    with pytest.raises(CommandFailure) as decoded:
+        runtime_read.dispatch(_args("bot.logs", "lead"))
+    item = decoded.value.data["items"][0]
+    assert item["decode_replacements"] is True
+    assert "readable" in item["text"]

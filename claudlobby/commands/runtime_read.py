@@ -107,7 +107,7 @@ def _tail(context, bot: str, lines: int, timeout: float) -> dict:
     env = {**os.environ, "CLAUDLOBBY_ROOT": str(context.paths.root)}
     try:
         with subprocess.Popen(command, env=env, stdout=subprocess.PIPE,
-                              stderr=subprocess.DEVNULL, start_new_session=True) as process:
+                              stderr=subprocess.STDOUT, start_new_session=True) as process:
             output = bytearray()
             deadline = time.monotonic() + timeout
             try:
@@ -134,14 +134,17 @@ def _tail(context, bot: str, lines: int, timeout: float) -> dict:
             returncode = process.returncode
     except (OSError, UnicodeError):
         return {"bot": bot, "status": "unavailable", "text": None}
-    if returncode:
-        return {"bot": bot, "status": "unavailable", "text": None}
+    replaced = False
     try:
         text = output.decode("utf-8").rstrip("\n")
     except UnicodeError:
-        return {"bot": bot, "status": "unavailable", "text": None}
+        text = output.decode("utf-8", errors="replace").rstrip("\n")
+        replaced = True
     status = ("missing" if text == _NO_LOGS else
               "empty" if text == _EMPTY_LOGS else "read")
+    if returncode or replaced:
+        return {"bot": bot, "status": "partial" if text else "unavailable",
+                "text": text or None, "decode_replacements": replaced}
     return {"bot": bot, "status": status, "text": text if status == "read" else None}
 
 
@@ -168,8 +171,8 @@ def _logs(args, context) -> CommandOutput:
                              data={"fleet": context.fleet.name, "lines_per_file": lines},
                              release_id=release_id,
                              hint="reduce --lines or read one bot")
-    if any(item["status"] == "unavailable" for item in items):
-        raise CommandFailure("unavailable", "one or more selected bot log sources could not be read",
+    if any(item["status"] in {"unavailable", "partial"} for item in items):
+        raise CommandFailure("unavailable", "one or more log sources are incomplete; readable output is retained in data.items",
                              data=data, release_id=release_id)
     if args.public_command == "bot.logs" and items[0]["status"] == "missing":
         raise CommandFailure("not_found", "selected bot has no log files yet",

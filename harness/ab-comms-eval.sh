@@ -259,6 +259,7 @@ _link_library_tree() {
     local dest="$1" real_subdir="$2" root e name
     root="$(dirname "$dest")"
     mkdir -p "$dest/$real_subdir"
+    (cd "$root" && pwd -P) > "$root/.claudlobby-harness-root"
     for e in "$SRC"/library/*; do
         name="$(basename "$e")"
         [ "$name" = "$real_subdir" ] && continue

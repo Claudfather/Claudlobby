@@ -35,6 +35,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("refusing to compose into the source checkout")
     if (root / "state/selected-release.json").exists() or (root / "state/selected-release.json").is_symlink():
         parser.error("refusing a root with an active or unreadable release selection")
+    marker = root / ".claudlobby-harness-root"
+    if (marker.is_symlink() or not marker.is_file()
+            or marker.read_text().strip() != str(root)):
+        parser.error("root is not a marked disposable harness directory")
     if args.record_plane:
         os.environ.pop("PLANE_EMIT_DISABLED", None)
     else:
@@ -65,6 +69,8 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("use a prepared disposable export or a clean committed harness tree")
         if resources.source_revision != revision.stdout.strip():
             parser.error("selected wheel was not built from this harness tree revision")
+    else:
+        parser.error("harness source has no built artifact or Git revision identity")
     args.seed = False
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)-8s %(message)s",

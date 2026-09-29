@@ -3356,6 +3356,7 @@ rm -rf "$GA_ROOT"
 # of the real script running with a real environment, not of a fixture.
 # =============================================================================
 SW_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-sw.XXXXXX")"
+(cd "$SW_ROOT" && pwd -P) > "$SW_ROOT/.claudlobby-harness-root"
 cat > "$SW_ROOT/fleet.yaml" <<'SWEOF'
 fleet:
   name: sw-validate

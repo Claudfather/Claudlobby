@@ -109,10 +109,11 @@ def _current_counts() -> dict[str, int]:
     the old bug to a different line.
     """
     counts: dict[str, int] = {}
-    for path in sorted(LIB_DIR.rglob("*")):
+    for path in sorted(path for directory in (LIB_DIR, REPO_DIR / "harness")
+                       for path in directory.rglob("*")):
         if not path.is_file():
             continue
-        rel = f"lib/{path.relative_to(LIB_DIR)}"
+        rel = path.relative_to(REPO_DIR).as_posix()
         if rel == ADAPTER_REL:
             continue
         n = 0

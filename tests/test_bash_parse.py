@@ -42,7 +42,8 @@ LIB_SCRIPTS = _lib_scripts()
 # The parse gate's own set: lib/ plus any *.sh a library/ item ships. A skill's
 # helper is symlinked into the bot dir rather than rendered, so a syntax error
 # in one reaches the bot verbatim — same trust properties as lib/.
-SHIPPED_SCRIPTS = sorted(set(LIB_SCRIPTS) | set((REPO_DIR / "library").rglob("*.sh")))
+SHIPPED_SCRIPTS = sorted(set(LIB_SCRIPTS) | set((REPO_DIR / "library").rglob("*.sh"))
+                         | set((REPO_DIR / "harness").rglob("*.sh")))
 
 
 def _script_id(p: Path) -> str:

@@ -60,6 +60,7 @@ done
 [ -n "$_TIMEOUT_BIN" ] || { printf 'SKIP: no timeout(1)/gtimeout to bound the boot\n'; exit 2; }
 
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-freshbox.XXXXXX")"
+(cd "$ROOT" && pwd -P) > "$ROOT/.claudlobby-harness-root"
 CONFIG_DIR="$ROOT/fbconfig"           # the fresh, empty per-bot CLAUDE_CONFIG_DIR
 BOT="fbgate"
 BOT_DIR="$ROOT/runtime/bots/$BOT"
@@ -135,6 +136,7 @@ NOTE
 cat > "$ROOT/fleet.yaml" <<YAML
 fleet:
   name: freshbox-gate
+  manager: $BOT
   service_prefix: fbgate
   accounts:
     default: ~/.claude

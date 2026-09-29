@@ -83,14 +83,12 @@ class TestDocumentedInstallPath:
         install instruction without a venv is a blocker, not a style nit.
         """
         lines = _shell_lines(doc)
-        # Match the extras form too — `-e '.[dev]'` is how the contributor guide
-        # installs, and an earlier bare `-e \.` pattern silently *skipped* that
-        # file rather than checking it.
-        installs_package = any(
-            re.search(r"pip\s+install\s+-e\s+['\"]?\.", ln) for ln in lines
-        )
+        installs_package = any(re.search(r"(?:-m\s+)?pip\s+install\b", ln) for ln in lines)
         if not installs_package:
-            pytest.skip(f"{doc.name} does not install the package")
+            # The README delegates assembly to the canonical walkthrough.
+            assert doc == README and "documentation/getting-started.md" in doc.read_text()
+            lines = _shell_lines(GETTING_STARTED)
+            assert any(re.search(r"-m\s+pip\s+install\b", ln) for ln in lines)
 
         assert any("venv" in ln for ln in lines), (
             f"{doc.name} installs the package but never creates a venv. "
@@ -109,30 +107,14 @@ class TestDocumentedInstallPath:
         The skill is included deliberately — the docs agreed with *each other*
         the whole time, so a docs-only comparison would have stayed green.
         """
-        pattern = re.compile(r"[Cc]opy\s+`?(fleet\.yaml\.\w+)|cp\s+(fleet\.yaml\.\w+)")
+        for source in (README, GETTING_STARTED, SETUP_SKILL):
+            assert "fleet.yaml.seed" in source.read_text(), source
+        # The executable copy uses the installed package path, including when
+        # the operator is still in the source checkout after building it.
+        walkthrough = GETTING_STARTED.read_text()
+        assert 'cp "$SEEDS/fleet.yaml.seed" "$WORK/fleet.yaml"' in walkthrough
+        assert 'SEEDS=$("$WORK/bootstrap/bin/python" -I -c' in walkthrough
 
-        def templates(source: Path) -> set[str]:
-            found = pattern.findall(source.read_text())
-            return {m for pair in found for m in pair if m}
-
-        sources = {
-            "README.md": README,
-            "getting-started.md": GETTING_STARTED,
-            "setup SKILL.md": SETUP_SKILL,
-        }
-        named = {label: templates(p) for label, p in sources.items() if p.is_file()}
-        named = {label: t for label, t in named.items() if t}
-        if len(named) < 2:
-            pytest.skip("fewer than two entry points name a first-run template")
-
-        union: set[str] = set()
-        for t in named.values():
-            union |= t
-        assert len(union) == 1, (
-            "onboarding entry points disagree on the first-run template: "
-            + "; ".join(f"{label} → {sorted(t)}" for label, t in named.items())
-            + " — pick one and make the others reference it."
-        )
 
 
 class TestSeedPlaceholderContract:
