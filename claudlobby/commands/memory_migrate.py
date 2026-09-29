@@ -110,5 +110,5 @@ def cmd_memory_migrate(args) -> int:
         return 1
 
     log.info("%s memory for %d bot(s).", "Migrated" if args.apply else "Would migrate", migrated)
-    log.info("Memories are now in local/<fleet>/runtime/bots/<bot>/memory/")
+    log.info("Destination: local/<fleet>/runtime/bots/<bot>/memory/")
     return 0
