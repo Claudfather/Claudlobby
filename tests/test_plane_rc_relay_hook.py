@@ -16,6 +16,7 @@ path.
 from __future__ import annotations
 
 from tests.plane_setup import initialize_plane
+from tests.test_plane_events_door import _serving
 
 import json
 import sqlite3
@@ -83,14 +84,24 @@ def _transcript(tmp_path, entries):
     return p
 
 
-def _run(tmp_path, root, entries, *, armed=True, disabled=False, payload=None, scratch_plane_env):
+def _run(tmp_path, root, entries, *, armed=True, disabled=False, payload=None,
+         socket=None, scratch_plane_env):
     tp = _transcript(tmp_path, entries)
     stdin = json.dumps(payload if payload is not None else
                        {"session_id": "s1", "transcript_path": str(tp),
                         "hook_event_name": "Stop", "stop_hook_active": False})
+    env = _env(tmp_path, root, armed=armed, disabled=disabled, scratch_plane_env=scratch_plane_env)
+    if socket is not None:
+        env["PLANE_SOCKET"] = str(socket)
     return subprocess.run(["bash", str(HOOK)], input=stdin, capture_output=True,
-                          text=True, env=_env(tmp_path, root, armed=armed, disabled=disabled, scratch_plane_env=scratch_plane_env),
+                          text=True, env=env,
                           timeout=120)
+
+
+def _run_committed(tmp_path, root, entries, *, scratch_plane_env, **kwargs):
+    with _serving(root, scratch_plane_env) as socket:
+        return _run(tmp_path, root, entries, socket=socket,
+                    scratch_plane_env=scratch_plane_env, **kwargs)
 
 
 def _rows(root, sql):
@@ -108,7 +119,7 @@ def _rows(root, sql):
 def test_genuine_rc_relayed_final_answer_is_recorded_honestly(tmp_path, *, scratch_plane_env):
     root = _root(tmp_path)
     initialize_plane(root)
-    r = _run(tmp_path, root, [_channel_user(), _assistant("All quiet, migration on track.")], scratch_plane_env=scratch_plane_env)
+    r = _run_committed(tmp_path, root, [_channel_user(), _assistant("All quiet, migration on track.")], scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0 and r.stdout == ""
     comms = _rows(root, "SELECT sender_uid, recipient_raw, body FROM communications")
     assert len(comms) == 1
@@ -167,7 +178,7 @@ def test_records_without_any_flag_and_disabled_silences_it(tmp_path, *, scratch_
     answer is recorded; PLANE_EMIT_DISABLED=1 → nothing, exit 0."""
     root = _root(tmp_path)
     initialize_plane(root)
-    r = _run(tmp_path, root, [_channel_user(), _assistant("hi")], armed=False, scratch_plane_env=scratch_plane_env)
+    r = _run_committed(tmp_path, root, [_channel_user(), _assistant("hi")], armed=False, scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0 and r.stdout == ""
     assert len(_rows(root, "SELECT 1 FROM communications")) == 1
     root2 = tmp_path / "root2"
@@ -190,8 +201,8 @@ def test_a_refired_stop_never_double_records(tmp_path, *, scratch_plane_env):
     root = _root(tmp_path)
     initialize_plane(root)
     ents = [_channel_user(), _assistant("All quiet.")]
-    assert _run(tmp_path, root, ents, scratch_plane_env=scratch_plane_env).returncode == 0
-    assert _run(tmp_path, root, ents, scratch_plane_env=scratch_plane_env).returncode == 0
+    assert _run_committed(tmp_path, root, ents, scratch_plane_env=scratch_plane_env).returncode == 0
+    assert _run_committed(tmp_path, root, ents, scratch_plane_env=scratch_plane_env).returncode == 0
     assert len(_rows(root, "SELECT 1 FROM communications")) == 1
 
 
@@ -218,7 +229,7 @@ def test_big_transcript_is_read_bounded_and_fast(tmp_path, *, scratch_plane_env)
                            "content": [{"type": "text", "text": "x" * 2000}]}}
               for i in range(3000)]                        # ~6 MB
     t0 = time.monotonic()
-    r = _run(tmp_path, root, filler + [_channel_user(), _assistant("Final answer.")], scratch_plane_env=scratch_plane_env)
+    r = _run_committed(tmp_path, root, filler + [_channel_user(), _assistant("Final answer.")], scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0 and r.stdout == ""
     assert time.monotonic() - t0 < 10
     assert len(_rows(root, "SELECT 1 FROM communications")) == 1
