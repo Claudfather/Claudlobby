@@ -80,10 +80,15 @@ def _list(paths) -> CommandOutput:
         for item in categories[kind]:
             name = f"voices/{item['name']}" if kind == "voices" else item["name"]
             lines.append(f"  {name}{' (override)' if item['source'] == 'overlay' else ''}")
-    overlay = paths.fleet_dir.relative_to(paths.root).as_posix() if paths.fleet_dir else None
+    overlay = None
+    if paths.fleet_dir:
+        overlay = (paths.fleet_dir.relative_to(paths.root).as_posix()
+                   if paths.fleet_dir.is_relative_to(paths.root) else str(paths.fleet_dir))
     lines.append(f"[fleet overlay: {overlay}]" if overlay else
                  "[no fleet overlay — root mode. Use --fleet <name> for overlay mode.]")
-    return CommandOutput({"categories": categories, "fleet_overlay": overlay}, lines=tuple(lines))
+    items = [{"kind": kind, **item} for kind, _label in labels for item in categories[kind]]
+    return CommandOutput({"items": items, "next_cursor": None, "fleet_overlay": overlay},
+                         lines=tuple(lines))
 
 
 def _create(args, paths) -> CommandOutput:

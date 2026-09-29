@@ -18,7 +18,8 @@ def _args(command, **values):
 
 
 def test_list_json_preserves_nested_overlay_precedence_and_other_categories(monkeypatch, tmp_path, capsys):
-    paths = Paths(root=tmp_path, package=source_package())
+    paths = Paths(root=tmp_path / "data-root", fleet_dir=tmp_path / "external-fleet",
+                  package=source_package())
     skill = paths.overlay_library / "skills" / "checkin"
     skill.mkdir(parents=True)
     (skill / "SKILL.md").write_text("overlay")
@@ -36,12 +37,14 @@ def test_list_json_preserves_nested_overlay_precedence_and_other_categories(monk
     assert execute("library.list", lambda: library.dispatch(args), json_output=True) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["schema_version"] == 1 and result["ok"] is True
-    categories = result["data"]["categories"]
-    assert {row["name"]: row["source"] for row in categories["skills"]}["checkin"] == "overlay"
-    assert {row["name"]: row["source"] for row in categories["skills"]}["group/nested"] == "overlay"
-    assert {row["name"]: row["source"] for row in categories["voices"]}["nested/voice.md"] == "overlay"
-    assert categories["mcp"] and all(row["source"] == "base" for row in categories["mcp"])
-    assert {row["name"]: row["source"] for row in categories["tools"]}["custom"] == "overlay"
+    data = result["data"]
+    assert data["next_cursor"] is None and data["fleet_overlay"] == str(paths.fleet_dir)
+    items = {(row["kind"], row["name"]): row["source"] for row in data["items"]}
+    assert items["skills", "checkin"] == "overlay"
+    assert items["skills", "group/nested"] == "overlay"
+    assert items["voices", "nested/voice.md"] == "overlay"
+    assert any(kind == "mcp" and source == "base" for (kind, _name), source in items.items())
+    assert items["tools", "custom"] == "overlay"
 
 
 def test_create_json_never_prompts_and_preview_stays_in_overlay(monkeypatch, tmp_path, capsys):
