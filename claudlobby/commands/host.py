@@ -47,12 +47,9 @@ def _status(args, root):
                          (f"Host recorded state: {state}; running processes are unobserved.",))
 
 
-def _operator_shell():
-    # Generated context is a trusted-local restriction, not authentication.
-    # The backend additionally asks the OS adapter about actual caller ancestry.
-    if any(name in os.environ for name in ("BOT_ID", "BOT_NAME", "BOT_DIR", "BOT_SERVICE")):
-        raise CommandFailure("conflict", "conflict: host activation requires an operator shell outside generated bot context",
-                             hint="run from an operator shell outside the managed bot/job process trees")
+def _operator_shell(root=None):
+    from .operator_context import require_operator_context
+    require_operator_context(root)
 
 
 def _recorded(root, activation_id):
@@ -146,7 +143,7 @@ def dispatch(args):
     activating = args.public_command == "host.activate"
     try:
         if activating:
-            _operator_shell()
+            _operator_shell()  # activation itself already checks native ancestry
         if args.root is None:
             raise CommandFailure("invalid_argument", "invalid argument: an explicit --root is required",
                                  hint=f"supply claudlobby --root PATH {args.public_command.replace('.', ' ')}")

@@ -592,6 +592,11 @@ class TestComposeSettingsLocal:
         assert "Write" in deny
         assert "Edit" in deny
         assert "NotebookEdit" in deny
+        assert "Bash(claudlobby bot remove *)" in deny
+        assert "Bash(claudlobby * bot remove *)" in deny
+        assert "Bash(claudlobby fleet move *)" in deny
+        assert "Bash(claudlobby host job run *)" in deny
+        assert "Bash(claudlobby host repos pull *)" in deny
 
     def test_tool_allow_generates_patterns(self, tmp_path):
         paths = self._make_paths_with_runtime(tmp_path)

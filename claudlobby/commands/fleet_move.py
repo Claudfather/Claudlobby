@@ -87,7 +87,7 @@ def dispatch(args) -> CommandOutput:
     from .host import _operator_shell
     from .setup import _root
 
-    _operator_shell()
+    _operator_shell(args.root)
     if (args.seed or not args.fleet or not _NAME.fullmatch(args.fleet)
             or not _NAME.fullmatch(args.system) or args.fleet == args.system):
         raise CommandFailure("invalid_argument", "fleet move requires distinct exact --fleet and --system names")

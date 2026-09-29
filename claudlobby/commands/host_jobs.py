@@ -41,10 +41,10 @@ def _run(args) -> CommandOutput:
     from .host import _operator_shell
     from .releases import _host_root
 
-    _operator_shell()
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", args.name):
         raise CommandFailure("invalid_argument", "supply one exact host job name")
     root = _host_root(args)
+    _operator_shell(root)
     data = {"name": args.name, "native_outcome": "unattempted", "completion": "unobserved"}
     try:
         result = run_host_job(root, args.name)

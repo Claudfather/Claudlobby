@@ -203,13 +203,13 @@ fi
                 assert not snapshot['trace'], (name, snapshot)
                 return
             assert snapshot['trace'][0].startswith(('event:bot_teardown_started:', 'event_failed:')), (name, snapshot)
-            assert actions[-1] == 'action:fleet-state-update.sh delete slug alpha', (name, snapshot)
+            assert actions[-1] == 'action:fleet-state-update.sh delete --fleet test-fleet slug alpha', (name, snapshot)
             assert sum('tmux ' in s for s in actions) == (0 if fault == 'socket' else 1), (name, snapshot)
             assert 'bots/slug/.tmux-env' not in snapshot['remaining'], (name, snapshot)
             assert 'state-key' not in snapshot['remaining'], (name, snapshot)
             if shape == 'empty':
                 assert not any('systemctl ' in s or 'launchctl ' in s for s in actions), (name, snapshot)
-                assert 'BOT_SERVICE unset' in snapshot['stdout'][1], (name, snapshot)
+                assert any('BOT_SERVICE unset' in line for line in snapshot['stdout']), (name, snapshot)
             if platform == 'Linux' and shape != 'empty':
                 assert actions[0] == 'action:systemctl --user disable --now canonical.service', (name, snapshot)
                 assert not (installed / 'canonical.service').exists(), (name, snapshot)

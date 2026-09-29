@@ -121,10 +121,10 @@ def _fresh_self_handoff(bot_dir: Path, *, observed_capture: bool = False) -> Non
             raise ValueError("naive handoff timestamp")
         age = datetime.now(timezone.utc).timestamp() - stamp.timestamp()
         mtime_age = datetime.now(timezone.utc).timestamp() - info.st_mtime
-        # Explicit native capture witnessed a changed checksum during this call.
-        # Its filesystem clock is stronger evidence than a model-authored date
-        # (the live canary wrote last_updated seven minutes into the future).
-        if not (-30 <= mtime_age <= 300) or (not observed_capture and not -30 <= age <= 300):
+        # Explicit capture's changed checksum proves a fresh write, but resume
+        # still reads last_updated. Require a recent model timestamp on both
+        # paths; tolerate future clock skew observed in the live canary.
+        if not (-30 <= mtime_age <= 300) or age > 300:
             raise ValueError("handoff is stale")
     except (OSError, UnicodeError, ValueError) as exc:
         raise BotLifecycleError("self restart requires a fresh owned session handoff") from exc

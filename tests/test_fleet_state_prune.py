@@ -107,6 +107,29 @@ def _prune(
     )
 
 
+def test_delete_protects_same_named_foreign_fleet_row(tmp_path: Path) -> None:
+    root = _host(tmp_path)
+    state = _seed_state(root, {
+        "worker": {"fleet": "f-beta", "status": "working",
+                   "autonomous_runner_pause": {"reason": "operator hold"}},
+        "own": {"fleet": "f-alpha", "status": "idle"},
+    })
+    env = {"PLANE_EMIT_DISABLED": "1", "PATH": "/usr/bin:/bin:/usr/local/bin",
+           "HOME": str(root), "CLAUDLOBBY_ROOT": str(root),
+           "FLEET_STATE_PATH": str(state)}
+    refused = subprocess.run(["bash", str(UPDATER), "delete", "--fleet", "f-alpha",
+                              "worker", "own"], env=env, capture_output=True, text=True)
+    assert refused.returncode == 3
+    assert "worker: belongs to f-beta" in refused.stderr
+    assert set(json.loads(state.read_text())["bots"]) == {"worker", "own"}
+    removed = subprocess.run(["bash", str(UPDATER), "delete", "--fleet", "f-alpha",
+                              "own"], env=env, capture_output=True, text=True)
+    assert removed.returncode == 0, removed.stderr
+    assert json.loads(state.read_text())["bots"] == {
+        "worker": {"fleet": "f-beta", "status": "working",
+                   "autonomous_runner_pause": {"reason": "operator hold"}}}
+
+
 # --- the host-wide fleet enumeration the message needs -----------------------
 
 

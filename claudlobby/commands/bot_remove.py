@@ -4,10 +4,40 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import signal
 import stat
 import subprocess
 
 from ..command_result import CommandFailure, CommandOutput
+
+
+def _teardown(command: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Bound the native tree together; a timed-out purge must not keep running."""
+    try:
+        process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True, start_new_session=True)
+    except OSError as exc:
+        raise CommandFailure("unavailable", "bot teardown could not start",
+                             data={"native_outcome": "unattempted"}) from exc
+    try:
+        stdout, stderr = process.communicate(timeout=60)
+    except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.communicate()
+        raise CommandFailure("commit_unknown", "bot teardown timed out; inspect partial native and directory state",
+                             data={"native_outcome": "unknown"}) from exc
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
+def _diagnostic(stderr: str) -> str:
+    return stderr.strip().splitlines()[-1][-400:] if stderr.strip() else ""
+
+
+def _effect_attempted(stdout: str) -> bool:
+    return any(line.endswith(": effect-attempted") for line in stdout.splitlines())
 
 
 def _last_declaration(root, selected, fleet, bot, package):
@@ -112,8 +142,8 @@ def dispatch(args) -> CommandOutput:
 
     if args.seed or args.root is None or not args.fleet:
         raise CommandFailure("invalid_argument", "bot remove requires explicit --root and --fleet")
-    if any(name in os.environ for name in ("BOT_ID", "BOT_NAME", "BOT_DIR", "BOT_SERVICE")):
-        raise CommandFailure("conflict", "bot remove requires an operator shell")
+    from .operator_context import require_operator_context
+    require_operator_context(args.root)
     if not args.bot_id or Path(args.bot_id).name != args.bot_id or args.bot_id in {".", ".."}:
         raise CommandFailure("invalid_argument", "supply one exact bot ID")
     try:
@@ -141,17 +171,41 @@ def dispatch(args) -> CommandOutput:
                     if args.purge:
                         command.append("--purge")
                     command.append(str(bot_dir))
-                    result = subprocess.run(command, env=env, capture_output=True,
-                                            text=True, timeout=60)
+                    try:
+                        result = _teardown(command, env)
+                    except CommandFailure as exc:
+                        exc.data.update(fleet=args.fleet, bot=args.bot_id)
+                        raise
                     if result.returncode:
-                        raise CommandFailure("unavailable", "bot teardown refused or outcome is unverified",
+                        attempted = _effect_attempted(result.stdout)
+                        detail = _diagnostic(result.stderr)
+                        raise CommandFailure("unavailable" if attempted else "conflict",
+                                             "bot teardown outcome is unverified" if attempted else
+                                             "bot teardown refused before an effect" + (f": {detail}" if detail else ""),
                                              data={"fleet": args.fleet, "bot": args.bot_id,
-                                                   "native_outcome": "unknown"})
-                data = {"fleet": args.fleet, "bot": args.bot_id, "purged": args.purge,
-                        "changed": retained, "native_outcome": "observed" if retained else "unattempted"}
+                                                   "native_outcome": "unknown" if attempted else "unattempted",
+                                                   "native_diagnostic": detail})
+                    warning = _diagnostic(result.stderr)
+                    receipt = ("unrecorded" if "receipt: FAILED to record" in result.stdout
+                               or "plane record failed" in result.stderr
+                               else "pending" if "plane STAGED or SPOOLED" in result.stderr
+                               else "disabled" if "spindown-receipt: OFF here" in result.stderr
+                               else "submitted")
+                else:
+                    warning = ""
+                    receipt = "not_attempted"
+                data = {"fleet": args.fleet, "bot": args.bot_id, "purged": args.purge and retained,
+                        "changed": retained, "native_outcome": "observed" if retained else "unattempted",
+                        "receipt_outcome": receipt}
+                if receipt == "unrecorded" and not warning:
+                    warning = "teardown receipt was not recorded"
+                if warning:
+                    data["native_warning"] = warning
                 return CommandOutput(data, release_id=release.release_id,
-                                     lines=(f"{args.fleet}/{args.bot_id}: removed after activated de-enrollment"
-                                            + ("; directory purged." if args.purge else "; directory retained."),))
+                                     lines=((f"{args.fleet}/{args.bot_id}: removed after activated de-enrollment"
+                                             + ("; directory purged." if args.purge else "; directory retained.")
+                                             if retained else f"{args.fleet}/{args.bot_id}: nothing to remove."),
+                                            *((f"Native warning: {warning}",) if warning else ())))
     except CommandFailure:
         raise
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:

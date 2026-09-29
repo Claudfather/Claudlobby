@@ -35,7 +35,7 @@ def _reported(stdout: bytes) -> tuple[tuple[str, str], ...]:
         name = os.fsdecode(name_bytes)
         status = status_bytes.decode("ascii", errors="replace")
         if (not name or name in (".", "..") or "/" in name or name in seen
-                or status not in {"updated", "unchanged", "skipped_dirty",
+                or status not in {"updated", "unchanged", "skipped_dirty", "skipped_blocked",
                                   "skipped_redirected", "failed"}):
             raise RepositoryPullError("native repository results are invalid", effect_attempted=True)
         seen.add(name)

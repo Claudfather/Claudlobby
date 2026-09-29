@@ -16,14 +16,14 @@ def dispatch(args) -> CommandOutput:
     from ..releases import ReleaseError
     from ..runtime_admission import ReleaseMismatch
 
-    if any(key in os.environ for key in ("BOT_ID", "BOT_NAME", "BOT_DIR", "BOT_SERVICE")):
-        raise CommandFailure("conflict", "repository pulls require an operator context")
     if args.seed or not args.fleet:
         raise CommandFailure("invalid_argument", "select one declared fleet with --fleet")
     value = args.root or os.environ.get("CLAUDLOBBY_ROOT")
     if not value:
         raise CommandFailure("invalid_argument", "select the host data root with --root")
     root = Path(value).expanduser().resolve()
+    from .operator_context import require_operator_context
+    require_operator_context(root)
     data = {"fleet": args.fleet, "bot": args.bot, "native_outcome": "unattempted",
             "repositories": []}
     try:
@@ -47,7 +47,7 @@ def dispatch(args) -> CommandOutput:
     rows = [{"repository": name, "status": status} for name, status in result.repositories]
     data.update(release_id=result.release_id, repositories=rows,
                 native_outcome="partial" if any(row["status"] in
-                    ("failed", "skipped_dirty", "skipped_redirected") for row in rows)
+                    ("failed", "skipped_dirty", "skipped_blocked", "skipped_redirected") for row in rows)
                 else "completed" if rows else "no_repositories")
     lines = tuple(f"{name}: {status}" for name, status in result.repositories)
     if data["native_outcome"] == "partial":

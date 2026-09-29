@@ -293,7 +293,7 @@ def apply_move(move, bot, *, force, cleanup):
 def dispatch(args):
     from .host import _operator_shell
 
-    _operator_shell()
+    _operator_shell(args.root)
     try:
         move = preflight(args)
         data = {"source_fleet": move.source.fleet.name, "target_fleet": move.target.fleet.name,

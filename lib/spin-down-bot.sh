@@ -173,11 +173,42 @@ install_error_trap "$BOT_DIR"
 # mutation all live there). Pass both the dir-slug and BOT_NAME identity in case
 # they differ; the `delete` verb removes only those keys, never a prune of others.
 reap_fleet_state() {
-    if "$LIB_DIR/fleet-state-update.sh" delete "$SLUG" "${BOT_NAME:-$SLUG}" 2>/dev/null; then
+    if [ -z "${FLEET_NAME:-}" ]; then
+        echo 'spin-down-bot: fleet-state delete skipped: no selected fleet' >&2
+    elif "$LIB_DIR/fleet-state-update.sh" delete --fleet "$FLEET_NAME" "$SLUG" "${BOT_NAME:-$SLUG}"; then
         sd_log "fleet-state key removed (surgical, via fleet-state-update.sh delete)"
     else
-        sd_log "fleet-state delete skipped (no state/jq or already gone)"
+        echo 'spin-down-bot: fleet-state delete failed; no other fleet row was removed' >&2
     fi
+}
+
+# The purge guard runs after the private server has stopped and before the
+# state-key and directory deletions. A preflight in the CLI alone can race a final
+# write from that session. Refuse when any repository fact cannot be proved.
+purge_projects_safe() {
+    local git_entry repo status stashes ahead worktrees
+    [ -d "$BOT_DIR/projects" ] || return 0
+    while IFS= read -r -d '' git_entry; do
+        repo="$(dirname "$git_entry")"
+        status=$(git -C "$repo" status --porcelain --untracked-files=all) || {
+            echo "spin-down-bot: purge refused: cannot inspect $repo" >&2; return 3;
+        }
+        [ -z "$status" ] || { echo "spin-down-bot: purge refused: dirty $repo" >&2; return 3; }
+        stashes=$(git -C "$repo" stash list) || {
+            echo "spin-down-bot: purge refused: cannot inspect stashes in $repo" >&2; return 3;
+        }
+        [ -z "$stashes" ] || { echo "spin-down-bot: purge refused: stashes in $repo" >&2; return 3; }
+        ahead=$(git -C "$repo" rev-list --count --all HEAD --not --remotes) || {
+            echo "spin-down-bot: purge refused: cannot inspect local commits in $repo" >&2; return 3;
+        }
+        [ "$ahead" -eq 0 ] || { echo "spin-down-bot: purge refused: unpushed commits in $repo" >&2; return 3; }
+        worktrees=$(git -C "$repo" worktree list --porcelain) || {
+            echo "spin-down-bot: purge refused: cannot inspect worktrees in $repo" >&2; return 3;
+        }
+        [ "$(printf '%s\n' "$worktrees" | grep -c '^worktree ' || true)" -eq 1 ] || {
+            echo "spin-down-bot: purge refused: linked worktrees from $repo" >&2; return 3;
+        }
+    done < <(find "$BOT_DIR/projects" -name .git -print0)
 }
 
 # Receipt first: a crash mid-teardown then leaves a record of an unfinished
@@ -193,11 +224,17 @@ if [ -n "$RETIRED_SERVICE" ]; then
     # by activation and must not be touched by a later cleanup.
     _tmpdir="${TMUX_TMPDIR:-${TMPDIR:-/tmp}}"
     if [ -S "$_tmpdir/tmux-$(id -u)/$_socket" ]; then
+        sd_log "effect-attempted"
         svc_activation_stop_private_server "$BOT_DIR" "$_socket" "$_tmpdir" retired || exit 3
     fi
+    sd_log "effect-attempted"
     rm -f "$BOT_DIR/.tmux-env"
 else
+    sd_log "effect-attempted"
     svc_disenroll "$BOT_DIR" sd_log "${BOT_SERVICE:-}" /bin/launchctl
+fi
+if [ "$PURGE" -eq 1 ]; then
+    purge_projects_safe || exit 3
 fi
 reap_fleet_state
 

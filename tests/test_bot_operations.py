@@ -172,6 +172,11 @@ def test_self_restart_requires_fresh_owned_frontmatter(tmp_path):
     handoff.write_text("---\nlast_updated: 2020-01-01T00:00:00Z\n---\ncontext\n")
     with pytest.raises(bot_operations.BotLifecycleError, match="fresh owned"):
         bot_operations._fresh_self_handoff(bot_dir)
+    with pytest.raises(bot_operations.BotLifecycleError, match="fresh owned"):
+        bot_operations._fresh_self_handoff(bot_dir, observed_capture=True)
+    future = now + timedelta(minutes=7)
+    handoff.write_text(f"---\nlast_updated: {future:%Y-%m-%dT%H:%M:%SZ}\n---\ncontext\n")
+    bot_operations._fresh_self_handoff(bot_dir)
     handoff.unlink()
     foreign = tmp_path / "foreign.md"
     foreign.write_text(f"---\nlast_updated: {now:%Y-%m-%dT%H:%M:%SZ}\n---\ncontext\n")

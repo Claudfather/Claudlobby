@@ -217,6 +217,23 @@ assert_eq "and the receipt degrades rather than failing" "unknown" \
     "$(field "$(receipt_row)" actor | cut -d@ -f2)"
 rm -f "$T/bin/hostname"
 
+# Purge checks nested repositories after the native stop and refuses local
+# commits that a clean `git status --porcelain` does not reveal.
+reset
+repo="$ROOT/local/f1/runtime/bots/worker/projects/org/repo"
+mkdir -p "$repo"
+git -C "$repo" init -q
+git -C "$repo" config user.name Test
+git -C "$repo" config user.email test@example.invalid
+printf 'local work\n' > "$repo/work.txt"
+git -C "$repo" add work.txt
+git -C "$repo" commit -qm local-only
+out="$(spin_down worker --purge)"
+assert_eq "purge refuses a nested repo with an unpushed commit" yes \
+    "$(printf '%s\n' "$out" | grep -q 'purge refused: unpushed commits' && echo yes || echo no)"
+assert_eq "refused purge retains the local commit" yes \
+    "$([ -f "$repo/work.txt" ] && echo yes || echo no)"
+
 echo ""
 echo "=== $PASS/$TOTAL passed ==="
 [ "$FAIL" -eq 0 ] || exit 1

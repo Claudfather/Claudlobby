@@ -106,8 +106,8 @@ def _fleet_setup(args) -> CommandOutput:
     from .host import _activate, _operator_shell
     from .releases import _config_plan, _executing_release, _release
 
-    _operator_shell()
     root = _root(args)
+    _operator_shell()  # activation itself checks native ancestry
     if args.seed or not args.fleet or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", args.fleet):
         raise CommandFailure("invalid_argument", "invalid argument: fleet setup requires one exact --fleet name")
     executing = _executing_release(root)

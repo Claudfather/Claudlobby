@@ -89,6 +89,9 @@ for repo in "$DIR"/*/; do
         elif [ -n "$DIRTY" ]; then
             echo "$(ts_iso) $REPO_NAME: SKIPPED — dirty checkout" >> "$LOG"
             report_status "$REPO_NAME" skipped_dirty
+        elif BLOCKER=$(repo_pull_blocker "$repo"); [ -n "$BLOCKER" ]; then
+            echo "$(ts_iso) $REPO_NAME: SKIPPED — $BLOCKER" >> "$LOG"
+            report_status "$REPO_NAME" skipped_blocked
         elif RESULT=$(cd "$repo" && git pull --ff-only 2>&1); then
             if AFTER=$(git -C "$repo" rev-parse HEAD 2>&1); then
                 if [ "$AFTER" = "$BEFORE" ]; then

@@ -17,8 +17,8 @@
 #     the reconcile AUDIT path calls; a destructive write must never ride along
 #     on a report-only verb.
 #
-#   fleet-state-update.sh delete <bot>...
-#     Surgically remove one or more named bot rows (leaves all others). The
+#   fleet-state-update.sh delete --fleet <fleet> <bot>...
+#     Surgically remove this fleet's named bot rows (leaves all others). The
 #     single-key inverse of prune — used by spin-down-bot.sh to reap a throwaway.
 #
 # Scaling note: the single-file + lock design works well for <50 bots.
@@ -246,14 +246,26 @@ fi
 # inverse of prune. Idempotent: a missing key or absent state file is a no-op.
 if [ "${1:-}" = "delete" ]; then
     shift
-    [ "$#" -ge 1 ] || { echo "Usage: fleet-state-update.sh delete <bot>..." >&2; exit 2; }
+    [ "${1:-}" = --fleet ] && [ "$#" -ge 3 ] || {
+        echo "Usage: fleet-state-update.sh delete --fleet <fleet> <bot>..." >&2; exit 2;
+    }
+    DELETE_FLEET="$2"
+    shift 2
+    case "$DELETE_FLEET" in ''|*[!A-Za-z0-9_.-]*) echo 'fleet-state-update: invalid delete fleet' >&2; exit 2 ;; esac
     [ -f "$STATE" ] || exit 0  # nothing to delete
     _delete_state() {
-        local tmp keys
+        local tmp keys foreign
         keys=$(printf '%s\n' "$@" | jq -Rnc '[inputs | select(length > 0)]')
+        foreign=$(jq -r --argjson keys "$keys" --arg fleet "$DELETE_FLEET" '
+            $keys[] as $b | select(.bots[$b] != null and .bots[$b].fleet != $fleet)
+            | "\($b): belongs to \(.bots[$b].fleet // "unattributed")"' "$STATE") || return 1
+        if [ -n "$foreign" ]; then
+            printf 'fleet-state-update: protected foreign row(s), no rows deleted:\n%s\n' "$foreign" >&2
+            return 3
+        fi
         tmp=$(safe_mktemp)
-        jq --argjson keys "$keys" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            'reduce $keys[] as $b (.; del(.bots[$b])) | .updated = $ts' "$STATE" > "$tmp" \
+        jq --argjson keys "$keys" --arg fleet "$DELETE_FLEET" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            'reduce $keys[] as $b (.; if .bots[$b].fleet == $fleet then del(.bots[$b]) else . end) | .updated = $ts' "$STATE" > "$tmp" \
             && mv "$tmp" "$STATE" || { echo "fleet-state-update: failed to write $STATE" >&2; rm -f "$tmp"; return 1; }
     }
     with_lock "$STATE.lock" _delete_state "$@"
