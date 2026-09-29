@@ -77,6 +77,13 @@ generated bot context selects your fleet and identity; check it with `claudlobby
 context show`. Discover exact flags with `claudlobby --help` and `claudlobby
 <group> <verb> --help`.
 
+Run each CLI example as one literal command in its own Bash tool call. Replace
+placeholders with recorded IDs or names before running it. Read the returned
+JSON directly; use the file reading tool for a file path. Do not pipe a CLI
+result through `python`, `head`, or another shell command, and do not wrap it
+in `echo`, shell variables, or command substitution. Those additions are not
+the granted CLI operation and can trigger a permission prompt.
+
 Read before acting:
 
 ```bash

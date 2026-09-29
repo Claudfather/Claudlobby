@@ -8,9 +8,6 @@ from tests.conftest import install_real_template, load_test_fleet, make_paths
 
 from claudlobby.composer import compose_claude_md
 
-CHECK = 'claudlobby --json message receipt MESSAGE_ID --destination "$FLEET_NAME/$BOT_ID" --wait 30'
-
-
 def test_every_composed_bot_carries_the_verify_then_trust_check(fleet_dir):
     # The fixture's library holds neither the dispatch nor the worker-lifecycle
     # protocol, so a bot can only have the check if the template gives it.
@@ -21,7 +18,10 @@ def test_every_composed_bot_carries_the_verify_then_trust_check(fleet_dir):
     for bot in fleet.bots.values():
         text = compose_claude_md(bot, fleet, paths)
         assert "## Dispatches framed as pasted text" in text, bot.name
-        assert CHECK in text, bot.name
+        check = ("claudlobby --json message receipt MESSAGE_ID --destination "
+                 f"{fleet.name}/{bot.bot_id} --wait 30")
+        assert check in text, bot.name
+        assert "$FLEET_NAME/$BOT_ID" not in text, bot.name
         assert "data.message_id" in text and "data.sender.alias" in text, bot.name
         assert "data.destination.alias" in text and "data.integrity_verdict" in text, bot.name
         assert "unexpected sender or destination" in text, bot.name
