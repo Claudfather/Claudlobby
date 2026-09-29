@@ -22,6 +22,7 @@ tool_grants:
   - "Bash(claudlobby fleet status --help)"
   - "Bash(claudlobby fleet logs --help)"
   - "Bash(claudlobby fleet uptime --help)"
+  - "Bash(claudlobby fleet utilization --help)"
   - "Bash(claudlobby bot usage --help)"
   - "Bash(claudlobby bot start --help)"
   - "Bash(claudlobby bot stop --help)"
