@@ -21,59 +21,25 @@ Add a 9th bot? Add 10 lines to `fleet.yaml`. Update a guardrail? Edit one file i
 
 ## Quick start
 
-**You need:** An Anthropic account (Claude Max, Team, or Enterprise — or an `ANTHROPIC_API_KEY`), [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed, and a Telegram account.
+**You need:** a working Python interpreter, `tmux`, a running user manager (launchd or systemd user), [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated, and the Telegram channel plugin if your fleet declares Telegram. `host setup` checks the native manager and required executables; it does not install them.
 
-**Guided setup (recommended):** Clone the repo, install, and let claudfather walk you through it:
-
-```bash
-git clone https://github.com/Claudfather/Claudlobby.git
-cd Claudlobby
-python3 -m venv .venv               # required — see note below
-source .venv/bin/activate
-python3 -m pip install -e '.[plane-ui]'
-claude                              # opens Claude Code in the repo
-```
-
-Then type `/setup` — it checks your host, collects credentials, and spins up claudfather (the built-in setup assistant) on Telegram. Continue setup from your phone.
-
-> **Why `[plane-ui]`.** The operator plane (`claudlobby plane view`) is enrolled by default
-> and needs FastAPI + uvicorn — two pure-Python wheels. Install without the extra and the
-> compositor deliberately composes no unit for it, so nothing crash-loops; `claudlobby doctor
-> --switches` then shows `plane-view` off with this pip line as its arm. Everything else works
-> either way.
->
-> **Why the venv is not optional.** Homebrew python (macOS) and Debian/Raspberry Pi system
-> python are both marked externally-managed under [PEP 668](https://peps.python.org/pep-0668/),
-> so a bare `pip install -e .` is *refused* on the two hosts this project targets first. Note
-> `python3 -m pip`, not `pip` — Homebrew ships `pip3` only, so plain `pip` is not a command.
->
-> Prefer not to manage it yourself? `lib/setup-system` creates the venv, installs claudlobby,
-> and checks every other host prerequisite in one idempotent pass (`--dry-run` to preview).
-> **It will prompt for `sudo`** — its managed-settings phase writes the root-owned
-> `/Library/Application Support/ClaudeCode/managed-settings.json` (and on Linux it installs
-> packages). Use `--dry-run` first if you want to see everything it would touch.
-
-**Manual setup:**
+Build the candidate wheel and its offline, SHA-256-locked dependency wheelhouse as shown in [Getting started](documentation/getting-started.md). Install that wheel into a temporary bootstrap venv, then use its CLI to assemble a sealed release under an **absolute data root outside the checkout**:
 
 ```bash
-git clone https://github.com/Claudfather/Claudlobby.git
-cd Claudlobby
-python3 -m venv .venv && source .venv/bin/activate && python3 -m pip install -e '.[plane-ui]'
-
-cp fleet.yaml.seed fleet.yaml       # one bot (claudfather) — the blessed first run
-cp .env.seed.example .env           # fill in your Telegram token + GitHub PAT
-$EDITOR fleet.yaml                  # replace every REPLACE_ME (validate enforces this)
-
-claudlobby validate && claudlobby generate
-lib/setup-fleet                     # enrolls timers + starts every declared bot
+"$WORK/bootstrap/bin/claudlobby" --root "$DATA" host setup --wheel "$WHEEL" \
+  --dependency-lock "$WORK/dependency.lock" --wheelhouse "$WORK/wheelhouse" \
+  --interpreter "$WORK/bootstrap/bin/python"
 ```
 
-Start from `fleet.yaml.seed` (one bot, ~60 lines). `fleet.yaml.example` is the **reference** —
-a full multi-bot manifest documenting every available field — not a starting point.
+The result names the sealed release CLI. Edit a copy of its packaged `fleet.yaml.seed` outside the data root, put the matching token in `$DATA/local/seed/.env`, then activate it through that **sealed CLI**:
 
-The generated `runtime/bots/<bot>/` is everything Claude Code needs — `CLAUDE.md`, `.mcp.json`, `bot.conf`, `.claude/skills/` symlinks, plus a systemd `<bot>.service` and a launchd `<bot>.plist`. Pick the right one for your host.
+```bash
+"$RELEASE_CLI" --root "$DATA" --fleet seed fleet setup \
+  --config "$WORK/fleet.yaml" --install-directory "$USER_UNIT_DIR"
+"$RELEASE_CLI" --root "$DATA" host doctor
+```
 
-See [`documentation/getting-started.md`](documentation/getting-started.md) for the full zero-to-running walkthrough.
+`fleet setup` places the authored file at `$DATA/local/seed/fleet.yaml`, stages the whole host, and uses the existing activation owner to start it. A different existing fleet file requires `--replace-config`. The sealed release keeps its own interpreter and packaged library/native scripts; generated bot files and persistent state live under the data root. See [Getting started](documentation/getting-started.md) for the complete commands, prerequisites, and paths for macOS and Linux.
 
 ## Architecture
 
@@ -127,14 +93,14 @@ claudlobby list-library          # show available personas / skills / mcp / etc.
 claudlobby diff [--bot <name>]   # show drift between runtime/ and library/
 claudlobby promote <bot>         # move runtime drift back to library/ (v1: manual)
 claudlobby status [--bot <name>] # fleet health dashboard
-claudlobby doctor                # pre-flight fleet health diagnostic
+claudlobby host doctor                # pre-flight fleet health diagnostic
 claudlobby --json fleet reports list  # paginated worker reports (--bot, --status, --since RFC3339)
 claudlobby uptime [--bot <name>] # per-bot uptime, MTBR, restart-rate metrics
 claudlobby events                # fleet events from the plane (--bot, --type, --critical)
 claudlobby new-bot               # interactive bot scaffolding
 claudlobby new-skill             # scaffold a new skill directory
 claudlobby new-guardrail         # scaffold a new guardrail file
-claudlobby move-bot <bot> --to <fleet>  # move a bot between fleets
+claudlobby bot move <bot> --to <fleet>  # move a bot between fleets
 claudlobby warm-cache            # pre-download npx + uvx packages for MCP servers
 ```
 
