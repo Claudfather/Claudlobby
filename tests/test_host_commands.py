@@ -58,6 +58,17 @@ def test_host_help_and_parse_are_lazy_and_global_scope_order_is_explicit(tmp_pat
     assert list(tmp_path.iterdir()) == []
 
 
+def test_supervision_reap_requires_an_explicit_mode_with_full_schema_command(tmp_path):
+    result = _run(PARSE, "--json", "host", "supervision", "reap-orphans",
+                  tmp_path=tmp_path)
+    assert result.returncode == 2 and result.stderr == ""
+    body = json.loads(result.stdout)
+    assert body["schema_version"] == 1
+    assert body["command"] == "host.supervision.reap-orphans"
+    assert body["error"]["code"] == "invalid_argument"
+    assert body["error"]["hint"] == "inspect claudlobby host supervision reap-orphans --help"
+
+
 def test_activate_freezes_one_id_and_delegates_exact_reviewed_candidate(candidate, monkeypatch, capsys):
     root, release, plan, directory = candidate
     calls = []
