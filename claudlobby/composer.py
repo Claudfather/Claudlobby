@@ -198,10 +198,43 @@ def _load_bot_fragments(bot: BotConfig, paths: Paths) -> dict[str, dict]:
 
 
 def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
-    """Compose one bot's .mcp.json from its merged MCP fragments; returns the config dict."""
+    """Compose one bot's .mcp.json from its merged MCP fragments; returns the config dict.
+
+    An armed bot's servers that must keep npx (#1604) are named in ONE warning,
+    so the saving it forgoes is visible where generate is read."""
+    from . import mcp_direct
+
+    merged, npx_fallbacks = mcp_launch_plan(bot, paths)
+    if npx_fallbacks:
+        listed = "; ".join(
+            f"{name} ({spec + ': ' if spec else ''}{why})" for name, spec, why in npx_fallbacks
+        )
+        fix = (
+            " Run `claudlobby warm-cache` for this fleet, then generate."
+            if any(why == mcp_direct.NOT_INSTALLED for _n, _s, why in npx_fallbacks)
+            else ""
+        )
+        _log.warning(
+            "%s: mcp_direct_launch is on, but %d MCP server(s) still launch through npx: %s.%s",
+            bot.bot_id, len(npx_fallbacks), listed, fix,
+        )
+    return merged
+
+
+def mcp_launch_plan(bot: BotConfig, paths: Paths) -> tuple[dict, list[tuple[str, str, str]]]:
+    """The composed .mcp.json, and for an ARMED bot every npx server that could
+    not launch directly, as ``(server, spec, reason)``.
+
+    The one plan `generate` and `doctor` both read (#1604), so the two cannot
+    disagree about which servers still carry an npm wrapper."""
     import shutil
 
+    from . import mcp_direct
+
     merged: dict = {"mcpServers": {}}
+    # (server, spec, reason) for every npx server an ARMED bot could not
+    # launch directly, reported once below so the forgone saving is visible.
+    npx_fallbacks: list[tuple[str, str, str]] = []
     for entry in bot.mcp:
         frag = _load_mcp_fragment(entry.name, paths)
         if frag is None:
@@ -226,6 +259,22 @@ def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
 
             instance_config = copy.deepcopy(server_config)
 
+            # #1604, opt-in per bot: the pinned package runs as `node <entry>`
+            # from the copy warm-cache installed, so no `npm exec` wrapper
+            # stays resident beside the server. It goes FIRST: a PATH-global
+            # binary is whatever version someone installed, the copy is the
+            # fragment's exact pin. Anything that cannot launch directly keeps
+            # npx, which cannot break a server, only forgo the saving.
+            direct_why: tuple[str, str] | None = None
+            if bot.mcp_direct_launch and instance_config.get("command") == "npx":
+                direct, spec, why = mcp_direct.direct_launch(
+                    instance_config, paths.root, grammar(paths)
+                )
+                if direct is not None:
+                    instance_config = direct
+                else:
+                    direct_why = (spec, why)
+
             # Use global binary if available (saves ~0.8s npx overhead per server)
             resolved_binary = shutil.which(global_binary) if global_binary else None
             if resolved_binary and instance_config.get("command") == "npx":
@@ -244,6 +293,11 @@ def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
                 )
                 instance_config["args"] = [resolved_binary] + rest_args
 
+            # Only a server still on npx is a fallback: the global-binary swap
+            # above also removes the wrapper, just not at the pinned version.
+            if direct_why is not None and instance_config.get("command") == "npx":
+                npx_fallbacks.append((output_name, *direct_why))
+
             # Resolve ${VAR} placeholders (instance-scoped vars get prefixed)
             for field in ["env", "url", "args", "headers"]:
                 if field in instance_config:
@@ -253,7 +307,7 @@ def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
 
             merged["mcpServers"][output_name] = instance_config
 
-    return merged
+    return merged, npx_fallbacks
 
 
 def _load_mcp_contract(paths: Paths, name: str) -> dict | None:

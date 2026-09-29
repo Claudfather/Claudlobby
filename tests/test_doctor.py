@@ -11,6 +11,7 @@ from textwrap import dedent
 
 import pytest
 
+import claudlobby.doctor as doctor_module
 from claudlobby.claudron_compat import COMPAT_FLOOR
 from claudlobby.config import load_fleet
 from claudlobby.doctor import (
@@ -392,6 +393,297 @@ class TestCheckClaudron:
         loop = [c for c in report.checks if c.name == "claudron-loop"][0]
         assert loop.status == "warn"
         assert "not present on this host" in loop.detail
+
+
+#: `claudron doctor --json` answers, shaped from live captures of claudron 0.5.3
+#: on scratch vaults (2026-09-29): D001 is one finding per pending migration,
+#: and `data.pending` carries each one's id, version and title; D008 is ONE
+#: finding whose message lists the files; an unreadable identity file reads
+#: `vault_format: 0` with nothing pending.
+def _finding(code: str, severity: str, path: str, message: str) -> dict:
+    return {
+        "code": code,
+        "severity": severity,
+        "path": path,
+        "field": None,
+        "line": None,
+        "message": message,
+    }
+
+
+def _doctor_envelope(
+    *, vault_format: int = 2, engine_format: int = 2, pending=(), errors=(), warnings=()
+) -> dict:
+    return {
+        "ok": not errors,
+        "command": "doctor",
+        "data": {
+            "engine_format": engine_format,
+            "fixable": [p["id"] for p in pending],
+            "fixed": False,
+            "git": {"state": "clean"},
+            "index": {},
+            "pending": list(pending),
+            "schema": {"errors": 0, "warnings": 0},
+            "vault_format": vault_format,
+        },
+        "warnings": list(warnings),
+        "errors": list(errors),
+    }
+
+
+PENDING = [
+    {
+        "id": "m001",
+        "version": 1,
+        "title": "create the .claudron-vault identity file (#183)",
+    },
+    {
+        "id": "m002",
+        "version": 2,
+        "title": "add the F9 .gitignore rules: runtime, telemetry, *.bak (#182)",
+    },
+]
+D001 = [
+    _finding(
+        "D001",
+        "error",
+        ".",
+        "migration m001 pending (format 1): create the .claudron-vault identity file (#183)"
+        " — run: claudron doctor --fix",
+    ),
+    _finding(
+        "D001",
+        "error",
+        ".",
+        "migration m002 pending (format 2): add the F9 .gitignore rules: runtime, telemetry,"
+        " *.bak (#182) — run: claudron doctor --fix",
+    ),
+]
+D008 = _finding(
+    "D008",
+    "warning",
+    ".",
+    "2 tracked file(s) match the ignore rules, so they keep being committed: a/data/.idle,"
+    " notes.bak — a human decides: `git rm --cached <path>` stops tracking without deleting"
+    " the file",
+)
+D007_UNREADABLE = _finding(
+    "D007",
+    "error",
+    ".claudron-vault",
+    ".claudron-vault is present but unreadable (want YAML with an integer `claudron:`)"
+    " — fix it by hand; doctor never guesses",
+)
+D004 = _finding(
+    "D004", "warning", ".", "git health: dirty (see: claudron sync --check)"
+)
+
+
+class TestClaudronDoctorRung:
+    """Claudron #190 part C: `claudlobby doctor` asks `claudron doctor` about
+    each wired vault on this host and surfaces what only a human should act on:
+    pending migrations (D001), the identity file (D007), and tracked files the
+    ignore rules match (D008). It never passes `--fix`."""
+
+    @staticmethod
+    def _engine(
+        tmp_path: Path,
+        monkeypatch,
+        *,
+        caps=("navigation", "doctor"),
+        version="0.5.3",
+        envelope=None,
+        rc=0,
+        hang=0,
+    ) -> Path:
+        """A stub `claudron`: `status` answers the capability probe, `doctor`
+        prints *envelope* and exits *rc* (or hangs *hang* seconds), and every
+        call's arguments land in the returned log."""
+        log = tmp_path / "claudron-argv.log"
+        answer = tmp_path / "doctor-answer.json"
+        answer.write_text(
+            envelope
+            if isinstance(envelope, str)
+            else json.dumps(envelope or _doctor_envelope())
+        )
+        status = {
+            "ok": True,
+            "command": "status",
+            "data": {"engine_version": version, "root": "/v", "total_docs": 7},
+            "warnings": [],
+            "errors": [],
+        }
+        if caps is not None:
+            status["data"]["capabilities"] = list(caps)
+        status_answer = tmp_path / "status-answer.json"
+        status_answer.write_text(json.dumps(status))
+        doctor_leg = f"exec sleep {hang}" if hang else f'cat "{answer}"; exit {rc}'
+        TestCheckClaudron._stub_cli(
+            tmp_path,
+            monkeypatch,
+            body=(
+                "#!/bin/sh\n"
+                f'echo "$*" >> "{log}"\n'
+                'case "$1" in\n'
+                f'  status) cat "{status_answer}"; exit 0 ;;\n'
+                f"  doctor) {doctor_leg} ;;\n"
+                "esac\n"
+                "exit 0\n"
+            ),
+        )
+        return log
+
+    def _diagnose(
+        self, doctor_fleet, tmp_path: Path, monkeypatch, *, vault=None, **engine
+    ):
+        root, _fleet, paths = doctor_fleet
+        vault = vault or TestCheckClaudron._vault(tmp_path)
+        fleet = TestCheckClaudron._wire(root, vault)
+        log = self._engine(tmp_path, monkeypatch, **engine)
+        report = DoctorReport()
+        check_claudron(fleet, paths, report)
+        rows = {
+            c.name: c for c in report.checks if c.name.startswith("claudron-doctor")
+        }
+        calls = log.read_text().splitlines() if log.exists() else []
+        return vault, rows, [c for c in calls if c.startswith("doctor")], calls
+
+    def test_pending_migrations_are_named_with_the_command_a_human_runs(
+        self, doctor_fleet, tmp_path, monkeypatch
+    ):
+        vault, rows, _, _ = self._diagnose(
+            doctor_fleet,
+            tmp_path,
+            monkeypatch,
+            envelope=_doctor_envelope(vault_format=0, pending=PENDING, errors=D001),
+            rc=1,
+        )
+        row = rows["claudron-doctor"]
+        assert row.status == "warn"
+        assert "2 migration(s) pending" in row.detail
+        assert "m001 (create the .claudron-vault identity file (#183))" in row.detail
+        assert "m002 (" in row.detail
+        assert f"claudron doctor --vault {vault} --fix" in row.detail
+        assert "claudlobby never runs it" in row.detail
+
+    def test_d008_quotes_the_engines_list_of_files(
+        self, doctor_fleet, tmp_path, monkeypatch
+    ):
+        _, rows, _, _ = self._diagnose(
+            doctor_fleet,
+            tmp_path,
+            monkeypatch,
+            envelope=_doctor_envelope(warnings=[D008]),
+        )
+        row = rows["claudron-doctor: D008"]
+        assert row.status == "warn"
+        assert "a/data/.idle, notes.bak" in row.detail
+        assert "git rm --cached" in row.detail
+        assert rows["claudron-doctor"].status == "pass"
+
+    def test_an_unreadable_identity_file_is_not_read_as_current(
+        self, doctor_fleet, tmp_path, monkeypatch
+    ):
+        # The engine reports format 0 with nothing pending: "nothing pending"
+        # alone must not read as a current vault.
+        _, rows, _, _ = self._diagnose(
+            doctor_fleet,
+            tmp_path,
+            monkeypatch,
+            envelope=_doctor_envelope(
+                vault_format=0, errors=[D007_UNREADABLE], warnings=[D004]
+            ),
+            rc=1,
+        )
+        identity = rows["claudron-doctor: D007"]
+        assert identity.status == "warn"
+        assert "present but unreadable" in identity.detail
+        assert rows["claudron-doctor"].status == "warn"
+        assert "vault format 0, engine format 2" in rows["claudron-doctor"].detail
+
+    def test_a_current_vault_passes_and_counts_what_it_does_not_surface(
+        self, doctor_fleet, tmp_path, monkeypatch
+    ):
+        _, rows, _, _ = self._diagnose(
+            doctor_fleet,
+            tmp_path,
+            monkeypatch,
+            envelope=_doctor_envelope(warnings=[D004]),
+        )
+        row = rows["claudron-doctor"]
+        assert row.status == "pass"
+        assert "vault format 2, engine format 2" in row.detail
+        assert "1 other finding(s) (D004)" in row.detail
+        assert set(rows) == {"claudron-doctor"}
+
+    def test_fix_is_never_passed(self, doctor_fleet, tmp_path, monkeypatch):
+        vault, _, doctor_calls, calls = self._diagnose(
+            doctor_fleet,
+            tmp_path,
+            monkeypatch,
+            envelope=_doctor_envelope(vault_format=0, pending=PENDING, errors=D001),
+            rc=1,
+        )
+        assert doctor_calls == [f"doctor --json --vault {vault}"]
+        assert not [c for c in calls if "--fix" in c]
+
+    def test_an_engine_that_does_not_declare_doctor_is_not_asked(
+        self, doctor_fleet, tmp_path, monkeypatch
+    ):
+        # A high version string opens nothing: the declared capability is the gate.
+        _, rows, doctor_calls, _ = self._diagnose(
+            doctor_fleet, tmp_path, monkeypatch, caps=("navigation",), version="9.9.9"
+        )
+        assert rows["claudron-doctor"].status == "warn"
+        assert (
+            "does not declare the `doctor` capability" in rows["claudron-doctor"].detail
+        )
+        assert doctor_calls == []
+
+    def test_the_capability_not_the_version_opens_the_door(
+        self, doctor_fleet, tmp_path, monkeypatch
+    ):
+        _, rows, doctor_calls, _ = self._diagnose(
+            doctor_fleet, tmp_path, monkeypatch, caps=("doctor",), version="0.0.0-dev"
+        )
+        assert len(doctor_calls) == 1
+        assert rows["claudron-doctor"].status == "pass"
+
+    def test_a_doctor_that_does_not_answer_in_time_is_unknown_never_pass(
+        self, doctor_fleet, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(doctor_module, "CLAUDRON_DOCTOR_TIMEOUT_S", 0.5)
+        _, rows, _, _ = self._diagnose(doctor_fleet, tmp_path, monkeypatch, hang=5)
+        row = rows["claudron-doctor"]
+        assert row.status == "warn"
+        assert "did not answer within 0.5s" in row.detail
+        assert "unknown" in row.detail and "#201" in row.detail
+
+    def test_no_vault_there_is_a_warn(self, doctor_fleet, tmp_path, monkeypatch):
+        _, rows, _, _ = self._diagnose(
+            doctor_fleet, tmp_path, monkeypatch, envelope="", rc=3
+        )
+        assert rows["claudron-doctor"].status == "warn"
+        assert "found no vault" in rows["claudron-doctor"].detail
+
+    def test_an_answer_without_the_envelope_is_a_warn(
+        self, doctor_fleet, tmp_path, monkeypatch
+    ):
+        _, rows, _, _ = self._diagnose(
+            doctor_fleet, tmp_path, monkeypatch, envelope="not json", rc=0
+        )
+        assert rows["claudron-doctor"].status == "warn"
+        assert "without its envelope" in rows["claudron-doctor"].detail
+
+    def test_a_vault_not_on_this_host_is_left_to_the_loop_row(
+        self, doctor_fleet, tmp_path, monkeypatch
+    ):
+        _, rows, doctor_calls, _ = self._diagnose(
+            doctor_fleet, tmp_path, monkeypatch, vault=tmp_path / "nowhere"
+        )
+        assert rows == {}
+        assert doctor_calls == []
 
 
 class TestCheckWorkstreamResidual:
