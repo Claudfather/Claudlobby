@@ -353,26 +353,50 @@ def _legacy_bot_socket(unit, *, require_for_active=True):
     return socket_path, True
 
 
-def _legacy_phase_membership(plan, inventory):
+def _legacy_phase_membership(plan, inventory, source_plan=None):
     from .activation_enrollment import _target
-    phase_by_target = {}
-    for declaration, item in planned_units(plan, inventory.manager):
-        if item["enroll"]:
-            target = _target(inventory.manager, _catalog(inventory.catalog)[1], declaration.source)
-            if target in phase_by_target:
-                raise ActivationError("candidate unit phase is ambiguous")
-            phase_by_target[target] = item["phase"]
+    def phase_map(frozen):
+        result = {}
+        for declaration, item in planned_units(frozen, inventory.manager):
+            if item["enroll"]:
+                target = _target(inventory.manager, _catalog(inventory.catalog)[1], declaration.source)
+                if target in result:
+                    raise ActivationError("unit phase is ambiguous")
+                result[target] = item["phase"]
+        return result
+
+    candidate_phases = phase_map(plan)
+    phase_by_target = phase_map(source_plan) if source_plan is not None else candidate_phases
+    for target, phase in phase_by_target.items():
+        if target in candidate_phases and candidate_phases[target] != phase:
+            raise ActivationError("candidate changes a retained native unit phase")
     phases = {phase: [] for phase in units.PHASES}
     for unit in inventory.units:
         if not unit.installed:
             continue
         phase = phase_by_target.get(unit.target)
         if phase not in phases:
-            raise ActivationError("old owned unit has no candidate phase; resolve it before first adoption")
+            raise ActivationError("old owned unit has no frozen source phase")
         phases[phase].append(unit.target)
     if not phases["ingest"] or len(phases["ingest"]) != 1:
         raise ActivationError("first adoption requires one exact existing ingest unit")
     return phases
+
+
+def _source_handoff_roster(source_plan, bot_dirs, package):
+    """Use frozen selected identities even when authoring removes an old bot."""
+    from .active_config import context_from_plan
+    roster = {}
+    for fleet in source_plan.fleets:
+        context = context_from_plan(source_plan, fleet, package=package)
+        installed = tuple(bot for bot in context.fleet.bots if (fleet, bot) in bot_dirs)
+        if installed:
+            if context.fleet.manager not in installed:
+                raise ActivationError("old fleet manager has no installed handoff owner")
+            roster[fleet] = (context.fleet.manager, installed)
+    if set(bot_dirs) != {(fleet, bot) for fleet, (_, bots) in roster.items() for bot in bots}:
+        raise ActivationError("old bot handoff roster differs from selected configuration")
+    return roster
 
 
 def _legacy_quiet(adapter, pause, phase, sockets):
@@ -418,7 +442,7 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
             if legacy_source:
                 raise ActivationError(f"existing activation {record.activation_id} requires explicit repair")
         plan.check_fresh()
-        source = None
+        source = source_plan = None
         if legacy_source:
             declarations = _legacy_declarations(plan)
         else:
@@ -454,8 +478,12 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
             if item["enroll"]:
                 starts[str(declaration.source)] = (declaration, item,
                     validate_unit_admission(release, declaration, item, plan.blob(item["sha256"])))
+        candidate_targets = {enrollment._target(inventory.manager, _catalog(inventory.catalog)[1], declaration.source)
+                             for declaration, item in candidates if item["enroll"]}
+        retired_units = tuple(unit for unit in inventory.units
+                              if unit.installed and unit.target not in candidate_targets)
         rank, contexts = _roster(plan, candidates, package)
-        phases = _legacy_phase_membership(plan, inventory)
+        phases = _legacy_phase_membership(plan, inventory, source_plan)
         tmpdirs = {unit.target: _original_bot_tmpdir(unit) for unit in inventory.units
                    if unit.installed and unit.declaration.scope == "bot"}
         for unit in inventory.units:
@@ -527,13 +555,16 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
                     for unit in inventory.units if unit.installed and unit.declaration.scope == "bot"}
         # Newly composed bots have no previous session or actor to hand off.
         # The handoff owner still checks every active historical assignment.
-        roster = {context.fleet.name: (context.fleet.manager,
+        roster = (_source_handoff_roster(source_plan, bot_dirs, package) if source_plan is not None else
+                  {context.fleet.name: (context.fleet.manager,
                       tuple(bot for bot in context.fleet.bots
                             if (context.fleet.name, bot) in bot_dirs))
-                  for context in contexts
-                  if any(fleet == context.fleet.name for fleet, _ in bot_dirs)}
+                   for context in contexts
+                   if any(fleet == context.fleet.name for fleet, _ in bot_dirs)})
         persist_canonical_handoffs(root, roster=roster, bot_dirs=bot_dirs,
-                                   expected_audit=migration.task_audit)
+                                   expected_audit=migration.task_audit,
+                                   candidate_bots={(context.fleet.name, bot)
+                                                   for context in contexts for bot in context.fleet.bots})
         # migration_apply binds this evidence slot to the exact manifest ID.
         store.complete(activation_id, "queues_classified", evidence_digest=migration.manifest_id[2:])
         store.begin(activation_id, "backup_saved")
@@ -571,6 +602,9 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
             store.complete(activation_id, step, evidence_digest=_digest([publication.digest, results, enabled, registry]))
         store.begin(activation_id, "verified")
         verified = {"ingest": _ingest_ready(root, release), "bots": []}
+        for unit in retired_units:
+            assert_quiescent(adapter, installed_file=Path(unit.installed[0].path),
+                             target=unit.target, socket_path=sockets.get(unit.target))
         for source, result in observations.items():
             declaration, _, unit = starts[source]
             if unit.phase == "bots":

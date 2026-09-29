@@ -145,6 +145,36 @@ def _enablement(entry, wanted_by, prior):
             "create": not entry["original"], "wanted_by": wanted_by}
 
 
+def _retired_enablement(enrollment, entries, pause, *, observe):
+    """Bind only old persistent links whose exact owned targets retire."""
+    if enrollment["manager"] != "Linux":
+        return []
+    retained = {entry["target"] for entry in entries}
+    result = []
+    for unit in enrollment["units"]:
+        if not unit["installed"] or unit["target"] in retained:
+            continue
+        state = dict(unit["properties"]).get("UnitFileState")
+        if state != "enabled":
+            continue
+        installed = Path(unit["installed"][0]["path"])
+        wanted = "timers.target" if installed.suffix == ".timer" else "default.target"
+        link = installed.parent / (wanted + ".wants") / installed.name
+        if link.parent.resolve() != link.parent:
+            raise ActivationError("retired enablement directory is redirected")
+        phase = next((name for name in PHASES if unit["target"] in pause.phases[name]), None)
+        if phase is None:
+            raise ActivationError("retired native target has no frozen parking phase")
+        entry = {"path": str(link), "target": str(installed), "phase": phase}
+        if observe:
+            before = path_state(link)
+            if before["node"]["kind"] != "symlink" or before["resolved"] != str(installed):
+                raise ActivationError("retired native enablement link is missing or foreign")
+            entry["before"] = before
+        result.append(entry)
+    return result
+
+
 def _check_enablement(entry, *, allow_candidate, require_applied=False):
     link = entry["enablement"]
     if link is None:
@@ -294,11 +324,13 @@ def prepare_candidate_enrollment(store: ActivationStore, activation_id: str, *,
         entries[-1]["enablement"] = _enablement(entries[-1], wanted, prior)
     if not entries:
         raise ActivationError("empty enrolled candidate manifest is not removal authority")
+    retired = _retired_enablement(enrollment, entries, pause, observe=True)
     _check_targets(adapter, enrollment, entries, allow_candidate=False)
     common = {"owner": _OWNER, "activation_id": activation_id,
               "configuration_journal": configuration_journal, "candidate_plan": candidate.plan_id,
               "install_directory": str(install_directory),
-              "enrollment_digest": record.body["intent"]["enrollment_digest"], "entries": entries}
+              "enrollment_digest": record.body["intent"]["enrollment_digest"],
+              "entries": entries, "retired_enablement": retired}
     directory_id = journal_id(activation_id, "directories")
     directory_path = store.root / "state/activations" / directory_id / "config"
     if directory_path.exists():
@@ -327,6 +359,9 @@ def prepare_candidate_enrollment(store: ActivationStore, activation_id: str, *,
                 link = entry["enablement"]
                 if link and link["create"]:
                     builder.symlink(Path(link["path"]), Path(link["target"]))
+        for link in retired:
+            if link["phase"] == phase:
+                builder.remove(Path(link["path"]))
         plans.append(builder.seal())
     _check_targets(adapter, enrollment, entries, allow_candidate=False)
     for phase, plan in zip(PHASES, plans):
@@ -334,7 +369,7 @@ def prepare_candidate_enrollment(store: ActivationStore, activation_id: str, *,
     return tuple(plans)
 
 
-def _check_publication_changes(plan, entries, phase):
+def _check_publication_changes(plan, entries, phase, retired=()):
     actual = {change.target: change.after for change in plan.changes}
     if phase == "directories":
         expected = {str(Path(entry["enablement"]["path"]).parent): {"kind": "directory", "mode": 0o755}
@@ -345,8 +380,13 @@ def _check_publication_changes(plan, entries, phase):
         expected.update({entry["enablement"]["path"]: {"kind": "symlink", "target": entry["enablement"]["target"]}
                          for entry in entries if entry["phase"] == phase
                          and entry["enablement"] and entry["enablement"]["create"]})
+        expected.update({link["path"]: {"kind": "absent"}
+                         for link in retired if link["phase"] == phase})
         valid = actual == expected
-    if not valid or any(change.before["node"] != {"kind": "absent"} for change in plan.changes):
+    retired_before = {link["path"]: link["before"] for link in retired if link["phase"] == phase}
+    if not valid or any((change.before != retired_before[change.target]
+                         if change.target in retired_before else change.before["node"] != {"kind": "absent"})
+                        for change in plan.changes):
         raise ActivationError("candidate publication contains unowned replacements")
 
 
@@ -374,7 +414,13 @@ def _load(store, activation_id, record):
             link = entry["enablement"]
             if entry["source"] not in wanted or (link["wanted_by"] if link else None) != wanted[entry["source"]]:
                 raise ActivationError("frozen enablement differs from candidate Install semantics")
-        _check_publication_changes(plan, effects["entries"], phase)
+        retired = effects.get("retired_enablement", [])
+        expected_retired = _retired_enablement(pause.enrollment, effects["entries"], pause, observe=False)
+        if ([{key: item[key] for key in ("path", "target", "phase")} for item in retired]
+                != expected_retired or any(item.get("before", {}).get("node", {}).get("kind") != "symlink"
+                                           or item["before"].get("resolved") != item["target"] for item in retired)):
+            raise ActivationError("retired enablement differs from frozen enrollment")
+        _check_publication_changes(plan, effects["entries"], phase, retired)
         if phase != "directories":
             plans.append(plan)
     configuration = read_config_install(store.root, plans[0].effects["configuration_journal"])
@@ -422,7 +468,7 @@ def selected_bot_entry(root: Path, fleet: str, bot: str, platform: str) -> dict:
     entries = effects.get("entries")
     if not isinstance(entries, list):
         raise ActivationError("selected bot publication has no entries")
-    _check_publication_changes(publication, entries, "bots")
+    _check_publication_changes(publication, entries, "bots", effects.get("retired_enablement", []))
     declarations = [(declaration, item) for declaration, item in planned_units(candidate, platform)
                     if declaration.scope == "bot" and declaration.fleet == fleet
                     and declaration.bot == bot and item["enroll"]]

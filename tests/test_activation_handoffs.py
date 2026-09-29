@@ -137,3 +137,16 @@ def test_first_adoption_persists_current_cross_fleet_ids_and_missing_status(tmp_
         assert worker_handoff.read_bytes() == first
     finally:
         conn.close()
+
+
+def test_retiring_bot_with_current_assignment_refuses_before_handoff_write(tmp_path):
+    conn, roster, dirs, expected, worker_handoff = _fixture(tmp_path)
+    try:
+        retained = set(dirs) - {("data", "worker")}
+        with pytest.raises(ActivationError, match="retired bot still owns open work"):
+            persist_canonical_handoffs(tmp_path, roster=roster, bot_dirs=dirs,
+                                       expected_audit=expected, candidate_bots=retained)
+        assert worker_handoff.read_bytes() == STALE_HANDOFF
+        assert not (dirs["eng", "manager"] / ".claude/session.md").exists()
+    finally:
+        conn.close()

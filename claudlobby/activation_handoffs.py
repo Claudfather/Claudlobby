@@ -138,10 +138,11 @@ def _replace(path: Path, content: bytes) -> None:
 
 def persist_canonical_handoffs(root: Path, *, roster: dict[str, tuple[str, tuple[str, ...]]],
                                bot_dirs: dict[tuple[str, str], Path],
-                               expected_audit: dict) -> dict:
+                               expected_audit: dict,
+                               candidate_bots: set[tuple[str, str]] | None = None) -> dict:
     """Write exact current IDs after old writers stop and before any new bot starts.
 
-    ``roster`` comes from the frozen candidate fleet contexts; ``bot_dirs``
+    ``roster`` comes from the frozen selected source fleet contexts; ``bot_dirs``
     comes from reviewed, installed old bot declarations. An actor may receive
     an assignment owned by a different fleet; the task retains its own fleet.
     The caller holds the activation lock and owns the stopped-writer proof.
@@ -198,6 +199,9 @@ def persist_canonical_handoffs(root: Path, *, roster: dict[str, tuple[str, tuple
                         for row in audit.references if row.active}
             if actual != expected:
                 raise ActivationError("canonical current work differs from the quiesced A0 mapping")
+            if candidate_bots is not None and any(
+                    key not in candidate_bots and (owning[key] or assigned[key]) for key in bot_dirs):
+                raise ActivationError("retired bot still owns open work or a current assignment")
     except (OSError, sqlite3.Error, TaskAuditError, TaskStateError, OperationContextError) as exc:
         raise ActivationError("quiesced canonical handoff mapping is unavailable") from exc
 

@@ -115,6 +115,9 @@ def enrollment(installed, tmp_path):
     wants = directory / "default.target.wants"
     wants.mkdir()
     (wants / "collector.service").symlink_to("../collector.service")
+    timer_wants = directory / "timers.target.wants"
+    timer_wants.mkdir()
+    (timer_wants / "clock.timer").symlink_to("../clock.timer")
     catalog = f"manager\tLinux\ndirectory\t{directory}\n" + "".join(
         f"loaded\t{unit.target}\ninstalled\t{unit.target}\n" for unit in entries)
     inventory = EnrollmentInventory(root, "Linux", catalog, tuple(entries),

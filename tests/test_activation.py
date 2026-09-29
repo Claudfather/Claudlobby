@@ -329,6 +329,35 @@ def test_upgrade_binds_applied_selected_plan_as_exact_source(cold, monkeypatch, 
     assert not (root / "state/activations/upgrade").exists()
 
 
+def test_upgrade_handoff_roster_uses_frozen_selected_bots_after_authoring_change(cold):
+    root, _, selected_plan, host = cold
+    manifest = root / "fleet.yaml"
+    manifest.write_text("fleet:\n  name: example\n  manager: manager\n"
+                        "  service_prefix: com.example\n  bots:\n"
+                        "    manager: {expertise: [orchestration]}\n")
+    old_dirs = {("example", bot): root / "runtime/bots" / bot for bot in ("manager", "worker")}
+    assert activation._source_handoff_roster(selected_plan, old_dirs, host.package) == {
+        "example": ("manager", ("worker", "manager"))
+    }
+
+
+def test_upgrade_parks_source_only_bot_by_selected_phase(cold):
+    root, release, selected_plan, _ = cold
+    retained = [item for item in selected_plan.effects["units"]
+                if item["bot"] != "worker"]
+    builder = ConfigPlanBuilder(root, release.release_id, release.seal_sha256,
+                                ("example",), effects={"units": retained})
+    for item in retained:
+        builder.file(Path(item["source"]), selected_plan.blob(item["sha256"]), mode=item["mode"])
+    candidate = builder.seal()
+    old = [SimpleNamespace(target=declaration.source.name, installed=(object(),))
+           for declaration, item in planned_units(selected_plan, "Linux") if item["enroll"]]
+    inventory = SimpleNamespace(manager="Linux", catalog="manager\tLinux\ndirectory\t/fixture\n", units=old)
+    phases = activation._legacy_phase_membership(candidate, inventory, selected_plan)
+    assert "com.example.worker.service" in phases["bots"]
+    assert "com.example.manager.service" in phases["bots"]
+
+
 @pytest.mark.parametrize("failure, pending", [("ingest", "ingest_started"), ("worker", "bots_started"),
                                              ("enablement", "ingest_started"), ("off", "bots_started"),
                                              ("incomplete", "bots_started"), ("uncommitted", "bots_started"),

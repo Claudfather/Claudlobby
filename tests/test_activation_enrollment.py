@@ -245,6 +245,7 @@ def test_phase_publication_retry_and_owned_cleanup_preserve_foreign(case, monkey
         assert not (wants / "member.service").is_symlink()  # preserve its original disabled state
         assert not (wants / "scheduled.service").is_symlink()  # paired oneshot remains static
         assert (adapter.directory / "member.service").stat().st_mode & 0o777 == 0o640
+        assert not (adapter.directory / "timers.target.wants/clock.timer").is_symlink()
         store.begin_rollback("cutover")
         for step in state.ROLLBACK_STEPS[:state.ROLLBACK_STEPS.index("candidate_units_removed")]:
             _complete(store, step)
@@ -271,7 +272,7 @@ def test_phase_publication_retry_and_owned_cleanup_preserve_foreign(case, monkey
         assert foreign.read_bytes() == foreign_bytes
         assert (wants / "collector.service").readlink() == wanted_link
         assert not added_link.is_symlink() and not timer_link.is_symlink()
-        assert not timer_link.parent.exists()  # ConfigInstall removes only its now-empty directory
+        assert (timer_link.parent / "clock.timer").readlink() == Path("../clock.timer")
         assert not any(call[0] in ("svc_activation_resume", "svc_enroll") for call in adapter.calls)
 
 
