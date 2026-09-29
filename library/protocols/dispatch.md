@@ -68,12 +68,25 @@ workers and managers can reconcile deadlines across host and local clocks.
 
 ## Preflight: ensure the worker is up under proper supervision
 
-Before dispatch, verify the target session exists. If it doesn't, **always bring it up via `lib/spin-up-bot.sh <bot-dir>`** — never `start-bot.sh` directly. `spin-up-bot.sh` is host-aware: it enrolls the bot as a systemd-user service on Linux or a launchd LaunchAgent on macOS, so the bot is supervised (auto-restart on crash, picked up by the fleet keepalive timer). `start-bot.sh` only spawns a raw tmux session — bots launched that way are invisible to the keepalive scope and won't survive a crash.
+Before dispatch, verify the target session exists. If it doesn't, the selected
+fleet manager uses `claudlobby --json bot start WORKER_ID`, replacing
+`WORKER_ID` with that declared bot's literal ID. This command checks the
+selected release and exact supervision unit, enrolling and starting the bot
+when needed; an already-ready session is left running. A raw `start-bot.sh`
+session is not supervised.
 
 ```bash
-# Idiomatic worker spin-up (idempotent: restarts if already enrolled):
-$CLAUDLOBBY_NATIVE_DIR/spin-up-bot.sh $CLAUDLOBBY_ROOT/local/<fleet>/runtime/bots/<bot>
+# Replace WORKER_ID with the target's literal declared bot ID.
+claudlobby --json bot start WORKER_ID
 ```
+
+Dispatch only after the result has `ok: true`, `data.state: "running"`,
+`data.native_outcome: "observed"`, and `data.readiness` of
+`current_session_ready`, `bridge_ready`, or `session_ready`. The first proves
+the existing supervised session, not bridge delivery; `session_ready` is the
+non-channel or intentionally tokenless outcome. On a conflict or unavailable
+result, inspect the exact unit and private session; do not fall back to a raw
+launcher or deliver into unknown readiness.
 
 To audit/repair an entire fleet's supervision state in one shot:
 

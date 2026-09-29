@@ -57,9 +57,9 @@ Read bot event logs at these natural decision points — not continuously, not o
 | `activity_stuck` | pulse | Bot has made **no tool call** for longer than its threshold AND keepalive has not classified it as idle (no recent `data/.idle` marker). Uses marker-file mtime comparison, not pane regex. Investigate; restart only if `safe-worker-restart` guards pass. |
 | `overdue_dispatch` | pulse | A task you dispatched to this bot passed its deadline with no terminal `[BOTREPORT]`. Check the bot (cross-reference `activity_stuck`): if hung, recover it; if mis-scoped or wedged, re-dispatch or reassign; if it needs a human, escalate. Don't silently wait. |
 | `pane_stuck` (>5 min) | pulse | Investigate pane content, restart if confirmed stuck. Note: a live spinner animates the pane, so an animated-but-hung bot shows up as `activity_stuck`, not `pane_stuck`. |
-| `crash_loop` | pulse | The unit is **failing its start over and over** and systemd is already restarting it (`restarts` in the payload is how many times running). **Do NOT restart it** — another restart only zeroes the counter; the unit is enrolled, so `spin-up-bot.sh` is not the fix either. The cause is in the bot's `logs/startup.log` (on 2026-09-23 it was a broken `claude` install, printed on every attempt). Fix the cause, or escalate to the human. Before #1769 this read as "boot in flight" indefinitely and paged no one. |
-| `service_down` | pulse | Re-enroll via `lib/spin-up-bot.sh <bot-dir>` |
-| `session_missing` | pulse | Re-enroll via `lib/spin-up-bot.sh <bot-dir>` |
+| `crash_loop` | pulse | The unit is **failing its start over and over** and systemd is already restarting it (`restarts` in the payload is how many times running). **Do NOT restart it** — another restart only zeroes the counter; the unit is enrolled, so `bot start` is not the fix either. The cause is in the bot's `logs/startup.log` (on 2026-09-23 it was a broken `claude` install, printed on every attempt). Fix the cause, or escalate to the human. Before #1769 this read as "boot in flight" indefinitely and paged no one. |
+| `service_down` | pulse | If the bot is meant to run, the selected manager calls `claudlobby --json bot start BOT_ID` with its literal declared ID; inspect state and readiness. |
+| `session_missing` | pulse | If the bot is meant to run, the selected manager calls `claudlobby --json bot start BOT_ID` with its literal declared ID; inspect state and readiness. |
 | `wip_uncommitted` | pulse | Do NOT restart — task is in flight. **Decide on the payload's `paths`, never on `dirty_files`**: a count cannot separate `M lib/foo.py` from `?? .venv/`, and reading it as a count is what made this alert fire forever and get skipped (#1728). `dirty_tracked`/`dirty_untracked` are facts to read, not a filter — an unadded new source file is untracked and is the unrecoverable case. `unchanged_for_s` is a floor measured from the sweep's first sighting; past ~2h on a source path, check for staleness. |
 | `session_event` | vitals | Informational — log awareness of session lifecycle |
 | `audit_selected` | audit | Informational — the rolling sweep picked this repo as stalest. |
@@ -68,6 +68,14 @@ Read bot event logs at these natural decision points — not continuously, not o
 | `sweep_repo_unreachable` | audit | A `gh` query failed (auth/network); that repo was skipped, not mis-ranked. Check fleet GitHub auth if it persists. |
 | `audit_completed` | audit | Informational — the audit finished and filed `auto-audit`-labelled issues. |
 | `audit_failed` | audit | The audit could not dispatch or run. Investigate the owner bot / `gh` auth. |
+
+For `bot start`, `ok: true`, `data.state: "running"`, and
+`data.native_outcome: "observed"` confirm the supervised result;
+`data.readiness` distinguishes an existing session (`current_session_ready`),
+new bridge readiness (`bridge_ready`), and non-channel or intentionally
+tokenless session readiness (`session_ready`). If the CLI refuses or readiness
+is unknown, report the failure and inspect the selected unit and private
+session. Do not fall back to a raw launcher.
 
 ## Active Notifications (push)
 
