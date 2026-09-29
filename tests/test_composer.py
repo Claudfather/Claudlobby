@@ -334,7 +334,7 @@ def _expected_default_fleet_ops_allow() -> list[str]:
 
     The skill frontmatter is independently pinned by test_requires_linking;
     this checks the composer adds it in order, with only the manager role grants
-    and the boot brief grant in this fixture.
+    in this fixture.
     """
     skill = (source_package().library / "skills" / "fleet-ops" / "SKILL.md").read_text()
     assert skill.startswith("---\n")
@@ -364,7 +364,6 @@ def _expected_default_fleet_ops_allow() -> list[str]:
         "Bash(claudlobby --json workstream close *)",
         "Bash(claudlobby --json workstream prune *)",
         "Bash(claudlobby --json bot restart solo)",
-        "Bash(claudlobby --fleet claudlobby brief --bot solo)",
     ]
 
 
@@ -3380,8 +3379,7 @@ class TestComposeBotConfShellEscaping:
 
 class TestDefaultStartupPromptIgnition:
     """#1633: a bot with no declared startup_prompt composes a read-then-act
-    default instead of an idle instruction, and gets exactly the Bash grant
-    that default names."""
+    default using the universal fleet-ops skill's exact read grants."""
 
     def _paths(self, tmp_path, bot_id="worker", overlay=False):
         root = tmp_path / "claudlobby"
@@ -3403,18 +3401,22 @@ class TestDefaultStartupPromptIgnition:
         bot = self._bot()
         conf = compose_bot_conf(bot, self._fleet(bot), self._paths(tmp_path))
         line = self._startup_prompt_line(conf)
-        assert "claudlobby brief --bot worker" in line
+        assert line.index("/fleet-ops") < line.index("claudlobby --json context show")
+        assert line.index("claudlobby --json context show") < line.index("claudlobby --json brief")
+        assert "report its error and stop" in line
         assert line != 'STARTUP_PROMPT="Welcome back. Read your CLAUDE.md. Idle and await Telegram messages."'
         # bot.conf is fully `source`d (load_bot_conf), and json.dumps() does
         # not shell-escape — a literal backtick here would run as a real
         # command substitution at every boot, not render as text.
         assert "`" not in line
 
-    def test_default_startup_prompt_names_the_fleet_flag_in_overlay_mode(self, tmp_path):
+    def test_default_startup_prompt_uses_generated_context_in_overlay_mode(self, tmp_path):
         bot = self._bot()
         conf = compose_bot_conf(bot, self._fleet(bot), self._paths(tmp_path, overlay=True))
         line = self._startup_prompt_line(conf)
-        assert "claudlobby --fleet claudlobby brief --bot worker" in line
+        assert "claudlobby --json context show" in line
+        assert "claudlobby --json brief" in line
+        assert "--fleet" not in line
 
     def test_default_startup_prompt_uses_the_hook_form_when_brief_on_start_is_armed(
         self, tmp_path
@@ -3422,22 +3424,20 @@ class TestDefaultStartupPromptIgnition:
         bot = self._bot(brief_on_start=True)
         conf = compose_bot_conf(bot, self._fleet(bot), self._paths(tmp_path))
         line = self._startup_prompt_line(conf)
-        assert "brief --bot" not in line
+        assert line.index("/fleet-ops") < line.index("claudlobby --json context show")
+        assert "claudlobby --json brief" not in line
         assert "fleet-brief you were given at session start" in line
 
-    def test_default_startup_prompt_composes_the_exact_brief_grant_and_no_wildcard(
+    def test_default_startup_prompt_uses_existing_fleet_ops_read_grants(
         self, tmp_path
     ):
         bot = self._bot(channels=[])
         result = compose_settings_local(bot, self._fleet(bot), self._paths(tmp_path))
         allow = result["permissions"]["allow"]
-        assert "Bash(claudlobby brief --bot worker)" in allow
-        # The universal fleet-ops skill intentionally grants `--json brief *`.
-        # The default boot prompt itself grants only its exact bot read.
-        assert not any(
-            p.startswith("Bash(claudlobby brief --bot") and p.endswith("*)")
-            for p in allow
-        )
+        assert "Skill(fleet-ops)" in allow
+        assert "Bash(claudlobby --json context show)" in allow
+        assert "Bash(claudlobby --json brief)" in allow
+        assert "Bash(claudlobby brief --bot worker)" not in allow
 
     def test_brief_grant_absent_when_brief_on_start_is_armed(self, tmp_path):
         bot = self._bot(channels=[], brief_on_start=True)

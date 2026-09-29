@@ -699,9 +699,6 @@ def test_a_fleet_with_no_requires_composes_exactly_the_declared_grants(fleet_dir
         "Bash(claudlobby --json bot restart worker-1)",
         "Bash(claudlobby --json bot restart worker-1 --ceiling *)",
         "Bash(claudlobby --json bot restart lead)",
-        # #1633: no custom startup_prompt -> the default read-then-act boot
-        # prompt names this exact read, and compose_settings_local grants it.
-        "Bash(claudlobby --fleet claudlobby brief --bot lead)",
     ]
     linked = sorted(
         p.name for p in (paths.bot_runtime("lead") / ".claude" / "skills").iterdir()

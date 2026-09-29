@@ -1336,27 +1336,28 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
         rendered = _render_startup_prompt(bot.startup_prompt, bot, fleet)
         lines.append(f"STARTUP_PROMPT={json.dumps(rendered)}")
     else:
-        # #1633: a bot with no declared prompt used to be told to idle on its
-        # very first turn — every boot spent on a fleet that cannot start its
-        # own turn. The default now names a READ and an ACT instead. Two
-        # forms, because the state can arrive two ways and only one needs a
-        # Bash grant (see compose_settings_local's matching branch, which
-        # composes the exact grant this text names):
+        # A bot with no declared prompt begins through the universal fleet-ops
+        # skill, whose exact grants cover context show and brief. Two forms,
+        # because the brief can arrive two ways:
         #   - brief.on_start armed: the bot's own SessionStart hook already
         #     injected its brief, so the prompt points at what is already in
         #     context rather than naming a read the bot must run itself.
-        #   - otherwise: name the one `claudlobby brief` read that shows the
-        #     bot its own open rows.
+        #   - otherwise: ask for the canonical brief read after context show.
         # NOTE: no backticks around the command. bot.conf is fully `source`d
         # (lib/lib-common.sh:load_bot_conf → `. "$bot_dir/bot.conf"`), and
         # json.dumps() does not escape `` ` `` or `$` — a literal backtick
         # here would run as a real command substitution at every boot,
         # not render as text.
-        fleet_arg = f" --fleet {paths.fleet_dir.name}" if paths.fleet_dir else ""
+        preface = (
+            "Welcome back. Read your CLAUDE.md and invoke /fleet-ops. "
+            "Run claudlobby --json context show to confirm your generated "
+            "fleet and bot. If a read refuses, report its error and stop; "
+            "do not guess context from environment variables. "
+        )
         if _boot_brief_armed(bot):
             default = (
-                "Welcome back. Read your CLAUDE.md and the fleet-brief you "
-                "were given at session start. If it shows open rows of "
+                preface + "Then read the fleet-brief you were given at session "
+                "start. If it shows open rows of "
                 "yours, continue them and report; if anything is blocked, "
                 "say so. Otherwise idle and await messages."
             )
@@ -1367,8 +1368,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
             # characters, not the glyph (measured via a real
             # `claudlobby generate`).
             default = (
-                "Welcome back. Read your CLAUDE.md, then run: claudlobby"
-                f"{fleet_arg} brief --bot {bot.bot_id} - act on what it "
+                preface + "Then run claudlobby --json brief and act on what it "
                 "shows: continue your own open rows, report anything "
                 "blocked, then idle and await messages."
             )
@@ -1397,29 +1397,6 @@ def _boot_brief_armed(bot: BotConfig) -> bool:
     ever does.
     """
     return bot.brief_on_start
-
-
-def _resolve_default_boot_grant(bot: BotConfig, paths: Paths) -> list[str]:
-    """The exact Bash grant the DEFAULT boot prompt names (#1633), or empty.
-
-    A NAMED resolver — matching every other ``_resolve_*_permissions`` /
-    ``_resolve_*_grants`` function in this module — rather than inline logic
-    in ``compose_settings_local``, because ``freshbox._sourced_grants`` calls
-    each of those independently to re-derive what SHOULD be granted and diff
-    it against what IS. Inline logic here is invisible to that re-derivation:
-    freshbox has no way to know this grant exists, and reports it as an
-    ``orphan_grant`` (fail) — composition emitting a grant nothing produced,
-    by freshbox's own read, when in fact something did (this function; it
-    was just never told). Empty under the same condition
-    ``compose_bot_conf``'s ``else`` branch uses to skip the read-then-act
-    default text: a custom ``startup_prompt`` or an armed ``brief.on_start``
-    hook both name no Bash read for the bot to run itself, so neither grants
-    one.
-    """
-    if bot.startup_prompt or _boot_brief_armed(bot):
-        return []
-    fleet_arg = f" --fleet {paths.fleet_dir.name}" if paths.fleet_dir else ""
-    return [f"Bash(claudlobby{fleet_arg} brief --bot {bot.bot_id})"]
 
 
 def _render_startup_prompt(prompt: str, bot: BotConfig, fleet: FleetConfig) -> str:
@@ -2786,13 +2763,6 @@ def compose_settings_local(
     # neither — a clean, single off-switch for a bot's Claudron loop wiring.
     if _session_loop_enabled(bot):
         _append_unique(allow_patterns, CLAUDRON_LOOP_GRANTS)
-
-    # Layer 5d: the exact read the DEFAULT boot prompt names (#1633). The
-    # bot's own read, no wildcard: reusing the checkin skill's
-    # `Bash(claudlobby --fleet * brief *)` would widen every such bot's
-    # surface to any fleet's brief for any bot. Named resolver (see its own
-    # docstring) so freshbox's independent re-derivation can see it too.
-    _append_unique(allow_patterns, _resolve_default_boot_grant(bot, paths))
 
     # Union-layer write guardrail: with every library-derived layer accumulated
     # (and before the operator's tools.allow escape hatch below), nothing may

@@ -864,7 +864,7 @@ All sub-fields except `skill`, `cadence`, and `target_repo` are optional with se
 
 Jinja2-templated string sent to the bot on startup. Available placeholders: `{{ bot_id }}` (the fleet.yaml key — what `claudlobby brief --bot` takes; `bot_name` is a display name and may differ), `{{ bot_name }}`, `{{ fleet_name }}`, `{{ telegram_group_chat_id }}`, `{{ telegram_handle }}`. Written to `bot.conf` as `STARTUP_PROMPT`.
 
-**Omit this field and a bot composes a read-then-act default instead of an idle instruction** (#1633): read `CLAUDE.md`, run `claudlobby brief --bot <id>` (or, when `brief.on_start` is armed, read the brief already injected at session start), act on what it shows — continue open rows, report anything blocked — then idle and await messages. Set your own `startup_prompt` only when a bot needs something beyond that; do not end a custom prompt in a bare "idle" instruction with no read or action before it, which is the exact defect the default replaced.
+**Omit this field and a bot composes a read-then-act default instead of an idle instruction** (#1633): read `CLAUDE.md`, invoke `/fleet-ops`, confirm identity with `claudlobby --json context show`, then read `claudlobby --json brief` (or the brief already injected at session start when `brief.on_start` is armed). Act on open rows, report blockers, then idle and await messages. A refused read must be reported rather than bypassed by guessing context from environment variables. Set `startup_prompt` under `bots.<name>` only when a bot needs custom coaching; `fleet.defaults.startup_prompt` is not a supported field.
 
 ## Auto-derived permissions
 
