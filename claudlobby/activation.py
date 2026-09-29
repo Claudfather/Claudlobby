@@ -469,10 +469,15 @@ def adopt_existing_activation(root: Path, activation_id: str, plan_id: str,
         if migration.blockers:
             raise ActivationError("legacy data or pending queues block first adoption: " + "; ".join(migration.blockers))
         from .activation_handoffs import persist_canonical_handoffs
-        roster = {context.fleet.name: (context.fleet.manager, tuple(context.fleet.bots))
-                  for context in contexts}
         bot_dirs = {(unit.declaration.fleet, unit.declaration.bot): unit.declaration.working_directory
                     for unit in inventory.units if unit.installed and unit.declaration.scope == "bot"}
+        # Newly composed bots have no previous session or actor to hand off.
+        # The handoff owner still checks every active historical assignment.
+        roster = {context.fleet.name: (context.fleet.manager,
+                      tuple(bot for bot in context.fleet.bots
+                            if (context.fleet.name, bot) in bot_dirs))
+                  for context in contexts
+                  if any(fleet == context.fleet.name for fleet, _ in bot_dirs)}
         persist_canonical_handoffs(root, roster=roster, bot_dirs=bot_dirs,
                                    expected_audit=migration.task_audit)
         # migration_apply binds this evidence slot to the exact manifest ID.
