@@ -84,7 +84,7 @@ keepalive is the one recovery actor. It still ticks per fleet, with four changes
   - the lease, with purpose `restart`.
 
   It still restarts through `spin-up-bot.sh` (on the adapter after PR B), then `start-bot.sh` and the gate, and waits for each bot's verdict.
-- **Who uses it:** managers (for context-degraded restarts), the weekly job, and operators. `spin-up-bot.sh` run by hand on a live bot takes the lease itself.
+- **Who uses it:** managers (for context-degraded restarts), the weekly job, and operators. `spin-up-bot.sh` on a bot with a live session takes the lease itself unless its caller already holds it, as when an operator runs it by hand or setup-fleet runs it.
 - **`start-bot.sh` becomes idempotent for a live session.** It replaces a live session only when the lease names that bot; otherwise it exits 0 with one log line. That stops a duplicate launch (a supervisor relaunch, or a racing kickstart) from becoming a sixth restarter.
 
 ## 2. What it replaces
@@ -94,22 +94,22 @@ These are the five mechanisms that restarted bots on Sep 28, followed by the job
 | # | mechanism | fate |
 |---|---|---|
 | 1 | **launchd/systemd units:** start every launcher at load, and relaunch a failed launcher (`KeepAlive SuccessfulExit=false` / `Restart=on-failure`) | **Keep, for exactly those two jobs (F3).** A relaunch queues in the gate, and once `start-bot.sh` is idempotent it cannot replace a live session. Every other kickstart or restart goes behind `svc_kick` (the #1573 ratchet). |
-| 2 | **`start-bot.sh`:** the `$TMPDIR` lock (`:25-45`); it kills the prior session unconditionally (`:138`); it pages twice, with `rc_timeout` (`:433`) and with `bridge_down` via `bridge_bringup_verify` (`:531-558`, `lib-common.sh:1481-1511`) | **Keep, as the only thing that brings a bot up.** Delete the lock: its release runs in the background, and that release is what was lost at 18:05 on Sep 28. `:138` replaces a live session only under the lease. The two pages become one verdict event. |
+| 2 | **`start-bot.sh`:** the `$TMPDIR` lock (`:25-45`); it kills the prior session unconditionally (`:138`); it records `rc_timeout` (`:433`), which fleet-pulse's burst detector pages (`fleet-pulse.sh:879-888`); it pages `bridge_down` via `bridge_bringup_verify` (`:531-558`, `lib-common.sh:1481-1511`) | **Keep, as the only thing that brings a bot up.** Delete the lock: its release runs in the background, and that release is what was lost at 18:05 on Sep 28. `:138` replaces a live session only under the lease. The `rc_timeout` record and the `bridge_down` page become one verdict event. |
 | 3 | **keepalive:** an inline restart ladder (`keepalive.sh:189-212`); kickstarts mid-boot, because `service_is_starting` returns 1 off Linux (`lib-common.sh:4699`, called at `keepalive.sh:338`, #1593); a bridge-heal ladder with its own escalation (`:223-277`) | **Keep, as the one recovery actor (§1.4).** It gains the lease, cause classification, a host budget, and PR B's `svc_kick` and `.boot-queued` rung. Its escalation becomes the episode's. |
 | 4 | **`rolling-restart.sh`:** unaware of the other actors, and no busy gate (`:169`, #1648) | **Keep, as the one deliberate-restart door (§1.5).** |
-| 5 | **manager restarts:** by judgement, on a FLEET ALERT. Library skills and protocols name `spin-up-bot.sh` 17 times, and raw `systemctl` and `launchctl` once each. | **Delete as a mechanism.** Managers use the door for work reasons, never for health (F4). |
+| 5 | **manager restarts:** by judgement, on a FLEET ALERT. Library skills and protocols name `spin-up-bot.sh` 17 times. They name `systemctl` 6 times and `launchctl` 4 times (every occurrence under `library/skills/` and `library/protocols/` at `85e66d6`). Of those 10, 5 are status checks and 4 are prose. The last is the one raw restart that bypasses the door: `sudo systemctl restart <bot-service>` (`library/skills/delegate/SKILL.md:52`). | **Delete as a mechanism.** Managers use the door for work reasons, never for health (F4). |
 | + | **`weekly-worker-restart.sh`:** its own pre-stop → spin-up → `BRIDGE_READY` loop, and its own `bridge_down` page (`:118`) | **Delete the loop.** The timer runs the door (`--all --workers-only`) under the lease (F6). |
-| + | **setup-fleet's bot leg:** runs `spin-up-bot.sh` on each bot whose unit is missing or whose session is dead, and skips a live session (`setup-fleet:319-329`) | **Keep.** It starts only stopped bots, so it needs the gate but not the lease, once a mid-start bot counts as not stopped. |
+| + | **setup-fleet's bot leg:** runs `spin-up-bot.sh` on each bot whose session is dead or whose unit is missing. The predicate is `bot_is_healthy` (`setup-fleet:319-329`); the loop that skips healthy bots and calls it is `:347-351`. | **Keep.** A dead session needs only the gate. A live session with no unit is replaced: `spin-up-bot.sh` installs the unit, and `start-bot.sh:138` kills the old session. So in that case `spin-up-bot.sh` takes the lease itself (§1.5). |
 | + | **`reload-fleet.sh`:** `/reload` at an idle tick, and `setup-fleet --jobs-only`, which skips the bot leg | **Keep unchanged.** It touches no live session. |
-| + | **fleet-pulse:** pages `bridge_down` (`fleet-pulse.sh:481`), burst-pages `rc_timeout`, and its summary lists any critical event in a time window (`:712`, `:985-1003`) | **Stop paging on bot health.** Page when the actor goes silent. The summary shows open episodes instead (§4). |
+| + | **fleet-pulse:** pages `bridge_down` (`fleet-pulse.sh:481`), burst-pages `rc_timeout` (`:879-888`), and its summary lists any critical event in a time window (`:712`, `:985-1003`) | **Stop paging on bot health.** Page when the actor goes silent. The summary shows open episodes instead (§4). |
 
 **Deleted outright:**
 - the `$TMPDIR` lock;
 - weekly-worker-restart's restart loop;
-- start-bot's two per-bot pages;
+- start-bot's per-bot `bridge_down` page, and fleet-pulse's burst page for `rc_timeout`;
 - fleet-pulse's `bridge_down` page;
 - keepalive's separate heal escalation;
-- the library's raw supervisor commands.
+- the library's one raw restart (`library/skills/delegate/SKILL.md:52`).
 
 PR B already retires the systemd `ExecStartPre` stagger and `boot_rung_for`.
 
@@ -219,10 +219,10 @@ Chris decides all six. All six are open.
 |---|---|---|---|
 | 0 | #1969, #1975, #1978, #1982, #1963 | in flight | — |
 | 1 | PR B of #1573 as planned, plus deleting the `$TMPDIR` lock | M | 0 |
-| 2 | the lease; keepalive stands down under it; an idempotent `start-bot.sh`; the door (`--bot`, busy check, lease); the weekly job runs the door | M | 1 |
+| 2 | the lease; keepalive stands down under it; an idempotent `start-bot.sh`; `spin-up-bot.sh` takes the lease for a live session; the door (`--bot`, busy check, lease); the weekly job runs the door | M | 1 |
 | 3 | the bring-up owner (F1) and `bringup_result` | M | 2 |
 | 4 | episodes: the classifier, the host budget, pages only from episodes; fleet-pulse pages when the actor goes silent; the summary shows open episodes | L | 2, 3 |
-| 5 | library: managers use the door, and the raw supervisor commands are removed | S | 2 |
+| 5 | library: managers use the door, and the raw restart in `library/skills/delegate/SKILL.md:52` becomes the door | S | 2 |
 
 The critical path is 0 → 1 → 2 → 3 → 4. Phase 5 can run alongside phase 3.
 
