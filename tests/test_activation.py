@@ -42,6 +42,7 @@ class NativeHost:
         self.registry = []
         self.external_result = 0
         self.fail_bot = None
+        self.ready_kind = "bridge-ready"
         self.by_name = {d.source.name: (d, item) for d, item in planned_units(plan, "Linux")}
 
     def read(self, function, *args):
@@ -76,7 +77,7 @@ class NativeHost:
                 rc = 3
             else:
                 self.ready.append(bot)
-                output = "bridge-ready"
+                output = self.ready_kind
         elif function == "svc_activation_start":
             file, target = Path(args[0]), args[1]
             assert file.is_file()
@@ -224,8 +225,10 @@ def cold(installed, monkeypatch, tmp_path):
     return root, release, plan, host
 
 
-def test_cold_bootstrap_uses_real_sql_config_and_serial_starts_before_timers(cold):
+@pytest.mark.parametrize("ready_kind", ["bridge-ready", "session-ready"])
+def test_cold_bootstrap_uses_real_sql_config_and_serial_starts_before_timers(cold, ready_kind):
     root, release, plan, host = cold
+    host.ready_kind = ready_kind
     record = activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
     assert record.status == "active" and tuple(record.body["completed"]) == state.STEPS
     assert host.starts == ["claudlobby-plane-daemon.service", "com.example.manager.service",

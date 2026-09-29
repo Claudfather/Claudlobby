@@ -22,6 +22,8 @@ from .releases import read_release
 from .runtime_admission import RuntimeIdentity, UnitStart, activation_start, parse_unit_argv
 from .supervision_inventory import Adapter
 
+BOT_READY_KINDS = frozenset({"bridge-ready", "session-ready"})
+
 
 class RuntimeEvidenceError(ActivationError):
     """A named runtime operation failed or its required evidence is unavailable."""
@@ -161,8 +163,8 @@ def start_unit(store: ActivationStore, activation_id: str, *, installed_file: Pa
         if bot is not None:
             ready = _call(adapter, "svc_activation_bot_ready", target,
                           store.root, bot, ceiling, token, timeout=ceiling + 10)
-            if ready != "bridge-ready":
-                raise RuntimeEvidenceError("readiness", target, "bridge evidence unavailable")
+            if ready not in BOT_READY_KINDS:
+                raise RuntimeEvidenceError("readiness", target, "bot readiness evidence unavailable")
             details["readiness"] = {"kind": ready, "ceiling": ceiling, "fence": token}
         if readiness is not None:
             try:

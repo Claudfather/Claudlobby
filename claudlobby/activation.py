@@ -20,7 +20,7 @@ import time
 from .activation_state import ActivationError, ActivationRecord, locked_activation, read_activation, read_selection
 from .activation_identity import identity_bindings_from_registry
 from . import activation_enrollment as enrollment, activation_units as units, config_install
-from .activation_runtime import assert_quiescent, start_unit
+from .activation_runtime import BOT_READY_KINDS, assert_quiescent, start_unit
 from .config_plan import path_state, read_plan
 from .config_units import planned_units
 from .migration_apply import apply_migration
@@ -274,7 +274,9 @@ def bootstrap_activation(root: Path, activation_id: str, plan_id: str,
             declaration, _, unit = starts[source]
             if unit.phase == "bots":
                 fence = result.details["readiness"]["fence"]
-                if adapter.read("svc_activation_bot_ready", root, declaration.working_directory, "0", fence).strip() != "bridge-ready":
+                kind = result.details["readiness"]["kind"]
+                if (kind not in BOT_READY_KINDS or adapter.read("svc_activation_bot_ready", root,
+                        declaration.working_directory, "0", fence).strip() != kind):
                     raise ActivationError("bot lost readiness before producer admission")
                 verified["bots"].append(result.digest)
         store.complete(activation_id, "verified", evidence_digest=_digest(verified))
@@ -514,7 +516,9 @@ def adopt_existing_activation(root: Path, activation_id: str, plan_id: str,
             declaration, _, unit = starts[source]
             if unit.phase == "bots":
                 fence = result.details["readiness"]["fence"]
-                if adapter.read("svc_activation_bot_ready", root, declaration.working_directory, "0", fence).strip() != "bridge-ready":
+                kind = result.details["readiness"]["kind"]
+                if (kind not in BOT_READY_KINDS or adapter.read("svc_activation_bot_ready", root,
+                        declaration.working_directory, "0", fence).strip() != kind):
                     raise ActivationError("candidate bot lost readiness before producer admission")
                 verified["bots"].append(result.digest)
         store.complete(activation_id, "verified", evidence_digest=_digest(verified))

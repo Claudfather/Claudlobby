@@ -164,8 +164,13 @@ TMUX_BIN=fixture_tmux; export TMUX_BIN
     assert no_session.returncode != 0
 
 
-@pytest.mark.parametrize("fail_ready", [False, True])
-def test_start_keeps_exact_grant_through_readiness_and_leaves_completion_to_owner(proposal, fail_ready):
+@pytest.mark.parametrize(("fail_ready", "ready_kind"), [
+    (False, "bridge-ready"), (False, "session-ready"), (False, "unknown-ready"),
+    (True, "bridge-ready"),
+])
+def test_start_keeps_exact_grant_through_readiness_and_leaves_completion_to_owner(
+    proposal, fail_ready, ready_kind
+):
     builder, _, settings = proposal
     plan = builder.seal()
     release = read_release(builder.root, plan.release_id)
@@ -209,7 +214,7 @@ def test_start_keeps_exact_grant_through_readiness_and_leaves_completion_to_owne
                 assert timeout == 220
                 if fail_ready:
                     return subprocess.CompletedProcess([function], 1, "", "fixture readiness failure")
-                output = "bridge-ready\n"
+                output = ready_kind + "\n"
             elif function == "svc_activation_snapshot":
                 output = "unchanged loaded inactive\n"  # successful launchd spawner exits
             else:
@@ -222,20 +227,21 @@ def test_start_keeps_exact_grant_through_readiness_and_leaves_completion_to_owne
             runtime.start_unit(store, "candidate", installed_file=file, target=target,
                                unit=unit, sha256="0" * 64, adapter=Adapter())
         assert calls == []
-        if fail_ready:
-            with pytest.raises(runtime.RuntimeEvidenceError, match="native refusal"):
+        if fail_ready or ready_kind == "unknown-ready":
+            with pytest.raises(runtime.RuntimeEvidenceError, match=(
+                "native refusal" if fail_ready else "bot readiness evidence unavailable")):
                 runtime.start_unit(store, "candidate", installed_file=file, target=target,
                                    unit=unit, sha256=digest, adapter=Adapter())
         else:
             result = runtime.start_unit(store, "candidate", installed_file=file, target=target,
                                         unit=unit, sha256=digest, adapter=Adapter())
             assert result.details["native"] == "unchanged loaded inactive"
-            assert result.details["readiness"]["kind"] == "bridge-ready"
+            assert result.details["readiness"]["kind"] == ready_kind
             assert len(result.digest) == 64
         assert state.read_activation(builder.root, "candidate").body["pending"] == "bots_started"
         assert not (builder.root / "state/activation-start.sock").exists()
     assert calls == ["svc_activation_bot_fence", "svc_activation_start", "svc_activation_bot_ready"] + (
-        [] if fail_ready else ["svc_activation_snapshot"])
+        [] if fail_ready or ready_kind == "unknown-ready" else ["svc_activation_snapshot"])
 
 
 def test_adapter_timeout_reaps_its_poll_group_without_delayed_effect(tmp_path):
