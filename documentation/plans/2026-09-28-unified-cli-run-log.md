@@ -1,5 +1,57 @@
 # Unified CLI implementation record
 
+### 2026-09-29 — independent live canary and public-door retirement
+
+**Measured:** an independent `cli-isolated-1747` manager/worker fleet on this
+Mac completed admission, assignment, delivery, worker acceptance and a linked
+completion report through the composed `fleet-ops` skill and public CLI.
+Canonical reads preserve task `wi_d13b42a73f7a4adcb98ee91d1a5f35c3`, assignment
+`asg_25d4c65610d248bbb6a25262c39596a6`, and report
+`msg_a9529955b3be46d0922362126a6faa7f` through subsequent canary recompositions.
+Unconfirmed initial sends were inspected and never automatically resent.
+This supersedes the earlier real-agent acceptance status below. Evidence is in
+`~/.local/share/claudlobby-canary-live-1747/evidence/` and
+[implementation PR #1985](https://github.com/Claudfather/Claudlobby/pull/1985).
+
+**Measured:** production remains on source `c32396c`, activation
+`437af124-851e-449c-bfd2-2fd6eab545b8`; the protected manager's pane PID is 2598
+and the Plane PID is 1498. The operator authorized live fix-forward but separately
+required leaving Lumbergh running until his work finishes. The independent
+canary's namespaced units and root allow progress without restarting him.
+
+**Read from code:** later slices add `bot interrupt/compact`, `fleet notify`,
+explicit `migration` converter verbs, scalar `config explain` provenance,
+`plane emit/emit-batch`, current `config diff`, and `config validate --runtime`.
+The startup canary also exposed an oversized context response (the worker
+reported 67.5 KB and read only its beginning). Orientation now reports registry
+status, scan provenance and counts; detailed entity rows stay with Plane reads.
+Their former public spellings are removed with actual callers. The native
+telemetry socket/stdlib path remains private and does not acquire a Python CLI
+start per event. Runtime-audit mode reuses the existing audit verdict rather
+than adding a new migration gate. Focused existing checks cover each changed
+owner; the full platform suites remain hosted CI's responsibility.
+
+**Measured:** configured session-provider handoff reached a real worker's
+permission prompt for `.claude/session.md.tmp` in `acceptEdits` mode. The manager
+returned timeout/unknown and did not restart or retry. An exact `Edit` grant did
+not remove the prompt and was reverted. Claude's documented
+[protected-path policy](https://code.claude.com/docs/en/permission-modes#protected-paths)
+runs before allow rules; an allowlist is not unattended-handoff evidence.
+The next canary uses `auto`, matching both production fleet manifests, with
+permission bypass disabled. Successful provider saving and post-restart resume
+remain acceptance work, not a claimed pass. The minimal provider-absent canary
+previously returned an honest capability skip.
+
+**Measured:** all seven hosted checks passed at `c94a1ad`; the later `687f3d2`
+platform suites are still running. No result for an older head certifies later
+changes. A parser inventory at `118822e` finds 127 public leaf routes; 12 still lack
+the common result, including the two remaining legacy composition doors and
+Plane administrative/foreground-service routes. Remaining work includes
+residual composition/setup callers, explicit
+bot removal, final private/harness placement and active guidance, current-head
+checks, cold-host/platform acceptance, and protected production adoption.
+No normal-load Pi timing has been measured.
+
 ### 2026-09-28 — working delegation candidate after CI repair
 
 **M:** repair head `56bc75ffec991d3724d371415d399db7e1d9dc98` is green in
