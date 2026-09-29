@@ -1,5 +1,45 @@
 # Unified CLI implementation record
 
+### 2026-09-29 16:02 UTC — direct generation retired; cold fleet move exercised
+
+**Read from code:** the public `generate` route and the 508-line
+`lib/migrate-fleet-to-system.sh` are deleted, without aliases or shims. The new
+`--root ROOT --fleet F fleet move --system SYSTEM` moves cold authored files
+only. It reuses the activation lock and complete native inventory, refusing a
+selected release, retained activation history, a runtime directory, owned native
+consumers, redirected/ambiguous paths or a cross-filesystem move. It performs
+one directory rename, preserves contents, and neither composes nor starts bots.
+Active fleet relocation is explicitly unsupported; it would require a separate
+recovery design. This uses the simpler default presented to the operator while
+continuing the authorized cleanup. Existing native and diagnostic recovery hints
+now direct callers to `config plan` and `host activate`.
+
+**Measured:** wheel source `d21451b` executed that public command on a private
+cold root using the real macOS native inventory. The move succeeded, the authored
+content remained intact, a repeat returned `already_nested`, and public
+`config validate` resolved the nested fleet. The retired `generate` invocation
+returned exit 2 and created no runtime. The wheel contains neither the retired
+migration script nor the moved development harness. Evidence:
+`~/.local/share/claudlobby-candidates/20260929-cli-cold-move/evidence/`
+`{fleet-move.json,acceptance.json,package.json}`;
+[PR #1985](https://github.com/Claudfather/Claudlobby/pull/1985).
+
+**Measured / read from code:** `plane registry` now supports the common JSON
+contract. Its verify result explicitly compares authored config with recorded
+projection; incomplete enumeration, drift or unvalidated tombstones cannot report
+verification success. The built CLI read the independent live canary's registry
+at exit 0, returning one bot row in structured JSON. This was a read by the new
+artifact, not activation of that artifact. Seven focused registry cases, eleven
+cold-move/caller-inventory cases and 42 CLI parsing cases passed. The revised
+inventory recovery assertion passed its exact case. No full local suite or new
+migration harness was added.
+
+**Limits:** the independent running canary remains on `ceaa249`; production
+remains on `c32396c` with Lumbergh's no-restart hold. Hosted `af8b9fe` has passed
+its harness and three fast checks while its Linux/macOS suites are still running;
+no current-batch hosted success is claimed. Cold Linux/Pi evidence, normal-load
+Pi timings, current-head hosted CI and protected production adoption remain.
+
 ### 2026-09-29 15:46 UTC — public diagnostic skill passed on the live canary
 
 **Measured:** source `ceaa249` is active only on the independent Mac canary,
