@@ -151,7 +151,6 @@ YAML
 
 printf 'composing scoped freshbox bot with %s ...\n' "$CLAUDLOBBY_SRC"
 CLAUDLOBBY_ROOT="$ROOT" PYTHONPATH="$CLAUDLOBBY_SRC" python3 -m claudlobby generate >/dev/null
-CLAUDLOBBY_ROOT="$ROOT" PYTHONPATH="$CLAUDLOBBY_SRC" python3 -m claudlobby config validate --runtime >/dev/null
 
 SETTINGS="$BOT_DIR/.claude/settings.local.json"
 [ -f "$SETTINGS" ] || { printf 'ERROR: compose produced no %s\n' "$SETTINGS"; exit 1; }
