@@ -324,6 +324,7 @@ class TestOwnToolPath:
             "command -v claudlobby >/dev/null 2>&1 || echo NO_AMBIENT_CLI\n"
             "claudlobby_cli",
             self.MINIMAL, HOME=str(home), CLAUDLOBBY_CLI=str(selected),
+            CLAUDLOBBY_TOOL_PREFIXES=str(prefix),
         )
         assert r.returncode == 0, r.stderr
         assert "BEFORE_MISSING" in r.stdout, r.stdout
