@@ -952,8 +952,8 @@ harness_check "keepalive marker path: .idle marker not set (fleet-pulse stays co
 # heal ladder in keepalive.sh end-to-end: a DARK poller (no bot.pid → no_bridge)
 # on an IDLE bot, with the heal flag on, triggers the restart ladder — the ONLY
 # respawn (a claude bounce; the bun poller is an MCP stdio child of claude). The
-# ladder's start-bot.sh fallback is a RECORDER stub, so nothing is really
-# restarted. Also asserts the gates: flag-off is a no-op; no_token never bounces;
+# selected native restart is recorded by a fake user manager, so nothing is
+# really restarted. Also asserts the gates: flag-off is a no-op; no_token never bounces;
 # the attempt budget caps then escalates (F3 escalate-only).
 # CAVEAT: this exercises the heal MACHINERY on a deterministically-dark bridge.
 # Recovery from genuine upstream nondeterministic non-spawn is measured by the
@@ -965,14 +965,12 @@ HSTATE="$ROOT/ch/telegram-$HBOT"   # TELEGRAM_STATE_DIR — no bot.pid ⇒ bridg
 HREC="$HDIR/data/.heal-restart-count"
 mkdir -p "$HDIR/data" "$HSTATE"
 
-# BOT_SERVICE="" so (a) the socket resolves to the harness fallback tmux-valheal
-# (matching the session below) and (b) the restart ladder falls through to the
-# start-bot.sh recorder rather than any real systemd unit.
+# The selected private socket and a throwaway installed unit share one label.
 _heal_conf() {   # $1 = OBSERVABILITY_BRIDGE_HEAL (0/1)   $2 = token present (y/n)
     cat > "$HDIR/bot.conf" <<CONF
 BOT_NAME="$HBOT"
 BOT_ID="$HBOT"
-BOT_SERVICE=""
+BOT_SERVICE="tmux-$HBOT"
 MANAGER_TMUX="$MGR"
 TELEGRAM_BOT_HANDLE="$HBOT"
 TELEGRAM_STATE_DIR="$HSTATE"
@@ -988,10 +986,8 @@ CONF
     fi
 }
 
-# Stub lib dir: REAL keepalive + lib-common (symlinked), but a recorder start-bot.sh
-# so the heal's restart ladder is observed, never executed. keepalive resolves
-# LIB_DIR from its own path, so both the sourced lib-common and the invoked
-# start-bot come from here.
+# Stub lib dir: real keepalive/native code. A fake user manager records only
+# the selected restart; no real systemd unit or bot process is started.
 HLIB="$ROOT/stublib"
 mkdir -p "$HLIB"
 ln -sf "$LIB_DIR/keepalive.sh" "$HLIB/keepalive.sh"
@@ -999,15 +995,18 @@ ln -sf "$LIB_DIR/lib-common.sh" "$HLIB/lib-common.sh"
 ln -sf "$LIB_DIR/supervisor.sh" "$HLIB/supervisor.sh"
 ln -sf "$LIB_DIR/runtime-admission.sh" "$HLIB/runtime-admission.sh"
 val_link_plane_shim "$HLIB"
-cat > "$HLIB/start-bot.sh" <<'REC'
+mkdir -p "$HOME/.config/systemd/user"
+: > "$HOME/.config/systemd/user/tmux-$HBOT.service"
+cat > "$STUB_BIN/systemctl" <<'REC'
 #!/bin/bash
-# Recorder stub for the heal restart ladder (start-bot.sh fallback). Counts the
-# bounce against the bot dir passed as $1 instead of restarting a service.
-d="$1"
-c=0; [ -f "$d/data/.heal-restart-count" ] && c=$(cat "$d/data/.heal-restart-count" 2>/dev/null)
-printf '%s' "$((c + 1))" > "$d/data/.heal-restart-count"
+if [ "$1" = --user ] && [ "$2" = restart ]; then
+    c=0
+    [ -f "$VAL_KEEPALIVE_RESTART_COUNT" ] && c=$(cat "$VAL_KEEPALIVE_RESTART_COUNT")
+    printf '%s' "$((c + 1))" > "$VAL_KEEPALIVE_RESTART_COUNT"
+fi
+exit 0
 REC
-chmod +x "$HLIB/start-bot.sh"
+chmod +x "$STUB_BIN/systemctl"
 
 # Idle pane (bare prompt glyph) so keepalive reaches the IDLE branch where the heal
 # runs — the BUSY-gate is implicit in that placement.
@@ -1017,7 +1016,10 @@ _heal_reset() {   # clear the recorder + heal-ladder state between phases
     printf '%s' "0" > "$HREC"
     rm -f "$HDIR/data/.bridge-heal" "$HDIR/data/.bridge-heal-escalated"
 }
-run_heal() { CLAUDLOBBY_ROOT="$ROOT" "$HLIB/keepalive.sh" "$HDIR" >/dev/null 2>&1 || true; }
+run_heal() {
+    CLAUDLOBBY_ROOT="$ROOT" VAL_KEEPALIVE_RESTART_COUNT="$HREC" PATH="$STUB_BIN:$PATH" \
+        "$HLIB/keepalive.sh" "$HDIR" >/dev/null 2>&1 || true
+}
 
 # --- Phase A: flag ON, token present, dark poller → bounce, retry, cap, escalate ---
 _heal_conf 1 y
@@ -1144,8 +1146,8 @@ harness_check "gate-on alert states keepalive will bounce to recover" "$r"
 # nothing drove keepalive's real dead-session branch to prove it EMITS a line the
 # parser recognizes — so the #577 restart_bot_service extraction left that wording
 # one refactor from silently drifting out of uptime.py's _LOG_LINE_RE. Drive the
-# real path (a session-less bot, via the HLIB recorder stub so nothing truly
-# restarts) and assert the REAL parser extracts a RESTART from the emitted log.
+# real path (a session-less bot with an installed throwaway unit and fake
+# systemctl) and assert the REAL parser extracts a RESTART from the emitted log.
 val_scenario "validate dead-session RESTART line (#579: keepalive emitter ⇄ uptime parser)"
 DBOT="valdead"
 DDIR="$ROOT/local/$FLEET/runtime/bots/$DBOT"
@@ -1154,8 +1156,8 @@ mkdir -p "$DDIR/data"
 # are load-bearing for what this scenario asserts — with no FLEET_NAME keepalive
 # anchors the restart on the HOST sentinel and records no per-bot fact, and with
 # FLEET_NAME but no BOT_SERVICE the socket resolver refuses before the dead-session
-# branch is reached (both probed on a throwaway rig, F18 R2b). No unit or plist
-# exists for the label, so the restart ladder falls through to the recorder stub.
+# branch is reached (both probed on a throwaway rig, F18 R2b). The unit below
+# exists only in the harness HOME, so the native action reaches no real service.
 cat > "$DDIR/bot.conf" <<CONF
 BOT_NAME="$DBOT"
 BOT_ID="$DBOT"
@@ -1166,7 +1168,9 @@ CONF
 # No tmux session for valdead on its socket → keepalive takes the dead-session
 # branch. The RESTART log line is echoed before the restart action fires, so it
 # lands regardless of the (stubbed) restart.
-CLAUDLOBBY_ROOT="$ROOT" "$HLIB/keepalive.sh" "$DDIR" >/dev/null 2>&1 || true
+: > "$HOME/.config/systemd/user/com.val.$DBOT.service"
+CLAUDLOBBY_ROOT="$ROOT" VAL_KEEPALIVE_RESTART_COUNT="$HREC" PATH="$STUB_BIN:$PATH" \
+    "$HLIB/keepalive.sh" "$DDIR" >/dev/null 2>&1 || true
 grep -qE 'RESTART.*session dead' "$DDIR/keepalive.log" 2>/dev/null && r=yes || r=no
 harness_check "keepalive dead-session path emits a RESTART … session dead log line" "$r"
 # Load-bearing assertion: the READER the fleet consumes must see that restart.
