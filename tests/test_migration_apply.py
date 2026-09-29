@@ -90,6 +90,30 @@ def test_wal_backup_preserves_ids_cursor_and_retry_is_read_only(candidate):
         conn.close()
 
 
+def test_current_schema_uses_verified_backup_digest_without_sql_rehearsal(candidate, monkeypatch):
+    root, _, plan = candidate
+    conn = _database(root, version=SCHEMA_USER_VERSION)
+    _insert(conn, "events", kind="system", event="already_current")
+    conn.close()
+    manifest = _preview(candidate)
+    assert not manifest.blockers
+
+    def no_scratch(*_args, **_kwargs):
+        raise AssertionError("current schema must not create a SQL rehearsal copy")
+
+    with activation.locked_activation(root) as store:
+        _quiesce(store, plan, manifest)
+        with monkeypatch.context() as patch:
+            patch.setattr(apply.tempfile, "NamedTemporaryFile", no_scratch)
+            result = apply.apply_migration(store, "upgrade", manifest)
+        assert result["backup"]["user_version"] == SCHEMA_USER_VERSION
+        assert result["result"]["logical_sha256"] == result["backup"]["logical_sha256"]
+        with sqlite3.connect(db_file(root)) as changed:
+            _insert(changed, "events", kind="system", event="unreviewed_writer")
+        with pytest.raises(apply.MigrationApplyError, match="contents differ"):
+            apply.apply_migration(store, "upgrade", manifest)
+
+
 def test_only_explicit_empty_initialization_can_create_database(candidate):
     root, _, plan = candidate
     manifest = _preview(candidate, initialize_empty=True)

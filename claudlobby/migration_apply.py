@@ -232,6 +232,14 @@ def _save_backup(store, activation_id, manifest, body, backup_path):
 
 
 def _expectations(backup_path, backup, scripts, observed_version):
+    # The backup was logically compared with the quiesced source before its
+    # journal was saved, and the caller has just rechecked its exact bytes.
+    # With both source and observed DB already at the runner's target version,
+    # there is no SQL prefix or suffix to rehearse: that verified digest is
+    # both the expected current state and the target state. The caller still
+    # compares the actual DB digest and verifies queues/activation evidence.
+    if backup["user_version"] == observed_version == SCHEMA_USER_VERSION:
+        return backup["logical_sha256"], backup["logical_sha256"]
     # Keep a potentially large Plane off the Python heap. The private scratch
     # copy is disposable; the durable backup is never used as a write target.
     with tempfile.NamedTemporaryFile(prefix=".sql-rehearsal-", dir=backup_path.parent) as scratch:
