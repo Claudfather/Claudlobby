@@ -5,8 +5,8 @@ drives the REAL keepalive.sh and fleet-pulse.sh against a systemctl stub that an
 from a scene's unit state and logs every `restart` with the counter it would zero.
 
 Every scenario is hermetic: temp HOME/root, PLANE_EMIT_DISABLED=1, a stub curl, no network.
-The emit=True scenes are the one exception to the middle of that: they arm the plane shim and
-point its cold rung at a recorder, so the events the scripts raise can be read back.
+The emit=True scenes are the one exception: they arm the Plane shim against a
+dead private socket and inspect its durable raw staged batch.
 """
 
 import json
@@ -77,14 +77,7 @@ class Scene:
         self.calls.write_text("")
         self.emit_dir = None
         if emit:
-            # Arms the plane shim and points its cold rung at a recorder that keeps each batch
-            # it is handed (test_fleet_pulse_no_events.py's idiom): no plane, no daemon, and
-            # the events the scripts raise can be read back with emitted().
-            self.emit_dir = self.tmp / "emitted"
-            self.emit_dir.mkdir()
-            rec = self.bin / "plane-cli"
-            rec.write_text('#!/bin/bash\ncp "${@: -1}" "$EMIT_DIR/$(date +%s%N).json"\n')
-            rec.chmod(0o755)
+            self.emit_dir = self.root / "state/plane/staged"
         for name, body in (
             ("systemctl", SYSTEMCTL),
             ("curl", '#!/bin/bash\nprintf "%s" \'{"ok":false}\'\n'),
@@ -114,8 +107,7 @@ class Scene:
             "TELEGRAM_STATE_DIR": str(self.tmp / "tg"),
         }
         if self.emit_dir:
-            env.update(self.scratch_plane_env(self.root, cli=self.bin / "plane-cli"))
-            env["EMIT_DIR"] = str(self.emit_dir)
+            env.update(self.scratch_plane_env(self.root))
         return env
 
     def keepalive(self):
@@ -156,9 +148,9 @@ class Scene:
         return sorted(p.name for p in self.pulse_state.glob("b.*"))
 
     def emitted(self, name):
-        """The plane events called `name` that the scripts handed the shim (emit=True scenes)."""
+        """Raw pending Plane events; daemon replay/capture is tested separately."""
         rows = []
-        for f in sorted(self.emit_dir.glob("*.json")):
+        for f in sorted(self.emit_dir.glob("*.batch")):
             rows += [e["payload"] for e in json.loads(f.read_text())["events"]]
         return [p for p in rows if p.get("event") == name]
 

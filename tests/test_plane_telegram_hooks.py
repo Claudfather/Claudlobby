@@ -1,7 +1,7 @@
 """#1402 battery: the Telegram carrier hooks — the operator in the stream.
 
-Every pin drives the REAL scripts with hook-shaped stdin against a real
-emit root (the cold CLI path end-to-end). The load-bearing laws: the
+Every pin drives the REAL scripts with hook-shaped stdin against a private
+Plane daemon. The load-bearing laws: the
 inbound hook's STDOUT IS EMPTY on every path (UserPromptSubmit stdout is
 added to the model's context — leakage would reshape turns fleet-wide);
 both hooks RECORD without any flag in their environment (the plane is the
@@ -17,11 +17,16 @@ from tests.plane_setup import initialize_plane
 
 from tests.package_fixtures import source_package
 import json
+import os
 import sqlite3
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
+
+from claudlobby.plane.daemon import PlaneDaemon
 
 REPO = Path(__file__).resolve().parent.parent
 OUT = REPO / "lib" / "plane-telegram-out.sh"
@@ -36,13 +41,11 @@ def _root(tmp_path: Path) -> Path:
 
 
 def _env(root: Path, *, scratch_plane_env, **extra) -> dict:
-    import os
+    sock = scratch_plane_env.socket_dir() / "s"
     env = {
-        # the repo venv leads PATH so plane-emit's cold rung resolves the
-        # real `claudlobby` CLI against the FIXTURE root (--root $ROOT)
-        "PATH": f"{REPO}/.venv/bin:" + os.environ.get("PATH", "/usr/bin:/bin"),
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": os.environ.get("HOME", "/tmp"),
-        **scratch_plane_env(root),
+        **scratch_plane_env(root, socket=sock),
         "FLEET_NAME": "test-fleet",
         "BOT_ID": "erlich",
         "PLANE_EMIT_ENABLED": "1",
@@ -52,9 +55,24 @@ def _env(root: Path, *, scratch_plane_env, **extra) -> dict:
 
 
 def _run(script: Path, stdin: str, env: dict) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["bash", str(script)], input=stdin, capture_output=True,
-        text=True, env=env, timeout=60)
+    root = Path(env["CLAUDLOBBY_ROOT"])
+    if env.get("PLANE_EMIT_DISABLED") == "1" or not (root / "state/plane/plane.db").is_file():
+        return subprocess.run(["bash", str(script)], input=stdin, capture_output=True,
+                              text=True, env=env, timeout=60)
+    sock = Path(env["PLANE_SOCKET"])
+    daemon = PlaneDaemon(root, socket_override=sock, drain_interval=0.2)
+    thread = threading.Thread(target=lambda: daemon.serve(install_signals=False), daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 10
+    while not sock.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert sock.exists(), "fixture Plane daemon did not bind"
+    try:
+        return subprocess.run(["bash", str(script)], input=stdin, capture_output=True,
+                              text=True, env=env, timeout=60)
+    finally:
+        daemon.stop()
+        thread.join(timeout=10)
 
 
 def _rows(root: Path, sql: str):
