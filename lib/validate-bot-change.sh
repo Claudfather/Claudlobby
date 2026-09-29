@@ -378,7 +378,7 @@ val_seed_dispatch() {
 {"event_type":"transmission","emitter":"dispatch-task","fleet":"$fleet","occurred_at":"$iso","payload":{"msg_id":"$msg","attempt_no":1,"carrier":"tmux","destination":"$bot","state":"pane_submitted"}}
 ]}
 JSON
-    "$VAL_CLI" --root "$root" emit-batch --json "$f" >/dev/null 2>&1 \
+    "$VAL_CLI" --root "$root" plane emit-batch --file "$f" >/dev/null 2>&1 \
         || echo "validate-bot-change: seeding dispatch $tid for $bot failed" >&2
     rm -f "$f"
 }
@@ -416,7 +416,7 @@ val_seed_report() {
         fi
         printf ']}\n'
     } > "$f"
-    "$VAL_CLI" --root "$root" emit-batch --json "$f" >/dev/null 2>&1 \
+    "$VAL_CLI" --root "$root" plane emit-batch --file "$f" >/dev/null 2>&1 \
         || echo "validate-bot-change: seeding a $status report by $bot failed" >&2
     rm -f "$f"
 }

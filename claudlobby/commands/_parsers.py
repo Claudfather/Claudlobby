@@ -117,17 +117,26 @@ def register_subparsers(sub) -> None:
     register_event_read_subparsers(sub)
 
     # --- observable plane (Phase 1 kernel) ---
-    pe = sub.add_parser("emit", help="Validated event ingest into the plane db")
-    pe.add_argument("event_type", help="communication | transmission | work_item | assignment | task")
-    pe.add_argument("--json", required=True, help="Request JSON path, or '-' for stdin")
-    pe.set_defaults(func=_command("plane", "cmd_emit"))
-
-    peb = sub.add_parser("emit-batch", help="Atomic multi-event unit of work (F4)")
-    peb.add_argument("--json", required=True, help='{"events": [...]} path, or "-"')
-    peb.set_defaults(func=_command("plane", "cmd_emit_batch"))
-
     pp = sub.add_parser("plane", help="Observable-plane operations")
     psub = pp.add_subparsers(dest="plane_action", required=True)
+    for action in ("emit", "emit-batch"):
+        pe = psub.add_parser(action, help="Validated Plane ingest" if action == "emit"
+                             else "Atomic multi-event Plane ingest")
+        if action == "emit":
+            pe.add_argument("event_type", help="Plane event family")
+        pe.add_argument("--file", required=True, help="Request JSON path, or '-' for stdin")
+        pe.add_argument("--require-commit", action="store_true",
+                        help="Refuse instead of spooling a conditional mutation")
+        pe.add_argument("--json", action="store_true", help="Schema-1 result")
+
+        def _emit_dispatch(args):
+            from ..command_result import execute
+            action = args.plane_action
+            return execute(f"plane.{action}",
+                           lambda: _command("plane_emit", "dispatch")(args),
+                           json_output=args.json)
+
+        pe.set_defaults(func=_emit_dispatch, public_command=f"plane.{action}")
     ps = psub.add_parser("status", help="Kernel health: db, counts, spool")
     ps.set_defaults(func=_command("plane", "cmd_plane_status"))
     pd = psub.add_parser("doctor", help="Kernel health rungs (exit 1 on attention)")

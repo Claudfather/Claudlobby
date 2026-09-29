@@ -1,9 +1,7 @@
-"""claudlobby emit / claudlobby plane — the kernel's CLI surface.
+"""Legacy Plane diagnostics and maintenance commands.
 
-Failure taxonomy is CENTRAL, not per-command: every plane door maps
-ContractViolation -> 2, SpoolWriteError -> 3, DowngradeError -> 4 through the
-same guard, so a wrong-shape request or a newer db exits by contract instead
-of escaping as a traceback from whichever command happened to touch it.
+Legacy diagnostics map Plane contract and storage failures through one guard.
+Public ingest uses the common result adapter in plane_emit.py.
 """
 
 from __future__ import annotations
@@ -20,13 +18,7 @@ from pathlib import Path
 from ._helpers import _load_fleet_or_exit, _resolve_paths
 from ..plane.contracts import ContractViolation, export_schemas
 from ..plane.db import connect, connect_ro, db_file, open_ro
-from ..plane.emit_api import (
-    emit,
-    emit_batch,
-    _load_capture_config,
-    capture_mode,
-    DEFAULT_CAPTURE,
-)
+from ..plane.emit_api import _load_capture_config, capture_mode, DEFAULT_CAPTURE
 from ..plane.identity import provisional_actors
 from ..plane.ids import ensure_host_uid
 from ..plane.migrations import DowngradeError, SCHEMA_USER_VERSION
@@ -77,80 +69,6 @@ def _guarded(label: str, fn) -> int:
         # not transient infrastructure — retrying it forever helps no one.
         print(f"{label}: REFUSED — {exc}", file=sys.stderr)
         return 4
-
-
-def _require_object(obj, where: str) -> dict:
-    """Valid JSON is not yet a valid request: [] / null / 42 / "x" used to
-    escape as TypeError tracebacks past the JSONDecodeError catch."""
-    if not isinstance(obj, dict):
-        raise ContractViolation(
-            [{"loc": (where,),
-              "msg": f"request must be a JSON object, got {type(obj).__name__}"}]
-        )
-    return obj
-
-
-def cmd_emit(args) -> int:
-    root = _resolve_paths(args).root
-    try:
-        raw = sys.stdin.read() if args.json == "-" else Path(args.json).read_text()
-        request = json.loads(raw)
-    except (OSError, json.JSONDecodeError) as exc:
-        print(f"emit: unreadable request: {exc}", file=sys.stderr)
-        return 2
-
-    def run() -> int:
-        req = _require_object(request, "request")
-        req["event_type"] = args.event_type
-        outcome = emit(root, req)
-        print(outcome.event_id)
-        if outcome.status == "spooled":
-            # #1711, same collapse as cmd_emit_batch. Found by the test rather
-            # than by reading: the first patch covered emit-batch alone because
-            # that is the door the shim uses, and `claudlobby emit` is a second
-            # public door with the identical defect.
-            print(f"plane: db unavailable — SPOOLED {outcome.detail} "
-                  f"(durable on disk, NOT in the plane until a drain)",
-                  file=sys.stderr)
-            return RC_SPOOLED
-        return 0
-
-    return _guarded("emit", run)
-
-
-def cmd_emit_batch(args) -> int:
-    """One atomic unit of work: {"events": [...]} or a bare JSON array (F4)."""
-    root = _resolve_paths(args).root
-    try:
-        raw = sys.stdin.read() if args.json == "-" else Path(args.json).read_text()
-        parsed = json.loads(raw)
-        requests = parsed["events"] if isinstance(parsed, dict) else parsed
-        assert isinstance(requests, list) and requests
-    except (OSError, json.JSONDecodeError, KeyError, AssertionError) as exc:
-        print(f"emit-batch: unreadable request: {exc}", file=sys.stderr)
-        return 2
-
-    def run() -> int:
-        members = [
-            _require_object(r, f"events[{i}]") for i, r in enumerate(requests)
-        ]
-        outcomes = emit_batch(root, members)
-        for o in outcomes:
-            print(o.event_id)
-        if outcomes and outcomes[0].status == "spooled":
-            # #1711. Symmetric with lib/plane-socket-client.py: a spooled batch
-            # is durable on disk and ABSENT from the plane, so rc 0 — which the
-            # shim and every door read as "recorded" — asserted something false.
-            # RC_SPOOLED is a verdict: the batch is already written, and the
-            # shim must not replay it down another rung.
-            print(f"plane: db unavailable — SPOOLED {outcomes[0].detail} "
-                  f"(durable on disk, NOT in the plane until a drain)",
-                  file=sys.stderr)
-            return RC_SPOOLED
-        return 0
-
-    return _guarded("emit-batch", run)
-
 
 
 def cmd_plane_status(args) -> int:

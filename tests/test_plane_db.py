@@ -295,7 +295,7 @@ def test_concurrent_first_emitters_on_a_fresh_plane_all_land_none_spooled(tmp_pa
             f = root / f"batch{i}.json"
             f.write_text(json.dumps(batch))
             files.append(f)
-        procs = [subprocess.Popen([str(cli), "--root", str(root), "emit-batch", "--json", str(f)],
+        procs = [subprocess.Popen([str(cli), "--root", str(root), "plane", "emit-batch", "--file", str(f)],
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for f in files]
         errs = [p.communicate()[1] for p in procs]
         assert all(p.returncode == 0 for p in procs), errs

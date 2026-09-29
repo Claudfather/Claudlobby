@@ -17,7 +17,9 @@ from .reference_hints import ReferenceHint
 _EXITS = {"internal_error": 1, "selection_defect": 1, "invalid_argument": 2, "not_found": 3,
           "conflict": 4, "wrong_reference": 4, "ambiguous_reference": 4,
           "delivery_unknown": 5, "delivery_failed": 5, "notification_failed": 5,
-          "unavailable": 6, "release_mismatch": 7, "timeout": 8,
+          "unavailable": 6, "spooled": 6, "commit_unknown": 5,
+          "total_failure": 3, "downgrade": 4, "migration_required": 7,
+          "release_mismatch": 7, "timeout": 8,
           "receipt_unobservable": 9, "receipt_mismatch": 10, "recording_degraded": 11}
 _PUBLIC = {("brief",): "brief", ("host", "releases"): "host.releases", ("host", "status"): "host.status",
            ("library", "list"): "library.list", ("library", "create"): "library.create",
@@ -57,6 +59,7 @@ _PUBLIC.update({(domain, verb): f"{domain}.{verb}" for domain, verbs in (
     ("event", ("list", "show"))) for verb in verbs})
 _PUBLIC.update({("bot", "automation", action): f"bot.automation.{action}"
                 for action in ("status", "pause", "resume", "record")})
+_PUBLIC.update({("plane", action): f"plane.{action}" for action in ("emit", "emit-batch")})
 _invocation = ContextVar("public_cli_invocation", default=(None, False))
 
 

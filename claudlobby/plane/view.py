@@ -253,7 +253,7 @@ def _envelope(root: Path, fn):
     if probe.state == SOURCE_ABSENT:
         return fail(SOURCE_ABSENT,
                     "no plane db yet — it appears on the first armed emission"
-                    " (or `claudlobby emit`); check PLANE_EMIT_ENABLED for"
+                    " (or `claudlobby plane emit`); check PLANE_EMIT_ENABLED for"
                     " the fleet")
     if probe.state == SOURCE_UNREADABLE:
         return fail(SOURCE_UNREADABLE,

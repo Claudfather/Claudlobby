@@ -481,14 +481,14 @@ def _run(args, stdin=None):
 
 @pytest.mark.parametrize("payload", ["[]", "null", "42", '"x"'])
 def test_f9_wrong_shape_single_request_exits_2(tmp_path: Path, payload):
-    r = _run(["--root", str(tmp_path), "emit", "communication", "--json", "-"],
+    r = _run(["--root", str(tmp_path), "plane", "emit", "communication", "--file", "-"],
              stdin=payload)
     assert r.returncode == 2, r.stderr
     assert "Traceback" not in r.stderr
 
 
 def test_f9_wrong_shape_batch_member_exits_2(tmp_path: Path):
-    r = _run(["--root", str(tmp_path), "emit-batch", "--json", "-"],
+    r = _run(["--root", str(tmp_path), "plane", "emit-batch", "--file", "-"],
              stdin='{"events": [42]}')
     assert r.returncode == 2, r.stderr
     assert "Traceback" not in r.stderr

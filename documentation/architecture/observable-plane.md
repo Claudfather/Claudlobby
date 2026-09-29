@@ -73,12 +73,15 @@ counts the provisional ones. Session uids are transcript-stable
 programmatic write: validate the RAW envelope, apply the capture policy,
 validate the captured form, then one transaction per batch (`ingest.py`) with
 dedupe on `event_id` — a batch that mixes duplicates and new rows is REFUSED
-("mixed state") rather than half-applied. Every bash door reaches it through
-`lib/plane-emit.sh`, a ladder: the daemon's socket (`lib/plane-socket-client.py`
-pre-mints event ids into a finalized file BEFORE the first attempt, so a commit
-whose ack was lost classifies as duplicate, never a second row) → the cold CLI
-(`claudlobby emit-batch`) → the spool (`claudlobby plane spool retry` drains
-it). The daemon (`plane serve`, composed as the dormant `claudlobby-plane-daemon`
+("mixed state") rather than half-applied. Public ingest uses
+`claudlobby plane emit FAMILY --file FILE|-` or
+`claudlobby plane emit-batch --file FILE|-`; `--json` selects the common result.
+Exit 0 means committed or already present, while exit 6 means durably spooled
+and still pending. Conditional writes can use `--require-commit` to refuse
+spooling; an uncertain commit must be reconciled by event ID before retrying.
+The hot bash path stays on `lib/plane-emit.sh`: its stdlib socket client
+pre-mints event IDs and durably stages an unacknowledged batch for daemon
+replay without starting the full CLI. The daemon (`plane serve`, composed as the dormant `claudlobby-plane-daemon`
 host service) owns INGEST AND NOTHING ELSE. `PLANE_EMIT_DISABLED=1` is the
 harness exemption (a byte-identical no-op); every door calls the shim `|| log`
 and never blocks its real action on it.
