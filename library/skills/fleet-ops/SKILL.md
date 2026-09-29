@@ -4,6 +4,7 @@ description: "Read fleet work, admit tasks, deliver and route assignments as man
 tool_grants:
   - "Bash(claudlobby --help)"
   - "Bash(claudlobby brief --help)"
+  - "Bash(claudlobby library list --help)"
   - "Bash(claudlobby task list --help)"
   - "Bash(claudlobby task show --help)"
   - "Bash(claudlobby task reviews --help)"
@@ -48,6 +49,7 @@ tool_grants:
   - "Bash(claudlobby fleet inbox --help)"
   - "Bash(claudlobby request show --help)"
   - "Bash(claudlobby --json context show)"
+  - "Bash(claudlobby --json library list)"
   - "Bash(claudlobby --json brief)"
   - "Bash(claudlobby --json brief *)"
   - "Bash(claudlobby --json task list)"
@@ -84,6 +86,11 @@ tool_grants:
 ---
 
 # Fleet operations
+
+Use `claudlobby --json library list` to discover available skills, guardrails,
+expertise and other composition components. Source authoring with `bot create`
+or `library create` requires the operator or an explicitly equipped author;
+review and activate configuration separately.
 
 Use this guide for task, assignment, message, and request reads; the admitted
 task and assignment lifecycle; and ordinary message send and reply. The
