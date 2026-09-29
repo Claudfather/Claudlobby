@@ -99,10 +99,10 @@ def test_current_schema_check_preserves_the_callers_transaction(tmp_path):
 def test_diagnostic_doors_refuse_pending_schema_without_advancing_it(tmp_path, monkeypatch, capsys):
     """The old status/doctor/registry doors each called migrate on a read."""
     from types import SimpleNamespace
-    from claudlobby.commands import plane, plane_status
+    from claudlobby.commands import plane, plane_registry, plane_status
     from claudlobby.command_result import CommandFailure
 
-    monkeypatch.setattr(plane, "_resolve_paths", lambda _: SimpleNamespace(root=tmp_path))
+    monkeypatch.setattr(plane_registry, "resolve_paths", lambda **_: SimpleNamespace(root=tmp_path))
     monkeypatch.setattr(plane_status, "resolve_paths", lambda **_: SimpleNamespace(root=tmp_path))
     path = db_file(tmp_path)
     path.parent.mkdir(parents=True)
@@ -116,11 +116,14 @@ def test_diagnostic_doors_refuse_pending_schema_without_advancing_it(tmp_path, m
     assert status_error.value.error.code == "migration_required"
     assert "explicit migration apply" in status_error.value.error.message
     assert path.read_bytes() == before
-    for door in (plane.cmd_plane_doctor, plane.cmd_plane_registry):
-        assert door(SimpleNamespace()) == 7
-        assert "explicit migration apply" in capsys.readouterr().err
-        assert path.read_bytes() == before
-        assert [item.name for item in path.parent.iterdir()] == ["plane.db"]
+    assert plane.cmd_plane_doctor(SimpleNamespace(root=tmp_path, fleet=None, seed=False)) == 7
+    assert "explicit Plane migration is required" in capsys.readouterr().err
+    with pytest.raises(CommandFailure) as registry_error:
+        plane_registry.dispatch(SimpleNamespace(root=tmp_path, fleet=None, seed=False))
+    assert registry_error.value.error.code == "migration_required"
+    assert "explicit migration apply" in registry_error.value.error.message
+    assert path.read_bytes() == before
+    assert [item.name for item in path.parent.iterdir()] == ["plane.db"]
 
 
 def test_status_on_absent_root_remains_read_only(tmp_path, monkeypatch, capsys):

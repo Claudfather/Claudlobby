@@ -254,6 +254,13 @@ disagree on the same fleet. Details: `documentation/runbooks/plane-view.md`.
   quarantine or pending entries do not return a clean success. Spool retry,
   operator quarantine and live prune require selected-release mutation
   admission; spool inspection and prune dry runs remain diagnostic reads.
+- **`plane registry`** — lists recorded registry rows and their history or
+  changes, with `--json` returning one schema-1 result. `--verify` compares
+  authored fleet configuration with the recorded Plane projection. Incomplete
+  authored enumeration or drift is a conflict, never a match; even a match
+  does not prove that the reviewed plan was activated or is running. Review
+  authored changes with `config plan` and activate the reviewed plan with
+  `host activate`.
 - **The stdlib readers** (`lib/plane-readers.py`, `lib/plane-lookup.py`) — the
   plane answered from bash doors without paying the package import: the open
   list and the overdue set (SQL pinned byte-identical to

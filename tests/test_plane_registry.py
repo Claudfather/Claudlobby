@@ -320,8 +320,41 @@ def test_cli_verify_door_matches_a_fresh_scan(tmp_path, *, scratch_plane_env):
          "plane", "registry", "--verify"],
         capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "projection matches the estate" in r.stdout
+    assert "authored configuration matches the recorded Plane projection" in r.stdout
     assert not (root / "host-uid").exists()   # read doors leave no writes
+    structured = subprocess.run(
+        [sys.executable, "-m", "claudlobby", "--root", str(root),
+         "plane", "registry", "--verify", "--json"],
+        capture_output=True, text=True, timeout=120)
+    body = json.loads(structured.stdout)
+    assert structured.returncode == 0 and structured.stderr == ""
+    assert body["data"]["comparison"] == "authored_config_vs_recorded_plane_projection"
+    assert body["data"]["proves_activation_or_runtime"] is False
+
+
+def test_cli_verify_incomplete_authored_enumeration_never_claims_match(
+        tmp_path, scratch_plane_env, monkeypatch):
+    from types import SimpleNamespace
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.commands.plane_registry import dispatch
+    from claudlobby.plane import registry_emit
+    from claudlobby.resources import get_resources
+
+    root = _fleet_root(tmp_path)
+    _scan(root, scratch_plane_env=scratch_plane_env, package=get_resources())
+    original = registry_emit.assemble_entities
+    def incomplete(*args):
+        rows, _ = original(*args)
+        return rows, False
+    monkeypatch.setattr(registry_emit, "assemble_entities", incomplete)
+    args = SimpleNamespace(root=root, fleet=None, seed=False, verify=True,
+                           history=None, changes=None, show=None, type=None,
+                           scope_fleet=None, json=True)
+    with pytest.raises(CommandFailure) as refused:
+        dispatch(args)
+    assert refused.value.error.code == "conflict"
+    assert refused.value.data["enumeration_complete"] is False
+    assert refused.value.data["comparison"] == "authored_config_vs_recorded_plane_projection"
 
 
 def test_emitter_re_tombstones_after_a_crashed_scan(tmp_path, *, scratch_plane_env):

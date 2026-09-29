@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 
 from tests.plane_setup import initialize_plane
@@ -324,8 +325,8 @@ def test_doctor_and_registry_survive_a_corrupt_declaration_row(tmp_path):
     assert "spool depth" in r.stdout          # later rungs still printed
     assert "Traceback" not in r.stderr
     r2 = _cli(root, "registry")
-    assert r2.returncode == 1
-    assert "registry unreadable" in r2.stderr
+    assert r2.returncode == 6
+    assert "registry projection is unreadable" in r2.stderr
     assert "Traceback" not in r2.stderr
 
 
@@ -391,7 +392,7 @@ def test_cli_changes_zero_and_exclusive_modes(tmp_path):
     r2 = _cli(root, "registry", "--show", "x", "--history", "y")
     assert r2.returncode == 2
     assert "invalid argument: command syntax" in r2.stderr
-    assert "inspect claudlobby plane --help" in r2.stderr
+    assert "inspect claudlobby plane registry --help" in r2.stderr
 
 
 # --- verify (the injectable-assembly seam) ---------------------------------
@@ -445,6 +446,14 @@ def test_cli_registry_list_show_history_and_trust_line(tmp_path):
     assert r.returncode == 0
     assert BOT in r.stdout
     assert "NOT honored" in r.stderr                # the trust line
+    structured = subprocess.run(
+        [sys.executable, "-m", "claudlobby", "--root", str(root), "--json",
+         "plane", "registry"], capture_output=True, text=True, timeout=120)
+    body = json.loads(structured.stdout)
+    assert structured.returncode == 0 and structured.stderr == ""
+    assert body["command"] == "plane.registry" and body["data"]["mode"] == "list"
+    assert body["data"]["trust"]["invalid_tombstones"] == 1
+    assert body["data"]["rows"][0]["entity_alias"] == BOT
     r2 = _cli(root, "registry", "--show", BOT)
     assert r2.returncode == 0
     assert '"model": "opus"' in r2.stdout
@@ -455,7 +464,7 @@ def test_cli_registry_list_show_history_and_trust_line(tmp_path):
     assert "TOMBSTONE" not in r3.stdout
     assert "scan=s1" in r3.stdout
     r4 = _cli(root, "registry", "--show", "nope")
-    assert r4.returncode == 1
+    assert r4.returncode == 3
     # a VALID tombstone renders in history as the deletion window
     root2 = _root(tmp_path / "valid")
     emit_batch(root2, [_snap(BOT, "s1", T1, P1), _done("s1", T1),
@@ -480,7 +489,7 @@ def test_cli_trust_line_survives_an_empty_registry(tmp_path):
                       _tomb("bot:f/ghost", "s4", T3)])         # invalid, ghost
     r = _cli(root, "registry")
     assert r.returncode == 0
-    assert "empty" in r.stderr
+    assert "empty" in r.stdout
     assert "NOT honored" in r.stderr
 
 

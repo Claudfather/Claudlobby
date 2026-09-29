@@ -185,7 +185,14 @@ def register_subparsers(sub) -> None:
                       help="Hash-verify the projection against the"
                       " re-derived estate (root-mode fleet.yaml, or the"
                       " global --fleet <name> for an overlay)")
-    prg.set_defaults(func=_command("plane", "cmd_plane_registry"))
+    prg.add_argument("--json", action="store_true", help="Schema-1 result")
+
+    def _registry_dispatch(args):
+        from ..command_result import execute
+        return execute("plane.registry", lambda: _command("plane_registry", "dispatch")(args),
+                       json_output=args.json)
+
+    prg.set_defaults(func=_registry_dispatch, public_command="plane.registry")
     psp = psub.add_parser("spool", help="Inspect/drain the emit spool")
     psp.add_argument("spool_action", choices=["list", "inspect", "retry", "quarantine"])
     psp.add_argument("name", nargs="?", help="Spool file name (inspect/quarantine)")
