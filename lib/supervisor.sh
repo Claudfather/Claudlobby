@@ -786,16 +786,26 @@ svc_activation_bot_fence() (
 
 svc_activation_bot_ready() (
     export CLAUDLOBBY_ROOT="$1"
-    local bot_dir="$2" ceiling="$3" token="$4" socket session
+    local bot_dir="$2" ceiling="$3" token="$4" socket session outcome=channel handle
     case "$ceiling" in ''|*[!0-9]*) return 3 ;; esac
     [ -n "$token" ] || return 3
     . "$_SUPERVISOR_LIB_DIR/rolling-restart.sh" || return 3
-    wait_bridge_ready "$bot_dir" "$ceiling" "$token" || return $?
+    handle=$(bot_conf_get "$bot_dir" TELEGRAM_BOT_HANDLE "") || return 3
+    if [ -z "$handle" ]; then
+        outcome=no_handle
+    elif bot_expects_no_token "$bot_dir"; then
+        outcome=expected_no_token
+    fi
+    wait_bridge_ready "$bot_dir" "$ceiling" "$token" "$outcome" || return $?
     socket=$(tmux_socket_for_bot "$bot_dir") || return 3
     [ -n "$socket" ] || return 3
     session=$(tmux_session_name "$bot_dir") || return 3
     check_tmux_session "$session" "$socket" || return 3
-    printf 'bridge-ready\n'
+    case "$WAIT_BRIDGE_READY_OUTCOME" in
+        bridge) printf 'bridge-ready\n' ;;
+        session) printf 'session-ready\n' ;;
+        *) return 3 ;;
+    esac
 )
 
 # Read-only enrollment observations. Catalog rows are tab-separated; native

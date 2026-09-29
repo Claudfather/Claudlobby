@@ -1589,10 +1589,11 @@ wait_bridge_ready_state() {
     done
 }
 
-# wait_bridge_ready <bot_dir> <ceiling_s> <fence_token>
-# Block until a BRIDGE_READY is appended to the bot's startup.log AFTER
-# <fence_token> — the unique marker bridge_fence_write wrote just before the
-# restart. Only a BRIDGE_READY that follows the marker counts, so a stale one
+# wait_bridge_ready <bot_dir> <ceiling_s> <fence_token> [channel|no_handle|expected_no_token]
+# Block until BRIDGE_READY (or the configured no-bridge outcome) is appended to
+# the bot's startup.log AFTER <fence_token> — the unique marker
+# bridge_fence_write wrote just before the restart. Only a matching outcome
+# that follows the marker counts, so a stale one
 # from a prior boot can never pass the gate. This is the per-bot gate for a
 # serial rolling restart (#689); the caller serializes / halts rather than
 # proceed-anyway across the fleet (the #688/#689 mass-restart outage).
@@ -1613,13 +1614,31 @@ wait_bridge_ready_state() {
 wait_bridge_ready() {
     local bot_dir="${1:?Usage: wait_bridge_ready <bot_dir> <ceiling_s> <fence_token>}"
     local ceiling="${2:-180}" token="${3:?wait_bridge_ready needs a fence token}"
-    local log="$bot_dir/logs/startup.log" waited=0 step=3 after
+    local outcome="${4:-channel}" log="$bot_dir/logs/startup.log" waited=0 step=3 after
+    WAIT_BRIDGE_READY_OUTCOME=
+    case "$outcome" in channel|no_handle|expected_no_token) ;; *) return 2 ;; esac
     while :; do
         # Everything after the LAST occurrence of the fence token. A prior boot's
         # lines precede the marker; only what follows it is this restart's.
         # POSIX awk only (index/ORS/printf) — runs on mawk, no GNU extensions.
         after="$(awk -v tok="$token" 'index($0, tok){after=""; seen=1; next} seen{after = after $0 ORS} END{printf "%s", after}' "$log" 2>/dev/null || true)"
-        case "$after" in *BRIDGE_READY*) return 0 ;; esac
+        case "$outcome" in
+            channel)
+                case "$after" in *BRIDGE_READY*) WAIT_BRIDGE_READY_OUTCOME=bridge; return 0 ;; esac ;;
+            no_handle)
+                # start-bot records this result after its session-scoped poll;
+                # a channel bot's generic READY must never satisfy the gate.
+                case "$after" in *'READY — non-channel bot, no poller to await'*)
+                    WAIT_BRIDGE_READY_OUTCOME=session; return 0 ;; esac ;;
+            expected_no_token)
+                # A marked canary may have a token after all and reach normal
+                # BRIDGE_READY, or intentionally skip its absent token.
+                case "$after" in
+                    *BRIDGE_READY*) WAIT_BRIDGE_READY_OUTCOME=bridge; return 0 ;;
+                    *'BRIDGE_SKIP — no token by design (EXPECT_NO_TOKEN)'*)
+                        WAIT_BRIDGE_READY_OUTCOME=session; return 0 ;;
+                esac ;;
+        esac
         [ "$waited" -ge "$ceiling" ] && return 1
         sleep "$step"
         waited=$((waited + step))

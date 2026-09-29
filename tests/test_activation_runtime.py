@@ -97,7 +97,8 @@ svc_activation_start "$file" "$target"
 def test_real_restart_policy_fence_is_verified_and_ready_uses_same_marker(tmp_path):
     bot = tmp_path / "bots/worker"
     bot.mkdir(parents=True)
-    (bot / "bot.conf").write_text('RC_READY_TIMEOUT_S="001"\nBOT_SERVICE="fixture-worker"\n')
+    (bot / "bot.conf").write_text('RC_READY_TIMEOUT_S="001"\nBOT_SERVICE="fixture-worker"\n'
+                                  'TELEGRAM_BOT_HANDLE="fixture_handle"\n')
     prefix = '''fixture_tmux() { [ "$*" = '-L fixture-worker has-session -t worker' ]; }
 TMUX_BIN=fixture_tmux; export TMUX_BIN
 . "$1/supervisor.sh"; shift; "$@"'''
@@ -117,6 +118,50 @@ TMUX_BIN=fixture_tmux; export TMUX_BIN
     log.mkdir()  # bridge_fence_write is best-effort; the new boundary must refuse
     failed = bash(prefix, NATIVE, "svc_activation_bot_fence", tmp_path, bot)
     assert failed.returncode != 0
+
+
+@pytest.mark.parametrize(("extra_conf", "accepted", "rejected", "readiness"), [
+    ("", "READY — non-channel bot, no poller to await",
+     "BRIDGE_READY — Telegram poller up", "session-ready"),
+    ('TELEGRAM_BOT_HANDLE="fixture_handle"\nEXPECT_NO_TOKEN=1\n',
+     "BRIDGE_SKIP — no token by design (EXPECT_NO_TOKEN); canary/throwaway, no alert",
+     "READY — non-channel bot, no poller to await", "session-ready"),
+    ('TELEGRAM_BOT_HANDLE="fixture_handle"\nEXPECT_NO_TOKEN=1\n',
+     "BRIDGE_READY — Telegram poller up",
+     "READY — non-channel bot, no poller to await", "bridge-ready"),
+    ('TELEGRAM_BOT_HANDLE="fixture_handle"\n',
+     "BRIDGE_READY — Telegram poller up",
+     "BRIDGE_SKIP — no token by design (EXPECT_NO_TOKEN); canary/throwaway, no alert",
+     "bridge-ready"),
+])
+def test_native_bot_readiness_accepts_only_configured_post_fence_outcome(
+    tmp_path, extra_conf, accepted, rejected, readiness
+):
+    bot = tmp_path / "bots/worker"
+    bot.mkdir(parents=True)
+    (bot / "bot.conf").write_text('BOT_SERVICE="fixture-worker"\n' + extra_conf)
+    log = bot / "logs/startup.log"
+    log.parent.mkdir()
+    log.write_text(accepted + "\n")  # an old boot cannot satisfy the new fence
+    prefix = '''fixture_tmux() { [ "$*" = '-L fixture-worker has-session -t worker' ]; }
+TMUX_BIN=fixture_tmux; export TMUX_BIN
+. "$1/supervisor.sh"; shift; "$@"'''
+    fence = bash(prefix, NATIVE, "svc_activation_bot_fence", tmp_path, bot, "1")
+    assert fence.returncode == 0, fence.stderr
+    _, token = fence.stdout.strip().split("\t")
+    assert bash(prefix, NATIVE, "svc_activation_bot_ready", tmp_path, bot, "0", token).returncode != 0
+    with log.open("a") as out:
+        out.write(rejected + "\n")
+    assert bash(prefix, NATIVE, "svc_activation_bot_ready", tmp_path, bot, "0", token).returncode != 0
+    with log.open("a") as out:
+        out.write(accepted + "\n")
+    ready = bash(prefix, NATIVE, "svc_activation_bot_ready", tmp_path, bot, "0", token)
+    assert ready.returncode == 0 and ready.stdout.strip() == readiness
+    no_session = bash(prefix.replace(
+        "fixture_tmux() { [ \"$*\" = '-L fixture-worker has-session -t worker' ]; }",
+        "fixture_tmux() { return 1; }",
+    ), NATIVE, "svc_activation_bot_ready", tmp_path, bot, "0", token)
+    assert no_session.returncode != 0
 
 
 @pytest.mark.parametrize("fail_ready", [False, True])
