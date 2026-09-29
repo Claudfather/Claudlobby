@@ -367,6 +367,43 @@ def test_upgrade_refuses_candidate_persistent_disabled_override_before_pause(col
     assert not any(name == "svc_activation_pause" for name, _ in host.calls[calls_before:])
 
 
+def test_same_release_upgrade_refuses_foreign_candidate_file_before_pause(cold, monkeypatch):
+    root, release, selected_plan, host = cold
+    activation.bootstrap_activation(root, "cold", selected_plan.plan_id, host.directory, adapter=host)
+    item = next(item for item in selected_plan.effects["units"]
+                if Path(item["source"]).name == "claudlobby-plane-daemon.plist")
+    builder = ConfigPlanBuilder(root, release.release_id, release.seal_sha256,
+                                ("example",), effects={"units": [item]})
+    builder.file(Path(item["source"]), selected_plan.blob(item["sha256"]), mode=item["mode"])
+    candidate = builder.seal()
+    foreign = host.directory / "claudlobby-plane-daemon.plist"
+    foreign.write_bytes(b"unrelated installed LaunchAgent")
+    original = foreign.read_bytes()
+    catalog = (f"manager\tDarwin\ndomain\tgui/{os.getuid()}\ndirectory\t{host.directory}\n"
+               f"installed\t{foreign.name}\nPID\tStatus\tLabel\n")
+    original_call = host.call
+
+    def call(function, *args, timeout=30):
+        if function == "svc_inventory_catalog":
+            return subprocess.CompletedProcess([function], 0, catalog, "")
+        if function == "svc_inventory_disabled":
+            return subprocess.CompletedProcess([function], 0, "\tdisabled services = {\n\t}\n", "")
+        return original_call(function, *args, timeout=timeout)
+
+    monkeypatch.setattr(host, "call", call)
+    inventory = SimpleNamespace(manager="Darwin", catalog=catalog, units=())
+    inventory.require_complete = lambda: inventory
+    monkeypatch.setattr(activation, "collect_enrollment", lambda *_, **__: inventory)
+    selection = state.read_selection(root)
+    calls_before = len(host.calls)
+    with pytest.raises(state.ActivationError, match="foreign candidate collision before activation"):
+        activation.upgrade_activation(root, "upgrade", candidate.plan_id, host.directory, adapter=host)
+    assert state.read_selection(root) == selection
+    assert not (root / "state/activations/upgrade").exists()
+    assert foreign.read_bytes() == original
+    assert not any(name == "svc_activation_pause" for name, _ in host.calls[calls_before:])
+
+
 def test_upgrade_handoff_roster_uses_frozen_selected_bots_after_authoring_change(cold):
     root, _, selected_plan, host = cold
     manifest = root / "fleet.yaml"

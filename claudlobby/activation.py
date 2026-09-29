@@ -30,7 +30,7 @@ from .plane.db import db_file
 from .releases import read_release
 from .resources import get_resources
 from .runtime_admission import RuntimeIdentity, validate_unit_admission
-from .supervision_inventory import (Adapter, InventoryError, UnitDeclaration,
+from .supervision_inventory import (Adapter, FileSnapshot, InventoryError, UnitDeclaration,
                                     _catalog, _darwin_disabled, _darwin_source, _environment,
                                     collect_enrollment)
 
@@ -158,6 +158,39 @@ def _legacy_declarations(plan) -> tuple[UnitDeclaration, ...]:
         raise ActivationError("no reviewed legacy unit sources were found")
     plan.check_fresh()
     return tuple(result)
+
+
+def _preflight_candidate_placement(inventory, candidates, install_directory: Path) -> None:
+    """Refuse foreign candidate labels before preparing or pausing an activation.
+
+    Enrollment repeats these checks after parking. Here the frozen original
+    inventory is still installed, so only its exact paths and bytes may occupy
+    a candidate label in any native search directory.
+    """
+    manager, domain, directories, _, loaded = _catalog(inventory.catalog)
+    originals = {unit.target: unit for unit in inventory.units}
+    for declaration, item in candidates:
+        if not item["enroll"]:
+            continue
+        target = enrollment._target(manager, domain, declaration.source)
+        prior = originals.get(target)
+        owned = prior.installed[0] if prior and len(prior.installed) == 1 else None
+        destination = Path(owned.path) if owned else install_directory / declaration.source.name
+        if destination == declaration.source:
+            raise ActivationError("generated source cannot also be an installed unit")
+        for directory in directories:
+            path = directory / destination.name
+            if path_state(path)["node"]["kind"] == "absent":
+                continue
+            if owned is None or path != Path(owned.path):
+                raise ActivationError(f"foreign candidate collision before activation: {path}")
+            try:
+                if FileSnapshot.read(path) != owned:
+                    raise ActivationError(f"changed original candidate before activation: {path}")
+            except (OSError, InventoryError) as exc:
+                raise ActivationError(f"original candidate cannot be verified: {path}") from exc
+        if destination.name in loaded and owned is None:
+            raise ActivationError(f"foreign loaded candidate before activation: {target}")
 
 
 def bootstrap_activation(root: Path, activation_id: str, plan_id: str,
@@ -491,6 +524,7 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
                              if disabled.get(target.rsplit("/", 1)[-1]) == "disabled")
             if blocked:
                 raise CandidateDisabledOverride(tuple(blocked))
+        _preflight_candidate_placement(inventory, candidates, install_directory)
         retired_units = tuple(unit for unit in inventory.units
                               if unit.installed and unit.target not in candidate_targets)
         rank, contexts = _roster(plan, candidates, package)
