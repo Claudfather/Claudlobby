@@ -26,7 +26,7 @@ from .config_install import apply_config, prepare_config, read_config_install, r
 from .config_plan import ConfigPlan, ConfigPlanBuilder, read_plan
 from .releases import read_release
 from .supervision_inventory import (
-    Adapter, EnrollmentInventory, FileSnapshot, InventoryError, collect_enrollment, validate_darwin_unit,
+    Adapter, EnrollmentInventory, FileSnapshot, InventoryError, _catalog, collect_enrollment, validate_darwin_unit,
 )
 
 
@@ -184,8 +184,18 @@ def _check_empty(enrollment, adapter):
     try:
         observed = collect_enrollment(Path(enrollment["data_root"]), (), bootstrap_empty=True,
                                       adapter=adapter).require_complete()
-        if observed.payload() != enrollment:
-            raise InventoryError("bootstrap enrollment changed since its frozen observation")
+        # The full re-inventory still refuses an unknown or newly owned unit.
+        # Foreign launchd jobs can start, exit or change PID between the frozen
+        # observation and parking; their catalog rows are not enrollment state.
+        before = _catalog(enrollment["catalog"])
+        after = _catalog(observed.catalog)
+        if (str(observed.data_root) != enrollment["data_root"]
+                or observed.manager != enrollment["manager"]
+                or before[:3] != after[:3]
+                or observed.units):
+            raise InventoryError("bootstrap enrollment scope changed since its frozen observation")
+        if observed.payload()["observed_files"] != enrollment["observed_files"]:
+            raise InventoryError("bootstrap installed sources changed since their frozen observation")
     except (InventoryError, OSError) as exc:
         raise ActivationError(f"empty original enrollment cannot be reverified: {exc}") from exc
 

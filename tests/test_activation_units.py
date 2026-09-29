@@ -245,6 +245,34 @@ def test_proven_empty_bootstrap_parking_and_restore_are_frozen_noops(empty_enrol
     assert not any(function.startswith("svc_activation_") for function, _ in obs.calls)
 
 
+def test_empty_bootstrap_parking_ignores_verified_foreign_launchd_pid_churn(installed, tmp_path):
+    root, inputs, paths, _, _ = installed
+    release = r.seal_release(root, inputs, paths)
+    (tmp_path / "observations").mkdir()
+    obs = Observations(tmp_path / "observations")
+    obs.root = root
+    obs.manager = "Darwin"
+    obs.env = {"CLAUDLOBBY_ROOT": str(tmp_path / "foreign")}
+    obs.add("com.fixture.foreign.plist", working=tmp_path / "foreign", declared=False)
+    obs.launchd["com.apple.mdworker.plist"] = (
+        "gui/501/com.apple.mdworker = {\n\tpath = (submitted by launchd)\n"
+        "\ttype = Submitted\n\tstate = running\n"
+        "\tprogram = /System/Library/Frameworks/CoreServices.framework/mdworker\n"
+        "\tdomain = gui/501 [1]\n\tpid = 710\n}\n")
+    adapter = Adapter(obs.package, runner=obs.runner)
+    inventory = collect_enrollment(root, (), bootstrap_empty=True, adapter=adapter).require_complete()
+    plan = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, (), effects={}).seal()
+
+    old_catalog = obs.catalog
+    obs.catalog = lambda: old_catalog().replace("710\t0\tcom.apple.mdworker", "712\t0\tcom.apple.mdworker")
+    obs.launchd["com.apple.mdworker.plist"] = obs.launchd["com.apple.mdworker.plist"].replace(
+        "pid = 710", "pid = 712")
+    with state.locked_activation(root) as store:
+        prepared = _prepare(store, inventory, {phase: [] for phase in units.PHASES}, plan, adapter)
+        assert prepared.units() == ()
+        assert prepared.enrollment["catalog"] != obs.catalog()
+
+
 @pytest.mark.parametrize("fault", ["missing", "overlap", "digest", "self-hosted", "unknown"])
 def test_invalid_coverage_or_late_caller_refuses_before_any_parking(enrollment, fault):
     inventory, phases, plan, adapter, _, _ = enrollment
