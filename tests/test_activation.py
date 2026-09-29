@@ -22,9 +22,11 @@ from claudlobby.migration_apply import read_migration
 from claudlobby.plane.db import db_file
 from claudlobby.plane.identity import resolve
 from claudlobby.plane.ids import ensure_host_uid
+from claudlobby.plane.queue_paths import spool_path
 from claudlobby.releases import MANIFEST, release_path, seal_release
 from claudlobby.supervision_inventory import FileSnapshot
 from tests.test_releases import installed
+from tests.test_migration_plan import _database, _event_request, _pending
 from tests.test_task_audit import _insert
 
 
@@ -184,6 +186,18 @@ def test_pre_effect_prepare_refusal_cancels_intent_without_starting(cold, monkey
         activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
     record = state.read_activation(root, "cold")
     assert record.status == "rolled_back" and record.body["completed"] == []
+    assert host.starts == []
+
+
+def test_legacy_pending_queue_blocks_before_activation_record_or_native_pause(cold):
+    root, _, plan, host = cold
+    connection = _database(root, version=11)
+    connection.close()
+    _pending(spool_path(root) / "undrained.json", [_event_request()])
+    with pytest.raises(state.ActivationError, match="migration preview blocks activation before pause"):
+        activation.adopt_existing_activation(root, "cutover", plan.plan_id, host.directory, adapter=host)
+    assert not (root / "state/activations/cutover/activation.json").exists()
+    assert not any(name == "svc_activation_pause" for name, _ in host.calls)
     assert host.starts == []
 
 

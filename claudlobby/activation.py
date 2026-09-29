@@ -35,6 +35,15 @@ from .supervision_inventory import (Adapter, FileSnapshot, InventoryError, UnitD
                                     collect_enrollment)
 
 
+# A live preview can race normal writers; these facts need the authoritative
+# quiesced pass. Every other blocker is a reason not to stop the old fleet.
+_LIVE_PREVIEW_CHURN = frozenset({
+    "database bytes changed during preview; repeat under quiescence",
+    "receipt inventory changed during preview",
+    "inflight spool claims require a quiesced ownership/recovery check",
+})
+
+
 def _digest(value) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
@@ -494,9 +503,7 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
                 raise ActivationError(f"existing activation {record.activation_id} requires explicit repair")
         plan.check_fresh()
         source = source_plan = None
-        if legacy_source:
-            declarations = _legacy_declarations(plan)
-        else:
+        if not legacy_source:
             previous = read_activation(root, selected["activation_id"])
             if (previous.status != "active"
                     or previous.body["intent"]["release_id"] != selected["release_id"]
@@ -514,6 +521,16 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
             # files instead; enrollment checks installed and loaded state.
             observed_manager = _catalog(adapter.read("svc_inventory_catalog"))[0]
             declarations = current_declarations(source_plan, observed_manager)
+        # The migration owner reads live state; SQLite may create empty WAL/SHM
+        # bookkeeping sidecars. Refuse standing blockers before any activation record or
+        # native pause, then repeat the entire proof after ingest is quiesced.
+        preview = build_migration_manifest(root, source, release)
+        standing = tuple(blocker for blocker in preview.blockers
+                         if blocker not in _LIVE_PREVIEW_CHURN)
+        if standing:
+            raise ActivationError("migration preview blocks activation before pause: " + "; ".join(standing))
+        if legacy_source:
+            declarations = _legacy_declarations(plan)
         inventory = collect_enrollment(root, declarations, legacy_source=legacy_source,
                                        adapter=adapter).require_complete()
         if legacy_source and inventory.manager != "Darwin":
