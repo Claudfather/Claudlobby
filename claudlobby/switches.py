@@ -212,11 +212,11 @@ def _carrier_lines(sw: Switch) -> tuple[str, str]:
     if sw.carrier == COMPOSE_BOT:
         return (
             f"bots.<bot>.{sw.config}: true in fleet.yaml for ONE bot first, then"
-            " config plan, config diff PLAN_ID, and host activate PLAN_ID (it binds on that"
-            f" bot's next tool call, no restart); widen to defaults.{sw.config}"
+            " config plan, config diff PLAN_ID, and host activate PLAN_ID (activation"
+            f" can restart selected bots); widen to defaults.{sw.config}"
             " once it has run clean",
             f"{sw.config}: false at bots.<bot> or defaults in fleet.yaml, then"
-            " config plan and host activate PLAN_ID (off on the next tool call, no restart)",
+            " config plan and host activate PLAN_ID (activation can restart selected bots)",
         )
     if sw.carrier == ENROLL_HOST:
         key = sw.config or f"host.jobs.{sw.job}.enroll"
@@ -597,10 +597,9 @@ SWITCHES: tuple[Switch, ...] = (
         polarity=OPT_IN,
         carrier=COMPOSE_BOT,
         config="isolation.shared_config",
-        why_opt_in="no restart gate: a composed deny binds on the bot's next "
-                   "tool call after activation, so a fleet-wide default "
-                   "would reach every bot at once — the manifest is where "
-                   "one bot can go first",
+        why_opt_in="restricts access to shared host resources used by running "
+                   "bots; enable for one canary bot before widening the "
+                   "manifest default through activation",
         what="compose the Layer 0b deny rules (#1665): other bots' transcripts "
              "and Telegram dirs, the shared history, credential and account "
              "config, every .env tier, and Edit on the install's code and the "

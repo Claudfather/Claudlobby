@@ -1,5 +1,54 @@
 # Unified CLI implementation record
 
+### 2026-09-29 14:54 UTC — real handoff/restart/resume passed
+
+**Measured:** source `9fab743` is active only on the independent Mac canary,
+activation `e56e3f08-10fc-4ff2-b518-aea60b69840d`. The actual manager invoked
+`fleet-ops`, requested one worker handoff, received `saved/fresh_file_verified`,
+then requested one restart and observed `session_ready`. The worker's private
+session PID changed from 51960 to 65516; the new session read its handoff and
+recovered marker `handoff-proof-20260929-1037`. This used the existing clauDNA
+session provider composed locally under normal `auto` permissions, with bypass
+disabled. Evidence: `~/.local/share/claudlobby-canary-live-1747/evidence/session-provider/`
+`verified-write-{acceptance.json,manager-results.md,worker-trace.json}`;
+[PR #1985](https://github.com/Claudfather/Claudlobby/pull/1985).
+
+**Measured / read from code:** the first auto-mode attempt saved within the
+native capture window but invented a `last_updated` seven minutes in the
+future. The manager correctly withheld restart on the unverified result.
+`c6a6853` now uses the native-observed checksum change plus fresh filesystem
+time for an explicit handoff; owned-file/frontmatter validation and the
+stricter self-restart check remain. The two focused handoff cases passed.
+The new controlled canary succeeded without automatically resending the prior
+unknown request. This supersedes the provider-continuity limitation below.
+
+**Read from code / measured checks:** `bot remove` now cleans up only a bot
+omitted by both active and authored configuration, using its retained activated
+declaration; it refuses reused native labels and project WIP before explicit
+purge. Selected Plane expiry requires a committed batch and rechecks candidates
+inside the existing write transaction, preventing a completion race or spool
+from being reported as expiry. Their combined 14 focused checks passed; the
+existing teardown shell test passed 27 assertions. `plane status` now has the
+common JSON result; its built-artifact subprocess check and private JSON
+invocation passed. The live selected expiry dry-run found zero candidates.
+No new general migration harness or full local suite was added.
+
+**Measured:** the prior completed task and linked receipt remain intact after
+this upgrade. Production selection, protected manager PID 2598 and Plane PID
+1498 are unchanged. Hosted `687f3d2` failed two checks: stale literal grant
+expectations and the scalar provenance reader's source-read tripwire. Both
+were repaired in `044289a` and their exact local checks passed. Its next Linux
+3.11 run found eight failures: five workstream-import calls shared a removed
+`emit_batch` import, two assertions expected retired parser wording, and the
+README script count was stale after deletion. The missing import was restored;
+all seven exact runtime/parser cases passed against a disposable built artifact.
+The README count and generated switch tables passed 10 focused checks. These
+repairs are included in the next push; its hosted CI remains pending.
+Remaining work includes old
+composition/setup callers and fleet-container migration, remaining Plane
+administrative contracts, final code/guidance placement, Linux/Pi acceptance,
+and production adoption after the protected work completes.
+
 ### 2026-09-29 — independent live canary and public-door retirement
 
 **Measured:** an independent `cli-isolated-1747` manager/worker fleet on this

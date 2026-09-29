@@ -111,8 +111,8 @@ claudlobby host cache warm            # pre-download npx + uvx packages for MCP 
 **Gives you:**
 
 - `library/` — 19 expertise profiles (manager, engineer, reviewer, designer, business, data-engineering, …), 55 skills (dispatch, lifecycle, prs, sweep, fleet-status, briefing, status, triage, …), 17 MCP fragments (github, github-app, gws, google-analytics, google-search-console, meta-ads, meta-business, posthog, notion, linear, slack, shopify, printify, homeassistant, docker, spotify, granola), 25 guardrails, 40 protocols
-- `lib/` — 85 bash lifecycle scripts: `start-bot.sh`, `keepalive.sh`, `plane-emit.sh`, `tg-post.sh`, `creds-check.sh` (daily credential keepalive), `fleet-state-update.sh`, and more
-- `bin/claudlobby` — the Python compositor
+- `lib/` — 84 bash lifecycle scripts, including private runtime owners and development instruments; operators and agents use the public CLI
+- `claudlobby` — the installed Python CLI and compositor
 - `fleet.yaml.example` — a full fleet manifest template you can copy and adapt
 
 **You install separately** (the things people miss on a fresh clone):
@@ -120,20 +120,18 @@ claudlobby host cache warm            # pre-download npx + uvx packages for MCP 
 - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — the CLI + OAuth login (or `ANTHROPIC_API_KEY`)
 - **[Telegram channel plugin](https://github.com/anthropics/claude-plugins-official)** — `claude plugin install telegram@claude-plugins-official`
 - **A clauDNA-style global skills install** — the `~/.claude/skills/` library (`/simplify`, `/review-pr`, `/tech-debt`, `/session-handoff`, …) is what makes the bots feel competent. Without it, the project skills in `library/skills/` work, but the global toolbox is sparse.
-- **Your secrets** — `GITHUB_PAT`, `NOTION_TOKEN`, BotFather tokens (one per bot), MCP server credentials. Stored in `.env` at the repo root (gitignored).
+- **Your secrets** — `GITHUB_PAT`, `NOTION_TOKEN`, BotFather tokens (one per bot), MCP server credentials. Keep them in the private host/data-root/fleet environment tiers described in the bootstrap guide.
 
 See [`documentation/getting-started.md`](documentation/getting-started.md) for the full bootstrap sequence.
 
 ## Sync-back: bots that learn
 
-Bots can edit themselves at runtime — `runtime/bots/` is gitignored, so an in-session edit to a skill, a CLAUDE.md, or a protocol won't pollute git. Two patterns:
-
-- **Skills** auto-sync because they're symlinks: a bot editing `runtime/bots/X/.claude/skills/foo/SKILL.md` is editing `library/skills/foo/SKILL.md`. The change propagates to every bot using `foo`.
-- **Composed CLAUDE.md** doesn't auto-sync (the next activation would overwrite it). Use:
-  - `claudlobby config diff --bot <bot>` — identify drifted rendered files without printing values
-  - Review the bot's changes and edit the source in `library/expertise/`, `voices/`, or a guardrail/protocol. Stage and inspect a configuration plan before activation.
-
-Foundation for the future ML layer: when claudlobby has embeddings + a knowledge graph behind `library/`, runtime drift becomes training data for "what if more bots needed this rule?"
+Put intended skill and policy changes in authored fleet-overlay source. Packaged
+release assets are sealed: editing a generated skill's symlink target can damage
+the installed release. `claudlobby config diff --bot <bot>` identifies rendered
+drift without printing values; review the change, edit its authored source, then
+stage and inspect a configuration plan before activation. Bot-owned `memory/`
+and `data/` remain mutable and are preserved during composition.
 
 ## Hosts
 
