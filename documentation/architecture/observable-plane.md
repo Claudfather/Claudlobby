@@ -246,13 +246,12 @@ disagree on the same fleet. Details: `documentation/runbooks/plane-view.md`.
 - **`plane status` / `plane doctor`** — the health page and the pre-flight
   rungs (schema, provisional actors, tombstone validity, reconciliation, the
   WAL against its ceiling).
-  **These RUN
-  `migrate()` and are therefore not read-only — and so do `plane registry`,
-  `plane prune`, `plane expire` and `spool retry`** — a newer db refuses them
-  (`DowngradeError`, rc 4) and an unmerged package's doctor (or registry read)
-  will migrate a live db. Verify a branch on a live host only through the
-  doors that open read-only: `brief`, `plane view`,
-  and the stdlib readers below.
+  These diagnostics open the database read-only and require the selected schema;
+  they do not migrate it. `plane prune` and `spool retry` are explicit
+  maintenance mutations; a newer db refuses them (`DowngradeError`, rc 4).
+  Both support `--json` with the common command result. A spool retry reports
+  committed, duplicate, quarantined and still-pending entries separately;
+  quarantine or pending entries do not return a clean success.
 - **The stdlib readers** (`lib/plane-readers.py`, `lib/plane-lookup.py`) — the
   plane answered from bash doors without paying the package import: the open
   list and the overdue set (SQL pinned byte-identical to
@@ -420,8 +419,10 @@ the fleet room · 0005 FTS · 0006 the registry lane · 0007 `assignments(source
 resolver's guard) · 0009 `events(fleet_uid, occurred_at) WHERE kind='system'` (Phase B: the fleet-events readers and the escalation window) · 0010 the task vocabulary widened for `escalated` and `nudged` (chunk M-A). A newer db refuses older code (rc 4), never downgrades — and a refusing *daemon* exits so its supervisor relaunches it on the current install (#1485, the write-spine section above). **0010 is the estate's first table REBUILD** — SQLite cannot ALTER a CHECK, so widening the task-event list means the documented 12-step copy of `events`, paid by explicit migration before activating the upgraded writers (it needs the table's size again in free space while it runs — and on a WAL database that means the WAL's copy TOO: an 80 MB plane whose `events` is 67 MB needs ~67 MB of WAL on top of the new table's ~67 MB, so a host at 90% full passes the naive check and fails the real one). It also holds the write lock for SECONDS rather than the milliseconds every earlier migration took, which is long enough for a second migrator's `BEGIN IMMEDIATE` to exceed `busy_timeout` and raise on a benign race — `migrate()` therefore re-reads `user_version` after WAITING for the write lock, so the loser no-ops on the winner's result. The O(1) alternative, a `PRAGMA writable_schema` edit of `sqlite_master`, corrupts the schema outright when the SQL is wrong, which is a worse failure than a slow start on the one database the estate keeps its history in.
 
 **Retention** — `plane prune` ages `metric_samples` past 30 days by
-`ingested_at` (the incident-join window); nothing else is ever deleted; no
-VACUUM against a live daemon. `plane expire` is the attention queue's aging
+`ingested_at` (the incident-join window). The separately armed system-event
+lane deletes only its two allowlisted event types in the same transaction;
+neither lane touches the ingest ledger. There is no VACUUM against a live
+daemon. `plane expire` is the attention queue's aging
 sweep (7-day horizon), idempotent by construction.
 
 **The rule every reader follows** — unreachable is not empty. A missing or

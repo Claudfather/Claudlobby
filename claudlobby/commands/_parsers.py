@@ -144,7 +144,14 @@ def register_subparsers(sub) -> None:
                      help="Retention window in days (default 30)")
     ppr.add_argument("--dry-run", action="store_true",
                      help="Report the count without deleting")
-    ppr.set_defaults(func=_command("plane", "cmd_plane_prune"))
+    ppr.add_argument("--json", action="store_true", help="Schema-1 result")
+
+    def _prune_dispatch(args):
+        from ..command_result import execute
+        return execute("plane.prune", lambda: _command("plane_maintenance", "prune")(args),
+                       json_output=args.json)
+
+    ppr.set_defaults(func=_prune_dispatch, public_command="plane.prune")
     pex = psub.add_parser(
         "expire",
         help="Attention expiry sweep: emit `expired` for assignments overdue"
@@ -192,4 +199,11 @@ def register_subparsers(sub) -> None:
     psp = psub.add_parser("spool", help="Inspect/drain the emit spool")
     psp.add_argument("spool_action", choices=["list", "inspect", "retry", "quarantine"])
     psp.add_argument("name", nargs="?", help="Spool file name (inspect/quarantine)")
-    psp.set_defaults(func=_command("plane", "cmd_plane_spool"))
+    psp.add_argument("--json", action="store_true", help="Schema-1 result")
+
+    def _spool_dispatch(args):
+        from ..command_result import execute
+        return execute("plane.spool", lambda: _command("plane_maintenance", "spool")(args),
+                       json_output=args.json)
+
+    psp.set_defaults(func=_spool_dispatch, public_command="plane.spool")

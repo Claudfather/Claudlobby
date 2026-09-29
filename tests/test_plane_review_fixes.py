@@ -597,6 +597,32 @@ def test_f11_spool_inspect_prints_entry_with_history(env):
     assert "history" in r.stdout and "locked" in r.stdout
 
 
+def test_spool_retry_reports_quarantine_in_common_result(env):
+    root, _conn, _host = env
+    name = "ev_" + "a" * 32 + ".json"
+    (spool_dir(root) / name).write_text("[]")
+    r = _run(["--root", str(root), "plane", "spool", "retry", "--json"])
+    body = json.loads(r.stdout)
+    assert r.returncode == 4
+    assert body["command"] == "plane.spool" and body["error"]["code"] == "conflict"
+    assert body["data"]["quarantined"] == 1 and body["data"]["remaining"] == 0
+    assert (quarantine_dir(root) / name).exists()
+
+
+def test_spool_quarantine_json_and_wrong_name_refusal(env):
+    root, _conn, _host = env
+    name = "ev_" + "b" * 32 + ".json"
+    source = spool_dir(root) / name
+    source.write_text("{}")
+    refused = _run(["--root", str(root), "plane", "spool", "quarantine", "../" + name,
+                    "--json"])
+    assert refused.returncode == 2 and json.loads(refused.stdout)["error"]["code"] == "invalid_argument"
+    assert source.exists()
+    moved = _run(["--root", str(root), "plane", "spool", "quarantine", name, "--json"])
+    assert moved.returncode == 0 and json.loads(moved.stdout)["data"]["quarantined"] is True
+    assert not source.exists() and (quarantine_dir(root) / name).exists()
+
+
 def test_f11_doctor_healthy_0_quarantine_1(tmp_path: Path):
     initialize_plane(tmp_path)
     emit(tmp_path, _comm())

@@ -13,8 +13,12 @@ from __future__ import annotations
 
 import sqlite3
 import subprocess
+import json
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
 
 from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import emit_batch
@@ -188,6 +192,30 @@ def test_cli_prune_ages_out_and_dry_run_is_safe(tmp_path, test_cli):
     # a db that never existed is a no-op, not an error
     empty = _cli(tmp_path / "nope", "prune", cli=test_cli)
     assert empty.returncode == 0
+
+
+def test_prune_json_and_two_lane_failure_do_not_claim_partial_success(tmp_path, test_cli, monkeypatch):
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.commands.plane_maintenance import prune
+    from claudlobby.plane import retention
+
+    root = _root(tmp_path)
+    _sample(root)
+    _backdate_all(root, days_old=40)
+    dry = _cli(root, "prune", "--dry-run", "--json", cli=test_cli)
+    body = json.loads(dry.stdout)
+    assert dry.returncode == 0 and body["data"]["metric_samples"] == 1
+    assert body["data"]["dry_run"] is True and _counts(root)[0] == 1
+
+    monkeypatch.setenv("PLANE_PRUNE_SYSTEM_EVENTS_ENABLED", "1")
+    def fail_system_lane(*_args, **_kwargs):
+        raise sqlite3.OperationalError("forced second lane failure")
+    monkeypatch.setattr(retention, "prune_system_events", fail_system_lane)
+    args = SimpleNamespace(root=root, fleet=None, seed=False, days=None, dry_run=False)
+    with pytest.raises(CommandFailure) as failure:
+        prune(args)
+    assert failure.value.error.code == "commit_unknown"
+    assert _counts(root)[0] == 1  # metric deletion rolled back with the failed lane
 
 
 def test_prune_job_ships_enrolled_and_reads_root():

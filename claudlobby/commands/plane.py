@@ -1,14 +1,13 @@
-"""Legacy Plane diagnostics and maintenance commands.
+"""Legacy Plane diagnostics and foreground commands.
 
 Legacy diagnostics map Plane contract and storage failures through one guard.
-Public ingest uses the common result adapter in plane_emit.py.
+Public ingest and maintenance use separate common-result adapters.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import re
 import sqlite3
 import sys
 import time
@@ -17,20 +16,12 @@ from pathlib import Path
 
 from ._helpers import _load_fleet_or_exit, _resolve_paths
 from ..plane.contracts import ContractViolation, export_schemas
-from ..plane.db import connect, connect_ro, db_file, open_ro
+from ..plane.db import connect_ro, db_file, open_ro
 from ..plane.emit_api import _load_capture_config, capture_mode, DEFAULT_CAPTURE, emit_batch
 from ..plane.identity import provisional_actors
-from ..plane.ids import ensure_host_uid
 from ..plane.migrations import DowngradeError, SCHEMA_USER_VERSION
-from ..plane.schema_state import PendingMigrationError, preflight_schema, require_current_schema
-from ..plane.spool import (
-    SpoolWriteError, drain, oldest_spooled_at, quarantine_dir,
-    quarantine_entry, scan_spool, spool_dir, spool_entries,
-)
-
-_SPOOL_NAME_RE = re.compile(r"ev_[0-9a-f]{32}\.json")
-
-
+from ..plane.schema_state import PendingMigrationError, require_current_schema
+from ..plane.spool import SpoolWriteError, oldest_spooled_at, scan_spool
 
 #: #1711. A spooled batch is ACCEPTED and DURABLE but not RECORDED — it is on
 #: disk and invisible to every reader until a drain. It needs a code of its own
@@ -61,69 +52,6 @@ def _guarded(label: str, fn) -> int:
         # not transient infrastructure — retrying it forever helps no one.
         print(f"{label}: REFUSED — {exc}", file=sys.stderr)
         return 4
-
-
-def cmd_plane_spool(args) -> int:
-    root = _resolve_paths(args).root
-
-    def run() -> int:
-        if args.spool_action == "list":
-            for e in spool_entries(root):
-                print(
-                    f"{e['_file']}  events={e.get('event_ids')}"
-                    f"  attempts={e.get('attempts')}"
-                )
-            return 0
-        if args.spool_action == "inspect":
-            if not _SPOOL_NAME_RE.fullmatch(args.name or ""):
-                print(f"invalid spool entry name: {args.name!r}", file=sys.stderr)
-                return 1
-            src = spool_dir(root) / args.name
-            if not src.exists():
-                src = quarantine_dir(root) / args.name
-                if not src.exists():
-                    print(f"no such spool entry: {args.name}", file=sys.stderr)
-                    return 1
-                reason = src.with_name(src.name + ".reason")
-                if reason.exists():
-                    print(f"quarantined: {reason.read_text().strip()}", file=sys.stderr)
-            try:
-                entry = json.loads(src.read_text())
-            except (OSError, json.JSONDecodeError) as exc:
-                print(f"unreadable spool entry: {exc}", file=sys.stderr)
-                return 1
-            print(json.dumps(entry, indent=2, sort_keys=True, default=str))
-            return 0
-        if args.spool_action == "retry":
-            preflight_schema(root)
-            conn = connect(db_file(root))
-            try:
-                require_current_schema(conn)
-                host = ensure_host_uid(root / "state")
-                report = drain(root, conn, host)
-            finally:
-                conn.close()
-            print(
-                f"ingested={report.ingested} duplicates={report.duplicates}"
-                f" quarantined={report.quarantined} remaining={report.remaining}"
-            )
-            return 0
-        if args.spool_action == "quarantine":
-            if not _SPOOL_NAME_RE.fullmatch(args.name or ""):
-                # Round-2 F9: the name is a filesystem operand — only validated
-                # spool basenames, never path components.
-                print(f"invalid spool entry name: {args.name!r}", file=sys.stderr)
-                return 1
-            src = spool_dir(root) / args.name
-            if not src.exists():
-                print(f"no such spool entry: {args.name}", file=sys.stderr)
-                return 1
-            quarantine_entry(root, src, "operator")
-            print(f"quarantined {args.name}")
-            return 0
-        return 1
-
-    return _guarded("plane spool", run)
 
 
 def _switch_fleet(paths):
@@ -576,83 +504,6 @@ def cmd_plane_registry(args) -> int:
             conn.close()
 
     return _guarded("plane registry", run)
-
-
-def cmd_plane_prune(args) -> int:
-    """Age out raw metric_samples past the retention window (chunk 3a;
-    spec §F20: 30-day raws, the incident-join window). Family-scoped — the
-    ONLY DELETE the plane performs, and it never touches the ledger (the
-    dedupe horizon). Runs from a composed timer, NOT the ingest-only
-    daemon. `--dry-run` reports the count without deleting."""
-    root = _resolve_paths(args).root
-
-    def run() -> int:
-        from ..plane.retention import (
-            DEFAULT_RETENTION_DAYS, PRUNABLE_SYSTEM_EVENTS,
-            prune_metric_samples, prune_system_events)
-
-        path = db_file(root)
-        if not path.exists():
-            print(f"prune: no plane db at {path} — nothing to age out",
-                  file=sys.stderr)
-            return 0
-        days = args.days if args.days is not None else DEFAULT_RETENTION_DAYS
-        if days < 0:
-            # a negative window's future cutoff would delete EVERYTHING — a
-            # clean contract refusal (rc 2), never a raw traceback (gauntlet)
-            raise ContractViolation(
-                [{"loc": ("days",), "msg": "retention days cannot be"
-                  " negative (a future cutoff would delete all samples)"}])
-        preflight_schema(root)
-        conn = connect_ro(path) if args.dry_run else connect(path)
-        try:
-            require_current_schema(conn)   # DowngradeError -> 4 via the guard
-            res = prune_metric_samples(conn, days=days,
-                                       dry_run=args.dry_run)
-            # #1659, the SECOND lane, OFF unless this host arms it. Inside this
-            # job rather than beside it because it shares the window and the
-            # connection; gated separately because it deletes a different
-            # thing. Measured before shipping: 15,422 system events in one day
-            # here, 98% of them the two allowlisted types.
-            sys_deleted = None
-            if _switch_on("PLANE_PRUNE_SYSTEM_EVENTS_ENABLED"):
-                if args.dry_run:
-                    marks = ",".join("?" for _ in PRUNABLE_SYSTEM_EVENTS)
-                    sys_deleted = conn.execute(
-                        f"SELECT COUNT(*) FROM events WHERE kind='system'"
-                        f" AND event IN ({marks}) AND ingested_at < ?",
-                        (*sorted(PRUNABLE_SYSTEM_EVENTS), res.cutoff),
-                    ).fetchone()[0]
-                else:
-                    sys_deleted = prune_system_events(conn, days=days)
-                    conn.commit()
-        finally:
-            conn.close()
-        verb = "would delete" if res.dry_run else "deleted"
-        print(f"metric_samples: {verb} {res.candidates if res.dry_run else res.deleted}"
-              f" rows older than {days}d (cutoff {res.cutoff})")
-        if sys_deleted is None:
-            # Said out loud rather than skipped silently: a disarmed lane and a
-            # lane that found nothing print differently, which is the rule the
-            # rest of this estate is held to.
-            print("system events: lane OFF — arm with"
-                  " PLANE_PRUNE_SYSTEM_EVENTS_ENABLED=1 in this host's .env"
-                  " (it deletes data; see claudlobby host doctor --switches)")
-        else:
-            print(f"system events: {verb} {sys_deleted} row(s) older than"
-                  f" {days}d, of {sorted(PRUNABLE_SYSTEM_EVENTS)}"
-                  " — every other event type is kept")
-        return 0
-
-    return _guarded("plane prune", run)
-
-
-def _switch_on(env_name: str) -> bool:
-    """An opt-in switch is ON only for an exact `1` (the registry's polarity
-    rule): unset, empty, or anything else is OFF. Matching `switch_is_on`'s
-    shell twin, where an empty assignment wins at its tier and is NOT a `1`."""
-    import os
-    return os.environ.get(env_name, "").strip() == "1"
 
 
 def cmd_plane_import_workstreams(args) -> int:
