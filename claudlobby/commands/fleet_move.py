@@ -107,7 +107,10 @@ def dispatch(args) -> CommandOutput:
         with locked_activation(root):
             if _root_manifest_names_fleet(root, args.fleet):
                 raise CommandFailure("conflict", "root and overlay declare the same fleet")
-            observed = _find_fleet_dir(local, args.fleet)
+            try:
+                observed = _find_fleet_dir(local, args.fleet)
+            except ValueError as exc:
+                raise CommandFailure("conflict", "fleet source resolves at multiple paths") from exc
             if observed not in (source, target):
                 raise CommandFailure("conflict", "fleet source is absent or ambiguous")
             if target.exists() or target.is_symlink():
