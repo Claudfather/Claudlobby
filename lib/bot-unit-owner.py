@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Read a bot unit's WorkingDirectory without executing its contents.
 
-Exit 0 for the expected directory, 1 for a different owner, and 3 when
-ownership cannot be established. Only the compositor's unit forms are read;
+Exit 0 for the expected directory, 1 for a different owner, 2 for a valid
+service without WorkingDirectory, and 3 when ownership cannot be established.
+Only the compositor's directory forms are read;
 unsupported syntax must preserve an installed unit, never authorize removal.
 """
 
