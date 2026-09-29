@@ -217,7 +217,7 @@ host:
     # the same file -- who, why and until, or the job still holds and pages:
     #   host: { jobs: { pull-root: { enroll: true, hold: { sha: <sha>,
     #     by: <who>, reason: <why>, until: <YYYY-MM-DD> } } } }
-    # The job reads the hold at run time (`claudlobby host-job pull-root`), so a
+    # The job reads the hold at run time (`claudlobby host job show pull-root`), so a
     # hold needs no recompose. 07:00 is host-local time, when a human is up for
     # the watch's page; persistent: false, so a host that was down at 07:00
     # does not pull at boot, unwatched.

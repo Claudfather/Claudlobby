@@ -112,12 +112,12 @@ FROM=$(git -C "$ROOT" rev-parse --short HEAD)
 TO="$FROM"
 
 # --- the hold (host.jobs.pull-root.hold), read through the host override ----
-# `claudlobby host-job` applies the same merge generate does. A hold that
+# `claudlobby host job show` applies the same merge generate does. A hold that
 # cannot be read holds: an unreadable override may carry one.
-if ! claudlobby_cli host-job pull-root > "$RUN_DIR/job.json" 2>>"$LOG"; then
+if ! claudlobby_cli host job show pull-root > "$RUN_DIR/job.json" 2>>"$LOG"; then
     OUTCOME=hold_unreadable; HOLD="unreadable"
     log "HELD — the host override could not be read (see above); not pulling"
-    notice source_pull_held unreadable "claudlobby root on $(hostname) was NOT pulled: the pull-root job config could not be read (claudlobby host-job pull-root failed), so a hold may be in force -- fix $OVERRIDE_HINT"
+    notice source_pull_held unreadable "claudlobby root on $(hostname) was NOT pulled: the pull-root job config could not be read (claudlobby host job show pull-root failed), so a hold may be in force -- fix $OVERRIDE_HINT"
     record; exit 0
 fi
 if ! python3 - "$RUN_DIR/job.json" > "$RUN_DIR/hold.txt" 2>>"$LOG" <<'PY'

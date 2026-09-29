@@ -15,6 +15,7 @@ every test host.
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -60,9 +61,9 @@ esac
 """
 
 # `claudlobby` stub: the job's two CLI reads.
-CLI_STUB = """#!/usr/bin/env bash
+CLI_STUB = r"""#!/usr/bin/env bash
 case "$*" in
-*host-job*) [ -e "$PULL_ROOT_STUB/job_fails" ] && exit 1; cat "$PULL_ROOT_STUB/job.json" ;;
+*host\ job\ show\ pull-root*) [ -e "$PULL_ROOT_STUB/job_fails" ] && exit 1; cat "$PULL_ROOT_STUB/job.json" ;;
 *status*--json*) [ -e "$PULL_ROOT_STUB/status_fails" ] && exit 3
     python3 "$PULL_ROOT_STUB/status.py" "$CLAUDLOBBY_ROOT" ;;
 esac
@@ -388,15 +389,10 @@ def test_a_hold_is_readable_at_the_state_with_its_reason(tmp_path, monkeypatch):
     env = constructed_env(CLAUDLOBBY_HOST_SYSTEM_YAML=override, HOME=tmp_path)
     proc = subprocess.run(
         [
-            str(
-                Path(
-                    shutil.which("python3", path=str(REPO / ".venv" / "bin"))
-                    or "python3"
-                )
-            ),
+            sys.executable,
             "-m",
             "claudlobby",
-            "host-job",
+            "host", "job", "show",
             "pull-root",
         ],
         cwd=REPO,

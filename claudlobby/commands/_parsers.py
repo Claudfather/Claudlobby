@@ -109,13 +109,6 @@ def register_subparsers(sub) -> None:
     )
     pht.set_defaults(func=_command("core", "cmd_host_timers"))
 
-    phj = sub.add_parser(
-        "host-job",
-        help="Print one host job as this host runs it (packaged + host override), as JSON",
-    )
-    phj.add_argument("name", help="the host job, e.g. pull-root")
-    phj.set_defaults(func=_command("core", "cmd_host_job"))
-
     pl = sub.add_parser(
         "list-library",
         help="List available personas, skills, mcp, guardrails, protocols, voices",

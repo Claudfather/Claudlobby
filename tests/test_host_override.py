@@ -4,6 +4,7 @@ Host-local config lives outside the tracked tree, so a root pull can refuse any
 dirty tree. Each test is named for the failure it guards against.
 """
 import copy
+import json
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from claudlobby.config import _load_system_defaults, load_host_jobs
 from claudlobby import switches as sw
 from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
+from claudlobby.__main__ import main
 
 PAUSE = "host: { jobs: { claude-update: { enroll: false } } }\n"
 
@@ -88,3 +90,18 @@ def test_a_malformed_override_renders_unknown_never_the_shipped_default(tmp_path
         assert str(override) in r.detail and "must be true or false" in r.detail
         assert r.label == "unknown"
     assert "host jobs unreadable" in sw.summary_line(rows)
+
+
+def test_host_job_reads_effective_host_override_without_fleet_merge(tmp_path, override, capsys):
+    override.write_text("host: { jobs: { claude-update: { enroll: false } } }\n")
+    assert main(["--root", str(tmp_path), "--fleet", "absent", "host", "job", "list", "--json"]) == 0
+    listing = json.loads(capsys.readouterr().out)
+    assert listing["command"] == "host.job.list" and listing["ok"]
+    assert {item["name"]: item["enroll"] for item in listing["data"]["jobs"]}["claude-update"] is False
+
+    assert main(["--root", str(tmp_path), "host", "job", "show", "claude-update", "--json"]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["data"]["job"] == load_host_jobs()["claude-update"]
+
+    assert main(["--root", str(tmp_path), "host", "job", "show", "claude-update"]) == 0
+    assert json.loads(capsys.readouterr().out) == shown["data"]["job"]

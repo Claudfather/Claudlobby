@@ -26,6 +26,12 @@ def _dispatch_doctor(args):
                    json_output=args.json)
 
 
+def _dispatch_host_job(args):
+    return execute(args.public_command,
+                   lambda: import_module(".host_jobs", __package__).dispatch(args),
+                   json_output=args.json)
+
+
 def _route(sub, name, command, help):
     parser = sub.add_parser(name, help=help)
     parser.add_argument("--json", action="store_true", help="One schema-1 result object")
@@ -38,6 +44,14 @@ def register_release_subparsers(sub):
     hosts = host.add_subparsers(dest="host_command", required=True)
     from ._setup_parsers import register_host_setup
     register_host_setup(hosts)
+    job = hosts.add_parser("job", help="Read this host's effective packaged jobs and overrides")
+    jobs = job.add_subparsers(dest="job_command", required=True)
+    for action in ("list", "show"):
+        route = jobs.add_parser(action, help=f"{action.capitalize()} effective host jobs")
+        route.add_argument("--json", action="store_true", help="One schema-1 result object")
+        if action == "show":
+            route.add_argument("name", help="Packaged host job name, e.g. pull-root")
+        route.set_defaults(func=_dispatch_host_job, public_command=f"host.job.{action}")
     doctor = _route(hosts, "doctor", "host.doctor", "Diagnose configured fleets on this host")
     doctor.set_defaults(func=_dispatch_doctor)
     doctor.add_argument("--switches", action="store_true", help="Only show resolved opt-in/out switches")

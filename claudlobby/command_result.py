@@ -20,6 +20,7 @@ _EXITS = {"internal_error": 1, "selection_defect": 1, "invalid_argument": 2, "no
           "unavailable": 6, "release_mismatch": 7, "timeout": 8,
           "receipt_unobservable": 9, "receipt_mismatch": 10, "recording_degraded": 11}
 _PUBLIC = {("brief",): "brief", ("host", "releases"): "host.releases", ("host", "status"): "host.status",
+           ("host", "job", "list"): "host.job.list", ("host", "job", "show"): "host.job.show",
            ("host", "setup"): "host.setup", ("host", "doctor"): "host.doctor", ("fleet", "setup"): "fleet.setup",
            ("host", "activate"): "host.activate", ("config", "plan"): "config.plan",
            ("config", "diff"): "config.diff", ("migration", "plan"): "migration.plan",
