@@ -19,7 +19,7 @@ No service mutations or filesystem writes occur here.
 from __future__ import annotations
 
 import base64
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 import os
@@ -340,6 +340,81 @@ def _environment(text):
             raise InventoryError("ambiguous native environment")
         result[key] = value
     return result
+
+
+def legacy_linux_declarations(plan) -> tuple[UnitDeclaration, ...]:
+    """Bind existing source-only user-systemd units to the candidate roster.
+
+    The source is the old compositor output, not the candidate's staged bytes.
+    Inventory subsequently proves exact installed bytes and effective native
+    identity before the shared adoption coordinator can pause anything.
+    """
+    from .config_units import planned_units
+
+    plan.check_fresh()
+    result = []
+    for declaration, _ in planned_units(plan, "Linux"):
+        source = declaration.source
+        if not source.exists() and not source.is_symlink():
+            continue
+        if not source.is_file() or source.is_symlink():
+            raise InventoryError("legacy generated Linux unit is not a regular source")
+        try:
+            content = source.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise InventoryError("legacy generated Linux unit cannot be read") from exc
+        section = None
+        fields = {}
+        for raw in content.splitlines():
+            line = raw.strip()
+            if not line or line.startswith(("#", ";")):
+                continue
+            if line.startswith("[") and line.endswith("]"):
+                section = line[1:-1]
+                continue
+            key, separator, value = line.partition("=")
+            if not separator or not section or raw.rstrip().endswith("\\"):
+                raise InventoryError("legacy generated Linux unit has ambiguous syntax")
+            fields.setdefault((section, key.strip()), []).append(value.strip())
+        selected = {"CLAUDLOBBY_ROOT": str(plan.data_root)}
+        if declaration.scope in ("fleet", "bot"):
+            fleet_root = dict(declaration.environment).get("FLEET_ROOT")
+            if not fleet_root or not Path(fleet_root).is_absolute():
+                raise InventoryError("legacy Linux unit has no declared fleet root")
+            selected["FLEET_ROOT"] = fleet_root
+        if declaration.scope == "fleet":
+            selected["CLAUDLOBBY_FLEET"] = declaration.fleet
+        if declaration.service:
+            if (fields.get(("Timer", "Unit"), [declaration.service]) != [declaration.service]
+                    or any(group == "Service" for group, _ in fields)):
+                raise InventoryError("legacy Linux timer has a different service owner")
+            # The paired service supplies the environment and working directory.
+            result.append(replace(declaration, release_id="", environment=tuple(sorted(selected.items()))))
+            continue
+        if fields.get(("Service", "WorkingDirectory")) != [str(declaration.working_directory)]:
+            raise InventoryError("legacy Linux service has a different working directory")
+        environment = {}
+        for value in fields.get(("Service", "Environment"), ()):
+            try:
+                assignments = shlex.split(value)
+            except ValueError as exc:
+                raise InventoryError("legacy Linux service environment is ambiguous") from exc
+            for assignment in assignments:
+                key, separator, item = assignment.partition("=")
+                if not separator or key in environment:
+                    raise InventoryError("legacy Linux service environment is ambiguous")
+                environment[key] = item
+        if any(environment.get(key) != value for key, value in selected.items()):
+            raise InventoryError("legacy Linux service has a different root or fleet owner")
+        if declaration.scope == "bot":
+            if not environment.get("TMUX_TMPDIR"):
+                raise InventoryError("legacy Linux bot has no tmux owner")
+            selected["TMUX_TMPDIR"] = environment["TMUX_TMPDIR"]
+        result.append(replace(declaration, release_id="", environment=tuple(sorted(selected.items()))))
+    if not result:
+        raise InventoryError("no reviewed legacy Linux unit sources were found")
+    plan.check_fresh()
+    return tuple(result)
 
 
 def _darwin_disabled(text: str) -> dict[str, str]:
@@ -824,7 +899,7 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
             if adapter.call("svc_bot_unit_owned_by", binding.source, binding.working_directory).returncode != 0:
                 raise InventoryError("generated ownership is foreign or unknown")
             for saved in sources:
-                if saved.content != generated.content and not legacy_source:
+                if saved.content != generated.content and (not legacy_source or manager == "Linux"):
                     raise InventoryError("installed bytes differ from reviewed generated source")
                 if not declaration.service and adapter.call("svc_bot_unit_owned_by", saved.path, declaration.working_directory).returncode != 0:
                     raise InventoryError("installed ownership is foreign or unknown")

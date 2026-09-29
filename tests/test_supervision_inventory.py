@@ -14,6 +14,7 @@ import pytest
 from claudlobby import supervision_inventory as inventory
 from claudlobby.supervision_inventory import (
     Adapter, InventoryError, UnitDeclaration, _darwin_disabled, _darwin_source, collect_enrollment,
+    legacy_linux_declarations,
 )
 from tests.package_fixtures import source_package
 
@@ -455,6 +456,57 @@ def test_unsealed_darwin_source_keeps_exact_unit_ownership_without_release_claim
     installed.write_bytes(installed.read_bytes() + b"\n")
     with pytest.raises(InventoryError, match="enrollment file changed"):
         inventory.check_files()
+
+
+def test_unsealed_linux_sources_preserve_owned_host_fleet_bot_and_foreign_units(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from claudlobby import config_units
+
+    obs = Observations(tmp_path)
+    obs.env = {"CLAUDLOBBY_ROOT": str(obs.root)}
+    obs.add("claudlobby-plane.service", scope="host", working=obs.root)
+    obs.env.update(FLEET_ROOT=str(obs.root / "local/alpha"), CLAUDLOBBY_FLEET="alpha")
+    obs.add("alpha-sweep.service", scope="fleet", working=obs.root)
+    timer = obs.add("alpha-sweep.timer", scope="fleet", working=obs.root,
+                    service="alpha-sweep.service")
+    # The shipped compositor omits Unit= when the service has the same stem.
+    (obs.root / "generated/alpha-sweep.timer").write_text("[Timer]\nOnCalendar=hourly\n")
+    timer.write_bytes((obs.root / "generated/alpha-sweep.timer").read_bytes())
+    obs.env.pop("CLAUDLOBBY_FLEET")
+    obs.env["TMUX_TMPDIR"] = "/tmp"
+    bot = obs.add("alpha.worker.service", scope="bot")
+    foreign = obs.add("pipewire.service", working=tmp_path / "unrelated", declared=False)
+    foreign.write_text("[Service]\nWorkingDirectory=/unrelated\nExecStart=/usr/bin/true\n")
+    obs.properties[foreign.name].update(WorkingDirectory="/unrelated", Environment="",
+                                        ExecStart="/usr/bin/true")
+
+    plan = SimpleNamespace(data_root=obs.root, check_fresh=lambda: None)
+    monkeypatch.setattr(config_units, "planned_units", lambda _plan, manager:
+                        tuple((item, {}) for item in obs.declarations) if manager == "Linux" else ())
+    declarations = legacy_linux_declarations(plan)
+    inventory = collect_enrollment(obs.root, declarations, package=obs.package,
+                                   runner=obs.runner, legacy_source=True).require_complete()
+    assert {unit.target for unit in inventory.units} == {
+        "claudlobby-plane.service", "alpha-sweep.service", "alpha-sweep.timer", "alpha.worker.service"}
+    assert str(foreign) in inventory.foreign
+    assert dict(next(item.declaration.environment for item in inventory.units
+                     if item.target == "alpha.worker.service"))["TMUX_TMPDIR"] == "/tmp"
+
+    # An old installed service cannot carry unreviewed bytes into the pause journal.
+    bot.write_bytes(bot.read_bytes() + b"\n# changed after source composition\n")
+    with pytest.raises(InventoryError, match="installed bytes differ"):
+        collect_enrollment(obs.root, declarations, package=obs.package,
+                           runner=obs.runner, legacy_source=True).require_complete()
+    bot.write_bytes((obs.root / "generated/alpha.worker.service").read_bytes())
+    obs.properties["alpha.worker.service"]["Environment"] = "CLAUDLOBBY_ROOT=/other-root"
+    with pytest.raises(InventoryError, match="loaded data/fleet/release identity differs"):
+        collect_enrollment(obs.root, declarations, package=obs.package,
+                           runner=obs.runner, legacy_source=True).require_complete()
+    fleet_source = obs.root / "generated/alpha-sweep.service"
+    fleet_source.write_bytes(fleet_source.read_bytes().replace(
+        b"Environment=CLAUDLOBBY_FLEET=alpha", b"Environment=CLAUDLOBBY_FLEET=other"))
+    with pytest.raises(InventoryError, match="different root or fleet owner"):
+        legacy_linux_declarations(plan)
 
 
 def test_all_scopes_bytes_links_and_exact_candidate_cleanup(tmp_path):
