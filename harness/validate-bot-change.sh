@@ -3463,7 +3463,10 @@ harness_check "  ...and a fleet that says nothing carries nothing (the door owns
 
 # And the surface the ruling actually asks for: the switches are NAMED where
 # the operator looks, with the line that flips them.
-"$VAL_CLI" --root "$SW_ROOT" host doctor --switches > "$SW_ROOT/sw.txt" 2>&1 || true
+# This scenario has its own fleet. Do not inherit the main harness fleet's
+# generated selector when asking about this scratch host's declarations.
+env -u FLEET_NAME -u CLAUDLOBBY_FLEET "$VAL_CLI" --root "$SW_ROOT" host doctor --switches \
+    > "$SW_ROOT/sw.txt" 2>&1 || true
 r=yes
 for _k in update-siblings session-digest code-audit-sweep; do
     grep -q "$_k" "$SW_ROOT/sw.txt" || r=no

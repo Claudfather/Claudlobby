@@ -137,9 +137,10 @@ def test_each_class_emits_nothing_when_the_switch_is_off(host, cls):
     rules = [r for r in iso.layer0b(otis, fleet, paths).rules if r.cls == cls]
     assert rules  # the positive control: there WAS something to leave out
     assert not [r.text for r in rules if r.text in deny]
-    # and Layer 0 is untouched: exactly the sibling pair, as before #1665
+    # Layer 0 read/edit isolation is unchanged; operator-command denies are independent.
     ravi_dir = paths.bot_runtime("ravi")
-    assert deny == [f"Read(/{ravi_dir}/**)", f"Edit(/{ravi_dir}/**)"]
+    assert [r for r in deny if r.startswith(("Read(", "Edit("))] == [
+        f"Read(/{ravi_dir}/**)", f"Edit(/{ravi_dir}/**)"]
 
 
 def test_every_rule_is_double_slash_anchored(host):

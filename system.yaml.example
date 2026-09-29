@@ -205,22 +205,9 @@ host:
       type: oneshot
       persistent: true
       randomized_delay: 300
-    # Daily fast-forward of $CLAUDLOBBY_ROOT itself (#1251): a merged fix was
-    # inert on every host until someone pulled by hand. lib/ is in force the
-    # moment the pull lands, on every bot at once, so the job restarts the
-    # plane daemon and view when claudlobby/ moved, watches every fleet on the
-    # host for 15 minutes, pages on a regression, and records one source_pull
-    # event per run. OPT-IN: it mutates operator source. Arm it in THIS host's
-    # override, ~/.config/claudlobby/system.yaml:
-    #   host: { jobs: { pull-root: { enroll: true } } }
-    # then stage with config plan, inspect config diff, and host activate. Pin the host at a commit with a hold in
-    # the same file -- who, why and until, or the job still holds and pages:
-    #   host: { jobs: { pull-root: { enroll: true, hold: { sha: <sha>,
-    #     by: <who>, reason: <why>, until: <YYYY-MM-DD> } } } }
-    # The job reads the hold at run time (`claudlobby host job show pull-root`), so a
-    # hold needs no recompose. 07:00 is host-local time, when a human is up for
-    # the watch's page; persistent: false, so a host that was down at 07:00
-    # does not pull at boot, unwatched.
+    # Retired on selected releases: framework updates are assembled and
+    # manually activated as immutable candidates. Do not arm pull-root;
+    # host job operations refuse it even if an old override enrolls it.
     pull-root:
       enroll: false
       script: "$CLAUDLOBBY_NATIVE_DIR/pull-root.sh"

@@ -168,6 +168,8 @@ name=$(basename "$repo")
 case "$1" in
   rev-parse) [ -e "$repo/.pulled" ] && echo after || echo before ;;
   status) if [ "$name" = dirty ]; then echo ' M local-file'; fi ;;
+  symbolic-ref) echo main ;;
+  rev-list) echo 0 ;;
   pull) [ "$2" = --ff-only ] || exit 9
         [ "$name" = failed ] && exit 1
         [ "$name" = updated ] && : > "$repo/.pulled"

@@ -2649,7 +2649,7 @@ class TestGoalBindingAndIgnitionNameEachOther:
     ):
         ignition = self._ignition(self._report(fleet_dir, monkeypatch))
         assert ignition.index("co-requisite") < ignition.index("Cheapest to arm:")
-        assert ignition.rstrip().endswith("host activate PLAN_ID"), ignition
+        assert ignition.rstrip().endswith("host activate PLAN_ID --install-directory <native-user-unit-dir>"), ignition
 
 
 class TestTheValidatorFixtureRefusesDeadWiring:

@@ -77,6 +77,8 @@ def test_cold_move_refuses_unsafe_layout_without_rename(tmp_path, monkeypatch, c
     elif hazard == "selection":
         from claudlobby import activation_state
         monkeypatch.setattr(activation_state, "read_selection", lambda root: {"release_id": "selected"})
+        # This case isolates the cold-host refusal; ancestry has its own owner tests.
+        monkeypatch.setattr("claudlobby.commands.operator_context.require_operator_context", lambda root: None)
     elif hazard == "redirected":
         real = tmp_path / "elsewhere"
         source.rename(real)

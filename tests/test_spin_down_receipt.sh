@@ -20,7 +20,8 @@ assert_eq() {
     if [ "$e" = "$a" ]; then echo "  PASS: $d"; PASS=$((PASS + 1)); else echo "  FAIL: $d (expected '$e', got '$a')"; FAIL=$((FAIL + 1)); fi
 }
 
-T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
+# A UNIX socket is exercised below; pytest TMPDIR can exceed sun_path.
+T="$(mktemp -d /tmp/clbrc.XXXXXX)"; trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bin"
 # Capture at the emission boundary. C3 has no cold CLI rung to intercept;
 # this suite checks teardown's payload and ordering, not transport commitment
