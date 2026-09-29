@@ -26,6 +26,25 @@ Telegram channel configured. Fresh hosted CI and a repeat of this one outage
 check remain required. This is one observed failure and one targeted repair;
 no new migration harness or full local suite was added.
 
+
+**Measured / read from code:** the same bare target made `display-message`
+return only `-`, omitting both manager-instance fields. `89314c2` corrects that
+lookup as well; the same three focused checks passed with the fixture enforcing
+the pane target for both calls. `721b1b0` replaces stale script commands in memory
+alerts and GitHub App recovery advice with their existing public CLI commands.
+The same cleanup updates five active operator guides, including the distinction
+between stopping a declared bot and permanently removing an omitted bot.
+
+**Measured:** a bounded caller inspection covered 560 active source/coaching
+files and found no executable invocation of the 41 deleted `lib/` files relative
+to `fb113fa`. The canary manager's 24 generated coaching files had no matching
+retired lifecycle/task/setup route. Its latest trace contained six Bash calls:
+five supported fleet operations used the public CLI, one was local file listing;
+zero retired doors, direct state/transport bypasses or unknown operations in
+that five-call sample. Four CLI calls succeeded; one correctly refused bot
+access to an operator-only command. These small canary samples do not establish
+estate-wide adoption or coverage of external integrations.
+
 ### 2026-09-29 — CI integration repairs; rollout held
 
 **Measured:** the operator's screenshot matches all four job durations from

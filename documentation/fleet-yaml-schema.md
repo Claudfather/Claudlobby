@@ -344,7 +344,7 @@ fleet:
     lease_days: 14    # lease length in days before a workstream needs renewal (default: 14)
 ```
 
-Both values emit into every bot's `bot.conf` (`WORKSTREAM_MAX_ACTIVE`, `WORKSTREAM_LEASE_DAYS`) and govern the `claudlobby workstreams` operation's open/renew checks. Parsed by `config.py` (`_coerce_workstreams`); the validator warns on non-positive values or unknown keys. See `advanced-patterns.md` for the workstream lifecycle.
+Both values emit into every bot's `bot.conf` (`WORKSTREAM_MAX_ACTIVE`, `WORKSTREAM_LEASE_DAYS`) and govern the `claudlobby workstream` operation's open/renew checks. Parsed by `config.py` (`_coerce_workstreams`); the validator warns on non-positive values or unknown keys. See `advanced-patterns.md` for the workstream lifecycle.
 
 ### `bots.<name>.expertise`
 

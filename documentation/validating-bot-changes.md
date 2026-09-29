@@ -40,7 +40,7 @@ Some changes (a skill's actual output, a guardrail's enforcement, a protocol's w
 claudlobby --fleet <fleet> config plan --release RELEASE_ID
 claudlobby config diff PLAN_ID
 claudlobby host activate PLAN_ID --install-directory INSTALL_DIR
-claudlobby --fleet <fleet> bot restart BOT   # if a new session must read the change
+# Activation performs the required bot restarts; inspect its outcome.
 # drive the affected path, then observe:
 claudlobby event list --bot <bot> --limit 20      # the plane's rows for the bot
 claudlobby fleet uptime --bot <bot>                 # heartbeat history, from the plane

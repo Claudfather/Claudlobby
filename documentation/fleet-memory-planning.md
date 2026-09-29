@@ -132,12 +132,13 @@ the private check's policy, not flags to pass to `host job run`.
 
 1. Check selected supervision and session state with `claudlobby --fleet FLEET
    fleet reconcile` and `claudlobby --fleet FLEET fleet status`.
-2. Check the candidate bot for uncommitted WIP in its `projects/` checkouts.
-   For permanent retirement, omit it from authored `fleet.yaml`, activate the
-   reviewed configuration plan, then run `claudlobby --fleet FLEET bot remove BOT`.
-   Add `--purge` only after reviewing retained directory contents. `bot stop`
-   is a temporary supervised stop; `systemctl --user stop` is not a durable
-   removal from the keepalive fleet.
+2. Check the candidate bot for uncommitted WIP in its `projects/` checkouts,
+   then run `claudlobby --fleet FLEET bot stop BOT`. This de-enrolls and stops
+   the declared bot while retaining its identity and directory; keepalive
+   cannot restart it. Use `bot start BOT` when ready to bring it back.
+   For permanent retirement, omit the bot from authored configuration,
+   activate that plan, then use `bot remove BOT`. Do not use a raw
+   `systemctl --user stop` as a substitute for de-enrollment.
 3. If all bots are active, defer new dispatches until at least one completes.
 4. Consider scaling to a host with more RAM if alerts are frequent.
 5. Review MCP server counts — each unnecessary MCP adds ~70 MB.

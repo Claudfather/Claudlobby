@@ -109,7 +109,7 @@ Which path runs the handoff depends on *who* is restarting the bot:
 
 - **In-session restart (the `restart` skill).** When a bot restarts itself — `/restart`, or `/restart --auto` from an automated caller — the skill captures the handoff in that session before requesting the supervised restart. The public lifecycle route is `claudlobby bot restart BOT`; the skill owns the in-session sequence. See `library/skills/restart/SKILL.md`.
 
-- **External restarter (`lib/pre-stop-handoff.sh`).** When something *outside* the session bounces the bot and can't invoke a skill directly, it calls `lib/pre-stop-handoff.sh <bot-dir>` first. The canonical caller is `lib/weekly-worker-restart.sh`, which bounces worker bots weekly to pick up a staged Claude Code binary; it runs the handoff, then `spin-up-bot.sh`.
+- **External restarter.** Use `claudlobby bot handoff BOT` to obtain an explicit saved-handoff result before requesting `claudlobby bot restart BOT`. Private scheduled restarters own their native handoff sequence; callers do not invoke those scripts directly.
 
 ### What `pre-stop-handoff.sh` actually does
 
