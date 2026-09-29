@@ -13,7 +13,7 @@ The copied interpreter still uses the host's standard library and system librari
 
 ## 1. Prepare the release inputs
 
-Use a committed Claudlobby source checkout for this example. A history-free test export needs a local build inventory first: `git init --quiet && git add --all`; no commit or remote is required. There is no hosted release bundle or built-in lock-generation command. These commands follow the repository's [offline assembly CI rehearsal](../.github/workflows/test.yml) and its [hash-lock construction](../tests/release_assembly_smoke.py): network access prepares inputs; assembly itself uses only local wheels.
+Use a committed Claudlobby source checkout for this example. A history-free test export needs a local build inventory **and commit** first: `git init --quiet && git add --all && git commit -m 'Record release source'`. Configure a local Git author if needed; no remote is required. An uncommitted export can build a wheel, but release assembly refuses its missing source revision. There is no hosted release bundle or built-in lock-generation command. These commands follow the repository's [offline assembly CI rehearsal](../.github/workflows/test.yml) and its [hash-lock construction](../tests/release_assembly_smoke.py): network access prepares inputs; assembly itself uses only local wheels.
 
 ```bash
 git clone https://github.com/Claudfather/Claudlobby.git

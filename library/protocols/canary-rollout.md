@@ -28,10 +28,11 @@ Reach for a canary by default when a change to the **Claudfather framework itsel
 
 A fleet-wide production canary adds no value here — don't spend one:
 
-- **Single-bot changes** — the blast radius is already one bot; that bot *is* the canary.
+- **An individual bot operation under an unchanged release** — the blast radius is already one bot. A composed config change is different: activation currently coordinates the whole host, even when only one bot's source changed.
 - **App-repo (product) work** — shipping a feature or fix to a product repo is not a fleet-wide framework rollout. The product's own tests and deploy gates cover it.
 - **Non-runtime changes** — docs, README, planning files: nothing to drill.
-- Library, skill and permission changes use the same staged activation as code. They are not a restart-free exception.
+
+Library, skill and permission changes use the same staged activation as code. They are not a restart-free exception.
 
 Judgment call in one line: would a bad version of this change hurt more than one running bot at once? Yes → canary. No → ship it.
 
