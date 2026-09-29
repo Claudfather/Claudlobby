@@ -156,7 +156,8 @@ campaigns is a deliberate, separate, reviewed change.
    META_ACCESS_TOKEN=<your-long-lived-ads_read-token>
    ```
 7. **Attach the MCP** — add `meta-ads` to a bot's `mcp:` list, then
-   `claudlobby generate` (see *Equipping a bot*). The first `npx` run downloads the
+   stage with `claudlobby config plan`, review `claudlobby config diff PLAN_ID`,
+   and activate with `claudlobby host activate PLAN_ID --install-directory PATH` (see *Equipping a bot*). The first `npx` run downloads the
    package — warm it once (`npx -y meta-ads-mcp-server@1.5.1 --help`, or
    `claudlobby host cache warm`) so first bot use isn't a cold download. **Verify** on
    first live use with `meta_ads_list_ad_accounts` (confirms the token sees the
@@ -281,7 +282,8 @@ Set the one fleet `.env` var (gitignored — the real token lives only there):
 META_ACCESS_TOKEN=<your-long-lived-ads_read-token>
 ```
 
-Then `claudlobby generate`. The 35 read-only tools compose in as auto-allowed
+Then stage with `claudlobby config plan`, review `claudlobby config diff PLAN_ID`,
+and activate with `claudlobby host activate PLAN_ID --install-directory PATH`. The 35 read-only tools compose in as auto-allowed
 `mcp__meta-ads__*` reads (the 19 write tools stay unregistered and prompt-gated, so
 nothing mutating runs unattended). `claudlobby host doctor` flags the `.env` var if
 missing.

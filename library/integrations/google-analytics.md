@@ -224,6 +224,7 @@ GA4_SA_KEY_PATH=/abs/path/to/local/<fleet>/.secrets/<name>.json
 GA4_PROPERTY_ID=123456789
 ```
 
-Then `claudlobby generate`. The 6 read-only tools compose in as auto-allowed
+Then stage with `claudlobby config plan`, review `claudlobby config diff PLAN_ID`,
+and activate with `claudlobby host activate PLAN_ID --install-directory PATH`. The 6 read-only tools compose in as auto-allowed
 `mcp__google-analytics__*` reads (no write tools, so nothing prompts unattended).
 `claudlobby host doctor` flags either `.env` var if missing.

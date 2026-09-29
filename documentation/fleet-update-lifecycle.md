@@ -9,13 +9,32 @@ Two update classes, two mechanisms:
 | Selected plugin cache | `claudlobby fleet reload` refreshes plugins through `lib/reload-fleet.sh` | Keepalive sends `/reload-plugins` + `/reload-skills` when idle | **No** | Daily, `03:30`, + on-demand |
 | Claude Code binary | `npm install -g @anthropic-ai/claude-code@latest` (`lib/update-claude-code.sh`) | new `claude` process at next start | **Yes** (binary swap) | Downloaded daily at `04:00`; applied via natural restarts + a weekly worker-only restart, `Sun 05:00` |
 
-The only update that costs a restart is the binary. That restart is made **rare** (weekly, workers only) and **lossless** (resume-on-every-start, below).
+Binary updates take effect on the next session start. A sealed configuration or
+framework release also reaches sessions through explicit activation, which hands
+off and restarts affected consumers. Plugin refresh is a separate idle-gated
+operation; it does not publish authored configuration.
 
-## The four delivery carriers
+## Sealed release delivery
 
-Everything below documents *what runs when*. This section answers the question
-that comes first: **I have a change — how does it reach a bot?** There are four
-carriers, and the mechanisms below are instances of them rather than peers.
+Edit source configuration and library inputs, assemble the reviewed release, then
+run `claudlobby config plan --release RELEASE_ID`, inspect `config diff PLAN_ID`,
+and use `host activate PLAN_ID --install-directory PATH`. A plan writes staged
+artifacts; activation owns publication and the required handoff/restart. A source
+checkout pull does not modify an already sealed release. Do not edit installed
+release files or generated bot output. See [getting started](getting-started.md)
+for cold-host assembly and the [implementation record](plans/2026-09-28-unified-cli-run-log.md)
+for measured canary evidence and remaining platform limits.
+
+A canary must have its own root, Plane and native unit names. Activation is scoped
+to that selected root; using a second fleet inside the production root does not
+provide an independent release switch. On-demand skills, hooks and permissions
+are published only after the activation owner has quiesced affected consumers.
+
+## Artifact read timing
+
+The read timing below explains why activation must control publication, including
+files that a running session can observe immediately. The historical probes that
+follow measured those mechanisms on the earlier mutable installation.
 
 **Sort by WHEN THE ARTIFACT IS READ, never by what type of file it is.** That is
 the discriminator, and getting it wrong is not a missing row — it is a *mis-sorted*
@@ -26,16 +45,15 @@ correctly from that row ran `generate` across a live estate without a canary (#1
 | Carrier | Read | Reaches a *running* process | Survives restart | Delivered by |
 |---|---|---|---|---|
 | **Dispatch** (tmux message) | on arrival | yes — but with no delivery-time guarantee | no | sending a message |
-| **Composed instructions** (`CLAUDE.md`, `bot.conf` env) | **once, at session start** | **no** — arrives at the next restart | yes | `claudlobby generate` |
-| **Composed MCP config** (`.mcp.json`) | **once, at session start** | **no** — servers are bound at startup | yes | `claudlobby generate` |
-| **Repo `CLAUDE.md`** (project instructions) | once, at session start | no | yes | a `git pull` on the shared install |
-| **Composed skills** (`.claude/skills/` symlinks) | **on demand, per use** | **YES — live the instant the symlink lands** | yes | `claudlobby generate` |
-| **Hook script** (`lib/*.sh` wired via `PreToolUse` etc.) | on demand, per call | yes — at the next tool call | yes | a `git pull` on the shared install |
-| **Composed permissions** (`settings.local.json`) | **reads: not during a turn. enforcement: on demand, per tool call — see below** | **YES for enforcement — live the instant `generate` writes. NO for reads** | yes | `claudlobby generate` |
+| **Composed instructions** (`CLAUDE.md`, `bot.conf` env) | **once, at session start** | **no** — arrives at the next restart | yes | sealed config activation |
+| **Composed MCP config** (`.mcp.json`) | **once, at session start** | **no** — servers are bound at startup | yes | sealed config activation |
+| **Repo `CLAUDE.md`** (project instructions) | once, at session start | no | yes | a project checkout update (separate from the sealed framework) |
+| **Composed skills** (`.claude/skills/` symlinks) | **on demand, per use** | **YES — live the instant the symlink lands** | yes | sealed config activation |
+| **Hook script** (`lib/*.sh` wired via `PreToolUse` etc.) | on demand, per call | yes — at the next tool call | yes | sealed release activation |
+| **Composed permissions** (`settings.local.json`) | **reads: not during a turn. enforcement: on demand, per tool call — see below** | **YES for enforcement — live if rewritten during a session. NO for reads** | yes | sealed config activation |
 
-**The framing predicts rather than explains: anything resolved on demand is live at
-compose time.** That is why skills sit with hooks and not with `CLAUDE.md`, despite
-being generated by the same command into the same tree.
+Anything resolved on demand can become live when published. Staging alone does
+not publish it; the activation boundary now controls that exposure.
 
 ### What was measured, and how
 

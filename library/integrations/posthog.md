@@ -108,7 +108,9 @@ layer 2 into one all-tunnelling grant).
    POSTHOG_PROJECT_ID=12345
    ```
 
-5. **Wire the MCP** — add `posthog` to a bot's `mcp:` list, `claudlobby generate`
+5. **Wire the MCP** — add `posthog` to a bot's `mcp:` list, then stage
+   with `claudlobby config plan`, review `claudlobby config diff PLAN_ID`, and
+   activate with `claudlobby host activate PLAN_ID --install-directory PATH`
    (see *Equipping a bot*). First `npx` run downloads `mcp-remote` into the cache —
    `claudlobby host cache warm` warms it so the first bot use isn't slow.
 6. **Verify it's connected *and* capturing.** These are two different questions —
@@ -212,6 +214,7 @@ POSTHOG_HOST=mcp.posthog.com
 POSTHOG_PROJECT_ID=12345
 ```
 
-Then `claudlobby generate`. The 13 read-only tools compose in as auto-allowed
+Then stage with `claudlobby config plan`, review `claudlobby config diff PLAN_ID`,
+and activate with `claudlobby host activate PLAN_ID --install-directory PATH`. The 13 read-only tools compose in as auto-allowed
 `mcp__posthog__*` reads (no write tools, so nothing prompts unattended).
 `claudlobby host doctor` flags any of the three `.env` vars if missing.
