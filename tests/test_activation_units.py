@@ -220,7 +220,7 @@ def test_resume_same_id_reloads_frozen_pause_before_forward_work(enrollment, mon
         _pause_all(store, adapter)
     observed = []
     monkeypatch.setattr(activation, "_legacy_bot_socket", lambda *_args, **_kwargs: (root / "absent.sock", False))
-    monkeypatch.setattr(activation, "_legacy_quiet", lambda _adapter, _pause, phase, _sockets:
+    monkeypatch.setattr(activation, "_legacy_quiet", lambda _adapter, _pause, phase, _sockets, **_kwargs:
                         observed.append(("quiet", phase)))
     monkeypatch.setattr(activation, "_probe", lambda _root: None)
     monkeypatch.setattr(activation, "planned_units", lambda _plan, _manager: ())
@@ -242,6 +242,64 @@ def test_resume_same_id_reloads_frozen_pause_before_forward_work(enrollment, mon
     assert result.body["completed"][-1] == "queues_classified"
     assert observed == [("quiet", phase) for phase in units.PHASES] + [("finish", "cutover", 4)]
     assert adapter.calls == before
+
+
+def test_running_resume_reconciles_receipted_candidate_instead_of_old_bot(enrollment, monkeypatch):
+    inventory, phases, plan, adapter, _, _ = enrollment
+    root = inventory.data_root
+    directory = Path(inventory.catalog.split("directory\t", 1)[1].splitlines()[0])
+    release = state.read_release(root, plan.release_id)
+    package = type("Package", (), {"native": release.native_path,
+                                    "artifact_id": release.inputs.artifact_id})()
+    adapter.package = package
+    monkeypatch.setattr(activation, "get_resources", lambda: package)
+    monkeypatch.setattr(activation.RuntimeIdentity, "current", classmethod(lambda cls:
+        activation.RuntimeIdentity(release.cli_path, release.native_path, release.inputs.artifact_id)))
+    monkeypatch.setattr(activation.sys, "executable", str(release.directory / release.paths.interpreter))
+    bot = next(unit for unit in inventory.units if unit.declaration.scope == "bot")
+    builder = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, ("alpha",), effects={})
+    builder.file(Path(bot.generated.path), bot.generated.content, mode=bot.generated.mode)
+    candidate_plan = builder.seal()
+    item = {"enroll": True, "phase": "bots", "sha256": bot.generated.sha256}
+    monkeypatch.setattr(activation, "planned_units", lambda _plan, _manager: ((bot.declaration, item),))
+    monkeypatch.setattr(activation, "validate_unit_admission", lambda *_args: object())
+    monkeypatch.setattr(activation, "_roster", lambda *_args: ({}, ()))
+    with state.locked_activation(root) as store:
+        store.prepare("previous", plan, recovery_release_id=release.release_id,
+                      enrollment_digest=inventory.digest)
+        for step in state.STEPS:
+            store.begin("previous", step)
+            if step == "selection_switched":
+                store.select("previous")
+            else:
+                store.complete("previous", step, evidence_digest="a" * 64)
+        _prepare(store, inventory, phases, candidate_plan, adapter, install_directory=directory)
+        _pause_all(store, adapter)
+        for step in ("backup_saved", "migration_applied", "selection_switched",
+                     "configuration_applied", "ingest_started"):
+            store.begin("cutover", step)
+            if step == "selection_switched":
+                store.select("cutover")
+            else:
+                store.complete("cutover", step, evidence_digest="a" * 64)
+        store.begin("cutover", "bots_started")
+        store.record_start_phase("cutover", phase="bots", publication_digest="b" * 64, registry=[])
+        store.record_start_intent("cutover", phase="bots", source=str(bot.declaration.source),
+                                  target=bot.target, sha256=bot.generated.sha256,
+                                  fence={"ceiling": 210, "fence": "RR_FENCE_member"})
+    quiet = []
+    monkeypatch.setattr(activation, "_legacy_bot_socket",
+                        lambda *_args, **_kwargs: (root / "candidate.sock", True))
+    monkeypatch.setattr(activation, "assert_quiescent",
+                        lambda _adapter, **kwargs: quiet.append(kwargs["target"]))
+    monkeypatch.setattr(activation, "_finish_running_activation",
+                        lambda *_args, **_kwargs: state.read_activation(root, "cutover"))
+    calls_before = list(adapter.calls)
+    resumed = activation.resume_activation(root, "cutover", candidate_plan.plan_id, directory, adapter=adapter)
+    assert resumed.body["pending"] == "bots_started"
+    assert bot.target not in quiet
+    assert set(quiet) == set(phases["ingest"] + phases["producers"])
+    assert adapter.calls == calls_before  # No native start or handoff replay.
 
 
 def test_phases_park_exact_nodes_then_restore_original_state_and_links(enrollment):

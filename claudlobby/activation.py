@@ -429,8 +429,10 @@ def _source_handoff_roster(source_plan, bot_dirs, package):
     return roster
 
 
-def _legacy_quiet(adapter, pause, phase, sockets):
+def _legacy_quiet(adapter, pause, phase, sockets, *, candidate_started=frozenset()):
     for unit in pause.units(phase):
+        if unit["target"] in candidate_started:
+            continue  # Exact saved candidate intent is reconciled by its readiness/native owner.
         assert_quiescent(adapter, installed_file=Path(unit["installed"][0]["path"]),
                          target=unit["target"], socket_path=sockets.get(unit["target"]))
 
@@ -616,11 +618,7 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
 def _finish_running_activation(root, store, activation_id, plan, release, source, source_plan,
                                old_units, candidates, starts, rank, contexts, retired_units, sockets,
                                install_directory, adapter, package, *, legacy_source):
-    """Continue only from recorded quiescence through the existing forward owners.
-
-    Candidate starts are intentionally entered only in this invocation. A prior
-    start has no durable readiness fence and is refused by resume_activation.
-    """
+    """Continue from recorded quiescence, reconciling any exact candidate starts."""
     record = read_activation(root, activation_id)
     completed = set(record.body["completed"])
     if "queues_classified" not in completed:
@@ -918,12 +916,30 @@ def resume_activation(root: Path, activation_id: str, plan_id: str,
         if source_plan is not None and (source_plan.release_id != source.release_id
                                         or source_plan.release_seal != source.seal_sha256):
             raise ActivationError("resume source plan differs from its selected release")
+        candidates = planned_units(plan, manager)
+        starts = {}
+        candidate_targets = {}
+        for declaration, item in candidates:
+            if item["enroll"]:
+                source_path = str(declaration.source)
+                starts[source_path] = (declaration, item,
+                    validate_unit_admission(release, declaration, item, plan.blob(item["sha256"])))
+                candidate_targets[source_path] = enrollment._target(manager, domain, declaration.source)
+        candidate_started = set()
+        if step in _RESUMABLE_START_STEPS:
+            for source_path, effect in record.body["start_effects"].items():
+                candidate = starts.get(source_path)
+                if (candidate is None or effect.get("phase") != candidate[1]["phase"]
+                        or effect.get("target") != candidate_targets[source_path]
+                        or effect.get("sha256") != candidate[1]["sha256"]):
+                    raise ActivationError("candidate start intent differs from frozen plan target")
+                candidate_started.add(effect["target"])
         old_units = tuple(_frozen_unit(row) for row in frozen["units"])
         sockets = {}
         for unit in old_units:
             if unit.installed and unit.declaration.scope == "bot":
                 socket_path, present = _legacy_bot_socket(unit, require_for_active=False)
-                if present:
+                if present and unit.target not in candidate_started:
                     raise ActivationError("old private bot server is present after recorded quiescence")
                 sockets[unit.target] = socket_path
         if bootstrap:
@@ -940,18 +956,11 @@ def resume_activation(root: Path, activation_id: str, plan_id: str,
                 store.complete(activation_id, next_step, evidence_digest=evidence)
         else:
             for phase in units.PHASES:
-                _legacy_quiet(adapter, pause, phase, sockets)
+                _legacy_quiet(adapter, pause, phase, sockets, candidate_started=candidate_started)
         if not bootstrap and STEPS.index(step) < STEPS.index("ingest_started") and _probe(root) is not None:
             raise ActivationError("old ingest still answers; resume requires a quiesced writer")
-        candidates = planned_units(plan, manager)
-        starts = {}
-        for declaration, item in candidates:
-            if item["enroll"]:
-                starts[str(declaration.source)] = (declaration, item,
-                    validate_unit_admission(release, declaration, item, plan.blob(item["sha256"])))
         rank, contexts = _roster(plan, candidates, package)
-        targets = {enrollment._target(manager, domain, declaration.source)
-                   for declaration, item in candidates if item["enroll"]}
+        targets = set(candidate_targets.values())
         retired = tuple(unit for unit in old_units if unit.installed and unit.target not in targets)
         if bootstrap:
             return _finish_bootstrap_activation(root, store, activation_id, plan, release,
