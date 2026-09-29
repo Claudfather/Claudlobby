@@ -176,6 +176,11 @@ plugins and mark running bots for reload when idle. Read `plugins_refreshed`
 and `bots_marked` in the result. This command does not compose configuration
 or change enrollment; authored configuration changes require operator activation.
 
+The manager can run `claudlobby --json fleet pulse` for a fleet health sweep.
+`tick_completed` means the sweep finished; inspect its summary for bot health.
+Read recorded pulse events with
+`claudlobby events --since 24h --source pulse --json`.
+
 The current manager can use `workstream open/progress/renew/block/unblock/close/prune`
 with a retained `--request-id UUID` for each mutation. `block ID --on
 human:NAME --note TEXT` records a declared wait; `unblock ID --note TEXT`
