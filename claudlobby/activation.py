@@ -12,6 +12,7 @@ import json
 import os
 from dataclasses import replace
 from pathlib import Path
+import re
 import socket
 import stat
 import sys
@@ -32,6 +33,18 @@ from .runtime_admission import RuntimeIdentity, validate_unit_admission
 from .supervision_inventory import (Adapter, InventoryError, UnitDeclaration,
                                     _catalog, _darwin_disabled, _darwin_source, _environment,
                                     collect_enrollment)
+
+
+class CandidateDisabledOverride(ActivationError):
+    """Exact candidate launchd targets blocked before any activation effect."""
+
+    def __init__(self, targets: tuple[str, ...]):
+        if not targets or any(not re.fullmatch(r"(?:gui|user)/[0-9]+/[A-Za-z0-9_.@:-]+", target)
+                              for target in targets):
+            raise ValueError("invalid candidate launchd target")
+        self.targets = tuple(sorted(set(targets)))
+        super().__init__("candidate launchd unit has a persistent disabled override: "
+                         + ", ".join(self.targets))
 
 
 def _digest(value) -> str:
@@ -489,9 +502,7 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
             blocked = sorted(target for target in candidate_targets
                              if disabled.get(target.rsplit("/", 1)[-1]) == "disabled")
             if blocked:
-                raise ActivationError("candidate launchd unit has a persistent disabled override: "
-                                      + ", ".join(blocked)
-                                      + "; review and explicitly enable the unit or unenroll it in config")
+                raise CandidateDisabledOverride(tuple(blocked))
         retired_units = tuple(unit for unit in inventory.units
                               if unit.installed and unit.target not in candidate_targets)
         rank, contexts = _roster(plan, candidates, package)

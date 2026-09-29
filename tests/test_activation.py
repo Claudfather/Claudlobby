@@ -361,7 +361,7 @@ def test_upgrade_refuses_candidate_persistent_disabled_override_before_pause(col
     with pytest.raises(state.ActivationError, match="persistent disabled override") as failure:
         activation.upgrade_activation(root, "upgrade", candidate.plan_id, host.directory, adapter=host)
     assert target in str(failure.value)
-    assert "explicitly enable" in str(failure.value)
+    assert isinstance(failure.value, activation.CandidateDisabledOverride)
     assert state.read_selection(root) == before
     assert not (root / "state/activations/upgrade").exists()
     assert not any(name == "svc_activation_pause" for name, _ in host.calls[calls_before:])

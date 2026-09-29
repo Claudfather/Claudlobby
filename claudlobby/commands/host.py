@@ -100,10 +100,18 @@ def _activate(args, root):
                     upgrade_activation if read_selection(root) is not None else bootstrap_activation)
         record = activate(root, args.activation_id, plan.plan_id, directory)
     except Exception as exc:
+        from ..activation import CandidateDisabledOverride
         from ..activation_state import ActivationError
         data.update(recorded_activation=_recorded(root, args.activation_id), recording="unknown")
         hint = _hint(root)
-        if isinstance(exc, (ImportError, OSError)):
+        if isinstance(exc, CandidateDisabledOverride):
+            code = "conflict"
+            message = ("conflict: candidate launchd units have persistent disabled overrides: "
+                       + ", ".join(exc.targets) + "; no activation was started")
+            hint = ("review these units and explicitly enable their launchd overrides, "
+                    "or unenroll them in authored config before retrying")
+            data["recording"] = "unchanged"
+        elif isinstance(exc, (ImportError, OSError)):
             code, message = "unavailable", "unavailable: cold-host activation dependency or native access"
         elif isinstance(exc, ActivationError):
             # Native stderr can contain arbitrary text. Disclose only the

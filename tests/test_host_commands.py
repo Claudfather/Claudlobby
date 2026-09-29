@@ -183,6 +183,17 @@ def test_activate_discloses_lock_preflight_without_claiming_a_pending_step(candi
         "conflict: host activation lock is held; no activation record was created")
     assert "pending step" not in result["error"]["hint"]
 
+    target = "gui/501/claudlobby-browser-reaper"
+    monkeypatch.setattr(activation, "bootstrap_activation", lambda *_:
+                        (_ for _ in ()).throw(activation.CandidateDisabledOverride((target,))))
+    disabled = call(capsys, ["--root", str(root), "--json", "host", "activate", plan.plan_id,
+                             "--install-directory", str(directory)], 4)
+    assert target in disabled["error"]["message"]
+    assert "explicitly enable" in disabled["error"]["hint"]
+    assert disabled["data"]["recorded_activation"] is None
+    assert disabled["data"]["recording"] == "unchanged"
+    assert "pending step" not in json.dumps(disabled)
+
 
 def test_host_status_distinguishes_absent_active_and_interrupted_recorded_state(candidate, capsys, tmp_path):
     root, release, plan, _ = candidate
