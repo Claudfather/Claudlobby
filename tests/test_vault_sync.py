@@ -176,6 +176,22 @@ class TestTheEnvelopeIsParsedNeverGrepped:
         log = (root / "state" / "vault-sync.log").read_text()
         assert "ok=0" in log and "rebase is stopped part-way" in log
 
+    def test_a_refusal_whose_envelope_says_ok_true_is_still_not_ok(self, tmp_path):
+        """#1970: Claudron before 0.5.3 printed "ok": true for a refused sync,
+        exiting 1 with the reason in data.detail. The job keyed on `ok` and
+        recorded every refusal as a success, so nothing ever paged."""
+        lying = json.dumps({"ok": True, "command": "sync", "errors": [], "warnings": [],
+                            "data": {"pulled": False, "pushed": False, "committed": False,
+                                     "quarantined": [],
+                                     "detail": "refusing to sync: HEAD is on 'main' and the "
+                                               "vault's default branch cannot be determined"}})
+        root = _root(tmp_path, {"w": str(tmp_path / "v")})
+        _claudron_stub(tmp_path / "bin", sync_json=lying, sync_rc=1)
+        r = _run(root, tmp_path / "bin")
+        assert r.returncode == 0, r.stderr
+        log = (root / "state" / "vault-sync.log").read_text()
+        assert "ok=0" in log and "refusing to sync" in log
+
     def test_an_engine_without_check_records_unknown_and_STILL_SYNCS(self, tmp_path):
         """rc 2 is argparse's usage error — an older engine, not a failing
         vault. Recording a state this job invented would be the very

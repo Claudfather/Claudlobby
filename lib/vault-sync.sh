@@ -126,9 +126,17 @@ sync_one_vault() {
     local out rc=0
     out="$(cd "$vault" && claudron sync --json --timeout "$SYNC_TIMEOUT_S" 2>/dev/null)" || rc=$?
     if [ -n "$out" ]; then
-        [ "$(_envelope_field "$out" "ok" "false")" = "true" ] && ok=1
         detail="$(_envelope_field "$out" "data.detail" "")"
         [ -n "$detail" ] || detail="$(_envelope_field "$out" "error" "")"
+        # ok needs BOTH rc 0 and the envelope's ok. Before Claudron 0.5.3 a
+        # refused sync printed "ok": true while exiting 1 with its reason in
+        # data.detail (#1970, Claudron #142), and this job logged every refusal
+        # as a success. The exit code is Claudron's own failure signal on every
+        # engine version, so it is never skipped.
+        if [ "$rc" -eq 0 ] \
+            && [ "$(_envelope_field "$out" "ok" "false")" = "true" ]; then
+            ok=1
+        fi
     else
         detail="claudron sync produced no envelope (rc=$rc)"
     fi
