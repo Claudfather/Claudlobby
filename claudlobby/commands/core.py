@@ -36,7 +36,6 @@ def cmd_freshbox(args) -> int:
         audit_fleet,
         exits_nonzero,
         format_report,
-        reap_orphan_units,
     )
 
     paths = _resolve_paths(args)
@@ -49,14 +48,6 @@ def cmd_freshbox(args) -> int:
         if bot is None:
             log.error("no such bot: %s", args.bot)
             return 1
-
-    # Reap before auditing so the report reflects the cleaned state.
-    if args.reap:
-        removed = reap_orphan_units(fleet, paths, [bot] if bot else None)
-        for p in removed:
-            print(f"reaped orphan unit: {p}")
-        if not removed:
-            print("no orphan units to reap")
 
     # The CLI opts into scanning the operator's host-tier ~/.env (a WARN surface);
     # the library default (home=None) never reaches into a personal home.

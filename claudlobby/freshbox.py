@@ -637,7 +637,7 @@ def _orphan_unit_findings(
             WARN,
             f"{f.name} — stale supervision unit, not the composed "
             f"{fleet.service_prefix}.{bot.bot_id} long-form; reap with "
-            "`claudlobby freshbox --reap`",
+            "`claudlobby host supervision reap-orphans --dry-run` (then --apply)",
         )
         for f in _orphan_unit_files(bot, fleet, paths)
     ]

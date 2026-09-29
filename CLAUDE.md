@@ -425,7 +425,8 @@ claudlobby status --bot <name>         # detailed status for one bot
 claudlobby host doctor                      # pre-flight fleet health diagnostic (incl. the `switches` rung)
 claudlobby host doctor --switches           # ONLY the switch table: every knob the system ships, its state here, and the line that flips it
 claudlobby host credentials reconcile  # declared vs stored vs equipped credentials (#1104 shapes 1+2; shape 3 = UNKNOWN by design)
-claudlobby freshbox                    # fresh-box self-containment audit (over-grant/orphan, denied source values, externals report, fleet-tier .env, rendered tools/; --strict, --bot, --reap)
+claudlobby freshbox                    # read-only fresh-box self-containment audit (over-grant/orphan, denied source values, externals report, fleet-tier .env, rendered tools/; --strict, --bot)
+claudlobby host supervision reap-orphans --dry-run  # preview selected-fleet stale supervision units; use --apply to remove
 claudlobby report-back                 # the fleet's reports, from the plane
 claudlobby report-back --since 24h     # filter by time window
 claudlobby uptime                      # per-bot uptime, MTBR, restart-rate

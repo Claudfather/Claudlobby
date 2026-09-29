@@ -56,6 +56,12 @@ def _dispatch_host_update(args):
                    json_output=args.json)
 
 
+def _dispatch_host_supervision(args):
+    return execute(args.public_command,
+                   lambda: import_module(".host_supervision", __package__).dispatch(args),
+                   json_output=args.json)
+
+
 def _route(sub, name, command, help):
     parser = sub.add_parser(name, help=help)
     parser.add_argument("--json", action="store_true", help="One schema-1 result object")
@@ -68,6 +74,15 @@ def register_release_subparsers(sub):
     hosts = host.add_subparsers(dest="host_command", required=True)
     from ._setup_parsers import register_host_setup
     register_host_setup(hosts)
+    supervision = hosts.add_parser("supervision", help="Inspect selected-fleet supervision cleanup")
+    supervision_actions = supervision.add_subparsers(dest="supervision_command", required=True)
+    reap = supervision_actions.add_parser("reap-orphans", help="Reap stale units in declared bot directories")
+    reap.add_argument("--bot", metavar="BOT", help="Limit to one declared bot")
+    mode = reap.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true", help="List stale units without removing them")
+    mode.add_argument("--apply", action="store_true", help="Remove stale units")
+    reap.add_argument("--json", action="store_true", help="One schema-1 result object")
+    reap.set_defaults(func=_dispatch_host_supervision, public_command="host.supervision.reap-orphans")
     env = hosts.add_parser("env", help="Inspect the runtime's environment tier paths")
     envs = env.add_subparsers(dest="env_command", required=True)
     tiers = envs.add_parser("tiers", help="List host, root, fleet, and bot .env tiers without values")
