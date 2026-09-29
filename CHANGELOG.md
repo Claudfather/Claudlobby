@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — `[vault]` pin bumped to Claudron v0.5.1; `vault-sync` never leaves a vault mid-rebase (Claudron #193)
+
+The `[vault]` extra now pins `claudron @ …@v0.5.1`. 0.5.1 makes worktree integration
+the only way `claudron sync` reconciles a diverged clone: a conflict or a timeout leaves
+the live vault byte-identical and is reported by path, with no conflict markers written.
+`CLAUDRON_SYNC_WORKTREE` no longer exists. Drop it from any `vault-sync` environment
+once this pin is installed; leaving it set does nothing.
+
 ### Changed — `[vault]` pin bumped to Claudron v0.5.0; hooks no longer reconcile a diverged vault clone (Claudron #185, #156)
 
 The `[vault]` extra now pins `claudron @ …@v0.5.0`. 0.5.0 carries two months of
