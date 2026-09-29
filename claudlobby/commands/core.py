@@ -24,42 +24,6 @@ from ._helpers import refuse_unreachable
 log = logging.getLogger("claudlobby")
 
 
-def cmd_freshbox(args) -> int:
-    """Fresh-box self-containment audit (#644 P4): every grant traces to an
-    equipped source's contract (no over-grant/orphan), the composed allow covers
-    every declared grant (no under-grant), and the Tier-A settings surface
-    (enabledPlugins/skip-flags/sandbox) is composed per-bot, not global-inherited.
-    """
-    from ..freshbox import (
-        audit_bot,
-        audit_fleet,
-        exits_nonzero,
-        format_report,
-    )
-
-    paths = _resolve_paths(args)
-    _load_env(paths)
-    fleet, _md = _load_fleet_or_exit(paths)
-
-    bot = None
-    if args.bot:
-        bot = fleet.bots.get(args.bot)
-        if bot is None:
-            log.error("no such bot: %s", args.bot)
-            return 1
-
-    # The CLI opts into scanning the operator's host-tier ~/.env (a WARN surface);
-    # the library default (home=None) never reaches into a personal home.
-    home = Path.home()
-    findings = (
-        audit_bot(bot, fleet, paths, home=home)
-        if bot
-        else audit_fleet(fleet, paths, home=home)
-    )
-    print(format_report(fleet, findings))
-    return 1 if exits_nonzero(findings, strict=args.strict) else 0
-
-
 def _warn_baseline_gate(report, path: Path, *, write: bool) -> int:
     """``config validate --warn-baseline``: fail only on a warning category that is
     new, or has more warnings than the baseline recorded (#1663).

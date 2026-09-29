@@ -7,8 +7,8 @@
 # runtime: the bot reaches a result without hitting the auth wall or the
 # onboarding/trust wizard, exercises its tools with zero permission prompts and
 # zero missing-perm failures, and every tool it calls is covered by the composed
-# allow-list. This is the empirical counterpart to the static `claudlobby
-# freshbox` gate — a bare no-prompt run only proves absence for the tools that
+# allow-list. This is the empirical counterpart to `claudlobby config validate
+# --runtime` — a bare no-prompt run only proves absence for the tools that
 # happen to fire, so the transcript is asserted against the composed allow-list.
 #
 # Design (each pins a review finding):
@@ -151,6 +151,7 @@ YAML
 
 printf 'composing scoped freshbox bot with %s ...\n' "$CLAUDLOBBY_SRC"
 CLAUDLOBBY_ROOT="$ROOT" PYTHONPATH="$CLAUDLOBBY_SRC" python3 -m claudlobby generate >/dev/null
+CLAUDLOBBY_ROOT="$ROOT" PYTHONPATH="$CLAUDLOBBY_SRC" python3 -m claudlobby config validate --runtime >/dev/null
 
 SETTINGS="$BOT_DIR/.claude/settings.local.json"
 [ -f "$SETTINGS" ] || { printf 'ERROR: compose produced no %s\n' "$SETTINGS"; exit 1; }

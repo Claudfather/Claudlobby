@@ -425,7 +425,7 @@ claudlobby status --bot <name>         # detailed status for one bot
 claudlobby host doctor                      # pre-flight fleet health diagnostic (incl. the `switches` rung)
 claudlobby host doctor --switches           # ONLY the switch table: every knob the system ships, its state here, and the line that flips it
 claudlobby host credentials reconcile  # declared vs stored vs equipped credentials (#1104 shapes 1+2; shape 3 = UNKNOWN by design)
-claudlobby freshbox                    # read-only fresh-box self-containment audit (over-grant/orphan, denied source values, externals report, fleet-tier .env, rendered tools/; --strict, --bot)
+claudlobby config validate --runtime   # self-containment audit (over-grant/orphan, env tiers, rendered tools/; --strict, --bot)
 claudlobby host supervision reap-orphans --dry-run  # preview selected-fleet stale supervision units; use --apply to remove
 claudlobby report-back                 # the fleet's reports, from the plane
 claudlobby report-back --since 24h     # filter by time window
@@ -515,7 +515,7 @@ claudlobby/
   dotenv.py           — .env file handling
   paths.py            — Path resolution helpers
   doctor.py           — Pre-flight fleet health diagnostic
-  freshbox.py         — Fresh-box self-containment audit (#644 P4): over-grant/orphan + under-grant + Tier-A composed-not-inherited; deny-by-default rungs (#703): denied source values, externals report + unused-declaration WARN, fleet-tier .env guard, rendered tools/ (backs `claudlobby freshbox`)
+  freshbox.py         — Fresh-box self-containment audit (#644 P4): over-grant/orphan + under-grant + Tier-A composed-not-inherited; deny-by-default rungs (#703): denied source values, externals report + unused-declaration WARN, fleet-tier .env guard, rendered tools/ (backs `claudlobby config validate --runtime`)
   status.py           — Fleet health dashboard (tmux/systemd/fleet-state + the plane: the newest `bot.heartbeat` sample per bot for heartbeat/pane state through presence's own `LATEST_HEARTBEAT_SQL`, and the heartbeat series behind the utilization columns — F18 R2b, keepalive.log is gone; a plane that cannot answer renders those columns `unknown`, flags health `?`, says why under the table and in `--json`'s `plane_unreachable`, never blank-as-healthy)
   uptime.py           — Per-bot uptime, MTBR, restart-rate metrics from the plane alone (F18 R2b): the (instant, state) pairs are the heartbeat samples, the dead-session fact (DOWN) and the `keepalive_restart` events (`plane-readers.keepalive_entries`, `entries_from_plane`) through `aggregate_fleet`'s now-required `entries_for` seam; the keepalive.log parser went with the file; `claudlobby uptime` refuses (rc 3) when the plane cannot answer, never an empty table
   utilization.py      — Fleet utilization rollup — per-bot busy/idle % over rolling windows from the plane's heartbeat series (`plane/utilization.heartbeat_series`, the ONE reader shared with the operator plane's surface; F18 R2b): `compute_bot_utilization` takes a bot's (instant, state) series, `compute_fleet_utilization` opens the plane for the fleet and raises `PlaneUnreachable` rather than rolling up zeros

@@ -648,7 +648,7 @@ Omit a key to keep the script's own default; the composer emits only what is set
 > use the fleet `.env` or to edit the unit's environment. **Neither worked** (#1120):
 > the timer unit sources no `.env` at any tier, and the unit is generated — a
 > hand-edit is reverted by the next `generate`, and its first line says so. Both
-> paths failed silently, which is why they are now a `claudlobby freshbox` FAIL
+> paths failed silently, which is why they are now a `claudlobby config validate --runtime` FAIL
 > (`fleet_pulse_env_inert`) rather than something an audit finds weeks later.
 
 The composed env vars, and what each does:
@@ -739,7 +739,7 @@ Rules enforced at parse time: the path must be absolute (declare the expanded fo
 
 For a host path a bot should *read and write through the bot dir*, prefer `mounts:` (a managed symlink) over a raw `external_paths` grant.
 
-`claudlobby freshbox` reports the surface these declarations bless: an INFO line per declaration with the source values it actually covers (over-broad `/**` grants become visible this way), a `WARN` for a declaration that covers nothing (declaration rot), and a `FAIL` for a path-classified value that is **undeclared and unanchored in a fleet-tier `.env`** (`<bot_dir>/.env`, `local/<fleet>/.env`) — the runtime-sourced surface `generate` cannot see (`.env` values are masked in the report; a host-tier `root/.env` / `~/.env` value WARNs). Rendered `tools/` scripts are scanned for improper fleet paths on the same footing as the other emitted wiring.
+`claudlobby config validate --runtime` reports finding kinds and severities for this surface: `INFO` for covered external declarations, `WARN` for a declaration that covers nothing (declaration rot), and `FAIL` for a path-classified value that is **undeclared and unanchored in a fleet-tier `.env`** (`<bot_dir>/.env`, `local/<fleet>/.env`) — the runtime-sourced surface ordinary validation cannot see. The public result omits values and path details; a host-tier `root/.env` / `~/.env` value warns. Rendered `tools/` scripts are scanned for improper fleet paths on the same footing as the other emitted wiring.
 
 ### `bots.<name>.secret_files`
 
@@ -910,9 +910,9 @@ defaults:            # or bots.<bot>:, which wins over defaults
 
 **What turning it on buys, and what it does not.** The rules gate Claude Code's own tool calls: the Read tool, and a Bash file command given a literal path. They do not stop `python3 -c "open(...)"`, a path the matcher cannot resolve (`$HOME/…`), or any script, hook, timer or MCP server, and every bot runs as one user. They reduce **accidental** reads; they are not confidentiality (#1408, #1606).
 
-**What turning it off gives up:** nothing a running bot had before #1665. Off is the shipped default; `claudlobby freshbox` prints one line per fleet naming what the bots' deny lists do not cover.
+**What turning it off gives up:** nothing a running bot had before #1665. Off is the shipped default; `claudlobby config validate --runtime` reports `isolation_off` for the fleet.
 
-**Rolling it out.** A composed deny binds on the bot's next tool call, with no restart in between, and the nightly `reload-fleet` composes every fleet, so arm **one** bot, run `claudlobby --fleet <fleet> generate --bot <bot>`, drive a real turn, then widen. Before arming, `claudlobby config validate` names every composed file (skill, resource, protocol, expertise) that tells the bot to `source ~/.env` or `. ~/.env`, the read the `env` class denies; the variables are already in the session env, so drop the line. After arming, `claudlobby freshbox` compares the bot's composed deny list with what the current install would compose and names any class that falls short, including a bot that joined the host after the last generate. Backout is `shared_config: false` and a generate, in force on the next tool call.
+**Rolling it out.** A composed deny binds on the bot's next tool call, with no restart in between, so arm **one** bot and activate a staged configuration plan before driving a real turn and widening. Before arming, `claudlobby config validate` names every composed file (skill, resource, protocol, expertise) that tells the bot to `source ~/.env` or `. ~/.env`, which the `env` class denies; the variables are already in the session env, so drop the line. After arming, `claudlobby config validate --runtime` compares the bot's composed deny list with what the current install would compose and reports any class that falls short, including a bot that joined the host after the last activation. Backout is `shared_config: false` followed by a staged activation, in force on the next tool call.
 
 ## Composition order (per bot)
 

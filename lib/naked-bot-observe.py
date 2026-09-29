@@ -19,9 +19,9 @@ distinguishes them. ``SURFACES`` below therefore records, per entity type, the
 file artifact AND the instruction section separately; a type that lands in one
 and not the other is the interesting case, not a rounding error.
 
-WHY ``claudlobby freshbox`` IS NOT SUFFICIENT HERE, though the plan names it the
-primary instrument. Measured on the naked fleet: freshbox reports
-``OK — Self-contained`` while the bot is carrying a protocol it never declared.
+WHY ``claudlobby config validate --runtime`` IS NOT SUFFICIENT HERE, though the
+plan names its fresh-box audit as the primary instrument. Measured on the naked
+fleet: that audit passes while the bot carries a protocol it never declared.
 It audits GRANTS — ``settings.local.json``, ``.mcp.json``, ``bot.conf``,
 rendered ``tools/`` — and never opens ``CLAUDE.md`` (zero matches in
 ``freshbox.py``). Composed prose is not a grant, so freshbox is blind to the
@@ -668,7 +668,7 @@ def run_generate(root: Path, candidate: Candidate) -> tuple[int, str]:
 
 
 def run_freshbox(root: Path, candidate: Candidate) -> tuple[int, str]:
-    """``claudlobby freshbox --strict`` on the composed probe.
+    """``claudlobby config validate --runtime --strict`` on the composed probe.
 
     Recorded as evidence for the WIRE/RESTRICT half AND as the standing
     demonstration of its bound: it passes while an undeclared protocol composes.
@@ -676,7 +676,8 @@ def run_freshbox(root: Path, candidate: Candidate) -> tuple[int, str]:
     env = _probe_env(root)
     env["CLAUDLOBBY_CLI"] = str(candidate.cli)
     proc = subprocess.run(
-        [str(candidate.cli), "--root", str(root), "--fleet", "naked-probe", "freshbox", "--strict"],
+        [str(candidate.cli), "--root", str(root), "--fleet", "naked-probe",
+         "config", "validate", "--runtime", "--strict"],
         cwd=root,
         env=env,
         capture_output=True,
@@ -935,7 +936,7 @@ def render_text(report: dict) -> str:
     inert = report.get("baseline_inert_defaults") or []
     lines += [
         "",
-        f"freshbox --strict: rc={report['freshbox']['rc']} — "
+        f"config validate --runtime --strict: rc={report['freshbox']['rc']} — "
         f"{report['freshbox']['output'].splitlines()[-1].strip() if report['freshbox']['output'] else ''}",
         "  NOTE: freshbox audits GRANTS and never opens CLAUDE.md, so it cannot",
         "  see the INSTRUCT tier. A green line above is not a clean gate.",

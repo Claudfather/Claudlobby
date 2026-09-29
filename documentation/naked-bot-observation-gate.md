@@ -77,7 +77,7 @@ that happened to be picked.
 | tools | WIRE | — | *(no instruction surface)* | — (no `tools/` dir) |
 | integrations · resources · lessons | WIRE | — | none | — |
 
-`freshbox --strict` on this fleet: **rc 0, "Self-contained"** — and see §3 for why
+The original `freshbox --strict` baseline on this fleet was **rc 0, "Self-contained"** — and see §3 for why
 that is not a clean gate.
 
 ## Findings
@@ -189,17 +189,18 @@ an unrecognised key should be rejected rather than silently dropped.
 Without that control, eleven no-ops would read as eleven findings rather than one
 finding plus a working instrument.
 
-### 3. `freshbox` cannot see the tier the gate exists to protect
+### 3. The fresh-box audit cannot see the tier the gate exists to protect
 
-The plan names `claudlobby freshbox` the **primary** instrument. On the naked
-fleet it reports `OK — Self-contained` at rc 0 while the bot is carrying six
+The plan named the former `claudlobby freshbox` route the **primary** instrument;
+its audit now runs through `claudlobby config validate --runtime`. On the naked
+fleet the original audit reported `OK — Self-contained` at rc 0 while the bot carried six
 undeclared protocol sections.
 
 `freshbox.py` never opens `CLAUDE.md` (zero matches). It audits **grants** —
 `settings.local.json`, `.mcp.json`, `bot.conf`, rendered `tools/`. Composed prose
 is not a grant, so freshbox is blind to the INSTRUCT class **by construction**.
 
-It remains correct for the WIRE/RESTRICT half and this harness runs it and
+It remains correct for the WIRE/RESTRICT half and this harness runs it through config validation and
 records its verdict. But it is a floor, not the gate: an INSTRUCT default could
 land fleet-wide with freshbox green throughout.
 

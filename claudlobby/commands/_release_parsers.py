@@ -180,8 +180,11 @@ def register_release_subparsers(sub):
     explain.add_argument("--bot", metavar="BOT", help="Select a declared bot for bot fields or its environment tier")
     explain.add_argument("--json", action="store_true", help="One schema-1 result object")
     explain.set_defaults(func=_dispatch_config_explain, public_command="config.explain")
-    validate = configs.add_parser("validate", help="Validate the selected fleet without composing it")
+    validate = configs.add_parser("validate", help="Validate authored config, or audit composed runtime with --runtime")
     validate.add_argument("--strict", action="store_true", help="Fail on warnings")
+    validate.add_argument("--runtime", action="store_true",
+                          help="Audit rendered grants, isolation and runtime-owned sources instead of authored config")
+    validate.add_argument("--bot", metavar="BOT", help="Limit --runtime audit to one declared bot")
     validate.add_argument("--warn-baseline", metavar="FILE",
                           help="Fail when a warning category is new or has grown since FILE was written")
     validate.add_argument("--write", action="store_true",

@@ -25,17 +25,6 @@ def register_subparsers(sub) -> None:
     register_orientation_subparsers(sub)
 
 
-    pfb = sub.add_parser(
-        "freshbox",
-        help="Fresh-box self-containment audit — grants trace to sources, "
-        "Tier-A composed (#644 P4)",
-    )
-    pfb.add_argument("--bot", help="Audit only one bot")
-    pfb.add_argument(
-        "--strict", action="store_true", help="Fail on advisory warnings too"
-    )
-    pfb.set_defaults(func=_command("core", "cmd_freshbox"))
-
     pg = sub.add_parser(
         "generate", help="Compose runtime/bots/ from fleet.yaml + library/"
     )

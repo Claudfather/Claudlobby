@@ -13,7 +13,7 @@ and `fleet.defaults.git_credentials`. All of those files are **tracked**, and th
 without ever holding a value.
 
 The reason is that a name is what the compositor and validator must both agree on: `validate`
-warns when a declared var is unset, `freshbox` audits declarations against `.env` tiers, and a
+warns when a declared var is unset, `config validate --runtime` audits declarations against `.env` tiers, and a
 reader needs to know what to provision. None of that works if names live only in an untracked file.
 A value in a tracked file, by contrast, is a leaked credential.
 

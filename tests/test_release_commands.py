@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from claudlobby.__main__ import main
-from claudlobby import activation_state, composer, config, context, migration_apply, resources
+from claudlobby import activation_state, composer, config, context, freshbox, migration_apply, resources
 from claudlobby.commands import releases as commands
 from claudlobby.config_plan import ConfigPlanBuilder, read_plan
 from claudlobby.migration_plan import build_migration_manifest
@@ -187,6 +187,43 @@ def test_config_diff_current_reports_drift_without_values_or_retired_routes(stag
             main(["--root", str(case.root), retired])
         assert exit.value.code == 2
         capsys.readouterr()
+
+
+def test_config_validate_runtime_keeps_audit_severities_and_hides_details(fleet_dir, capsys, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+    monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+
+    def call(*options, expected=0):
+        return _call(capsys, ["--root", str(fleet_dir), "config", "validate",
+                              "--runtime", *options, "--json"], expected)[0]
+
+    monkeypatch.setattr(freshbox, "audit_fleet", lambda *_args, **_kwargs: [
+        freshbox.Finding("lead", "external_ref", freshbox.INFO, "SECRET-info-value")])
+    info = call("--strict")
+    assert info["data"]["mode"] == "runtime" and info["data"]["info_count"] == 1
+    assert "SECRET-info-value" not in json.dumps(info)
+
+    monkeypatch.setattr(freshbox, "audit_fleet", lambda *_args, **_kwargs: [
+        freshbox.Finding("lead", "unused_declaration", freshbox.WARN, "SECRET-warn-value")])
+    assert call()["data"]["warning_count"] == 1
+    blocked = call("--strict", expected=4)
+    assert blocked["error"]["code"] == "conflict"
+    assert "SECRET-warn-value" not in json.dumps(blocked)
+
+    monkeypatch.setattr(freshbox, "audit_fleet", lambda *_args, **_kwargs: [
+        freshbox.Finding("lead", "orphan_grant", freshbox.FAIL, "SECRET-fail-value")])
+    assert call(expected=4)["data"]["fail_count"] == 1
+    selected = []
+    monkeypatch.setattr(freshbox, "audit_bot", lambda bot, *_args, **_kwargs:
+                        selected.append(bot.bot_id) or [])
+    assert call("--bot", "lead")["data"]["bot"] == "lead"
+    assert selected == ["lead"]
+    assert call("--bot", "missing", expected=3)["error"]["code"] == "not_found"
+    assert call("--warn-baseline", str(fleet_dir / "warnings.json"), expected=2)["error"]["code"] == "invalid_argument"
+    with pytest.raises(SystemExit) as exit:
+        main(["--root", str(fleet_dir), "freshbox"])
+    assert exit.value.code == 2
+    capsys.readouterr()
 
 
 def test_migration_cli_preview_is_read_only_and_status_separates_recorded_progress(releases, capsys):
