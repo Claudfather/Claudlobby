@@ -450,7 +450,12 @@ OBSERVABILITY_BRIDGE_DOWN_GRACE=0
 CONF
 
 # --- Run: stand up a non-idle worker pane + a manager session to receive alerts ---
-tmux new-session -d -s "$MGR" "sleep 600"
+# The manager pane DRAINS what it is sent. Under `sleep` nothing reads the tty,
+# so every push stays queued in it, and once about 4 KB is queued the kernel
+# drops the rest: a later scenario's push then never reaches the pane, and its
+# check fails for want of capacity rather than for a defect. The display is
+# the same either way, because the tty echoes a push as it arrives.
+tmux new-session -d -s "$MGR" "cat >/dev/null"
 tmux new-session -d -s "$BOT" 'printf "\n⠹ Cogitating (esc to interrupt)\n"; sleep 600'
 sleep 1  # let panes render
 
@@ -2581,7 +2586,7 @@ tmux new-session -d -s "$BRIEFWAIT" "sleep 600"
 touch "$BRIEFWAIT_DIR/data/.last-tool-call"
 # Every bot here names $MGR, so the FLEET NOTICE must land in its pane, which
 # must be alive to take the push: the first scenario's sleep 600 may have ended.
-tmux has-session -t "$MGR" 2>/dev/null || tmux new-session -d -s "$MGR" "sleep 600"
+tmux has-session -t "$MGR" 2>/dev/null || tmux new-session -d -s "$MGR" "cat >/dev/null"
 # Idle briefing bot with no composed skill: the trigger must refuse it.
 tmux new-session -d -s "$BRIEFNOSKILL" "sleep 600"
 # Classifier sink: an idle pane that receives direct dispatch.sh sends, so the
