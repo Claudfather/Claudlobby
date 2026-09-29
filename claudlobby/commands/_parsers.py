@@ -60,34 +60,6 @@ def register_subparsers(sub) -> None:
     )
     pv.set_defaults(func=_command("core", "cmd_validate"))
 
-    pdr = sub.add_parser(
-        "doctor",
-        help="Pre-flight fleet health diagnostic (env, MCP, services, creds,"
-        " switches)",
-    )
-    pdr.add_argument(
-        "--switches",
-        action="store_true",
-        help="Print ONLY the switch table — every knob the system ships, its"
-        " state here, and the one line that flips it (what setup-fleet and"
-        " setup-system print at the end of a run)",
-    )
-    pdr.add_argument(
-        "--markdown",
-        action="store_true",
-        help="With --switches: print the GENERATED doc blocks (the three"
-        " schema/architecture tables are rendered from the registry, not"
-        " hand-kept) so a doc can be regenerated after a switch changes",
-    )
-    pdr.add_argument(
-        "--no-delivery", dest="delivery", action="store_false", default=True,
-        help="Skip the delivery rung (#1745), which makes ~3 network calls per "
-             "repo in scope — measured 4.1s on a 147-branch repo, 1.5s on a "
-             "small one. Skipping says so in the report: undelivered work is "
-             "then UNCHECKED, never reported clean.",
-    )
-    pdr.set_defaults(func=_command("core", "cmd_doctor"))
-
     pcr = sub.add_parser(
         "creds-reconcile",
         help="Reconcile declared credentials vs stored values vs equipped bots "
@@ -417,35 +389,6 @@ def register_subparsers(sub) -> None:
         help="Show packages that would be warmed without downloading",
     )
     pw.set_defaults(func=_command("core", "cmd_warm_cache"))
-
-    pmb = sub.add_parser(
-        "move-bot",
-        help="Move a bot between fleets (copy state, re-enroll service)",
-    )
-    pmb.add_argument("bot", help="Bot name to move")
-    pmb.add_argument("--to", required=True, help="Target fleet name")
-    pmb.add_argument(
-        "--from",
-        dest="from_fleet",
-        help="Source fleet name (auto-detected if omitted)",
-    )
-    pmb.add_argument(
-        "--apply",
-        action="store_true",
-        help="Execute the move (default: dry-run preview)",
-    )
-    pmb.add_argument(
-        "--cleanup-source",
-        action="store_true",
-        help="Remove source bot directory after move (default: left in place, "
-        "which orphans the source dir — move-bot warns when this is omitted)",
-    )
-    pmb.add_argument(
-        "--force",
-        action="store_true",
-        help="Override pre-flight checks (e.g. active tmux session)",
-    )
-    pmb.set_defaults(func=_command("move_bot", "cmd_move_bot"))
 
     pev = sub.add_parser(
         "events",

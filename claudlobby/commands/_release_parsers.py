@@ -20,6 +20,12 @@ def _dispatch_host(args):
                    json_output=args.json, request_id=args.activation_id)
 
 
+def _dispatch_doctor(args):
+    return execute(args.public_command,
+                   lambda: import_module(".host_doctor", __package__).dispatch(args),
+                   json_output=args.json)
+
+
 def _route(sub, name, command, help):
     parser = sub.add_parser(name, help=help)
     parser.add_argument("--json", action="store_true", help="One schema-1 result object")
@@ -30,6 +36,14 @@ def _route(sub, name, command, help):
 def register_release_subparsers(sub):
     host = sub.add_parser("host", help="Host release diagnosis and explicit first activation")
     hosts = host.add_subparsers(dest="host_command", required=True)
+    from ._setup_parsers import register_host_setup
+    register_host_setup(hosts)
+    doctor = _route(hosts, "doctor", "host.doctor", "Diagnose configured fleets on this host")
+    doctor.set_defaults(func=_dispatch_doctor)
+    doctor.add_argument("--switches", action="store_true", help="Only show resolved opt-in/out switches")
+    doctor.add_argument("--markdown", action="store_true", help="With --switches, render documentation tables")
+    doctor.add_argument("--no-delivery", dest="delivery", action="store_false", default=True,
+                        help="Skip repository delivery probes, reporting that evidence as unchecked")
     _route(hosts, "releases", "host.releases", "Verify installed releases and report selection")
     status = _route(hosts, "status", "host.status", "Inspect recorded host state; running processes are unobserved")
     status.set_defaults(func=_dispatch_host)

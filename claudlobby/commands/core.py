@@ -25,49 +25,6 @@ from ._helpers import refuse_unreachable
 log = logging.getLogger("claudlobby")
 
 
-def cmd_doctor(args) -> int:
-    """Pre-flight fleet health diagnostic."""
-    from ..doctor import format_report, run_doctor
-
-    paths = _resolve_paths(args)
-    _load_env(paths)
-    if getattr(args, "switches", False):
-        # The table ALONE — the form lib/setup-fleet and lib/setup-system
-        # call, so their closing summary and this command's rung come from
-        # one renderer rather than a bash copy that drifts. Deliberately
-        # cheap: no service probes, no credential curls, no npx cache walk.
-        #
-        # The fleet is OPTIONAL here, which the full doctor's is not:
-        # lib/setup-system runs once per HOST and a host with overlay fleets
-        # has no root fleet.yaml at all, so requiring one would have made the
-        # host door print nothing — the exact silence this chunk exists to
-        # remove. Without a fleet the fleet-scoped rows fall back to their
-        # shipped defaults and the host rows are still true.
-        from .. import switches as _sw
-        from ..config import load_fleet
-        if getattr(args, "markdown", False):
-            # The doc blocks, for regeneration. The three schema/architecture
-            # tables used to be a fourth hand-kept copy of the registry; they
-            # are now a generated block, pinned by test, and this is the door
-            # the failure message points at. Deliberately state-FREE: a doc
-            # must describe what ships, never what this host happens to have.
-            for doc, kw in _sw.DOC_BLOCKS.items():
-                print(f"--- {doc}")
-                print(_sw.format_markdown(**kw))
-                print()
-            return 0
-        try:
-            fleet, _md = load_fleet(paths.fleet_yaml)
-        except Exception:  # noqa: BLE001 — no fleet is a host run, not an error
-            fleet = None
-        print(_sw.format_table(_sw.resolve(paths, fleet)))
-        return 0
-    fleet, _md = _load_fleet_or_exit(paths)
-    report = run_doctor(fleet, paths, delivery=getattr(args, "delivery", True))
-    print(format_report(report))
-    return 1 if report.has_failures else 0
-
-
 def cmd_freshbox(args) -> int:
     """Fresh-box self-containment audit (#644 P4): every grant traces to an
     equipped source's contract (no over-grant/orphan), the composed allow covers

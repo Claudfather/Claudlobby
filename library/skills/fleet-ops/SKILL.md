@@ -20,6 +20,10 @@ tool_grants:
   - "Bash(claudlobby bot restart --help)"
   - "Bash(claudlobby bot automation --help)"
   - "Bash(claudlobby fleet usage --help)"
+  - "Bash(claudlobby fleet start --help)"
+  - "Bash(claudlobby fleet stop --help)"
+  - "Bash(claudlobby fleet restart --help)"
+  - "Bash(claudlobby fleet reconcile --help)"
   - "Bash(claudlobby assignment show --help)"
   - "Bash(claudlobby assignment accept --help)"
   - "Bash(claudlobby assignment deliver --help)"
@@ -67,6 +71,7 @@ tool_grants:
   - "Bash(claudlobby --json bot automation record *)"
   - "Bash(claudlobby --json fleet usage)"
   - "Bash(claudlobby --json fleet usage *)"
+  - "Bash(claudlobby --json fleet reconcile)"
 ---
 
 # Fleet operations
@@ -142,6 +147,15 @@ native unit and private session before another operation. Workers cannot use
 another bot's lifecycle. A self restart returns only `requested` with a request
 ID and startup-log path; it does not prove readiness. Read the final log entry
 after the new session starts before claiming completion.
+
+The manager can operate its workers serially with one standalone call:
+`claudlobby --json fleet start --workers`,
+`claudlobby --json fleet stop --workers`, or
+`claudlobby --json fleet restart --workers`. A generated manager must keep `--workers` so
+the sweep cannot stop its own caller midway; whole-fleet sweeps belong to an
+operator outside the fleet. `claudlobby --json fleet reconcile` reads declared,
+enrolled, and session state separately without repairing it. A partial sweep
+reports completed bots and the failed bot; inspect those outcomes before retrying.
 
 The current manager can use `workstream open/progress/renew/block/unblock/close/prune`
 with a retained `--request-id UUID` for each mutation. `block ID --on

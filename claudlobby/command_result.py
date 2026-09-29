@@ -20,6 +20,7 @@ _EXITS = {"internal_error": 1, "selection_defect": 1, "invalid_argument": 2, "no
           "unavailable": 6, "release_mismatch": 7, "timeout": 8,
           "receipt_unobservable": 9, "receipt_mismatch": 10, "recording_degraded": 11}
 _PUBLIC = {("brief",): "brief", ("host", "releases"): "host.releases", ("host", "status"): "host.status",
+           ("host", "setup"): "host.setup", ("host", "doctor"): "host.doctor", ("fleet", "setup"): "fleet.setup",
            ("host", "activate"): "host.activate", ("config", "plan"): "config.plan",
            ("config", "diff"): "config.diff", ("migration", "plan"): "migration.plan",
            ("migration", "status"): "migration.status",
@@ -31,8 +32,8 @@ _PUBLIC = {("brief",): "brief", ("host", "releases"): "host.releases", ("host", 
            ("checkin", "selection", "verify"): "checkin.selection.verify",
            ("checkin", "selection", "focus-refs"): "checkin.selection.focus-refs"}
 _PUBLIC.update({(domain, verb): f"{domain}.{verb}" for domain, verbs in (
-    ("context", ("show",)), ("bot", ("list", "show", "capabilities", "usage", "start", "stop", "restart")),
-    ("fleet", ("show", "inbox", "usage")), ("project", ("list", "show")),
+    ("context", ("show",)), ("bot", ("list", "show", "capabilities", "usage", "start", "stop", "restart", "move")),
+    ("fleet", ("show", "inbox", "usage", "start", "stop", "restart", "reconcile")), ("project", ("list", "show")),
     ("task", ("list", "show", "reviews", "admit", "assign", "withdraw", "reassign", "escalate", "nudge")),
     ("assignment", ("show", "deliver", "accept", "progress", "block", "return", "complete", "fail")),
     ("message", ("show", "receipt", "wait", "send", "reply")),

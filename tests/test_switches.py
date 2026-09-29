@@ -3,7 +3,7 @@
 The defaults flip is only half a change. The other half — and the half these
 tests are mostly about — is that whatever stays off has to be VISIBLE, with the
 one line that flips it, at the three places an operator actually looks:
-`claudlobby doctor`, `claudlobby plane doctor`, and the end of a setup run.
+`claudlobby host doctor`, `claudlobby plane doctor`, and the end of a setup run.
 
 So the assertions here are deliberately about the SURFACE, not just the data:
 a registry nobody renders is the same opacity in a tidier shape.
@@ -386,7 +386,7 @@ def _cli(root: Path, *argv):
 
 
 def test_doctor_switches_prints_the_table_alone(tmp_path):
-    r = _cli(_root(tmp_path, "TASK_RECHECK_ENABLED=0\n"), "doctor", "--switches")
+    r = _cli(_root(tmp_path, "TASK_RECHECK_ENABLED=0\n"), "host", "doctor", "--switches")
     assert r.returncode == 0, r.stderr
     assert "=== switches ===" in r.stdout
     assert "task-recheck" in r.stdout and "off" in r.stdout
@@ -401,7 +401,7 @@ def test_doctor_switches_prints_the_table_alone(tmp_path):
     # ...and ONLY the table: the shell setup doors call this, and a health
     # command's service probes / credential curls have no business in a
     # setup summary.
-    assert "npx" not in r.stdout and "=== claudlobby doctor ===" not in r.stdout
+    assert "npx" not in r.stdout and "=== claudlobby host doctor ===" not in r.stdout
 
 
 def test_the_doctor_rung_exists_and_never_fails(tmp_path):
@@ -693,7 +693,7 @@ def test_doctor_switches_works_with_NO_fleet_at_all(tmp_path):
     root = tmp_path / "hostonly"
     root.mkdir()
     (root / "lib").symlink_to(REPO / "lib")
-    r = _cli(root, "doctor", "--switches")
+    r = _cli(root, "host", "doctor", "--switches")
     assert r.returncode == 0, r.stderr
     assert "plane-daemon" in r.stdout and "update-siblings" in r.stdout
 
@@ -875,7 +875,7 @@ def test_plane_doctor_and_doctor_switches_agree_on_one_fleet(tmp_path):
     answered differently about the same fleet — one read the fleet tier, the
     other reported the shipped defaults."""
     root = _root(tmp_path, "PLANE_EMIT_ENABLED=0\n")
-    doc = _cli(root, "doctor", "--switches")
+    doc = _cli(root, "host", "doctor", "--switches")
     pln = _cli(root, "plane", "doctor")
     import re
 
@@ -945,14 +945,14 @@ def test_the_doc_switch_tables_ARE_the_registrys_render(doc):
     """Three hand-written tables were a fourth copy of the registry, and the
     estate's recurring defect is a copy drifting (#892/#1143) — two of them
     were already wrong about `session-digest`'s carrier. The block is
-    generated; regenerate with `claudlobby doctor --switches --markdown`."""
+    generated; regenerate with `claudlobby host doctor --switches --markdown`."""
     text = (REPO / doc).read_text()
     assert sw.DOC_BEGIN in text, f"{doc}: no generated block"
     body = text[text.index(sw.DOC_BEGIN):
                 text.index(sw.DOC_END) + len(sw.DOC_END)]
     assert body == sw.format_markdown(**sw.DOC_BLOCKS[doc]), (
         f"{doc} is stale — regenerate:"
-        " claudlobby doctor --switches --markdown")
+        " claudlobby host doctor --switches --markdown")
 
 
 def test_the_markdown_render_is_state_free(tmp_path):
@@ -965,7 +965,7 @@ def test_the_markdown_render_is_state_free(tmp_path):
 
 
 def test_doctor_switches_markdown_prints_every_block(tmp_path):
-    r = _cli(_root(tmp_path), "doctor", "--switches", "--markdown")
+    r = _cli(_root(tmp_path), "host", "doctor", "--switches", "--markdown")
     assert r.returncode == 0, r.stderr
     for doc in sw.DOC_BLOCKS:
         assert doc in r.stdout

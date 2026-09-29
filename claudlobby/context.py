@@ -113,6 +113,23 @@ def load_context(
     return Context(paths, config, merged_defaults, bot)
 
 
+def declared_paths(root: Path, package: PackageResources, *, external=()) -> list[Paths]:
+    """The host's authored fleets, including explicitly retained external sources."""
+    from .paths import _iter_fleet_dirs
+
+    directories = ([root] if (root / "fleet.yaml").is_file() else [])
+    directories.extend(path for path in _iter_fleet_dirs(root / "local")
+                       if (path / "fleet.yaml").is_file())
+    for selected in external:
+        path = Path(selected).expanduser().resolve()
+        directory = path.parent if path.name == "fleet.yaml" else path
+        if not (directory / "fleet.yaml").is_file():
+            raise FileNotFoundError(f"fleet declaration not found: {directory / 'fleet.yaml'}")
+        directories.append(directory)
+    return [Paths(root, package=package, fleet_dir=None if path == root else path)
+            for path in dict.fromkeys(directories)]
+
+
 def resolve_context(
     *, root: Path | None = None, fleet: str | None = None, bot: str | None = None,
     seed: bool = False, package: PackageResources | None = None,

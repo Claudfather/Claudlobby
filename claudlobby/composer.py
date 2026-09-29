@@ -1211,7 +1211,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
                             ("PLANE_EMIT_DISABLED",))
     if _silencer:
         lines.append("")
-        lines.append("# Plane recording (the estate silencer; claudlobby doctor --switches)")
+        lines.append("# Plane recording (the estate silencer; claudlobby host doctor --switches)")
         for _k, _v in _silencer.items():
             lines.append(f"export {_k}={_shq(_v)}")
 
@@ -2509,6 +2509,8 @@ def _resolve_fleet_ops_grants(bot: BotConfig, fleet: FleetConfig) -> list[str]:
             "Bash(claudlobby --json workstream prune *)",
         ))
     if bot.bot_id == fleet.manager:
+        for verb in ("start", "stop", "restart"):
+            grants.append(f"Bash(claudlobby --json fleet {verb} --workers)")
         # The public lifecycle guard admits only this exact manager operating
         # another declared bot. Enumerate targets to avoid a wildcard mutation.
         for target in fleet.bots:

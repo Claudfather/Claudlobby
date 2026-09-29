@@ -216,7 +216,7 @@ def _plan_data(plan) -> dict:
 def _config_plan(args, root: Path) -> CommandOutput:
     from ..config_plan import PlanError
     from ..config_staging import stage_configuration
-    from ..paths import Paths, _iter_fleet_dirs
+    from ..context import declared_paths
     from ..resources import get_resources
 
     release = _release(root, args.release)
@@ -224,16 +224,10 @@ def _config_plan(args, root: Path) -> CommandOutput:
         package = get_resources()
     except RuntimeError as exc:
         raise CommandFailure("unavailable", "unavailable: installed package resources") from exc
-    directories = ([root] if (root / "fleet.yaml").is_file() else [])
-    directories.extend(path for path in _iter_fleet_dirs(root / "local") if (path / "fleet.yaml").is_file())
-    for selected in args.fleet_path:
-        path = Path(selected).expanduser().resolve()
-        directory = path.parent if path.name == "fleet.yaml" else path
-        if not (directory / "fleet.yaml").is_file():
-            raise CommandFailure("not_found", f"fleet declaration not found: {directory / 'fleet.yaml'}")
-        directories.append(directory)
-    paths = [Paths(root, package=package, fleet_dir=None if directory == root else directory)
-             for directory in directories]
+    try:
+        paths = declared_paths(root, package, external=args.fleet_path)
+    except FileNotFoundError as exc:
+        raise CommandFailure("not_found", str(exc)) from exc
     try:
         plan = stage_configuration(paths, release,
                                    log=lambda _: print("configuration warning reported by the validator",
