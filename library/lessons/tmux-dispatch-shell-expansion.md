@@ -3,7 +3,7 @@ title: tmux dispatch shell expansion
 description: Disable bash history expansion before tmux send-keys dispatches containing ! tokens
 ---
 
-Every tmux send-keys dispatch with prompt-like content MUST begin with `set +H;` prefix to disable bash history expansion.
+Every tmux send-keys dispatch with prompt-like content MUST begin with `set +H;` prefix to disable bash history expansion. This is about the interactive shell you type the send into, which expands `!word` before tmux sees it; a Claude Code prompt never expands history, and what the prefix does at the receiving end is in *Dispatches framed as pasted text* in your CLAUDE.md.
 
 A literal `!` followed by a word (e.g., `!readOnly`, `!isDashboard`, `!foo && bar`) triggers bash/zsh history expansion, which can:
 - Silently blank exclamation-adjacent text
