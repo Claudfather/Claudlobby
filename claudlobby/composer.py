@@ -2263,6 +2263,11 @@ def _compose_hooks(hooks: dict[str, list[dict[str, Any]]]) -> dict[str, list]:
 # approaches this, the held #1123 lazy-import branch lands before arming).
 BRIEF_HOOK_TIMEOUT_S = 10
 
+#: The heavy-job slot's PreToolUse hook (#1686), composed for a bot that set
+#: `heavy_slot: true` and for no other. Its script and the wrapper it inserts
+#: are read per use from the install's lib/.
+HEAVY_SLOT_HOOK = "$CLAUDLOBBY_ROOT/lib/heavy-slot-guard.sh"
+
 
 @functools.cache
 def _brief_cli_probe() -> tuple[str | None, str]:
@@ -2342,6 +2347,21 @@ def _with_brief_boot_hook(
         entries.append(
             {"command": cmd, "matcher": matcher, "timeout": BRIEF_HOOK_TIMEOUT_S}
         )
+    return out
+
+
+def _with_heavy_slot_hook(
+    hooks: dict[str, list[dict[str, Any]]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Return a copy of the flat fleet.yaml-shaped hooks with the heavy-job
+    slot's PreToolUse entry appended, matcher ``Bash`` (#1686).
+
+    Composed only for a bot whose ``heavy_slot`` is true: a composed hook is
+    live on every bot the moment ``generate`` writes it (#1310), so composing
+    it per bot is what makes the manifest key a canary, and a bot that did not
+    opt in runs no process for it at all."""
+    out = {k: list(v) for k, v in hooks.items()}
+    out.setdefault("PreToolUse", []).append({"command": HEAVY_SLOT_HOOK, "matcher": "Bash"})
     return out
 
 
@@ -2941,6 +2961,8 @@ def compose_settings_local(
             exe,
             fleet=paths.fleet_dir.name if paths.fleet_dir else None,
         )
+    if bot.heavy_slot:
+        bot_hooks = _with_heavy_slot_hook(bot_hooks)
     hooks = _compose_hooks(bot_hooks)
     if _session_loop_enabled(bot):
         executable, warning = _resolve_claudron_executable()

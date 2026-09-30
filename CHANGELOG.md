@@ -16,6 +16,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Tests:** one bot, and a whole-fleet `compose_fleet` (the path `claudlobby generate` takes), each read from the logger, which is what the CLI shows. In both, the channel root is replaced by a regular file, so the write fails even when the suite runs as root. Two more simulate a write that stores 40 bytes and fails, on an existing file and on a first write. The mode tests: a 0600 and a 0640 file keep it through a reconcile, a first write creates the file 0600, and the text never reaches a file more open than the target; at both write sites, a plugin save in the middle of the write leaves the file 0600, and a temporary file the plugin left behind is left alone. The partial-write tests check that no `access.json.*.tmp` is left behind.
 - **Unchanged:** where the file lands (#1683 step 2). That remains a separate decision.
 
+### Added — the host's heavy-job slot: heavy Bash commands run one at a time host-wide, opt-in per bot (#1686)
+
+Heavy jobs stacked across fleets stormed the primary host three times on 2026-09-29 (load 25 to 57, iowait up to 66%, swap full), and a prose rule saying "one at a time" cannot hold across a score of bots in four fleets. A bot with `heavy_slot: true` in `fleet.yaml` now gets a PreToolUse hook, `lib/heavy-slot-guard.sh`, composed for that bot and no other.
+
+- **What it gates:** a whole pytest or vitest run (a run that names its test files is not gated), an npm/pnpm/yarn install, a `test` or `build` package script, `next build`, Playwright and Chromium. It recognises them through `npx`, `pnpm exec`/`dlx`, `yarn`, `env`, `timeout`, `nice`, `nohup`, `uv run` and `bash -c`. The matcher reads the command as the shell does: an argument, a quoted string, a heredoc body or a comment never matches. A construct it does not parse is left untouched and counted, because a rewrite at a guessed position would corrupt the command.
+- **How it holds the slot:** the hook puts `lib/heavy-slot.py run --` in front of each heavy command and leaves every other byte alone. The wrapper takes a non-blocking `flock` on `state/heavy-slot/slot-N.lock`, writes the holder into the file, runs the job, and writes the release.
+- **A refusal names the holder:** when every slot is taken the call is denied before anything runs, with the holder's fleet, bot, command and start time, so the bot retries later instead of hanging behind a 15-minute suite.
+- **A dead holder cannot wedge it:** the kernel drops the lock with its holder. The next holder reports the unreleased record on the plane (`heavy_slot_unreleased`), and a changed boot id means the job was running when the host reset. That is the evidence #1644 lacks.
+- **Knobs, host-wide, read on every use:** `state/heavy-slot/slots` (default 1) and `state/heavy-slot/disabled`, which passes every call through at once. `lib/heavy-slot.py status` answers who holds each slot, or who held it last.
+- **It counts only bots that opted in.** The storms came from product fleets' heavy jobs, so the slot relieves them once those fleets' managers set the key on their bots.
+
 ### Added — the README says what setup changes on your machine and what bounds a bot (#1996)
 
 A stranger deciding whether to run Claudlobby could not find out what it does to their machine without reading the scripts. The README now has two sections above the quick start, and every line names the file it can be checked against.
