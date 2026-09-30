@@ -19,6 +19,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -3000,6 +3001,30 @@ def compose_settings_local(
     return settings
 
 
+def _write_atomic(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` so a write that fails part-way leaves the old file whole.
+
+    The file keeps the mode it had, and a new one is created 0600, as the Telegram plugin
+    creates access.json. The temporary file is new and uniquely named, because the plugin
+    writes ``access.json.tmp`` itself, and it has that mode before any text reaches it, so
+    the rename never hands the file the default mode.
+    """
+    try:
+        mode = path.stat().st_mode & 0o7777
+    except FileNotFoundError:
+        mode = 0o600
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    os.close(fd)
+    tmp = Path(name)
+    try:
+        os.chmod(tmp, mode)
+        tmp.write_text(text)
+        os.replace(tmp, path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def _reconcile_access_json(
     access_path: Path,
     fresh: dict,
@@ -3049,7 +3074,7 @@ def _reconcile_access_json(
         if fleet.human_telegram_id not in allow:
             allow.append(fleet.human_telegram_id)
 
-    access_path.write_text(json.dumps(existing, indent=2) + "\n")
+    _write_atomic(access_path, json.dumps(existing, indent=2) + "\n")
 
 
 def compose_bot(
@@ -3153,12 +3178,25 @@ def compose_bot(
                 )
         else:
             channel_dir = Path.home() / telegram_channel_rel(handle)
-            channel_dir.mkdir(parents=True, exist_ok=True)
             access_path = channel_dir / "access.json"
-            if access_path.exists():
-                _reconcile_access_json(access_path, access, bot, fleet, log)
-            else:
-                access_path.write_text(json.dumps(access, indent=2) + "\n")
+            # This write lands in the host-global ~/.claude, outside the tree
+            # being composed. Like the invalid-handle branch above, a failure is
+            # a named warning, not a traceback that stops the fleet's generate.
+            try:
+                channel_dir.mkdir(parents=True, exist_ok=True)
+                if access_path.exists():
+                    _reconcile_access_json(access_path, access, bot, fleet, log)
+                else:
+                    _write_atomic(access_path, json.dumps(access, indent=2) + "\n")
+            except OSError as exc:
+                msg = (
+                    f"bot {bot.bot_id}: could not write {access_path} "
+                    f"({exc.strerror or exc.__class__.__name__}), skipping access.json, so the bot's "
+                    "Telegram group settings may be missing or stale; fix the path and re-run generate"
+                )
+                _log.warning("%s", msg)
+                if log is not None:
+                    log(f"  WARNING: {msg}")
 
     (bot_dir / f"{fleet.service_prefix}.{bot.bot_id}.service").write_text(
         compose_systemd_unit(bot, fleet, paths, boot_delay_s=boot_delay_s)
