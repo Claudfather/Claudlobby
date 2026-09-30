@@ -739,3 +739,20 @@ def test_a_human_row_with_a_deadline_still_ahead_is_not_due(tmp_path, sent, told
               assigned_by="human:chris")
     assert task_cmd.cmd_task_recheck(_Args(tmp_path)) == 0
     assert sent == [] and told == []
+
+
+def test_the_human_ask_records_what_was_sent_not_the_bot_text(tmp_path, told):
+    # #2017 review (ravi): on the person route the plane must record the text the
+    # person actually received on Telegram, not the bot-pane wording with its
+    # task-act.sh close commands (which the person never saw).
+    _compose(tmp_path, "erlich", "ramanujan")
+    asg = _seed_row(tmp_path, task_id="t-h", dispatched=_ago(20), expected_by=_ago(10),
+                    assigned_by="human:chris", title="port the parser")
+    assert task_cmd.cmd_task_recheck(_Args(tmp_path)) == 0
+    assert len(told) == 1
+    posted = told[0][1]
+    asks = [c for c in _comms(tmp_path) if c["source_ref"] == f"task-recheck:{asg}"]
+    assert len(asks) == 1, asks
+    body = asks[0]["body"]
+    assert "task-act.sh" not in body, f"recorded bot text, not what was sent: {body!r}"
+    assert body and body in posted, f"recorded body is not part of the sent message: {body!r} not in {posted!r}"

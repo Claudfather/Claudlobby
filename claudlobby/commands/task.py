@@ -585,7 +585,16 @@ def assigner_is_bot(alias: str | None, composed: set | None) -> bool:
     composed a bot of that name, i.e. the registry holds a `bot_instance` for
     it: a person's goal minted as `bot:<fleet>/operator` (dispatch-task.sh
     names its sender from BOT_ID, whoever ran it) has none. With `composed`
-    None the registry cannot answer, so a `bot:` alias is trusted as before."""
+    None the registry cannot answer, so a `bot:` alias is trusted as before.
+
+    Known limit (ravi #2017, follow-up): the source is the registry alone. A
+    manager whose `bot_instance` is missing from the registry while the fleet
+    manifest DOES declare it would be read as not-composed and its stale rows
+    routed to the fleet's Telegram instead of its pane. Latent today — every
+    composed bot on this host has a `bot_instance` and no `operator` alias is
+    manifest-declared, so the motivating person-goal case is unaffected — and
+    left to a follow-up that also consults the manifest, which the pane route
+    would then fail toward (safer than the Telegram route for a real bot)."""
     if not alias or not alias.startswith("bot:"):
         return False
     return composed is None or alias.lower() in composed
@@ -694,11 +703,13 @@ def recheck_ask_request(row, *, msg_id: str, manager: str, body: str) -> dict:
     }
 
 
-def human_recheck_message(rows: list[dict], *, who: str, fleet: str,
-                          now: datetime) -> str:
-    """The re-check a PERSON gets, on the fleet's Telegram (#2011): the rows
-    they assigned whose deadline passed, in words rather than the four
-    commands a bot runs. The fleet's group also shows it to the manager bot."""
+def human_recheck_parts(rows: list[dict], *, now: datetime) -> list[str]:
+    """The per-row fragments of the person's Telegram re-check — each is what the
+    person saw about ONE row, and (the #2017 review) what the plane records as the
+    ask about that row: the text that was SENT, not the bot-pane wording with its
+    task-act.sh commands the person never received. Each part is a substring of
+    `human_recheck_message`, so the record matches the message byte for byte for
+    that row (the bot route's `recheck_row_line` relationship to its digest)."""
     parts = []
     for i, r in enumerate(rows, 1):
         ref = r.get("task_id") or r["assignment_id"]
@@ -706,11 +717,23 @@ def human_recheck_message(rows: list[dict], *, who: str, fleet: str,
         late = f", due {_span((now - exp).total_seconds())} ago" if exp else ""
         parts.append(f"{i}) {_clip(r.get('title') or ref)}"
                      f" ({_short(r.get('assignee')) or 'unknown'}{late}; {ref})")
+    return parts
+
+
+def human_recheck_message(rows: list[dict], *, who: str, fleet: str,
+                          now: datetime) -> str:
+    """The re-check a PERSON gets, on the fleet's Telegram (#2011): the rows
+    they assigned whose deadline passed, in words rather than the four
+    commands a bot runs. The fleet's group also shows it to the manager bot."""
+    parts = human_recheck_parts(rows, now=now)
     return _one_line(
         f"TASK RE-CHECK ({fleet}) for {who}: {len(rows)} task(s) you assigned are past"
         f" their deadline: " + "; ".join(parts) + ". Reply here or to the assignee:"
         " chase it, re-scope it, or withdraw it. While a row stays open past its"
         " deadline this is asked again after the repeat window.")
+
+
+
 
 
 def send_to_human(paths, fleet: str, message: str) -> tuple[int, str, str | None]:
@@ -983,11 +1006,14 @@ def cmd_task_recheck(args) -> int:
             print(f"[dry-run] {who} (Telegram): {len(named)} row(s)")
             print(f"[dry-run] {message}")
             continue
-        lines = [recheck_row_line(r, index=i, now=now) for i, r in enumerate(named, 1)]
+        # ravi #2017: record the text the person RECEIVED (their own per-row
+        # fragment of `message`), never the bot-pane line with its task-act.sh
+        # commands — the plane must show what the human saw.
+        parts = human_recheck_parts(named, now=now)
         ids = [mint_msg_id() for _ in named]
         asked, verdict = _emit(paths.root, [
-            recheck_ask_request(r, msg_id=m, manager=alias, body=line)
-            for r, m, line in zip(named, ids, lines)])
+            recheck_ask_request(r, msg_id=m, manager=alias, body=part)
+            for r, m, part in zip(named, ids, parts)])
         if not asked:
             print(f"recheck: the plane did NOT record the ask to {who}"
                   f" ({verdict or 'no outcome'}) — sending anyway; these rows"
