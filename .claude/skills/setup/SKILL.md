@@ -30,6 +30,7 @@ missing package makes the whole flow fail in confusing ways — and the user may
 well be here *because* the documented install did not work for them.
 
 ```bash
+# pwd -P, not pwd: through a symlinked checkout, plain pwd never equals the realpath below.
 ( R="$(pwd -P)"; cd / && [ "$("$R/.venv/bin/python" -c 'import claudlobby.composer as c, os; print(os.path.realpath(c.__file__))' 2>/dev/null)" = "$R/claudlobby/composer.py" ] ) && echo INSTALLED || echo MISSING
 ```
 
@@ -57,8 +58,13 @@ only, so bare `pip` is not a command. `lib/setup-system` does exactly this, and
 launchd/systemd runs resolve the CLI without an activated shell.
 
 Then re-run the check above before continuing. If it still prints `MISSING`, stop
-and show the user the real error, which `./.venv/bin/python -c 'import claudlobby.composer'`
-prints — do not proceed into Step 1 on a broken install.
+and show the user the real error — do not proceed into Step 1 on a broken install.
+This prints where the venv's `claudlobby` comes from, or the error that stops it
+importing, asked from outside the tree for the same reason as the check:
+
+```bash
+( R="$(pwd -P)"; cd / && "$R/.venv/bin/python" -c 'import claudlobby.composer as c; print(c.__file__)' )
+```
 
 **For the rest of this skill:** if the venv exists but is not activated, invoke
 the CLI as `./.venv/bin/claudlobby ...` rather than bare `claudlobby`.

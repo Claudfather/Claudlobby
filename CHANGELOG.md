@@ -16,7 +16,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - a venv that resolves to this tree: `INSTALLED`;
   - a venv that resolves to another tree: `MISSING`.
   A variant that runs from the repo root instead of `/` fails the third.
-- **The basic-group example ID** at `SKILL.md:158` is now the obviously fake `-1234567890`, per the PII rule. A new test holds every ID-shaped number in README, getting-started and the setup skill to an obviously fake form: an ascending run, or a single repeated digit.
+- **The command Step 0 names for "show the user the real error"** now asks the venv's Python the same way, from `/`, and prints where `claudlobby.composer` comes from or the error that stops it importing. The old command, run from the repo root, printed nothing in the two states the new check exists for. Tests run it in three states: another tree (it names that tree's `composer.py`), no `claudlobby` in the venv (`No module named 'claudlobby'`), and no venv (a non-zero exit with the error).
+- **The basic-group example ID** in the setup skill is now the obviously fake `-1234567890`, per the PII rule. A new test holds every ID-shaped number in README, getting-started and the setup skill to an obviously fake form: an ascending run, or a single repeated digit.
 
 ### Added — `claudlobby doctor` asks `claudron doctor` about each wired vault, and never applies `--fix` (Claudron #190, part C)
 

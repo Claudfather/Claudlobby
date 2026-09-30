@@ -481,12 +481,16 @@ def _fake_tree(root: Path) -> Path:
     return root
 
 
-def _stub_venv(tree: Path, resolves_to: Path) -> None:
-    """A `.venv/bin/python` whose installed `claudlobby` is *resolves_to*."""
+def _stub_venv(tree: Path, resolves_to: Path, *, site: bool = True) -> None:
+    """A `.venv/bin/python` whose installed `claudlobby` is *resolves_to*.
+
+    ``site=False`` leaves out the test runner's own site-packages (``-S``),
+    where an editable `claudlobby` install would otherwise answer the import."""
     bindir = tree / ".venv" / "bin"
     bindir.mkdir(parents=True)
     stub = bindir / "python"
-    stub.write_text(f'#!/bin/sh\nPYTHONPATH="{resolves_to}" exec "{sys.executable}" "$@"\n')
+    flag = "" if site else " -S"
+    stub.write_text(f'#!/bin/sh\nPYTHONPATH="{resolves_to}" exec "{sys.executable}"{flag} "$@"\n')
     stub.chmod(0o755)
 
 
@@ -519,6 +523,47 @@ class TestSetupStep0ProvesThisTree:
         other = _fake_tree(tmp_path / "other")
         _stub_venv(tree, resolves_to=other)
         assert _run_step0(tree) == "MISSING"
+
+
+_REAL_ERROR_RE = re.compile(r"show the user the real error.*?```bash\n(.*?)```", re.DOTALL)
+
+
+def _real_error_command() -> str:
+    """The command Step 0 names for "show the user the real error"."""
+    step0 = SETUP_SKILL.read_text().split("## Step 0", 1)[1].split("\n## ", 1)[0]
+    m = _REAL_ERROR_RE.search(step0)
+    assert m, "Step 0 gives no bash block after 'show the user the real error'"
+    return m.group(1).strip()
+
+
+def _run_real_error(tree: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["bash", "-c", _real_error_command()], cwd=tree, capture_output=True, text=True, timeout=60
+    )
+
+
+class TestSetupStep0NamesTheRealError:
+    """When Step 0 still prints MISSING, the skill tells the operator to show the
+    user the real error, and names the command that prints it. In each MISSING
+    state that command must print something the user can act on."""
+
+    def test_a_venv_that_resolves_to_another_tree_names_that_tree(self, tmp_path: Path):
+        tree = _fake_tree(tmp_path / "tree")
+        other = _fake_tree(tmp_path / "other")
+        _stub_venv(tree, resolves_to=other)
+        run = _run_real_error(tree)
+        assert run.stdout.strip() == str(other / "claudlobby" / "composer.py"), run.stdout + run.stderr
+
+    def test_a_venv_without_claudlobby_says_it_is_not_installed(self, tmp_path: Path):
+        tree = _fake_tree(tmp_path / "tree")
+        _stub_venv(tree, resolves_to=tmp_path / "empty", site=False)
+        run = _run_real_error(tree)
+        assert run.returncode != 0 and "No module named 'claudlobby'" in run.stderr, run.stdout + run.stderr
+
+    def test_no_venv_fails_loudly(self, tmp_path: Path):
+        tree = _fake_tree(tmp_path / "tree")
+        run = _run_real_error(tree)
+        assert run.returncode != 0 and run.stderr.strip(), run.stdout + run.stderr
 
 
 # --- Example IDs in the onboarding docs are obviously fake (#2002, finding F3) --
