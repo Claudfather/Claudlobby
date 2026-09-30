@@ -593,3 +593,11 @@ def test_a_gist_is_public_whatever_its_flag(env, tmp_path):
     assert bash(env, f"gh gist create {tmp_path}/notes.md", tmp_path)[0] == "deny"
     assert bash(env, f"gh gist create --public {tmp_path}/plain.md", tmp_path)[0] == "allow"
     assert lookups(env) == []  # a gist's visibility is known without asking
+
+
+def test_a_redirect_is_not_a_ref_to_push(env, tmp_path):
+    """`2>&1` tokenizes as `2`, `>&`, `1`: the descriptor is not a refspec."""
+    pub = repo(tmp_path, env, "pub-org/pub-repo")
+    commit(pub, env, "b.txt", "plain\n", "plain")
+    assert bash(env, "git push origin main 2>&1", pub)[0] == "allow"
+    assert bash(env, "git push origin main >/dev/null 2>&1 || echo failed", pub)[0] == "allow"

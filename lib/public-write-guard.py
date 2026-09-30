@@ -327,6 +327,8 @@ def _parse_cmd(toks: list[str], st: _State, bodies: list[str]) -> _Cmd:
     while k < len(toks):
         t = toks[k]
         if _is_op(t):  # a redirect: separators never reach here
+            if k and c.words and toks[k - 1] == c.words[-1] and c.words[-1].isdigit():
+                c.words.pop()  # the descriptor in `2>&1`, not a word of the command
             operand = (
                 toks[k + 1] if k + 1 < len(toks) and not _is_op(toks[k + 1]) else None
             )
