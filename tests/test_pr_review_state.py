@@ -1454,3 +1454,59 @@ class TestTheVerdictIsTheCommentsHeaderLine:
         result = prs.assess_pr(payload, ledger_identity=ledger)
         assert result["blocking"] == ["rev1"]
         assert result["resolved"]["rev1"]["verdict"] == prs.BLOCK
+
+
+# ---- #2029: outside the header, a verdict-shaped line is reported, never read --
+
+# Claudlobby#1166 comment, 2026-08-11T04:48:17Z and Claudlobby#1587 comment,
+# 2026-09-20T19:00:30Z: verdicts written as the comment's own heading.
+HEADING_APPROVE_1166 = (
+    "## **Approve**\n\nReviewed as the companion to #1165 (the `lib/` half, mine)."
+)
+HEADING_BLOCK_1587 = (
+    "## **Request Changes**\n\nOne defect, narrow but on the change's central claim."
+)
+# Claudlobby#1395 comment, 2026-08-31T17:09:06Z: a real block on the LAST line.
+BLOCK_ON_LAST_LINE_1395 = (
+    "Reviewed fix range: `9878432..134079e`\n\n"
+    "All other mapped round-1 closure claims reproduced independently.\n\n"
+    "**Merge-gate verdict: Request Changes.**"
+)
+# Claudlobby#1690 comment, 2026-09-21T14:51:23Z: an approve under a labelled heading.
+LABELLED_HEADING_1690 = (
+    "## Review: **Approve** — reviewed at `5e06bb5`\n\n"
+    "> **SUPERSEDED.** This verdict was reviewed at `5e06bb5` and the head has since moved."
+)
+
+
+class TestOutsideTheHeaderIsReportedNeverRead:
+    """#2029. A verdict written below the header is not the comment's verdict,
+    and it is not dropped: it is reported verbatim as UNPARSED-HEADER, so a
+    block there reaches a human instead of reading as silence."""
+
+    @pytest.mark.parametrize("body, want", [
+        (HEADING_APPROVE_1166, "APPROVE"), (HEADING_BLOCK_1587, "REQUEST-CHANGES"),
+    ], ids=["1166-heading-approve", "1587-heading-block"])
+    def test_a_verdict_written_as_the_comments_heading_counts(self, body, want):
+        assert prs.parse_verdict(body) == want
+
+    @pytest.mark.parametrize("body, line", [
+        (BLOCK_ON_LAST_LINE_1395, "**Merge-gate verdict: Request Changes.**"),
+        (LABELLED_HEADING_1690, "## Review: **Approve** — reviewed at `5e06bb5`"),
+    ], ids=["1395-block-on-last-line", "1690-labelled-heading"])
+    def test_a_verdict_line_outside_the_header_is_reported_not_read(self, body, line):
+        assert prs.parse_verdict(body) is None
+        result = prs.assess_pr(_payload([("comments", "2026-09-30T12:00:00Z", body)]))
+        assert result["blocking"] == []
+        assert prs.UNPARSED in result["flags"]
+        assert line in result["unparsed_headers"]
+
+    def test_quoted_fenced_and_tabled_verdicts_are_not_reported(self):
+        body = (
+            "**Note** for the author.\n\n"
+            "> **Request Changes**\n\n"
+            "```\n**[alex] [VERDICT] approve** — reviewed at a1b2c3d\n```\n\n"
+            "| review | verdict |\n|---|---|\n| **Ship it** | ok |\n"
+        )
+        assert prs.parse_verdict(body) is None
+        assert prs.verdict_lines_outside_header(body) == []
