@@ -368,6 +368,39 @@ class TestComposeBotFiresPathGuard:
         assert bot_dir.is_dir()
         assert "CLAUDRON_VAULT_PATH=" in (bot_dir / "bot.conf").read_text()
 
+    def test_a_tilde_vault_path_composes_clean(self, fleet_dir, monkeypatch):
+        # The same vault root declared as `~/local`. The session-loop hooks
+        # carry it expanded (`--vault <root>/local`, Claudron #183), because
+        # the engine never expands "~"; L2 must bless the expanded root as the
+        # fleet's own vault, or generate refuses a correct fleet.
+        from claudlobby.composer import compose_bot
+        from claudlobby.config import load_fleet
+
+        root = fleet_dir
+        monkeypatch.setenv("HOME", str(root))
+        nested = root / "local" / "home" / "tl"
+        nested.mkdir(parents=True)
+        (nested / "fleet.yaml").write_text(
+            "fleet:\n"
+            "  name: tl\n"
+            "  service_prefix: com.crog.tl\n"
+            '  telegram_group_chat_id: "-100999"\n'
+            "  accounts:\n"
+            "    default: ~/.claude\n"
+            "  bots:\n"
+            "    kev:\n"
+            "      expertise: [software-engineering]\n"
+            "      claudron_vault_path: ~/local\n"
+            "      telegram:\n"
+            "        handle: kev_bot\n"
+            "        token_env: T\n"
+        )
+        paths = Paths(root=root, fleet_dir=nested)
+        fleet, _ = load_fleet(nested / "fleet.yaml")
+        bot_dir = compose_bot(fleet.bots["kev"], fleet, paths)
+        settings = (bot_dir / ".claude" / "settings.local.json").read_text()
+        assert f"--vault {root / 'local'} hook session-start" in settings
+
 
 class TestVaultModePathAudit:
     """Vault-mode regression coverage (PR #690 review flagged this branch as

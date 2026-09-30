@@ -9,6 +9,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from .. import mcp_direct
 from ..mcp_grammar import GrammarUnavailable, grammar
 from ..composer import compose_bot, compose_fleet
 from ..diff import diff_bot, promote_bot
@@ -928,6 +929,9 @@ def cmd_warm_cache(args) -> int:
     # is the shape two of the three shipped uvx fragments use.
     targets: dict[tuple[str, tuple[str, ...]], str] = {}
     unreadable: set[str] = set()
+    # #1604: spec -> (bare, version) for the copies an ARMED bot launches from.
+    # Only armed bots contribute, so a fleet that armed nobody installs nothing.
+    direct: dict[str, tuple[str, str]] = {}
     for bot in fleet.bots.values():
         for entry in bot.mcp:
             frag_path = paths.find_library_file("mcp", entry.name, ".json")
@@ -947,6 +951,10 @@ def cmd_warm_cache(args) -> int:
                     continue
                 pkg, prefix = target
                 targets[(runtime, tuple(prefix))] = pkg
+                if bot.mcp_direct_launch and runtime == "npx":
+                    pin = mcp_direct.pinned(g, pkg)
+                    if pin is not None:
+                        direct[pkg] = pin
 
     if unreadable:
         # Coverage honesty: these servers are NOT warmed and will pay the cold
@@ -1013,15 +1021,46 @@ def cmd_warm_cache(args) -> int:
                 )
                 failed.append(pkg)
 
+    # The copies armed bots launch directly (#1604), after the npx warm: with
+    # `--prefer-offline` the install resolves from the tarballs that warm left.
+    install_failed: list[str] = []
+    if direct:
+        log.info("direct-launch copies for %d package(s):", len(direct))
+    for spec, (bare, version) in sorted(direct.items()):
+        if args.dry_run:
+            there = mcp_direct.entry_point(
+                mcp_direct.package_dir(paths.root, bare, version), bare
+            )[0]
+            log.info("  %s: %s", spec, "present" if there else "would install")
+            continue
+        outcome, detail = mcp_direct.install(paths.root, bare, version)
+        if outcome == "failed":
+            log.warning("  failed to install %s for direct launch: %s", spec, detail)
+            install_failed.append(spec)
+        elif outcome == "unusable":
+            # Not a failed warm: the npx launch still works, it only keeps
+            # its wrapper. Said, so the forgone saving is visible.
+            log.warning("  %s cannot launch directly (%s); its bots keep npx", spec, detail)
+        else:
+            log.info("  %s: %s", spec, outcome)
+
     if args.dry_run:
         log.info("(dry run — no downloads)")
-    elif failed:
-        log.warning(
-            "%d of %d packages failed to warm: %s",
-            len(failed),
-            len(targets),
-            ", ".join(failed),
-        )
+    elif failed or install_failed:
+        if failed:
+            log.warning(
+                "%d of %d packages failed to warm: %s",
+                len(failed),
+                len(targets),
+                ", ".join(failed),
+            )
+        if install_failed:
+            log.warning(
+                "%d of %d direct-launch copies failed to install: %s",
+                len(install_failed),
+                len(direct),
+                ", ".join(install_failed),
+            )
         # Exit non-zero so a caller cannot read silence as success. Note what
         # this still cannot tell you: a non-zero child does NOT prove the cache
         # is unpopulated -- a package whose CLI rejects `--help` (mcp-remote

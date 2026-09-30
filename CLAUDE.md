@@ -174,7 +174,7 @@ One line per script, for routing. **Before changing a script, read [`lib/CLAUDE.
 - `code-audit-sweep.sh` — picks the stalest repo for a code audit, hands it to its owner (opt-in)
 - `vault-sync.sh` — scheduled vault sync that reports what happened (dormant)
 
-**GitHub identity and guards**
+**GitHub identity and tool-call guards**
 - `git-credential-github-app` — git credential helper that mints GitHub App installation tokens
 - `mint-github-token.sh` — print a fresh App token for one command; never export it at boot
 - `github-app-mcp-wrapper.py` — runs the GitHub MCP server with auto-refreshed App tokens
@@ -184,6 +184,8 @@ One line per script, for routing. **Before changing a script, read [`lib/CLAUDE.
 - `vault-git-guard.sh` — PreToolUse hook: stops bots rewriting git state inside the vault
 - `vault-git-decide.py` — the decision half of `vault-git-guard.sh`
 - `vault-git-base-rate.py` — how often state-changing git reaches that guard directly
+- `heavy-slot-guard.sh` — PreToolUse hook: puts heavy Bash commands (test suites, installs, builds) behind the host's heavy-job slot (opt-in per bot)
+- `heavy-slot.py` — the heavy-job slot itself: `hook` finds heavy commands, `run` holds a slot while one runs, `status` names holders
 
 **Validation, canaries and measurement**
 - `validate-bot-change.sh` — end-to-end harness for bot behavior changes
@@ -337,6 +339,7 @@ claudlobby freshbox                    # fresh-box self-containment audit (--str
 claudlobby report-back [--since 24h]   # the fleet's reports, from the plane
 claudlobby uptime                      # per-bot uptime, MTBR, restart-rate
 claudlobby events                      # the fleet's events from the plane (rc 3 when it cannot answer)
+claudlobby plane samples host.load --since 2h  # one metric family for one subject over a window (read-only)
 claudlobby workstreams [list|show <id>] # the fleet's workstream registry, from the plane
 claudlobby task nudge <task-id> ["why"] # record a nudge on one open task and ask its manager to act
 claudlobby task recheck --fleet <F>    # ask each manager to act on their stale rows (--dry-run)

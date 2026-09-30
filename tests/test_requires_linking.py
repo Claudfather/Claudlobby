@@ -71,6 +71,18 @@ def _equip(fleet_dir: Path, bot_id: str, **fields: list[str]) -> None:
     (fleet_dir / "fleet.yaml").write_text(text)
 
 
+def _no_skill_defaults(fleet_dir: Path) -> None:
+    """Switch off the registry's skill defaults for the fixture fleet, so a
+    test pins `requires:` linking alone. The manager role's `status` default
+    (#2010) would otherwise join a manager's effective set; it is pinned by
+    tests/test_manager_status_default.py."""
+    text = (fleet_dir / "fleet.yaml").read_text()
+    assert text.count("  accounts:\n") == 1
+    (fleet_dir / "fleet.yaml").write_text(
+        text.replace("  accounts:\n", "  system_defaults:\n    skills: false\n\n  accounts:\n")
+    )
+
+
 def _paths(fleet_dir: Path) -> Paths:
     return Paths(root=fleet_dir, fleet_dir=fleet_dir)
 
@@ -184,6 +196,7 @@ class TestResolveEffectiveSkills:
         _write_skill(fleet_dir, "gadget", tool_grants=["Bash(gadget-tool *)"])
         _write_skill(fleet_dir, "widget")
         _equip(fleet_dir, "lead", protocols=["needs-gadget"], skills=["widget", "gadget"])
+        _no_skill_defaults(fleet_dir)
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         bot = fleet.bots["lead"]
         is_manager = bot.bot_id in fleet.manager_bots()
@@ -491,6 +504,7 @@ def test_a_fleet_with_no_requires_composes_exactly_the_declared_grants(fleet_dir
     _write_skill(fleet_dir, "gadget", tool_grants=["Bash(gadget-tool *)"])
     _write_skill(fleet_dir, "widget", tool_grants=["Bash(widget-tool *)"])
     _equip(fleet_dir, "lead", skills=["gadget", "widget"], channels=[])
+    _no_skill_defaults(fleet_dir)
     fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
     paths = _paths(fleet_dir)
     bot = fleet.bots["lead"]
@@ -525,6 +539,7 @@ def test_effective_skills_is_a_no_op_when_no_effective_protocol_declares_require
     """The identity property underlying the byte-identical proof above,
     isolated: with no `requires:` anywhere in the effective protocol set,
     resolve_effective_skills reduces to exactly bot.skills."""
+    _no_skill_defaults(fleet_dir)
     fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
     paths = _paths(fleet_dir)
     for bot_id in ("lead", "worker-1"):

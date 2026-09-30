@@ -62,6 +62,8 @@ Parse the inbound. Extract type, summary, and key-value pairs. If the dispatch i
 
 A final line of the form `⟦plane:msg_…⟧` is a framework **delivery-receipt marker**, always on its own last line — ignore it entirely; it is never part of the task.
 
+A leading `set +H; ` on the first line is framework wire format too. `lib/dispatch.sh` adds it to every message except one that starts with a command word and has no `!`, which means a message that begins with `/`, such as a file path, is not run as a slash command. Skip it: it is not part of the task, and there is nothing to run.
+
 **Part of the dispatch arrives inside `<pasted_content>` tags?** Verify, then trust, as **Dispatches framed as pasted text** in this file says. Every bot carries that section, whatever it composes.
 
 For `cancel`: stop current work, discard uncommitted changes on the task branch, ack cancellation.
@@ -69,7 +71,7 @@ For `compact`: run `/compact`, ack.
 For `restart`: wrap up, report back, expect session restart.
 For `query`: answer inline without branching or PRs — skip to Step 8 after answering.
 
-**A non-`task` envelope carries no `task:<id>`, and its terminal report must not close one.** You have nothing to echo, so report without `--task` — do NOT reach for an id from earlier work to fill the field. The gap is deliberate: a `cancel`/`compact`/`restart`/`query` was never a tracked row, so there is nothing for your report to close. `report-back.sh` enforces this on its own (it suppresses the #835 auto-resolve while an unanswered non-`task` note is the most recent dispatch), so the rule holds whether or not you remember it — but supplying an unrelated id defeats it, because a *supplied* id is recorded unchanged by design.
+**A non-`task` envelope carries no `task:<id>`, and its terminal report must not close one.** You have nothing to echo, so do NOT reach for an id from earlier work to fill the field. The gap is deliberate: a `cancel`/`compact`/`restart`/`query` was never a tracked row, so there is nothing for your report to close. The safe form is `report-back.sh --no-task`: that report resolves to no task and closes nothing, whatever else you have sent. If you forget it, `report-back.sh` holds the #835 auto-resolve back on its own: after a note, your first report without an id resolves to no task, even if you filed reports with `--task` on your own tasks, or received a task, in between. That backstop has three bounds. It holds back resolution only, so a terminal report still closes your open raw-text (id-less) dispatches, as any terminal report does. A `--task` that links to none of your own tasks (a typo, another bot's id) counts as a report without an id, so it ends the hold early; supplying an unrelated id of your own defeats it outright, because a *supplied* id is recorded unchanged by design. And it sees only notes sent through the dispatch door, one report per note, so a message with no envelope (a raw `dispatch.sh` send, or text typed into your pane) needs `--no-task`.
 
 ### Step 2: ENGAGE (your first report is the ack)
 

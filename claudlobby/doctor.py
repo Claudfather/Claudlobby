@@ -267,6 +267,91 @@ def check_npx_cache(paths: Paths, report: DoctorReport) -> None:
 # ----------------------------------------------------------------------
 
 
+def _check_composed_launches(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> None:
+    """What each bot WILL launch: its composed `.mcp.json` (#1991 review).
+
+    A `node` entry inside a `state/mcp/npm/` copy whose script is gone is a
+    server that will not start at the bot's next session, and nothing else says
+    so: the plan below reads what `generate` would compose NOW, which is the npx
+    fallback. Every bot is read, armed or not, because a bot disarmed without a
+    regenerate still launches whatever its file names. A fleet with no composed
+    direct launch adds no line."""
+    from . import mcp_direct
+
+    marker = mcp_direct.INSTALL_ROOT
+    seen = 0
+    dead: list[str] = []
+    for bot in fleet.bots.values():
+        try:
+            composed = json.loads((paths.bot_runtime(bot.bot_id) / ".mcp.json").read_text())
+        except FileNotFoundError:
+            continue  # never generated: there is nothing to launch yet
+        except (OSError, ValueError) as exc:
+            report.add("mcp-launch-composed", "warn",
+                       f"{bot.bot_id}: .mcp.json unreadable ({exc.__class__.__name__})")
+            continue
+        for name, server in (composed.get("mcpServers") or {}).items():
+            args = server.get("args") or []
+            if server.get("command") != "node" or not args:
+                continue
+            entry = Path(str(args[0]))
+            # By its path SEGMENTS, not a prefix of this run's root: a file
+            # composed under another spelling of the root is still a copy.
+            parts = entry.parts
+            if not any(parts[i:i + len(marker)] == marker for i in range(len(parts))):
+                continue
+            seen += 1
+            if not entry.is_file():
+                dead.append(f"{bot.bot_id}/{name} ({entry})")
+    if dead:
+        shown = ", ".join(dead[:4]) + (f" (+{len(dead) - 4} more)" if len(dead) > 4 else "")
+        report.add("mcp-launch-composed", "fail",
+                   f"{len(dead)} composed MCP server(s) will not start: the state/mcp copy"
+                   f" they launch is gone: {shown} — run `claudlobby warm-cache` for this"
+                   " fleet, then generate (generate alone falls back to npx)")
+    elif seen:
+        report.add("mcp-launch-composed", "pass",
+                   f"{seen} composed direct launch(es): every entry point exists")
+
+
+def check_mcp_launch(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> None:
+    """#1604: an armed bot's npx servers launch directly, or this names each one
+    still carrying an npm wrapper and why.
+
+    It reads the composer's own plan (`mcp_launch_plan`), so doctor and
+    generate cannot disagree. No armed bot adds no line: off is the shipped
+    default, and the switches rung already names it with its arm line. The
+    composed files are read first and separately (`mcp-launch-composed`),
+    because the plan cannot see a copy removed after compose."""
+    from . import mcp_direct
+    from .composer import mcp_launch_plan
+    from .mcp_grammar import GrammarUnavailable
+
+    _check_composed_launches(fleet, paths, report)
+    armed = [b for b in fleet.bots.values() if b.mcp_direct_launch]
+    if not armed:
+        return
+    left: list[str] = []
+    fixable = False
+    try:
+        for bot in armed:
+            _merged, fallbacks = mcp_launch_plan(bot, paths)
+            for name, _spec, why in fallbacks:
+                left.append(f"{bot.bot_id}/{name} ({why})")
+                fixable = fixable or why == mcp_direct.NOT_INSTALLED
+    except (GrammarUnavailable, ValueError, OSError) as exc:
+        report.add("mcp-launch", "warn", f"could not read the launch plan: {exc}")
+        return
+    if not left:
+        report.add("mcp-launch", "pass",
+                   f"{len(armed)} armed bot(s): every npx server launches directly")
+        return
+    shown = ", ".join(left[:6]) + (f" (+{len(left) - 6} more)" if len(left) > 6 else "")
+    fix = " — run `claudlobby warm-cache` for this fleet, then generate" if fixable else ""
+    report.add("mcp-launch", "warn",
+               f"{len(left)} server(s) on armed bot(s) still launch through npx: {shown}{fix}")
+
+
 def check_services(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> None:
     """Check systemd/launchd enrollment and tmux session presence per bot."""
     import platform
@@ -645,39 +730,136 @@ def check_credentials(
 #: A hook degradation older than this is history, not a live symptom.
 _LOOP_DEGRADATION_WINDOW_DAYS = 7
 
+#: How long doctor waits for `claudron doctor` (Claudron #190 part C). A vault
+#: that holds only notes answers in seconds; a vault root that also holds large
+#: ignored trees can take many minutes to walk (Claudron #201), and a doctor
+#: that hangs is worse than one that says it could not tell.
+CLAUDRON_DOCTOR_TIMEOUT_S = 60.0
+
+#: `_run`'s return code for a call that did not finish in time, as coreutils
+#: `timeout` reports it. Distinct from 1, which `claudron doctor` exits with
+#: when it has error findings.
+_RC_TIMEOUT = 124
+
 
 def _run(argv: list[str], timeout: float = 10.0) -> tuple[int, str]:
-    """Run *argv*, returning (returncode, stdout). Absent binary ⇒ (127, "")."""
+    """Run *argv*, returning (returncode, stdout). Absent binary ⇒ (127, ""),
+    no answer within *timeout* ⇒ (_RC_TIMEOUT, "")."""
     try:
         r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
         return r.returncode, r.stdout
     except FileNotFoundError:
         return 127, ""
-    except (subprocess.TimeoutExpired, OSError):
+    except subprocess.TimeoutExpired:
+        return _RC_TIMEOUT, ""
+    except OSError:
         return 1, ""
 
 
-def _claudron_probe(vault: str) -> tuple[str, str]:
+def _claudron_probe(vault: str) -> tuple[str, str, dict | None]:
     """Claudron's sanctioned capability probe (CLI_CONTRACT §Capability probe).
 
-    Returns (status, detail) for a doctor row. Branches on the exit code, never
-    on message text: 0 ⇒ envelope on stdout, 3 ⇒ engine present but no vault.
+    Returns (status, detail) for a doctor row, plus the envelope's `data` (None
+    when there is no envelope) so later rows can gate on `data.capabilities`.
+    Branches on the exit code, never on message text: 0 ⇒ envelope on stdout,
+    3 ⇒ engine present but no vault.
     """
     rc, out = _run(["claudron", "status", "--json", "--vault", vault])
     if rc == 3:
-        return "warn", f"claudron installed but no vault resolved at {vault}"
+        return "warn", f"claudron installed but no vault resolved at {vault}", None
     if rc != 0:
-        return "warn", f"`claudron status --json` exited {rc} for {vault}"
+        return "warn", f"`claudron status --json` exited {rc} for {vault}", None
     try:
         data = json.loads(out)["data"]
     except (json.JSONDecodeError, KeyError, TypeError):
-        return "warn", "`claudron status --json` did not return the CLI envelope"
+        return "warn", "`claudron status --json` did not return the CLI envelope", None
+    if not isinstance(data, dict):
+        return "warn", "`claudron status --json` did not return the CLI envelope", None
     # engine_version does not exist before 0.3.0 — index it defensively.
     version = data.get("engine_version", "unknown (pre-0.3.0)")
     return "pass", (
         f"engine {version}, vault {data.get('root', vault)} "
         f"({data.get('total_docs', '?')} notes)"
+    ), data
+
+
+def _claudron_doctor(vault: str, probe: dict | None) -> list[tuple[str, str, str]]:
+    """`claudron doctor --json --vault <vault>` as doctor rows (Claudron #190 part C).
+
+    Surfaces what only a human should act on: pending migrations (D001), the
+    identity file (D007), and tracked files the ignore rules match (D008).
+    Every other finding is counted, not restated. **Never passes `--fix`**:
+    applying a migration stays a human's, or a librarian's.
+
+    Gated on `"doctor"` in the capability probe's `data.capabilities`, never on
+    `engine_version` (Claudron CLI_CONTRACT §Capability probe). The engine is
+    the only source of findings: nothing here inspects the vault itself.
+    """
+    name = "claudron-doctor"
+    if probe is None:
+        return [(name, "warn", f"{vault}: not checked, because the capability probe did not answer")]
+    if "doctor" not in (probe.get("capabilities") or []):
+        return [(name, "warn", (
+            f"{vault}: this claudron does not declare the `doctor` capability, so pending "
+            f"migrations cannot be checked — upgrade Claudron (engine "
+            f"{probe.get('engine_version', 'unknown')})"
+        ))]
+    rc, out = _run(
+        ["claudron", "doctor", "--json", "--vault", vault], timeout=CLAUDRON_DOCTOR_TIMEOUT_S
     )
+    if rc == _RC_TIMEOUT:
+        return [(name, "warn", (
+            f"{vault}: `claudron doctor` did not answer within {CLAUDRON_DOCTOR_TIMEOUT_S:g}s, "
+            f"so pending migrations are unknown — walking a vault root that holds large "
+            f"ignored trees takes minutes (Claudron #201); run `claudron doctor --vault "
+            f"{vault}` by hand"
+        ))]
+    if rc == 3:
+        return [(name, "warn", f"{vault}: `claudron doctor` found no vault there (exit 3)")]
+    try:
+        env = json.loads(out)
+        data = env["data"]
+        findings = [f for f in list(env["errors"]) + list(env["warnings"]) if isinstance(f, dict)]
+        shaped = env.get("command") == "doctor" and isinstance(data, dict)
+    except (json.JSONDecodeError, KeyError, TypeError):
+        shaped = False
+    if rc not in (0, 1) or not shaped:
+        return [(name, "warn", f"{vault}: `claudron doctor --json` exited {rc} without its envelope")]
+
+    def of(code: str) -> list[dict]:
+        return [f for f in findings if f.get("code") == code]
+
+    rows: list[tuple[str, str, str]] = []
+    others = sorted({str(f.get("code")) for f in findings} - {"D001", "D007", "D008"})
+    tail = (
+        f"; {len(others)} other finding(s) ({', '.join(others)}): `claudron doctor --vault "
+        f"{vault}` has the detail"
+        if others
+        else ""
+    )
+    fmt = (
+        f"vault format {data.get('vault_format', '?')}, "
+        f"engine format {data.get('engine_format', '?')}"
+    )
+    pending = [p for p in (data.get("pending") or []) if isinstance(p, dict)]
+    if pending or of("D001"):
+        shown = ", ".join(f"{p.get('id')} ({p.get('title')})" for p in pending[:4])
+        more = f" (+{len(pending) - 4} more)" if len(pending) > 4 else ""
+        count = len(pending) or len(of("D001"))
+        rows.append((name, "warn", (
+            f"{vault}: {fmt}: {count} migration(s) pending: {shown or 'see D001'}{more} — a "
+            f"human applies them with `claudron doctor --vault {vault} --fix`; claudlobby "
+            f"never runs it{tail}"
+        )))
+    elif data.get("vault_format") != data.get("engine_format"):
+        rows.append((name, "warn", f"{vault}: {fmt}, and nothing is pending{tail}"))
+    else:
+        rows.append((name, "pass", f"{vault}: {fmt}, no migration pending{tail}"))
+    for finding in of("D007"):
+        rows.append((f"{name}: D007", "warn", f"{vault}: {finding.get('message')}"))
+    for finding in of("D008"):
+        rows.append((f"{name}: D008", "warn", f"{vault}: {finding.get('message')}"))
+    return rows
 
 
 def _floor_row_state(cap, cli_present: bool) -> tuple[str, str]:
@@ -779,9 +961,10 @@ def check_claudron(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> No
 
     Silent for a fleet with no vault-wired bot — nothing to diagnose. For a
     vault-wired fleet it reports, in order: CLI presence, the engine capability
-    probe, every COMPAT_FLOOR row as met/unmet/parked, and per-vault
+    probe, every COMPAT_FLOOR row as met/unmet/parked, per-vault
     loop-execution evidence so a wired-but-dead session loop is visible in
-    steady state.
+    steady state, and, for each vault this host holds, what `claudron doctor`
+    says only a human should act on (`_claudron_doctor`; never `--fix`).
 
     Warn-level throughout, deliberately: a host can be composing for a fleet it
     does not itself run, and a diagnostic that fails the whole doctor run on
@@ -796,9 +979,10 @@ def check_claudron(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> No
         return
 
     cli_present = shutil.which("claudron") is not None
+    probe: dict | None = None
     if cli_present:
         report.add("claudron-cli", "pass", f"{len(wired)} vault-wired bot(s)")
-        status, detail = _claudron_probe(sorted(set(wired.values()))[0])
+        status, detail, probe = _claudron_probe(sorted(set(wired.values()))[0])
         report.add("claudron-engine", status, detail)
     else:
         report.add(
@@ -815,6 +999,11 @@ def check_claudron(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> No
     for vault in sorted(set(wired.values())):
         status, detail = _loop_evidence(vault)
         report.add("claudron-loop", status, detail)
+        # A vault this host does not hold is the loop row's to report; the
+        # engine is only asked about one it can reach.
+        if cli_present and Path(vault).expanduser().is_dir():
+            for row in _claudron_doctor(vault, probe):
+                report.add(*row)
 
 
 # ----------------------------------------------------------------------
@@ -1287,6 +1476,7 @@ def run_doctor(fleet: FleetConfig, paths: Paths, *,
     check_mcp_configs(fleet, paths, report)
     check_mcp_packages(fleet, paths, report)
     check_npx_cache(paths, report)
+    check_mcp_launch(fleet, paths, report)
     check_services(fleet, paths, report)
     check_credentials(fleet, paths, report)
     check_claudron(fleet, paths, report)

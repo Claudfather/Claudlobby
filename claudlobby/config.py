@@ -98,7 +98,7 @@ class SystemDefaultsConfig:
     disabling all injection.  Per-category bools allow surgical opt-out.
 
     KNOWN BOUND: the keys below are a fixed set, not "one per entity type".
-    Ten of the twelve library entity types still have no opt-out, and an
+    Nine of the twelve library entity types still have no opt-out, and an
     unrecognised key is silently dropped — so a fleet cannot yet tell a working
     opt-out from a typo (#1168 Phase 3 finding 2). Adding a key here is what
     gives a type an opt-out; the check is in the code that consumes the default.
@@ -113,6 +113,25 @@ class SystemDefaultsConfig:
     # protocols default is availability-gated on a Paths fact this layer cannot
     # see. See defaults.AVAILABILITY_GATES.
     protocols: bool = True
+    # Also consumed in composer.py (resolve_effective_skills): the skills
+    # default is role-scoped, so it is resolved per bot there. One bot can
+    # switch it off for itself with BotSystemDefaultsConfig below.
+    skills: bool = True
+
+
+@dataclass
+class BotSystemDefaultsConfig:
+    """Per-bot opt-outs from the system defaults (``bots.<name>.system_defaults``).
+
+    Narrower than the fleet's :class:`SystemDefaultsConfig` on purpose: only a
+    default the composer resolves per bot can be switched off per bot, and
+    ``skills`` is the one this switch covers (the manager role's ``status``,
+    #2010). Any other key is refused rather than dropped, because a dropped
+    key reads exactly like a working opt-out (#1168 Phase 3 finding 2). It
+    switches off the DEFAULT only: a skill the bot lists itself stays.
+    """
+
+    skills: bool = True
 
 
 @dataclass
@@ -754,10 +773,22 @@ class BotConfig:
     claudosseum_tenant_id: str | None = None
     autonomous_runner: AutonomousRunnerConfig | None = None
     briefing: BriefingConfig | None = None  # equippable briefing feature (#627)
+    # Per-bot opt-outs from the system defaults (#2010); see the class.
+    system_defaults: BotSystemDefaultsConfig = field(
+        default_factory=BotSystemDefaultsConfig
+    )
     # #904 M1 (epic #1102 R3, fork R3-F1): SessionStart boot brief. Default off;
     # arming is additionally gated at compose time on the installed CLI exposing
     # `brief --boot` (composed settings outlive installs on this estate).
     brief_on_start: bool = False
+    # #1604, opt-in per bot: launch each exactly pinned npx MCP server as
+    # `node <entry>` from the copy warm-cache installs under state/mcp/npm,
+    # with no resident `npm exec` wrapper (composer.compose_mcp_json).
+    mcp_direct_launch: bool = False
+    # #1686, opt-in per bot: run the bot's heavy Bash commands under the host's
+    # heavy-job slot, a PreToolUse hook composed for this bot only
+    # (composer._with_heavy_slot_hook).
+    heavy_slot: bool = False
     # #1665 Layer 0b, opt-in per bot: deny rules on the shared config dir, the
     # .env tiers and the install's code (composer.compose_settings_local).
     isolation: IsolationConfig = field(default_factory=IsolationConfig)
@@ -1891,7 +1922,16 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         or defaults.get("claudosseum_tenant_id"),
         autonomous_runner=_coerce_autonomous_runner(raw.get("autonomous_runner"), name),
         briefing=_coerce_briefing(raw.get("briefing")),
+        system_defaults=_coerce_bot_system_defaults(raw.get("system_defaults"), name),
         brief_on_start=_parse_brief(raw.get("brief", defaults.get("brief"))),
+        mcp_direct_launch=_strict_bool(
+            "'mcp_direct_launch'",
+            raw.get("mcp_direct_launch", defaults.get("mcp_direct_launch", False)),
+        ),
+        heavy_slot=_strict_bool(
+            "'heavy_slot'",
+            raw.get("heavy_slot", defaults.get("heavy_slot", False)),
+        ),
         isolation=_parse_isolation(
             defaults.get("isolation"), raw.get("isolation"), name
         ),
@@ -1916,8 +1956,38 @@ def _coerce_system_defaults(raw: Any) -> SystemDefaultsConfig:
             observability=bool(raw.get("observability", True)),
             guardrails=bool(raw.get("guardrails", True)),
             protocols=bool(raw.get("protocols", True)),
+            skills=bool(raw.get("skills", True)),
         )
     return SystemDefaultsConfig()
+
+
+#: The system defaults one bot can switch off for itself (BotSystemDefaultsConfig).
+_BOT_SYSTEM_DEFAULT_KEYS = ("skills",)
+
+
+def _coerce_bot_system_defaults(raw: Any, bot_name: str) -> BotSystemDefaultsConfig:
+    """Parse ``bots.<name>.system_defaults``: a mapping of the per-bot keys to
+    YAML booleans. Refuses anything else by name, since the loose ``bool()``
+    the fleet-wide mapping uses would read a typo or an unsupported key as a
+    working opt-out."""
+    if raw is None:
+        return BotSystemDefaultsConfig()
+    where = f"bot '{bot_name}': system_defaults"
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"{where} must be a mapping such as {{skills: false}}, got {raw!r}; "
+            "the fleet-wide switches live under fleet.system_defaults"
+        )
+    unknown = sorted(str(k) for k in set(raw) - set(_BOT_SYSTEM_DEFAULT_KEYS))
+    if unknown:
+        raise ValueError(
+            f"{where}: only {', '.join(_BOT_SYSTEM_DEFAULT_KEYS)} can be switched "
+            f"off per bot, got {', '.join(unknown)}; switch the others off "
+            "fleet-wide under fleet.system_defaults"
+        )
+    return BotSystemDefaultsConfig(
+        skills=_strict_bool(f"{where}.skills", raw.get("skills", True)),
+    )
 
 
 def _resolve_system_yaml(pkg_dir: Path) -> Path | None:
