@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — `pr-review-state.py` reads a comment's verdict from its header only (#2029)
+
+The reader searched a comment's whole body, so a verdict named anywhere in it counted as the comment's own, in both directions. A note explaining someone else's block read as a block (#1757 read one live block too many). A note that mentions an earlier approve, once attributed to its writer, released that writer's real block. On a 677-PR corpus the old reader also took an approve from a table cell and from the word "approver", and a block from bold labels such as "Environment-blocked suites".
+
+- **The rule.** A verdict is read from the comment's header only: its leading markdown headings and its first line that is neither blank nor a heading. The verdict span must open one of those lines, and the verdict word must lead it, after nothing but an optional `[name] [VERDICT]` tag or `Verdict:`. The header identity comes from the same lines, so a tag quoted in prose attributes nothing.
+- **What still reads.** The taught bracket-tag header, a verdict written as the comment's heading (`## **Approve**`), a verdict line under a title (#1985 and #1989 carry live blocks on line 3), and the older header families (#1160's live blocks).
+- **Never silent.** A line elsewhere whose opening bold span holds a verdict word is not read, and is reported verbatim as `UNPARSED-HEADER`, so a block written below the header reaches a human. Fenced code, blockquotes and table rows are not reported.
+- **Measured.** Over the corpus, 54 comments change reading. 36 are now reported rather than read. The 18 dropped without a report are prose, quotes, bullets, relayed verdicts or restatements, plus two approvals written in prose (the safe direction); no block is dropped silently. Of the 11 open PRs carrying a verdict, 9 read the same and 2 lose only false reads (#1160: two blocks and an approve from prose; #1989: a block from a bold label), keeping every real block.
+- CLI flags, output format and exit codes are unchanged. Tests: `tests/test_pr_review_state.py` (`TestTheVerdictIsTheCommentsHeaderLine`, `TestOutsideTheHeaderIsReportedNeverRead`); the two doc-example tests read each example as a reviewer posts it, with unchanged counts.
+
 ### Changed — composed Claudron hooks name the bot's vault with `--vault` (Claudron #183)
 
 Since Claudron v0.6.0 the engine's hook snippet names its vault in every command: `<exe> --vault <root> hook <event>` (Claudron #203). Walk-up binds only a directory carrying the `.claudron-vault` identity file, so a hook with no address finds a vault only when its session's environment or working directory happens to reach one. The composer renders a copy of that snippet behind the R3 drift gate, so each vault-wired bot's three hook commands now name that bot's own vault.
