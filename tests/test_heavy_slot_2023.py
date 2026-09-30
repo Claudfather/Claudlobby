@@ -6,6 +6,12 @@ installs were not matched; and the guard did not see through `flock`/`xargs` wra
 The classifier's false-positive discipline is unchanged: a run that names its test files
 stays ungated, `--dry-run`/`--help`/`--version` are not heavy, and a heavy word that is
 not the command (an argument, a path) is left alone.
+
+Round 2 (ravi's review of 5db1d42) adds cases that are red there: `xargs -i`,
+`--replace` and `-l` take only an ATTACHED optional argument in GNU xargs, so the
+word after them is the command; `uv pip sync` and `uv add` install like `uv pip
+install` and `uv sync`, except that `uv add --frozen`/`--no-sync`/`--script` sync
+nothing (uv 0.11.3's help), unlike `uv sync --frozen`, which installs.
 """
 
 from __future__ import annotations
@@ -52,6 +58,10 @@ PIP_UV_GATED = [
     ("uv sync", "W uv sync"),
     ("uv sync --frozen", "W uv sync --frozen"),
     ("pip -q install build", "W pip -q install build"),
+    ("uv pip sync requirements.txt", "W uv pip sync requirements.txt"),
+    ("uv add requests", "W uv add requests"),
+    ("uv add --dev pytest", "W uv add --dev pytest"),
+    ("uv add --locked requests", "W uv add --locked requests"),
 ]
 
 
@@ -74,6 +84,14 @@ PIP_UV_NOT_HEAVY = [
     "uv pip install --dry-run x",
     "uv pip list",
     "uv lock",
+    "uv pip sync --dry-run requirements.txt",
+    "uv pip sync --help",
+    # uv add syncs the environment unless told not to; --frozen here means no sync
+    "uv add --no-sync requests",
+    "uv add --frozen requests",
+    "uv add --script tool.py requests",
+    "uv add --script=tool.py requests",
+    "uv add --help",
 ]
 
 
@@ -93,6 +111,11 @@ WRAPPER_GATED = [
     ("flock /tmp/x.lock -c \"npm ci\"", "flock /tmp/x.lock -c \"W npm ci\""),
     ("xargs pytest", "W xargs pytest"),
     ("xargs -0 npm ci", "W xargs -0 npm ci"),
+    # GNU xargs: -i/--replace/-l take an ATTACHED optional argument, never the next word
+    ("xargs -i pytest {}", "W xargs -i pytest {}"),
+    ("xargs --replace pytest {}", "W xargs --replace pytest {}"),
+    ("xargs -l pytest", "W xargs -l pytest"),
+    ("xargs -I {} pytest {}", "W xargs -I {} pytest {}"),
     # sudo -u <user> is already a runner; confirm it still sees the suite
     ("sudo -u ci pytest -q", "W sudo -u ci pytest -q"),
 ]
@@ -123,11 +146,19 @@ FAMILY_ACCEPT = [
     ["flock", "/tmp/x.lock", "pytest"],
     ["flock", "-w", "60", "/tmp/x.lock", "npm", "ci"],
     ["xargs", "pytest"],
+    ["xargs", "-i", "pytest", "{}"],
+    ["xargs", "--replace", "pytest", "{}"],
+    ["xargs", "-l", "pytest"],
     ["pip", "install", "pytest"],
     ["pip3", "install", "-e", "."],
     ["python3", "-m", "pip", "install", "-e", "."],
     ["uv", "pip", "install", "-e", "."],
     ["uv", "sync"],
+    ["uv", "pip", "sync", "requirements.txt"],
+    ["uv", "add", "requests"],
+    # the wrapper checks the TOOL: a quiet flag it only sees after expansion
+    # (`uv add $FLAGS x`) must never refuse a job the hook sent
+    ["uv", "add", "--no-sync", "requests"],
     ["sudo", "-u", "ci", "pytest"],
 ]
 

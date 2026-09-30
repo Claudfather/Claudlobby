@@ -71,7 +71,9 @@ class Unsure(Exception):
 
 # Only a region that could hold a heavy command makes an unparsed construct a
 # problem worth refusing to guess about.
-_HEAVY_WORD = re.compile(r"pytest|py\.test|vitest|npm|pnpm|yarn|npx|next|playwright|chrom|pip|uv")
+# pip and uv only as words: as substrings they would match pipe, pipefail and pipeline.
+_HEAVY_WORD = re.compile(
+    r"pytest|py\.test|vitest|npm|pnpm|yarn|npx|next|playwright|chrom|\bpip3?\b|\buv\b")
 _ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=")
 _REDIR = re.compile(r"(\d+|\{[A-Za-z_][A-Za-z0-9_]*\})?(<<<|<<-|<<|<>|<&|>&|>>|>\||&>>|&>|<|>)")
 _META = set(" \t\n;&|()<>")
@@ -596,10 +598,12 @@ def _strip_runners(args: List[Tok]) -> List[Tok]:
                 j += 1  # the lockfile (or an fd number)
             i = j
         elif b == "xargs":
+            # -i, --replace and -l are left out on purpose: GNU xargs gives them only an
+            # ATTACHED optional argument (-i[R], --replace[=R], -l[N]), so the next word is
+            # the command (`xargs -i pytest {}`). -I and -L do take the next word.
             i = _skip_opts(args, i + 1, {"-a", "--arg-file", "-E", "-d", "--delimiter",
-                                         "-I", "-i", "--replace", "-L", "-l", "-n",
-                                         "--max-args", "-P", "--max-procs", "-s",
-                                         "--max-chars"})
+                                         "-I", "-L", "-n", "--max-args", "-P",
+                                         "--max-procs", "-s", "--max-chars"})
         else:
             break
     return args[i:]
@@ -798,7 +802,7 @@ def _pip(args: List[Tok], lenient: bool) -> Optional[str]:
 
 
 def _uv(args: List[Tok], lenient: bool) -> Optional[str]:
-    """uv sync / uv pip install (uv run is a runner, stripped upstream)."""
+    """uv sync / uv add / uv pip install / uv pip sync (uv run is a runner, stripped upstream)."""
     i = _skip_opts(args, 0, _UV_VALUE)
     if i >= len(args) or args[i].value is None:
         return None
@@ -809,10 +813,19 @@ def _uv(args: List[Tok], lenient: bool) -> Optional[str]:
 
     if sub == "sync":
         return None if light(rest) else "uv sync"
+    if sub == "add":
+        # `uv add` re-locks, then syncs the environment unless told not to: its --frozen
+        # skips the sync (unlike `uv sync --frozen`, which installs), and --script only
+        # edits a script's inline metadata (uv 0.11.3's help).
+        quiet = ("--no-sync", "--frozen", "--script")
+        if light(rest) or (not lenient and any(
+                (t.value or "").split("=", 1)[0] in quiet for t in rest)):
+            return None
+        return "uv add"
     if sub == "pip":
         j = _skip_opts(rest, 0, set())
-        if j < len(rest) and rest[j].value == "install":
-            return None if light(rest[j + 1:]) else "uv pip install"
+        if j < len(rest) and rest[j].value in ("install", "sync"):
+            return None if light(rest[j + 1:]) else "uv pip " + rest[j].value
     return None
 
 

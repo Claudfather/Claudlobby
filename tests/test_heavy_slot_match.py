@@ -139,6 +139,9 @@ GATED = [
         "google-chrome --headless --print-to-pdf=x.pdf page.html",
         "W google-chrome --headless --print-to-pdf=x.pdf page.html",
     ),
+    # pip and uv are words to the unparsed-region check: `pipe` is not pip, so the
+    # backtick is harmless and the suite after it still gets the wrapper
+    ("echo `echo pipe`; pytest -q", "echo `echo pipe`; W pytest -q"),
 ]
 
 
@@ -212,6 +215,7 @@ NOT_GATED = [
     "git commit -m \"$(cat <<'EOF'\nnpm ci && pytest (all\nEOF\n)\"",
     "python3 - <<'EOF'\nimport subprocess\nsubprocess.run(['pytest'])\nEOF",
     "cat <<< 'npm ci'",
+    'x=`echo pipeline`; echo "$x"',
 ]
 
 
@@ -229,6 +233,9 @@ UNSURE = [
     'bash -c "npm ci $X"',
     "echo 'unterminated npm ci",
     "cat <<EOF\nnpm ci",
+    # ...while a backtick that does hold an install is still refused
+    "x=`pip install foo`",
+    "x=`uv sync`",
 ]
 
 
