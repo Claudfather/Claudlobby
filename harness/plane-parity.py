@@ -36,7 +36,7 @@ being declared missing-in-legacy — a twin that exists below the window is
 WINDOW-SKEW, disclosed and excluded from the verdict, never a mismatch.
 
 Unreachable is never empty (source_state.py's rule, vocabulary mirrored here
-because a lib/ standalone cannot import the package): an ABSENT or unreadable
+because a claudlobby/_runtime_scripts/ standalone cannot import the package): an ABSENT or unreadable
 ledger/db REFUSES at rc 3 — "cannot look" must not read as "nothing to
 reconcile" — while an EXISTING ledger with zero rows is a door that has not
 fired yet, for which "nothing to compare" is TRUE (rc 0). Malformed ledger

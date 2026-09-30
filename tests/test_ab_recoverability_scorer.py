@@ -15,7 +15,7 @@ than a rubber stamp:
   4. No verdict is emitted. A2's bar is not ratified; the module emits a
      comparable score and stops.
 
-The module is loaded by path because lib/ filenames are hyphenated and so are
+The module is loaded by path because claudlobby/_runtime_scripts/ filenames are hyphenated and so are
 not importable as modules — the ab-comms-verdict.py precedent.
 """
 

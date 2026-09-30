@@ -38,7 +38,7 @@ from tests.conftest import constructed_env, read_fleet_events
 from tests.test_plane_events_door import _serving
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-FLEET_PULSE = REPO_ROOT / "lib" / "fleet-pulse.sh"
+FLEET_PULSE = REPO_ROOT / "claudlobby/_runtime_scripts" / "fleet-pulse.sh"
 FLEET = "wipfleet"
 BOT = "wipbot"
 

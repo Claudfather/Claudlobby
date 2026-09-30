@@ -93,7 +93,7 @@ class TestFragmentContract:
         # the two fragments must move together.
         github = json.loads((REPO_ROOT / "library" / "mcp" / "github.json").read_text())
         pinned = [a for a in github["github"]["args"] if a.startswith("@modelcontextprotocol")]
-        wrapper_src = (REPO_ROOT / "lib" / "github-app-mcp-wrapper.py").read_text()
+        wrapper_src = (REPO_ROOT / "claudlobby/_runtime_scripts" / "github-app-mcp-wrapper.py").read_text()
         assert len(pinned) == 1
         assert pinned[0] in wrapper_src
 

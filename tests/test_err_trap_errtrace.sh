@@ -3,7 +3,7 @@
 # that happen INSIDE shell functions (#844).
 #
 # A bash ERR trap is not inherited by shell functions unless errtrace is on, so
-# a bare `trap … ERR` covers only top-level failures. lib/ does nearly all its
+# a bare `trap … ERR` covers only top-level failures. claudlobby/_runtime_scripts/ does nearly all its
 # work in functions, which meant the fleet's error-breadcrumb mechanism was
 # silently uninstrumented across the whole supervision surface. Ordinary unit
 # tests cannot catch this — composition is identical either way; only running a
@@ -28,7 +28,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB_COMMON="$SCRIPT_DIR/../lib/lib-common.sh"
+LIB_COMMON="$SCRIPT_DIR/../claudlobby/_runtime_scripts/lib-common.sh"
 PASS=0; FAIL=0; TOTAL=0
 
 assert_eq() {
@@ -96,13 +96,13 @@ assert_eq "in-function failure emits a script_error row" "1" "$(rows_of "$r")"
 r=$(run_case "-euo pipefail" '/nonexistent-command-xyz-844')
 assert_eq "top-level failure still emits (control)" "1" "$(rows_of "$r")"
 
-# Nested three frames down — functions calling functions is the shape lib/ is
+# Nested three frames down — functions calling functions is the shape claudlobby/_runtime_scripts/ is
 # actually built out of.
 r=$(run_case "-euo pipefail" 'mid() { boom; }; outer() { mid; }; outer')
 assert_eq "failure three frames deep emits exactly one row" "1" "$(rows_of "$r")"
 
 # --- deliberate tolerance must stay silent -------------------------------------
-# Arming errtrace must not turn `lib/`'s 700+ guarded call sites into rows. Bash
+# Arming errtrace must not turn `claudlobby/_runtime_scripts/`'s 700+ guarded call sites into rows. Bash
 # suppresses the ERR trap in the same contexts it suppresses errexit, and that
 # suppression is inherited by callees — these pin that, since the fix is only
 # safe while it holds.
@@ -158,7 +158,7 @@ assert_eq "…while still writing its row" "1" "$(rows_of "$r")"
 # line numbers, so this is characterised rather than deduped — dedup would cost
 # handler state to lose the more precise of the two.
 #
-# Pinned because `echo "$(…)"` is a shape lib/ actually contains (~64 sites), so
+# Pinned because `echo "$(…)"` is a shape claudlobby/_runtime_scripts/ actually contains (~64 sites), so
 # this is the change's real new-row source: silent today, two rows and a
 # still-running script after. A future change that starts collapsing or dropping
 # one of these should have to say so out loud.

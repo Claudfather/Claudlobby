@@ -29,7 +29,7 @@ from pathlib import Path
 
 import pytest
 
-LIB = Path(__file__).resolve().parent.parent / "lib" / "lib-common.sh"
+LIB = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts" / "lib-common.sh"
 
 # jq is the seeding helpers' only external dependency (settings.local.json merge).
 pytestmark = pytest.mark.skipif(

@@ -4,7 +4,7 @@
 functions. That is only safe because bash suppresses the ERR trap in the same
 contexts it suppresses errexit — ``f || true``, ``if f; then`` — and that
 suppression is inherited by callees. If it did NOT hold, arming errtrace would
-emit a ``script_error`` row for every one of ``lib/``'s ~700 deliberately
+emit a ``script_error`` row for every one of ``claudlobby/_runtime_scripts/``'s ~700 deliberately
 guarded call sites.
 
 That premise was measured on bash 5.2, but ``/bin/bash`` on macOS is 3.2 and is
@@ -86,7 +86,7 @@ def test_errtrace_fires_inside_functions_on_bash32(probe_output):
 
 def test_suppressed_contexts_stay_silent_on_bash32(probe_output):
     """The premise the blast-radius analysis rests on. If this fails, arming
-    errtrace floods every guarded call site in lib/ and the fix must be revisited
+    errtrace floods every guarded call site in claudlobby/_runtime_scripts/ and the fix must be revisited
     — do not relax this assertion to make it pass."""
     assert "or=[]" in probe_output, (
         f"'f || true' fired the ERR trap on 3.2: {probe_output}"

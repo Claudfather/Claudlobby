@@ -33,7 +33,7 @@ from pathlib import Path
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-LIB = REPO_ROOT / "lib"
+LIB = REPO_ROOT / "claudlobby/_runtime_scripts"
 
 # Wrappers on _emit_fleet_signal, plus the one that wraps a wrapper (rule 1).
 DOORS = ("emit_failure_alert", "emit_fleet_notice", "notify_currency")

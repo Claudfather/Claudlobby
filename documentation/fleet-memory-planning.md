@@ -6,7 +6,7 @@ description: Per-bot RSS estimates and host sizing guidelines for claudlobby fle
 # Fleet Memory Planning
 
 This document covers how to estimate per-bot memory usage, size your host for a
-given fleet configuration, and use `lib/fleet-memory-check.sh` to monitor RSS
+given fleet configuration, and use `claudlobby/_runtime_scripts/fleet-memory-check.sh` to monitor RSS
 in production.
 
 ## Per-Bot Memory Estimates
@@ -147,11 +147,11 @@ the private check's policy, not flags to pass to `host job run`.
 
 | Script                      | What it monitors         | Alert channel  |
 |-----------------------------|--------------------------|----------------|
-| `lib/disk-monitor.sh`       | Disk usage %             | FLEET ALERT    |
-| `lib/fleet-memory-check.sh` | Fleet RSS %              | FLEET ALERT    |
-| `lib/keepalive.sh`          | Bot session liveness     | Log only       |
+| `claudlobby/_runtime_scripts/disk-monitor.sh`       | Disk usage %             | FLEET ALERT    |
+| `claudlobby/_runtime_scripts/fleet-memory-check.sh` | Fleet RSS %              | FLEET ALERT    |
+| `claudlobby/_runtime_scripts/keepalive.sh`          | Bot session liveness     | Log only       |
 | `claudlobby fleet reconcile` | Supervision state      | CLI result     |
-| `lib/creds-check.sh`        | Token expiry             | Log + Telegram (on ok↔fail transition) |
+| `claudlobby/_runtime_scripts/creds-check.sh`        | Token expiry             | Log + Telegram (on ok↔fail transition) |
 
 The selected host configuration schedules these checks; inspect it with
 `claudlobby host job list` before requesting a one-shot `host job run`.

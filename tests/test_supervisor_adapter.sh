@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/test_supervisor_adapter.sh — contract tests for lib/supervisor.sh, the
+# tests/test_supervisor_adapter.sh — contract tests for claudlobby/_runtime_scripts/supervisor.sh, the
 # five-verb systemctl/launchctl adapter (#1573 boot admission, task 6).
 #
 # Standalone bash (not pytest-collected on its own); discovered by
@@ -23,7 +23,7 @@
 # never touch the real host. svc_enroll's own contract test additionally
 # points $_SUPERVISOR_LIB_DIR (supervisor.sh's own sibling-script lookup,
 # deliberately NOT $CLAUDLOBBY_ROOT -- see the comment beside it in
-# lib/supervisor.sh) at a scratch tree holding FAKE install-bot-systemd.sh /
+# claudlobby/_runtime_scripts/supervisor.sh) at a scratch tree holding FAKE install-bot-systemd.sh /
 # install-bot.sh stand-ins, never the real ones: the real install-bot.sh
 # shells out to the absolute, un-fakeable /bin/launchctl bootstrap, and
 # actually bootstrapping a LaunchAgent on the machine running this suite is
@@ -31,7 +31,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB_DIR="$SCRIPT_DIR/../lib"
+LIB_DIR="$SCRIPT_DIR/../claudlobby/_runtime_scripts"
 PASS=0; FAIL=0; TOTAL=0
 assert_eq() {
     TOTAL=$((TOTAL + 1)); local d="$1" e="$2" a="$3"
@@ -125,10 +125,10 @@ chmod +x "$T/bin/uname" "$T/bin/systemctl" "$T/bin/launchctl" "$T/bin/tmux"
 export PATH="$T/bin:$PATH"
 export TMUX_BIN="$T/bin/tmux"
 
-# shellcheck source=../lib/lib-common.sh
+# shellcheck source=../claudlobby/_runtime_scripts/lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 
-# A syntax error inside the sourced lib/supervisor.sh DOES abort this whole
+# A syntax error inside the sourced claudlobby/_runtime_scripts/supervisor.sh DOES abort this whole
 # suite under `set -euo pipefail` above (MEASURED: bash 3.2.57 on macOS) --
 # but this suite's own `trap '...rm -rf "$T"...' EXIT` then runs, and its
 # last command's exit status becomes the process's FINAL reported exit code,

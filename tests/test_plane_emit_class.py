@@ -32,7 +32,7 @@ import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parent.parent
-LIB = REPO / "lib"
+LIB = REPO / "claudlobby/_runtime_scripts"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("bash") is None, reason="bash not installed"

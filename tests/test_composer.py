@@ -2297,7 +2297,7 @@ class TestComposeSystemdUnit:
     def test_unit_shape_keeps_substate_meaningful(self, tmp_path):
         """The three directives service_is_starting depends on (#1002).
 
-        lib/lib-common.sh service_is_starting reads active/running as "boot in
+        claudlobby/_runtime_scripts/lib-common.sh service_is_starting reads active/running as "boot in
         flight". That is only true while ExecStart is a spawner that exits and
         RemainAfterExit holds the unit active afterwards — together they make
         active/exited the steady state. Drop either and active/running becomes
@@ -2628,7 +2628,7 @@ class TestHostBootOffset:
 class TestDeclaredManagerRecognition:
     """One explicit field controls role and routing, independent of org metadata."""
 
-    LIB_COMMON = Path(__file__).resolve().parents[1] / "lib" / "lib-common.sh"
+    LIB_COMMON = Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts" / "lib-common.sh"
 
     def _fleet(self, *, manager, name="coord-fleet", **bots):
         return FleetConfig(
@@ -5128,7 +5128,7 @@ class TestLaunchdArgvSplitting:
 class TestComposeBotConfTelegramStateDirExported:
     """TELEGRAM_STATE_DIR must be EXPORTED into bot.conf (#976).
 
-    Most bot.conf lines deliberately lack `export` — lib/ reads them from the
+    Most bot.conf lines deliberately lack `export` — claudlobby/_runtime_scripts/ reads them from the
     file via `bot_conf_get`. This one is different: it has to reach the `claude`
     CHILD process environment, because the telegram plugin resolves its state
     directory from `process.env.TELEGRAM_STATE_DIR` and silently falls back to

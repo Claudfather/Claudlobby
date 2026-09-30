@@ -1,7 +1,7 @@
 """Read-only view of the per-fleet workstream registry — the Plane's rendering.
 
 Since the F18 closure the registry is materialized from the plane's workstream
-events (``lib/plane-readers.py::workstream_registry``); there is no file.
+events (``claudlobby/_runtime_scripts/plane-readers.py::workstream_registry``); there is no file.
 Mutations use the canonical workstream operation owner.
 """
 

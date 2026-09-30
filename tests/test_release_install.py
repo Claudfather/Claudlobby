@@ -46,7 +46,7 @@ def assembly(tmp_path, monkeypatch):
         "claudlobby/__init__.py": "raise RuntimeError('do not import candidate')\n",
         "claudlobby/__main__.py": "def main(): return 0\n",
         "claudlobby/system.yaml": "system: fixture\n",
-        "claudlobby/_native/run.sh": "#!/bin/sh\nexit 0\n",
+        "claudlobby/_runtime_scripts/run.sh":"#!/bin/sh\nexit 0\n",
         "claudlobby/_resources/library/fixture.md": "fixture",
         "claudlobby/_resources/voices/fixture.md": "fixture",
         "claudlobby/_resources/templates/fixture.j2": "fixture",

@@ -24,7 +24,7 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LIB_DIR="$REPO/lib"
+LIB_DIR="$REPO/claudlobby/_runtime_scripts"
 
 command -v python3 >/dev/null 2>&1 || { echo "rehearse: python3 required" >&2; exit 2; }
 

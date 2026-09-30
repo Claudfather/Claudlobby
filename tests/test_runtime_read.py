@@ -11,7 +11,7 @@ from claudlobby.commands import runtime_read
 from claudlobby.fleet_operations import FleetBotObservation, FleetReconcileResult
 
 
-LIB = Path(__file__).resolve().parents[1] / "lib"
+LIB = Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts"
 
 
 def _context(tmp_path):

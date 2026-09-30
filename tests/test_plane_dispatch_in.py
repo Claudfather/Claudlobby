@@ -1,4 +1,4 @@
-"""chunk P (#1501) + fold F1: the receiver hook lib/plane-dispatch-in.sh, end to
+"""chunk P (#1501) + fold F1: the receiver hook claudlobby/_runtime_scripts/plane-dispatch-in.sh, end to
 end through a private serving Plane root (the test_plane_telegram_hooks.py shape).
 
 The load-bearing laws, all pinned here:
@@ -39,8 +39,8 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
-HOOK = REPO / "lib" / "plane-dispatch-in.sh"
-LIB = REPO / "lib"
+HOOK = REPO / "claudlobby/_runtime_scripts" / "plane-dispatch-in.sh"
+LIB = REPO / "claudlobby/_runtime_scripts"
 
 # a real minted-shape id (msg_ + 32 hex), value faked
 MSGID = "msg_1f3c9a7b2e5d4068a1b2c3d4e5f60718"
@@ -487,7 +487,7 @@ def test_a_pasted_arrival_is_received_as_the_wire_form(tmp_path, where, *, scrat
 # must print `delivered <sender>`. Every framing and escaping shape below is a
 # live capture from a receiver with the framing flag on (claude 2.1.281).
 
-LOOKUP = REPO / "lib" / "plane-lookup.py"
+LOOKUP = REPO / "claudlobby/_runtime_scripts" / "plane-lookup.py"
 OPENER, CLOSER = '<pasted_content id="0a1b">', '</pasted_content id="0a1b">'
 
 

@@ -1,6 +1,6 @@
 """Keepalive-as-a-door: presence's RECORDED half (#1361, harvest item 1).
 
-Every pin drives the REAL lib/keepalive.sh tick (real lib-common, real
+Every pin drives the REAL claudlobby/_runtime_scripts/keepalive.sh tick (real lib-common, real
 shim, real staged replay into a scratch plane db; tmux and start-bot.sh
 stubbed) — the door-test pattern from test_plane_gauntlet_doors. The
 load-bearing laws: the tick's ALREADY-COMPUTED verdict is what gets
@@ -29,7 +29,7 @@ from claudlobby.plane.emit_api import emit_batch
 from tests.fixtures.native_admission import admit_watchdog_fixture
 
 REPO = Path(__file__).resolve().parent.parent
-LIB = REPO / "lib"
+LIB = REPO / "claudlobby/_runtime_scripts"
 CLI = Path(sys.executable).parent / "claudlobby"
 
 DOOR_FILES = ("keepalive.sh", "lib-common.sh", "supervisor.sh", "plane-emit.sh",

@@ -21,7 +21,7 @@ def _script_host(tmp_path: Path):
     root.mkdir()
     for name in ("reload-fleet.sh", "lib-common.sh", "cli-context.sh", "supervisor.sh"):
         target = native / name
-        target.write_bytes((REPO / "lib" / name).read_bytes())
+        target.write_bytes((REPO / "claudlobby/_runtime_scripts" / name).read_bytes())
         target.chmod(0o755)
     (native / "check-npx-cache.sh").write_text("#!/bin/bash\nexit 0\n")
     (native / "check-npx-cache.sh").chmod(0o755)

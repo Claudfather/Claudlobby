@@ -87,7 +87,7 @@ def _fleet(**kw) -> FleetConfig:
 
 @pytest.fixture
 def root(tmp_path: Path) -> Path:  # noqa: F811 — imported short-path fixture
-    """A claudlobby root with the REAL dispatch matcher in lib/ (and the
+    """A claudlobby root with the REAL dispatch matcher in claudlobby/_runtime_scripts/ (and the
     stdlib plane readers it imports beside itself).
 
     Copied rather than stubbed: the point of the dispatch assertions is that
@@ -95,12 +95,12 @@ def root(tmp_path: Path) -> Path:  # noqa: F811 — imported short-path fixture
     quietly sever.
     """
     (tmp_path / "lib").mkdir()
+    # The native report reader resolves its codec from the package that holds
+    # its realpath, so link the real scripts rather than copying them: the
+    # fixture directory stays mutable (a case unlinks the matcher) while every
+    # reader binds to this exact source package.
     for name in ("dispatch-overdue.py", "plane-readers.py", "plane-lookup.py"):
-        shutil.copy(REPO_ROOT / "lib" / name, tmp_path / "lib" / name)
-    # The native report reader resolves its codec from the selected sibling
-    # package. Keep the mutable lib copies, but bind them to this exact source
-    # package instead of leaving a lib-only layout that production never has.
-    (tmp_path / "claudlobby").symlink_to(REPO_ROOT / "claudlobby", target_is_directory=True)
+        (tmp_path / "lib" / name).symlink_to(REPO_ROOT / "claudlobby/_runtime_scripts" / name)
     (tmp_path / "state" / "plane").mkdir(parents=True)
     (tmp_path / "state" / "plane" / "capture.json").write_text('{"*": "full"}')   # bodies kept, as on the estate
     (tmp_path / "runtime" / "fleet").mkdir(parents=True)
@@ -529,10 +529,10 @@ def test_a_fleets_reports_are_the_room_axis_and_progress_is_never_unacked(paths:
 
 
 def test_no_cursor_file_is_written_or_read_anywhere():
-    """The deletion, pinned: no door under claudlobby/ or lib/ names the file."""
+    """The deletion, pinned: no door under claudlobby/ (runtime scripts included) names the file."""
     import subprocess
     out = subprocess.run(["grep", "-rn", "-E", "brief-cursor|read_cursor|write_cursor|cursor_path",
-                          str(REPO_ROOT / "claudlobby"), str(REPO_ROOT / "lib")],
+                          str(REPO_ROOT / "claudlobby")],
                          capture_output=True, text=True)
     assert out.returncode == 1 and out.stdout == "", out.stdout
 

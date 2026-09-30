@@ -43,7 +43,7 @@
 set -uo pipefail
 
 SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LIB_DIR="$SRC_ROOT/lib"
+LIB_DIR="$SRC_ROOT/claudlobby/_runtime_scripts"
 
 if [ "${REHEARSE_STAGED_UPDATE_REAL:-}" != "1" ]; then
     echo "rehearse-staged-claude-update: refused — this downloads ~700 MB through real npm." >&2

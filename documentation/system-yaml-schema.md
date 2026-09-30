@@ -144,9 +144,9 @@ leftover flag without anyone maintaining a list.
 | Switch | Ships | Scope | Carrier | Flip it with |
 |---|---|---|---|---|
 | `boot-brief` | **off** — standing context per session; rollout operator-held pending ratified cost | door | fleet.yaml | bots.<bot>.brief.on_start: true in fleet.yaml, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> |
-| `boot-capture` | **off** — no deployment gate — lib/ is read on demand per use, so the pull that delivers it is in force on every bot at once and nothing can be staged ahead. Enrollment is the only canary available; flip it on once one host has run it through a real boot | host job | system.yaml enroll | host.jobs.boot-capture.enroll: true in this host's override, ~/.config/claudlobby/system.yaml (host jobs bypass the fleet merge), then config plan + config diff + host activate |
+| `boot-capture` | **off** — no deployment gate — claudlobby/_runtime_scripts/ is read on demand per use, so the pull that delivers it is in force on every bot at once and nothing can be staged ahead. Enrollment is the only canary available; flip it on once one host has run it through a real boot | host job | system.yaml enroll | host.jobs.boot-capture.enroll: true in this host's override, ~/.config/claudlobby/system.yaml (host jobs bypass the fleet merge), then config plan + config diff + host activate |
 | `boot-capture-stamp` | **off** — no deployment gate, and more sharply than boot-capture: this half has no enrollment step at all, so a root pull reaches every bot start immediately | door | fleet.yaml env: → bot.conf | BOOT_CAPTURE_ENABLED=1 in fleet.yaml bots.NAME.env: (then config plan and host activate; the bot reads it at its next start — a .env tier does NOT reach a session) |
-| `claude-staged-update` | **off** — no deployment gate — it changes which claude binary every bot on the host launches, and lib/ is read on demand, so a root pull would move the whole host at once. Armed per host, on the operator's say-so, after the rehearsal (harness/rehearse-staged-claude-update.sh) | door | host/root .env | CLAUDLOBBY_STAGED_CLAUDE_UPDATE_ENABLED=1 in the host or root .env |
+| `claude-staged-update` | **off** — no deployment gate — it changes which claude binary every bot on the host launches, and claudlobby/_runtime_scripts/ is read on demand, so a root pull would move the whole host at once. Armed per host, on the operator's say-so, after the rehearsal (harness/rehearse-staged-claude-update.sh) | door | host/root .env | CLAUDLOBBY_STAGED_CLAUDE_UPDATE_ENABLED=1 in the host or root .env |
 | `code-audit-sweep` | **off** — model spend + outbound GitHub issues | fleet job | fleet.yaml | sweep.enabled: true in fleet.yaml (plus owner_bot and repos), then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> |
 | `heavy-slot` | **off** — no deployment gate: a composed hook is live on every bot the next generate composes it for (#1310), with no restart in between, and this one rewrites the bot's heavy commands, so the manifest is the only place one bot can go first | composition | fleet.yaml bots.<bot> → activated composition | bots.<bot>.heavy_slot: true in fleet.yaml on an independent canary root with ONE armed bot first, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> (activation can restart selected bots; the deny then binds on the next tool call); widen to defaults.heavy_slot once it has run clean |
 | `manager-checkin` | **off** — model spend — one manager turn per idle beat — and it injects into a live session | fleet job | fleet.yaml | defaults.jobs.manager-checkin.enroll: true in fleet.yaml, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> |
@@ -381,11 +381,11 @@ preserved. Currently ships:
 
 | Event | Command | Notes |
 |---|---|---|
-| `PreToolUse` | `lib/bot-vitals.sh` | always active |
-| `PreToolUse` | `lib/gh-mention-guard.sh` | always active — rewrites `@handle` out of GitHub-bound tool calls (#1019) |
-| `PostToolUse` | `lib/bot-vitals.sh` | always active |
-| `SessionEnd` | `lib/transcript-digest.sh` | composed on every bot; **self-gated** on `SESSION_DIGEST_ENABLED=1` in the fleet's own `env:` — see [Two dormancy patterns](#two-dormancy-patterns-composed-vs-enrolled) below |
-| `SessionStart` | `lib/plane-session-start.sh` | composed on every bot; always on (`PLANE_EMIT_DISABLED=1` is the one silencer); exits 0 on every path |
+| `PreToolUse` | `claudlobby/_runtime_scripts/bot-vitals.sh` | always active |
+| `PreToolUse` | `claudlobby/_runtime_scripts/gh-mention-guard.sh` | always active — rewrites `@handle` out of GitHub-bound tool calls (#1019) |
+| `PostToolUse` | `claudlobby/_runtime_scripts/bot-vitals.sh` | always active |
+| `SessionEnd` | `claudlobby/_runtime_scripts/transcript-digest.sh` | composed on every bot; **self-gated** on `SESSION_DIGEST_ENABLED=1` in the fleet's own `env:` — see [Two dormancy patterns](#two-dormancy-patterns-composed-vs-enrolled) below |
+| `SessionStart` | `claudlobby/_runtime_scripts/plane-session-start.sh` | composed on every bot; always on (`PLANE_EMIT_DISABLED=1` is the one silencer); exits 0 on every path |
 
 A fleet disables the whole category with `system_defaults: { hooks: false }`
 in its own `fleet.yaml`, or overrides/extends individual events by declaring

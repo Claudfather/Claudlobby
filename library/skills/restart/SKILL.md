@@ -20,7 +20,7 @@ silently unsatisfiable, which is the defect this wording exists to prevent.
 ## Arguments
 
 Parse `$ARGUMENTS`:
-- `--auto`: Headless. Propagate it to whichever session-handoff skill you use, if that skill takes it. The new session's resume is injected by `start-bot.sh`, so you do not pass it through yourself. This is the form invoked by systemd/launchd and by `lib/weekly-worker-restart.sh`; humans invoking `/restart` interactively should omit it.
+- `--auto`: Headless. Propagate it to whichever session-handoff skill you use, if that skill takes it. The new session's resume is injected by `start-bot.sh`, so you do not pass it through yourself. This is the form invoked by systemd/launchd and by `claudlobby/_runtime_scripts/weekly-worker-restart.sh`; humans invoking `/restart` interactively should omit it.
 
 ## Steps
 

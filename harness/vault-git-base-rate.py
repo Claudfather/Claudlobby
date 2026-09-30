@@ -72,7 +72,7 @@ was the harness measuring a different population than the claim:
 
   1. 68.1% -- verb text matched anywhere after the word `git`. The gap filled
      with heredoc bodies (report prose, memory notes, dispatch payloads) and
-     `grep 'git push' lib/`. None of those run git.
+     `grep 'git push' claudlobby/_runtime_scripts/`. None of those run git.
   2. 82.8% -- heredoc bodies stripped, `git` required at a command position.
   3. 81.9% -- `commit`/`push`/`branch`/`pull` made conditional on the flag that
      makes them dangerous, matching the guard's own split. Counting
@@ -222,7 +222,7 @@ _CONDITIONAL_WORDS = {
 #: The first version of this script omitted the position requirement and matched
 #: the verb text anywhere after the word `git`. It reported 68.1%, and the gap
 #: was almost entirely heredoc bodies -- report text, memory files, dispatch
-#: payloads -- plus `grep 'git push' lib/`. None of those run git. That is the
+#: payloads -- plus `grep 'git push' claudlobby/_runtime_scripts/`. None of those run git. That is the
 #: same defect as the 42.6% reproduction this script's docstring warns about,
 #: inverted: a denominator measuring something WIDER than the claim deflates the
 #: rate exactly as a narrower one inflated it. Both are the harness measuring a
@@ -659,7 +659,7 @@ def main(argv: list[str] | None = None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--transcripts", default=str(DEFAULT_TRANSCRIPTS),
                     help="root holding Claude Code *.jsonl transcripts")
-    ap.add_argument("--lib-dir", default=str(Path(__file__).resolve().parent.parent / "lib"),
+    ap.add_argument("--lib-dir", default=str(Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts"),
                     help="directory holding the shipped vault-git-decide.py")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--samples", action="store_true",

@@ -3,7 +3,7 @@
 Compose-text pins in the house pin-per-property style (a reorder breaks
 routing SILENTLY — git takes the first helper that answers), plus behavioral
 runs through REAL `git credential fill` with an on-disk counting stub helper
-(no crypto, no network: the stub stands where `lib/git-credential-github-app`
+(no crypto, no network: the stub stands where `claudlobby/_runtime_scripts/git-credential-github-app`
 is baked, exactly as a fleet checkout would place it).
 """
 

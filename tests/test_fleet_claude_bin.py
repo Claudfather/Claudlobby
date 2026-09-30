@@ -23,7 +23,7 @@ import pytest
 
 from tests.conftest import _scrubbed_env, _write_exec
 
-LIB = Path(__file__).resolve().parent.parent / "lib"
+LIB = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts"
 LINK_REL = Path("state/bin/claude")
 
 

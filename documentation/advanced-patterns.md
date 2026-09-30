@@ -2,7 +2,7 @@
 
 Patterns that extend a running claudlobby fleet beyond basic dispatch and briefings. Each section is self-contained — implement whichever ones fit your setup.
 
-Prerequisites: a working fleet with at least a manager bot and one worker, supervised services (systemd user units on Linux, launchd LaunchAgents on macOS), and the shared `lib/` scripts. See [getting-started](getting-started.md) if you're not there yet.
+Prerequisites: a working fleet with at least a manager bot and one worker, supervised services (systemd user units on Linux, launchd LaunchAgents on macOS), and the shared `claudlobby/_runtime_scripts/` scripts. See [getting-started](getting-started.md) if you're not there yet.
 
 Two mechanics run through most of these patterns. Read them once here:
 
@@ -97,7 +97,7 @@ Same as the alert sweep: declare and activate the fleet job so its composed time
 
 ## 4. Graceful Restart & Pre-Stop Handoff
 
-Capture a bot's working context before a restart kills its process, so the next session can resume where it left off. The mechanism is real and current (`lib/pre-stop-handoff.sh`), but it is *not* wired to systemd `ExecStop` — it's invoked by whatever is doing the restart.
+Capture a bot's working context before a restart kills its process, so the next session can resume where it left off. The mechanism is real and current (`claudlobby/_runtime_scripts/pre-stop-handoff.sh`), but it is *not* wired to systemd `ExecStop` — it's invoked by whatever is doing the restart.
 
 ### Why
 
@@ -122,7 +122,7 @@ Given a bot directory, the script:
 
 ### Resume on the next start
 
-Resume needs no separate wiring in the common case. `lib/start-bot.sh` injects the configured session-resume command as the new session's first keystroke, behind two gates: the checkpoint must be fresh (~24h, else clean-start) **and** the command must actually resolve. The command is configuration — `SESSION_RESUME_COMMAND`, set empty to disable — so a fleet running without a session plugin is not fed an unresolvable keystroke on every boot. When either gate closes, `start-bot.sh` logs `RESUME SKIP` with the reason and emits `resume_skipped`. This does not depend on the bot's `STARTUP_PROMPT` carrying a resume instruction.
+Resume needs no separate wiring in the common case. `claudlobby/_runtime_scripts/start-bot.sh` injects the configured session-resume command as the new session's first keystroke, behind two gates: the checkpoint must be fresh (~24h, else clean-start) **and** the command must actually resolve. The command is configuration — `SESSION_RESUME_COMMAND`, set empty to disable — so a fleet running without a session plugin is not fed an unresolvable keystroke on every boot. When either gate closes, `start-bot.sh` logs `RESUME SKIP` with the reason and emits `resume_skipped`. This does not depend on the bot's `STARTUP_PROMPT` carrying a resume instruction.
 
 ### Gotchas
 
@@ -219,7 +219,7 @@ fleet:
     # label / schedule / enabled have sensible defaults
 ```
 
-On a timer, the no-LLM selector `lib/code-audit-sweep.sh` asks GitHub for the most recent issue on each repo carrying the staleness label (default `auto-audit`), picks the **stalest** repo (oldest newest-audit, or never audited), and dispatches `/code-audit-sweep <org/repo> <audit-type>` into the owner bot's session via `lib/bot-sweep-cron.sh`. The `code-audit-sweep` skill runs the corresponding `/claudna:<audit-type>` audit and **guarantees the `auto-audit` label on every issue it files**.
+On a timer, the no-LLM selector `claudlobby/_runtime_scripts/code-audit-sweep.sh` asks GitHub for the most recent issue on each repo carrying the staleness label (default `auto-audit`), picks the **stalest** repo (oldest newest-audit, or never audited), and dispatches `/code-audit-sweep <org/repo> <audit-type>` into the owner bot's session via `claudlobby/_runtime_scripts/bot-sweep-cron.sh`. The `code-audit-sweep` skill runs the corresponding `/claudna:<audit-type>` audit and **guarantees the `auto-audit` label on every issue it files**.
 
 The design's key property: **GitHub is the only ledger.** The labelled issues *are* the staleness record — an audit's own filed issues make its repo look "fresh" for the next run — so there's no local tracker file to maintain and nothing to drift out of sync. (Earlier guidance here described a hand-built `next-audit-target.py` + `audit-tracker.json`; that approach was replaced precisely because a local tracker drifts.)
 
@@ -306,7 +306,7 @@ fleet:
       account: work        # → compositor writes CLAUDE_CONFIG_DIR into this bot's bot.conf
 ```
 
-When a bot's `account` is not `default`, configuration staging and activation writes `CLAUDE_CONFIG_DIR=<that dir>` into its `bot.conf`; `lib/start-bot.sh` exports it before launching Claude Code, so the bot authenticates, installs plugins, and stores channel state under that directory. You do **not** hand-write `CLAUDE_CONFIG_DIR` into `bot.conf` — that file is generated and the `accounts:` mechanism manages the value. (`TELEGRAM_STATE_DIR` is likewise always derived and emitted for every bot, multi-account or not; it isn't a separate thing you toggle for multi-account setups.)
+When a bot's `account` is not `default`, configuration staging and activation writes `CLAUDE_CONFIG_DIR=<that dir>` into its `bot.conf`; `claudlobby/_runtime_scripts/start-bot.sh` exports it before launching Claude Code, so the bot authenticates, installs plugins, and stores channel state under that directory. You do **not** hand-write `CLAUDE_CONFIG_DIR` into `bot.conf` — that file is generated and the `accounts:` mechanism manages the value. (`TELEGRAM_STATE_DIR` is likewise always derived and emitted for every bot, multi-account or not; it isn't a separate thing you toggle for multi-account setups.)
 
 ### The host side (one-time, per account)
 
@@ -336,7 +336,7 @@ ln -s ~/.claude/skills ~/.claude-work/skills
 
 ## 11. Finance/Data Pre-Sync Pattern
 
-Pre-fetch slow or rate-limited data before a scheduled briefing so the briefing reads a snapshot instead of making live calls. Unlike most patterns here, this has no shipped equivalent — it's a genuine build-it-yourself template. (Note: `lib/data-sweep.sh` is unrelated — it's a retention job that *purges* old ephemeral `data/` files, not a pre-fetch cache.)
+Pre-fetch slow or rate-limited data before a scheduled briefing so the briefing reads a snapshot instead of making live calls. Unlike most patterns here, this has no shipped equivalent — it's a genuine build-it-yourself template. (Note: `claudlobby/_runtime_scripts/data-sweep.sh` is unrelated — it's a retention job that *purges* old ephemeral `data/` files, not a pre-fetch cache.)
 
 ### Why
 

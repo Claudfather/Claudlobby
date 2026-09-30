@@ -22,7 +22,7 @@ def _predicate() -> str:
 
 def _landed(root: Path, fleet: str, bot: str) -> bool:
     if not (root / "lib").exists():
-        (root / "lib").symlink_to(REPO / "lib")
+        (root / "lib").symlink_to(REPO / "claudlobby/_runtime_scripts")
     r = subprocess.run(["bash", "-c", _predicate() + f'\nbriefing_event_landed "$1" "$2" "$3"', "_",
                         str(root), fleet, bot], capture_output=True, text=True, timeout=60)
     return r.returncode == 0

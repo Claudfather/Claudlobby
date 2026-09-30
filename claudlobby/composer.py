@@ -296,7 +296,7 @@ def mcp_launch_plan(bot: BotConfig, paths: Paths) -> tuple[dict, list[tuple[str,
                 # below, which is why that moved out and this test did not.
                 instance_config["command"] = "node"
                 # [-y, pkg, ...rest] -> [binary, ...rest]. The split is
-                # `lib/mcp-package-grammar.py`'s: warm-cache wants the package
+                # `claudlobby/_runtime_scripts/mcp-package-grammar.py`'s: warm-cache wants the package
                 # this discards, so one parse decides the boundary for both.
                 _pkg, rest_args = grammar(paths).split_npx_args(
                     instance_config.get("args", [])
@@ -763,7 +763,7 @@ def compose_bot_gitconfig(bot: BotConfig, paths: Paths) -> str | None:
 
     Covers BOTH declaration surfaces: per-org PAT routing (``git_credentials``)
     and GitHub App routing (``github_app``, App-auth P3 #1273). The App block
-    references ``lib/git-credential-github-app`` by BAKED ABSOLUTE PATH (the
+    references ``claudlobby/_runtime_scripts/git-credential-github-app`` by BAKED ABSOLUTE PATH (the
     same precedent as the operator-gitconfig include and the resolved gh
     fallback — gitconfig files do not expand env vars), layers ``cache
     --timeout=3000`` in front so a mint is amortized across git operations,
@@ -1025,11 +1025,11 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
         f"BOT_SERVICE={_shq(bot_service)}",
         # Per-bot tmux server socket (the `-L` name) — equals BOT_SERVICE so one
         # server's death drops only this bot. Resolved for peer bots via
-        # tmux_socket_for_bot() (lib/lib-common.sh).
+        # tmux_socket_for_bot() (claudlobby/_runtime_scripts/lib-common.sh).
         f"TMUX_SOCKET={_shq(bot_service)}",
         f"BOT_LABEL={_shq(bot.bot_id.upper())}",
         bot_dir_line,
-        # Exported, unlike the bot.conf vars above: lib/ reads those from the
+        # Exported, unlike the bot.conf vars above: claudlobby/_runtime_scripts/ reads those from the
         # file via bot_conf_get, but this one must reach the `claude` CHILD
         # process environment. The telegram plugin resolves its state dir from
         # process.env.TELEGRAM_STATE_DIR and silently falls back to the shared
@@ -1048,7 +1048,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
         lines.append(f"# CLAUDE_CONFIG_DIR={_shq(config_dir)}  # default account")
     lines.append("")
 
-    # Assemble the full claude CLI flag set. lib/start-bot.sh reads
+    # Assemble the full claude CLI flag set. claudlobby/_runtime_scripts/start-bot.sh reads
     # CLAUDE_FLAGS verbatim and appends only --name <session>.
     flags: list[str] = []
     for ch in bot.channels:
@@ -1261,7 +1261,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
     # THE ESTATE SILENCER, carried to the session (F2). start-bot.sh sources
     # the .env tiers BEFORE `set -a`, so a bare `PLANE_EMIT_DISABLED=1` in a
     # tier is assigned unexported and dies with that shell — it never reaches
-    # `claude`, its hooks, or any lib/ door a bot runs itself. bot.conf IS the
+    # `claude`, its hooks, or any claudlobby/_runtime_scripts/ door a bot runs itself. bot.conf IS the
     # session carrier, so the composer bridges the tier's resolved value here.
     # Stamped only when a tier actually says 0 or 1: an unset flag must leave
     # the door's own default as the ONE place the answer lives (an empty
@@ -1282,7 +1282,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
     lines.append(f"export WORKSTREAM_LEASE_DAYS={_shq(fleet.workstreams.lease_days)}")
 
     # Rolling code-audit sweep — emitted only into the owner bot's conf, so the
-    # fleet-level selector (lib/code-audit-sweep.sh) resolves exactly one owner.
+    # fleet-level selector (claudlobby/_runtime_scripts/code-audit-sweep.sh) resolves exactly one owner.
     # repos default to the owner's scope.repos when sweep.repos is unset.
     if fleet.sweep_enabled() and fleet.sweep.owner_bot == bot.bot_id:
         sweep_repos = fleet.sweep.repos or (bot.scope.repos if bot.scope else [])
@@ -1431,7 +1431,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
         #     context rather than naming a read the bot must run itself.
         #   - otherwise: ask for the canonical brief read after context show.
         # NOTE: no backticks around the command. bot.conf is fully `source`d
-        # (lib/lib-common.sh:load_bot_conf → `. "$bot_dir/bot.conf"`), and
+        # (claudlobby/_runtime_scripts/lib-common.sh:load_bot_conf → `. "$bot_dir/bot.conf"`), and
         # json.dumps() does not escape `` ` `` or `$` — a literal backtick
         # here would run as a real command substitution at every boot,
         # not render as text.
@@ -1528,7 +1528,7 @@ def _scheduler_tool_path() -> str:
     start-bot.sh exports, so a tool resolves identically under a timer as in a
     bot session (tests/test_claude_version.py pins the two), resolved at
     compose time: ``$HOME`` → the composing user's home; Homebrew → the host
-    layout (lib/lib-common.sh detect_os — /opt/homebrew on Apple Silicon,
+    layout (claudlobby/_runtime_scripts/lib-common.sh detect_os — /opt/homebrew on Apple Silicon,
     /usr/local on Intel, absent off macOS). On Intel the Homebrew segment
     intentionally re-collides with the leading /usr/local/bin, matching
     fleet_launch_path's own duplication — a harmless, deliberate mirror.
@@ -3732,7 +3732,7 @@ def _upstream_env_names(paths: Paths, *, for_tier: str = "bot") -> frozenset[str
     #
     # The tier -> PATH mapping below is the one place in the compositor that
     # still restates something the resolver knows, and it is deliberate rather
-    # than overlooked: reading it from lib/env-tiers.sh means a bash subprocess
+    # than overlooked: reading it from claudlobby/_runtime_scripts/env-tiers.sh means a bash subprocess
     # inside `generate`, and no test fixture root carries a lib/. The order —
     # the part that actually drifted and caused #1226 — now comes from the
     # pinned registry; only the leaf names are local. Tracked as the residual.
@@ -5139,7 +5139,7 @@ def compose_host_mention_allowlist(
     until someone says so, in writing, in a manifest.
 
     A composed BOT name always wins over this list — see the deny-override in
-    lib/mention-rewrite.py. Without that, someone eventually allowlists a bot's
+    claudlobby/_runtime_scripts/mention-rewrite.py. Without that, someone eventually allowlists a bot's
     name meaning our bot and silently re-arms the original bug.
     """
     names: set[str] = set()
@@ -5164,7 +5164,7 @@ def compose_host_bot_handles(
 ) -> Path:
     """Write every bot name on the HOST, one per line, for the mention guard.
 
-    Consumed by ``lib/gh-mention-guard.sh`` (#1019), which rewrites ``@<name>``
+    Consumed by ``claudlobby/_runtime_scripts/gh-mention-guard.sh`` (#1019), which rewrites ``@<name>``
     out of GitHub-bound tool calls. Every one of this estate's bot names is also
     a real GitHub account — all 21 resolve, 19 of them to real people and 2 to
     organizations — so an unguarded teammate reference emails a stranger. One of

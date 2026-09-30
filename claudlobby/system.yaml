@@ -303,7 +303,7 @@ host:
     # keepalive window. Once the boot closes every later tick is two file tests.
     #
     # COMPOSED-BUT-DORMANT, and the reason is delivery mechanics rather than the
-    # convention. lib/ is read ON DEMAND, PER USE -- no restart gate, no canary
+    # convention. claudlobby/_runtime_scripts/ is read ON DEMAND, PER USE -- no restart gate, no canary
     # window -- so a root pull is in force for every bot on its next call. The
     # pull that delivers this recorder delivers everything else accumulated with
     # it, live, to every fleet at once, and there is no deployment step at which
@@ -324,7 +324,7 @@ host:
     # then stage with `config plan`, inspect `config diff`, and apply `host activate`.
     #
     # The stamp half of #1265 (inject_stamp, called from start-bot.sh) has no
-    # enrollment step at all -- it runs on every bot start the instant lib/ moves
+    # enrollment step at all -- it runs on every bot start the instant claudlobby/_runtime_scripts/ moves
     # -- so it carries its OWN per-fleet flag, BOOT_CAPTURE_ENABLED. Two gates
     # because there are two delivery paths, not for belt and braces.
     boot-capture:
@@ -536,7 +536,7 @@ defaults:
       type: oneshot
     # PR 2 of the manager check-in build (chunk 2): every 15 min, inject
     # `/checkin` into an idle, EQUIPPED manager through the beat
-    # (lib/manager-checkin.sh, chunk 2) -- the same reaction task-recheck
+    # (claudlobby/_runtime_scripts/manager-checkin.sh, chunk 2) -- the same reaction task-recheck
     # triggers on a schedule, but initiative-shaped rather than row-shaped:
     # nothing needs to be overdue for a manager to check in.
     #

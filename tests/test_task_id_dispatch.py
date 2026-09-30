@@ -4,7 +4,7 @@ import re
 import subprocess
 from pathlib import Path
 
-LIB_DIR = Path(__file__).resolve().parent.parent / "lib"
+LIB_DIR = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts"
 TASK_ID_RE = re.compile(r"^t-[0-9]+-[0-9a-f]{4}$")
 
 def _sourced(fn_call: str):

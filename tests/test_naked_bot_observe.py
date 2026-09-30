@@ -694,7 +694,7 @@ def leaf_manager_compose(tmp_path_factory):
     assert candidate.package.is_relative_to(root.resolve() / ".probe-release")
     unavailable = root / "source-unavailable"
     unavailable.mkdir()
-    for name in ("claudlobby", "library", "lib", "templates", "voices"):
+    for name in ("claudlobby", "library", "templates", "voices"):
         (root / name).rename(unavailable / name)
     # Poison any accidental source/module or ambient CLI selection. The real
     # candidate has already been installed, so neither is part of this run.

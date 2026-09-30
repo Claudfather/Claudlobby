@@ -33,13 +33,13 @@ from claudlobby.task_state import TASK_EMITTER
 from tests.plane_fixtures import F, REPO, _live_dispatch, _paths, plane_root
 from tests.test_plane_events_door import _serving
 
-LIB = REPO / "lib"
+LIB = REPO / "claudlobby/_runtime_scripts"
 needs_tmux = pytest.mark.skipif(shutil.which("tmux") is None,
                                 reason="fleet-pulse needs tmux")
 
 
 def _pulse_lib(tmp_path, capture, *, lookup_stub=None):
-    """The repo's lib/ with ONE stub: tg-post.sh appends its page to *capture*
+    """The repo's claudlobby/_runtime_scripts/ with ONE stub: tg-post.sh appends its page to *capture*
     (and, for the refusal pin, a plane-lookup.py that refuses)."""
     libdir = tmp_path / "lib"
     libdir.mkdir(parents=True)

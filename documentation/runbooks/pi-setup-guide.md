@@ -113,7 +113,7 @@ sudo apt install -y tmux
 
 ### jq
 
-Required by several `lib/` scripts (dispatch, reconcile-fleet, report-back, creds-check, keepalive helpers, etc.) for JSON parsing.
+Required by several `claudlobby/_runtime_scripts/` scripts (dispatch, reconcile-fleet, report-back, creds-check, keepalive helpers, etc.) for JSON parsing.
 
 ```bash
 sudo apt install -y jq

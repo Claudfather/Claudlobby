@@ -290,7 +290,7 @@ no beat unit composes and an armed job produces a validation warning.
 
 ### `fleet.sweep`
 
-Opt-in rolling code-audit sweep. A fleet-level nightly timer runs a no-LLM selector (`lib/code-audit-sweep.sh`) that picks the **stalest** repo — by the timestamp of its most recent `auto-audit`-labelled GitHub issue — and dispatches an audit into the owner bot's session via `lib/bot-sweep-cron.sh`. The audit's filed issues become the next run's staleness signal, so GitHub is the only ledger (no local tracker, no drift). Presence of the block opts in; omit it and nothing is emitted.
+Opt-in rolling code-audit sweep. A fleet-level nightly timer runs a no-LLM selector (`claudlobby/_runtime_scripts/code-audit-sweep.sh`) that picks the **stalest** repo — by the timestamp of its most recent `auto-audit`-labelled GitHub issue — and dispatches an audit into the owner bot's session via `claudlobby/_runtime_scripts/bot-sweep-cron.sh`. The audit's filed issues become the next run's staleness signal, so GitHub is the only ledger (no local tracker, no drift). Presence of the block opts in; omit it and nothing is emitted.
 
 ```yaml
 fleet:
@@ -307,7 +307,7 @@ After editing `fleet.sweep`, stage the source with `claudlobby config plan --rel
 
 ### `bots.<bot>.briefing`
 
-Equippable scheduled briefing (#627). A bot turns briefings on in `fleet.yaml` alone: the `briefing` skill is linked for it (no `skills:` entry needed), and each **slot** becomes a composed per-(bot,slot) `OnCalendar` timer (`<service_prefix>.briefing-<bot>-<slot>`) whose `ExecStart` runs `lib/briefing-trigger.sh <fleet> <bot> <slot>` — a committed, never-swept trigger that delivers `/briefing <slot>` into the bot's own session through the slash-aware `lib/dispatch.sh`, so the skill actually fires (never hand-install a briefing cron). Presence of the block opts in; omit it and nothing is emitted for that bot.
+Equippable scheduled briefing (#627). A bot turns briefings on in `fleet.yaml` alone: the `briefing` skill is linked for it (no `skills:` entry needed), and each **slot** becomes a composed per-(bot,slot) `OnCalendar` timer (`<service_prefix>.briefing-<bot>-<slot>`) whose `ExecStart` runs `claudlobby/_runtime_scripts/briefing-trigger.sh <fleet> <bot> <slot>` — a committed, never-swept trigger that delivers `/briefing <slot>` into the bot's own session through the slash-aware `claudlobby/_runtime_scripts/dispatch.sh`, so the skill actually fires (never hand-install a briefing cron). Presence of the block opts in; omit it and nothing is emitted for that bot.
 
 ```yaml
 fleet:
@@ -481,7 +481,7 @@ fleet:
 ```
 
 **What it composes.** An App section in the per-bot `.gitconfig` (`GIT_CONFIG_GLOBAL`): a
-`cache --timeout=3000` layer, the `lib/git-credential-github-app` helper by absolute path, the
+`cache --timeout=3000` layer, the `claudlobby/_runtime_scripts/git-credential-github-app` helper by absolute path, the
 ssh→https `insteadOf` rewrite (App tokens are HTTPS-only), the `<slug>[bot]` commit identity when
 both identity fields are set, and a composed `tools/gh` shim (on PATH ahead of system `gh`) so
 per-call App minting is mechanical.
@@ -554,10 +554,10 @@ bots:
 ```
 
 - **What counts as heavy:** a whole pytest or vitest run (a run that names its test files is not gated), a pip/uv/npm/pnpm/yarn install, a `test` or `build` package script, `next build`, Playwright, and Chromium. They are recognised through `npx`, `pnpm exec`/`dlx`, `yarn`, `timeout`, `env`, `nice`, `nohup`, `flock`, `xargs`, `uv run` and `bash -c '…'`. `--collect-only` pytest calls do not take a slot. Bash tool calls only: a heavy job started from inside a script is not seen.
-- **How:** configuration staging composes a PreToolUse hook, `lib/heavy-slot-guard.sh`, for this bot and for no other. It puts `lib/heavy-slot.py run --` in front of each heavy command and leaves every other byte of the command alone.
+- **How:** configuration staging composes a PreToolUse hook, `claudlobby/_runtime_scripts/heavy-slot-guard.sh`, for this bot and for no other. It puts `claudlobby/_runtime_scripts/heavy-slot.py run --` in front of each heavy command and leaves every other byte of the command alone.
 - **The slot** is a `flock` on `$CLAUDLOBBY_ROOT/state/heavy-slot/slot-N.lock`, whose contents name the holder: fleet, bot, the job's shape (its tool and flag names, never an argument value), start and, once it ends, release and exit code. A refusal names each holder's bot, tool and start time, never its command. The kernel drops the lock when its holder dies, so a dead holder never wedges the slot. The next holder records the unreleased hold on the plane (`heavy_slot_unreleased`); a different boot id means the job was running when the host reset (#1644).
 
-- **Knobs, host-wide, read on every use:** `state/heavy-slot/slots` holds the slot count (1 when absent). `state/heavy-slot/disabled`, when it exists, makes the hook pass every call through at once, with no generate and no restart. `lib/heavy-slot.py status` answers who holds each slot, or who held it last.
+- **Knobs, host-wide, read on every use:** `state/heavy-slot/slots` holds the slot count (1 when absent). `state/heavy-slot/disabled`, when it exists, makes the hook pass every call through at once, with no generate and no restart. `claudlobby/_runtime_scripts/heavy-slot.py status` answers who holds each slot, or who held it last.
 - **It only counts bots that opted in.** A heavy job run by a bot without the key takes no slot and is refused by none.
 
 To arm one canary bot, set the key in an independent canary manifest, review `config plan` and `config diff PLAN_ID`, then use `host activate PLAN_ID --install-directory PATH`. Activation is host-wide; do not use a production manifest to simulate a one-bot canary. Hooks are read on demand once delivered, so the activation boundary is essential. The earlier hook mechanism was measured with a headless session on Claude 2.1.281; that is not proof of this release's activation. To widen it, set `defaults.heavy_slot: true`. A bot's own `false` still opts that bot out.
@@ -592,7 +592,7 @@ Any server that can't launch directly keeps today's npx launch. That launch can'
 
 A copy removed *after* activation is different. The bot's composed file still points at it, so that server will not start at the bot's next session, while a fresh plan would quietly fall back to npx. The `host doctor` `mcp-launch-composed` rung reads every bot's composed `.mcp.json`, armed or not, and **fails** naming each such bot, server and path. Restore the exact cache with `host cache warm`, then stage and activate a fresh plan (or stage and activate without warming to return to npx).
 
-The copy installs the fragment's exact pin. npm resolves the rest of its dependency tree from its own cache first (`--prefer-offline`). uvx servers are untouched. `lib/fleet-memory-check.sh` does not show the saving (#862): its fleet total never matched an `npm exec` line, and its per-bot figure counts only the pane process and its direct children.
+The copy installs the fragment's exact pin. npm resolves the rest of its dependency tree from its own cache first (`--prefer-offline`). uvx servers are untouched. `claudlobby/_runtime_scripts/fleet-memory-check.sh` does not show the saving (#862): its fleet total never matched an `npm exec` line, and its per-bot figure counts only the pane process and its direct children.
 
 ### `bots.<name>.guardrails` / `protocols` / `resources` / `lessons` / `principles` / `permissions` / `post_actions`
 
@@ -606,7 +606,7 @@ The `persona:` key is accepted as a backwards-compatible alias for `expertise:` 
 
 Telegram config for this bot. Fields: `handle` (bot username), `token_env` (env var name holding the token), `require_mention` (whether the bot responds only to @-mentions), `chat_id` (override fleet-level group).
 
-`token_env` names the **env var** that holds the Telegram token (e.g., `TELEGRAM_TOKEN_LEAD`). The actual token lives in `.env`. The generator writes the env-var *name* into `bot.conf` as `TELEGRAM_TOKEN_ENV_NAME`; `lib/start-bot.sh` reads through to the actual token. This indirection lets you commit `fleet.yaml` publicly while keeping tokens in a gitignored `.env`.
+`token_env` names the **env var** that holds the Telegram token (e.g., `TELEGRAM_TOKEN_LEAD`). The actual token lives in `.env`. The generator writes the env-var *name* into `bot.conf` as `TELEGRAM_TOKEN_ENV_NAME`; `claudlobby/_runtime_scripts/start-bot.sh` reads through to the actual token. This indirection lets you commit `fleet.yaml` publicly while keeping tokens in a gitignored `.env`.
 
 Telegram fields support defaults merging — set common values (like `token_env`) in `defaults.telegram` and override per-bot as needed.
 
@@ -648,7 +648,7 @@ Deny wins over allow at the same layer. The validator warns if denied tools conf
 
 ### `bots.<name>.observability`
 
-Controls fleet observability thresholds for heartbeat pulses and stuck-detection. Emitted as env vars in `bot.conf` for consumption by `lib/fleet-pulse.sh`, `lib/bot-vitals.sh`, and the dispatch watchdog.
+Controls fleet observability thresholds for heartbeat pulses and stuck-detection. Emitted as env vars in `bot.conf` for consumption by `claudlobby/_runtime_scripts/fleet-pulse.sh`, `claudlobby/_runtime_scripts/bot-vitals.sh`, and the dispatch watchdog.
 
 ```yaml
 observability:
@@ -668,7 +668,7 @@ observability:
 
 The three threshold fields are optional integers with sensible defaults. `bridge_heal` is a boolean. Can be set in `defaults:` to apply fleet-wide; bot-level overrides (a per-bot `bridge_heal: false` opts a bot out of a fleet default-on). The validator warns if `pulse_interval` is `<= 0` or greater than `3600` (1 hour), if `reap_days` is `<= 0` or greater than `365`, and if `bridge_heal_max_attempts` is outside `1..10`. There is currently no validation on `activity_stuck_threshold` or `dispatch_deadline`.
 
-**`bridge_heal` must be set here, not via a `.env` tier.** The keepalive watchdog (`lib/keepalive.sh`) loads `bot.conf` only — it never sources the fleet `.env` tiers (those reach the bot's `claude` session via `start-bot.sh`, not the supervisor). Setting `OBSERVABILITY_BRIDGE_HEAL` in `defaults.env` (silently dropped) or a fleet `.env` file leaves keepalive's gate closed and the heal a no-op. This structured field is the one path that composes into every `bot.conf`, where keepalive's per-tick read picks it up. `bridge_heal` emits as the shell boolean `1`/`0` that the gate (`[ "${OBSERVABILITY_BRIDGE_HEAL:-0}" = "1" ]`) expects.
+**`bridge_heal` must be set here, not via a `.env` tier.** The keepalive watchdog (`claudlobby/_runtime_scripts/keepalive.sh`) loads `bot.conf` only — it never sources the fleet `.env` tiers (those reach the bot's `claude` session via `start-bot.sh`, not the supervisor). Setting `OBSERVABILITY_BRIDGE_HEAL` in `defaults.env` (silently dropped) or a fleet `.env` file leaves keepalive's gate closed and the heal a no-op. This structured field is the one path that composes into every `bot.conf`, where keepalive's per-tick read picks it up. `bridge_heal` emits as the shell boolean `1`/`0` that the gate (`[ "${OBSERVABILITY_BRIDGE_HEAL:-0}" = "1" ]`) expects.
 
 **`unassigned_check` is the mirror of the overdue-dispatch watchdog** (#1024). `overdue_dispatch` answers "work was sent and never came back"; this answers "work came back and nothing was sent" — a worker that reported terminal and was then forgotten. `activity_stuck` cannot cover it: a genuinely idle bot *is* idle, so keepalive re-stamps `.idle` and that branch never fires. The check emits `worker_unassigned` and pushes a debounced `[FLEET-PULSE]` line, exactly like `overdue_dispatch`.
 
@@ -676,13 +676,13 @@ It is **off by default** because it is the only pulse check whose subject is the
 
 **`unassigned_max_age` is a trade in both directions, and the second one matters here.** Past the cap the check stops reporting a strand *and clears its debounce state*, so the emitted signal becomes indistinguishable from "the strand resolved" — a worker idle longer than the window goes quiet again. That is bounded rather than immediate (roughly 3–4 pushes at the default 6h renotify cadence before it lapses) and it is the same expiry `overdue_dispatch` already applies via `DISPATCH_OVERDUE_MAX_AGE_S`, so it is a deliberate symmetry rather than a gap unique to this check. But a check that exists to close a silent failure does reopen a narrower one at the far end: set `unassigned_max_age: 0` to refuse the trade and keep reporting indefinitely.
 
-**These three must be set here, not via a `.env` tier** — the same constraint as `bridge_heal`, for a different reason. The composed fleet-pulse unit carries a fixed set of `Environment=` lines (`CLAUDLOBBY_ROOT`, `PATH`, `CLAUDLOBBY_FLEET`, `TELEGRAM_GROUP_CHAT_ID`, plus any `fleet_pulse:` knobs — see below) and `lib/fleet-pulse.sh` sources no `.env` file, so a fleet-tier `.env` setting never reaches it. `bot.conf` is the one path that does, and the per-bot granularity is useful in its own right: a deliberately parked bot can set `unassigned_check: false` and stop tripping the alarm without disarming the fleet.
+**These three must be set here, not via a `.env` tier** — the same constraint as `bridge_heal`, for a different reason. The composed fleet-pulse unit carries a fixed set of `Environment=` lines (`CLAUDLOBBY_ROOT`, `PATH`, `CLAUDLOBBY_FLEET`, `TELEGRAM_GROUP_CHAT_ID`, plus any `fleet_pulse:` knobs — see below) and `claudlobby/_runtime_scripts/fleet-pulse.sh` sources no `.env` file, so a fleet-tier `.env` setting never reaches it. `bot.conf` is the one path that does, and the per-bot granularity is useful in its own right: a deliberately parked bot can set `unassigned_check: false` and stop tripping the alarm without disarming the fleet.
 
 Emitted env vars: `OBSERVABILITY_PULSE_INTERVAL`, `OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD`, `OBSERVABILITY_DISPATCH_DEADLINE`, `OBSERVABILITY_BRIDGE_HEAL`, `BRIDGE_HEAL_MAX_ATTEMPTS`, `OBSERVABILITY_UNASSIGNED_CHECK`, `OBSERVABILITY_UNASSIGNED_THRESHOLD`, `OBSERVABILITY_UNASSIGNED_MAX_AGE`.
 
 ### Fleet-pulse escalation (environment overrides)
 
-`lib/fleet-pulse.sh` escalates to Telegram when the same critical event (`service_down`, `session_missing`, `crash_loop`, …) affects multiple bots within a short window.
+`claudlobby/_runtime_scripts/fleet-pulse.sh` escalates to Telegram when the same critical event (`service_down`, `session_missing`, `crash_loop`, …) affects multiple bots within a short window.
 
 Set these in the fleet-level `fleet_pulse:` block. The composer emits them as `Environment=` lines on the fleet-pulse timer unit, which is the only tier the script can read:
 
@@ -958,7 +958,7 @@ defaults:            # or bots.<bot>:, which wins over defaults
 | `credentials` | `.credentials.json` in each config dir | Read + Edit |
 | `account_config` | `.config.json*` and `.claude.json*` in each config dir, and `~/.claude.json*` | Read + Edit |
 | `env` | `~/.env*`, the root `.env` and `.env.bak*`, every fleet's `.env*`, and every bot's `.env*` — **its own included** | Read + Edit |
-| `install_root` | the install's `lib/`, `claudlobby/`, `library/`, `templates/`, `voices/`, `bin/` | Edit only |
+| `install_root` | the install's `claudlobby/_runtime_scripts/`, `claudlobby/`, `library/`, `templates/`, `voices/`, `bin/` | Edit only |
 | `telegram` | every other bot's Telegram state dir, token included | Read + Edit |
 | `config_surfaces` | `settings.json`, `settings.local.json`, `CLAUDE.md`, `hooks/`, `skills/`, `plugins/`, `agents/`, `commands/` in each config dir | Edit only |
 

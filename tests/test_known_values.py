@@ -210,15 +210,15 @@ class TestClaudnaRenameSSOT:
         """The session-hyphen typo family (live verbs with no dead standalone,
         e.g. `checkpoint`) is guard-local pattern policy — pin the guards'
         intended split so it cannot drift silently: both ban the namespaced
-        form; the bare form is doc-guard territory, and lib/ coverage for it
-        rides on the doc guard scanning lib/*.sh."""
+        form; the bare form is doc-guard territory, and claudlobby/_runtime_scripts/ coverage for it
+        rides on the doc guard scanning claudlobby/_runtime_scripts/*.sh."""
         from tests.test_no_dead_claudna_refs import DEAD_REF, SCAN_GLOBS
         from tests.test_no_dead_session_command import _DEAD_SESSION_CMD
 
         assert DEAD_REF.search("/claudna:session-checkpoint")
         assert _DEAD_SESSION_CMD.search("/claudna:session-checkpoint")
         assert DEAD_REF.search("/session-checkpoint")
-        assert ("lib", "*.sh") in SCAN_GLOBS
+        assert ("claudlobby/_runtime_scripts", "*.sh") in SCAN_GLOBS
         # Neither guard flags the live space-form or the unrelated bare tmux
         # `session-name` (no leading slash).
         for benign in ("/claudna:session resume", "tmux session-name x"):

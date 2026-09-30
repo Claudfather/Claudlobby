@@ -35,17 +35,19 @@ def _require_prepared_resources():
         if not isinstance(sources, list) or not sources:
             raise ValueError("missing source inventory")
         indexed = subprocess.check_output(
-            ["git", "ls-files", "-z", "--", "lib", "library", "templates", "voices",
-             "fleet.yaml.seed", "fleet.yaml.example", "projects.yaml.seed",
-             ".env.seed.example", "missions/fleet.md.seed"],
+            ["git", "ls-files", "-z", "--", "claudlobby/_runtime_scripts", "library",
+             "templates", "voices", "fleet.yaml.seed", "fleet.yaml.example",
+             "projects.yaml.seed", ".env.seed.example", "missions/fleet.md.seed"],
             cwd=_TEST_TREE, timeout=10).decode().split("\0")
         indexed = {name for name in indexed if name and name not in {
-            "lib/CLAUDE.md", "lib/personal/finance-presync.sh"}}
+            "claudlobby/_runtime_scripts/CLAUDE.md",
+            "claudlobby/_runtime_scripts/personal/finance-presync.sh"}}
         if indexed != set(sources):
             raise ValueError("prepared resource inventory differs from the source index")
         for name in sources:
             source = _TEST_TREE / name
-            target = (package / "_native" / name.removeprefix("lib/") if name.startswith("lib/")
+            # Runtime scripts are authored at their installed package path.
+            target = (source if name.startswith("claudlobby/_runtime_scripts/")
                       else package / "_resources" / "seeds" / name if name in {
                           "fleet.yaml.seed", "fleet.yaml.example", "projects.yaml.seed",
                           ".env.seed.example", "missions/fleet.md.seed"}
@@ -338,10 +340,10 @@ def equip_grammar(root: Path) -> Path:
 
     Opt-in, per test module, rather than a side effect of `fleet_dir`: the
     grammar is needed by the four modules that drive composition or
-    warm-cache, and planting a one-file `lib/` in all 71 fixtures to serve 4
-    is what made `lib/` EXIST without being WIRED. Thirteen helpers across
+    warm-cache, and planting a one-file `claudlobby/_runtime_scripts/` in all 71 fixtures to serve 4
+    is what made `claudlobby/_runtime_scripts/` EXIST without being WIRED. Thirteen helpers across
     the suite key on `(root / "lib").exists()` to decide whether to link the
-    real tree; a partial `lib/` makes that check answer yes and skip, and the
+    real tree; a partial `claudlobby/_runtime_scripts/` makes that check answer yes and skip, and the
     test then runs against doors it cannot read (#1633's ignition tests, where
     `task-recheck` fell back to ARMED and every scenario passed vacuously).
 
@@ -354,7 +356,7 @@ def equip_grammar(root: Path) -> Path:
     lib.mkdir(exist_ok=True)
     repo = Path(__file__).resolve().parent.parent
     dest = lib / "mcp-package-grammar.py"
-    shutil.copy(repo / "lib" / "mcp-package-grammar.py", dest)
+    shutil.copy(repo / "claudlobby/_runtime_scripts" / "mcp-package-grammar.py", dest)
     return dest
 
 
@@ -472,7 +474,7 @@ def call_lib_fn(fn: str, value: str) -> str:
     """Source lib-common.sh and call one function on a single value, returning
     stdout. The value travels as a positional arg so the shell never
     interprets it."""
-    lib = Path(__file__).resolve().parent.parent / "lib" / "lib-common.sh"
+    lib = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts" / "lib-common.sh"
     r = subprocess.run(
         ["bash", "-c", f'. "{lib}"; {fn} "$1"', "_", value],
         capture_output=True,
@@ -484,11 +486,11 @@ def call_lib_fn(fn: str, value: str) -> str:
     return r.stdout
 
 
-def load_lib_module(name: str, *, directory: str = "lib"):
-    """Import an un-packaged lib or harness script as a module."""
+def load_lib_module(name: str, *, directory: str = "claudlobby/_runtime_scripts"):
+    """Import an un-packaged runtime or harness script as a module."""
     import importlib.util
 
-    if directory not in {"lib", "harness"}:
+    if directory not in {"claudlobby/_runtime_scripts", "harness"}:
         raise ValueError("unknown source script directory")
     spec = importlib.util.spec_from_file_location(
         name.replace("-", "_"), Path(__file__).parent.parent / directory / f"{name}.py"

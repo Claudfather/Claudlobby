@@ -26,7 +26,7 @@ from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 REPO = Path(__file__).resolve().parent.parent
-LIB = REPO / "lib"
+LIB = REPO / "claudlobby/_runtime_scripts"
 
 # Reserved for what the platform genuinely withholds — a launchctl binary that
 # does not exist off Darwin. The reason names `launchctl` specifically rather

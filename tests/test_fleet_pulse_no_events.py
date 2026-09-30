@@ -30,7 +30,7 @@ from tests.conftest import _scrubbed_env, read_fleet_events
 from tests.test_plane_events_door import _serving
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-FLEET_PULSE = REPO_ROOT / "lib" / "fleet-pulse.sh"
+FLEET_PULSE = REPO_ROOT / "claudlobby/_runtime_scripts" / "fleet-pulse.sh"
 
 # --- end-to-end: the pulse survives a no-events bot ---------------------------
 
@@ -163,7 +163,7 @@ def test_a_healthy_bridge_check_fires_no_phantom_script_error(tmp_path, *, scrat
     bridge_down_state returns 1 on every HEALTHY bot. The demonstration runs
     the two shapes under the real trap installer; the shape pin guards the
     line in fleet-pulse.sh."""
-    src = (REPO_ROOT / "lib" / "fleet-pulse.sh").read_text()
+    src = (REPO_ROOT / "claudlobby/_runtime_scripts" / "fleet-pulse.sh").read_text()
     assert '_bridge_st=$(bridge_down_state "$bot_dir" "$_bridge_grace" || true)' in src
     assert 'if _bridge_st=$(bridge_down_state' not in src
     # The class is bash 3.2's (macOS /bin/bash — the Mini, where it was
@@ -187,7 +187,7 @@ def test_a_healthy_bridge_check_fires_no_phantom_script_error(tmp_path, *, scrat
                    **scratch_plane_env(root, socket=socket),
                    "BOT_DIR": str(root / "bot"), "BOT_ID": "b", "FLEET_NAME": "f"}
             r = subprocess.run(["/bin/bash", "-c",
-                                f'. "{REPO_ROOT}/lib/lib-common.sh"; install_error_trap "";'
+                                f'. "{REPO_ROOT}/claudlobby/_runtime_scripts/lib-common.sh"; install_error_trap "";'
                                 f' healthy() {{ return 1; }}; {body}; echo done'],
                                capture_output=True, text=True, env=env, timeout=60)
         assert r.returncode == 0 and "done" in r.stdout, (shape, r.stderr)
@@ -200,7 +200,7 @@ def test_the_handoff_status_is_captured_without_firing_the_trap():
     shape (one phantom script_error per bot per restart, measured on the
     flip's rolling restart); the status is captured with `|| true` inside the
     substitution and judged by the predicate's own value table."""
-    src = (REPO_ROOT / "lib" / "pre-stop-handoff.sh").read_text()
+    src = (REPO_ROOT / "claudlobby/_runtime_scripts" / "pre-stop-handoff.sh").read_text()
     assert '_handoff_status="$(session_command_status "$_HANDOFF_CMD" "$BOT_DIR" || true)"' in src
     assert 'if _handoff_status="$(session_command_status' not in src
     assert "available|unverifiable)" in src

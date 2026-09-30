@@ -6,7 +6,7 @@ and the guard pages. The same third state is rendered for a REFUSED overdue
 reader (rc 3), which once printed `none` per bot while the events reader
 said unknown (filed on #1467 by the R2a adversarial lens).
 
-Each pin drives the REAL sweep (the repo's lib/, one stub: tg-post.sh
+Each pin drives the REAL sweep (the repo's claudlobby/_runtime_scripts/, one stub: tg-post.sh
 captures its page) against a throwaway plane through the real doors.
 """
 from __future__ import annotations
@@ -23,13 +23,13 @@ import pytest
 from tests.plane_fixtures import F, REPO, _live_dispatch, _scene, ro
 from tests.test_plane_events_door import _serving
 
-LIB = REPO / "lib"
+LIB = REPO / "claudlobby/_runtime_scripts"
 needs_tmux = pytest.mark.skipif(shutil.which("tmux") is None, reason="fleet-pulse needs tmux")
 PAGE = "FLEET ALERT: session_missing on 2 bots (w1 w2)."
 
 
 def _pulse_lib(tmp_path, capture, *, matcher_stub=None):
-    """The repo's lib/ with ONE stub: tg-post.sh appends its page to *capture*
+    """The repo's claudlobby/_runtime_scripts/ with ONE stub: tg-post.sh appends its page to *capture*
     (and, for the refused-overdue pin, a dispatch-overdue.py that refuses)."""
     libdir = tmp_path / "lib"
     libdir.mkdir()

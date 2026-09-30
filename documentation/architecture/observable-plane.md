@@ -66,7 +66,7 @@ message from a bot the registry has not seen creates a PROVISIONAL actor that
 the next `generate` (the registry scan) confirms or tombstones; `plane doctor`
 counts the provisional ones. Session uids are transcript-stable
 (`sess_` + sha256 of the platform session id — the bash derivation in
-`lib/plane-session-start.sh` is pinned byte-identical to `ids.derive_session_uid`).
+`claudlobby/_runtime_scripts/plane-session-start.sh` is pinned byte-identical to `ids.derive_session_uid`).
 
 ## The write spine
 
@@ -80,7 +80,7 @@ dedupe on `event_id` — a batch that mixes duplicates and new rows is REFUSED
 Exit 0 means committed or already present, while exit 6 means durably spooled
 and still pending. Conditional writes can use `--require-commit` to refuse
 spooling; an uncertain commit must be reconciled by event ID before retrying.
-The hot bash path stays on `lib/plane-emit.sh`: its stdlib socket client
+The hot bash path stays on `claudlobby/_runtime_scripts/plane-emit.sh`: its stdlib socket client
 pre-mints event IDs and durably stages an unacknowledged batch for daemon
 replay without starting the full CLI. The daemon (`plane serve`, composed as the dormant `claudlobby-plane-daemon`
 host service) owns INGEST AND NOTHING ELSE. `PLANE_EMIT_DISABLED=1` is the
@@ -202,16 +202,16 @@ program keeps refusing.
 | Door | Records | Silenced by |
 |---|---|---|
 | `lib/dispatch-task.sh` | for a TRACKED shape (a `task`, and a raw-text send which inherits type=task) work_item + assignment + communication; for a CONTROL type (`query` / `cancel` / `compact` / `restart`) the communication ALONE — an open assignment for a note that asks nothing is a row no report can close and it blanks the resolver head (#1491), so a control type mints none. Both carry the `pane_submitted` / `carrier_queued` / `failed` transmission after the send, and `--supersedes` sets `supersedes_msg_id` and a terminal `superseded` on the retired assignment whatever the type (the note retires its target even though the note itself is untracked); a raw-text dispatch is keyed by the content hash of its dispatch row | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
-| `lib/report-back.sh` | the report as a communication; task events on the assignment the legacy task id resolves to (`lib/plane-lookup.py`); an id-less terminal report closes the bot's open id-less dispatches | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
-| `lib/keepalive.sh` | `bot.heartbeat` + `bot.session_up` metric samples per tick (presence's recorded half) | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
-| `lib/plane-telegram-in.sh` / `-out.sh` / `plane-rc-relay-out.sh` (hooks) | the operator's inbound messages, the bot's replies, RC-relayed final answers, with honest transmission states (carrier `telegram-bridge`) | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
-| `lib/plane-dispatch-in.sh` (UserPromptSubmit hook) | a `received` transmission for a tracked dispatch, report, or briefing whose final-line plane marker reaches the receiving bot; records the received wire byte count and hash so delivery can be checked against the sender's proof, while ordinary prompts record nothing | `PLANE_EMIT_DISABLED=1` |
-| `lib/tg-post.sh` | a `notice` communication + its transmission for every fleet post to Telegram (carrier `telegram-tgpost`, intent before the send, the outcome after) | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
-| `lib/plane-session-start.sh` (hook) | the session uid + a per-process uid to `$BOT_DIR/data/.plane-session` | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
-| `lib/plane-host-probe.sh` (host timer) | `host.*` metric samples (load, RAM, disk, Pi thermals) | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
-| `lib/transcript-digest.sh` (SessionEnd hook) | one `session_digest` system event per finished session on the bot's actor — the capture rubric (context/worked/failed/would_change/reusable), session id + uid, model, turn/tool counts, all in `data`; a `skipped` variant at zero model cost, distinct from an `ok` with empty fields (#1503 moved it off `transcript-digest-<date>.jsonl`, the last production JSONL data record) | `SESSION_DIGEST_ENABLED=1` per fleet (dormant by default); `PLANE_EMIT_DISABLED=1` |
+| `lib/report-back.sh` | the report as a communication; task events on the assignment the legacy task id resolves to (`claudlobby/_runtime_scripts/plane-lookup.py`); an id-less terminal report closes the bot's open id-less dispatches | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
+| `claudlobby/_runtime_scripts/keepalive.sh` | `bot.heartbeat` + `bot.session_up` metric samples per tick (presence's recorded half) | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
+| `claudlobby/_runtime_scripts/plane-telegram-in.sh` / `-out.sh` / `plane-rc-relay-out.sh` (hooks) | the operator's inbound messages, the bot's replies, RC-relayed final answers, with honest transmission states (carrier `telegram-bridge`) | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
+| `claudlobby/_runtime_scripts/plane-dispatch-in.sh` (UserPromptSubmit hook) | a `received` transmission for a tracked dispatch, report, or briefing whose final-line plane marker reaches the receiving bot; records the received wire byte count and hash so delivery can be checked against the sender's proof, while ordinary prompts record nothing | `PLANE_EMIT_DISABLED=1` |
+| `claudlobby/_runtime_scripts/tg-post.sh` | a `notice` communication + its transmission for every fleet post to Telegram (carrier `telegram-tgpost`, intent before the send, the outcome after) | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
+| `claudlobby/_runtime_scripts/plane-session-start.sh` (hook) | the session uid + a per-process uid to `$BOT_DIR/data/.plane-session` | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
+| `claudlobby/_runtime_scripts/plane-host-probe.sh` (host timer) | `host.*` metric samples (load, RAM, disk, Pi thermals) | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
+| `claudlobby/_runtime_scripts/transcript-digest.sh` (SessionEnd hook) | one `session_digest` system event per finished session on the bot's actor — the capture rubric (context/worked/failed/would_change/reusable), session id + uid, model, turn/tool counts, all in `data`; a `skipped` variant at zero model cost, distinct from an `ok` with empty fields (#1503 moved it off `transcript-digest-<date>.jsonl`, the last production JSONL data record) | `SESSION_DIGEST_ENABLED=1` per fleet (dormant by default); `PLANE_EMIT_DISABLED=1` |
 | `claudlobby generate` (`registry_emit.py`) | registry keyframes for every composed entity; the `scan_completed` declaration that validates its tombstones | dormant until `PLANE_EMIT_ENABLED` in the fleet `.env` tier (the tier cascade, not `fleet.yaml env:`) — the flag's only meaning since the closure |
-| `lib/workstream-update.sh`, `lib/briefing-trigger.sh` | workstream construct + verb events; briefing communications | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
+| `lib/workstream-update.sh`, `claudlobby/_runtime_scripts/briefing-trigger.sh` | workstream construct + verb events; briefing communications | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
 | `claudlobby plane expire` (host timer) | a terminal `expired` on assignments overdue past the horizon — a Lane-B fact through normal ingest | `PLANE_EXPIRE_ENABLED` |
 | `claudlobby task withdraw` / `task escalate` | Fleet-owned acts on a canonical work item: a withdrawal records a terminal `cancelled` task event, and an escalation records a non-terminal question that remains visible while the work is open. Both accept queued work and use a durable request UUID; historical dispatch display and assignment IDs are not aliases. The granted bot forms use `claudlobby --json task ...`. | No action is claimed if the Plane write fails; a replay with the same request UUID returns the prior result. |
 | `claudlobby task nudge` | non-terminal `nudged` on canonical open work, including queued intake, plus a linked request from the actual caller to the selected fleet's implicit manager; both commit before shared native notification. `--by` is provenance. Request replay never resends | Recording or request persistence unavailable: refuses before notification; a later transport failure leaves the committed fact intact |
@@ -271,7 +271,7 @@ disagree on the same fleet. Details: `documentation/runbooks/plane-view.md`.
   does not prove that the reviewed plan was activated or is running. Review
   authored changes with `config plan` and activate the reviewed plan with
   `host activate`.
-- **The stdlib readers** (`lib/plane-readers.py`, `lib/plane-lookup.py`) — the
+- **The stdlib readers** (`claudlobby/_runtime_scripts/plane-readers.py`, `claudlobby/_runtime_scripts/plane-lookup.py`) — the
   plane answered from bash doors without paying the package import: the open
   list and the overdue set (SQL pinned byte-identical to
   `queries.OPEN_ASSIGNMENTS_AT_SQL`), the resolver, the legacy-id join, the

@@ -61,7 +61,7 @@ The integration can only see pages explicitly shared with it:
 MCP servers are wired up at Claude Code startup, so applying the new `.mcp.json` needs a real restart, not just a reload. The cross-platform, idempotent way (picks systemd vs. launchd for you):
 
 ```bash
-lib/spin-up-bot.sh runtime/bots/my-bot
+claudlobby/_runtime_scripts/spin-up-bot.sh runtime/bots/my-bot
 ```
 
 Or restart the supervised unit directly:

@@ -43,7 +43,7 @@ def _root(tmp_path: Path, env: str | None = None) -> Path:
     # that a Python copy of the cascade drifts from the runtime (#1226), and a
     # test that stubs it certifies the copy instead of the contract.
     if not (root / "lib").exists():
-        (root / "lib").symlink_to(REPO / "lib")
+        (root / "lib").symlink_to(REPO / "claudlobby/_runtime_scripts")
     (root / "fleet.yaml").write_text(dedent(_FLEET))
     if env is not None:
         (root / ".env").write_text(env)
@@ -74,7 +74,7 @@ def test_exactly_the_categories_that_ship_off():
     ARRIVES (#1265, added deliberately and NOT by widening the set quietly), and
     the list is not numbered on purpose — `weekly-worker-restart` already states
     a reason outside the original four. The category: a door with **no
-    deployment gate**. `lib/`
+    deployment gate**. `claudlobby/_runtime_scripts/`
     is read on demand, per use, so a root pull is in force on every bot on its
     next call — no restart, no canary window, no step at which one bot could be
     staged ahead of the others. For those the flag is not a hedge about the
@@ -555,7 +555,7 @@ def _walk_back(tmp_path: Path, home: Path, composed: Path):
         f.chmod(0o755)
     script = tmp_path / "drive.sh"
     script.write_text(
-        f'. "{REPO}/lib/lib-common.sh"\n'
+        f'. "{REPO}/claudlobby/_runtime_scripts/lib-common.sh"\n'
         'set +e\n'
         f'walk_back_uncomposed_host_units "{composed}"\n'
     )
@@ -673,7 +673,7 @@ def test_the_validator_namespaces_come_from_the_registry():
     assert sw.namespaces() == {
         "TASK", "PLANE", "SESSION", "SPINDOWN", "PANE", "BOOT",
         # worker-unassigned (#1633): OBSERVABILITY_UNASSIGNED_CHECK existed
-        # in lib/fleet-pulse.sh unregistered — the dead-flag sweep could not
+        # in claudlobby/_runtime_scripts/fleet-pulse.sh unregistered — the dead-flag sweep could not
         # tell it apart from a fleet's own tooling variable. Registering the
         # switch is what makes this namespace ours to claim.
         "OBSERVABILITY",
@@ -698,7 +698,7 @@ def test_doctor_switches_works_with_NO_fleet_at_all(tmp_path):
     to their shipped defaults."""
     root = tmp_path / "hostonly"
     root.mkdir()
-    (root / "lib").symlink_to(REPO / "lib")
+    (root / "lib").symlink_to(REPO / "claudlobby/_runtime_scripts")
     r = _cli(root, "host", "doctor", "--switches")
     assert r.returncode == 0, r.stderr
     assert "plane-daemon" in r.stdout and "update-siblings" in r.stdout
@@ -833,7 +833,7 @@ def test_the_lib_door_and_the_registry_spell_the_knob_the_same_way():
     """The shell reads the variable and the table describes it; a rename on one
     side and not the other is how the estate ended up with flags nothing read.
     Pinned against the door's own source, not a second list."""
-    body = (REPO / "lib" / "lib-common.sh").read_text()
+    body = (REPO / "claudlobby/_runtime_scripts" / "lib-common.sh").read_text()
     assert "PANE_SEND_CHUNK_BYTES" in body
     # the loud line the fold added, so an off switch is visible in the logs of
     # the host it is off on
@@ -905,7 +905,7 @@ def _gate(tmp_path: Path, value: str | None):
 
     script = tmp_path / "g.sh"
     script.write_text(
-        f'. "{REPO}/lib/lib-common.sh"\n'
+        f'. "{REPO}/claudlobby/_runtime_scripts/lib-common.sh"\n'
         'set +e\n'
         'switch_is_on DEMO_ENABLED demo-door "nothing will happen" || echo OFF\n'
     )
@@ -933,9 +933,9 @@ def test_switch_is_on_owns_polarity(tmp_path, value, off):
 
 
 @pytest.mark.parametrize("script,var", [
-    ("lib/plane-expire.sh", "PLANE_EXPIRE_ENABLED"),
-    ("lib/plane-prune.sh", "PLANE_PRUNE_ENABLED"),
-    ("lib/spin-down-bot.sh", "SPINDOWN_RECEIPT_ENABLED"),
+    ("claudlobby/_runtime_scripts/plane-expire.sh", "PLANE_EXPIRE_ENABLED"),
+    ("claudlobby/_runtime_scripts/plane-prune.sh", "PLANE_PRUNE_ENABLED"),
+    ("claudlobby/_runtime_scripts/spin-down-bot.sh", "SPINDOWN_RECEIPT_ENABLED"),
 ])
 def test_the_remaining_shell_launchers_call_the_shared_gate(script, var):
     body = (REPO / script).read_text()

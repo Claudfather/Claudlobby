@@ -8,7 +8,7 @@ So any change to how a bot behaves at runtime is validated by an empirical loop,
 
 | Step | What you do |
 |------|-------------|
-| **Deliver** | Make the code/library change (a lib/ script, hook, protocol, guardrail, principle, or composer field). |
+| **Deliver** | Make the code/library change (a claudlobby/_runtime_scripts/ script, hook, protocol, guardrail, principle, or composer field). |
 | **Add config** | Set the relevant field(s) in `fleet.yaml` (e.g. `observability.activity_stuck_threshold: 60`). |
 | **Recompose** | Stage the edited source with `claudlobby config plan --release RELEASE_ID`, review `claudlobby config diff PLAN_ID`, then run `claudlobby host activate PLAN_ID --install-directory INSTALL_DIR` from an operator shell. Confirm the change in the composed `bot.conf` / `.claude/settings.local.json` / `CLAUDE.md`. |
 | **Observe** | Run it and watch the real behavior fire. |

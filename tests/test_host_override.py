@@ -247,7 +247,7 @@ def test_native_host_job_run_requests_loaded_inactive_unit_only(tmp_path, platfo
     import os
     for state, expected_rc in (("inactive", 0), ("active", 3)):
         result = subprocess.run(["/bin/bash", "-c", script, "job-test",
-                                 str(Path(__file__).resolve().parents[1] / "lib/supervisor.sh"),
+                                 str(Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts/supervisor.sh"),
                                  str(unit), target],
                                 env={**os.environ, "JOB_STATE": state, "CALLS": str(calls),
                                      "PLATFORM": platform},

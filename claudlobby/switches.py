@@ -12,7 +12,7 @@ The cost reasons are about what a door DOES when it runs. This one is about
 how it ARRIVES — a different axis, so the list is deliberately not numbered
 here or in its test (``weekly-worker-restart`` already states a reason outside
 the original four, and a prose count over a registry is the thing that rots).
-It exists and it exists because ``lib/`` is read on demand, per use: a root
+It exists and it exists because ``claudlobby/_runtime_scripts/`` is read on demand, per use: a root
 pull is in force for every bot on its next call, with no restart gate and no
 canary window. Where that is the whole delivery mechanism there is no step at
 which one bot can be staged ahead of the others, so the flag is not a hedge
@@ -41,7 +41,7 @@ closes — did not run anywhere unless an operator had read a dozen source
 comments and armed a dozen flags. That is opacity, not safety.
 
 **Why a registry rather than the flags themselves.** The flags already
-existed, spread across ``system.yaml`` enroll keys, ``lib/*.sh`` self-gates,
+existed, spread across ``system.yaml`` enroll keys, ``claudlobby/_runtime_scripts/*.sh`` self-gates,
 ``composer.py`` arming tables and a validator's hardcoded prefix list. Four
 copies of "what knobs exist" means the fifth reader gets it wrong: the F18
 closure deleted the shadow and ``PLANE_SHADOW_ENABLED`` kept sitting in a live
@@ -336,7 +336,7 @@ SWITCHES: tuple[Switch, ...] = (
     ),
     # OFF BY DEFAULT BECAUSE IT DELETES DATA -- and this lane is the one that
     # could delete a RECORD rather than a sample, which is why it is an
-    # allowlist rather than an age sweep. `lib/selfstart-snapshot.sh`'s boot
+    # allowlist rather than an age sweep. `claudlobby/_runtime_scripts/selfstart-snapshot.sh`'s boot
     # gate fails CLOSED on an UNREACHABLE rescue-receipt read (its own exit 7:
     # "a receipt gate that fails OPEN is the one failure this measurement must
     # never have") -- but a receipt that was PRUNED is not unreachable, it is
@@ -398,7 +398,7 @@ SWITCHES: tuple[Switch, ...] = (
         # it: the door runs inside a bot's own session (every dispatch, every
         # boot, every keepalive reload), and start-bot.sh sources the .env tiers
         # BEFORE `set -a`, so a bare tier assignment never reaches it. A
-        # host-side sender — a hand-run lib/ script, a timer's dispatch — reads
+        # host-side sender — a hand-run claudlobby/_runtime_scripts/ script, a timer's dispatch — reads
         # the host or root .env instead, which is why the `what` below names
         # both: one door, two kinds of caller.
         carrier=BOT_CONF,
@@ -485,7 +485,7 @@ SWITCHES: tuple[Switch, ...] = (
         env="CLAUDLOBBY_STAGED_CLAUDE_UPDATE_ENABLED",
         job="claude-update",
         why_opt_in="no deployment gate — it changes which claude binary every "
-                   "bot on the host launches, and lib/ is read on demand, so a "
+                   "bot on the host launches, and claudlobby/_runtime_scripts/ is read on demand, so a "
                    "root pull would move the whole host at once. Armed per "
                    "host, on the operator's say-so, after the rehearsal "
                    "(harness/rehearse-staged-claude-update.sh)",
@@ -501,7 +501,7 @@ SWITCHES: tuple[Switch, ...] = (
         polarity=OPT_IN,
         carrier=ENROLL_HOST,
         job="boot-capture",
-        why_opt_in="no deployment gate — lib/ is read on demand per use, so "
+        why_opt_in="no deployment gate — claudlobby/_runtime_scripts/ is read on demand per use, so "
                    "the pull that delivers it is in force on every bot at once "
                    "and nothing can be staged ahead. Enrollment is the only "
                    "canary available; flip it on once one host has run it "

@@ -87,7 +87,7 @@ def not_sentinel_sql(col: str = "alias") -> str:
 # fleet's ROOM AXIS — sent by the fleet (fleet_uid) or addressed to it
 # (recipient_fleet: a worker on another fleet reporting to this fleet's manager
 # is this fleet's report). Brief's unacked list, `fleet reports list`, and
-# the overview card all read this text (lib/plane-readers.py carries the
+# the overview card all read this text (claudlobby/_runtime_scripts/plane-readers.py carries the
 # byte-identical copy, pinned): a second population let the card count a report
 # the manager's brief never showed, which no ack could clear. Binds
 # (fleet_uid, fleet_alias, since, since, since_seq, since_seq).
@@ -205,7 +205,7 @@ ASSIGNMENT_DELIVERY_MSG_SQL = (
 # receiver ingested (94 of 180 large sends the week before chunk O were wrong);
 # the RECEIVER's own row can. A `received` transmission carries the byte length
 # and sha256 of the prompt the receiving session actually got (received_bytes /
-# received_sha256, in `detail`, landed by lib/plane-dispatch-in.sh), keyed to
+# received_sha256, in `detail`, landed by claudlobby/_runtime_scripts/plane-dispatch-in.sh), keyed to
 # the sender's msg_id.
 #
 # fold F1: it JOINs that against the SENDER's WIRE proof (wire_sha256 /

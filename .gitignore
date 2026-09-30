@@ -44,7 +44,6 @@ node_modules/
 
 # Disposable editable-test resources; never commit wheel-built copies.
 claudlobby/_artifact.json
-claudlobby/_native/
 claudlobby/_resources/
 
 # Logs

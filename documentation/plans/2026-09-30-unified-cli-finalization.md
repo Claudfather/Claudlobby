@@ -350,7 +350,9 @@ The remaining gates and their dispositions are:
   date does not authorize a later pull. The service subsequently finished
   successfully and was inactive. No scheduler or service was changed. This
   verifies the Pi ceiling; it does not establish holds on other hosts.
-- **Next native acceptance: a bounded same-uid Pi canary** (not yet operated).
+- **Next native acceptance: a bounded same-uid Pi canary** (not yet operated;
+  historical, superseded by the canary recorded under "Runtime script
+  relocation" below).
   - Its safety scope: a distinct fleet `service_prefix`, and a private host
     override whose `unit_prefix` does not begin with `claudlobby-`, which the
     old installation's walk-back can remove.
@@ -361,3 +363,31 @@ The remaining gates and their dispositions are:
 Lumbergh's restart hold remains in force. This record makes no claim that the
 branch is ready to merge or that the epic is complete. No live checkout, fleet
 generation, service, deployment, GitHub comment or review request was made.
+
+## Runtime script relocation (#1989)
+
+- **Move.** All 77 tracked `lib/` files moved to `claudlobby/_runtime_scripts/`
+  with executable modes kept; top-level `lib/` is gone. `library/` equipment and
+  `harness/` instruments remain top-level. Source and installed wheel use the
+  same package path, so there is one reader layout and no alias, symlink or
+  shim. `CLAUDE.md` and `personal/finance-presync.sh` stay out of the wheel and
+  sdist. Existing releases keep their recorded `_native` path in `release.json`.
+- **Unset-root fallback, disposed.** `vault-sync.sh`, `manager-checkin.sh` and
+  `selfstart-snapshot.sh` derive a root from their own directory only when
+  `CLAUDLOBBY_ROOT` is unset. Supported callers always set it: composed job
+  units carry `native_environment()` (`CLAUDLOBBY_ROOT`, `CLAUDLOBBY_NATIVE_DIR`
+  and so on), and `selfstart-snapshot.sh` runs under `boot-capture.sh`, which
+  refuses without `CLAUDLOBBY_ROOT`. A bare private invocation is unsupported,
+  and installed releases already resolved that fallback inside the package. No
+  code change was made.
+- **Evidence.** 394 focused tests passed on the private candidate `4215445f`,
+  including the direct wheel and sdist payload, modes and exclusions. All 7
+  hosted checks passed on the prior revision `3d41c899`; CI for the new
+  revision is pending.
+- **Pi canary, scope.** The earlier native canary at `d60cdac9` passed 16 public
+  commands with a stub Claude, real user systemd, tmux and Plane, an empty
+  private root, and teardown. It is not a populated production adoption, and it
+  is not evidence for this relocated-path revision.
+
+Every earlier unresolved gate stands. This section makes no merge or
+completion claim.

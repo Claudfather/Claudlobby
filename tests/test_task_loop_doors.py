@@ -30,7 +30,7 @@ def test_the_escalated_read_refuses_an_unreachable_plane(tmp_path, *, scratch_pl
     """source_state's rule: unreachable is not empty. A watchdog that read
     'nothing escalated' off a plane it could not open would go dark in
     silence, which is the exact class #1014 named."""
-    libdir, env = Path(__file__).resolve().parent.parent / "lib", scratch_plane_env(tmp_path)
+    libdir, env = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts", scratch_plane_env(tmp_path)
     out = _lookup(tmp_path / "nowhere", libdir, env, "--escalated", "--fleet", F)
     assert out.returncode == 3 and out.stdout == ""
     assert "unreachable" in out.stderr
@@ -45,7 +45,7 @@ def test_cancelled_is_terminal_in_every_matcher_vocabulary():
     live. One vocabulary, or the doors disagree about the same fact."""
     import importlib.util
 
-    lib = Path(__file__).resolve().parent.parent / "lib"
+    lib = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts"
     spec = importlib.util.spec_from_file_location("dov", lib / "dispatch-overdue.py")
     dov = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(dov)

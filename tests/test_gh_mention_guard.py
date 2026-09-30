@@ -5,7 +5,7 @@ to real people and 2 to organizations — so `@teammate` in a PR comment emails 
 stranger. One asked us to stop. There is no safe name: an organization is
 still an account we do not control. Whether a person-valued field accepts or
 rejects one is untested — settling it needs a real assignment attempt.
-`lib/gh-mention-guard.sh` rewrites those mentions out of GitHub-bound tool calls;
+`claudlobby/_runtime_scripts/gh-mention-guard.sh` rewrites those mentions out of GitHub-bound tool calls;
 this covers the list it reads.
 
 The list is the part that rots. A hardcoded one re-breaks the moment a bot is

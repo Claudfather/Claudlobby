@@ -97,7 +97,7 @@ def transcript_slug(path: object) -> str:
     """The name Claude Code gives a session's transcript dir: the session's cwd
     with every non-alphanumeric character replaced by ``-``.
 
-    The one Python copy. ``lib/transcript-digest.sh`` carries the same rule as
+    The one Python copy. ``claudlobby/_runtime_scripts/transcript-digest.sh`` carries the same rule as
     its fallback (its primary input is the hook payload's ``transcript_path``)
     and cross-references this one. A copy that drifted would aim every row-A
     rule at directories that do not exist, and nothing would say so."""

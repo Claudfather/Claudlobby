@@ -46,7 +46,7 @@ NPX = {"command": "npx", "args": ["-y", SPEC, "--flag"], "env": {"TOKEN": "${TOK
 @pytest.fixture(autouse=True)
 def _equip_grammar(fleet_dir):
     """compose and warm-cache read the pin and bin grammar from the install's
-    `lib/`, and that door refuses rather than falling back, so the fixture root
+    `claudlobby/_runtime_scripts/`, and that door refuses rather than falling back, so the fixture root
     carries the real file (the test_warm_cache_uvx.py fixture, same reason)."""
     from tests.conftest import equip_grammar
 

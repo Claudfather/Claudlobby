@@ -44,7 +44,7 @@ from claudlobby.paths import Paths, tmux_socket_for_bot
 # Resolve relative to this file so the test exercises the checkout's
 # lib-common.sh, not the shared install's.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LIB_DIR = os.path.join(_REPO_ROOT, "lib")
+LIB_DIR = os.path.join(_REPO_ROOT, "claudlobby", "_runtime_scripts")
 
 
 # --- bash-helper harness (mirrors test_lifecycle_names.py) ------------------

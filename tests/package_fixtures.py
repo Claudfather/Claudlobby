@@ -13,7 +13,7 @@ def source_package() -> PackageResources:
         voices=root / "voices",
         templates=root / "templates",
         seeds=root,
-        native=root / "lib",
+        native=root / "claudlobby" / "_runtime_scripts",
         system_yaml=root / "claudlobby" / "system.yaml",
         artifact_id="test-source",
         source_revision=None,

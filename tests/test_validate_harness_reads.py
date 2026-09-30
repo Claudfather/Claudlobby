@@ -18,7 +18,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 HARNESS = REPO / "harness" / "validate-bot-change.sh"
-LIB_COMMON = REPO / "lib" / "lib-common.sh"
+LIB_COMMON = REPO / "claudlobby/_runtime_scripts" / "lib-common.sh"
 F = "vf"
 
 
@@ -44,7 +44,7 @@ def _run(root: Path, body: str, **env: str) -> subprocess.CompletedProcess:
         ]
     )
     return subprocess.run(
-        ["bash", "-c", script, "_", str(LIB_COMMON), str(root), str(REPO / "lib")],
+        ["bash", "-c", script, "_", str(LIB_COMMON), str(root), str(REPO / "claudlobby/_runtime_scripts")],
         capture_output=True,
         text=True,
         env={**os.environ, **env},
@@ -140,7 +140,7 @@ def test_the_harness_invokes_no_sqlite3_cli():
 # The doors that read the plane: every lib script that loads plane-readers
 # (the reader itself included), found rather than listed, and the CLI verbs
 # that print plane rows.
-_DOORS = sorted(p.stem for p in (REPO / "lib").glob("*.py") if "plane-readers" in p.read_text())
+_DOORS = sorted(p.stem for p in (REPO / "claudlobby/_runtime_scripts").glob("*.py") if "plane-readers" in p.read_text())
 _DOOR = r"\b(?:" + "|".join(map(re.escape, _DOORS)) + r")\.py\b"
 _DOOR_CALL = re.compile(
     rf"python3\b[^|;]*{_DOOR}"

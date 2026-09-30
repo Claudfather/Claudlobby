@@ -9,7 +9,7 @@
 # #1503 moved the SINK: the hook no longer appends a `transcript-digest-<date>`
 # JSONL row (the last production JSONL data record outside the plane). It emits
 # a `system` event (event=session_digest) on the bot's actor through the shim
-# (lib/plane-emit.sh). With its socket deliberately down, this suite reads the
+# (claudlobby/_runtime_scripts/plane-emit.sh). With its socket deliberately down, this suite reads the
 # raw staged batch and asserts on its event and `data` object. Daemon replay and
 # capture policy are exercised by test_plane_daemon.py.
 #
@@ -25,7 +25,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB_DIR="$SCRIPT_DIR/../lib"
+LIB_DIR="$SCRIPT_DIR/../claudlobby/_runtime_scripts"
 DIGEST="$LIB_DIR/transcript-digest.sh"
 PASS=0; FAIL=0; TOTAL=0
 

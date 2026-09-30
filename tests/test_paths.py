@@ -13,7 +13,7 @@ def package(tmp_path: Path) -> PackageResources:
     install = tmp_path / "installed" / "claudlobby"
     assets = install / "_resources"
     directories = [assets / name for name in ("library", "voices", "templates", "seeds")]
-    directories.append(install / "_native")
+    directories.append(install / "_runtime_scripts")
     for directory in directories:
         directory.mkdir(parents=True)
     system_yaml = install / "system.yaml"

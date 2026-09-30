@@ -1,4 +1,4 @@
-"""Behavioral tests for lib/notify-behind.sh (the F5 notify-only
+"""Behavioral tests for claudlobby/_runtime_scripts/notify-behind.sh (the F5 notify-only
 source-currency nudge) and the lib-common fleet-signal primitives it rides on.
 
 The real script runs against a throwaway CLAUDLOBBY_ROOT that doubles as the
@@ -17,9 +17,9 @@ from tests.test_maintenance_jobs import _native_fixture
 from tests.test_plane_events_door import _serving
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SCRIPT = os.path.join(REPO_ROOT, "lib", "notify-behind.sh")
-LIB_COMMON = os.path.join(REPO_ROOT, "lib", "lib-common.sh")
-TG_POST = os.path.join(REPO_ROOT, "lib", "tg-post.sh")
+SCRIPT = os.path.join(REPO_ROOT, "claudlobby", "_runtime_scripts", "notify-behind.sh")
+LIB_COMMON = os.path.join(REPO_ROOT, "claudlobby", "_runtime_scripts", "lib-common.sh")
+TG_POST = os.path.join(REPO_ROOT, "claudlobby", "_runtime_scripts", "tg-post.sh")
 
 # Identity/signing pinned per-invocation so tests never depend on host git config.
 GIT = [

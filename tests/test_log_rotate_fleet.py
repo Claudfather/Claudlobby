@@ -1,4 +1,4 @@
-"""Regression coverage for lib/log-rotate-fleet.sh — previously untested,
+"""Regression coverage for claudlobby/_runtime_scripts/log-rotate-fleet.sh — previously untested,
 which let a dangling `-o` in its data/ find expression ship: find rejected
 the whole expression with a syntax error (eaten by 2>/dev/null inside a
 process substitution), silently dropping rotation for every data/ log type."""
@@ -9,7 +9,7 @@ import subprocess
 from tests.conftest import _scrubbed_env
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LIB = os.path.join(REPO_ROOT, "lib")
+LIB = os.path.join(REPO_ROOT, "claudlobby", "_runtime_scripts")
 
 # Every data/ log name the find expression must match.
 DATA_LOGS = ("cron.log", "git-pull.log", "briefing-morning.log", "home-assistant.log")

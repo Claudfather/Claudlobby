@@ -43,7 +43,7 @@ from claudlobby.plane.registries import SYSTEM_EVENT_SEVERITY
 from tests.plane_fixtures import F, REPO, _cli, _env, _scene, _stdlib_readers, ro as _ro
 from tests.test_plane_lookup import _run as _lookup
 
-LIB = REPO / "lib"
+LIB = REPO / "claudlobby/_runtime_scripts"
 CLI = Path(sys.executable).parent / "claudlobby"
 TODAY = datetime.now().strftime("%Y-%m-%d")          # the door names its file by the LOCAL date
 needs_tmux = pytest.mark.skipif(shutil.which("tmux") is None, reason="fleet-pulse needs tmux")
@@ -228,7 +228,7 @@ def test_a_nested_fleet_event_never_clobbers_the_callers_own_emission_verdict(tm
 
 
 def test_a_wedged_rung_is_waited_on_only_to_the_bound_and_disclosed(tmp_path, *, scratch_plane_env):
-    """The door runs inside every lib/ hot path (the keepalive tick's ERR trap,
+    """The door runs inside every claudlobby/_runtime_scripts/ hot path (the keepalive tick's ERR trap,
     its send verifier), so a wedged rung must never hold it for a minute —
     measured: a synchronous emission held the keepalive tick 60s per fleet
     event. It waits, bounded, and a reaped emission is DISCLOSED as not
@@ -493,7 +493,7 @@ def test_the_row_renderer_discloses_a_truncated_detail_and_never_strips_another_
 # --- fleet-pulse: the escalation and the summary read the plane ---------------
 
 def _pulse_lib(tmp_path, capture):
-    """The repo's lib/ with ONE stub: tg-post.sh appends its message to *capture*."""
+    """The repo's claudlobby/_runtime_scripts/ with ONE stub: tg-post.sh appends its message to *capture*."""
     libdir = tmp_path / "lib"
     libdir.mkdir()
     for f in LIB.iterdir():

@@ -148,7 +148,7 @@ def ignition_gap(
     one of them did.
 
     The cheap conjunct is tested FIRST and short-circuits: resolving the doors
-    shells out to ``lib/env-tiers.sh`` through the switch cascade, and a
+    shells out to ``claudlobby/_runtime_scripts/env-tiers.sh`` through the switch cascade, and a
     manager-less fleet can never have a gap however its doors read. ``doors``
     is the seam for a caller that has already paid for that resolve — both
     ``validate`` and ``check_goal_binding`` pass it, so one run resolves once.

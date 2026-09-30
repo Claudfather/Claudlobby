@@ -253,7 +253,7 @@ def test_launcher_execs_selected_cli_without_path_probes(tmp_path, script, verb)
         env.update(PLANE_VIEW_HOST="127.0.0.1", PLANE_VIEW_PORT="4567")
         expected = ["--host", "127.0.0.1", "--port", "4567"]
     with subprocess.Popen(
-        ["/bin/bash", str(REPO / "lib" / script)],
+        ["/bin/bash", str(REPO / "claudlobby/_runtime_scripts" / script)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -282,7 +282,7 @@ def test_launcher_refuses_unselected_cli_despite_stale_path(tmp_path, script):
         stale.write_text("#!/bin/bash\necho STALE; exit 99\n")
         stale.chmod(0o755)
     result = subprocess.run(
-        ["/bin/bash", str(REPO / "lib" / script)],
+        ["/bin/bash", str(REPO / "claudlobby/_runtime_scripts" / script)],
         capture_output=True,
         text=True,
         timeout=10,
@@ -303,7 +303,7 @@ def test_launcher_requires_explicit_absolute_data_root(tmp_path, root, script):
     if root is not None:
         env["CLAUDLOBBY_ROOT"] = root
     result = subprocess.run(
-        ["/bin/bash", str(REPO / "lib" / script)],
+        ["/bin/bash", str(REPO / "claudlobby/_runtime_scripts" / script)],
         capture_output=True,
         text=True,
         timeout=10,

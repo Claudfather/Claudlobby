@@ -86,7 +86,7 @@ def _section(path: Path) -> dict:
 
 
 def _resume_gate(path: Path) -> int:
-    helper = Path(__file__).resolve().parents[1] / "lib/lib-common.sh"
+    helper = Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts/lib-common.sh"
     result = subprocess.run(["/bin/bash", "-c", '. "$1"; should_resume_session "$2" 86400',
                              "bash", str(helper), str(path)], capture_output=True, text=True,
                             check=False)

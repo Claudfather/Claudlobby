@@ -43,7 +43,7 @@ set -euo pipefail
 
 HARNESS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$(cd "$HARNESS/.." && pwd)"
-LIB="$SRC/lib"
+LIB="$SRC/claudlobby/_runtime_scripts"
 # shellcheck source=lib-common.sh
 . "$LIB/lib-common.sh"
 
@@ -266,7 +266,7 @@ _link_library_tree() {
         ln -s "$e" "$dest/$name"
     done
     ln -s "$SRC/templates" "$root/templates"
-    ln -s "$SRC/lib" "$root/lib"
+    ln -s "$SRC/claudlobby/_runtime_scripts" "$root/lib"
     ln -s "$SRC/voices" "$root/voices" 2>/dev/null || true
 }
 

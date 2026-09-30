@@ -187,7 +187,7 @@ SOCKET="$(sed -n 's/^ *export *BOT_SERVICE=//p;s/^ *BOT_SERVICE=//p' "$BOT_DIR/b
 run_spinup() {
     CLAUDLOBBY_ROOT="$EXPORT_ROOT" FLEET_NAME="$FLEET" \
     PATH="$WORK/bin:$PATH" \
-        bash "$EXPORT_ROOT/lib/spin-up-bot.sh" "$BOT_DIR" >>"$WORK/spinup.log" 2>&1
+        bash "$EXPORT_ROOT/claudlobby/_runtime_scripts/spin-up-bot.sh" "$BOT_DIR" >>"$WORK/spinup.log" 2>&1
 }
 
 # The RUNTIME's answer: source the .tmux-env the real start path wrote, exactly
@@ -326,7 +326,7 @@ fi
 say "== 4: spin-down (real) then spin-up, resolution must be intact =="
 say "   SPINDOWN_RECEIPT_ENABLED=${SPINDOWN_RECEIPT_ENABLED:-<unset — ON by default since chunk N; a receipt is expected>}"
 CLAUDLOBBY_ROOT="$EXPORT_ROOT" FLEET_NAME="$FLEET" \
-    bash "$EXPORT_ROOT/lib/spin-down-bot.sh" --reason "#1226 cascade rehearsal" \
+    bash "$EXPORT_ROOT/claudlobby/_runtime_scripts/spin-down-bot.sh" --reason "#1226 cascade rehearsal" \
     "$BOT_DIR" >>"$WORK/spindown.log" 2>&1
 sleep 2
 if tmux -L "$SOCKET" has-session -t "$BOT" 2>/dev/null; then
@@ -348,7 +348,7 @@ fi
 say "== teardown: --purge on the throwaway (path-guarded) =="
 _assert_disposable "$BOT_DIR"
 CLAUDLOBBY_ROOT="$EXPORT_ROOT" FLEET_NAME="$FLEET" \
-    bash "$EXPORT_ROOT/lib/spin-down-bot.sh" --purge --reason "#1226 rehearsal teardown" \
+    bash "$EXPORT_ROOT/claudlobby/_runtime_scripts/spin-down-bot.sh" --purge --reason "#1226 rehearsal teardown" \
     "$BOT_DIR" >>"$WORK/spindown.log" 2>&1
 [ -d "$BOT_DIR" ] && bad "--purge left the bot dir behind" || ok "--purge removed the throwaway bot dir"
 

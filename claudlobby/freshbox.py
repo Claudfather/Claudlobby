@@ -350,7 +350,7 @@ def _env_secret_leak_findings(
 ) -> list[Finding]:
     """#792: a per-bot identity secret sitting in a host-shared env tier.
 
-    ``source_env_tiered`` (lib/lib-common.sh) sources the global ``~/.env`` and the
+    ``source_env_tiered`` (claudlobby/_runtime_scripts/lib-common.sh) sources the global ``~/.env`` and the
     deprecated/install-shared ``$CLAUDLOBBY_ROOT/.env`` into EVERY bot's process
     env, so a per-bot secret placed in either leaks host-wide — the A1
     config-review incident, where one bot's token became readable by another. A
@@ -698,7 +698,7 @@ def _fleet_pulse_env_findings(
 ) -> list[Finding]:
     """#1120: a fleet-pulse escalation knob sitting in ANY ``.env`` tier.
 
-    ``lib/fleet-pulse.sh`` runs from a composed timer unit that sources no
+    ``claudlobby/_runtime_scripts/fleet-pulse.sh`` runs from a composed timer unit that sources no
     ``.env`` at all — not the bot tier, not the fleet tier, not a host tier — so
     a ``FLEET_PULSE_*`` key in any of them reaches nothing and the script keeps
     its own default. The operator sees no change and cannot tell "ignored" from

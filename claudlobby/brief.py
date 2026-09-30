@@ -204,7 +204,7 @@ def _epoch(ts: str | None) -> int | None:
 
 
 def load_dispatch_doors(paths: Paths):
-    """Import ``lib/dispatch-overdue.py`` as a module, or None when unreadable.
+    """Import ``claudlobby/_runtime_scripts/dispatch-overdue.py`` as a module, or None when unreadable.
 
     The same ``spec_from_file_location`` seam ``tests/conftest.py`` uses: those
     doors are a standalone stdlib script with no package, and re-implementing
@@ -240,12 +240,12 @@ def resolve_fleet_name(paths: Paths) -> str | None:
 
 
 def plane_session(paths: Paths, fleet: str | None = None):
-    """(plane, note): the matcher's plane session (`lib/dispatch-overdue.py`'s
+    """(plane, note): the matcher's plane session (`claudlobby/_runtime_scripts/dispatch-overdue.py`'s
     `open_plane` — connection, the stdlib readers, the resolved fleet and its
     roster, a context manager) when the plane can answer for this fleet, else
     (None, note). ONE door for every plane read in the package (F18 closure,
     R2b-1): no flag, no retirement fact, no file to fall back on — and
-    unreachable is not empty. No db, no schema, an unreadable lib/, no fleet
+    unreachable is not empty. No db, no schema, an unreadable claudlobby/_runtime_scripts/, no fleet
     name, a matcher that predates the plane-only reader, or a plane that holds
     no bot of the fleet (a wrong root is not "nothing recorded" — the
     matcher's rule, #1014's class) all return the note, and the caller omits
@@ -258,7 +258,7 @@ def plane_session(paths: Paths, fleet: str | None = None):
     doors = load_dispatch_doors(paths)
     if doors is None or not hasattr(doors, "open_plane"):
         if not db.is_file():
-            return None, (f"no plane db at {db} and no lib/dispatch-overdue.py under {paths.root} —"
+            return None, (f"no plane db at {db} and no claudlobby/_runtime_scripts/dispatch-overdue.py under {paths.root} —"
                           " a wrong root (restore state/plane/plane.db, or name the right root)")
         return None, (f"the matcher installed at {paths.lib / 'dispatch-overdue.py'} is unreadable or"
                       " predates the plane-only reader — pull the install and re-run")

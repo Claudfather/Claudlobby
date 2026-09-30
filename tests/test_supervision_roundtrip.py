@@ -309,7 +309,7 @@ class TestFormatSpecificAllowances:
 
 
 class TestLabelMatchesBotService:
-    """`svc_unit_name` and the installers (lib/supervisor.sh,
+    """`svc_unit_name` and the installers (claudlobby/_runtime_scripts/supervisor.sh,
     lib/install-bot*.sh) rely on one invariant: the label a rendered unit
     answers to is the SAME string bot.conf's BOT_SERVICE= names. Before this
     test nothing pinned the two together -- `build_supervision_spec`'s

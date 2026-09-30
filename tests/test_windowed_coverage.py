@@ -25,7 +25,7 @@ REPO = Path(__file__).resolve().parent.parent
 
 def _readers():
     spec = importlib.util.spec_from_file_location(
-        "plane_readers", REPO / "lib" / "plane-readers.py")
+        "plane_readers", REPO / "claudlobby/_runtime_scripts" / "plane-readers.py")
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     return m

@@ -13,7 +13,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB_DIR="$SCRIPT_DIR/../lib"
+LIB_DIR="$SCRIPT_DIR/../claudlobby/_runtime_scripts"
 PASS=0; FAIL=0; TOTAL=0
 assert_eq() {
     TOTAL=$((TOTAL + 1)); local d="$1" e="$2" a="$3"
@@ -186,7 +186,7 @@ assert_eq "no receipt for a bot that was never there" "" "$(receipt_row)"
 
 # --- the rollout contract: an opt-OUT since chunk N -------------------------
 # REWRITTEN: this block pinned the OPPOSITE polarity (dormant until a fleet
-# armed it, because lib/ is a shared install and a root-pull must not activate
+# armed it, because claudlobby/_runtime_scripts/ is a shared install and a root-pull must not activate
 # new behavior on a destructive door). Chunk N flipped it and left the pin
 # behind. The argument that moved: the door is no longer new, and the receipt
 # is the part of a destructive teardown an operator most needs -- it is the

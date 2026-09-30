@@ -4,14 +4,14 @@ Composable lifecycle hooks — actions to take when the bot's session ends, rest
 
 ## What belongs here
 
-- **Pre-stop handoff** — "before this session ends, write a handoff note for the next session" (see `lib/pre-stop-handoff.sh`)
+- **Pre-stop handoff** — "before this session ends, write a handoff note for the next session" (see `claudlobby/_runtime_scripts/pre-stop-handoff.sh`)
 - **Post-restart announce** — "when you come back from a restart, briefly summarize what state you're in"
 - **Session retrospective** — "every N hours, log a one-line activity summary to state/fleet-state.json"
 - **Daily wrap-up** — "at end-of-day, post a Telegram summary of the day's work"
 
 ## What does NOT belong here
 
-- **Imperative scripts** — those go in `lib/` (e.g., `lib/pre-stop-handoff.sh`); a post_action references them in prose
+- **Imperative scripts** — those go in `claudlobby/_runtime_scripts/` (e.g., `claudlobby/_runtime_scripts/pre-stop-handoff.sh`); a post_action references them in prose
 - **Rules** — guardrails
 - **Capability** — expertise
 
@@ -19,7 +19,7 @@ Composable lifecycle hooks — actions to take when the bot's session ends, rest
 
 Each `<action>.md` is appended under a `## Post-actions` section in the bot's CLAUDE.md, in the order listed in `fleet.yaml` `post_actions:`.
 
-These instructions tell the bot **what to do at each lifecycle moment** — the scheduling and triggering itself happens via the bot's service unit, cron, or in-session timer (handled by `lib/`).
+These instructions tell the bot **what to do at each lifecycle moment** — the scheduling and triggering itself happens via the bot's service unit, cron, or in-session timer (handled by `claudlobby/_runtime_scripts/`).
 
 ## Example
 
@@ -43,7 +43,7 @@ Keep it to one line. This is a presence signal, not a status report — if there
 news, send that as a separate message.
 ```
 
-Note that `lib/pre-stop-handoff.sh` — the script a `pre-stop-handoff.md` post_action would
+Note that `claudlobby/_runtime_scripts/pre-stop-handoff.sh` — the script a `pre-stop-handoff.md` post_action would
 naturally wrap — already exists and runs today, invoked directly via the bot's systemd
 `ExecStop` (see the script's own header comment). A `post_actions/pre-stop-handoff.md`
 file would add bot-facing prose on top of that existing mechanism; it just hasn't been

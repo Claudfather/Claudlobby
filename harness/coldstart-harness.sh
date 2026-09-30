@@ -29,7 +29,7 @@ _INHERITED_VAULT="${CLAUDRON_VAULT_PATH:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
-. "$SCRIPT_DIR/../lib/lib-common.sh"
+. "$SCRIPT_DIR/../claudlobby/_runtime_scripts/lib-common.sh"
 install_error_trap ""
 
 CLAUDLOBBY_SRC="$(cd "$SCRIPT_DIR/.." && pwd)"

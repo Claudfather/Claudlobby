@@ -2,7 +2,7 @@
 # boot-strand-sampler.sh — #843 real-boot STARTUP_PROMPT strand sampler.
 #
 # Measures the post-#837 boot-strand rate by driving N GENUINE boots — the real
-# `claude` TUI, started by the real lib/start-bot.sh, in a real tmux session on
+# `claude` TUI, started by the real claudlobby/_runtime_scripts/start-bot.sh, in a real tmux session on
 # a private socket — of a disposable bot composed into a throwaway root
 # (freshbox-boot-gate.sh precedent). validate-bot-change.sh cannot answer this
 # question by construction: it stubs bin/claude with `exec cat`, replacing the
@@ -154,7 +154,7 @@ set -euo pipefail
 
 HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_ROOT="$(dirname "$HARNESS_DIR")"
-LIB_DIR="$SRC_ROOT/lib"
+LIB_DIR="$SRC_ROOT/claudlobby/_runtime_scripts"
 # shellcheck source=/dev/null
 . "$LIB_DIR/lib-common.sh"
 
@@ -802,7 +802,7 @@ main() {
 
     # ── compose the probe into the throwaway root (freshbox pattern) ──────────
     ln -s "$CLAUDLOBBY_SRC/library" "$ROOT/library"
-    ln -s "$CLAUDLOBBY_SRC/lib" "$ROOT/lib"
+    ln -s "$CLAUDLOBBY_SRC/claudlobby/_runtime_scripts" "$ROOT/lib"
     ln -s "$CLAUDLOBBY_SRC/templates" "$ROOT/templates"
 
     # Throwaway vault so the claudron session-loop hooks compose — production

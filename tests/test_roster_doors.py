@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-LIB = REPO_ROOT / "lib" / "lib-common.sh"
+LIB = REPO_ROOT / "claudlobby/_runtime_scripts" / "lib-common.sh"
 
 MANIFEST = textwrap.dedent(
     """\

@@ -37,7 +37,7 @@ from claudlobby import mcp_packages as mp  # noqa: E402
 
 def _grammar():
     spec = importlib.util.spec_from_file_location(
-        "mcp_package_grammar", REPO_ROOT / "lib" / "mcp-package-grammar.py"
+        "mcp_package_grammar", REPO_ROOT / "claudlobby/_runtime_scripts" / "mcp-package-grammar.py"
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

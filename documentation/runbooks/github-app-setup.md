@@ -256,9 +256,9 @@ To revoke access entirely, uninstall the App from the org (immediate) or delete 
 | File | Role |
 |---|---|
 | `claudlobby host github-app setup` | one-time validation + config write + prints fleet values via packaged native script |
-| `lib/git-credential-github-app` | the git credential helper (mints the token) |
+| `claudlobby/_runtime_scripts/git-credential-github-app` | the git credential helper (mints the token) |
 | `claudlobby host github-app token` | prints a token for deliberate per-call `gh` use via the private mint helper |
-| `lib/github-app-mcp-wrapper.py` | keeps the GitHub MCP server on a fresh token |
+| `claudlobby/_runtime_scripts/github-app-mcp-wrapper.py` | keeps the GitHub MCP server on a fresh token |
 | `library/mcp/github-app.json` | the `mcp: [github-app]` fragment |
 | `library/integrations/github-app.md` | App-mode integration guidance |
 | `documentation/examples/prevent-main-push-ruleset.json` | the branch-protection ruleset |

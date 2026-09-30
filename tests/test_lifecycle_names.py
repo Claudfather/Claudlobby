@@ -20,7 +20,7 @@ import pytest
 # Always resolve relative to this file's location so the test uses the
 # checkout's lib-common.sh, not the shared install's.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LIB_DIR = os.path.join(_REPO_ROOT, "lib")
+LIB_DIR = os.path.join(_REPO_ROOT, "claudlobby", "_runtime_scripts")
 
 
 @pytest.fixture
@@ -150,7 +150,7 @@ class TestKeepaliveAllArgConvention:
 
     def _run(self, root, arg):
         # keepalive-all resolves its worker script from CLAUDLOBBY_ROOT — give
-        # the tmp root a real lib/ so only the arg semantics are under test.
+        # the tmp root a real scripts dir so only the arg semantics are under test.
         libdir = os.path.join(root, "lib")
         os.makedirs(libdir, exist_ok=True)
         # supervisor.sh is a required sibling: lib-common.sh unconditionally

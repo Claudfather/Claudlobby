@@ -21,11 +21,11 @@ import os
 import subprocess
 from pathlib import Path
 
-LIB_COMMON = Path(__file__).resolve().parent.parent / "lib" / "lib-common.sh"
+LIB_COMMON = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts" / "lib-common.sh"
 # lib-common.sh unconditionally sources supervisor.sh from its own directory
 # (#1573 task 6) -- the patched copy below needs this sibling staged next to
 # it too, exactly as it already needs lib-common.sh itself.
-SUPERVISOR = Path(__file__).resolve().parent.parent / "lib" / "supervisor.sh"
+SUPERVISOR = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts" / "supervisor.sh"
 
 
 def _run(

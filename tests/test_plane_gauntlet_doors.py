@@ -20,7 +20,7 @@ import pytest
 from claudlobby.plane.db import connect, db_path
 from tests.test_plane_events_door import _serving
 
-LIB_DIR = Path(__file__).resolve().parent.parent / "lib"
+LIB_DIR = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts"
 CLI = Path(sys.executable).parent / "claudlobby"
 
 DOOR_FILES = (

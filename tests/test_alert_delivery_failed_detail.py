@@ -6,7 +6,7 @@ own plane record — and a manager read that benign line as the cause of the
 failure, when the real rejection came second. The verdict now leads.
 
 End to end, so the benign line comes from the real code rather than from the
-fixture: the throwaway root's lib/ IS the repo's lib/ (the real tg-post and
+fixture: the throwaway root's claudlobby/_runtime_scripts/ IS the repo's claudlobby/_runtime_scripts/ (the real tg-post and
 lib-common), a stub curl answers the rejection a quoted token earned in
 production (404 Not Found), the env is constructed with no FLEET_NAME, and the
 row is read back from the root's own plane.
@@ -40,7 +40,7 @@ def _host(tmp_path, *, scratch_plane_env):
     root = tmp_path / "root"
     root.mkdir()
     # The real lib, never written to: the alert path runs ${CLAUDLOBBY_ROOT}/lib/tg-post.sh.
-    (root / "lib").symlink_to(REPO / "lib")
+    (root / "lib").symlink_to(REPO / "claudlobby/_runtime_scripts")
     chan = tmp_path / "chan"
     chan.mkdir()
     (chan / ".env").write_text("TELEGRAM_BOT_TOKEN=123:ABC\n")
@@ -63,7 +63,7 @@ def _host(tmp_path, *, scratch_plane_env):
 
 def _fire(root, env):
     driver = (
-        f'. "{REPO}/lib/lib-common.sh"; '
+        f'. "{REPO}/claudlobby/_runtime_scripts/lib-common.sh"; '
         f'emit_failure_alert "{root}/runtime/bots" probe_alert "a probe"'
     )
     return subprocess.run(

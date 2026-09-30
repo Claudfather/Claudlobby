@@ -19,7 +19,7 @@
 
 set -uo pipefail
 
-LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)"
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../claudlobby/_runtime_scripts" && pwd)"
 
 command -v tmux >/dev/null 2>&1 || { echo "SKIP: tmux not available"; exit 0; }
 

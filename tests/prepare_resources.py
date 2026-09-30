@@ -12,8 +12,9 @@ are copied using their current working bytes, so unstaged edits are included;
 untracked files, old build output, and previously staged test assets are not.
 
 The wheel is built in a separate temporary source tree with ``python -m build
---no-isolation`` (the dev extra supplies its dependencies). Only _artifact.json,
-_resources/, and _native/ are copied back. Python imports continue to resolve to
+--no-isolation`` (the dev extra supplies its dependencies). Only _artifact.json
+and _resources/ are copied back; runtime scripts are already authored at their
+installed package path, _runtime_scripts/. Python imports continue to resolve to
 the exact checkout, preserving the test_cli origin guard. This is test setup,
 never a runtime resource fallback. Do not add the generated paths to Git or
 copy them into source-build fixtures. Rerun preparation after resource source
@@ -34,7 +35,7 @@ import tempfile
 import zipfile
 
 
-GENERATED = ("_artifact.json", "_resources", "_native")
+GENERATED = ("_artifact.json", "_resources")
 
 
 def _run(args, cwd: Path, env: dict[str, str]) -> str:
@@ -94,6 +95,7 @@ def _copy_indexed_source(root: Path, source: Path, env: dict[str, str]) -> None:
 
 def _extract_assets(wheel: Path, destination: Path) -> None:
     seen = set()
+    runtime_scripts = set()
     with zipfile.ZipFile(wheel) as archive:
         for item in archive.infolist():
             name = item.filename.rstrip("/") if item.is_dir() else item.filename
@@ -109,6 +111,8 @@ def _extract_assets(wheel: Path, destination: Path) -> None:
             if relative.parts[:1] != ("claudlobby",) or len(relative.parts) < 2:
                 continue
             asset = relative.parts[1]
+            if asset == "_runtime_scripts" and not item.is_dir():
+                runtime_scripts.add(name)
             if asset not in GENERATED:
                 continue
             if asset == "_artifact.json" and (len(relative.parts) != 2 or item.is_dir()):
@@ -123,12 +127,13 @@ def _extract_assets(wheel: Path, destination: Path) -> None:
                 target.chmod(0o644 | (mode & 0o111))
     package = destination / "claudlobby"
     metadata = json.loads((package / "_artifact.json").read_text())
-    directories = [package / "_native"] + [
+    directories = [
         package / "_resources" / name for name in ("library", "voices", "templates", "seeds")
     ]
     if metadata.get("schema") != 1 or not metadata.get("artifact_id"):
         raise ValueError("Wheel has unsupported or missing artifact metadata")
-    if any(not path.is_dir() or not any(path.iterdir()) for path in directories):
+    if not runtime_scripts or any(not path.is_dir() or not any(path.iterdir())
+                                  for path in directories):
         raise ValueError("Wheel is missing required runtime resource directories")
 
 
@@ -165,7 +170,7 @@ def prepare(root: Path) -> None:
         # Validate/build everything before touching the disposable test package.
         # Metadata is installed last, so a partial refresh cannot look complete.
         (package / "_artifact.json").unlink(missing_ok=True)
-        for name in ("_resources", "_native"):
+        for name in ("_resources",):
             target = package / name
             if target.exists():
                 if not target.is_dir():

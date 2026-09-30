@@ -97,7 +97,7 @@ def test_real_native_send_uses_exact_session_and_pane_target():
             subprocess.run([tmux, "-L", socket, "new-session", "-d", "-s", "worker", "cat"],
                            env=env, check=True)
             destination = transport.TransportDestination(root, "fleet", socket, "worker", sockets)
-            package = replace(source_package(), native=Path(__file__).resolve().parents[1] / "lib")
+            package = replace(source_package(), native=Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts")
             body = "X" * 1450 + "END_OF_PRIVATE_MESSAGE"
             result = transport.send(package, destination, message_id=MSG, body=body, timeout=10)
             assert result.status == "submitted" and result.native_returncode == 0, result

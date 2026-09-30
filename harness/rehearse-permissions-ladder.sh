@@ -42,7 +42,7 @@
 set -uo pipefail
 
 SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LIB_DIR="$SRC_ROOT/lib"
+LIB_DIR="$SRC_ROOT/claudlobby/_runtime_scripts"
 # shellcheck source=/dev/null
 . "$LIB_DIR/lib-common.sh"
 # lib-common sets -e (and -u) at source time and installs its own EXIT trap.

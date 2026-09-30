@@ -95,7 +95,7 @@ def estate(tmp_path: Path, monkeypatch):
     # supervisor.sh is a third required sibling: lib-common.sh unconditionally
     # sources it from its own directory (#1573 task 6).
     for f in ("lib-common.sh", "env-tiers.sh", "supervisor.sh"):
-        (root / "lib" / f).write_bytes((repo / "lib" / f).read_bytes())
+        (root / "lib" / f).write_bytes((repo / "claudlobby/_runtime_scripts" / f).read_bytes())
     # An isolated HOST tier. Without this the tests would read the developer's
     # own ~/.env — non-hermetic, and on a machine that happens to define one of
     # these vars the suite would go green for the wrong reason.

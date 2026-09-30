@@ -48,13 +48,13 @@ class Installer:
                      tmp_path / "channels", self.root / "state" / "plane"):
             path.mkdir(parents=True, exist_ok=True)
         for name in ("lib-common.sh", "supervisor.sh", "bot-unit-owner.py"):
-            source = REPO / "lib" / name
+            source = REPO / "claudlobby/_runtime_scripts" / name
             if source.exists():  # The red arm has no ownership reader yet.
                 shutil.copyfile(source, self.lib / name)
         self.script = self.lib / (
             "install-bot.sh" if flavor == "plist" else "install-bot-systemd.sh"
         )
-        source = (REPO / "lib" / self.script.name).read_text()
+        source = (REPO / "claudlobby/_runtime_scripts" / self.script.name).read_text()
         if flavor == "plist":
             assert source.count("/bin/launchctl") == 3
             source = source.replace("/bin/launchctl", shlex.quote(str(self.bin / "launchctl")))
@@ -278,7 +278,7 @@ def test_foreign_owner_reader_does_not_emit_inherited_bash_error(tmp_path):
     unit.write_text(f"[Service]\nWorkingDirectory={tmp_path / 'other'}\n")
     script = (
         "set -E; trap 'printf \"SCRIPT_ERROR\\n\" >&2' ERR; "
-        f"_SUPERVISOR_LIB_DIR={shlex.quote(str(REPO / 'lib'))}; "
+        f"_SUPERVISOR_LIB_DIR={shlex.quote(str(REPO / 'claudlobby/_runtime_scripts'))}; "
         f"CLAUDLOBBY_NATIVE_PYTHON={shlex.quote(sys.executable)}; "
         ". \"$_SUPERVISOR_LIB_DIR/supervisor.sh\"; "
         f"if svc_bot_unit_owned_by {shlex.quote(str(unit))} "

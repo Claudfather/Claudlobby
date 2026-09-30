@@ -180,7 +180,7 @@ def test_candidate_and_recovery_targets_are_protected_but_overlays_are_writable(
         targets.extend((alias, target.resolve()))
     deny = _deny(fleet.bots["ravi"], fleet, paths)
     for release in targets:
-        for relative in (".venv/bin/claudlobby", "claudlobby/_native/keepalive.sh"):
+        for relative in (".venv/bin/claudlobby", "claudlobby/_runtime_scripts/keepalive.sh"):
             path = release / relative
             assert _denied(deny, "Edit", path), path
             assert not _denied(deny, "Read", path), path

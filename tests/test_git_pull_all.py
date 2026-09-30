@@ -5,7 +5,7 @@ from pathlib import Path
 import subprocess
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "lib" / "git-pull-all.sh"
+SCRIPT = Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts" / "git-pull-all.sh"
 
 
 def test_local_only_checkout_is_reported_as_blocked(tmp_path):

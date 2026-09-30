@@ -21,7 +21,7 @@ from claudlobby.plane.emit_api import emit_batch
 from tests.plane_fixtures import open_assignment_ids, plane_root
 
 REPO = Path(__file__).resolve().parent.parent
-LOOKUP = REPO / "lib" / "plane-lookup.py"
+LOOKUP = REPO / "claudlobby/_runtime_scripts" / "plane-lookup.py"
 F = "f"
 
 

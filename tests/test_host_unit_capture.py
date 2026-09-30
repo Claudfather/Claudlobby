@@ -5,7 +5,7 @@ from pathlib import Path
 from tests.conftest import call_script_fn
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-LIB_COMMON = REPO_ROOT / "lib" / "lib-common.sh"
+LIB_COMMON = REPO_ROOT / "claudlobby/_runtime_scripts" / "lib-common.sh"
 JOB = "disk-monitor"
 
 

@@ -7,7 +7,7 @@ argument-hint: "<org/repo> <audit-type>"
 # Code Audit Sweep
 
 The execution half of the rolling code-audit sweep. The no-LLM selector
-(`lib/code-audit-sweep.sh`) picks the stalest repo and the audit type for the
+(`claudlobby/_runtime_scripts/code-audit-sweep.sh`) picks the stalest repo and the audit type for the
 run, then dispatches `/code-audit-sweep <org/repo> <audit-type>` into this
 bot's session. This skill runs exactly that one audit — it does **not** choose
 the target (the selector already did, from live GitHub staleness).

@@ -9,7 +9,7 @@ tool_grants:
 Wire config: `library/mcp/github-app.json` — the GitHub MCP server authenticated as the
 fleet's **GitHub App** with ~1h installation tokens minted at use time, instead of a
 long-lived `${GITHUB_PAT}`. Reference via `mcp: [github-app]`; tools are
-`mcp__github-app__*`. The token refresh wrapper (`lib/github-app-mcp-wrapper.py`)
+`mcp__github-app__*`. The token refresh wrapper (`claudlobby/_runtime_scripts/github-app-mcp-wrapper.py`)
 re-mints and respawns the server every ~50 minutes — token expiry never requires a bot
 restart, and in-flight MCP requests fail for ~2s during a respawn (retry on transient
 MCP errors).
@@ -73,7 +73,7 @@ erases the cache and re-mints, at the cost of one failed round trip. Nothing to 
 
 #### MCP respawn caveat
 
-`lib/github-app-mcp-wrapper.py` respawns the MCP server every ~50 minutes to rotate the
+`claudlobby/_runtime_scripts/github-app-mcp-wrapper.py` respawns the MCP server every ~50 minutes to rotate the
 token; in-flight MCP requests fail for ~2s per respawn (retry on transient MCP errors).
 Respawn transparency is validated against the pinned server package only — a server swap
 re-validates post-respawn tool calls.

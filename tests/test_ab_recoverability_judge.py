@@ -14,7 +14,7 @@ pin the properties that keep that true:
   4. No threshold, no PASS/FAIL — same posture as the scorer.
   5. Round-trip: what the judge writes is what the scorer reads.
 
-Loaded by path because lib/ filenames are hyphenated (ab-comms-verdict.py
+Loaded by path because claudlobby/_runtime_scripts/ filenames are hyphenated (ab-comms-verdict.py
 precedent). No test here makes a model call.
 """
 

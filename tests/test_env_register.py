@@ -45,7 +45,7 @@ def world(tmp_path: Path, monkeypatch):
     # supervisor.sh is a third required sibling: lib-common.sh unconditionally
     # sources it from its own directory (#1573 task 6).
     for f in ("lib-common.sh", "env-tiers.sh", "supervisor.sh"):
-        (tmp_path / "lib" / f).write_bytes((REPO_ROOT / "lib" / f).read_bytes())
+        (tmp_path / "lib" / f).write_bytes((REPO_ROOT / "claudlobby/_runtime_scripts" / f).read_bytes())
     (tmp_path / "library" / "expertise" / "x.md").write_text("---\ntitle: x\n---\n# x\n")
     (tmp_path / "library" / "mcp" / "github.json").write_text(
         json.dumps(

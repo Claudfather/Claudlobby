@@ -24,7 +24,7 @@ description: Decision tree for diagnosing fleet issues from logs, events, and CL
 | Last pulse snapshot | The fleet's pulse summary file | `cat state/pulse/<fleet>.pulse-summary.txt` |
 | Is the observable-plane kernel healthy? | Plane kernel status (db/spool/quarantine) | `claudlobby plane doctor` |
 
-> Every bot runs its own private tmux server (`-L <socket>`, the socket name is the bot's `BOT_SERVICE`/`TMUX_SOCKET`) since per-bot-tmux-socket isolation shipped. A bare `tmux -t <bot>` targets the shared *default* server, which has none of your bots on it, and silently reports no session instead of erroring. The commands above resolve the socket via `tmux_socket_for_bot <bot-dir>` — `source lib/lib-common.sh` first (from the claudlobby repo root) to get it in scope — or skip raw tmux entirely and dispatch through `lib/dispatch.sh` / the `bot_tmux`/`bot_tmux_send` wrappers. See [advanced-patterns.md](../advanced-patterns.md) for the full model.
+> Every bot runs its own private tmux server (`-L <socket>`, the socket name is the bot's `BOT_SERVICE`/`TMUX_SOCKET`) since per-bot-tmux-socket isolation shipped. A bare `tmux -t <bot>` targets the shared *default* server, which has none of your bots on it, and silently reports no session instead of erroring. The commands above resolve the socket via `tmux_socket_for_bot <bot-dir>` — `source claudlobby/_runtime_scripts/lib-common.sh` first (from the claudlobby repo root) to get it in scope — or skip raw tmux entirely and dispatch through `claudlobby/_runtime_scripts/dispatch.sh` / the `bot_tmux`/`bot_tmux_send` wrappers. See [advanced-patterns.md](../advanced-patterns.md) for the full model.
 
 > **The plane is the fleet's only record.** `emit_fleet_event` and fleet doors land on `state/plane/plane.db`; `claudlobby event list` / `fleet reports list` / `fleet uptime` / `fleet status` / `brief` read it; `plane prune` ages its metric samples. Health: `claudlobby plane status` / `plane doctor`.
 
@@ -81,7 +81,7 @@ Readers: claudlobby event list / fleet reports list / fleet uptime / fleet statu
 1. `tmux -L "$(tmux_socket_for_bot <bot-dir>)" has-session -t <bot>` — is the session alive on its private socket?
 2. If no: `systemctl --user status <BOT_SERVICE>` — is the service running?
 3. If service failed: `journalctl --user -u <BOT_SERVICE> -n 50` — what killed it?
-4. If service running but no tmux: `lib/spin-up-bot.sh <bot-dir>` to re-enroll
+4. If service running but no tmux: `claudlobby/_runtime_scripts/spin-up-bot.sh <bot-dir>` to re-enroll
 
 **Bot is "stuck" (session alive, not making progress):**
 
@@ -93,8 +93,8 @@ Readers: claudlobby event list / fleet reports list / fleet uptime / fleet statu
 **Multiple bots down simultaneously:**
 
 1. `claudlobby event list --critical` — fleet-wide critical events
-2. `lib/reconcile-fleet.sh <fleet>` — audit supervision state
-3. `lib/reconcile-fleet.sh <fleet> --enroll` — re-enroll orphans
+2. `claudlobby/_runtime_scripts/reconcile-fleet.sh <fleet>` — audit supervision state
+3. `claudlobby/_runtime_scripts/reconcile-fleet.sh <fleet> --enroll` — re-enroll orphans
 4. Check if a recent `claudlobby generate` changed unit file names without re-enrolling
 
 **Script failures:**

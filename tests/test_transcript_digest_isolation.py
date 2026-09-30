@@ -1,6 +1,6 @@
 """A real digest run leaves no needs-auth cache entry behind (#1972), on the REAL binary.
 
-``tests/test_transcript_digest.sh`` pins that ``lib/transcript-digest.sh`` passes
+``tests/test_transcript_digest.sh`` pins that ``claudlobby/_runtime_scripts/transcript-digest.sh`` passes
 the isolation flags. What the flags DO is Claude Code's behaviour, and no stub
 can show it: the needs-auth cache writer lives inside the binary. So this runs
 the real hook with the real ``claude``, at zero spend, in a throwaway HOME built
@@ -39,7 +39,7 @@ import pytest
 from tests.conftest import constructed_env
 
 REPO = Path(__file__).resolve().parent.parent
-DIGEST = REPO / "lib" / "transcript-digest.sh"
+DIGEST = REPO / "claudlobby/_runtime_scripts" / "transcript-digest.sh"
 
 # Not conftest.realboot_skip_reason: that gate requires host auth, jq and claudron,
 # and this test needs none of them (zero spend, no credential, no vault).

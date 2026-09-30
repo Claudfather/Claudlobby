@@ -126,7 +126,7 @@ class TestSweepTimerEmission:
         # schedule flows through to OnCalendar
         assert "OnCalendar=*-*-* 02:30:00" in timer.read_text()
         # the unit runs the selector script
-        assert "lib/code-audit-sweep.sh" in svc.read_text()
+        assert "claudlobby/_runtime_scripts/code-audit-sweep.sh" in svc.read_text()
 
     def test_no_units_when_no_sweep_block(self, tmp_path):
         root = tmp_path / "f"
@@ -253,7 +253,7 @@ class TestSweepValidation:
 
 
 class TestSweepSelector:
-    """Hermetic end-to-end of lib/code-audit-sweep.sh with gh + tmux shimmed.
+    """Hermetic end-to-end of claudlobby/_runtime_scripts/code-audit-sweep.sh with gh + tmux shimmed.
 
     Runs the real selector (and real bot-sweep-cron.sh) against a fixture fleet:
     `gh` returns canned staleness (acme/beta oldest ⇒ stalest) and `tmux` fakes
@@ -262,7 +262,7 @@ class TestSweepSelector:
 
     def _run(self, tmp_path: Path, *, scratch_plane_env):
         repo_root = Path(__file__).resolve().parents[1]
-        selector = repo_root / "lib" / "code-audit-sweep.sh"
+        selector = repo_root / "claudlobby/_runtime_scripts" / "code-audit-sweep.sh"
 
         root = tmp_path / "root"
         owner = root / "local" / "tf" / "runtime" / "bots" / "owner"

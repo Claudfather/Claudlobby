@@ -9,9 +9,9 @@ import pytest
 from tests.conftest import _write_exec, constructed_env
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LIB = os.path.join(REPO_ROOT, "lib")
+LIB = os.path.join(REPO_ROOT, "claudlobby", "_runtime_scripts")
 
-# Copied verbatim into the harness lib/ — these are the scripts under test.
+# Copied verbatim into the harness claudlobby/_runtime_scripts/ — these are the scripts under test.
 # supervisor.sh rides along as a required sibling: lib-common.sh unconditionally
 # sources it from its own directory (#1573 task 6).
 REAL_SCRIPTS = [

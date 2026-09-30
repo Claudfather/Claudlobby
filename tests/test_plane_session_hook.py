@@ -12,7 +12,7 @@ import pytest
 
 from claudlobby.plane.ids import ID_PATTERNS, derive_session_uid, mint_uid
 
-HOOK = Path(__file__).resolve().parent.parent / "lib" / "plane-session-start.sh"
+HOOK = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts" / "plane-session-start.sh"
 
 
 def _run(payload: str, env: dict):

@@ -18,7 +18,7 @@ from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import emit
 from claudlobby.plane.ids import mint_assignment_id, mint_event_id, mint_msg_id, mint_work_item_id
 
-LIB = Path(__file__).resolve().parent.parent / "lib"
+LIB = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts"
 
 
 def test_f1_capture_cannot_launder_malformed_wire(tmp_path):

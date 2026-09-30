@@ -282,7 +282,7 @@ def _launcher(root: Path, *argv, cli, armed):
     # Opt-OUT since the defaults flip: absence RUNS, only an exact 0 stops it.
     env["PLANE_PRUNE_ENABLED"] = "1" if armed else "0"
     return subprocess.run(
-        ["bash", str(REPO / "lib" / "plane-prune.sh"), *argv],
+        ["bash", str(REPO / "claudlobby/_runtime_scripts" / "plane-prune.sh"), *argv],
         capture_output=True, text=True, timeout=120, env=env)
 
 
@@ -313,7 +313,7 @@ def test_launcher_prunes_with_no_flag_at_all(tmp_path, test_cli):
     _sample(root)
     _backdate_all(root, days_old=40)
     env = constructed_env(CLAUDLOBBY_ROOT=root, CLAUDLOBBY_CLI=test_cli)
-    r = subprocess.run(["bash", str(REPO / "lib" / "plane-prune.sh")],
+    r = subprocess.run(["bash", str(REPO / "claudlobby/_runtime_scripts" / "plane-prune.sh")],
                        capture_output=True, text=True, timeout=120, env=env)
     assert r.returncode == 7, r.stderr
     assert "prune refused" in r.stderr
@@ -345,7 +345,7 @@ def test_prune_huge_window_refuses_before_any_storage_effect(tmp_path, monkeypat
 
 
 def test_prune_launcher_is_thin_and_root_flag_precedes_subcommand():
-    body = (REPO / "lib" / "plane-prune.sh").read_text()
+    body = (REPO / "claudlobby/_runtime_scripts" / "plane-prune.sh").read_text()
     # --root is global and MUST precede the subcommand (the plane-daemon
     # smoke caught the inverted order as a real argparse refusal)
     assert 'exec "$CLAUDLOBBY_CLI" --root "$CLAUDLOBBY_ROOT" plane prune "$@"' in body

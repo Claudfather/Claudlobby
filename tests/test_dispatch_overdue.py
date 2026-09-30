@@ -1,4 +1,4 @@
-"""Unit tests for lib/dispatch-overdue.py — the dispatch watchdog matcher,
+"""Unit tests for claudlobby/_runtime_scripts/dispatch-overdue.py — the dispatch watchdog matcher,
 including the P4 task-id join matrix (semantics: overdue_all docstring).
 
 THE PLANE IS THE ONLY SOURCE (F18 closure, R2a). Every fixture below is still

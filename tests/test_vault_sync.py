@@ -5,7 +5,7 @@ reporting to a log inside the vault it is failing to sync. When a live host
 wedged, every sync refused for twelve days printing success-shaped output and
 nothing scheduled ever looked. This job is the thing that notices.
 
-Every test drives the REAL `lib/vault-sync.sh` with a stubbed `claudron` whose
+Every test drives the REAL `claudlobby/_runtime_scripts/vault-sync.sh` with a stubbed `claudron` whose
 envelope the test controls — the script's contract is that it parses that
 envelope and never the text, so the stub is the whole seam.
 """
@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
-SCRIPT = REPO / "lib" / "vault-sync.sh"
+SCRIPT = REPO / "claudlobby/_runtime_scripts" / "vault-sync.sh"
 
 
 def _claudron_stub(bindir: Path, *, sync_json: str, sync_rc: int = 0,

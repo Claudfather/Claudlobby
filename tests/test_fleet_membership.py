@@ -26,8 +26,8 @@ import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-LIB_COMMON = REPO_ROOT / "lib" / "lib-common.sh"
-GIT_PULL_ALL = REPO_ROOT / "lib" / "git-pull-all.sh"
+LIB_COMMON = REPO_ROOT / "claudlobby/_runtime_scripts" / "lib-common.sh"
+GIT_PULL_ALL = REPO_ROOT / "claudlobby/_runtime_scripts" / "git-pull-all.sh"
 
 
 def _run(snippet: str, *args: str) -> tuple[str, int]:

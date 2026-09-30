@@ -29,8 +29,8 @@ import pytest
 from claudlobby.plane.daemon import PlaneDaemon
 
 REPO = Path(__file__).resolve().parent.parent
-OUT = REPO / "lib" / "plane-telegram-out.sh"
-IN = REPO / "lib" / "plane-telegram-in.sh"
+OUT = REPO / "claudlobby/_runtime_scripts" / "plane-telegram-out.sh"
+IN = REPO / "claudlobby/_runtime_scripts" / "plane-telegram-in.sh"
 
 
 def _root(tmp_path: Path) -> Path:

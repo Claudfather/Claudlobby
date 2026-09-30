@@ -44,7 +44,7 @@ def mock_paths(tmp_path):
     root = tmp_path / "claudlobby"
     root.mkdir()
     (root / "library").mkdir()
-    (root / "lib").symlink_to(REPO / "lib")   # the install's lib/: every reader rides the matcher's session
+    (root / "lib").symlink_to(REPO / "claudlobby/_runtime_scripts")   # the install's claudlobby/_runtime_scripts/: every reader rides the matcher's session
     fleet_dir = root / "local" / "test-fleet"
     fleet_dir.mkdir(parents=True)
     runtime = fleet_dir / "runtime" / "bots"

@@ -14,8 +14,8 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-LIB = REPO_ROOT / "lib" / "lib-common.sh"
-START_BOT = REPO_ROOT / "lib" / "start-bot.sh"
+LIB = REPO_ROOT / "claudlobby/_runtime_scripts" / "lib-common.sh"
+START_BOT = REPO_ROOT / "claudlobby/_runtime_scripts" / "start-bot.sh"
 
 MARKER = "SELECTED_CLI_MARKER"
 SAFE_PATH = "/usr/bin:/bin"

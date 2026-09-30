@@ -24,7 +24,7 @@ from tests.test_releases import installed  # noqa: F401 — cold fixture depende
 
 def test_private_control_uses_one_exact_native_send(tmp_path):
     """Exercise the shell adapter with fake tmux; no live session is touched."""
-    native = Path(__file__).resolve().parents[1] / "lib/supervisor.sh"
+    native = Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts/supervisor.sh"
     private = tmp_path / "native"
     private.mkdir()
     (private / "lib-common.sh").write_text("""
@@ -63,7 +63,7 @@ pane_send_verified() {
     ("wrong socket", "retired", 3),
 ])
 def test_retired_private_server_handles_stale_socket_without_hiding_errors(tmp_path, message, mode, expected_rc):
-    native = Path(__file__).resolve().parents[1] / "lib/supervisor.sh"
+    native = Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts/supervisor.sh"
     private = tmp_path / "native"
     private.mkdir()
     (private / "lib-common.sh").write_text('''
@@ -224,7 +224,7 @@ def test_explicit_handoff_keeps_running_session_env_while_stop_cleans_it(tmp_pat
     (bot_dir / ".claude/session.md").write_text("recent checkpoint\n")
     secret_env = bot_dir / ".tmux-env"
     secret_env.write_text("private launch values\n")
-    script = Path(__file__).resolve().parents[1] / "lib/pre-stop-handoff.sh"
+    script = Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts/pre-stop-handoff.sh"
     env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "TMPDIR": str(tmp_path),
            "CLAUDLOBBY_ROOT": str(tmp_path), "PLANE_EMIT_DISABLED": "1"}
     explicit = subprocess.run(["/bin/bash", str(script), str(bot_dir), "--explicit"],

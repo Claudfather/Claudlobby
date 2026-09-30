@@ -131,7 +131,7 @@ def test_framework_sender_is_verified_from_registry_with_recipient_scope(estate)
 
 def test_wrong_fleet_bare_receipt_cannot_corroborate_same_name_or_replace_valid_proof(estate):
     ctx, conn = estate
-    stdlib_reader = runpy.run_path(str(Path(__file__).resolve().parents[1] / "lib/plane-readers.py"))
+    stdlib_reader = runpy.run_path(str(Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts/plane-readers.py"))
     assert stdlib_reader["DELIVERY_SQL"] == q.DELIVERY_STATUS_SQL
     assert stdlib_reader["RECEIPT_HISTORY_SQL"] == q.RECEIPT_HISTORY_SQL
     ident = communication(conn, recipient_raw="worker")  # historical carrier spelling

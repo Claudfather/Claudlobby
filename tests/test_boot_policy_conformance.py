@@ -63,7 +63,7 @@ BOOT_KEYS = [
 # Only MCP_TIMEOUT carries an `export` prefix IN THE FILE (spec §6.1: it is
 # the one key Claude Code itself reads out of the environment; the rest are
 # read by the launcher). That is a fact about bot.conf's text, NOT about what
-# reaches the session: lib/start-bot.sh sources bot.conf under `set -a`, so
+# reaches the session: claudlobby/_runtime_scripts/start-bot.sh sources bot.conf under `set -a`, so
 # all six land in `exec claude`'s environment as exported variables whatever
 # their prefix. The prefix is what makes MCP_TIMEOUT independent of that
 # sourcing convention.
@@ -137,7 +137,7 @@ def _mock_host_boot(monkeypatch) -> dict:
 
 def _key_line(conf: str, key: str) -> list[str]:
     """Every bot.conf line whose key is `key`, matching the exact grep
-    `bot_conf_get` (lib/lib-common.sh) uses at runtime: optional `export `,
+    `bot_conf_get` (claudlobby/_runtime_scripts/lib-common.sh) uses at runtime: optional `export `,
     then `KEY=`."""
     pattern = re.compile(rf"^(export )?{re.escape(key)}=")
     return [line for line in conf.splitlines() if pattern.match(line)]
@@ -237,14 +237,14 @@ class TestUnitsCarryNoBootPolicy:
             assert needle not in plist, f"{needle!r} leaked into the launchd plist"
 
 
-# lib/start-bot.sh cannot import claudlobby.boot.READY_TIMEOUT_FLOOR_S -- bash
+# claudlobby/_runtime_scripts/start-bot.sh cannot import claudlobby.boot.READY_TIMEOUT_FLOOR_S -- bash
 # has no such door -- so it names the floor literally in two places (final
 # wave item 7): the `${RC_READY_TIMEOUT_S:-N}` default read at startup, and
 # the `_rc_timeout_s=N` fallback a non-numeric/empty override coerces to
 # under `set -u` (F4: an un-regenerated bot.conf that predates the BOOT_*
 # keys still has a value to fall back on). Nothing pinned either literal to
 # the Python constant it must equal -- this reads the real shipped script.
-_START_BOT_SH = Path(__file__).resolve().parent.parent / "lib" / "start-bot.sh"
+_START_BOT_SH = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts" / "start-bot.sh"
 
 
 class TestStartBotShReadyTimeoutFloor:
@@ -256,7 +256,7 @@ class TestStartBotShReadyTimeoutFloor:
         text = self._start_bot_sh_text()
         match = re.search(r"RC_READY_TIMEOUT_S:-(\d+)\}", text)
         assert match, (
-            "could not find ${RC_READY_TIMEOUT_S:-N} in lib/start-bot.sh"
+            "could not find ${RC_READY_TIMEOUT_S:-N} in claudlobby/_runtime_scripts/start-bot.sh"
         )
         assert int(match.group(1)) == READY_TIMEOUT_FLOOR_S
 
@@ -264,6 +264,6 @@ class TestStartBotShReadyTimeoutFloor:
         text = self._start_bot_sh_text()
         match = re.search(r"_rc_timeout_s=(\d+)\s*;;", text)
         assert match, (
-            "could not find the _rc_timeout_s=N coercion fallback in lib/start-bot.sh"
+            "could not find the _rc_timeout_s=N coercion fallback in claudlobby/_runtime_scripts/start-bot.sh"
         )
         assert int(match.group(1)) == READY_TIMEOUT_FLOOR_S

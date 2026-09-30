@@ -1,6 +1,6 @@
 """Every script a composed unit ExecStarts must be executable in git.
 
-`lib/host-health-check.sh` shipped mode 100644. systemd's ExecStart requires the
+`claudlobby/_runtime_scripts/host-health-check.sh` shipped mode 100644. systemd's ExecStart requires the
 executable bit, so its composed unit died `203/EXEC` on every deployment from the
 day it was added, and nothing caught it: the unit enrolls fine, the timer arms
 fine, and the failure only exists at fire time on the host.
@@ -27,7 +27,7 @@ those live under gitignored `runtime/` and do not exist on a clean CI clone, so
 such a gate would pass by finding nothing. It composes into `tmp_path` instead.
 
 Scope stays narrow, deliberately: a script is in scope **because a unit
-ExecStarts it**, not because it lives in `lib/`. Files that are sourced
+ExecStarts it**, not because it lives in `claudlobby/_runtime_scripts/`. Files that are sourced
 (`. file`) or invoked as `bash file` do not need the bit, and demanding it of
 them would be cleanup wearing a correctness gate's clothes.
 """
@@ -70,16 +70,16 @@ _FLEET = """\
 """
 
 _EXEC_START = re.compile(r"^ExecStart=(.+)$", re.M)
-# Any lib/ script named on an ExecStart line, however it was interpolated
-# ($CLAUDLOBBY_ROOT/lib/x.sh, {paths.lib}/x.sh, or an absolute rendered path).
-_LIB_SCRIPT = re.compile(r"[^\s=]*/lib/([A-Za-z0-9._-]+\.(?:sh|py))")
+# Any claudlobby/_runtime_scripts/ script named on an ExecStart line, however it was interpolated
+# ({paths.lib}/x.sh or an absolute rendered path).
+_LIB_SCRIPT = re.compile(r"[^\s=]*/_runtime_scripts/([A-Za-z0-9._-]+\.(?:sh|py))")
 
 
 def _scripts_from_units(text: str) -> set[str]:
     out = set()
     for line in _EXEC_START.findall(text):
         for name in _LIB_SCRIPT.findall(line):
-            out.add(f"lib/{name}")
+            out.add(f"claudlobby/_runtime_scripts/{name}")
     return out
 
 
@@ -133,9 +133,9 @@ def test_composition_yields_scripts(execstarted_scripts):
         f"({sorted(execstarted_scripts)}) — composition or the parser drifted"
     )
     for required in (
-        "lib/host-health-check.sh",  # host job, the original defect
-        "lib/briefing-trigger.sh",  # hardcoded at composer.py:2990
-        "lib/start-bot.sh",  # per-bot service, composer.py:1075
+        "claudlobby/_runtime_scripts/host-health-check.sh",  # host job, the original defect
+        "claudlobby/_runtime_scripts/briefing-trigger.sh",  # hardcoded at composer.py:2990
+        "claudlobby/_runtime_scripts/start-bot.sh",  # per-bot service, composer.py:1075
     ):
         assert required in execstarted_scripts, (
             f"{required} is ExecStarted by a composed unit but did not appear in "

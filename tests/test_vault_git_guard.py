@@ -28,12 +28,12 @@ from tests.conftest import constructed_env, read_fleet_events
 from tests.test_plane_events_door import _serving
 
 REPO = Path(__file__).resolve().parent.parent
-GUARD = REPO / "lib" / "vault-git-guard.sh"
+GUARD = REPO / "claudlobby/_runtime_scripts" / "vault-git-guard.sh"
 
 
 def _decider():
     spec = importlib.util.spec_from_file_location(
-        "vault_git_decide", REPO / "lib" / "vault-git-decide.py")
+        "vault_git_decide", REPO / "claudlobby/_runtime_scripts" / "vault-git-decide.py")
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     return m

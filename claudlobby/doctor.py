@@ -497,12 +497,12 @@ _CREDENTIAL_PROBES: dict[str, tuple[str, str]] = {
 #:
 #: A CREDENTIAL HAS AN IDENTITY AND A REACH; THEY ARE INDEPENDENT. An identity
 #: endpoint answers nothing about access -- probe the OPERATION you need. The
-#: GitHub App branch in `lib/creds-check.sh` already embodies this (it probes
+#: GitHub App branch in `claudlobby/_runtime_scripts/creds-check.sh` already embodies this (it probes
 #: `/installation/repositories` because a `ghs_` token 403s on `/user`, D13).
 #: Durable home for the rule: Claudlobby#1400.
 #:
 #: KNOWN DUPLICATION, named rather than left to be rediscovered. This table
-#: also exists in bash, as `_railway_token_specs` in `lib/creds-check.sh`, and
+#: also exists in bash, as `_railway_token_specs` in `claudlobby/_runtime_scripts/creds-check.sh`, and
 #: the two cannot share a literal across languages. A previous version carried
 #: the comment "matches creds-check.sh" -- a copy kept in sync by hand, which
 #: went stale the moment the bash side was fixed, and that is how `doctor` came
@@ -1461,7 +1461,7 @@ def run_doctor(fleet: FleetConfig, paths: Paths, *,
     report = DoctorReport()
     # Resolved ONCE for the three rungs that ask the same question (#1680):
     # ignition_doors goes through the switch cascade, which shells out to
-    # lib/env-tiers.sh. Falling back to None rather than guarding here keeps
+    # claudlobby/_runtime_scripts/env-tiers.sh. Falling back to None rather than guarding here keeps
     # the HOIST itself from becoming a new failure point — where a resolver
     # failure surfaces is then whatever it is on main. Deliberately not a
     # claim about WHICH rung that is: on a fleet with a leaf manager

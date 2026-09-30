@@ -47,7 +47,7 @@ def _arm_briefing(text: str) -> str:
 def _validate_with_real_resolver(
     fleet_dir, monkeypatch, *, env_text: str = "TASK_RECHECK_ENABLED=0\n"
 ):
-    """`validate()` with the repo's REAL `lib/` wired (#1633/#1680).
+    """`validate()` with the repo's REAL `claudlobby/_runtime_scripts/` wired (#1633/#1680).
 
     task-recheck ships opt-out, so a resolver-unavailable fallback reads it as
     ARMED and every disarmed ignition case collapses to silence; the `.env`
@@ -59,18 +59,18 @@ def _validate_with_real_resolver(
     monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
     # Wire whatever is MISSING rather than keying on the directory's existence
     # (origin/main's fix for the same #1588 class, adopted here). `fleet_dir`
-    # now ships a real `mcp-package-grammar.py`, so `lib/` EXISTS without being
+    # now ships a real `mcp-package-grammar.py`, so `claudlobby/_runtime_scripts/` EXISTS without being
     # wired, and an existence check skips the wiring silently: the switch
     # resolver then cannot read its doors, `task-recheck` falls back to ARMED
     # regardless of `.env`, and `_validate_ignition`'s early return makes every
     # scenario below pass vacuously.
     #
     # Per-entry links, never a whole-dir symlink: fixtures delete files under
-    # `lib/`, and through a directory symlink those unlinks reach the repo's
+    # `claudlobby/_runtime_scripts/`, and through a directory symlink those unlinks reach the repo's
     # own copies.
     lib = fleet_dir / "lib"
     lib.mkdir(exist_ok=True)
-    for real in (REPO / "lib").iterdir():
+    for real in (REPO / "claudlobby/_runtime_scripts").iterdir():
         link = lib / real.name
         if not link.exists():
             link.symlink_to(real)
@@ -78,7 +78,7 @@ def _validate_with_real_resolver(
     # (#1689). Testing for the FILE the resolver needs tests the proposition;
     # testing that a directory exists is the proxy that failed (#1588).
     assert (lib / "env-tiers.sh").is_file(), (
-        f"{lib} exists but does not carry the real lib/ — the switch resolver "
+        f"{lib} exists but does not carry the real claudlobby/_runtime_scripts/ — the switch resolver "
         f"cannot run, so TASK_RECHECK_ENABLED=0 never lands and task-recheck "
         f"reads ARMED. Every disarmed case here would measure the wrong state."
     )
@@ -2494,9 +2494,9 @@ class TestIgnitionValidation:
     """#1633: the same composite ignition question as doctor's check_ignition,
     at validate() time too. `fleet_dir`'s `lead`/`worker-1` team already makes
     `lead` a leaf manager, so these tests need only control which door is
-    armed — but the shared fixture carries no `lib/`, and task-recheck ships
+    armed — but the shared fixture carries no `claudlobby/_runtime_scripts/`, and task-recheck ships
     opt-out (on by default), so a resolver-unavailable fallback reads it as
-    armed regardless of scenario. Wire the repo's real lib/ (the
+    armed regardless of scenario. Wire the repo's real claudlobby/_runtime_scripts/ (the
     test_switches.py / test_doctor.py pattern) so "off" is reachable at all.
     """
 
@@ -2556,7 +2556,7 @@ class TestGoalBindingAndIgnitionNameEachOther:
 
     `fleet_dir`'s lead/worker-1 team already makes `lead` a leaf manager and
     the fixture declares no projects; what varies below is only which of the
-    two conditions is fixed. The repo's real lib/ is wired (the
+    two conditions is fixed. The repo's real claudlobby/_runtime_scripts/ is wired (the
     TestIgnitionValidation pattern) because task-recheck ships opt-out and a
     resolver-unavailable fallback reads it as ARMED, which would collapse
     every disarmed case here to silence.
@@ -2664,10 +2664,10 @@ class TestTheValidatorFixtureRefusesDeadWiring:
         self, fleet_dir, monkeypatch
     ):
         """Armed with the REAL shipped armer rather than a synthetic
-        directory: `conftest.equip_grammar` plants a one-file `lib/` for the
+        directory: `conftest.equip_grammar` plants a one-file `claudlobby/_runtime_scripts/` for the
         modules that need the package grammar, and its own docstring records
         that thirteen helpers key on `(root / "lib").exists()` — so a partial
-        `lib/` makes that check answer yes, skip, and run the test against
+        `claudlobby/_runtime_scripts/` makes that check answer yes, skip, and run the test against
         doors it cannot read. A module that equips the grammar and then calls
         this helper is the live pairing, and it must be repaired, not skipped.
         """
@@ -2676,7 +2676,7 @@ class TestTheValidatorFixtureRefusesDeadWiring:
         equip_grammar(fleet_dir)
         assert (fleet_dir / "lib").exists(), "precondition: the armer ran"
         assert not (fleet_dir / "lib" / "env-tiers.sh").exists(), (
-            "precondition: lib/ must be PARTIAL — that is the case an "
+            "precondition: claudlobby/_runtime_scripts/ must be PARTIAL — that is the case an "
             "existence-keyed guard gets wrong"
         )
         report, _fleet = _validate_with_real_resolver(fleet_dir, monkeypatch)

@@ -14,7 +14,7 @@ from claudlobby.brief import _workstream_section
 from claudlobby.config import load_fleet
 from tests.plane_fixtures import F, REPO, _env, _scene, _stdlib_readers, ro as _ro
 
-LIB = REPO / "lib"
+LIB = REPO / "claudlobby/_runtime_scripts"
 
 
 def _cli(root, *args):

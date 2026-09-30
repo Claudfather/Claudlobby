@@ -27,7 +27,7 @@ def test_native_entrypoints_refuse_before_runtime_effects(tmp_path):
     env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "TMPDIR": str(scratch),
            "PLANE_EMIT_DISABLED": "1"}
     for name in ("start-bot.sh", "keepalive.sh"):
-        result = subprocess.run(["/bin/bash", str(ROOT / "lib" / name), str(bot)],
+        result = subprocess.run(["/bin/bash", str(ROOT / "claudlobby/_runtime_scripts" / name), str(bot)],
                                 env=env, text=True, capture_output=True, timeout=5)
         assert result.returncode == 7, (result.stdout, result.stderr)
         assert "selected release interpreter/CLI unavailable" in result.stderr
@@ -39,11 +39,11 @@ def test_native_entrypoints_refuse_before_runtime_effects(tmp_path):
 
 def test_guard_is_only_at_native_start_and_watchdog_boundary():
     for name, operation in (("start-bot.sh", "start-bot"), ("keepalive.sh", "keepalive")):
-        source = (ROOT / "lib" / name).read_text()
+        source = (ROOT / "claudlobby/_runtime_scripts" / name).read_text()
         assert source.index('load_bot_conf "$BOT_DIR"') < source.index(f"native_admission {operation}")
         assert source.index(f"native_admission {operation}") < source.index('install_error_trap "$BOT_DIR"')
     for name in ("lib-common.sh", "spin-down-bot.sh", "pre-stop-handoff.sh"):
-        assert "runtime-admission.sh" not in (ROOT / "lib" / name).read_text()
+        assert "runtime-admission.sh" not in (ROOT / "claudlobby/_runtime_scripts" / name).read_text()
 
 
 def test_shell_guard_preserves_temporary_pause_exit(tmp_path):
@@ -59,9 +59,9 @@ def test_shell_guard_preserves_temporary_pause_exit(tmp_path):
     script = (f'CLAUDLOBBY_ROOT={shlex.quote(str(root))}\n'
               f'BOT_DIR={shlex.quote(str(root / "bot"))}\n'
               f'CLAUDLOBBY_CLI={shlex.quote(str(bindir / "claudlobby"))}\n'
-              f'LIB_DIR={shlex.quote(str(ROOT / "lib"))}\n'
+              f'LIB_DIR={shlex.quote(str(ROOT / "claudlobby/_runtime_scripts"))}\n'
               'CLAUDLOBBY_RELEASE_ID=r-test\nCLAUDLOBBY_ARTIFACT_ID=a-test\n'
-              f'. {shlex.quote(str(ROOT / "lib/runtime-admission.sh"))}\n'
+              f'. {shlex.quote(str(ROOT / "claudlobby/_runtime_scripts/runtime-admission.sh"))}\n'
               'native_admission keepalive\n')
     result = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True)
     assert result.returncode == 75
@@ -80,7 +80,7 @@ def test_private_tmux_child_cannot_retain_native_activation_descriptor(tmp_path)
     script = f"""
 set -eu
 TMUX_BIN={shlex.quote(str(fake_tmux))}
-. {shlex.quote(str(ROOT / 'lib/lib-common.sh'))}
+. {shlex.quote(str(ROOT / 'claudlobby/_runtime_scripts/lib-common.sh'))}
 exec 9<{shlex.quote(str(lock))}
 {shlex.quote(sys.executable)} -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_SH)'
 bot_tmux private new-session

@@ -31,7 +31,7 @@ from claudlobby.validator import validate
 
 
 def _make_root(base: Path) -> Path:
-    """A claudlobby root carrying the detection markers (library/ + lib/)."""
+    """A claudlobby root carrying the detection markers (library/ + claudlobby/_runtime_scripts/)."""
     root = base / "claudlobby"
     (root / "library").mkdir(parents=True)
     (root / "lib").mkdir()
@@ -60,7 +60,7 @@ def test_nested_fleet_resolves_one_level_under_a_system_container(tmp_path: Path
 
 def test_native_fleet_resolution_keeps_flat_priority_and_unique_nested_owner(tmp_path: Path):
     root = _make_root(tmp_path)
-    lib = Path(__file__).resolve().parents[1] / "lib/lib-common.sh"
+    lib = Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts/lib-common.sh"
 
     def resolve(command):
         return subprocess.run(["/bin/bash", "-c", '. "$1"; "$2" fleetA', "test", str(lib), command],

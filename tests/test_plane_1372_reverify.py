@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-LIB = Path(__file__).resolve().parent.parent / "lib"
+LIB = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts"
 
 
 def _client(*extra, stdin='{"events": [{"event_type": "x"}]}', timeout=20):

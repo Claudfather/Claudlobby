@@ -1,6 +1,6 @@
 """Host facet probe (chunk 3) — the cause=probe emitter for host.* metrics.
 
-Drives the REAL lib/plane-host-probe.sh (real lib-common, real shim, private
+Drives the REAL claudlobby/_runtime_scripts/plane-host-probe.sh (real lib-common, real shim, private
 Plane daemon committing to a scratch db; the facet tools stubbed on PATH so the
 values are deterministic). Load-bearing laws: subject_kind=host keyed by
 hostname (joins the Host card); Pi-only facets are ABSENT on a non-Pi host,
@@ -74,7 +74,7 @@ def _rig(tmp_path, *, pi=False, armed=True, disabled=False, scratch_plane_env):
 
 def _run(root, env):
     return subprocess.run(
-        ["bash", str(REPO / "lib" / "plane-host-probe.sh")],
+        ["bash", str(REPO / "claudlobby/_runtime_scripts" / "plane-host-probe.sh")],
         capture_output=True, text=True, env=env, timeout=120)
 
 
@@ -179,9 +179,9 @@ def test_probe_job_ships_enrolled_and_carries_the_emit_flag(tmp_path,
 
 
 def test_launcher_parses_and_references():
-    body = (REPO / "lib" / "plane-host-probe.sh").read_text()
+    body = (REPO / "claudlobby/_runtime_scripts" / "plane-host-probe.sh").read_text()
     assert "plane_armed plane-host-probe" in body
-    r = subprocess.run(["bash", "-n", str(REPO / "lib" / "plane-host-probe.sh")],
+    r = subprocess.run(["bash", "-n", str(REPO / "claudlobby/_runtime_scripts" / "plane-host-probe.sh")],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
 

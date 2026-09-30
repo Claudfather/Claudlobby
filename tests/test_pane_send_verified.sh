@@ -19,7 +19,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB_DIR="$SCRIPT_DIR/../lib"
+LIB_DIR="$SCRIPT_DIR/../claudlobby/_runtime_scripts"
 FIXTURES="$SCRIPT_DIR/fixtures/pane-states"
 PASS=0; FAIL=0; TOTAL=0
 
@@ -46,7 +46,7 @@ export PANE_SEND_VERIFY_TICKS=1
 # the suite inside test_sh_suites.py's 120s bound.
 export PANE_SEND_CHUNK_SETTLE_S=0
 
-# shellcheck source=../lib/lib-common.sh
+# shellcheck source=../claudlobby/_runtime_scripts/lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 
 TMPD=$(mktemp -d)
@@ -66,7 +66,7 @@ export CLAUDLOBBY_ROOT="$TMPD/synth-root"
 mkdir -p "$BOT_DIR/data"
 mkdir -p "$CLAUDLOBBY_ROOT/state"
 # F18 closure R1: emit_fleet_event writes no per-bot event file any more — every
-# fleet event goes through lib/plane-emit.sh to the plane. The suite stays
+# fleet event goes through claudlobby/_runtime_scripts/plane-emit.sh to the plane. The suite stays
 # hermetic (no plane, no daemon): the dead socket causes the native shim to
 # stage raw batches under the scratch root. The assertions read those batches.
 # FLEET_NAME anchors the rows on the synthetic bot.
@@ -281,9 +281,9 @@ assert_eq "unarmed: the wait is off inside the function, not just in the env" "u
 # (per-call prefix, no process-wide export) rather than one literal line, so a
 # requote or rename does not redden a behaviourally identical change.
 r=$(grep -cE '^[[:space:]]*PANE_READY_TICKS="\$_PANE_READY_TICKS_BOOT"[[:space:]]*\\?$' \
-    "$SCRIPT_DIR/../lib/start-bot.sh" || true)
+    "$SCRIPT_DIR/../claudlobby/_runtime_scripts/start-bot.sh" || true)
 assert_eq "start-bot arms the wait per call, once for each cold-boot send" "2" "$r"
-r=$(grep -cE '^[[:space:]]*export[[:space:]]+PANE_READY_TICKS' "$SCRIPT_DIR/../lib/start-bot.sh" || true)
+r=$(grep -cE '^[[:space:]]*export[[:space:]]+PANE_READY_TICKS' "$SCRIPT_DIR/../claudlobby/_runtime_scripts/start-bot.sh" || true)
 assert_eq "start-bot never exports it process-wide (it would leak past the sends)" "0" "$r"
 
 echo "=== the readiness verdict: what was observed, not just pass/fail (#860) ==="

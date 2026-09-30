@@ -11,7 +11,7 @@ clean epoch), so this is a repair tool, not archaeology.
 Two rules this module exists to honour, both from the naive-import failure
 mode #1635 names explicitly as the wrong turn:
 
-  * ORIGINAL INSTANTS. `lib/plane-readers.py::workstream_registry` RECOMPUTES
+  * ORIGINAL INSTANTS. `claudlobby/_runtime_scripts/plane-readers.py::workstream_registry` RECOMPUTES
     a never-renewed lease as opened + WORKSTREAM_LEASE_DAYS, and re-derives
     it on every `progressed` event from THAT event's own `occurred_at` — so
     a constructs-only import re-leases every stale row from the import
@@ -184,7 +184,7 @@ def _project_key(raw: Optional[str]) -> Optional[str]:
 
 
 def _plus_days_iso(ts: str, days: int) -> str:
-    """The SAME derivation `lib/plane-readers.py::_plus_days` uses on the
+    """The SAME derivation `claudlobby/_runtime_scripts/plane-readers.py::_plus_days` uses on the
     read side. Both `progress` and `renew` compute their lease target as
     call-time + WORKSTREAM_LEASE_DAYS (`_lease_expiry_iso` in the shell
     writer) — the two verbs share one formula — so a `renewals[]` entry's

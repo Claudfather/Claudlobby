@@ -44,12 +44,12 @@ with tempfile.TemporaryDirectory(prefix='supervisor-callers-') as temp:
         trace = root / 'trace'
         trace.touch()
         for file in ('supervisor.sh', 'keepalive.sh', 'spin-up-bot.sh', 'spin-down-bot.sh'):
-            shutil.copy2(source / 'lib' / file, lib / file)
-        if (source / 'lib/runtime-admission.sh').exists():
+            shutil.copy2(source / 'claudlobby/_runtime_scripts' / file, lib / file)
+        if (source / 'claudlobby/_runtime_scripts/runtime-admission.sh').exists():
             # This suite characterizes behavior after admission. Its actual
             # release/lock protocol has dedicated tests; never borrow live state.
             admit_watchdog_fixture(lib)
-        shutil.copy2(source / 'lib/lib-common.sh', lib / 'lib-common-real.sh')
+        shutil.copy2(source / 'claudlobby/_runtime_scripts/lib-common.sh', lib / 'lib-common-real.sh')
         # Explicit seam in a CHARACTERIZATION COPY. Production still spells
         # /bin/launchctl; the assertion prevents an accidental real invocation.
         down = lib / 'spin-down-bot.sh'

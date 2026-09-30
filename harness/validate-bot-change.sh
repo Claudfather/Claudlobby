@@ -16,7 +16,7 @@
 #   Exit 0 = all observations matched intent, 1 = a behavior did not fire.
 set -euo pipefail
 
-LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)"
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../claudlobby/_runtime_scripts" && pwd)"
 # shellcheck source=lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 
@@ -116,12 +116,12 @@ install_error_trap "$BOT_DIR"
 EVENTS="$BOT_DIR/data/events"   # the marker/idle files still live under data/; no event file does (F18 R1)
 
 # ---------------------------------------------------------------------------
-# The plane is the ONLY record every lib/ door writes (F18 closure, R1). No
+# The plane is the ONLY record every claudlobby/_runtime_scripts/ door writes (F18 closure, R1). No
 # door appends a JSONL row any more, so every observation this harness makes
 # of a fleet event, a dispatch or a report is read back FROM THE PLANE, and
 # every ledger row it used to seed is seeded AS PLANE ROWS instead.
 #
-# Every door emits through lib/plane-emit.sh to its root's private daemon.
+# Every door emits through claudlobby/_runtime_scripts/plane-emit.sh to its root's private daemon.
 # Each throwaway root gets its own db and short socket (sun_path is 104 bytes
 # on macOS). The CLI remains selected for fixture seeding and Plane reads.
 # ---------------------------------------------------------------------------
@@ -174,11 +174,15 @@ val_initialize_plane "$ROOT"
 # real start/watchdog bodies with an explicit, private admission collaborator;
 # tests/test_native_admission.py and test_unit_admission.py own real refusal.
 # Never overwrite the checked-out or installed guard, even in a source export.
-# The stdlib native reader accepts the actual source layout: lib/ beside its
-# selected claudlobby/ package. Keep the copied lib writable for this fixture's
-# private admission override, and bind the package to the exact source tree.
-cp -R "$LIB_DIR" "$ROOT/lib"
-ln -s "$VAL_REPO/claudlobby" "$ROOT/claudlobby"
+# The stdlib native readers accept only claudlobby/_runtime_scripts/ inside
+# their selected package, found through realpath. Link every source script so
+# they bind to the exact source tree; only the admission guard is a private,
+# writable file for this fixture's override.
+mkdir "$ROOT/lib"
+for _val_script in "$LIB_DIR"/*; do
+    [ "${_val_script##*/}" = runtime-admission.sh ] && continue
+    ln -s "$_val_script" "$ROOT/lib/${_val_script##*/}"
+done
 LIB_DIR="$ROOT/lib"
 # The private admission collaborator still supplies the selected interpreter
 # that start-bot's boot timer uses after admission. The real adapter binds the
@@ -3269,7 +3273,7 @@ rm -rf "$FS_ROOT"
 # The pytest battery stubs the helper; THIS is where the real one runs: a real
 # openssl-signed JWT through the real composed routing, only curl faked. Seeds
 # a throwaway export root, composes a github_app bot with the REAL compositor,
-# and drives real git credential fill against the real lib/ helper.
+# and drives real git credential fill against the real claudlobby/_runtime_scripts/ helper.
 GA_ROOT="$(mktemp -d /tmp/ga-harness.XXXXXX)"
 GA_BIN="$GA_ROOT/bin"; mkdir -p "$GA_BIN" "$GA_ROOT/lib" "$GA_ROOT/home"
 cp "$LIB_DIR/git-credential-github-app" "$LIB_DIR/mint-github-token.sh" "$LIB_DIR/lib-common.sh" "$LIB_DIR/supervisor.sh" "$GA_ROOT/lib/"
@@ -3493,7 +3497,7 @@ else
     PL_LIB="$PL_ROOT/lib"
     mkdir -p "$PL_LIB"
     for _f in plane-emit.sh plane-socket-client.py lib-common.sh supervisor.sh cli-context.sh; do
-        ln -s "$PL_REPO/lib/$_f" "$PL_LIB/$_f"
+        ln -s "$PL_REPO/claudlobby/_runtime_scripts/$_f" "$PL_LIB/$_f"
     done
 
     "$PL_CLI" --root "$PL_ROOT" plane serve --socket "$PL_SOCK" \
@@ -3696,7 +3700,7 @@ PLPY
     # An ARMED keepalive tick against a stubbed-idle pane must record the
     # verdict as metric_samples (bot.heartbeat + bot.session_up) through the
     # real shim into the real db — the Observe step for presence recording.
-    ln -s "$PL_REPO/lib/keepalive.sh" "$PL_LIB/keepalive.sh"
+    ln -s "$PL_REPO/claudlobby/_runtime_scripts/keepalive.sh" "$PL_LIB/keepalive.sh"
     ln -s "$LIB_DIR/runtime-admission.sh" "$PL_LIB/runtime-admission.sh"
     printf '#!/bin/bash\nexit 0\n' > "$PL_LIB/start-bot.sh"
     chmod +x "$PL_LIB/start-bot.sh"
@@ -3844,7 +3848,7 @@ done
 [ "$_ck2_ready" -eq 1 ] || echo "validate-bot-change: checkin responder pane never drew its prompt (proceeding anyway)" >&2
 
 # --- the beat, clean ---------------------------------------------------------
-CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$CK2_FLEET" bash "$VAL_REPO/lib/manager-checkin.sh" "$CK2_FLEET" || true
+CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$CK2_FLEET" bash "$VAL_REPO/claudlobby/_runtime_scripts/manager-checkin.sh" "$CK2_FLEET" || true
 sleep 3
 
 ck2_n1=$(tmux capture-pane -t "$CK2_BOT" -p | grep -c '/checkin' || true)
@@ -3859,7 +3863,7 @@ harness_check "checkin: ...and recorded ONE checkin_triggered anchored on the ma
 # No flag: the same default gap as the run above. The plane read IS the rate
 # limit -- there is no timer state file to lose or to lie, so a repeat inside
 # the window must add nothing: no new pane text, no new event.
-CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$CK2_FLEET" bash "$VAL_REPO/lib/manager-checkin.sh" "$CK2_FLEET" || true
+CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$CK2_FLEET" bash "$VAL_REPO/claudlobby/_runtime_scripts/manager-checkin.sh" "$CK2_FLEET" || true
 sleep 1
 ck2_n2=$(tmux capture-pane -t "$CK2_BOT" -p | grep -c '/checkin' || true)
 ck2_trig2=$(val_events "$ROOT" "$CK2_FLEET" "$CK2_BOT" checkin_triggered | wc -l)
@@ -3872,7 +3876,7 @@ harness_check "checkin: a second tick inside the min gap does NOT inject again (
 # detection were broken, this tick would dispatch a second time cleanly
 # rather than being masked by the still-open rate-limit window.
 touch "$CK2_DIR/data/.last-tool-call"
-CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$CK2_FLEET" bash "$VAL_REPO/lib/manager-checkin.sh" "$CK2_FLEET" --min-gap-s 0 || true
+CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$CK2_FLEET" bash "$VAL_REPO/claudlobby/_runtime_scripts/manager-checkin.sh" "$CK2_FLEET" --min-gap-s 0 || true
 sleep 1
 ck2_n3=$(tmux capture-pane -t "$CK2_BOT" -p | grep -c '/checkin' || true)
 ck2_busy=$(val_events "$ROOT" "$CK2_FLEET" "$CK2_BOT" checkin_skipped)
@@ -3906,7 +3910,7 @@ MANAGER_TMUX=$CK2_BOT
 BOT_SERVICE=$(vsock "$CK2_BOT")
 CONF
 ln -sfn "$CLAUDLOBBY_LIBRARY_DIR/skills/checkin" "$CK2_DIR2/.claude/skills/checkin"
-CLAUDLOBBY_ROOT="$CK2_ROOT2" CLAUDLOBBY_FLEET="$CK2_FLEET" bash "$VAL_REPO/lib/manager-checkin.sh" "$CK2_FLEET" || true
+CLAUDLOBBY_ROOT="$CK2_ROOT2" CLAUDLOBBY_FLEET="$CK2_FLEET" bash "$VAL_REPO/claudlobby/_runtime_scripts/manager-checkin.sh" "$CK2_FLEET" || true
 sleep 1
 ck2_n4=$(tmux capture-pane -t "$CK2_BOT" -p | grep -c '/checkin' || true)
 # Compared against ck2_n3 (the count immediately BEFORE this action), same

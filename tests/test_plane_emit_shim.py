@@ -42,7 +42,7 @@ def test_daemon_down_stages_without_a_selected_cli(tmp_path):
         PLANE_EMIT_DISABLED="0",
     )
     run = subprocess.run(
-        ["/bin/bash", str(REPO_ROOT / "lib" / "plane-emit.sh")],
+        ["/bin/bash", str(REPO_ROOT / "claudlobby/_runtime_scripts" / "plane-emit.sh")],
         input='{"events":[{"event_type":"system","emitter":"test",'
               '"payload":{"event":"daemon_started"}}]}',
         capture_output=True, text=True, timeout=10, env=env,
@@ -59,7 +59,7 @@ def test_shim_refuses_missing_or_relative_data_root(root):
     if root is not None:
         env["CLAUDLOBBY_ROOT"] = root
     run = subprocess.run(
-        ["/bin/bash", str(REPO_ROOT / "lib" / "plane-emit.sh")],
+        ["/bin/bash", str(REPO_ROOT / "claudlobby/_runtime_scripts" / "plane-emit.sh")],
         input="{}", capture_output=True, text=True, timeout=10, env=env,
     )
     assert run.returncode == 127

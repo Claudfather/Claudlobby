@@ -18,7 +18,7 @@ request never reaches `connect(...)`, so it cannot pay the checkpoint. The
 original benchmark on this issue measured refusals and is struck; rebuilding it
 here would be rebuilding the invalid instrument.
 
-The event_id minting is IMPORTED from `lib/plane-socket-client.py`, not
+The event_id minting is IMPORTED from `claudlobby/_runtime_scripts/plane-socket-client.py`, not
 re-implemented — the ids in the witness must be the same ids the real door
 would have minted, or the cross-check is comparing two different populations.
 """
@@ -33,7 +33,7 @@ import sys
 import time
 from pathlib import Path
 
-LIB = Path(__file__).resolve().parent.parent / "lib"
+LIB = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts"
 
 
 def _shipped_client():

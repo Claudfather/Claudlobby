@@ -435,7 +435,7 @@ class TestKnobDisclosure:
         # knob be scrubbed silently. The regex reads `${PANE_X...}` expansion
         # reads — a bare `$PANE_X` read would escape it, which is accepted as
         # the floor (lib-common uses braced reads for every current knob).
-        lib_common = (REPO_ROOT / "lib" / "lib-common.sh").read_text(encoding="utf-8")
+        lib_common = (REPO_ROOT / "claudlobby/_runtime_scripts" / "lib-common.sh").read_text(encoding="utf-8")
         actual = set(re.findall(r"\$\{(PANE_[A-Z0-9_]+)", lib_common))
         declared = set(
             call_script_fn(
@@ -452,7 +452,7 @@ class TestKnobDisclosure:
         # call sites. If this pin fails, start-bot now honors an inherited
         # value — update knob_disclosure's INERT branch (and this pin), or the
         # disclosure starts lying in the safe-but-wrong direction.
-        start_bot = (REPO_ROOT / "lib" / "start-bot.sh").read_text(encoding="utf-8")
+        start_bot = (REPO_ROOT / "claudlobby/_runtime_scripts" / "start-bot.sh").read_text(encoding="utf-8")
         arming = re.findall(
             r'PANE_READY_TICKS="\$_PANE_READY_TICKS_BOOT"\s*\\\s*\n\s*pane_send_verified',
             start_bot,
@@ -481,7 +481,7 @@ def _arm_record(**overrides) -> dict:
 
 
 def _lib_common() -> str:
-    return (REPO_ROOT / "lib" / "lib-common.sh").read_text(encoding="utf-8")
+    return (REPO_ROOT / "claudlobby/_runtime_scripts" / "lib-common.sh").read_text(encoding="utf-8")
 
 
 def _lib_common_constants() -> dict[str, str]:
@@ -1400,7 +1400,7 @@ class TestCountSendRetriesReadsThePlane:
         bot_dir.mkdir(parents=True)
         (bot_dir / "bot.conf").write_text(f'BOT_ID="{bot}"\nFLEET_NAME="{fleet}"\n')
         if not (root / "lib").exists():
-            (root / "lib").symlink_to(REPO_ROOT / "lib")
+            (root / "lib").symlink_to(REPO_ROOT / "claudlobby/_runtime_scripts")
         return bot_dir
 
     @staticmethod

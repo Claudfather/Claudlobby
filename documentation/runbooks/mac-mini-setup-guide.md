@@ -158,7 +158,7 @@ In the [Tailscale admin console](https://login.tailscale.com), rename the device
 
 ## Phase 5: Install Node + Claude Code
 
-`jq` is also required here — several `lib/` scripts (dispatch, reconcile-fleet, report-back, creds-check, etc.) depend on it for JSON parsing.
+`jq` is also required here — several `claudlobby/_runtime_scripts/` scripts (dispatch, reconcile-fleet, report-back, creds-check, etc.) depend on it for JSON parsing.
 
 ```bash
 brew install node jq

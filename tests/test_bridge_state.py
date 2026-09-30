@@ -28,7 +28,7 @@ from pathlib import Path
 
 import pytest
 
-LIB_COMMON = Path(__file__).resolve().parent.parent / "lib" / "lib-common.sh"
+LIB_COMMON = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts" / "lib-common.sh"
 
 # The Linux ownership read uses /proc/<pid>/environ; the macOS branch uses
 # `ps eww`. These live-bridge tests spawn a real process tree, so they gate on

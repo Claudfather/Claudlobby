@@ -338,7 +338,7 @@ def _composed(tmp_path, monkeypatch, armed: dict[str, str]):
 
 
 def test_the_watchdog_names_its_fleet_on_every_matcher_call():
-    src = (REPO / "lib" / "fleet-pulse.sh").read_text()
+    src = (REPO / "claudlobby/_runtime_scripts" / "fleet-pulse.sh").read_text()
     for mode in ("--all", "--orphans", "--unassigned"):
         line = next(l for l in src.splitlines() if f'dispatch-overdue.py" {mode}' in l)
         assert '--fleet "$fleet"' in line, mode

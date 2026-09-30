@@ -20,7 +20,7 @@ from tests.fixtures.native_admission import admit_watchdog_fixture
 
 
 REPO = Path(__file__).resolve().parent.parent
-LIB = REPO / "lib"
+LIB = REPO / "claudlobby/_runtime_scripts"
 
 # The scenes drive the systemd branch of the real scripts and read /proc/uptime; on
 # macOS service_is_crash_looping answers "unknown" by design, so they cannot hold.

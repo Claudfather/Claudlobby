@@ -176,7 +176,7 @@ def test_pulse_timeout_kills_its_private_process_group(monkeypatch):
 
 
 def test_selected_private_pulse_refuses_direct_entry(tmp_path):
-    script = Path(__file__).resolve().parent.parent / "lib/fleet-pulse.sh"
+    script = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts/fleet-pulse.sh"
     env = {**os.environ, "CLAUDLOBBY_RELEASE_ID": "selected-release",
            "CLAUDLOBBY_ROOT": str(tmp_path)}
     env.pop("CLAUDLOBBY_PRIVATE_PULSE_RELEASE", None)

@@ -4,7 +4,7 @@
 # private socket; a recorder is a tripwire against cold full-CLI invocation.
 set -euo pipefail
 
-LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)"
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../claudlobby/_runtime_scripts" && pwd)"
 SHIM="$LIB_DIR/plane-emit.sh"
 
 tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/planeemit.XXXXXX")

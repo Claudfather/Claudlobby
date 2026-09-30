@@ -31,10 +31,17 @@ RUNTIME_COMPATIBILITY = runpy.run_path(
 ASSET_DIRS = ("library", "voices", "templates")
 SEEDS = ("fleet.yaml.seed", "fleet.yaml.example", "projects.yaml.seed", ".env.seed.example",
          "missions/fleet.md.seed")
+# Private runtime scripts are authored inside the package and install at the
+# same package-relative path.
+NATIVE_DIR = "claudlobby/_runtime_scripts"
 # Development and measurement instruments live in harness/ and never enter
-# the installed native runtime. These two remaining lib sources are likewise
-# not runtime dependencies.
+# the installed native runtime. These two remaining runtime-script sources are
+# likewise not runtime dependencies.
 NATIVE_EXCLUDED = {"CLAUDE.md", "personal/finance-presync.sh"}
+
+
+def _is_native(name):
+    return Path(name).parts[:2] == tuple(NATIVE_DIR.split("/"))
 
 
 @cache
@@ -43,7 +50,7 @@ def _resource_sources():
     if (ROOT / ".git").exists():
         try:
             output = subprocess.check_output(
-                ["git", "ls-files", "-z", "--", *ASSET_DIRS, "lib", *SEEDS],
+                ["git", "ls-files", "-z", "--", *ASSET_DIRS, NATIVE_DIR, *SEEDS],
                 cwd=ROOT, text=True, stderr=subprocess.PIPE, timeout=10,
             )
         except (OSError, subprocess.SubprocessError) as exc:
@@ -62,8 +69,8 @@ def _resource_sources():
         relative = Path(name)
         if relative.is_absolute() or ".." in relative.parts:
             raise SetupError(f"Resource path escapes source tree: {name}")
-        if relative.parts[:1] == ("lib",):
-            if relative.relative_to("lib").as_posix() in NATIVE_EXCLUDED:
+        if _is_native(name):
+            if relative.relative_to(NATIVE_DIR).as_posix() in NATIVE_EXCLUDED:
                 continue
         elif name not in SEEDS and relative.parts[:1] not in [(d,) for d in ASSET_DIRS]:
             raise SetupError(f"Unexpected resource source: {name}")
@@ -76,7 +83,7 @@ def _resource_sources():
     for required in SEEDS:
         if required not in sources:
             raise SetupError(f"Resource inventory is missing seed: {required}")
-    for directory in (*ASSET_DIRS, "lib"):
+    for directory in (*ASSET_DIRS, NATIVE_DIR):
         if not any(name.startswith(directory + "/") for name in sources):
             raise SetupError(f"Resource inventory is missing directory: {directory}")
     return tuple(sources)
@@ -86,8 +93,8 @@ def _assets():
     """Pairs of canonical source and installed package-relative destination."""
     for name in _resource_sources():
         source = ROOT / name
-        if name.startswith("lib/"):
-            target = Path("_native") / source.relative_to(ROOT / "lib")
+        if _is_native(name):
+            target = source.relative_to(ROOT / "claudlobby")
         elif name in SEEDS:
             target = Path("_resources/seeds") / name
         else:
@@ -180,7 +187,8 @@ class ResourceSdist(sdist):
         metadata = self.get_finalized_command("build_py").artifact_metadata()
         # An old egg-info/SOURCES.txt can retain entries from a prior build.
         canonical = set(_resource_sources())
-        files = [name for name in files if Path(name).parts[0] not in (*ASSET_DIRS, "lib")
+        files = [name for name in files
+                 if (Path(name).parts[0] not in ASSET_DIRS and not _is_native(name))
                  or name in canonical]
         super().make_release_tree(base_dir, files)
         _write_metadata(Path(base_dir) / "claudlobby/_artifact.json", metadata)

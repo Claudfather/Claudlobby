@@ -37,7 +37,7 @@ from tests.conftest import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CHECKER = REPO_ROOT / "lib" / "check-npx-cache.sh"
+CHECKER = REPO_ROOT / "claudlobby/_runtime_scripts" / "check-npx-cache.sh"
 
 PKG = "demo-mcp@1.2.3"
 
@@ -189,7 +189,7 @@ class TestCheckNpxCacheRefusesRatherThanGuessing:
     """
 
     def _partial_install(self, tmp_path: Path) -> Path:
-        """A real `lib/` with exactly one file missing.
+        """A real `claudlobby/_runtime_scripts/` with exactly one file missing.
 
         The script resolves the grammar from its OWN dirname, so the condition
         cannot be made by pointing an env var somewhere else, and the repo's
@@ -202,7 +202,7 @@ class TestCheckNpxCacheRefusesRatherThanGuessing:
         (root / "library" / "mcp" / "demo.json").write_text(
             json.dumps({"demo": {"command": "npx", "args": ["-y", PKG]}})
         )
-        shutil.copytree(REPO_ROOT / "lib", root / "lib")
+        shutil.copytree(REPO_ROOT / "claudlobby/_runtime_scripts", root / "lib")
         (root / "lib" / "mcp-package-grammar.py").unlink()
         return root
 

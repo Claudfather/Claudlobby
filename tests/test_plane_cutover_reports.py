@@ -247,7 +247,7 @@ def test_brief_unacked_from_the_plane_and_the_cursor_keeps_comparing(tmp_path, m
 
 def test_brief_omits_the_section_when_the_matcher_is_unreachable(tmp_path):
     """Every plane read rides the install's matcher session (R2b-1 fold): an
-    install whose lib/ lacks it cannot answer, and the section is OMITTED —
+    install whose claudlobby/_runtime_scripts/ lacks it cannot answer, and the section is OMITTED —
     never '0 unacked'."""
     root, paths, _, _ = _scene(tmp_path)
     paths = _without_matcher(paths, tmp_path / "native")

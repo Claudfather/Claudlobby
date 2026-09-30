@@ -101,7 +101,7 @@ The monitor reads **only** pre-aggregated sources:
 
 ### Digest row contract
 
-Emitted by `lib/transcript-digest.sh` (`SessionEnd`) as a `session_digest` system
+Emitted by `claudlobby/_runtime_scripts/transcript-digest.sh` (`SessionEnd`) as a `session_digest` system
 event on the plane (`bot` and `ts` on the row, the fleet from the query scope;
 the rest ride `.data`, which `/fleet-digest` lifts up). Fields the monitor depends
 on:

@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-LIB_COMMON = Path(__file__).resolve().parent.parent / "lib" / "lib-common.sh"
+LIB_COMMON = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts" / "lib-common.sh"
 
 # A private HOME for every git subprocess this module starts, and a CLOSED env.
 #

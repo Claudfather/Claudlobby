@@ -1,7 +1,7 @@
 """THE capture policy, stdlib-only, and the staged queue's bound.
 
 Two consumers apply the same rule. `emit_api` applies it before ingest and the
-spool; the socket client (lib/plane-socket-client.py) applies it before it
+spool; the socket client (claudlobby/_runtime_scripts/plane-socket-client.py) applies it before it
 durably stages a batch the daemon could not take (S5a-04). A staged file must
 never hold a fuller body than the policy allows: under metadata capture a
 stranded or quarantined raw batch was the operator's opted-out content, kept

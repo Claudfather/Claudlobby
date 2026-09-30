@@ -14,7 +14,7 @@ including one that ignores the mission entirely. So this module records the
 whole candidate set with the score each item got, the cut, and the provenance of
 the query that produced the candidates.
 
-WHY NOT THE EXISTING SELECTOR'S RECORD SHAPE. `lib/code-audit-sweep.sh` emits
+WHY NOT THE EXISTING SELECTOR'S RECORD SHAPE. `claudlobby/_runtime_scripts/code-audit-sweep.sh` emits
 `audit_selected` carrying the winner only (repo, staleness, audit type). That is
 sufficient THERE and would be worthless HERE, for a reason worth stating before
 it gets copied: the audit sweep is DETERMINISTIC -- stalest repo wins -- so its

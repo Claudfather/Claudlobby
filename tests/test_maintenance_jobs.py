@@ -18,7 +18,7 @@ from tests.conftest import TG_STUB, _scrubbed_env, _write_exec, read_fleet_event
 from tests.test_plane_events_door import _serving
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LIB = os.path.join(REPO_ROOT, "lib")
+LIB = os.path.join(REPO_ROOT, "claudlobby", "_runtime_scripts")
 
 
 def _native_fixture(tmp_path, *scripts):

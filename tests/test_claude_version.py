@@ -3,7 +3,7 @@
 `measure_claude_version` (lib-common) is the only thing that reads a version:
 the binary RAN and the first line of its stdout carries X.Y.Z, or it is
 could-not-measure with a reason. Every consumer goes through it: the update
-job, the query door `lib/claude-version.sh` and so the registry scan, the eval's
+job, the query door `claudlobby/_runtime_scripts/claude-version.sh` and so the registry scan, the eval's
 version pin, the onboarding seeds and the permissions ladder's record. Each
 one REFUSES when the binary cannot run, rather than recording a stand-in value.
 Six copies of the reader existed, and three of them turned could-not-measure
@@ -35,7 +35,7 @@ from tests.conftest import _write_exec, constructed_env
 from tests.test_update_claude_code_verify import broken_stub, healthy
 
 REPO = Path(__file__).resolve().parent.parent
-LIB = REPO / "lib"
+LIB = REPO / "claudlobby/_runtime_scripts"
 HARNESS = REPO / "harness"
 DOOR = LIB / "claude-version.sh"
 
@@ -654,9 +654,9 @@ def test_no_other_script_reads_a_claude_version():
     py = [
         p.relative_to(REPO)
         for p in (REPO / "claudlobby").rglob("*.py")
-        # Build copies of native scripts/assets retain their source owners;
-        # this half of the ratchet checks the Python implementation package.
-        if p.relative_to(REPO / "claudlobby").parts[0] not in {"_native", "_resources"}
+        # Runtime scripts are covered above and build copies of assets retain
+        # their source owners; this half checks the Python implementation package.
+        if p.relative_to(REPO / "claudlobby").parts[0] not in {"_runtime_scripts", "_resources"}
         and '"--version"' in p.read_text() and p.name != "__main__.py"
     ]
     assert py == [], py

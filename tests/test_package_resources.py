@@ -39,7 +39,7 @@ def _wheel_payload(path):
 
 def _asset_hashes(package):
     paths = [package / "system.yaml", package / "_artifact.json"]
-    for directory in ("_resources", "_native"):
+    for directory in ("_resources", "_runtime_scripts"):
         paths.extend(path for path in (package / directory).rglob("*") if path.is_file())
     return {
         path.relative_to(package).as_posix(): (
@@ -108,9 +108,9 @@ def _copy_installed_dependencies(wheel, installed):
 def test_installed_resources_match_direct_and_sdist_wheels(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
-    for directory in ("claudlobby", "lib", "library", "voices", "templates", "missions"):
+    for directory in ("claudlobby", "library", "voices", "templates", "missions"):
         shutil.copytree(REPO / directory, source / directory,
-                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "_artifact.json", "_resources", "_native"))
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "_artifact.json", "_resources"))
     for name in ("pyproject.toml", "setup.py", "README.md", ".gitignore", "fleet.yaml.seed", "fleet.yaml.example",
                  "projects.yaml.seed", ".env.seed.example"):
         shutil.copy2(REPO / name, source / name)
@@ -120,7 +120,7 @@ def test_installed_resources_match_direct_and_sdist_wheels(tmp_path):
     _run(["git", "init", "--quiet"], source)
     _run(["git", "add", "."], source)
     ignored = ("voices/local/operator.md", "library/skills/printify/config.json",
-               "lib/fleet-state.json")
+               "claudlobby/_runtime_scripts/fleet-state.json")
     for name in ignored:
         path = source / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -165,8 +165,12 @@ def test_installed_resources_match_direct_and_sdist_wheels(tmp_path):
         source_inputs.add(source / name)
     assert payload["claudlobby/system.yaml"][0] == (source / "claudlobby/system.yaml").read_bytes()
 
-    native = {name.removeprefix("claudlobby/_native/") for name in payload
-              if name.startswith("claudlobby/_native/")}
+    native = {name.removeprefix("claudlobby/_runtime_scripts/") for name in payload
+              if name.startswith("claudlobby/_runtime_scripts/")}
+    # Runtime scripts install at their authored package path, never twice.
+    assert not any(name.startswith("claudlobby/_native/") for name in payload)
+    with zipfile.ZipFile(wheel) as archive:
+        assert not any(name.startswith("lib/") for name in archive.namelist())
     assert {"keepalive.sh", "lib-common.sh", "supervisor.sh", "git-credential-github-app",
             "env-tiers.sh", "plane-socket-client.py"} <= native
     assert not native.intersection({"setup-fleet", "setup-fleets"})
@@ -178,11 +182,11 @@ def test_installed_resources_match_direct_and_sdist_wheels(tmp_path):
         "validate-bot-change.sh", "vault-git-base-rate.py", "personal/finance-presync.sh",
     })
     for name in native:
-        path = source / "lib" / name
-        assert payload["claudlobby/_native/" + name] == (path.read_bytes(), path.stat().st_mode & 0o111)
+        path = source / "claudlobby/_runtime_scripts" / name
+        assert payload["claudlobby/_runtime_scripts/" + name] == (path.read_bytes(), path.stat().st_mode & 0o111)
         source_inputs.add(path)
     for name in payload:
-        if not name.startswith(("claudlobby/_resources/", "claudlobby/_native/")):
+        if not name.startswith(("claudlobby/_resources/", "claudlobby/_runtime_scripts/")):
             if name != "claudlobby/_artifact.json":
                 source_inputs.add(source / name)
 
@@ -203,6 +207,9 @@ def test_installed_resources_match_direct_and_sdist_wheels(tmp_path):
                    for path in source_inputs)
         assert prefix + "bin/claudlobby" not in archive.getnames()
         assert not any(prefix + name in archive.getnames() for name in ignored)
+        assert not any(prefix + "claudlobby/_runtime_scripts/" + name in archive.getnames()
+                       for name in ("CLAUDE.md", "personal/finance-presync.sh"))
+        assert len(archive.getnames()) == len(set(archive.getnames()))
 
     release = tmp_path / "release"
     _run([sys.executable, "-m", "venv", release], tmp_path)
@@ -287,7 +294,7 @@ for name in sys.argv[4:]:
     distribution = importlib.metadata.distribution(name)
     assert pathlib.Path(distribution.locate_file('')).resolve() == package.parent.resolve()
 resources = get_resources()
-assert resources.native == package / '_native'
+assert resources.native == package / '_runtime_scripts'
 assert selected_cli() == cli
 context = resolve_context(root=root)
 assert context.paths.package == resources

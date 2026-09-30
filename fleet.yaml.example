@@ -241,7 +241,7 @@ fleet:
 #
 #     # briefing — equippable scheduled briefing (#627). Each slot becomes a
 #     # composed per-(bot,slot) OnCalendar timer that dispatches /briefing <slot>
-#     # into THIS bot's session via lib/briefing-trigger.sh — never hand-install
+#     # into THIS bot's session via claudlobby/_runtime_scripts/briefing-trigger.sh — never hand-install
 #     # cron. Slot names must be shell identifiers (they become the
 #     # BRIEFING_SECTIONS_<SLOT> env suffix); values are systemd OnCalendar, NOT
 #     # 5-field cron. BRIEFING_* lands in bot.conf for the /briefing skill; the

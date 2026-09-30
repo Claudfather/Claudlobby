@@ -168,18 +168,18 @@ def test_selected_timer_enters_public_owner_before_any_update(tmp_path, script, 
     root.mkdir()
     env = constructed_env(HOME=str(tmp_path), CLAUDLOBBY_ROOT=str(root),
                           CLAUDLOBBY_RELEASE_ID="r-selected", CLAUDLOBBY_CLI=str(cli),
-                          CLAUDLOBBY_NATIVE_DIR=str(REPO / "lib"), PLANE_EMIT_DISABLED="1")
-    result = subprocess.run(["bash", str(REPO / "lib" / script)], env=env,
+                          CLAUDLOBBY_NATIVE_DIR=str(REPO / "claudlobby/_runtime_scripts"), PLANE_EMIT_DISABLED="1")
+    result = subprocess.run(["bash", str(REPO / "claudlobby/_runtime_scripts" / script)], env=env,
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert called.read_text().splitlines() == ["--root", str(root), "host", "update", command]
     called.unlink()
     env.pop("CLAUDLOBBY_CLI")
-    result = subprocess.run(["bash", str(REPO / "lib" / script)], env=env,
+    result = subprocess.run(["bash", str(REPO / "claudlobby/_runtime_scripts" / script)], env=env,
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == 2
     assert not called.exists()
-    result = subprocess.run(["bash", str(REPO / "lib" / script),
+    result = subprocess.run(["bash", str(REPO / "claudlobby/_runtime_scripts" / script),
                              "--selected-release", "wrong-release"], env=env,
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == 2

@@ -3,7 +3,7 @@
 Every fleet event lands on the plane as a system event anchored on the bot's
 actor (or the fleet, or the host) with a ``fleet-events:`` provenance and a
 detail carrying ``{source, legacy_ts, data}`` (F18 R1: the plane is the only
-recorder). The stdlib readers the bash doors ship (``lib/plane-readers.py``)
+recorder). The stdlib readers the bash doors ship (``claudlobby/_runtime_scripts/plane-readers.py``)
 render each one back as the row the retired ledgers used to hold. Private
 legacy rows keep that shape through one renderer shared with
 ``plane-lookup.py --events`` and fleet-pulse. ``--critical`` is
@@ -70,7 +70,7 @@ def collect_plane_events(conn, paths, *, fleet=None, pr=None, bot=None, event_ty
     from ..paths import load_lib_module
     pr = pr or load_lib_module(paths.lib, "plane-readers.py")
     if pr is None:
-        raise RuntimeError(f"lib/plane-readers.py is not readable under {paths.lib}")
+        raise RuntimeError(f"claudlobby/_runtime_scripts/plane-readers.py is not readable under {paths.lib}")
     try:
         rows = pr.fleet_events(conn, fleet or resolve_fleet_name(paths), since=since, bot=bot,
                                event_type=event_type)

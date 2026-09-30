@@ -1,4 +1,4 @@
-"""App-auth P1 (#1271): lib/git-credential-github-app + mint + setup.
+"""App-auth P1 (#1271): claudlobby/_runtime_scripts/git-credential-github-app + mint + setup.
 
 Lane-A wrappers (model: tests/test_creds_check_telegram.py): the real scripts
 run under subprocess with the network stubbed on a private PATH. Real openssl
@@ -33,9 +33,9 @@ from tests.conftest import (
 from tests.test_plane_events_door import _serving
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-HELPER = REPO_ROOT / "lib" / "git-credential-github-app"
-MINT = REPO_ROOT / "lib" / "mint-github-token.sh"
-SETUP = REPO_ROOT / "lib" / "setup-github-app.sh"
+HELPER = REPO_ROOT / "claudlobby/_runtime_scripts" / "git-credential-github-app"
+MINT = REPO_ROOT / "claudlobby/_runtime_scripts" / "mint-github-token.sh"
+SETUP = REPO_ROOT / "claudlobby/_runtime_scripts" / "setup-github-app.sh"
 
 CTX = "protocol=https\nhost=github.com\n\n"
 STUB_TOKEN = "ghs_STUBTOKEN1234567890"

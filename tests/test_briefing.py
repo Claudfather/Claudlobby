@@ -239,7 +239,7 @@ class TestBriefingTimerComposition:
     def test_execstart_passes_fleet_bot_slot(self, tmp_path):
         timers = self._compose(tmp_path)
         svc = (timers / "com.test.briefing-kev-morning.service").read_text()
-        assert "lib/briefing-trigger.sh" in svc
+        assert "claudlobby/_runtime_scripts/briefing-trigger.sh" in svc
         assert "test-fleet kev morning" in svc
 
     def test_plist_passes_fleet_bot_slot(self, tmp_path):

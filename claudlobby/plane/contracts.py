@@ -535,7 +535,7 @@ class WorkstreamEvent(_Strict):
 
 class _HostSystem(_Strict):
     claudlobby_version: str
-    #: The Claude Code version the fleet launches, as lib/claude-version.sh
+    #: The Claude Code version the fleet launches, as claudlobby/_runtime_scripts/claude-version.sh
     #: measured it (#1772), or None when it could not be measured, and then
     #: claude_version_unmeasured says why: exactly one of the two is set, and
     #: never a stand-in string.

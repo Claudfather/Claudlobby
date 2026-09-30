@@ -44,7 +44,7 @@ who you tell and how fast, never whether you act.
 |---|---|
 | A problem in another fleet | Report to that fleet's manager, with the citation |
 | A problem nobody owns | Escalate to your Lead; they route or escalate to the human |
-| A platform bug (`library/`, `lib/`, compositor) | Branch + PR in the normal way — that repo is yours |
+| A platform bug (`library/`, `claudlobby/_runtime_scripts/`, compositor) | Branch + PR in the normal way — that repo is yours |
 | Something urgent | Report faster and louder; still do not act |
 | A gap in an instrument | File it as a finding; propose the instrument, do not build it unasked |
 

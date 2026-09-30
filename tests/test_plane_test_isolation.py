@@ -17,7 +17,7 @@ from tests.conftest import constructed_env, _scrubbed_env, read_fleet_events
 from tests.test_plane_events_door import _serving
 
 REPO = Path(__file__).resolve().parents[1]
-SHIM = REPO / "lib" / "plane-emit.sh"
+SHIM = REPO / "claudlobby/_runtime_scripts" / "plane-emit.sh"
 MSG_ID = "msg_" + "1" * 32
 BATCH = json.dumps({"events": [{
     "event_type": "communication", "emitter": "isolation-test", "fleet": "scratch",

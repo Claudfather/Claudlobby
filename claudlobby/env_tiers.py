@@ -1,6 +1,6 @@
 """The ``.env`` tier cascade, as the compositor sees it.
 
-**This module owns no order.** It asks ``lib/env-tiers.sh`` — which is
+**This module owns no order.** It asks ``claudlobby/_runtime_scripts/env-tiers.sh`` — which is
 ``env_tier_rows`` in ``lib-common.sh``, the same function ``start-bot.sh``
 sources at boot — and reports what the runtime says. That is the whole point
 of #1226: ``Paths.env_file`` used to pick ONE tier (fleet if present, else

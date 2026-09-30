@@ -701,7 +701,7 @@ class TestSessionEndContention:
         #      rebases the live tree; SessionEnd only pushes. A clone whose push
         #      lost the race is diverged, so a full hook cycle leaves it stranded.
         #      Pinned so nobody re-reads the hooks as the recovery path: on a
-        #      multi-host estate, lib/vault-sync.sh (the scheduled `claudron sync`)
+        #      multi-host estate, claudlobby/_runtime_scripts/vault-sync.sh (the scheduled `claudron sync`)
         #      is what carries a raced capture home.
         for clone in clones:
             subprocess.run(start_argv, env=env, cwd=str(clone), input="{}", capture_output=True, text=True, timeout=60)
@@ -712,7 +712,7 @@ class TestSessionEndContention:
         )
 
         # (4b) Eventual consistency via the reconciliation door: a bounded
-        #      `claudron sync` over each clone — the exact command lib/vault-sync.sh
+        #      `claudron sync` over each clone — the exact command claudlobby/_runtime_scripts/vault-sync.sh
         #      runs — converges the remote to all N notes. Adds never conflict
         #      (distinct files), so one pass suffices; the loop is bounded. THIS is
         #      the recovery #682 says must actually run (reconcile_cycles >= 1).

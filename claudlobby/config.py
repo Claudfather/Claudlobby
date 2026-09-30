@@ -197,7 +197,7 @@ class FleetPulseConfig:
     """Fleet-pulse escalation knobs — the alert-volume controls (#1120).
 
     **Fleet-scoped, not per-bot**, and that is what decides the transport.
-    ``lib/fleet-pulse.sh`` resolves these once at top level, outside its per-bot
+    ``claudlobby/_runtime_scripts/fleet-pulse.sh`` resolves these once at top level, outside its per-bot
     loop, so ``bot.conf`` — the tier ``bridge_heal`` and ``unassigned_check``
     use, per the note on :class:`ObservabilityConfig` — cannot carry them
     without electing an arbitrary bot's conf. That is precisely the
@@ -239,7 +239,7 @@ class SweepConfig:
     """Fleet rolling code-audit sweep — opt-in via the fleet.yaml `sweep:` block.
 
     A fleet-level nightly job like fleet-pulse/creds-check: the no-LLM selector
-    lib/code-audit-sweep.sh picks the stalest repo by GitHub `auto-audit` issue
+    claudlobby/_runtime_scripts/code-audit-sweep.sh picks the stalest repo by GitHub `auto-audit` issue
     timestamps and dispatches the audit into the owner bot's session.  Presence
     of the block is opt-in; absence ⇒ FleetConfig.sweep is None ⇒ nothing
     emitted (no env, no timer).

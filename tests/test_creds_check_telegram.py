@@ -3,7 +3,7 @@
 A channel bot could sit deaf — revoked token, or a token resolving *empty*
 through the env tiers (#492) — with zero credential alerts. The check's
 mechanics (SSOT token resolution shared with bridge_state, getMe via curl
-config file) are documented at check_telegram_tokens in lib/creds-check.sh;
+config file) are documented at check_telegram_tokens in claudlobby/_runtime_scripts/creds-check.sh;
 this suite runs the real script end-to-end against a scratch fleet with a
 canned-response curl stub.
 
@@ -103,7 +103,7 @@ def _fleet(
         # Real delivery path: creds-check resolves + exports the delivery
         # token, the real tg-post.sh posts under it, the curl stub records
         # the sendMessage URL (which embeds the token) in send.log.
-        shutil.copy2(REPO_ROOT / "lib" / "tg-post.sh", native / "tg-post.sh")
+        shutil.copy2(REPO_ROOT / "claudlobby/_runtime_scripts" / "tg-post.sh", native / "tg-post.sh")
     else:
         _write_exec(
             native / "tg-post.sh", f'#!/bin/bash\necho "$*" >> "{tg_log}"\n'
@@ -410,7 +410,7 @@ def test_no_live_channel_exports_no_delivery_token(tmp_path):
     # EMPTY token is indistinguishable downstream (tg-post's ${VAR:-fallback}
     # treats empty as unset), so this absence is what catches a dropped
     # [ -n "$_dtok" ] guard. Wording is a tested contract, pinned at the log
-    # call in lib/creds-check.sh.
+    # call in claudlobby/_runtime_scripts/creds-check.sh.
     log_text = (f["root"] / "creds-check.log").read_text()
     assert "alert delivery token resolved" not in log_text
 

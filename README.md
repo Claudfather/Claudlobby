@@ -28,8 +28,8 @@ The [setup walkthrough](documentation/getting-started.md) builds an installed wh
 | A copied interpreter, dependency wheels and immutable framework resources | `<data-root>/releases/` | `host setup` / release assembly |
 | Authored manifests, staged configuration, activation records and Plane state | The explicit data root, including `local/` and `state/` | `fleet setup`, `config plan`, `host activate`, and runtime owners |
 | Units running under your account: bots, fleet timers and host jobs | The reviewed user-unit directory: normally `~/.config/systemd/user/` or `~/Library/LaunchAgents/` | `host activate` through the native supervisor adapter |
-| Claude Code plugins at user level | `~/.claude/plugins/` | `plugin_ensure` in `lib/lib-common.sh`, used by bot startup; this can affect your own Claude sessions too |
-| Your Claude Code consent settings | `~/.claude/settings.json`, or the selected Claude config directory | The headless consent block in `lib/start-bot.sh` sets `skipAutoPermissionPrompt` and `skipDangerousModePermissionPrompt`; malformed JSON is replaced with those keys |
+| Claude Code plugins at user level | `~/.claude/plugins/` | `plugin_ensure` in `claudlobby/_runtime_scripts/lib-common.sh`, used by bot startup; this can affect your own Claude sessions too |
+| Your Claude Code consent settings | `~/.claude/settings.json`, or the selected Claude config directory | The headless consent block in `claudlobby/_runtime_scripts/start-bot.sh` sets `skipAutoPermissionPrompt` and `skipDangerousModePermissionPrompt`; malformed JSON is replaced with those keys |
 | Each bot's Telegram access list | `~/.claude/channels/telegram-<handle>/access.json` | The activation composition owner in `claudlobby/composer.py`; writes are atomic and mode 0600, and failures are disclosed per bot |
 | Optional managed channel approvals | `/etc/claude-code/managed-settings.json`, or `/Library/Application Support/ClaudeCode/managed-settings.json` | Explicit operator `host channels approve`; preserves existing keys, requires pre-existing administrative write access and never invokes `sudo` |
 | Optional MCP package downloads | Host cache directories | Explicit `host cache warm`; the first MCP launch may otherwise download packages |
@@ -40,7 +40,7 @@ The Plane serves a read-only view on `127.0.0.1:8899` and receives events throug
 
 **Where secrets live**
 
-- `.env` files resolve in host, root, fleet, then bot order, with the most specific assignment winning (`lib/env-tiers.sh`). Keep fleet tokens in the data overlay. `claudlobby config explain KEY` reports provenance without printing secret values.
+- `.env` files resolve in host, root, fleet, then bot order, with the most specific assignment winning (`claudlobby/_runtime_scripts/env-tiers.sh`). Keep fleet tokens in the data overlay. `claudlobby config explain KEY` reports provenance without printing secret values.
 - Claude Code's login lives in its config directory. Bots using the default account share the operator's login; the same OS user may also access the operator's `gh` login.
 - A GitHub App identity uses its explicitly configured credentials and private key; see [GitHub App setup](documentation/runbooks/github-app-setup.md).
 
@@ -53,14 +53,14 @@ The Plane serves a read-only view on `127.0.0.1:8899` and receives events throug
 - **Run shell commands without asking.** The default permission mode is `acceptEdits` (`claudlobby/composer.py`), but an allowed tool runs without a prompt. `allow_all: true` in `library/expertise/software-engineering.md` allows every tool, bare `Bash` included (`ALL_TOOLS` in `claudlobby/composer.py`), and the seed bot's `library/expertise/setup-assistant.md` allows `Bash` as well. `fleet.yaml` can also set `permission_mode: auto` or `dangerously_skip_permissions: true` (`fleet.yaml.example`).
 - **Act as your user.** Every bot's unit runs under your account (see the units above), so the operating system lets a bot read and change anything you can, other bots' files included.
 - **Use `sudo` wherever your account needs no password for it.** No composed rule denies `sudo`, so on a host where `sudo -n true` succeeds, every bot has root.
-- **Use every credential on the host.** Each bot's session exports the `.env` files above (`lib/start-bot.sh`), and it has your Claude Code and `gh` logins.
+- **Use every credential on the host.** Each bot's session exports the `.env` files above (`claudlobby/_runtime_scripts/start-bot.sh`), and it has your Claude Code and `gh` logins.
 - **Take instructions over Telegram.** Direct messages are accepted only from `human_telegram_id`. In a fleet's group, composition leaves `allowFrom` empty (`claudlobby/composer.py`), which the Telegram plugin reads as every member of the group (the plugin's `server.ts`). A `fleet.yaml` field for that list is #1669.
 - **Follow your own Claude Code settings.** Bots on the `default` account read your `~/.claude/settings.json`, so an allow rule you add there, such as a bare `Bash`, applies to every bot.
 
 **What bounds them**
 
 - **Deny rules**, in each bot's `.claude/settings.local.json`. Every bot is denied Read and Edit of its fleet siblings' directories (`claudlobby/composer.py`), plus any `tools.deny` in `fleet.yaml`, and `isolation.shared_config: true` adds transcripts, credentials and the `.env` files (`claudlobby/isolation.py`). **These are not an operating-system boundary.** A deny rule gates Claude Code's own tool calls: the Read tool, and a shell command given a literal path. It does not stop an interpreter that opens a file itself, a path written through a variable, or any script, hook, timer or MCP server (`claudlobby/isolation.py`). Splitting bots off your account is tracked in #1606.
-- **Hooks on every bot** (`defaults.hooks` in `claudlobby/system.yaml`). `lib/gh-mention-guard.sh` rewrites `@` mentions out of GitHub-bound text, and `lib/vault-git-guard.sh` refuses git state rewrites (checkout, rebase, reset and the like) inside a Claudron vault. The rest record activity.
+- **Hooks on every bot** (`defaults.hooks` in `claudlobby/system.yaml`). `claudlobby/_runtime_scripts/gh-mention-guard.sh` rewrites `@` mentions out of GitHub-bound text, and `claudlobby/_runtime_scripts/vault-git-guard.sh` refuses git state rewrites (checkout, rebase, reset and the like) inside a Claudron vault. The rest record activity.
 - **Guardrails are instructions, not enforcement.** The seed's `no-push-main`, `no-destructive-git`, `pii-protection` and `no-fabrication` (`fleet.yaml.seed`) are text in each bot's `CLAUDE.md`, and none carries a deny rule (`library/guardrails/`). Only branch protection on your repository actually blocks a push to `main`.
 - **The sandbox is off in the seed** (`sandbox: enabled: false` in `fleet.yaml.seed`). The `sandbox:` block turns Claude Code's sandbox on (`documentation/fleet-yaml-schema.md`).
 - **Your tokens' scope.** A bot can do on GitHub, Telegram or any other service what the token it holds allows.
@@ -113,7 +113,7 @@ The result names the sealed release CLI. Edit a copy of its packaged `fleet.yaml
 │  ├── CLAUDE.md            ← persona + voice + roster +      │
 │  │                          protocols + guardrails          │
 │  ├── .mcp.json            ← merged from library/mcp/        │
-│  ├── bot.conf             ← env exports for lib/start-bot.sh│
+│  ├── bot.conf             ← env exports for claudlobby/_runtime_scripts/start-bot.sh│
 │  ├── .claude/skills/      ← symlinks → library/skills/      │
 │  ├── <bot>.service        ← systemd (Linux)                 │
 │  └── <bot>.plist          ← launchd (macOS)                 │
@@ -121,7 +121,7 @@ The result names the sealed release CLI. Edit a copy of its packaged `fleet.yaml
                          │
                          ▼
                 ┌────────────────┐
-                │ Claude Code    │ ← started by lib/start-bot.sh
+                │ Claude Code    │ ← started by claudlobby/_runtime_scripts/start-bot.sh
                 │ + tmux session │   inside the runtime dir
                 │ + Telegram     │
                 │ + MCP servers  │
@@ -161,7 +161,7 @@ claudlobby host cache warm            # pre-download npx + uvx packages for MCP 
 **Gives you:**
 
 - `library/` — 19 expertise profiles (manager, engineer, reviewer, designer, business, data-engineering, …), 55 skills (dispatch, lifecycle, prs, sweep, fleet-status, briefing, status, triage, …), 17 MCP fragments (github, github-app, gws, google-analytics, google-search-console, meta-ads, meta-business, posthog, notion, linear, slack, shopify, printify, homeassistant, docker, spotify, granola), 25 guardrails, 40 protocols
-- `lib/` — native runtime scripts and companions; `harness/` holds the development and measurement instruments. Operators and agents use the public CLI
+- `claudlobby/_runtime_scripts/` — native runtime scripts and companions; `harness/` holds the development and measurement instruments. Operators and agents use the public CLI
 - `claudlobby` — the installed Python CLI and compositor
 - `fleet.yaml.example` — a full fleet manifest template you can copy and adapt
 
@@ -187,7 +187,7 @@ and `data/` remain mutable and are preserved during composition.
 
 | Host | Notes |
 |------|-------|
-| macOS (Mac mini) | launchd via `<bot>.plist`. `lib/creds-check.sh` ships with a launchd install pattern. |
+| macOS (Mac mini) | launchd via `<bot>.plist`. `claudlobby/_runtime_scripts/creds-check.sh` ships with a launchd install pattern. |
 | Linux (Raspberry Pi 5, Debian, Ubuntu) | systemd user services via `<bot>.service`. Set `CLAUDLOBBY_ROOT=$HOME/claudlobby` in the unit's Environment. |
 | Linux (root systemd) | Same as user systemd; install to `/etc/systemd/system/` instead of `~/.config/systemd/user/`. |
 
@@ -199,7 +199,7 @@ Opt-in and dormant — a fleet that declares no `github_app:` is unaffected.
 
 ## Status
 
-This repo is in active migration from the older "one-dir-per-bot" template model to the compositor. The current layout is: `library/` (sources), `lib/` (lifecycle scripts), `runtime/` (output), `voices/` (overlays).
+This repo is in active migration from the older "one-dir-per-bot" template model to the compositor. The current layout is: `library/` (sources), `claudlobby/_runtime_scripts/` (lifecycle scripts), `runtime/` (output), `voices/` (overlays).
 
 PRs welcome.
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 # tests/test_boot_epoch.sh -- resolve_boot_epoch / boot_epoch_from_sysctl / sysctl_bin
-# (lib/lib-common.sh). Hermetic: a fake sysctl on PATH, a fake uptime that
+# (claudlobby/_runtime_scripts/lib-common.sh). Hermetic: a fake sysctl on PATH, a fake uptime that
 # refuses -s (the macOS shape), no /proc reachable through the seams.
 #
 # Why this suite exists (2026-09-21, live on the primary host): a restarted
@@ -19,7 +19,7 @@ assert_eq() {
     if [ "$e" = "$a" ]; then echo "  PASS: $d"; PASS=$((PASS + 1)); else echo "  FAIL: $d (expected '$e', got '$a')"; FAIL=$((FAIL + 1)); fi
 }
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB_DIR="$(cd "$HERE/../lib" && pwd)"
+LIB_DIR="$(cd "$HERE/../claudlobby/_runtime_scripts" && pwd)"
 T="$(mktemp -d "${TMPDIR:-/tmp}/boot-epoch.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bin" "$T/root"
@@ -40,7 +40,7 @@ FAKE
 chmod +x "$T/bin/uptime" "$T/bin/sysctl"
 export PATH="$T/bin:$PATH"
 export CLAUDLOBBY_ROOT="$T/root"
-# shellcheck source=../lib/lib-common.sh
+# shellcheck source=../claudlobby/_runtime_scripts/lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 set -e
 unset CLAUDLOBBY_BOOT_EPOCH
@@ -77,8 +77,8 @@ assert_eq "CLAUDLOBBY_BOOT_EPOCH overrides everything" "1234567890" "$(CLAUDLOBB
 
 echo "=== one parser, no second copy ==="
 assert_eq "plane-host-probe.sh reads kern.boottime through the helper, not its own sed" "1" "$(grep -c '^ *_bsec=.*boot_epoch_from_sysctl' "$LIB_DIR/plane-host-probe.sh")"
-# the READ, not the mention: a non-comment line that names both the binary and the key, in ANY lib/ file (the helper reads through "$bin")
-assert_eq "no bare 'sysctl … kern.boottime' read survives anywhere under lib/ (the helper is the one reader)" "0" "$(grep -nI 'kern\.boottime' "$LIB_DIR"/* 2>/dev/null | grep -v ':[[:space:]]*#' | grep -c 'sysctl' | tr -d ' ')"
+# the READ, not the mention: a non-comment line that names both the binary and the key, in ANY claudlobby/_runtime_scripts/ file (the helper reads through "$bin")
+assert_eq "no bare 'sysctl … kern.boottime' read survives anywhere under claudlobby/_runtime_scripts/ (the helper is the one reader)" "0" "$(grep -nI 'kern\.boottime' "$LIB_DIR"/* 2>/dev/null | grep -v ':[[:space:]]*#' | grep -c 'sysctl' | tr -d ' ')"
 
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

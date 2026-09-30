@@ -927,8 +927,8 @@ def _validate_bots(
                     f"bot '{bot_name}': credential_sources['{var_name}'] = "
                     f"'mint:github-app' is RESERVED — no boot-time resolver "
                     f"reads it (deliberate; App-auth mints at use time via "
-                    f"lib/git-credential-github-app, see mcp: [github-app] "
-                    f"and lib/mint-github-token.sh). Supply {var_name} in a "
+                    f"claudlobby/_runtime_scripts/git-credential-github-app, see mcp: [github-app] "
+                    f"and claudlobby/_runtime_scripts/mint-github-token.sh). Supply {var_name} in a "
                     f".env tier or adopt App mode; the resolver arm belongs "
                     f"to #252's per-bot sidecar"
                 )
@@ -2467,7 +2467,7 @@ def _validate_mcp_packages(
         report.warn(
             "mcp-unchecked",
             "MCP package check did not run — the shared package grammar "
-            "(lib/mcp-package-grammar.py) could not be loaded from this root, "
+            "(claudlobby/_runtime_scripts/mcp-package-grammar.py) could not be loaded from this root, "
             "so whether the declared packages resolve is UNKNOWN"
         )
         return

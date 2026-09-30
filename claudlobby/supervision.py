@@ -172,7 +172,7 @@ ExecStop=/bin/sh -c '{spec.stop_command}'
 {stop_post}
 # Restart= here only fires on non-zero exit of start-bot.sh — i.e., a config
 # failure before tmux ever spawned. Tmux dying after we've gone "active" is
-# detected by lib/keepalive.sh, NOT by systemd, because exit 0 + RemainAfterExit
+# detected by claudlobby/_runtime_scripts/keepalive.sh, NOT by systemd, because exit 0 + RemainAfterExit
 # leaves the unit looking healthy regardless of what tmux is doing.
 Restart={restart_directive}
 RestartSec=5

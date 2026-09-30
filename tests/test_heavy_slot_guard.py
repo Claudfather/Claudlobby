@@ -24,8 +24,8 @@ import pytest
 from tests.conftest import constructed_env
 
 REPO = Path(__file__).resolve().parent.parent
-GUARD = REPO / "lib" / "heavy-slot-guard.sh"
-WRAPPER = REPO / "lib" / "heavy-slot.py"
+GUARD = REPO / "claudlobby/_runtime_scripts" / "heavy-slot-guard.sh"
+WRAPPER = REPO / "claudlobby/_runtime_scripts" / "heavy-slot.py"
 W = shlex.quote(str(WRAPPER.resolve())) + " run --"
 BASH = shutil.which("bash")
 

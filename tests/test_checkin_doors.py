@@ -1,6 +1,6 @@
 """The hand-caller tg-post sender identity remains independently covered."""
 from pathlib import Path
-LIB = Path(__file__).resolve().parent.parent / "lib"
+LIB = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts"
 
 def test_tg_post_anchors_the_sender_on_bot_id_with_the_hand_caller_fallback():
     text = (LIB / "tg-post.sh").read_text()

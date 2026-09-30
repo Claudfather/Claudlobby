@@ -41,7 +41,7 @@ from claudlobby.paths import Paths
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PKG = REPO_ROOT / "claudlobby"
-LIB = REPO_ROOT / "lib"
+LIB = REPO_ROOT / "claudlobby/_runtime_scripts"
 
 # The one module allowed to import claudron — the sanctioned [vault] import seam.
 CLAUDRON_IMPORT_SEAM = "paths.py"

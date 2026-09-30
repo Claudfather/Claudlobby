@@ -55,10 +55,10 @@ def _fleet_root(tmp_path: Path, *, armed: bool = True,
     root.mkdir(exist_ok=True)
     # PRODUCTION-SHAPED arming (gauntlet r1: the shipped check read a tier
     # the estate does not use and every test passed anyway): the REAL
-    # lib/env-tiers.sh resolver + a root-tier .env — exactly the estate's
+    # claudlobby/_runtime_scripts/env-tiers.sh resolver + a root-tier .env — exactly the estate's
     # arming surface.
     if not (root / "lib").exists():
-        (root / "lib").symlink_to(REPO / "lib")
+        (root / "lib").symlink_to(REPO / "claudlobby/_runtime_scripts")
     # Opt-OUT since the defaults flip (chunk N): the scan runs unless a tier
     # says exactly 0. `armed=False` therefore writes the OFF value rather than
     # nothing — absence is now the ON case and has its own pin below.

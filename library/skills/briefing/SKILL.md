@@ -10,7 +10,7 @@ A consolidated status briefing delivered to Telegram, personalized per bot by th
 
 ## Trigger
 
-Triggered by the composed briefing timers (the `briefing:` stanza in `fleet.yaml`) via `lib/briefing-trigger.sh`, which delivers `/briefing <slot>` into the bot's own session — see `documentation/fleet-yaml-schema.md`. Never hand-install cron for this.
+Triggered by the composed briefing timers (the `briefing:` stanza in `fleet.yaml`) via `claudlobby/_runtime_scripts/briefing-trigger.sh`, which delivers `/briefing <slot>` into the bot's own session — see `documentation/fleet-yaml-schema.md`. Never hand-install cron for this.
 
 Run `/briefing <slot>` by hand any time for an ad-hoc summary.
 

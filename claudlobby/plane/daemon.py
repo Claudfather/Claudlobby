@@ -20,7 +20,7 @@ Protocol (one request per connection, newline-delimited JSON):
   codes mirror the CLI exits: bad_request/contract_violation -> 2,
   total_failure and capture_config (the host's capture.json is untrusted)
   -> 3, downgrade -> 4, internal -> 1. One deliberate
-  exception: lib/plane-socket-client.py maps a DAEMON's `downgrade` to its
+  exception: claudlobby/_runtime_scripts/plane-socket-client.py maps a DAEMON's `downgrade` to its
   transport-unavailable exit 5, because that refusal is about the answering
   process rather than the batch and the cold rung commits it (#1485).
 

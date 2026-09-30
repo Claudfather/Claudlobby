@@ -1,7 +1,7 @@
 {
   "_env_contract": {
     "GITHUB_APP_ID": {
-      "description": "GitHub App ID (numeric, top of the App settings page). One of the three inputs the use-time helper (lib/git-credential-github-app) mints ~1h installation tokens from. Human-supplied — deliberately no source: the mint:github-app resolver arm stays RESERVED for the #252 per-bot sidecar, because a boot-time resolver would put 1h tokens at rest in the launch env.",
+      "description": "GitHub App ID (numeric, top of the App settings page). One of the three inputs the use-time helper (claudlobby/_runtime_scripts/git-credential-github-app) mints ~1h installation tokens from. Human-supplied — deliberately no source: the mint:github-app resolver arm stays RESERVED for the #252 per-bot sidecar, because a boot-time resolver would put 1h tokens at rest in the launch env.",
       "default_tier": "fleet",
       "secret": true
     },

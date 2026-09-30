@@ -2,11 +2,11 @@
 
 #1503 moved the session digest OFF ``state/transcript-digests/transcript-digest-
 <date>.jsonl`` and ONTO the plane as a ``session_digest`` system event:
-``lib/transcript-digest.sh`` emits it, ``claudlobby events --type
+``claudlobby/_runtime_scripts/transcript-digest.sh`` emits it, ``claudlobby events --type
 session_digest`` reads it. The sink cutover shipped, but its on-estate READER —
 the ``fleet-digest`` skill and the ``fleet-monitoring`` protocol under
 ``library/`` — kept pointing at the deleted file, because the "no on-estate
-consumer" census swept only ``lib/`` and ``claudlobby/`` and missed ``library/``.
+consumer" census swept only ``claudlobby/_runtime_scripts/`` and ``claudlobby/`` and missed ``library/``.
 That left the reader reading an empty window the moment a fleet armed the
 digester, and the docs contradicting the code.
 

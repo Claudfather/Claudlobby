@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-HOOK = REPO / "lib" / "plane-rc-relay-out.sh"
+HOOK = REPO / "claudlobby/_runtime_scripts" / "plane-rc-relay-out.sh"
 CLI = Path(sys.executable).parent / "claudlobby"
 CHAT = "-1001234567890"
 

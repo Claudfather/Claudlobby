@@ -26,8 +26,8 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-LIB_COMMON = REPO_ROOT / "lib" / "lib-common.sh"
-START_BOT = REPO_ROOT / "lib" / "start-bot.sh"
+LIB_COMMON = REPO_ROOT / "claudlobby/_runtime_scripts" / "lib-common.sh"
+START_BOT = REPO_ROOT / "claudlobby/_runtime_scripts" / "start-bot.sh"
 
 
 def _run(snippet: str, *args: str) -> tuple[str, int]:

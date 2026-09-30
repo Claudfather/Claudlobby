@@ -1,4 +1,4 @@
-"""Python-wrapped bash test for lib/manager-checkin.sh (manager check-in PR 2,
+"""Python-wrapped bash test for claudlobby/_runtime_scripts/manager-checkin.sh (manager check-in PR 2,
 chunk 2: the trigger). Spec: documentation/plans/2026-09-13-manager-checkin-design.md
 section 5.
 
@@ -35,7 +35,7 @@ from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parents[1]
-TRIGGER = REPO / "lib" / "manager-checkin.sh"
+TRIGGER = REPO / "claudlobby/_runtime_scripts" / "manager-checkin.sh"
 
 DEFAULT_MIN_GAP_S = 2700
 
@@ -620,7 +620,7 @@ def test_neither_nonzero_expecting_call_runs_in_a_command_substitution():
 # PR 2 chunk 2 — the composed fleet job (system.yaml defaults.jobs) and its
 # switch row (switches.py). These exercise the PYTHON composer, not the bash
 # trigger above: real load_fleet + compose_fleet_timers against a throwaway
-# fleet.yaml with the real lib/ symlinked in — never a hand-built FleetConfig
+# fleet.yaml with the real claudlobby/_runtime_scripts/ symlinked in — never a hand-built FleetConfig
 # or a stubbed env_tiers resolver — the test_switches.py `_root` shape, so
 # what these prove is the shipped composer against the shipped system.yaml,
 # not a copy of either.
@@ -650,7 +650,7 @@ fleet:
 
 
 def _checkin_timers(tmp_path: Path, extra: str = "") -> Path:
-    """Compose a throwaway fleet's timers: real lib/, real load_fleet, real
+    """Compose a throwaway fleet's timers: real claudlobby/_runtime_scripts/, real load_fleet, real
     compose_fleet_timers. `extra` is raw YAML appended under `fleet:` at its
     own 2-space indent, for a `defaults.jobs.manager-checkin.enroll`
     override (the TestTaskRecheckTimer shape in tests/test_composer.py)."""
@@ -662,7 +662,7 @@ def _checkin_timers(tmp_path: Path, extra: str = "") -> Path:
     root = tmp_path / "r"
     root.mkdir(parents=True, exist_ok=True)
     if not (root / "lib").exists():
-        (root / "lib").symlink_to(REPO / "lib")
+        (root / "lib").symlink_to(REPO / "claudlobby/_runtime_scripts")
     (root / "fleet.yaml").write_text(_CHECKIN_FLEET + extra)
     fleet, merged = load_fleet(root / "fleet.yaml")
     paths = Paths(root=root, fleet_dir=root, package=source_package())
@@ -699,14 +699,14 @@ def test_arming_the_job_takes_it_out_of_the_dormant_manifest(tmp_path):
     # Not just present: composed from the REAL system.yaml job (script +
     # fleet argument), not a fleet-only stub the override happened to create
     # with no script of its own.
-    assert "lib/manager-checkin.sh checkin-fleet" in service.read_text()
+    assert "claudlobby/_runtime_scripts/manager-checkin.sh checkin-fleet" in service.read_text()
     assert "com.checkin.manager-checkin" not in _dormant_entries(timers)
 
 
 def test_the_unit_execs_the_trigger_with_the_fleet_as_its_argument(tmp_path):
     timers = _checkin_timers(tmp_path)
     service = (timers / "com.checkin.manager-checkin.service").read_text()
-    assert "lib/manager-checkin.sh checkin-fleet" in service
+    assert "claudlobby/_runtime_scripts/manager-checkin.sh checkin-fleet" in service
 
 
 def test_the_beat_is_fifteen_minutes(tmp_path):

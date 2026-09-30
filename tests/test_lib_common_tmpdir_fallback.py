@@ -19,7 +19,7 @@ actually run, could never succeed. Three things pinned here:
    lib-common.sh rather than surfacing as a bare, context-free mktemp error
    with nothing connecting it back to its real cause -- the actual defect
    #1682 reports: the template bug was silent at the SOURCE, and the symptom
-   that reached an operator (`lib/env-tiers.sh` exiting 1) carried no
+   that reached an operator (`claudlobby/_runtime_scripts/env-tiers.sh` exiting 1) carried no
    indication of what had actually failed or why.
 """
 
@@ -37,8 +37,8 @@ import pytest
 from tests.conftest import constructed_env
 
 REPO = Path(__file__).resolve().parents[1]
-LIB_COMMON = REPO / "lib" / "lib-common.sh"
-ENV_TIERS = REPO / "lib" / "env-tiers.sh"
+LIB_COMMON = REPO / "claudlobby/_runtime_scripts" / "lib-common.sh"
+ENV_TIERS = REPO / "claudlobby/_runtime_scripts" / "env-tiers.sh"
 
 
 def _source_probe(tmp_path: Path, env: dict) -> subprocess.CompletedProcess:
@@ -137,7 +137,7 @@ class TestBothAttemptsFailingNamesTheHelper:
     """The actual reported defect: before the fix, this path surfaced as a
     bare, context-free mktemp error -- nothing connecting it back to
     lib-common.sh or `_LC_TMPDIR`. Exercised through the real downstream
-    door the issue names, `lib/env-tiers.sh`, not just lib-common.sh alone."""
+    door the issue names, `claudlobby/_runtime_scripts/env-tiers.sh`, not just lib-common.sh alone."""
 
     @pytest.fixture
     def failing_mktemp(self, tmp_path: Path) -> Path:

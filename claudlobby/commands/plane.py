@@ -514,7 +514,7 @@ def cmd_plane_import_workstreams(args) -> int:
 
     pr = load_lib_module(paths.lib, "plane-readers.py")
     if pr is None:
-        print(f"migration workstreams: lib/plane-readers.py is not readable under {paths.lib}",
+        print(f"migration workstreams: claudlobby/_runtime_scripts/plane-readers.py is not readable under {paths.lib}",
               file=sys.stderr)
         return 3
 

@@ -129,7 +129,7 @@ def test_inherited_native_lock_spans_shell_work_and_normal_cleanup(proposal, tmp
         "sys.argv = sys.argv[sys.argv.index('claudlobby.runtime_admission'):]\n"
         "raise SystemExit(r._native_main())\n"
     )
-    guard = Path(__file__).resolve().parents[1] / "lib/runtime-admission.sh"
+    guard = Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts/runtime-admission.sh"
     script = f"""
 set -eu
 . {shlex.quote(str(guard))}

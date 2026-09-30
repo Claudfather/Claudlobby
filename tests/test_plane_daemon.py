@@ -661,12 +661,12 @@ def test_failed_drain_advances_the_deadline(tmp_path: Path, monkeypatch):
 
 
 def test_shim_end_to_end_through_real_daemon(running, *, scratch_plane_env):
-    """lib/plane-emit.sh -> lib/plane-socket-client.py -> daemon -> row: the
+    """claudlobby/_runtime_scripts/plane-emit.sh -> claudlobby/_runtime_scripts/plane-socket-client.py -> daemon -> row: the
     whole rung-1 chain, cross-language, on a real db."""
     import subprocess
 
     root, sock, _ = running
-    shim = Path(__file__).resolve().parent.parent / "lib" / "plane-emit.sh"
+    shim = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts" / "plane-emit.sh"
     batch = json.dumps({"events": [_comm("f", body="via the shim")]})
     r = subprocess.run(
         ["bash", str(shim)], input=batch, capture_output=True, text=True,
@@ -1121,7 +1121,7 @@ def test_a_cooldown_batch_lands_through_the_daemon_under_the_capture_policy(
             _until(lambda: (plane / "staged").is_dir())
             (plane / ".socket-wedged").write_text(f"{int(time.time())}\n")
         staged = plane / "staged"
-        shim = Path(__file__).resolve().parent.parent / "lib" / "plane-emit.sh"
+        shim = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts" / "plane-emit.sh"
         r = subprocess.run(
             ["bash", str(shim)],
             input=json.dumps({"events": [_comm("c", body="secret content")]}),

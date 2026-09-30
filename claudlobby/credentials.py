@@ -39,7 +39,7 @@ THE VISIBILITY TRAP, which this module used to have and now reports on. It read
 `Paths.env_file` — the FLEET `.env` when one exists, else the ROOT one, never
 both — and called that "the tier this fleet reads". The runtime reads FOUR, so
 a credential in `~/.env` was reported "absent from every tier" while the bot
-resolved it fine at boot. `lib/creds-check.sh` had the mirror bug (it read root
+resolved it fine at boot. `claudlobby/_runtime_scripts/creds-check.sh` had the mirror bug (it read root
 while being invoked per-fleet).
 
 Resolution now goes through `Paths.env_resolved`, the same door the runtime

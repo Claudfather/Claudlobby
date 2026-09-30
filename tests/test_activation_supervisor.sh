@@ -3,7 +3,7 @@
 # so neither a PATH mistake nor an absolute executable can reach a supervisor.
 set -euo pipefail
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-. "$TEST_DIR/../lib/supervisor.sh"
+. "$TEST_DIR/../claudlobby/_runtime_scripts/supervisor.sh"
 T="$(mktemp -d "${TMPDIR:?}/activation-supervisor.XXXXXX")"; trap 'rm -rf "$T"' EXIT
 TRACE="$T/trace"; : > "$TRACE"
 DELAY_UNLOAD="$T/delay-unload"; DELAY_ON_BOOTOUT=0
@@ -206,7 +206,7 @@ JOB_PID=600; CALLER_RC=0
 # Exercise the actual membership predicates with observed-data fixtures; only
 # kernel reads are replaced. No real process ownership or service is queried.
 unset -f python3
-python3 - "$TEST_DIR/../lib/supervisor-caller.py" <<'PY'
+python3 - "$TEST_DIR/../claudlobby/_runtime_scripts/supervisor-caller.py" <<'PY'
 import importlib.util
 from pathlib import Path
 import sys

@@ -32,7 +32,7 @@ def test_every_composed_bot_carries_the_verify_then_trust_check(fleet_dir):
 
 
 def test_every_composed_bot_is_told_what_the_set_h_prefix_is(fleet_dir):
-    # lib/dispatch.sh puts `set +H; ` in front of every non-slash-command
+    # claudlobby/_runtime_scripts/dispatch.sh puts `set +H; ` in front of every non-slash-command
     # message, and receivers flagged it as unexplained: only the dispatch
     # protocol said what it was, and only managers compose that. The note
     # sits in the pasted-text section every bot carries.

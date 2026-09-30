@@ -4,7 +4,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB_DIR="$SCRIPT_DIR/../lib"
+LIB_DIR="$SCRIPT_DIR/../claudlobby/_runtime_scripts"
 PASS=0; FAIL=0; TOTAL=0
 assert_eq() {
     TOTAL=$((TOTAL + 1)); local d="$1" e="$2" a="$3"
@@ -17,7 +17,7 @@ export HOME="$T/home"
 mkdir -p "$HOME/.config/systemd/user" "$HOME/Library/LaunchAgents"
 
 echo "=== bridge_fence_write + wait_bridge_ready — the marker-fenced gate ==="
-# shellcheck source=../lib/lib-common.sh
+# shellcheck source=../claudlobby/_runtime_scripts/lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 
 BOT="$T/bot"; mkdir -p "$BOT/logs"
@@ -70,7 +70,7 @@ echo "=== rolling-restart.sh — fleet enumeration + CLI guards ==="
 mkdir -p "$T/local/flatfleet" "$T/local/sysA/nestedfleet"
 printf 'fleet:\n  name: flatfleet\n' > "$T/local/flatfleet/fleet.yaml"
 printf 'fleet:\n  name: nestedfleet\n' > "$T/local/sysA/nestedfleet/fleet.yaml"
-# shellcheck source=../lib/rolling-restart.sh
+# shellcheck source=../claudlobby/_runtime_scripts/rolling-restart.sh
 . "$LIB_DIR/rolling-restart.sh"
 _fleets="$(rr_list_fleets | sort | tr '\n' ',')"
 assert_eq "rr_list_fleets finds flat + nested fleets" "flatfleet,nestedfleet," "$_fleets"

@@ -19,7 +19,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SNAP="$SCRIPT_DIR/../lib/selfstart-snapshot.sh"
+SNAP="$SCRIPT_DIR/../claudlobby/_runtime_scripts/selfstart-snapshot.sh"
 PASS=0; FAIL=0; TOTAL=0
 
 assert_eq() {

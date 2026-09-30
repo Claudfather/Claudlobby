@@ -220,7 +220,7 @@ class TestComputeBotUtilization:
 class TestComputeFleetUtilization:
     def _paths(self, tmp_path):
         (tmp_path / "library").mkdir(exist_ok=True)
-        (tmp_path / "lib").exists() or (tmp_path / "lib").symlink_to(REPO / "lib")
+        (tmp_path / "lib").exists() or (tmp_path / "lib").symlink_to(REPO / "claudlobby/_runtime_scripts")
         from tests.package_fixtures import source_package
         from claudlobby.paths import Paths
         return Paths(root=tmp_path, package=source_package())

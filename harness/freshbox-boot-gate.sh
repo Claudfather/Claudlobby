@@ -34,7 +34,7 @@
 set -euo pipefail
 
 SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LIB_DIR="$SRC_ROOT/lib"
+LIB_DIR="$SRC_ROOT/claudlobby/_runtime_scripts"
 # shellcheck source=/dev/null
 . "$LIB_DIR/lib-common.sh"
 
@@ -104,9 +104,9 @@ bash_tool_used() {  # rc 0 iff the transcript contains a Bash tool_use (a gated,
 # Symlink the real library/templates so a throwaway root-mode generate resolves
 # expertise/skills/guardrails; the freshbox account pins CLAUDE_CONFIG_DIR active
 # at the empty dir (the exact #644 F1(b) per-bot-config mechanism).
-# Paths.detect requires library/ + lib/ at the root; templates/ feeds generate.
+# Paths.detect requires library/ + claudlobby/_runtime_scripts/ at the root; templates/ feeds generate.
 ln -s "$CLAUDLOBBY_SRC/library" "$ROOT/library"
-ln -s "$CLAUDLOBBY_SRC/lib" "$ROOT/lib"
+ln -s "$CLAUDLOBBY_SRC/claudlobby/_runtime_scripts" "$ROOT/lib"
 ln -s "$CLAUDLOBBY_SRC/templates" "$ROOT/templates"
 mkdir -p "$CONFIG_DIR"
 

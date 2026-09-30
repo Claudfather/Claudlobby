@@ -20,7 +20,7 @@ from tests.test_config_plan import proposal
 from tests.test_releases import installed
 from tests.test_runtime_admission import _starting
 
-NATIVE = Path(__file__).resolve().parents[1] / "lib"
+NATIVE = Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts"
 
 
 def test_high_linux_boot_rung_extends_only_its_exact_start_budget():

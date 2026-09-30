@@ -1,6 +1,6 @@
 """The Claude Code version, as the compositor sees it (#1772).
 
-**This module owns no predicate.** It asks ``lib/claude-version.sh``, which is
+**This module owns no predicate.** It asks ``claudlobby/_runtime_scripts/claude-version.sh``, which is
 ``measure_claude_version`` in ``lib-common.sh``, the one reader every consumer
 of the version shares, and reports what it says. A Python copy of "run it,
 check the exit, parse the first line" would be a second reader to drift from

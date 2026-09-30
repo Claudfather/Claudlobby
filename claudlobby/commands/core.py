@@ -174,7 +174,7 @@ def cmd_warm_cache(args, *, paths=None, fleet=None, summary=None) -> int:
     than a nice-to-have.
 
     Which token of a server's args names its package is NOT decided here: that
-    grammar is `lib/mcp-package-grammar.py`, shared with the composer's binary
+    grammar is `claudlobby/_runtime_scripts/mcp-package-grammar.py`, shared with the composer's binary
     swap and with `check-npx-cache.sh`, the probe that gates this command.
     """
     paths = paths if paths is not None else _resolve_paths(args)

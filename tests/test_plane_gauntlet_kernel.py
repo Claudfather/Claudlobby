@@ -35,7 +35,7 @@ from claudlobby.plane.daemon import _recv_line
 from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import emit_batch
 
-LIB = Path(__file__).resolve().parent.parent / "lib"
+LIB = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts"
 H = "a" * 32
 
 

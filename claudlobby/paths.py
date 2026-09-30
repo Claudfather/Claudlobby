@@ -79,7 +79,7 @@ def _read_claudron_config(path: Path) -> dict[str, str]:
 def tmux_socket_for_bot(bot_dir: Path) -> str:
     """Resolve a bot's per-bot tmux server socket name from its ``bot.conf``.
 
-    Mirrors the bash SSOT ``tmux_socket_for_bot`` (lib/lib-common.sh): prefer the
+    Mirrors the bash SSOT ``tmux_socket_for_bot`` (claudlobby/_runtime_scripts/lib-common.sh): prefer the
     explicit ``TMUX_SOCKET`` field, fall back to ``BOT_SERVICE`` (equal by
     construction). When neither resolves (an un-regenerated or missing
     ``bot.conf``):
@@ -623,7 +623,7 @@ class Paths:
     def env_tiers(self, bot_name: str | None = None) -> list["EnvTier"]:
         """The four ``.env`` tiers in runtime sourcing order, least specific first.
 
-        Answered by ``lib/env-tiers.sh`` — the runtime's own resolver — not by a
+        Answered by ``claudlobby/_runtime_scripts/env-tiers.sh`` — the runtime's own resolver — not by a
         copy of its order kept here. Pass *bot_name* to include that bot's tier;
         without it the bot tier reports ``unresolved`` rather than guessing.
         """
@@ -781,13 +781,13 @@ def _is_host_data_root(path: Path) -> bool:
     )
 
 
-# --- importing the INSTALL's stdlib lib/*.py doors --------------------------
+# --- importing the INSTALL's stdlib claudlobby/_runtime_scripts/*.py doors --------------------------
 
 _LIB_MODULES: dict[tuple[str, float], object] = {}
 
 
 def load_lib_module(lib_dir: Path, filename: str):
-    """Import one of the INSTALL's stdlib ``lib/*.py`` scripts as a module, or
+    """Import one of the INSTALL's stdlib ``claudlobby/_runtime_scripts/*.py`` scripts as a module, or
     None when unreadable.
 
     Lives here rather than in any one consumer because three of them now exist
@@ -795,7 +795,7 @@ def load_lib_module(lib_dir: Path, filename: str):
     bash side which execs the same files directly), and a private copy of a
     loading mechanism is how the *next* consumer ends up loading from somewhere
     else. Memoized on (path, mtime): a brief once exec'd ``plane-readers.py``
-    six times per call; a re-installed ``lib/`` changes the mtime and is
+    six times per call; a re-installed ``claudlobby/_runtime_scripts/`` changes the mtime and is
     re-read.
 
     Returning None rather than raising is deliberate and is NOT a fallback —

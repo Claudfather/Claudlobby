@@ -28,7 +28,7 @@ from tests.plane_fixtures import plane_root
 
 REPO = Path(__file__).resolve().parent.parent
 # The REAL clock, not a literal instant, and that is load-bearing rather than
-# lazy. Three of these tests run lib/plane-expire.sh as a SUBPROCESS, which
+# lazy. Three of these tests run claudlobby/_runtime_scripts/plane-expire.sh as a SUBPROCESS, which
 # reads the wall clock; every other test seeds its rows at NOW +/- N days. Pin
 # NOW to a fixed past instant and the two clocks drift apart at one day per day
 # until the `fresh` row (NOW - 2d) crosses the 7-day horizon by the real clock
@@ -247,7 +247,7 @@ def _launcher(root, *argv, cli, armed):
     # and only an exact 0 stops it. The harness spells both explicitly rather
     # than relying on absence, so the pin reads the same way the door does.
     env["PLANE_EXPIRE_ENABLED"] = "1" if armed else "0"
-    return subprocess.run(["bash", str(REPO / "lib" / "plane-expire.sh"), *argv],
+    return subprocess.run(["bash", str(REPO / "claudlobby/_runtime_scripts" / "plane-expire.sh"), *argv],
                           capture_output=True, text=True, timeout=120, env=env)
 
 
@@ -287,7 +287,7 @@ def test_launcher_runs_with_no_flag_at_all(tmp_path):
     _seed(root)
     cli, argv = _recording_cli(tmp_path)
     env = constructed_env(CLAUDLOBBY_ROOT=root, CLAUDLOBBY_CLI=cli)
-    r = subprocess.run(["bash", str(REPO / "lib" / "plane-expire.sh"), "--dry-run"],
+    r = subprocess.run(["bash", str(REPO / "claudlobby/_runtime_scripts" / "plane-expire.sh"), "--dry-run"],
                        capture_output=True, text=True, timeout=120, env=env)
     assert r.returncode == 7
     assert argv.read_text().splitlines() == ["--root", str(root), "plane", "expire", "--dry-run"]

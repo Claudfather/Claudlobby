@@ -36,9 +36,9 @@ import pytest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-LIB_COMMON = REPO_ROOT / "lib" / "lib-common.sh"
-UPDATER = REPO_ROOT / "lib" / "fleet-state-update.sh"
-RECONCILE = REPO_ROOT / "lib" / "reconcile-fleet.sh"
+LIB_COMMON = REPO_ROOT / "claudlobby/_runtime_scripts" / "lib-common.sh"
+UPDATER = REPO_ROOT / "claudlobby/_runtime_scripts" / "fleet-state-update.sh"
+RECONCILE = REPO_ROOT / "claudlobby/_runtime_scripts" / "reconcile-fleet.sh"
 
 # Attribution matters now: prune is SCOPED, so a row's owning fleet decides
 # whether this fleet may remove it. "a0" is f-alpha's own departed bot — the one

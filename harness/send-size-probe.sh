@@ -138,7 +138,7 @@
 #                    FRESHBOX_REALBOOT) gate the same way, so a test sweep can
 #                    never spend one by accident.
 #      CLAUDE_BIN    default `claude` — the real one is the point.
-#      CLAUDLOBBY_SRC  checkout whose lib/ is under test (default: this script's).
+#      CLAUDLOBBY_SRC  checkout whose claudlobby/_runtime_scripts/ is under test (default: this script's).
 set -uo pipefail
 
 # ── pure helpers (sourceable for unit tests: guarded main at the bottom) ──────
@@ -362,7 +362,7 @@ payload_sha256() {
 # rather than a false disagreement. Exercises the real hook, never a copy.
 hook_received_fact() {
     local arrived="$1" msgid="$2" root="$3"
-    local hookp; hookp="$(dirname "${BASH_SOURCE[0]}")/../lib/plane-dispatch-in.sh"
+    local hookp; hookp="$(dirname "${BASH_SOURCE[0]}")/../claudlobby/_runtime_scripts/plane-dispatch-in.sh"
     [ -f "$hookp" ] || return 1
     mkdir -p "$root/state/plane" 2>/dev/null || return 1
     printf '{"*": "full"}' > "$root/state/plane/capture.json" 2>/dev/null || return 1
@@ -746,11 +746,11 @@ main() {
     [ -z "$miss" ] || { echo "send-size-probe: missing dependencies:$miss" >&2; return 3; }
 
     # The harness exemption, and the only flag that silences a plane record
-    # (lib/plane-emit.sh). A probe's synthetic send_blind / send_retry rows have
+    # (claudlobby/_runtime_scripts/plane-emit.sh). A probe's synthetic send_blind / send_retry rows have
     # no business in the host's plane — #846's constructed-destination rule.
     export PLANE_EMIT_DISABLED=1
     # shellcheck source=./lib-common.sh
-    . "$src/lib/lib-common.sh"
+    . "$src/claudlobby/_runtime_scripts/lib-common.sh"
     # lib-common arms `set -e` at source time on its caller's behalf. A probe
     # measures failures rather than aborting on them, and a mid-run abort would
     # print a partial table that reads as a complete one.
@@ -802,7 +802,7 @@ main() {
 
     echo "send-size-probe (#1493)"
     echo "  claude:   $claude_bin $ver"
-    echo "  lib:      $src/lib/lib-common.sh"
+    echo "  lib:      $src/claudlobby/_runtime_scripts/lib-common.sh"
     echo "  scratch:  $PROBE_BASE"
     echo "  home:     $home (throwaway)"
     echo "  arms:     $ARM   reps: $REPS   deadline: ${DEADLINE}s   filler: $FILLER"

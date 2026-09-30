@@ -24,7 +24,7 @@ from tests.conftest import constructed_env, load_lib_module
 from tests.package_fixtures import source_package
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CHECKER = REPO_ROOT / "lib" / "check-npx-cache.sh"
+CHECKER = REPO_ROOT / "claudlobby/_runtime_scripts" / "check-npx-cache.sh"
 SHIPPED_MCP = REPO_ROOT / "library" / "mcp"
 
 g = load_lib_module("mcp-package-grammar")

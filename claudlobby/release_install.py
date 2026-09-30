@@ -128,7 +128,7 @@ def _wheel_contents(wheel: Path, content: bytes) -> tuple[dict, dict[str, tuple[
             raise ReleaseError("candidate wheel has unsupported artifact metadata")
         Compatibility.from_dict(artifact.get("compatibility"))
         package = {name: value for name, value in files.items() if name.startswith("claudlobby/")}
-        for prefix in ("_native/", "_resources/library/", "_resources/voices/",
+        for prefix in ("_runtime_scripts/", "_resources/library/", "_resources/voices/",
                        "_resources/templates/", "_resources/seeds/"):
             if not any(name.startswith("claudlobby/" + prefix) for name in package):
                 raise ReleaseError(f"candidate wheel is missing packaged {prefix}")
@@ -282,7 +282,7 @@ def assemble_release(data_root: Path, wheel: Path, dependency_lock: Path,
             paths = ReleasePaths(
                 interpreter=python.relative_to(directory).as_posix(),
                 cli=(venv / "bin/claudlobby").relative_to(directory).as_posix(),
-                native=(site / "claudlobby/_native").relative_to(directory).as_posix(),
+                native=(site / "claudlobby/_runtime_scripts").relative_to(directory).as_posix(),
                 artifact=(site / "claudlobby/_artifact.json").relative_to(directory).as_posix(),
                 wheel=installed_wheel.relative_to(directory).as_posix(),
                 dependency_lock="dependency.lock")

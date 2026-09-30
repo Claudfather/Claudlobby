@@ -26,7 +26,7 @@ from tests.test_maintenance_jobs import _native_fixture
 from tests.test_plane_events_door import _serving
 
 REPO = Path(__file__).resolve().parent.parent
-LIB = REPO / "lib"
+LIB = REPO / "claudlobby/_runtime_scripts"
 
 CHAT_A = "-1001111111111"
 CHAT_B = "-1002222222222"

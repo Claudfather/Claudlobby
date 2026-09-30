@@ -18,7 +18,7 @@ The throwaway bot runs in a clean, synthetic environment. Production carries sta
 
 Reach for a canary by default when a change to the **Claudfather framework itself** (claudlobby, clauDNA, claudron) goes **live fleet-wide** — where applying it touches or restarts every running bot at once and a bad rollout would hurt the fleet:
 
-- `lib/` supervision & lifecycle scripts (`start-bot.sh`, `keepalive.sh`, restart/reload paths)
+- `claudlobby/_runtime_scripts/` supervision & lifecycle scripts (`start-bot.sh`, `keepalive.sh`, restart/reload paths)
 - The fleet plugin set (adds, removes, marketplace changes)
 - The bridge / dispatch transport
 - Composed `bot.conf` env that every bot sources at startup

@@ -1231,7 +1231,7 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
             _REPORTS_SINCE_SQL, (f["uid"], day_ago, alias, day_ago)).fetchone()[0]
         unacked, unacked_reason, acked_by, acked_at = None, None, None, None
         if pr is None:
-            unacked_reason = ("the install's lib/plane-readers.py is unreadable — the card"
+            unacked_reason = ("the install's claudlobby/_runtime_scripts/plane-readers.py is unreadable — the card"
                               " cannot count what the brief lists")
         elif not uids:
             unacked_reason = "no actor of this fleet on the plane — nobody could have acked"

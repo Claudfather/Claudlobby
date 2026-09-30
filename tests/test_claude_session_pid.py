@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-DOOR = Path(__file__).resolve().parent.parent / "lib" / "claude-session-pid.sh"
+DOOR = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts" / "claude-session-pid.sh"
 
 
 def run(args, **kw):
@@ -246,16 +246,16 @@ _LIB_REF = _re.compile(
 
 
 def _skill_lib_refs():
-    """Every lib/ path referenced by any shipped skill, with its source line."""
+    """Every claudlobby/_runtime_scripts/ path referenced by any shipped skill, with its source line."""
     skills = DOOR.parent.parent / "library" / "skills"
     for path in sorted(skills.glob("*/SKILL.md")):
         for lineno, line in enumerate(path.read_text().splitlines(), 1):
             for m in _LIB_REF.finditer(line):
-                yield path, lineno, "lib/" + m.group(1), line
+                yield path, lineno, "claudlobby/_runtime_scripts/" + m.group(1), line
 
 
 def test_every_lib_path_a_skill_references_exists_on_disk():
-    """Repo-wide, not just this door: a skill that names a lib/ script the
+    """Repo-wide, not just this door: a skill that names a claudlobby/_runtime_scripts/ script the
     repo does not ship is a rc-127 at the caller.
 
     Deliberately broader than the PR that added it -- the failure class is
@@ -267,7 +267,7 @@ def test_every_lib_path_a_skill_references_exists_on_disk():
         for p, n, rel, _ in _skill_lib_refs()
         if not (repo / rel).exists()
     ]
-    assert not missing, "skills reference lib/ paths that do not exist:\n  " + "\n  ".join(missing)
+    assert not missing, "skills reference claudlobby/_runtime_scripts/ paths that do not exist:\n  " + "\n  ".join(missing)
 
 
 def test_the_existence_check_rejects_the_shape_that_shipped():
@@ -277,8 +277,8 @@ def test_the_existence_check_rejects_the_shape_that_shipped():
     indistinguishable from one that cannot. Feeds it the exact mangled name.
     """
     repo = DOOR.parent.parent
-    assert not (repo / "lib/claude-claude-session-pid.sh").exists()
-    assert (repo / "lib/claude-session-pid.sh").exists()
+    assert not (repo / "claudlobby/_runtime_scripts/claude-claude-session-pid.sh").exists()
+    assert (repo / "claudlobby/_runtime_scripts/claude-session-pid.sh").exists()
     # and the substring form that passed for a whole review round:
     assert "claude-session-pid.sh" in "claude-claude-session-pid.sh", (
         "if this ever stops holding, the containment trap is gone and the "
@@ -307,7 +307,7 @@ def test_the_skill_line_actually_runs(skill):
         r = subprocess.run(
             ["bash", "-c", line],
             capture_output=True, text=True,
-            env={**os.environ, "CLAUDLOBBY_NATIVE_DIR": str(repo / "lib")},
+            env={**os.environ, "CLAUDLOBBY_NATIVE_DIR": str(repo / "claudlobby/_runtime_scripts")},
         )
         assert r.returncode != 127, (
             f"{skill}: the shipped line is not executable (rc 127): {line}\n{r.stderr}"

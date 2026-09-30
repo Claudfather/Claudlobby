@@ -52,7 +52,7 @@ def _coverage_line(plane, window_s, family=None) -> str:
     """The coverage statement for an OPEN plane session (#1658).
 
     The uptime door routes through here so the wording and derivation live in
-    `lib/plane-readers.py`, beside the plane's other SQL.
+    `claudlobby/_runtime_scripts/plane-readers.py`, beside the plane's other SQL.
 
     Degrades to a plain note rather than raising: a door must not lose its
     answer because the sentence describing that answer could not be built. An
