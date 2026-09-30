@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the cold-start harness launches the cold arm without the operator's settings, and fences root (#2002)
+
+The documented launch was a bare `claude` in the exported tree, and a bare `claude` loads the user's settings. On the #2002 host those held three things at once:
+- a bare `Bash` allow rule, which approves every shell command;
+- `defaultMode: auto`, which Claude Code now uses by default anyway;
+- passwordless sudo, beside those settings.
+
+So a blind run could have run `sudo`, or `lib/setup-system` (which calls sudo itself), without a single prompt. The skill's fence, "tell the human to decline `sudo`", assumed a prompt that need not appear.
+
+- **The launch line.** `prepare` now prints `cd <tree> && PATH="<state>/fence:$PATH" claude --setting-sources project,local --strict-mcp-config`.
+  - It loads no user settings and none of the user's MCP servers.
+  - The fence is a refusing `sudo`, first on `PATH`, so a script that calls sudo fails loudly instead of acting as root.
+  - Credentials still come from the Claude Code login.
+- **The preflight** now warns when user settings approve every shell command (a `Bash`, `Bash(*)` or `Bash(:*)` allow rule, or `bypassPermissions`), and when `sudo -n true` succeeds.
+- **`status` no longer records a false `script_error`.** Its process count was `$(pgrep -f "$tree" | wc -l)`. `pgrep` exits 1 when nothing matches, so under `pipefail` the substitution failed, and the inherited ERR trap recorded `non-zero exit at line 286` on every clean run. That landed in the plane of whatever root the harness resolved, which is the production plane when run from an install.
+- **Docs.** The skill, `validating-cold-start.md` and the `CLAUDE.md` row describe the new launch.
+- **Tests.** `tests/test_coldstart_harness.py` runs `prepare` itself (it must write the fence and print the line that uses it), each allow-everything spelling, and the status count with and without matching processes.
+
 ### Added — the host's heavy-job slot: heavy Bash commands run one at a time host-wide, opt-in per bot (#1686)
 
 Heavy jobs stacked across fleets stormed the primary host three times on 2026-09-29 (load 25 to 57, iowait up to 66%, swap full), and a prose rule saying "one at a time" cannot hold across a score of bots in four fleets. A bot with `heavy_slot: true` in `fleet.yaml` now gets a PreToolUse hook, `lib/heavy-slot-guard.sh`, composed for that bot and no other.
@@ -53,6 +71,7 @@ the fourth did not, and a new user's first bot, `claudfather`, did not.
   list `status` gains the skill and its four grants. That takes effect the
   moment `generate` writes it (#1310). A manager that already lists it
   composes it once, as before.
+
 ### Fixed — `/setup` asks `bridge_state` about claudfather's own session (#1536)
 
 **The old guidance could read `up` for a bridge that was going dark.** Step 5 told first-run operators to trust `bridge_state runtime/bots/claudfather` over the log. Without a session pid, that answers whether *a* poller holds the bot's Telegram slot, and during a restart the outgoing session's poller still does (#1530).
