@@ -1164,6 +1164,26 @@ def cmd_run(argv: List[str]) -> int:
                                      "holders": [_holder_summary(h) for h in holders]})
         return EX_TEMPFAIL
     slot, fd = got
+    # From here the wrapper holds the slot, so a signal must reach the job and
+    # the release must still be written. The handler goes in NOW: installed
+    # after the job started, it left a window in which a TERM killed the
+    # wrapper outright, with no forward and no release (found at load 18). A
+    # signal that lands before the job exists is held, and delivered to it the
+    # moment it does.
+    child = None
+    pending: List[int] = []
+
+    def forward(signum, _frame):
+        if child is None:
+            pending.append(signum)
+            return
+        try:
+            child.send_signal(signum)
+        except OSError:
+            pass
+
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, forward)
     boot = boot_id()
     previous = _read(fd)
     if previous.get("state") == "held":
@@ -1184,7 +1204,12 @@ def cmd_run(argv: List[str]) -> int:
     _write(fd, record)
     _emit("heavy_slot_acquired", {"slot": slot, "slots": n, "command": shape,
                                   "started_at": record["started_at"]})
-    child = None
+    delay = os.environ.get("HEAVY_SLOT_START_DELAY_S")  # test seam: hold the pre-start window open
+    if delay:
+        try:
+            time.sleep(float(delay))
+        except ValueError:
+            pass
     try:
         child = subprocess.Popen(argv)
     except FileNotFoundError:
@@ -1194,14 +1219,11 @@ def cmd_run(argv: List[str]) -> int:
         print(f"heavy-slot: {argv[0]}: permission denied", file=sys.stderr)
         rc = 126
     if child is not None:
-        def forward(signum, _frame):
+        for signum in pending:
             try:
                 child.send_signal(signum)
             except OSError:
                 pass
-
-        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-            signal.signal(sig, forward)
         rc = child.wait()
     status = rc if rc >= 0 else 128 - rc
     ended = time.time()

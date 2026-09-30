@@ -28,8 +28,8 @@ WRAPPER = REPO / "lib" / "heavy-slot.py"
 # The stub job: records that it ran, traps TERM, waits for a file when asked,
 # exits with a chosen code.
 STUB = """#!/bin/bash
-touch "$STUB_DIR/ran.$$"
 trap 'touch "$STUB_DIR/term"; exit 143' TERM
+touch "$STUB_DIR/ran.$$"
 if [ -n "${STUB_WAIT:-}" ]; then
   while [ ! -e "$STUB_WAIT" ]; do sleep 0.05; done
 fi
@@ -229,6 +229,20 @@ class TestTheSlot:
         assert (se.tmp / "term").exists()
         assert rc in (143, -signal.SIGTERM)
         assert _record(se)["state"] == "released"
+
+    def test_a_signal_before_the_job_starts_is_still_forwarded_and_released(self, se):
+        # The wrapper holds the slot from the moment it writes the record, so a
+        # TERM from then on must reach the job and leave a release. Found at
+        # load 18: with the handler installed after the job started, a TERM in
+        # between killed the wrapper outright. The seam holds that window open.
+        p = _start(se, "pytest", STUB_WAIT=se.tmp / "never", HEAVY_SLOT_START_DELAY_S=3)
+        _wait_for(lambda: (se.state / "slot-0.lock").exists()
+                  and _record(se).get("state") == "held")
+        p.send_signal(signal.SIGTERM)
+        rc = p.wait(15)
+        assert rc in (143, -signal.SIGTERM)
+        rec = _record(se)
+        assert rec["state"] == "released" and rec["exit"] == 143
 
     def test_a_command_that_is_not_found_is_released_with_127(self, se):
         r = _run(se, str(se.tmp / "missing" / "pytest"))
