@@ -41,6 +41,7 @@ from .config import (
     load_fleet,
     load_host_boot,
     load_host_jobs,
+    heavy_slot_script_path,
 )
 from .known_values import ENV_TIERS, HEADLESS_TRIM_VARS, SHELL_IDENT_RE
 from .loader import (
@@ -4946,6 +4947,45 @@ def compose_host_mention_allowlist(
     target = base / "mention-allowlist"
     safe = sorted(n for n in names if _HANDLE_RE.match(n or ""))
     target.write_text("".join(f"{n}\n" for n in safe), encoding="utf-8")
+    return target
+
+
+def compose_heavy_slot_scripts(fleet: FleetConfig, paths: Paths, *,
+                               output_dir: Path | None = None) -> Path:
+    """Write this fleet's declared heavy scripts for the heavy-job slot (#2039).
+
+    `heavy_slot: {scripts: [...]}` names scripts that start a heavy tool inside
+    them (a render script that drives a browser), which the hook cannot see and
+    the wrapper refuses by design. Each is resolved here: relative to its bot's
+    directory, or absolute (`~` expanded). The fleet's scripts go to the
+    INSTALL's `runtime/_host/heavy-slot/<fleet>.json`, beside a `<fleet>.names`
+    file of their last path components for the guard's no-fork prefilter.
+
+    `lib/heavy-slot.py` reads every fleet's file from its own install and never
+    through the environment, so a script passes the wrapper's heavy check only
+    because a manifest declares it, never because of its command line. A fleet
+    that declares none has neither file: a stale pair is removed, so dropping a
+    declaration takes effect at the next generate like adding one does.
+    """
+    base = output_dir if output_dir is not None else paths.root / "runtime" / "_host" / "heavy-slot"
+    target = base / f"{fleet.name}.json"
+    names_file = base / f"{fleet.name}.names"
+    bots: dict[str, list[str]] = {}
+    for name, bot in sorted(fleet.bots.items()):
+        if not bot.heavy_slot_scripts:
+            continue
+        bots[name] = [heavy_slot_script_path(p, paths.runtime_bots / name)
+                      for p in bot.heavy_slot_scripts]
+    if not bots:
+        for f in (target, names_file):
+            if f.exists():
+                f.unlink()
+        return target
+    base.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps({"v": 1, "fleet": fleet.name, "bots": bots},
+                                 indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    names = sorted({Path(p).name for patterns in bots.values() for p in patterns})
+    names_file.write_text("".join(f"{n}\n" for n in names), encoding="utf-8")
     return target
 
 

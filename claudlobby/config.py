@@ -789,6 +789,11 @@ class BotConfig:
     # heavy-job slot, a PreToolUse hook composed for this bot only
     # (composer._with_heavy_slot_hook).
     heavy_slot: bool = False
+    # Opt-in per bot, beside it: scripts that start a heavy tool inside them
+    # (#2039), as written in fleet.yaml (relative to the bot dir, or absolute;
+    # a glob matches within one path component). The composer resolves them
+    # and hands them to the hook and the wrapper (compose_heavy_slot_scripts).
+    heavy_slot_scripts: tuple[str, ...] = ()
     # #1665 Layer 0b, opt-in per bot: deny rules on the shared config dir, the
     # .env tiers and the install's code (composer.compose_settings_local).
     isolation: IsolationConfig = field(default_factory=IsolationConfig)
@@ -1740,6 +1745,31 @@ def _parse_enum(label: str, value: str | None, known: frozenset[str]) -> str | N
     return value
 
 
+def heavy_slot_script_path(pattern: str, bot_dir: Path) -> str:
+    """Where a declared heavy script (#2039) resolves: an absolute pattern
+    (`~` expanded) as written, anything else relative to its bot's directory,
+    normalized. The one rule the composer and the validator share."""
+    p = os.path.expanduser(pattern)
+    return os.path.normpath(p if os.path.isabs(p) else str(bot_dir / p))
+
+
+def _heavy_slot(value: Any) -> tuple[bool, tuple[str, ...]]:
+    """``heavy_slot``: ``true``/``false`` (strict, as before), or a mapping
+    ``{scripts: [...]}`` that turns the slot on and declares the bot's heavy
+    scripts (#2039). A malformed mapping is refused, never read as on."""
+    if isinstance(value, dict):
+        unknown = sorted(set(value) - {"scripts"})
+        if unknown:
+            raise ValueError(f"'heavy_slot' takes only 'scripts'; unknown key(s): {unknown}")
+        scripts = value.get("scripts", [])
+        if not isinstance(scripts, list) or not all(
+            isinstance(s, str) and s.strip() for s in scripts
+        ):
+            raise ValueError("'heavy_slot.scripts' must be a list of non-empty paths or globs")
+        return True, tuple(s.strip() for s in scripts)
+    return _strict_bool("'heavy_slot'", value), ()
+
+
 def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> BotConfig:
     raw = raw or {}
     tg_defaults = defaults.get("telegram", {}) or {}
@@ -1928,10 +1958,10 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
             "'mcp_direct_launch'",
             raw.get("mcp_direct_launch", defaults.get("mcp_direct_launch", False)),
         ),
-        heavy_slot=_strict_bool(
-            "'heavy_slot'",
-            raw.get("heavy_slot", defaults.get("heavy_slot", False)),
-        ),
+        heavy_slot=_heavy_slot(
+            raw.get("heavy_slot", defaults.get("heavy_slot", False)))[0],
+        heavy_slot_scripts=_heavy_slot(
+            raw.get("heavy_slot", defaults.get("heavy_slot", False)))[1],
         isolation=_parse_isolation(
             defaults.get("isolation"), raw.get("isolation"), name
         ),

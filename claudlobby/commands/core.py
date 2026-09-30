@@ -285,6 +285,7 @@ def cmd_validate(args) -> int:
 def cmd_generate(args) -> int:
     from ..composer import (
         compose_fleet_timers,
+        compose_heavy_slot_scripts,
         compose_host_bot_handles,
         compose_host_mention_allowlist,
         compose_host_timers,
@@ -341,6 +342,12 @@ def cmd_generate(args) -> int:
     log.info("composed bot-handle guard list → %s", handles)
     allowlist = compose_host_mention_allowlist(paths)
     log.info("composed mention allowlist → %s", allowlist)
+
+    # The fleet's declared heavy scripts (#2039): every bot of the fleet, so a
+    # `generate --bot` rewrites the whole fleet's file, not only that bot's.
+    declared = compose_heavy_slot_scripts(fleet, paths)
+    if declared.exists():
+        log.info("composed declared heavy scripts → %s", declared)
 
     _warn_unresolvable_skill_refs(paths)
 

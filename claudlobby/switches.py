@@ -655,7 +655,9 @@ SWITCHES: tuple[Switch, ...] = (
              "an npm/pnpm/yarn install, a test or build script, next build, "
              "Playwright, Chromium) under the host's heavy-job slot: one at a "
              "time host-wide, a refused call names the holder, and the lock "
-             "file records what was running if the host resets (#1686)",
+             "file records what was running if the host resets (#1686); "
+             "heavy_slot: {scripts: [...]} also slots declared scripts that "
+             "start a heavy tool inside them (#2039)",
     ),
     Switch(
         key="boot-brief",

@@ -532,9 +532,18 @@ Opt-in, off by default (#1686). Heavy jobs stacked across fleets have stormed th
 bots:
   ravi:
     heavy_slot: true   # STRICT bool: a typo string is a parse error, never an arming
+  render-bot:
+    heavy_slot:        # the slot, plus scripts that start a heavy tool inside them (#2039)
+      scripts: [render.py, "tools/*.py", /opt/shared/export.py]
 ```
 
-- **What counts as heavy:** a whole pytest or vitest run (a run that names its test files is not gated), an npm/pnpm/yarn install, a `test` or `build` package script, `next build`, Playwright, and Chromium. They are recognised through `npx`, `pnpm exec`/`dlx`, `yarn`, `timeout`, `env`, `nice`, `nohup`, `uv run` and `bash -c '…'`. Bash tool calls only: a heavy job started from inside a script is not seen.
+- **What counts as heavy:** a whole pytest or vitest run (a run that names its test files is not gated), an npm/pnpm/yarn install, a `test` or `build` package script, `next build`, Playwright, and Chromium. They are recognised through `npx`, `pnpm exec`/`dlx`, `yarn`, `timeout`, `env`, `nice`, `nohup`, `uv run` and `bash -c '…'`. Bash tool calls only: a heavy job started from inside a script is not seen unless the script is declared (next item).
+- **Declared scripts** (#2039). A heavy tool started inside a script, such as a render script that drives a browser, is invisible to the matcher, and the wrapper refuses a script by design. `heavy_slot: {scripts: [...]}` turns the slot on, exactly as `true` does, and declares such scripts.
+  - **Paths:** each is relative to the bot directory, or absolute (`~` is expanded). A glob (`*`, `?`, `[...]`) matches within one directory level.
+  - **Where the list lives:** `generate` writes the fleet's resolved list to the install's `runtime/_host/heavy-slot/<fleet>.json`, rewritten on every generate, `--bot` included. The hook and the wrapper read it from there and never through the environment, so a script passes the wrapper's heavy check only because a manifest declares it.
+  - **How it may be run:** `python3 <script>`, `node`/`bash`/`sh <script>`, `uv run <script>`, or the script itself by path.
+  - **The `cd` limit:** the hook resolves a relative script against the Bash call's working directory, so a script reached after a `cd` in the same command is slotted only when it is named by an absolute path.
+  - **A typo is visible:** a declared script that matches no file draws a `heavy-slot-script` warning at validate.
 - **How:** `generate` composes a PreToolUse hook, `lib/heavy-slot-guard.sh`, for this bot and for no other. It puts `lib/heavy-slot.py run --` in front of each heavy command and leaves every other byte of the command alone.
 - **The slot** is a `flock` on `$CLAUDLOBBY_ROOT/state/heavy-slot/slot-N.lock`, whose contents name the holder: fleet, bot, command, start and, once it ends, release and exit code. The kernel drops the lock when its holder dies, so a dead holder never wedges the slot. The next holder records the unreleased hold on the plane (`heavy_slot_unreleased`); a different boot id means the job was running when the host reset (#1644).
 - **Knobs, host-wide, read on every use:** `state/heavy-slot/slots` holds the slot count (1 when absent). `state/heavy-slot/disabled`, when it exists, makes the hook pass every call through at once, with no generate and no restart. `lib/heavy-slot.py status` answers who holds each slot, or who held it last.
