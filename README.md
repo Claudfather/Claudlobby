@@ -21,7 +21,7 @@ Add a 9th bot? Add 10 lines to `fleet.yaml`. Update a guardrail? Edit one file i
 
 ## What it changes on your machine
 
-The `/setup` skill runs three steps from your checkout: `lib/setup-system` once per host, `claudlobby generate`, and `lib/setup-fleet` once per fleet (`.claude/skills/setup/SKILL.md`). `lib/setup-system --dry-run` changes nothing: every host step — `apt-get update` and the package installs — is guarded by `[ "$DRY_RUN" != 1 ]` and only announced (`phase_packages`, `phase_node`). A real run (no `--dry-run`) makes these changes with `sudo`, which may prompt for your password, and installs with `apt-get install -y`, which does not ask. Each row below names the file that makes the change.
+The `/setup` skill runs three steps from your checkout: `lib/setup-system` once per host, `claudlobby generate`, and `lib/setup-fleet` once per fleet (`.claude/skills/setup/SKILL.md`). `lib/setup-system --dry-run` changes nothing: `apt-get update` and every install are guarded by `[ "$DRY_RUN" != 1 ]` (`phase_packages`, `phase_node`), so `--dry-run` runs none of them — a missing package is listed as a `would run` line, not installed. A real run (no `--dry-run`) makes these changes with `sudo`, which may prompt for your password, and installs with `apt-get install -y`, which does not ask. Each row below names the file that makes the change.
 
 | Change | Where | Made by |
 |---|---|---|
