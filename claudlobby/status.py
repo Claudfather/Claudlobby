@@ -113,6 +113,11 @@ class BotStatus:
         """True when nothing ever answered, so up-or-down is not known."""
         return self.service_sub == _SVC_UNDETERMINED
 
+    @property
+    def active_task(self) -> str | None:
+        """Legacy recorded tasks are current only while working or blocked."""
+        return self.current_task if self.state in ("working", "blocked") else None
+
 
 def _check_tmux_sessions(fleet, paths) -> set[str]:
     """Live bot session names across every per-bot tmux server.
@@ -618,9 +623,9 @@ def format_table(statuses: list[BotStatus], fleet_name: str,
 
     for bs in statuses:
         indicator = _health_indicator(bs)
-        activity = bs.current_task or bs.last_completed or ""
+        activity = bs.active_task or bs.last_completed or ""
         activity = _truncate(activity, 40)
-        if bs.current_task:
+        if bs.active_task:
             activity_display = activity
         elif bs.last_completed:
             activity_display = _dim(activity)
@@ -684,8 +689,8 @@ def format_bot_detail(bs: BotStatus) -> str:
     lines.append(f"  Idle since: {_idle_since_display(bs, now)}")
     lines.append(f"  Task age:   {_task_age_display(bs)}")
 
-    if bs.current_task:
-        lines.append(f"  Task:       {bs.current_task}")
+    if bs.active_task:
+        lines.append(f"  Task:       {bs.active_task}")
     if bs.last_completed:
         lines.append(f"  Last:       {bs.last_completed}")
 
@@ -716,7 +721,7 @@ def format_json(statuses: list[BotStatus], fleet_name: str,
                 "busy_pct_24h": bs.busy_pct_24h,
                 "idle_since": (bs.idle_since.isoformat() if bs.idle_since else None),
                 "current_task_age_secs": bs.current_task_age_secs,
-                "current_task": bs.current_task,
+                "current_task": bs.active_task,
                 "last_completed": bs.last_completed,
             }
         )

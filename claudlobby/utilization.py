@@ -175,7 +175,8 @@ def compute_bot_utilization(
     busy_7d = _compute_busy_pct(entries, timedelta(days=7), now)
 
     state = fleet_state_bot.get("status", "unknown")
-    current_task = fleet_state_bot.get("current_task")
+    current_task = (fleet_state_bot.get("current_task")
+                    if state in ("working", "blocked") else None)
 
     idle_since = None
     if entries and entries[-1][1] == "IDLE":
