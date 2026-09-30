@@ -61,11 +61,13 @@ def _timer_text() -> str:
 
 @pytest.fixture
 def host(tmp_path):
-    """An isolated HOME with a stub systemctl, plus two composed trees.
+    """A modeled Linux host with private HOME, uname and systemctl stubs.
 
     systemctl is stubbed rather than skipped: the guard has to run in the real
     script's control flow, and a real `enable --now` would touch this machine's
-    live user units.
+    live user units. The Linux-only installer's OS input is also explicit, so
+    this ownership contract runs on macOS without claiming native systemd
+    coverage. A separate negative control exercises its real Darwin refusal.
     """
     home = tmp_path / "home"
     (home / ".config" / "systemd" / "user").mkdir(parents=True)
@@ -74,6 +76,16 @@ def host(tmp_path):
     stub = bin_dir / "systemctl"
     stub.write_text('#!/bin/bash\nprintf "%s\\n" "systemctl $*" >> "$SYSTEMCTL_LOG"\n')
     stub.chmod(0o755)
+    uname = bin_dir / "uname"
+    uname.write_text(
+        '#!/bin/bash\n'
+        '[ "$#" -eq 0 ] || exit 91\n'
+        'printf "%s\\n" "${HOST_TEST_KERNEL:?}" >> "$UNAME_LOG"\n'
+        'printf "%s\\n" "$HOST_TEST_KERNEL"\n'
+    )
+    uname.chmod(0o755)
+    temp = tmp_path / "tmp"
+    temp.mkdir()
 
     trees = {}
     for name in ("A", "B"):
@@ -89,11 +101,13 @@ def host(tmp_path):
         "units": home / ".config" / "systemd" / "user",
         "trees": trees,
         "log": tmp_path / "systemctl.log",
+        "uname_log": tmp_path / "uname.log",
+        "tmp": temp,
         "path": f"{bin_dir}:{os.environ.get('PATH', '')}",
     }
 
 
-def _enroll(host, tree: str, *extra: str) -> subprocess.CompletedProcess:
+def _enroll(host, tree: str, *extra: str, kernel="Linux") -> subprocess.CompletedProcess:
     """setup-system phase 9's call shape: TIMER_DIR + UNIT_NAME overrides."""
     root = host["trees"][tree]
     env = constructed_env(
@@ -102,6 +116,12 @@ def _enroll(host, tree: str, *extra: str) -> subprocess.CompletedProcess:
         TIMER_DIR=str(root / "runtime" / "_host" / "timers"),
         UNIT_NAME=UNIT,
         SYSTEMCTL_LOG=str(host["log"]),
+        HOST_TEST_KERNEL=kernel,
+        UNAME_LOG=str(host["uname_log"]),
+        TMPDIR=str(host["tmp"]),
+        CLAUDLOBBY_ROOT=str(root),
+        PLANE_EMIT_DISABLED="1",
+        PLANE_SOCKET=str(root / "no-daemon.sock"),
     )
     return subprocess.run(
         ["bash", str(INSTALLER), JOB, *extra],
@@ -162,6 +182,21 @@ class TestEnrollmentRefusesCapture:
         r = _enroll(host, "A")
         assert r.returncode == 0, r.stderr
         assert str(host["trees"]["A"]) in _installed(host)
+        assert host["uname_log"].read_text().splitlines() == ["Linux"]
+        assert host["log"].read_text().splitlines() == [
+            "systemctl --user daemon-reload",
+            f"systemctl --user enable --now {UNIT}.timer",
+        ]
+
+    @pytest.mark.parametrize("kernel", ["Darwin", "OtherOS"])
+    def test_platform_refusal_precedes_install_and_manager_calls(self, host, kernel):
+        before = sorted(host["units"].iterdir())
+        result = _enroll(host, "A", kernel=kernel)
+        assert result.returncode == 1
+        assert "Linux only (systemd)" in result.stderr
+        assert host["uname_log"].read_text().splitlines() == [kernel]
+        assert sorted(host["units"].iterdir()) == before
+        assert not host["log"].exists(), "platform refusal invoked the service manager"
 
     def test_reenrolling_from_the_owning_root_stays_frictionless(self, host):
         assert _enroll(host, "A").returncode == 0
