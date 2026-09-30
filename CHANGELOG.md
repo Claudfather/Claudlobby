@@ -10,13 +10,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 The repository had no license file, while `pyproject.toml` declared MIT. It
 now carries the Apache License 2.0 (`LICENSE`, the unmodified text) and a
-`NOTICE` naming the copyright holder, which section 4(d) of the license carries
-into every redistribution.
+`NOTICE`, which section 4(d) of the license carries into every redistribution.
+`NOTICE` names the copyright holder. It also credits the three outside
+contributions merged while `pyproject.toml` declared MIT (#190 and #191 by
+0xbeamish, #271 by GHX5T-SOL): it lists their files and carries the MIT
+License notice that accompanies them.
 
 - `pyproject.toml` declares `license = "Apache-2.0"`, an SPDX expression
   (PEP 639), and ships `LICENSE` and `NOTICE` as license files. The expression
   form needs setuptools 77, so the build requirement moved from
-  `setuptools>=68` to `setuptools>=77`.
+  `setuptools>=68` to `setuptools>=77`. An isolated build (pip's default)
+  fetches it. A build with `--no-build-isolation` needs setuptools 77 or newer
+  installed first: with 66.1.1 it fails at metadata generation
+  (`invalid pyproject.toml config: project.license`).
 - `README.md` has a License section.
 
 ### Fixed — every bot is told what a dispatch's leading `set +H; ` is, and the dispatch protocol stops describing something it does not do

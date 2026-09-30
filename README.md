@@ -189,4 +189,4 @@ PRs welcome.
 
 ## License
 
-Licensed under the [Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE) for the copyright notice that travels with it.
+Licensed under the [Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE) for the notices that travel with it: the copyright notice, and the MIT License notice for three outside contributions made while the project declared MIT.
