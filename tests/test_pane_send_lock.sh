@@ -192,10 +192,12 @@ echo "=== #2036: two senders to ONE pane each arrive whole, then their own Enter
 
 # THE defect. A starts first and is slow (0.2s between chunks); B starts once
 # A's first chunk is in the pane, while A still has four to go. Without a lock
-# B's chunks land between A's, and A's Enter submits a mixture.
+# B's chunks land between A's, and A's Enter submits a mixture. A also pauses
+# 0.3s before its Enter, so a lock that covered the chunks but not the Enter
+# (the issue asks for the whole send, verify and repair included) fails too.
 : > "$PANE_LOG"
 rca=0; rcb=0
-( PANE_SEND_CHUNK_SETTLE_S=0.2 pane_send_verified sockX botX "$A" ) >/dev/null 2>"$TMPD/a.err" &
+( PANE_SEND_CHUNK_SETTLE_S=0.2 PANE_SEND_SETTLE_S=0.3 pane_send_verified sockX botX "$A" ) >/dev/null 2>"$TMPD/a.err" &
 pa=$!
 wait_for "sockX|botX|chunk|A0001" || true
 ( PANE_SEND_CHUNK_SETTLE_S=0.01 pane_send_verified sockX botX "$B" ) >/dev/null 2>"$TMPD/b.err" &
@@ -288,18 +290,28 @@ lock_free "$lf" && r=free || r=held
 assert_eq "...and leaves the pane's lock free" "free" "$r"
 
 # SIGKILL runs no trap. The kernel drops the lock with the last descriptor, so
-# the holder's death frees it once its in-flight child (a chunk's sleep) exits.
+# the holder's death frees it once its in-flight child (a chunk's 1s sleep)
+# exits. The send left alone would hold the pane for 4s more, and the check
+# gives the kill 1.5s, so a pass is the kill's doing, not the send ending.
 lf=$(lock_file_for sockX botK)
 : > "$PANE_LOG"
-( PANE_SEND_CHUNK_SETTLE_S=0.5 pane_send_verified sockX botK "$A" ) >/dev/null 2>&1 &
+( PANE_SEND_CHUNK_SETTLE_S=1 pane_send_verified sockX botK "$A" ) >/dev/null 2>&1 &
 pk=$!
 BG_PIDS="$BG_PIDS $pk"
 wait_for "sockX|botK|chunk|A0001" || true
 holder=""
-[ -z "$lf" ] || holder=$(sed -n 's/^pid=\([0-9][0-9]*\) .*/\1/p' "$lf" 2>/dev/null | head -1)
+[ -z "$lf" ] || holder=$(sed -n 's/^pid=\([0-9][0-9]*\) .*/\1/p' "$lf" 2>/dev/null | head -1 || true)
+r=$(sed -n '1p' "$lf" 2>/dev/null || true)
+case "$r" in
+    *"bot=$SYNTH_ID door="*"what=payload"*) r=named ;;
+    *) r="record: ${r:-none}" ;;
+esac
+assert_eq "a sender holding a pane records who it is in the lock file" "named" "$r"
+lock_free "$lf" && r=free || r=held
+assert_eq "...and the pane is held while it sends" "held" "$r"
 [ -z "$holder" ] || kill -9 "$holder" 2>/dev/null || true
 r=held; i=0
-while [ "$i" -lt 60 ]; do
+while [ "$i" -lt 30 ]; do
     if lock_free "$lf"; then r=free; break; fi
     sleep 0.05
     i=$((i + 1))
