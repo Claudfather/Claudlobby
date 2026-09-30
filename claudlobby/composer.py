@@ -2950,6 +2950,17 @@ def compose_settings_local(
     return settings
 
 
+def _write_atomic(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` so a write that fails part-way leaves the old file whole."""
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(text)
+        os.replace(tmp, path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def _reconcile_access_json(
     access_path: Path,
     fresh: dict,
@@ -2999,7 +3010,7 @@ def _reconcile_access_json(
         if fleet.human_telegram_id not in allow:
             allow.append(fleet.human_telegram_id)
 
-    access_path.write_text(json.dumps(existing, indent=2) + "\n")
+    _write_atomic(access_path, json.dumps(existing, indent=2) + "\n")
 
 
 def compose_bot(
@@ -3112,20 +3123,16 @@ def compose_bot(
                 if access_path.exists():
                     _reconcile_access_json(access_path, access, bot, fleet, log)
                 else:
-                    access_path.write_text(json.dumps(access, indent=2) + "\n")
+                    _write_atomic(access_path, json.dumps(access, indent=2) + "\n")
             except OSError as exc:
-                reason = exc.strerror or exc.__class__.__name__
-                _log.warning(
-                    "bot %s: could not write %s (%s), skipping access.json",
-                    bot.bot_id,
-                    access_path,
-                    reason,
+                msg = (
+                    f"bot {bot.bot_id}: could not write {access_path} "
+                    f"({exc.strerror or exc.__class__.__name__}), skipping access.json, so the bot's "
+                    "Telegram group settings may be missing or stale; fix the path and re-run generate"
                 )
+                _log.warning("%s", msg)
                 if log is not None:
-                    log(
-                        f"  WARNING: bot {bot.bot_id}: could not write {access_path} ({reason}), "
-                        "skipping access.json; fix the path and re-run generate"
-                    )
+                    log(f"  WARNING: {msg}")
 
     (bot_dir / f"{fleet.service_prefix}.{bot.bot_id}.service").write_text(
         compose_systemd_unit(bot, fleet, paths, boot_delay_s=boot_delay_s)

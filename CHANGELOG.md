@@ -10,8 +10,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 `compose_bot` writes each Telegram bot's `access.json` into the host-global `~/.claude/channels/telegram-<handle>/`, outside the tree being composed. The invalid-handle branch beside it already warned and skipped, but this branch had no error handling. So a failed write aborted `generate` part-way with a raw traceback, and the fleet's later bots never composed. Causes include an unwritable or non-directory channel root, or a full disk.
 
-- **Now:** each affected bot gets one warning naming the path and the reason. Composition continues, and the next `generate` retries the write.
-- **Tests:** one bot, and a whole-fleet `compose_fleet` (the path `claudlobby generate` takes). In both, the channel root is replaced by a regular file, so the write fails even when the suite runs as root.
+- **Now:** each affected bot gets one warning naming the path, the reason and what it means: the bot's Telegram group settings may be missing or stale until the path is fixed and `generate` re-runs. Composition continues.
+- **The write is whole or not at all.** `access.json` is written to a temporary name and renamed into place, at both write sites. A write that fails part-way, as on a full disk, leaves the old file and its runtime state (approved senders, pending pairings) untouched, or no file at all, and the next `generate` writes it.
+- **Tests:** one bot, and a whole-fleet `compose_fleet` (the path `claudlobby generate` takes), each read from the logger, which is what the CLI shows. In both, the channel root is replaced by a regular file, so the write fails even when the suite runs as root. Two more simulate a write that stores 40 bytes and fails, on an existing file and on a first write.
 - **Unchanged:** where the file lands (#1683 step 2). That remains a separate decision.
 
 ### Added — `claudlobby doctor` asks `claudron doctor` about each wired vault, and never applies `--fix` (Claudron #190, part C)

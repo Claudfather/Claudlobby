@@ -5322,52 +5322,128 @@ class TestNoLeafManagerShapesComposeByteIdentically:
 class TestAccessJsonWriteFailureWarns:
     """#1683: the channel access.json write reaches the host-global ~/.claude and
     had no error handling, while the invalid-handle branch beside it warns and
-    skips. A failed write aborted `generate` part-way with a traceback."""
+    skips. A failed write aborted `generate` part-way with a traceback.
+
+    `claudlobby generate` passes no `log=`, so the warning an operator sees is
+    the logger's; these tests read that, the way the CLI calls the composer."""
 
     @staticmethod
-    def _compose_lead(fleet_dir, tmp_path, monkeypatch):
-        from claudlobby.composer import compose_bot
-        from tests.conftest import load_test_fleet, make_paths
-
+    def _home_with_a_file_where_channels_belongs(tmp_path, monkeypatch) -> Path:
         fake_home = tmp_path / "home"
         (fake_home / ".claude").mkdir(parents=True)
         # A regular file where the channels directory belongs: `mkdir` under it
         # fails whoever runs the suite, root included (a chmod would not).
         (fake_home / ".claude" / "channels").write_text("not a directory\n")
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
-        fleet = load_test_fleet(fleet_dir)
-        logs: list[str] = []
-        bot_dir = compose_bot(fleet.bots["lead"], fleet, make_paths(fleet_dir), log=logs.append)
-        return fake_home, fleet, bot_dir, logs
+        return fake_home
 
-    def test_an_unwritable_channel_root_warns_and_the_bot_still_composes(
-        self, fleet_dir, tmp_path, monkeypatch
+    @staticmethod
+    def _access_warnings(caplog) -> list[str]:
+        return [r.getMessage() for r in caplog.records if "access.json" in r.getMessage()]
+
+    def test_generate_prints_the_access_json_warning_where_the_cli_shows_it(
+        self, fleet_dir, tmp_path, monkeypatch, caplog
     ):
-        fake_home, fleet, bot_dir, logs = self._compose_lead(fleet_dir, tmp_path, monkeypatch)
+        import logging
+
+        from claudlobby.composer import compose_bot
+        from tests.conftest import load_test_fleet, make_paths
+
+        fake_home = self._home_with_a_file_where_channels_belongs(tmp_path, monkeypatch)
+        fleet = load_test_fleet(fleet_dir)
+        with caplog.at_level(logging.WARNING, logger="claudlobby.composer"):
+            bot_dir = compose_bot(fleet.bots["lead"], fleet, make_paths(fleet_dir))
         # Composition went on past the access.json block: the unit files follow it.
         assert (bot_dir / f"{fleet.service_prefix}.lead.service").exists()
-        warnings = [line for line in logs if "WARNING" in line and "access.json" in line]
-        assert len(warnings) == 1, logs
-        assert "lead" in warnings[0]
-        assert str(fake_home / ".claude" / "channels") in warnings[0]
+        msgs = self._access_warnings(caplog)
+        assert len(msgs) == 1, msgs
+        assert "lead" in msgs[0] and str(fake_home / ".claude" / "channels") in msgs[0], msgs
+        assert "re-run generate" in msgs[0], msgs
 
     def test_a_fleet_generate_composes_every_bot_and_warns_once_each(
-        self, fleet_dir, tmp_path, monkeypatch
+        self, fleet_dir, tmp_path, monkeypatch, caplog
     ):
         # The path `claudlobby generate` takes: before the fix the first bot's
         # failed write aborted the fleet part-way, so later bots never composed.
+        import logging
+
         from claudlobby.composer import compose_fleet
         from tests.conftest import load_test_fleet, make_paths
 
-        fake_home = tmp_path / "home"
-        (fake_home / ".claude").mkdir(parents=True)
-        (fake_home / ".claude" / "channels").write_text("not a directory\n")
-        monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+        self._home_with_a_file_where_channels_belongs(tmp_path, monkeypatch)
         fleet = load_test_fleet(fleet_dir)
-        logs: list[str] = []
-        composed = compose_fleet(fleet, make_paths(fleet_dir), log=logs.append)
+        with caplog.at_level(logging.WARNING, logger="claudlobby.composer"):
+            composed = compose_fleet(fleet, make_paths(fleet_dir))
         assert set(composed) == set(fleet.bots), composed
-        warned = [line for line in logs if "WARNING" in line and "access.json" in line]
-        assert len(warned) == len(fleet.bots), logs
+        warned = self._access_warnings(caplog)
+        assert len(warned) == len(fleet.bots), warned
         for bot_id, bot in fleet.bots.items():
             assert any(f"telegram-{bot.telegram.handle}" in line for line in warned), (bot_id, warned)
+
+
+class TestAccessJsonIsWrittenWhole:
+    """A write that fails part-way (a full disk) must leave the old access.json
+    whole. It holds runtime state, approved senders and pending pairings, that no
+    generate can rebuild, and a truncated file is one the reconcile never rewrites."""
+
+    @staticmethod
+    def _writes_fail_after_40_bytes(monkeypatch):
+        import errno
+
+        real = Path.write_text
+
+        def write_text(self, data, *args, **kwargs):
+            if self.name.startswith("access.json"):
+                with open(self, "w") as fh:
+                    fh.write(data[:40])
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real(self, data, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "write_text", write_text)
+        return real
+
+    @staticmethod
+    def _lead(fleet_dir, tmp_path, monkeypatch):
+        from claudlobby.composer import telegram_channel_rel
+        from tests.conftest import load_test_fleet
+
+        fake_home = tmp_path / "home"
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+        fleet = load_test_fleet(fleet_dir)
+        bot = fleet.bots["lead"]
+        return fleet, bot, fake_home / telegram_channel_rel(bot.telegram.handle) / "access.json"
+
+    def test_a_failed_rewrite_leaves_the_existing_file_and_its_runtime_state(
+        self, fleet_dir, tmp_path, monkeypatch
+    ):
+        from claudlobby.composer import compose_bot
+        from tests.conftest import make_paths
+
+        fleet, bot, access = self._lead(fleet_dir, tmp_path, monkeypatch)
+        access.parent.mkdir(parents=True)
+        runtime = {"allowFrom": ["111"], "groups": {}, "pending": {"abc123": {"senderId": "222"}}}
+        original = json.dumps({"dmPolicy": "allowlist", **runtime}, indent=2) + "\n"
+        access.write_text(original)
+        real = self._writes_fail_after_40_bytes(monkeypatch)
+        compose_bot(bot, fleet, make_paths(fleet_dir))
+        assert access.read_text() == original
+        assert not access.with_name("access.json.tmp").exists()
+        # With space back, the next generate rewrites it and keeps the runtime state.
+        monkeypatch.setattr(Path, "write_text", real)
+        compose_bot(bot, fleet, make_paths(fleet_dir))
+        after = json.loads(access.read_text())
+        assert after["pending"] == runtime["pending"] and "111" in after["allowFrom"], after
+
+    def test_a_failed_first_write_leaves_no_file_and_the_next_generate_writes_it(
+        self, fleet_dir, tmp_path, monkeypatch
+    ):
+        from claudlobby.composer import compose_bot
+        from tests.conftest import make_paths
+
+        fleet, bot, access = self._lead(fleet_dir, tmp_path, monkeypatch)
+        real = self._writes_fail_after_40_bytes(monkeypatch)
+        compose_bot(bot, fleet, make_paths(fleet_dir))
+        assert not access.exists() and not access.with_name("access.json.tmp").exists()
+        monkeypatch.setattr(Path, "write_text", real)
+        compose_bot(bot, fleet, make_paths(fleet_dir))
+        assert isinstance(json.loads(access.read_text()), dict)
