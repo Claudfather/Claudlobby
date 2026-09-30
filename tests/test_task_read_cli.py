@@ -3,6 +3,7 @@
 import builtins
 import json
 from pathlib import Path
+import re
 import sqlite3
 
 import pytest
@@ -109,8 +110,11 @@ def test_task_reviews_reads_host_evidence_without_writing_and_refuses_plane_outa
     url = "https://github.com/org/repo/pull/1046"
     ts = "2026-09-02T14:00:00Z"
     doc = Path(__file__).resolve().parents[1] / "library/expertise/code-review.md"
-    examples = [line for line in doc.read_text().splitlines()
-                if "<" not in line and review_rules.parse_verdict(line) == review_rules.APPROVE]
+    # The header as a reviewer posts it: the doc quotes it in backticks inside a
+    # bullet, and a header inside a bullet is prose to the header-only reader (#2029).
+    posted = [match.group(1) if (match := re.search(r"`(\*\*[^`]*)`", line)) else line.strip()
+              for line in doc.read_text().splitlines() if "<" not in line]
+    examples = [line for line in posted if review_rules.parse_verdict(line) == review_rules.APPROVE]
     assert examples, "the documented approve header must reach the public review reader"
     doc_header = examples[0]
     anchor = review_rules.parse_anchor(doc_header)

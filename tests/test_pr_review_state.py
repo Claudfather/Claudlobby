@@ -1067,6 +1067,17 @@ EXAMPLES_PER_FILE = {
 }
 
 
+def _example_of(line: str) -> str:
+    """The first backticked span that opens with bold, else the stripped line.
+
+    Structural on purpose: it keys on the backticks, never on the regexes the
+    assertions probe, so a dropped bracket tag still fails an assertion
+    instead of leaving the sample (#1921 review, R2).
+    """
+    match = re.search(r"`(\*\*[^`]*)`", line)
+    return match.group(1) if match else line.strip()
+
+
 def _repo_root() -> Path:
     # This file lives at <repo>/tests/test_pr_review_state.py.
     return Path(__file__).resolve().parent.parent
@@ -1090,9 +1101,14 @@ class TestDocsTeachTheParseableHeader:
         found = []
         for rel in DOC_PATHS:
             text = (_repo_root() / rel).read_text()
-            for line in text.splitlines():
-                if "<" in line:
+            for raw in text.splitlines():
+                if "<" in raw:
                     continue  # a template line, not a concrete example
+                # The example as a reviewer posts it: the backticked header when
+                # the doc quotes one inside a bullet or a sentence, else the line.
+                # A header inside a bullet or a sentence is prose to the parser,
+                # which reads only a comment's header line (#2029).
+                line = _example_of(raw)
                 verdict = prs.parse_verdict(line)
                 if verdict is None and not BRACKET_TAG.search(line):
                     continue  # not verdict-shaped at all -- ordinary prose
@@ -1152,3 +1168,200 @@ class TestDocsTeachTheParseableHeader:
             said_words.add(re.sub(r"[\s-]+", " ", words.lower()))
         missing = TAUGHT_VERDICT_WORDS - said_words
         assert not missing, f"taught verdict word(s) no longer demonstrated in any doc: {missing}"
+
+
+# ---- #2029: a comment's verdict is its header line, never its prose -----------
+#
+# The parser searched a comment's WHOLE body, so a verdict named anywhere in it
+# counted as the comment's own verdict, in both directions: a note explaining
+# someone else's block read as a block, and a note that mentions an earlier
+# approve read as an approve that releases its writer's real block. The header
+# line is the comment's first line that is neither blank nor a markdown heading,
+# and the verdict must lead the bold span that opens it. The excerpts below are
+# real (provenance on each, trimmed after the matched text). Two fixtures are
+# synthetic because #2029 asks for them: the #1757 comment's SHAPE (its real text
+# names another fleet's reviewer) and the event sequences.
+
+# Claudlobby#1989 review, 2026-09-29T19:19:15Z: a real block, on line 3.
+HEADER_AFTER_TITLE_1989 = (
+    "## Multi-lens review of #1989 at `cffa258` — summary\n\n"
+    "**Verdict: Request changes.** Posted as a comment review: GitHub does not let "
+    "the PR author's own account request changes, and this review runs under that account."
+)
+# Claudlobby#1985 review, 2026-09-29T18:34:33Z: a real block, on line 3.
+HEADER_AFTER_TITLE_1985 = (
+    "# Review of #1985: Consolidate configuration and operational CLI commands\n\n"
+    "**Verdict: Request changes.** This is posted as a COMMENT review only because "
+    "GitHub won't let the PR author's own account request changes on its own PR."
+)
+# Claudlobby#1160 comment, 2026-08-10T23:37:02Z: names another reviewer's block.
+PROSE_NAMES_A_BLOCK_1160 = (
+    "## Coverage input from ai-platform — not a verdict\n\n"
+    "We are not clearing the outstanding **Request Changes** from 19:47. That reviewer "
+    "raised it; it is theirs to clear."
+)
+# Claudlobby#1160 comment, 2026-09-09T14:58:00Z: an approve named in a table cell.
+TABLE_CELL_1160 = (
+    "| review | scope it declared | finding |\n"
+    "|---|---|---|\n"
+    "| **Ship it** | *\"Reproduced all three of the claims I was asked to check\"* | Confirmed |"
+)
+# Claudlobby#1160 comment, 2026-09-21T16:40:47Z: a status header, then prose.
+STATUS_THEN_PROSE_1160 = (
+    "**Status check, anchored to `040cad6` (unchanged since 2026-08-10T19:54Z — the doc "
+    "itself has never been revised past rev 2).** Answering the three questions in order.\n\n"
+    "So: **the block is live**, but not because attribution failed to disambiguate reviewers."
+)
+# Claudron#205 comment 5901486549: a bracket-tag line that is not a verdict line.
+BRACKET_NOTE_205 = "**[otis] Review round on vera's request-changes at 36eb78c.** Round two below."
+# clauDNA#118 review: a header whose verdict word does not lead it (#1899).
+NOT_BLOCKING_118 = "**Not blocking**"
+# Synthetic, #2029: the #1757 comment's shape. A non-verdict bold label, then, in
+# the same line, a bold phrase naming a DIFFERENT review's verdict.
+SHAPE_1757 = (
+    "**Comment** — an independent note. Not a competing verdict: the standing "
+    "**Request Changes** review above is a separate post.\n\n"
+    "Every claim I was asked to check holds; no findings of my own."
+)
+# Synthetic: a bracket-tag verdict header quoted in a note's prose.
+QUOTED_HEADER = (
+    "**Note** — the reviewer's line was **[vera] [VERDICT] approve** — reviewed at "
+    "`abc1234`, for the previous head."
+)
+
+
+class TestTheVerdictIsTheCommentsHeaderLine:
+    """#2029. The rule: a comment's verdict is its header line only."""
+
+    @pytest.mark.parametrize("body", [
+        SHAPE_1757, PROSE_NAMES_A_BLOCK_1160, TABLE_CELL_1160, STATUS_THEN_PROSE_1160,
+        BRACKET_NOTE_205, NOT_BLOCKING_118, QUOTED_HEADER,
+    ], ids=["shape-1757", "1160-names-a-block", "1160-table-cell", "1160-status-then-prose",
+            "205-bracket-note", "118-not-blocking", "quoted-header"])
+    def test_a_verdict_named_in_prose_is_not_the_comments_verdict(self, body):
+        assert prs.parse_verdict(body) is None
+        assert prs.verdict_words(body) is None
+
+    @pytest.mark.parametrize("body", [HEADER_AFTER_TITLE_1989, HEADER_AFTER_TITLE_1985],
+                             ids=["1989", "1985"])
+    def test_a_verdict_header_after_a_title_heading_still_counts(self, body):
+        """Live blocks on open PRs. A rule that read only a comment's very first
+        line would release both; this pins that it does not."""
+        assert prs.parse_verdict(body) == prs.BLOCK
+
+    def test_a_header_quoted_in_prose_attributes_nothing(self):
+        assert prs.parse_header_identity(QUOTED_HEADER) is None
+
+    def test_prose_request_changes_does_not_block(self):
+        """The #1757 misread: an approve, then a note naming someone else's block.
+        Before #2029 the note read as an unattributed block, and the tool
+        reported a live block with an UNATTRIBUTED-SEQUENCE."""
+        payload = _payload([
+            ("comments", "2026-09-30T10:00:00Z",
+             f"**[rev2] [VERDICT] approve** — reviewed at {REAL_HEAD[:7]}"),
+            ("comments", "2026-09-30T10:20:00Z", SHAPE_1757),
+        ])
+        result = prs.assess_pr(payload)
+        assert result["blocking"] == []
+        assert prs.UNATTRIBUTED not in result["flags"]
+        assert set(result["resolved"]) == {"rev2"}
+
+    @pytest.mark.parametrize("note, observed, reviewer", [
+        ("**[rev1] [NOTE] context for the author**\n\nThe earlier **Approve** on this PR "
+         "was for an older head; my block stands.", None, "rev1"),
+        # Canonical attribution: both events observed as the same Plane actor,
+        # keyed by event occurrence (main keyed its report ledger by timestamp).
+        ("**Note** — the earlier **Approve** on this PR was for an older head; my block "
+         "stands.", {("comments", 0): "bot:f/rev1", ("comments", 1): "bot:f/rev1"},
+         "bot:f/rev1"),
+    ], ids=["two-bracket-note-header", "attributed-by-observation"])
+    def test_prose_approve_does_not_release_a_live_block(self, note, observed, reviewer):
+        """The mirror, and the unsafe direction: before #2029 the note, once
+        attributed to rev1, read as rev1 approving, and rev1's real block was
+        released (0 blocking)."""
+        payload = _payload([
+            ("comments", "2026-09-30T10:00:00Z",
+             f"**[rev1] [VERDICT] request changes** — reviewed at {REAL_HEAD[:7]}"),
+            ("comments", "2026-09-30T11:00:00Z", note),
+        ])
+        result = prs.assess_pr(payload, observed_identity=observed)
+        assert result["blocking"] == [reviewer]
+        assert result["resolved"][reviewer]["verdict"] == prs.BLOCK
+
+
+# ---- #2029: outside the header, a verdict-shaped line is reported, never read --
+
+# Claudlobby#1166 comment, 2026-08-11T04:48:17Z and Claudlobby#1587 comment,
+# 2026-09-20T19:00:30Z: verdicts written as the comment's own heading.
+HEADING_APPROVE_1166 = (
+    "## **Approve**\n\nReviewed as the companion to #1165 (the `lib/` half, mine)."
+)
+HEADING_BLOCK_1587 = (
+    "## **Request Changes**\n\nOne defect, narrow but on the change's central claim."
+)
+# Claudlobby#1395 comment, 2026-08-31T17:09:06Z: a real block on the LAST line.
+BLOCK_ON_LAST_LINE_1395 = (
+    "Reviewed fix range: `9878432..134079e`\n\n"
+    "All other mapped round-1 closure claims reproduced independently.\n\n"
+    "**Merge-gate verdict: Request Changes.**"
+)
+# Claudlobby#1690 comment, 2026-09-21T14:51:23Z: an approve under a labelled heading.
+LABELLED_HEADING_1690 = (
+    "## Review: **Approve** — reviewed at `5e06bb5`\n\n"
+    "> **SUPERSEDED.** This verdict was reviewed at `5e06bb5` and the head has since moved."
+)
+
+
+class TestOutsideTheHeaderIsReportedNeverRead:
+    """#2029. A verdict written below the header is not the comment's verdict,
+    and it is not dropped: it is reported verbatim as UNPARSED-HEADER, so a
+    block there reaches a human instead of reading as silence."""
+
+    @pytest.mark.parametrize("body, want", [
+        (HEADING_APPROVE_1166, "APPROVE"), (HEADING_BLOCK_1587, "REQUEST-CHANGES"),
+    ], ids=["1166-heading-approve", "1587-heading-block"])
+    def test_a_verdict_written_as_the_comments_heading_counts(self, body, want):
+        assert prs.parse_verdict(body) == want
+
+    @pytest.mark.parametrize("body, line", [
+        (BLOCK_ON_LAST_LINE_1395, "**Merge-gate verdict: Request Changes.**"),
+        (LABELLED_HEADING_1690, "## Review: **Approve** — reviewed at `5e06bb5`"),
+    ], ids=["1395-block-on-last-line", "1690-labelled-heading"])
+    def test_a_verdict_line_outside_the_header_is_reported_not_read(self, body, line):
+        assert prs.parse_verdict(body) is None
+        result = prs.assess_pr(_payload([("comments", "2026-09-30T12:00:00Z", body)]))
+        assert result["blocking"] == []
+        assert prs.UNPARSED in result["flags"]
+        assert line in result["unparsed_headers"]
+
+    def test_quoted_fenced_and_tabled_verdicts_are_not_reported(self):
+        body = (
+            "**Note** for the author.\n\n"
+            "> **Request Changes**\n\n"
+            "```\n**[alex] [VERDICT] approve** — reviewed at a1b2c3d\n```\n\n"
+            "| review | verdict |\n|---|---|\n| **Ship it** | ok |\n"
+        )
+        assert prs.parse_verdict(body) is None
+        assert prs.verdict_lines_outside_header(body) == []
+
+
+# clauDNA#118 review, 2026-06-02T02:17:31Z: a real block (Mechanical fixes) on line
+# 145 of 149, with a label INSIDE its bold span, below an earlier bold label that
+# the first-bold drift channel stops at. Only the outside-header report sees it.
+LABEL_INSIDE_THE_SPAN_118 = (
+    "**Writing-skills quality lens** — `skills/forge/SKILL.md` against Anthropic "
+    "official superpowers best practices.\n\n"
+    "Every item below was checked against the file.\n\n"
+    "**Overall verdict: Mechanical fixes.**\n\n"
+    "One required change: trim the description to triggering conditions only."
+)
+
+
+def test_a_block_whose_label_sits_inside_its_span_is_reported_not_silent():
+    """#2029. The word need not lead the span to be REPORTED (a detector may be
+    loose); it must lead to be READ (a classifier must be tight)."""
+    assert prs.parse_verdict(LABEL_INSIDE_THE_SPAN_118) is None
+    assert prs.first_bold(LABEL_INSIDE_THE_SPAN_118) == "**Writing-skills quality lens**"
+    result = prs.assess_pr(_payload([("reviews", "2026-06-02T02:17:31Z", LABEL_INSIDE_THE_SPAN_118)]))
+    assert "**Overall verdict: Mechanical fixes.**" in result["unparsed_headers"]
+    assert prs.UNPARSED in result["flags"]
