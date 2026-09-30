@@ -269,7 +269,7 @@ class TestRefusals:
         """Bot-name collision across fleets (#526) must not silently resolve."""
         rows = _rows(
             (_report("vera", "2026-08-06T14:22:17Z", pr_url=URL), "ai-platform"),
-            (_report("vera", "2026-08-06T14:22:20Z", pr_url=URL), "tl-enterprises"),
+            (_report("vera", "2026-08-06T14:22:20Z", pr_url=URL), "acme-fleet"),
         )
         out = who.attribute([_event("2026-08-06T14:22:05Z")], rows, REPO, 1046)
         assert out[0]["verdict"] == "AMBIGUOUS"
