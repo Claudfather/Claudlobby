@@ -6,6 +6,58 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a control note holds the report resolver back again, and `report-back.sh --no-task` declares a report that answers no dispatch (#1981)
+
+Since #1491 a `query`, `cancel`, `compact` or `restart` note lands its
+communication alone, with no assignment. The resolver's guard read the bot's
+newest *assignment*, so a note stopped holding it back. The worker's id-less
+answer to the note was stamped with its live task and closed it as `completed`.
+This happened on the ai-platform fleet at 2026-09-29 04:23:57Z.
+
+- **The guard.** `plane-readers.head()` now also returns nothing while any
+  control note sent to the bot has no id-less report from the bot after it
+  (`answering_control_note`).
+  - The note is found by the dispatch door's provenance (`dispatch-log:`),
+    either through its recipient alias or through the door's `recipient_raw`
+    fallback.
+  - Only an id-less report releases it: one whose communication links no
+    assignment. A report naming one of the bot's own tasks, and a newer task,
+    do not: neither answers a note, and a wrong completion is worse than an
+    open row. A `--task` that links to none of the bot's tasks (a typo,
+    another bot's id) links nothing, so it counts as id-less and releases the
+    hold early. `--no-task` is the safe way to answer a note.
+  - The hold is on resolution only. A terminal report after a note still
+    closes the bot's open raw-text (id-less) dispatches, as any terminal
+    report does.
+  - The one cost: the first id-less report after a note resolves to no task,
+    whatever it is. If it was really finishing an id'd task, that task stays
+    open and pages as overdue, at most one row per note.
+  - Notes sent before the upgrade count too. Workers mostly report with
+    `--task`, so most bots hold a note with no id-less report after it, and
+    each one's next id-less report resolves to no task.
+  - #1491's rows are not brought back, and the `answering_idless` rule is
+    unchanged.
+- **The opt-out.** `report-back.sh --no-task` (or `--task -`) declares a
+  terminal report that answers no dispatch.
+  - It skips the resolver and the id-less closer, and its status marker records
+    `no_task`.
+  - It is the safe way to answer any note, and the only one when the guard
+    cannot see the note (a raw `dispatch.sh` send, or text typed into the
+    pane) or has already been released by another id-less report.
+  - It is refused beside a real `--task` id.
+- **The docs.** `dispatch.md` and `worker-lifecycle.md` now say which notes the
+  automatic guard sees, and when to use `--no-task`.
+- **Tests.**
+  - `tests/test_resolver_control_note_guard.py`, 22 tests, including both gap
+    orders: a report naming one of the bot's own tasks, and a newer task,
+    between a note and its answer.
+  - Two of #1491's pins in `tests/test_dispatch_type.py` asserted the defect: a
+    no-id report after a control note resolved the real row. Both are inverted
+    in place, over all four types. #1491's other property, that a control note
+    mints no assignment, stays pinned.
+  - A `validate-bot-change.sh` scenario that runs the 2026-09-29 sequence
+    through the real doors.
+
 ### Fixed — the session digest's model call loads no MCP server, plugin or hook, so it no longer takes Telegram away from every bot on the host (#1972)
 
 `lib/transcript-digest.sh` runs its Haiku pass inside a bot's session end, in the
