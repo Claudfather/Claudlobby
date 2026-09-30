@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — `/setup` asks `bridge_state` about claudfather's own session (#1536)
+
+**The old guidance could read `up` for a bridge that was going dark.** Step 5 told first-run operators to trust `bridge_state runtime/bots/claudfather` over the log. Without a session pid, that answers whether *a* poller holds the bot's Telegram slot, and during a restart the outgoing session's poller still does (#1530).
+
+- **Now:** the skill resolves claudfather's pane pid through the same helpers `start-bot.sh` uses (`tmux_socket_for_bot`, `tmux_session_name`, `bot_tmux`), and passes it. The pane runs Claude itself, so its pid is the session. The skill also explains `not_mine`.
+- **The token is passed too, and that is load-bearing.** `bridge_state` takes *any* second argument as the resolved token, so an empty `""` answers `no_token` for a healthy bot. Measured on a live bot:
+  - scoped with its own session: `up`;
+  - scoped with another pid: `not_mine`;
+  - with `""` as the token: `no_token`.
+- **The other caller #1536 names,** `lib/bench-cold-start.sh`, was deleted in #1858.
+- **`tests/test_cold_start_contract.py`** requires every `bridge_state` call in the setup skill to name the session and a non-empty token.
+
 ### Added — `claudlobby plane samples`: one metric family for one subject over a window, read-only (#1644)
 
 The host probe records `host.load`, `host.mem_available_mb` and the other `host.*` facets every minute, but nothing read a window of them back. After a reset, the load and memory trajectory into it could only be read by opening the plane db by hand. `claudlobby plane samples <metric> [--subject ALIAS] [--kind KIND] [--since W] [--until W] [--json]` prints one family for one subject over a window, as text or JSON. In text, `host.load`'s one, five and fifteen print as pairs. The subject defaults to the only one of its kind, which on a host's own plane is the host.
