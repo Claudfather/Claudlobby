@@ -10,10 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **The manual quickstart ran `lib/setup-fleet` even after `validate` failed.** It printed `claudlobby validate && claudlobby generate` and then `lib/setup-fleet` on a line of its own. On a first run with placeholders still in place, `validate` correctly fails, and `setup-fleet` then ran anyway and failed twice more. The line now continues the chain (`… && lib/setup-fleet`), under a comment saying `validate` stops it until every `REPLACE_ME` is filled in.
 - **The install step now states a duration**, in both README and getting-started.
-  - On a Raspberry Pi 5 it takes about 1 minute: 45 s measured from an empty pip cache.
-  - Where a dependency has to be compiled, one cold host ran past 8 minutes.
-  - pip prints each package as it goes. `lib/setup-system` installs with `--quiet`, so it now says to expect the same wait with no output.
-- **`tests/test_cold_start_contract.py`** fails if an onboarding page runs `lib/setup-fleet` on its own line after a `validate` chain, or if the install section states no duration.
+  - On one Raspberry Pi 5 whose pip config adds piwheels, under a minute in two runs (45 s from an empty pip cache, 55 s with the cache state not recorded). Other hosts are unmeasured.
+  - One cold host was stopped after 8 minutes, and the cause was not recorded.
+  - `lib/setup-system` installs with `--quiet`, so it now says to expect the same wait with no output.
+- **`tests/test_cold_start_contract.py`** runs the README's quickstart block with stubs: a failed `validate` must be the only call, and a passing one must run `generate` and `lib/setup-fleet`. On getting-started and the setup skill it fails if `lib/setup-fleet` starts the line after a `validate` chain. It also fails if an install section states no duration.
 
 ### Added — `claudlobby doctor` asks `claudron doctor` about each wired vault, and never applies `--fix` (Claudron #190, part C)
 

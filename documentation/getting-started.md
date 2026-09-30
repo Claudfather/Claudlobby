@@ -29,10 +29,11 @@ python3 -m pip install -e '.[plane-ui]'
 composes **no** unit for it rather than supervising a process that cannot start; `claudlobby
 doctor --switches` then lists `plane-view` as off, with this pip line as the way to arm it.
 
-**How long it takes.** On a Raspberry Pi 5 the install takes about 1 minute (45 s from an empty
-pip cache). Where a dependency has no prebuilt wheel for your platform, pip compiles it, and one
-cold host ran past 8 minutes. pip prints each package as it goes, so a long quiet stretch at
-`Building wheel for …` means compiling, not stuck.
+**How long it takes.** On one Raspberry Pi 5, whose pip config adds piwheels, the install took
+under a minute in two runs (45 s from an empty pip cache, 55 s with the cache state not recorded).
+Other hosts are unmeasured. One cold host was stopped after 8 minutes, and the cause was not
+recorded. Where a dependency has no prebuilt wheel for the platform, pip builds it from source,
+which takes longer.
 
 **The virtualenv is required, not a style preference.** Homebrew python (macOS) and Debian /
 Raspberry Pi OS system python are both marked externally-managed under

@@ -167,7 +167,37 @@ class TestQuickstartStopsAtAFailedValidate:
     place, validate correctly fails, and setup-fleet then ran anyway and failed twice
     more. The conditional has to be written, not implied."""
 
-    @pytest.mark.parametrize("doc", [README, GETTING_STARTED, SETUP_SKILL], ids=lambda p: p.name)
+    @staticmethod
+    def _run_readme_chain(tmp_path: Path, validate_rc: int) -> tuple[list[str], str]:
+        """Run the README's quickstart block from the seed copies on, with stubs for
+        `claudlobby` and `lib/setup-fleet`, and return the calls in order."""
+        text = next(b for b in _FENCE_RE.findall(README.read_text()) if "claudlobby validate" in b)
+        text = text[text.index("cp fleet.yaml.seed") :]  # the part after the clone and install
+        (tmp_path / "bin").mkdir()
+        (tmp_path / "lib").mkdir()
+        log = tmp_path / "calls"
+
+        def stub(path: Path, body: str) -> None:
+            path.write_text("#!/bin/bash\n" + body + "\n")
+            path.chmod(0o755)
+
+        stub(tmp_path / "bin" / "claudlobby", f'echo "$1" >> {log}; [ "$1" = validate ] && exit {validate_rc}; exit 0')
+        stub(tmp_path / "lib" / "setup-fleet", f"echo setup-fleet >> {log}")
+        (tmp_path / "fleet.yaml.seed").write_text("")
+        (tmp_path / ".env.seed.example").write_text("")
+        env = {"PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin", "EDITOR": "true", "HOME": str(tmp_path)}
+        r = subprocess.run(["bash", "-c", text], cwd=tmp_path, env=env, capture_output=True, text=True)
+        return log.read_text().split(), r.stderr
+
+    def test_a_failed_validate_is_the_only_call_the_readme_chain_makes(self, tmp_path: Path):
+        calls, err = self._run_readme_chain(tmp_path, 1)
+        assert calls == ["validate"], (calls, err)
+
+    def test_a_passing_validate_runs_the_whole_readme_chain(self, tmp_path: Path):
+        calls, err = self._run_readme_chain(tmp_path, 0)
+        assert calls == ["validate", "generate", "setup-fleet"], (calls, err)
+
+    @pytest.mark.parametrize("doc", [GETTING_STARTED, SETUP_SKILL], ids=lambda p: p.name)
     def test_setup_fleet_never_runs_on_its_own_line_after_a_validate_chain(self, doc: Path):
         for block in _FENCE_RE.findall(doc.read_text()):
             lines = [raw.split("#", 1)[0].rstrip() for raw in block.splitlines()]

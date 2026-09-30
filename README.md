@@ -36,10 +36,11 @@ claude                              # opens Claude Code in the repo
 
 Then type `/setup` — it checks your host, collects credentials, and spins up claudfather (the built-in setup assistant) on Telegram. Continue setup from your phone.
 
-> **How long the install takes.** On a Raspberry Pi 5 the `pip install` line takes about 1 minute
-> (45 s from an empty pip cache). Where a dependency has no prebuilt wheel for your platform, pip
-> compiles it, and one cold host ran past 8 minutes. pip prints each package as it goes, so a long
-> quiet stretch at `Building wheel for …` means compiling, not stuck.
+> **How long the install takes.** On one Raspberry Pi 5, whose pip config adds piwheels, the
+> `pip install` line took under a minute in two runs (45 s from an empty pip cache, 55 s with the
+> cache state not recorded). Other hosts are unmeasured. One cold host was stopped after 8 minutes,
+> and the cause was not recorded. Where a dependency has no prebuilt wheel for the platform, pip
+> builds it from source, which takes longer.
 
 > **Why `[plane-ui]`.** The operator plane (`claudlobby plane view`) is enrolled by default
 > and needs FastAPI + uvicorn — two pure-Python wheels. Install without the extra and the
