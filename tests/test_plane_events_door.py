@@ -145,7 +145,7 @@ def test_the_door_lands_the_event_on_the_plane_and_the_reader_renders_the_legacy
     legacy = _public(rows[0])                                      # the row as the retired ledger wrote it
     assert (legacy["bot"], legacy["type"], legacy["source"], legacy["data"]) == \
         ("w1", "session_missing", "pulse", {"session": "w1"})
-    assert legacy["ts"] and set(legacy) == {"ts", "bot", "type", "source", "data"}
+    assert legacy["ts"] and set(legacy) == {"ts", "ts_local", "bot", "type", "source", "data"}
     assert rows[0]["_severity"] == "critical"
 
 
@@ -403,7 +403,7 @@ def test_plane_lookup_answers_the_events_and_escalation_questions(tmp_path):
     rows = [json.loads(line) for line in ev.stdout.splitlines()]
     assert ev.returncode == 0 and [(r["bot"], r["type"]) for r in rows] == [
         ("w1", "session_missing"), ("w1", "session_missing"), ("w2", "service_down"), ("w2", "keepalive")]
-    assert rows[0] == {"ts": "2026-09-03T10:00:00Z", "bot": "w1", "type": "session_missing",
+    assert rows[0] == {"ts": "2026-09-03T10:00:00Z", "ts_local": "2026-09-03T10:00:00Z", "bot": "w1", "type": "session_missing",
                        "source": "pulse", "data": {"session": "w1"}}
     assert len(_lookup(root, "--events", "--fleet", F, "--since", "2026-09-03T10:05:00Z").stdout.splitlines()) == 3
     assert len(_lookup(root, "--events", "--fleet", F, "--type", "service_down").stdout.splitlines()) == 1
@@ -441,9 +441,9 @@ def test_the_row_renderer_discloses_a_truncated_detail_and_never_strips_another_
     pr = _stdlib_readers()
     detail = '{"source":"pulse","legacy_ts":"2026-09-03T10:00:00-04:00","data":{"a":1}}'
     whole = pr.legacy_event_row("2026-09-03T14:00:00+00:00", "x", "notice", "actor", f"bot:{F}/w1", detail, 0, F)
-    assert whole == {"ts": "2026-09-03T10:00:00-04:00", "bot": "w1", "type": "x", "source": "pulse",
+    assert whole == {"ts": "2026-09-03T14:00:00Z", "ts_local": "2026-09-03T10:00:00-04:00", "bot": "w1", "type": "x", "source": "pulse",
                      "data": {"a": 1}, "_severity": "notice", "_truncated": False}
-    assert pr.public(whole) == {"ts": "2026-09-03T10:00:00-04:00", "bot": "w1", "type": "x", "source": "pulse",
+    assert pr.public(whole) == {"ts": "2026-09-03T14:00:00Z", "ts_local": "2026-09-03T10:00:00-04:00", "bot": "w1", "type": "x", "source": "pulse",
                                 "data": {"a": 1}}
     cut_off = pr.legacy_event_row("2026-09-03T14:00:00+00:00", "x", None, "actor", "bot:g/w1", detail, 1, F)
     assert cut_off["_truncated"] and cut_off["data"] == {} and cut_off["source"] == "plane"

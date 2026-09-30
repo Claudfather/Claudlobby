@@ -90,8 +90,8 @@ def format_event_table(events: list[dict]) -> str:
 
     for ev in events:
         ts = ev.get("ts", "?")
-        if len(ts) > 19:
-            ts = ts[:19]
+        if len(ts) > 20:
+            ts = ts[:19] + "Z"
         bot_name = ev.get("bot", "?")
         ev_type = ev.get("type", "?")
         ev_source = ev.get("source", "?")

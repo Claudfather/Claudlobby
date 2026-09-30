@@ -847,7 +847,7 @@ def _alerts_section(
             "data": e.get("data", {}),
         }
         for e in events
-        if isinstance(e.get("ts"), str) and e["ts"] >= cutoff
+        if isinstance(e.get("ts"), str)
     ]
 
 
@@ -1139,7 +1139,7 @@ def format_brief(brief: dict) -> str:
 
     alerts = brief.get("alerts", [])
     out.append(
-        f"ALERTS — critical events, last {ALERT_WINDOW_H}h ({len(alerts)}){mark('alerts')}"
+        f"ALERTS — critical events, last {ALERT_WINDOW_H}h ({len(alerts)}), UTC{mark('alerts')}"
     )
     shown, more = rows(alerts)
     for a in shown:
