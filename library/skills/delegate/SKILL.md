@@ -10,11 +10,9 @@ Manage and dispatch tasks to engineer bots.
 
 ## Bots
 
-| Bot | tmux session | systemd service | Scope |
-|-----|-------------|-----------------|-------|
-| personal-eng | <bot-c> | <bot-c> | personal-projects, side-project-1, side-project-2 |
-| business-eng | <bot-b> | <bot-b> | data-warehouse, ingest-pipeline, internal-api |
-| code-reviewer | code-reviewer-bot | code-reviewer-bot | PR reviews only (Sonnet 4.6) |
+Use the fleet's declared bot roster. Resolve each bot's `BOT_SERVICE`,
+`TMUX_SESSION` and bot directory from its composed configuration; do not guess
+service names from display names.
 
 ## Commands
 
@@ -23,7 +21,7 @@ Manage and dispatch tasks to engineer bots.
 Send a task to an engineer bot via the socket-aware helper — each bot is on its own tmux server, so a raw `tmux send-keys -t` against the default socket no longer reaches it (reliable, instant):
 
 ```bash
-$CLAUDLOBBY_ROOT/lib/dispatch.sh <bot-session> '<task prompt>'
+"$CLAUDLOBBY_ROOT/lib/dispatch.sh" <bot-session> '<task prompt>'
 ```
 
 Before dispatching (each bot is on its own server; the socket is its `BOT_SERVICE`):
@@ -40,16 +38,17 @@ After dispatching:
 Check a specific bot's health:
 
 ```bash
-tmux has-session -t <bot-session> && echo "ALIVE" || echo "DEAD"
-tmux capture-pane -t <bot-session> -p | tail -10
+tmux -L <bot-service> has-session -t <bot-session> && echo "ALIVE" || echo "DEAD"
+tmux -L <bot-service> capture-pane -t <bot-session> -p | tail -10
 ```
 
 ### restart <bot>
 
-Restart a bot (e.g., after heavy session, context exhaustion):
+Follow the composed `safe-worker-restart` checks and preserve the worker's
+handoff before restarting it. The cross-platform helper owns service naming:
 
 ```bash
-sudo systemctl restart <bot-service>
+"$CLAUDLOBBY_ROOT/lib/spin-up-bot.sh" <bot-dir>
 ```
 
 ### fleet
@@ -57,18 +56,12 @@ sudo systemctl restart <bot-service>
 Overview of all bots:
 
 ```bash
-for bot in <bot-a> <bot-b> <bot-c> <bot-d>; do
-    if tmux has-session -t $bot 2>/dev/null; then
-        echo "$bot: ALIVE"
-    else
-        echo "$bot: DEAD"
-    fi
-done
+claudlobby --fleet "$FLEET_NAME" status
 ```
 
 ## Rules
 
 - Don't dispatch to a bot that's already processing
-- If a bot is stuck for >10 min, restart it
+- For a stuck bot, follow `safe-worker-restart`; elapsed time alone does not bypass its checks
 - Always report dispatch and results in the Telegram group
 - For quick questions, @mention the bot in Telegram instead of tmux dispatch
