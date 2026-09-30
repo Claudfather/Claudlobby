@@ -328,15 +328,18 @@ def _properties(text, *, foreign=False):
     service_fields = {"WorkingDirectory", "Environment", "ExecStart"}
     allowed = required | service_fields
     if result.get("Id", "").endswith(".service"):
-        # systemctl show omits an empty ExecStart list: a loaded special unit
-        # (systemd-exit.service) or an inactive not-found reference with no
-        # definition runs no command. Only foreign units get this reading;
-        # a declared unit must still show its exact command.
-        if (foreign and service_fields - result.keys() == {"ExecStart"}
-                and (result.get("LoadState") == "loaded"
-                     or result.get("LoadState") == "not-found"
-                     and result.get("ActiveState") == "inactive"
-                     and result.get("FragmentPath") == "")):
+        # systemctl show omits an empty ExecStart list. An absent unit (not-found,
+        # inactive, no fragment) has no definition and runs nothing, whether a
+        # foreign dependency reference or a declared bot de-enrolled by bot stop.
+        # Only a foreign loaded special unit (systemd-exit.service) gets the same
+        # reading when loaded; a loaded or active declared unit must show its
+        # exact command. A declared absent unit must also carry no binding data.
+        absent = (result.get("LoadState") == "not-found" and result.get("ActiveState") == "inactive"
+                  and result.get("FragmentPath") == ""
+                  and (foreign or all(result.get(key) == "" for key in (
+                      "WorkingDirectory", "Environment", "DropInPaths", "UnitFileState"))))
+        if (service_fields - result.keys() == {"ExecStart"}
+                and (absent or foreign and result.get("LoadState") == "loaded")):
             result["ExecStart"] = ""
         required |= service_fields
     if not required <= result.keys() or not result.keys() <= allowed:

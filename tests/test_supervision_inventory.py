@@ -490,6 +490,38 @@ def test_linux_bootstrap_classifies_pi_ghost_special_template_and_continued_unit
         owned.collect().require_complete()
 
 
+def test_declared_bot_deenrolled_by_stop_reads_absent_without_execstart(tmp_path):
+    """Actual Pi f68 output after bot stop: systemd omits ExecStart entirely."""
+    obs = Observations(tmp_path)
+    name = "can1747.1745.c1747w.service"
+    obs.add(name, "bot").unlink()  # de-enrolled: no installed file, no catalogue rows
+    del obs.properties[name]
+    absent = {"Environment": "", "WorkingDirectory": "", "Id": name, "Triggers": "",
+              "TriggeredBy": "", "LoadState": "not-found", "ActiveState": "inactive",
+              "FragmentPath": "", "DropInPaths": "", "UnitFileState": "", "NeedDaemonReload": "no"}
+    obs.extra[name] = dict(absent)
+    inventory = obs.collect().require_complete()
+    (unit,) = inventory.units
+    assert unit.installed == () and dict(unit.properties)["ExecStart"] == ""
+    only = collect_enrollment(obs.root, tuple(obs.declarations), package=obs.package,
+                              runner=obs.runner, only_names=frozenset({name})).require_complete()
+    assert only.units[0].installed == ()
+
+    # Missing execution identity is never normalized for a present or bound unit.
+    for changed in ({"LoadState": "loaded"}, {"ActiveState": "active"},
+                    {"FragmentPath": str(obs.installed / name)},
+                    {"Environment": f"CLAUDLOBBY_ROOT={obs.root}"},
+                    {"WorkingDirectory": str(obs.root)}):
+        obs.extra[name] = {**absent, **changed}
+        with pytest.raises(InventoryError, match="missing/unknown native unit properties"):
+            obs.collect().require_complete()
+    # The absent form still refuses while the catalogue reports it loaded.
+    obs.extra[name] = dict(absent)
+    obs.rows.append(f"loaded\t{name}")
+    with pytest.raises(InventoryError, match="loaded consumer lacks installed source bytes"):
+        obs.collect().require_complete()
+
+
 def test_empty_bootstrap_refuses_unknown_catalog_and_prior_selection(tmp_path):
     obs = Observations(tmp_path)
     foreign = obs.add("foreign.service", working=tmp_path / "foreign-root", declared=False)
