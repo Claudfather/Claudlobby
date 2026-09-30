@@ -15,7 +15,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import dotenv
 from .claudron_compat import (
     CLAUDRON_INTEGRATION_URL,
     COMPAT_FLOOR,
@@ -73,15 +72,18 @@ class DoctorReport:
 def check_env_vars(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> None:
     """Verify all contracted env vars are present and non-empty."""
     from .composer import collect_env_contracts
+    from .env_tiers import ResolverUnavailable
 
     env_vars = collect_env_contracts(fleet, paths)
-    effective_env = dict(os.environ)
-
-    # Merge fleet-level .env
-    if paths.env_file and paths.env_file.is_file():
-        for k, v in dotenv.read(paths.env_file).items():
-            if k not in effective_env:
-                effective_env[k] = v
+    try:
+        effective_env = {name: row.value for name, row in paths.env_resolved().items()}
+    except ResolverUnavailable as exc:
+        report.add("env-vars", "warn", f"env resolver unreachable — not read: {exc}")
+        return
+    # A tier's empty assignment wins too. Ambient values are only a fallback
+    # when the runtime cascade never assigned the key.
+    for name, value in os.environ.items():
+        effective_env.setdefault(name, value)
 
     missing = []
     empty = []

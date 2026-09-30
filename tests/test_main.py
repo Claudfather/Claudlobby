@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import shutil
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -53,11 +55,23 @@ class TestResolvePaths:
 # ── _load_env ────────────────────────────────────────────────────────
 
 
+@pytest.fixture
+def env_paths(tmp_path, monkeypatch):
+    home = tmp_path / "private-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    for name in ("env-tiers.sh", "lib-common.sh", "supervisor.sh"):
+        shutil.copyfile(Path(__file__).resolve().parents[1] / "lib" / name, lib / name)
+    return Paths(root=tmp_path)
+
+
 class TestLoadEnv:
-    def test_loads_env_vars(self, tmp_path, monkeypatch):
+    def test_loads_env_vars(self, tmp_path, monkeypatch, env_paths):
         env_file = tmp_path / ".env"
         env_file.write_text("MY_TEST_VAR=hello\nexport MY_OTHER_VAR=world\n")
-        paths = SimpleNamespace(env_file=env_file)
+        paths = env_paths
         # Ensure clean state
         monkeypatch.delenv("MY_TEST_VAR", raising=False)
         monkeypatch.delenv("MY_OTHER_VAR", raising=False)
@@ -68,17 +82,16 @@ class TestLoadEnv:
         monkeypatch.delenv("MY_TEST_VAR")
         monkeypatch.delenv("MY_OTHER_VAR")
 
-    def test_does_not_override_existing(self, tmp_path, monkeypatch):
+    def test_does_not_override_existing(self, tmp_path, monkeypatch, env_paths):
         env_file = tmp_path / ".env"
         env_file.write_text("EXISTING_VAR=from-file\n")
         monkeypatch.setenv("EXISTING_VAR", "original")
-        paths = SimpleNamespace(env_file=env_file)
+        paths = env_paths
         _load_env(paths)
         assert os.environ["EXISTING_VAR"] == "original"
 
-    def test_missing_env_file_ok(self, tmp_path):
-        paths = SimpleNamespace(env_file=tmp_path / "nope.env")
-        _load_env(paths)  # should not raise
+    def test_missing_env_file_ok(self, env_paths):
+        _load_env(env_paths)  # should not raise
 
 
 # ── _load_fleet_or_exit ──────────────────────────────────────────────

@@ -7,7 +7,6 @@ import os
 import sys
 from pathlib import Path
 
-from .. import dotenv
 from ..config import load_fleet
 from ..paths import Paths, _find_fleet_dir, _root_manifest_names_fleet
 
@@ -61,12 +60,18 @@ def _resolve_paths(args) -> Paths:
 
 
 def _load_env(paths: Paths) -> None:
-    """Load .env file into os.environ (without overriding existing vars).
-    Handles both `VAR=value` and `export VAR=value` formats — the latter is
-    what env-migrate writes and what hand-edited .env files commonly use."""
-    for k, v in dotenv.read(paths.env_file).items():
-        if k not in os.environ:
-            os.environ[k] = v
+    """Load the runtime cascade, preserving explicit command environment overrides."""
+    from ..env_tiers import ResolverUnavailable
+
+    try:
+        resolved = paths.env_resolved()
+    except ResolverUnavailable as exc:
+        # Doctor calls this before its structured rungs. Disclose the failure
+        # and let those rungs report it; do not silently choose another source.
+        log.warning("env resolver unreachable — environment not loaded: %s", exc)
+        return
+    for name, row in resolved.items():
+        os.environ.setdefault(name, row.value)
 
 
 def _load_fleet_or_exit(paths: Paths) -> tuple["FleetConfig", dict]:
