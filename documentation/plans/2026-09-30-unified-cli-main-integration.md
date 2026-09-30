@@ -7,6 +7,10 @@ The landing vehicle is **#1989**. This is a merge, not a rebase: aggregate paren
 18 commits and the trial merge conflicts in 26 paths. This includes #2024 and
 #2013, which landed after the team's report at `49bbbccb`.
 
+A final freshness check found #2003 had landed as
+`dd789c524281f2b315dcbe8682fdc6216304207e`. A second ordinary merge preserves
+that commit too (19 upstream commits total), with only a changelog conflict.
+
 ## Behavior ports and proof
 
 Test names below identify the checks for each port; final run results are recorded
@@ -32,6 +36,7 @@ in the validation section. They are code/fixture evidence, not production proof.
 | #2006 atomic private access.json and per-bot warning | `composer._write_atomic` and guarded compose path; existing staged config installer | `tests/test_composer.py` access-write cases, `test_config_staging.py`, `test_config_install.py` |
 | #2024 heavy-slot pip/uv, flock/xargs, collect-only | private native `lib/heavy-slot.py` classifier | `tests/test_heavy_slot_2023.py` plus match/guard/run tests |
 | #2013 Apache-2.0 | `LICENSE`, `NOTICE`, `pyproject.toml`; build/dev setuptools floor 77 | `tests/test_package_resources.py` direct and sdist wheel build |
+| #2003 explicit vault in composed hooks, Claudron 0.6.0 | `composer.py`, `path_audit.py`, pinned optional dependency and conformance lane | `tests/test_claudron_loop.py`, `test_claudron_compat.py`, `test_path_audit.py`; engine parity remains in the pinned vault CI lane |
 
 ### Deliberate mappings across the deleted doors
 
@@ -88,6 +93,12 @@ Combined validation in a private Python 3.12 export:
   regressions, opt-in hook composition/classification, data-root isolation,
   access-file writes, coldstart fencing, setup, defaults and doctor diagnostics.
 
+The final #2003 follow-up passed **410 tests** and skipped six tests requiring
+  the optional pinned Claudron engine. Its new path-audit fixture initially used
+  the old `Paths` constructor and omitted the manager. Porting that fixture passed
+  **all 41 path-audit tests**; these counts overlap. The engine-parity/native-vault
+  checks remain assigned to the hosted vault lane.
+
 Hosted current-head CI is required independently of these local results. No test was run in the live checkout. No host pull,
 fleet generation, service operation, bot restart or external notification occurred.
 The imported `naked-bot-2026-09-30.json` is an earlier observation from main; it is
@@ -121,7 +132,7 @@ Keep their reviewed source stable. After aggregate acceptance/merge, verify each
 slice has no unique unincorporated work before closing it as superseded. This
 integration closes or merges no GitHub PR. #1925 remains the plan reference.
 
-At the integration snapshot #2024 and #2013 are included; #2003 and #2021 are
+At the final integration snapshot #2024, #2013 and #2003 are included; #2021 is
 still open and not included. Refresh main and PR heads immediately before any
 landing decision. Current-head CI, disposition of substantive external findings,
 and review of this amended revision are still required. The earlier green

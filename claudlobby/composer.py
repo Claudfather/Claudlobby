@@ -2471,21 +2471,43 @@ def _resolve_claudron_executable() -> tuple[str, str | None]:
     )
 
 
-def _claudron_hook_entries(executable: str) -> dict[str, list]:
+def _claudron_hook_vault_root(bot: BotConfig, bot_dir: Path) -> str | None:
+    """The absolute vault root a vault-wired bot's hook commands name, or None.
+
+    ``~`` is expanded here because nothing downstream expands it: the engine
+    reads the address as ``Path(hint).resolve()``, and a shell does not expand
+    a quoted ``~``, so ``~/vault`` would name a directory called ``~`` under
+    the hook's cwd. A relative path is anchored at the bot dir, where a
+    session runs and so where its ``CLAUDRON_VAULT_PATH`` export resolves it.
+    Symlinks are left to the engine, which resolves them at run time.
+    """
+    if not bot.claudron_vault_path:
+        return None
+    return str(bot_dir / Path(bot.claudron_vault_path).expanduser())
+
+
+def _claudron_hook_entries(executable: str, vault_root: str) -> dict[str, list]:
     """The engine's session-loop hook entries in Claude Code settings shape.
 
     Emitted INLINE (never by shelling ``claudron hooks install``) so composition
     works on a CLI-less host. Byte-for-byte identical to the pinned engine's
-    ``claudron.hooks.settings_snippet(executable)["hooks"]`` — the parity gate
-    in tests/test_claudron_loop.py enforces that.
+    ``claudron.hooks.settings_snippet(executable, vault_root)["hooks"]`` — the
+    parity gate in tests/test_claudron_loop.py enforces that.
+
+    Each command names its vault with the global ``--vault``, ahead of the
+    ``hook <event>`` identity suffix (Claudron #183): walk-up binds only a
+    directory carrying ``.claudron-vault``, so an address is what makes the
+    hook independent of the environment and cwd it was launched with. The
+    root is shell-quoted, because Claude Code runs the command through a
+    shell; the executable is not, as in the engine, which treats it as a
+    command prefix.
     """
+    prefix = f"{executable} --vault {shlex.quote(vault_root)}"
     return {
         event: [
             {
                 "matcher": "",
-                "hooks": [
-                    {"type": "command", "command": f"{executable} hook {event_cmd}"}
-                ],
+                "hooks": [{"type": "command", "command": f"{prefix} hook {event_cmd}"}],
             }
         ]
         for event, event_cmd in _CLAUDRON_HOOK_EVENTS.items()
@@ -2495,14 +2517,17 @@ def _claudron_hook_entries(executable: str) -> dict[str, list]:
 def _is_claudron_hook_entry(group: dict, event_cmd: str) -> bool:
     """A claudron entry's identity is its ``hook <event>`` command SUFFIX, not the
     full string (mirrors the engine's ``merge_settings`` key). Keying on the full
-    path would append a duplicate whenever the resolved executable moved."""
+    string would append a duplicate whenever the resolved executable or the
+    bot's vault moved."""
     return any(
         str(h.get("command", "")).endswith(f"hook {event_cmd}")
         for h in (group.get("hooks") or [])
     )
 
 
-def _merge_claudron_hooks(hooks: dict[str, list], executable: str) -> dict[str, list]:
+def _merge_claudron_hooks(
+    hooks: dict[str, list], executable: str, vault_root: str
+) -> dict[str, list]:
     """Merge the engine's session-loop entries into a composed hooks block.
 
     Self-replacing per event (a stale claudron entry for the same event is
@@ -2512,7 +2537,7 @@ def _merge_claudron_hooks(hooks: dict[str, list], executable: str) -> dict[str, 
     composer-installed loop converge on the same file. Idempotent.
     """
     merged = dict(hooks)
-    for event, entries in _claudron_hook_entries(executable).items():
+    for event, entries in _claudron_hook_entries(executable, vault_root).items():
         event_cmd = _CLAUDRON_HOOK_EVENTS[event]
         kept = [
             g
@@ -3052,11 +3077,16 @@ def compose_settings_local(
     if bot.heavy_slot:
         bot_hooks = _with_heavy_slot_hook(bot_hooks)
     hooks = _compose_hooks(bot_hooks)
-    if _session_loop_enabled(bot):
+    # No vault, no hooks: an explicit `claudron_session_loop: true` with no
+    # `claudron_vault_path` has no address to render. The engine refuses to
+    # install such a loop (Claudron #183), and the validator errors on it, so
+    # generate stops before it gets here; the loud refusal is the validator's.
+    vault_root = _claudron_hook_vault_root(bot, bot_dir)
+    if _session_loop_enabled(bot) and vault_root is not None:
         executable, warning = _resolve_claudron_executable()
         if warning:
             _log.warning("bot %s: %s", bot.bot_id, warning)
-        hooks = _merge_claudron_hooks(hooks, executable)
+        hooks = _merge_claudron_hooks(hooks, executable, vault_root)
     if hooks:
         settings["hooks"] = hooks
 

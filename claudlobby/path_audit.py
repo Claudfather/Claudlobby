@@ -211,8 +211,11 @@ def improper_fleet_paths(
     # neither the .claudron bridge string nor the fleet.yaml declaration is
     # guaranteed normalized): bridge-derived (paths.vault_root) and/or
     # bot-declared (claudron_vault_path, L1-exempt as declared-by-construction).
+    # Expanded too: the session-loop hooks carry the declared root with "~"
+    # expanded (`--vault <root>`, Claudron #183), so a `~/…` declaration must
+    # bless the path the composer actually wrote.
     vault_roots = {
-        os.path.normpath(r)
+        os.path.normpath(os.path.expanduser(r))
         for r in (paths.vault_root, bot.claudron_vault_path)
         if r
     }
