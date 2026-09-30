@@ -30,6 +30,46 @@ A PreToolUse hook, `lib/public-write-guard.sh` (with its decider `lib/public-wri
 - **Opt-in:** registered in the switch registry as opt-in for the `heavy_slot` reason. A composed hook has no deployment gate (#1310), so the manifest key is where one bot goes first.
 - **Tests:** `tests/test_public_write_guard.py` drives the real hook with a fake `gh` and real git repositories, in both directions for each shape; `tests/test_public_write_guard_compose.py` covers the composition.
 
+### Fixed — the heavy-job slot records a job's shape, never its text (#2037)
+
+`lib/heavy-slot.py` kept the first 200 characters of each command it handled, in five places:
+- the slot's lock file;
+- the wrapper's own events;
+- the hook's events;
+- events about other holders;
+- the refusal another bot reads.
+
+System events on the plane are never pruned.
+
+Each of those now holds a **shape**: the tool, then the names of the flags it was given, with no value, no positional word and no environment assignment. For example:
+- `env -i PATH=… SOME_KEY=… pytest -q -k expr tests/` is recorded as `pytest -q -k`;
+- `--maxfail=2` becomes `--maxfail`.
+
+A refusal names each holder's bot, tool and start time, never its command.
+
+**Why a shape, not redaction.**
+- The wrapper sees argv after the shell has expanded it. A value passed as `"$VAR"` arrives as a bare word with nothing naming it, so no rule can recognise it.
+- The hook records an unparsed command as typed, and its text can carry anything, heredoc bodies included.
+
+A shape keeps neither.
+
+**Other changes:**
+- The record gains a `tool` field. Events and records carry `shape` in place of `command`.
+- A record written before this change has its command reduced to a shape wherever it is read back: status, holder summaries, and `heavy_slot_unreleased`. An old lock file is therefore never re-emitted or shown whole.
+
+**Tests.** `tests/test_heavy_slot_redaction.py` covers both directions:
+- A planted secret never lands in the lock file, any event, either refusal or status, whether it is:
+  - named by an assignment, a flag, a header or a URL;
+  - passed by variable (a bare word after expansion);
+  - inside an unparsed command, heredoc body included.
+- An ordinary command keeps its tool and flags.
+
+All 15 of the secret cases fail on the previous code.
+
+### Changed — the `[vault]` extra pins Claudron v0.6.1
+
+`pyproject.toml`'s `[vault]` extra moves from `@v0.6.0` to `@v0.6.1`, with the conformance workflow's comment and `documentation/integrations/claudron-integration.md` (the "What works today" headline, the write-lock note and the pin line). v0.6.1 carries two changes. `claudron doctor` walks only the note tiers, where it walked the whole vault tree: a Pi vault's run went from about 26 minutes to under 2 seconds (Claudron #208). And `doctor --settings` is declared as the `doctor-settings` capability (Claudron #209), so a consumer can gate on it; nothing in this repository passes `--settings` yet. The compat floor in `claudlobby/claudron_compat.py` is unchanged: its highest live row needs 0.4.0.
+
 ### Changed — composed Claudron hooks name the bot's vault with `--vault` (Claudron #183)
 
 Since Claudron v0.6.0 the engine's hook snippet names its vault in every command: `<exe> --vault <root> hook <event>` (Claudron #203). Walk-up binds only a directory carrying the `.claudron-vault` identity file, so a hook with no address finds a vault only when its session's environment or working directory happens to reach one. The composer renders a copy of that snippet behind the R3 drift gate, so each vault-wired bot's three hook commands now name that bot's own vault.
