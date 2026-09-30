@@ -167,7 +167,41 @@ REGISTRY: dict[str, Disposition] = {
     # The Phase 3 naked-bot observation gate exists as of #1171, so entries are
     # now admissible here. Each must diff against the recorded baseline.
     "expertise": Disposition(tier=Tier.INSTRUCT, reason=_UNARGUED),
-    "skills": Disposition(tier=Tier.INSTRUCT, reason=_UNARGUED),
+    "skills": Disposition(
+        tier=Tier.INSTRUCT,
+        settled=True,
+        roles={ROLE_MANAGER: ("status",)},
+        reason=(
+            "NO GLOBAL ENTRY, AND THAT IS NOT A FINDING. Nobody has argued a "
+            "skill that every bot needs, so the global list stays empty; a "
+            "future global entry clears TIER_TESTS[Tier.INSTRUCT] and the "
+            "naked-bot gate on its own terms.\n\n"
+            "THE MANAGER ROLE OVERLAY (`status`, #2010) reaches every bot "
+            "`FleetConfig.manager_bots()` names: the fact `bot_is_manager` "
+            "reads, a coordinator whose reports are all managers included. "
+            "`leaf-manager` would have left that coordinator out, and it is "
+            "the manager that answers the human most, which is the skill's "
+            "audience. 'Every bot would be WORSE at its job without it': a "
+            "manager is the bot the human asks what moved and what waits on "
+            "their decision, and `/status` is that readout, one line each "
+            "with its bounds stated, built on `claudlobby brief` plus the PR "
+            "surface. Without it the manager assembles the answer by hand or "
+            "not at all, and it reached a manager only when a fleet.yaml "
+            "listed it: three of one host's four managers carried it and the "
+            "fourth did not. 'No bot is made to do something surprising by "
+            "having it': a skill is a verb the bot runs only when invoked, "
+            "and it composes no CLAUDE.md instruction. What it does add is "
+            "the grants its own `tool_grants` declare, `Bash(claudlobby *)`, "
+            "`Bash(gh *)` and the Telegram reply tool, composed only beside "
+            "the skill, so either opt-out removes both. `Bash(gh *)` is "
+            "broader than the read the skill needs; narrowing it is the "
+            "skill's frontmatter to change, not this registry's.\n\n"
+            "OPT-OUT: `system_defaults.skills: false` for the fleet, or "
+            "`bots.<name>.system_defaults: {skills: false}` for one bot. "
+            "Either switches off the DEFAULT only: a bot that lists `status` "
+            "itself keeps it."
+        ),
+    ),
     "protocols": Disposition(
         tier=Tier.INSTRUCT,
         entries=("shared-documentation", "shared-documentation-vault"),

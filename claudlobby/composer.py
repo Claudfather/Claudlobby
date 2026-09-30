@@ -1899,6 +1899,16 @@ def compose_access_json(bot: BotConfig, fleet: FleetConfig) -> dict | None:
 # ----------------------------------------------------------------------
 
 
+def default_roles(bot: BotConfig, fleet: FleetConfig, *, is_manager: bool) -> tuple[str, ...]:
+    """The roles a bot holds for the defaults registry's role overlays: every
+    manager, and the leaf managers among them (``defaults.DETECTABLE_ROLES``).
+    ONE derivation for every entity type's overlay, so the protocols and
+    skills defaults can never disagree about who is a manager."""
+    return ((defaults.ROLE_MANAGER,) if is_manager else ()) + (
+        (defaults.ROLE_LEAF_MANAGER,) if bot.bot_id in fleet.leaf_manager_bots() else ()
+    )
+
+
 def resolve_effective_protocols(
     bot: BotConfig, fleet: FleetConfig, paths: Paths, *, is_manager: bool
 ) -> list[str]:
@@ -1925,8 +1935,7 @@ def resolve_effective_protocols(
     protocol_names = list(bot.protocols)
     sd = fleet.system_defaults
     if sd.enabled and sd.protocols:
-        roles = ((defaults.ROLE_MANAGER,) if is_manager else ()) + (
-            (defaults.ROLE_LEAF_MANAGER,) if bot.bot_id in fleet.leaf_manager_bots() else ())
+        roles = default_roles(bot, fleet, is_manager=is_manager)
         for name in defaults.resolve("protocols", roles):
             if defaults.available(name, facts) and name not in protocol_names:
                 protocol_names.append(name)
@@ -1966,8 +1975,10 @@ def resolve_effective_skills(
     bot: BotConfig, fleet: FleetConfig, paths: Paths, *, is_manager: bool
 ) -> list[str]:
     """The skills a bot is ACTUALLY composed with: declared, plus ``briefing``
-    when it equips a ``briefing:`` stanza, plus every ``requires.skills`` entry
-    of its EFFECTIVE protocols (spec §10).
+    when it equips a ``briefing:`` stanza, plus the registry's skill defaults
+    for the bot's roles (``status`` for every manager, #2010) unless the fleet
+    or the bot switched them off, plus every ``requires.skills`` entry of its
+    EFFECTIVE protocols (spec §10).
 
     ONE definition, for the reason ``resolve_effective_protocols`` states two
     functions up: the compose path, the validator, freshbox and the plane's
@@ -1981,6 +1992,13 @@ def resolve_effective_skills(
     # skill Claude Code rejects the command locally and the send reads OK (#1819).
     if bot.briefing and bot.briefing.slots and "briefing" not in skills:
         skills.append("briefing")
+    sd = fleet.system_defaults
+    if sd.enabled and sd.skills and bot.system_defaults.skills:
+        for name in defaults.resolve(
+            "skills", default_roles(bot, fleet, is_manager=is_manager)
+        ):
+            if name not in skills:
+                skills.append(name)
     protocol_names = resolve_effective_protocols(
         bot, fleet, paths, is_manager=is_manager
     )
