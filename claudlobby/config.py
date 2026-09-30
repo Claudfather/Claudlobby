@@ -762,6 +762,10 @@ class BotConfig:
     # `node <entry>` from the copy warm-cache installs under state/mcp/npm,
     # with no resident `npm exec` wrapper (composer.compose_mcp_json).
     mcp_direct_launch: bool = False
+    # #1686, opt-in per bot: run the bot's heavy Bash commands under the host's
+    # heavy-job slot, a PreToolUse hook composed for this bot only
+    # (composer._with_heavy_slot_hook).
+    heavy_slot: bool = False
     # #1665 Layer 0b, opt-in per bot: deny rules on the shared config dir, the
     # .env tiers and the install's code (composer.compose_settings_local).
     isolation: IsolationConfig = field(default_factory=IsolationConfig)
@@ -1899,6 +1903,10 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         mcp_direct_launch=_strict_bool(
             "'mcp_direct_launch'",
             raw.get("mcp_direct_launch", defaults.get("mcp_direct_launch", False)),
+        ),
+        heavy_slot=_strict_bool(
+            "'heavy_slot'",
+            raw.get("heavy_slot", defaults.get("heavy_slot", False)),
         ),
         isolation=_parse_isolation(
             defaults.get("isolation"), raw.get("isolation"), name
