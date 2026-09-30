@@ -47,11 +47,12 @@ esac
 _bail() { # <reason> — fail open, but leave a breadcrumb
     # lib-common is sourced HERE and in a subshell: an `exit` inside a sourced
     # file ends the shell whatever surrounds it, and a fail-open hook must not
-    # fail because its breadcrumb did.
+    # fail because its breadcrumb did. The breadcrumb names the bot: an empty
+    # bot dir anchors it on the fleet, where the bot's brief never looks.
     (
         # shellcheck source=lib-common.sh
         . "$LIB_DIR/lib-common.sh" &&
-            emit_script_error "" "public-write-guard.sh" 1 \
+            emit_script_error "${BOT_DIR:-}" "public-write-guard.sh" 1 \
                 "$1 — public-write guard INACTIVE for this call"
     ) >/dev/null 2>&1 || true
     exit 0

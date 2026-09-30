@@ -18,11 +18,13 @@ WHAT A WRITE PUTS IN THE REPOSITORY is all this guard reads for terms:
     its own words, every file it names as a body, and its standard input;
   - ``git commit``: its messages, and the lines and new paths it adds (the
     staged diff, plus the unstaged one when ``-a``, ``-i``, ``-o``, a pathspec
-    or an earlier ``git add`` in the command brings it in);
+    or an earlier ``git add`` in the command brings it in), and every new file
+    an earlier ``git add`` in the command names, which no diff lists yet;
   - ``git push``: the messages, added lines and new paths of every commit it
-    would send. For git this is the complete check, since a commit publishes
-    nothing until it is pushed. One gap: an annotated tag's own message is not
-    read.
+    would send, and of every commit made earlier in the same command, which
+    does not exist yet when this guard runs. For git this is the complete
+    check, since a commit publishes nothing until it is pushed. One gap: an
+    annotated tag's own message is not read.
 It does not read a directory named by ``cd``, the path of a body file, or the
 target repository's name. None of those is content the write puts in the
 repository, and reading them would refuse a clean write made from a path that
@@ -30,17 +32,25 @@ happens to contain a listed term.
 
 Only a HIT asks where the write goes. The repository's visibility is read LIVE
 (``gh api repos/OWNER/REPO``), never from a list, and cached for
-``CACHE_LIFETIME_S`` so a burst of writes does not repeat the call.
+``CACHE_LIFETIME_S`` so a burst of writes does not repeat the call. A REST call
+that fails fast (a 404, or a REST throttle, which leaves GraphQL working) is
+asked again over GraphQL (``gh repo view``); when both fail, an answer cached
+up to ``STALE_LIFETIME_S`` ago stands in rather than a refusal, since a
+repository that was private an hour ago and cannot be read now is far more
+likely private than not.
 
-``--check`` says whether the host's list is armed (absent, broken, or ok with
-its pattern count) and never prints a term; rollout runs it on each host.
+``--check`` says whether the host's guard is armed (the list absent, broken, or
+ok with its pattern count, and whether the off switch is set) and never prints
+a term; rollout runs it on each host.
 
 Failure directions, each chosen on purpose:
   - no list file: ALLOW, and record ``public_write_guard_unarmed``. There is
     nothing to match, and refusing every GitHub write on a host that was never
     configured is an outage; the canary checks that the file exists.
-  - a list that does not compile: REFUSE every guarded write, naming the error.
-    Someone meant to protect this host, and a broken list must not read as none.
+  - a broken list (a line that does not compile, or one that can match an
+    empty string, so every write would be a hit): REFUSE every guarded write,
+    naming the line and column, never the line's text. Someone meant to protect
+    this host, and a broken list must not read as none.
   - a payload that is not JSON: ALLOW, loudly (exit 3: the hook leaves a
     breadcrumb). A hook that cannot read the harness's own payload must not
     wedge every call.
@@ -48,20 +58,26 @@ Failure directions, each chosen on purpose:
     REFUSE, saying which. Only a hit pays this, so the cost falls where the risk
     is.
   - content that cannot be read counts as a hit. That covers a body file that
-    is not there, a program's output piped into the write, and a git command
-    run from a directory this guard cannot name (a command substitution or a
-    glob).
+    is not there, a program's output piped or substituted into the write
+    (``$(...)`` or backticks, except ``cat`` of a file or of a heredoc), and a
+    git command run from a directory this guard cannot name (a command
+    substitution or a glob).
 A remote that is not github.com, or a repository with no remote, is out of
 scope and allowed.
 
 THE CEILING: this reads the shell the way people write it, not the way a shell
-runs it. ``eval``, a function, backticks, or a script file that runs git or gh
-are not followed. It keeps accidents out of public repositories; it is not a
-boundary against a caller trying to get past it.
+runs it. ``eval``, a function, an alias, or a script file that runs git or gh
+are not followed (the commands inside a command substitution are). Three
+writes publish content that is not a word of the command, and are not read:
+``gh pr create --fill`` (its title and body come from commits already pushed),
+``gh repo create --source --push`` (the local history) and the asset files of
+``gh release create`` and ``upload``. It keeps accidents out of public
+repositories; it is not a boundary against a caller trying to get past it.
 """
 
 from __future__ import annotations
 
+import fnmatch
 import importlib.util
 import json
 import os
@@ -82,6 +98,7 @@ _spec.loader.exec_module(
 )  # git's option table and path resolver, not a second copy
 
 CACHE_LIFETIME_S = 600
+STALE_LIFETIME_S = 86400  # a cached answer stands in when GitHub cannot be read
 GIT_TIMEOUT_S = 10
 GH_TIMEOUT_S = 10
 DEFAULT_LIST = "~/.config/claudlobby/public-write-terms"
@@ -145,6 +162,17 @@ _CAT_SUBST = re.compile(r"\$\(\s*(?:cat\s+|<\s*)([^\s()|;&<>]+)\s*\)")
 _HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
 _PLACEHOLDER = re.compile(r"@@pwg-heredoc-(\d+)@@")
 _PUNCT = ";&|()<>\n"
+_SUBST = re.compile(r"\$@@pwg-subst-(\d+)@@")
+_READABLE_SUBST = re.compile(
+    r"\s*(?:(?:cat\s+|<\s*)[^\s()|;&<>]+|cat\s*<<-?\s*@@pwg-heredoc-\d+@@)\s*"
+)
+_ISSUE_URL = re.compile(
+    r"://(?P<host>[^/\s]+)/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)/(?:issues|pull)/\d+"
+)
+_VISIBILITIES = ("public", "private", "internal")
+# a line that matches any of these with zero width matches at every position of
+# every write, so every write would be a hit
+_PROBES = ("", "x", "plain words, 12.\n")
 
 
 # --- the list -------------------------------------------------------------------------
@@ -160,7 +188,10 @@ def _list_label() -> str:
 
 
 def load_terms(path: Path) -> tuple[re.Pattern | None, str]:
-    """(compiled list, state): state is ``ok``, ``absent`` or ``broken: <why>``."""
+    """(compiled list, state): state is ``ok``, ``absent`` or ``broken: <why>``.
+
+    A broken list is named by line and column, never by the line's text: the
+    reason reaches the bot, and the list is what must not travel."""
     try:
         lines = path.read_text().splitlines()
     except FileNotFoundError:
@@ -168,14 +199,27 @@ def load_terms(path: Path) -> tuple[re.Pattern | None, str]:
     except OSError as exc:
         return None, f"broken: {exc.strerror or exc}"
     parts = [
-        ln.strip() for ln in lines if ln.strip() and not ln.strip().startswith("#")
+        (n, ln.strip())
+        for n, ln in enumerate(lines, 1)
+        if ln.strip() and not ln.strip().startswith("#")
     ]
     if not parts:
         return None, "absent"
+    for n, p in parts:
+        try:
+            one = re.compile(f"(?:{p})", re.IGNORECASE)  # as the list uses it
+        except re.error as exc:
+            col = "" if exc.colno is None else f", column {max(exc.colno - 3, 1)}"
+            return None, f"broken: line {n} does not compile{col}"
+        if any(m.start() == m.end() for probe in _PROBES for m in one.finditer(probe)):
+            return None, (
+                f"broken: line {n} can match an empty string, so every write "
+                "would be a hit"
+            )
     try:
-        return re.compile("|".join(f"(?:{p})" for p in parts), re.IGNORECASE), "ok"
-    except re.error as exc:
-        return None, f"broken: {exc}"
+        return re.compile("|".join(f"(?:{p})" for _, p in parts), re.IGNORECASE), "ok"
+    except re.error:
+        return None, "broken: its lines do not compile together (a group name used twice?)"
 
 
 # --- reading the shell ----------------------------------------------------------------
@@ -217,33 +261,99 @@ def _heredocs(command: str, bodies: list[str]) -> str:
     return "\n".join(out)
 
 
-def _uncomment(text: str) -> str:
-    """The text without shell comments: a ``#`` that starts a word, outside
-    quotes, up to its newline. shlex's own comment handling swallows the NEWLINE
-    too, which would join the next command's words onto this one's."""
-    out, quote, i, n = [], "", 0, len(text)
+def _unfold(text: str, substs: list[str]) -> str:
+    """The text as the shell reads it before splitting words.
+
+    - A comment (a ``#`` that starts a word, outside quotes) goes, up to its
+      newline. shlex's own comment handling swallows the NEWLINE too, which
+      would join the next command's words onto this one's.
+    - A backslash-newline outside single quotes is a line continuation and
+      goes, so ``gh pr create -R O/R \\`` then an indented ``--body ...`` reads
+      as the one command it is.
+    - A command substitution outside single quotes (``$(...)`` or backticks)
+      whose output this guard cannot know, which is anything but ``cat`` of a
+      file or of a heredoc, moves into ``substs`` and leaves a placeholder
+      word: its output is content this guard cannot read, and its own commands
+      are walked like a subshell's.
+    """
+    out: list[str] = []
+    quote, i, n = "", 0, len(text)
     while i < n:
         c = text[i]
-        if quote:
-            if c == "\\" and quote == '"' and i + 1 < n:
+        if quote == "'":
+            quote = "" if c == "'" else quote
+            out.append(c)
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            if text[i + 1] != "\n":
                 out.append(text[i : i + 2])
-                i += 2
-                continue
-            if c == quote:
-                quote = ""
-        elif c == "\\" and i + 1 < n:
-            out.append(text[i : i + 2])
             i += 2
             continue
+        end = None
+        if c == "$" and text.startswith("(", i + 1) and not text.startswith("((", i + 1):
+            end = _close_paren(text, i + 2)
+            if end is not None and _READABLE_SUBST.fullmatch(text[i + 2 : end]):
+                out.append(text[i : end + 1])  # read where it is used (_CAT_SUBST)
+                i = end + 1
+                continue
+            inner = text[i + 2 : end] if end is not None else ""
+        elif c == "`":
+            end = _close_tick(text, i + 1)
+            inner = text[i + 1 : end] if end is not None else ""
+        if end is not None:
+            out.append(f"$@@pwg-subst-{len(substs)}@@")
+            substs.append(inner)
+            i = end + 1
+            continue
+        if quote:
+            quote = "" if c == '"' else quote
         elif c in "'\"":
             quote = c
-        elif c == "#" and (i == 0 or text[i - 1] in " \t\n;&|()"):
+        elif c == "#" and (not out or out[-1][-1] in " \t\n;&|()"):
             j = text.find("\n", i)
             i = n if j < 0 else j
             continue
         out.append(c)
         i += 1
     return "".join(out)
+
+
+def _close_paren(text: str, i: int) -> int | None:
+    """The ``)`` that closes the ``$(`` whose body starts at ``i``, following
+    nesting and quotes; None when it never closes (bash would not run it)."""
+    depth, quote = 1, ""
+    while i < len(text):
+        c = text[i]
+        if quote == "'":
+            quote = "" if c == "'" else quote
+        elif c == "\\":
+            i += 2
+            continue
+        elif quote:
+            quote = "" if c == '"' else quote
+        elif c in "'\"":
+            quote = c
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return None
+
+
+def _close_tick(text: str, i: int) -> int | None:
+    """The backtick that closes the one before ``i``: the next unescaped one."""
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] == "`":
+            return i
+        i += 1
+    return None
 
 
 def _is_op(tok: str) -> bool:
@@ -308,6 +418,7 @@ class _Cmd:
         self.herestrings: list[str] = []
         self.inputs: list[str] = []
         self.outputs: list[str] = []
+        self.substs: list[int] = []  # the command substitutions it runs first
 
 
 class _State:
@@ -321,10 +432,18 @@ class _State:
             str, str | None
         ] = {}  # file -> what the command writes there
         self.adding = False  # an earlier `git add` in this command
+        # each earlier `git add` that takes in new files: (its directory, its
+        # pathspecs or None when a file names them, whether it forces)
+        self.added: list[tuple[str | None, list[str] | None, bool]] = []
+        # repository -> what commits made earlier in this command hold (parts,
+        # what could not be read): a later push sends them, and they do not
+        # exist yet when this guard runs
+        self.pending: dict[str, tuple[list[tuple[str, str]], str]] = {}
 
 
 def _parse_cmd(toks: list[str], st: _State, bodies: list[str]) -> _Cmd:
     c = _Cmd()
+    c.substs = [int(m.group(1)) for t in toks for m in _SUBST.finditer(t)]
     lead = True
     k = 0
     while k < len(toks):
@@ -379,7 +498,8 @@ def _supplied(c: _Cmd, st: _State) -> str | None:
     Any other program's output cannot be known before it runs (None)."""
     prog = os.path.basename(c.words[0]) if c.words else ""
     if prog in ("echo", "printf"):
-        return "\n".join(_lenient(w, st.assigns) for w in c.words[1:])
+        words = [_lenient(w, st.assigns) for w in c.words[1:]]
+        return None if any(_SUBST.search(w) for w in words) else "\n".join(words)
     if prog == "cat":
         body = _Body(st.here, dict(st.assigns), st.written)
         body.attached(c)
@@ -391,7 +511,8 @@ def _supplied(c: _Cmd, st: _State) -> str | None:
 
 
 def _walk(text: str, st: _State, writes: list[Write], bodies: list[str]) -> None:
-    toks = _words(_uncomment(_heredocs(text, bodies)))
+    substs: list[str] = []
+    toks = _words(_unfold(_heredocs(text, bodies), substs))
     stack: list[tuple[str | None, str]] = []
     cmd: list[str] = []
     pipe_in: _Cmd | None = None
@@ -400,6 +521,11 @@ def _walk(text: str, st: _State, writes: list[Write], bodies: list[str]) -> None
             cmd.append(t)
             continue
         c = _parse_cmd(cmd, st, bodies) if cmd else None
+        for k in c.substs if c is not None else []:
+            if k < len(substs):  # runs before the command, in a subshell
+                saved = (st.here, st.unnamed)
+                _walk(substs[k], st, writes, bodies)
+                st.here, st.unnamed = saved
         if c is not None and c.words:
             _run(c, st, writes, pipe_in, bodies)
         pipe_in = c if t in ("|", "|&") else None
@@ -437,6 +563,10 @@ def _run(
         return
     for k, w in enumerate(c.words):
         base = os.path.basename(w)
+        if k and prog == "env" and _ASSIGN.match(w):  # `env GH_REPO=O/R gh ...`
+            name, value = _ASSIGN.match(w).groups()
+            st.assigns[name] = _lenient(value, st.assigns)
+            continue
         if base in ("bash", "sh", "zsh") and "-c" in c.words[k + 1 :]:
             j = c.words.index("-c", k + 1)
             if j + 1 < len(c.words):
@@ -551,9 +681,14 @@ class _Body:
     def _cannot(self, what: str) -> None:
         self.unreadable = self.unreadable or what
 
+    def _add(self, label: str, text: str) -> None:
+        self.parts.append((label, text))
+        if _SUBST.search(text):
+            self._cannot(f"the output of a command substitution in {label}")
+
     def text(self, label: str, words: list[str]) -> None:
         expanded = [_lenient(w, self.assigns) for w in words]
-        self.parts.append((label, "\n".join(expanded)))
+        self._add(label, "\n".join(expanded))
         for w in expanded:
             for m in _CAT_SUBST.finditer(w):
                 self.file(m.group(1))
@@ -562,10 +697,13 @@ class _Body:
         if word == "-":
             return
         p = _expand(word, self.assigns)
-        if p is None or not (os.path.isabs(p) or self.here):
+        if p and (os.path.isabs(p) or self.here):
+            p = _vgd._resolve(p, self.here)
+        else:
+            p = None  # a substitution, a glob, or a variable that is not set
+        if p is None:
             self._cannot(word)
             return
-        p = _vgd._resolve(p, self.here)
         if p in self.written:
             if self.written[p] is None:
                 self._cannot(f"{word} (the command writes it from a program's output)")
@@ -581,7 +719,7 @@ class _Body:
         for b in c.heredocs:
             self.parts.append(("a heredoc", b))
         for h in c.herestrings:
-            self.parts.append(("a here-string", _lenient(h, self.assigns)))
+            self._add("a here-string", _lenient(h, self.assigns))
         for f in c.inputs:
             self.file(f)
 
@@ -620,7 +758,7 @@ class Write:
     ):
         self.where, self.target, self.parts = where, target, parts
         self.unreadable, self.known_visibility, self.hint = (
-            unreadable,
+            _SUBST.sub("$(...)", unreadable),  # a placeholder never reaches a reason
             known_visibility,
             hint,
         )
@@ -777,6 +915,13 @@ def _gh_write(
         flag = _flag_values(args, {"-R", "--repo"})
         if flag:
             return _parse_repo(_expand(flag[-1], assigns))
+        for a in pos[2:] if group in ("issue", "pr") else []:
+            m = _ISSUE_URL.search(_lenient(a, assigns))
+            if m:  # gh writes where the URL points, whatever directory it runs in
+                host = m.group("host").lower()
+                if host != "github.com" and not host.endswith(".github.com"):
+                    return ("", "")  # another host
+                return (m.group("owner"), m.group("repo"))
         if group == "repo" and len(pos) > 2:
             if verb == "create":
                 return ("(new)", pos[2])
@@ -814,7 +959,9 @@ def _gh_api(args: list[str], c: _Cmd, st: _State, pipe_in: _Cmd | None) -> Write
     body.attached(c)
     if "-" in files:
         body.piped(pipe_in, st)
-    if endpoint == "graphql" and not any("mutation" in t for _, t in body.parts):
+    if endpoint == "graphql" and not body.unreadable and not any(
+        "mutation" in t for _, t in body.parts
+    ):
         return None  # a GraphQL query reads; only a mutation writes
 
     def target():
@@ -885,6 +1032,96 @@ def _commit_args(rest: list[str]) -> tuple[list[str], list[str], bool]:
     return msgs, files, tree
 
 
+def _add_args(rest: list[str]) -> tuple[list[str] | None, bool] | None:
+    """What a ``git add`` takes in that git does not track yet: ``(pathspecs,
+    force)``, the pathspecs None when a file this guard does not read names
+    them (``--pathspec-from-file``); None when it takes in no new file (``-u``,
+    a dry run, or no pathspec at all)."""
+    specs: list[str] = []
+    whole = update = force = False
+    for k, a in enumerate(rest):
+        if a == "--":
+            specs += rest[k + 1 :]
+            break
+        if a.startswith("--"):
+            name = a.partition("=")[0]
+            if name == "--pathspec-from-file":
+                return None, False
+            if name == "--dry-run":
+                return None
+            whole = whole or name in ("--all", "--no-ignore-removal")
+            update = update or name == "--update"
+            force = force or name == "--force"
+        elif a.startswith("-") and len(a) > 1:
+            if "n" in a[1:]:
+                return None
+            whole = whole or "A" in a[1:]
+            update = update or "u" in a[1:]
+            force = force or "f" in a[1:]
+        else:
+            specs.append(a)
+    if update and not whole or not (specs or whole):
+        return None
+    return specs or [":/"], force
+
+
+def _takes_in(spec: str, path: str, d: str, top: str) -> bool:
+    """Whether a pathspec given to ``git add`` in ``d`` takes in ``path``."""
+    base = os.path.normpath(
+        os.path.join(top, spec[2:]) if spec.startswith(":/") else os.path.join(d, spec)
+    )
+    if any(ch in spec for ch in "*?["):
+        return fnmatch.fnmatch(path, base)
+    return path == base or path.startswith(base.rstrip(os.sep) + os.sep)
+
+
+def _new_files(body: _Body, st: _State, here: str, top: str) -> None:
+    """The files earlier ``git add``s in this command take in that git does not
+    track yet. ``git diff`` never lists one, so without this ``git add new.md
+    && git commit`` in one command reads nothing of the new file. A file the
+    command itself writes first is read from the command: it is not on disk
+    yet."""
+    top = os.path.realpath(top)
+    for d, specs, force in st.added:
+        if d is None or specs is None:
+            body._cannot("the files an earlier git add in this command names")
+            continue
+        d = os.path.realpath(d)
+        if d != os.path.realpath(here):
+            other = _git(d, "rev-parse", "--show-toplevel")
+            if other is None:
+                body._cannot("the files an earlier git add in this command names")
+                continue
+            if other.returncode != 0 or os.path.realpath(other.stdout.strip()) != top:
+                continue  # another repository: not what this commit takes
+        listed = _git(
+            d,
+            "ls-files",
+            "-z",
+            "--others",
+            *([] if force else ["--exclude-standard"]),
+            "--",
+            *specs,
+        )
+        if listed is None or listed.returncode != 0:
+            body._cannot("the files an earlier git add in this command names")
+            continue
+        for rel in filter(None, listed.stdout.split("\0")):
+            body.parts.append(("a new file's path", rel))
+            try:
+                body.parts.append(("a new file", Path(d, rel).read_text(errors="replace")))
+            except OSError:
+                body._cannot(rel)
+        for p, text in st.written.items():
+            if any(_takes_in(s, p, d, top) for s in specs):
+                rel = os.path.relpath(p, top)
+                body.parts.append(("a new file's path", rel))
+                if text is None:
+                    body._cannot(f"{rel} (the command writes it from a program's output)")
+                else:
+                    body.parts.append(("a new file", text))
+
+
 def _git_write(
     args: list[str], c: _Cmd, st: _State, pipe_in: _Cmd | None
 ) -> Write | None:
@@ -897,10 +1134,7 @@ def _git_write(
         if vi is None:
             return None
         verb = args[vi]
-    if verb in ("add", "stage"):
-        st.adding = True
-        return None
-    if verb not in ("commit", "push"):
+    if verb not in ("add", "stage", "commit", "push"):
         return None
     here, unnamed = st.here, st.unnamed
     if {"--git-dir", "--work-tree"} & set(scope) or {"GIT_DIR", "GIT_WORK_TREE"} & set(
@@ -910,6 +1144,12 @@ def _git_write(
     elif "-C" in scope:
         p = _path(scope["-C"], st)
         here, unnamed = (p, "") if p else (None, scope["-C"])
+    if verb in ("add", "stage"):
+        st.adding = True
+        added = _add_args(args[vi + 1 :])
+        if added is not None:
+            st.added.append((here, *added))
+        return None
     where = f"git {verb}"
     if here is None:
         return Write(
@@ -948,6 +1188,10 @@ def _git_write(
             body.git(
                 "the unstaged changes", _git(here, "diff", "--no-color", "-U0", "-M")
             )
+        repo_top = top.stdout.strip()
+        _new_files(body, st, here, repo_top)
+        parts, cannot = st.pending.get(repo_top, ([], ""))
+        st.pending[repo_top] = (parts + body.parts, cannot or body.unreadable)
         return Write(
             where,
             lambda: _url_repo(here, _git_push_remote(here), push=True),
@@ -1009,6 +1253,13 @@ def _git_write(
             "--",
         ),
     )
+    parts, cannot = st.pending.get(top.stdout.strip(), ([], ""))
+    body.parts += [
+        (f"{label} of a commit made earlier in this command", text)
+        for label, text in parts
+    ]
+    if cannot:
+        body._cannot(cannot)
     return Write(where, target, body.parts, body.unreadable)
 
 
@@ -1032,7 +1283,9 @@ def _cache_path() -> Path:
 
 def visibility(owner: str, repo: str) -> str:
     """``public``, ``private``, ``internal`` or ``unknown``, read live and cached
-    for CACHE_LIFETIME_S. An unknown answer is never cached."""
+    for CACHE_LIFETIME_S. An unknown answer is never cached, and an answer
+    stamped in the future (the clock stepped back since) is not trusted. When
+    the live read fails, an answer cached up to STALE_LIFETIME_S ago stands in."""
     key = f"{owner}/{repo}".lower()
     cache = _cache_path()
     now = time.time()
@@ -1040,23 +1293,23 @@ def visibility(owner: str, repo: str) -> str:
         data = json.loads(cache.read_text())
     except (OSError, ValueError):
         data = {}
-    hit = data.get(key) if isinstance(data, dict) else None
-    if isinstance(hit, list) and len(hit) == 2 and now - hit[1] < CACHE_LIFETIME_S:
-        return hit[0]
-    try:
-        p = subprocess.run(
-            ["gh", "api", f"repos/{owner}/{repo}", "--jq", ".visibility"],
-            capture_output=True,
-            text=True,
-            timeout=GH_TIMEOUT_S,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return "unknown"
-    vis = p.stdout.strip().lower() if p.returncode == 0 else ""
-    if vis not in ("public", "private", "internal"):
-        return "unknown"
     if not isinstance(data, dict):
         data = {}
+    hit = data.get(key)
+    age = None
+    if (
+        isinstance(hit, list)
+        and len(hit) == 2
+        and hit[0] in _VISIBILITIES
+        and isinstance(hit[1], (int, float))
+        and 0 <= now - hit[1] < STALE_LIFETIME_S
+    ):
+        age = now - hit[1]
+    if age is not None and age < CACHE_LIFETIME_S:
+        return hit[0]
+    vis = _live_visibility(owner, repo)
+    if vis == "unknown":
+        return hit[0] if age is not None else "unknown"
     data[key] = [vis, now]
     try:
         cache.parent.mkdir(parents=True, exist_ok=True)
@@ -1066,6 +1319,24 @@ def visibility(owner: str, repo: str) -> str:
     except OSError:
         pass
     return vis
+
+
+def _live_visibility(owner: str, repo: str) -> str:
+    """REST first, then GraphQL (``gh repo view``) when REST failed fast: a REST
+    throttle leaves GraphQL working. A call that timed out is not repeated,
+    since a gh that hung would hang again."""
+    for argv in (
+        ["gh", "api", f"repos/{owner}/{repo}", "--jq", ".visibility"],
+        ["gh", "repo", "view", f"{owner}/{repo}", "--json", "visibility", "--jq", ".visibility"],
+    ):
+        try:
+            p = subprocess.run(argv, capture_output=True, text=True, timeout=GH_TIMEOUT_S)
+        except (OSError, subprocess.SubprocessError):
+            return "unknown"
+        vis = p.stdout.strip().lower() if p.returncode == 0 else ""
+        if vis in _VISIBILITIES:
+            return vis
+    return "unknown"
 
 
 # --- the decision ---------------------------------------------------------------------
@@ -1097,9 +1368,11 @@ def _emit(event: str, data: dict) -> None:
         if root and (Path(root) / "lib" / "lib-common.sh").is_file()
         else str(LIB)
     )
+    # The bot is named rather than left to an ambient BOT_DIR: an event anchored
+    # on the fleet is one neither `claudlobby events --bot` nor its brief reads.
     script = (
         '( . "$1/lib-common.sh" >/dev/null 2>&1 || exit 0; '
-        'emit_fleet_event "$2" public-write-guard "$3" ) </dev/null >/dev/null 2>&1 &'
+        'emit_fleet_event "$2" public-write-guard "$3" "$4" "$5" ) </dev/null >/dev/null 2>&1 &'
     )
     try:
         subprocess.run(
@@ -1111,6 +1384,8 @@ def _emit(event: str, data: dict) -> None:
                 lib,
                 event,
                 json.dumps(data, sort_keys=True),
+                os.environ.get("BOT_DIR", ""),
+                os.environ.get("BOT_ID", ""),
             ],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -1150,7 +1425,7 @@ def decide(payload: dict) -> str | None:
     if rx is None:
         _emit("public_write_refused", {"where": writes[0].where, "why": "list"})
         return _deny(
-            f"the host's term list ({_list_label()}) does not compile "
+            f"the host's term list ({_list_label()}) is broken "
             f"({state[len('broken: ') :]}); fix the list, then retry"
         )
     for w in writes:
@@ -1178,7 +1453,7 @@ def decide(payload: dict) -> str | None:
         if hits:
             what = (
                 f"{found} match(es) for the host's term list ({_list_label()}) in "
-                + ", ".join(label for label, _ in hits)
+                + ", ".join(dict.fromkeys(label for label, _ in hits))
             )
             fix = "Remove the listed text, or write it somewhere private."
         else:
@@ -1204,16 +1479,31 @@ def decide(payload: dict) -> str | None:
     return None
 
 
+def _off_switch() -> Path:
+    """The host-wide off switch the hook script checks before anything else."""
+    root = os.environ.get("CLAUDLOBBY_ROOT")
+    return (Path(root) if root else LIB.parent) / "state" / "public-write-guard" / "disabled"
+
+
 def check() -> int:
-    """``--check``: whether the host's list is armed, without printing a term."""
+    """``--check``: whether the host's guard is armed, without printing a term.
+    It names the off switch too: that passes every call and records nothing,
+    so a host left switched off would otherwise read as a canary with no
+    refusals."""
     rx, state = load_terms(terms_path())
     if rx is None:
         print(f"{_list_label()}: {state}")
-        return 1
-    n = sum(1 for ln in terms_path().read_text().splitlines()
-            if ln.strip() and not ln.strip().startswith("#"))
-    print(f"{_list_label()}: ok, {n} pattern(s)")
-    return 0
+    else:
+        n = sum(
+            1
+            for ln in terms_path().read_text().splitlines()
+            if ln.strip() and not ln.strip().startswith("#")
+        )
+        print(f"{_list_label()}: ok, {n} pattern(s)")
+    off = _off_switch()
+    if off.exists():
+        print(f"{off}: set, so every call passes unread; remove it to arm the guard")
+    return 0 if rx is not None and not off.exists() else 1
 
 
 def main() -> int:
