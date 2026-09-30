@@ -992,8 +992,11 @@ plane_emit_bounded() {
     # most of the host's traffic, bot-vitals' two per tool call included.
     # For the same reason its class is `background` unless the caller named
     # one (#1693): bot-vitals names `hook`, because a turn waits on it.
+    # `9>&-`: the shim never inherits a pane's send lock (#2036). An emit made
+    # inside a locked send is waited for, but a shim orphaned by a killed sender
+    # would otherwise keep that pane locked until it finished.
     PLANE_EMIT_CLASS="${PLANE_EMIT_CLASS:-background}" PLANE_EMIT_COOLDOWN_STAGE=1 \
-        "${BASH_SOURCE[0]%/*}/plane-emit.sh" <<<"$batch" >/dev/null &
+        "${BASH_SOURCE[0]%/*}/plane-emit.sh" <<<"$batch" >/dev/null 9>&- &
     _pid=$!
     while kill -0 "$_pid" 2>/dev/null && [ "$SECONDS" -lt "$_deadline" ]; do
         # 50ms: the socket rung answers in ~40ms, so a 1s poll spent ~96% of
@@ -3123,6 +3126,161 @@ _pane_recover_unconfirmed_send() {
     return 0
 }
 
+# --- the per-recipient send lock (#2036) --------------------------------------
+#
+# ONE sender at a time per recipient pane. A payload crosses the pty as 400-byte
+# chunks 0.15s apart (#1493), so a large send takes seconds, and nothing
+# serialised the senders of ONE pane: a second send that started inside that
+# window typed its chunks between the first one's. Seen live on 2026-09-30: a
+# manager's short query landed inside a worker's report, splitting it mid-word,
+# and both receipt trailers (#1876) broke. The per-sender verify (#1236) cannot
+# see it, because it compares one input box with its OWN payload.
+#
+# THE KEY IS THE RECIPIENT: socket + target, as the caller names it. Every
+# injector passes the bare session name (bot_tmux_send, start-bot, keepalive,
+# pre-stop-handoff), so a pane has one spelling. Two names that sanitize alike
+# share a lock and only wait for each other; nothing is corrupted by that.
+#
+# THE LOCK IS THE KERNEL'S, through python's fcntl, because macOS has no
+# flock(1). The locked work runs in a subshell that opens the pane's lock file on
+# fd 9; a python child flock(2)s that open file and exits. The lock stays with
+# the open file, so it is held exactly as long as the subshell, or a child still
+# holding fd 9, lives: a return, a failure, set -e, SIGTERM and SIGKILL all
+# release it, with no trap and no stale-holder recovery, since the kernel does
+# the releasing. Measured cost on the Pi at load ~15: ~54 ms per send (the python
+# start), against a send whose own settle and first verify tick are 0.5 s.
+#
+# A HELD LOCK IS WAITED FOR, BOUNDED, AND NEVER SENT PAST. A sender that cannot
+# get the lock within PANE_SEND_LOCK_WAIT_S (60 s) sends NOTHING: it names the
+# holder on stderr, records a send_miss (reason recipient-lock-timeout) and
+# returns 75, so the door records the send as failed. 60 s covers every hold on a
+# running bot (a 4 KB dispatch holds ~2 s) and most of a cold boot's 45 s wait
+# for the input box (start-bot only; a dispatch that waits longer is refused).
+#
+# A LOCK THAT CANNOT BE TAKEN AT ALL (no lock dir, no python) is not evidence of
+# a concurrent sender, so that send goes out WITHOUT the lock, loudly: stderr
+# plus a send_unlocked event. Failing closed there would stop every dispatch,
+# report and startup prompt on the host at once over a directory permission.
+# This is the one path that sends unlocked.
+#
+# fd 9 belongs to the subshell alone, so no caller's descriptor is touched.
+# Nothing in this file opens fd 9, and plane_emit_bounded closes it for the emit
+# it backgrounds, so an emit orphaned by a killed sender cannot keep a pane locked.
+_PANE_SEND_LOCK_WAIT_DEFAULT=60
+# The lock program, argv <fd> <wait seconds> <holder record>. rc 0: held, and
+# the record written into the lock file for a refused sender to name (best
+# effort: a record that cannot be written, on a full disk say, is diagnostic
+# only and must not turn a held lock into an unlocked send). rc 75:
+# another sender still held it at the deadline. Any other rc: no lock could be
+# taken. LOCK_NB polled every 20 ms rather than a blocking flock under an alarm,
+# so no signal can land between taking the lock and cancelling the timer; the
+# price is at most 20 ms of latency on a contended send.
+_PANE_SEND_LOCK_PY='# pane-send-lock (#2036)
+import fcntl, os, sys, time
+fd, wait, info = int(sys.argv[1]), float(sys.argv[2]), sys.argv[3]
+deadline = time.monotonic() + wait
+while True:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        break
+    except BlockingIOError:
+        if time.monotonic() >= deadline:
+            sys.exit(75)
+        time.sleep(0.02)
+rec = "pid=%d since=%s %s\n" % (os.getppid(), time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), info)
+try:
+    os.ftruncate(fd, 0)
+    os.pwrite(fd, rec.encode("utf-8", "replace"), 0)
+except OSError:
+    pass
+'
+
+# _pane_send_lock_file <socket> <target>
+# Set _PANE_SEND_LOCK_FILE to the recipient's lock file, under
+# $CLAUDLOBBY_ROOT/state/pane-send/, which every door on the host shares
+# (lib-common fills CLAUDLOBBY_ROOT in for a caller that has none). A global,
+# not stdout: this runs on every send, and a command substitution would fork.
+# PANE_SEND_LOCK_DIR is a TEST SEAM only: senders that disagree on it do not
+# exclude each other, which is why no switch names it.
+_pane_send_lock_file() {
+    local LC_ALL=C
+    local key="${1:-default}--${2:-}"
+    key=${key//[!A-Za-z0-9._-]/_}
+    [ "${#key}" -le 200 ] || key=${key:0:200}
+    _PANE_SEND_LOCK_FILE="${PANE_SEND_LOCK_DIR:-${CLAUDLOBBY_ROOT:-.}/state/pane-send}/$key.lock"
+}
+
+# _pane_send_lock_refused <what> <socket> <session> <waited_s> <holder>
+# The bounded wait ran out: say so where a human reads, and record it where the
+# fleet reads. send_miss, not a new event: the keystrokes did NOT land, which is
+# what fleet-pulse and the doors read that event to mean.
+_pane_send_lock_refused() {
+    local what="$1" socket="$2" session="$3" waited="$4" holder="${5:-}"
+    [ -n "$holder" ] || holder="(the holder had not written its record)"
+    printf 'pane_send: %s NOT sent to %s (socket %s): another send to that pane held its lock for the whole %ss wait -- holder: %s. Recorded as send_miss; nothing was retried.\n' \
+        "$what" "$session" "${socket:-default}" "$waited" "$holder" >&2
+    emit_fleet_event send_miss dispatch \
+        "$(printf '{"session":"%s","reason":"recipient-lock-timeout","what":"%s","waited_s":"%s","holder":"%s"}' \
+            "$(json_escape "$session")" "$what" "$waited" "$(json_escape "$holder")")"
+}
+
+# _pane_send_lock_unavailable <what> <socket> <session> <why>
+# No lock could be taken at all, so the send goes out without one: loudly, since
+# a concurrent send to this pane can now interleave with it.
+_pane_send_lock_unavailable() {
+    local what="$1" socket="$2" session="$3" why="$4"
+    printf 'pane_send: sending the %s to %s (socket %s) WITHOUT its send lock: %s -- a concurrent send to this pane can interleave with it\n' \
+        "$what" "$session" "${socket:-default}" "$why" >&2
+    emit_fleet_event send_unlocked dispatch \
+        "$(printf '{"session":"%s","reason":"lock-unavailable","what":"%s","detail":"%s"}' \
+            "$(json_escape "$session")" "$what" "$(json_escape "$why")")"
+}
+
+# _pane_with_send_lock <what> <wait_s> <socket> <session> <cmd...>
+# Run <cmd...> holding <session>'s send lock (above), in a subshell, and return
+# its rc. <what> names the keystrokes for the record (payload, enter). Refused at
+# the deadline: <cmd> does NOT run, rc 75. No lock to be had: <cmd> runs
+# unlocked, loudly.
+#
+# Every failure in here is caught by a condition (`||`, `if`) and never left as
+# a bare failing command: set -E carries a caller's ERR trap into this subshell,
+# and a bare failure would file a script_error on top of the record the door is
+# about to make anyway. The same is why the subshell's rc leaves by `|| return`.
+_pane_with_send_lock() {
+    local what="$1" wait="$2" socket="$3" session="$4"
+    shift 4
+    case "$wait" in
+        ''|*[!0-9.]*|*.*.*|.) wait=$_PANE_SEND_LOCK_WAIT_DEFAULT ;;
+    esac
+    _pane_send_lock_file "$socket" "$session"
+    local file="$_PANE_SEND_LOCK_FILE"
+    (
+        rc=0 why="" holder=""
+        if ! { [ -d "${file%/*}" ] || mkdir -p "${file%/*}" 2>/dev/null; }; then
+            why="cannot create ${file%/*}"
+        elif ! { exec 9<>"$file"; } 2>/dev/null; then
+            why="cannot open $file"
+        else
+            python3 -S -E -c "$_PANE_SEND_LOCK_PY" 9 "$wait" \
+                "bot=${BOT_ID:-${BOT_NAME:-?}} door=${0##*/} what=$what" || rc=$?
+            if [ "$rc" -eq 0 ]; then
+                "$@" || exit $?
+                exit 0
+            fi
+            if [ "$rc" -eq 75 ]; then
+                IFS= read -r holder <&9 || true
+                _pane_send_lock_refused "$what" "$socket" "$session" "$wait" "$holder"
+                exit 75
+            fi
+            why="the lock helper failed (rc $rc)"
+            exec 9>&-
+        fi
+        _pane_send_lock_unavailable "$what" "$socket" "$session" "$why"
+        "$@" || exit $?
+        exit 0
+    ) || return $?
+}
+
 # pane_send_verified <socket> <session> <text>
 # THE verified pane send, and the one home for the send/settle/Enter/verify-retry
 # dance: send <text> in pty-sized chunks, let the buffer settle, send Enter once,
@@ -3147,6 +3305,18 @@ pane_send_verified() {
     local socket="${1?Usage: pane_send_verified <socket> <session> <text>}"
     local session="${2:?Usage: pane_send_verified <socket> <session> <text>}"
     local text="${3:?Usage: pane_send_verified <socket> <session> <text>}"
+    # #2036: the WHOLE send, from the wait for a box to the last verify tick and
+    # any repair, holds the recipient's send lock, so no other sender's
+    # keystrokes can land between our chunks, or between them and our Enter.
+    _pane_with_send_lock payload "${PANE_SEND_LOCK_WAIT_S:-}" "$socket" "$session" \
+        _pane_send_verified_locked "$socket" "$session" "$text" || return $?
+}
+
+# _pane_send_verified_locked <socket> <session> <text>
+# The send itself, run by pane_send_verified with the recipient's send lock
+# held. Never call it directly: without the lock it is the #2036 interleave.
+_pane_send_verified_locked() {
+    local socket="$1" session="$2" text="$3"
     # The FULL payload, never a prefix (#1082). Reversed containment asks whether
     # what is rendered is part of what we sent, and a rendered interior window is
     # a substring of the payload but NOT of its first N characters — so truncating
@@ -3273,6 +3443,14 @@ pane_send_verified() {
 # within 10s of it; the ones past 20s were held boxes a human rescued.
 _PANE_RECEIPT_WAIT_DEFAULT=10
 
+# _pane_receipt_enter <socket> <session> <send_retry data>
+# pane_await_receipt's one repair Enter, recorded as send_retry first. Run only
+# under the recipient's send lock (#2036), by pane_await_receipt below.
+_pane_receipt_enter() {
+    emit_fleet_event send_retry dispatch "$3"
+    bot_tmux "$1" send-keys -t "$2" Enter 2>/dev/null || true
+}
+
 # pane_await_receipt <socket> <session> <msg_id>
 # A tracked send was SUBMITTED only once the receiver's UserPromptSubmit hook
 # (plane-dispatch-in.sh) has recorded its `received` row: the one signal a held
@@ -3298,8 +3476,12 @@ pane_await_receipt() {
     [ "$rc" -eq 1 ] || return 0
     if bot_is_busy "$socket" "$session"; then return 0; fi
     printf -v data '{"session":"%s","msg_id":"%s","reason":"no-receipt"}' "$(json_escape "$session")" "$msg"
-    emit_fleet_event send_retry dispatch "$data"
-    bot_tmux "$socket" send-keys -t "$session" Enter 2>/dev/null || true
+    # #2036: this Enter is a keystroke into the pane like any other, so it takes
+    # the recipient's send lock. Pressed between another sender's chunks, it
+    # would submit that payload half-typed. The receipt wait bounds the lock
+    # wait; refused, the Enter is recorded and skipped, and the wait below goes on.
+    _pane_with_send_lock enter "$wait" "$socket" "$session" \
+        _pane_receipt_enter "$socket" "$session" "$data" || true
     rc=0; "${ask[@]}" || rc=$?
     [ "$rc" -eq 1 ] || return 0
     if bot_is_busy "$socket" "$session"; then return 0; fi
