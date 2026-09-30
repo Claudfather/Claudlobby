@@ -213,10 +213,16 @@ reconcile_briefing_timers() {
     # Live ENROLLED set (the real firing units), not the composed dir.
     local enrolled=() unit label uid
     if [ "$_OS" = "Linux" ]; then
+        # list-unit-files exits 1 when the pattern matches nothing, as it does
+        # on any fleet with no briefing timers. The guard sits INSIDE the
+        # process substitution: the errtrace ERR trap runs in the substitution
+        # shell, where no guard outside it reaches (#1707). An empty list means
+        # nothing to reconcile, so a real listing failure swallowed with it
+        # fails toward doing nothing.
         while IFS= read -r unit; do
             [ -n "$unit" ] && enrolled+=("${unit%.timer}")
         done < <(systemctl --user list-unit-files --no-legend \
-            "$SERVICE_PREFIX.briefing-*.timer" 2>/dev/null | awk '{print $1}')
+            "$SERVICE_PREFIX.briefing-*.timer" 2>/dev/null | awk '{print $1}' || true)
     else
         uid="$(id -u)"
         for c in "$HOME/Library/LaunchAgents/$SERVICE_PREFIX".briefing-*.plist; do

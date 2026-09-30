@@ -8,6 +8,7 @@ behavior are asserted on actual execution — without touching the host's
 systemd or tmux state.
 """
 
+import json
 import os
 import shutil
 import subprocess
@@ -73,14 +74,18 @@ class Harness:
             '        grep -qx "${3:-}" "$STUB_ENROLLED" 2>/dev/null; exit $? ;;\n'
             # Emulate systemd glob expansion for list-unit-files: the last arg
             # may be a pattern (e.g. <prefix>.briefing-*.timer); a literal name
-            # still exact-matches, keeping existing callers unchanged.
+            # still exact-matches, keeping existing callers unchanged. Like
+            # systemd (252, measured), a pattern or name that matches nothing
+            # exits 1 with no output, which is what fires an unguarded
+            # caller's ERR trap (#1707).
             "    list-unit-files)\n"
+            "        _rc=1\n"
             "        while IFS= read -r _u; do\n"
             '            [ -n "$_u" ] || continue\n'
             "            # shellcheck disable=SC2254\n"
-            '            case "$_u" in ${!#}) echo "$_u enabled enabled" ;; esac\n'
+            '            case "$_u" in ${!#}) echo "$_u enabled enabled"; _rc=0 ;; esac\n'
             '        done < "$STUB_UNIT_FILES" 2>/dev/null\n'
-            "        exit 0 ;;\n"
+            "        exit $_rc ;;\n"
             "    is-active)\n"
             '        grep -qx "${!#}" "$STUB_ACTIVE" 2>/dev/null && exit 0\n'
             "        exit 3 ;;\n"
@@ -109,6 +114,15 @@ class Harness:
         _write_exec(
             self.bin / "journalctl",
             '#!/bin/bash\necho "journalctl $*" >> "$STUB_LOG"\nexit 0\n',
+        )
+        # The plane shim, recording: every batch a door emits is appended to
+        # $STUB_EMITS, one per line, so a test can read back what reached the
+        # plane. Without it the doors find no shim and only disclose rc 127.
+        self.emits = tmp_path / "emits"
+        self.emits.write_text("")
+        _write_exec(
+            self.root / "lib" / "plane-emit.sh",
+            '#!/bin/bash\ncat >> "$STUB_EMITS"\nexit 0\n',
         )
         # claudlobby: logs its invocation so warm-cache ordering is assertable.
         _write_exec(
@@ -208,6 +222,7 @@ class Harness:
             STUB_UNIT_FILES=self.unit_files,
             STUB_ACTIVE=self.active,
             STUB_START_FAIL=self.start_fail,
+            STUB_EMITS=self.emits,
             # Isolate the unbound-session socket walk from the host's real tmux.
             TMUX_TMPDIR=self.root / "no-tmux",
         )
@@ -218,6 +233,15 @@ class Harness:
 
     def stub_log(self):
         return self.log.read_text()
+
+    def emitted(self, event):
+        """The data of every plane event of this type that reached the shim."""
+        found = []
+        for line in self.emits.read_text().splitlines():
+            for ev in json.loads(line)["events"]:
+                if ev["payload"]["event"] == event:
+                    found.append(ev["payload"]["data"]["data"])
+        return found
 
 
 @pytest.fixture
@@ -765,3 +789,48 @@ class TestBriefingReconcileGuard:
         assert r.returncode == 0, r.stdout + r.stderr
         assert "disable --now test.prefix.briefing-" not in h.stub_log()
         assert "briefing reconcile ABORTED" in r.stdout
+
+
+class TestBriefingReconcileErrTrap:
+    """#1707: `systemctl list-unit-files` exits 1 when its pattern matches
+    nothing, so on a fleet with no briefing timers the errtrace ERR trap
+    fired inside reconcile_briefing_timers' process substitution and filed a
+    critical script_error every night, while the function went on to return
+    0. Runs `setup-fleet --jobs-only`, the nightly reload's call, under the
+    real install_error_trap, and reads back what reached the plane shim."""
+
+    def test_no_briefing_timers_files_no_script_error(self, h):
+        h.fleet("f1", timers=("keepalive",))
+        # The precondition this test rests on: the stub answers a pattern
+        # that matches nothing the way systemd does, rc 1 and no output.
+        probe = h.run(
+            str(h.bin / "systemctl"),
+            "--user",
+            "list-unit-files",
+            "--no-legend",
+            "test.prefix.briefing-*.timer",
+        )
+        assert (probe.returncode, probe.stdout) == (1, "")
+        h.log.write_text("")  # the probe logs itself; the run must earn its line
+        r = h.run(_sf(h), "f1", "--jobs-only")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "list-unit-files --no-legend test.prefix.briefing-*.timer" in h.stub_log()
+        # The function returned 0: under set -e a failed return would stop
+        # the script before step 1 starts.
+        assert "step 1/4" in r.stdout
+        assert h.emitted("script_error") == [], r.stderr
+
+    def test_a_real_failure_in_the_function_still_files_one(self, h):
+        # Positive control for the test above: the same trap, shim and
+        # function, with a genuine failure. A directory where an orphan's
+        # unit file belongs makes the unguarded `rm -f` of that file fail.
+        fdir = h.fleet("f1")
+        tdir = fdir / "runtime" / "fleet" / "timers"
+        (tdir / "BRIEFING_EXPECTED").write_text("# config-declared briefing units\n")
+        with open(h.unit_files, "a") as f:
+            f.write("test.prefix.briefing-kev-morning.timer\n")
+        (h.unit_dir / "test.prefix.briefing-kev-morning.timer").mkdir()
+        r = h.run(_sf(h), "f1", "--jobs-only")
+        assert "disable --now test.prefix.briefing-kev-morning.timer" in h.stub_log()
+        scripts = [e["script"] for e in h.emitted("script_error")]
+        assert scripts == ["setup-fleet"], r.stdout + r.stderr
