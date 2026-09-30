@@ -20,11 +20,13 @@ results remain required before production use.
 
 Before merging incompatible code into the branch an old source-puller follows,
 identify that host's exact installed pull-root timer/service or launchd label by
-its executable and checkout path. Stop and disable its scheduler through the
-native user manager, verify the service is not running, and prevent concurrent
-manual pulls. A setting in new source cannot stop an already-installed old job.
-A commit ceiling remains held until conversion is verified; it is not permission
-to let the next scheduled pull cross the ceiling.
+its executable and checkout path. Either stop and disable that exact scheduler
+and verify its service is not running, or verify that the installed old job reads
+and enforces a commit ceiling below this conversion. For a ceiling, inspect the
+actual installed script and its configured input; a setting in new source is not
+proof. Confirm that expiry keeps holding instead of releasing it, let any running
+pull finish, and prevent concurrent manual pulls. Keep the source hold until
+conversion is verified; it is not permission to cross the ceiling.
 
 Record, for this host:
 
@@ -37,6 +39,29 @@ Record, for this host:
   with its existing consistent-backup procedure or while writers are quiesced;
   copying only a live SQLite database file can omit WAL data. Do not copy secret
   values into the PR or evidence report.
+
+Also record these, because first adoption cannot recover them later:
+
+- **Run intent.** List every de-enrolled bot (the explicit stop contract),
+  and every `<bot runtime dir>/autonomous-runner.paused` marker. Activation starts
+  every candidate bot, and the new runner gate reads only recorded
+  `bot automation` state. It therefore refuses, before any record or native
+  effect, while a candidate includes a stopped bot or a configured runner whose
+  legacy marker has no recorded pause. A paused runner is never silently resumed.
+  Resolve it in the reviewed candidate:
+  - omit the stopped bot, or start it deliberately;
+  - remove `autonomous_runner` from a paused bot and re-plan, then record
+    `bot automation pause` after activation before restoring it.
+
+  Remove a marker only when that runner may resume.
+- **Open legacy work.** List every open dispatch and assignment row per bot, using
+  the old installation's own reads. Legacy rows keyed only by a `dispatch-log`
+  content hash are not mapped to canonical tasks. Have the manager complete,
+  report or withdraw that work through the old installation before the window,
+  and keep the list with the recovery inputs so it can be compared after adoption.
+- **Plane queues.** Count the files in `state/plane/staged/`, in the spool and its
+  inflight claims (`state/plane/spool/`), and in `state/plane/spool/quarantine/`,
+  without opening or moving any of them.
 
 On Linux, this release targets `systemctl --user` units. Ordinary system-level
 units, foreign unit ownership or an incomplete roster require a separately
@@ -68,6 +93,12 @@ From an external operator shell, use the assembled sealed CLI:
 "$RELEASE_CLI" --root "$DATA" host status
 ```
 
+Every authored manifest must declare `fleet.manager`, naming one of its own bots.
+There is one implicit manager per fleet, and `config plan` refuses a manifest
+without one. If an old manifest lacks it, adding it edits a file that the running
+old installation also reads. First confirm that the old installation accepts the
+field, then make the edit while the source hold is in force.
+
 For fleet manifests outside the discovered root layout, pass each exact authored
 manifest with repeated `config plan --fleet-path PATH`. Review the **complete
 host roster**, producer jobs, ingest ownership, task-history migration blockers,
@@ -91,6 +122,35 @@ and the heavy-slot behavior for an opted-in bot. Check ordinary degraded deliver
 and strict recording refusal only through an explicitly authorized bounded fault.
 Retain honest unavailable/refused outcomes. Unknown delivery is never permission
 to resend automatically. Capture normal-load Pi timing separately.
+
+### Pre-adoption queue and data preflight
+
+First adoption refuses unless the existing Plane is readable and the staged,
+spool and inflight queues are all empty. Quarantine is retained and inventoried,
+without replay or deletion. It checks this before any
+activation record or pause, and again after quiescence. Before the window:
+
+- Keep the **old** ingest daemon running so it can commit staged and spooled
+  batches, then confirm that those directories are empty. A new pending entry
+  written between that check and the window will still block adoption.
+- Do not use the sealed CLI to drain or move queue entries on a host that has not
+  yet been adopted. `plane spool retry` and `plane spool quarantine` need an active
+  selected release and refuse beforehand. `plane status` and `plane doctor` refuse
+  a Plane that still needs migration, so they cannot count these queues there.
+- **Quarantine is evidence, not debris.** Its entries are retained outside replay,
+  and neither replay nor discard may be assumed. Never delete or replay them to
+  satisfy the check. Readable quarantine bytes remain bound to the migration
+  inventory even when their payload is malformed. An unreadable, missing or
+  changed quarantine file still refuses; adoption never repairs it automatically.
+- An inflight spool claim is normal while the old daemon is draining. One that
+  persists after the queues settle needs its ownership checked with the old ingest
+  stopped. Do not remove it by hand.
+
+A refusal with `no activation record was created` means the host is unchanged, not
+that adoption succeeded. Run-intent and queue/data refusals report the blocker
+and safe next step without exposing native stderr or pending payload values.
+Correct that cause before retrying. Only `host status` and the step-5 observations
+establish success; an incomplete log or a refusal never does.
 
 The production window requires every protected workload to finish or receive an
 explicit operator-approved handoff. A passing isolated canary does not release

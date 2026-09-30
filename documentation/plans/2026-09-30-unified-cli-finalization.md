@@ -247,8 +247,27 @@ this procedure; paused task writes still refuse.
 The existing Linux bootstrap fixture cannot represent populated legacy adoption
 without substantial new simulation. That simulation was not built. Ubuntu CI
 provides Linux x86_64 code/harness and offline release-assembly evidence; actual
-Pi/user-systemd adoption remains unproven. Tailscale discovery on September 30
-found the Pi offline with an expired node key, so no hardware canary ran.
+Pi/user-systemd adoption remains unproven. Tailscale discovery earlier on
+September 30 found the Pi offline, so no hardware canary ran then.
+
+**Later Pi evidence (Linux aarch64, read-only natively).** These results are at
+`4adfb7b2` and use two separate sources.
+
+- **Tests:** a disposable source export with a private home, temporary directory
+  and virtual environment passed **170 tests, with no failures or skips**, in 35.71
+  seconds. The files were the heavy-slot guard, run, redaction and #2023
+  classifier tests plus `test_supervision_inventory.py`.
+- **Native catalogue read:** the selected adapter's `svc_inventory_catalog` parsed
+  the real user-systemd catalogue:
+  - 16 search directories;
+  - 186 service, timer, socket and path names;
+  - 158 loaded names;
+  - 36 escaped device and mount rows, correctly ignored.
+
+  Production was not changed.
+
+This closes the concrete S4b-04 escaped-unit concern on real hardware. It does not
+establish Pi bootstrap, adoption, interrupted recovery or timing.
 
 The merge standard is concrete failures and plausible dangerous paths plus a
 bounded real canary. Performance speculation, broad platform matrices and a
@@ -256,19 +275,45 @@ general rollback framework are not automatic merge requirements. Remaining
 substantive findings still require an explicit fix or deferral; this is not a
 claim that all 199 findings are resolved.
 
+## Accepted policy dispositions
+
+- **S2-03, no automatic Enter repair.** A repair keystroke after an uncertain
+  submission is a resend risk. Uncertain sends stay disclosed and held, and
+  `message send` performs exactly one native submission. Cleanup of the stale
+  docstring and the uncalled `pane_await_receipt` helper is a follow-up.
+- **S5a-01 / S5a-08, honest recording outages.**
+  - **Disarmed daemon:** disarming it is an operator choice. Hook and timer emits
+    stage within their bound, stay unrecorded and are shown as attention by
+    `plane doctor`. Canonical task and linked mutations still commit in-process,
+    and ordinary sends degrade under O1.
+  - **Pending schema:** the daemon exits 7 and supervision relaunches it,
+    deliberately without a restart-prevention setting. Schema changes belong only
+    to `host activate`, so the remedy is `host status` followed by a same-ID
+    `--resume` repair-forward.
+- **S6-11, operator-only exception.** The broad setup-assistant grants are a
+  deliberate opt-in exception for the seed's operator onboarding bot. The default
+  fleet-ops grants stay narrow. Operator-only activation still refuses a hosted
+  caller.
+
+Future optimizations, a general rollback framework and exhaustive variant matrices
+remain follow-ups.
+
 ## Host conversion and outstanding gates
 
-Fresh hosted checks and external review of the final commit are required; no
-current-revision approval exists. The
-[conversion runbook](../existing-host-release-conversion.md) still requires
+**CI status.** All seven hosted checks passed on `e0236a13`, and the operator
+signed off on that revision after the extensive reviews recorded here. The main merge at `4adfb7b2` and the adoption corrections in `57401cc5` require
+their own hosted checks; an earlier green head does not certify them. New focused changes need their own tests and the repository's
+existing required GitHub approval rule; no fresh broad review panel is required.
+
+The [conversion runbook](../existing-host-release-conversion.md) still requires
 old source-puller holds, a same-OS isolated canary and a host-wide adoption
 window through `host activate --adopt-existing`. No shim converts a host.
 
 A read of the Mac's current-user LaunchAgents and `launchctl` inventory found no
-pull-root match. Other launchd domains and the Pi were not checked, so this is
-not proof that the estate is held.
+pull-root match. Other launchd domains were not checked, so this is not proof
+that the estate is held.
 
-The following remain unverified:
+The remaining gates and their dispositions are:
 
 - a populated Linux first-adoption coordinator run;
 - real Pi/user-systemd adoption;
@@ -279,11 +324,39 @@ The following remain unverified:
 - the mandatory cold-host onboarding run;
 - retirement of already-installed updaters and pullers on each host;
 - the remaining migration items: old-ingest drain and a public legacy preview;
-- a decision for S3b-06: activation still re-enrolls and starts a stopped bot that
-  has no work, so run intent must either be frozen or the effect documented;
-- runbook gaps (S9-05/S9-06/S9-09): the queue-drain step, reconciling open rows,
-  the `fleet.manager` and runner-marker preflight lines, and the pre-activation
-  rollback guidance.
+- **Adoption corrections in `57401cc5` (S1-13 / S3b-06 / S9-06), focused tests passed.**
+  The pre-record guard refuses a candidate that would re-enroll an explicitly
+  stopped bot or resume a legacy-paused runner without a recorded pause.
+  Installed inactive bots remain under supervision; transient inactivity does
+  not establish a deliberate stop. Resume follows the frozen intent; external
+  start/stop/marker changes during the window are unsupported.
+  Run-intent and migration blockers use the existing typed refusal, while native
+  stderr and pending payload values remain hidden. Quarantine is inventoried
+  and retained, including malformed payloads, without replay or discard.
+  Active pending queues, unreadable quarantine and changed evidence still refuse.
+  **99 tests passed in 13.76 seconds** in a private macOS export at tree
+  `e2b196589148c0ea1ed3cbabe3a4a8eec3325766`: activation, handoffs, units,
+  migration plan/apply and host commands. These use native adapter fixtures;
+  they are not successful populated Pi adoption evidence.
+- **Runbook coverage.** The
+  [conversion runbook](../existing-host-release-conversion.md) now covers
+  `fleet.manager`, run intent and runner markers, open legacy work, staged, spool
+  and inflight drain by the old ingest, and quarantine kept as evidence rather
+  than deleted or replayed.
+- **S9-01 Pi source-pull hold, verified read-only.** The timer remains enabled,
+  but its host override pins the source at `8bc588a8` for this migration, dated
+  through October 7. The installed script matches that main revision and its
+  last run read this exact hold. The script keeps holding after expiry, so the
+  date does not authorize a later pull. The service subsequently finished
+  successfully and was inactive. No scheduler or service was changed. This
+  verifies the Pi ceiling; it does not establish holds on other hosts.
+- **Next native acceptance: a bounded same-uid Pi canary** (not yet operated).
+  - Its safety scope: a distinct fleet `service_prefix`, and a private host
+    override whose `unit_prefix` does not begin with `claudlobby-`, which the
+    old installation's walk-back can remove.
+  - Its shared-resource decisions: the account directory, host `.env` and Git
+    config.
+  - Its teardown, planned in advance by exact unit names.
 
 Lumbergh's restart hold remains in force. This record makes no claim that the
 branch is ready to merge or that the epic is complete. No live checkout, fleet
