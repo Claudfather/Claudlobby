@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import _write_exec, constructed_env
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 README = REPO_ROOT / "README.md"
 GETTING_STARTED = REPO_ROOT / "documentation" / "getting-started.md"
@@ -349,13 +351,59 @@ class TestSetupAsksAboutItsOwnBridge:
         for line in calls:
             # The call runs to the first `;`, a `$( )` quoted inside it included.
             call = re.search(r"\bbridge_state\s+((?:\"[^\"]*\$\([^)]*\)\"|[^;])*)", line).group(1)
-            args = shlex.split(call)
+            # comments=True: a trailing `# -> up | ...` comment is not an
+            # argument, or the old one-argument call counts its words as three.
+            args = shlex.split(call, comments=True)
             # bridge_state takes ANY second argument as the resolved token, so an
             # empty one answers `no_token` for a healthy bot; the third is the session.
             assert len(args) >= 3, line
             assert args[1] != "" and args[2] != "", line
 
+    def _run_block(self, tmp_path: Path, *, pane_pid: str | None):
+        """Run the skill's bridge block VERBATIM from a scratch cwd whose
+        `lib/` is this checkout's, against a stub `tmux` that answers
+        `list-panes` with ``pane_pid`` or, with None, fails the way tmux does
+        for a session that does not exist. The env is constructed, so an
+        ambient FLEET_NAME cannot change which socket the block asks."""
+        block = next(
+            b for b in _FENCE_RE.findall(SETUP_SKILL.read_text()) if "bridge_state" in b
+        )
+        (tmp_path / "lib").symlink_to(REPO_ROOT / "lib")
+        stub_dir = tmp_path / "bin"
+        stub_dir.mkdir()
+        log = tmp_path / "tmux.log"
+        answer = f"echo {pane_pid}\n" if pane_pid else "exit 1\n"
+        _write_exec(stub_dir / "tmux", f'#!/bin/bash\necho "$*" >> "{log}"\n{answer}')
+        env = constructed_env(PATH=f"{stub_dir}:{os.environ['PATH']}", HOME=tmp_path)
+        run = subprocess.run(
+            ["bash", "-c", block],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        return run, (log.read_text() if log.exists() else "")
 
+    def test_with_no_session_the_block_says_so(self, tmp_path):
+        # `. lib/lib-common.sh` arms `set -euo pipefail` in the caller, so a
+        # failing pane lookup must be guarded on its assignment or errexit
+        # ends the shell before the `if` can say "no session yet".
+        run, calls = self._run_block(tmp_path, pane_pid=None)
+        assert "list-panes -t claudfather -F #{pane_pid}" in calls, calls
+        assert (run.returncode, run.stdout.strip()) == (0, "no session yet"), run.stderr
+
+    def test_with_a_session_the_block_asks_bridge_state(self, tmp_path):
+        run, calls = self._run_block(tmp_path, pane_pid="4242")
+        assert "list-panes -t claudfather -F #{pane_pid}" in calls, calls
+        # No bot is composed here, so bridge_state answers with a failure
+        # word; what is pinned is that the found-session branch ran.
+        assert run.stdout.strip() in {
+            "up", "not_mine", "no_bridge", "no_token", "no_handle", "unknown"
+        }, (run.stdout, run.stderr)
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash required")
 class TestSetupSystemHonesty:
     """`setup-system --dry-run` must not report post-conditions it never took."""
 

@@ -275,7 +275,7 @@ pane runs Claude itself, so the pane's pid is the session:
 ```bash
 . lib/lib-common.sh
 B=runtime/bots/claudfather
-pid="$(bot_tmux "$(tmux_socket_for_bot "$B")" list-panes -t "$(tmux_session_name "$B")" -F '#{pane_pid}' 2>/dev/null | head -1)"
+pid="$(bot_tmux "$(tmux_socket_for_bot "$B")" list-panes -t "$(tmux_session_name "$B")" -F '#{pane_pid}' 2>/dev/null | head -1)" || true
 if [ -n "$pid" ]; then bridge_state "$B" "$(resolve_bot_telegram_token "$B")" "$pid"; else echo "no session yet"; fi   # -> up | not_mine | no_bridge | no_token | no_handle | unknown
 ```
 
@@ -284,7 +284,7 @@ token: an empty `""` there reads as "no token" and answers `no_token` for a heal
 
 Only `up` means inbound actually works. `not_mine` means a poller holds the slot but belongs to
 another session, usually the outgoing one mid-restart: wait and ask again. "no session yet" means
-claudfather's tmux session has not started. Do **not** substitute
+no tmux session answered for claudfather, usually because it has not started yet. Do **not** substitute
 `grep BRIDGE_READY .../logs/startup.log`: that file is opened append-only and survives restarts,
 so a line from a previous boot reads exactly like a live bridge — the check passes while the bot
 is deaf. A tmux session existing is likewise not the same as a bot that can receive messages.
