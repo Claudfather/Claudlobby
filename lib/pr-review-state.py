@@ -285,6 +285,47 @@ SHA_ANCHOR = re.compile(
 #: Self-reported author inside the header: ``**[rajan] [VERDICT] approve**``.
 HEADER_IDENTITY = re.compile(r"\*\*\s*\[([a-z0-9][a-z0-9_-]{0,38})\]\s*\[", re.I)
 
+#: THE HEADER LINE IS WHERE A VERDICT LIVES (#2029).
+#:
+#: ``VERDICT_HEADER`` used to be SEARCHED over a comment's whole body, so the
+#: first bold span anywhere that held a verdict word was taken as the comment's
+#: own verdict. A note explaining someone else's block read as a block (#1757: a
+#: comment that opens with a non-verdict label and, later in its first line,
+#: names "the standing **Request Changes** review above"); on #1160 an approve in
+#: a table cell read as an approve, and "**the block is live**" in a status
+#: comment read as a block. The mirror is the unsafe direction: a note that only
+#: MENTIONS an earlier **Approve**, once attributed to its writer (a two-bracket
+#: header, or a report under ``--attribute``), superseded that writer's real
+#: block, and the PR read 0 blocking.
+#:
+#: So a verdict is read from the comment's HEADER only: its leading markdown
+#: headings and its first line that is neither blank nor a heading. The verdict
+#: span must OPEN one of those lines, and the verdict word must lead the span,
+#: after nothing but an optional ``[name] [VERDICT]`` tag or ``Verdict:``
+#: (``HEADER_LEAD``). A heading counts because real verdicts are written as one
+#: (``## **Approve**``) or follow one: #1985 and #1989 each carry a live block on
+#: line 3, under a ``#`` title, and a rule that read only the very first line
+#: would release both. The older header families (``**Request Changes**``,
+#: ``**Verdict: Ship it**``) still count in the header: #1160's live blocks are
+#: written that way. The header identity is read from the same lines, so a
+#: bracket-tag header quoted in prose attributes nothing.
+#:
+#: Verdicts written anywhere else are not read, and are not dropped: a line that
+#: opens with a verdict below the header (the last line of a structured review,
+#: a labelled heading such as ``## Review: **Approve**``) is reported verbatim as
+#: UNPARSED-HEADER (``verdict_lines_outside_header``). An unread approve cannot
+#: clear a merge, and an unread block must reach a human.
+#:
+#: Why #1899's measured discriminator did not catch #1757: it asks whether the
+#: token LEADS its bold span, and in #1757 it does, since the span is exactly
+#: ``**Request Changes**``. What made it prose was the span's place in the
+#: COMMENT, which no span-level rule can see. This rule applies both: the span
+#: opens the header line, and the token leads the span.
+HEADER_LEAD = re.compile(
+    r"\*\*\s*(?:\[[a-z0-9][a-z0-9_-]{0,38}\]\s*\[verdict\]\s*|verdict:?\s*)?", re.I
+)
+_MARKDOWN_HEADING = re.compile(r"#{1,6}\s")
+
 #: A bold span that is SHAPED like a verdict header but did not map to one — the
 #: drift signal. Narrow on purpose: the first version flagged ANY comment leading
 #: with bold, which on a real PR (Claudlobby#1160) produced three false drift
@@ -454,9 +495,81 @@ def attribution_advice(info: dict) -> str:
 # --------------------------------------------------------------------------
 
 
+def header_lines(body: str) -> list[str]:
+    """The comment's header: its leading markdown headings (marker stripped)
+    and its first line that is neither blank nor a heading, in order (#2029)."""
+    out: list[str] = []
+    for line in (body or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        heading = _MARKDOWN_HEADING.match(stripped)
+        if heading:
+            out.append(stripped[heading.end():].strip())
+            continue
+        out.append(stripped)
+        break
+    return out
+
+
+def _opens_with_verdict(line: str):
+    """``VERDICT_HEADER``'s match when the verdict span OPENS ``line`` and the
+    verdict word leads the span (``HEADER_LEAD``); otherwise None."""
+    match = VERDICT_HEADER.match(line)
+    if not match or not HEADER_LEAD.fullmatch(line[: match.start(1)]):
+        return None
+    return match
+
+
+def _header_verdict(body: str):
+    """The verdict span on the comment's header, or None (#2029).
+
+    A verdict named anywhere else in the comment is prose, in either
+    direction; ``verdict_lines_outside_header`` reports the ones shaped like
+    a verdict, so a block written below the header is never silence.
+    """
+    for line in header_lines(body):
+        match = _opens_with_verdict(line)
+        if match:
+            return match
+    return None
+
+
+#: A line outside the header that OPENS with a verdict, after at most a heading
+#: marker or a short ``Label:`` (#2029). Never counted as the comment's verdict;
+#: reported verbatim as drift, so a block written below the header, or under a
+#: labelled heading, reaches a human instead of vanishing.
+_LINE_LABEL = re.compile(r"(?:#{1,6}\s+)?(?:[^*\n:>`|]{1,32}:\s*)?")
+_FENCE = re.compile(r"(`{3,}|~{3,})")
+
+
+def verdict_lines_outside_header(body: str) -> list[str]:
+    """Lines that open with a verdict but are not the comment's header verdict.
+
+    Skipped: fenced code, blockquotes and table rows, which quote rather than
+    render. Empty when the header carries the verdict.
+    """
+    if _header_verdict(body):
+        return []
+    found: list[str] = []
+    fence = None
+    for raw in (body or "").splitlines():
+        stripped = raw.strip()
+        marker = _FENCE.match(stripped)
+        if marker:
+            fence = None if fence and stripped.startswith(fence) else (fence or marker.group(1))
+            continue
+        if fence or stripped.startswith((">", "|")):
+            continue
+        label = _LINE_LABEL.match(stripped)
+        if _opens_with_verdict(stripped[label.end():] if label else stripped):
+            found.append(stripped[:100])
+    return found
+
+
 def parse_verdict(body: str) -> str | None:
-    """``APPROVE`` / ``REQUEST-CHANGES``, or None when no header matches."""
-    match = VERDICT_HEADER.search(body or "")
+    """``APPROVE`` / ``REQUEST-CHANGES`` from the header line, or None (#2029)."""
+    match = _header_verdict(body)
     if not match:
         return None
     return NORM.get(re.sub(r"[\s-]+", " ", match.group(1).lower()))
@@ -470,7 +583,7 @@ def verdict_words(body: str) -> str | None:
     (``Mechanical fixes``), a substantive objection (``Request changes``), or an
     escalation to the manager and a human (``Architectural concerns``, #1895).
     """
-    match = VERDICT_HEADER.search(body or "")
+    match = _header_verdict(body)
     return match.group(1) if match else None
 
 
@@ -481,9 +594,13 @@ def parse_anchor(body: str) -> str | None:
 
 
 def parse_header_identity(body: str) -> str | None:
-    """The self-reported author inside a verdict header, or None."""
-    match = HEADER_IDENTITY.search(body or "")
-    return match.group(1).lower() if match else None
+    """The self-reported author on the header line, or None (#2029: a bracket
+    tag quoted in prose names nobody)."""
+    for line in header_lines(body):
+        match = HEADER_IDENTITY.match(line)
+        if match:
+            return match.group(1).lower()
+    return None
 
 
 def first_bold(body: str) -> str:
@@ -615,6 +732,13 @@ def assess_pr(payload: dict, ledger_identity: dict | None = None, canonical: boo
         and (VERDICT_SHAPED.search(first_bold(e["body"]))
              or DECISION_SHAPED.search(first_bold(e["body"])))
     ]
+    # #2029: a verdict-shaped line outside a comment's header is not its verdict,
+    # but it is never dropped either. A block written below the header, or under
+    # a labelled heading, reaches a human as drift, never as silence.
+    for e in events:
+        for line in verdict_lines_outside_header(e["body"]):
+            if line not in unparsed:
+                unparsed.append(line)
 
     # Two or more DISAGREEING verdicts that nobody could attribute. This is the
     # honest middle of defect 1: with identity, per-reviewer resolution answers it;
@@ -971,6 +1095,12 @@ _SELFTEST_CASES = [
     ("**[branden] [VERDICT] approve** reviewed against `ee29406`", APPROVE, "ee29406"),
     ("**Merge note**\n\nThe reviewer will approve once CI clears.\n\n**Status**",
      None, None),
+    # #2029: a verdict named in prose is not the comment's verdict, and a real
+    # verdict line under a title heading still is.
+    ("**Comment** \u2014 not a verdict: the standing **Request Changes** review above "
+     "is a separate post.", None, None),
+    ("## Review summary\n\n**Verdict: Request changes.** Posted as a comment review.",
+     BLOCK, None),
 ]
 
 
