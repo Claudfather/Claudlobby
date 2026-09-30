@@ -14,7 +14,7 @@ Before each step, check filesystem state. Skip completed steps:
 
 | Check | Skip to |
 |-------|---------|
-| `claudlobby.composer` imports | Step 1 |
+| Step 0's check prints `INSTALLED` | Step 1 |
 | All host deps present | Step 2 |
 | `.env` exists with `TELEGRAM_TOKEN_CLAUDFATHER` filled in | Step 4 |
 | `fleet.yaml` exists | Step 4 (validate + generate) |
@@ -30,13 +30,18 @@ missing package makes the whole flow fail in confusing ways — and the user may
 well be here *because* the documented install did not work for them.
 
 ```bash
-python3 -c 'import claudlobby.composer' 2>/dev/null && echo INSTALLED || echo MISSING
+# pwd -P, not pwd: through a symlinked checkout, plain pwd never equals the realpath below.
+( R="$(pwd -P)"; cd / && [ "$("$R/.venv/bin/python" -c 'import claudlobby.composer as c, os; print(os.path.realpath(c.__file__))' 2>/dev/null)" = "$R/claudlobby/composer.py" ] ) && echo INSTALLED || echo MISSING
 ```
 
-Import `claudlobby.composer`, **not** `claudlobby`. The bare package is a plain
-directory at the repo root, so it imports from cwd even when nothing is
-installed — a false positive that reports success on a host with no
-dependencies at all.
+It asks the repo venv's Python, from outside the tree, where `claudlobby.composer`
+comes from, and passes only when the answer is **this** tree. Run from the repo
+root instead, any Python imports the repo's own `claudlobby/` from the current
+directory, so an import there proves only that its dependencies (PyYAML, Jinja2)
+are importable. A host that has them anywhere, from distro packages or a user-site
+install, then reads as installed with nothing installed. Measured on a cold run
+(#2002): a fresh export with no venv printed `INSTALLED` under the old check, and
+that host's `claudlobby` command belonged to a different checkout.
 
 If MISSING, create the repo-local venv and install into it:
 
@@ -52,8 +57,14 @@ only, so bare `pip` is not a command. `lib/setup-system` does exactly this, and
 `claudlobby_cli` prefers `$CLAUDLOBBY_ROOT/.venv`, which is what lets supervised
 launchd/systemd runs resolve the CLI without an activated shell.
 
-Then re-check the import before continuing. If it still fails, stop and show the
-user the real error — do not proceed into Step 1 on a broken install.
+Then re-run the check above before continuing. If it still prints `MISSING`, stop
+and show the user the real error — do not proceed into Step 1 on a broken install.
+This prints where the venv's `claudlobby` comes from, or the error that stops it
+importing, asked from outside the tree for the same reason as the check:
+
+```bash
+( R="$(pwd -P)"; cd / && "$R/.venv/bin/python" -c 'import claudlobby.composer as c; print(c.__file__)' )
+```
 
 **For the rest of this skill:** if the venv exists but is not activated, invoke
 the CLI as `./.venv/bin/claudlobby ...` rather than bare `claudlobby`.
@@ -155,7 +166,7 @@ Tell the user:
 3. Add @RawDataBot to the group — it will print a message containing the chat ID
 4. The chat ID is **negative**. Two valid shapes, both fine:
    - **supergroup / channel** — `-100` prefix, e.g. `-1001234567890`
-   - **basic group** — plain negative, e.g. `-5556622542`
+   - **basic group** — plain negative, e.g. `-1234567890`
 5. You can remove @RawDataBot after getting the ID
 
 Validate: a negative integer. **Do not require the `-100` prefix** — that rejects every basic
@@ -266,15 +277,25 @@ claudlobby status --bot claudfather
 
 Poll up to 90 seconds (matching `start-bot.sh` readiness timeout).
 
-**For inbound, ask `bridge_state` — not the log.** It is the classifier `start-bot.sh` itself
-gates readiness on, and it verifies a *live, owned* poller process:
+**For inbound, ask `bridge_state` about claudfather's own session — not the log.** It is the
+classifier `start-bot.sh` itself gates readiness on. Give it the session's pid: asked without one,
+it answers whether *a* poller holds claudfather's Telegram slot, and during a restart the outgoing
+session's poller still holds it, so it reads `up` for a bridge that is going dark. The bot's tmux
+pane runs Claude itself, so the pane's pid is the session:
 
 ```bash
 . lib/lib-common.sh
-bridge_state runtime/bots/claudfather   # -> up | no_bridge | no_token | no_handle | unknown
+B=runtime/bots/claudfather
+pid="$(bot_tmux "$(tmux_socket_for_bot "$B")" list-panes -t "$(tmux_session_name "$B")" -F '#{pane_pid}' 2>/dev/null | head -1)" || true
+if [ -n "$pid" ]; then bridge_state "$B" "$(resolve_bot_telegram_token "$B")" "$pid"; else echo "no session yet"; fi   # -> up | not_mine | no_bridge | no_token | no_handle | unknown
 ```
 
-Only `up` means inbound actually works. Do **not** substitute
+The token goes in second place because `bridge_state` takes any second argument as the resolved
+token: an empty `""` there reads as "no token" and answers `no_token` for a healthy bot.
+
+Only `up` means inbound actually works. `not_mine` means a poller holds the slot but belongs to
+another session, usually the outgoing one mid-restart: wait and ask again. "no session yet" means
+no tmux session answered for claudfather, usually because it has not started yet. Do **not** substitute
 `grep BRIDGE_READY .../logs/startup.log`: that file is opened append-only and survives restarts,
 so a line from a previous boot reads exactly like a live bridge — the check passes while the bot
 is deaf. A tmux session existing is likewise not the same as a bot that can receive messages.

@@ -5317,3 +5317,257 @@ class TestNoLeafManagerShapesComposeByteIdentically:
             after_dormant = after["timers_text"]["DORMANT"]
             assert "manager-checkin" in before_dormant
             assert "manager-checkin" not in after_dormant
+
+
+class TestAccessJsonWriteFailureWarns:
+    """#1683: the channel access.json write reaches the host-global ~/.claude and
+    had no error handling, while the invalid-handle branch beside it warns and
+    skips. A failed write aborted `generate` part-way with a traceback.
+
+    `claudlobby generate` passes no `log=`, so the warning an operator sees is
+    the logger's; these tests read that, the way the CLI calls the composer."""
+
+    @staticmethod
+    def _home_with_a_file_where_channels_belongs(tmp_path, monkeypatch) -> Path:
+        fake_home = tmp_path / "home"
+        (fake_home / ".claude").mkdir(parents=True)
+        # A regular file where the channels directory belongs: `mkdir` under it
+        # fails whoever runs the suite, root included (a chmod would not).
+        (fake_home / ".claude" / "channels").write_text("not a directory\n")
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+        return fake_home
+
+    @staticmethod
+    def _access_warnings(caplog) -> list[str]:
+        return [r.getMessage() for r in caplog.records if "access.json" in r.getMessage()]
+
+    def test_generate_prints_the_access_json_warning_where_the_cli_shows_it(
+        self, fleet_dir, tmp_path, monkeypatch, caplog
+    ):
+        import logging
+
+        from claudlobby.composer import compose_bot
+        from tests.conftest import load_test_fleet, make_paths
+
+        fake_home = self._home_with_a_file_where_channels_belongs(tmp_path, monkeypatch)
+        fleet = load_test_fleet(fleet_dir)
+        with caplog.at_level(logging.WARNING, logger="claudlobby.composer"):
+            bot_dir = compose_bot(fleet.bots["lead"], fleet, make_paths(fleet_dir))
+        # Composition went on past the access.json block: the unit files follow it.
+        assert (bot_dir / f"{fleet.service_prefix}.lead.service").exists()
+        msgs = self._access_warnings(caplog)
+        assert len(msgs) == 1, msgs
+        assert "lead" in msgs[0] and str(fake_home / ".claude" / "channels") in msgs[0], msgs
+        assert "re-run generate" in msgs[0], msgs
+
+    def test_a_fleet_generate_composes_every_bot_and_warns_once_each(
+        self, fleet_dir, tmp_path, monkeypatch, caplog
+    ):
+        # The path `claudlobby generate` takes: before the fix the first bot's
+        # failed write aborted the fleet part-way, so later bots never composed.
+        import logging
+
+        from claudlobby.composer import compose_fleet
+        from tests.conftest import load_test_fleet, make_paths
+
+        self._home_with_a_file_where_channels_belongs(tmp_path, monkeypatch)
+        fleet = load_test_fleet(fleet_dir)
+        with caplog.at_level(logging.WARNING, logger="claudlobby.composer"):
+            composed = compose_fleet(fleet, make_paths(fleet_dir))
+        assert set(composed) == set(fleet.bots), composed
+        warned = self._access_warnings(caplog)
+        assert len(warned) == len(fleet.bots), warned
+        for bot_id, bot in fleet.bots.items():
+            assert any(f"telegram-{bot.telegram.handle}" in line for line in warned), (bot_id, warned)
+
+
+class TestAccessJsonIsWrittenWhole:
+    """A write that fails part-way (a full disk) must leave the old access.json
+    whole. It holds runtime state, approved senders and pending pairings, that no
+    generate can rebuild, and a truncated file is one the reconcile never rewrites."""
+
+    @staticmethod
+    def _writes_fail_after_40_bytes(monkeypatch):
+        import errno
+
+        real = Path.write_text
+
+        def write_text(self, data, *args, **kwargs):
+            if self.name.startswith("access.json"):
+                with open(self, "w") as fh:
+                    fh.write(data[:40])
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real(self, data, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "write_text", write_text)
+        return real
+
+    @staticmethod
+    def _lead(fleet_dir, tmp_path, monkeypatch):
+        from claudlobby.composer import telegram_channel_rel
+        from tests.conftest import load_test_fleet
+
+        fake_home = tmp_path / "home"
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+        fleet = load_test_fleet(fleet_dir)
+        bot = fleet.bots["lead"]
+        return fleet, bot, fake_home / telegram_channel_rel(bot.telegram.handle) / "access.json"
+
+    @staticmethod
+    def _temps(access: Path) -> list[Path]:
+        """The composer's own temporary files beside access.json, ``access.json.<unique>.tmp``."""
+        return sorted(access.parent.glob("access.json.*.tmp"))
+
+    def test_a_failed_rewrite_leaves_the_existing_file_and_its_runtime_state(
+        self, fleet_dir, tmp_path, monkeypatch
+    ):
+        from claudlobby.composer import compose_bot
+        from tests.conftest import make_paths
+
+        fleet, bot, access = self._lead(fleet_dir, tmp_path, monkeypatch)
+        access.parent.mkdir(parents=True)
+        runtime = {"allowFrom": ["111"], "groups": {}, "pending": {"abc123": {"senderId": "222"}}}
+        original = json.dumps({"dmPolicy": "allowlist", **runtime}, indent=2) + "\n"
+        access.write_text(original)
+        real = self._writes_fail_after_40_bytes(monkeypatch)
+        compose_bot(bot, fleet, make_paths(fleet_dir))
+        assert access.read_text() == original
+        assert not self._temps(access), self._temps(access)
+        # With space back, the next generate rewrites it and keeps the runtime state.
+        monkeypatch.setattr(Path, "write_text", real)
+        compose_bot(bot, fleet, make_paths(fleet_dir))
+        after = json.loads(access.read_text())
+        assert after["pending"] == runtime["pending"] and "111" in after["allowFrom"], after
+
+    def test_a_failed_first_write_leaves_no_file_and_the_next_generate_writes_it(
+        self, fleet_dir, tmp_path, monkeypatch
+    ):
+        from claudlobby.composer import compose_bot
+        from tests.conftest import make_paths
+
+        fleet, bot, access = self._lead(fleet_dir, tmp_path, monkeypatch)
+        real = self._writes_fail_after_40_bytes(monkeypatch)
+        compose_bot(bot, fleet, make_paths(fleet_dir))
+        assert not access.exists() and not self._temps(access), self._temps(access)
+        monkeypatch.setattr(Path, "write_text", real)
+        compose_bot(bot, fleet, make_paths(fleet_dir))
+        assert isinstance(json.loads(access.read_text()), dict)
+
+
+class TestAccessJsonKeepsItsMode:
+    """The Telegram plugin keeps access.json 0600 in a 0700 directory: it holds the
+    allowlist and pending pairings. The atomic write (a temp file, then a rename) must
+    not give the file the default mode at either write site. The reconcile keeps the
+    mode the file had, and a first write creates the file 0600, as the plugin does."""
+
+    @pytest.fixture(autouse=True)
+    def _usual_umask(self):
+        # Under the usual umask 022 a new file is 0644; a stricter umask would hide the defect.
+        old = os.umask(0o022)
+        yield
+        os.umask(old)
+
+    @staticmethod
+    def _mode(path: Path) -> int:
+        return path.stat().st_mode & 0o7777
+
+    @pytest.mark.parametrize("mode", [0o600, 0o640])
+    def test_a_reconcile_keeps_the_mode_the_file_had(self, fleet_dir, tmp_path, monkeypatch, mode):
+        from claudlobby.composer import compose_bot
+        from tests.conftest import make_paths
+
+        fleet, bot, access = TestAccessJsonIsWrittenWhole._lead(fleet_dir, tmp_path, monkeypatch)
+        access.parent.mkdir(parents=True, mode=0o700)
+        original = json.dumps({"dmPolicy": "allowlist", "allowFrom": ["111"], "groups": {}, "pending": {}})
+        access.write_text(original)
+        os.chmod(access, mode)
+        compose_bot(bot, fleet, make_paths(fleet_dir))
+        assert access.read_text() != original, "precondition: the reconcile rewrote the file"
+        assert self._mode(access) == mode, oct(self._mode(access))
+
+    @staticmethod
+    def _as_the_plugin_leaves_it(access: Path, existing: bool) -> None:
+        """The plugin's channel directory (0700), with its 0600 access.json when ``existing``."""
+        access.parent.mkdir(parents=True, mode=0o700)
+        if existing:
+            access.write_text(json.dumps({"dmPolicy": "allowlist", "allowFrom": ["111"], "groups": {}, "pending": {}}))
+            os.chmod(access, 0o600)
+
+    @pytest.mark.parametrize("existing", [True, False], ids=["reconcile", "first-write"])
+    def test_a_temp_file_the_plugin_left_is_left_alone(self, fleet_dir, tmp_path, monkeypatch, existing):
+        # The plugin's saveAccess writes access.json.tmp and renames it over access.json, so an
+        # interrupted save leaves that name behind. The composer's temp file has its own name.
+        from claudlobby.composer import compose_bot
+        from tests.conftest import make_paths
+
+        fleet, bot, access = TestAccessJsonIsWrittenWhole._lead(fleet_dir, tmp_path, monkeypatch)
+        self._as_the_plugin_leaves_it(access, existing)
+        stale = access.with_name("access.json.tmp")
+        stale.write_text("{}")
+        os.chmod(stale, 0o644)
+        compose_bot(bot, fleet, make_paths(fleet_dir))
+        assert access.is_file(), "precondition: the write ran"
+        assert stale.is_file() and stale.read_text() == "{}" and self._mode(stale) == 0o644, "the plugin's temp was used"
+        assert self._mode(access) == 0o600, oct(self._mode(access))
+        assert not TestAccessJsonIsWrittenWhole._temps(access)
+
+    @pytest.mark.parametrize("existing", [True, False], ids=["reconcile", "first-write"])
+    def test_the_plugin_saving_mid_write_does_not_change_the_mode(self, fleet_dir, tmp_path, monkeypatch, existing):
+        # The plugin's saveAccess, run while generate writes: writeFileSync(access.json.tmp, ...,
+        # {mode: 0o600}), then renameSync(access.json.tmp, access.json). With a shared temp name,
+        # generate then recreated its temp file with the default mode and renamed that into place.
+        from claudlobby.composer import compose_bot
+        from tests.conftest import make_paths
+
+        fleet, bot, access = TestAccessJsonIsWrittenWhole._lead(fleet_dir, tmp_path, monkeypatch)
+        self._as_the_plugin_leaves_it(access, existing)
+        fired = []
+        real = Path.write_text
+
+        def write_text(self, data, *args, **kwargs):
+            if self.parent == access.parent and self.name.startswith("access.json.") and not fired:
+                body = b'{"dmPolicy": "allowlist"}\n'
+                plugin_tmp = access.with_name("access.json.tmp")
+                fd = os.open(plugin_tmp, os.O_WRONLY | os.O_CREAT, 0o600)
+                os.write(fd, body)
+                os.ftruncate(fd, len(body))
+                os.close(fd)
+                os.rename(plugin_tmp, access)
+                fired.append(self.name)
+            return real(self, data, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "write_text", write_text)
+        compose_bot(bot, fleet, make_paths(fleet_dir))
+        assert fired, "precondition: the plugin saved while generate was writing"
+        assert self._mode(access) == 0o600, oct(self._mode(access))
+        json.loads(access.read_text())
+        assert not TestAccessJsonIsWrittenWhole._temps(access)
+
+    def test_a_first_write_creates_the_file_readable_by_the_user_alone(self, fleet_dir, tmp_path, monkeypatch):
+        from claudlobby.composer import compose_bot
+        from tests.conftest import make_paths
+
+        fleet, bot, access = TestAccessJsonIsWrittenWhole._lead(fleet_dir, tmp_path, monkeypatch)
+        compose_bot(bot, fleet, make_paths(fleet_dir))
+        assert access.is_file(), "precondition: the first write ran"
+        assert self._mode(access) == 0o600, oct(self._mode(access))
+
+    def test_the_text_never_reaches_a_file_more_open_than_the_target(self, fleet_dir, tmp_path, monkeypatch):
+        # The temp file has its final mode before any text is written to it, so there is
+        # no moment when the allowlist sits in a file with the default mode.
+        from claudlobby.composer import compose_bot
+        from tests.conftest import make_paths
+
+        fleet, bot, access = TestAccessJsonIsWrittenWhole._lead(fleet_dir, tmp_path, monkeypatch)
+        seen = []
+        real = Path.write_text
+
+        def write_text(self, data, *args, **kwargs):
+            if re.fullmatch(r"access\.json\..+\.tmp", self.name):
+                seen.append(self.stat().st_mode & 0o7777 if self.exists() else None)
+            return real(self, data, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "write_text", write_text)
+        compose_bot(bot, fleet, make_paths(fleet_dir))
+        assert access.is_file(), "precondition: the first write ran"
+        assert seen == [0o600], seen

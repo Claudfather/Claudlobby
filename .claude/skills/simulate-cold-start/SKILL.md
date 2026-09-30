@@ -46,8 +46,13 @@ So: snapshot the host, let the run do whatever it does, diff, and reap determini
 snapshot**. A production fleet on the same host is invisible to it. That is the property that
 makes this safe to run on a machine that matters.
 
-Fence only the genuinely irreversible. Tell the human to decline if the cold session asks for:
-- `sudo` anything (notably `setup-system` phase 7, which writes to `/Library/Application Support`)
+Fence only the genuinely irreversible. **Root is fenced by the launch line itself** (step 2): it
+puts a refusing `sudo` first on `PATH`, because a permission prompt cannot be relied on to
+appear. Claude Code starts in auto mode by default, user settings may approve every shell
+command, and a script the session runs can call `sudo` where no prompt sees it. All three held
+together on the #2002 host, beside passwordless sudo. Tell the human to decline if the cold
+session asks for:
+- `sudo` anything, which the fence refuses anyway (notably `setup-system` phase 7, which writes to `/Library/Application Support`)
 - `pip --break-system-packages`, or a global/pipx install
 - writes outside the exported tree and `~/Library/LaunchAgents` (or `~/.config/systemd/user`)
 
@@ -60,9 +65,10 @@ lib/coldstart-harness.sh prepare            # or: --ref <branch>  --dir <path>
 ```
 
 This runs a contamination preflight (inherited `CLAUDLOBBY_ROOT` / `CLAUDRON_VAULT_PATH`, a
-user-level `~/.claude/CLAUDE.md`), exports `<ref>` with `git archive`, asserts the tree carries
-none of `.git local .venv .env fleet.yaml runtime state`, records the host snapshot, and prints
-the launch command.
+user-level `~/.claude/CLAUDE.md`, user settings that approve every shell command, passwordless
+sudo), exports `<ref>` with `git archive`, asserts the tree carries none of
+`.git local .venv .env fleet.yaml runtime state`, records the host snapshot, writes the root
+fence, and prints the launch line.
 
 **Export, never clone.** A `.git` carries the commit messages describing the defects you are
 trying to rediscover.
@@ -70,8 +76,14 @@ trying to rediscover.
 ### 2. Run the cold arm — human, new terminal
 
 ```
-cd <printed tree> && claude
+cd <printed tree> && PATH="<state dir>/fence:$PATH" claude --setting-sources project,local --strict-mcp-config
 ```
+
+Use the line `prepare` prints, not a bare `claude`. A bare `claude` loads your user settings:
+their allow rules and default mode decide what runs unasked, and their plugins, hooks and
+connectors are not a stranger's. `--setting-sources project,local` loads only what the tree
+ships, `--strict-mcp-config` drops your MCP servers, and the fence refuses `sudo`. Credentials
+still come from your Claude Code login.
 
 Then `/setup`, and **nothing else**. No hints, no follow-up questions answered beyond what the
 skill itself asks for. If it asks for credentials, decide in advance:
