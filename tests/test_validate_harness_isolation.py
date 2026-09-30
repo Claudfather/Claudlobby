@@ -57,11 +57,18 @@ def test_validation_setup_uses_owned_transport_and_preflighted_cli(
         daemon_log.read_text() if daemon_log.exists() else ""
     )
     assert (REPO / "claudlobby/_runtime_scripts/runtime-admission.sh").read_bytes() == native_guard
-    assert (root / "claudlobby/_runtime_scripts/runtime-admission.sh").read_text() == (
+    # The fixture's scratch lib: only the admission guard is a private file;
+    # every other script links to the selected source package.
+    guard = root / "lib/runtime-admission.sh"
+    assert guard.is_file() and not guard.is_symlink()
+    assert guard.read_text() == (
         'native_admission() { _NATIVE_ADMISSION_PYTHON="${PLANE_EMIT_CLI%/*}/python"; '
         '[ -x "$_NATIVE_ADMISSION_PYTHON" ]; }\n'
     )
-    assert (root / "claudlobby").resolve() == REPO / "claudlobby"
+    for name in ("plane-readers.py", "plane-socket-client.py"):
+        link = root / "lib" / name
+        assert link.is_symlink(), name
+        assert link.resolve() == (REPO / "claudlobby/_runtime_scripts" / name).resolve(), name
     assert cli_calls.is_file(), "harness ignored the preflighted CLI"
     assert '"type":"validate_started"' in read_fleet_events(root)
 

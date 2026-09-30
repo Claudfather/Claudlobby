@@ -95,7 +95,7 @@ def test_probe_daemon_survives_list_reply_and_trickle(tmp_path):
 
 def test_bench_negative_shim_is_a_usage_error():
     r = subprocess.run(
-        [sys.executable, str(LIB.parent / "bin" / "plane-bench.py"),
+        [sys.executable, str(LIB.parents[1] / "bin" / "plane-bench.py"),
          "--shim", "-1"],
         capture_output=True, text=True, timeout=30,
     )

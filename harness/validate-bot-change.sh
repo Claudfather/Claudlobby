@@ -125,7 +125,7 @@ EVENTS="$BOT_DIR/data/events"   # the marker/idle files still live under data/; 
 # Each throwaway root gets its own db and short socket (sun_path is 104 bytes
 # on macOS). The CLI remains selected for fixture seeding and Plane reads.
 # ---------------------------------------------------------------------------
-VAL_REPO="$(cd "$LIB_DIR/.." && pwd)"
+VAL_REPO="$(cd "$LIB_DIR/../.." && pwd)"
 # The pytest wrapper supplies its preflighted CLI. Hand callers must also select
 # one explicitly; neither PATH nor a nearby checkout chooses this harness's code.
 VAL_CLI="${PLANE_EMIT_CLI:-${CLAUDLOBBY_CLI:-}}"
