@@ -5,6 +5,7 @@ Pass `--strict` to make warnings into errors (CI-friendly).
 """
 
 from __future__ import annotations
+import glob
 import json
 import logging
 import os
@@ -30,6 +31,7 @@ from .config import (
     FleetConfig,
     is_pos_int,
     load_projects,
+    heavy_slot_script_path,
 )
 from .known_values import (
     AUTO_ELIGIBLE_SKILLS,
@@ -169,6 +171,7 @@ WARNING_CATEGORIES: dict[str, str] = {
     "grant-malformed": "a grant is not an mcp__ glob, a Bash(...) grant or a bare tool name",
     "grant-migration": "an MCP fragment grants tools its paired integration does not carry as tool_grants",
     "grant-conflict": "tools.deny removes a tool the expertise needs, or a tool is both allowed and denied",
+    "heavy-slot-script": "a declared heavy_slot script matches no file, so it never takes the slot",
     # roles and names
     "checkin-role": "the checkin protocol is declared on a bot that is not a leaf manager",
     "topology": "reports_to, manages or a team member names a bot this fleet does not have",
@@ -624,6 +627,20 @@ def _validate_env_contracts(paths: Paths, report: ValidationReport) -> None:
                 f"both records, so the fail-loud rung would read whichever it "
                 f"saw first. Make them agree."
             )
+
+
+def _warn_heavy_slot_scripts(fleet: FleetConfig, paths: Paths, report: ValidationReport) -> None:
+    """A declared heavy script (#2039) that matches no file is never slotted,
+    and nothing else would say so. Validate runs before every generate."""
+    for bot_name, bot in sorted(fleet.bots.items()):
+        for pattern in bot.heavy_slot_scripts:
+            resolved = heavy_slot_script_path(pattern, paths.runtime_bots / bot_name)
+            if not glob.glob(resolved):
+                report.warn(
+                    "heavy-slot-script",
+                    f"bot '{bot_name}': heavy_slot script '{pattern}' matches no file "
+                    f"({resolved}); it takes the slot only once a file there matches",
+                )
 
 
 def _validate_bots(
@@ -2513,6 +2530,7 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     fleet_env = dotenv.read(paths.env_file)
     _warn_dead_flags(fleet_env, paths, report)
     _validate_bots(fleet, paths, fleet_env, report)
+    _warn_heavy_slot_scripts(fleet, paths, report)
     _validate_teams(fleet, report)
     _validate_fleet(fleet, report)
     _validate_timers(fleet, report)

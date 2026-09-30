@@ -112,3 +112,73 @@ class TestTheSwitch:
         fleet = load_test_fleet(fleet_dir)
         assert switches._bot_config_value(fleet.bots["lead"], "heavy_slot") is True
         assert switches._bot_config_value(fleet.bots["worker-1"], "heavy_slot") is False
+
+
+class TestDeclaredScripts:
+    """`heavy_slot: {scripts: [...]}` (#2039): the slot, plus declared scripts."""
+
+    def _declare(self, fleet_dir, value, where="lead"):
+        fy = fleet_dir / "fleet.yaml"
+        before = fy.read_text()
+        anchor = f"    {where}:\n"
+        after = before.replace(anchor, anchor + f"      heavy_slot: {value}\n", 1)
+        assert after != before
+        fy.write_text(after)
+
+    def test_the_mapping_turns_the_slot_on_and_keeps_the_scripts(self, fleet_dir: Path):
+        self._declare(fleet_dir, '{scripts: [render.py, "tools/*.py"]}')
+        bot = load_test_fleet(fleet_dir).bots["lead"]
+        assert bot.heavy_slot is True
+        assert bot.heavy_slot_scripts == ("render.py", "tools/*.py")
+        assert _guard_groups(_settings(fleet_dir, "lead")) == ["Bash"]
+
+    def test_true_still_means_the_slot_with_no_scripts(self, fleet_dir: Path):
+        self._declare(fleet_dir, "true")
+        bot = load_test_fleet(fleet_dir).bots["lead"]
+        assert bot.heavy_slot is True and bot.heavy_slot_scripts == ()
+
+    @pytest.mark.parametrize("value", ['{scripts: render.py}', '{script: [render.py]}', '{scripts: [""]}'])
+    def test_a_malformed_mapping_is_refused(self, fleet_dir: Path, value):
+        self._declare(fleet_dir, value)
+        with pytest.raises(ValueError, match="heavy_slot"):
+            load_test_fleet(fleet_dir)
+
+    def test_generate_writes_the_fleets_declared_scripts_as_absolute_patterns(self, fleet_dir: Path):
+        from claudlobby.composer import compose_heavy_slot_scripts
+
+        self._declare(fleet_dir, '{scripts: [render.py, "tools/*.py", /opt/shared/job.py]}')
+        self._declare(fleet_dir, "true", where="worker-1")
+        fleet = load_test_fleet(fleet_dir)
+        paths = make_paths(fleet_dir)
+        out = compose_heavy_slot_scripts(fleet, paths)
+        data = json.loads(out.read_text())
+        bot_dir = paths.runtime_bots / "lead"
+        assert data["fleet"] == fleet.name
+        assert data["bots"] == {"lead": [str(bot_dir / "render.py"), str(bot_dir / "tools" / "*.py"),
+                                         "/opt/shared/job.py"]}
+        names = out.with_suffix(".names").read_text().split()
+        assert names == ["*.py", "job.py", "render.py"]
+
+    def test_no_declared_script_removes_the_fleets_files(self, fleet_dir: Path):
+        from claudlobby.composer import compose_heavy_slot_scripts
+
+        self._declare(fleet_dir, '{scripts: [render.py]}')
+        out = compose_heavy_slot_scripts(load_test_fleet(fleet_dir), make_paths(fleet_dir))
+        assert out.exists()
+        fy = fleet_dir / "fleet.yaml"
+        fy.write_text(fy.read_text().replace("      heavy_slot: {scripts: [render.py]}\n", ""))
+        compose_heavy_slot_scripts(load_test_fleet(fleet_dir), make_paths(fleet_dir))
+        assert not out.exists() and not out.with_suffix(".names").exists()
+
+    def test_validate_warns_when_a_declared_script_matches_no_file(self, fleet_dir: Path):
+        from claudlobby.validator import validate
+
+        self._declare(fleet_dir, '{scripts: [render.py]}')
+        paths = make_paths(fleet_dir)
+        fleet = load_test_fleet(fleet_dir)
+        report = validate(fleet, paths)
+        assert "heavy-slot-script" in report.warning_categories, report.categorized()
+        bot_dir = paths.runtime_bots / "lead"
+        bot_dir.mkdir(parents=True, exist_ok=True)
+        (bot_dir / "render.py").write_text("print(1)\n")
+        assert "heavy-slot-script" not in validate(fleet, paths).warning_categories

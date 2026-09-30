@@ -44,7 +44,23 @@ PLANE_EMIT_CLASS=hook   # a live Claude Code turn waits on this hook (#1693)
 payload="$(cat)"
 case "$payload" in
 *pytest* | *py.test* | *vitest* | *npm* | *yarn* | *npx* | *"next build"* | *playwright* | *chrom* | *pip* | *uv*) ;;
-*) exit 0 ;;
+*)
+    # A declared heavy script (#2039) need not name a heavy tool. Pass the call
+    # on only when it names one some fleet on this host declares: each fleet's
+    # composed <fleet>.names lists the last path component of its scripts, as
+    # glob patterns. No fork: a glob and a read loop. The directory is found from
+    # this script, never from the environment.
+    found=
+    for names in "$LIB_DIR/../runtime/_host/heavy-slot/"*.names; do
+        [ -e "$names" ] || break
+        while IFS= read -r n || [ -n "$n" ]; do
+            [ -n "$n" ] || continue
+            # shellcheck disable=SC2254 # a declared name is a glob pattern
+            case "$payload" in *$n*) found=1 && break 2 ;; esac
+        done <"$names"
+    done
+    [ -n "$found" ] || exit 0
+    ;;
 esac
 case "$payload" in
 *Bash*) ;;

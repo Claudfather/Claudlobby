@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — a bot can declare heavy scripts for the heavy-job slot (#2039)
+
+A heavy tool started inside a script is invisible to the heavy-job slot's matcher, which reads only the Bash command line; a render script that drives a browser is the common case. The wrapper also refuses a script by design, so such a job had no slot path at all, and bots that run one were back on a manual one-at-a-time rule.
+
+`heavy_slot` now also takes a mapping:
+
+```yaml
+heavy_slot:
+  scripts: [render.py, "tools/*.py", /opt/shared/export.py]
+```
+
+It turns the slot on, exactly as `true` does, and declares the listed scripts. `heavy_slot: true` is unchanged.
+
+- **Paths:** each is relative to the bot directory, or absolute (`~` is expanded). A glob matches within one directory level.
+- **Where the list lives:** `generate` resolves every bot's scripts and writes the fleet's list to the install's `runtime/_host/heavy-slot/<fleet>.json`, beside a `<fleet>.names` file for the guard's no-fork prefilter. It rewrites them on every generate (`--bot` included) and removes them when nothing is declared.
+- **Config only:** the hook and the wrapper read those files from the install they belong to, never through the environment. A script passes the wrapper's heavy check only because a manifest declares it; no argv word or environment variable can add one.
+- **How it may be run:** a declared script is slotted when run as `python3 <script>`, `node`/`bash`/`sh <script>`, `uv run <script>` or by path. An undeclared script is refused exactly as before.
+- **A typo is visible:** a declared script that matches no file draws a `heavy-slot-script` warning at validate, so it cannot fail silently.
+- **Tests:**
+  - `tests/test_heavy_slot_declared.py` drives a copied install root. A declared script takes the slot; an undeclared one exits 2; `CLAUDLOBBY_ROOT` pointing at another root cannot declare one; a glob stays within one directory. It also covers other invocations, the hook's rewrite and the prefilter.
+  - `tests/test_heavy_slot_compose.py` covers the mapping form, malformed mappings, the composed files and their removal, and the warning.
+
 ### Changed — the `[vault]` extra pins Claudron v0.6.1
 
 `pyproject.toml`'s `[vault]` extra moves from `@v0.6.0` to `@v0.6.1`, with the conformance workflow's comment and `documentation/integrations/claudron-integration.md` (the "What works today" headline, the write-lock note and the pin line). v0.6.1 carries two changes. `claudron doctor` walks only the note tiers, where it walked the whole vault tree: a Pi vault's run went from about 26 minutes to under 2 seconds (Claudron #208). And `doctor --settings` is declared as the `doctor-settings` capability (Claudron #209), so a consumer can gate on it; nothing in this repository passes `--settings` yet. The compat floor in `claudlobby/claudron_compat.py` is unchanged: its highest live row needs 0.4.0.

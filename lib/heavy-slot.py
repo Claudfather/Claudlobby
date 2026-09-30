@@ -51,12 +51,13 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import List, Optional, Tuple
 
 EX_TEMPFAIL = 75  # every slot is taken: retry later
@@ -830,6 +831,18 @@ def _uv(args: List[Tok], lenient: bool) -> Optional[str]:
 
 
 def _classify(args: List[Tok], lenient: bool, allow_pm: bool = True) -> Optional[str]:
+    """The heavy label of a command: a heavy tool's, else a declared script's
+    (#2039). The one predicate the hook and the wrapper share."""
+    label = _classify_tool(args, lenient, allow_pm)
+    if label is None:
+        try:
+            label = _declared(_strip_runners(args))
+        except Exception:  # an unreadable declaration never makes a job heavy
+            label = None
+    return label
+
+
+def _classify_tool(args: List[Tok], lenient: bool, allow_pm: bool = True) -> Optional[str]:
     args = _strip_runners(args)
     if not args:
         return None
@@ -872,6 +885,80 @@ def _classify(args: List[Tok], lenient: bool, allow_pm: bool = True) -> Optional
 def classify(argv: List[str]) -> Optional[str]:
     """The kind of heavy job argv is, or None."""
     return _classify(_toks(argv), lenient=False)
+
+
+# --- declared heavy scripts (#2039) ---------------------------------------------
+# A heavy tool started inside a script (a render script that drives a browser) is
+# invisible to the matcher above, so a bot may declare such scripts in fleet.yaml
+# (`heavy_slot: {scripts: [...]}`). The composer resolves them to absolute paths
+# and writes each fleet's under THIS install's runtime/_host/heavy-slot/. They
+# are read from this file's own location, never through the environment, so a
+# script passes the heavy check only because a manifest declares it, never
+# because of anything on its command line. A pattern matches the script's path
+# component by component (`*`, `?`, `[...]` within one directory level).
+
+_CWD: Optional[str] = None  # a relative script resolves here: the hook's payload cwd, else ours
+_DECLARED: Optional[List[str]] = None
+_SCRIPT_INTERPRETERS = {"node", "bash", "sh"}
+
+
+def _declared_patterns() -> List[str]:
+    global _DECLARED
+    if _DECLARED is None:
+        pats: List[str] = []
+        d = Path(__file__).resolve().parent.parent / "runtime" / "_host" / "heavy-slot"
+        for f in sorted(d.glob("*.json")) if d.is_dir() else []:
+            try:
+                data = json.loads(f.read_text())
+            except (OSError, ValueError):
+                continue
+            bots = data.get("bots") if isinstance(data, dict) else None
+            for patterns in (bots.values() if isinstance(bots, dict) else []):
+                if isinstance(patterns, list):
+                    pats += [p for p in patterns if isinstance(p, str) and os.path.isabs(p)]
+        _DECLARED = pats
+    return _DECLARED
+
+
+def _script_word(args: List[Tok]) -> Optional[str]:
+    """The script a command runs: an interpreter's first operand (python, node,
+    bash, sh), or the program itself. None for `-c`, `-m` or stdin."""
+    if not args or args[0].value is None:
+        return None
+    b = _base(args[0]) or ""
+    python = bool(_PYTHON.match(b))
+    if not (python or b in _SCRIPT_INTERPRETERS):
+        return args[0].value
+    i = 1
+    while i < len(args):
+        v = args[i].value
+        if v is None or v in ("-c", "-m", "-"):
+            return None
+        if python and v in ("-X", "-W"):
+            i += 2
+        elif v.startswith("-"):
+            i += 1
+        else:
+            return v
+    return None
+
+
+def _declared(args: List[Tok]) -> Optional[str]:
+    """A declared script's label (its file name), or None."""
+    word = _script_word(args)
+    if not word or not _declared_patterns():
+        return None
+    word = os.path.expanduser(word)
+    if "/" not in word and args[0].value == word:
+        found = shutil.which(word)  # a bare program name is found on PATH, not in the cwd
+        if not found:
+            return None
+        word = found
+    path = os.path.normpath(os.path.join(_CWD or os.getcwd(), word))
+    for candidate in {path, os.path.realpath(path)}:
+        if any(PurePosixPath(candidate).match(p) for p in _declared_patterns()):
+            return os.path.basename(path)
+    return None
 
 
 def heavy_family(argv: List[str]) -> bool:
@@ -1231,6 +1318,9 @@ def cmd_hook() -> int:
         return 0
     tool_input = payload.get("tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    global _CWD
+    if isinstance(payload.get("cwd"), str) and payload["cwd"]:
+        _CWD = payload["cwd"]  # where the call runs, so a relative script resolves there
     if not isinstance(command, str) or not command.strip():
         return 0
     d = slot_dir()
