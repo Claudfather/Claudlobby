@@ -119,6 +119,11 @@ def test_uuid_conflicts_and_private_digest_only_storage(receipt_case, operation,
         assert stat.S_IMODE(store.path.stat().st_mode) == 0o600
         assert b"SECRET" not in store.path.read_bytes()
         raw = json.loads(store.path.read_bytes())
+        assert raw["intent"].pop("expected_by") is None  # earlier records omit the field
+        store.path.write_text(json.dumps(raw))
+        assert store.load().intent.expected_by is None
+        with pytest.raises(rr.ReceiptError, match="deadline"):
+            store.prepare(replace(intent, expected_by="2026-10-01T00:00:00"))
         raw["format_version"] = 2
         store.path.write_text(json.dumps(raw))
         with pytest.raises(rr.ReceiptError):

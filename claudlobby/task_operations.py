@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import fcntl
 import json
 import os
@@ -260,6 +260,35 @@ def _existing(store, ctx, operation, semantic, recipient=None, *, fact_count=1, 
     return receipt
 
 
+OPEN_ENDED = "none"  # explicit open-ended routing; omission takes the fleet default
+_DEFAULT_DISPATCH_DEADLINE_S = 86_400  # mirrors composer.DEFAULT_DISPATCH_DEADLINE_S
+
+
+def _deadline(ctx, expected_by, previous):
+    """Return (payload deadline, receipt-frozen default) for assign/reassign.
+
+    The semantic digest keeps the caller's intent (omitted, none or explicit);
+    an omitted deadline is resolved once and retries reuse the frozen value.
+    """
+    if expected_by == OPEN_ENDED:
+        return None, None
+    if expected_by is not None:
+        return expected_by, None
+    if previous is not None:  # never today's clock or config
+        return previous.intent.expected_by, previous.intent.expected_by
+    # Fleet-owned routing uses the implicit manager's resolved observability,
+    # the same composed default whether a human or a local bot submits it.
+    fleet = ctx.context.fleet
+    seconds = fleet.bots[fleet.manager].observability.dispatch_deadline
+    seconds = _DEFAULT_DISPATCH_DEADLINE_S if seconds is None else seconds
+    if type(seconds) is not int or seconds < 0:
+        raise TaskQueryError("observability.dispatch_deadline must be a nonnegative integer of seconds")
+    if seconds == 0:
+        return None, None
+    frozen = (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat(timespec="seconds")
+    return frozen, frozen
+
+
 def _replayed(store, receipt, conn):
     if receipt is None:
         return False
@@ -289,7 +318,7 @@ def _raw(ctx, request_id, family, payload, receipt, *, fact_index=0):
 
 
 def _prepare(store, ctx, operation, semantic, raws, task_id, assignment_id=None, recipient=None, actors=(),
-             *, message_id=None, notification=False, route=None):
+             *, message_id=None, notification=False, route=None, expected_by=None):
     from .plane.emit_api import CONTENT_FIELDS, load_capture_config, validate_item
     modes = load_capture_config(ctx.root) if any(CONTENT_FIELDS.get(r["event_type"]) for r in raws) else {}
     parties = {actor.alias: actor.uid for actor in (ctx.caller, *actors)}
@@ -299,7 +328,7 @@ def _prepare(store, ctx, operation, semantic, raws, task_id, assignment_id=None,
     return store.prepare(RequestIntent(operation, 1, ctx.host_uid, ctx.fleet_uid, ctx.caller.uid,
                          recipient, semantic, stages,
                          task_id=task_id, assignment_id=assignment_id, message_id=message_id,
-                         route=route))
+                         route=route, expected_by=expected_by))
 
 
 def _result(ctx, conn, receipt, replayed):
@@ -383,6 +412,7 @@ def assign(ctx: TaskOperationContext, request_id: str, task_id: str, *, bot_id: 
     with locked_request(ctx.root, ctx.fleet_uid, request_id) as store:
         previous = _existing(store, ctx, "task.assign", semantic, worker.uid,
                              fact_count=2 if checkin_id is not None else 1)
+        due, frozen = _deadline(ctx, expected_by, previous)
         with _reader(ctx) as conn:
             task = show_task(conn, task_id, fleet_uid=ctx.fleet_uid)  # canonical recovery errors
             with _locked_task(store, task.task_id) as check:
@@ -398,7 +428,7 @@ def assign(ctx: TaskOperationContext, request_id: str, task_id: str, *, bot_id: 
                     _checkin_decision(ctx, conn, checkin_id)
                 aid = previous.intent.assignment_id if previous else mint_assignment_id()
                 raw = _raw(ctx, request_id, "assignment", dict(assignment_id=aid, work_item_id=task_id,
-                           assignee=worker.alias, assigned_by=provenance.alias, expected_by=expected_by), previous)
+                           assignee=worker.alias, assigned_by=provenance.alias, expected_by=due), previous)
                 raws = (raw,)
                 if checkin_id is not None:
                     join = _raw(ctx, request_id, "system", {
@@ -408,7 +438,7 @@ def assign(ctx: TaskOperationContext, request_id: str, task_id: str, *, bot_id: 
                     }, previous, fact_index=1)
                     raws = (raw, join)
                 receipt = _prepare(store, ctx, "task.assign", semantic, raws, task_id, aid, worker.uid,
-                                   (worker, provenance))
+                                   (worker, provenance), expected_by=frozen)
                 return _commit(store, ctx, conn, receipt, raws, check)
 
 
@@ -654,6 +684,7 @@ def reassign(ctx: TaskOperationContext, request_id: str, task_id: str, *, bot_id
                                     expected_by=expected_by, by=by_alias))
     with locked_request(ctx.root, ctx.fleet_uid, request_id) as store:
         previous = _existing(store, ctx, "task.reassign", semantic, worker.uid, fact_count=2)
+        due, frozen = _deadline(ctx, expected_by, previous)
         with _reader(ctx) as conn:
             first = show_task(conn, task_id, fleet_uid=ctx.fleet_uid)
             with _locked_task(store, first.task_id) as check:
@@ -671,12 +702,12 @@ def reassign(ctx: TaskOperationContext, request_id: str, task_id: str, *, bot_id
                          assignment_id=task.current_assignment.assignment_id, event="reassigned",
                          successor_id=successor, actor=provenance.alias, reason=reason), previous),
                     _raw(ctx, request_id, "assignment", dict(assignment_id=successor, work_item_id=task_id,
-                         assignee=worker.alias, assigned_by=provenance.alias, expected_by=expected_by),
+                         assignee=worker.alias, assigned_by=provenance.alias, expected_by=due),
                          previous, fact_index=1),
                 )
                 # The immutable closure projection freezes both predecessor
                 # and successor. A retry against a replacement cannot prepare
                 # a different closure under this UUID, even when no fact landed.
                 receipt = _prepare(store, ctx, "task.reassign", semantic, raws,
-                                   task_id, successor, worker.uid, (worker, provenance))
+                                   task_id, successor, worker.uid, (worker, provenance), expected_by=frozen)
                 return _commit(store, ctx, conn, receipt, raws, check)

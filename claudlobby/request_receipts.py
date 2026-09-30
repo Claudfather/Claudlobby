@@ -123,6 +123,7 @@ class RequestIntent:
     assignment_id: str | None = None
     message_id: str | None = None
     route: MessageRouteBinding | None = None
+    expected_by: str | None = None  # task routing's frozen fleet-default deadline only
 
 
 @dataclass(frozen=True)
@@ -269,6 +270,15 @@ def _validate(receipt):
         if getattr(intent, field) is not None:
             _id(getattr(intent, field), kind)
     _sha(intent.semantic_sha256)
+    if intent.expected_by is not None:
+        from datetime import datetime
+        try:
+            aware = (intent.operation in ("task.assign", "task.reassign") and type(intent.expected_by) is str
+                     and datetime.fromisoformat(intent.expected_by).tzinfo is not None)
+        except ValueError:
+            aware = False
+        if not aware:
+            raise ReceiptError("only task routing may freeze a timezone-aware default deadline")
     is_message = intent.operation in _O1_NATIVE
     native_stage = _NATIVE_STAGES.get(intent.operation)
     if is_message or intent.route is not None:
@@ -359,6 +369,9 @@ def _validate(receipt):
 
 def _decode(raw):
     try:
+        if "expected_by" not in raw["intent"]:
+            # Receipts written before the frozen default kept routing open-ended.
+            raw = {**raw, "intent": {**raw["intent"], "expected_by": None}}
         intent = raw["intent"]
         route = intent["route"]
         if route is not None:

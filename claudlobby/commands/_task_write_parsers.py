@@ -4,6 +4,9 @@ from importlib import import_module
 
 from ..command_result import execute
 
+_DEADLINE_HELP = ("RFC3339 deadline, or 'none' for open-ended; omitted freezes now plus the "
+                  "fleet manager's observability.dispatch_deadline (default 86400s, 0 open-ended)")
+
 
 def _dispatch(args):
     module = (".assignment_delivery" if args.public_command == "assignment.deliver" else
@@ -43,7 +46,7 @@ def register_task_write_subparsers(task_children, assignment_children):
     assigning = _route(task_children, "assign", "task.assign", "Assign queued work without delivery")
     assigning.add_argument("task_id", metavar="TASK_ID")
     assigning.add_argument("--bot", required=True, metavar="BOT")
-    assigning.add_argument("--expected-by", metavar="RFC3339")
+    assigning.add_argument("--expected-by", metavar="RFC3339|none", help=_DEADLINE_HELP)
     assigning.add_argument("--checkin", metavar="ID")
     assigning.add_argument("--by", metavar="ACTOR", help="Provenance, never caller authority")
 
@@ -77,7 +80,7 @@ def register_task_write_subparsers(task_children, assignment_children):
     reassigning.add_argument("task_id", metavar="TASK_ID")
     reassigning.add_argument("--bot", required=True, metavar="BOT")
     reassigning.add_argument("--reason", required=True, metavar="TEXT")
-    reassigning.add_argument("--expected-by", metavar="RFC3339")
+    reassigning.add_argument("--expected-by", metavar="RFC3339|none", help=_DEADLINE_HELP)
     reassigning.add_argument("--by", metavar="ACTOR", help="Provenance, never caller authority")
 
     accepting = _route(assignment_children, "accept", "assignment.accept",

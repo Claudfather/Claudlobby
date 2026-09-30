@@ -225,6 +225,17 @@ def test_withdrawn_assignment_is_absent_from_the_pulse_overdue_read(active, caps
     assert not doors.overdue_all(now, max_age=0, fleet="example", root=str(root)).get("worker")
 
 
+def test_assign_defaults_to_the_fleet_deadline_unless_explicitly_open_ended(active, capsys):
+    root, _ = active
+    for bot, deadline in (("worker", ()), ("manager", ("--expected-by", "none"))):
+        task_id = _call(capsys, root, "task", "admit", "--title", "Deadline " + bot,
+                        "--request-id", str(uuid4()))["data"]["task_id"]
+        _call(capsys, root, "task", "assign", task_id, "--bot", bot, *deadline, "--request-id", str(uuid4()))
+    later = int(datetime.now(timezone.utc).timestamp()) + 2 * 86400
+    overdue = load_lib_module("dispatch-overdue").overdue_all(later, max_age=0, fleet="example", root=str(root))
+    assert overdue.get("worker") and not overdue.get("manager")
+
+
 def test_escalate_queued_task_is_visible_and_replay_does_not_move_it(active, capsys):
     root, release = active
     admitted = _call(capsys, root, "task", "admit", "--title", "Need human guidance",

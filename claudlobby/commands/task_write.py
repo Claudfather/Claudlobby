@@ -65,8 +65,8 @@ def _body(path: str | None) -> str | None:
 
 
 def _deadline(value: str | None) -> str | None:
-    if value is None:
-        return None
+    if value is None or value == "none":  # omitted: fleet default; none: open-ended
+        return value
     if not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)", value):
         raise CommandFailure("invalid_argument", "--expected-by requires RFC3339 with a timezone")
     try:

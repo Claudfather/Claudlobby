@@ -1,6 +1,7 @@
 """Real task ingestion and exact retry proof on explicitly owned Plane roots."""
 
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import signal
@@ -354,6 +355,47 @@ def test_competing_routing_and_exact_assignee_acceptance(estate):
     assert _counts(conn) == (1, 1, 1, 0)
 
 
+def test_omitted_deadline_freezes_fleet_default_once_and_explicit_none_stays_open(estate, monkeypatch):
+    from claudlobby.config import ObservabilityConfig
+    from claudlobby.plane import emit_api
+    ctx, conn = estate
+    def configured(seconds):
+        fleet = ctx.context.fleet
+        bots = {**fleet.bots, fleet.manager: replace(
+            fleet.bots[fleet.manager], observability=ObservabilityConfig(dispatch_deadline=seconds))}
+        return replace(ctx, context=replace(ctx.context, fleet=replace(fleet, bots=bots)))
+    def ahead(value):
+        return datetime.fromisoformat(value) - datetime.now(timezone.utc)
+    task = tasks.admit(ctx, str(uuid4()), title="Deadline")
+    bad = str(uuid4())
+    with pytest.raises(tasks.TaskQueryError, match="dispatch_deadline"):
+        tasks.assign(configured(-1), bad, task.task_id, bot_id="worker")
+    assert _receipt(ctx, bad) is None and _counts(conn) == (1, 0, 0, 0)
+    rid = str(uuid4())
+    with monkeypatch.context() as patch:
+        patch.setattr(emit_api, "emit_batch",
+                      lambda *_a, **_k: (_ for _ in ()).throw(sqlite3.OperationalError("down")))
+        with pytest.raises(tasks.TaskRecordingError):
+            tasks.assign(configured(3600), rid, task.task_id, bot_id="worker")
+    frozen = _receipt(ctx, rid).intent.expected_by
+    assert timedelta(minutes=59) < ahead(frozen) <= timedelta(hours=1)
+    # The uncommitted retry ignores changed config; committed replay keeps it.
+    routed = tasks.assign(configured(0), rid, task.task_id, bot_id="worker")
+    assert datetime.fromisoformat(routed.task.current_assignment.expected_by) == datetime.fromisoformat(frozen)
+    replayed = tasks.assign(configured(7200), rid, task.task_id, bot_id="worker")
+    assert replayed.replayed and replayed.task.current_assignment.expected_by == routed.task.current_assignment.expected_by
+    with pytest.raises(ReceiptConflict):
+        tasks.assign(ctx, rid, task.task_id, bot_id="worker", expected_by=tasks.OPEN_ENDED)
+    for scoped, expected, hours in ((ctx, None, 24), (configured(0), None, None), (ctx, tasks.OPEN_ENDED, None)):
+        other = tasks.admit(ctx, str(uuid4()), title="More deadlines")
+        due = tasks.assign(scoped, str(uuid4()), other.task_id, bot_id="worker",
+                           expected_by=expected).task.current_assignment.expected_by
+        if hours is None:
+            assert due is None
+        else:
+            assert timedelta(hours=hours, minutes=-1) < ahead(due) <= timedelta(hours=hours)
+
+
 def test_stale_assignment_cannot_accept_its_replacement(estate):
     from claudlobby.plane.emit_api import emit_batch
     ctx, conn = estate
@@ -640,6 +682,8 @@ def test_reassign_commit_before_receipt_update_replays_without_retargeting(estat
     current = show_task(conn, admitted.task_id, fleet_uid=ctx.fleet_uid)
     successor = current.current_assignment.assignment_id
     assert successor == pending.intent.assignment_id and successor != old.assignment_id
+    assert (datetime.fromisoformat(current.current_assignment.expected_by)
+            == datetime.fromisoformat(pending.intent.expected_by))
     assert current.state == "assigned" and current.assignments[0].state == "closed"
     closure = current.assignments[0].terminal_event
     assert closure.event == "reassigned" and closure.successor_id == successor
