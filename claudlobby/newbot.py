@@ -28,7 +28,7 @@ import yaml
 log = logging.getLogger(__name__)
 
 from .config import load_fleet
-from .paths import Paths
+from .paths import INSTRUCTION_FILE_NAMES, Paths
 from .prompts import ask as _ask, ask_yn as _ask_yn, ask_pick as _ask_pick
 
 
@@ -354,7 +354,11 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
     choice = _ask("Choice (1/2/3)", default="3")
     if choice == "1":
         existing = (
-            sorted(p.relative_to(paths.root) for p in paths.base_voices.rglob("*.md"))
+            sorted(
+                p.relative_to(paths.root)
+                for p in paths.base_voices.rglob("*.md")
+                if p.name not in INSTRUCTION_FILE_NAMES
+            )
             if paths.base_voices.is_dir()
             else []
         )

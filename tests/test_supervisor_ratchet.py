@@ -98,7 +98,7 @@ CALL_PATTERN = re.compile(r"(^|[^A-Za-z_-])(systemctl|launchctl)( |$)")
 
 def _current_counts() -> dict[str, int]:
     """Measured NOW, over every regular file under lib/ recursively, minus
-    the adapter itself -- EVERY scanned file, zero-count ones included. Never
+    the adapter itself and markdown -- EVERY scanned file, zero-count ones included. Never
     read from the allowlist -- the allowlist is the claim being checked, not
     the source of truth for what exists on disk.
 
@@ -114,6 +114,13 @@ def _current_counts() -> dict[str, int]:
             continue
         rel = f"lib/{path.relative_to(LIB_DIR)}"
         if rel == ADAPTER_REL:
+            continue
+        # Markdown is never executed. lib/CLAUDE.md (and the AGENTS.md
+        # symlink to it) quotes `systemctl --user stop` and the like while
+        # documenting the scripts, and prose naming a call is not a call
+        # site. A script's own comments still count: this skips documents,
+        # not comments.
+        if path.suffix == ".md":
             continue
         n = 0
         for line in path.read_text(errors="ignore").splitlines():

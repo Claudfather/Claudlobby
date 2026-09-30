@@ -67,6 +67,14 @@ The trap always fires on normal or `set -e` exit; `INT TERM HUP` add Ctrl-C, kil
 
 Cite the observation in the PR body — claimed evidence is not evidence. See `library/lessons/review/empirical-verification.md`; reviewers gate bot-behavior PRs on a cited Observe step, not on "the composer test passes."
 
+## Live captures, and code versus rollout
+
+Both rules were stated in full in the root `CLAUDE.md` until 2026-09-29; it now keeps one line on each.
+
+**When a change matches an externally produced shape** (a plugin's injection, a carrier's response, a tool's output), ground the canonical fixture in a **live capture** — a transcript or real response — never in reading the producer's source; and commit the capture's **shape, never its identifiers** (the repo is public). Four gauntlet rounds on the Telegram carrier (#1404/#1411) each found the same class: fixtures certifying a shape reality does not produce, the last one shipped and silently dropped the operator's first live message. This is also how latent bugs surface: the harness above caught a `fleet-pulse.sh` sweep-abort that every unit test missed.
+
+**This gate proves the code; it does not prove the rollout.** Clearing it is mandatory for every runtime change. Separately, when a change to the framework itself (claudlobby, clauDNA, claudron) ships **live fleet-wide** — supervision/`lib` scripts, plugins, the bridge, composed `bot.conf` — the manager should *by default* canary the rollout on one production bot before rolling the fleet: a strong default for fleet-wide framework changes, not a universal mandate (skip it for single-bot, product-repo, or non-runtime work). See the `canary-rollout` protocol.
+
 ## Boundary: this is not Claudosseum
 
 This loop is **pre-merge change validation** — does *this* change work. It's a claudlobby dev/operator discipline. **Longitudinal scoring** of which behaviors actually perform across hundreds of real runs ("trials and combat") is Claudosseum's job; claudlobby only *emits* the structured telemetry (the plane's rows, the same the fleet's own doors read) for it to consume. See `PROJECT_MISSION.md` sibling boundaries.

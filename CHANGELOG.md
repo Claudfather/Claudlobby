@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — the root CLAUDE.md is an index again, and AGENTS.md mirrors every CLAUDE.md for Codex
+
+The root `CLAUDE.md` had grown to 189k characters, past Claude Code's 150k warning, almost all of it the `lib/` table. Every session in this checkout loads it whole, and so does every bot: bot directories sit under the root, and Claude Code reads the `CLAUDE.md` of each parent directory. Codex, which reads `AGENTS.md`, stops at 32 KiB by default. The root is now a 30k index with one line per `lib/` script (all 116, including 12 that had no row). The full per-script reference moved verbatim to `lib/CLAUDE.md`, which loads only when a session reads a file in `lib/`, and the Python module map to `claudlobby/CLAUDE.md`. The test-suite guidance moved to `documentation/test-suite.md`, and the sections the root now summarises keep their full text in `documentation/validating-bot-changes.md` and `documentation/fleet-update-lifecycle.md`.
+
+- Every `CLAUDE.md` has a committed `AGENTS.md` symlink beside it, and each `.agents/skills/<name>` is a directory symlink to `.claude/skills/<name>`, so Claude Code and Codex read the same text. Measured against Codex's own loaders: a symlinked `AGENTS.md` is read at the root and nested, and a symlinked skill directory is discovered, but a real skill directory holding a symlinked `SKILL.md` is skipped without an error.
+- `tests/test_instruction_budget.py` fails a PR when the root passes 32 KiB, a nested instruction file passes 150k characters, the `lib/` index misses, duplicates or invents a script or runs past one line, or an `AGENTS.md` or Codex skill is anything but a symlink to its Claude source.
+- `tests/test_supervisor_ratchet.py` skips `.md` files: prose that names `systemctl` is not a call site, and `lib/CLAUDE.md` now quotes three.
+- `claudlobby list-library` and the `new-bot` voice picker no longer offer `voices/CLAUDE.md`, or its new `AGENTS.md`, as a voice, and the generate-time skill-reference scan reads a symlinked `AGENTS.md` once, under its real name.
+
 ### Added — the host probe records what splits load into CPU and IO: swap, swap traffic, runnable and blocked processes, iowait (#1644)
 
 On Linux, load counts tasks waiting on IO as well as tasks waiting for a CPU. So `host.load` alone cannot tell a CPU burst from an SD-card stall, and that is exactly the question every reset on #1644 leaves open. The host probe now records four more facets every minute, read from `/proc`:

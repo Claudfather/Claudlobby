@@ -12,6 +12,7 @@ from pathlib import Path
 from ..mcp_grammar import GrammarUnavailable, grammar
 from ..composer import compose_bot, compose_fleet
 from ..diff import diff_bot, promote_bot
+from ..paths import INSTRUCTION_FILE_NAMES
 from ..source_state import (
     SOURCE_ABSENT,
     UNREACHABLE_REMEDIES,
@@ -476,10 +477,12 @@ def cmd_list_library(args) -> int:
     seen_voices: dict[str, Path] = {}
     if paths.overlay_voices and paths.overlay_voices.is_dir():
         for p in sorted(paths.overlay_voices.rglob("*.md")):
-            seen_voices[p.name] = p
+            if p.name not in INSTRUCTION_FILE_NAMES:
+                seen_voices[p.name] = p
     if paths.base_voices.is_dir():
         for p in sorted(paths.base_voices.rglob("*.md")):
-            seen_voices.setdefault(p.name, p)
+            if p.name not in INSTRUCTION_FILE_NAMES:
+                seen_voices.setdefault(p.name, p)
     for name in sorted(seen_voices):
         p = seen_voices[name]
         try:
