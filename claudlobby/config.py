@@ -98,7 +98,7 @@ class SystemDefaultsConfig:
     disabling all injection.  Per-category bools allow surgical opt-out.
 
     KNOWN BOUND: the keys below are a fixed set, not "one per entity type".
-    Ten of the twelve library entity types still have no opt-out, and an
+    Nine of the twelve library entity types still have no opt-out, and an
     unrecognised key is silently dropped — so a fleet cannot yet tell a working
     opt-out from a typo (#1168 Phase 3 finding 2). Adding a key here is what
     gives a type an opt-out; the check is in the code that consumes the default.
