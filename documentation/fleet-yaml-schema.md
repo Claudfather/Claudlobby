@@ -194,11 +194,14 @@ fleet:
     observability: true    # merge system.yaml observability defaults
     guardrails: true       # apply default guardrails (e.g. claudlobby-dev-in-projects)
     protocols: true        # apply default protocols, including the leaf-manager checkin default
+    skills: true           # apply default skills: the status skill on every manager
 ```
 
 Omit the field entirely for the common case — everything defaults to `true`. Useful for a fleet that wants to supply its own hooks/observability tuning without the package defaults layered underneath.
 
 `protocols: false` is also how a fleet opts out of the leaf-manager check-in default (see `fleet.teams`, below) — and opting out of the protocol drops the `checkin` skill its `requires:` block links too, unless the bot declares that skill directly. It drops every default protocol for every bot — `shared-documentation` / `shared-documentation-vault` included — and there is no per-bot opt-out.
+
+`skills: false` switches off the default skills: today, the `status` skill every manager gets (a bot `teams:` or `manages:` names as a manager), with the grants its frontmatter declares. **One bot can opt out on its own** with `bots.<name>.system_defaults: {skills: false}`. That is the only per-bot key, and any other key there is refused rather than ignored. Both switches turn off the DEFAULT only: a bot that lists `status` in its own `skills:` keeps it.
 
 ### `fleet.defaults`
 
