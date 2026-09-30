@@ -98,8 +98,8 @@ Then type `/setup` — it checks your host, collects credentials, and spins up c
 > **How long the install takes.** On one Raspberry Pi 5, whose pip config adds piwheels, the
 > `pip install` line took 45 s to 61 s in four timed runs: 45 s from an empty pip cache, 52 s and
 > 61 s with a warm cache, and 55 s with the cache state not recorded. Other hosts are unmeasured. One
-> cold host was stopped after 8 minutes, and the cause was not recorded. Where a dependency has no prebuilt wheel for the platform, pip
-> builds it from source, which takes longer.
+> cold host was stopped after 8 minutes, and the cause was not recorded. Where a dependency has no
+> prebuilt wheel for the platform, pip builds it from source, which takes longer.
 
 > **Why `[plane-ui]`.** The operator plane (`claudlobby plane view`) is enrolled by default
 > and needs FastAPI + uvicorn — two pure-Python wheels. Install without the extra and the

@@ -32,8 +32,8 @@ doctor --switches` then lists `plane-view` as off, with this pip line as the way
 **How long it takes.** On one Raspberry Pi 5, whose pip config adds piwheels, the install took
 45 s to 61 s in four timed runs: 45 s from an empty pip cache, 52 s and 61 s with a warm cache, and
 55 s with the cache state not recorded. Other hosts are unmeasured. One cold host was stopped after
-8 minutes, and the cause was not recorded. Where a dependency has no prebuilt wheel for the platform, pip builds it from source,
-which takes longer.
+8 minutes, and the cause was not recorded. Where a dependency has no prebuilt wheel for the
+platform, pip builds it from source, which takes longer.
 
 **The virtualenv is required, not a style preference.** Homebrew python (macOS) and Debian /
 Raspberry Pi OS system python are both marked externally-managed under
