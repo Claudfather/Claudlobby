@@ -24,6 +24,10 @@ hold their old source-puller, build separately, prove an independent canary, and
 adopt the complete host through `host activate`. There are no compatibility shims;
 the coordinator is host-wide and cannot bypass a protected busy bot's restart hold.
 
+### Changed — the `[vault]` extra pins Claudron v0.6.1
+
+`pyproject.toml`'s `[vault]` extra moves from `@v0.6.0` to `@v0.6.1`, with the conformance workflow's comment and `documentation/integrations/claudron-integration.md` (the "What works today" headline, the write-lock note and the pin line). v0.6.1 carries two changes. `claudron doctor` walks only the note tiers, where it walked the whole vault tree: a Pi vault's run went from about 26 minutes to under 2 seconds (Claudron #208). And `doctor --settings` is declared as the `doctor-settings` capability (Claudron #209), so a consumer can gate on it; nothing in this repository passes `--settings` yet. The compat floor in `claudlobby/claudron_compat.py` is unchanged: its highest live row needs 0.4.0.
+
 ### Changed — composed Claudron hooks name the bot's vault with `--vault` (Claudron #183)
 
 Since Claudron v0.6.0 the engine's hook snippet names its vault in every command: `<exe> --vault <root> hook <event>` (Claudron #203). Walk-up binds only a directory carrying the `.claudron-vault` identity file, so a hook with no address finds a vault only when its session's environment or working directory happens to reach one. The composer renders a copy of that snippet behind the R3 drift gate, so each vault-wired bot's three hook commands now name that bot's own vault.
