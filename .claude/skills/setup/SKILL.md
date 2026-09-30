@@ -266,15 +266,25 @@ claudlobby status --bot claudfather
 
 Poll up to 90 seconds (matching `start-bot.sh` readiness timeout).
 
-**For inbound, ask `bridge_state` — not the log.** It is the classifier `start-bot.sh` itself
-gates readiness on, and it verifies a *live, owned* poller process:
+**For inbound, ask `bridge_state` about claudfather's own session — not the log.** It is the
+classifier `start-bot.sh` itself gates readiness on. Give it the session's pid: asked without one,
+it answers whether *a* poller holds claudfather's Telegram slot, and during a restart the outgoing
+session's poller still holds it, so it reads `up` for a bridge that is going dark. The bot's tmux
+pane runs Claude itself, so the pane's pid is the session:
 
 ```bash
 . lib/lib-common.sh
-bridge_state runtime/bots/claudfather   # -> up | no_bridge | no_token | no_handle | unknown
+B=runtime/bots/claudfather
+pid="$(bot_tmux "$(tmux_socket_for_bot "$B")" list-panes -t "$(tmux_session_name "$B")" -F '#{pane_pid}' 2>/dev/null | head -1)" || true
+if [ -n "$pid" ]; then bridge_state "$B" "$(resolve_bot_telegram_token "$B")" "$pid"; else echo "no session yet"; fi   # -> up | not_mine | no_bridge | no_token | no_handle | unknown
 ```
 
-Only `up` means inbound actually works. Do **not** substitute
+The token goes in second place because `bridge_state` takes any second argument as the resolved
+token: an empty `""` there reads as "no token" and answers `no_token` for a healthy bot.
+
+Only `up` means inbound actually works. `not_mine` means a poller holds the slot but belongs to
+another session, usually the outgoing one mid-restart: wait and ask again. "no session yet" means
+no tmux session answered for claudfather, usually because it has not started yet. Do **not** substitute
 `grep BRIDGE_READY .../logs/startup.log`: that file is opened append-only and survives restarts,
 so a line from a previous boot reads exactly like a live bridge — the check passes while the bot
 is deaf. A tmux session existing is likewise not the same as a bot that can receive messages.
