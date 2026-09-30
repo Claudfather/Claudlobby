@@ -5447,3 +5447,80 @@ class TestAccessJsonIsWrittenWhole:
         monkeypatch.setattr(Path, "write_text", real)
         compose_bot(bot, fleet, make_paths(fleet_dir))
         assert isinstance(json.loads(access.read_text()), dict)
+
+
+class TestAccessJsonKeepsItsMode:
+    """The Telegram plugin keeps access.json 0600 in a 0700 directory: it holds the
+    allowlist and pending pairings. The atomic write (a temp file, then a rename) must
+    not give the file the default mode at either write site. The reconcile keeps the
+    mode the file had, and a first write creates the file 0600, as the plugin does."""
+
+    @pytest.fixture(autouse=True)
+    def _usual_umask(self):
+        # Under the usual umask 022 a new file is 0644; a stricter umask would hide the defect.
+        old = os.umask(0o022)
+        yield
+        os.umask(old)
+
+    @staticmethod
+    def _mode(path: Path) -> int:
+        return path.stat().st_mode & 0o7777
+
+    @pytest.mark.parametrize("mode", [0o600, 0o640])
+    def test_a_reconcile_keeps_the_mode_the_file_had(self, fleet_dir, tmp_path, monkeypatch, mode):
+        from claudlobby.composer import compose_bot
+        from tests.conftest import make_paths
+
+        fleet, bot, access = TestAccessJsonIsWrittenWhole._lead(fleet_dir, tmp_path, monkeypatch)
+        access.parent.mkdir(parents=True, mode=0o700)
+        original = json.dumps({"dmPolicy": "allowlist", "allowFrom": ["111"], "groups": {}, "pending": {}})
+        access.write_text(original)
+        os.chmod(access, mode)
+        compose_bot(bot, fleet, make_paths(fleet_dir))
+        assert access.read_text() != original, "precondition: the reconcile rewrote the file"
+        assert self._mode(access) == mode, oct(self._mode(access))
+
+    def test_a_stale_temp_file_does_not_pass_its_mode_on(self, fleet_dir, tmp_path, monkeypatch):
+        # An interrupted run can leave access.json.tmp behind; opening it again keeps its mode.
+        from claudlobby.composer import compose_bot
+        from tests.conftest import make_paths
+
+        fleet, bot, access = TestAccessJsonIsWrittenWhole._lead(fleet_dir, tmp_path, monkeypatch)
+        access.parent.mkdir(parents=True, mode=0o700)
+        access.write_text(json.dumps({"dmPolicy": "allowlist", "allowFrom": [], "groups": {}, "pending": {}}))
+        os.chmod(access, 0o600)
+        stale = access.with_name("access.json.tmp")
+        stale.write_text("{}")
+        os.chmod(stale, 0o644)
+        compose_bot(bot, fleet, make_paths(fleet_dir))
+        assert not stale.exists(), "precondition: the write went through the temp file"
+        assert self._mode(access) == 0o600, oct(self._mode(access))
+
+    def test_a_first_write_creates_the_file_readable_by_the_user_alone(self, fleet_dir, tmp_path, monkeypatch):
+        from claudlobby.composer import compose_bot
+        from tests.conftest import make_paths
+
+        fleet, bot, access = TestAccessJsonIsWrittenWhole._lead(fleet_dir, tmp_path, monkeypatch)
+        compose_bot(bot, fleet, make_paths(fleet_dir))
+        assert access.is_file(), "precondition: the first write ran"
+        assert self._mode(access) == 0o600, oct(self._mode(access))
+
+    def test_the_text_never_reaches_a_file_more_open_than_the_target(self, fleet_dir, tmp_path, monkeypatch):
+        # The temp file has its final mode before any text is written to it, so there is
+        # no moment when the allowlist sits in a file with the default mode.
+        from claudlobby.composer import compose_bot
+        from tests.conftest import make_paths
+
+        fleet, bot, access = TestAccessJsonIsWrittenWhole._lead(fleet_dir, tmp_path, monkeypatch)
+        seen = []
+        real = Path.write_text
+
+        def write_text(self, data, *args, **kwargs):
+            if self.name == "access.json.tmp":
+                seen.append(self.stat().st_mode & 0o7777 if self.exists() else None)
+            return real(self, data, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "write_text", write_text)
+        compose_bot(bot, fleet, make_paths(fleet_dir))
+        assert access.is_file(), "precondition: the first write ran"
+        assert seen == [0o600], seen

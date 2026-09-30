@@ -2951,9 +2951,20 @@ def compose_settings_local(
 
 
 def _write_atomic(path: Path, text: str) -> None:
-    """Write ``text`` to ``path`` so a write that fails part-way leaves the old file whole."""
+    """Write ``text`` to ``path`` so a write that fails part-way leaves the old file whole.
+
+    The file keeps the mode it had, and a new one is created 0600, as the Telegram plugin
+    creates access.json. The temp file has that mode before any text reaches it, so the
+    rename never hands the file the default mode.
+    """
     tmp = path.with_name(path.name + ".tmp")
     try:
+        mode = path.stat().st_mode & 0o7777
+    except FileNotFoundError:
+        mode = 0o600
+    try:
+        os.close(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode))
+        os.chmod(tmp, mode)
         tmp.write_text(text)
         os.replace(tmp, path)
     except OSError:
