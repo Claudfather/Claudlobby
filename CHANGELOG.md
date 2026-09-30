@@ -16,6 +16,90 @@ Heavy jobs stacked across fleets stormed the primary host three times on 2026-09
 - **A dead holder cannot wedge it:** the kernel drops the lock with its holder. The next holder reports the unreleased record on the plane (`heavy_slot_unreleased`), and a changed boot id means the job was running when the host reset. That is the evidence #1644 lacks.
 - **Knobs, host-wide, read on every use:** `state/heavy-slot/slots` (default 1) and `state/heavy-slot/disabled`, which passes every call through at once. `lib/heavy-slot.py status` answers who holds each slot, or who held it last.
 - **It counts only bots that opted in.** The storms came from product fleets' heavy jobs, so the slot relieves them once those fleets' managers set the key on their bots.
+### Added — the README says what setup changes on your machine and what bounds a bot (#1996)
+
+A stranger deciding whether to run Claudlobby could not find out what it does to their machine without reading the scripts. The README now has two sections above the quick start, and every line names the file it can be checked against.
+
+- **What it changes on your machine:** every host change setup makes, and the script that makes it. That covers the `sudo` calls (apt packages, the GitHub CLI's apt repository, NodeSource, `loginctl enable-linger`, and Claude Code's managed settings, rewritten on every run), the units it installs, the two keys each bot start sets in your own `~/.claude/settings.json`, the Telegram access lists under `~/.claude/channels/`, the recurring jobs that act beyond the fleet, and where each secret lives.
+- **Safety model:** a bot can run shell commands as you. The expertise it is given can allow every tool, bare `Bash` included, and no composed rule denies `sudo`, so passwordless sudo on the host means root for every bot. Anyone in a fleet's Telegram group can instruct its bots. Bots also inherit your own Claude Code settings. What bounds a bot: deny rules that gate only Claude Code's own tool calls (they are not an operating-system boundary), two guard hooks, guardrails that are instructions rather than enforcement, the sandbox (off in the seed), and the scope of the tokens it holds.
+### Fixed — task re-check routes a person's stale rows to Telegram, and leaves their standing goals alone (#2011)
+
+`claudlobby task recheck` re-checked every open row past a deadline by pushing a message into the assignee's manager's tmux pane. But a row a *person* assigned is minted `bot:<fleet>/operator` by `dispatch-task.sh` (which names its sender from whoever ran it), and a person has no pane — so one such row (`t-1789966048-473b`, which carries no deadline) was re-checked every 6 hours, forever, into a pane nobody has. The assigner's kind is now read from the plane's own registry (`plane-readers.composed_bot_aliases`: a `bot:` alias is a bot only when `generate` composed a `bot_instance` for it), never inferred from "no tmux session". A person's rows go to the fleet's Telegram through `resolve_alert_target`'s (chat, sender) pair with their own delivery evidence — a `carrier_accepted` transmission, which `RECHECKED_SQL` now counts as landed beside the pane route's `pane_submitted` — so the repeat-window debounce holds on the non-tmux route too. The plane records the person's OWN per-row text (the fragment they received on Telegram), not the bot-pane wording, so the recorded ask matches what the human saw. A person's stale row past its deadline is chased once per window and no oftener; a person's row with **no** deadline is a standing goal — disclosed in the run, not re-checked; and a recipient who cannot be reached is named and fails the run, never a silent drop. Verified on this host's plane (read-only snapshot): the motivating row now classifies as a standing goal and is not sent.
+
+### Added — every manager gets `/status` by default, and so does the seed's claudfather (#2010)
+
+The `status` skill is the manager's readout for the human: what moved, and
+what is waiting on their decision. It reached a bot only when that bot's
+`fleet.yaml` listed it. On one host, three of the four managers had it and
+the fourth did not, and a new user's first bot, `claudfather`, did not.
+
+- **Every manager gets it.** `status` is now a role default on `skills`
+  (`defaults.REGISTRY["skills"].roles`), keyed to the `manager` role: every
+  bot a `teams:` or `manages:` names as a manager, including a coordinator
+  whose reports are all managers. The leaf-manager role that brings `checkin`
+  would have missed that coordinator. The skill's own grants come with it
+  (`Bash(claudlobby *)`, `Bash(gh *)`, the Telegram reply tool). One helper,
+  `composer.default_roles`, now derives a bot's roles for both the protocols
+  and the skills overlays.
+- **The seed lists it for claudfather.** claudfather is not a manager, since
+  it manages no bots, so the default never reaches it. The seed declares the
+  skill instead, and `/status` works on a new user's first bot.
+- **Opting out.** `system_defaults.skills: false` switches the default off for
+  a fleet, and `bots.<name>.system_defaults: {skills: false}` for one bot.
+  `skills` is the only per-bot key; any other key there, or a value that is
+  not a mapping, is refused instead of being dropped silently. Both switches
+  turn off the default only: a bot that lists `status` itself keeps it.
+- **What the next `generate` changes on a live host:** a manager that did not
+  list `status` gains the skill and its four grants. That takes effect the
+  moment `generate` writes it (#1310). A manager that already lists it
+  composes it once, as before.
+### Fixed — `/setup` asks `bridge_state` about claudfather's own session (#1536)
+
+**The old guidance could read `up` for a bridge that was going dark.** Step 5 told first-run operators to trust `bridge_state runtime/bots/claudfather` over the log. Without a session pid, that answers whether *a* poller holds the bot's Telegram slot, and during a restart the outgoing session's poller still does (#1530).
+
+- **Now:** the skill resolves claudfather's pane pid through the same helpers `start-bot.sh` uses (`tmux_socket_for_bot`, `tmux_session_name`, `bot_tmux`), and passes it. The pane runs Claude itself, so its pid is the session. The skill also explains `not_mine`.
+- **The token is passed too, and that is load-bearing.** `bridge_state` takes *any* second argument as the resolved token, so an empty `""` answers `no_token` for a healthy bot. Measured on a live bot:
+  - scoped with its own session: `up`;
+  - scoped with another pid: `not_mine`;
+  - with `""` as the token: `no_token`.
+- **The other caller #1536 names,** `lib/bench-cold-start.sh`, was deleted in #1858.
+- **`tests/test_cold_start_contract.py`** requires every `bridge_state` call in the setup skill to name the session and a non-empty token.
+
+### Added — `claudlobby plane samples`: one metric family for one subject over a window, read-only (#1644)
+
+The host probe records `host.load`, `host.mem_available_mb` and the other `host.*` facets every minute, but nothing read a window of them back. After a reset, the load and memory trajectory into it could only be read by opening the plane db by hand. `claudlobby plane samples <metric> [--subject ALIAS] [--kind KIND] [--since W] [--until W] [--json]` prints one family for one subject over a window, as text or JSON. In text, `host.load`'s one, five and fifteen print as pairs. The subject defaults to the only one of its kind, which on a host's own plane is the host.
+
+- **Read-only by construction, and the plane is released before anything prints.** It opens through `open_ro` (`mode=ro` plus `query_only`) and never runs `migrate()`. It fetches every row and closes the connection before the first line prints, a refusal included, so it never holds a snapshot that keeps the daemon's checkpoint from resetting the WAL (#1905, #1912). A test fails if anything prints to either stream while the connection is open, after a failed read as well as a good one.
+- **The window compares times, not text.** Ingest keeps the offset an emitter gave: a `-04:00` instant is stored as `-04:00`. A text compare against UTC bounds would drop in-window samples, so the query goes through `julianday()`, and a mixed-offset test pins that.
+- **Refusals name the fix, and a refusal is never read as an answer.** An unknown family lists the known ones, an unknown subject lists the recorded ones, and two subjects of one kind with no `--subject` names both. A window bound that does not parse is refused at rc 2, an empty one included, so `--since "$UNSET"` is not read as now. An unreachable plane refuses at rc 3 and creates nothing, and so does a plane that records no subject of the kind, because a wrong root is not an empty window. Every refusal goes to stderr and leaves stdout empty, `--json` included. An empty window is an answer (rc 0).
+- `plane.identity` gains `lookup()`, the read half of `resolve()`, which now calls it: a read door must not mint an identity.
+
+### Fixed — `setup-fleet` stops filing a critical `script_error` every night on a fleet with no briefing timers (#1707)
+
+`reconcile_briefing_timers` lists the fleet's enrolled briefing timers with
+`systemctl --user list-unit-files`, which exits 1 when its pattern matches
+nothing. On a fleet with no briefing timers, that exit fired the errtrace ERR
+trap inside the process substitution, so the nightly `setup-fleet --jobs-only`
+filed a critical `script_error` at the function's first line. The function and
+the script both carried on correctly. It fired 6 nights of 7 on each of the two
+fleets with no briefing timers, in the week to 2026-09-29.
+
+- **The fix.** The guard moved inside the substitution:
+  `… | awk '{print $1}' || true)`. A guard outside cannot help, because the trap
+  fires in the substitution's own shell. An empty listing means nothing to
+  reconcile, so a real listing failure swallowed with it fails toward doing
+  nothing.
+- **The test harness now matches systemd.** The stub `systemctl` in
+  `tests/test_setup_backbone.py` exited 0 when a pattern matched nothing, which
+  is why no test saw this. It now exits 1 with no output, as systemd 252 does
+  (measured on the Pi). The harness also records every batch that reaches the
+  plane shim, so a test can assert what was filed.
+- **Tests.** `TestBriefingReconcileErrTrap` checks that the no-match case files
+  no row under the real `install_error_trap`. Its positive control checks that a
+  real failure in the same function (an orphan unit file that cannot be removed)
+  still files one.
+- **Not covered.** The class-level pass over `lib/` and its regression gate stay
+  with #1707.
 
 ### Fixed — every bot is told what a dispatch's leading `set +H; ` is, and the dispatch protocol stops describing something it does not do
 
