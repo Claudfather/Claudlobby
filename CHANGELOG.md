@@ -26,7 +26,7 @@ A PreToolUse hook, `lib/public-write-guard.sh` (with its decider `lib/public-wri
   - a hit whose repository or visibility is unknown: refuse;
   - content it cannot read (a missing body file, a program's output used as a body, a git command run from a directory it cannot name): counts as a hit.
 - **Its ceiling:** it does not follow `eval`, functions, backticks or scripts, and it does not read an annotated tag's own message. It keeps accidents out; it is not a boundary against a caller trying to get past it.
-- **Off switch:** `state/public-write-guard/disabled`, host-wide.
+- **Off switch:** `state/public-write-guard/disabled`, host-wide. `python3 lib/public-write-guard.py --check` says whether a host's list is armed without printing a term.
 - **Opt-in:** registered in the switch registry as opt-in for the `heavy_slot` reason. A composed hook has no deployment gate (#1310), so the manifest key is where one bot goes first.
 - **Tests:** `tests/test_public_write_guard.py` drives the real hook with a fake `gh` and real git repositories, in both directions for each shape; `tests/test_public_write_guard_compose.py` covers the composition.
 

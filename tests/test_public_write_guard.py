@@ -601,3 +601,19 @@ def test_a_redirect_is_not_a_ref_to_push(env, tmp_path):
     commit(pub, env, "b.txt", "plain\n", "plain")
     assert bash(env, "git push origin main 2>&1", pub)[0] == "allow"
     assert bash(env, "git push origin main >/dev/null 2>&1 || echo failed", pub)[0] == "allow"
+
+
+def test_check_reports_the_list_without_printing_a_term(env, tmp_path):
+    def check():
+        p = subprocess.run(["python3", str(REPO / "lib" / "public-write-guard.py"), "--check"],
+                           capture_output=True, text=True, env=env, timeout=30)
+        return p.returncode, p.stdout
+
+    rc, out = check()
+    assert rc == 0 and "ok, 2 pattern(s)" in out and "zephyr" not in out.lower()
+    Path(env["PUBLIC_WRITE_GUARD_TERMS"]).write_text("broken[\n")
+    rc, out = check()
+    assert rc == 1 and "broken" in out
+    Path(env["PUBLIC_WRITE_GUARD_TERMS"]).unlink()
+    rc, out = check()
+    assert rc == 1 and "absent" in out

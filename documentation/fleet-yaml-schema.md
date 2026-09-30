@@ -577,7 +577,7 @@ bots:
 - **Its ceiling.** It reads the shell as people write it. `eval`, a shell function, backticks, and a script file that runs `git` or `gh` are not followed, and an annotated tag's own message is not read. It keeps accidents out of public repositories; it is not a boundary against a caller trying to get past it.
 - **The off switch**, host-wide and instant: `touch $CLAUDLOBBY_ROOT/state/public-write-guard/disabled`.
 
-To arm one bot, write the host's list, set the key, and run `claudlobby --fleet <fleet> generate --bot <bot>`. The hook binds on that bot's next tool call.
+To arm one bot, write the host's list and check it with `python3 $CLAUDLOBBY_ROOT/lib/public-write-guard.py --check` (it prints `ok` and the pattern count, never a term). Then set the key and run `claudlobby --fleet <fleet> generate --bot <bot>`. The hook binds on that bot's next tool call.
 
 ### `bots.<name>.mcp_direct_launch` / `fleet.defaults.mcp_direct_launch`
 

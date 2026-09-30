@@ -32,6 +32,9 @@ Only a HIT asks where the write goes. The repository's visibility is read LIVE
 (``gh api repos/OWNER/REPO``), never from a list, and cached for
 ``CACHE_LIFETIME_S`` so a burst of writes does not repeat the call.
 
+``--check`` says whether the host's list is armed (absent, broken, or ok with
+its pattern count) and never prints a term; rollout runs it on each host.
+
 Failure directions, each chosen on purpose:
   - no list file: ALLOW, and record ``public_write_guard_unarmed``. There is
     nothing to match, and refusing every GitHub write on a host that was never
@@ -1201,7 +1204,21 @@ def decide(payload: dict) -> str | None:
     return None
 
 
+def check() -> int:
+    """``--check``: whether the host's list is armed, without printing a term."""
+    rx, state = load_terms(terms_path())
+    if rx is None:
+        print(f"{_list_label()}: {state}")
+        return 1
+    n = sum(1 for ln in terms_path().read_text().splitlines()
+            if ln.strip() and not ln.strip().startswith("#"))
+    print(f"{_list_label()}: ok, {n} pattern(s)")
+    return 0
+
+
 def main() -> int:
+    if sys.argv[1:] == ["--check"]:
+        return check()
     try:
         payload = json.loads(sys.stdin.read())
     except ValueError:
