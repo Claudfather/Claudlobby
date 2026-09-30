@@ -196,7 +196,7 @@ class TestTheVaultFork:
         # headings carrying opposite instructions, which is #1172 in a strictly
         # worse form than the original defect.
         #
-        # `local/home/tl-enterprises/fleet.yaml` declares this protocol today.
+        # `local/home/merch-fleet/fleet.yaml` declares this protocol today.
         # It is vault-less, so the defect was latent rather than live.
         out = _compose(
             tmp_path, vault=True, declared_protocols=["shared-documentation"]

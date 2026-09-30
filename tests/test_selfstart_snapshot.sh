@@ -934,6 +934,8 @@ assert_eq "the output is sorted — it is a set, not the receipt's sequence" \
 # puts it at top level) and both use the spaced `": ["` form. The expected
 # lists are the pre-fix parser's own output on these same two rows, measured
 # and sorted: the fix must reproduce them as SETS, adding and losing nothing.
+# One edit since freezing: a fleet name was replaced with a neutral one. It
+# moves no key, no shape and no rescued name.
 RRN_REAL="$SCRIPT_DIR/fixtures/rescue-receipts/fleet-2026-09-20-real.jsonl"
 assert_eq "the frozen receipt fixture is present and both rows are there" \
     "2" "$(grep -c . "$RRN_REAL" 2>/dev/null || echo 0)"

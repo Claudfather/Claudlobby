@@ -454,7 +454,7 @@ def derive_projects(bots: dict[str, "BotConfig"]) -> dict[str, ProjectConfig]:
 
     # Two orgs holding one repo NAME collide on the short slug. Qualify EVERY
     # member of a colliding group, not just the later one: an asymmetric pair
-    # ('tl-enterprises' and 'other-tl-enterprises') reads as if the first owns
+    # ('merch-fleet' and 'other-merch-fleet') reads as if the first owns
     # the plain name, which is exactly the ambiguity the qualification exists
     # to remove.
     by_short: dict[str, list[str]] = {}
