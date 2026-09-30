@@ -626,3 +626,134 @@ class TestSetupSystemHonesty:
                 f"{tool} was absent and never installed, so it belongs in "
                 f"'prereqs missing'.\n{ok_line}\n{missing_line}"
             )
+
+
+# --- /setup Step 0 must prove THIS tree is installed (#2002, finding F2) -------
+
+_STEP0_RE = re.compile(r"^## Step 0\b.*?```bash\n(.*?)```", re.DOTALL | re.MULTILINE)
+
+
+def _step0_check() -> str:
+    """The first shell block under the setup skill's `## Step 0` heading."""
+    m = _STEP0_RE.search(SETUP_SKILL.read_text())
+    assert m, "setup SKILL.md has no bash block under '## Step 0'"
+    return m.group(1).strip()
+
+
+def _fake_tree(root: Path) -> Path:
+    """A tree whose `claudlobby.composer` imports with NO dependencies at all,
+    standing in for a host where PyYAML and Jinja2 are importable anyway."""
+    pkg = root / "claudlobby"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("")
+    (pkg / "composer.py").write_text("")
+    return root
+
+
+def _stub_venv(tree: Path, resolves_to: Path, *, site: bool = True) -> None:
+    """A `.venv/bin/python` whose installed `claudlobby` is *resolves_to*.
+
+    ``site=False`` leaves out the test runner's own site-packages (``-S``),
+    where an editable `claudlobby` install would otherwise answer the import."""
+    bindir = tree / ".venv" / "bin"
+    bindir.mkdir(parents=True)
+    stub = bindir / "python"
+    flag = "" if site else " -S"
+    stub.write_text(f'#!/bin/sh\nPYTHONPATH="{resolves_to}" exec "{sys.executable}"{flag} "$@"\n')
+    stub.chmod(0o755)
+
+
+def _run_step0(tree: Path) -> str:
+    proc = subprocess.run(
+        ["bash", "-c", _step0_check()], cwd=tree, capture_output=True, text=True, timeout=60
+    )
+    return proc.stdout.strip()
+
+
+class TestSetupStep0ProvesThisTree:
+    """Run from the repo root, any Python imports the repo's own `claudlobby/`
+    from the current directory. So "does `claudlobby.composer` import?" proves
+    only that its dependencies do, and a host that has them anywhere (distro
+    packages, a user-site install) reads as installed with nothing installed.
+    Measured on the #2002 cold run: a fresh export with no venv printed
+    INSTALLED. These run the skill's own Step 0 command against fixture trees."""
+
+    def test_no_venv_is_missing_even_when_the_import_succeeds_from_cwd(self, tmp_path: Path):
+        tree = _fake_tree(tmp_path / "tree")
+        assert _run_step0(tree) == "MISSING"
+
+    def test_a_venv_that_resolves_to_this_tree_is_installed(self, tmp_path: Path):
+        tree = _fake_tree(tmp_path / "tree")
+        _stub_venv(tree, resolves_to=tree)
+        assert _run_step0(tree) == "INSTALLED"
+
+    def test_a_venv_that_resolves_to_another_tree_is_missing(self, tmp_path: Path):
+        tree = _fake_tree(tmp_path / "tree")
+        other = _fake_tree(tmp_path / "other")
+        _stub_venv(tree, resolves_to=other)
+        assert _run_step0(tree) == "MISSING"
+
+
+_REAL_ERROR_RE = re.compile(r"show the user the real error.*?```bash\n(.*?)```", re.DOTALL)
+
+
+def _real_error_command() -> str:
+    """The command Step 0 names for "show the user the real error"."""
+    step0 = SETUP_SKILL.read_text().split("## Step 0", 1)[1].split("\n## ", 1)[0]
+    m = _REAL_ERROR_RE.search(step0)
+    assert m, "Step 0 gives no bash block after 'show the user the real error'"
+    return m.group(1).strip()
+
+
+def _run_real_error(tree: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["bash", "-c", _real_error_command()], cwd=tree, capture_output=True, text=True, timeout=60
+    )
+
+
+class TestSetupStep0NamesTheRealError:
+    """When Step 0 still prints MISSING, the skill tells the operator to show the
+    user the real error, and names the command that prints it. In each MISSING
+    state that command must print something the user can act on."""
+
+    def test_a_venv_that_resolves_to_another_tree_names_that_tree(self, tmp_path: Path):
+        tree = _fake_tree(tmp_path / "tree")
+        other = _fake_tree(tmp_path / "other")
+        _stub_venv(tree, resolves_to=other)
+        run = _run_real_error(tree)
+        assert run.stdout.strip() == str(other / "claudlobby" / "composer.py"), run.stdout + run.stderr
+
+    def test_a_venv_without_claudlobby_says_it_is_not_installed(self, tmp_path: Path):
+        tree = _fake_tree(tmp_path / "tree")
+        _stub_venv(tree, resolves_to=tmp_path / "empty", site=False)
+        run = _run_real_error(tree)
+        assert run.returncode != 0 and "No module named 'claudlobby'" in run.stderr, run.stdout + run.stderr
+
+    def test_no_venv_fails_loudly(self, tmp_path: Path):
+        tree = _fake_tree(tmp_path / "tree")
+        run = _run_real_error(tree)
+        assert run.returncode != 0 and run.stderr.strip(), run.stdout + run.stderr
+
+
+# --- Example IDs in the onboarding docs are obviously fake (#2002, finding F3) --
+
+_ID_RE = re.compile(r"(?<![\w.:/-])(-?\d{7,})(?![\w:])")
+
+
+def _obviously_fake(token: str) -> bool:
+    """An ascending run (`1234567890`, after an optional `-` or `-100`) or a
+    single repeated digit (`8888888`), the placeholder styles CLAUDE.md's PII
+    rule uses. Anything else could be someone's real chat or user ID."""
+    digits = token.lstrip("-")
+    if token.startswith("-100") and len(digits) > 10:
+        digits = digits[3:]
+    return "1234567890123456789".startswith(digits) or len(set(digits)) == 1
+
+
+@pytest.mark.parametrize("doc", [README, GETTING_STARTED, SETUP_SKILL], ids=lambda p: p.name)
+def test_example_ids_in_onboarding_docs_are_obviously_fake(doc: Path):
+    real_looking = [t for t in _ID_RE.findall(doc.read_text()) if not _obviously_fake(t)]
+    assert not real_looking, (
+        f"{doc.relative_to(REPO_ROOT)} carries ID-shaped numbers that are not obviously "
+        f"fake placeholders: {real_looking}"
+    )

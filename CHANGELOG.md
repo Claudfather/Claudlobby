@@ -15,6 +15,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - `lib/setup-system` runs the same pip install with `--quiet`, so the pages now say to expect the same wait with no output.
 - **`tests/test_cold_start_contract.py`** runs the README's quickstart block with stubs: a failed `validate` must be the only call, and a passing one must run `generate` and `lib/setup-fleet`. On getting-started and the setup skill it fails if `lib/setup-fleet` starts the line after a `validate` chain. Its duration tests read both pages: the stated range must be the lowest and highest of the runs listed beside it, the run count must match, the range must name the one host it was measured on, and the stopped run and setup-system's wait must be stated as above.
 
+### Fixed — `/setup` Step 0 proves this tree is installed, not only that its dependencies import (#2002)
+
+**The old check could pass with nothing installed.** It ran `python3 -c 'import claudlobby.composer'` from the repo root. Any Python imports the repo's own `claudlobby/` from the current directory, so that proved only that PyYAML and Jinja2 were importable. On the Linux cold run for #2002, a fresh export with no venv printed `INSTALLED`: the host had both packages in its user site, and its `claudlobby` command belonged to a different checkout. The cold session noticed on its own and checked where the module came from, and the skill now does the same.
+
+- **How the check works now.** It asks the repo venv's Python, from `/`, where `claudlobby.composer` comes from, and passes only when the answer is this tree's `claudlobby/composer.py`.
+- **How it is tested.** `tests/test_cold_start_contract.py` runs the skill's own command against three fixture trees:
+  - no venv, while the current directory's import succeeds: `MISSING`;
+  - a venv that resolves to this tree: `INSTALLED`;
+  - a venv that resolves to another tree: `MISSING`.
+  A variant that runs from the repo root instead of `/` fails the third.
+- **The command Step 0 names for "show the user the real error"** now asks the venv's Python the same way, from `/`, and prints where `claudlobby.composer` comes from or the error that stops it importing. The old command, run from the repo root, printed nothing in the two states the new check exists for. Tests run it in three states: another tree (it names that tree's `composer.py`), no `claudlobby` in the venv (`No module named 'claudlobby'`), and no venv (a non-zero exit with the error).
+- **The basic-group example ID** in the setup skill is now the obviously fake `-1234567890`, per the PII rule. A new test holds every ID-shaped number in README, getting-started and the setup skill to an obviously fake form: an ascending run, or a single repeated digit.
+
+### Fixed — the cold-start harness launches the cold arm without the operator's settings, and fences root (#2002)
+
+The documented launch was a bare `claude` in the exported tree, and a bare `claude` loads the user's settings. On the #2002 host those held three things at once:
+- a bare `Bash` allow rule, which approves every shell command;
+- `defaultMode: auto`, which Claude Code now uses by default anyway;
+- passwordless sudo, beside those settings.
+
+So a blind run could have run `sudo`, or `lib/setup-system` (which calls sudo itself), without a single prompt. The skill's fence, "tell the human to decline `sudo`", assumed a prompt that need not appear.
+
+- **The launch line.** `prepare` now prints `cd <tree> && PATH="<state>/fence:$PATH" claude --setting-sources project,local --strict-mcp-config`.
+  - It loads no user settings and none of the user's MCP servers.
+  - The fence is a refusing `sudo`, first on `PATH`, so a script that calls sudo fails loudly instead of acting as root.
+  - Credentials still come from the Claude Code login.
+- **The preflight** now warns when user settings approve every shell command (a `Bash`, `Bash(*)` or `Bash(:*)` allow rule, or `bypassPermissions`), and when `sudo -n true` succeeds.
+- **`status` no longer records a false `script_error`.** Its process count was `$(pgrep -f "$tree" | wc -l)`. `pgrep` exits 1 when nothing matches, so under `pipefail` the substitution failed, and the inherited ERR trap recorded `non-zero exit at line 286` on every clean run. That landed in the plane of whatever root the harness resolved, which is the production plane when run from an install.
+- **Docs.** The skill, `validating-cold-start.md` and the `CLAUDE.md` row describe the new launch.
+- **Tests.** `tests/test_coldstart_harness.py` runs `prepare` itself (it must write the fence and print the line that uses it), each allow-everything spelling, and the status count with and without matching processes.
+
+### Added — the host's heavy-job slot: heavy Bash commands run one at a time host-wide, opt-in per bot (#1686)
+
+Heavy jobs stacked across fleets stormed the primary host three times on 2026-09-29 (load 25 to 57, iowait up to 66%, swap full), and a prose rule saying "one at a time" cannot hold across a score of bots in four fleets. A bot with `heavy_slot: true` in `fleet.yaml` now gets a PreToolUse hook, `lib/heavy-slot-guard.sh`, composed for that bot and no other.
+
+- **What it gates:** a whole pytest or vitest run (a run that names its test files is not gated), an npm/pnpm/yarn install, a `test` or `build` package script, `next build`, Playwright and Chromium. It recognises them through `npx`, `pnpm exec`/`dlx`, `yarn`, `env`, `timeout`, `nice`, `nohup`, `uv run` and `bash -c`. The matcher reads the command as the shell does: an argument, a quoted string, a heredoc body or a comment never matches. A construct it does not parse is left untouched and counted, because a rewrite at a guessed position would corrupt the command.
+- **How it holds the slot:** the hook puts `lib/heavy-slot.py run --` in front of each heavy command and leaves every other byte alone. The wrapper takes a non-blocking `flock` on `state/heavy-slot/slot-N.lock`, writes the holder into the file, runs the job, and writes the release.
+- **A refusal names the holder:** when every slot is taken the call is denied before anything runs, with the holder's fleet, bot, command and start time, so the bot retries later instead of hanging behind a 15-minute suite.
+- **A dead holder cannot wedge it:** the kernel drops the lock with its holder. The next holder reports the unreleased record on the plane (`heavy_slot_unreleased`), and a changed boot id means the job was running when the host reset. That is the evidence #1644 lacks.
+- **Knobs, host-wide, read on every use:** `state/heavy-slot/slots` (default 1) and `state/heavy-slot/disabled`, which passes every call through at once. `lib/heavy-slot.py status` answers who holds each slot, or who held it last.
+- **It counts only bots that opted in.** The storms came from product fleets' heavy jobs, so the slot relieves them once those fleets' managers set the key on their bots.
+
 ### Added — the README says what setup changes on your machine and what bounds a bot (#1996)
 
 A stranger deciding whether to run Claudlobby could not find out what it does to their machine without reading the scripts. The README now has two sections above the quick start, and every line names the file it can be checked against.
