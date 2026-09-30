@@ -41,6 +41,7 @@ on provably carries the id the caller named.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -531,7 +532,8 @@ def _deadline_phrase(expected_by: str | None, now: datetime) -> str:
     return f"deadline in {_span((at - now).total_seconds())}"
 
 
-def row_would_be_due(row, *, now: datetime, max_age_s: float) -> bool:
+def row_would_be_due(row, *, now: datetime, max_age_s: float,
+                     assigner_is_bot: bool = True) -> bool:
     """The clock-and-deadline half of `row_is_due`, WITHOUT the escalation
     exemption (F5) — its deadline has passed, or it has been open longer than
     the max age. The two are OR'd because they catch different failures — a
@@ -543,17 +545,25 @@ def row_would_be_due(row, *, now: datetime, max_age_s: float) -> bool:
 
     Named and kept separate so `cmd_task_recheck` can still ask "would this
     row otherwise be due" for an escalated row, to report it in the
-    'waiting on the human' footer rather than making it silently vanish."""
+    'waiting on the human' footer rather than making it silently vanish.
+
+    A row whose assigner is NOT a bot (#2011) is due only once its own
+    deadline has passed: the person set the promise, so the promise decides,
+    and with no deadline the row is a standing goal, not a stale task. Age
+    alone re-checked one every 6 hours, forever, through a pane nobody has."""
     at = _instant(row.get("occurred_at"))
     if at is None:
         return False
     exp = _instant(row.get("expected_by"))
     if exp is not None and exp <= now:
         return True
+    if not assigner_is_bot:
+        return False
     return (now - at).total_seconds() > max_age_s
 
 
-def row_is_due(row, *, now: datetime, max_age_s: float) -> bool:
+def row_is_due(row, *, now: datetime, max_age_s: float,
+               assigner_is_bot: bool = True) -> bool:
     """A row the re-check names. An ESCALATED row is exempt (the fold's F5):
     its newest word is `escalated` (`fleet_open_rows`'s own `menu_facts` join
     — the same fact the digest's line renders, never re-derived here), which
@@ -564,7 +574,42 @@ def row_is_due(row, *, now: datetime, max_age_s: float) -> bool:
     `row_would_be_due` for the clock-and-deadline test alone."""
     if row.get("escalated"):
         return False
-    return row_would_be_due(row, now=now, max_age_s=max_age_s)
+    return row_would_be_due(row, now=now, max_age_s=max_age_s,
+                            assigner_is_bot=assigner_is_bot)
+
+
+def assigner_is_bot(alias: str | None, composed: set | None) -> bool:
+    """Whether a row's assigner is a bot the re-check can ask in its pane
+    (#2011), decided by the plane's own records and never by probing tmux.
+    `human:<who>` is never a bot. A `bot:` alias is one only when `generate`
+    composed a bot of that name, i.e. the registry holds a `bot_instance` for
+    it: a person's goal minted as `bot:<fleet>/operator` (dispatch-task.sh
+    names its sender from BOT_ID, whoever ran it) has none. With `composed`
+    None the registry cannot answer, so a `bot:` alias is trusted as before.
+
+    Known limit (ravi #2017, follow-up): the source is the registry alone. A
+    manager whose `bot_instance` is missing from the registry while the fleet
+    manifest DOES declare it would be read as not-composed and its stale rows
+    routed to the fleet's Telegram instead of its pane. Latent today — every
+    composed bot on this host has a `bot_instance` and no `operator` alias is
+    manifest-declared, so the motivating person-goal case is unaffected — and
+    left to a follow-up that also consults the manifest, which the pane route
+    would then fail toward (safer than the Telegram route for a real bot)."""
+    if not alias or not alias.startswith("bot:"):
+        return False
+    return composed is None or alias.lower() in composed
+
+
+def _composed_bots(plane) -> set | None:
+    """The fleet's composed bots' aliases, lower-cased, or None when the plane
+    cannot say: no `bot_instance` at all (the registry scan has not run on
+    this host) or an install whose readers predate the question. Unknown is
+    not "no bots": treating it as empty would stop every bot's re-check."""
+    read = getattr(plane.pr, "composed_bot_aliases", None)
+    if read is None:
+        return None
+    found = {a.lower() for a in read(plane.conn, plane.fleet)}
+    return found or None
 
 
 def _clip(text: str, limit: int = 80) -> str:
@@ -658,6 +703,96 @@ def recheck_ask_request(row, *, msg_id: str, manager: str, body: str) -> dict:
     }
 
 
+def human_recheck_parts(rows: list[dict], *, now: datetime) -> list[str]:
+    """The per-row fragments of the person's Telegram re-check — each is what the
+    person saw about ONE row, and (the #2017 review) what the plane records as the
+    ask about that row: the text that was SENT, not the bot-pane wording with its
+    task-act.sh commands the person never received. Each part is a substring of
+    `human_recheck_message`, so the record matches the message byte for byte for
+    that row (the bot route's `recheck_row_line` relationship to its digest)."""
+    parts = []
+    for i, r in enumerate(rows, 1):
+        ref = r.get("task_id") or r["assignment_id"]
+        exp = _instant(r.get("expected_by"))
+        late = f", due {_span((now - exp).total_seconds())} ago" if exp else ""
+        parts.append(f"{i}) {_clip(r.get('title') or ref)}"
+                     f" ({_short(r.get('assignee')) or 'unknown'}{late}; {ref})")
+    return parts
+
+
+def human_recheck_message(rows: list[dict], *, who: str, fleet: str,
+                          now: datetime) -> str:
+    """The re-check a PERSON gets, on the fleet's Telegram (#2011): the rows
+    they assigned whose deadline passed, in words rather than the four
+    commands a bot runs. The fleet's group also shows it to the manager bot."""
+    parts = human_recheck_parts(rows, now=now)
+    return _one_line(
+        f"TASK RE-CHECK ({fleet}) for {who}: {len(rows)} task(s) you assigned are past"
+        f" their deadline: " + "; ".join(parts) + ". Reply here or to the assignee:"
+        " chase it, re-scope it, or withdraw it. While a row stays open past its"
+        " deadline this is asked again after the repeat window.")
+
+
+
+
+
+def send_to_human(paths, fleet: str, message: str) -> tuple[int, str, str | None]:
+    """Post a re-check to the fleet's Telegram through `resolve_alert_target`'s
+    pair: the chat and its sender resolved as ONE pair (#1771), handed to
+    `tg-post.sh` in the three variables fleet-pulse uses. (rc, error,
+    carrier_ref): rc 0 only when the Bot API accepted the message, and then
+    `tg:<message_id>`; rc 3 when no pair resolves, the refusal naming the fix.
+
+    tg-post records nothing itself without a bot identity, and this door
+    records the ask and its transmission, so the identity is withheld: one
+    record, never two."""
+    script = (
+        '. "$1/lib-common.sh" >/dev/null 2>&1 || { echo "lib-common.sh did not load" >&2; exit 3; }\n'
+        'set +e\n'
+        'resolve_alert_target "$(resolve_bots_dir "$2")" fleet\n'
+        'if [ -z "${_alert_chat_id:-}" ]; then\n'
+        '    echo "no Telegram target: ${_alert_refusal:-none resolved}" >&2\n'
+        '    exit 3\n'
+        'fi\n'
+        'TELEGRAM_GROUP_CHAT_ID="$_alert_chat_id" TELEGRAM_STATE_DIR="${_alert_state_dir:-}" \\\n'
+        '    TELEGRAM_BOT_TOKEN="${_alert_token:-}" "$1/tg-post.sh" "$3"\n')
+    env = {k: v for k, v in os.environ.items() if k not in ("BOT_ID", "BOT_NAME")}
+    env["FLEET_NAME"] = fleet
+    try:
+        r = subprocess.run(["bash", "-c", script, "task-recheck", str(paths.lib), fleet,
+                            message], capture_output=True, text=True, timeout=60, env=env)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 1, _one_line(str(exc)), None
+    err = _one_line(r.stderr.strip())[-400:]
+    if r.returncode != 0:
+        return r.returncode, err or f"exit {r.returncode}", None
+    try:
+        answer = json.loads(r.stdout)
+    except ValueError:
+        return 1, err or "tg-post printed no JSON answer", None
+    if not isinstance(answer, dict) or answer.get("ok") is not True:
+        return 1, err or "the Bot API did not accept the message", None
+    mid = answer.get("msg_id")
+    return 0, "", (f"tg:{mid}" if mid is not None else None)
+
+
+def telegram_transmission_request(row, *, msg_id: str, destination: str, ok: bool,
+                                  detail: str = "", carrier_ref: str | None = None) -> dict:
+    """The Telegram route's delivery evidence, in tg-post's own shape:
+    `carrier_accepted` only when the Bot API accepted the post (it carries the
+    message id), else `failed` with the reason. RECHECKED_SQL counts the
+    accepted state as landed, beside the pane route's `pane_submitted`."""
+    payload = {"msg_id": msg_id, "attempt_no": 1, "carrier": "telegram-tgpost",
+               "destination": destination,
+               "state": "carrier_accepted" if ok else "failed"}
+    if ok and carrier_ref:
+        payload["carrier_ref"] = carrier_ref
+    if not ok and detail:
+        payload["error"] = _one_line(detail)[:512]
+    return {"event_type": "transmission", "emitter": "task-recheck",
+            "fleet": row["fleet"], "payload": payload}
+
+
 def _group_by_manager(rows: list[dict]) -> tuple[dict, list[dict]]:
     """(manager → its rows, oldest first; the rows no manager can be named
     for). The second list is DISCLOSED rather than dropped or reassigned to a
@@ -684,9 +819,18 @@ def _collect_due(plane, *, now: datetime, max_age_s: float, repeat_s: float
     how many of a manager's stale rows are the human's to answer, rather than
     the manager reading silence as "nothing else is stale"."""
     rows = plane.pr.fleet_open_rows(plane.conn, plane.fleet)
-    due = [r for r in rows if row_is_due(r, now=now, max_age_s=max_age_s)]
+    composed = _composed_bots(plane)
+    for r in rows:
+        # A row with no assigner at all keeps the bot path, so it still
+        # reaches the orphan disclosure in `_group_by_manager`.
+        r["by_bot"] = not r.get("assigned_by") or assigner_is_bot(r["assigned_by"], composed)
+    due = [r for r in rows
+           if row_is_due(r, now=now, max_age_s=max_age_s, assigner_is_bot=r["by_bot"])]
     waiting = [r for r in rows if r.get("escalated")
-              and row_would_be_due(r, now=now, max_age_s=max_age_s)]
+              and row_would_be_due(r, now=now, max_age_s=max_age_s,
+                                   assigner_is_bot=r["by_bot"])]
+    standing = [r for r in rows if not r["by_bot"] and not r.get("escalated")
+                and _instant(r.get("expected_by")) is None]
     stamps = plane.pr.rechecked_at(plane.conn, [r["assignment_id"] for r in due])
     fresh, held = [], []
     for row in due:
@@ -695,7 +839,7 @@ def _collect_due(plane, *, now: datetime, max_age_s: float, repeat_s: float
             held.append(row)
         else:
             fresh.append(row)
-    return fresh, held, waiting
+    return fresh, held, waiting, standing, composed is not None
 
 
 def cmd_task_recheck(args) -> int:
@@ -760,12 +904,23 @@ def cmd_task_recheck(args) -> int:
                   " predate the task-loop menu — pull the install and re-run",
                   file=sys.stderr)
             return 3
-        fresh, held, waiting = _collect_due(plane, now=now, max_age_s=max_age_s,
-                                           repeat_s=repeat_s)
+        fresh, held, waiting, standing, composed_known = _collect_due(
+            plane, now=now, max_age_s=max_age_s, repeat_s=repeat_s)
     finally:
         plane.close()
 
-    by_manager, orphans = _group_by_manager(fresh)
+    if not composed_known:
+        print(f"recheck: the plane holds no composed bot for {fleet} (the registry"
+              " scan has not run here), so every bot: assigner is taken to be a"
+              " bot, as before #2011")
+    if standing:
+        names = sorted({_short(r["assigned_by"]) or r["assigned_by"] for r in standing})
+        refs = [r.get("task_id") or r["assignment_id"] for r in standing]
+        print(f"recheck: {len(standing)} standing goal(s) not re-checked: assigned by"
+              f" {', '.join(names)}, not a composed bot, with no deadline ("
+              + ", ".join(refs[:5]) + (" …" if len(refs) > 5 else "") + ")")
+    human_rows = [r for r in fresh if not r["by_bot"]]
+    by_manager, orphans = _group_by_manager([r for r in fresh if r["by_bot"]])
     # F5: escalated-and-otherwise-due rows, per manager — a COUNT for the
     # digest's footer, never a list of rows to act on (their orphans are
     # discarded here: an escalated row with no nameable manager still names
@@ -776,7 +931,7 @@ def cmd_task_recheck(args) -> int:
         print(f"recheck: {row.get('task_id') or row['assignment_id']} has no"
               " manager on the plane (no assigned_by the registry can name) —"
               " nobody was asked", file=sys.stderr)
-    if not by_manager:
+    if not by_manager and not human_rows:
         if orphans:
             return 1
         print(f"recheck: nothing in {fleet} is past deadline or older than"
@@ -834,6 +989,49 @@ def cmd_task_recheck(args) -> int:
             rc = 1
             continue
         print(f"asked {manager} about {len(named)} row(s)"
+              + (f" (+{len(rows) - len(named)} held over)"
+                 if len(rows) > len(named) else ""))
+
+    # A person who assigned rows (#2011): one digest per person on the fleet's
+    # Telegram, the ask recorded first, the post's own evidence after it. A
+    # person who cannot be reached is named, and fails the unit.
+    by_person: dict[str, list[dict]] = {}
+    for r in human_rows:
+        by_person.setdefault(r["assigned_by"], []).append(r)
+    for alias, rows in sorted(by_person.items()):
+        who = _short(alias) or alias
+        named = rows[:RECHECK_MAX_ROWS]
+        message = human_recheck_message(named, who=who, fleet=fleet, now=now)
+        if dry:
+            print(f"[dry-run] {who} (Telegram): {len(named)} row(s)")
+            print(f"[dry-run] {message}")
+            continue
+        # ravi #2017: record the text the person RECEIVED (their own per-row
+        # fragment of `message`), never the bot-pane line with its task-act.sh
+        # commands — the plane must show what the human saw.
+        parts = human_recheck_parts(named, now=now)
+        ids = [mint_msg_id() for _ in named]
+        asked, verdict = _emit(paths.root, [
+            recheck_ask_request(r, msg_id=m, manager=alias, body=part)
+            for r, m, part in zip(named, ids, parts)])
+        if not asked:
+            print(f"recheck: the plane did NOT record the ask to {who}"
+                  f" ({verdict or 'no outcome'}) — sending anyway; these rows"
+                  " will be re-checked again next sweep", file=sys.stderr)
+        send_rc, err, ref = send_to_human(paths, fleet, message)
+        if asked:
+            _emit(paths.root, [
+                telegram_transmission_request(r, msg_id=m, destination=alias,
+                                              ok=(send_rc == 0), detail=err,
+                                              carrier_ref=ref)
+                for r, m in zip(named, ids)])
+        if send_rc != 0:
+            print(f"recheck: the re-check did NOT reach {who} on the fleet's Telegram"
+                  f" (rc={send_rc}{': ' + err if err else ''}) — {len(named)} row(s)"
+                  " stay on the plane unanswered", file=sys.stderr)
+            rc = 1
+            continue
+        print(f"asked {who} about {len(named)} row(s) on the fleet's Telegram"
               + (f" (+{len(rows) - len(named)} held over)"
                  if len(rows) > len(named) else ""))
     return rc
