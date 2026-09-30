@@ -193,10 +193,12 @@ If it refuses or cannot confirm recording, **stop before ACT**. For a refusal,
 correct the JSON and re-record once; if refused again, record a minimal valid
 `nothing` decision with every required key and the refusal reasons. If storage
 is unavailable, inspect `claudlobby --json request show CHECKIN_UUID` and do
-not act without exact committed proof. Never claim an unknown recording was
-rolled back or retry it with a new UUID blindly.
-For `ask`, use the existing Telegram reply or `tg-post.sh` route only after
-recording. For `nothing`, stop after recording.
+not act without exact committed proof. After the request is proved unrecorded,
+retry the same decision with the same request UUID; retain that UUID across a
+release switch. Never claim an unknown recording was rolled back or retry it
+with a new UUID blindly.
+For `ask`, use the equipped Telegram reply tool only after recording. If
+notification fails, disclose that failure and retain the recorded decision. For `nothing`, stop after recording.
 
 For `dispatch`, keep the returned `CHECKIN_ID`, then perform these distinct
 steps, inspecting each result before starting the next:

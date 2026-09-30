@@ -1,5 +1,5 @@
 #!/bin/bash
-# Hermetic shim checks: committed socket ACK versus durable raw-stage pending,
+# Hermetic shim checks: committed socket ACK versus durable stage pending,
 # refusal, cooldown, and pre-minted replay IDs. The fake daemon uses a short
 # private socket; a recorder is a tripwire against cold full-CLI invocation.
 set -euo pipefail
@@ -282,5 +282,71 @@ printf '%s' "$batch" | PLANE_SOCKET="$sockdir/absent" bash "$SHIM" >/dev/null 2>
 grep -q 'bot:f/old' "$arms" && { echo "FAIL(arm-retention): old arm survived"; exit 1; }
 grep -q 'bot:f/kept' "$arms" || { echo "FAIL(arm-retention): recent arm lost"; exit 1; }
 [ "$(wc -l < "$arms")" -eq 2 ] || { echo "FAIL(arm-retention): wrong count"; exit 1; }
+
+# S5a-04: the stage is capture-policy-applied. Under metadata capture the
+# body never reaches disk; the proof triple does.
+secret='{"events": [{"event_type": "communication", "emitter": "sh-test", "fleet": "f", "payload": {"msg_id": "msg_00000000000000000000000000000001", "sender": "bot:f/a", "message_class": "notice", "body": "SECRET-PLAN"}}]}'
+rm -f "$marker" "$CLAUDLOBBY_ROOT/state/plane/.emit-losses"
+rm -rf "$staged"
+printf '{"*": "metadata"}' > "$CLAUDLOBBY_ROOT/state/plane/capture.json"
+rc=0
+printf '%s' "$secret" | PLANE_SOCKET="$sockdir/absent" bash "$SHIM" >/dev/null 2>"$tmpdir/meta.err" || rc=$?
+[ "$rc" -eq 6 ] || { echo "FAIL(metadata-stage): rc=$rc"; cat "$tmpdir/meta.err"; exit 1; }
+! grep -q 'SECRET-PLAN' "$staged"/*.batch && grep -q '"body_sha256"' "$staged"/*.batch || {
+    echo "FAIL(metadata-stage): body persisted or proof missing"; exit 1;
+}
+
+# A broken capture.json refuses a content batch (never stages it raw) and
+# counts the loss; it is not a contract verdict about the batch.
+rm -f "$marker"; rm -rf "$staged"
+printf '{"*": "metdata"}' > "$CLAUDLOBBY_ROOT/state/plane/capture.json"
+rc=0
+printf '%s' "$secret" | PLANE_EMIT_CLASS=hook PLANE_SOCKET="$sockdir/absent" bash "$SHIM" \
+    >/dev/null 2>"$tmpdir/badcap.err" || rc=$?
+[ "$rc" -eq 3 ] && [ -z "$(find "$staged" -name '*.batch' 2>/dev/null)" ] || {
+    echo "FAIL(bad-capture): rc=$rc"; cat "$tmpdir/badcap.err"; exit 1;
+}
+grep -q 'capture.json is unreadable or invalid' "$tmpdir/badcap.err" \
+    && awk -F'\t' '$2 == "stage_refused" && $3 == "hook" { ok = 1 } END { exit !ok }' \
+        "$CLAUDLOBBY_ROOT/state/plane/.emit-losses" || {
+    echo "FAIL(bad-capture): refusal undisclosed or uncounted"; exit 1;
+}
+# The disclosure is authored, never the file's own contents.
+! grep -q 'metdata' "$tmpdir/badcap.err" "$CLAUDLOBBY_ROOT/state/plane/.emit-losses" || {
+    echo "FAIL(bad-capture): capture.json contents echoed"; exit 1;
+}
+rm -f "$CLAUDLOBBY_ROOT/state/plane/capture.json"
+
+# A client copied away from claudlobby/plane cannot apply the policy, so it
+# refuses (rc 3, counted) rather than staging anything as given.
+lonely="$tmpdir/lonely-lib"; mkdir -p "$lonely"
+cp "$LIB_DIR/plane-emit.sh" "$LIB_DIR/plane-socket-client.py" "$lonely/"
+rm -f "$marker" "$CLAUDLOBBY_ROOT/state/plane/.emit-losses"; rm -rf "$staged"
+rc=0
+printf '%s' "$batch" | PLANE_SOCKET="$sockdir/absent" bash "$lonely/plane-emit.sh" \
+    >/dev/null 2>"$tmpdir/nopolicy.err" || rc=$?
+[ "$rc" -eq 3 ] && [ -z "$(find "$staged" -name '*.batch' 2>/dev/null)" ] || {
+    echo "FAIL(no-policy): rc=$rc"; cat "$tmpdir/nopolicy.err"; exit 1;
+}
+grep -q 'capture policy module unavailable' "$tmpdir/nopolicy.err" \
+    && awk -F'\t' '$2 == "stage_refused" { ok = 1 } END { exit !ok }' \
+        "$CLAUDLOBBY_ROOT/state/plane/.emit-losses" || {
+    echo "FAIL(no-policy): refusal undisclosed or uncounted"; exit 1;
+}
+
+# S5a-01: the staged queue is bounded. At the byte bound the batch is refused
+# (rc 3), disclosed and counted; the queue does not grow.
+rm -f "$marker"; mkdir -p "$staged"
+python3 -c 'import sys; open(sys.argv[1], "wb").truncate(32 * 1024 * 1024)' "$staged/1-ev_full.batch"
+rc=0
+printf '%s' "$batch" | PLANE_SOCKET="$sockdir/absent" bash "$SHIM" >/dev/null 2>"$tmpdir/full.err" || rc=$?
+[ "$rc" -eq 3 ] && [ "$(find "$staged" -name '*.batch' | wc -l)" -eq 1 ] || {
+    echo "FAIL(staged-full): rc=$rc"; cat "$tmpdir/full.err"; exit 1;
+}
+grep -q 'staged queue FULL' "$tmpdir/full.err" \
+    && grep -q $'\tstaged_full\t' "$CLAUDLOBBY_ROOT/state/plane/.emit-losses" || {
+    echo "FAIL(staged-full): refusal undisclosed or uncounted"; exit 1;
+}
+rm -rf "$staged"
 
 echo "PASS: plane-emit committed/pending/refusal paths"

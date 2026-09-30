@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..command_result import selection_read_conflict
+
 from contextlib import closing
 import re
 import sqlite3
@@ -71,8 +73,7 @@ def _read(args) -> CommandOutput:
                                      release_id=release_id)
             data = review_queries.assess_payloads(conn, payloads, args.repo)
         if read_selection(destination.paths.root) != selected:
-            raise CommandFailure("conflict", "active review selection changed during read",
-                                 release_id=release_id)
+            raise selection_read_conflict('active review selection changed during read', release_id=release_id)
         data.update({"caller_fleet": destination.fleet.name,
                      "host_uid": bindings["host_uid"],
                      "merge_authorization": False})

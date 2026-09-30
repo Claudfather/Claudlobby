@@ -27,7 +27,12 @@ def _native_fixture(tmp_path, *scripts):
     native.mkdir(exist_ok=True)
     for name in ("lib-common.sh", "supervisor.sh", "cli-context.sh", "plane-emit.sh",
                  "plane-socket-client.py", *scripts):
-        shutil.copy2(Path(LIB) / name, native / name)
+        if name == "plane-socket-client.py":
+            # Keep the client beside its shared capture-policy package.
+            if not (native / name).is_symlink():
+                (native / name).symlink_to(Path(LIB) / name)
+        else:
+            shutil.copy2(Path(LIB) / name, native / name)
     if not (native / "tg-post.sh").exists():
         _write_exec(native / "tg-post.sh", TG_STUB)
     return native

@@ -47,19 +47,19 @@ $CLAUDLOBBY_ROOT/state/ironclad-runs/<pr-number>-<YYYYMMDD-HHMMSS>/
 
 ### 1. Select idle workers
 
-Read `claudlobby --fleet "$FLEET_NAME" fleet status --json` and inspect `data.bots[]` for observed worker availability; exclude yourself. A missing or unknown observation is not idle. If zero workers are observed idle, note any prior-cycle results, post a status comment, and stop — do not block.
+Read `claudlobby --json fleet status` and inspect `data.bots[]` for observed worker availability; exclude yourself. A missing or unknown observation is not idle. If zero workers are observed idle, note any prior-cycle results, post a status comment, and stop — do not block.
 
 ### 2. Dispatch each applicable lens
 
 Round-robin across the idle workers (no worker gets a second lens until every idle worker has one). For each lens:
 
-1. Write `lenses/<lens>/dispatch.md` instructing the worker to read `skills/<lens>/SKILL.md`, apply it with `--dispatch` to the run's `source.md`, write findings **only** to `lenses/<lens>/result.md` (no PR posts or issues), and complete the assigned work with `skill:ironclad-lens`. Embed the lens result format the skill defines.
-2. Use `claudlobby --json task admit --title "<lens outcome>" --request-id ADMIT_UUID`; inspect its canonical task ID. Then use `claudlobby --json task assign TASK_ID --bot WORKER --request-id ASSIGN_UUID`; inspect its assignment ID. Finally use `claudlobby --json assignment deliver ASSIGNMENT_ID --file lenses/<lens>/dispatch.md --request-id DELIVER_UUID`. Each new step has its own retained UUID. `/fleet-ops` and `dispatch` own the detailed result and uncertainty rules.
+1. Write `lenses/<lens>/dispatch.md` instructing the worker to read `skills/<lens>/SKILL.md`, apply it with `--dispatch` to the run's `source.md`, write findings **only** to `lenses/<lens>/result.md` (no PR posts or issues), and complete the assigned work with `--skill ironclad-lens`. Embed the lens result format the skill defines.
+2. Use `claudlobby --json task admit --title "<lens outcome>" --request-id ADMIT_UUID`; inspect its canonical task ID. Then use `claudlobby --json task assign TASK_ID --bot WORKER --expected-by RFC3339_DEADLINE --request-id ASSIGN_UUID`; inspect its assignment ID. Finally use `claudlobby --json assignment deliver ASSIGNMENT_ID --file lenses/<lens>/dispatch.md --request-id DELIVER_UUID`. Each new step has its own retained UUID. `/fleet-ops` and `dispatch` own the detailed result and uncertainty rules.
 3. Observe assignment acceptance and reports through the fleet read doors. Do not write a replacement task status into `fleet-state.json`.
 
 ### 3. Collect results
 
-Read the linked assignment state and reports (`claudlobby --json assignment show ASSIGNMENT_ID` and `claudlobby --json fleet reports list`). On `completed` with `skill:ironclad-lens`, read that lens's `result.md`. On `failed`/`blocked`, queue the lens for retry. Set a concrete `--expected-by RFC3339` when assigning; an overdue observation calls for inspection, not an inferred failure.
+Read the linked assignment state and reports (`claudlobby --json assignment show ASSIGNMENT_ID` and `claudlobby --json fleet reports list`). On `completed` with `--skill ironclad-lens`, read that lens's `result.md`. On `failed`/`blocked`, queue the lens for retry. Set a concrete `--expected-by RFC3339` when assigning; an overdue observation calls for inspection, not an inferred failure.
 
 ### 4. Retry
 

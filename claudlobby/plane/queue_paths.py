@@ -15,7 +15,7 @@ def spool_path(root: Path) -> Path:
 
 
 def staged_dir(root: Path) -> Path:
-    """Raw shim batches; existence is the daemon's staging handshake."""
+    """Policy-applied shim batches awaiting daemon recording."""
     return db_file(root).parent / "staged"
 
 

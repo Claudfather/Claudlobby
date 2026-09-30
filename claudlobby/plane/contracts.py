@@ -7,8 +7,6 @@ never spooled. `delivered` is deliberately absent from ATTEMPT_STATES (F9).
 
 from __future__ import annotations
 
-import hashlib
-import re
 from typing import Literal, Optional
 
 from pydantic import (
@@ -159,9 +157,9 @@ FLEET_REQUIRED = {"communication", "work_item", "assignment", "transmission",
 # imported here so validators ENFORCE from it — one SSOT, no duplicated caps
 # (round-5 F8: descriptive-only policy meant editing a cap changed nothing).
 from .registries import CONTENT_FIELDS, FIELD_POLICY, PR_ROLES  # noqa: E402  (re-export)
+from .capture_policy import body_proof  # noqa: E402  (the one proof owner)
 
 # BODY_CAP_BYTES retired (round-6): caps are read from FIELD_POLICY at call time.
-_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
 def _reject_over_cap(family: str, field: str, v):
@@ -197,20 +195,12 @@ class BodyFields(_Strict):
 def cap_body(text: str) -> BodyFields:
     """ANSI-strip, then cap at FIELD_POLICY's communication-body byte cap
     (UTF-8 safe), hashing the FULL stripped content so a truncated row still
-    proves what it truncated."""
-    stripped = _ANSI_RE.sub("", text)
-    raw = stripped.encode("utf-8")
-    digest = "sha256:" + hashlib.sha256(raw).hexdigest()
-    # Read the cap from the registry AT CALL TIME (round-6): an import-time
-    # constant snapshot made FIELD_POLICY descriptive for communications.
-    cap = FIELD_POLICY[("communication", "body")]["cap"]
-    if len(raw) <= cap:
-        return BodyFields(
-            body=stripped, body_bytes=len(raw), body_sha256=digest, truncated=False
-        )
-    cut = raw[:cap].decode("utf-8", errors="ignore")
+    proves what it truncated. The calculation has ONE owner,
+    capture_policy.body_proof, which the stdlib socket client also applies
+    before staging; the cap is still read from FIELD_POLICY at call time."""
+    body, body_bytes, body_sha256, truncated = body_proof(text)
     return BodyFields(
-        body=cut, body_bytes=len(raw), body_sha256=digest, truncated=True
+        body=body, body_bytes=body_bytes, body_sha256=body_sha256, truncated=truncated
     )
 
 

@@ -3,6 +3,8 @@
 This is a first-adoption write to the exact old bot directories. It does not
 create task state, infer ownership from a legacy display ID, or certify that a
 session actually produced a handoff. The original session bytes are retained.
+A read-only preflight shares the same mapping and rendering owners so standing
+refusals surface before any activation record or native pause.
 """
 
 from __future__ import annotations
@@ -136,79 +138,67 @@ def _replace(path: Path, content: bytes) -> None:
             os.unlink(temporary)
 
 
-def persist_canonical_handoffs(root: Path, *, roster: dict[str, tuple[str, tuple[str, ...]]],
-                               bot_dirs: dict[tuple[str, str], Path],
-                               expected_audit: dict,
-                               candidate_bots: set[tuple[str, str]] | None = None) -> dict:
-    """Write exact current IDs after old writers stop and before any new bot starts.
-
-    ``roster`` comes from the frozen selected source fleet contexts; ``bot_dirs``
-    comes from reviewed, installed old bot declarations. Active assignments
-    must remain inside their owning fleet; legacy cross-fleet work blocks adoption.
-    The caller holds the activation lock and owns the stopped-writer proof.
-    """
-    root = Path(root).resolve()
+def _check_roster(roster, bot_dirs) -> None:
     if not roster or set(bot_dirs) != {(fleet, bot) for fleet, (_, bots) in roster.items()
                                    for bot in bots}:
         raise ActivationError("old bot handoffs do not cover the reviewed fleet roster")
+    # Manager-owned work is written only into an installed manager's handoff.
+    if any(manager not in bots for manager, bots in roster.values()):
+        raise ActivationError("old fleet manager has no installed handoff owner")
     if len({str(path) for path in bot_dirs.values()}) != len(bot_dirs):
         raise ActivationError("old bot handoff paths are ambiguous")
-    try:
-        with closing(connect_ro(db_file(root))) as conn:
-            conn.execute("BEGIN")
-            audit = audit_tasks(conn)
-            if asdict(audit) != expected_audit or audit.blockers:
-                raise ActivationError("quiesced task audit changed or has unresolved active links")
-            host_uid = _host_uid(root)
-            fleet_uids = {}
-            actor_by_uid = {}
-            for fleet, (_, bots) in sorted(roster.items()):
-                fleet_uid = _identity(conn, "fleet", fleet, parent=host_uid)
-                fleet_uids[fleet] = fleet_uid
-                for bot in bots:
-                    alias = f"bot:{fleet}/{bot}"
-                    uid = _identity(conn, "actor", alias, parent=fleet_uid)
-                    if uid in actor_by_uid:
-                        raise ActivationError("old bot actor UID is ambiguous")
-                    actor_by_uid[uid] = (fleet, bot)
-            if len(set(fleet_uids.values())) != len(fleet_uids):
-                raise ActivationError("old fleet UIDs are ambiguous")
-            owning = defaultdict(list)
-            assigned = defaultdict(list)
-            actual = set()
-            for fleet, fleet_uid in sorted(fleet_uids.items()):
-                snapshot = read_tasks(conn, fleet_uid=fleet_uid)
-                if any(issue.blocking for issue in snapshot.issues):
-                    raise ActivationError("canonical task state has unresolved active history")
-                for task in snapshot.tasks:
-                    if not task.open:
-                        continue
-                    assignment = task.current_assignment
-                    aid = assignment.assignment_id if assignment else None
-                    actual.add((fleet_uid, task.task_id, aid))
-                    assignee = actor_by_uid.get(assignment.assignee_uid) if assignment else None
-                    if assignment and assignee is None:
-                        raise ActivationError("current assignment has no reviewed old bot actor")
-                    row = {"task_id": task.task_id, "assignment_id": aid,
-                           "owning_fleet": fleet, "state": task.state,
-                           "current_assignee": f"bot:{assignee[0]}/{assignee[1]}" if assignee else None}
-                    owning[(fleet, roster[fleet][0])].append(row)
-                    if assignee is not None:
-                        assigned[assignee].append(row)
-            expected = {(row.fleet_uid, row.task_id, row.assignment_id)
-                        for row in audit.references if row.active}
-            if actual != expected:
-                raise ActivationError("canonical current work differs from the quiesced A0 mapping")
-            if candidate_bots is not None and any(
-                    key not in candidate_bots and (owning[key] or assigned[key]) for key in bot_dirs):
-                raise ActivationError("retired bot still owns open work or a current assignment")
-    except (OSError, sqlite3.Error, TaskAuditError, TaskStateError, OperationContextError) as exc:
-        raise ActivationError("quiesced canonical handoff mapping is unavailable") from exc
 
-    # Validate and render every target before replacing the first file. A
-    # failure during replacement still leaves activation pending, not started.
+
+def _current_work(conn, root: Path, roster):
+    """Map open work to reviewed old bots inside the caller's read snapshot."""
+    host_uid = _host_uid(root)
+    fleet_uids = {}
+    actor_by_uid = {}
+    for fleet, (_, bots) in sorted(roster.items()):
+        fleet_uid = _identity(conn, "fleet", fleet, parent=host_uid)
+        fleet_uids[fleet] = fleet_uid
+        for bot in bots:
+            alias = f"bot:{fleet}/{bot}"
+            uid = _identity(conn, "actor", alias, parent=fleet_uid)
+            if uid in actor_by_uid:
+                raise ActivationError("old bot actor UID is ambiguous")
+            actor_by_uid[uid] = (fleet, bot)
+    if len(set(fleet_uids.values())) != len(fleet_uids):
+        raise ActivationError("old fleet UIDs are ambiguous")
+    owning = defaultdict(list)
+    assigned = defaultdict(list)
+    actual = set()
+    for fleet, fleet_uid in sorted(fleet_uids.items()):
+        snapshot = read_tasks(conn, fleet_uid=fleet_uid)
+        if any(issue.blocking for issue in snapshot.issues):
+            raise ActivationError("canonical task state has unresolved active history")
+        for task in snapshot.tasks:
+            if not task.open:
+                continue
+            assignment = task.current_assignment
+            aid = assignment.assignment_id if assignment else None
+            actual.add((fleet_uid, task.task_id, aid))
+            assignee = actor_by_uid.get(assignment.assignee_uid) if assignment else None
+            if assignment and assignee is None:
+                raise ActivationError("current assignment has no reviewed old bot actor")
+            row = {"task_id": task.task_id, "assignment_id": aid,
+                   "owning_fleet": fleet, "state": task.state,
+                   "current_assignee": f"bot:{assignee[0]}/{assignee[1]}" if assignee else None}
+            owning[(fleet, roster[fleet][0])].append(row)
+            if assignee is not None:
+                assigned[assignee].append(row)
+    return owning, assigned, actual
+
+
+def _refuse_retired_work(owning, assigned, bot_dirs, candidate_bots) -> None:
+    if candidate_bots is not None and any(
+            key not in candidate_bots and (owning[key] or assigned[key]) for key in bot_dirs):
+        raise ActivationError("retired bot still owns open work or a current assignment")
+
+
+def _render_handoffs(root: Path, bot_dirs, owning, assigned, now: datetime) -> list[tuple[Path, bytes]]:
+    """Validate every existing handoff and render its replacement; writes nothing."""
     writes = []
-    now = datetime.now(timezone.utc)
     for key, directory in sorted(bot_dirs.items()):
         path, previous, status, prior_refresh = _handoff_file(Path(directory), root)
         refresh = now
@@ -227,6 +217,63 @@ def persist_canonical_handoffs(root: Path, *, roster: dict[str, tuple[str, tuple
                    + b"\n```\n" + _END + b"\n")
         writes.append((path, _refresh_envelope(Path(directory), timestamp)
                        + previous + b"\n\n" + section))
+    return writes
+
+
+def preflight_canonical_handoffs(root: Path, *, roster: dict[str, tuple[str, tuple[str, ...]]],
+                                 bot_dirs: dict[tuple[str, str], Path],
+                                 candidate_bots: set[tuple[str, str]] | None = None) -> None:
+    """Refuse standing handoff blockers while old writers still run; write nothing.
+
+    One read snapshot checks roster coverage, current assignees without a
+    reviewed installed old bot, retired bots with open work and existing
+    handoff parsing. It freezes no audit or mapping: live writers may change
+    work before quiescence, when persist_canonical_handoffs rereads everything.
+    The caller holds the activation lock, before any activation record.
+    """
+    root = Path(root).resolve()
+    _check_roster(roster, bot_dirs)
+    try:
+        with closing(connect_ro(db_file(root))) as conn:
+            conn.execute("BEGIN")
+            owning, assigned, _ = _current_work(conn, root, roster)
+            _refuse_retired_work(owning, assigned, bot_dirs, candidate_bots)
+    except (OSError, sqlite3.Error, TaskStateError, OperationContextError) as exc:
+        raise ActivationError("live canonical handoff preflight is unavailable") from exc
+    _render_handoffs(root, bot_dirs, owning, assigned, datetime.now(timezone.utc))
+
+
+def persist_canonical_handoffs(root: Path, *, roster: dict[str, tuple[str, tuple[str, ...]]],
+                               bot_dirs: dict[tuple[str, str], Path],
+                               expected_audit: dict,
+                               candidate_bots: set[tuple[str, str]] | None = None) -> dict:
+    """Write exact current IDs after old writers stop and before any new bot starts.
+
+    ``roster`` comes from the frozen selected source fleet contexts; ``bot_dirs``
+    comes from reviewed, installed old bot declarations. Active assignments
+    must remain inside their owning fleet; legacy cross-fleet work blocks adoption.
+    The caller holds the activation lock and owns the stopped-writer proof.
+    """
+    root = Path(root).resolve()
+    _check_roster(roster, bot_dirs)
+    try:
+        with closing(connect_ro(db_file(root))) as conn:
+            conn.execute("BEGIN")
+            audit = audit_tasks(conn)
+            if asdict(audit) != expected_audit or audit.blockers:
+                raise ActivationError("quiesced task audit changed or has unresolved active links")
+            owning, assigned, actual = _current_work(conn, root, roster)
+            expected = {(row.fleet_uid, row.task_id, row.assignment_id)
+                        for row in audit.references if row.active}
+            if actual != expected:
+                raise ActivationError("canonical current work differs from the quiesced A0 mapping")
+            _refuse_retired_work(owning, assigned, bot_dirs, candidate_bots)
+    except (OSError, sqlite3.Error, TaskAuditError, TaskStateError, OperationContextError) as exc:
+        raise ActivationError("quiesced canonical handoff mapping is unavailable") from exc
+
+    # Validate and render every target before replacing the first file. A
+    # failure during replacement still leaves activation pending, not started.
+    writes = _render_handoffs(root, bot_dirs, owning, assigned, datetime.now(timezone.utc))
     try:
         for path, content in writes:
             _replace(path, content)

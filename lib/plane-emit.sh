@@ -5,15 +5,16 @@
 # later. No full claudlobby CLI is spawned for a telemetry event.
 #
 # Exit 2: bad input or contract verdict. Exit 3: total failure, including an
-# unwriteable staged queue. Exit 6: durable pending in staged or daemon spool, never
-# queryable yet. Callers that need an immediate receipt must require 0 or use
-# the commit-required Plane API; they cannot treat 6 as success.
+# unwriteable or full staged queue and an untrusted capture policy (counted in
+# state/plane/.emit-losses). Exit 6: durable pending in staged or daemon spool,
+# never queryable yet. Callers that need an immediate receipt must require 0 or
+# use the commit-required Plane API; they cannot treat 6 as success.
 #
 # PLANE_EMIT_DISABLED=1 is a no-op for isolated harnesses. The socket deadline
 # follows PLANE_EMIT_CLASS (hook/background/door), with optional class-specific
-# PLANE_SOCKET_DEADLINE_*_S settings. Raw events always use the existing
-# staged queue on socket failure, so daemon replay applies capture policy.
-# All paths use explicit
+# PLANE_SOCKET_DEADLINE_*_S settings. On socket failure the client applies the
+# capture policy before it stages, within the staged queue's bound; only the
+# daemon replays that queue. All paths use explicit
 # CLAUDLOBBY_ROOT, never ambient fleet discovery.
 
 set -euo pipefail
@@ -56,7 +57,7 @@ if [ -f "$WEDGE_MARK" ]; then
     # rung 1 matters most. Negative delta = expired.
     if [ "$_delta" -ge 0 ] && [ "$_delta" -lt "$COOLDOWN" ]; then
         skip_socket=1
-        # The raw batch will be durably staged for daemon replay.
+        # The policy-applied batch will be durably staged for daemon replay.
         printf 'plane-emit: socket in wedge cooldown (%ss) — skipping the socket\n' "$COOLDOWN" >&2
     else
         rm -f "$WEDGE_MARK"

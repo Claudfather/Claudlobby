@@ -294,8 +294,9 @@ SWITCHES: tuple[Switch, ...] = (
         carrier=ENROLL_HOST,
         job="plane-daemon",
         plane=True,
-        what="the resident ingest daemon — without it every emit takes the "
-             "cold CLI rung (slower, still recorded)",
+        what="the resident ingest daemon — the only recorder for hooks and "
+             "timers: without it their emits stage (bounded) and are NOT "
+             "recorded until it runs; `plane doctor` flags the backlog",
     ),
     Switch(
         key="plane-view",

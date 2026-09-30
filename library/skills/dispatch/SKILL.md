@@ -1,33 +1,30 @@
 ---
 name: dispatch
-description: "Dispatch a task to a fleet bot with structured tracking. Validates bot health, sends via tmux, emits to Telegram."
-argument-hint: "<bot> <task description> [--repo <repo>] [--issue <url>]"
+description: "Admit fleet work, assign a declared worker, and deliver the recorded assignment through the public CLI."
+argument-hint: "<bot> <task description> [--repo <repo>]"
 ---
 
 # Dispatch
 
-Send a task to a fleet bot. Validates health before dispatching, sends via tmux, reports in Telegram.
+Use the universally composed `fleet-ops` skill for the full contract. Only the
+selected fleet manager assigns and delivers work. Read `claudlobby --json fleet
+status` and `claudlobby --json task list` before choosing a declared worker;
+unavailable evidence does not mean idle.
 
-## Bots
+1. Admit the work with `claudlobby --json task admit --title "TASK" --request-id UUID`.
+   Retain the returned `data.task_id`. Put longer context in a UTF-8 file and
+   supply `--body-file FILE`; add `--repo OWNER/REPO` when appropriate.
+2. Assign it with `claudlobby --json task assign TASK_ID --bot BOT --request-id UUID`.
+   Retain `data.assignment_id`. This records ownership without sending a prompt.
+3. Write the bounded worker instructions to a UTF-8 file, then run
+   `claudlobby --json assignment deliver ASSIGNMENT_ID --file FILE --request-id UUID`.
+4. Inspect the result and its message receipt before claiming delivery. The
+   assigned bot accepts the canonical assignment before acting and records its
+   linked progress or terminal report through the assignment commands.
 
-Update this table with your actual fleet:
-
-| Bot | tmux session | systemd service | Scope |
-|-----|-------------|-----------------|-------|
-| Engineer A | eng-a-bot | eng-a-bot | Repo group A |
-| Engineer B | eng-b-bot | eng-b-bot | Repo group B |
-| Code Reviewer | code-reviewer-bot | code-reviewer-bot | PR reviews |
-
-## Dispatch Flow
-
-1. **Check bot is alive:** `tmux -L <bot-service> has-session -t <bot-session>` (each bot is on its own server; the socket is its `BOT_SERVICE`)
-2. **Check bot is idle:** `tmux -L <bot-service> capture-pane -t <bot-session> -p | tail -5`
-3. **If busy:** report to user, wait or queue
-4. **If idle:** dispatch via the socket-aware helper — `$CLAUDLOBBY_NATIVE_DIR/dispatch.sh <bot-session> '<task prompt>'` (resolves the bot's socket + race-safe two-step send; never hand-type `tmux send-keys -t`)
-5. **Emit to Telegram:** notify the group that a task was dispatched
-
-## Rules
-
-- Don't dispatch to a bot that's already processing
-- If a bot is stuck for >10 min, restart it
-- Always report dispatch and results in Telegram
+Use a separate UUID for each distinct operation; retain it for inspection or
+replay of that same operation. Unknown delivery never authorizes an automatic
+resend. An ordinary question uses `message send`, not a new task assignment.
+Summarize the verified outcome in the original human thread. A busy, silent or
+unavailable worker is not permission to restart it; respect explicit holds and
+use the safe-worker-restart protocol when recovery is needed.

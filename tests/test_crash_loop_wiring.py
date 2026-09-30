@@ -62,6 +62,9 @@ class Scene:
         self.bin.mkdir()
         self.lib = self.tmp / "native"
         shutil.copytree(LIB, self.lib)
+        # The stdlib client imports its package's shared capture policy.
+        (self.lib / "plane-socket-client.py").unlink()
+        (self.lib / "plane-socket-client.py").symlink_to(Path(LIB) / "plane-socket-client.py")
         self.admission_calls = admit_watchdog_fixture(self.lib)
         (self.tmp / "tmux").mkdir()
         unit = self.home / ".config/systemd/user/probe1774svc.service"

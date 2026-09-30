@@ -98,7 +98,8 @@ def cmd_plane_doctor(args) -> int:
 
         path = db_file(root)
         if not path.exists():
-            rung(True, "db", f"absent (not yet used): {path}")
+            rung(True, "db", f"absent — recording blocked until host activation"
+                             f" initializes the plane: {path}")
         else:
             conn = connect_ro(path)
             try:
@@ -197,11 +198,12 @@ def cmd_plane_doctor(args) -> int:
         except ContractViolation as exc:
             errors = getattr(exc, "errors", None)
             rung(False, "capture config", str(errors[0] if errors else exc))
-        # Daemon rung (PR-B T9): three-state, evidence-based — never assume a
-        # daemon SHOULD run. Serving = ok. Never-started + no socket = ok
-        # (unarmed; doors stage raw input until it can be replayed). Started
-        # historically but not serving = ATTENTION with the corrective command
-        # (§17 direction: symptom -> exact command).
+        # Daemon rung (PR-B T9): three-state, evidence-based. Serving = ok.
+        # Started historically but not serving = ATTENTION with the corrective
+        # command (§17 direction: symptom -> exact command). Never started is
+        # ok only before the plane exists: once it does, the daemon is the only
+        # recorder for hooks and timers and the only replayer of what they
+        # stage, so its absence is ATTENTION, never a green "unarmed" (S5a-02).
         from ..plane.daemon import probe_daemon, socket_path
 
         # Honor PLANE_SOCKET like the shim does (gauntlet round): doctor used
@@ -232,10 +234,20 @@ def cmd_plane_doctor(args) -> int:
                  f"started {started}x historically but not serving — check:"
                  " systemctl --user status claudlobby-plane-daemon.service"
                  " (macOS: launchctl print gui/$UID/claudlobby-plane-daemon);"
-                 " doors stage raw input for daemon replay meanwhile (pending, not committed)")
+                 " doors stage input for daemon replay meanwhile (pending, not committed)")
+        elif path.exists():
+            rung(False, "daemon",
+                 "never armed — hook and timer emits stage for daemon replay and are"
+                 " NOT recorded until a plane daemon serves (host.jobs.plane-daemon)")
         else:
-            rung(True, "daemon", "never armed (doors stage raw input for daemon replay)")
+            rung(True, "daemon", "never armed (plane not initialized)")
         rung(True, "last ingest", str(last_ingest or "none yet"))
+        # The staged queue (S5a-02): the only record a hook or timer has while
+        # the daemon cannot answer. Non-empty with no serving daemon, full, or
+        # stale is ATTENTION; unreadable is a gap, never a zero.
+        from ..plane.health import scan_staged, staged_rung
+        staged_ok, staged_detail = staged_rung(scan_staged(root), serving)
+        rung(staged_ok, "staged depth", staged_detail)
         # scan_spool — the same shared definition the trust panel and
         # status consume; an unreadable enumeration is a FAILING rung and a
         # nonzero exit, never a green zero (external round 4, probed).
@@ -286,7 +298,15 @@ def cmd_plane_doctor(args) -> int:
                                " Each is a batch whose commit is UNDETERMINED:"
                                " re-emitting is safe (ingest dedupes on the"
                                " pre-minted event id)")
-                rung(not reaps, "emit losses", detail)
+                # A batch the client refused to stage (full queue, untrusted
+                # capture policy, failed write): its fate is known — NOT
+                # recorded — and it must not hide behind a green rung (S5a-01).
+                refused = [r for r in rows if "\treap\t" not in r]
+                if refused:
+                    kinds = sorted({r.split("\t")[1] for r in refused if len(r.split("\t")) > 1})
+                    detail += (f"; {len(refused)} emit(s) NOT recorded"
+                               f" ({', '.join(kinds)}) — see state/plane/.emit-losses")
+                rung(not reaps and not refused, "emit losses", detail)
 
         # The breaker's own state. Not a defect in itself — measured on this
         # estate it damps (89% of episodes are a single arming) and nothing is
@@ -301,7 +321,7 @@ def cmd_plane_doctor(args) -> int:
             try:
                 age = int(time.time() - wedged.stat().st_mtime)
                 rung(True, "socket breaker",
-                     f"ARMED {age}s ago — doors stage raw input until it"
+                     f"ARMED {age}s ago — doors stage input until it"
                      " expires. Pending, not committed; see #1693 for the cause")
             except OSError as exc:
                 rung(False, "socket breaker", f"UNREADABLE — {exc}")

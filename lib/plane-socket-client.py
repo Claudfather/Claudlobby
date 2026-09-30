@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Stdlib-only socket and durable raw-stage leg of the private Plane shim.
+"""Stdlib-only socket and durable stage leg of the private Plane shim.
 
 Event IDs and occurrence times are minted before the socket attempt. A lost
 acknowledgement can therefore be replayed from the staged queue as a duplicate.
+A staged batch is capture-policy-applied and the queue is bounded; both rules
+come from claudlobby/plane/capture_policy.py, imported in this process.
 Exit 0 is committed/duplicate; 6 is daemon-spooled or cooldown-staged; 7 is
 client-staged after a transport miss (the shell maps it to pending exit 6 and
-arms the cooldown). Exits 2 and 3 are refusal/total failure. Exit 5 is only
-for a direct client invocation without a staging target.
+arms the cooldown). Exits 2 and 3 are refusal/total failure; 3 includes a full
+staged queue and an untrusted capture policy, each counted in `.emit-losses`.
+Exit 5 is only for a direct client invocation without a staging target.
 """
 
 from __future__ import annotations
@@ -25,6 +28,10 @@ import uuid
 from datetime import datetime, timezone
 
 TRANSPORT_UNAVAILABLE = 5
+
+
+class StagedFull(Exception):
+    """The staged queue is at its bound (capture_policy.STAGED_MAX_*)."""
 
 # Contract and storage verdicts do not become pending queue entries. A stale
 # daemon, transport miss, or unclassified refusal does: the selected daemon
@@ -124,16 +131,17 @@ def _arm_record(path: str, timeout: float, started: float, cause: str) -> None:
         pass
 
 
-def _arm_rotate(path: str, now: int) -> None:
+def _arm_rotate(path: str, now: int, window: int = ARM_LOG_WINDOW_S,
+                slack: int = ARM_LOG_SLACK_S) -> None:
     def epoch(line: str) -> int:
         try:
             return int(line.split("\t", 1)[0])
         except ValueError:
             return 0    # an unreadable row goes with the old ones
     with open(path, errors="replace") as f:     # a torn row only ages out
-        if epoch(f.readline()) >= now - ARM_LOG_WINDOW_S - ARM_LOG_SLACK_S:
+        if epoch(f.readline()) >= now - window - slack:
             return
-        keep = [line for line in f if epoch(line) >= now - ARM_LOG_WINDOW_S]
+        keep = [line for line in f if epoch(line) >= now - window]
     tmp = f"{path}.{os.getpid()}"
     try:
         with open(tmp, "w") as f:
@@ -146,13 +154,61 @@ def _arm_rotate(path: str, now: int) -> None:
             pass
 
 
-def _stage(stage_dir: str, payload: str, lead: str) -> None:
-    """Durably stage RAW events for daemon replay through emit_batch/capture.
+def _capture_policy():
+    """THE capture policy and staged bound (claudlobby/plane/capture_policy.py),
+    imported in this process: stdlib-only, so -S -E and no second interpreter.
+    Installed, this file is <package>/_native/; in a checkout it is lib/ beside
+    the package. realpath: harnesses symlink the client into a scratch lib."""
+    here = os.path.dirname(os.path.realpath(__file__))
+    if os.path.basename(here) == "_native":
+        parent = os.path.dirname(os.path.dirname(here))
+    else:
+        parent = os.path.dirname(here)
+    if not os.path.isfile(os.path.join(parent, "claudlobby", "plane", "capture_policy.py")):
+        raise ImportError(f"capture policy not found beside {here}")
+    sys.path.insert(0, parent)
+    from claudlobby.plane import capture_policy
+    return capture_policy
 
-    The canonical spool holds policy-applied requests and its drain ingests
-    them as-is; putting raw socket input there would bypass capture policy.
-    The existing staged queue instead replays via emit_batch, even after the
-    daemon was down when this file was written.
+
+def _staged_usage(path: str):
+    """(batches, bytes) already pending. Temp names count: they age into
+    replay. An unreadable queue raises OSError, which refuses the stage."""
+    count = size = 0
+    with os.scandir(path) as it:
+        for entry in it:
+            if entry.name.endswith((".batch", ".tmp")):
+                count += 1
+                try:
+                    size += entry.stat(follow_symlinks=False).st_size
+                except FileNotFoundError:
+                    pass    # replayed or renamed since the listing
+    return count, size
+
+
+def _record_loss(stage_dir: str, kind: str, detail: str) -> None:
+    """One `.emit-losses` row (lib-common plane_emit_loss's format) for a batch
+    this client refused to stage. Its fate is stated — NOT recorded — but a
+    stderr line alone reaches no durable surface for a hook or a timer. Rotated
+    by the arm log's rule with a one-day window. Best-effort."""
+    path = os.path.join(os.path.dirname(os.path.abspath(stage_dir)), ".emit-losses")
+    door = os.environ.get("PLANE_EMIT_CLASS") or "-"
+    now = int(time.time())
+    try:
+        with open(path, "a") as f:
+            f.write("\t".join((str(now), kind, door, " ".join(detail.split()))) + "\n")
+        _arm_rotate(path, now, window=86400, slack=3600)
+    except Exception:  # noqa: BLE001 -- best-effort: it never changes the exit
+        pass
+
+
+def _stage(stage_dir: str, payload: str, lead: str, bound=None) -> None:
+    """Durably stage events for daemon replay through emit_batch.
+
+    The payload is already capture-policy-applied (S5a-04): the replay applies
+    the policy again, but the file itself never holds a fuller body than the
+    policy allows. `bound` = (max batches, max bytes); at or past it this
+    raises StagedFull and writes nothing.
     """
     path = os.path.abspath(stage_dir)
     for directory in (os.path.dirname(os.path.dirname(path)), os.path.dirname(path), path):
@@ -168,6 +224,11 @@ def _stage(stage_dir: str, payload: str, lead: str) -> None:
                 os.close(parent)
         if not stat.S_ISDIR(os.lstat(directory).st_mode):
             raise OSError(f"staged queue parent is not an owned directory: {directory}")
+    if bound is not None:
+        count, size = _staged_usage(path)
+        if count >= bound[0] or size + len(payload.encode()) > bound[1]:
+            raise StagedFull(f"{count} batches, {size} bytes pending (bound "
+                             f"{bound[0]} batches, {bound[1]} bytes)")
     name = f"{time.time_ns()}-{lead}.batch"
     tmp = os.path.join(path, f".{name}.{os.getpid()}.tmp")
     fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY |
@@ -204,14 +265,55 @@ def _finalize(events: list) -> list:
     return out
 
 
-def _stage_pending(stage_dir: str, payload: str, lead: str, cause: str) -> int:
+def _stage_pending(stage_dir: str, finalized: list, cause: str) -> int:
+    """Stage the policy-applied batch, within the queue's bound. Every refusal
+    names what was not recorded; none writes a fuller body than the policy
+    allows (S5a-01, S5a-04)."""
     if not stage_dir:
         return TRANSPORT_UNAVAILABLE  # direct client without a staging target
+    # <root>/state/plane/staged: capture.json lives two levels up from root/state.
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(stage_dir))))
     try:
-        _stage(stage_dir, payload, lead)
+        policy = _capture_policy()
+    except Exception as exc:  # noqa: BLE001 -- ImportError, or a broken module
+        # Without the shared policy nothing can prove what may be persisted,
+        # so nothing is staged. The exception class names the fault; its text
+        # could carry a path or source line, so it is not echoed.
+        print("plane-socket-client: capture policy module unavailable "
+              f"({type(exc).__name__}) — batch NOT staged or recorded (a broken "
+              "install: the client must ship beside claudlobby/plane)", file=sys.stderr)
+        _record_loss(stage_dir, "stage_refused",
+                     f"capture policy module unavailable ({type(exc).__name__})")
+        return 3
+    bound = (policy.STAGED_MAX_BATCHES, policy.STAGED_MAX_BYTES)
+    try:
+        captured = policy.apply_to_batch(root, finalized)
+    except policy.CaptureConfigInvalid:
+        # An environment fault, not a batch fault — but staging the raw batch
+        # could keep content the operator opted out of storing. Generic text:
+        # the parser's message can quote the file's contents.
+        print("plane-socket-client: state/plane/capture.json is unreadable or invalid "
+              "— batch NOT staged or recorded (fix the file; `claudlobby plane doctor` "
+              "names the fault)", file=sys.stderr)
+        _record_loss(stage_dir, "stage_refused", "capture.json unreadable or invalid")
+        return 3
+    except (ValueError, TypeError) as exc:
+        print(f"plane-socket-client: contract violation — batch NOT staged: {exc}",
+              file=sys.stderr)
+        return 2
+    payload = json.dumps({"events": captured}, ensure_ascii=False)
+    try:
+        _stage(stage_dir, payload, finalized[0]["event_id"], bound=bound)
+    except StagedFull as exc:
+        print(f"plane-socket-client: staged queue FULL ({exc}) — batch NOT recorded. "
+              "The daemon is its only consumer: check `claudlobby plane doctor`",
+              file=sys.stderr)
+        _record_loss(stage_dir, "staged_full", str(exc))
+        return 3
     except OSError as exc:
         print(f"plane-socket-client: staged write failed — batch NOT recorded: {exc}",
               file=sys.stderr)
+        _record_loss(stage_dir, "stage_failed", str(exc))
         return 3
     print(f"plane-socket-client: batch STAGED after {cause} — durable on disk, "
           "NOT in the plane until a drain", file=sys.stderr)
@@ -242,9 +344,9 @@ def main() -> int:
             f.write(payload + "\n")
 
     if finalize_only:
-        # During cooldown, persist raw input for daemon replay without a
-        # socket attempt.
-        staged = _stage_pending(stage_to, payload, finalized[0]["event_id"], "socket cooldown")
+        # During cooldown, persist the policy-applied batch for daemon replay
+        # without a socket attempt.
+        staged = _stage_pending(stage_to, finalized, "socket cooldown")
         return 6 if staged == 7 else staged
 
     # HARD TOTAL deadline, not per-operation (#1372 review F5): a live-but-
@@ -295,8 +397,7 @@ def main() -> int:
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         print(f"plane-socket-client: transport failed: {exc}", file=sys.stderr)
         _arm_record(arm_log, timeout, started, _cause(exc))
-        return _stage_pending(stage_to, payload, finalized[0]["event_id"],
-                              f"socket transport: {_cause(exc)}")
+        return _stage_pending(stage_to, finalized, f"socket transport: {_cause(exc)}")
 
     if resp.get("ok"):
         results = resp.get("results")
@@ -307,8 +408,7 @@ def main() -> int:
             print("plane-socket-client: invalid daemon acknowledgement — "
                   "commit unconfirmed", file=sys.stderr)
             _arm_record(arm_log, timeout, started, "invalid-ack")
-            return _stage_pending(stage_to, payload, finalized[0]["event_id"],
-                                  "invalid daemon acknowledgement")
+            return _stage_pending(stage_to, finalized, "invalid daemon acknowledgement")
         spooled = False
         for r in results:
             print(r.get("event_id", ""))
@@ -334,15 +434,19 @@ def main() -> int:
         print("plane-socket-client: daemon code is older than its database — "
               "waiting for a refreshed daemon to replay the staged batch", file=sys.stderr)
         _arm_record(arm_log, timeout, started, "downgrade")
-        return _stage_pending(stage_to, payload, finalized[0]["event_id"],
-                              "daemon downgrade")
+        return _stage_pending(stage_to, finalized, "daemon downgrade")
+    if code == "capture_config":
+        # An environment fault, not this batch's: staging it could keep
+        # content the operator opted out of, so it is a counted loss.
+        if stage_to:
+            _record_loss(stage_to, "stage_refused", "capture.json unreadable or invalid")
+        return 3
     # Verdicts pass through; anything else (forbidden/internal/unknown) is
     # transport-ish — staging the pre-minted batch is safe by idempotency.
     rc = VERDICT_EXITS.get(code, TRANSPORT_UNAVAILABLE)
     if rc == TRANSPORT_UNAVAILABLE:
         _arm_record(arm_log, timeout, started, f"code:{code or '-'}")
-        return _stage_pending(stage_to, payload, finalized[0]["event_id"],
-                              f"daemon refusal: {code or 'unknown'}")
+        return _stage_pending(stage_to, finalized, f"daemon refusal: {code or 'unknown'}")
     return rc
 
 

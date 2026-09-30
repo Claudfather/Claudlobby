@@ -414,19 +414,39 @@ def _legacy_phase_membership(plan, inventory, source_plan=None):
 
 
 def _source_handoff_roster(source_plan, bot_dirs, package):
-    """Use frozen selected identities even when authoring removes an old bot."""
+    """Use frozen selected identities even when authoring removes an old bot.
+
+    Manager coverage belongs to the shared handoff owner, which checks it for
+    both upgrade and first-adoption rosters.
+    """
     from .active_config import context_from_plan
     roster = {}
     for fleet in source_plan.fleets:
         context = context_from_plan(source_plan, fleet, package=package)
         installed = tuple(bot for bot in context.fleet.bots if (fleet, bot) in bot_dirs)
         if installed:
-            if context.fleet.manager not in installed:
-                raise ActivationError("old fleet manager has no installed handoff owner")
             roster[fleet] = (context.fleet.manager, installed)
     if set(bot_dirs) != {(fleet, bot) for fleet, (_, bots) in roster.items() for bot in bots}:
         raise ActivationError("old bot handoff roster differs from selected configuration")
     return roster
+
+
+def _handoff_inputs(old_units, source_plan, contexts, package):
+    """Old handoff roster, exact bot directories and retained candidate bots.
+
+    Shared by the live pre-record preflight and the authoritative quiesced
+    write, so both judge the same frozen old units and reviewed configuration.
+    """
+    bot_dirs = {(unit.declaration.fleet, unit.declaration.bot): unit.declaration.working_directory
+                for unit in old_units if unit.installed and unit.declaration.scope == "bot"}
+    roster = (_source_handoff_roster(source_plan, bot_dirs, package) if source_plan is not None else
+              {context.fleet.name: (context.fleet.manager,
+                  tuple(bot for bot in context.fleet.bots
+                        if (context.fleet.name, bot) in bot_dirs))
+               for context in contexts
+               if any(fleet == context.fleet.name for fleet, _ in bot_dirs)})
+    candidate_bots = {(context.fleet.name, bot) for context in contexts for bot in context.fleet.bots}
+    return roster, bot_dirs, candidate_bots
 
 
 def _legacy_quiet(adapter, pause, phase, sockets, *, candidate_started=frozenset()):
@@ -622,6 +642,14 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
         retired_units = tuple(unit for unit in inventory.units
                               if unit.installed and unit.target not in candidate_targets)
         rank, contexts = _roster(plan, candidates, package)
+        # Standing handoff refusals (manager coverage, stopped or uninstalled
+        # assignees, retired owners, unparsable sections) must not wait for a
+        # quiesced fleet. This live read proves only those conditions; the
+        # quiesced write rereads its own audit and remains authoritative.
+        from .activation_handoffs import preflight_canonical_handoffs
+        roster, bot_dirs, candidate_bots = _handoff_inputs(inventory.units, source_plan, contexts, package)
+        preflight_canonical_handoffs(root, roster=roster, bot_dirs=bot_dirs,
+                                     candidate_bots=candidate_bots)
         phases = _legacy_phase_membership(plan, inventory, source_plan)
         for unit in inventory.units:
             if unit.installed and unit.declaration.scope == "bot":
@@ -655,18 +683,10 @@ def _finish_running_activation(root, store, activation_id, plan, release, source
         if migration.blockers:
             raise ActivationError("data or pending queues block activation: " + "; ".join(migration.blockers))
         from .activation_handoffs import persist_canonical_handoffs
-        bot_dirs = {(unit.declaration.fleet, unit.declaration.bot): unit.declaration.working_directory
-                    for unit in old_units if unit.installed and unit.declaration.scope == "bot"}
-        roster = (_source_handoff_roster(source_plan, bot_dirs, package) if source_plan is not None else
-                  {context.fleet.name: (context.fleet.manager,
-                      tuple(bot for bot in context.fleet.bots
-                            if (context.fleet.name, bot) in bot_dirs))
-                   for context in contexts
-                   if any(fleet == context.fleet.name for fleet, _ in bot_dirs)})
+        roster, bot_dirs, candidate_bots = _handoff_inputs(old_units, source_plan, contexts, package)
         persist_canonical_handoffs(root, roster=roster, bot_dirs=bot_dirs,
                                    expected_audit=migration.task_audit,
-                                   candidate_bots={(context.fleet.name, bot)
-                                                   for context in contexts for bot in context.fleet.bots})
+                                   candidate_bots=candidate_bots)
         store.complete(activation_id, "queues_classified", evidence_digest=migration.manifest_id[2:])
     else:
         journal = read_migration(root, activation_id)

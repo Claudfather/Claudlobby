@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..command_result import selection_read_conflict
+
 from dataclasses import asdict
 
 from ..command_result import CommandFailure, CommandOutput
@@ -55,8 +57,7 @@ def dispatch(args) -> CommandOutput:
             raise CommandFailure("conflict", "retained request belongs to another active host or fleet",
                                  release_id=release_id)
         if read_selection(destination.paths.root) != selected:
-            raise CommandFailure("conflict", "active request selection changed during read",
-                                 release_id=release_id)
+            raise selection_read_conflict('active request selection changed during read', release_id=release_id)
         return CommandOutput({"fleet": destination.fleet.name, "request": asdict(view)},
                              release_id=release_id, lines=_lines(view))
     except CommandFailure:

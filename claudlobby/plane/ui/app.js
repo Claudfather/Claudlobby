@@ -1162,6 +1162,16 @@ function renderTrust(env) {
              <small>${d.spool_oldest_at
                ? "oldest " + esc(ago(d.spool_oldest_at)) : ""}</small></div>`}
     </div>
+    <div class="trust-block"><h3>staged — waiting for daemon recording</h3>
+      ${!d.staged || d.staged.state === "unreadable"
+        ? `<div class="trust-row trust-bad"><b>staged queue unavailable</b>
+             <small>cannot count pending batches — a gap, not a zero</small></div>`
+        : `<div class="trust-row">${trustNum(d.staged.pending)}
+             <b>pending batches, not committed</b>
+             <small>${esc(d.staged.bytes)} bytes${d.staged.oldest_age_s === null
+               ? "" : ", oldest " + esc(d.staged.oldest_age_s) + "s"}${d.staged.full
+               ? " — FULL: new emits refused" : ""}</small></div>`}
+    </div>
     <div class="trust-block"><h3>doors — per-emitter freshness</h3>
       ${emitters}
     </div>

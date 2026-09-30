@@ -49,14 +49,14 @@ Read bot event logs at these natural decision points — not continuously, not o
 | **Before dispatch** | Check target worker health before sending work |
 | **Review routing** | Pick the healthiest available reviewer |
 | **Idle / between tasks** | Proactive fleet health scan |
-| **On BOTREPORT receipt** | Cross-reference report with recent events for context |
+| **On linked-report receipt** | Cross-reference report with recent events for context |
 
 ## Decision Table
 
 | Event type | Source | Manager action |
 |------------|--------|---------------|
 | `activity_stuck` | pulse | Bot has made **no tool call** for longer than its threshold AND keepalive has not classified it as idle (no recent `data/.idle` marker). Uses marker-file mtime comparison, not pane regex. Investigate; restart only if `safe-worker-restart` guards pass. |
-| `overdue_dispatch` | pulse | A task you dispatched to this bot passed its deadline with no terminal `[BOTREPORT]`. Check the bot (cross-reference `activity_stuck`): if hung, recover it; if mis-scoped or wedged, re-dispatch or reassign; if it needs a human, escalate. Don't silently wait. |
+| `overdue_dispatch` | pulse | A task you dispatched to this bot passed its deadline with no terminal linked report. Check the bot (cross-reference `activity_stuck`): if hung, recover it; if mis-scoped or wedged, re-dispatch or reassign; if it needs a human, escalate. Don't silently wait. |
 | `pane_stuck` (>5 min) | pulse | Investigate pane content, restart if confirmed stuck. Note: a live spinner animates the pane, so an animated-but-hung bot shows up as `activity_stuck`, not `pane_stuck`. |
 | `crash_loop` | pulse | The unit is **failing its start over and over** and systemd is already restarting it (`restarts` in the payload is how many times running). **Do NOT restart it** — another restart only zeroes the counter; the unit is enrolled, so `bot start` is not the fix either. The cause is in the bot's `logs/startup.log` (on 2026-09-23 it was a broken `claude` install, printed on every attempt). Fix the cause, or escalate to the human. Before #1769 this read as "boot in flight" indefinitely and paged no one. |
 | `service_down` | pulse | If the bot is meant to run, the selected manager calls `claudlobby --json bot start BOT_ID` with its literal declared ID; inspect state and readiness. |
@@ -86,7 +86,7 @@ Reading events at decision points is the default, but silent stalls — the reas
 [FLEET-PULSE] <bot> activity_stuck — no tool calls for 11400s while not idle (likely hung mid-task)
 ```
 
-Treat a `[FLEET-PULSE]` line like a `[BOTREPORT]`: look up the event in the table above and act. The push tells you *something needs attention*; the decision (investigate, restart, escalate to the human via Telegram) is still yours.
+Treat a `[FLEET-PULSE]` line like a linked report: look up the event in the table above and act. The push tells you *something needs attention*; the decision (investigate, restart, escalate to the human via Telegram) is still yours.
 
 **Not yet captured via hooks:** several fleet-health signals are not derivable from the Claude Code PreToolUse/PostToolUse hook payload. Managers must use live checks for these until the hook schema exposes them:
 
@@ -166,7 +166,7 @@ Tail today's events across the fleet:
 claudlobby --json event list --limit 50
 ```
 
-Scope to one bot — e.g. before dispatch, or cross-referencing a `[BOTREPORT]`:
+Scope to one bot — e.g. before dispatch, or cross-referencing a linked report:
 
 ```bash
 claudlobby --json event list --bot "$BOT_NAME" --limit 20

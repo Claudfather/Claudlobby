@@ -103,8 +103,13 @@ def test_trust_counts_quarantine_with_reasons(tmp_path):
     (q / "ev_bad.json").write_text("{}")
     (q / "ev_bad.json.reason").write_text("schema violation: missing sender")
     (q / "ev_worse.json").write_text("{}")
+    staged = tmp_path / "state" / "plane" / "staged"
+    staged.mkdir()
+    (staged / "pending.batch").write_text('{"events": []}')
     body = TestClient(create_app(tmp_path, package=source_package())).get("/api/trust").json()
     d = body["data"]
+    assert d["staged"]["state"] == "ok"
+    assert d["staged"]["pending"] == 1 and d["staged"]["bytes"] > 0
     assert d["quarantined"] == 2
     reasons = {r["event"]: r["reason"] for r in d["quarantine_reasons"]}
     assert reasons["ev_bad.json"].startswith("schema violation")
@@ -526,7 +531,7 @@ def test_doctor_and_status_agree_with_trust_on_an_unenumerable_spool(
     out = capsys.readouterr().out
     assert rc != 0
     assert "UNREADABLE" in out and "spool depth" in out
-    assert "0 pending" not in out                    # never the green zero
+    assert "spool depth — 0 pending" not in out      # never the green zero for this queue
 
     monkeypatch.setattr(plane_status, "resolve_paths", lambda **_: types.SimpleNamespace(root=tmp_path))
     status = plane_status.dispatch(types.SimpleNamespace(root=tmp_path, fleet=None, seed=False))

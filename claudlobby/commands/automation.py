@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..command_result import selection_read_conflict
+
 import os
 import re
 from uuid import UUID
@@ -46,7 +48,7 @@ def dispatch(args) -> CommandOutput:
             result = status(destination.paths.root, destination.fleet.name, bot,
                             configured=config is not None)
             if read_selection(destination.paths.root) != selected:
-                raise CommandFailure("conflict", "active automation selection changed during read")
+                raise selection_read_conflict('active automation selection changed during read')
             return CommandOutput(result, release_id=selected["release_id"],
                                  lines=(f"{bot}: eligible={result['eligible']}; "
                                         f"reason={result['ineligible_reason'] or '-'}; "

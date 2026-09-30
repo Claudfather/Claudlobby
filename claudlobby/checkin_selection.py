@@ -217,7 +217,14 @@ def verify(record: dict, issue_states: dict | None = None) -> tuple[str, list[st
 
     # THE NOTHING-OBSERVED BAR, higher by construction.
     if filtered.get("count") == 0:
-        if unfiltered.get("count", 0) > 0:
+        if unfiltered.get("count") == 0:
+            # The one legitimate nothing-to-do state: disclosed, not a defect.
+            # A nonzero rc above still makes the whole record DEFECT.
+            disclosures.append(
+                "filtered=0 and unfiltered=0: genuinely empty backlog, "
+                "confirmed by an independent count."
+            )
+        elif isinstance(unfiltered.get("count"), int) and unfiltered["count"] > 0:
             findings.append(
                 f"DEFECT: filter matched 0 of {unfiltered.get('count')} open items. "
                 "This is a broken filter, NOT an empty backlog -- do not emit a "
@@ -225,8 +232,8 @@ def verify(record: dict, issue_states: dict | None = None) -> tuple[str, list[st
             )
         else:
             findings.append(
-                "filtered=0 and unfiltered=0: genuinely empty backlog, "
-                "confirmed by an independent count."
+                f"filtered=0 but unfiltered count is {unfiltered.get('count')!r}: "
+                "an empty backlog cannot be confirmed."
             )
 
     # Losers must be present and scored.

@@ -115,9 +115,12 @@ def test_broken_filter_is_a_DEFECT_not_an_empty_backlog():
 def test_genuinely_empty_backlog_is_distinguishable_from_a_broken_filter():
     """The whole point: these two must not produce the same row."""
     rec = _record(queries=_queries(filtered=0, unfiltered=0), candidates=[], selected_ids=[])
-    _, findings = ssr.verify(rec)
+    verdict, findings = ssr.verify_record(rec)
+    assert verdict == ssr.OK, findings
     assert any("genuinely empty" in f for f in findings)
     assert not any("broken filter" in f for f in findings)
+    failed = _record(queries=_queries(filtered=0, unfiltered=0, rc=1), candidates=[], selected_ids=[])
+    assert ssr.verify_record(failed)[0] == ssr.DEFECT
 
 
 def test_scoring_out_everything_is_a_legitimate_result_not_a_defect():

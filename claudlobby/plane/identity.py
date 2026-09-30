@@ -16,6 +16,10 @@ import sqlite3
 from .ids import mint_uid
 
 
+class IdentityConflict(ValueError):
+    """An alias is already bound to another parent; never silently re-parent."""
+
+
 def resolve(
     conn: sqlite3.Connection,
     kind: str,
@@ -42,7 +46,7 @@ def resolve(
     ).fetchone()
     if (parent_uid is not None and row["parent_uid"] is not None
             and row["parent_uid"] != parent_uid):
-        raise ValueError(f"conflicting parent for {kind} identity {alias!r}")
+        raise IdentityConflict(f"conflicting parent for {kind} identity {alias!r}")
     # Earlier alias sightings may have minted this row without a parent.
     # Attach an authoritative parent without changing an existing binding.
     conn.execute(

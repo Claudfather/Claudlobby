@@ -786,7 +786,7 @@ plane_mint_id() {
 }
 
 # plane_emit_events <door> — stdin {"events":[...]} routed through THE shim
-# (plane-emit.sh: socket -> durable raw staged queue on a miss). stdout
+# (plane-emit.sh: socket -> capture-policy-applied staged queue on a miss). stdout
 # discarded; stderr passes through (the pending disclosure is the contract); rc never
 # propagates — a door's real action is never blocked by its record.
 # The wrapper SURFACES the result: PLANE_EMIT_LAST_RC is 0 after a RECORDED
@@ -838,19 +838,11 @@ plane_kill_tree() {
 # door cannot state. Host-scoped, beside the wedge marker:
 #   $CLAUDLOBBY_ROOT/state/plane/.emit-losses    <epoch>\t<kind>\t<door>\t<detail>
 #
-# WHAT BELONGS HERE IS A RULE, NOT A LIST: an emission whose fate THIS DOOR
-# CANNOT STATE. A reap qualifies — the batch may have committed before the kill
-# and nothing can tell which. That is the only kind wired today.
-#
-# A COOLDOWN DIVERSION DELIBERATELY DOES NOT QUALIFY: the shim stages the raw
-# batch durably and returns rc 6. Its fate is known pending, not lost; counting
-# it as an unknown-fate loss would make the file misleading.
-#
-# The `kind` field stays because the rule admits other kinds (a spool write that
-# failed has an unstatable fate too) — it is the rule that decides, not this
-# sentence. The diversion RATE is still worth knowing and is a different
-# question: #1657 closes the breaker as measured-and-acceptable, and the rate is
-# observable in the journal for timer callers, which is where that need sits.
+# This independent breadcrumb covers unknown fate (a reap may follow a commit)
+# and explicit staging refusals (stage_refused/staged_full/stage_failed). The
+# kind distinguishes them; refusal means NOT recorded, never an unknown commit.
+# A successful cooldown stage is pending with known fate and does not qualify.
+# The socket client rotates refusal rows with the same one-day retention.
 #
 # WHY A FILE AND NOT THE PLANE. What gets counted is precisely the case where
 # the plane could not be reached. Recording it THROUGH the plane would be the

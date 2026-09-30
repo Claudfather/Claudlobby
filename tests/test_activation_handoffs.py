@@ -10,7 +10,8 @@ import subprocess
 
 import pytest
 
-from claudlobby.activation_handoffs import persist_canonical_handoffs
+from claudlobby.activation_handoffs import (_BEGIN, _END, persist_canonical_handoffs,
+                                            preflight_canonical_handoffs)
 from claudlobby.activation_state import ActivationError
 from claudlobby.plane.db import db_file
 from claudlobby.plane.migrations import migrate
@@ -150,6 +151,65 @@ def test_retiring_bot_with_current_assignment_refuses_before_handoff_write(tmp_p
                                        expected_audit=expected, candidate_bots=retained)
         assert worker_handoff.read_bytes() == STALE_HANDOFF
         assert not (dirs["eng", "manager"] / ".claude/session.md").exists()
+    finally:
+        conn.close()
+
+
+def _tree(root: Path) -> dict:
+    return {str(path.relative_to(root)): path.read_bytes()
+            for path in root.rglob("*") if path.is_file() and path.parent.name == ".claude"}
+
+
+def test_live_preflight_writes_nothing_and_freezes_no_audit(tmp_path):
+    conn, roster, dirs, _expected, worker_handoff = _fixture(tmp_path)
+    try:
+        before = _tree(tmp_path)
+        preflight_canonical_handoffs(tmp_path, roster=roster, bot_dirs=dirs, candidate_bots=set(dirs))
+        assert _tree(tmp_path) == before
+        assert not (dirs["eng", "manager"] / ".claude").exists()
+        # Live writers may add work before quiescence; the quiesced owner
+        # rereads its own audit instead of requiring the preflight view.
+        _row(conn, "work_items", fleet_uid=ENG, work_item_id="wi_" + "c" * 32,
+             title="Arrived before quiescence", created_by_uid=ENG_MANAGER)
+        result = persist_canonical_handoffs(tmp_path, roster=roster, bot_dirs=dirs,
+                                            expected_audit=asdict(audit_tasks(conn)))
+        assert result["open_tasks"] == 3
+    finally:
+        conn.close()
+
+
+def _malformed(worker_handoff: Path) -> None:
+    # A later session appended notes after a previous activation's section.
+    worker_handoff.write_bytes(STALE_HANDOFF + b"\n\n" + _BEGIN + b"\n```json\n{}\n```\n"
+                               + _END + b"\n\n## Later notes\n")
+
+
+@pytest.mark.parametrize("case, message", [
+    ("stopped-worker", "no reviewed old bot actor"),
+    ("uninstalled-manager", "old fleet manager has no installed handoff owner"),
+    ("retired-worker", "retired bot still owns open work"),
+    ("appended-section", "existing canonical handoff section is malformed"),
+])
+def test_live_preflight_refuses_standing_blockers_without_writes(tmp_path, case, message):
+    conn, roster, dirs, _expected, worker_handoff = _fixture(tmp_path)
+    try:
+        candidates = set(dirs)
+        if case == "stopped-worker":
+            # `bot stop` de-enrolled the worker; its assignment stays current.
+            del dirs["data", "worker"]
+            roster["data"] = ("manager", ("manager",))
+        elif case == "uninstalled-manager":
+            del dirs["data", "manager"]
+            roster["data"] = ("manager", ("worker",))
+        elif case == "retired-worker":
+            candidates.discard(("data", "worker"))
+        else:
+            _malformed(worker_handoff)
+        before = _tree(tmp_path)
+        with pytest.raises(ActivationError, match=message):
+            preflight_canonical_handoffs(tmp_path, roster=roster, bot_dirs=dirs, candidate_bots=candidates)
+        assert _tree(tmp_path) == before
+        assert not (dirs["eng", "manager"] / ".claude").exists()
     finally:
         conn.close()
 

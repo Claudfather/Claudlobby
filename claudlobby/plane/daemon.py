@@ -18,7 +18,8 @@ Protocol (one request per connection, newline-delimited JSON):
   daemon replies:{"ok": true,  "results": [{"event_id","status","detail"?}...]}\n
              or  {"ok": false, "code": "<taxonomy>", "error": "..."}\n
   codes mirror the CLI exits: bad_request/contract_violation -> 2,
-  total_failure -> 3, downgrade -> 4, internal -> 1. One deliberate
+  total_failure and capture_config (the host's capture.json is untrusted)
+  -> 3, downgrade -> 4, internal -> 1. One deliberate
   exception: lib/plane-socket-client.py maps a DAEMON's `downgrade` to its
   transport-unavailable exit 5, because that refusal is about the answering
   process rather than the batch and the cold rung commits it (#1485).
@@ -81,6 +82,8 @@ from typing import Optional
 from .contracts import ContractViolation
 from .db import connect, connect_ro, db_file, db_path
 from .queue_paths import scan_queue_dir, scan_spool, staged_dir, staged_payload
+from .capture_policy import CaptureConfigInvalid
+from .identity import IdentityConflict
 from .emit_api import emit_batch
 from .writer import PlaneWriter
 from .ids import ensure_host_uid
@@ -95,6 +98,12 @@ MAX_REQUEST_BYTES = 4 * 1024 * 1024
 # letting bind() truncate or fail obscurely.
 MAX_SOCKET_PATH_BYTES = 100
 DEFAULT_DRAIN_INTERVAL = 600.0
+# One serve-loop replay tick of the staged queue (S5a-01). The loop is serial,
+# so an unbounded replay of a returning backlog held accept(): live callers
+# missed their deadline, staged and fed the backlog. A limited tick schedules
+# the next one at once, after at most one accept poll.
+STAGED_REPLAY_TICK_BATCHES = 200
+STAGED_REPLAY_TICK_S = 0.5
 
 
 @dataclass
@@ -533,11 +542,12 @@ class PlaneDaemon:
 
     def _replay_staged(self, *, approved: dict[str, str] | None = None,
                        max_batches: int | None = None, deadline: float | None = None) -> ReplayReport:
-        """Batches the shim STAGED during a socket cooldown, instead of spawning
-        the cold CLI (#1657). They are raw, so each goes through emit_batch
-        exactly as a socket request does (capture, validation, idempotency on
-        the pre-minted ids). Never through drain(), which ingests spool
-        entries as-is because they are stored policy-applied."""
+        """Batches the shim STAGED when the socket missed, instead of spawning
+        the cold CLI (#1657). The client already applied the capture policy
+        (S5a-04); each still goes through emit_batch exactly as a socket
+        request does (capture, validation, idempotency on the pre-minted ids).
+        Never through drain(), which ingests spool entries as-is. The serve
+        loop bounds each tick; a controlled drain passes its own bounds."""
         self._next_replay = time.monotonic() + 1.0
         report = ReplayReport()
         sd = staged_dir(self.root)
@@ -549,7 +559,7 @@ class PlaneDaemon:
             batches += _orphaned_stages(entries)
         except OSError as exc:
             report.error = type(exc).__name__
-            return report                   # a broken root: the cold rung keeps recording
+            return report                   # a broken root: the queue is kept for a later tick
         if approved is not None:
             report.refused = tuple(sorted(set(approved) - {f.name for f in batches}))
         for f in batches:
@@ -573,6 +583,19 @@ class PlaneDaemon:
                                       **({"require_commit": True} if approved is not None else {}))
             except DowngradeError as exc:
                 raise self._downgrade_exit(exc) from None
+            except (CaptureConfigInvalid, IdentityConflict) as exc:
+                # capture.json is an environment fault, never this batch's
+                # (S5a-04): keep the file for a later tick, as a storage fault
+                # is kept. Quarantine would strand it where nothing replays.
+                # Generic text: the parser's message can quote the file.
+                fault = ("state/plane/capture.json is unreadable or invalid"
+                         if isinstance(exc, CaptureConfigInvalid) else
+                         "identity parent conflicts with the existing registry")
+                print(f"plane-daemon: staged replay paused ({f.name}): {fault} — "
+                      "batches kept until it is fixed", file=sys.stderr)
+                self._next_replay = time.monotonic() + 30.0
+                report.error = type(exc).__name__
+                return report
             except (ValueError, KeyError, TypeError) as exc:  # ContractViolation is a ValueError
                 why = "contract violation" if isinstance(exc, ContractViolation) else "malformed batch"
                 # lstrip: an orphan's name is a dotfile, which a listing hides
@@ -643,6 +666,13 @@ class PlaneDaemon:
             # batch is written into an unlinked inode rather than after.
             outcomes = emit_batch(self.root, events,
                                   conn_factory=self.writer.connection)
+        except CaptureConfigInvalid:
+            # The host's policy file, not this batch, is broken (S5a-04). The
+            # client reports it as a counted loss, never a caller-bug verdict.
+            # Generic text: the parser's message can quote the file's contents.
+            self._reply(conn, {"ok": False, "code": "capture_config",
+                               "error": "state/plane/capture.json is unreadable or invalid"})
+            return False
         except ContractViolation as exc:
             errors = getattr(exc, "errors", None)
             self._reply(conn, {"ok": False, "code": "contract_violation",
@@ -821,7 +851,11 @@ class PlaneDaemon:
                     self._drain_spool(reason="interval")
                     self._optimize()
                 if not self._controlled_drain and time.monotonic() >= self._next_replay:
-                    self._replay_staged()
+                    tick = self._replay_staged(
+                        max_batches=STAGED_REPLAY_TICK_BATCHES,
+                        deadline=time.monotonic() + STAGED_REPLAY_TICK_S)
+                    if tick.limited:
+                        self._next_replay = 0.0     # continue after one accept poll
                 try:
                     conn, _ = self._listener.accept()
                 except socket.timeout:

@@ -2,6 +2,7 @@
 name: fleet-ops
 description: "Read fleet work, admit tasks, deliver and route assignments as manager, and accept or report assigned work as worker. Use the canonical claudlobby CLI and verify recorded results."
 tool_grants:
+  - "Bash(uuidgen)"
   - "Bash(claudlobby --help)"
   - "Bash(claudlobby brief --help)"
   - "Bash(claudlobby library list --help)"
@@ -100,6 +101,12 @@ tool_grants:
 ---
 
 # Fleet operations
+
+Before a new mutation, run the granted standalone `uuidgen` command once. Convert
+its hex letters to lowercase when copying the UUID into the CLI argument. Retain
+that literal UUID with the operation; never reuse a tutorial UUID or mint a new
+one to retry the same uncertain effect. A distinct operation gets a fresh UUID.
+Do not wrap UUID generation and a mutation in one shell command.
 
 Use `claudlobby --json config explain` to inspect environment declarations and
 which tier supplies or blanks each variable. `config explain KEY --bot BOT`

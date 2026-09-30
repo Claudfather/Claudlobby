@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..command_result import selection_read_conflict
+
 from datetime import datetime, timedelta, timezone
 import re
 import sqlite3
@@ -79,7 +81,7 @@ def dispatch(args) -> CommandOutput:
                        f"shared account peers={','.join(row['shared_account_with_selected_fleet_bots']) or '-'}"
                        for row in data['bots']))
         if read_selection(destination.paths.root) != selected:
-            raise CommandFailure("conflict", "active usage selection changed during read")
+            raise selection_read_conflict('active usage selection changed during read')
         return CommandOutput(data, release_id=selected["release_id"], lines=lines)
     except CommandFailure:
         raise

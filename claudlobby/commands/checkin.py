@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from ..command_result import selection_read_conflict
+
 from contextlib import closing
 from dataclasses import asdict
 import json
 import os
 from pathlib import Path
 import re
+import shlex
 import sqlite3
 import stat
 from uuid import UUID
@@ -68,31 +71,51 @@ def _offline(args) -> CommandOutput:
     data = {"verdict": verdict, "findings": findings,
             "unknown_count": sum(item.startswith("UNKNOWN") for item in findings)}
     if verdict in (DEFECT, INVALID):
+        # Text mode prints only message and hint, so the findings ride in the message.
         raise CommandFailure("selection_defect" if verdict == DEFECT else "invalid_argument",
-                             "selection evidence is defective" if verdict == DEFECT else
-                             "selection evidence is invalid", data=data)
+                             f"selection evidence is {'defective' if verdict == DEFECT else 'invalid'} "
+                             f"({len(findings)} findings): " + "; ".join(findings), data=data)
     return CommandOutput(data, lines=(f"{verdict} (unknown={data['unknown_count']})", *findings))
 
 
 def _scope(args):
     from ..activation_identity import read_selected_identity_bindings
     from ..activation_state import read_selection
-    from ..operation_context import resolve_operation_scope
+    from ..config_plan import PlanError
+    from ..context import BotNotFoundError
+    from ..operation_context import OperationContextError, resolve_operation_scope
+    from ..paths import InvalidPathSelector
+    from ..releases import ReleaseError
 
     if args.seed:
         raise CommandFailure("conflict", "seed configuration has no active check-in selection")
-    destination, origin = resolve_operation_scope(root=args.root, fleet=args.fleet)
+    try:
+        destination, origin = resolve_operation_scope(root=args.root, fleet=args.fleet)
+    except (InvalidPathSelector, BotNotFoundError, OperationContextError, PlanError, ReleaseError):
+        raise
+    except ValueError as exc:
+        # A present-but-empty generated selector (or frozen config); values stay private.
+        raise CommandFailure("invalid_argument", "invalid generated check-in selector or configuration",
+                             hint="generated FLEET_NAME, CLAUDLOBBY_FLEET and BOT_ID must be single "
+                                  "non-empty names; pass explicit --root and --fleet") from exc
     if destination.paths.seed:
         raise CommandFailure("conflict", "seed configuration has no active check-in selection")
+    root = shlex.quote(str(destination.paths.root))
+    restage = (f"run claudlobby --root {root} --fleet {shlex.quote(destination.fleet.name)} "
+               "config plan, then host activate the reviewed plan")
     selected = read_selection(destination.paths.root)
     if selected is None:
-        raise CommandFailure("conflict", "active check-in selection is unavailable")
+        raise CommandFailure("conflict", "active check-in selection is unavailable",
+                             hint=f"inspect claudlobby --root {root} host releases; pass this "
+                                  f"host's --root, or {restage}")
     bindings = read_selected_identity_bindings(destination.paths.root, destination.fleet.name,
                                                package=destination.paths.package)
+    if read_selection(destination.paths.root) != selected:
+        raise selection_read_conflict('active check-in selection changed during read', hint='retry the same command')
     if (bindings["manager"] != destination.fleet.manager
-            or set(bindings["bots"]) != set(destination.fleet.bots)
-            or read_selection(destination.paths.root) != selected):
-        raise CommandFailure("conflict", "active check-in scope changed or differs from frozen bindings")
+            or set(bindings["bots"]) != set(destination.fleet.bots)):
+        raise CommandFailure("conflict", "active check-in scope differs from frozen bindings",
+                             hint=f"fleet bots or manager changed after activation; {restage}")
     return destination, origin, selected, bindings
 
 
@@ -141,7 +164,7 @@ def _read(args) -> CommandOutput:
             lease_days=destination.fleet.workstreams.lease_days)["workstreams"],
             int(datetime.now(timezone.utc).timestamp()))
     if read_selection(destination.paths.root) != selected:
-        raise CommandFailure("conflict", "active check-in selection changed during read")
+        raise selection_read_conflict('active check-in selection changed during read')
     if args.public_command == "checkin.show":
         if not rows:
             raise CommandFailure("not_found", "check-in decision is not in the selected fleet")
@@ -197,7 +220,11 @@ def _record(args) -> CommandOutput:
     with mutation_admission(destination.paths.root, identity=RuntimeIdentity.current(),
                             expected_release=bound_release) as release:
         if release.release_id != selected["release_id"] or read_selection(destination.paths.root) != selected:
-            raise CommandFailure("release_mismatch", "selected check-in release changed")
+            raise CommandFailure("release_mismatch", "selected check-in release changed",
+                                 retryable=origin is None,
+                                 hint="retry the same --request-id" if origin is None else
+                                 "a generated caller stays on its bound release; "
+                                 "inspect claudlobby host releases")
         ctx = resolve_task_mutation_context(root=destination.paths.root,
                                             fleet=destination.fleet.name,
                                             package=destination.paths.package)
@@ -233,23 +260,39 @@ def dispatch(args) -> CommandOutput:
     except CommandFailure:
         raise
     except ContractError as exc:
-        raise CommandFailure("invalid_argument", "invalid check-in decision: " + "; ".join(exc.reasons[:4])) from exc
+        # Every defect, so one correction can fix them all.
+        raise CommandFailure("invalid_argument",
+                             f"invalid check-in decision ({len(exc.reasons)} defects): "
+                             + "; ".join(exc.reasons), data={"reasons": list(exc.reasons)}) from exc
     except RecordError as exc:
-        raise CommandFailure("invalid_argument", "invalid selection evidence") from exc
+        raise CommandFailure("invalid_argument", f"invalid selection evidence: {exc}") from exc
     except CheckinError as exc:
-        raise CommandFailure(exc.code, str(exc),
-                             data=asdict(exc.result) if exc.result is not None else {}) from exc
+        data = asdict(exc.result) if exc.result is not None else {}
+        raise CommandFailure(exc.code, str(exc), hint=exc.hint, retryable=exc.retryable,
+                             data={**(exc.data or {}), **data}) from exc
     except ReleaseMismatch as exc:
         raise CommandFailure("release_mismatch", "selected release differs from this caller",
                              hint=exc.hint) from exc
     except InvalidPathSelector as exc:
-        raise CommandFailure("invalid_argument", "invalid check-in root or fleet selector") from exc
+        raise CommandFailure("invalid_argument", "invalid check-in root or fleet selector",
+                             hint=str(exc)) from exc
     except OperationContextUnavailableError as exc:
-        raise CommandFailure("unavailable", "check-in identity registry is unavailable") from exc
-    except (ActivationError, PlanError, OperationContextError, BotNotFoundError,
-            TaskStateError) as exc:
-        raise CommandFailure("conflict", "active check-in scope or history is incomplete") from exc
+        raise CommandFailure("unavailable", "check-in identity registry is unavailable",
+                             retryable=True) from exc
+    except (ActivationError, PlanError, OperationContextError, BotNotFoundError) as exc:
+        # Authored scope causes name selectors and identities, not config values.
+        raise CommandFailure("conflict", "active check-in scope is incomplete",
+                             hint=f"{exc}; inspect claudlobby host releases") from exc
+    except TaskStateError as exc:
+        raise CommandFailure("conflict", "check-in history cannot be interpreted safely",
+                             hint="inspect claudlobby host doctor") from exc
     except ReleaseError as exc:
-        raise CommandFailure("release_mismatch", "selected release is unavailable or mismatched") from exc
-    except (PendingMigrationError, DowngradeError, ReceiptError, OSError, sqlite3.Error) as exc:
-        raise CommandFailure("unavailable", "check-in Plane or request state is unavailable") from exc
+        raise CommandFailure("release_mismatch", "selected release is unavailable or mismatched",
+                             hint="inspect claudlobby host releases") from exc
+    except (PendingMigrationError, DowngradeError) as exc:
+        raise CommandFailure("unavailable", "Plane schema is not current for this CLI") from exc
+    except ReceiptError as exc:
+        raise CommandFailure("conflict", "check-in request state is invalid") from exc
+    except (OSError, sqlite3.Error) as exc:
+        raise CommandFailure("unavailable", "check-in Plane storage is unavailable",
+                             retryable=True) from exc

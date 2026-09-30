@@ -108,6 +108,13 @@ class CommandFailure(Exception):
         super().__init__(message)
 
 
+def selection_read_conflict(message: str, *, release_id: str | None = None,
+                            hint: str = "retry the same read") -> CommandFailure:
+    """A selection switched while a snapshot was read; no mutation is retried."""
+    return CommandFailure("conflict", message, retryable=True, hint=hint,
+                          release_id=release_id)
+
+
 def emit(result: CommandResult, *, json_output: bool, lines: tuple[str, ...] = ()) -> int:
     if json_output:
         print(json.dumps(asdict(result), sort_keys=True, separators=(",", ":")))

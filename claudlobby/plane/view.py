@@ -46,6 +46,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..context import resolve_paths
+from .health import staged_summary
 from ..paths import Paths, load_lib_module
 from ..resources import PackageResources
 from ..task_state import TaskStateError, read_tasks
@@ -945,6 +946,7 @@ def _fetch_trust(conn: sqlite3.Connection, root: Path) -> dict:
         "quarantined": quarantined,
         "quarantine_state": quarantine_state,
         "quarantine_reasons": reasons,
+        "staged": staged_summary(root),
         "spool_pending": spool,
         "spool_oldest_at": spool_oldest,
         "spool_state": spool_state,

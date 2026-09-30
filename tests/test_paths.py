@@ -114,6 +114,26 @@ def test_vault_fleet_and_root_fleet_by_name(tmp_path, monkeypatch, package):
         Paths.detect(root, "../vault/example", package=package)
 
 
+def test_checkout_data_root_serves_host_and_local_fleets_but_not_root_mode(tmp_path, package):
+    root = tmp_path / "old-checkout"
+    _fleet(root / "local" / "example")
+    (root / "claudlobby").mkdir()
+    (root / "claudlobby" / "__init__.py").write_text("")
+    (root / "library" / "skills").mkdir(parents=True)
+    # The conversion runbook keeps the checkout as the data root: host-level
+    # scope and local fleets resolve, and a local fleet's overlay is its own.
+    assert Paths.detect(root, package=package).root == root.resolve()
+    local = Paths.detect(root, "example", package=package)
+    assert local.fleet_dir == root / "local" / "example"
+    assert local.overlay_library == root / "local" / "example" / "library"
+    # A root-mode fleet would let the checkout's library outrank the release.
+    _fleet(root, "root-fleet")
+    for fleet in ("root-fleet", None):
+        with pytest.raises(ValueError, match="source checkout"):
+            Paths.detect(root, fleet, package=package)
+    assert Paths.detect(root, "example", package=package).fleet_dir == root / "local" / "example"
+
+
 def test_base_accessors_and_root_overlay_precedence(tmp_path, package):
     root = tmp_path / "data"
     paths = Paths(root=root, package=package)

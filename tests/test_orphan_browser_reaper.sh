@@ -29,7 +29,12 @@ assert_eq() {
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bin" "$T/native" "$T/root/state/logs"
 for helper in orphan-browser-reaper.sh lib-common.sh supervisor.sh cli-context.sh plane-emit.sh plane-socket-client.py; do
-    cp "$LIB_DIR/$helper" "$T/native/$helper"
+    if [ "$helper" = plane-socket-client.py ]; then
+        # Resolve the shared policy beside the real client, as an installed pair.
+        ln -s "$LIB_DIR/$helper" "$T/native/$helper"
+    else
+        cp "$LIB_DIR/$helper" "$T/native/$helper"
+    fi
 done
 REAPER="$T/native/orphan-browser-reaper.sh"
 ROOT="$T/root"

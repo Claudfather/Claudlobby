@@ -739,14 +739,36 @@ class Paths:
                             "running in root mode",
                             fleet,
                         )
+                        _refuse_checkout_root(root)
                         return cls(root=root, package=package)
                     flat = root / "local" / fleet
                     raise FileNotFoundError(
                         f"Fleet overlay not found: {flat} (run `claudlobby new-fleet {fleet}` to scaffold)"
                     )
 
+        if fleet_dir is None and not seed:
+            _refuse_checkout_root(root)
         return cls(root=root, package=package, fleet_dir=fleet_dir,
                    vault_root=vault_root, seed=seed)
+
+
+def _refuse_checkout_root(root: Path) -> None:
+    """A root-mode fleet makes root/library|templates|voices overlays that
+    outrank the sealed release. On a source checkout that would silently shadow
+    the release with the working tree, so refuse that fleet. A checkout kept as
+    the data root with fleets under local/ (and host-level scope) stays valid.
+    """
+    if not (root / "fleet.yaml").is_file():
+        return
+    # A native helper alone can belong to a legitimate data overlay. The
+    # Python source package distinguishes a source tree from that layout.
+    if (root / "claudlobby" / "__init__.py").is_file():
+        raise InvalidPathSelector(
+            "root",
+            f"data root {root} is a Claudlobby source checkout with a root-mode fleet.yaml; "
+            "its library/templates would shadow the selected release. Move that fleet.yaml "
+            "into local/<fleet>/ (the checkout may stay the data root)",
+        )
 
 
 def _is_host_data_root(path: Path) -> bool:

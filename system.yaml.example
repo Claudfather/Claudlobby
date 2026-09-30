@@ -481,12 +481,12 @@ defaults:
   observability:
     pulse_interval: 300
     activity_stuck_threshold: 1800
-    # Historical dispatch observation uses a 24h default, in SECONDS.
-    # Canonical assignments carry an explicit --expected-by timestamp.
-    # The system tier and composer both default to 86400 seconds. Historical
-    # native watchdog rows retain their recorded deadlines; canonical task
-    # assignment instead accepts an explicit --expected-by timestamp. Do not
-    # lower this default merely to quiet false alerts across every fleet.
+    # Dispatch deadline default: 24h, in SECONDS. The system tier and composer
+    # both default to 86400 seconds; `0` means open-ended. `task assign` and
+    # `task reassign` without --expected-by freeze now + this value once per
+    # request; `--expected-by none` is explicitly open-ended. Historical native
+    # watchdog rows retain their recorded deadlines. Do not lower this default
+    # merely to quiet false alerts across every fleet.
     dispatch_deadline: 86400
 
   jobs:

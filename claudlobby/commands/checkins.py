@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
 from ..plane.queries import (
@@ -95,7 +96,12 @@ def _since(text: str) -> datetime:
             return now - timedelta(days=int(raw[:-1]))
         if raw.endswith("m"):
             return now - timedelta(minutes=int(raw[:-1]))
-        got = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        # Python 3.10 accepts only 3 or 6 fractional-second digits. Normalize
+        # the ISO fraction before parsing so the same window works on every
+        # supported interpreter (plane samples shares this grammar).
+        instant = re.sub(r"(\d{2}:\d{2}:\d{2})[.,](\d+)",
+                         lambda m: m[1] + "." + m[2][:6].ljust(6, "0"), raw)
+        got = datetime.fromisoformat(instant.replace("Z", "+00:00"))
         return got if got.tzinfo else got.replace(tzinfo=timezone.utc)
     except ValueError:
         raise ValueError(f"cannot parse --since '{raw}' (use e.g. 24h, 7d, 30m, or ISO date)") from None

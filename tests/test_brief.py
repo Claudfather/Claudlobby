@@ -1210,6 +1210,27 @@ class TestBootCLI:
                      conn.execute("SELECT COUNT(*) FROM ingest_ledger").fetchone()[0])
         assert after == before
 
+        # #1973: refusals name a remedy, and only the selection race is retryable.
+        from claudlobby import activation_state
+        real_read = activation_state.read_selection
+        reads = []
+
+        def racing(path):
+            reads.append(path)
+            value = real_read(path)
+            return value if len(reads) == 1 else {**value, "release_id": "r-" + "e" * 64}
+
+        with monkeypatch.context() as patch:
+            patch.setattr(activation_state, "read_selection", racing)
+            assert main(["--root", str(root), "--json", "brief"]) == 4
+        raced = json.loads(capsys.readouterr().out)["error"]
+        assert raced["retryable"] is True and raced["hint"] == "retry the same read"
+        with monkeypatch.context() as patch:
+            patch.setenv("FLEET_NAME", "")
+            assert main(["--root", str(root), "--fleet", "example", "--json", "brief"]) == 2
+        empty = json.loads(capsys.readouterr().out)["error"]
+        assert empty["retryable"] is False and "FLEET_NAME" in empty["hint"]
+
         # The alias still looks like this manager, but its Plane actor no
         # longer matches the frozen activation binding. Never render it.
         with sqlite3.connect(db_file(root)) as conn:

@@ -17,7 +17,6 @@ the body is dropped at the door with its proof triple retained.
 
 from __future__ import annotations
 
-import json
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -26,10 +25,11 @@ from pathlib import Path
 from typing import Literal, Optional
 
 from . import PLANE_SCHEMA_VERSION
+from . import capture_policy
+from .capture_policy import DEFAULT_CAPTURE, CaptureConfigInvalid
 from .contracts import (
     CONTENT_FIELDS,
     ContractViolation,
-    cap_body,
     validate_request,
 )
 from .db import connect, db_file
@@ -47,7 +47,7 @@ class EmitOutcome:
     detail: Optional[str] = None
 
 
-class CaptureConfigError(ContractViolation):
+class CaptureConfigError(CaptureConfigInvalid, ContractViolation):
     """state/plane/capture.json exists but cannot be trusted — unreadable,
     invalid JSON, or an unknown mode value. An ABSENT file is the documented
     default (:data:`DEFAULT_CAPTURE`); a BROKEN file must fail visibly rather
@@ -55,35 +55,18 @@ class CaptureConfigError(ContractViolation):
     (2026-09-20): under `metadata` a silent fallback stripped content an
     operator opted INTO keeping; under `full` it would STORE content an
     operator opted OUT of keeping (F23 + the no-silent-switch rule). Routes
-    like ContractViolation: loud, never spooled, CLI exit 2."""
+    like ContractViolation: loud, never spooled, CLI exit 2. It is an
+    environment fault, not a batch fault: staged replay keeps the batch
+    (S5a-04) rather than quarantining it."""
 
 
 def _load_capture_config(root: Path) -> dict:
-    cfg = Path(root) / "state" / "plane" / "capture.json"
+    # One reader and one rule (capture_policy), shared with the stdlib
+    # socket client that applies it before staging.
     try:
-        text = cfg.read_text()
-    except FileNotFoundError:
-        return {}
-    except OSError as exc:
-        raise CaptureConfigError(
-            [{"loc": ("capture.json",), "msg": f"unreadable: {exc}"}]
-        ) from exc
-    try:
-        modes = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise CaptureConfigError(
-            [{"loc": ("capture.json",), "msg": f"invalid JSON: {exc}"}]
-        ) from exc
-    # The WHOLE file must be valid, not just the looked-up key: a typo'd mode
-    # on any fleet is a policy error someone believes is in force.
-    if not isinstance(modes, dict) or not all(
-        isinstance(k, str) and v in ("full", "metadata") for k, v in modes.items()
-    ):
-        raise CaptureConfigError(
-            [{"loc": ("capture.json",),
-              "msg": "must map fleet (or '*') to 'full' | 'metadata'"}]
-        )
-    return modes
+        return capture_policy.load_capture_config(root)
+    except CaptureConfigInvalid as exc:
+        raise CaptureConfigError(exc.errors) from exc
 
 
 #: The shipped capture policy when nothing is configured. `full` since
@@ -105,14 +88,10 @@ def _load_capture_config(root: Path) -> dict:
 #: fails LOUD rather than resolving to either mode (CaptureConfigError) — that
 #: refusal matters more under a `full` default, not less, because a silent
 #: fallback would now STORE content an operator opted out of keeping.
-DEFAULT_CAPTURE = "full"
+#: DEFAULT_CAPTURE itself is owned by capture_policy and re-exported here.
 
-
-def _capture_mode(modes: dict, fleet: str | None) -> str:
-    """Fleet-keyed capture mode from the loaded plane config; default
-    :data:`DEFAULT_CAPTURE` (F7/F23, re-ruled 2026-09-20). The caller's
-    request never decides this."""
-    return modes.get(fleet or "", modes.get("*", DEFAULT_CAPTURE))
+#: Fleet-keyed capture mode (F7/F23, re-ruled 2026-09-20); capture_policy owns it.
+_capture_mode = capture_policy.capture_mode
 
 
 # Public aliases: the trust surface (view.py) is a second consumer of the
@@ -123,44 +102,10 @@ load_capture_config = _load_capture_config
 capture_mode = _capture_mode
 
 
-def _apply_capture(raw: dict, modes: dict) -> dict:
-    """Round-3 F8: the policy transforms EVERY content-bearing family
-    (contracts.CONTENT_FIELDS is the registry's code form), not
-    communications alone. Communications keep the proof triple on drop.
-
-    IDENTITY CONTRACT (T8): returns the INPUT OBJECT ITSELF when the policy
-    changed nothing — the caller uses `is` to skip the second validation pass
-    for untransformed requests, which is the safe half of the #1345-review
-    disclosure (warm emit 62->106ms from validating twice)."""
-    fields = CONTENT_FIELDS.get(raw.get("event_type"))
-    if not fields:
-        return raw
-    mode = _capture_mode(modes, raw.get("fleet"))
-    if raw.get("event_type") == "communication":
-        payload = dict(raw.get("payload") or {})
-        if mode == "full":
-            payload["privacy"] = "full"
-        else:
-            body = payload.get("body")
-            payload["privacy"] = "metadata"
-            if body is not None:
-                proof = cap_body(body)
-                payload["body"] = None      # dropped AT THE DOOR (F23)
-                payload["body_bytes"] = proof.body_bytes
-                payload["body_sha256"] = proof.body_sha256
-                payload["truncated"] = proof.truncated
-        return {**raw, "payload": payload}
-    if mode == "full":
-        return raw                          # nothing to transform — identity
-    payload = dict(raw.get("payload") or {})
-    dropped = False
-    for field in fields:
-        if field in payload:
-            payload.pop(field)              # dropped, no proof triple owed
-            dropped = True
-    if not dropped:
-        return raw                          # metadata mode, no content present
-    return {**raw, "payload": payload}
+#: Round-3 F8: the policy transforms EVERY content-bearing family, with the
+#: T8 identity contract (the caller uses `is` to skip the second validation
+#: pass). One owner, capture_policy, which the socket client also applies.
+_apply_capture = capture_policy.apply_capture
 
 
 def _finalize(raw: dict) -> dict:

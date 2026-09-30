@@ -694,8 +694,8 @@ def _doctor(root: Path):
 
 
 def test_doctor_daemon_rung_serving_and_never_armed(running, tmp_path: Path):
-    """T9: three-state daemon rung. A live daemon reads serving; a root that
-    never started one reads ok-unarmed (native events stage for replay)."""
+    """T9: three-state daemon rung. A live daemon reads serving; an
+    initialized root that never started one needs attention (S5a-02)."""
     root, sock, _ = running
     import claudlobby.plane.daemon as dmod
 
@@ -714,7 +714,7 @@ def test_doctor_daemon_rung_serving_and_never_armed(running, tmp_path: Path):
     # STARTED-NOT-SERVING attention branch instead (daemon_started was logged).
     r = _doctor(root)
     assert r.returncode == 4  # Common CLI conflict/attention result.
-    assert "not serving" in r.stdout and "stage raw input for daemon replay" in r.stdout
+    assert "not serving" in r.stdout and "stage input for daemon replay" in r.stdout
     assert "pending, not committed" in r.stdout
     from claudlobby.plane.emit_api import emit
 
@@ -725,9 +725,17 @@ def test_doctor_daemon_rung_serving_and_never_armed(running, tmp_path: Path):
                  "fleet": "f", "payload": {
                      "work_item_id": "wi_" + "9" * 32, "title": "t",
                      "created_by": "bot:f/a"}})
+    # An initialized plane with no daemon records no hook or timer emit, so
+    # "never armed" is ATTENTION, and so is anything staged meanwhile (S5a-02).
     r2 = _doctor(fresh)
-    assert r2.returncode == 0, r2.stdout
-    assert "never armed" in r2.stdout
+    assert r2.returncode == 4, r2.stdout
+    assert "[ATTENTION] daemon — never armed" in r2.stdout and "NOT recorded" in r2.stdout
+    assert "[ok] staged depth — 0 pending" in r2.stdout
+    (fresh / "state/plane/staged").mkdir(exist_ok=True)
+    (fresh / "state/plane/staged/1-ev_x.batch").write_text('{"events": []}\n')
+    r3 = _doctor(fresh)
+    assert "[ATTENTION] staged depth — 1 pending" in r3.stdout, r3.stdout
+    assert "only a serving plane daemon replays this queue" in r3.stdout
 
 
 def test_send_batch_raises_oserror_when_no_daemon(tmp_path: Path):
@@ -1095,10 +1103,9 @@ def _until(pred, timeout: float = 15.0):
 @pytest.mark.parametrize("daemon_at_emit", [True, False])
 def test_a_cooldown_batch_lands_through_the_daemon_under_the_capture_policy(
         tmp_path: Path, scratch_plane_env, daemon_at_emit: bool):
-    """The shim stages a RAW batch, so the daemon must land it through
-    emit_batch, the socket path's own call, for the capture policy to apply.
-    The spool's drain() ingests entries as-is (they are stored
-    policy-applied), and would keep a body a metadata fleet must not store."""
+    """The shim stages a policy-applied batch (S5a-04): the body a metadata
+    fleet must not store never reaches the staged file. The daemon still lands
+    it through emit_batch, the socket path's own call, never drain()."""
     initialize_plane(tmp_path)
     plane = tmp_path / "state" / "plane"
     plane.mkdir(parents=True, exist_ok=True)
@@ -1125,7 +1132,10 @@ def test_a_cooldown_batch_lands_through_the_daemon_under_the_capture_policy(
         )
         assert r.returncode == 6, r.stderr
         if not daemon_at_emit:
-            assert len(list(staged.glob("*.batch"))) == 1
+            batches = list(staged.glob("*.batch"))
+            assert len(batches) == 1
+            text = batches[0].read_text()
+            assert "secret content" not in text and '"body_sha256"' in text
             t.start()  # startup/interval replay must apply capture policy
 
         def landed():
@@ -1175,6 +1185,40 @@ def test_a_refused_staged_batch_is_quarantined_not_retried(running):
     reasons = list((root / "state" / "plane" / "spool" / "quarantine").glob("*.reason"))
     assert len(reasons) == 1 and "contract" in reasons[0].read_text()
     assert send_batch(sock, [_comm("f")])["ok"] is True
+
+
+def test_staged_replay_keeps_batches_under_a_broken_capture_config_and_bounds_a_tick(tmp_path):
+    """S5a-04: capture.json is an environment fault, so replay keeps the batch
+    instead of quarantining it where nothing replays. S5a-01: a bounded tick
+    stops starting batches and says so."""
+    initialize_plane(tmp_path)
+    plane = tmp_path / "state" / "plane"
+    staged = plane / "staged"
+    _stage(staged, "1-a.batch", [_comm("a")])
+    _stage(staged, "2-b.batch", [_comm("b")])
+    (plane / "capture.json").write_text('{"*": "metdata"}')
+    daemon = PlaneDaemon(tmp_path)
+    try:
+        paused = daemon._replay_staged(max_batches=200)
+        assert paused.error == "CaptureConfigError" and paused.quarantined == 0
+        assert sorted(p.name for p in staged.glob("*.batch")) == ["1-a.batch", "2-b.batch"]
+        assert not list((plane / "spool" / "quarantine").glob("*"))
+        (plane / "capture.json").write_text('{"*": "metadata"}')
+        # Existing identity conflicts are environment faults too: preserve the
+        # batch, never overwrite the parent or quarantine accepted pending data.
+        from claudlobby.plane.identity import resolve
+        conn = daemon.writer.connection()
+        resolve(conn, "fleet", "example-fleet", now="2026-09-30T00:00:00Z",
+                parent_uid="host_" + "f" * 32)
+        paused = daemon._replay_staged(max_batches=200)
+        assert paused.error == "IdentityConflict" and paused.quarantined == 0
+        assert len(list(staged.glob("*.batch"))) == 2
+        conn.execute("UPDATE identity_registry SET parent_uid=NULL WHERE kind='fleet' AND alias='example-fleet'")
+        tick = daemon._replay_staged(max_batches=1)
+        assert tick.limited and tick.committed == 1
+        assert [p.name for p in staged.glob("*.batch")] == ["2-b.batch"]
+    finally:
+        daemon.writer.close()
 
 
 def test_controlled_drain_binds_old_identity_and_reviewed_batches_with_retained_evidence(tmp_path, monkeypatch):

@@ -1,7 +1,7 @@
 ---
 permissions:
-  allow: [Bash, Agent, Read, Grep, Glob, WebFetch, WebSearch]
-  bash_allow: [tmux, git, gh, systemctl, launchctl, cat, grep, tail, jq]
+  allow: [Agent, Read, Grep, Glob, WebFetch, WebSearch]
+  bash_allow: [git, gh, cat, grep, tail, jq]
 ---
 
 # {{BOT_NAME}} — Manager / Orchestrator
@@ -64,13 +64,17 @@ Bots accumulate context; bad context degrades output. Proactively manage:
 
   Use the selected fleet context; name `--fleet FLEET` explicitly when reading
   another active fleet. A failed or unavailable read is not zero completed work.
-- **Between unrelated tasks:** send `/clear` to the worker.
-- **Reviewers (Sonnet-sensitive):** `/compact` between every PR review on the same project; `/clear` when switching projects; restart on the first `context-degraded` report, or after ~3 completed rows in a 24h window, before a new review batch.
-- **Restart syntax:**
-  - macOS: `launchctl kickstart -k gui/$(id -u)/{{SERVICE_PREFIX}}.<bot>`
-  - Linux: `sudo systemctl restart <bot>` or `systemctl --user restart <bot>`
+- **Between unrelated tasks:** preserve a fresh handoff and use the supported restart flow when a fresh session is needed.
+- **Reviewers:** use the supported compaction command between substantial reviews. Consider a fresh session after completed work and a verified handoff; respect operator holds and never interrupt an active review because of a report count alone.
+- **Restart:** honor operator holds and the safe-worker-restart protocol. Request
+  `claudlobby --json bot handoff WORKER`, require `data.handoff=saved`, then use
+  `claudlobby --json bot restart WORKER` and inspect its readiness result.
+- **Compaction:** use `claudlobby --json bot compact WORKER`; an accepted control
+  submission is not proof that compaction has finished. Read the selected bot's
+  session/status before claiming success. Unknown outcomes do not allow resend.
 
-Session `/clear`, `/compact`, restart, and pane inspection remain lifecycle operations; the task/message CLI does not implement them. Do not use those legacy surfaces to send task prompts or retry an uncertain delivery.
+Use the public CLI's composed fleet-ops grants for fleet controls. The manager
+role does not grant unrestricted shell or native supervisor control.
 
 ### Rate-limit awareness — fleets that share an Anthropic account
 
@@ -93,20 +97,17 @@ If the fleet shares one Anthropic Opus account (no per-bot API keys, no per-bot 
 
 ## Fleet Health
 
-- `tmux list-sessions` — who's alive
-- `tmux capture-pane -t <bot> -p | tail -10` — recent activity / idle / error
-- `cat {{CLAUDLOBBY_ROOT}}/state/fleet-state.json | jq '.bots'` — fleet-state ledger
-- If a worker is stuck > 5 min, restart via:
-  - macOS: `launchctl kickstart -k gui/$(id -u)/{{SERVICE_PREFIX}}.<bot>`
-  - Linux: `sudo systemctl restart <bot>`
-- For deeper checks (macOS): `launchctl print gui/$(id -u)/{{SERVICE_PREFIX}}.<bot> | grep -E '(state|last exit)'`
+- `claudlobby --json fleet status` — current native/session and recorded observations.
+- `claudlobby --json bot session BOT` — the selected bot's private-session state.
+- `claudlobby --json bot logs BOT --lines 50` — bounded diagnostic output.
+- `claudlobby --json fleet reconcile` — supervision discrepancies, without repair.
+
+Use the explicit CLI lifecycle commands after checking the worker's assignment,
+handoff and operator holds. Missing evidence is unknown; it does not license a
+restart or an unrecorded task send.
 
 ## Self-Restart
 
-```bash
-# macOS
-launchctl kickstart -k gui/$(id -u)/{{SERVICE_PREFIX}}.{{BOT_NAME}}
-
-# Linux
-sudo systemctl restart {{BOT_NAME}}
-```
+Follow the `/restart` skill to save a fresh self-handoff, then call
+`claudlobby --json bot restart BOT` with your literal generated bot ID. A self-restart interrupts this
+session; only a fresh session can confirm successful resumption.

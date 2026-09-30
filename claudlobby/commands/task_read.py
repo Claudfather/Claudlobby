@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..command_result import selection_read_conflict
+
 from contextlib import closing
 from dataclasses import asdict
 import sqlite3
@@ -38,7 +40,7 @@ def _read(args) -> CommandOutput:
         bindings = read_selected_identity_bindings(destination.paths.root, destination.fleet.name,
                                                    package=destination.paths.package)
         if read_selection(destination.paths.root) != selected:
-            raise CommandFailure("conflict", "active task selection changed during read")
+            raise selection_read_conflict('active task selection changed during read')
         if (bindings["manager"] != destination.fleet.manager
                 or set(bindings["bots"]) != set(destination.fleet.bots)):
             raise CommandFailure("conflict", "active task identity bindings differ from frozen fleet")

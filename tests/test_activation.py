@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from claudlobby import activation, activation_state as state, runtime_admission as admission
+from claudlobby.activation_handoffs import _BEGIN as _HANDOFF_BEGIN, _END as _HANDOFF_END
 from claudlobby.activation_identity import read_selected_identity_bindings
 from claudlobby.config_plan import ConfigPlanBuilder
 from claudlobby.config_units import planned_units, unit_family
@@ -236,6 +237,74 @@ def test_legacy_pending_queue_blocks_before_activation_record_or_native_pause(co
     assert not (root / "state/activations/cutover/activation.json").exists()
     assert not any(name == "svc_activation_pause" for name, _ in host.calls)
     assert host.starts == []
+
+
+def _legacy_handoff_estate(root, installed_bots):
+    """A legacy Plane with a current worker assignment, plus frozen old bot units.
+
+    Old bot directories sit outside the candidate plan's reviewed destinations,
+    so plan freshness is unchanged.
+    """
+    host, fleet = "host_" + "1" * 32, "fleet_" + "2" * 32
+    actors = {"manager": "actor_" + "4" * 32, "worker": "actor_" + "5" * 32}
+    connection = _database(root, version=11)
+    try:
+        for uid, kind, alias, parent in ((host, "host", "host", None), (fleet, "fleet", "example", host),
+                                         *((uid, "actor", f"bot:example/{bot}", fleet)
+                                           for bot, uid in actors.items())):
+            connection.execute("INSERT INTO identity_registry (uid, kind, alias, parent_uid, provisional,"
+                               " first_seen, last_seen) VALUES (?, ?, ?, ?, 0, 't', 't')",
+                               (uid, kind, alias, parent))
+        _insert(connection, "work_items", work_item_id="wi_" + "7" * 32, fleet_uid=fleet,
+                title="Running work", created_by_uid=actors["manager"])
+        _insert(connection, "assignments", assignment_id="asg_" + "9" * 32, work_item_id="wi_" + "7" * 32,
+                fleet_uid=fleet, assignee_uid=actors["worker"], assigned_by_uid=actors["manager"])
+    finally:
+        connection.close()
+    identity = root / "state/host-uid"
+    identity.parent.mkdir(parents=True, exist_ok=True)
+    identity.write_text(host + "\n")
+    identity.chmod(0o600)
+    units = []
+    for bot in installed_bots:
+        directory = root.resolve() / "legacy-runtime" / bot
+        directory.mkdir(parents=True)
+        units.append(SimpleNamespace(target=f"legacy.example.{bot}.service", installed=(object(),),
+                                     declaration=SimpleNamespace(scope="bot", fleet="example", bot=bot,
+                                                                 working_directory=directory)))
+    return units
+
+
+@pytest.mark.parametrize("installed_bots, appended, message", [
+    (("manager",), False, "no reviewed old bot actor"),
+    (("worker",), False, "old fleet manager has no installed handoff owner"),
+    (("manager", "worker"), True, "existing canonical handoff section is malformed"),
+], ids=["stopped-worker", "uninstalled-manager", "appended-section"])
+def test_first_adoption_refuses_standing_handoff_blockers_before_record_or_pause(
+        cold, monkeypatch, installed_bots, appended, message):
+    root, _, plan, host = cold
+    units = _legacy_handoff_estate(root, installed_bots)
+    handoff = root.resolve() / "legacy-runtime" / installed_bots[0] / ".claude/session.md"
+    if appended:
+        handoff.parent.mkdir()
+        handoff.write_bytes(b"old notes\n\n" + _HANDOFF_BEGIN + b"\n```json\n{}\n```\n"
+                            + _HANDOFF_END + b"\n\n## Later notes\n")
+    before = handoff.read_bytes() if appended else None
+    inventory = SimpleNamespace(manager="Linux", catalog=f"manager\tLinux\ndirectory\t{host.directory}\n",
+                                units=tuple(units))
+    inventory.require_complete = lambda: inventory
+    monkeypatch.setattr(activation, "legacy_linux_declarations", lambda _plan: ("reviewed-legacy",))
+    monkeypatch.setattr(activation, "collect_enrollment", lambda *_, **__: inventory)
+    with pytest.raises(state.ActivationError, match=message):
+        activation.adopt_existing_activation(root, "cutover", plan.plan_id, host.directory, adapter=host)
+    assert not (root / "state/activations/cutover").exists()
+    assert state.read_selection(root) is None
+    assert {name for name, _ in host.calls} == {"svc_inventory_catalog"}  # no pause or handoff
+    assert host.starts == []
+    sessions = [path for path in (root.resolve() / "legacy-runtime").rglob("session.md")]
+    assert sessions == ([handoff] if appended else [])
+    if appended:
+        assert handoff.read_bytes() == before
 
 
 @pytest.fixture

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..command_result import selection_read_conflict
+
 from dataclasses import asdict
 import sqlite3
 
@@ -72,8 +74,7 @@ def _read(args) -> CommandOutput:
             lines = ((f"{observation.message_id}\t{observation.reply.message_id}",)
                      if observation.reply else ())
         if read_selection(destination.paths.root) != selected:
-            raise CommandFailure("conflict", "active message selection changed during read",
-                                 release_id=release_id)
+            raise selection_read_conflict('active message selection changed during read', release_id=release_id)
         if failure is not None:
             raise CommandFailure(*failure, data=data, release_id=release_id,
                                  retryable=failure[0] in {"unavailable", "timeout"})

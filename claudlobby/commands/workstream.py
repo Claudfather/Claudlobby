@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..command_result import selection_read_conflict
+
 from dataclasses import asdict
 import os
 import re
@@ -87,7 +89,7 @@ def _read(args, destination, selected, bindings):
     from ..activation_state import read_selection
 
     if read_selection(destination.paths.root) != selected:
-        raise CommandFailure("conflict", "active workstream selection changed during read")
+        raise selection_read_conflict('active workstream selection changed during read')
     entries = registry["workstreams"]
     if args.workstream_action == "show":
         row = entries.get(_id(args.id))

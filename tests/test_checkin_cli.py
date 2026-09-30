@@ -126,7 +126,8 @@ def _counts(root):
                 conn.execute("SELECT COUNT(*) FROM ingest_ledger").fetchone()[0])
 
 
-def test_record_list_show_and_assignment_link_keep_exact_selected_scope(active, capsys, tmp_path):  # noqa: F811
+def test_record_list_show_and_assignment_link_keep_exact_selected_scope(active, capsys, tmp_path,  # noqa: F811
+                                                                        monkeypatch):
     root, release = active
     selection = tmp_path / "selection.json"
     selection.write_text(json.dumps(selection_record()), encoding="utf-8")
@@ -150,10 +151,33 @@ def test_record_list_show_and_assignment_link_keep_exact_selected_scope(active, 
                 "--request-id", request_id, "--dry-run")
     assert dry["data"]["checkin_id"] is None and _counts(root) == before
     file.write_text('{"action":"coffee"}', encoding="utf-8")
-    assert _call(capsys, root, "checkin", "record", "--file", str(file),
-                 "--request-id", request_id, expected=2)["error"]["code"] == "invalid_argument"
+    refused = _call(capsys, root, "checkin", "record", "--file", str(file),
+                    "--request-id", request_id, expected=2)
+    reasons = refused["data"]["reasons"]
+    assert refused["error"]["code"] == "invalid_argument" and len(reasons) > 4
+    assert f"({len(reasons)} defects)" in refused["error"]["message"]
+    assert all(reason in refused["error"]["message"] for reason in reasons)
     assert _counts(root) == before
     file.write_text(json.dumps(decision), encoding="utf-8")
+    # A genuinely empty backlog is recordable evidence, disclosed rather than refused.
+    from tests.test_sprint_selection_record import _queries
+    selection.write_text(json.dumps(selection_record(
+        queries=_queries(filtered=0, unfiltered=0), candidates=[], selected_ids=[])), encoding="utf-8")
+    assert _call(capsys, root, "checkin", "selection", "verify", str(selection))["data"]["verdict"] == "OK"
+    assert _call(capsys, root, "checkin", "record", "--file", str(file), "--selection-file",
+                 str(selection), "--request-id", request_id, "--dry-run")["data"]["validated"] is True
+
+    # A worker session cannot record the fleet's check-in.
+    with monkeypatch.context() as generated:
+        for key, value in {"CLAUDLOBBY_ROOT": str(root), "FLEET_NAME": "example",
+                           "BOT_ID": "worker", "CLAUDLOBBY_RELEASE_ID": release.release_id}.items():
+            generated.setenv(key, value)
+        assert _call(capsys, root, "checkin", "record", "--file", str(file), "--request-id",
+                     str(uuid4()), expected=4)["error"]["code"] == "conflict"
+        generated.setenv("FLEET_NAME", "")
+        empty = _call(capsys, root, "--fleet", "example", "checkin", "list", expected=2)["error"]
+        assert "FLEET_NAME" in empty["hint"]
+    assert _counts(root) == before
 
     recorded = _call(capsys, root, "checkin", "record", "--file", str(file),
                      "--request-id", request_id)
@@ -217,3 +241,31 @@ def test_record_list_show_and_assignment_link_keep_exact_selected_scope(active, 
     assert fleet_usage["data"]["coverage"]["status"] == "partial"
     assert fleet_usage["data"]["coverage"]["bots_observed"] == 1
     assert _call(capsys, root, "fleet", "usage", "--since", "8d", expected=2)["error"]["code"] == "invalid_argument"
+
+    # A recording outage leaves the attempt unrecorded; the same UUID then records exactly once.
+    from claudlobby.plane import emit_api
+    from claudlobby.request_receipts import locked_request
+
+    def down(*_args, **_kwargs):
+        raise OSError("Plane down")
+
+    outage_id = str(uuid4())
+    with monkeypatch.context() as outage:
+        outage.setattr(emit_api, "emit_batch", down)
+        failed = _call(capsys, root, "checkin", "record", "--file", str(file),
+                       "--request-id", outage_id, expected=6)["error"]
+    assert failed["code"] == "unavailable" and outage_id in failed["hint"]
+    assert _call(capsys, root, "checkin", "list", "--summary")["data"]["summary"]["totals"]["checkins"] == 1
+    retried = _call(capsys, root, "checkin", "record", "--file", str(file),
+                    "--request-id", outage_id)["data"]
+    assert retried["recording"] == "committed" and retried["replayed"] is False
+    assert _call(capsys, root, "checkin", "record", "--file", str(file),
+                 "--request-id", outage_id)["data"]["replayed"] is True
+    file.write_text(json.dumps(_decision(action="nothing")), encoding="utf-8")
+    reused = _call(capsys, root, "checkin", "record", "--file", str(file),
+                   "--request-id", outage_id, expected=4)["error"]
+    assert "new --request-id" in reused["hint"] and reused["retryable"] is False
+    with locked_request(root, retried["fleet_uid"], request_id):
+        busy = _call(capsys, root, "checkin", "record", "--file", str(file),
+                     "--request-id", request_id, expected=4)["error"]
+    assert busy["retryable"] is True and "already being processed" in busy["message"]

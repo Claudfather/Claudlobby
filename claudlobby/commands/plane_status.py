@@ -9,6 +9,7 @@ import sqlite3
 from ..command_result import CommandFailure, CommandOutput
 from ..context import resolve_paths
 from ..plane.db import connect_ro, db_file
+from ..plane.health import staged_summary
 from ..plane.identity import provisional_actors
 from ..plane.migrations import DowngradeError
 from ..plane.schema_state import PendingMigrationError, require_current_schema
@@ -63,6 +64,12 @@ def dispatch(args) -> CommandOutput:
                                              - datetime.fromisoformat(oldest)).total_seconds())
             age = f", oldest {spool['oldest_age_s']}s" if oldest else ""
             lines.append(f"spool: {spool['pending']} pending{age}")
+        staged = staged_summary(root)
+        if staged["state"] == "unreadable":
+            lines.append("staged: unreadable — cannot count (a gap, not a zero)")
+        else:
+            lines.append(f"staged: {staged['pending']} pending, NOT committed"
+                         f" ({staged['bytes']} bytes, oldest {staged['oldest_age_s']}s)")
         quarantine = {"state": scan.quarantine_state, "count": None}
         if scan.quarantine_state == "unreadable":
             lines.append("quarantine: unreadable — cannot count")
@@ -70,7 +77,7 @@ def dispatch(args) -> CommandOutput:
             quarantine["count"] = len(scan.quarantined)
             lines.append(f"quarantine: {quarantine['count']}")
         return CommandOutput({"database": database, "spool": spool,
-                              "quarantine": quarantine}, lines=tuple(lines))
+                              "staged": staged, "quarantine": quarantine}, lines=tuple(lines))
     except PendingMigrationError as exc:
         raise CommandFailure("migration_required", f"Plane status refused: {exc}") from exc
     except DowngradeError as exc:

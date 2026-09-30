@@ -98,6 +98,13 @@ def test_composed_manager_worker_project_orientation_never_claims_running_permis
     case.paths.fleet_yaml.write_text(case.paths.fleet_yaml.read_text() + "# changed after compose\n")
     drift = _call(capsys, case.root, "context", "show")["context"]["composition"]
     assert drift["manifest_inputs_match"] is False and "fleet.yaml" in drift["changed_inputs"]
+    # A YAML syntax error names its position, never the quoted source line.
+    case.paths.fleet_yaml.write_text(case.paths.fleet_yaml.read_text()
+                                     + "broken: [SECRET-orientation-yaml\n")
+    assert main(["--root", str(case.root), "--json", "context", "show"]) == 4
+    captured = capsys.readouterr()
+    assert "SECRET-orientation" not in captured.out + captured.err
+    assert "line " in json.loads(captured.out)["error"]["hint"]
 
 
 def test_generated_context_defaults_are_explicit_and_never_replace_bad_identity(staging_case, monkeypatch, capsys):

@@ -22,6 +22,7 @@ plans: `2026-08-2x-observable-plane-phase-*.md`; the cutover walk:
 | `state/plane/plane.db` (+ `-wal`, `-shm`) | the database, WAL mode |
 | `state/plane/capture.json` | per-fleet capture policy: `full` (the shipped default — bodies recorded) or `metadata` (the opt-out — bodies stripped at the door, proof triple kept). A named fleet beats `*`; a malformed file fails loud and resolves to no mode at all |
 | `state/plane/ingest.sock` | the ingest daemon's socket (`claudlobby plane serve`) |
+| `state/plane/staged/` | bounded policy-applied batches pending daemon recording; never committed proof |
 | `state/plane/spool/` | the filesystem spool — the valve that must not depend on the db it protects |
 
 One database per host. A fleet is a partition inside it (the `fleet_uid`
@@ -116,25 +117,24 @@ passthrough arm carries **2 and 3 only**; a `4` there was dead code. A
 CLI's rc verbatim — there the install itself is behind the db and no rung can
 help.
 
-**Cooldown staging (#1657).** Under load that cooldown did not damp: each
-diverted emission spawned the package-importing cold CLI (`claudlobby --help`
-alone took 1.8–4.9 s at load ~20 on the Pi), and those spawns kept the CPU the
-daemon needed pegged, so it kept missing its deadline. The three emitters that
-never read the result — `plane_emit_bounded` (every `emit_fleet_event`),
-keepalive's heartbeat and the host probe — set `PLANE_EMIT_COOLDOWN_STAGE=1`,
-and in a cooldown `plane-socket-client.py --stage-to` leaves their finalized
-batch in `state/plane/staged/` instead (rc 6: durable, not yet in the plane).
-The daemon replays staged batches on each loop tick through the same
-`emit_batch()` a socket request runs, never through the spool's `drain()`,
-which ingests its entries as-is because they are stored policy-applied and so
-would skip the capture policy for a raw batch. The client stages only when that
-directory exists (the daemon creates it at startup, so an older daemon never
-gets one) and a connect probe finds a listener; otherwise it takes the cold
-rung as before. Doors that read a non-zero rc as "not recorded" never opt in.
-Staged depth is not yet a `plane doctor` rung. A stage killed before its rename
-leaves `.<event id>.tmp` (plane_emit_bounded's 10 s reaper, inside the stage's
-fsync), and the daemon replays one once it is an hour old: it is a finished
-batch with pre-minted ids (#1657).
+**Durable staging (#1657, unified CLI).** A socket miss or cooldown leaves a
+finalized, capture-policy-applied batch in `state/plane/staged/`. This is
+pending, not committed recording. The stdlib client imports the same capture
+policy as the daemon in its existing process; it never starts a cold CLI on
+this path. Missing or invalid policy refuses staging explicitly.
+
+The queue accepts at most 2,000 batches or 32 MiB at each admission check;
+concurrent producers can overshoot by their simultaneous batches. A full or
+unwritable queue refuses and records a best-effort `.emit-losses` breadcrumb.
+Daemon replay uses the normal `emit_batch()` owner, at most 200 batches or
+0.5 seconds per serving tick. Invalid capture configuration or an existing identity-parent conflict leaves
+batches pending for later repair instead of quarantining them. An interrupted stage's
+`.<event id>.tmp` becomes eligible for replay after an hour.
+
+`plane doctor`, `plane status`, and the trust panel expose staged depth.
+Doctor flags unreadable, full, stale, or undrainable pending data. An
+initialized plane with a never-started daemon needs attention. A staged batch
+never satisfies a linked/task operation's committed-recording requirement.
 
 **The deadline follows who waits (#1693).** The client's total deadline is
 1.0 s unless the caller's class says otherwise. `PLANE_EMIT_CLASS` is `hook`

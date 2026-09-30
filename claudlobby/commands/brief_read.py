@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from ..command_result import selection_read_conflict
+
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import os
+import shlex
 import sqlite3
 
 from ..command_result import CommandFailure, CommandOutput
@@ -60,23 +63,32 @@ def dispatch(args) -> CommandOutput:
     from ..releases import ReleaseError
 
     release_id = None
+    releases = "inspect claudlobby host releases"
     try:
         context, origin = resolve_operation_scope(root=args.root, fleet=args.fleet)
         if context.paths.seed:
             raise CommandFailure("conflict", "seed configuration has no operational brief")
+        root = shlex.quote(str(context.paths.root))
+        restage = (f"run claudlobby --root {root} --fleet {shlex.quote(context.fleet.name)} "
+                   "config plan, then host activate the reviewed plan")
         selection = read_selection(context.paths.root)
         if selection is None:
-            raise CommandFailure("conflict", "active brief selection is unavailable")
+            raise CommandFailure("conflict", "active brief selection is unavailable",
+                                 hint=f"inspect claudlobby --root {root} host releases; pass this "
+                                      f"host's --root, or {restage}")
         release_id = selection["release_id"]
         bindings = read_selected_identity_bindings(context.paths.root, context.fleet.name,
                                                    package=context.paths.package)
         if (bindings["manager"] != context.fleet.manager
                 or set(bindings["bots"]) != set(context.fleet.bots)):
             raise CommandFailure("conflict", "active brief identities differ from frozen fleet",
+                                 hint=f"fleet bots or manager changed after activation; {restage}",
                                  release_id=release_id)
         if origin is not None and (origin.fleet.name != context.fleet.name
                                    or origin.bot_id not in context.fleet.bots):
             raise CommandFailure("conflict", "generated brief caller differs from selected fleet",
+                                 hint=f"caller is bot:{origin.fleet.name}/{origin.bot_id}; "
+                                      "omit --fleet to read your own fleet's brief",
                                  release_id=release_id)
         if args.bot is not None:
             if args.bot not in context.fleet.bots:
@@ -110,41 +122,47 @@ def dispatch(args) -> CommandOutput:
                      if args.boot else (f"Brief viewer: bot:{context.fleet.name}/{viewer} ({source})",
                                         format_brief(brief).rstrip("\n")))
         if read_selection(context.paths.root) != selection:
-            raise CommandFailure("conflict", "active brief selection changed during read",
-                                 release_id=release_id)
+            raise selection_read_conflict('active brief selection changed during read', release_id=release_id)
         return CommandOutput({"brief": brief, "viewer_selection": source},
                              release_id=release_id, lines=lines)
     except CommandFailure:
         raise
     except BriefIdentityMismatch as exc:
         raise CommandFailure("conflict", "Plane brief identities differ from selected activation",
-                             release_id=release_id) from exc
+                             hint=releases, release_id=release_id) from exc
     except OperationContextUnavailableError as exc:
         raise CommandFailure("unavailable", "brief identity registry is unavailable",
-                             release_id=release_id) from exc
+                             retryable=True, release_id=release_id) from exc
     except (OperationContextError, BotNotFoundError) as exc:
+        # Authored scope causes name selectors and identities, not config values.
         raise CommandFailure("conflict", "generated brief context conflicts with active fleet",
+                             hint=f"{exc}; compare CLAUDLOBBY_ROOT, FLEET_NAME and BOT_ID with "
+                                  f"the active fleet ({releases}); a bot added since activation "
+                                  "needs config plan, then host activate",
                              release_id=release_id) from exc
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid brief root or fleet selector",
-                             release_id=release_id) from exc
+                             hint=str(exc), release_id=release_id) from exc
     except ActivationError as exc:
         message = str(exc)
         if "executing package differ" in message or "selected release differ" in message:
             raise CommandFailure("release_mismatch", "selected release differs from this CLI",
+                                 hint=f"{message}; {releases} and run the selected release's CLI",
                                  release_id=release_id) from exc
         if "unavailable" in message:
             raise CommandFailure("unavailable", "active brief scope is unavailable",
+                                 hint=f"{message}; {releases}",
                                  release_id=release_id) from exc
         raise CommandFailure("conflict", "active brief scope or identities are incomplete",
-                             hint=f"{message}; inspect claudlobby host releases",
+                             hint=f"{message}; {releases}",
                              release_id=release_id) from exc
     except ReleaseError as exc:
         raise CommandFailure("release_mismatch", "selected brief release is unavailable or mismatched",
-                             release_id=release_id) from exc
+                             hint=releases, release_id=release_id) from exc
     except PlanError as exc:
+        # e.g. "select --fleet from the active fleets" on a multi-fleet host.
         raise CommandFailure("conflict", "active brief configuration is incomplete",
-                             release_id=release_id) from exc
+                             hint=f"{exc}; {releases}", release_id=release_id) from exc
     except ResolverUnavailable as exc:
         raise CommandFailure("unavailable", "brief runtime environment tiers are unavailable",
                              release_id=release_id) from exc
@@ -152,5 +170,8 @@ def dispatch(args) -> CommandOutput:
         raise CommandFailure("unavailable", "brief storage is unavailable",
                              release_id=release_id) from exc
     except ValueError as exc:
+        # Includes a present-but-empty generated selector; config values stay private.
         raise CommandFailure("invalid_argument", "invalid generated brief selector",
+                             hint="generated FLEET_NAME, CLAUDLOBBY_FLEET and BOT_ID must be single "
+                                  "non-empty names; pass explicit --root and --fleet",
                              release_id=release_id) from exc

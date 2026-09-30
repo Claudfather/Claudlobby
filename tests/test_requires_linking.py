@@ -7,6 +7,7 @@ cycle-1 review B8 regression this task exists to close)."""
 from __future__ import annotations
 
 import json
+from fnmatch import fnmatchcase
 from dataclasses import replace
 from pathlib import Path
 from textwrap import dedent
@@ -303,6 +304,10 @@ def _write_fleet_yaml(
 
 class TestGrantUnion:
     def test_default_fleet_ops_is_usable_without_worker_admin_grants(self, fleet_dir):
+        # Exercise the actual manager role as well as the universal skill; a
+        # blanket role grant would otherwise mask an unsafe default.
+        role = source_package().library / "expertise" / "orchestration.md"
+        (fleet_dir / "library" / "expertise" / "orchestration.md").write_bytes(role.read_bytes())
         text = (fleet_dir / "fleet.yaml").read_text().replace(
             "  accounts:\n", "  system_defaults: false\n\n  accounts:\n", 1
         )
@@ -356,6 +361,20 @@ class TestGrantUnion:
             } <= set(allow)
             assert "Bash(git push *)" in deny
             assert "Bash" not in allow
+            assert "Bash(uuidgen)" in allow
+            operator_commands = (
+                "host activate plan", "host job run sample", "host supervision reap-orphans",
+                "host repos pull", "bot remove worker-1 --purge", "bot move worker-1 --to other",
+                "bot create new", "library create skill new", "fleet setup new", "fleet move other",
+                "config plan", "config diff plan", "migration apply plan", "plane emit --file request.json",
+                "plane emit-batch --file request.json", "_task-recheck-tick",
+            )
+            patterns = [rule[5:-1] for rule in allow if rule.startswith("Bash(") and rule.endswith(")")]
+            for command in operator_commands:
+                assert not any(fnmatchcase("claudlobby --json " + command, pattern)
+                               for pattern in patterns), command
+            cli_patterns = [p for p in patterns if p.startswith("claudlobby ")]
+            assert not any("--fleet" in p or "--root" in p for p in cli_patterns)
             assert not any("systemctl" in grant or "launchctl" in grant for grant in allow)
             lifecycle = {grant for grant in allow
                          if grant.startswith("Bash(claudlobby --json bot ")
@@ -631,6 +650,7 @@ def test_a_fleet_with_no_requires_composes_exactly_the_declared_grants(fleet_dir
         "Skill(fleet-ops:*)",
         "Bash(gadget-tool *)",
         "Bash(widget-tool *)",
+        "Bash(uuidgen)",
         "Bash(claudlobby --help)",
         "Bash(claudlobby brief --help)",
         "Bash(claudlobby library list --help)",

@@ -24,6 +24,6 @@ Reply in-thread first with "Assigning to <Worker>." so the human sees what's hap
 **Posting proactively (no inbound message to reply to):**
 
 1. MCP tool: `mcp__plugin_telegram_telegram__reply` with `chat_id: <GROUP_CHAT_ID>` and your text.
-2. Bash fallback: `$CLAUDLOBBY_NATIVE_DIR/tg-post.sh "Your message"`.
+2. If the Telegram tool is unavailable, disclose that the human notification was not sent. Record the linked assignment report (or an explicitly unlinked fleet report) so the manager can relay it; do not invoke the private transport helper.
 
 **Mandatory worker post moments:** completion (+ PR link, tag manager), blocked (+ record `assignment block ASSIGNMENT_ID --reason "..." --request-id UUID`, or an unlinked fleet report when no assignment exists), unexpected scope change. Telegram preserves human visibility; the canonical assignment report is the manager's structured record. No acknowledgement post — `assignment accept` records that separately (Worker Lifecycle, Step 2).

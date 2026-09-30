@@ -643,12 +643,14 @@ def test_f11_doctor_healthy_0_quarantine_attention(tmp_path: Path):
     initialize_plane(tmp_path)
     emit(tmp_path, _comm())
     r = _run(["--root", str(tmp_path), "plane", "doctor"])
-    assert r.returncode == 0, r.stdout + r.stderr
+    # No daemon serves this initialized root, so the doctor exits 4 on the
+    # daemon rung (S5a-02); the quarantine rung is what this test pins.
+    assert "[ok] quarantine — 0" in r.stdout, r.stdout + r.stderr
     qname = "ev_" + "d" * 32 + ".json"
     (quarantine_dir(tmp_path) / qname).write_text("{}")
     r = _run(["--root", str(tmp_path), "plane", "doctor"])
     assert r.returncode == 4
-    assert "quarantine" in r.stdout
+    assert "[ATTENTION] quarantine — 1" in r.stdout
 
 
 def test_f11_doctor_flags_broken_capture_config(tmp_path: Path):

@@ -41,10 +41,18 @@ def _context(args):
     except FileNotFoundError as exc:
         raise CommandFailure("not_found", "context source was not found",
                              hint="select --root DATA_ROOT and --fleet FLEET explicitly") from exc
-    except (ValueError, yaml.YAMLError) as exc:
+    except yaml.YAMLError as exc:
+        # The parser's problem and position name no scalar; its snippet could.
+        mark = getattr(exc, "problem_mark", None)
+        where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark is not None else ""
+        raise CommandFailure("conflict", "fleet configuration is not valid YAML",
+                             hint=f"{getattr(exc, 'problem', None) or 'YAML syntax error'}{where}; "
+                                  "fix the selected fleet.yaml") from exc
+    except ValueError as exc:
         # Config errors may quote secret scalar values. Do not forward them.
         raise CommandFailure("conflict", "context selectors or fleet configuration are invalid",
-                             hint="check the explicit root, fleet and local bot declaration") from exc
+                             hint="check the explicit root, fleet and local bot declaration, "
+                                  "including the required fleet.manager") from exc
 
 
 def _release(context):

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..command_result import selection_read_conflict
+
 from dataclasses import asdict
 from datetime import datetime, timezone
 import sqlite3
@@ -98,8 +100,7 @@ def dispatch(args) -> CommandOutput:
             alert_labeled = any(item.field == "alerts" and item.mode == "labeled"
                                 for item in degraded)
         if read_selection(destination.paths.root) != selected:
-            raise CommandFailure("conflict", "active inbox selection changed during read",
-                                 release_id=release_id)
+            raise selection_read_conflict('active inbox selection changed during read', release_id=release_id)
         reports = [report_item(row) for row in page.reports]
         viewer = f"bot:{destination.fleet.name}/{viewer_bot}"
         data = {"fleet": destination.fleet.name, "manager": bindings["manager"],

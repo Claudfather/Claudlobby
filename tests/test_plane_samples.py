@@ -60,6 +60,7 @@ def test_a_window_prints_its_samples_oldest_first_bounds_included(plane: Path) -
     assert lines[0].startswith("host.mem_available_mb (MB) for host probe-host,") and lines[0].endswith(": 3 sample(s)")
     assert lines[1:] == ["  2026-09-29T11:30:06Z  4800", "  2026-09-29T11:40:06Z  900", "  2026-09-29T11:47:06Z  150"]
     edge = _cli(plane, "host.mem_available_mb", "--since", "2026-09-29T11:30:06.5Z", "--until", "2026-09-29T11:30:06.5Z")
+    assert edge.returncode == 0, edge.stderr
     assert edge.stdout.splitlines()[1:] == ["  2026-09-29T11:30:06Z  4800"]
 
 

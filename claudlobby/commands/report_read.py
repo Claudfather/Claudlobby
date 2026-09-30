@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..command_result import selection_read_conflict
+
 import base64
 import binascii
 from datetime import datetime, timezone
@@ -199,8 +201,7 @@ def _read(args) -> CommandOutput:
             items = [_item(row) for row in page]
             lines = tuple(_line(item) for item in items)
         if read_selection(destination.paths.root) != selected:
-            raise CommandFailure("conflict", "active report selection changed during read",
-                                 release_id=release_id)
+            raise selection_read_conflict('active report selection changed during read', release_id=release_id)
         return CommandOutput({"fleet": destination.fleet.name, "viewer": viewer,
                               "viewer_uid": viewer_uid,
                               "items": items, "next_cursor": next_cursor,
