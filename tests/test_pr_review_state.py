@@ -1510,3 +1510,25 @@ class TestOutsideTheHeaderIsReportedNeverRead:
         )
         assert prs.parse_verdict(body) is None
         assert prs.verdict_lines_outside_header(body) == []
+
+
+# clauDNA#118 review, 2026-06-02T02:17:31Z: a real block (Mechanical fixes) on line
+# 145 of 149, with a label INSIDE its bold span, below an earlier bold label that
+# the first-bold drift channel stops at. Only the outside-header report sees it.
+LABEL_INSIDE_THE_SPAN_118 = (
+    "**Writing-skills quality lens** — `skills/forge/SKILL.md` against Anthropic "
+    "official superpowers best practices.\n\n"
+    "Every item below was checked against the file.\n\n"
+    "**Overall verdict: Mechanical fixes.**\n\n"
+    "One required change: trim the description to triggering conditions only."
+)
+
+
+def test_a_block_whose_label_sits_inside_its_span_is_reported_not_silent():
+    """#2029. The word need not lead the span to be REPORTED (a detector may be
+    loose); it must lead to be READ (a classifier must be tight)."""
+    assert prs.parse_verdict(LABEL_INSIDE_THE_SPAN_118) is None
+    assert prs.first_bold(LABEL_INSIDE_THE_SPAN_118) == "**Writing-skills quality lens**"
+    result = prs.assess_pr(_payload([("reviews", "2026-06-02T02:17:31Z", LABEL_INSIDE_THE_SPAN_118)]))
+    assert "**Overall verdict: Mechanical fixes.**" in result["unparsed_headers"]
+    assert prs.UNPARSED in result["flags"]

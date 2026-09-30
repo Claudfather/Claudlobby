@@ -535,10 +535,14 @@ def _header_verdict(body: str):
     return None
 
 
-#: A line outside the header that OPENS with a verdict, after at most a heading
-#: marker or a short ``Label:`` (#2029). Never counted as the comment's verdict;
-#: reported verbatim as drift, so a block written below the header, or under a
-#: labelled heading, reaches a human instead of vanishing.
+#: A line outside the header whose OPENING bold span holds a verdict word, after
+#: at most a heading marker or a short ``Label:`` (#2029). Never counted as the
+#: comment's verdict; reported verbatim as drift, so a block written below the
+#: header, or under a labelled heading, reaches a human instead of vanishing.
+#: Looser than the header rule on purpose (a detector may be loose, a classifier
+#: must be tight): the word need not lead the span, because real blocks put a
+#: label inside it (``**Merge-gate verdict: Request Changes.**``,
+#: ``**Overall verdict: Mechanical fixes.**``, measured on the corpus).
 _LINE_LABEL = re.compile(r"(?:#{1,6}\s+)?(?:[^*\n:>`|]{1,32}:\s*)?")
 _FENCE = re.compile(r"(`{3,}|~{3,})")
 
@@ -562,7 +566,7 @@ def verdict_lines_outside_header(body: str) -> list[str]:
         if fence or stripped.startswith((">", "|")):
             continue
         label = _LINE_LABEL.match(stripped)
-        if _opens_with_verdict(stripped[label.end():] if label else stripped):
+        if VERDICT_HEADER.match(stripped[label.end():] if label else stripped):
             found.append(stripped[:100])
     return found
 
