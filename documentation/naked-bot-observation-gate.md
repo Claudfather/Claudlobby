@@ -389,3 +389,9 @@ work around — comparing a report to one that lacks fields it has would
 silently under-report drift rather than name it. Diff future admissions
 against the `-09-18` file; the two SCHEMA 2 files stay readable as the
 pre-role-overlay historical record.
+
+**`documentation/baselines/naked-bot-2026-09-30.json` records the `manager` role's
+`status` skill default (#2010).** Against an observation of `main` just before
+it, the drift is two lines, both in the `shape:leaf-manager` arm: the manager
+gains `.claude/skills/status` and the skill's grants. Every other arm composes
+one non-manager bot and is unchanged. Diff later admissions against this file.
