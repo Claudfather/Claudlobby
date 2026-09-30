@@ -6,6 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — `claudlobby plane samples`: one metric family for one subject over a window, read-only (#1644)
+
+The host probe records `host.load`, `host.mem_available_mb` and the other `host.*` facets every minute, but nothing read a window of them back. After a reset, the load and memory trajectory into it could only be read by opening the plane db by hand. `claudlobby plane samples <metric> [--subject ALIAS] [--kind KIND] [--since W] [--until W] [--json]` prints one family for one subject over a window, as text or JSON. In text, `host.load`'s one, five and fifteen print as pairs. The subject defaults to the only one of its kind, which on a host's own plane is the host.
+
+- **Read-only by construction, and the plane is released before anything prints.** It opens through `open_ro` (`mode=ro` plus `query_only`) and never runs `migrate()`. It fetches every row and closes the connection before the first line prints, a refusal included, so it never holds a snapshot that keeps the daemon's checkpoint from resetting the WAL (#1905, #1912). A test fails if anything prints to either stream while the connection is open, after a failed read as well as a good one.
+- **The window compares times, not text.** Ingest keeps the offset an emitter gave: a `-04:00` instant is stored as `-04:00`. A text compare against UTC bounds would drop in-window samples, so the query goes through `julianday()`, and a mixed-offset test pins that.
+- **Refusals name the fix, and a refusal is never read as an answer.** An unknown family lists the known ones, an unknown subject lists the recorded ones, and two subjects of one kind with no `--subject` names both. A window bound that does not parse is refused at rc 2, an empty one included, so `--since "$UNSET"` is not read as now. An unreachable plane refuses at rc 3 and creates nothing, and so does a plane that records no subject of the kind, because a wrong root is not an empty window. Every refusal goes to stderr and leaves stdout empty, `--json` included. An empty window is an answer (rc 0).
+- `plane.identity` gains `lookup()`, the read half of `resolve()`, which now calls it: a read door must not mint an identity.
+
+### Fixed — `setup-fleet` stops filing a critical `script_error` every night on a fleet with no briefing timers (#1707)
+
+`reconcile_briefing_timers` lists the fleet's enrolled briefing timers with
+`systemctl --user list-unit-files`, which exits 1 when its pattern matches
+nothing. On a fleet with no briefing timers, that exit fired the errtrace ERR
+trap inside the process substitution, so the nightly `setup-fleet --jobs-only`
+filed a critical `script_error` at the function's first line. The function and
+the script both carried on correctly. It fired 6 nights of 7 on each of the two
+fleets with no briefing timers, in the week to 2026-09-29.
+
+- **The fix.** The guard moved inside the substitution:
+  `… | awk '{print $1}' || true)`. A guard outside cannot help, because the trap
+  fires in the substitution's own shell. An empty listing means nothing to
+  reconcile, so a real listing failure swallowed with it fails toward doing
+  nothing.
+- **The test harness now matches systemd.** The stub `systemctl` in
+  `tests/test_setup_backbone.py` exited 0 when a pattern matched nothing, which
+  is why no test saw this. It now exits 1 with no output, as systemd 252 does
+  (measured on the Pi). The harness also records every batch that reaches the
+  plane shim, so a test can assert what was filed.
+- **Tests.** `TestBriefingReconcileErrTrap` checks that the no-match case files
+  no row under the real `install_error_trap`. Its positive control checks that a
+  real failure in the same function (an orphan unit file that cannot be removed)
+  still files one.
+- **Not covered.** The class-level pass over `lib/` and its regression gate stay
+  with #1707.
+
 ### Fixed — every bot is told what a dispatch's leading `set +H; ` is, and the dispatch protocol stops describing something it does not do
 
 `lib/dispatch.sh` puts `set +H; ` in front of every message except one that starts with a command word and has no `!`. Receivers flagged it as unexplained text at the head of their task. The one explanation lived in the dispatch protocol, which only managers compose, and the worker-lifecycle protocol, which is declared by only a few bots, did not mention it. The pasted-text section every bot composes (`templates/claude.md.j2`) now says what the prefix is and that there is nothing to run, and worker-lifecycle's RECEIVE step says the same beside the receipt-marker line. `tests/test_framed_dispatch_guidance.py` pins it for every composed bot; it fails on the previous template.
