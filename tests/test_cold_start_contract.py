@@ -242,6 +242,14 @@ class TestTheInstallStepSaysHowLongItTakes:
         assert (min(runs), max(runs)) == (int(m.group(1)), int(m.group(2))), (m.group(0), runs)
 
     @pytest.mark.parametrize("doc", [README, GETTING_STARTED], ids=lambda p: p.name)
+    def test_the_range_names_the_one_host_it_was_measured_on(self, doc: Path):
+        # Without these two phrases the range reads as the install time on every host,
+        # which is the slow-or-stopped misreading #1681 is about.
+        section = self._joined(doc)
+        assert "On one Raspberry Pi 5, whose pip config adds piwheels," in section
+        assert "Other hosts are unmeasured." in section
+
+    @pytest.mark.parametrize("doc", [README, GETTING_STARTED], ids=lambda p: p.name)
     def test_the_stopped_run_is_stated_as_a_floor(self, doc: Path):
         assert "was stopped after 8 minutes, and the cause was not recorded" in self._joined(doc)
 
