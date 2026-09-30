@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — task re-check routes a person's stale rows to Telegram, and leaves their standing goals alone (#2011)
+
+`claudlobby task recheck` re-checked every open row past a deadline by pushing a message into the assignee's manager's tmux pane. But a row a *person* assigned is minted `bot:<fleet>/operator` by `dispatch-task.sh` (which names its sender from whoever ran it), and a person has no pane — so one such row (`t-1789966048-473b`, which carries no deadline) was re-checked every 6 hours, forever, into a pane nobody has. The assigner's kind is now read from the plane's own registry (`plane-readers.composed_bot_aliases`: a `bot:` alias is a bot only when `generate` composed a `bot_instance` for it), never inferred from "no tmux session". A person's rows go to the fleet's Telegram through `resolve_alert_target`'s (chat, sender) pair with their own delivery evidence — a `carrier_accepted` transmission, which `RECHECKED_SQL` now counts as landed beside the pane route's `pane_submitted` — so the repeat-window debounce holds on the non-tmux route too. A person's stale row past its deadline is chased once per window and no oftener; a person's row with **no** deadline is a standing goal — disclosed in the run, not re-checked; and a recipient who cannot be reached is named and fails the run, never a silent drop. Verified on this host's plane (read-only snapshot): the motivating row now classifies as a standing goal and is not sent.
+
 ### Fixed — `/setup` asks `bridge_state` about claudfather's own session (#1536)
 
 **The old guidance could read `up` for a bridge that was going dark.** Step 5 told first-run operators to trust `bridge_state runtime/bots/claudfather` over the log. Without a session pid, that answers whether *a* poller holds the bot's Telegram slot, and during a restart the outgoing session's poller still does (#1530).
