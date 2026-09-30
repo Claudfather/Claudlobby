@@ -14,19 +14,20 @@ A PreToolUse hook, `lib/public-write-guard.sh` (with its decider `lib/public-wri
 - **What it reads is what the write puts in the repository:**
   - every `mcp__github__*` tool except `get_`/`list_`/`search_`;
   - the `gh` issue, pr, release, gist, repo and label commands except their reads, and `gh api` with fields (not a GET, not a GraphQL query), including body files and standard input;
-  - `git commit`: messages and added lines;
-  - `git push`: the messages, added lines and new paths of every outgoing commit.
+  - `git commit`: messages, added lines, and the new files an earlier `git add` in the same command names;
+  - `git push`: the messages, added lines and new paths of every outgoing commit, and of any commit made earlier in the same command, which does not exist yet when the guard runs.
 
-  It does not read removed lines, a `cd` directory, a body file's path or the target's name, so a clean-up commit passes and so does a clean write made from a path that contains a term.
-- **Public is read live, only on a hit:** `gh api repos/OWNER/REPO`, cached for 10 minutes. An unknown answer is never cached.
+  It reads the command as the shell does: a backslash-newline continues the line, a GitHub issue or PR URL names the target, `env NAME=value` and `NAME=value` set what the command sees, and the commands inside a command substitution are read. It does not read removed lines, a `cd` directory, a body file's path or the target's name, so a clean-up commit passes and so does a clean write made from a path that contains a term.
+- **Public is read live, only on a hit:** `gh api repos/OWNER/REPO`, cached for 10 minutes. A REST call that fails fast is asked again over GraphQL (`gh repo view`), since a REST throttle leaves GraphQL working. When both fail, an answer cached up to a day ago stands in. An unknown answer is never cached, and a cache stamp from the future is not trusted.
 - **Failure directions:**
   - no list: allow, plus a critical `public_write_guard_unarmed` event;
-  - a list that does not compile: refuse every guarded write;
+  - a broken list (a line that does not compile, or one that can match an empty string, so every write would be a hit): refuse every guarded write, naming the line and column, never its text;
   - a payload that is not JSON: allow, with a `script_error` breadcrumb;
   - a hit whose repository or visibility is unknown: refuse;
-  - content it cannot read (a missing body file, a program's output used as a body, a git command run from a directory it cannot name): counts as a hit.
-- **Its ceiling:** it does not follow `eval`, functions, backticks or scripts, and it does not read an annotated tag's own message. It keeps accidents out; it is not a boundary against a caller trying to get past it.
-- **Off switch:** `state/public-write-guard/disabled`, host-wide. `python3 lib/public-write-guard.py --check` says whether a host's list is armed without printing a term.
+  - content it cannot read counts as a hit: a missing body file, a program's output piped or substituted into the write (`$(...)` or backticks, except `cat` of a file or of a heredoc), a git command run from a directory it cannot name.
+- **Its events name the bot**, the refusal, the no-list alarm and the fail-open breadcrumb alike, so `claudlobby events --bot <bot>` and the bot's brief see them.
+- **Its ceiling:** it does not follow `eval`, functions, aliases or scripts, and it does not read an annotated tag's own message. Three writes publish content that is not a word of the command, and are not read: `gh pr create --fill` (its title and body come from commits already pushed), `gh repo create --source --push` (the local history), and the asset files of `gh release create` and `upload`. It keeps accidents out; it is not a boundary against a caller trying to get past it.
+- **Off switch:** `state/public-write-guard/disabled`, host-wide. `python3 lib/public-write-guard.py --check` says whether a host's guard is armed, the list and the off switch, without printing a term.
 - **Opt-in:** registered in the switch registry as opt-in for the `heavy_slot` reason. A composed hook has no deployment gate (#1310), so the manifest key is where one bot goes first.
 - **Tests:** `tests/test_public_write_guard.py` drives the real hook with a fake `gh` and real git repositories, in both directions for each shape; `tests/test_public_write_guard_compose.py` covers the composition.
 

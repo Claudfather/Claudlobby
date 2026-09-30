@@ -557,27 +557,27 @@ bots:
 - **What it reads is what the write puts in the repository:**
   - an `mcp__github__*` tool that is not a read (`get_`, `list_`, `search_`): every string in its input except `owner` and `repo`;
   - a `gh` command in the issue, pr, release, gist, repo or label group that is not a read (`view`, `list`, `status`, `diff`, `checks`, `checkout`, `download`, `clone`, `browse`): its own words, the files it names as a body, and its standard input. `gh api` counts when it sends fields, unless it is a GET or a GraphQL query;
-  - `git commit`: its messages, and the lines and new paths it adds;
-  - `git push`: the messages, added lines and new paths of every commit it would send. For git this is the complete check, since a commit publishes nothing until it is pushed.
+  - `git commit`: its messages, the lines and new paths it adds, and the new files an earlier `git add` in the same command names;
+  - `git push`: the messages, added lines and new paths of every commit it would send, and of any commit made earlier in the same command, which does not exist yet when the guard runs. For git this is the complete check, since a commit publishes nothing until it is pushed.
 
-  It does not read a directory named by `cd`, a body file's path, or the target repository's name, so a clean write made from a path that contains a term passes. It does not read removed lines either, so a commit that takes a term out passes.
-- **Public means public at write time.** Only a hit asks where the write goes, so a write with no hit makes no call. The repository's visibility is read live (`gh api repos/OWNER/REPO`) and cached for 10 minutes in `state/public-write-guard/visibility.json`, so a repository made public is seen as public within 10 minutes. An unknown answer is never cached.
-- **It refuses with a reason and never rewrites.** The reason names the repository, its visibility and which part matched (the command, a body file, the staged changes, the commits to push), never the matched text.
+  It reads the command as the shell does: a backslash-newline continues the line, a GitHub issue or PR URL names the target, `env NAME=value` and `NAME=value` set what the command sees, and the commands inside a command substitution are read. It does not read a directory named by `cd`, a body file's path, or the target repository's name, so a clean write made from a path that contains a term passes. It does not read removed lines either, so a commit that takes a term out passes.
+- **Public means public at write time.** Only a hit asks where the write goes, so a write with no hit makes no call. The repository's visibility is read live (`gh api repos/OWNER/REPO`) and cached for 10 minutes in `state/public-write-guard/visibility.json`, so a repository made public is seen as public within 10 minutes. A REST call that fails fast is asked again over GraphQL (`gh repo view`), since a REST throttle leaves GraphQL working; when both fail, an answer cached up to a day ago stands in. An unknown answer is never cached, and a cache stamp from the future is not trusted.
+- **It refuses with a reason and never rewrites.** The reason names the repository, its visibility and which part matched (the command, a body file, the staged changes, the commits to push), never the matched text. Its events name the bot, so `claudlobby events --bot <bot> --type public_write_refused` and the bot's brief see them.
 - **Failure directions**, each chosen on purpose:
 
   | case | what happens |
   |---|---|
   | no list file | allow, and a critical `public_write_guard_unarmed` event in `claudlobby events` (it does not page) |
-  | a list that does not compile | refuse every guarded write, naming the error |
+  | a broken list: a line that does not compile, or one that can match an empty string (every write would be a hit) | refuse every guarded write, naming the line and column, never its text |
   | a payload that is not JSON | allow, with a `script_error` breadcrumb |
   | a hit whose repository cannot be named, or whose visibility cannot be read | refuse, saying which |
-  | content it cannot read: a missing body file, a program's output used as a body, a git command run from a directory it cannot name (a command substitution) | counts as a hit |
+  | content it cannot read: a missing body file, a program's output piped or substituted into the write (`$(...)` or backticks, except `cat` of a file or of a heredoc), a git command run from a directory it cannot name | counts as a hit |
   | a remote that is not github.com, or a repository with no remote | out of scope, allowed |
 
-- **Its ceiling.** It reads the shell as people write it. `eval`, a shell function, backticks, and a script file that runs `git` or `gh` are not followed, and an annotated tag's own message is not read. It keeps accidents out of public repositories; it is not a boundary against a caller trying to get past it.
-- **The off switch**, host-wide and instant: `touch $CLAUDLOBBY_ROOT/state/public-write-guard/disabled`.
+- **Its ceiling.** It reads the shell as people write it. `eval`, a shell function, an alias, and a script file that runs `git` or `gh` are not followed, and an annotated tag's own message is not read. Three writes publish content that is not a word of the command, and are not read: `gh pr create --fill` (its title and body come from commits already pushed), `gh repo create --source --push` (the local history), and the asset files of `gh release create` and `upload`. It keeps accidents out of public repositories; it is not a boundary against a caller trying to get past it.
+- **The off switch**, host-wide and instant: `touch $CLAUDLOBBY_ROOT/state/public-write-guard/disabled`. It passes every call and records nothing, so `--check` names it.
 
-To arm one bot, write the host's list and check it with `python3 $CLAUDLOBBY_ROOT/lib/public-write-guard.py --check` (it prints `ok` and the pattern count, never a term). Then set the key and run `claudlobby --fleet <fleet> generate --bot <bot>`. The hook binds on that bot's next tool call.
+To arm one bot, write the host's list and check it with `python3 $CLAUDLOBBY_ROOT/lib/public-write-guard.py --check` (it prints `ok` and the pattern count, never a term, and says so when the off switch is set). Then set the key and run `claudlobby --fleet <fleet> generate --bot <bot>`. The hook binds on that bot's next tool call.
 
 ### `bots.<name>.mcp_direct_launch` / `fleet.defaults.mcp_direct_launch`
 
