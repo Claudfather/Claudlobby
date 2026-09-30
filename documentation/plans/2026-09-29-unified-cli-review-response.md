@@ -131,7 +131,7 @@ The #1989 review covers `cffa258a`: **199 findings, comprising 190 inline commen
 
 **Read from code:** [S9-09 / S6-31](https://github.com/Claudfather/Claudlobby/pull/1989#discussion_r4137380765) is partial: the breaking changelog and pre-pull conversion warning now ship and are linked from onboarding, but a verified populated-host conversion/recovery runbook still depends on the remaining activation work.
 
-**Read from code:** S2-02/S5a-03 remains open: a staged receiver receipt during daemon outage must be distinguished from missing delivery. S2-06 also remains open: the configured assignment deadline must reach the canonical assignment owner without changing the frozen request on replay. These are corrections to existing semantics, not new migration machinery.
+**At the third-batch checkpoint:** S2-02/S5a-03 (staged receiver receipts) and S2-06 (configured assignment deadlines) remained open. The September 30 correction batch below implements those corrections without adding migration machinery.
 
 ## Remaining epic scope
 
@@ -142,3 +142,18 @@ The #1989 review covers `cffa258a`: **199 findings, comprising 190 inline commen
 - Close command/coaching/permission coverage gaps, including the planned `fleet checkin` route ([S1-32](https://github.com/Claudfather/Claudlobby/pull/1989#discussion_r4137292041)), broad legacy grants and remaining retired recipes. Complete outside-user cold onboarding and the existing-host conversion runbook.
 - Establish current-head CI and external review, then repeat the affected real canary operations with narrow grants and retained task/session data. Demonstrate user-systemd adoption and normal-load Pi timing; Mac/stub evidence cannot substitute.
 - Adopt the validated release on the remaining production fleets with existing restart holds respected, sample real CLI use, and remove superseded runtime artifacts and development scratch after successful adoption. No live rollout is performed by this review task.
+
+
+## September 30 delegated implementation
+
+A separate Claude implementation session addressed the accepted findings from the bounded follow-up reviews. The parent reviewed its complete diff, requested one focused correction pass, and validated the final source in a private test environment. The earlier #1985 findings were not duplicated; their fixes remain in this aggregate.
+
+| Finding | Disposition | Change and evidence boundary |
+|---|---|---|
+| [S3b-01 / S9-04](https://github.com/Claudfather/Claudlobby/pull/1989#discussion_r4137307896) | expanded recovery in code; runtime acceptance open | Same-ID resume now re-enters interrupted running-estate producer pause, session handoff/quiesce and ingest pause through the existing journal owners. Per-bot handoff intent and result are persisted before/after the effect; a recorded handoff is not repeated. An unknown handoff result still refuses. Existing tests exercise five interruption cases, including the refusal; real systemd/launchd recovery remains unverified. |
+| S2-02 / S5a-03; [S2-07](https://github.com/Claudfather/Claudlobby/pull/1989#discussion_r4137294170) | fixed in code; live outage acceptance open | Receipt reads distinguish staged/spooled proof and unavailable daemon/queue observations from missing delivery, using the existing public unavailable result and exit 6. Committed positive proof wins. Explicit uncertain retries refuse pending or unavailable evidence; unrelated work with healthy ingest and first ordinary degraded sends retain their behavior. The receiving hook distinguishes durable pending from failed recording. Existing tests exercise staged proof, the real spool writer, malformed/FIFO entries, daemon outage and retry refusal. No automatic resend or queue mutation was added. |
+| [S2-06](https://github.com/Claudfather/Claudlobby/pull/1989#discussion_r4137294156) | fixed in code | The configured manager assignment deadline reaches the canonical owner. One optional field in the existing request receipt freezes the resolved deadline for replay; zero remains open-ended. This carries the already validated deadline commit rather than rebuilding it. |
+
+The final delegated patch passed **159 focused tests in 86.26 seconds** across activation, activation-state/units, message queries/operations/read/write CLI, receiver-hook and host-command modules. The assignment deadline previously passed **47 focused tests** across task operations/write CLI and request receipts; counts are reported separately. Bash syntax and diff whitespace checks passed. A first run hit the macOS Unix-socket path-length limit in 30 cases; the rerun used a short explicit pytest base directory, with no assertions disabled. No full suite was repeated locally.
+
+Current-head hosted CI and external review remain required. Old installed source-puller holds, real Linux/Pi adoption and timing, interrupted native recovery, narrow-grant proof and protected production adoption are not established by these tests. The rest of the original review queue is unchanged; this is not a claim that all 199 findings are resolved.

@@ -444,6 +444,82 @@ def _startable_producers(entries):
                   if Path(entry["installed"]).name not in timer_services), timer_services)
 
 
+def _quiesce_running(root, store, activation_id, pause, old_units, adapter):
+    """Run or resume the running-estate pause steps under one owner.
+
+    Parking resumes through its ConfigInstall journal and the native pause
+    converges on the frozen original state. A handoff injects into a live
+    session, so each bot's intent is recorded first: a recorded result is never
+    repeated and an intent without one refuses. A private server is stopped
+    only while still observed and witnessed live at handoff.
+    """
+    completed = read_activation(root, activation_id).body["completed"]
+    old_bots = {unit.target: unit for unit in old_units
+                if unit.installed and unit.declaration.scope == "bot"}
+    if "producers_paused" not in completed:
+        store.begin(activation_id, "producers_paused")
+        evidence = units.pause_phase(store, activation_id, "producers", adapter=adapter)
+        _legacy_quiet(adapter, pause, "producers", {})
+        store.complete(activation_id, "producers_paused", evidence_digest=evidence.digest)
+    sockets = {target: _legacy_bot_socket(unit, require_for_active=False)[0]
+               for target, unit in old_bots.items()}
+    if "sessions_handed_off" not in completed:
+        if read_activation(root, activation_id).body["pending"] is None:
+            store.arm_handoff_evidence(activation_id)
+        store.begin(activation_id, "sessions_handed_off")
+        effects = read_activation(root, activation_id).body.get("handoff_effects")
+        if not isinstance(effects, dict) or None in effects.values():
+            raise ActivationError("legacy bot handoff has an unknown effect; inspect its session before repair")
+        for target, unit in old_bots.items():
+            if target in effects:
+                continue  # Recorded before interruption; never inject twice.
+            _, present = _legacy_bot_socket(unit)
+            if not present:
+                store.record_handoff(activation_id, target=target, result="server_absent")
+                continue
+            store.record_handoff(activation_id, target=target, result=None)
+            if adapter.call("svc_activation_handoff", unit.declaration.working_directory,
+                            unit.declaration.source.stem, _original_bot_tmpdir(unit),
+                            timeout=45).returncode:
+                raise ActivationError("legacy bot handoff did not complete")
+            store.record_handoff(activation_id, target=target, result="handed_off")
+        store.complete(activation_id, "sessions_handed_off", evidence_digest=_digest(
+            {"old_bots": sorted(sockets), "handoff": "existing-door-attempted-or-private-server-absent"}))
+    if "sessions_quiesced" not in completed:
+        store.begin(activation_id, "sessions_quiesced")
+        # An older record has no witness; any server it left running refuses.
+        effects = read_activation(root, activation_id).body.get("handoff_effects") or {}
+        live_sockets = {target for target, result in effects.items() if result == "handed_off"}
+        evidence = units.pause_phase(store, activation_id, "bots", adapter=adapter)
+        for unit in pause.units("bots"):
+            socket_path = sockets.get(unit["target"])
+            original = old_bots.get(unit["target"])
+            if socket_path is None or original is None:
+                raise ActivationError("parked bot has no retained private-server observation")
+            observed_path, still_present = _legacy_bot_socket(
+                original, require_for_active=False)
+            if observed_path != socket_path or (still_present and unit["target"] not in live_sockets):
+                raise ActivationError("unexpected private bot server after native pause")
+            if still_present:
+                declaration = unit["declaration"]
+                response = adapter.call("svc_activation_stop_private_server",
+                                        declaration["working_directory"],
+                                        Path(declaration["source"]).stem,
+                                        _original_bot_tmpdir(original))
+                if response.returncode:
+                    raise ActivationError("legacy private bot server did not stop")
+        _legacy_quiet(adapter, pause, "bots", sockets)
+        store.complete(activation_id, "sessions_quiesced", evidence_digest=evidence.digest)
+    if "ingest_quiesced" not in completed:
+        store.begin(activation_id, "ingest_quiesced")
+        evidence = units.pause_phase(store, activation_id, "ingest", adapter=adapter)
+        _legacy_quiet(adapter, pause, "ingest", {})
+        if _probe(root) is not None:
+            raise ActivationError("old ingest still answers after native pause")
+        store.complete(activation_id, "ingest_quiesced", evidence_digest=evidence.digest)
+    return sockets
+
+
 def _running_activation(root: Path, activation_id: str, plan_id: str,
                         install_directory: Path, *, legacy_source: bool,
                         adapter: Adapter | None = None) -> ActivationRecord:
@@ -547,8 +623,9 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
                               if unit.installed and unit.target not in candidate_targets)
         rank, contexts = _roster(plan, candidates, package)
         phases = _legacy_phase_membership(plan, inventory, source_plan)
-        tmpdirs = {unit.target: _original_bot_tmpdir(unit) for unit in inventory.units
-                   if unit.installed and unit.declaration.scope == "bot"}
+        for unit in inventory.units:
+            if unit.installed and unit.declaration.scope == "bot":
+                _original_bot_tmpdir(unit)  # Refuse an unknown private server before any record.
         for unit in inventory.units:
             if unit.installed and adapter.call("svc_activation_assert_external",
                     unit.installed[0].path, unit.target, str(os.getpid())).returncode:
@@ -559,56 +636,7 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
                       enrollment_digest=inventory.digest, legacy_source=legacy_source,
                       install_directory=install_directory)
         pause = _prepare_no_effect_journals(store, activation_id, plan, inventory, phases, adapter)
-        store.begin(activation_id, "producers_paused")
-        evidence = units.pause_phase(store, activation_id, "producers", adapter=adapter)
-        _legacy_quiet(adapter, pause, "producers", {})
-        store.complete(activation_id, "producers_paused", evidence_digest=evidence.digest)
-        store.begin(activation_id, "sessions_handed_off")
-        sockets = {}
-        live_sockets = set()
-        for unit in inventory.units:
-            if not unit.installed or unit.declaration.scope != "bot":
-                continue
-            socket_path, present = _legacy_bot_socket(unit)
-            sockets[unit.target] = socket_path
-            if present:
-                live_sockets.add(unit.target)
-            if present and adapter.call("svc_activation_handoff",
-                                        unit.declaration.working_directory,
-                                        unit.declaration.source.stem,
-                                        tmpdirs[unit.target], timeout=45).returncode:
-                raise ActivationError("legacy bot handoff did not complete")
-        store.complete(activation_id, "sessions_handed_off", evidence_digest=_digest(
-            {"old_bots": sorted(sockets), "handoff": "existing-door-attempted-or-private-server-absent"}))
-        store.begin(activation_id, "sessions_quiesced")
-        evidence = units.pause_phase(store, activation_id, "bots", adapter=adapter)
-        old_bots = {unit.target: unit for unit in inventory.units
-                    if unit.installed and unit.declaration.scope == "bot"}
-        for unit in pause.units("bots"):
-            socket_path = sockets.get(unit["target"])
-            original = old_bots.get(unit["target"])
-            if socket_path is None or original is None:
-                raise ActivationError("parked bot has no retained private-server observation")
-            observed_path, still_present = _legacy_bot_socket(
-                original, require_for_active=False)
-            if observed_path != socket_path or (still_present and unit["target"] not in live_sockets):
-                raise ActivationError("unexpected private bot server after native pause")
-            if still_present:
-                declaration = unit["declaration"]
-                response = adapter.call("svc_activation_stop_private_server",
-                                        declaration["working_directory"],
-                                        Path(declaration["source"]).stem,
-                                        tmpdirs[unit["target"]])
-                if response.returncode:
-                    raise ActivationError("legacy private bot server did not stop")
-        _legacy_quiet(adapter, pause, "bots", sockets)
-        store.complete(activation_id, "sessions_quiesced", evidence_digest=evidence.digest)
-        store.begin(activation_id, "ingest_quiesced")
-        evidence = units.pause_phase(store, activation_id, "ingest", adapter=adapter)
-        _legacy_quiet(adapter, pause, "ingest", {})
-        if _probe(root) is not None:
-            raise ActivationError("old ingest still answers after native pause")
-        store.complete(activation_id, "ingest_quiesced", evidence_digest=evidence.digest)
+        sockets = _quiesce_running(root, store, activation_id, pause, inventory.units, adapter)
         return _finish_running_activation(
             root, store, activation_id, plan, release, source, source_plan,
             inventory.units, candidates, starts, rank, contexts, retired_units, sockets,
@@ -812,6 +840,7 @@ _RESUMABLE_RUNNING_STEPS = frozenset({
 _RESUMABLE_START_STEPS = frozenset({"ingest_started", "bots_started", "verified", "producers_resumed"})
 _BOOTSTRAP_EMPTY_STEPS = frozenset({"producers_paused", "sessions_handed_off",
                                     "sessions_quiesced", "ingest_quiesced"})
+_RUNNING_QUIESCE_STEPS = _BOOTSTRAP_EMPTY_STEPS
 
 
 def resumable_running_step(record: ActivationRecord) -> str | None:
@@ -825,6 +854,12 @@ def resumable_running_step(record: ActivationRecord) -> str | None:
     bootstrap = (record.body["previous_selection"] is None
                  and record.body["intent"].get("source_kind") != "legacy-unsealed")
     supported = step in _RESUMABLE_RUNNING_STEPS or bootstrap and step in _BOOTSTRAP_EMPTY_STEPS
+    if not bootstrap and step in _RUNNING_QUIESCE_STEPS:
+        # Parking and native pause converge; a begun handoff needs a per-bot
+        # witness with no unknown intent, or it stays refused for inspection.
+        effects = record.body.get("handoff_effects")
+        supported = (step != "sessions_handed_off" or record.body["pending"] is None
+                     or isinstance(effects, dict) and None not in effects.values())
     if step in _RESUMABLE_START_STEPS:
         supported = (isinstance(record.body.get("start_effects"), dict)
                      and isinstance(record.body.get("start_phases"), dict))
@@ -935,6 +970,8 @@ def resume_activation(root: Path, activation_id: str, plan_id: str,
                     raise ActivationError("candidate start intent differs from frozen plan target")
                 candidate_started.add(effect["target"])
         old_units = tuple(_frozen_unit(row) for row in frozen["units"])
+        if not bootstrap and step in _RUNNING_QUIESCE_STEPS:
+            _quiesce_running(root, store, activation_id, pause, old_units, adapter)
         sockets = {}
         for unit in old_units:
             if unit.installed and unit.declaration.scope == "bot":

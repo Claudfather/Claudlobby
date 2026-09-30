@@ -19,6 +19,7 @@ from uuid import UUID
 from .message_context import MessageRoute
 from .message_payload import (MessageBody, encode_communication, encode_transmission,
                               native_message_envelope, native_unlinked_report_envelope)
+from .message_queries import pending_transmission_proof
 from .message_transport import TransportOutcome, send as native_send
 from .plane.db import connect_ro, db_file
 from .plane.emit_api import _load_capture_config, emit_batch, validate_item
@@ -172,7 +173,12 @@ def _retry_has_no_submission_proof(root: Path, route: MessageRoute,
     there is no expected projection with which to reconcile it. Unavailable
     proof never permits a retry. Recorded unknown/failed outcomes alone do not
     establish submission, so an explicit uncertain retry can still proceed.
+    Proof for this message still awaiting ingest, queues that cannot be
+    inspected, or a dead daemon behind the staged handshake forbid it too;
+    unrelated queued work beside a live daemon does not.
     """
+    if pending_transmission_proof(root, message_id) != "absent":
+        return False
     with _reader(root, route) as conn:
         if conn is None:
             return False

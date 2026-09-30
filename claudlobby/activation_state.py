@@ -228,7 +228,7 @@ class ActivationStore:
         body = {"schema": 1, "activation_id": activation_id, "root": str(self.root),
                 "intent": intent, "previous_selection": previous, "status": "prepared",
                 "completed": [], "pending": None, "evidence": {}, "start_effects": {},
-                "start_phases": {}}
+                "start_phases": {}, "handoff_effects": {}}
         path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         _sync(path.parent.parent)
         return self._save(ActivationRecord(activation_id, self.root, body))
@@ -314,6 +314,34 @@ class ActivationStore:
             raise ActivationError("native bot start lacks exact readiness fence")
         record.body["start_effects"][source] = {"phase": phase, "target": target,
             "sha256": sha256, "fence": fence, "result": None}
+        return self._save(record)
+
+    def arm_handoff_evidence(self, activation_id: str) -> ActivationRecord:
+        """Upgrade an older record before its first session handoff begins."""
+        self.assert_locked()
+        record = read_activation(self.root, activation_id)
+        if (record.status != "activating" or record.body["pending"] is not None
+                or record.body["completed"] != ["producers_paused"]):
+            raise ActivationError("handoff evidence must be armed before session handoff")
+        if "handoff_effects" not in record.body:
+            record.body["handoff_effects"] = {}
+            return self._save(record)
+        if record.body["handoff_effects"] != {}:
+            raise ActivationError("session handoff evidence is inconsistent")
+        return record
+
+    def record_handoff(self, activation_id: str, *, target: str, result: str | None) -> ActivationRecord:
+        """Fence one old bot's handoff; an intent without a result is unknown."""
+        self.assert_locked()
+        record = read_activation(self.root, activation_id)
+        effects = record.body.get("handoff_effects")
+        prior = effects.get(target, "missing") if isinstance(effects, dict) else "invalid"
+        admitted = (prior == "missing" if result in (None, "server_absent") else
+                    prior is None if result == "handed_off" else False)
+        if (record.status != "activating" or record.body["pending"] != "sessions_handed_off"
+                or not target or not admitted):
+            raise ActivationError("session handoff evidence is not the admitted effect")
+        effects[target] = result
         return self._save(record)
 
     def record_start_phase(self, activation_id: str, *, phase: str,

@@ -302,6 +302,90 @@ def test_running_resume_reconciles_receipted_candidate_instead_of_old_bot(enroll
     assert adapter.calls == calls_before  # No native start or handoff replay.
 
 
+@pytest.mark.parametrize("interrupt", ["producers", "handoff", "sessions", "ingest", "unknown"])
+def test_running_resume_before_selection_reparks_without_repeating_handoff(enrollment, monkeypatch, interrupt):
+    inventory, phases, plan, adapter, _, _ = enrollment
+    root = inventory.data_root
+    directory = Path(inventory.catalog.split("directory\t", 1)[1].splitlines()[0])
+    release = state.read_release(root, plan.release_id)
+    package = type("Package", (), {"native": release.native_path,
+                                    "artifact_id": release.inputs.artifact_id})()
+    adapter.package = package
+    monkeypatch.setattr(activation, "get_resources", lambda: package)
+    monkeypatch.setattr(activation.RuntimeIdentity, "current", classmethod(lambda cls:
+        activation.RuntimeIdentity(release.cli_path, release.native_path, release.inputs.artifact_id)))
+    monkeypatch.setattr(activation.sys, "executable", str(release.directory / release.paths.interpreter))
+    # One old bot's exact private server; only the native stop owner ends it.
+    live = {"member.service": True}
+    recorded = adapter.call
+
+    def call(function, *args, timeout=30):
+        if function not in ("svc_activation_handoff", "svc_activation_stop_private_server"):
+            return recorded(function, *args)
+        adapter.calls.append((function, args[1]))
+        if function == "svc_activation_stop_private_server":
+            live["member.service"] = False
+        return subprocess.CompletedProcess([function, *args], 0, "", "")
+
+    adapter.call = call
+    monkeypatch.setattr(activation, "_original_bot_tmpdir", lambda _unit: "/private-fixture-tmux")
+    monkeypatch.setattr(activation, "_legacy_bot_socket", lambda unit, **_kwargs:
+                        (root / f"{unit.target}.sock", live[unit.target]))
+    monkeypatch.setattr(activation, "_legacy_quiet", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(activation, "_probe", lambda _root: None)
+    monkeypatch.setattr(activation, "planned_units", lambda _plan, _manager: ())
+    monkeypatch.setattr(activation, "_roster", lambda *_args: ({}, ()))
+    monkeypatch.setattr(activation, "_finish_running_activation",
+                        lambda _root, _store, identifier, *_args, **_kwargs: state.read_activation(root, identifier))
+    with state.locked_activation(root) as store:
+        store.prepare("previous", plan, recovery_release_id=release.release_id,
+                      enrollment_digest=inventory.digest)
+        for step in state.STEPS:
+            store.begin("previous", step)
+            if step == "selection_switched":
+                store.select("previous")
+            else:
+                store.complete("previous", step, evidence_digest="a" * 64)
+        _prepare(store, inventory, phases, plan, adapter, install_directory=directory)
+        # Interrupted running estate: each crash leaves its begun step pending.
+        store.begin("cutover", "producers_paused")
+        producers = units.pause_phase(store, "cutover", "producers", adapter=adapter)
+        if interrupt != "producers":
+            store.complete("cutover", "producers_paused", evidence_digest=producers.digest)
+            store.arm_handoff_evidence("cutover")
+            store.begin("cutover", "sessions_handed_off")
+            store.record_handoff("cutover", target="member.service", result=None)
+            if interrupt != "unknown":
+                store.record_handoff("cutover", target="member.service", result="handed_off")
+        if interrupt in ("sessions", "ingest"):
+            store.complete("cutover", "sessions_handed_off", evidence_digest="a" * 64)
+            store.begin("cutover", "sessions_quiesced")
+            bots = units.pause_phase(store, "cutover", "bots", adapter=adapter)
+            if interrupt == "ingest":
+                live["member.service"] = False
+                store.complete("cutover", "sessions_quiesced", evidence_digest=bots.digest)
+                store.begin("cutover", "ingest_quiesced")
+    before = len(adapter.calls)
+    if interrupt == "unknown":
+        # The handoff keystrokes may or may not have reached the session.
+        assert activation.resumable_running_step(state.read_activation(root, "cutover")) is None
+        with pytest.raises(state.ActivationError, match="lacks a durable handoff"):
+            activation.resume_activation(root, "cutover", plan.plan_id, directory, adapter=adapter)
+        assert adapter.calls[before:] == [] and live["member.service"]
+        assert state.read_activation(root, "cutover").body["pending"] == "sessions_handed_off"
+        return
+    resumed = activation.resume_activation(root, "cutover", plan.plan_id, directory, adapter=adapter)
+    assert resumed.body["completed"] == list(state.STEPS[:4]) and resumed.body["pending"] is None
+    assert resumed.body["handoff_effects"] == {"member.service": "handed_off"}
+    effects = [call for call in adapter.calls[before:]
+               if call[0] in ("svc_activation_handoff", "svc_activation_stop_private_server")]
+    assert effects == ([("svc_activation_handoff", "member")] if interrupt == "producers" else []) + (
+        [("svc_activation_stop_private_server", "member")] if interrupt != "ingest" else [])
+    assert not live["member.service"]
+    assert all(adapter.states[unit.target].startswith("masked") for unit in inventory.units)
+    assert state.read_selection(root)["activation_id"] == "previous"
+
+
 def test_phases_park_exact_nodes_then_restore_original_state_and_links(enrollment):
     inventory, phases, plan, adapter, foreign, wants = enrollment
     before_foreign = foreign.read_bytes()

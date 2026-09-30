@@ -190,6 +190,13 @@ def test_resume_stage_boundary_requires_start_receipts_and_running_handoff_witne
     assert activation.resumable_running_step(record("sessions_handed_off", source="bootstrap")) == "sessions_handed_off"
     assert activation.resumable_running_step(record("sessions_handed_off")) is None
     assert activation.resumable_running_step(record("ingest_started")) is None
+    # Parking converges through its journal; a begun handoff needs per-bot results.
+    assert activation.resumable_running_step(record("sessions_quiesced", source="legacy")) == "sessions_quiesced"
+    witnessed = record("sessions_handed_off")
+    witnessed.body["handoff_effects"] = {"old.service": "handed_off", "idle.service": "server_absent"}
+    assert activation.resumable_running_step(witnessed) == "sessions_handed_off"
+    witnessed.body["handoff_effects"]["unknown.service"] = None
+    assert activation.resumable_running_step(witnessed) is None
 
 
 def test_pre_effect_prepare_refusal_cancels_intent_without_starting(cold, monkeypatch):

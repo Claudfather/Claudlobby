@@ -197,6 +197,51 @@ def test_unknown_result_needs_explicit_retry_and_preserves_first_attempt(estate)
     assert saved.message_attempts[1].observation.status == "submitted"
 
 
+def test_uncertain_retry_refuses_staged_or_uninspectable_receiver_proof_only(estate, monkeypatch):
+    from claudlobby.plane import daemon
+    route, package, conn = estate
+    root = route.selected.paths.root
+    staged = root / "state/plane/staged"
+    staged.mkdir(parents=True, exist_ok=True)
+
+    def stage(message_id, name):
+        # The receiver hook's batch, as plane-emit.sh stages it while ingest is down.
+        (staged / name).write_text(json.dumps({"events": [{
+            "event_type": "transmission", "emitter": "dispatch-in-hook", "fleet": "example",
+            "event_id": "ev_" + mint_msg_id()[4:], "occurred_at": "2026-09-28T00:00:00Z",
+            "payload": {"msg_id": message_id, "attempt_no": 1, "carrier": "tmux",
+                        "destination": "worker", "state": "received",
+                        "received_sha256": "sha256:" + "a" * 64, "received_bytes": 99}}]}) + "\n")
+
+    # Staged handshake, no live ingest daemon: a first O1 send is never gated.
+    stage(mint_msg_id(), "1-ev_unrelated.batch")
+    request_id = str(uuid4())
+    calls = []
+    def transport(*args, **kwargs):
+        calls.append(1)
+        return TransportOutcome("unknown") if len(calls) == 1 else TransportOutcome(
+            "submitted", "sha256:" + "a" * 64, 99, 0)
+    first = _call(route, package, request_id, transport=transport)
+    assert first.delivery == "unknown" and len(calls) == 1
+    stage(first.message_id, "2-ev_receiver.batch")
+    with pytest.raises(ReceiptConflict, match="recorded submission"):
+        _call(route, package, request_id, transport=transport, retry_uncertain=True)
+    (staged / "2-ev_receiver.batch").unlink()
+    spool = db_file(root).parent / "spool"
+    spool.write_text("not a directory")  # relevant pending evidence cannot be inspected
+    with pytest.raises(ReceiptConflict, match="recorded submission"):
+        _call(route, package, request_id, transport=transport, retry_uncertain=True)
+    spool.unlink()
+    # Only unrelated work is queued, but the dead daemon may hold unstaged proof.
+    with pytest.raises(ReceiptConflict, match="recorded submission"):
+        _call(route, package, request_id, transport=transport, retry_uncertain=True)
+    assert len(calls) == 1 and len(_receipt(route, request_id).message_attempts) == 1
+    monkeypatch.setattr(daemon, "probe_daemon", lambda _path, timeout: True)  # healthy ingest
+    retried = _call(route, package, request_id, transport=transport, retry_uncertain=True)
+    assert retried.delivery == "submitted" and len(calls) == 2
+    assert (staged / "1-ev_unrelated.batch").is_file()  # the gate never drains a queue
+
+
 def test_interrupted_send_replay_is_delivery_unknown_without_false_outage(estate):
     route, package, conn = estate
     request_id = str(uuid4())

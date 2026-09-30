@@ -320,6 +320,19 @@ def test_records_with_no_plane_flag_at_all(tmp_path, *, scratch_plane_env):
     assert len(_received_row(root)) == 1
 
 
+def test_a_receipt_staged_while_ingest_is_down_is_disclosed_as_pending(tmp_path, *, scratch_plane_env):
+    """plane-emit rc 6 is durable pending, never a lost receipt."""
+    _, safe, _ = _wire_proof("set +H; " + BODY)
+    root = _root(tmp_path)
+    r = _run(_hookjson(_arrival(safe), ensure_ascii=False),
+             _env(root, PLANE_SOCKET=str(tmp_path / "absent.sock"), scratch_plane_env=scratch_plane_env))
+    assert r.returncode == 0 and r.stdout == ""
+    assert "receipt staged for Plane ingest (pending)" in r.stderr
+    assert "not recorded" not in r.stderr
+    assert any((root / "state" / "plane" / "staged").iterdir())
+    assert _received_row(root) == []
+
+
 def test_missing_identity_does_not_record(tmp_path, *, scratch_plane_env):
     _, safe, _ = _wire_proof("set +H; " + BODY)
     root = _root(tmp_path)

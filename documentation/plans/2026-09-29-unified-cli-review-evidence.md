@@ -96,3 +96,17 @@ This was a deterministic walkthrough, not a blind-agent study or a new physical 
 **Measured follow-up:** [run 36638669709](https://github.com/Claudfather/Claudlobby/actions/runs/36638669709) on `8905e768` passed every executed test body: 6,394 on Linux 3.11, 6,395 on Linux 3.10 and 6,373 on macOS 3.11. Each lane still failed with one session-cleanup error. `test_config_install.py` intentionally retained a mode-0550 fixture directory to verify exact rollback; the final session cleanup could not unlink its child. Pytest attached the session error to the last test, `test_worktree_export`, which was not the cause.
 
 **Read from code and measured:** the configuration proposal fixture now restores directory write permission only after the test's assertions, within its own private vault tree, including renamed backups. The rollback assertions and runtime implementation remain unchanged. One existing case reproduced the cleanup error locally; all five configuration-install tests then passed with clean teardown in the private export (`reviews/readonly-cleanup-{repro,fix}-20260929.log`). No broad local rerun or new test/harness was added. The corrected head still requires hosted CI; review and runtime acceptance remain open.
+
+
+## September 30 activation and receipt correction proof
+
+The isolated delegated implementation builds on the locally validated assignment-deadline commit `f22e6f62f6fedd152145dd82db4a2bbdf630a108`. A fresh Claude session made the changes; parent review requested one focused correction, then independently ran the final checks.
+
+- **159 passed in 86.26s:** `test_activation.py`, `test_activation_state.py`, `test_activation_units.py`, `test_message_queries.py`, `test_message_operations.py`, `test_message_read_cli.py`, `test_message_write_cli.py`, `test_plane_dispatch_in.py` and `test_host_commands.py` in a disposable source-bound environment with private HOME/TMPDIR/Plane and a short explicit pytest base directory.
+- The first invocation yielded 129 passed, 17 failures and 13 setup errors; all 30 non-passing results were `AF_UNIX path too long`. The corrected-path invocation passed every selected node, without deselection or assertion changes for that environment problem.
+- The running-estate fixture covers interruptions in producer pause, handoff, session quiesce and ingest pause, plus an unknown-handoff refusal. Native supervision is an adapter fixture; this is not real systemd/launchd acceptance.
+- Receipt checks cover actual receiver-hook staging with ingest down, a spool entry written by the existing spool owner, conservative malformed/FIFO observations, authoritative committed receipts and refusal of uncertain retries. Ordinary first sends remain allowed during recording outages. The public receipt-state vocabulary is unchanged.
+- The earlier deadline change separately passed 47 task/CLI/request-receipt cases in 59.99s. The final activation/message selection runs on top of that source.
+- `git diff --check` and `/bin/bash -n lib/plane-dispatch-in.sh` passed. The parent verified integrated implementation bytes against the tested worker checkout.
+
+No production checkout, generated fleet, installed service or protected manager was changed. No new migration harness was added. Hosted CI and current-revision external coverage are pending for the resulting aggregate commit. Real Linux/Pi and protected production adoption remain separate gates.

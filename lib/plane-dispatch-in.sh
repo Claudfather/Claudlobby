@@ -147,6 +147,13 @@ if [ $? -ne 0 ]; then
   exit 0
 fi
 [ -n "$BATCH" ] || exit 0
-printf '%s' "$BATCH" | PLANE_EMIT_CLASS="$PLANE_EMIT_CLASS" "$LIB_DIR/plane-emit.sh" >/dev/null || \
-  echo "plane-dispatch-in: plane record failed rc=$? — receipt not recorded" >&2
+# rc 6 is plane-emit.sh's durable pending: the receipt is staged or spooled for
+# daemon replay, not yet queryable — a different fact from a lost receipt.
+printf '%s' "$BATCH" | PLANE_EMIT_CLASS="$PLANE_EMIT_CLASS" "$LIB_DIR/plane-emit.sh" >/dev/null
+EMIT_RC=$?
+case "$EMIT_RC" in
+  0) ;;
+  6) echo "plane-dispatch-in: receipt staged for Plane ingest (pending) — not yet queryable" >&2 ;;
+  *) echo "plane-dispatch-in: plane record failed rc=$EMIT_RC — receipt not recorded" >&2 ;;
+esac
 exit 0

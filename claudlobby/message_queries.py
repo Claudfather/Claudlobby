@@ -9,9 +9,13 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+import json
 import math
+import os
+from pathlib import Path
 import re
 import sqlite3
+import stat
 import time
 from typing import Literal, TYPE_CHECKING
 
@@ -19,7 +23,9 @@ from .plane.db import connect_ro, db_file
 from .plane.ids import ID_PATTERNS
 from .plane.migrations import DowngradeError
 from .plane.queries import DELIVERY_STATUS_SQL, RECEIPT_HISTORY_SQL
+from .plane.queue_paths import scan_queue_dir, scan_spool, staged_dir, staged_payload
 from .plane.schema_state import PendingMigrationError, require_current_schema
+from .source_state import SOURCE_ABSENT, SOURCE_OK, SOURCE_UNREADABLE
 
 if TYPE_CHECKING:
     from .task_operations import TaskOperationContext
@@ -95,6 +101,87 @@ class ReplyObservation:
     exit_code: int
     code: str | None
     reason: str | None
+
+
+_PENDING_FILES = 256
+_PENDING_BYTES = 8 * 1024 * 1024
+_SUBMISSION_PROOF = frozenset({"received", "pane_submitted"})
+
+
+def _queued_proof(value, message_id) -> bool:
+    if isinstance(value, list):
+        return any(_queued_proof(item, message_id) for item in value)
+    if not isinstance(value, dict):
+        return False
+    payload = value.get("payload")
+    if (value.get("event_type") == "transmission" and isinstance(payload, dict)
+            and payload.get("msg_id") == message_id and payload.get("state") in _SUBMISSION_PROOF):
+        return True
+    return any(_queued_proof(item, message_id) for item in value.values())
+
+
+def _queued_bytes(path: Path, limit: int) -> bytes | None:
+    """At most limit+1 bytes of one regular, unredirected queue file."""
+    try:
+        # O_NONBLOCK: opening a FIFO must not wait for a writer before fstat.
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None  # Redirected, claimed or ingested mid-scan: re-read later.
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        chunks, size = [], 0
+        while size <= limit:
+            chunk = os.read(fd, limit + 1 - size)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        return b"".join(chunks)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def pending_transmission_proof(root: Path, message_id: str, *,
+                               probe_timeout: float = 0.5) -> Literal["pending", "absent", "unavailable"]:
+    """Submission/receiver proof for one message still awaiting Plane ingest.
+
+    Bounded and read-only over the existing staged and spool queues: it never
+    claims, replays or deletes a file. Scan these before the committed read,
+    because ingest moves proof from queue to database, never the reverse. An
+    unreadable, non-regular, torn or over-bound queue entry is unavailable,
+    never absent. A root using the staged handshake also needs a live ingest
+    daemon: a dead one may hold unstaged proof, so absence is then unproven.
+    """
+    probe, entries = scan_queue_dir(staged_dir(root))
+    spool = scan_spool(root)
+    if probe.state == SOURCE_UNREADABLE or spool.spool_state == "unreadable":
+        return "unavailable"
+    files = ([entry for entry in entries if staged_payload(entry)] if probe.state == SOURCE_OK else [])
+    files += spool.pending + spool.inflight
+    if len(files) > _PENDING_FILES:
+        return "unavailable"
+    budget, needle = _PENDING_BYTES, message_id.encode()
+    for path in files:
+        data = _queued_bytes(path, budget)
+        if data is None:
+            return "unavailable"
+        budget -= len(data)
+        if budget < 0:
+            return "unavailable"
+        try:
+            value = json.loads(data)
+        except ValueError:
+            return "unavailable"  # A torn entry cannot establish irrelevance.
+        if needle in data and _queued_proof(value, message_id):
+            return "pending"
+    if probe.state != SOURCE_ABSENT:
+        from .plane.daemon import probe_daemon, socket_path
+        if not probe_daemon(socket_path(root), timeout=probe_timeout):
+            return "unavailable"
+    return "absent"
 
 
 def _message_id(value):
@@ -214,6 +301,7 @@ def receipt(ctx: TaskOperationContext, message_id: str, *, destination: str | No
     deadline = time.monotonic() + wait
     message = None
     while True:
+        queued = pending_transmission_proof(ctx.root, message_id)
         try:
             with _snapshot(ctx, deadline=deadline) as conn:
                 observed = _show(conn, ctx, message_id)
@@ -227,12 +315,23 @@ def receipt(ctx: TaskOperationContext, message_id: str, *, destination: str | No
         except MessageUnavailableError as exc:
             return ReceiptObservation(message_id, str(ctx.root), message.sender if message else None,
                 message.destination if message else None, "unavailable", "unknown", 6, "unavailable", str(exc))
-        observation = "received" if received else "missing" if history else "no_history"
+        # Uncommitted or unobservable proof is neither missing nor absent history.
+        observation = ("received" if received else "unavailable" if queued != "absent" else
+                       "missing" if history else "no_history")
         verdict = proof["delivery"] or ("unconfirmed" if received else "unknown")
         if verdict in ("delivered", "truncated", "altered"):
             code = None if verdict == "delivered" else "receipt_mismatch"
             reason = None if code is None else f"receipt {message_id} is {verdict}; delivery not verified"
             exit_code = 0 if code is None else 10
+        elif observation == "unavailable":
+            if time.monotonic() < deadline:
+                time.sleep(min(0.25, max(0, deadline - time.monotonic())))
+                continue
+            code, exit_code = "unavailable", 6
+            reason = ("transmission proof for this message is staged (pending Plane ingest); "
+                      "not yet queryable" if queued == "pending" else
+                      "Plane ingest is down or its pending queues cannot be inspected; "
+                      "receipt absence is unproven")
         elif observation == "no_history":
             code, exit_code = "receipt_unobservable", 9
             reason = (f"no receipt history for {message.destination.alias} under {ctx.root}; "

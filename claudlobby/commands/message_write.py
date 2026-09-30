@@ -248,6 +248,8 @@ def dispatch(args) -> CommandOutput:
                                      data=data, request_id=request_id, release_id=release_id)
             else:
                 raise _effect_failure("delivery_unknown",
+                                     f"message was submitted; {observed.reason}"
+                                     if observed.code == "unavailable" and observed.reason else
                                      "message was submitted; final receiver proof is incomplete",
                                      data=data, request_id=request_id, release_id=release_id)
         return CommandOutput(data, release_id=release_id,

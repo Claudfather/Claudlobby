@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 import json
+import os
 from pathlib import Path
 import runpy
 from types import SimpleNamespace
@@ -183,6 +184,69 @@ def test_no_history_is_immediate_and_observable_missing_times_out_without_writes
     assert (missing.receipt_observation, missing.integrity_verdict, missing.exit_code) == ("missing", "unknown", 8)
     assert clock.now == 1 and conn.total_changes == changes
     assert not list(ctx.root.rglob("*.jsonl")) and not (ctx.root / "state/requests").exists()
+
+
+def received_event(number=1):
+    """The receiver hook's event, as plane-socket-client.py finalizes it."""
+    return {"event_type": "transmission", "emitter": "dispatch-in-hook", "fleet": "b",
+            "event_id": "ev_" + "e" * 32, "occurred_at": "2026-09-28T00:00:00Z",
+            "payload": {"msg_id": mid(number), "attempt_no": 1, "carrier": "tmux",
+                        "destination": "worker", "state": "received"}}
+
+
+def staged_receipt(root, number=1, name="1-ev_staged.batch"):
+    """The receiver hook's batch as plane-emit.sh stages it while ingest is down."""
+    staged = root / "state/plane/staged"
+    staged.mkdir(parents=True, exist_ok=True)
+    (staged / name).write_text(json.dumps({"events": [received_event(number)]}) + "\n")
+    return staged / name
+
+
+def test_queued_receiver_proof_is_unavailable_never_missing_and_committed_proof_wins(estate, monkeypatch):
+    from claudlobby.plane import daemon
+    from claudlobby.plane.spool import spool_write
+    ctx, conn = estate
+    ident = communication(conn)
+    transmission(conn, "pane_submitted", fleet="a")
+    transmission(conn, "received", number=2)  # destination history exists
+    clock = Clock()
+    monkeypatch.setattr(q, "time", clock)
+    staged = staged_receipt(ctx.root, number=3, name="1-ev_unrelated.batch").parent
+    with monkeypatch.context() as healthy:
+        healthy.setattr(daemon, "probe_daemon", lambda _path, timeout: True)
+        assert q.receipt(ctx, ident, wait=1).receipt_observation == "missing"  # unrelated work is no gate
+        batch = staged_receipt(ctx.root)
+        before = sorted(path.name for path in staged.iterdir())
+        pending = q.receipt(ctx, ident, wait=1)
+        assert (pending.receipt_observation, pending.exit_code, pending.code) == ("unavailable", 6, "unavailable")
+        assert pending.integrity_verdict != "delivered" and "staged (pending" in pending.reason
+        assert sorted(path.name for path in staged.iterdir()) == before  # readers never drain
+        batch.unlink()
+        # The daemon's own spool envelope, written by its real owner.
+        spooled = spool_write(ctx.root, [received_event()], "database is locked")
+        assert q.pending_transmission_proof(ctx.root, ident) == "pending"
+        spooled.unlink()
+        torn = staged / "2-ev_torn.batch"
+        torn.write_text('{"events": [{"event_type": "transmission", "payload": {"msg_id": "msg_')
+        assert q.pending_transmission_proof(ctx.root, ident) == "unavailable"
+        torn.unlink()
+        fifo = staged / "3-ev_fifo.batch"
+        os.mkfifo(fifo)  # Must be refused before any blocking open or read.
+        assert q.pending_transmission_proof(ctx.root, ident) == "unavailable"
+        fifo.unlink()
+        assert q.pending_transmission_proof(ctx.root, ident) == "absent"
+    # Same staged handshake, only unrelated work queued, no live ingest daemon.
+    assert q.pending_transmission_proof(ctx.root, ident, probe_timeout=0.1) == "unavailable"
+    down = q.receipt(ctx, ident, wait=0)
+    assert (down.receipt_observation, down.exit_code, down.code) == ("unavailable", 6, "unavailable")
+    assert "ingest is down" in down.reason
+    (ctx.root / "state/plane/spool").rmdir()
+    (ctx.root / "state/plane/spool").write_text("not a directory")
+    unreadable = q.receipt(ctx, ident, wait=0)
+    assert (unreadable.receipt_observation, unreadable.exit_code) == ("unavailable", 6)
+    transmission(conn, "received")  # committed receiver proof beside unavailable queues
+    final = q.receipt(ctx, ident)
+    assert (final.receipt_observation, final.integrity_verdict, final.exit_code) == ("received", "delivered", 0)
 
 
 def test_reply_wait_ignores_wrong_peer_and_descendants_then_returns_first_direct_reply(estate, monkeypatch):

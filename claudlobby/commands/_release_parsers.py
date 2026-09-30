@@ -178,9 +178,10 @@ def register_release_subparsers(sub):
     activate = _route(hosts, "activate", "host.activate", "Activate PLAN_ID from an operator shell")
     activate.description = ("First activation requires explicit global --root. "
                             "Use --adopt-existing only for an unsealed, already running estate. "
-                            "--resume ID can fix forward supported recorded bootstrap, quiesced, and "
-                            "candidate-start stages with durable receipts; running-session handoff "
-                            "and starts without receipts require manual recovery evidence.")
+                            "--resume ID can fix forward supported recorded bootstrap, pause/quiesce, "
+                            "and candidate-start stages with durable receipts. It never repeats a "
+                            "recorded bot handoff or start; a handoff or start begun without a "
+                            "recorded result requires manual recovery evidence.")
     activate.set_defaults(func=_dispatch_host)
     activate.add_argument("plan_id", metavar="PLAN_ID")
     activate.add_argument("--install-directory", required=True, metavar="PATH",
