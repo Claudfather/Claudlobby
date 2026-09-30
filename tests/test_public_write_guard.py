@@ -8,9 +8,12 @@ test can also pin that a write without a hit asks nothing."""
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
+import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -23,6 +26,8 @@ VIS = {
     "pub-org/pub-repo": "public",
     "priv-org/priv-repo": "private",
     "pub-org/zephyr-widgets": "public",
+    "int-org/int-repo": "internal",
+    "caps-org/caps-repo": "PRIVATE",
 }
 
 FAKE_GH = r"""#!/usr/bin/env python3
@@ -30,9 +35,14 @@ import json, os, sys
 open(os.environ["FAKE_GH_LOG"], "a").write(" ".join(sys.argv[1:]) + "\n")
 vis = json.load(open(os.environ["FAKE_GH_VIS"]))
 if len(sys.argv) > 2 and sys.argv[1] == "api" and sys.argv[2].startswith("repos/"):
+    if os.environ.get("FAKE_GH_REST_DOWN"):
+        print("HTTP 403: API rate limit exceeded", file=sys.stderr); sys.exit(1)
     key = sys.argv[2][len("repos/"):]
     if key in vis:
         print(vis[key]); sys.exit(0)
+if sys.argv[1:3] == ["repo", "view"] and not os.environ.get("FAKE_GH_GRAPHQL_DOWN"):
+    if sys.argv[3] in vis:
+        print(vis[sys.argv[3]].upper()); sys.exit(0)
 print("HTTP 404", file=sys.stderr); sys.exit(1)
 """
 
@@ -617,3 +627,357 @@ def test_check_reports_the_list_without_printing_a_term(env, tmp_path):
     Path(env["PUBLIC_WRITE_GUARD_TERMS"]).unlink()
     rc, out = check()
     assert rc == 1 and "absent" in out
+
+
+# --- the shapes the first cut read less of than the command says (vera, #2032) ---------
+
+
+def issue(owner, repo, body=HIT):
+    return {"owner": owner, "repo": repo, "title": "t", "body": body}
+
+
+def check_list(env):
+    p = subprocess.run(["python3", str(REPO / "lib" / "public-write-guard.py"), "--check"],
+                       capture_output=True, text=True, env=env, timeout=30)
+    return p.returncode, p.stdout
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        'gh pr create -R {r} \\\n  --title t \\\n  --body "{t}"',
+        'gh issue comment 5 -R {r} \\\n\t--body "{t}"',
+        'gh issue comment 5 \\\n  -R {r} --body "{t}"',
+        'gh api repos/{r}/issues \\\n  -f title=t \\\n  -f body="{t}"',
+    ],
+    ids=["pr-create", "tab-indent", "target-on-line-2", "api"],
+)
+def test_an_indented_continuation_is_one_command(env, tmp_path, shape):
+    """A backslash-newline joins two lines. The indent after it used to split the
+    command, so a body on a later line was never read."""
+    assert bash(env, shape.format(r="pub-org/pub-repo", t=HIT), tmp_path)[0] == "deny"
+    assert bash(env, shape.format(r="priv-org/priv-repo", t=HIT), tmp_path)[0] == "allow"
+    assert bash(env, shape.format(r="pub-org/pub-repo", t="plain"), tmp_path)[0] == "allow"
+
+
+def test_a_commit_message_on_a_continued_line_is_read(env, tmp_path):
+    pub = repo(tmp_path, env, "pub-org/pub-repo")
+    assert bash(env, f'git commit --allow-empty \\\n  -m "{HIT}"', pub)[0] == "deny"
+
+
+def test_a_backslash_newline_inside_single_quotes_is_text(env, tmp_path):
+    """Single quotes keep a backslash-newline, so the body there is not the
+    listed term; double quotes join the lines, and then it is."""
+    single = "gh issue comment 5 -R pub-org/pub-repo --body 'zephyr\\\nwidgets'"
+    assert bash(env, single, tmp_path)[0] == "allow"
+    assert bash(env, single.replace("'", '"'), tmp_path)[0] == "deny"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'git add new.txt && git commit -m "widgets"',
+        'git add -A && git commit -m "widgets"',
+        'git add . && git commit -m "widgets" && git push',
+        'git add new.txt && git commit -m "widgets" && git push origin main',
+    ],
+    ids=["add-commit", "add-all", "add-dot-push", "push-origin"],
+)
+def test_a_new_file_added_and_committed_in_one_command_is_read(env, tmp_path, command):
+    """git diff never lists an untracked file, and the push runs before the
+    commit exists: the new file is read from the add's own pathspecs."""
+    for slug, want in (("pub-org/pub-repo", "deny"), ("priv-org/priv-repo", "allow")):
+        d = repo(tmp_path, env, slug)
+        (d / "new.txt").write_text(f"{HIT}\n")
+        assert bash(env, command, d)[0] == want, slug
+
+
+def test_an_add_counts_only_the_new_files_it_takes_in(env, tmp_path):
+    pub = repo(tmp_path, env, "pub-org/pub-repo")
+    (pub / "new.txt").write_text("plain\n")
+    (pub / "other.txt").write_text(f"{HIT}\n")
+    assert bash(env, 'git add new.txt && git commit -m "widgets"', pub)[0] == "allow"
+    assert bash(env, 'git add -u && git commit -m "widgets"', pub)[0] == "allow"
+    assert bash(env, 'git add . && git commit -m "widgets"', pub)[0] == "deny"
+    (pub / "other.txt").unlink()
+    (pub / ".gitignore").write_text("ignored.txt\n")
+    (pub / "ignored.txt").write_text(f"{HIT}\n")
+    assert bash(env, 'git add . && git commit -m "widgets"', pub)[0] == "allow"
+    assert bash(env, 'git add -f ignored.txt && git commit -m "widgets"', pub)[0] == "deny"
+
+
+def test_a_file_the_command_writes_then_adds_is_read_from_the_command(env, tmp_path):
+    pub = repo(tmp_path, env, "pub-org/pub-repo")
+    command = "cat > notes.md <<'EOF'\n{}\nEOF\ngit add notes.md && git commit -m widgets"
+    assert bash(env, command.format(HIT), pub)[0] == "deny"
+    assert bash(env, command.format("plain"), pub)[0] == "allow"
+    assert not (pub / "notes.md").exists()  # the hook reads the command, never runs it
+
+
+def test_a_push_reads_a_commit_made_earlier_in_the_same_command(env, tmp_path):
+    """The commit does not exist yet when the guard runs. Its own remote is
+    private here; the push in the same command names a public one."""
+    d = repo(tmp_path, env, "priv-org/priv-repo")
+    g = ["git", "-C", str(d)]
+    subprocess.run([*g, "remote", "add", "pub", "https://github.com/pub-org/pub-repo.git"],
+                   check=True, env=env)
+    subprocess.run([*g, "update-ref", "refs/remotes/pub/main", "HEAD"], check=True, env=env)
+    assert bash(env, f'git commit --allow-empty -m "{HIT}" && git push pub main', d)[0] == "deny"
+    assert bash(env, 'git commit --allow-empty -m "plain" && git push pub main', d)[0] == "allow"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'gh issue comment 5 -R {r} --body "$(python3 gen.py)"',
+        'gh issue comment 5 -R {r} --body "notes: `python3 gen.py`"',
+        "gh issue comment 5 -R {r} --body $(python3 gen.py)",
+        'B="$(python3 gen.py)"; gh issue comment 5 -R {r} --body "$B"',
+        'gh issue comment 5 -R {r} --body "$(cat notes.md | head -5)"',
+        'echo "$(date)" > b.md && gh issue comment 5 -R {r} --body-file b.md',
+    ],
+    ids=["dollar-paren", "backticks", "unquoted", "via-variable", "cat-in-a-pipe", "written-file"],
+)
+def test_a_programs_output_substituted_into_a_write_cannot_be_read(env, tmp_path, command):
+    """The failure table: a program's output used as a body counts as a hit."""
+    verdict, why = bash(env, command.format(r="pub-org/pub-repo"), tmp_path)
+    assert verdict == "deny" and "could not read" in why and "@@" not in why
+    assert bash(env, command.format(r="priv-org/priv-repo"), tmp_path)[0] == "allow"
+
+
+def test_cat_of_a_file_or_a_heredoc_is_read_where_it_is_substituted(env, tmp_path):
+    (tmp_path / "body.md").write_text("plain\n")
+    for form in ('"$(cat body.md)"', '"$(< body.md)"', "\"$(cat <<'EOF'\nplain\nEOF\n)\""):
+        command = f"gh issue comment 5 -R pub-org/pub-repo --body {form}"
+        assert bash(env, command, tmp_path)[0] == "allow", form
+    (tmp_path / "body.md").write_text(f"{HIT}\n")
+    command = 'gh issue comment 5 -R pub-org/pub-repo --body "$(cat body.md)"'
+    assert bash(env, command, tmp_path)[0] == "deny"
+
+
+def test_a_substitution_inside_single_quotes_is_text(env, tmp_path):
+    command = "gh issue comment 5 -R pub-org/pub-repo --body 'run $(pwd) and `ls`'"
+    assert bash(env, command, tmp_path)[0] == "allow"
+
+
+def test_the_commands_inside_a_substitution_are_read(env, tmp_path):
+    pub = repo(tmp_path, env, "pub-org/pub-repo")
+    commit(pub, env, "b.txt", "x\n", HIT)
+    assert bash(env, 'out="$(git push origin main 2>&1)"; echo "$out"', pub)[0] == "deny"
+
+
+def test_a_url_names_the_repository_gh_writes_to(env, tmp_path):
+    priv = repo(tmp_path, env, "priv-org/priv-repo")
+    pub = repo(tmp_path, env, "pub-org/pub-repo")
+    to_pub = f'gh issue comment https://github.com/pub-org/pub-repo/issues/5 --body "{HIT}"'
+    to_priv = f'gh pr comment https://github.com/priv-org/priv-repo/pull/5 --body "{HIT}"'
+    assert bash(env, to_pub, priv)[0] == "deny"  # a public target from a private checkout
+    assert bash(env, to_pub, tmp_path)[0] == "deny"  # and from no checkout
+    assert bash(env, to_priv, pub)[0] == "allow"  # a private target from a public checkout
+    assert bash(env, to_pub.replace("github.com", "ghe.example.com"), pub)[0] == "allow"
+
+
+def test_a_body_file_named_by_an_unset_variable_is_unreadable_not_a_crash(env, tmp_path):
+    command = 'gh issue comment 5 -R pub-org/pub-repo --body-file "$NOPE_UNSET"'
+    verdict, why = bash(env, command, tmp_path)
+    assert verdict == "deny" and "could not read" in why
+    both = ('gh issue comment 5 -R priv-org/priv-repo --body-file "$NOPE_UNSET" && '
+            f'gh issue comment 6 -R pub-org/pub-repo --body "{HIT}"')
+    assert bash(env, both, tmp_path)[0] == "deny"  # a crash failed the whole line open
+
+
+def test_env_names_the_repository_too(env, tmp_path):
+    command = 'env GH_REPO={r} gh issue create --title t --body "' + HIT + '"'
+    assert bash(env, command.format(r="pub-org/pub-repo"), tmp_path)[0] == "deny"
+    assert bash(env, command.format(r="priv-org/priv-repo"), tmp_path)[0] == "allow"
+
+
+@pytest.mark.parametrize("line", ["widgets|", ".*", "\\b", "x?"])
+def test_a_line_that_can_match_an_empty_string_breaks_the_list(env, tmp_path, line):
+    """Every write would be a hit: that is a broken list, named by its line."""
+    Path(env["PUBLIC_WRITE_GUARD_TERMS"]).write_text(f"zephyr\n{line}\n")
+    verdict, why = run(env, "mcp__github__create_issue", issue("priv-org", "priv-repo", "plain"),
+                       tmp_path)
+    assert verdict == "deny" and "line 2 can match an empty string" in why
+    rc, out = check_list(env)
+    assert rc == 1 and "line 2" in out
+
+
+def test_a_broken_line_is_named_by_position_never_by_its_text(env, tmp_path):
+    Path(env["PUBLIC_WRITE_GUARD_TERMS"]).write_text("# invented\nzephyr\n(?P=quillon)\n")
+    verdict, why = run(env, "mcp__github__create_issue", issue("priv-org", "priv-repo", "plain"),
+                       tmp_path)
+    assert verdict == "deny" and "line 3 does not compile" in why
+    assert "quillon" not in why.lower()
+    rc, out = check_list(env)
+    assert rc == 1 and "quillon" not in out.lower()
+
+
+def test_check_names_the_off_switch(env, tmp_path):
+    off = Path(env["CLAUDLOBBY_ROOT"]) / "state" / "public-write-guard"
+    off.mkdir(parents=True)
+    (off / "disabled").write_text("")
+    rc, out = check_list(env)
+    assert rc == 1 and "ok, 2 pattern(s)" in out and "disabled: set" in out
+
+
+def test_a_cache_stamp_from_the_future_is_not_trusted(env, tmp_path):
+    """The Pi has no RTC and steps its clock at boot."""
+    Path(env["PUBLIC_WRITE_GUARD_CACHE"]).write_text(
+        json.dumps({"pub-org/pub-repo": ["private", time.time() + 3600]}))
+    assert run(env, "mcp__github__create_issue", issue("pub-org", "pub-repo"), tmp_path)[0] == "deny"
+    assert len(lookups(env)) == 1
+
+
+def test_a_cached_answer_past_its_lifetime_is_asked_again(env, tmp_path):
+    Path(env["PUBLIC_WRITE_GUARD_CACHE"]).write_text(
+        json.dumps({"pub-org/pub-repo": ["private", time.time() - 601]}))
+    assert run(env, "mcp__github__create_issue", issue("pub-org", "pub-repo"), tmp_path)[0] == "deny"
+    assert len(lookups(env)) == 1
+
+
+def test_an_unknown_answer_is_asked_again_every_time(env, tmp_path):
+    for _ in range(2):
+        assert run(env, "mcp__github__create_issue", issue("gone-org", "gone"), tmp_path)[0] == "deny"
+    assert sum(1 for ln in lookups(env) if ln.startswith("api ")) == 2
+
+
+def test_an_internal_repository_is_not_public(env, tmp_path):
+    assert run(env, "mcp__github__create_issue", issue("int-org", "int-repo"), tmp_path)[0] == "allow"
+
+
+def test_the_visibility_answer_and_the_cache_key_ignore_case(env, tmp_path):
+    for owner, name in (("caps-org", "caps-repo"), ("priv-org", "priv-repo"), ("Priv-Org", "PRIV-REPO")):
+        assert run(env, "mcp__github__create_issue", issue(owner, name), tmp_path)[0] == "allow"
+    assert lookups(env) == ["api repos/caps-org/caps-repo --jq .visibility",
+                            "api repos/priv-org/priv-repo --jq .visibility"]
+
+
+def test_a_rest_throttle_is_asked_again_over_graphql(env, tmp_path):
+    env = dict(env, FAKE_GH_REST_DOWN="1")
+    assert run(env, "mcp__github__create_issue", issue("priv-org", "priv-repo"), tmp_path)[0] == "allow"
+    verdict, why = run(env, "mcp__github__create_issue", issue("pub-org", "pub-repo"), tmp_path)
+    assert verdict == "deny" and "which is public" in why
+
+
+def test_a_cached_answer_stands_in_when_github_cannot_be_read(env, tmp_path):
+    env = dict(env, FAKE_GH_REST_DOWN="1", FAKE_GH_GRAPHQL_DOWN="1")
+    now = time.time()
+    Path(env["PUBLIC_WRITE_GUARD_CACHE"]).write_text(json.dumps({
+        "priv-org/priv-repo": ["private", now - 3600],
+        "pub-org/pub-repo": ["public", now - 3600],
+        "old-org/old-repo": ["private", now - 2 * 86400],
+    }))
+    assert run(env, "mcp__github__create_issue", issue("priv-org", "priv-repo"), tmp_path)[0] == "allow"
+    verdict, why = run(env, "mcp__github__create_issue", issue("pub-org", "pub-repo"), tmp_path)
+    assert verdict == "deny" and "which is public" in why
+    verdict, why = run(env, "mcp__github__create_issue", issue("old-org", "old-repo"), tmp_path)
+    assert verdict == "deny" and "could not be read" in why
+
+
+def test_deleting_a_remote_branch_carries_no_content(env, tmp_path):
+    pub = repo(tmp_path, env, "pub-org/pub-repo")
+    commit(pub, env, "b.txt", "x\n", HIT)
+    assert bash(env, "git push origin --delete old-branch", pub)[0] == "allow"
+    assert bash(env, "git push origin :old-branch", pub)[0] == "allow"
+    assert bash(env, "git push origin main", pub)[0] == "deny"  # the control
+
+
+def test_a_new_files_path_is_content(env, tmp_path):
+    pub = repo(tmp_path, env, "pub-org/pub-repo")
+    (pub / "zephyr-widgets.md").write_text("plain\n")
+    subprocess.run(["git", "-C", str(pub), "add", "zephyr-widgets.md"], check=True, env=env)
+    verdict, why = bash(env, 'git commit -m "plain"', pub)
+    assert verdict == "deny" and "staged changes" in why
+
+
+# Each arm of the hook's prefilter with a payload that ONLY it admits: a target
+# such as pub-org/pub-repo contains `repo`, which the `*gh*repo*` arm admits,
+# so an arm dropped from the hook would pass every other test.
+PREFILTER_ARMS = {
+    "*mcp__*github*": ("mcp__github__create_issue", {"owner": "o", "repo": "r", "body": "b"}),
+    "*gh*issue*": ("Bash", {"command": "gh issue create -R o/r"}),
+    "*gh*pr*": ("Bash", {"command": "gh pr create -R o/r"}),
+    "*gh*release*": ("Bash", {"command": "gh release create v1 -R o/r"}),
+    "*gh*gist*": ("Bash", {"command": "gh gist create f"}),
+    "*gh*repo*": ("Bash", {"command": "gh repo create x"}),
+    "*gh*label*": ("Bash", {"command": "gh label create x -R o/r"}),
+    "*gh*api*": ("Bash", {"command": "gh api x -f a=b"}),
+    "*git*commit*": ("Bash", {"command": "git commit -m m"}),
+    "*git*push*": ("Bash", {"command": "git push"}),
+}
+
+
+@pytest.mark.parametrize("arm", sorted(PREFILTER_ARMS))
+def test_every_prefilter_arm_starts_the_decider_on_its_own(env, tmp_path, arm):
+    tool, tool_input = PREFILTER_ARMS[arm]
+    payload = json.dumps({"tool_name": tool, "tool_input": tool_input, "cwd": "/w"})
+    assert [a for a in PREFILTER_ARMS if fnmatch.fnmatchcase(payload, a)] == [arm]
+    assert arm in HOOK.read_text()  # the arm this case holds is the hook's own
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    os.symlink("/bin/cat", shim / "cat")
+    marker = tmp_path / "python-started"
+    (shim / "python3").write_text(f"#!/bin/sh\n: > {marker}\ncat >/dev/null\n")
+    (shim / "python3").chmod(0o755)
+    p = subprocess.run(["/bin/bash", str(HOOK)], input=payload, capture_output=True, text=True,
+                       env=dict(env, PATH=str(shim)), timeout=30)
+    assert p.returncode == 0 and marker.exists(), p.stderr
+
+
+def test_the_guards_event_types_are_registered():
+    """The no-list alarm is critical: that is what puts it under the bot's
+    ALERTS and in `events --critical`."""
+    from claudlobby.plane.registries import SYSTEM_EVENT_SEVERITY
+
+    assert SYSTEM_EVENT_SEVERITY["public_write_guard_unarmed"] == "critical"
+    assert SYSTEM_EVENT_SEVERITY["public_write_refused"] == "notice"
+
+
+def test_the_guards_events_land_on_the_plane_anchored_on_the_bot(env, tmp_path):
+    """Through the REAL emission path, not the test seam: a refusal, the no-list
+    alarm and the fail-open breadcrumb each land anchored on the bot, so the
+    rollout's `claudlobby events --bot <bot>` finds them."""
+    from tests.plane_fixtures import _scene
+    from tests.test_plane_events_door import _door_env, _events_cmd, _rows
+
+    root, paths, _, _ = _scene(tmp_path)
+    bot_dir = paths.runtime_bots / "w1"
+    (bot_dir / "data").mkdir(parents=True)
+    real = shutil.which("python3", path="/usr/bin:/bin")
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    (shim / "python3").write_text(  # fails the decider on demand, and nothing else
+        '#!/bin/bash\ncase "$1" in */public-write-guard.py) [ -n "${PWG_FAIL:-}" ] && exit 1 ;; esac\n'
+        f'exec {real} "$@"\n'
+    )
+    (shim / "python3").chmod(0o755)
+    e = {k: v for k, v in env.items()
+         if k not in ("PLANE_EMIT_DISABLED", "PUBLIC_WRITE_GUARD_EVENTS_FILE")}
+    e.update(_door_env(root))
+    e.update(PATH=f"{shim}:{tmp_path / 'bin'}:/usr/bin:/bin", BOT_DIR=str(bot_dir), BOT_ID="w1",
+             FLEET_EVENT_EMIT_TIMEOUT_S="120")
+
+    def landed(*args):
+        deadline = time.monotonic() + 180
+        while True:
+            rows = _rows(_events_cmd(root, "--json", "--bot", "w1", *args))
+            if rows or time.monotonic() > deadline:
+                return rows
+            time.sleep(1)
+
+    assert run(e, "mcp__github__create_issue", issue("pub-org", "pub-repo"), tmp_path)[0] == "deny"
+    assert [r["type"] for r in landed("--type", "public_write_refused")] == ["public_write_refused"]
+    no_dir = {k: v for k, v in e.items() if k != "BOT_DIR"}  # BOT_ID alone still names the bot
+    assert run(no_dir, "mcp__github__create_issue", issue("pub-org", "pub-repo"), tmp_path)[0] == "deny"
+    deadline = time.monotonic() + 180
+    while len(landed("--type", "public_write_refused")) < 2 and time.monotonic() < deadline:
+        time.sleep(1)
+    assert len(landed("--type", "public_write_refused")) == 2
+    Path(e["PUBLIC_WRITE_GUARD_TERMS"]).unlink()
+    assert run(e, "mcp__github__create_issue", issue("pub-org", "pub-repo"), tmp_path)[0] == "allow"
+    assert [r["type"] for r in landed("--critical")] == ["public_write_guard_unarmed"]
+    failing = dict(e, PWG_FAIL="1")
+    assert run(failing, "mcp__github__create_issue", issue("pub-org", "pub-repo"), tmp_path)[0] == "allow"
+    crumbs = landed("--type", "script_error")
+    assert len(crumbs) == 1 and "INACTIVE" in crumbs[0]["data"]["message"]
