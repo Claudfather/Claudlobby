@@ -239,6 +239,14 @@ disagree on the same fleet. Details: `documentation/runbooks/plane-view.md`.
   grid + one live pane, trust/gaps, SSE off the ingest-ledger cursor, `/healthz`.
   Composed as the dormant `claudlobby-plane-view` host service; Tailscale Serve
   fronts it.
+- **`plane samples <metric>`** (#1644) — one `metric_samples` family for one
+  subject over `--since`/`--until`, as text or `--json`; the host probe's
+  `host.*` families by default (`host.load`, `host.mem_available_mb`, …), the
+  subject being the only one of its kind unless `--subject` names it. It is
+  read-only by construction: `open_ro`, no `migrate()`, and every row is
+  fetched and the connection closed before anything prints. The window
+  compares instants through `julianday()`, because ingest keeps each sample's
+  own offset. This is how a host's load and memory into a reset are read back.
 - **`plane status` / `plane doctor`** — the health page and the pre-flight
   rungs (schema, provisional actors, tombstone validity, reconciliation, the
   WAL against its ceiling).
@@ -247,7 +255,7 @@ disagree on the same fleet. Details: `documentation/runbooks/plane-view.md`.
   `plane prune`, `plane expire` and `spool retry`** — a newer db refuses them
   (`DowngradeError`, rc 4) and an unmerged package's doctor (or registry read)
   will migrate a live db. Verify a branch on a live host only through the
-  doors that open read-only: `brief`, `plane view`,
+  doors that open read-only: `brief`, `plane view`, `plane samples`,
   and the stdlib readers below.
 - **The stdlib readers** (`lib/plane-readers.py`, `lib/plane-lookup.py`,
   `lib/who-reviewed.py`) — the
