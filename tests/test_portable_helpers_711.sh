@@ -2,10 +2,9 @@
 # tests/test_portable_helpers_711.sh — #711 coreutils-portability helpers.
 #
 # #711 routes the last three GNU-coreutils bypasses through the GNU/BSD
-# abstraction layer. This suite pins the Linux behavior of the helpers they land
-# on so a regression is caught in CI; the macOS branch of each is reasoned in the
-# PR, not run here (eng runs Linux). Hermetic: only lib-common.sh + coreutils
-# already on PATH — no tmux, no network, no services.
+# abstraction layer. Run the native GNU/BSD branches on either test host, with
+# explicit controls for the optional timeout capability. Hermetic: only
+# lib-common.sh + host utilities — no tmux, no network, no services.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,17 +52,42 @@ echo "=== iso_to_epoch: GitHub createdAt (RFC3339 Z) parse (site 2: date -d) ===
 # the portable helper must yield the SAME epoch the prior `date -d` produced, so
 # the Linux staleness integer is unchanged.
 iso="2026-01-01T00:00:00Z"
-old=$(date -d "$iso" +%s)
+# Independently known Unix epoch, not a GNU-only expected-value calculation.
+old=1767225600
 new=$(iso_to_epoch "$iso")
 assert_eq "iso_to_epoch matches prior 'date -d' for a Z timestamp" "$old" "$new"
 assert_true "iso_to_epoch yields a positive epoch" test "$new" -gt 0
 
-echo "=== timeout availability: freshbox guard passes on Linux (site 3) ==="
+echo "=== timeout capability: freshbox guard and generic fallback (site 3) ==="
 # freshbox-boot-gate SKIPs when neither timeout(1) nor gtimeout resolves; on the
-# Linux CI runner one MUST resolve, so the gate is not spuriously skipped. (The
-# absent case is stock macOS -> clean SKIP, reasoned in the PR, not run here.)
-assert_true "_TIMEOUT_BIN resolves on this host" test -n "$_TIMEOUT_BIN"
+# Linux CI runner one MUST resolve, so the gate is not spuriously skipped.
+# Stock macOS may lack it: with_timeout then runs UNGUARDED. These controls
+# exercise forwarding/fallback only, never claim the fallback has a deadline.
+if [ "$_OS" = Linux ]; then
+    assert_true "_TIMEOUT_BIN resolves on Linux" test -n "$_TIMEOUT_BIN"
+elif [ -n "$_TIMEOUT_BIN" ]; then
+    assert_true "resolved timeout is executable" test -x "$_TIMEOUT_BIN"
+else
+    echo "  INFO: no timeout executable; generic with_timeout runs unguarded"
+fi
 assert_eq "with_timeout runs a command to completion" "ok" "$(with_timeout 5 echo ok)"
+
+# A function stub isolates the available-binary branch without needing GNU
+# coreutils installed. Its output proves the duration and argument boundaries.
+_fixture_timeout() { local secs="$1"; shift; printf '%s|' "$secs"; "$@"; }
+saved_timeout="$_TIMEOUT_BIN"
+_TIMEOUT_BIN=_fixture_timeout
+assert_eq "available timeout receives duration and intact arguments" "5|ok with spaces" \
+    "$(with_timeout 5 printf '%s' 'ok with spaces')"
+rc=0; with_timeout 5 /bin/sh -c 'exit 23' >/dev/null || rc=$?
+assert_eq "available timeout preserves command failure" "23" "$rc"
+
+_TIMEOUT_BIN=""
+assert_eq "absent timeout runs the command unguarded with intact arguments" "ok with spaces" \
+    "$(with_timeout 5 printf '%s' 'ok with spaces')"
+rc=0; with_timeout 5 /bin/sh -c 'exit 23' || rc=$?
+assert_eq "unguarded fallback preserves command failure" "23" "$rc"
+_TIMEOUT_BIN="$saved_timeout"
 
 echo
 echo "TOTAL=$TOTAL PASS=$PASS FAIL=$FAIL"
