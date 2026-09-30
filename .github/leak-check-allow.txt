@@ -5,4 +5,3 @@
 # required. The check reads this file from the pull request itself, so adding
 # an entry is part of the diff under review. The private list has no allowlist.
 library/skills/network/SKILL.md email LinkedIn's own sender addresses, which the skill sorts mail by
-tests/test_migrate_fleet_fileops.sh email a synthetic git identity for a throwaway repository

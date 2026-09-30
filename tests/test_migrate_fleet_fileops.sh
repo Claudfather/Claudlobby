@@ -35,7 +35,7 @@ echo "RUNTIME-STATE-MARKER" > "$ROOT/local/web/runtime/bots/b1/data/state.txt"
 (
   cd "$ROOT/local"
   git init -q
-  git config user.email t@e.st
+  git config user.email t@example.invalid
   git config user.name test
   printf '%s\n' 'runtime/' > .gitignore
   git add -A
