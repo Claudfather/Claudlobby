@@ -65,7 +65,7 @@ The two jobs that pull new source into your checkouts, `pull-root` and `update-s
 - **Act as your user.** Every bot's unit runs under your account (see the units above), so the operating system lets a bot read and change anything you can, other bots' files included.
 - **Use `sudo` wherever your account needs no password for it.** No composed rule denies `sudo`, so on a host where `sudo -n true` succeeds, every bot has root.
 - **Use every credential on the host.** Each bot's session exports the `.env` files above (`lib/start-bot.sh`), and it has your Claude Code and `gh` logins.
-- **Take instructions over Telegram.** Direct messages are accepted only from `human_telegram_id`. In a fleet's group, `generate` leaves `allowFrom` empty (`claudlobby/composer.py`), which the Telegram plugin reads as every member of the group (the plugin's `server.ts`).
+- **Take instructions over Telegram.** Direct messages are accepted only from `human_telegram_id`. In a fleet's group, `generate` leaves `allowFrom` empty (`claudlobby/composer.py`), which the Telegram plugin reads as every member of the group (the plugin's `server.ts`). A `fleet.yaml` field for that list is #1669.
 - **Follow your own Claude Code settings.** Bots on the `default` account read your `~/.claude/settings.json`, so an allow rule you add there, such as a bare `Bash`, applies to every bot.
 
 **What bounds them**
