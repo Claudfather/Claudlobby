@@ -1994,10 +1994,20 @@ def resolve_effective_skills(
         skills.append("briefing")
     sd = fleet.system_defaults
     if sd.enabled and sd.skills and bot.system_defaults.skills:
+        # Gate each skill default on availability, as the protocol defaults are
+        # (resolve_effective_protocols): a role default naming a skill the
+        # library lacks must not compose, or it dangles and the validator flags
+        # skill-missing (#2010 follow-up). `status` is available only where the
+        # library provides it.
+        facts = defaults.Facts(
+            shared_docs=paths.shared_docs is not None,
+            vault_wired=bot_is_vault_wired(bot),
+            available_skills=frozenset(paths.expand_skill_folder("")),
+        )
         for name in defaults.resolve(
             "skills", default_roles(bot, fleet, is_manager=is_manager)
         ):
-            if name not in skills:
+            if defaults.available(name, facts) and name not in skills:
                 skills.append(name)
     protocol_names = resolve_effective_protocols(
         bot, fleet, paths, is_manager=is_manager

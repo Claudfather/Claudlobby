@@ -223,3 +223,49 @@ class TestTheRegistry:
         # is also a manager, and a coordinator is only a manager.
         assert defaults.resolve("skills", (defaults.ROLE_LEAF_MANAGER,)) == []
         assert (LIBRARY / "skills" / "status" / "SKILL.md").is_file()
+
+
+class TestTheDefaultNeedsTheLibraryToProvideIt:
+    """#2016 CI: the manager default named `status`, but a fleet whose library
+    has no `status` skill then composed a dangling default and the validator
+    flagged `skill-missing` (validator.py, over `resolve_effective_skills`). The
+    default is gated on availability, so a library without the skill gets no
+    default and no warning; the compose path still injects it where the library
+    provides it (`TestTheManagerRoleDefault`)."""
+
+    def _compose_without_status(self, fleet_dir: Path, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        install_real_template(fleet_dir)
+        # deliberately do NOT copy library/skills/status in
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        paths = Paths(root=fleet_dir, fleet_dir=fleet_dir)
+        return fleet, paths
+
+    def test_a_library_without_status_gives_the_manager_no_default(self, fleet_dir, monkeypatch):
+        fleet, paths = self._compose_without_status(fleet_dir, monkeypatch)
+        assert paths.find_library_dir("skills", "status") is None  # library truly lacks it
+        skills = resolve_effective_skills(
+            fleet.bots["lead"], fleet, paths, is_manager=True
+        )
+        assert "status" not in skills, skills
+
+    def test_a_library_without_status_raises_no_skill_missing_warning(self, fleet_dir, monkeypatch):
+        # skill-missing is emitted per effective skill with no library dir
+        # (validator.py). No status in the effective set => nothing to flag.
+        fleet, paths = self._compose_without_status(fleet_dir, monkeypatch)
+        for bot in fleet.bots.values():
+            is_mgr = bot.bot_id in fleet.manager_bots()
+            effective = resolve_effective_skills(bot, fleet, paths, is_manager=is_mgr)
+            missing = [s for s in effective if paths.find_library_dir("skills", s) is None]
+            assert missing == [], (bot.bot_id, missing)
+
+    def test_with_status_present_the_manager_still_gets_it(self, fleet_dir, monkeypatch):
+        # control: the gate does not suppress a default the library provides.
+        fleet, paths = self._compose_without_status(fleet_dir, monkeypatch)
+        dst = fleet_dir / "library" / "skills" / "status"
+        shutil.copytree(LIBRARY / "skills" / "status", dst)
+        skills = resolve_effective_skills(
+            fleet.bots["lead"], fleet, paths, is_manager=True
+        )
+        assert "status" in skills, skills

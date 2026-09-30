@@ -309,7 +309,13 @@ class TestScopeBoundary:
         # no such guard: it is a predicate, so a bad `Paths` attribute raises at
         # compose time instead of reading falsy and suppressing the default on
         # every bot, which is why it is a predicate rather than an attribute name.
-        registered = {e for d in REGISTRY.values() for e in d.entries}
+        # A gate may key a role-scoped default (e.g. `status`), so a real entry
+        # is any global entry OR any role entry.
+        registered = {
+            e
+            for d in REGISTRY.values()
+            for e in (*d.entries, *(x for entries in d.roles.values() for x in entries))
+        }
         for entry, gate in defaults.AVAILABILITY_GATES.items():
             assert entry in registered, f"gate for unregistered entry: {entry}"
             assert callable(gate), f"gate for {entry} is not callable"

@@ -343,6 +343,13 @@ class Facts:
     shared_docs: bool
     #: The bot is wired to a Claudron vault (`claudron_vault_path`).
     vault_wired: bool
+    #: The skill leaf-names the library provides for this bot (overlay + base).
+    #: A skill DEFAULT must not name a skill the library lacks: a role default
+    #: for a skill absent here is dropped, so a minimal library composes no
+    #: dangling default and the validator raises no skill-missing warning
+    #: (#2010 follow-up). Default empty so a Facts built without it gates every
+    #: skill default OFF (fail closed); the composer always supplies the set.
+    available_skills: frozenset[str] = frozenset()
 
 
 # Some defaults are conditional on a fact this module cannot see. `guardrails`
@@ -377,6 +384,12 @@ AVAILABILITY_GATES: dict[str, Callable[[Facts], bool]] = {
     # that satisfied neither would silently drop the protocol estate-wide.
     "shared-documentation": lambda f: f.shared_docs and not f.vault_wired,
     "shared-documentation-vault": lambda f: f.shared_docs and f.vault_wired,
+    # A skill role-default (today `status` for a manager, #2010) is available
+    # only where the library actually provides that skill. Without this a
+    # minimal library composed the default anyway and the validator flagged
+    # skill-missing; the gate keeps a default from naming a skill the library
+    # lacks. Keyed by the entry name, like the shared-documentation gates.
+    "status": lambda f: "status" in f.available_skills,
 }
 
 
