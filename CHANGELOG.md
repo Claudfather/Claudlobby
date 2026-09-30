@@ -10,10 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **The manual quickstart ran `lib/setup-fleet` even after `validate` failed.** It printed `claudlobby validate && claudlobby generate` and then `lib/setup-fleet` on a line of its own. On a first run with placeholders still in place, `validate` correctly fails, and `setup-fleet` then ran anyway and failed twice more. The line now continues the chain (`… && lib/setup-fleet`), under a comment saying `validate` stops it until every `REPLACE_ME` is filled in.
 - **The install step now states a duration**, in both README and getting-started.
-  - On one Raspberry Pi 5 whose pip config adds piwheels, under a minute in two runs (45 s from an empty pip cache, 55 s with the cache state not recorded). Other hosts are unmeasured.
+  - On one Raspberry Pi 5 whose pip config adds piwheels, 45 s to 61 s in four timed runs: 45 s from an empty pip cache, 52 s and 61 s with a warm cache, and 55 s with the cache state not recorded. Other hosts are unmeasured.
   - One cold host was stopped after 8 minutes, and the cause was not recorded.
-  - `lib/setup-system` installs with `--quiet`, so it now says to expect the same wait with no output.
-- **`tests/test_cold_start_contract.py`** runs the README's quickstart block with stubs: a failed `validate` must be the only call, and a passing one must run `generate` and `lib/setup-fleet`. On getting-started and the setup skill it fails if `lib/setup-fleet` starts the line after a `validate` chain. It also fails if an install section states no duration.
+  - `lib/setup-system` runs the same pip install with `--quiet`, so the pages now say to expect the same wait with no output.
+- **`tests/test_cold_start_contract.py`** runs the README's quickstart block with stubs: a failed `validate` must be the only call, and a passing one must run `generate` and `lib/setup-fleet`. On getting-started and the setup skill it fails if `lib/setup-fleet` starts the line after a `validate` chain. Its duration tests read both pages: the stated range must be the lowest and highest of the runs listed beside it, the run count must match, and the stopped run and setup-system's wait must be stated as above.
 
 ### Fixed — `/setup` asks `bridge_state` about claudfather's own session (#1536)
 

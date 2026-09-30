@@ -189,7 +189,7 @@ class TestQuickstartStopsAtAFailedValidate:
         (tmp_path / "fleet.yaml.seed").write_text("")
         (tmp_path / ".env.seed.example").write_text("")
         env = {"PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin", "EDITOR": "true", "HOME": str(tmp_path)}
-        r = subprocess.run(["bash", "-c", text], cwd=tmp_path, env=env, capture_output=True, text=True)
+        r = subprocess.run(["bash", "-c", text], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60)
         return log.read_text().split(), r.stderr
 
     def test_a_failed_validate_is_the_only_call_the_readme_chain_makes(self, tmp_path: Path):
@@ -213,16 +213,42 @@ class TestQuickstartStopsAtAFailedValidate:
 class TestTheInstallStepSaysHowLongItTakes:
     """#1681: on a cold host the install ran past eight minutes with no stated
     duration, and `lib/setup-system` installs with `--quiet`. A stranger cannot tell
-    slow from stopped, which decides whether they wait or press Ctrl-C."""
+    slow from stopped, which decides whether they wait or press Ctrl-C.
+
+    Each duration a page states is a measurement. The install time is the range of
+    the runs listed beside it, the stopped run is stated as the floor it is, and
+    setup-system's wait is tied to its running the same install."""
+
+    _COUNTS = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8}
+
+    @staticmethod
+    def _joined(doc: Path, section_only: bool = True) -> str:
+        """The install section (or the whole page), with blockquote markers and line wraps removed."""
+        text = doc.read_text()
+        if section_only:
+            start = text.find("python3 -m pip install -e '.[plane-ui]'")
+            assert start != -1, doc.name
+            end = text.find("\n## ", start)
+            text = text[start : end if end != -1 else len(text)]
+        return " ".join(line.lstrip("> ").strip() for line in text.splitlines())
 
     @pytest.mark.parametrize("doc", [README, GETTING_STARTED], ids=lambda p: p.name)
-    def test_the_install_section_states_a_duration(self, doc: Path):
-        text = doc.read_text()
-        start = text.find("python3 -m pip install -e '.[plane-ui]'")
-        assert start != -1, doc.name
-        end = text.find("\n## ", start)
-        section = text[start : end if end != -1 else len(text)]
-        assert re.search(r"\b\d+\s*(?:(?:–|-|to)\s*\d+\s*)?minutes?\b", section), section[:600]
+    def test_the_stated_range_is_the_range_of_the_listed_runs(self, doc: Path):
+        section = self._joined(doc)
+        m = re.search(r"took (\d+) s to (\d+) s in (\w+) timed runs: (.*?)\. ", section)
+        assert m, section[:800]
+        runs = [int(n) for n in re.findall(r"\b(\d+) s\b", m.group(4))]
+        assert len(runs) == self._COUNTS[m.group(3)], (m.group(3), runs)
+        assert (min(runs), max(runs)) == (int(m.group(1)), int(m.group(2))), (m.group(0), runs)
+
+    @pytest.mark.parametrize("doc", [README, GETTING_STARTED], ids=lambda p: p.name)
+    def test_the_stopped_run_is_stated_as_a_floor(self, doc: Path):
+        assert "was stopped after 8 minutes, and the cause was not recorded" in self._joined(doc)
+
+    @pytest.mark.parametrize("doc", [README, GETTING_STARTED], ids=lambda p: p.name)
+    def test_setup_systems_wait_is_tied_to_the_same_install(self, doc: Path):
+        page = self._joined(doc, section_only=False)
+        assert "runs the same pip install with `--quiet`, so expect the same wait with no output" in page
 
 
 class TestCliResolutionProbe:

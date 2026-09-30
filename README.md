@@ -37,9 +37,9 @@ claude                              # opens Claude Code in the repo
 Then type `/setup` — it checks your host, collects credentials, and spins up claudfather (the built-in setup assistant) on Telegram. Continue setup from your phone.
 
 > **How long the install takes.** On one Raspberry Pi 5, whose pip config adds piwheels, the
-> `pip install` line took under a minute in two runs (45 s from an empty pip cache, 55 s with the
-> cache state not recorded). Other hosts are unmeasured. One cold host was stopped after 8 minutes,
-> and the cause was not recorded. Where a dependency has no prebuilt wheel for the platform, pip
+> `pip install` line took 45 s to 61 s in four timed runs: 45 s from an empty pip cache, 52 s and
+> 61 s with a warm cache, and 55 s with the cache state not recorded. Other hosts are unmeasured. One
+> cold host was stopped after 8 minutes, and the cause was not recorded. Where a dependency has no prebuilt wheel for the platform, pip
 > builds it from source, which takes longer.
 
 > **Why `[plane-ui]`.** The operator plane (`claudlobby plane view`) is enrolled by default
@@ -54,8 +54,8 @@ Then type `/setup` — it checks your host, collects credentials, and spins up c
 > `python3 -m pip`, not `pip` — Homebrew ships `pip3` only, so plain `pip` is not a command.
 >
 > Prefer not to manage it yourself? `lib/setup-system` creates the venv, installs claudlobby,
-> and checks every other host prerequisite in one idempotent pass (`--dry-run` to preview). Its
-> install runs quietly, so expect the same wait with no output.
+> and checks every other host prerequisite in one idempotent pass (`--dry-run` to preview). It
+> runs the same pip install with `--quiet`, so expect the same wait with no output.
 > **It will prompt for `sudo`** — its managed-settings phase writes the root-owned
 > `/Library/Application Support/ClaudeCode/managed-settings.json` (and on Linux it installs
 > packages). Use `--dry-run` first if you want to see everything it would touch.
