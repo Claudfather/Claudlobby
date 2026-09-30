@@ -275,6 +275,29 @@ def test_activate_discloses_lock_preflight_without_claiming_a_pending_step(candi
     assert "SECRET" not in json.dumps(timeout)
 
 
+def test_activate_shows_run_intent_refusal_with_host_unchanged(candidate, monkeypatch, capsys):
+    root, _, plan, directory = candidate
+    # The real pre-record owner: a de-enrolled old bot the candidate still declares.
+    context = SimpleNamespace(paths=SimpleNamespace(bot_runtime=lambda bot: root / bot),
+                              fleet=SimpleNamespace(name="alpha", manager="manager",
+                                                    bots={"worker": SimpleNamespace(autonomous_runner=None)}))
+    stopped = SimpleNamespace(installed=(), properties=(), declaration=SimpleNamespace(
+        scope="bot", fleet="alpha", bot="worker", working_directory=root / "worker"))
+    monkeypatch.setattr(activation, "bootstrap_activation", lambda *_:
+                        activation._refuse_unrecorded_run_intent(root, (stopped,), (context,)))
+    before = snapshot(root)
+    result = call(capsys, ["--root", str(root), "--json", "host", "activate", plan.plan_id,
+                           "--install-directory", str(directory)], 4)
+    message = result["error"]["message"]
+    assert message.startswith("conflict: activation refused: run intent blocks activation before any record: "
+                              "activation would start deliberately stopped bots (alpha/worker)")
+    assert "re-run config plan" in message and message.endswith("no activation record was created")
+    assert result["data"]["recorded_activation"] is None
+    assert result["data"]["recording"] == "unchanged"
+    assert "no activation record" in result["error"]["hint"] and "--resume" not in result["error"]["hint"]
+    assert snapshot(root) == before
+
+
 def test_host_status_distinguishes_absent_active_and_interrupted_recorded_state(candidate, capsys, tmp_path):
     root, release, plan, _ = candidate
     empty = tmp_path / "empty"

@@ -214,4 +214,3 @@ def test_without_a_data_root_the_hook_fails_open_and_writes_no_slot(se):
                        capture_output=True, text=True, timeout=60)
     assert p.returncode == 2 and "CLAUDLOBBY_ROOT" in p.stderr
     assert not (WRAPPER.parent.parent / "state" / "heavy-slot").exists()
-

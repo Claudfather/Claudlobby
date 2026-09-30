@@ -18,7 +18,8 @@ import stat
 import sys
 import time
 
-from .activation_state import (ActivationError, ActivationRecord, CandidateDisabledOverride, STEPS,
+from .activation_state import (ActivationError, ActivationRecord, ActivationRefusal,
+                               CandidateDisabledOverride, STEPS,
                                locked_activation, read_activation, read_selection)
 from .activation_identity import identity_bindings_from_registry
 from . import activation_enrollment as enrollment, activation_units as units, config_install
@@ -449,6 +450,65 @@ def _handoff_inputs(old_units, source_plan, contexts, package):
     return roster, bot_dirs, candidate_bots
 
 
+LEGACY_RUNNER_PAUSE = "autonomous-runner.paused"
+
+
+def _refuse_unrecorded_run_intent(root: Path, old_units, contexts) -> None:
+    """Refuse, before any record, work the operator deliberately stopped or paused.
+
+    Activation starts every candidate bot, and the new runner gate reads only
+    recorded automation state. So a frozen old bot unit that is uninstalled,
+    and a legacy runner pause marker without a recorded pause, both need an
+    explicit operator decision first. This reads only; no marker or state is
+    changed.
+
+    Only an uninstalled unit is an explicit stop: ``bot stop`` and legacy
+    spin-down disable and remove the unit file. An installed but inactive bot,
+    whether enabled, disabled or unloaded, is still supervised, because the
+    keepalive restarts any bot whose unit file exists, so it is not treated as
+    stopped. Only bot-scope units are considered, so a timer's normal
+    inactive state never counts.
+    """
+    from .automation_state import AutomationStateError, status
+    candidates = {(context.fleet.name, bot): context for context in contexts for bot in context.fleet.bots}
+    stopped, paused = [], []
+    for unit in old_units:
+        declaration = unit.declaration
+        key = (declaration.fleet, declaration.bot)
+        if declaration.scope != "bot" or key not in candidates:
+            continue  # A bot the candidate omits is retired, never started.
+        if not unit.installed:
+            stopped.append(f"{key[0]}/{key[1]}")
+    for (fleet, bot), context in sorted(candidates.items()):
+        if context.fleet.bots[bot].autonomous_runner is None:
+            continue  # An unconfigured runner stays ineligible under the new gate.
+        directories = {Path(unit.declaration.working_directory) for unit in old_units
+                       if unit.declaration.scope == "bot"
+                       and (unit.declaration.fleet, unit.declaration.bot) == (fleet, bot)}
+        directories.add(Path(context.paths.bot_runtime(bot)))
+        if not any(os.path.lexists(directory / LEGACY_RUNNER_PAUSE) for directory in directories):
+            continue
+        try:
+            recorded = status(root, fleet, bot, configured=True)["paused"]
+        except AutomationStateError:
+            recorded = False  # Unverifiable state is not a recorded pause.
+        if not recorded:
+            paused.append(f"{fleet}/{bot}")
+    reasons = []
+    if stopped:
+        reasons.append("activation would start deliberately stopped bots (" + ", ".join(stopped)
+                       + "); remove them from the reviewed candidate fleet and re-run config plan, "
+                       "or start them deliberately with the host's current supervisor, then retry")
+    if paused:
+        reasons.append(f"legacy {LEGACY_RUNNER_PAUSE} markers have no recorded automation pause ("
+                       + ", ".join(paused) + "); the new runner gate would resume them. Remove "
+                       "autonomous_runner from those bots in the reviewed candidate and re-plan "
+                       "(record `bot automation pause` after activation before restoring it), "
+                       "or remove the marker only if the runner may resume")
+    if reasons:
+        raise ActivationRefusal("run intent blocks activation before any record: " + "; ".join(reasons))
+
+
 def _legacy_quiet(adapter, pause, phase, sockets, *, candidate_started=frozenset()):
     for unit in pause.units(phase):
         if unit["target"] in candidate_started:
@@ -603,7 +663,7 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
         standing = tuple(blocker for blocker in preview.blockers
                          if blocker not in _LIVE_PREVIEW_CHURN)
         if standing:
-            raise ActivationError("migration preview blocks activation before pause: " + "; ".join(standing))
+            raise ActivationRefusal("migration preview blocks activation before pause: " + "; ".join(standing))
         if legacy_source:
             observed_manager = _catalog(adapter.read("svc_inventory_catalog"))[0]
             declarations = (legacy_linux_declarations(plan) if observed_manager == "Linux" else
@@ -650,6 +710,7 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
         roster, bot_dirs, candidate_bots = _handoff_inputs(inventory.units, source_plan, contexts, package)
         preflight_canonical_handoffs(root, roster=roster, bot_dirs=bot_dirs,
                                      candidate_bots=candidate_bots)
+        _refuse_unrecorded_run_intent(root, inventory.units, contexts)
         phases = _legacy_phase_membership(plan, inventory, source_plan)
         for unit in inventory.units:
             if unit.installed and unit.declaration.scope == "bot":
@@ -681,7 +742,7 @@ def _finish_running_activation(root, store, activation_id, plan, release, source
         store.begin(activation_id, "queues_classified")
         migration = build_migration_manifest(root, source, release)
         if migration.blockers:
-            raise ActivationError("data or pending queues block activation: " + "; ".join(migration.blockers))
+            raise ActivationRefusal("data or pending queues block activation: " + "; ".join(migration.blockers))
         from .activation_handoffs import persist_canonical_handoffs
         roster, bot_dirs, candidate_bots = _handoff_inputs(old_units, source_plan, contexts, package)
         persist_canonical_handoffs(root, roster=roster, bot_dirs=bot_dirs,

@@ -240,7 +240,10 @@ def test_legacy_pending_queue_blocks_before_activation_record_or_native_pause(co
     assert host.starts == []
 
 
-def _legacy_handoff_estate(root, installed_bots):
+_RUNNING = (("ActiveState", "active"), ("LoadState", "loaded"), ("UnitFileState", "enabled"))
+
+
+def _legacy_handoff_estate(root, installed_bots, *, assigned=True, stopped=(), properties=_RUNNING):
     """A legacy Plane with a current worker assignment, plus frozen old bot units.
 
     Old bot directories sit outside the candidate plan's reviewed destinations,
@@ -258,8 +261,9 @@ def _legacy_handoff_estate(root, installed_bots):
                                (uid, kind, alias, parent))
         _insert(connection, "work_items", work_item_id="wi_" + "7" * 32, fleet_uid=fleet,
                 title="Running work", created_by_uid=actors["manager"])
-        _insert(connection, "assignments", assignment_id="asg_" + "9" * 32, work_item_id="wi_" + "7" * 32,
-                fleet_uid=fleet, assignee_uid=actors["worker"], assigned_by_uid=actors["manager"])
+        if assigned:
+            _insert(connection, "assignments", assignment_id="asg_" + "9" * 32, work_item_id="wi_" + "7" * 32,
+                    fleet_uid=fleet, assignee_uid=actors["worker"], assigned_by_uid=actors["manager"])
     finally:
         connection.close()
     identity = root / "state/host-uid"
@@ -267,13 +271,111 @@ def _legacy_handoff_estate(root, installed_bots):
     identity.write_text(host + "\n")
     identity.chmod(0o600)
     units = []
-    for bot in installed_bots:
+    for bot in (*installed_bots, *stopped):
         directory = root.resolve() / "legacy-runtime" / bot
         directory.mkdir(parents=True)
-        units.append(SimpleNamespace(target=f"legacy.example.{bot}.service", installed=(object(),),
+        # `bot stop` de-enrolls: the frozen declaration remains with no installed unit.
+        units.append(SimpleNamespace(target=f"legacy.example.{bot}.service",
+                                     installed=() if bot in stopped else (object(),),
+                                     properties=(("LoadState", "not-found"),) if bot in stopped else properties,
                                      declaration=SimpleNamespace(scope="bot", fleet="example", bot=bot,
                                                                  working_directory=directory)))
     return units
+
+
+def _adopt_legacy(root, plan, host, monkeypatch, units):
+    inventory = SimpleNamespace(manager="Linux", catalog=f"manager\tLinux\ndirectory\t{host.directory}\n",
+                                units=tuple(units))
+    inventory.require_complete = lambda: inventory
+    monkeypatch.setattr(activation, "legacy_linux_declarations", lambda _plan: ("reviewed-legacy",))
+    monkeypatch.setattr(activation, "collect_enrollment", lambda *_, **__: inventory)
+    return lambda: activation.adopt_existing_activation(root, "cutover", plan.plan_id, host.directory,
+                                                       adapter=host)
+
+
+def _no_activation_effect(root, host):
+    assert not (root / "state/activations/cutover").exists()
+    assert state.read_selection(root) is None
+    assert {name for name, _ in host.calls} == {"svc_inventory_catalog"}  # no pause, handoff or start
+    assert host.starts == []
+
+
+def test_first_adoption_refuses_to_start_deliberately_stopped_bot_before_record(cold, monkeypatch):
+    root, _, plan, host = cold
+    # `bot stop` / spin-down removed the unit file; the frozen declaration remains.
+    units = _legacy_handoff_estate(root, ("manager",), assigned=False, stopped=("worker",))
+    adopt = _adopt_legacy(root, plan, host, monkeypatch, units)
+    with pytest.raises(state.ActivationRefusal, match=r"deliberately stopped bots \(example/worker\)"):
+        adopt()
+    _no_activation_effect(root, host)
+
+
+@pytest.mark.parametrize("properties", [
+    (("ActiveState", "inactive"), ("LoadState", "loaded"), ("UnitFileState", "enabled")),
+    (("ActiveState", "inactive"), ("LoadState", "loaded"), ("UnitFileState", "disabled")),
+    (("ActiveState", "inactive"), ("LoadState", "unloaded"), ("UnitFileState", "unchanged")),
+], ids=["systemd-enabled-inactive", "systemd-disabled-inactive", "launchd-unloaded"])
+def test_run_intent_leaves_installed_inactive_bots_and_timers_to_supervision(tmp_path, properties):
+    # An installed unit file is still supervised: the old keepalive restarts it.
+    root = tmp_path.resolve()
+    context = SimpleNamespace(paths=SimpleNamespace(bot_runtime=lambda bot: root / bot),
+                              fleet=SimpleNamespace(name="example", manager="worker",
+                                                    bots={"worker": SimpleNamespace(autonomous_runner=None)}))
+    bot = SimpleNamespace(installed=(object(),), properties=properties,
+                          declaration=SimpleNamespace(scope="bot", fleet="example", bot="worker",
+                                                      working_directory=root / "worker"))
+    timer = SimpleNamespace(installed=(object(),), properties=properties,
+                            declaration=SimpleNamespace(scope="fleet", fleet="example", bot=None,
+                                                        working_directory=root))
+    activation._refuse_unrecorded_run_intent(root, (bot, timer), (context,))
+
+
+def test_first_adoption_refuses_unrecorded_legacy_runner_pause_without_touching_marker(cold, monkeypatch):
+    root, _, plan, host = cold
+    units = _legacy_handoff_estate(root, ("manager", "worker"), assigned=False)
+    marker = root.resolve() / "legacy-runtime/worker" / activation.LEGACY_RUNNER_PAUSE
+    marker.write_bytes(b"paused: needs-input\n")
+    original = activation._roster
+
+    def configured(*args):
+        # The fixture manifest has no runner block; configure the worker's.
+        rank, contexts = original(*args)
+        return rank, tuple(SimpleNamespace(
+            paths=context.paths,
+            fleet=SimpleNamespace(name=context.fleet.name, manager=context.fleet.manager,
+                                  bots={bot: SimpleNamespace(autonomous_runner=object() if bot == "worker" else None)
+                                        for bot in context.fleet.bots}))
+            for context in contexts)
+
+    monkeypatch.setattr(activation, "_roster", configured)
+    adopt = _adopt_legacy(root, plan, host, monkeypatch, units)
+    with pytest.raises(state.ActivationRefusal, match=r"autonomous-runner\.paused markers .*\(example/worker\)"):
+        adopt()
+    _no_activation_effect(root, host)
+    assert marker.read_bytes() == b"paused: needs-input\n"
+    assert not (root / "state/fleet-state.json").exists()
+
+
+def test_run_intent_accepts_recorded_pause_new_bots_and_omitted_bots(tmp_path):
+    root = tmp_path.resolve()
+    runtime = root / "runtime"
+    (runtime / "worker").mkdir(parents=True)
+    (runtime / "worker" / activation.LEGACY_RUNNER_PAUSE).write_text("paused\n")
+    paths = SimpleNamespace(bot_runtime=lambda bot: runtime / bot)
+    context = SimpleNamespace(paths=paths, fleet=SimpleNamespace(
+        name="example", manager="manager",
+        bots={"manager": SimpleNamespace(autonomous_runner=None),
+              "worker": SimpleNamespace(autonomous_runner=object()),
+              "added": SimpleNamespace(autonomous_runner=None)}))
+    retired = SimpleNamespace(installed=(), properties=(),
+                              declaration=SimpleNamespace(scope="bot", fleet="example", bot="retired",
+                                                          working_directory=runtime / "retired"))
+    (root / "state").mkdir()
+    (root / "state/fleet-state.json").write_text(json.dumps({"bots": {"worker": {
+        "fleet": "example", "autonomous_runner_pause": {"reason": "legacy marker", "since": "t", "actor": "op"}}}}))
+    # A recorded pause keeps the runner ineligible; a new candidate bot has no old
+    # unit, and an omitted old bot is retired rather than started.
+    activation._refuse_unrecorded_run_intent(root, (retired,), (context,))
 
 
 @pytest.mark.parametrize("installed_bots, appended, message", [

@@ -133,7 +133,8 @@ def _database(root: Path, initialize_empty: bool) -> tuple[dict, dict | None, li
         finally:
             conn.close()
     except (OSError, sqlite3.Error, TaskAuditError) as exc:
-        blockers.append(f"historical task audit unavailable: {exc}")
+        blockers.append("historical task audit unavailable: "
+                        + (str(exc) if isinstance(exc, TaskAuditError) else type(exc).__name__))
         state["state"] = "uninterpretable"
     after = [_file(Path(item["path"]))[0] for item in files]
     # On a quiesced WAL-mode database, SQLite's first read can create an empty
@@ -239,7 +240,8 @@ def _classify(request: dict, *, raw: bool, source, target) -> dict:
         raise ValueError("event and payload must be objects")
     family, payload = request.get("event_type"), request["payload"]
     if not isinstance(family, str) or family not in _REQUIRED:
-        raise ValueError(f"unknown event family: {family!r}")
+        # Issue text becomes operator-visible refusal text; never echo payload values.
+        raise ValueError("unknown event family")
     if any(not isinstance(request.get(key), str) or not request[key]
            for key in ("event_id", "occurred_at", "emitter")):
         raise ValueError("pending event lacks finalized identity/time/emitter")
@@ -263,9 +265,9 @@ def _classify(request: dict, *, raw: bool, source, target) -> dict:
         if version != target.envelope.write:
             raise ValueError("unstamped raw envelope needs an explicit old-reader drain decision")
     if version not in SUPPORTED_PLANE_SCHEMA_VERSIONS:
-        raise ValueError(f"unknown pending envelope version: {version!r}")
+        raise ValueError("unknown pending envelope version")
     if not target.envelope.supports(version):
-        raise ValueError(f"target cannot read pending envelope version: {version!r}")
+        raise ValueError("target cannot read pending envelope version")
     category = "ordinary_telemetry"
     if family == "workstream_event" and "waiting_on" in payload:
         # Optional on the new wire, but an older strict payload codec cannot
@@ -292,13 +294,13 @@ def _unique(pairs):
     value = {}
     for key, item in pairs:
         if key in value:
-            raise ValueError(f"duplicate JSON key: {key}")
+            raise ValueError("duplicate JSON key")
         value[key] = item
     return value
 
 
 def _invalid_number(value):
-    raise ValueError(f"invalid JSON number: {value}")
+    raise ValueError("invalid JSON number")
 
 
 def _pending(path: Path, queue: str, source, target) -> dict:
@@ -326,7 +328,12 @@ def _pending(path: Path, queue: str, source, target) -> dict:
             raise ValueError("pending event identity list is missing, duplicated or inconsistent")
         if any(r["classification"] != "ordinary_telemetry" for r in result["records"]):
             result["disposition"] = "explicit old-semantics drain or named quarantine/replay decision required"
-    except (UnicodeError, ValueError, TypeError) as exc:
+    except UnicodeError:
+        result["issues"].append("pending file is not UTF-8 JSON")
+    except TypeError:
+        result["issues"].append("pending payload has an invalid type")
+    except ValueError as exc:
+        # Product-authored messages above, or JSON syntax positions; no values.
         result["issues"].append(str(exc))
     if queue == "quarantine":
         result["disposition"] = "retain outside replay paths; no replay/discard permission inferred"
@@ -363,6 +370,13 @@ def _queues(root: Path, source, target) -> tuple[dict, list[str]]:
         if queue == "inflight" and files:
             blockers.append("inflight spool claims require a quiesced ownership/recovery check")
         for item in files:
+            if queue == "quarantine":
+                # Retained evidence, never replayed or interpreted: a malformed
+                # payload is normal. Its exact bytes stay bound in the digest,
+                # and a vanished or unreadable file still refuses.
+                if item["state"] != "ok":
+                    blockers.append(f"{item['path']}: retained quarantine file is {item['state']}")
+                continue
             blockers.extend(f"{item['path']}: {issue}" for issue in item["issues"])
             if queue != "quarantine" and any(r["classification"] != "ordinary_telemetry"
                                              for r in item["records"]):
@@ -399,8 +413,9 @@ def build_migration_manifest(data_root: Path, source: ReleaseManifest | None,
         blockers.append("legacy adoption requires an existing readable Plane database")
     queues, queue_blockers = _queues(root, (source or target).compatibility, target.compatibility)
     blockers.extend(queue_blockers)
-    if source is None and any(row["file_count"] != 0 for row in queues.values()):
-        blockers.append("legacy adoption requires empty pending, inflight, staged and quarantine queues")
+    if source is None and any(row["file_count"] != 0 for name, row in queues.items() if name != "quarantine"):
+        # Quarantine is retained outside replay and bound by its inventory digest.
+        blockers.append("legacy adoption requires empty pending, inflight and staged queues")
     receipts, receipt_blockers = _receipts(root)
     blockers.extend(receipt_blockers)
     operational = {"receipts": receipts, "task_model_versions": database["task_model_versions"],
@@ -428,7 +443,8 @@ def build_migration_manifest(data_root: Path, source: ReleaseManifest | None,
         if [m["version"] for m in migrations] != list(range(1, goal + 1)):
             raise ValueError("candidate migration sequence does not match its declared schema")
     except (OSError, ValueError) as exc:
-        blockers.append(f"migration SQL inventory incomplete: {exc}")
+        blockers.append("migration SQL inventory incomplete: "
+                        + (str(exc) if isinstance(exc, ValueError) else type(exc).__name__))
     if current is not None and current > goal:
         blockers.append("forward-only SQL owner cannot downgrade the current database")
     for name, version in target.compatibility.write_versions.items():

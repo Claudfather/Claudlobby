@@ -144,6 +144,38 @@ def test_unsealed_first_adoption_binds_real_database_and_refuses_pending_queue(r
         verify_pending_queues(root, plan)
 
 
+def test_first_adoption_retains_malformed_quarantine_but_refuses_active_pending(releases):
+    root, _, target = releases
+    _database(root, version=11).close()
+    quarantine = spool_path(root) / "quarantine"
+    quarantine.mkdir(parents=True)
+    (quarantine / "poison.json").write_text('{"requests": [{"event_type": "private-family-value"')
+    _pending(quarantine / "unknown.json", [_event_request("private-family-value")])
+    (quarantine / "unknown.json.reason").write_text("malformed spool entry\n")
+    before = _snapshot(root)
+    plan = build_migration_manifest(root, None, target)
+    assert not plan.blockers
+    retained = plan.queues["quarantine"]
+    assert retained["file_count"] == 2 and retained["sha256"]
+    assert all(item["issues"] and "no replay/discard permission" in item["disposition"]
+               for item in retained["files"])
+    assert "private-family-value" not in json.dumps(retained["files"])
+    verify_pending_queues(root, plan)
+    assert _snapshot(root) == before  # retained evidence is neither interpreted away nor moved
+
+    (quarantine / "poison.json").write_text('{"requests": []}')
+    with pytest.raises(ValueError, match="queue inventory changed"):
+        verify_pending_queues(root, plan)
+    (quarantine / "poison.json").write_text('{"requests": [{"event_type": "private-family-value"')
+    verify_pending_queues(root, plan)
+
+    _pending(spool_path(root) / "active.json", [_event_request()])
+    blocked = build_migration_manifest(root, None, target)
+    assert any("empty pending, inflight and staged" in reason for reason in blocked.blockers)
+    with pytest.raises(ValueError, match="queue inventory changed"):
+        verify_pending_queues(root, plan)
+
+
 def test_wal_mode_read_only_preview_binds_only_sqlites_empty_sidecar(releases, monkeypatch):
     root, _, target = releases
     conn = _database(root, version=11)
