@@ -395,7 +395,24 @@ PROMPT_FILE="$(safe_mktemp)"
     tail -n +2 "$WORK"
 } >"$PROMPT_FILE" 2>/dev/null || true
 
-RAW="$(with_timeout "$MODEL_TIMEOUT" "$CLAUDE" -p --model "$MODEL" <"$PROMPT_FILE" 2>/dev/null || true)"
+# Load NOTHING but the model (#1972). This pass runs inside the bot's session
+# end, in the bot's directory and with the bot's environment, so on its
+# defaults `claude -p` loads everything the bot has: every MCP server and
+# plugin, and the bot directory's own hooks. The Telegram channel plugin then
+# finds the bot's live poller, defers and exits, and Claude Code records a
+# HOST-GLOBAL needs-auth entry: every bot that starts in the next 15 minutes
+# skips its own Telegram server (#1962). The pass only distils text:
+#   --strict-mcp-config, empty --mcp-config   no MCP server from any config or
+#                                             plugin, and no claude.ai connector
+#   --setting-sources ''                      no user, project or local
+#                                             settings, so no plugin, no hook
+# Each alone kept the cache clean on 2.1.281 and 2.1.283, and only the second
+# stops the hooks. Both are passed, so a later release that changes one does
+# not reopen the trap. The prompt stays on stdin: --mcp-config takes several
+# values and would swallow a prompt placed after it.
+RAW="$(with_timeout "$MODEL_TIMEOUT" "$CLAUDE" -p --model "$MODEL" \
+    --strict-mcp-config --mcp-config '{"mcpServers":{}}' --setting-sources '' \
+    <"$PROMPT_FILE" 2>/dev/null || true)"
 rm -f "$PROMPT_FILE" "$WORK" 2>/dev/null || true
 
 if [ -z "$RAW" ]; then
