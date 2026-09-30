@@ -264,6 +264,65 @@ class TestAggregation:
         assert agg.turns == 2
 
 
+class TestSelectedCoverage:
+    """An idle bot's complete scan is observed zero; an unreadable source is not."""
+
+    def _fleet(self, tmp_path, *bots):
+        from types import SimpleNamespace
+
+        fleet = SimpleNamespace(name="f", bots={b: SimpleNamespace(account=b) for b in bots},
+                                accounts={b: str(tmp_path / "acct" / b) for b in bots})
+        paths = SimpleNamespace(root=tmp_path, bot_runtime=lambda b: tmp_path / "runtime" / b)
+        return fleet, paths
+
+    def _window(self):
+        from datetime import datetime, timedelta, timezone
+
+        end = datetime.now(timezone.utc)
+        return end - timedelta(hours=24), end
+
+    def test_idle_directory_is_observed_zero_and_missing_is_unavailable(self, tmp_path):
+        import os
+        from claudlobby.isolation import transcript_slug
+
+        fleet, paths = self._fleet(tmp_path, "idle", "gone")
+        directory = (tmp_path / "acct" / "idle" / "projects"
+                     / transcript_slug(paths.bot_runtime("idle")))
+        directory.mkdir(parents=True)
+        old = _write(directory, [_ROW1], "old.jsonl")
+        os.utime(old, (0, 0))
+        since, until = self._window()
+        idle = tu.collect_bot_usage(paths, fleet, "idle", since, until)
+        assert idle["coverage"]["status"] == "observed"
+        assert idle["coverage"]["issues"] == []
+        assert idle["coverage"]["older_files_excluded_by_mtime"] == 1
+        assert idle["usage"]["input_tokens"] == 0 and idle["usage"]["turns"] == 0
+        gone = tu.collect_bot_usage(paths, fleet, "gone", since, until)
+        assert gone["coverage"]["status"] == "unavailable"
+        fleet_row = tu.collect_fleet_usage(paths, fleet, since, until)
+        assert fleet_row["coverage"]["status"] == "partial"
+        assert fleet_row["coverage"]["bots_observed"] == 1
+
+    def test_unavailable_usage_refuses_instead_of_zero(self, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+        import pytest
+        from claudlobby.command_result import CommandFailure
+        from claudlobby.commands import checkin, usage_read
+        from claudlobby import activation_state
+
+        fleet, paths = self._fleet(tmp_path, "gone")
+        selected = {"release_id": "r1"}
+        monkeypatch.setattr(checkin, "_scope", lambda _args: (
+            SimpleNamespace(paths=paths, fleet=fleet), None, selected, None))
+        monkeypatch.setattr(activation_state, "read_selection", lambda _root: selected)
+        for command, extra in (("fleet.usage", {}), ("bot.usage", {"bot_id": "gone"})):
+            with pytest.raises(CommandFailure) as caught:
+                usage_read.dispatch(SimpleNamespace(since="24h", public_command=command, **extra))
+            assert caught.value.error.code == "unavailable"
+            assert caught.value.data["usage"] is None
+            assert caught.value.data["coverage"]["status"] == "unavailable"
+
+
 class TestCli:
     def test_json_matches_hand_computed_sums(self, tmp_path):
         fixture = _write(tmp_path, PRIMARY)

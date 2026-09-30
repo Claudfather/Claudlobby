@@ -20,7 +20,7 @@ import sqlite3
 import stat
 import tempfile
 
-from .activation_state import ActivationError
+from .activation_state import ActivationRefusal
 from .operation_context import OperationContextError, _host_uid, _identity
 from .plane.db import connect_ro, db_file
 from .task_audit import TaskAuditError, audit_tasks
@@ -51,7 +51,7 @@ def _owned_directory(path: Path, root: Path) -> None:
                 or info.st_uid != os.getuid()):
             raise ValueError("redirected or foreign directory")
     except (OSError, ValueError) as exc:
-        raise ActivationError(f"handoff directory is unavailable or foreign: {path}") from exc
+        raise ActivationRefusal(f"handoff directory is unavailable or foreign: {path}") from exc
 
 
 def _handoff_file(bot_dir: Path, root: Path) -> tuple[Path, bytes, str, str | None]:
@@ -70,48 +70,48 @@ def _handoff_file(bot_dir: Path, root: Path) -> tuple[Path, bytes, str, str | No
     except FileNotFoundError:
         return path, b"", "unavailable (no previous session handoff)", None
     except OSError as exc:
-        raise ActivationError(f"existing handoff cannot be read: {path}") from exc
+        raise ActivationRefusal(f"existing handoff cannot be read: {path}") from exc
     try:
         with os.fdopen(fd, "rb") as stream:
             info = os.fstat(stream.fileno())
             if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
-                raise ActivationError(f"existing handoff is foreign or not a regular file: {path}")
+                raise ActivationRefusal(f"existing handoff is foreign or not a regular file: {path}")
             previous = stream.read()
     except OSError as exc:
-        raise ActivationError(f"existing handoff cannot be read: {path}") from exc
+        raise ActivationRefusal(f"existing handoff cannot be read: {path}") from exc
     prior_status = None
     if _BEGIN in previous or _END in previous:
         if previous.count(_BEGIN) != 1 or previous.count(_END) != 1 or not previous.rstrip().endswith(_END):
-            raise ActivationError(f"existing canonical handoff section is malformed: {path}")
+            raise ActivationRefusal(f"existing canonical handoff section is malformed: {path}")
         try:
             section = previous[previous.index(_BEGIN):]
             prior_status = json.loads(section.split(b"```json\n", 1)[1].split(b"\n```", 1)[0])[
                 "previous_handoff"]
         except (IndexError, KeyError, ValueError, UnicodeError) as exc:
-            raise ActivationError(f"existing canonical handoff section is unreadable: {path}") from exc
+            raise ActivationRefusal(f"existing canonical handoff section is unreadable: {path}") from exc
         if prior_status not in ("existing file present (fresh capture unverified)",
                                 "unavailable (no previous session handoff)",
                                 "unavailable (empty previous session handoff)"):
-            raise ActivationError(f"existing canonical handoff status is invalid: {path}")
+            raise ActivationRefusal(f"existing canonical handoff status is invalid: {path}")
         prefix = previous[:previous.index(_BEGIN)]
         if prefix.endswith(b"\n\n"):
             previous = prefix[:-2]
         elif prefix:
-            raise ActivationError(f"existing canonical handoff separator is malformed: {path}")
+            raise ActivationRefusal(f"existing canonical handoff separator is malformed: {path}")
         else:
             previous = b""
     refresh_time = None
     if _REFRESH_BEGIN in previous or _REFRESH_END in previous:
         if (previous.count(_REFRESH_BEGIN) != 1 or previous.count(_REFRESH_END) != 1
                 or not previous.startswith(b"---\n")):
-            raise ActivationError(f"existing canonical reference refresh is malformed: {path}")
+            raise ActivationRefusal(f"existing canonical reference refresh is malformed: {path}")
         try:
             refresh_time = previous.split(b"\nlast_updated: ", 1)[1].split(b"\n", 1)[0].decode("ascii")
             envelope = _refresh_envelope(bot_dir, refresh_time)
             if not previous.startswith(envelope):
                 raise ValueError("unexpected reference refresh envelope")
         except (IndexError, UnicodeError, ValueError) as exc:
-            raise ActivationError(f"existing canonical reference refresh is malformed: {path}") from exc
+            raise ActivationRefusal(f"existing canonical reference refresh is malformed: {path}") from exc
         previous = previous[len(envelope):]
     return path, previous, (prior_status or ("existing file present (fresh capture unverified)" if previous else
                                             "unavailable (empty previous session handoff)")), refresh_time
@@ -141,12 +141,12 @@ def _replace(path: Path, content: bytes) -> None:
 def _check_roster(roster, bot_dirs) -> None:
     if not roster or set(bot_dirs) != {(fleet, bot) for fleet, (_, bots) in roster.items()
                                    for bot in bots}:
-        raise ActivationError("old bot handoffs do not cover the reviewed fleet roster")
+        raise ActivationRefusal("old bot handoffs do not cover the reviewed fleet roster")
     # Manager-owned work is written only into an installed manager's handoff.
     if any(manager not in bots for manager, bots in roster.values()):
-        raise ActivationError("old fleet manager has no installed handoff owner")
+        raise ActivationRefusal("old fleet manager has no installed handoff owner")
     if len({str(path) for path in bot_dirs.values()}) != len(bot_dirs):
-        raise ActivationError("old bot handoff paths are ambiguous")
+        raise ActivationRefusal("old bot handoff paths are ambiguous")
 
 
 def _current_work(conn, root: Path, roster):
@@ -161,17 +161,17 @@ def _current_work(conn, root: Path, roster):
             alias = f"bot:{fleet}/{bot}"
             uid = _identity(conn, "actor", alias, parent=fleet_uid)
             if uid in actor_by_uid:
-                raise ActivationError("old bot actor UID is ambiguous")
+                raise ActivationRefusal("old bot actor UID is ambiguous")
             actor_by_uid[uid] = (fleet, bot)
     if len(set(fleet_uids.values())) != len(fleet_uids):
-        raise ActivationError("old fleet UIDs are ambiguous")
+        raise ActivationRefusal("old fleet UIDs are ambiguous")
     owning = defaultdict(list)
     assigned = defaultdict(list)
     actual = set()
     for fleet, fleet_uid in sorted(fleet_uids.items()):
         snapshot = read_tasks(conn, fleet_uid=fleet_uid)
         if any(issue.blocking for issue in snapshot.issues):
-            raise ActivationError("canonical task state has unresolved active history")
+            raise ActivationRefusal("canonical task state has unresolved active history")
         for task in snapshot.tasks:
             if not task.open:
                 continue
@@ -180,7 +180,7 @@ def _current_work(conn, root: Path, roster):
             actual.add((fleet_uid, task.task_id, aid))
             assignee = actor_by_uid.get(assignment.assignee_uid) if assignment else None
             if assignment and assignee is None:
-                raise ActivationError("current assignment has no reviewed old bot actor")
+                raise ActivationRefusal("current assignment has no reviewed old bot actor")
             row = {"task_id": task.task_id, "assignment_id": aid,
                    "owning_fleet": fleet, "state": task.state,
                    "current_assignee": f"bot:{assignee[0]}/{assignee[1]}" if assignee else None}
@@ -193,7 +193,7 @@ def _current_work(conn, root: Path, roster):
 def _refuse_retired_work(owning, assigned, bot_dirs, candidate_bots) -> None:
     if candidate_bots is not None and any(
             key not in candidate_bots and (owning[key] or assigned[key]) for key in bot_dirs):
-        raise ActivationError("retired bot still owns open work or a current assignment")
+        raise ActivationRefusal("retired bot still owns open work or a current assignment")
 
 
 def _render_handoffs(root: Path, bot_dirs, owning, assigned, now: datetime) -> list[tuple[Path, bytes]]:
@@ -206,7 +206,7 @@ def _render_handoffs(root: Path, bot_dirs, owning, assigned, now: datetime) -> l
             try:
                 previous_time = datetime.strptime(prior_refresh, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
             except ValueError as exc:
-                raise ActivationError(f"existing canonical reference refresh has invalid time: {path}") from exc
+                raise ActivationRefusal(f"existing canonical reference refresh has invalid time: {path}") from exc
             if timedelta(0) <= now - previous_time < timedelta(hours=12):
                 refresh = previous_time
         timestamp = refresh.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -239,7 +239,7 @@ def preflight_canonical_handoffs(root: Path, *, roster: dict[str, tuple[str, tup
             owning, assigned, _ = _current_work(conn, root, roster)
             _refuse_retired_work(owning, assigned, bot_dirs, candidate_bots)
     except (OSError, sqlite3.Error, TaskStateError, OperationContextError) as exc:
-        raise ActivationError("live canonical handoff preflight is unavailable") from exc
+        raise ActivationRefusal("live canonical handoff preflight is unavailable") from exc
     _render_handoffs(root, bot_dirs, owning, assigned, datetime.now(timezone.utc))
 
 
@@ -261,15 +261,15 @@ def persist_canonical_handoffs(root: Path, *, roster: dict[str, tuple[str, tuple
             conn.execute("BEGIN")
             audit = audit_tasks(conn)
             if asdict(audit) != expected_audit or audit.blockers:
-                raise ActivationError("quiesced task audit changed or has unresolved active links")
+                raise ActivationRefusal("quiesced task audit changed or has unresolved active links")
             owning, assigned, actual = _current_work(conn, root, roster)
             expected = {(row.fleet_uid, row.task_id, row.assignment_id)
                         for row in audit.references if row.active}
             if actual != expected:
-                raise ActivationError("canonical current work differs from the quiesced A0 mapping")
+                raise ActivationRefusal("canonical current work differs from the quiesced A0 mapping")
             _refuse_retired_work(owning, assigned, bot_dirs, candidate_bots)
     except (OSError, sqlite3.Error, TaskAuditError, TaskStateError, OperationContextError) as exc:
-        raise ActivationError("quiesced canonical handoff mapping is unavailable") from exc
+        raise ActivationRefusal("quiesced canonical handoff mapping is unavailable") from exc
 
     # Validate and render every target before replacing the first file. A
     # failure during replacement still leaves activation pending, not started.
@@ -278,7 +278,7 @@ def persist_canonical_handoffs(root: Path, *, roster: dict[str, tuple[str, tuple
         for path, content in writes:
             _replace(path, content)
     except OSError as exc:
-        raise ActivationError("canonical handoff persistence failed; activation remains pending") from exc
+        raise ActivationRefusal("canonical handoff persistence failed; activation remains pending") from exc
     return {"bots": len(writes), "open_tasks": len(actual),
             "active_assignments": sum(aid is not None for _, _, aid in actual),
             "handoffs": [str(path) for path, _ in writes]}

@@ -122,7 +122,7 @@ def _preflight(root, fleet, bot, package, selected, release):
                             for directory in directories):
         raise CommandFailure("conflict", "retired native label is installed or loaded")
     if not bot_dir.exists() and not bot_dir.is_symlink():
-        return bot_dir, label, False
+        return bot_dir, label, False, None
     info = bot_dir.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or bot_dir.resolve() != bot_dir:
         raise CommandFailure("conflict", "retained bot directory is not an owned directory")
@@ -131,7 +131,39 @@ def _preflight(root, fleet, bot, package, selected, release):
     if (len(changes) != 1 or changes[0].after.get("kind") != "file"
             or path_state(conf)["node"] != changes[0].after):
         raise CommandFailure("conflict", "retained bot.conf differs from frozen declaration")
-    return bot_dir, label, True
+    from ..supervision import build_supervision_spec
+    try:
+        spec = build_supervision_spec(old.fleet.bots[bot], old.fleet, old.paths)
+        socket = Path(spec.environment["TMUX_TMPDIR"]) / f"tmux-{os.getuid()}" / label
+    except (KeyError, OSError, ValueError, RuntimeError):
+        socket = None  # Only purge needs this witness; it refuses without one.
+    return bot_dir, label, True, socket
+
+
+def _purge_quiet(bot_dir, socket, data):
+    """Purge reads WIP only once no retained private session can still write.
+
+    Activation already retired the native unit (checked in _preflight). The
+    retained tmux server is the remaining writer: purge requires its socket
+    and session marker to be gone, which a plain bot remove establishes. A
+    socket file that remains is ambiguous here and is never cleaned up.
+    """
+    remedy = ("run bot remove without --purge first to stop the retained private session; "
+              "if its socket file remains, inspect the session and remove the socket manually, "
+              "then retry with --purge")
+    if socket is None:
+        raise CommandFailure("unavailable", "retained private session state is unknown",
+                             hint=remedy, data=data)
+    for witness in (socket, bot_dir / ".tmux-env"):
+        try:
+            witness.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise CommandFailure("unavailable", "retained private session state is unknown",
+                                 hint=remedy, data=data) from exc
+        raise CommandFailure("conflict", "purge requires a retired bot with no retained private session",
+                             hint=remedy, data=data)
 
 
 def dispatch(args) -> CommandOutput:
@@ -155,10 +187,14 @@ def dispatch(args) -> CommandOutput:
                 selected = read_selection(root)
                 if selected is None or selected["release_id"] != release.release_id:
                     raise CommandFailure("conflict", "active selection changed before bot removal")
-                bot_dir, label, retained = _preflight(root, args.fleet, args.bot_id,
-                                                      paths.package, selected, release)
+                bot_dir, label, retained, socket = _preflight(root, args.fleet, args.bot_id,
+                                                              paths.package, selected, release)
                 if retained:
                     if args.purge:
+                        # Under the lifecycle lock: prove no retained writer
+                        # first, then read WIP with the one shared owner.
+                        _purge_quiet(bot_dir, socket, {"fleet": args.fleet, "bot": args.bot_id,
+                                                       "native_outcome": "unattempted"})
                         source_wip(bot_dir)
                     native = release.native_path / "spin-down-bot.sh"
                     env = os.environ.copy()

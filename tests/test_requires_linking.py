@@ -303,6 +303,30 @@ def _write_fleet_yaml(
 
 
 class TestGrantUnion:
+    def test_status_coaching_uses_own_fleet_public_reads(self):
+        """S2-05/S6-10: equipped status skills read liveness through the public
+        CLI in the composed own-fleet shape. Default-socket tmux sees no bot on
+        the fleet's private socket, and a `--fleet *` read matches no composed
+        grant, so neither may appear in a runnable fence or a grant."""
+        skills = source_package().library / "skills"
+        for name in ("fleet-status", "selfcheck", "fleet-pulse", "fleet-digest"):
+            text = (skills / name / "SKILL.md").read_text()
+            front, body = text.split("---", 2)[1:]
+            assert "--fleet" not in front, name
+            fenced, in_fence = [], False
+            for line in body.splitlines():
+                if line.strip().startswith("```"):
+                    in_fence = not in_fence
+                elif in_fence:
+                    fenced.append(line.strip())
+            assert not any("tmux " in line for line in fenced), name
+            assert not any("claudlobby --fleet" in line for line in fenced), name
+            assert "tmux capture-pane" not in body and "tmux list-sessions" not in body, name
+        assert "claudlobby --json fleet status" in (skills / "fleet-status" / "SKILL.md").read_text()
+        assert "claudlobby --json fleet status" in (skills / "selfcheck" / "SKILL.md").read_text()
+        assert "claudlobby --json bot session BOT_ID" in (
+            skills / "fleet-pulse" / "SKILL.md").read_text()
+
     def test_default_fleet_ops_is_usable_without_worker_admin_grants(self, fleet_dir):
         # Exercise the actual manager role as well as the universal skill; a
         # blanket role grant would otherwise mask an unsafe default.

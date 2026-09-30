@@ -171,13 +171,33 @@ _TX_ACTIVATION = ",".join(f"'{e}'" for e in ACTIVATION_TX_EVENTS)
 # this dispatch". Without this filter a `received` row alone (the sender's
 # pane_submitted lost — plane down at dispatch, up at receipt) made
 # `never_activated` fire for a message that was demonstrably received.
+#
+# The assignment's delivery message, ONE definition for every arm, the status
+# ladder and the board: the legacy `dispatch_msg_id` where the assignment row
+# carries one, else the newest canonical `assignment deliver` communication
+# (command_type='task') linked to this task AND this assignment, addressed to
+# this assignee in this fleet on this host. Canonical delivery never writes
+# dispatch_msg_id, so a join on that column alone hid every failed canonical
+# send from the board.
+_DELIVERY_MSG = (
+    "COALESCE(a.dispatch_msg_id, (SELECT c.msg_id FROM communications c"
+    " WHERE c.work_item_id = a.work_item_id AND c.assignment_id = a.assignment_id"
+    " AND c.command_type = 'task' AND c.recipient_uid = a.assignee_uid"
+    " AND c.fleet_uid = a.fleet_uid AND c.host_uid = a.host_uid"
+    " ORDER BY c.ingest_seq DESC LIMIT 1))")
 _TX_EXISTS = ("EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
-              " AND e.msg_id = a.dispatch_msg_id AND e.event <> 'received')")
+              f" AND e.msg_id = {_DELIVERY_MSG} AND e.event <> 'received')")
 _TX_ACTIVATED = ("EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
-                 " AND e.msg_id = a.dispatch_msg_id"
+                 f" AND e.msg_id = {_DELIVERY_MSG}"
                  f" AND e.event IN ({_TX_ACTIVATION}))")
 _TX_FAILED = ("EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
-              " AND e.msg_id = a.dispatch_msg_id AND e.event='failed')")
+              f" AND e.msg_id = {_DELIVERY_MSG} AND e.event='failed')")
+
+# The resolved delivery message per assignment, for the board's delivery field.
+# Format with ph = the assignment_id placeholders.
+ASSIGNMENT_DELIVERY_MSG_SQL = (
+    f"SELECT a.assignment_id, {_DELIVERY_MSG} AS msg_id FROM assignments a"
+    " WHERE a.assignment_id IN ({ph})")
 
 # --- the delivery JOIN (chunk P, #1501; fold F1/F3) ---------------------------
 # Delivery, derived ONCE here — the honest replacement for reading
@@ -708,18 +728,18 @@ TASK_STATUS_SQL = (
     "  AND t.event <> 'supplied_id_not_open'"
     "  ORDER BY t.ingest_seq DESC LIMIT 1),"
     " CASE"
-    "  WHEN a.dispatch_msg_id IS NULL THEN 'created_not_sent'"
+    f"  WHEN {_DELIVERY_MSG} IS NULL THEN 'created_not_sent'"
     "  WHEN EXISTS (SELECT 1 FROM events x WHERE x.kind='transmission'"
-    "    AND x.msg_id = a.dispatch_msg_id"
+    f"    AND x.msg_id = {_DELIVERY_MSG}"
     f"    AND x.event IN ({_TX_OPEN})) THEN 'open'"
     "  WHEN EXISTS (SELECT 1 FROM events x WHERE x.kind='transmission'"
-    "    AND x.msg_id = a.dispatch_msg_id"
+    f"    AND x.msg_id = {_DELIVERY_MSG}"
     f"    AND x.event IN ({_TX_UNRESOLVED})"
     "    AND NOT EXISTS (SELECT 1 FROM events y WHERE y.kind='transmission'"
     "      AND y.msg_id = x.msg_id AND y.attempt_no = x.attempt_no"
     "      AND y.event='failed')) THEN 'pending_unacknowledged'"
     "  WHEN EXISTS (SELECT 1 FROM events x WHERE x.kind='transmission'"
-    "    AND x.msg_id = a.dispatch_msg_id"
+    f"    AND x.msg_id = {_DELIVERY_MSG}"
     "    AND x.event='failed') THEN 'dispatch_failed'"
     "  ELSE 'created_not_sent'"
     " END) AS status,"

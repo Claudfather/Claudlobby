@@ -82,6 +82,13 @@ def dispatch(args) -> CommandOutput:
                        for row in data['bots']))
         if read_selection(destination.paths.root) != selected:
             raise selection_read_conflict('active usage selection changed during read')
+        if data["coverage"]["status"] == "unavailable":
+            # Unreadable is not empty: no zero totals when nothing was observed.
+            raise CommandFailure(
+                "unavailable", "no transcript usage could be observed for the selected scope",
+                data={**{key: value for key, value in data.items()
+                         if key not in ("main", "sidechain")}, "usage": None},
+                release_id=selected["release_id"])
         return CommandOutput(data, release_id=selected["release_id"], lines=lines)
     except CommandFailure:
         raise

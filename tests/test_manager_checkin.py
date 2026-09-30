@@ -147,6 +147,12 @@ hits = os.environ.get("STUB_PLANE_HITS", "")
 if hits:
     sys.stdout.write(hits)
 
+# Ingest landing just after this committed read answered empty: the queued
+# entry is committed, then deleted, so a later queue scan would find nothing.
+ingested = os.environ.get("STUB_PLANE_INGEST_AFTER_READ")
+if ingested and os.path.exists(ingested):
+    os.unlink(ingested)
+
 sys.exit(int(os.environ.get("STUB_PLANE_RC", "0")))
 """
 
@@ -467,6 +473,57 @@ def test_an_unreachable_plane_does_not_fire(tmp_path, *, scratch_plane_env):
     assert _dispatched(tmp_path) == ""
     assert _events(tmp_path) == []
     assert "unreachable" in _log(tmp_path)
+
+
+def _pending_trigger(tmp_path: Path, queue: str, name: str, subject: str) -> None:
+    """A checkin_triggered batch a daemon outage left durable but unrecorded,
+    in the shape emit_fleet_event stages it."""
+    d = tmp_path / "state" / "plane" / queue
+    d.mkdir(parents=True, exist_ok=True)
+    (d / name).write_text(json.dumps({"events": [{
+        "event_type": "system", "emitter": "manager-checkin", "fleet": "f",
+        "payload": {"event": "checkin_triggered", "subject_kind": "actor",
+                    "subject": subject, "data": {}}}]}))
+
+
+def test_a_staged_trigger_during_an_outage_does_not_refire(tmp_path, *, scratch_plane_env):
+    # S2-02: the committed read is empty while the last trigger sits staged;
+    # pending is not recorded, but it is not absent either -- no second /checkin.
+    _pending_trigger(tmp_path, "staged", "a.batch", "bot:f/mgr")
+    rc, _out, err = _run(tmp_path, bots=[{"dir": "mgr", "fleet": "f"}],
+                         scratch_plane_env=scratch_plane_env)
+    assert rc == 0, err
+    assert _dispatched(tmp_path) == ""
+    assert _events(tmp_path) == []
+    assert "pending Plane ingest" in _log(tmp_path)
+
+
+def test_ingest_between_the_two_reads_cannot_let_the_trigger_refire(tmp_path, *, scratch_plane_env):
+    # Integration review: ingest commits a queued trigger, then deletes it. Had
+    # the committed read run first (empty) and the queue scan second (entry
+    # gone), both would miss it. The queue scan runs first, so the trigger is
+    # seen while still queued and the committed read is never consulted.
+    _pending_trigger(tmp_path, "staged", "a.batch", "bot:f/mgr")
+    entry = tmp_path / "state" / "plane" / "staged" / "a.batch"
+    rc, _out, err = _run(tmp_path, bots=[{"dir": "mgr", "fleet": "f"}],
+                         env_extra={"STUB_PLANE_INGEST_AFTER_READ": str(entry)},
+                         scratch_plane_env=scratch_plane_env)
+    assert rc == 0, err
+    assert _dispatched(tmp_path) == ""
+    assert _events(tmp_path) == []
+    assert _plane_argv(tmp_path) == []      # skipped before the committed read
+    assert entry.exists()
+    assert "pending Plane ingest" in _log(tmp_path)
+
+
+def test_a_spooled_trigger_for_another_manager_does_not_block_this_one(tmp_path, *, scratch_plane_env):
+    _pending_trigger(tmp_path, "spool", "b.json", "bot:f/someone-else")
+    _pending_trigger(tmp_path, "spool", "c.json", "bot:g/mgr")
+    rc, _out, err = _run(tmp_path, bots=[{"dir": "mgr", "fleet": "f"}],
+                         scratch_plane_env=scratch_plane_env)
+    assert rc == 0, err
+    assert _dispatched(tmp_path) == "mgr\t/checkin"
+    assert [e["type"] for e in _events(tmp_path)] == ["checkin_triggered"]
 
 
 def test_a_disabled_plane_emit_warns_the_trigger_was_not_recorded(tmp_path, *, scratch_plane_env):

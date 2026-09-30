@@ -113,6 +113,12 @@ EOF
 cat > "$T/bin/tmux" <<'EOF'
 #!/bin/bash
 printf '%s\n' "$*" >> "$TMUX_LOG"
+if [ "${3:-}" = list-sessions ]; then
+    if [ -n "${FAKE_TMUX_NO_SERVER:-}" ]; then
+        printf 'no server running on %s\n' "$FAKE_TMUX_NO_SERVER" >&2; exit 1
+    fi
+    [ -z "${FAKE_TMUX_SESSIONS:-}" ] || printf '%s\n' "$FAKE_TMUX_SESSIONS"
+fi
 exit 0
 EOF
 chmod +x "$T/bin/uname" "$T/bin/systemctl" "$T/bin/launchctl" "$T/bin/tmux"
@@ -154,7 +160,7 @@ write_bot_conf() {  # write_bot_conf <bot_dir> <bot_service> <bot_name>
 reset_fakes() {
     : > "$FAKE_LOG"
     : > "$TMUX_LOG"
-    unset FAKE_STATE FAKE_EXIT FAKE_PIDS FAKE_SUBSTATE || true
+    unset FAKE_STATE FAKE_EXIT FAKE_PIDS FAKE_SUBSTATE FAKE_TMUX_NO_SERVER FAKE_TMUX_SESSIONS || true
     rm -f "$HOME/.config/systemd/user"/*.service "$HOME/Library/LaunchAgents"/*.plist 2>/dev/null || true
 }
 
@@ -594,6 +600,44 @@ assert_eq "exact active launchd job without a socket stays unknown" "unknown" \
     "$(FAKE_STATE=active svc_bot_session_observe "$BOT" svc-alpha "$T" "$installed" "$target")"
 assert_eq "failed exact native read without a socket stays unknown" "unknown" \
     "$(FAKE_LIST_EXIT=3 svc_bot_session_observe "$BOT" svc-alpha "$T" "$installed" "$target")"
+
+echo "=== selected bot stop cleans a stale private socket only after retirement ==="
+as_os Darwin
+BOTX="$T/bots/xray"
+write_bot_conf "$BOTX" "svc-xray" "xray"
+XTMP="$T/xray-tmux"
+xsocket="$XTMP/tmux-$(id -u)/svc-xray"
+mkdir -p "$XTMP/tmux-$(id -u)" "$T/generated"
+# Bind relative to the directory: sun_path is short and TMPDIR may be long.
+(cd "$XTMP/tmux-$(id -u)" && python3 -c 'import socket; socket.socket(socket.AF_UNIX).bind("svc-xray")')
+xsource="$T/generated/svc-xray.plist"
+xinstalled="$HOME/Library/LaunchAgents/svc-xray.plist"
+printf '%s\n' 'selected release plist' > "$xsource"
+stop_xray() {  # stop_xray [VAR=value...] -- exact inactive launchd job, stale or live socket
+    reset_fakes
+    cp "$xsource" "$xinstalled"
+    printf 'TMUX_SOCKET=svc-xray\n' > "$BOTX/.tmux-env"
+    set +e
+    xout=$(export "$@" FAKE_STATE=inactive
+           svc_bot_disenroll_exact "$xsource" "$xinstalled" "gui/$(id -u)/svc-xray" \
+               "$BOTX" svc-xray "$XTMP" 2>/dev/null); xrc=$?
+    set -e
+}
+stop_xray FAKE_TMUX_NO_SERVER="$xsocket"
+assert_eq "stale socket after bootout: stop succeeds" "0" "$xrc"
+assert_contains "stale socket after bootout: effect reported" "effect-attempted" "$xout"
+assert_eq "stale socket after bootout: .tmux-env removed" "false" "$([ -f "$BOTX/.tmux-env" ] && echo true || echo false)"
+assert_eq "stale socket after bootout: no kill-server" "0" "$(grep -c kill-server "$TMUX_LOG" || true)"
+stop_xray FAKE_TMUX_SESSIONS=xray
+assert_eq "live exact private server after bootout: stop succeeds" "0" "$xrc"
+assert_contains "live exact private server after bootout: server killed" "-L svc-xray kill-server" "$(cat "$TMUX_LOG")"
+stop_xray FAKE_TMUX_SESSIONS=xray-and-another
+assert_eq "live private server with another session: stop refuses" "3" "$xrc"
+assert_eq "live private server with another session: .tmux-env kept" "true" "$([ -f "$BOTX/.tmux-env" ] && echo true || echo false)"
+stop_xray FAKE_TMUX_NO_SERVER="$T/elsewhere/svc-xray"
+assert_eq "no-server text for another socket: stop refuses" "3" "$xrc"
+assert_eq "no-server text for another socket: .tmux-env kept" "true" "$([ -f "$BOTX/.tmux-env" ] && echo true || echo false)"
+reset_fakes
 
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
 # A suite that ran zero assertions and never touched FAIL would otherwise

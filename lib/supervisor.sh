@@ -602,8 +602,12 @@ svc_bot_disenroll_exact() {
             rm -f "$installed" || return $? ;;
         *) return 3 ;;
     esac
+    # The exact unit is now disabled or booted out, so tmux's exact no-server
+    # text for this socket is a stale file from a clean exit. A live matching
+    # server is still stopped; any other answer refuses. The caller's
+    # quiescence check then probes the socket independently.
     if [ -S "$tmpdir/tmux-$(id -u)/$socket" ]; then
-        svc_activation_stop_private_server "$bot_dir" "$socket" "$tmpdir" || return 3
+        svc_activation_stop_private_server "$bot_dir" "$socket" "$tmpdir" retired || return 3
     fi
     rm -f "$bot_dir/.tmux-env" || return $?
 }

@@ -55,6 +55,14 @@ class CandidateDisabledOverride(ActivationError):
                          + ", ".join(self.targets))
 
 
+class ActivationRefusal(ActivationError):
+    """A product-authored refusal whose text is safe to show the operator.
+
+    Messages name only fixed conditions and product-owned paths; never raise
+    this with native stderr, authored config values or another exception's text.
+    """
+
+
 def _json(value) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 

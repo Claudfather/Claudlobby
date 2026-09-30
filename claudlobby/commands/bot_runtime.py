@@ -39,6 +39,9 @@ def dispatch(args) -> CommandOutput:
                                      running=running, restart=action == "restart",
                                      ceiling=ceiling)
     except BotLifecycleError as exc:
+        if exc.busy:
+            raise CommandFailure("conflict", str(exc), data=data, retryable=True,
+                                 hint="retry after the running bot lifecycle operation finishes") from exc
         if exc.effect_attempted:
             data["native_outcome"] = "unknown"
             data["release_id"] = exc.release_id

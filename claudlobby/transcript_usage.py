@@ -449,11 +449,14 @@ def collect_bot_usage(paths, fleet, bot_id: str, since: datetime,
                                              "conflicting_duplicates", "truncated_file")):
         issues.append("transcript_rows_not_fully_attributable")
     files_read = len(files) - unreadable_files
-    if not files_read:
+    # A complete scan with no in-window candidates is an idle bot: observed zero.
+    idle = not files and not issues
+    if not files_read and not idle:
         issues.append("no_readable_recent_transcripts")
     return {**base, "usage": _counts(main + side), "main": _counts(main),
             "sidechain": _counts(side),
-            "coverage": {"status": "unavailable" if not files_read else
+            "coverage": {"status": "observed" if idle else
+                         "unavailable" if not files_read else
                          "partial" if issues else "observed",
                          "issues": sorted(set(issues)), "files_read": files_read,
                          "files_skipped_at_least": skipped, "candidate_files": len(files),

@@ -64,6 +64,56 @@ def test_native_effect_marker_distinguishes_preflight_refusal():
     assert bot_remove._effect_attempted("effect-attempted\n")
 
 
+@pytest.mark.parametrize("witness", (None, "socket", ".tmux-env", "unknown"))
+def test_purge_reads_wip_only_after_retained_session_is_gone(monkeypatch, tmp_path, witness):
+    from contextlib import contextmanager
+    from claudlobby import activation_state, bot_operations, context, runtime_admission
+    from claudlobby.commands import move_bot, operator_context
+
+    bot_dir = tmp_path / "bots" / "worker"
+    bot_dir.mkdir(parents=True)
+    socket = tmp_path / "tmux" / "svc-worker"
+    socket.parent.mkdir()
+    if witness == "socket":
+        socket.write_text("")
+    elif witness == ".tmux-env":
+        (bot_dir / ".tmux-env").write_text("TMUX_SOCKET=svc-worker\n")
+    events = []
+    release = SimpleNamespace(release_id="release", native_path=tmp_path / "native",
+                              cli_path=tmp_path / "cli", inputs=SimpleNamespace(artifact_id="a"))
+
+    @contextmanager
+    def admitted(*_args, **_kwargs):
+        yield release
+
+    @contextmanager
+    def locked(_root):
+        events.append("lock")
+        yield
+
+    monkeypatch.setattr(operator_context, "require_operator_context", lambda *_: None)
+    monkeypatch.setattr(context, "resolve_paths", lambda **_: SimpleNamespace(root=tmp_path, package=object()))
+    monkeypatch.setattr(runtime_admission, "mutation_admission", admitted)
+    monkeypatch.setattr(bot_operations, "_operation_lock", locked)
+    monkeypatch.setattr(activation_state, "read_selection", lambda *_: {"release_id": "release"})
+    monkeypatch.setattr(bot_remove, "_preflight", lambda *_: (
+        bot_dir, "svc-worker", True, None if witness == "unknown" else socket))
+    monkeypatch.setattr(move_bot, "source_wip", lambda directory: events.append(("wip", directory)))
+    monkeypatch.setattr(bot_remove, "_teardown", lambda command, env: (
+        events.append(("teardown", command[-2:])) or subprocess.CompletedProcess(command, 0, "", "")))
+    args = SimpleNamespace(seed=False, root=tmp_path, fleet="example", bot_id="worker", purge=True)
+    if witness is None:
+        bot_remove.dispatch(args)
+        assert events == ["lock", ("wip", bot_dir), ("teardown", ["--purge", str(bot_dir)])]
+        return
+    with pytest.raises(CommandFailure) as refused:
+        bot_remove.dispatch(args)
+    assert refused.value.error.code == ("unavailable" if witness == "unknown" else "conflict")
+    assert "without --purge first" in refused.value.error.hint
+    assert refused.value.data["native_outcome"] == "unattempted"
+    assert events == ["lock"]  # neither WIP nor any native teardown ran
+
+
 @pytest.mark.parametrize("declared_in", ("active", "authored"))
 def test_remove_refuses_declared_bot_before_native_teardown(monkeypatch, tmp_path, declared_in):
     from claudlobby import active_config, config_plan, context

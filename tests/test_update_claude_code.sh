@@ -101,6 +101,30 @@ _log2="$_T/root2/state/claude-update.log"
 assert_eq "fleet-PATH resolution prefers the system-first binary (1.1.1, not 2.2.2)" "true" \
     "$([ -f "$_log2" ] && grep -q "current: 1.1.1" "$_log2" && grep -q "target: $_T/sysbin/claude" "$_log2" && echo true || echo false)"
 
+# (c) No timeout/gtimeout (stock macOS): the version cannot be BOUNDED, which is
+#     this job's missing prerequisite, not a binary that cannot run. The run skips
+#     distinctly: no false "CANNOT RUN", no failure alert, and nothing installed.
+mkdir -p "$_T/notimeout" "$_T/root3"
+for _d in /usr/bin /bin; do
+    for _f in "$_d"/*; do
+        _n="${_f##*/}"
+        case "$_n" in timeout|gtimeout) continue ;; esac
+        [ -e "$_T/notimeout/$_n" ] || ln -s "$_f" "$_T/notimeout/$_n"
+    done
+done
+: > "$_T/npm.calls"
+_rc3=0
+PATH="$_T/notimeout" CLAUDLOBBY_ROOT="$_T/root3" HOME="$_T/home" CLAUDE_BIN="$_T/fakeclaude" \
+    CLAUDE_UPDATE_FLEET_PATH="$_T/empty" \
+    "$BASH" "$LIB_DIR/update-claude-code.sh" testfleet >/dev/null 2>&1 || _rc3=$?
+_log3="$_T/root3/state/claude-update.log"
+assert_eq "no timeout/gtimeout: run skips cleanly (rc 0)" "0" "$_rc3"
+assert_eq "no timeout/gtimeout: skip names the missing bound" "true" \
+    "$([ -f "$_log3" ] && grep -q "UPDATE skipped — the claude version probe cannot be bounded" "$_log3" && echo true || echo false)"
+assert_eq "no timeout/gtimeout: never reports the binary as unable to run" "false" \
+    "$([ -f "$_log3" ] && grep -Eq "CANNOT RUN|cannot run before|UPDATE FAILED" "$_log3" && echo true || echo false)"
+assert_eq "no timeout/gtimeout: nothing installed" "" "$(cat "$_T/npm.calls")"
+
 echo ""
 echo "=== composed host-job spine (system.yaml claude-update) ==="
 # The self-generating installer is retired; the unit semantics live in

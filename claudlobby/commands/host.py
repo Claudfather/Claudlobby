@@ -134,9 +134,15 @@ def _activate(args, root):
                     upgrade_activation if read_selection(root) is not None else bootstrap_activation)
         record = activate(root, args.activation_id, plan.plan_id, directory)
     except Exception as exc:
-        from ..activation_state import ActivationError, CandidateDisabledOverride
-        data.update(recorded_activation=_recorded(root, args.activation_id), recording="unknown")
-        hint = _hint(root)
+        from subprocess import TimeoutExpired
+        from ..activation_state import ActivationError, ActivationRefusal, CandidateDisabledOverride
+        recorded = _recorded(root, args.activation_id)
+        # The owner prepares the record before any pause or effect; no record
+        # for this ID means the refusal happened while the host was unchanged.
+        data.update(recorded_activation=recorded, recording="unknown" if recorded else "unchanged")
+        hint = _hint(root) if recorded else (
+            "no activation record was created; correct the refusal and rerun the same command")
+        pending = "inspect its pending step" if recorded else "no activation record was created"
         if isinstance(exc, CandidateDisabledOverride):
             code = "conflict"
             message = ("conflict: candidate launchd units have persistent disabled overrides: "
@@ -144,14 +150,18 @@ def _activate(args, root):
             hint = ("review these units and explicitly enable their launchd overrides, "
                     "or unenroll them in authored config before retrying")
             data["recording"] = "unchanged"
+        elif isinstance(exc, TimeoutExpired):
+            code, message = "unavailable", f"unavailable: native user manager did not answer in time; {pending}"
         elif isinstance(exc, (ImportError, OSError)):
             code, message = "unavailable", "unavailable: cold-host activation dependency or native access"
+        elif isinstance(exc, ActivationRefusal):
+            code, message = "conflict", f"conflict: activation refused: {exc}; {pending}"
         elif isinstance(exc, ActivationError):
             # Native stderr can contain arbitrary text. Disclose only the
             # operation and rc from the product-owned refusal envelope.
             refusal = re.match(r"\A(svc_activation_[a-z_]+) refused \(([0-9]{1,3})\):", str(exc))
             code, message = "conflict", (f"conflict: {refusal[1]} refused ({refusal[2]})"
-                                         if refusal else "conflict: activation did not complete; inspect its pending step")
+                                         if refusal else f"conflict: activation did not complete; {pending}")
             if getattr(args, "resume", None) and data["recorded_activation"]:
                 from ..activation import resumable_running_step
                 from ..activation_state import read_activation
@@ -168,7 +178,7 @@ def _activate(args, root):
                 message = "conflict: host activation lock is held; no activation record was created"
                 hint = "inspect running host operations and activation.lock holders before retrying"
         elif isinstance(exc, (ValueError, RuntimeError)):
-            code, message = "conflict", "conflict: activation did not complete; inspect its pending step"
+            code, message = "conflict", f"conflict: activation did not complete; {pending}"
         else:
             diagnostic = str(uuid4())
             print(f"diagnostic {diagnostic}: {type(exc).__name__}", file=sys.stderr)

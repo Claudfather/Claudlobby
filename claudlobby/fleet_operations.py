@@ -96,6 +96,14 @@ def set_fleet_running(*, root: Path, fleet: str | None, action: str,
                                      bot=bot, running=action != "stop",
                                      restart=action == "restart")
         except BotLifecycleError as exc:
+            if (action == "restart" and exc.skip_reason == "de_enrolled"
+                    and not exc.effect_attempted):
+                # Like the native rolling/weekly restart doors, a deliberately
+                # stopped bot stays stopped; the sweep continues past it.
+                completed.append(BotLifecycleResult(
+                    destination.fleet.name, bot, exc.release_id or selected["release_id"],
+                    exc.target or "", "skipped", False, "not_checked", reason="de_enrolled"))
+                continue
             raise FleetLifecycleError("fleet lifecycle stopped at an unverified bot",
                                       completed=completed, bot=bot,
                                       effect_attempted=exc.effect_attempted,

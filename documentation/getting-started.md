@@ -6,8 +6,8 @@ For an existing checkout-based host, first read the [conversion prerequisite](ex
 
 ## Prerequisites
 
-- A working CPython accepted by the candidate wheel (`python3 -c 'import plistlib, ssl, venv'` must succeed), `git` for a source build, and enough disk for a copied Python environment and dependency wheels.
-- `tmux` and the `claude` executable on `PATH`; Claude Code must be installed and authenticated for the user who will run the bots.
+- A working CPython accepted by the candidate wheel that can create a virtual environment (step 1 probes this by creating a disposable one), `git` for a source build, and enough disk for a copied Python environment and dependency wheels. Debian, Ubuntu and Raspberry Pi OS ship `venv` without `ensurepip` unless the `python3-venv` package is installed; `import venv` alone is not proof.
+- `tmux`, `jq` and the `claude` executable on `PATH`; Claude Code must be installed and authenticated for the user who will run the bots. Bot startup uses `jq` to pre-accept consent and seed trust, so `host setup` refuses without it.
 - A working **user** manager: launchd in the current macOS user domain, or `systemctl --user` on Linux. For unattended Linux boots, enable user lingering using your host's normal administrative procedure. `host setup` observes the manager; it does not install packages, enable lingering, or change system settings.
 - For the seed's Telegram bot, install the Telegram channel plugin (`claude plugin install telegram@claude-plugins-official`), obtain a token from BotFather, and know your Telegram user and group IDs. A fleet without Telegram may author a different manifest.
 
@@ -23,12 +23,19 @@ Approval does not change the separate `channelsEnabled` master policy. If the ch
 
 Use a committed Claudlobby source checkout for this example. A history-free test export needs a local build inventory **and commit** first: `git init --quiet && git add --all && git commit -m 'Record release source'`. Configure a local Git author if needed; no remote is required. An uncommitted export can build a wheel, but release assembly refuses its missing source revision. There is no hosted release bundle or built-in lock-generation command. These commands follow the repository's [offline assembly CI rehearsal](../.github/workflows/test.yml) and its [hash-lock construction](../tests/release_assembly_smoke.py): network access prepares inputs; assembly itself uses only local wheels.
 
+Choose the host CPython and prove it can create a disposable virtual environment. Stop unless this prints `python ok`:
+
+```bash
+PYTHON="$(command -v python3)"                 # choose a working host CPython
+PROBE="$(mktemp -d)"
+"$PYTHON" -c 'import plistlib, ssl' && "$PYTHON" -m venv "$PROBE/venv" && echo 'python ok'
+rm -rf "$PROBE"
+```
+
 ```bash
 git clone https://github.com/Claudfather/Claudlobby.git
 cd Claudlobby
 
-PYTHON="$(command -v python3)"                 # choose a working host CPython
-"$PYTHON" -c 'import plistlib, ssl, venv'
 WORK="$HOME/.local/share/claudlobby-build"
 DATA="$HOME/.local/share/claudlobby-data"    # outside the checkout
 mkdir -p "$WORK/dist" "$WORK/wheelhouse"
@@ -83,23 +90,26 @@ The assembler refuses URLs, source distributions, unpinned requirements, missing
 
 ## 2. Assemble a sealed host release
 
-Choose the single wheel built above. `host setup` verifies package resources, the user manager, `tmux`, and `claude`; it assembles an immutable release and reports its CLI and native search paths. It **does not select the release or start a bot**.
+Choose the single wheel built above. `host setup` verifies package resources, the user manager, `tmux`, `jq`, and `claude`; it assembles an immutable release and reports its CLI and native search paths. It **does not select the release or start a bot**. The block stops at the first failure without closing your shell.
 
 ```bash
 set -- "$WORK"/dist/*.whl
-[ "$#" -eq 1 ] || { echo 'expected exactly one candidate wheel' >&2; exit 1; }
-WHEEL="$1"
-"$WORK/bootstrap/bin/claudlobby" --root "$DATA" host setup \
-  --wheel "$WHEEL" --dependency-lock "$WORK/dependency.lock" \
-  --wheelhouse "$WORK/wheelhouse" --interpreter "$WORK/bootstrap/bin/python" \
-  --json > "$WORK/host-setup.json"
-RELEASE_CLI=$("$WORK/bootstrap/bin/python" -c \
-  'import json,sys; result=json.load(open(sys.argv[1])); assert result["ok"]; print(result["data"]["cli"])' \
-  "$WORK/host-setup.json")
-"$RELEASE_CLI" --help
+if [ "$#" -ne 1 ]; then
+  echo 'expected exactly one candidate wheel; stop here' >&2
+else
+  WHEEL="$1"
+  "$WORK/bootstrap/bin/claudlobby" --root "$DATA" host setup \
+    --wheel "$WHEEL" --dependency-lock "$WORK/dependency.lock" \
+    --wheelhouse "$WORK/wheelhouse" --interpreter "$WORK/bootstrap/bin/python" \
+    --json > "$WORK/host-setup.json" &&
+  RELEASE_CLI=$("$WORK/bootstrap/bin/python" -c \
+    'import json,sys; result=json.load(open(sys.argv[1])); assert result["ok"]; print(result["data"]["cli"])' \
+    "$WORK/host-setup.json") &&
+  "$RELEASE_CLI" --help
+fi
 ```
 
-Use the exact CLI reported by setup for the remaining commands. If setup refuses native manager access, repair the host's user-manager session first; a guessed unit directory cannot replace that proof.
+Use the exact CLI reported by setup for the remaining commands. If setup refuses native manager access, repair the host's user-manager session first; a guessed unit directory cannot replace that proof. If assembly fails after creating its release directory, the refusal names the retained incomplete directory under `$DATA/state/releases/`. Assembly never repairs or overwrites it, so the same inputs keep refusing: inspect it, remove that directory yourself, then rerun `host setup`.
 
 ## 3. Author the first fleet
 
@@ -126,16 +136,17 @@ Set `USER_UNIT_DIR` to a path reported in `host-setup.json` under `data.install_
 case "$(uname -s)" in
   Darwin) USER_UNIT_DIR="$HOME/Library/LaunchAgents" ;;
   Linux)  USER_UNIT_DIR="$HOME/.config/systemd/user" ;;
-  *) echo 'unsupported native manager' >&2; exit 1 ;;
+  *) USER_UNIT_DIR=""; echo 'unsupported native manager; stop here' >&2 ;;
 esac
-mkdir -p "$USER_UNIT_DIR"
-"$RELEASE_CLI" --root "$DATA" --fleet seed fleet setup \
-  --config "$WORK/fleet.yaml" --install-directory "$USER_UNIT_DIR" || exit
-"$RELEASE_CLI" --root "$DATA" host doctor
-"$RELEASE_CLI" --root "$DATA" host status
+if [ -n "$USER_UNIT_DIR" ] && mkdir -p "$USER_UNIT_DIR" &&
+   "$RELEASE_CLI" --root "$DATA" --fleet seed fleet setup \
+     --config "$WORK/fleet.yaml" --install-directory "$USER_UNIT_DIR"; then
+  "$RELEASE_CLI" --root "$DATA" host doctor
+  "$RELEASE_CLI" --root "$DATA" host status
+fi
 ```
 
-`fleet setup` copies the authored manifest to `$DATA/local/seed/fleet.yaml`, stages all declared host fleets, and activates through the release owner. It may stop or start supervised processes, so run it when you intend to bring the fleet up. A different existing target manifest requires `--replace-config`; an unchanged, already active plan is not a new activation. A failed activation retains its recorded pending step for explicit repair. `host doctor` reports configuration and host checks; verify the bot's channel and response separately. Native startup checks `bridge_state` against the current session PID, not merely a poller occupying the Telegram slot (#2008). An old `BRIDGE_READY` log line or tmux session alone does not establish current inbound readiness.
+`fleet setup` checks that the manifest's `fleet.name` matches `--fleet`, copies it to `$DATA/local/seed/fleet.yaml`, stages all declared host fleets, and activates through the release owner. It may stop or start supervised processes, so run it when you intend to bring the fleet up. A different existing target manifest requires `--replace-config`; an unchanged, already active plan is not a new activation. It refuses when `local/seed` is a system container or `seed` is already declared nested under one. If staging refuses, setup puts back the previous manifest (or removes the new copy) and reports which. A refusal before any activation record reports `recording: unchanged` and its reason; correct it and rerun. A failed activation after its record exists retains its recorded pending step for explicit repair. `host doctor` reports configuration and host checks; verify the bot's channel and response separately. Native startup checks `bridge_state` against the current session PID, not merely a poller occupying the Telegram slot (#2008). An old `BRIDGE_READY` log line or tmux session alone does not establish current inbound readiness.
 
 For later config changes, edit an authoring file and stage and activate through the sealed CLI. The retired checkout `generate`/fleet setup sequence is outside the selected activation journal. The [fleet schema](fleet-yaml-schema.md) documents each manifest field.
 

@@ -1049,6 +1049,71 @@ def test_every_attention_arm_is_stamped_by_the_query_that_selected_it(tmp_path):
                    if not r["attention"])
 
 
+def _canonical_delivery(root: Path, h: str, *, tx_state: str | None,
+                        fleet: str = "f", recipient: str | None = None) -> str:
+    """The `assignment deliver` shape: the assignment row carries NO
+    dispatch_msg_id; the task communication links task + assignment."""
+    stem = (h * 32)[:32]
+    mgr, worker = f"bot:{fleet}/erlich", f"bot:{fleet}/ramanujan"
+    initialize_plane(root)
+    emit_batch(root, [
+        {"event_type": "work_item", "emitter": "t", "fleet": fleet,
+         "payload": {"work_item_id": "wi_" + stem, "title": f"task {h}",
+                     "created_by": mgr}},
+        {"event_type": "assignment", "emitter": "t", "fleet": fleet,
+         "payload": {"assignment_id": "asg_" + stem, "work_item_id": "wi_" + stem,
+                     "assignee": worker, "assigned_by": mgr,
+                     "expected_by": FUTURE}},
+        {"event_type": "communication", "emitter": "t", "fleet": fleet,
+         "payload": {"msg_id": "msg_" + stem, "sender": mgr,
+                     "recipient": recipient or worker, "message_class": "task_request",
+                     "command_type": "task", "work_item_id": "wi_" + stem,
+                     "assignment_id": "asg_" + stem, "body": f"go {h}"}}])
+    if tx_state:
+        emit_batch(root, [{
+            "event_type": "transmission", "emitter": "t", "fleet": fleet,
+            "payload": {"msg_id": "msg_" + stem, "attempt_no": 1, "carrier": "tmux",
+                        "destination": "ramanujan", "state": tx_state}}])
+    return "asg_" + stem
+
+
+def test_board_joins_canonical_task_delivery_not_only_dispatch_msg_id(tmp_path):
+    """S5a-05: canonical delivery never writes assignments.dispatch_msg_id, so
+    its failed send must still raise send_failed and fill the delivery field;
+    a queued one stays never_activated and a submitted one stays quiet. A task
+    communication addressed to someone else is not this assignment's delivery."""
+    failed = _canonical_delivery(tmp_path, "c1", tx_state="failed")
+    queued = _canonical_delivery(tmp_path, "c2", tx_state="carrier_queued")
+    fine = _canonical_delivery(tmp_path, "c3", tx_state="pane_submitted")
+    stray = _canonical_delivery(tmp_path, "c4", tx_state="failed",
+                                recipient="bot:f/someone-else")
+    rows = _tasks(tmp_path)
+    assert rows[failed]["attention_reason"] == ["send_failed"]
+    assert rows[failed]["delivery"]["message_id"] == "msg_" + ("c1" * 16)
+    assert rows[failed]["current_assignment"]["dispatch_message_id"] == "msg_" + ("c1" * 16)
+    assert rows[queued]["attention_reason"] == ["never_activated"]
+    assert rows[fine]["attention"] is False
+    assert rows[fine]["delivery"]["integrity"] == "unconfirmed"
+    assert rows[stray]["attention"] is False and rows[stray]["delivery"] is None
+
+
+def test_overview_attention_is_the_boards_owning_fleet_count(tmp_path):
+    """S5a-06: the strip and the board count the same cards. Work fleet `a`
+    owns but assigned a bot of fleet `b` is `a`'s attention on both surfaces;
+    the assignee axis stays `open`, disclosed as such."""
+    _dispatch(tmp_path, "a1", fleet="a", worker="bot:b/ramanujan",
+              expected_by=PAST, tx_state=None)
+    _dispatch(tmp_path, "b1", fleet="b", expected_by=FUTURE, tx_state="pane_submitted")
+    client = TestClient(create_app(tmp_path, package=source_package()))
+    fleets = {r["alias"]: r for r in client.get("/api/overview").json()["data"]["fleets"]}
+    for alias in ("a", "b"):
+        board = client.get(f"/api/tasks?fleet={alias}").json()["data"]
+        assert fleets[alias]["attention"] == board["attention_count"]
+        assert fleets[alias]["attention_scope"] == "owning_fleet_tasks"
+    assert (fleets["a"]["attention"], fleets["b"]["attention"]) == (1, 0)
+    assert fleets["b"]["open_scope"] == "assigned_to_fleet_bots"
+
+
 def test_the_arms_query_selects_exactly_the_attention_query(tmp_path):
     """Both are built from `queries.ATTENTION_ARMS`, so the queue and the
     reasons cannot disagree about who is in it — a new arm reaches both or

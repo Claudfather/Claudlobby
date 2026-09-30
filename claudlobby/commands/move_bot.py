@@ -28,22 +28,101 @@ class Move:
     release_id: str
     install_directory: Path
     external: tuple[str, ...] = ()
+    installed: str = ""
+    native_target: str = ""
+    selected_plan_id: str = ""
+    move_inputs: tuple[str, ...] = ()
+
+
+_PENDING_REMEDY = ("review pending authoring with config plan and config diff, activate it "
+                   "with host activate, then retry the move")
+
+
+def selected_inputs_fresh(plan, source, authored_source, target, candidates, bot, package):
+    """Refuse authoring the move's host-wide activation would ship unreviewed.
+
+    The selected plan's recorded inputs are the fingerprints. Only the source
+    and target fleet.yaml may differ, and their rosters only by this bot. That
+    owner is file-granular: other edits inside those two files are not told
+    apart here. Returns the two manifest inputs the move may change.
+    """
+    from ..active_config import context_from_plan
+    from ..config_plan import path_state
+
+    if target.fleet.name not in plan.fleets:
+        raise CommandFailure("conflict", "target fleet is not active; activate it before moving a bot into it",
+                             hint=_PENDING_REMEDY)
+    if {context.fleet.name for context in candidates} != set(plan.fleets):
+        raise CommandFailure("conflict", "authored fleets differ from the selected configuration",
+                             hint=_PENDING_REMEDY)
+    frozen_target = context_from_plan(plan, target.fleet.name, package=package).fleet
+    if (set(authored_source.bots) != set(source.fleet.bots) - {bot}
+            or set(target.fleet.bots) != set(frozen_target.bots) | {bot}):
+        raise CommandFailure("conflict", "authored rosters differ from the selected configuration "
+                             "by more than this bot", hint=_PENDING_REMEDY)
+    manifests = plan.effects.get("fleet_manifests", {})
+    if not all(isinstance(manifests.get(name), str) for name in (source.fleet.name, target.fleet.name)):
+        raise CommandFailure("conflict", "selected configuration lacks the source or target manifest")
+    allowed = tuple(os.path.abspath(manifests[name])
+                    for name in (source.fleet.name, target.fleet.name))
+    for path, recorded in plan.inputs.items():
+        if path in allowed:
+            continue
+        if path_state(Path(path), source=recorded["follow_links"]) != recorded["state"]:
+            raise CommandFailure("conflict", f"authored input changed since the selected configuration: {path}",
+                                 hint=_PENDING_REMEDY)
+    return allowed
+
+
+def staged_scope(move, staged):
+    """The staged plan may differ from the selected one only in the move's inputs."""
+    from ..config_plan import read_plan
+
+    selected = read_plan(move.root, move.selected_plan_id)
+    if not move.move_inputs or tuple(staged.fleets) != tuple(selected.fleets):
+        raise RuntimeError("staged move plan changes the active fleet set")
+    for path in staged.inputs.keys() & selected.inputs.keys():
+        if path not in move.move_inputs and staged.inputs[path] != selected.inputs[path]:
+            raise RuntimeError(f"staged move plan includes unrelated authoring: {path}")
+
+
+def _git(repo, *command):
+    # An inherited GIT_DIR/GIT_WORK_TREE would answer for another repository.
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    try:
+        return subprocess.run(["git", *command], cwd=repo, env=env,
+                              capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise CommandFailure("unavailable", "source project WIP cannot be checked") from exc
 
 
 def source_wip(directory):
+    """Refuse unless every source checkout's authored work is also published.
+
+    A dirty tree, detached HEAD, missing upstream, commits on any local branch
+    that no remote-tracking ref holds, a stash, or unreadable Git state all
+    refuse; a purge would otherwise destroy them.
+    """
     projects = directory / "projects"
     if not projects.is_dir():
         return
     for repo in sorted(projects.iterdir()):
-        if not (repo / ".git").exists():
+        if not (repo / ".git").exists() and not (repo / ".git").is_symlink():
             continue
-        try:
-            result = subprocess.run(["git", "status", "--porcelain"], cwd=repo,
-                                    capture_output=True, text=True, timeout=20)
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise CommandFailure("unavailable", "source project WIP cannot be checked") from exc
-        if result.returncode or result.stdout.strip():
+        status = _git(repo, "status", "--porcelain")
+        if status.returncode or status.stdout.strip():
             raise CommandFailure("conflict", f"source project has uncommitted or unknown WIP: {repo}")
+        if _git(repo, "symbolic-ref", "-q", "HEAD").returncode:
+            raise CommandFailure("conflict", f"source project has a detached or unreadable HEAD: {repo}")
+        if _git(repo, "rev-parse", "--verify", "-q", "@{upstream}").returncode:
+            raise CommandFailure("conflict", f"source project branch has no upstream: {repo}")
+        unpushed = _git(repo, "rev-list", "--count", "HEAD", "--branches", "--not", "--remotes")
+        if unpushed.returncode or unpushed.stdout.strip() != "0":
+            raise CommandFailure("conflict", f"source project has unpushed or unknown commits: {repo}")
+        stashes = _git(repo, "stash", "list")
+        if stashes.returncode or stashes.stdout.strip():
+            raise CommandFailure("conflict", f"source project has stashed or unknown WIP: {repo}")
 
 
 def preflight(args):
@@ -108,6 +187,8 @@ def preflight(args):
     for context in candidates:
         if not _validation_gate(context.fleet, context.paths, context="retry bot move"):
             raise CommandFailure("conflict", "authored fleet validation failed")
+    move_inputs = selected_inputs_fresh(plan, source, authored_source, target, candidates,
+                                        args.bot, package)
 
     source_dir = source.paths.bot_runtime(args.bot)
     target_dir = target.paths.bot_runtime(args.bot)
@@ -124,7 +205,8 @@ def preflight(args):
     manager, *_ = _catalog(Adapter(package).read("svc_inventory_catalog"))
     entry = selected_bot_entry(root, source.fleet.name, args.bot, manager)
     move = Move(root, source, target, source_dir, target_dir,
-                release.release_id, Path(entry["installed"]).parent, external)
+                release.release_id, Path(entry["installed"]).parent, external,
+                entry["installed"], entry["target"], selected["plan_id"], move_inputs)
     if getattr(args, "apply", False):
         update_access(move, args.bot, dry_run=True)
     return move
@@ -147,14 +229,40 @@ def no_active_assignment(move, bot):
 
 
 def source_session(move, bot, *, force):
-    from ..supervision import build_supervision_spec
-    from ..supervision_inventory import Adapter
+    """Observe the source against its frozen installed unit and native target.
 
+    A stopped, de-enrolled or crashed source proves absent without --force;
+    --force only accepts a ready live session. Unknown state always refuses.
+    """
+    from ..activation_runtime import assert_quiescent
+    from ..bot_operations import _selected_adapter
+    from ..supervision import build_supervision_spec
+    from ..supervision_inventory import Adapter, InventoryError
+
+    if not move.installed or not move.native_target:
+        raise CommandFailure("unavailable", "source frozen native placement is unknown")
     spec = build_supervision_spec(move.source.fleet.bots[bot], move.source.fleet,
                                   move.source.paths)
-    state = Adapter(move.source.paths.package).read(
-        "svc_bot_session_observe", spec.bot_dir, spec.label, spec.environment["TMUX_TMPDIR"]
-    ).strip()
+    try:
+        adapter = _selected_adapter(move.root, move.source.fleet.name, bot,
+                                    Adapter(move.source.paths.package))
+        state = adapter.read(
+            "svc_bot_session_observe", spec.bot_dir, spec.label, spec.environment["TMUX_TMPDIR"],
+            move.installed, move.native_target,
+        ).strip()
+        if state == "unknown":
+            # A clean stop can leave tmux's socket file. Only the existing
+            # kernel proof (inactive exact unit, empty cgroup where witnessed,
+            # socket refusing connections) reads it as absent; no cleanup.
+            socket = (Path(spec.environment["TMUX_TMPDIR"]) / f"tmux-{os.getuid()}" / spec.label)
+            try:
+                assert_quiescent(adapter, installed_file=Path(move.installed),
+                                 target=move.native_target, socket_path=socket)
+                state = "absent"
+            except (RuntimeError, OSError):
+                pass
+    except (RuntimeError, InventoryError, OSError, subprocess.SubprocessError) as exc:
+        raise CommandFailure("unavailable", "source private session state is unknown") from exc
     if state not in {"ready", "absent"}:
         raise CommandFailure("unavailable", "source private session state is unknown")
     if state == "ready" and not force:
@@ -269,6 +377,7 @@ def apply_move(move, bot, *, force, cleanup):
         plan = stage_configuration(declared_paths(move.root, move.source.paths.package,
                                                   external=move.external), release)
         data["plan_id"] = plan.plan_id
+        staged_scope(move, plan)
         activation_id = str(uuid4())
         data["activation_id"] = activation_id
         record = upgrade_activation(move.root, activation_id, plan.plan_id,

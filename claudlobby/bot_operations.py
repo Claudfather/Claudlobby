@@ -42,12 +42,17 @@ _SELF_RESPONSE_WAIT_S = 30
 class BotLifecycleError(RuntimeError):
     def __init__(self, reason: str, *, effect_attempted: bool = False,
                  unavailable: bool = False, release_id: str | None = None,
-                 target: str | None = None, handoff_reason: str | None = None):
+                 target: str | None = None, handoff_reason: str | None = None,
+                 busy: bool = False, skip_reason: str | None = None):
         self.effect_attempted = effect_attempted
         self.unavailable = unavailable
         self.release_id = release_id
         self.target = target
         self.handoff_reason = handoff_reason
+        # Another lifecycle operation holds the host lock; nothing was attempted.
+        self.busy = busy
+        # A deliberate operator state (for example de-enrolled) refused this verb.
+        self.skip_reason = skip_reason
         super().__init__(reason)
 
 
@@ -63,6 +68,7 @@ class BotLifecycleResult:
     handoff: str = "not_applicable"
     request_id: str | None = None
     log_path: str | None = None
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -258,7 +264,11 @@ def _operation_lock(root: Path):
                 or stat.S_IMODE(info.st_mode) != 0o600
                 or (info.st_dev, info.st_ino) != (linked.st_dev, linked.st_ino)):
             raise BotLifecycleError("bot lifecycle lock is not private or changed")
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise BotLifecycleError("another bot lifecycle operation is running on this host",
+                                    busy=True) from exc
         yield
     finally:
         os.close(fd)
@@ -584,7 +594,10 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                 # A deliberate stop removed supervision. Restart may bounce only
                 # an already enrolled exact unit; bot start owns re-enrollment.
                 if not unit.installed:
-                    raise BotLifecycleError("bot is de-enrolled; use bot start")
+                    raise BotLifecycleError("bot is de-enrolled; use bot start",
+                                            skip_reason="de_enrolled",
+                                            release_id=release.release_id,
+                                            target=entry["target"])
                 native_state = dict(unit.properties).get("ActiveState")
                 if native_state in {"failed", "activating"} and manager == "Linux":
                     raise BotLifecycleError(f"bot native state is {native_state}; use bot stop, then bot start")

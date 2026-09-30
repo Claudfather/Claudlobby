@@ -213,7 +213,10 @@ def test_generated_context_and_existing_estate_refuse_with_inspection_guidance(c
     monkeypatch.delenv("BOT_ID")
     denied = call(capsys, argv, 4)
     assert len(calls) == 1 and denied["data"]["activation_id"] == calls[0][1]
-    assert "host status" in denied["error"]["hint"] and "--resume ID" in denied["error"]["hint"]
+    # No record for this ID: the host is unchanged and there is nothing to resume.
+    assert denied["data"]["recording"] == "unchanged"
+    assert "no activation record" in denied["error"]["hint"] and "--resume" not in denied["error"]["hint"]
+    assert "pending step" not in json.dumps(denied)
     assert "SECRET-value" not in json.dumps(denied) and snapshot(root) == before
     def native_refuse(*_):
         raise state.ActivationError("svc_activation_pause refused (3): SECRET-value")
@@ -244,6 +247,32 @@ def test_activate_discloses_lock_preflight_without_claiming_a_pending_step(candi
     assert disabled["data"]["recorded_activation"] is None
     assert disabled["data"]["recording"] == "unchanged"
     assert "pending step" not in json.dumps(disabled)
+
+    # The real pre-pause handoff preflight refuses before any record or pause;
+    # the operator must see the product-owned reason, not a pending-step guess.
+    from claudlobby.activation_handoffs import preflight_canonical_handoffs
+    old_bot = root / "old-bot"
+    old_bot.mkdir()
+    monkeypatch.setattr(activation, "bootstrap_activation", lambda *_: preflight_canonical_handoffs(
+        root, roster={"alpha": ("manager", ("worker",))}, bot_dirs={("alpha", "worker"): old_bot}))
+    before = snapshot(root)
+    handoff = call(capsys, ["--root", str(root), "--json", "host", "activate", plan.plan_id,
+                            "--install-directory", str(directory)], 4)
+    assert handoff["error"]["message"] == (
+        "conflict: activation refused: old fleet manager has no installed handoff owner; "
+        "no activation record was created")
+    assert handoff["data"]["recorded_activation"] is None
+    assert handoff["data"]["recording"] == "unchanged"
+    assert "pending step" not in json.dumps(handoff) and snapshot(root) == before
+
+    import subprocess
+    monkeypatch.setattr(activation, "bootstrap_activation", lambda *_: (_ for _ in ()).throw(
+        subprocess.TimeoutExpired(["svc", "SECRET-arg"], 5, stderr=b"SECRET-stderr")))
+    timeout = call(capsys, ["--root", str(root), "--json", "host", "activate", plan.plan_id,
+                            "--install-directory", str(directory)], 6)
+    assert timeout["error"]["code"] == "unavailable"
+    assert timeout["data"]["recording"] == "unchanged"
+    assert "SECRET" not in json.dumps(timeout)
 
 
 def test_host_status_distinguishes_absent_active_and_interrupted_recorded_state(candidate, capsys, tmp_path):

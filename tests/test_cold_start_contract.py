@@ -99,6 +99,18 @@ class TestDocumentedInstallPath:
             "PEP 668 makes that install fail on both supported host families."
         )
 
+    def test_walkthrough_probes_a_real_venv_and_never_exits_the_pasting_shell(self):
+        """`import venv` passes on Debian without python3-venv; only creating
+        one proves ensurepip. Snippets are pasted into an interactive shell, so
+        `exit` would close the operator's terminal instead of stopping a block.
+        """
+        lines = _shell_lines(GETTING_STARTED)
+        assert not [ln for ln in lines if re.search(r"\bexit\b", ln)]
+        assert not [ln for ln in lines if re.search(r"\bimport [\w, ]*\bvenv\b", ln)]
+        assert any(re.search(r'-m venv "\$PROBE/', ln) for ln in lines)
+        text = GETTING_STARTED.read_text()
+        assert "python3-venv" in text and "`jq`" in text
+
     def test_every_entry_point_agrees_on_the_first_run_template(self):
         """The three onboarding entry points must name the same template.
 

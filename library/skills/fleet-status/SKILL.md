@@ -1,40 +1,44 @@
 ---
 name: fleet-status
-description: "Quick health check across all fleet bots — tmux sessions, service status, reported context-degraded state, who's idle/working/dead."
+description: "Quick health check across your own fleet's bots — session and service observations, reported context-degraded state, who's idle/working/down/unknown."
 argument-hint: "[bot-name]"
 ---
 
 # Fleet Status
 
-Check health of all bots in the fleet.
+Check health of the bots in your own fleet. The generated bot context selects
+the fleet; do not name it. Run each command below as one literal command in its
+own Bash tool call and read the returned JSON directly — no pipes, shell
+variables or loops, which are not the granted operation.
 
-## Bot Discovery
-
-Discover running bots by listing tmux sessions. If `$CLAUDLOBBY_ROOT` and `$FLEET_NAME` are set, also read `fleet.yaml` to compare expected vs running bots.
-
-### Step 1: Discover running bots
-
-```bash
-tmux list-sessions -F '#{session_name}' 2>/dev/null
-```
-
-This is the source of truth for what is currently alive.
-
-### Step 2: Discover expected bots (optional)
-
-If `$CLAUDLOBBY_ROOT` and `$FLEET_NAME` are set, parse the fleet config to get the expected bot list:
+## Step 1: Read the fleet
 
 ```bash
-# For overlay fleets:
-grep -A1 '^\s*bots:' "$CLAUDLOBBY_ROOT/local/$FLEET_NAME/fleet.yaml" 2>/dev/null
-
-# For seed fleet:
-grep -A1 '^\s*bots:' "$CLAUDLOBBY_ROOT/fleet.yaml.seed" 2>/dev/null
+claudlobby --json fleet status
 ```
 
-Compare expected bots against running tmux sessions to identify bots that should be running but aren't (MISSING) and sessions that exist but aren't in the fleet config (UNREGISTERED).
+`data.bots[]` lists every declared bot with its private-session, supervision
+and recorded-heartbeat observations. This is the source of truth for declared
+versus observed bots. Do not list tmux sessions yourself: bots run on the
+fleet's private socket, so the default socket shows none of them and would read
+every worker as dead.
 
-If the fleet config is unavailable, report only what tmux shows.
+Inspect `ok` first. A refusal or an unknown observation is **unknown**, not
+down; say which source could not answer.
+
+## Step 2: One bot in detail (optional)
+
+For a single bot, or any bot Step 1 shows as down or unknown:
+
+```bash
+claudlobby --json bot status BOT
+claudlobby --json bot session BOT
+```
+
+Replace `BOT` with its literal declared ID. `bot session` reads the private
+session and native enrollment; it does not inspect another process by name.
+For recent output, `claudlobby --json bot logs BOT --lines 50` is a bounded log
+tail; a missing log is different from an unreadable one.
 
 ## Checks
 
@@ -48,8 +52,10 @@ Choose a 24-hour cutoff from the current time in RFC3339 form with an offset,
 then read the report pages directly:
 
 ```bash
-claudlobby --fleet "$FLEET_NAME" --json fleet reports list --since "$CUTOFF"
+claudlobby --json fleet reports list --since CUTOFF
 ```
+
+Replace `CUTOFF` with the literal timestamp.
 
 Inspect `ok` and each item's captured summary for `context-degraded`; continue
 with `--cursor NEXT_CURSOR` until `data.next_cursor` is null. A withheld summary
@@ -59,46 +65,21 @@ the same window only after reading every page.
 Any bot listed there is asking to be restarted — pair it with its completed
 count in the same window before deciding.
 
-Keep `--fleet` for the intended fleet. Inspect the result envelope and exit
-status before treating an empty page as clear. Do not pipe the CLI straight to
-`grep`: that hides its failure status, and a single page may omit later reports.
-
-
-For each discovered bot:
-
-```bash
-for bot in $(tmux list-sessions -F '#{session_name}' 2>/dev/null); do
-    PANE=$(tmux capture-pane -t "$bot" -p 2>/dev/null | tail -3)
-    echo "$bot: ALIVE | $PANE"
-done
-```
-
-For any expected bot not found in tmux sessions:
-
-```bash
-echo "$bot: DEAD"
-```
-
-Also check system resources:
-
-```bash
-free -h | head -2
-vcgencmd measure_temp 2>/dev/null
-df -h / | tail -1
-```
+The generated context already selects your fleet; reading another fleet is an
+operator action, not this skill. Inspect the result envelope and exit status
+before treating an empty page as clear. Do not pipe the CLI straight to `grep`:
+that hides its failure status, and a single page may omit later reports.
 
 ## Report Format
 
 ```
 FLEET STATUS
 
-Bots (discovered from tmux sessions + fleet.yaml):
-  <bot-a>: ALIVE (idle)
-  <bot-b>: ALIVE (working — last 3 lines of pane output)
-  <bot-c>: DEAD (expected in fleet.yaml, no tmux session)
-
-System:
-  RAM: 4.2G / 16G | Temp: 58C | Disk: 19G / 235G (9%)
+Bots (from claudlobby fleet status):
+  <bot-a>: running (idle)
+  <bot-b>: running (working — current task)
+  <bot-c>: down (declared, no private session observed)
+  <bot-d>: unknown (which source could not answer)
 ```
 
 If an argument is provided (a specific bot name), check only that bot instead of the full fleet.

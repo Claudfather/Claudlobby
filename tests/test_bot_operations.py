@@ -116,6 +116,30 @@ def test_disenroll_native_phase_is_reported_honestly(stdout, attempted, tmp_path
         assert "before a native effect" in public.value.error.message
 
 
+def test_lifecycle_lock_contention_is_a_retryable_conflict(tmp_path, monkeypatch):
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.commands import bot_runtime
+
+    (tmp_path / "state").mkdir(exist_ok=True)
+    with bot_operations._operation_lock(tmp_path):
+        with pytest.raises(bot_operations.BotLifecycleError) as busy:
+            with bot_operations._operation_lock(tmp_path):
+                pytest.fail("second lifecycle lock was granted")
+    assert busy.value.busy and not busy.value.effect_attempted
+    with bot_operations._operation_lock(tmp_path):
+        pass
+
+    monkeypatch.setattr(context, "resolve_paths", lambda **kwargs: SimpleNamespace(root=tmp_path))
+    monkeypatch.setattr(bot_operations, "set_bot_running", lambda **kwargs: (_ for _ in ()).throw(busy.value))
+    args = SimpleNamespace(seed=False, bot_id="worker", public_command="bot.restart",
+                           ceiling=None, fleet="example", root=tmp_path)
+    with pytest.raises(CommandFailure) as public:
+        bot_runtime.dispatch(args)
+    assert public.value.error.code == "conflict" and public.value.error.retryable
+    assert "another bot lifecycle operation" in public.value.error.message
+    assert public.value.data["native_outcome"] == "unattempted"
+
+
 def test_selected_bot_placement_survives_removal_of_installed_unit(cold):  # noqa: F811
     root, _, plan, host = cold
     activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)

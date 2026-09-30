@@ -60,6 +60,30 @@ ck_skip() {   # <bot_dir> <bot_id> <reason> <log note>
         "$(printf '{"bot":"%s","reason":"%s"}' "$(json_escape "$2")" "$3")" "$1" "$2"
 }
 
+# ck_trigger_pending <bot_id> -- rc 0 when this manager's checkin_triggered may
+# still be waiting in the Plane's durable staged/spool queues (a daemon outage
+# stages the emission: durable, but invisible to the committed read), or
+# when those queues cannot be read in full. rc 1 only when every entry was read
+# and none names it. Pending is not recorded, and it is not absent either: the
+# committed read's silence cannot license another paid /checkin. Bounded like
+# the message receipt's queue read; over the bound is unknown, never clear.
+ck_trigger_pending() {
+    local q f n=0
+    for q in "$ROOT/state/plane/staged" "$ROOT/state/plane/spool"; do
+        [ -e "$q" ] || continue
+        { [ -d "$q" ] && [ -r "$q" ] && [ -x "$q" ]; } || return 0
+        for f in "$q"/*; do
+            [ -f "$f" ] || continue
+            n=$((n + 1))
+            [ "$n" -le 256 ] && [ -r "$f" ] || return 0
+            if grep -qF '"checkin_triggered"' "$f" && grep -qF "\"bot:$FLEET/$1\"" "$f"; then
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
 ROSTER="$(safe_mktemp)"; BAD="$(safe_mktemp)"; HITS="$(safe_mktemp)"
 # Form D, both calls: rc 1 here means SOME manifest was bad, and the good rows
 # still printed -- a disclosure, never a reason to stop. A substitution would
@@ -86,6 +110,16 @@ while IFS="$(printf '\t')" read -r bot bot_fleet bot_dir; do
     fi
     if bot_is_busy "$socket" "$bot" "$bot_dir"; then
         ck_skip "$bot_dir" "$bot_id" busy "mid-turn"; continue
+    fi
+    # Queues FIRST, committed read second: ingest commits a queued trigger and
+    # only then deletes its entry, so a trigger that leaves the queue after this
+    # scan is already committed when the plane read below runs. The reverse
+    # order let ingest land between the two reads and both miss it.
+    if ck_trigger_pending "$bot_id"; then
+        pending_msg="$TS SKIP $FLEET/$bot_id -- a trigger may be pending Plane ingest (staged/spooled or queue unreadable), not firing"
+        echo "$pending_msg" >> "$LOG"
+        echo "$pending_msg" >&2
+        continue
     fi
     # THE RATE LIMIT IS A PLANE READ (task-recheck rule: no timer state file to
     # lose or to lie). Unreachable is NOT empty: a money-spending action must

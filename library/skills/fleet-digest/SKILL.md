@@ -5,7 +5,7 @@ argument-hint: "[days] [fleet]"
 tool_grants:
   - "Bash(jq *)"
   - "Bash(python3 *)"
-  - "Bash(claudlobby --fleet * --json event list *)"
+  - "Bash(claudlobby --json event list *)"
 ---
 
 # Fleet Digest
@@ -17,25 +17,22 @@ apart is what stops thousands of raw rows reaching an Opus reasoning pass.
 Contract: the `fleet-monitoring` protocol. Read its evidence-contract and
 token-discipline sections before changing anything here.
 
-**Arguments:** `$1` = window in days (default `7`). `$2` = fleet filter
-(default: all fleets).
+**Arguments:** `$1` = window in days (default `7`). `$2` = fleet label for the
+coverage rows (default: your own fleet's name from `claudlobby --json context
+show`).
 
-## Step 1 — Enumerate the fleets in scope
+## Step 1 — Scope: your own fleet
 
 The digest is a `session_digest` **system event on the plane** (#1503 — there is
 no `transcript-digest` file any more). `claudlobby event list` reads the plane one
-fleet at a time, so first fix the set of fleets to sweep: `$2` if given,
-otherwise every fleet declared by the flat and nested `local/` manifests.
+fleet at a time, and the generated bot context selects **your own fleet**; the
+commands below never name a fleet. A sweep of other fleets is an operator action
+from an operator shell (`claudlobby --fleet NAME --json event list …`), not a
+grant of this skill — report other fleets as out of scope rather than reading
+them.
 
 ```bash
-if [ -n "${2:-}" ]; then
-  FLEETS="$2"
-else
-  FLEETS="$(for fy in "$CLAUDLOBBY_ROOT"/local/*/fleet.yaml \
-                      "$CLAUDLOBBY_ROOT"/local/*/*/fleet.yaml; do
-    [ -f "$fy" ] && basename "$(dirname "$fy")"
-  done | sort -u)"
-fi
+FLEETS="${2:?pass your own fleet name from claudlobby --json context show}"
 ```
 
 ## Step 2 — Assemble the window from the plane
@@ -58,9 +55,9 @@ for F in $FLEETS; do
   cursor=""; n=0; failed=0
   while :; do
     if [ -n "$cursor" ]; then
-      out="$(claudlobby --fleet "$F" --json event list --type session_digest --since "${DAYS}d" --limit 1000 --cursor "$cursor")"; rc=$?
+      out="$(claudlobby --json event list --type session_digest --since "${DAYS}d" --limit 1000 --cursor "$cursor")"; rc=$?
     else
-      out="$(claudlobby --fleet "$F" --json event list --type session_digest --since "${DAYS}d" --limit 1000)"; rc=$?
+      out="$(claudlobby --json event list --type session_digest --since "${DAYS}d" --limit 1000)"; rc=$?
     fi
     if [ "$rc" -ne 0 ]; then failed=1; break; fi
     page="$(printf '%s\n' "$out" | jq -c --arg fleet "$F" --arg since "$SINCE" \
@@ -143,10 +140,13 @@ an uncitable theme is unusable downstream.
 ## Step 5 — Join the rollups
 
 ```bash
-claudlobby --fleet "$F" fleet uptime
-claudlobby --fleet "$F" fleet utilization
-claudlobby --fleet "$F" --json fleet reports list --since "${SINCE}T00:00:00Z"
+claudlobby --json fleet uptime
+claudlobby --json fleet utilization
+claudlobby --json fleet reports list --since CUTOFF
 ```
+
+Run each as one literal command; `CUTOFF` is the literal `<SINCE>T00:00:00Z`
+with Step 2's date. These read your own fleet.
 
 This cutoff is the first UTC midnight of the calendar-day window assembled in
 Step 2, not a rolling `DAYS` × 24-hour cutoff. For reports, inspect `ok` and

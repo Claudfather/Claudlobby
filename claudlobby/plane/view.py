@@ -79,6 +79,7 @@ from .presence import STALE_AFTER_S, _parse_iso, derive_presence, presence_count
 from .sampler import PaneSampler, discover_bot_dirs
 from .queries import (
     ACTIVATION_TX_EVENTS,
+    ASSIGNMENT_DELIVERY_MSG_SQL,
     DELIVERY_STATUS_SQL,
     ATTENTION_ARMS,
     ATTENTION_ARMS_SQL,
@@ -615,6 +616,7 @@ def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None) -> dict:
         arms = {}
         nudges = {}
         delivery = {}
+        delivery_msg = {}
         if ids:
             ph = ",".join("?" * len(ids))
             now = _now_iso()
@@ -623,8 +625,9 @@ def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None) -> dict:
                 (*attention_arms_params(now), *ids))}
             nudges = {row["assignment_id"]: row for row in conn.execute(
                 NUDGE_STATE_SQL + f" AND a.assignment_id IN ({ph})", ids)}
-            msg_ids = [task.current_assignment.dispatch_message_id for task in current.values()
-                       if task.current_assignment.dispatch_message_id]
+            delivery_msg = {row[0]: row[1] for row in conn.execute(
+                ASSIGNMENT_DELIVERY_MSG_SQL.format(ph=ph), ids) if row[1]}
+            msg_ids = sorted(set(delivery_msg.values()))
             if msg_ids:
                 delivery = {row["msg_id"]: row["delivery"] for row in conn.execute(
                     DELIVERY_STATUS_SQL.format(ph=",".join("?" * len(msg_ids))), msg_ids)}
@@ -646,6 +649,8 @@ def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None) -> dict:
                 if name != "escalated" and arm and arm[name]]
             lead = reasons[0] if reasons and reasons[0] in HUMAN_ARMS else None
             nudge = nudges.get(aid)
+            message_id = delivery_msg.get(aid) or (assignment.dispatch_message_id
+                                                   if assignment else None)
             card = {
                 "task_id": task.task_id, "fleet_uid": task.fleet_uid,
                 "fleet": fleet_names.get(task.fleet_uid), "title": body_words(task.title),
@@ -654,7 +659,8 @@ def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None) -> dict:
                 "created_by_alias": aliases.get(task.created_by_uid),
                 "repo": task.repo, "project_key": task.project_key,
                 "workstream_id": task.workstream_id,
-                "current_assignment": (_task_assignment(assignment, aliases, labels)
+                "current_assignment": ({**_task_assignment(assignment, aliases, labels),
+                                        "dispatch_message_id": message_id}
                                        if assignment else None),
                 "assignment_count": len(task.assignments),
                 "assignment_history": [_task_assignment(a, aliases, labels)
@@ -664,9 +670,9 @@ def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None) -> dict:
                 "terminal_event": _task_event(task.terminal_event, aliases),
                 "issues": [_task_issue(issue) for issue in task.issues],
                 "resolved": not task.blockers,
-                "delivery": ({"message_id": assignment.dispatch_message_id,
-                              "integrity": delivery.get(assignment.dispatch_message_id)}
-                             if assignment and assignment.dispatch_message_id else None),
+                "delivery": ({"message_id": message_id,
+                              "integrity": delivery.get(message_id)}
+                             if message_id else None),
                 "attention": bool(reasons) or bool(task.blockers),
                 "attention_reason": reasons,
                 "attention_since": (escalation.occurred_at if escalation else
@@ -1137,10 +1143,12 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
       of one task id when a later one completes). ONE definition of open,
       so the strip can never disagree with the watchdog on the same fleet;
       per actor because the query is indexed on the assignee.
-    * `attention` / `overdue` — `ATTENTION_ARMS_SQL` with the fleet's
-      assignees APPENDED as a restriction (the tasks door's pattern:
-      queries.py stays the one definition); overdue is the deadline ARM,
-      read off the query's own column rather than re-derived here.
+    * `open` — assignment axis (work assigned to this fleet's bots), kept
+      separate from the work-ownership axis below (`open_scope`).
+    * `attention` / `overdue` — the board's own cards for the tasks this
+      fleet OWNS (`_fetch_tasks`, the one counting owner, whose reasons come
+      from `ATTENTION_ARMS_SQL`); overdue is cards led or joined by the
+      deadline arm. `attention_truncated` discloses the board's card cap.
     * `orphaned` — the watchdog's split (#835): an id'd overdue dispatch
       older than the bot's `.spawn` was lost to a restart. It needs the
       bot's DIRECTORY, so a fleet with none under the view's root reports
@@ -1188,18 +1196,13 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
         open_rows = [(uid, *r) for uid in uids for r in conn.execute(
             OPEN_ASSIGNMENTS_AT_SQL, (uid, None, None, None, None, None, None))]
         open_n = len(open_rows)
-        attention = overdue = 0
-        if uids:
-            ph = ",".join("?" * len(uids))
-            # the queue's rows for this fleet WITH their arms: ONE read
-            # answers attention AND overdue (its deadline arm), through the
-            # same query the task board reads its reasons from — the strip
-            # had a third Python re-derivation of the same arm (fold F2)
-            att = conn.execute(
-                ATTENTION_ARMS_SQL + f" AND a.assignee_uid IN ({ph})",
-                (*attention_arms_params(now), *uids)).fetchall()
-            attention = len(att)
-            overdue = sum(1 for r in att if r["overdue"])
+        # attention / overdue are the fleet's OWN work, counted by the board's
+        # card builder (one counting owner): the board groups by owning fleet,
+        # so an assignee-axis count here disagreed with it for cross-fleet work
+        board = _fetch_tasks(conn, alias)
+        attention = board["attention_count"]
+        overdue = sum(1 for card in board["tasks"]
+                      if "overdue" in card["attention_reason"])
         orphaned: int | None = 0
         orphaned_reason = None
         fleet_dirs = {b: d for (fl_, b), d in bot_dirs.items() if fl_ == alias}
@@ -1252,7 +1255,10 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
             "alias": alias, "bots": f["bots"], "provisional": f["provisional"],
             "presence": {"counts": presence_counts(verdicts),
                          "live_poll": live_poll},
-            "open": open_n, "attention": attention, "overdue": overdue,
+            "open": open_n, "open_scope": "assigned_to_fleet_bots",
+            "attention": attention, "overdue": overdue,
+            "attention_scope": "owning_fleet_tasks",
+            "attention_truncated": board["truncated"],
             "orphaned": orphaned, "orphaned_reason": orphaned_reason,
             "newest_report_at": newest[0] if newest else None,
             "reports_24h": reports_24h,

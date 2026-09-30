@@ -61,6 +61,44 @@ def test_manager_origin_requires_workers_before_any_fleet_effect(tmp_path, monke
     assert calls == ["worker-a", "worker-b"] and len(done.completed) == 2
 
 
+def test_fleet_restart_skips_de_enrolled_bot_and_continues(tmp_path, monkeypatch):
+    destination, origin, selected = _scope(tmp_path)
+    monkeypatch.setattr(fleet, "_scope", lambda *_a, **_k: (destination, origin, selected))
+    calls = []
+    def restart(**kwargs):
+        calls.append(kwargs["bot"])
+        if kwargs["bot"] == "worker-a":
+            raise BotLifecycleError("bot is de-enrolled; use bot start", skip_reason="de_enrolled",
+                                    release_id="selected-release", target="worker-a-unit")
+        if kwargs["bot"] == "manager":
+            raise BotLifecycleError("bot native state is failed; use bot stop, then bot start")
+        return BotLifecycleResult("example", kwargs["bot"], "selected-release",
+                                  kwargs["bot"] + "-unit", "running", True, "bridge_ready", "attempted")
+    monkeypatch.setattr(fleet, "set_bot_running", restart)
+    done = fleet.set_fleet_running(root=tmp_path, fleet="example", action="restart",
+                                   workers_only=True)
+    assert calls == ["worker-a", "worker-b"]
+    assert [(row.bot, row.state, row.changed, row.reason) for row in done.completed] == [
+        ("worker-a", "skipped", False, "de_enrolled"), ("worker-b", "running", True, None)]
+    # Only restart skips; any other refusal still stops the sweep honestly.
+    calls.clear()
+    with pytest.raises(fleet.FleetLifecycleError) as failed:
+        fleet.set_fleet_running(root=tmp_path, fleet="example", action="restart")
+    assert calls == ["worker-a", "worker-b", "manager"] and failed.value.bot == "manager"
+    assert [row.state for row in failed.value.completed] == ["skipped", "running"]
+
+
+def test_fleet_start_does_not_skip_de_enrolled_refusal(tmp_path, monkeypatch):
+    destination, origin, selected = _scope(tmp_path)
+    monkeypatch.setattr(fleet, "_scope", lambda *_a, **_k: (destination, origin, selected))
+    def start(**kwargs):
+        raise BotLifecycleError("refused", skip_reason="de_enrolled")
+    monkeypatch.setattr(fleet, "set_bot_running", start)
+    with pytest.raises(fleet.FleetLifecycleError) as failed:
+        fleet.set_fleet_running(root=tmp_path, fleet="example", action="start")
+    assert failed.value.bot == "worker-a" and failed.value.completed == ()
+
+
 def test_generated_worker_cannot_mutate_selected_fleet(tmp_path, monkeypatch):
     destination, _, selected = _scope(tmp_path)
     worker = SimpleNamespace(fleet=destination.fleet, bot_id="worker-a")
