@@ -1,4 +1,4 @@
-"""Tests for structured logging throughout the claudlobby compositor.
+"""Tests for structured logging and public command output.
 
 Verifies that print() calls have been replaced with logging calls,
 that the --verbose flag enables DEBUG output, and that commands emit
@@ -8,11 +8,13 @@ the right log levels for success, warning, and error conditions.
 from __future__ import annotations
 
 import logging
+import json
 import types
 from pathlib import Path
 from unittest.mock import patch  # noqa: F401 — used in generate tests
 
-from claudlobby.commands.core import cmd_generate, cmd_list_library, cmd_validate
+from claudlobby.__main__ import main
+from claudlobby.commands.core import cmd_generate
 from claudlobby.commands.memory_migrate import cmd_memory_migrate
 
 
@@ -63,51 +65,53 @@ class TestLoggingConfiguration:
         assert newbot_log.name == "claudlobby.newbot"
 
 
-# ── cmd_validate ──────────────────────────────────────────────────────────────
+# ── config validate output ──────────────────────────────────────────────────
 
 
-class TestValidateCommandLogging:
-    def test_validate_logs_ok_on_clean_fleet(self, fleet_dir, monkeypatch, caplog):
+class TestValidateCommandOutput:
+    def test_json_is_one_object(self, fleet_dir, monkeypatch, capsys):
         monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
         monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
-        args = _args(root=str(fleet_dir))
-        with caplog.at_level(logging.INFO, logger="claudlobby"):
-            result = cmd_validate(args)
-        assert result == 0
-        # Something was logged (warnings or OK); no errors means clean pass
-        assert caplog.records
+        assert main(["--root", str(fleet_dir), "--json", "config", "validate"]) == 0
+        captured = capsys.readouterr()
+        assert json.loads(captured.out)["command"] == "config.validate"
+        assert captured.out.count("\n") == 1
 
-    def test_validate_logs_errors_for_missing_expertise(self, fleet_dir, caplog):
+    def test_validate_reports_clean_fleet(self, fleet_dir, monkeypatch, capsys):
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        result = main(["--root", str(fleet_dir), "config", "validate"])
+        assert result == 0
+        assert capsys.readouterr().out
+
+    def test_validate_reports_errors_for_missing_expertise(self, fleet_dir, capsys):
         text = (fleet_dir / "fleet.yaml").read_text()
         (fleet_dir / "fleet.yaml").write_text(
             text.replace("orchestration", "no-such-expertise")
         )
-        args = _args(root=str(fleet_dir))
-        with caplog.at_level(logging.ERROR, logger="claudlobby"):
-            result = cmd_validate(args)
-        assert result == 1
-        assert "no-such-expertise" in caplog.text
+        result = main(["--root", str(fleet_dir), "config", "validate"])
+        assert result == 4
+        assert "no-such-expertise" in capsys.readouterr().err
 
-    def test_validate_logs_warnings_for_missing_env(
-        self, fleet_dir, monkeypatch, caplog
+    def test_validate_reports_warnings_for_missing_env(
+        self, fleet_dir, monkeypatch, capsys
     ):
         monkeypatch.delenv("TELEGRAM_TOKEN_LEAD", raising=False)
         monkeypatch.delenv("TELEGRAM_TOKEN_WORKER1", raising=False)
-        args = _args(root=str(fleet_dir))
-        with caplog.at_level(logging.WARNING, logger="claudlobby"):
-            cmd_validate(args)
-        assert "TELEGRAM_TOKEN_LEAD" in caplog.text
+        result = main(["--root", str(fleet_dir), "config", "validate"])
+        assert result == 0
+        assert "TELEGRAM_TOKEN_LEAD" in capsys.readouterr().out
 
-    def test_validate_strict_logs_error_on_warnings(
-        self, fleet_dir, monkeypatch, caplog
+    def test_validate_strict_reports_actual_warning_on_failure(
+        self, fleet_dir, monkeypatch, capsys
     ):
         monkeypatch.delenv("TELEGRAM_TOKEN_LEAD", raising=False)
         monkeypatch.delenv("TELEGRAM_TOKEN_WORKER1", raising=False)
-        args = _args(root=str(fleet_dir), strict=True)
-        with caplog.at_level(logging.ERROR, logger="claudlobby"):
-            result = cmd_validate(args)
-        assert result == 1
-        assert "strict" in caplog.text.lower()
+        result = main(["--root", str(fleet_dir), "config", "validate", "--strict"])
+        assert result == 4
+        captured = capsys.readouterr()
+        assert "strict" in captured.err.lower()
+        assert "TELEGRAM_TOKEN_LEAD" in captured.err and "[env-unset]" in captured.err
 
 
 # ── cmd_generate ──────────────────────────────────────────────────────────────
@@ -155,39 +159,6 @@ class TestGenerateCommandLogging:
         assert "lead" in caplog.text
 
 
-# ── cmd_list_library ──────────────────────────────────────────────────────────
-
-
-class TestListLibraryLogging:
-    def test_list_library_logs_expertise_header(self, fleet_dir, caplog):
-        args = _args(root=str(fleet_dir))
-        with caplog.at_level(logging.INFO, logger="claudlobby"):
-            result = cmd_list_library(args)
-        assert result == 0
-        assert "Expertise" in caplog.text
-
-    def test_list_library_logs_skills_header(self, fleet_dir, caplog):
-        args = _args(root=str(fleet_dir))
-        with caplog.at_level(logging.INFO, logger="claudlobby"):
-            cmd_list_library(args)
-        assert "Skills" in caplog.text
-
-    def test_list_library_logs_root_mode_message(self, fleet_dir, caplog):
-        """No fleet overlay → logs root-mode message."""
-        args = _args(root=str(fleet_dir))
-        with caplog.at_level(logging.INFO, logger="claudlobby"):
-            cmd_list_library(args)
-        assert "root mode" in caplog.text or "no fleet overlay" in caplog.text.lower()
-
-    def test_list_library_logs_expertise_names(self, fleet_dir, caplog):
-        """Expertise entries are logged as INFO records."""
-        args = _args(root=str(fleet_dir))
-        with caplog.at_level(logging.INFO, logger="claudlobby"):
-            cmd_list_library(args)
-        # orchestration.md and software-engineering.md are in the fixture
-        assert "orchestration" in caplog.text
-
-
 # ── cmd_memory_migrate ────────────────────────────────────────────────────────
 
 
@@ -212,15 +183,6 @@ class TestNoPrintInMainCommands:
     """Regression: verify that logging-converted commands do not call print()
     for status/error output. This catches accidental re-introduction of prints."""
 
-    def test_no_print_in_cmd_validate_path(self, fleet_dir, monkeypatch, capsys):
-        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
-        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
-        args = _args(root=str(fleet_dir))
-        cmd_validate(args)
-        captured = capsys.readouterr()
-        # cmd_validate should emit nothing to stdout (only logging)
-        assert captured.out == ""
-
     def test_no_print_in_cmd_generate_path(self, fleet_dir, monkeypatch, capsys):
         monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
         monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
@@ -228,11 +190,4 @@ class TestNoPrintInMainCommands:
         with patch("claudlobby.commands.core.compose_fleet", return_value={}):
             cmd_generate(args)
         captured = capsys.readouterr()
-        assert captured.out == ""
-
-    def test_no_print_in_list_library(self, fleet_dir, capsys):
-        args = _args(root=str(fleet_dir))
-        cmd_list_library(args)
-        captured = capsys.readouterr()
-        # list-library now uses log.info(), not print()
         assert captured.out == ""

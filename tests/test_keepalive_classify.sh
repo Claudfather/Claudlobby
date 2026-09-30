@@ -13,13 +13,13 @@ FIXTURE_DIR="$SCRIPT_DIR/fixtures/pane-states"
 
 # classify_pane delegates to lib-common's pane_is_busy/pane_is_idle, so
 # lib-common.sh must be sourced first.
-# shellcheck source=../lib/lib-common.sh
-. "$REPO_DIR/lib/lib-common.sh"
+# shellcheck source=../claudlobby/_runtime_scripts/lib-common.sh
+. "$REPO_DIR/claudlobby/_runtime_scripts/lib-common.sh"
 
 # Source only the classify_pane function from keepalive.sh.
 # keepalive.sh runs bot-level setup at the top level, so we extract just
 # the function definition.
-eval "$(sed -n '/^classify_pane()/,/^}/p' "$REPO_DIR/lib/keepalive.sh")"
+eval "$(sed -n '/^classify_pane()/,/^}/p' "$REPO_DIR/claudlobby/_runtime_scripts/keepalive.sh")"
 
 passed=0
 failed=0

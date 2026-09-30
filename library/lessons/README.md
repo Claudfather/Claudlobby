@@ -17,7 +17,7 @@
 > **Existing files are retained** as the composition fallback for **non-vault** fleets (a fleet with
 > no `claudron_vault_path` still renders the lessons it lists in `fleet.yaml`). They also carry the
 > provenance behind the protocols/guardrails they motivated. The referential subset has been
-> migrated to the vault via `claudlobby lessons-migrate`; the per-note verdicts are the triage
+> migrated to the vault via `claudlobby migration lessons`; the per-note verdicts are the triage
 > ledger at `documentation/plans/2026-07-23-l3-lessons-triage-ledger.md`. Removal of these files is a
 > later, scheduled release — not this one.
 

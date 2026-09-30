@@ -6,16 +6,37 @@ Two update classes, two mechanisms:
 
 | Update type | Stays current (download) | Applied to a *running* bot | Restart? | Cadence |
 |---|---|---|---|---|
-| Composed skills + clauDNA marketplace plugin | `claude plugin update` + `claudlobby generate` (`lib/reload-fleet.sh`) | `/reload-plugins` + `/reload-skills` broadcast (live) | **No** | Daily, `03:30`, + on-demand |
-| Claude Code binary | `npm install -g @anthropic-ai/claude-code@latest` (`lib/update-claude-code.sh`) | new `claude` process at next start | **Yes** (binary swap) | Downloaded daily at `04:00`; applied via natural restarts + a weekly worker-only restart, `Sun 05:00` |
+| Selected plugin cache | `claudlobby fleet reload` refreshes plugins through `claudlobby/_runtime_scripts/reload-fleet.sh` | Keepalive sends `/reload-plugins` + `/reload-skills` when idle | **No** | Daily, `03:30`, + on-demand |
+| Claude Code binary | `npm install -g @anthropic-ai/claude-code@latest` (`claudlobby/_runtime_scripts/update-claude-code.sh`) | new `claude` process at next start | **Yes** (binary swap) | Downloaded daily at `04:00`; applied via natural restarts + a weekly worker-only restart, `Sun 05:00` |
 
-The only update that costs a restart is the binary. That restart is made **rare** (weekly, workers only) and **lossless** (resume-on-every-start, below).
+Binary updates take effect on the next session start. A sealed configuration or
+framework release also reaches sessions through explicit activation, which hands
+off and restarts affected consumers. Plugin refresh is a separate idle-gated
+operation; it does not publish authored configuration.
 
-## The four delivery carriers
+## Sealed release delivery
 
-Everything below documents *what runs when*. This section answers the question
-that comes first: **I have a change — how does it reach a bot?** There are four
-carriers, and the mechanisms below are instances of them rather than peers.
+An existing mutable installation must first satisfy the [conversion prerequisite](existing-host-release-conversion.md), including stopping its old source puller before merging code that timer follows.
+
+Edit source configuration and library inputs, assemble the reviewed release, then
+run `claudlobby config plan --release RELEASE_ID`, inspect `config diff PLAN_ID`,
+and use `host activate PLAN_ID --install-directory PATH`. A plan writes staged
+artifacts; activation owns publication and the required handoff/restart. A source
+checkout pull does not modify an already sealed release. Do not edit installed
+release files or generated bot output. See [getting started](getting-started.md)
+for cold-host assembly and the [implementation record](plans/2026-09-28-unified-cli-run-log.md)
+for measured canary evidence and remaining platform limits.
+
+A canary must have its own root, Plane and native unit names. Activation is scoped
+to that selected root; using a second fleet inside the production root does not
+provide an independent release switch. On-demand skills, hooks and permissions
+are published only after the activation owner has quiesced affected consumers.
+
+## Artifact read timing
+
+The read timing below explains why activation must control publication, including
+files that a running session can observe immediately. The historical probes that
+follow measured those mechanisms on the earlier mutable installation.
 
 **Sort by WHEN THE ARTIFACT IS READ, never by what type of file it is.** That is
 the discriminator, and getting it wrong is not a missing row — it is a *mis-sorted*
@@ -26,16 +47,15 @@ correctly from that row ran `generate` across a live estate without a canary (#1
 | Carrier | Read | Reaches a *running* process | Survives restart | Delivered by |
 |---|---|---|---|---|
 | **Dispatch** (tmux message) | on arrival | yes — but with no delivery-time guarantee | no | sending a message |
-| **Composed instructions** (`CLAUDE.md`, `bot.conf` env) | **once, at session start** | **no** — arrives at the next restart | yes | `claudlobby generate` |
-| **Composed MCP config** (`.mcp.json`) | **once, at session start** | **no** — servers are bound at startup | yes | `claudlobby generate` |
-| **Repo `CLAUDE.md`** (project instructions) | once, at session start | no | yes | a `git pull` on the shared install |
-| **Composed skills** (`.claude/skills/` symlinks) | **on demand, per use** | **YES — live the instant the symlink lands** | yes | `claudlobby generate` |
-| **Hook script** (`lib/*.sh` wired via `PreToolUse` etc.) | on demand, per call | yes — at the next tool call | yes | a `git pull` on the shared install |
-| **Composed permissions** (`settings.local.json`) | **reads: not during a turn. enforcement: on demand, per tool call — see below** | **YES for enforcement — live the instant `generate` writes. NO for reads** | yes | `claudlobby generate` |
+| **Composed instructions** (`CLAUDE.md`, `bot.conf` env) | **once, at session start** | **no** — arrives at the next restart | yes | sealed config activation |
+| **Composed MCP config** (`.mcp.json`) | **once, at session start** | **no** — servers are bound at startup | yes | sealed config activation |
+| **Repo `CLAUDE.md`** (project instructions) | once, at session start | no | yes | a project checkout update (separate from the sealed framework) |
+| **Composed skills** (`.claude/skills/` symlinks) | **on demand, per use** | **YES — live the instant the symlink lands** | yes | sealed config activation |
+| **Hook script** (`claudlobby/_runtime_scripts/*.sh` wired via `PreToolUse` etc.) | on demand, per call | yes — at the next tool call | yes | sealed release activation |
+| **Composed permissions** (`settings.local.json`) | **reads: not during a turn. enforcement: on demand, per tool call — see below** | **YES for enforcement — live if rewritten during a session. NO for reads** | yes | sealed config activation |
 
-**The framing predicts rather than explains: anything resolved on demand is live at
-compose time.** That is why skills sit with hooks and not with `CLAUDE.md`, despite
-being generated by the same command into the same tree.
+Anything resolved on demand can become live when published. Staging alone does
+not publish it; the activation boundary now controls that exposure.
 
 ### What was measured, and how
 
@@ -306,7 +326,7 @@ pty input queue, which on macOS FLUSHES rather than drops, so 85 of 180 large
 sends arrived with their head — envelope and task id included — gone, all of them
 recorded `pane_submitted` (#1493). `pane_send_verified` now writes the payload in
 400-byte chunks with a short settle between them (900 until #1876, which found
-the receiving TUI frames any read over 800 bytes as pasted text), and `lib/send-size-probe.sh`
+the receiving TUI frames any read over 800 bytes as pasted text), and `harness/send-size-probe.sh`
 measures the result against the recipient's own transcript. The wider point stands
 unchanged and is the reason this paragraph is in a lifecycle doc: `pane_submitted`
 is a **sender-side inference**, not an observation of arrival.
@@ -347,18 +367,18 @@ running `generate` across a live estate without a canary (#1310).
 **Hook script — no canary *window*.** One pull and it is live on every bot at its
 next tool call, so staging cannot be applied *around* the change; it has to be
 built *into* it, via a dormant flag. Two precedents exist — cited rather than
-generalised, because copyable beats abstract. `lib/spin-down-bot.sh:22-27` states
+generalised, because copyable beats abstract. `claudlobby/_runtime_scripts/spin-down-bot.sh:22-27` states
 the problem, the solution and the procedure:
 
 > `DEFAULT 0 (dormant): the flags above still parse and the teardown is
-> unchanged, but no ledger row is written. lib/ is a shared install, so this is
+> unchanged, but no ledger row is written. claudlobby/_runtime_scripts/ is a shared install, so this is
 > what keeps a root-pull from making new behavior live on a destructive door
 > without a canary. Arm per fleet in fleet.yaml `env:`, canary on a throwaway
 > first.`
 
-The second is `SESSION_DIGEST_ENABLED` (`lib/transcript-digest.sh:41`). That is
+The second is `SESSION_DIGEST_ENABLED` (`claudlobby/_runtime_scripts/transcript-digest.sh:41`). That is
 **two instances, not an established convention** — a grep for `*_ENABLED` across
-`lib/*.sh` and `claudlobby/*.py` returns exactly those two. Whether other
+`claudlobby/_runtime_scripts/*.sh` and `claudlobby/*.py` returns exactly those two. Whether other
 staging paths exist has not been checked.
 
 A stronger form of this row — "no staging by construction" — was proposed,
@@ -405,13 +425,13 @@ rationale, not the flag.
 union of bots declared across every `fleet.yaml`; a `find` over `runtime/bots/`
 also returns test fixtures nested inside a checked-out copy of this repo, which
 are not bots this or any carrier reaches. Enumerate from the manifests and look
-each one up — the same rule `lib/selfstart-snapshot.sh` already applies, and for
+each one up — the same rule `claudlobby/_runtime_scripts/selfstart-snapshot.sh` already applies, and for
 the same reason: a denominator drawn from directories silently changes when
 something unrelated appears on disk.
 
 ## The manifest is a fifth input, and it has its own read-time (#1722)
 
-The carriers above answer "when does a change to `library/` or `lib/` reach a
+The carriers above answer "when does a change to `library/` or `claudlobby/_runtime_scripts/` reach a
 bot". A change to the fleet's **manifest** — `fleet.yaml`, `projects.yaml`, the
 mission file — is a different question with the same discriminator: **when is
 the artifact read?**
@@ -440,10 +460,10 @@ drift on every bot.
 
 Two rungs read that record:
 
-- `claudlobby --fleet <name> doctor` → `manifest-provenance`: **warns** when the
+- `claudlobby --fleet <name> host doctor` → `manifest-provenance`: **warns** when the
   manifest on disk differs from what the running fleet was composed from, and
   names the restart step above.
-- `claudlobby --fleet <name> diff` prints one line first: `manifest: unchanged
+- `claudlobby --fleet <name> config diff` prints one line first: `manifest: unchanged
   since compose (<when>)`, or `manifest: CHANGED`. Without it, a diff body
   cannot say whether the *runtime* drifted or the *inputs* moved — they look
   identical.
@@ -481,34 +501,37 @@ reader go and look instead of trusting a word.
 A durable per-generate trail would close the second row and is **not** built
 here — tracked as #1732.
 
-## Mechanism 1 — daily live reload (plugins + skills)
+## Mechanism 1 — daily selected-fleet plugin refresh
 
-`lib/reload-fleet.sh`, timer job `reload-fleet` (`claudlobby/system.yaml`, `schedule: "*-*-* 03:30:00"`, `type: oneshot`), enrolled by `lib/setup-fleet` (via `lib/install_fleet_timer.sh`, the generic timer enroller).
+The `reload-fleet` timer calls the selected release's `claudlobby fleet reload` at `03:30`. The public command uses the active plan's fleet roster and plugin list, then calls the packaged `claudlobby/_runtime_scripts/reload-fleet.sh` owner.
 
 1. Under a fleet-wide lock (`with_lock`), runs `claude plugin update` for each `FLEET_PLUGINS_REQUIRED` — refreshes the shared host plugin cache (`~/.claude/plugins/cache/`).
-2. Runs `claudlobby generate` to completion — re-links composed skill symlinks.
-3. Runs `lib/setup-fleet --jobs-only` (#1633), non-fatally, so a job this generate composed is enrolled the same day. On launchd it never boots out the job that is running it — reload-fleet's own (#1924): booting that job out stops the run, so an unchanged plist is left loaded, and a changed one is left untouched for the next `setup-fleet` run from a shell, which the log says (`DEFERRED`) and a `job_reenroll_deferred` FLEET NOTICE repeats on every run until it is applied.
-4. Drops `data/.reload-pending` on every **running** bot. It does not send any keystroke itself.
+2. Drops `data/.reload-pending` on each **running bot in the active plan**. It does not send any keystroke itself.
+
+The timer never composes or enrolls native units. Changes to authored configuration, composed skills, or native enrollment require a staged config plan and operator `host activate`.
 
 Every step is announced in `state/reload-fleet.log` before it runs (`reload-fleet[<fleet>] pid N step: …`), and its output streams there as it runs. A run killed or aborted mid-step raises `reload_failed` naming the step: at once on SIGTERM, SIGINT or SIGHUP, from its EXIT trap, and at the next run for a SIGKILL, which runs no trap (each run keeps a record under `state/reload-fleet.inflight/` until it ends).
 
-Activation is consolidated in `lib/keepalive.sh`: on its next idle-classification tick (each watchdog pass), if `data/.reload-pending` exists, keepalive sends `/reload-plugins` then `/reload-skills` and clears the marker. A bot mid-task is never interrupted by *this* path, and there's no separate broadcaster racing the idle check. Convergence lag is bounded by the keepalive tick interval (on the order of a minute), which is immaterial for a daily reload.
+Activation is consolidated in `claudlobby/_runtime_scripts/keepalive.sh`: on its next idle-classification tick (each watchdog pass), if `data/.reload-pending` exists, keepalive sends `/reload-plugins` then `/reload-skills` and clears the marker. A bot mid-task is never interrupted by *this* path, and there's no separate broadcaster racing the idle check. Convergence lag is bounded by the keepalive tick interval (on the order of a minute), which is immaterial for a daily reload.
 
-> **This idle gate does NOT cover composed skill symlinks, and reading it as though it does is the #1310 defect in its most dangerous form** — here the doc appears to *promise* a deferral that does not exist. Step 2's `generate` re-links symlinks, and a composed skill is live from that moment on every running bot, busy or idle, with no marker and no keystroke. Measured: `data/.reload-pending` is written only by `reload-fleet.sh` (zero hits in `claudlobby/*.py`), and **zero** RELOAD entries appear in any of 21 bots' `keepalive.log` — yet a newly composed skill entered the live skill registry of three bots mid-session. So the marker was never set, keepalive never reached its reload block, and the skills activated anyway.
+> **The idle gate does not cover composed skill symlinks.** A separate operator activation that replaces a skill symlink makes it visible on demand immediately, even while a bot is busy. This timer no longer writes those symlinks.
 >
-> What the idle gate genuinely covers is the **plugin-cache** half — step 1's `claude plugin update`, where `/reload-plugins` is doing real work. **Whether `/reload-skills` is required for anything is not established here**; it was simply never observed to be the thing that made a composed skill live.
+> The idle gate covers the plugin-cache refresh. Whether `/reload-skills` is required for another purpose has not been established.
 
-Runnable **on-demand** (not just on the timer) to push a release immediately — activation still lands at each bot's next idle keepalive tick.
+Runnable **on-demand** as `claudlobby --root DATA --fleet FLEET fleet reload`; it does not deploy a new release.
 
 **Applies to every running bot, managers included** — live reload is free and lossless, so there's no reason to exclude managers here (contrast Mechanism 2).
 
-**Loud-failure contract:** a failed `claude plugin update` or `generate` aborts before any marker is dropped — no half-reload — and raises `emit_failure_alert` (fleet event + manager tmux nudge + Telegram escalation on critical failure).
+**Loud-failure contract:** a failed `claude plugin update` aborts before any marker is dropped and raises `emit_failure_alert` (fleet event + manager tmux nudge + Telegram escalation on critical failure).
 
 ## Mechanism 2 — weekly lossless worker restart (binary)
 
-`lib/update-claude-code.sh` is **download-only**: it installs the latest `claude` binary daily (`claude-update` job, `04:00`) and does not restart any bot. A failed install raises the same `emit_failure_alert` primitive Mechanism 1 uses — and "failed" is measured on the **staged binary, not on npm**: the install worked only when the binary the fleet launches runs and prints a parseable version, because npm can exit 0 while omitting the platform-native optional dependency and leave a stub that cannot run (#1767). A binary that already cannot run when the job starts raises `binary_unrunnable` before the reinstall and `binary_repaired` if the reinstall fixes it. This is detect-and-alert only: nothing keeps the previous binary, so a failed install still leaves every bot that starts or restarts unable to launch until the host is repaired (#1768).
+For one explicit operator run, use `claudlobby host update runtime`; the daily
+host timer enters that same selected operation before the private updater runs.
 
-The binary cannot hot-reload, so it reaches a running bot only via restart. `lib/weekly-worker-restart.sh` (job `weekly-worker-restart`, `schedule: "Sun *-*-* 05:00:00"`) bounces every **worker** bot once a week to pick it up:
+`claudlobby/_runtime_scripts/update-claude-code.sh` is **download-only**: it installs the latest `claude` binary daily (`claude-update` job, `04:00`) and does not restart any bot. A failed install raises the same `emit_failure_alert` primitive Mechanism 1 uses — and "failed" is measured on the **staged binary, not on npm**: the install worked only when the binary the fleet launches runs and prints a parseable version, because npm can exit 0 while omitting the platform-native optional dependency and leave a stub that cannot run (#1767). A binary that already cannot run when the job starts raises `binary_unrunnable` before the reinstall and `binary_repaired` if the reinstall fixes it. This is detect-and-alert only: nothing keeps the previous binary, so a failed install still leaves every bot that starts or restarts unable to launch until the host is repaired (#1768).
+
+The binary cannot hot-reload, so it reaches a running bot only via restart. `claudlobby/_runtime_scripts/weekly-worker-restart.sh` (job `weekly-worker-restart`, `schedule: "Sun *-*-* 05:00:00"`) bounces every **worker** bot once a week to pick it up:
 
 ```
 pre-stop-handoff.sh   (writes a session.md handoff, best-effort, never blocks)
@@ -516,7 +539,7 @@ pre-stop-handoff.sh   (writes a session.md handoff, best-effort, never blocks)
   → start-bot.sh       resumes from the handoff (age-gated) on the new session
 ```
 
-**Managers are excluded** — identified by `MANAGER_TMUX == BOT_ID` (`bot_is_manager()` in `lib/lib-common.sh`) — because a manager's long-horizon orchestration context is the least summarizable. Managers still get Mechanism 1's daily reload; they just never get auto-restarted for the binary. They pick up a new binary on any natural restart or a deliberate human-initiated one. A worker's binary staleness is bounded to ≤1 week.
+**Managers are excluded** — identified by `MANAGER_TMUX == BOT_ID` (`bot_is_manager()` in `claudlobby/_runtime_scripts/lib-common.sh`) — because a manager's long-horizon orchestration context is the least summarizable. Managers still get Mechanism 1's daily reload; they just never get auto-restarted for the binary. They pick up a new binary on any natural restart or a deliberate human-initiated one. A worker's binary staleness is bounded to ≤1 week.
 
 This job is **composed-but-dormant by default** (`enroll: false` in `claudlobby/system.yaml`) — bouncing workers is disruptive enough that a fleet opts in explicitly:
 
@@ -531,28 +554,28 @@ fleet:
 
 ## Resume-on-every-start (the age gate)
 
-Every bot start — intentional (restart skill, weekly bounce), crash (keepalive), or an operator's manual restart — is a potential context loss. `lib/start-bot.sh` closes that gap:
+Every bot start — intentional (restart skill, weekly bounce), crash (keepalive), or an operator's manual restart — is a potential context loss. `claudlobby/_runtime_scripts/start-bot.sh` closes that gap:
 
-- Before `STARTUP_PROMPT`, it injects the configured session-resume command as the first keystroke, behind **two independent gates** (`lib/lib-common.sh`): `should_resume_session()` for checkpoint age, and `session_command_status()` for whether that command can actually resolve. The command itself is configuration (`SESSION_RESUME_COMMAND`, empty to disable), not a hardcoded provider — under `plugins.include_defaults: false` there is no session plugin, and injecting an unresolvable keystroke into every pane on every boot was #1163.
+- Before `STARTUP_PROMPT`, it injects the configured session-resume command as the first keystroke, behind **two independent gates** (`claudlobby/_runtime_scripts/lib-common.sh`): `should_resume_session()` for checkpoint age, and `session_command_status()` for whether that command can actually resolve. The command itself is configuration (`SESSION_RESUME_COMMAND`, empty to disable), not a hardcoded provider — under `plugins.include_defaults: false` there is no session plugin, and injecting an unresolvable keystroke into every pane on every boot was #1163.
 - `should_resume_session` reads the handoff's `last_updated:` frontmatter field from `.claude/session.md` (falling back to file mtime for older artifacts) and compares its age against `RESUME_MAX_AGE_S` (env-overridable; default `86400` seconds = 24h).
 - **Fresh** checkpoint (age < threshold) → resume fires, the bot picks up its last handoff.
 - **Stale** checkpoint (age ≥ threshold) or none → resume is skipped and the bot clean-starts rather than replaying dead state (e.g. re-attempting an already-merged PR).
 
-On the intentional-restart paths (`library/skills/restart`, `weekly-worker-restart.sh`), `lib/pre-stop-handoff.sh` triggers a fresh handoff before the restart — behind the same capability gate, since this runs on the `ExecStop` path where an unresolvable command costs the handoff at exactly the moment it matters. Non-blocking either way (always exits 0, even on a 30s timeout), so the restart never stalls on a slow or failed handoff; a skip is logged and emits `handoff_skipped`. Crash-restarts (`keepalive.sh`) skip straight to resume-from-last-checkpoint, since there's no live session left to hand off from.
+On the intentional-restart paths (`library/skills/restart`, `weekly-worker-restart.sh`), `claudlobby/_runtime_scripts/pre-stop-handoff.sh` triggers a fresh handoff before the restart — behind the same capability gate, since this runs on the `ExecStop` path where an unresolvable command costs the handoff at exactly the moment it matters. Non-blocking either way (always exits 0, even on a 30s timeout), so the restart never stalls on a slow or failed handoff; a skip is logged and emits `handoff_skipped`. Crash-restarts (`keepalive.sh`) skip straight to resume-from-last-checkpoint, since there's no live session left to hand off from.
 
 ## Relationship to PR #399
 
-PR #399 added `lib/update-claude-code.sh` with a daily **fleet-wide bounce** — every bot, managers included, restarted once a day whenever the binary changed. That bounce is the literal daily-reset context-loss pain this lifecycle removes. It is **retired**: `update-claude-code.sh` is now download-only. Its daily binary download **survives unchanged**. The bounce it used to perform is replaced by the weekly worker-only lossless restart (Mechanism 2) plus natural restarts — both now resume-on-start instead of cold-starting.
+PR #399 added `claudlobby/_runtime_scripts/update-claude-code.sh` with a daily **fleet-wide bounce** — every bot, managers included, restarted once a day whenever the binary changed. That bounce is the literal daily-reset context-loss pain this lifecycle removes. It is **retired**: `update-claude-code.sh` is now download-only. Its daily binary download **survives unchanged**. The bounce it used to perform is replaced by the weekly worker-only lossless restart (Mechanism 2) plus natural restarts — both now resume-on-start instead of cold-starting.
 
 ## Reference
 
 | Script | Role |
 |---|---|
-| `lib/reload-fleet.sh` | Mechanism 1: plugin update + generate + mark reload-pending |
-| `lib/update-claude-code.sh` | Daily binary download only (no restart) |
-| `lib/weekly-worker-restart.sh` | Mechanism 2: weekly worker-only lossless restart |
-| `lib/keepalive.sh` | Consumes `data/.reload-pending` at each idle tick; also the crash-restart entrypoint |
-| `lib/start-bot.sh` | Injects the configured resume command before `STARTUP_PROMPT`, gated on BOTH checkpoint age and resume capability; logs `RESUME SKIP` + `resume_skipped` when either gate closes |
-| `lib/pre-stop-handoff.sh` | Best-effort, non-blocking handoff before an intentional restart |
+| `claudlobby/_runtime_scripts/reload-fleet.sh` | Mechanism 1: selected plugin update + mark reload-pending |
+| `claudlobby/_runtime_scripts/update-claude-code.sh` | Daily binary download only (no restart) |
+| `claudlobby/_runtime_scripts/weekly-worker-restart.sh` | Mechanism 2: weekly worker-only lossless restart |
+| `claudlobby/_runtime_scripts/keepalive.sh` | Consumes `data/.reload-pending` at each idle tick; also the crash-restart entrypoint |
+| `claudlobby/_runtime_scripts/start-bot.sh` | Injects the configured resume command before `STARTUP_PROMPT`, gated on BOTH checkpoint age and resume capability; logs `RESUME SKIP` + `resume_skipped` when either gate closes |
+| `claudlobby/_runtime_scripts/pre-stop-handoff.sh` | Best-effort, non-blocking handoff before an intentional restart |
 
 Full design history, decision forks, and rationale: `documentation/plans/archive/2026-06-14-fleet-skill-plugin-update-lifecycle.md`.

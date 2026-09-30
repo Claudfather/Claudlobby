@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)"
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../claudlobby/_runtime_scripts" && pwd)"
 . "$LIB_DIR/lib-common.sh"
 
 # Create a temp bot dir with a mock bot.conf

@@ -6,10 +6,8 @@ tolerates -- so the branch was unreachable in normal conditions (the primary
 `mktemp -d` almost always succeeds) and, on the one platform where it could
 actually run, could never succeed. Three things pinned here:
 
-1. The fixed template succeeds on GNU coreutils (this host). BSD/macOS is not
-   independently verified -- no such host is available here; the fixed
-   template is documented as accepted by both, and adding X's is strictly a
-   widening of what the old (X-less) template already required.
+1. The fixed template succeeds on both hosted platforms. The old template
+   fails only on GNU; BSD's accepted control is removed after inspection.
 2. When the primary genuinely fails but a WORKING fallback path exists, the
    fallback actually rescues it. Real OS conditions (a full/read-only /tmp)
    cannot isolate this branch: measured directly (not assumed) that GNU
@@ -21,7 +19,7 @@ actually run, could never succeed. Three things pinned here:
    lib-common.sh rather than surfacing as a bare, context-free mktemp error
    with nothing connecting it back to its real cause -- the actual defect
    #1682 reports: the template bug was silent at the SOURCE, and the symptom
-   that reached an operator (`lib/env-tiers.sh` exiting 1) carried no
+   that reached an operator (`claudlobby/_runtime_scripts/env-tiers.sh` exiting 1) carried no
    indication of what had actually failed or why.
 """
 
@@ -31,6 +29,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -38,8 +37,8 @@ import pytest
 from tests.conftest import constructed_env
 
 REPO = Path(__file__).resolve().parents[1]
-LIB_COMMON = REPO / "lib" / "lib-common.sh"
-ENV_TIERS = REPO / "lib" / "env-tiers.sh"
+LIB_COMMON = REPO / "claudlobby/_runtime_scripts" / "lib-common.sh"
+ENV_TIERS = REPO / "claudlobby/_runtime_scripts" / "env-tiers.sh"
 
 
 def _source_probe(tmp_path: Path, env: dict) -> subprocess.CompletedProcess:
@@ -66,7 +65,7 @@ def _parse(stdout: str) -> tuple[str, str]:
     return path, marker
 
 
-class TestTheFixedTemplateWorksOnGnu:
+class TestTheFixedTemplateWorksOnNativeMktemp:
     def test_the_new_template_succeeds_where_the_old_one_failed(self, tmp_path: Path):
         """Direct regression pin on the literal defect: the OLD template
         (no X's) fails on GNU with 'too few X's in template'; confirm that
@@ -76,8 +75,12 @@ class TestTheFixedTemplateWorksOnGnu:
         old = subprocess.run(
             ["mktemp", "-d", "-t", "lib-common"], capture_output=True, text=True
         )
-        assert old.returncode != 0
-        assert "too few X" in old.stderr
+        if sys.platform == "darwin":
+            assert old.returncode == 0, old.stderr
+            Path(old.stdout.strip()).rmdir()
+        else:
+            assert old.returncode != 0
+            assert "too few X" in old.stderr
 
         r = _source_probe(tmp_path, constructed_env())
         assert r.returncode == 0, r.stdout + r.stderr
@@ -134,21 +137,25 @@ class TestBothAttemptsFailingNamesTheHelper:
     """The actual reported defect: before the fix, this path surfaced as a
     bare, context-free mktemp error -- nothing connecting it back to
     lib-common.sh or `_LC_TMPDIR`. Exercised through the real downstream
-    door the issue names, `lib/env-tiers.sh`, not just lib-common.sh alone."""
+    door the issue names, `claudlobby/_runtime_scripts/env-tiers.sh`, not just lib-common.sh alone."""
 
     @pytest.fixture
-    def readonly_tmpdir(self, tmp_path: Path) -> Path:
-        ro = tmp_path / "ro"
-        ro.mkdir()
-        ro.chmod(0o555)
-        yield ro
-        ro.chmod(0o755)  # restore so pytest's own cleanup can remove it
+    def failing_mktemp(self, tmp_path: Path) -> Path:
+        # BSD mktemp falls back to its OS temp directory when TMPDIR is not
+        # writable. Force both calls to fail; the rescue test above delegates
+        # the actual fallback template to the native binary on each platform.
+        binaries = tmp_path / "bin"
+        binaries.mkdir()
+        command = binaries / "mktemp"
+        command.write_text("#!/bin/bash\necho 'owned mktemp failure' >&2\nexit 1\n")
+        command.chmod(0o755)
+        return binaries
 
     def test_env_tiers_names_lc_tmpdir_not_a_bare_exit(
-        self, tmp_path: Path, readonly_tmpdir: Path
+        self, tmp_path: Path, failing_mktemp: Path
     ):
         env = constructed_env(
-            TMPDIR=str(readonly_tmpdir), CLAUDLOBBY_ROOT=str(tmp_path)
+            PATH=f"{failing_mktemp}:{os.environ['PATH']}", CLAUDLOBBY_ROOT=str(tmp_path)
         )
         r = subprocess.run(
             ["bash", str(ENV_TIERS)], capture_output=True, text=True, env=env
@@ -158,9 +165,9 @@ class TestBothAttemptsFailingNamesTheHelper:
         assert "lib-common.sh" in r.stderr, r.stderr
 
     def test_lib_common_alone_shows_the_same_diagnostic(
-        self, tmp_path: Path, readonly_tmpdir: Path
+        self, tmp_path: Path, failing_mktemp: Path
     ):
-        env = constructed_env(TMPDIR=str(readonly_tmpdir))
+        env = constructed_env(PATH=f"{failing_mktemp}:{os.environ['PATH']}")
         r = _source_probe(tmp_path, env)
         assert r.returncode == 1
         assert "_LC_TMPDIR" in r.stderr, r.stderr

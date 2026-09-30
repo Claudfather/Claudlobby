@@ -32,7 +32,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB_DIR="$SCRIPT_DIR/../lib"
+LIB_DIR="$SCRIPT_DIR/../claudlobby/_runtime_scripts"
 PASS=0; FAIL=0; TOTAL=0
 assert_eq() {
     TOTAL=$((TOTAL + 1)); local d="$1" e="$2" a="$3"
@@ -44,7 +44,7 @@ export CLAUDLOBBY_ROOT="$T/root"
 export HOME="$T/home"
 mkdir -p "$CLAUDLOBBY_ROOT" "$HOME/.claude/plugins" "$T/bin"
 
-# shellcheck source=../lib/lib-common.sh
+# shellcheck source=../claudlobby/_runtime_scripts/lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 
 # A fake `claude` on a prepended PATH -- resolved by name, exactly as

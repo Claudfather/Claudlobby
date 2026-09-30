@@ -1,0 +1,247 @@
+#!/bin/bash
+# spin-down-bot.sh — the inverse of spin-up-bot.sh: a guaranteed teardown/reaper
+# for canary and throwaway bots. Removes the per-bot supervision (systemd user
+# unit on Linux, launchd agent on macOS), kills the private tmux server,
+# surgically drops the bot's fleet-state.json key (a locked single-key delete,
+# never a prune), and with --purge removes the bot directory.
+#
+# Cross-platform (via lib-common OS detection), idempotent, and safe to re-run:
+# every leg is a no-op when its target is already gone. Designed to be invoked
+# under a `trap ... EXIT` by canary flows so a throwaway is reaped even if the
+# driving session crashes or dies mid-run.
+#
+# Usage: spin-down-bot.sh [--purge] [--reason <text>] [--expected-return <iso8601|none>] <bot-dir>
+#   --purge            also rm -rf the bot directory after supervision is reaped.
+#   --reason           why this teardown is happening (free text).
+#   --expected-return  ISO8601 timestamp the bot is expected back, or "none" to
+#                      assert a genuine decommission. Absent records as
+#                      "unspecified" — which is NOT the same claim as "none".
+#   $SPINDOWN_ACTOR    overrides the recorded actor, so a bot-driven teardown
+#                      names itself instead of masquerading as the host user.
+#
+# $SPINDOWN_RECEIPT_ENABLED — "0" turns the teardown receipt OFF for this
+# fleet. DEFAULT ON since the defaults flip (chunk N): the receipt is the only
+# thing that survives a --purge, so a fleet whose bot vanished has something to
+# read; it records, it destroys nothing, and it costs one plane event per
+# teardown. The canary reasoning that made it dormant was about a NEW door
+# arriving on a destructive path via a root pull -- the door is no longer new,
+# and the record is the part of a destructive teardown an operator most needs.
+#
+# The RAM lever that holds under keepalive — and a destructive door; see
+# $_sd_warning below / --help.
+set -euo pipefail
+
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
+
+_sd_usage='Usage: spin-down-bot.sh [--purge] [--reason <text>] [--expected-return <iso8601|none>] <bot-dir>'
+_sd_warning='The durable lever for RAM pressure — and a destructive door. This script
+REMOVES supervision: nothing revives the bot, and reconcile-fleet reports it as
+unsupervised-down until spun back up. Check the bot for uncommitted WIP first.
+Do NOT reach for `systemctl --user stop` to free RAM: under the 60s keepalive a
+stopped bot is walked back up within a minute and the stop frees nothing.
+Spin-down holds because de-enrolment is the one thing keepalive cannot undo.'
+PURGE=0
+RETIRED_SERVICE=""
+BOT_DIR=""
+REASON="unspecified"
+EXPECTED_RETURN="unspecified"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --purge) PURGE=1 ;;
+        --retired-service) RETIRED_SERVICE="${2:?--retired-service requires a label}"; shift ;;
+        --reason) REASON="${2:?--reason requires a value}"; shift ;;
+        --expected-return) EXPECTED_RETURN="${2:?--expected-return requires a value}"; shift ;;
+        # The warning prints on --help, not just in the source: an operator
+        # reaching for this under memory pressure never opens the file.
+        -h | --help) printf '%s\n\n%s\n' "$_sd_usage" "$_sd_warning"; exit 0 ;;
+        -*) printf 'spin-down-bot: unknown option: %s\n' "$1" >&2; exit 2 ;;
+        *) BOT_DIR="$1" ;;
+    esac
+    shift
+done
+[ -n "$BOT_DIR" ] || { printf '%s\n' "$_sd_usage" >&2; exit 2; }
+
+# Canonicalize while the dir exists; keep the literal path otherwise so a repeat
+# run (e.g. after a prior --purge) still logs coherently.
+[ -d "$BOT_DIR" ] && BOT_DIR="$(cd "$BOT_DIR" && pwd)"
+SLUG="$(basename "$BOT_DIR")"
+
+sd_log() { printf 'spin-down[%s]: %s\n' "$SLUG" "$*"; }
+
+# --- The receipt -------------------------------------------------------------
+# sd_log is stdout-only, so it dies with the invoking terminal: the ledger row is
+# the only durable record of WHO tore a bot down and WHY.
+#
+# It is anchored on the FLEET on the plane, not on the bot, because --purge
+# deletes the bot dir — a record written there would die with the very
+# transaction it documents. An explicitly empty bot_dir arg forces
+# emit_fleet_event's fleet-level branch while keeping bot identity explicit.
+#
+# fleet and bot_dir are recorded because they are unrecoverable after --purge,
+# and they are what a reader needs to bring the bot back. That ledger is
+# host-global, so the fleet is also what distinguishes same-named bots.
+emit_teardown_receipt() {
+    local action="spin-down" actor fleet data
+    # ON BY DEFAULT since the defaults flip (chunk N) — an opt-OUT. The receipt
+    # is written BEFORE the destructive legs and is the one record that
+    # outlives a --purge, which is exactly when a reader has nothing else to
+    # go on. Only an exact 0 disarms it (an empty assignment is a win at its
+    # tier, #1213, but is not a 0), and the disarm is said out loud so a
+    # missing receipt is never a mystery.
+    if ! switch_is_on SPINDOWN_RECEIPT_ENABLED spindown-receipt \
+        "this teardown will leave no record"; then
+        return 0
+    fi
+    [ "$PURGE" -eq 1 ] && action="spin-down --purge"
+    # Every substitution below degrades instead of failing. This function runs
+    # BEFORE the destructive legs, so under set -e a non-zero command here would
+    # abort the script and strand a bot that the operator asked to tear down --
+    # the record must never cost the teardown.
+    actor="${SPINDOWN_ACTOR:-${USER:-unknown}@$(hostname 2>/dev/null || echo unknown)}"
+    fleet="${FLEET_NAME:-unknown}"
+    data=$(printf '{"action":"%s","actor":"%s","fleet":"%s","bot_dir":"%s","expected_return":"%s","reason":"%s"}' \
+        "$(json_escape "$action")" "$(json_escape "$actor")" \
+        "$(json_escape "$fleet")" "$(json_escape "$BOT_DIR")" \
+        "$(json_escape "$EXPECTED_RETURN")" "$(json_escape "$REASON")")
+    # Named for what it is: emitted BEFORE the legs, so it records an intent the
+    # script has not yet carried out, never an observed outcome.
+    emit_fleet_event bot_teardown_started spin-down "$data" "" "$SLUG"
+    sd_log "receipt: actor=$actor action=$action expected_return=$EXPECTED_RETURN reason=$REASON"
+}
+
+# Identity comes from bot.conf: BOT_SERVICE (the systemd unit / launchd label /
+# tmux socket — one value, all three), FLEET_STATE_PATH, TMUX_SOCKET/TMUX_TMPDIR,
+# BOT_NAME. If bot.conf is gone the bot was already reaped (or this is not a bot
+# dir) — a clean no-op keeps the reaper idempotent.
+_selected_cli="${CLAUDLOBBY_CLI-}"
+_selected_release="${CLAUDLOBBY_RELEASE_ID-}"
+_selected_native="${CLAUDLOBBY_NATIVE_DIR-}"
+_selected_artifact="${CLAUDLOBBY_ARTIFACT_ID-}"
+_selected_root="${CLAUDLOBBY_ROOT-}"
+_selected_fleet="${FLEET_NAME-}"
+_selected_plane_disabled="${PLANE_EMIT_DISABLED-}"
+_selected_receipt_enabled="${SPINDOWN_RECEIPT_ENABLED-}"
+if ! load_bot_conf "$BOT_DIR" 2>/dev/null; then
+    sd_log "no bot.conf found — already reaped or not a bot dir; nothing to do"
+    exit 0
+fi
+if [ -n "$RETIRED_SERVICE" ]; then
+    # The retained bot.conf can name an older sealed release. Its identity is
+    # useful for teardown, but the receipt must use the selected executable.
+    export CLAUDLOBBY_CLI="$_selected_cli" CLAUDLOBBY_RELEASE_ID="$_selected_release"
+    export CLAUDLOBBY_NATIVE_DIR="$_selected_native" CLAUDLOBBY_ARTIFACT_ID="$_selected_artifact"
+    export CLAUDLOBBY_ROOT="$_selected_root" FLEET_NAME="$_selected_fleet"
+    export PLANE_EMIT_DISABLED="$_selected_plane_disabled"
+    export SPINDOWN_RECEIPT_ENABLED="$_selected_receipt_enabled"
+    case "$RETIRED_SERVICE" in *[!A-Za-z0-9_.-]*|'') echo 'invalid retired service' >&2; exit 3 ;; esac
+    [ "${BOT_SERVICE:-}" = "$RETIRED_SERVICE" ] || { echo 'retired service differs from bot.conf' >&2; exit 3; }
+    # Activation has already de-enrolled this unit. Never let the ordinary
+    # spin-down leg remove a new occupant of its label.
+    _unit="$RETIRED_SERVICE.service"
+    [ "$_OS" = Darwin ] && _unit="$RETIRED_SERVICE.plist"
+    _catalog="$(svc_inventory_catalog)" || { echo 'native catalog unavailable' >&2; exit 3; }
+    while IFS= read -r _row; do
+        case "$_row" in
+            "installed"$'\t'"$_unit"|"loaded"$'\t'"$_unit") echo 'retired service is enrolled' >&2; exit 3 ;;
+        esac
+        if [ "$_OS" = Darwin ]; then
+            read -r _pid _status _label _extra <<< "$_row"
+            [ "${_label:-}" != "$RETIRED_SERVICE" ] || { echo 'retired service is loaded' >&2; exit 3; }
+        fi
+    done <<< "$_catalog"
+    if [ "$_OS" = Darwin ]; then
+        [ ! -e "$HOME/Library/LaunchAgents/$_unit" ] && [ ! -L "$HOME/Library/LaunchAgents/$_unit" ] || { echo 'retired service is installed' >&2; exit 3; }
+        # A Background operator's current catalog sees user/, not gui/.
+        # Check the selected GUI domain too before claiming de-enrollment.
+        _gui_catalog="$(svc_inventory_gui_list)" || { echo 'GUI native catalog unavailable' >&2; exit 3; }
+        while read -r _pid _status _label _extra; do
+            [ "${_label:-}" != "$RETIRED_SERVICE" ] || { echo 'retired service is loaded in GUI domain' >&2; exit 3; }
+        done <<< "$_gui_catalog"
+    else
+        [ ! -e "$HOME/.config/systemd/user/$_unit" ] && [ ! -L "$HOME/.config/systemd/user/$_unit" ] || { echo 'retired service is installed' >&2; exit 3; }
+    fi
+    _socket="$(tmux_socket_for_bot "$BOT_DIR")" || exit 3
+    [ "$_socket" = "$RETIRED_SERVICE" ] || { echo 'retired socket differs from service' >&2; exit 3; }
+fi
+# Emit a script_error event on an unguarded abort (parity with lifecycle peers).
+install_error_trap "$BOT_DIR"
+
+# --- Leg 3: fleet-state key — delegate the surgical delete to its owner -------
+# fleet-state-update.sh is the single writer of fleet-state.json (path, lock, and
+# mutation all live there). Pass both the dir-slug and BOT_NAME identity in case
+# they differ; the `delete` verb removes only those keys, never a prune of others.
+reap_fleet_state() {
+    if [ -z "${FLEET_NAME:-}" ]; then
+        echo 'spin-down-bot: fleet-state delete skipped: no selected fleet' >&2
+    elif "$LIB_DIR/fleet-state-update.sh" delete --fleet "$FLEET_NAME" "$SLUG" "${BOT_NAME:-$SLUG}"; then
+        sd_log "fleet-state key removed (surgical, via fleet-state-update.sh delete)"
+    else
+        echo 'spin-down-bot: fleet-state delete failed; no other fleet row was removed' >&2
+    fi
+}
+
+# The purge guard runs after the private server has stopped and before the
+# state-key and directory deletions. A preflight in the CLI alone can race a final
+# write from that session. Refuse when any repository fact cannot be proved.
+purge_projects_safe() {
+    local git_entry repo status stashes ahead worktrees
+    [ -d "$BOT_DIR/projects" ] || return 0
+    while IFS= read -r -d '' git_entry; do
+        repo="$(dirname "$git_entry")"
+        status=$(git -C "$repo" status --porcelain --untracked-files=all) || {
+            echo "spin-down-bot: purge refused: cannot inspect $repo" >&2; return 3;
+        }
+        [ -z "$status" ] || { echo "spin-down-bot: purge refused: dirty $repo" >&2; return 3; }
+        stashes=$(git -C "$repo" stash list) || {
+            echo "spin-down-bot: purge refused: cannot inspect stashes in $repo" >&2; return 3;
+        }
+        [ -z "$stashes" ] || { echo "spin-down-bot: purge refused: stashes in $repo" >&2; return 3; }
+        ahead=$(git -C "$repo" rev-list --count --all HEAD --not --remotes) || {
+            echo "spin-down-bot: purge refused: cannot inspect local commits in $repo" >&2; return 3;
+        }
+        [ "$ahead" -eq 0 ] || { echo "spin-down-bot: purge refused: unpushed commits in $repo" >&2; return 3; }
+        worktrees=$(git -C "$repo" worktree list --porcelain) || {
+            echo "spin-down-bot: purge refused: cannot inspect worktrees in $repo" >&2; return 3;
+        }
+        [ "$(printf '%s\n' "$worktrees" | grep -c '^worktree ' || true)" -eq 1 ] || {
+            echo "spin-down-bot: purge refused: linked worktrees from $repo" >&2; return 3;
+        }
+    done < <(find "$BOT_DIR/projects" -name .git -print0)
+}
+
+# Receipt first: a crash mid-teardown then leaves a record of an unfinished
+# teardown, never a finished teardown with no record.
+#
+# `|| ...` is load-bearing, not decoration. Running first on a DESTRUCTIVE path
+# means any non-zero status in here would abort under set -e and leave the bot
+# standing. The teardown must not be contingent on the bookkeeping succeeding,
+# so the receipt is allowed to fail loudly and the legs run regardless.
+emit_teardown_receipt || sd_log "receipt: FAILED to record — continuing teardown"
+if [ -n "$RETIRED_SERVICE" ]; then
+    # Only the retained private server remains; native supervision was retired
+    # by activation and must not be touched by a later cleanup.
+    _tmpdir="${TMUX_TMPDIR:-${TMPDIR:-/tmp}}"
+    if [ -S "$_tmpdir/tmux-$(id -u)/$_socket" ]; then
+        _stop_mode=retired
+        [ "$PURGE" -eq 1 ] && _stop_mode=retired-purge
+        svc_activation_stop_private_server "$BOT_DIR" "$_socket" "$_tmpdir" "$_stop_mode" || exit 3
+    fi
+    sd_log "effect-attempted"
+    rm -f "$BOT_DIR/.tmux-env"
+else
+    sd_log "effect-attempted"
+    svc_disenroll "$BOT_DIR" sd_log "${BOT_SERVICE:-}" /bin/launchctl
+fi
+if [ "$PURGE" -eq 1 ]; then
+    purge_projects_safe || exit 3
+fi
+reap_fleet_state
+
+if [ "$PURGE" -eq 1 ]; then
+    rm -rf "$BOT_DIR"
+    sd_log "purged bot directory"
+fi
+
+sd_log "reaped"

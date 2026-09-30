@@ -46,7 +46,7 @@ NPX = {"command": "npx", "args": ["-y", SPEC, "--flag"], "env": {"TOKEN": "${TOK
 @pytest.fixture(autouse=True)
 def _equip_grammar(fleet_dir):
     """compose and warm-cache read the pin and bin grammar from the install's
-    `lib/`, and that door refuses rather than falling back, so the fixture root
+    `claudlobby/_runtime_scripts/`, and that door refuses rather than falling back, so the fixture root
     carries the real file (the test_warm_cache_uvx.py fixture, same reason)."""
     from tests.conftest import equip_grammar
 
@@ -227,7 +227,8 @@ class TestAnArmedBotFallsBackToNpxAndSaysSo:
         assert server["command"] == "npx"
         assert server["args"] == ["-y", SPEC, "--flag"]
         assert "lead" in text and "demo" in text and SPEC in text
-        assert "not installed" in text and "warm-cache" in text
+        assert "not installed" in text and "host cache warm" in text
+        assert "config plan" in text
 
     def test_a_version_range_keeps_npx(self, fleet_dir: Path, caplog):
         # A bare name falls out on its own (no version to install); a RANGE has
@@ -271,7 +272,7 @@ class TestAnArmedBotFallsBackToNpxAndSaysSo:
         server, text = self._fallback(fleet_dir, caplog)
         assert server["command"] == "npx"
         assert "not an exact version pin" in text
-        assert "warm-cache" not in text, "warm-cache cannot fix an unpinned spec"
+        assert "host cache warm" not in text, "cache warming cannot fix an unpinned spec"
 
     def test_an_entry_with_a_flagged_shebang_keeps_npx(self, fleet_dir: Path, caplog):
         # `node <path>` would drop the flags a `#!/usr/bin/env -S node --x` asks for.
@@ -344,10 +345,10 @@ class _FakeNpm(SubprocessRecorder):
 
 class TestWarmCacheInstallsForArmedBots:
     def _run(
-        self, fleet_dir: Path, monkeypatch, npm: _FakeNpm, *, dry_run=False
+        self, fleet_dir: Path, monkeypatch, npm: _FakeNpm, *, dry_run=False, summary=None
     ) -> int:
         monkeypatch.setattr(subprocess, "run", npm)
-        return cmd_warm_cache(warm_cache_args(fleet_dir, dry_run=dry_run))
+        return cmd_warm_cache(warm_cache_args(fleet_dir, dry_run=dry_run), summary=summary)
 
     def _installs(self, npm: _FakeNpm) -> list[list[str]]:
         return [c for c in npm.argv_for("npm") if c[1:2] == ["install"]]
@@ -399,8 +400,10 @@ class TestWarmCacheInstallsForArmedBots:
     ):
         equip_bot_with_mcp(fleet_dir, {"demo": NPX})
         _arm(fleet_dir)
+        summary = {}
         with caplog.at_level(logging.WARNING):
-            assert self._run(fleet_dir, monkeypatch, _FakeNpm(fail=True)) == 1
+            assert self._run(fleet_dir, monkeypatch, _FakeNpm(fail=True), summary=summary) == 1
+        assert SPEC in summary["failed"]
         assert not (fleet_dir / "state" / "mcp" / "npm" / SPEC).exists()
         leftovers = list((fleet_dir / "state" / "mcp" / "npm" / "@scope").iterdir())
         assert leftovers == [], f"a torn install was left on disk: {leftovers}"
@@ -432,29 +435,23 @@ class TestTheSwitchIsNamedWhereTheOperatorLooks:
         assert row.config == "mcp_direct_launch"
         assert row.why_opt_in.strip()
 
-    def test_its_arm_line_says_restart_and_warm_cache_not_next_tool_call(self):
+    def test_its_arm_line_says_restart_and_cache_warm_not_next_tool_call(self):
         from claudlobby import switches as sw
 
         row = sw.by_key("mcp-direct-launch")
-        assert "warm-cache" in row.arm and "restart" in row.arm
+        assert "host cache warm" in row.arm and "host activate" in row.arm
+        assert "restart" in row.arm
         assert "next tool call" not in row.arm and "next tool call" not in row.disarm
 
-    def test_the_isolation_switch_lines_are_unchanged(self):
-        # The COMPOSE_BOT lines were generalised for this switch; the switch
-        # that already used them must render byte for byte as before.
+    def test_the_isolation_switch_retains_its_next_tool_call_contract(self):
+        # The shared carrier can name activation for both switches while the
+        # isolation deny still binds at a different time from .mcp.json.
         from claudlobby import switches as sw
 
         row = sw.by_key("shared-config-isolation")
-        assert row.arm == (
-            "bots.<bot>.isolation.shared_config: true in fleet.yaml for ONE bot first,"
-            " then claudlobby --fleet <fleet> generate --bot <bot> (it binds on that"
-            " bot's next tool call, no restart); widen to"
-            " defaults.isolation.shared_config once it has run clean"
-        )
-        assert row.disarm == (
-            "isolation.shared_config: false at bots.<bot> or defaults in fleet.yaml,"
-            " then generate (off on the next tool call, no restart)"
-        )
+        assert "config plan" in row.arm and "host activate" in row.arm
+        assert "next tool call" in row.arm and "next tool call" in row.disarm
+        assert "at the bot's next restart" not in row.arm
 
     def test_resolve_names_the_bots_that_have_it_on(self, fleet_dir: Path):
         from claudlobby import switches as sw
@@ -470,10 +467,10 @@ class TestTheSwitchIsNamedWhereTheOperatorLooks:
         assert "1 of 2 bot(s): lead" in row.source
 
 
-# --- doctor names what generate would compose ------------------------------
+# --- doctor names what config staging would compose -------------------------
 
 class TestDoctorNamesTheFallbacks:
-    """The rung reads the composer's own plan, so doctor and generate cannot
+    """The rung reads the composer's own plan, so doctor and config staging cannot
     disagree about which servers still carry a wrapper."""
 
     def _rung(self, fleet_dir: Path):
@@ -489,7 +486,7 @@ class TestDoctorNamesTheFallbacks:
         [check] = self._rung(fleet_dir)
         assert check.status == "warn"
         assert "lead/demo" in check.detail and "not installed" in check.detail
-        assert "warm-cache" in check.detail
+        assert "host cache warm" in check.detail and "config plan" in check.detail
 
     def test_an_armed_bot_whose_servers_all_launch_directly_passes(self, fleet_dir: Path):
         equip_bot_with_mcp(fleet_dir, {"demo": NPX})
@@ -548,7 +545,7 @@ class TestDoctorReadsTheComposedFile:
         dead = checks["mcp-launch-composed"]
         assert dead.status == "fail"
         assert "lead/demo" in dead.detail and str(entry) in dead.detail
-        assert "will not start" in dead.detail and "warm-cache" in dead.detail
+        assert "will not start" in dead.detail and "host cache warm" in dead.detail
         # ...and the plan rung keeps its own reading: what generate would compose now.
         assert checks["mcp-launch"].status == "warn"
 

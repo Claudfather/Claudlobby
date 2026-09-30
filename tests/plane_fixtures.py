@@ -9,12 +9,15 @@ from pathlib import Path
 
 from claudlobby.plane.db import connect_ro, db_file
 from claudlobby.plane.emit_api import emit_batch
+from tests.plane_setup import initialize_plane
 
 
-def plane_root(tmp_path: Path, *, capture: str = '{"*": "full"}') -> Path:
+def plane_root(tmp_path: Path, *, capture: str = '{"*": "full"}', initialize: bool = False) -> Path:
     root = tmp_path / "root"
     (root / "state" / "plane").mkdir(parents=True)
     (root / "state" / "plane" / "capture.json").write_text(capture)
+    if initialize:
+        initialize_plane(root)
     return root
 
 
@@ -49,22 +52,23 @@ REPO = Path(__file__).resolve().parent.parent
 F = "f"
 NOW = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)
 NOW_EPOCH = int(datetime(2026, 9, 2, 20, 0, tzinfo=timezone.utc).timestamp())
-MATCHER = REPO / "lib" / "dispatch-overdue.py"
-FLEET_YAML = ("fleet:\n  name: f\n  service_prefix: com.test\n  bots:\n"
+MATCHER = REPO / "claudlobby/_runtime_scripts" / "dispatch-overdue.py"
+FLEET_YAML = ("fleet:\n  manager: w2\n  name: f\n  service_prefix: com.test\n  bots:\n"
               "    w1:\n      expertise: [software-engineering]\n"
               "    w2:\n      expertise: [software-engineering]\n")
 
 
 def _paths(root):
-    """An overlay root whose lib/ IS the repo's lib/ — the matcher a door
+    """An overlay root whose claudlobby/_runtime_scripts/ IS the repo's claudlobby/_runtime_scripts/ — the matcher a door
     loads is the install's own script, never a copy. `bots:` nests under
     `fleet:` (a top-level `bots:` parses to zero bots, silently)."""
+    from tests.package_fixtures import source_package
     from claudlobby.paths import Paths
     (root / "local" / F / "runtime").mkdir(parents=True, exist_ok=True)
     (root / "local" / F / "fleet.yaml").write_text(FLEET_YAML)
     if not (root / "lib").exists():
-        (root / "lib").symlink_to(REPO / "lib")
-    return Paths(root=root, fleet_dir=root / "local" / F)
+        (root / "lib").symlink_to(REPO / "claudlobby/_runtime_scripts")
+    return Paths(root=root, fleet_dir=root / "local" / F, package=source_package())
 
 
 def _epoch(iso):
@@ -94,6 +98,7 @@ def _report(root, wi, asg, ts, *, bot="w1", event="completed", extra=None, statu
     and, when it resolved an assignment, the task event — both under one
     `report-back:<msg_id>` ref. (`event=None` = a report that resolved nothing.)"""
     from claudlobby.plane.emit_api import emit_batch
+    initialize_plane(root)
     _REPORT_SEQ[0] += 1
     msg = f"msg_{'e' * 24}{_REPORT_SEQ[0]:0>8x}"
     ref = f"report-back:{msg}"
@@ -156,7 +161,7 @@ def _cli(root, *args, **extra):
 
 
 def _stdlib_readers():
-    spec = importlib.util.spec_from_file_location("pr", REPO / "lib" / "plane-readers.py")
+    spec = importlib.util.spec_from_file_location("pr", REPO / "claudlobby/_runtime_scripts" / "plane-readers.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -173,6 +178,7 @@ def _live_dispatch(root, n, task_id, *, ts, bot="w1", expected_by=None, fleet=No
     *expected_by* (ISO) mirrors the ledger row's deadline when a test needs
     the watchdog's question answered on both sides; *ref* overrides the
     source_ref (an id-less construct's ``dispatch-log:sha:<key>``)."""
+    initialize_plane(root)
     fl = fleet or F
     wi, asg, msg = f"wi_{n:0>32}", f"asg_{n:0>32}", f"msg_{n:0>32}"
     ref = ref or f"dispatch-log:{task_id}"

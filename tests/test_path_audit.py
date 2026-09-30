@@ -21,6 +21,7 @@ from claudlobby.path_audit import (
     audit_bot_paths,
     improper_fleet_paths,
 )
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 
@@ -29,7 +30,7 @@ def _paths(tmp_path):
     fleet_dir = root / "local" / "home" / "tl"
     (fleet_dir / "runtime" / "bots" / "kev").mkdir(parents=True)
     (root / "lib").mkdir(parents=True)
-    return Paths(root=root, fleet_dir=fleet_dir)
+    return Paths(root=root, fleet_dir=fleet_dir, package=source_package())
 
 
 def _bot(**overrides):
@@ -44,7 +45,19 @@ def _bot(**overrides):
 
 
 def _fleet():
-    return FleetConfig(name="tl", service_prefix="com.crog.tl")
+    return FleetConfig(
+        name="tl", service_prefix="com.crog.tl", manager="kev", bots={"kev": _bot()}
+    )
+
+
+def test_session_provider_commands_are_tui_input_not_filesystem_paths():
+    from claudlobby.path_audit import audit_bot_sources
+
+    bot = _bot(env={"SESSION_HANDOFF_COMMAND": "/session handoff --auto",
+                    "SESSION_RESUME_COMMAND": "/claudna:session resume --auto",
+                    "OTHER_PATH": "/foreign/file"})
+    findings = audit_bot_sources(bot, _fleet())
+    assert [finding.source for finding in findings] == ["bots.kev.env.OTHER_PATH"]
 
 
 class TestImproperFleetPaths:
@@ -55,9 +68,18 @@ class TestImproperFleetPaths:
         assert [p for p, _ in bad] == [flat]
 
     def test_nested_correct_absolute_is_ok(self, tmp_path):
-        paths = _paths(tmp_path)
-        good = f"{paths.root}/local/home/tl/.secrets/ga4.json"
-        assert improper_fleet_paths(good, _bot(), paths) == []
+        paths = _paths(tmp_path / "host data with spaces")
+        good = str(paths.bot_runtime("kev"))
+        # The same absolute crosses shell, JSON permission, systemd and XML
+        # boundaries. Whitespace in its configured root is part of the path.
+        for text in (
+            f'BOT_DIR="{good}"',
+            json.dumps({"allow": [f"Read(/{good}/memory/**)"]}),
+            f"WorkingDirectory={good}\nEnvironmentFile={good}/.tmux-env",
+            f"<string>{good}/logs/kev.out.log</string>",
+            "${BOT_DIR}/data",
+        ):
+            assert improper_fleet_paths(text, _bot(), paths) == [], text
 
     def test_fleet_root_token_is_ok(self, tmp_path):
         paths = _paths(tmp_path)
@@ -80,9 +102,9 @@ class TestImproperFleetPaths:
         assert improper_fleet_paths(txt, _bot(), paths) == []
 
     def test_cross_fleet_path_flagged(self, tmp_path):
-        paths = _paths(tmp_path)
+        paths = _paths(tmp_path / "host data with spaces")
         other = f"{paths.root}/local/home/other-fleet/runtime/bots/z/x.js"
-        bad = improper_fleet_paths(other, _bot(), paths)
+        bad = improper_fleet_paths(f'"{paths.bot_runtime("kev")}" "{other}"', _bot(), paths)
         assert [p for p, _ in bad] == [other]
 
     def test_fleet_state_path_style_root_anchor_is_ok(self, tmp_path):
@@ -242,11 +264,14 @@ class TestAuditBotPaths:
         assert audit_bot_paths(_bot(), _fleet(), paths) == []
 
 
-def test_anchor_ssot_is_the_three_blessed_anchors():
+def test_anchor_ssot_covers_data_and_selected_package_paths():
     assert set(COMPOSER_PROVIDED_PATH_ANCHORS) == {
         "CLAUDLOBBY_ROOT",
         "FLEET_ROOT",
         "BOT_DIR",
+        "CLAUDLOBBY_NATIVE_DIR",
+        "CLAUDLOBBY_LIBRARY_DIR",
+        "CLAUDLOBBY_CLI",
     }
 
 
@@ -259,6 +284,7 @@ def _write_nested_fleet(root, env_path_value):
         "fleet:\n"
         "  name: tl\n"
         "  service_prefix: com.crog.tl\n"
+        "  manager: kev\n"
         '  telegram_group_chat_id: "-100999"\n'
         "  accounts:\n"
         "    default: ~/.claude\n"
@@ -292,7 +318,7 @@ class TestComposeBotFiresPathGuard:
         root = fleet_dir
         flat = f"{root}/local/tl/data/x"  # flat husk: local/tl not local/home/tl
         nested = _write_nested_fleet(root, flat)
-        paths = Paths(root=root, fleet_dir=nested)
+        paths = Paths(root=root, fleet_dir=nested, package=source_package())
         fleet, _ = load_fleet(nested / "fleet.yaml")
         # L1 denies the unanchored absolute at the source, before emission.
         with pytest.raises(ValueError, match="absolute path"):
@@ -307,7 +333,7 @@ class TestComposeBotFiresPathGuard:
         # and the emitted (resolved) path resolves in-fleet so L2 passes too.
         good = "${FLEET_ROOT}/data/x"
         nested = _write_nested_fleet(root, good)
-        paths = Paths(root=root, fleet_dir=nested)
+        paths = Paths(root=root, fleet_dir=nested, package=source_package())
         fleet, _ = load_fleet(nested / "fleet.yaml")
         bot_dir = compose_bot(fleet.bots["kev"], fleet, paths)
         assert bot_dir.is_dir()
@@ -324,7 +350,7 @@ class TestComposeBotFiresPathGuard:
             "/Users/olduser/old-mac-mini-install/claudlobby/local/tl/.secrets/ga4.json"
         )
         nested = _write_nested_fleet(root, foreign)
-        paths = Paths(root=root, fleet_dir=nested)
+        paths = Paths(root=root, fleet_dir=nested, package=source_package())
         fleet, _ = load_fleet(nested / "fleet.yaml")
         with pytest.raises(ValueError, match="absolute path"):
             compose_bot(fleet.bots["kev"], fleet, paths)
@@ -349,6 +375,7 @@ class TestComposeBotFiresPathGuard:
             "fleet:\n"
             "  name: tl\n"
             "  service_prefix: com.crog.tl\n"
+            "  manager: kev\n"
             '  telegram_group_chat_id: "-100999"\n'
             "  accounts:\n"
             "    default: ~/.claude\n"
@@ -361,7 +388,7 @@ class TestComposeBotFiresPathGuard:
             "        token_env: T\n"
         )
         paths = Paths(
-            root=root, fleet_dir=nested, vault_root=vault_root if bridged else None
+            root=root, fleet_dir=nested, vault_root=vault_root if bridged else None, package=source_package()
         )
         fleet, _ = load_fleet(nested / "fleet.yaml")
         bot_dir = compose_bot(fleet.bots["kev"], fleet, paths)
@@ -384,6 +411,7 @@ class TestComposeBotFiresPathGuard:
             "fleet:\n"
             "  name: tl\n"
             "  service_prefix: com.crog.tl\n"
+            "  manager: kev\n"
             '  telegram_group_chat_id: "-100999"\n'
             "  accounts:\n"
             "    default: ~/.claude\n"
@@ -395,7 +423,7 @@ class TestComposeBotFiresPathGuard:
             "        handle: kev_bot\n"
             "        token_env: T\n"
         )
-        paths = Paths(root=root, fleet_dir=nested)
+        paths = Paths(root=root, fleet_dir=nested, package=source_package())
         fleet, _ = load_fleet(nested / "fleet.yaml")
         bot_dir = compose_bot(fleet.bots["kev"], fleet, paths)
         settings = (bot_dir / ".claude" / "settings.local.json").read_text()
@@ -413,10 +441,13 @@ class TestVaultModePathAudit:
         vault = tmp_path / "vault"
         fleet_dir = vault / "tl"  # fleet lives in the vault, not under local/
         (fleet_dir / "runtime" / "bots" / "kev").mkdir(parents=True)
-        (fleet_dir / "fleet.yaml").write_text("fleet:\n  name: tl\n")
+        (fleet_dir / "fleet.yaml").write_text(
+            "fleet:\n  name: tl\n  manager: kev\n  bots:\n"
+            "    kev:\n      expertise: [eng]\n"
+        )
         (root / "library").mkdir(parents=True)
         (root / "lib").mkdir(parents=True)
-        return Paths(root=root, fleet_dir=fleet_dir, vault_root=vault)
+        return Paths(root=root, fleet_dir=fleet_dir, vault_root=vault, package=source_package())
 
     def test_own_vault_fleet_path_is_ok(self, tmp_path):
         paths = self._vault_paths(tmp_path)

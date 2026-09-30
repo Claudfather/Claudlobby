@@ -6,7 +6,7 @@ in its ``settings.local.json`` allow-list traces to an equipped source's contrac
 allow-list (no under-grant / silent reliance on the retired global ``~/.claude``),
 and the Tier-A settings surface (``enabledPlugins`` / skip-flags / ``sandbox``) is
 composed per-bot rather than inherited from the hand-accumulated global. The
-real-boot half of the gate lives in ``lib/freshbox-boot-gate.sh``.
+real-boot half of the gate lives in ``harness/freshbox-boot-gate.sh``.
 
 #703 folds the deny-by-default path guard into the same audit: a source re-check
 (the L1 guard, ``_value_findings``), an externals visibility report
@@ -29,8 +29,8 @@ from pathlib import Path
 from .composer import (
     BASE_TOOLS,
     _resolve_channel_permissions,
-    _resolve_default_boot_grant,
     _resolve_expertise_permissions,
+    _resolve_fleet_ops_grants,
     _resolve_guardrail_permissions,
     _resolve_integration_grants,
     _resolve_mcp_permissions,
@@ -84,7 +84,7 @@ def _sourced_grants(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> set[str
     )
     sourced |= set(_resolve_skill_permissions(effective_skills))
     sourced |= set(_resolve_skill_grants(effective_skills, paths))
-    sourced |= set(_resolve_default_boot_grant(bot, paths))
+    sourced |= set(_resolve_fleet_ops_grants(bot, fleet))
     return sourced
 
 
@@ -180,7 +180,7 @@ def _isolation_findings(
     ``settings.local.json``), never a re-derivation, and compares it class by
     class with what this install and today's host roster would compose. A
     missing rule means the file was composed by an older install, or a bot joined
-    the host after it was; either way the fix is a generate, and the finding says
+    the host after it was; either way the fix is staged host activation, and the finding says
     which fleet. WARN, never FAIL: a present rule reduces accidental reads through
     Claude's own tools and is not confidentiality (see isolation.py), so a FAIL
     would overclaim what fixing it buys. Also names each composed file that tells
@@ -199,12 +199,14 @@ def _isolation_findings(
         composed = set(json.loads(target.read_text())["permissions"]["deny"])
     except (OSError, ValueError, KeyError, TypeError):
         composed = None
-    regen = f"claudlobby --fleet {fleet.name} generate --bot {bot.bot_id}"
+    remedy = ("stage `claudlobby --root <data-root> config plan --release <sealed-release-id>`"
+              " and activate the returned plan with `claudlobby --root <data-root>"
+              " host activate <plan-id> --install-directory <native-user-unit-dir>`")
     if composed is None:
         findings.append(Finding(
             bot.bot_id, "isolation_not_composed", WARN,
             f"shared-config isolation is on, but {target} holds no deny list to"
-            f" check — the bot runs without its rules until `{regen}`"))
+            f" check — the bot runs without its rules until you {remedy}"))
     else:
         for cls, what in CLASSES.items():
             rules = [r for r in expected.rules if r.cls == cls]
@@ -219,7 +221,7 @@ def _isolation_findings(
                         f" {missing[0].text} (composed by an older install?)")
             findings.append(Finding(
                 bot.bot_id, "isolation_missing", WARN,
-                f"{cls} — {what}: {why}; run `{regen}`"))
+                f"{cls} — {what}: {why}; {remedy}"))
     for name in sorted(bot.isolation.exempt):
         findings.append(Finding(
             bot.bot_id, "isolation_exempt", INFO,
@@ -348,7 +350,7 @@ def _env_secret_leak_findings(
 ) -> list[Finding]:
     """#792: a per-bot identity secret sitting in a host-shared env tier.
 
-    ``source_env_tiered`` (lib/lib-common.sh) sources the global ``~/.env`` and the
+    ``source_env_tiered`` (claudlobby/_runtime_scripts/lib-common.sh) sources the global ``~/.env`` and the
     deprecated/install-shared ``$CLAUDLOBBY_ROOT/.env`` into EVERY bot's process
     env, so a per-bot secret placed in either leaks host-wide — the A1
     config-review incident, where one bot's token became readable by another. A
@@ -637,7 +639,7 @@ def _orphan_unit_findings(
             WARN,
             f"{f.name} — stale supervision unit, not the composed "
             f"{fleet.service_prefix}.{bot.bot_id} long-form; reap with "
-            "`claudlobby freshbox --reap`",
+            "`claudlobby host supervision reap-orphans --dry-run` (then --apply)",
         )
         for f in _orphan_unit_files(bot, fleet, paths)
     ]
@@ -696,7 +698,7 @@ def _fleet_pulse_env_findings(
 ) -> list[Finding]:
     """#1120: a fleet-pulse escalation knob sitting in ANY ``.env`` tier.
 
-    ``lib/fleet-pulse.sh`` runs from a composed timer unit that sources no
+    ``claudlobby/_runtime_scripts/fleet-pulse.sh`` runs from a composed timer unit that sources no
     ``.env`` at all — not the bot tier, not the fleet tier, not a host tier — so
     a ``FLEET_PULSE_*`` key in any of them reaches nothing and the script keeps
     its own default. The operator sees no change and cannot tell "ignored" from

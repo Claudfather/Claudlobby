@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-DISPATCH = REPO / "lib" / "dispatch.sh"
+DISPATCH = REPO / "claudlobby/_runtime_scripts" / "dispatch.sh"
 
 STUB_LIB_COMMON = """\
 #!/bin/bash

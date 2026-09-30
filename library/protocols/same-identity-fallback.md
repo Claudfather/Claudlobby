@@ -10,7 +10,7 @@ When the fleet shares a single GitHub PAT (every bot commits as the same identit
 **Fallback:**
 
 1. If `--approve` or `--request-changes` returns "Can not approve your own pull request" or equivalent — post `--comment` instead.
-2. Lead the comment body with the verdict: `**[<bot>] [VERDICT] approve** — reviewed at <sha>`, `**[<bot>] [VERDICT] request changes** — reviewed at <sha>`, or `**Comment**` (no verdict) — leave a plain `**Comment**` bare, never bracket-tag it: `lib/pr-review-state.py` treats a bracket-tagged word it does not recognize as vocabulary drift, not as a neutral note.
+2. Lead the comment body with the verdict: `**[<bot>] [VERDICT] approve** — reviewed at <sha>`, `**[<bot>] [VERDICT] request changes** — reviewed at <sha>`, or `**Comment**` (no verdict) — leave a plain `**Comment**` bare, never bracket-tag it: `claudlobby task reviews` treats an unrecognized bracket-tagged word as vocabulary drift, not as a neutral note. Record the review-role fleet report for authoritative actor attribution.
 3. The verdict line is the contract — the merge gate reads it programmatically.
 
 **Do not:**

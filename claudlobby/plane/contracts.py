@@ -7,8 +7,6 @@ never spooled. `delivered` is deliberately absent from ATTEMPT_STATES (F9).
 
 from __future__ import annotations
 
-import hashlib
-import re
 from typing import Literal, Optional
 
 from pydantic import (
@@ -47,19 +45,6 @@ ATTEMPT_STATES = (
     # A tmux/pane fact (see _CARRIER_ONLY_STATES).
     "received",
 )
-#: Who the reporter was TO THE PR they are citing (#1666). A CLOSED vocabulary
-#: rather than free text, and the closure is the point: the consumer of this
-#: field decides whether a bot may merge, so an unrecognised value must be a
-#: refusal at the door rather than a string nobody can classify later.
-#:
-#: **There is deliberately no "unknown" member.** Absent (None) IS the third
-#: state, and it has to stay distinguishable from `reviewed`: 19% of in-epoch
-#: PRs have no citing report at all, and rung 1 must REFUSE for those rather
-#: than read "no role recorded" as "not an author" and pass. A member spelled
-#: `unknown` would invite a writer to record one, which converts an absence the
-#: consumer can refuse on into a value it might accept.
-PR_ROLES = ("authored", "reviewed")
-
 #: How a report's task link was resolved (#1710). A STRING ENUM rather than a
 #: boolean `auto_resolved`, deliberately: absent must stay distinguishable from
 #: "not auto-resolved", and a boolean collapses those two under any falsy test a
@@ -171,10 +156,10 @@ FLEET_REQUIRED = {"communication", "work_item", "assignment", "transmission",
 # Field policy lives in plane/registries.py (the design's stated home) and is
 # imported here so validators ENFORCE from it — one SSOT, no duplicated caps
 # (round-5 F8: descriptive-only policy meant editing a cap changed nothing).
-from .registries import CONTENT_FIELDS, FIELD_POLICY  # noqa: E402  (re-export)
+from .registries import CONTENT_FIELDS, FIELD_POLICY, PR_ROLES  # noqa: E402  (re-export)
+from .capture_policy import body_proof  # noqa: E402  (the one proof owner)
 
 # BODY_CAP_BYTES retired (round-6): caps are read from FIELD_POLICY at call time.
-_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
 def _reject_over_cap(family: str, field: str, v):
@@ -210,20 +195,12 @@ class BodyFields(_Strict):
 def cap_body(text: str) -> BodyFields:
     """ANSI-strip, then cap at FIELD_POLICY's communication-body byte cap
     (UTF-8 safe), hashing the FULL stripped content so a truncated row still
-    proves what it truncated."""
-    stripped = _ANSI_RE.sub("", text)
-    raw = stripped.encode("utf-8")
-    digest = "sha256:" + hashlib.sha256(raw).hexdigest()
-    # Read the cap from the registry AT CALL TIME (round-6): an import-time
-    # constant snapshot made FIELD_POLICY descriptive for communications.
-    cap = FIELD_POLICY[("communication", "body")]["cap"]
-    if len(raw) <= cap:
-        return BodyFields(
-            body=stripped, body_bytes=len(raw), body_sha256=digest, truncated=False
-        )
-    cut = raw[:cap].decode("utf-8", errors="ignore")
+    proves what it truncated. The calculation has ONE owner,
+    capture_policy.body_proof, which the stdlib socket client also applies
+    before staging; the cap is still read from FIELD_POLICY at call time."""
+    body, body_bytes, body_sha256, truncated = body_proof(text)
     return BodyFields(
-        body=cut, body_bytes=len(raw), body_sha256=digest, truncated=True
+        body=body, body_bytes=body_bytes, body_sha256=body_sha256, truncated=truncated
     )
 
 
@@ -534,6 +511,7 @@ class WorkstreamEvent(_Strict):
     # authored -> over-cap REJECTS); disposition carries close --status
     # done|abandoned (F21); plan_ref is the linked-never-stored doc pointer.
     note: Optional[str] = None
+    waiting_on: Optional[str] = Field(None, max_length=256)
     next_step: Optional[str] = None
     disposition: Optional[Literal["done", "abandoned"]] = None
     plan_ref: Optional[str] = None
@@ -557,7 +535,7 @@ class WorkstreamEvent(_Strict):
 
 class _HostSystem(_Strict):
     claudlobby_version: str
-    #: The Claude Code version the fleet launches, as lib/claude-version.sh
+    #: The Claude Code version the fleet launches, as claudlobby/_runtime_scripts/claude-version.sh
     #: measured it (#1772), or None when it could not be measured, and then
     #: claude_version_unmeasured says why: exactly one of the two is set, and
     #: never a stand-in string.

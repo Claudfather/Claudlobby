@@ -7,7 +7,7 @@ a year, each also pinning an ingest-ledger row, on an SD card.
 
 **Why these tests are shaped as a complement rather than a checklist.** The
 hazard is not deleting too little, it is deleting something a door depends on:
-`lib/selfstart-snapshot.sh` fails CLOSED on an unreachable rescue-receipt read
+`claudlobby/_runtime_scripts/selfstart-snapshot.sh` fails CLOSED on an unreachable rescue-receipt read
 (exit 7) but reads an ABSENT receipt as a certain no-receipt — so a pruned
 receipt silently credits a rescued boot as a self-start. Enumerating what we
 checked would leave the next type unprotected; enumerating what may GO makes

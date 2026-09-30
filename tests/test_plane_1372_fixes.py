@@ -11,12 +11,14 @@ from pathlib import Path
 
 import pytest
 
+from tests.plane_setup import initialize_plane
+
 from claudlobby.plane.contracts import ContractViolation, validate_request
 from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import emit
 from claudlobby.plane.ids import mint_assignment_id, mint_event_id, mint_msg_id, mint_work_item_id
 
-LIB = Path(__file__).resolve().parent.parent / "lib"
+LIB = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts"
 
 
 def test_f1_capture_cannot_launder_malformed_wire(tmp_path):
@@ -34,6 +36,7 @@ def test_f1_capture_cannot_launder_malformed_wire(tmp_path):
 
 
 def test_f4_workstream_event_replay_is_duplicate_not_divergence(tmp_path):
+    initialize_plane(tmp_path)
     emit(tmp_path, {"event_type": "workstream", "emitter": "f4", "fleet": "f",
                     "payload": {"workstream_id": "ws-x", "title": "t",
                                 "opened_by": "bot:f/a"}})
@@ -47,6 +50,7 @@ def test_f4_workstream_event_replay_is_duplicate_not_divergence(tmp_path):
 
 
 def test_f11_anomaly_token_is_not_a_lifecycle_status(tmp_path):
+    initialize_plane(tmp_path)
     from claudlobby.plane.emit_api import emit_batch
     from claudlobby.plane.queries import TASK_STATUS_SQL
 
@@ -89,6 +93,8 @@ def test_f12_carrier_state_matrix_enforced(tmp_path):
         emit(tmp_path, tx("telegram-bridge", "carrier_queued"))
     with pytest.raises(ContractViolation):
         emit(tmp_path, tx("tmux", "carrier_accepted"))
+    assert not db_path(tmp_path).exists()  # invalid envelopes never initialize storage
+    initialize_plane(tmp_path)
     assert emit(tmp_path, tx("tmux", "pane_submitted")).status == "committed"
     assert emit(tmp_path, tx("telegram-tgpost", "carrier_accepted")).status == "committed"
 

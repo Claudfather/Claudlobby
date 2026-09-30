@@ -4,237 +4,106 @@ title: Dispatch Protocol
 
 # Dispatch Protocol
 
-Manager → worker via the socket-aware `lib/dispatch.sh` helper (each bot runs on its **own** tmux server, so a raw `tmux send-keys -t <worker>` against the default per-user socket no longer reaches it). The default payload format is `[BOTCOMMAND]` — a structured envelope that workers parse on receipt (see `worker-lifecycle` for the inbound spec).
+Fleet work is admitted before it is assigned, and assignment is recorded before
+delivery. Use the canonical `task_id` and `assignment_id` returned by each step;
+these are different IDs. The default `/fleet-ops` skill owns the full command
+contract, grants, request reconciliation, and worker reporting. Discover the
+current grammar with `claudlobby task --help` and `claudlobby assignment --help`.
 
-## [BOTCOMMAND] format
+## Manager task flow
 
+Choose a concrete outcome and prepare an existing UTF-8 delivery file with the
+worker's instructions and relevant plan, repo, deadline, and project context.
+For one operation, retain its UUID; each *new* operation gets a different UUID.
+Inspect each schema-1 result before proceeding:
+
+```bash
+claudlobby --json task admit --title "Run the security audit" --repo org/repo-a --project PROJECT_KEY --request-id ADMIT_UUID
+claudlobby --json task assign TASK_ID --bot WORKER --request-id ASSIGN_UUID
+claudlobby --json assignment deliver ASSIGNMENT_ID --file FILE --request-id DELIVER_UUID
 ```
-[BOTCOMMAND] <manager> | <type> | <summary> | <key:value pairs>
+
+`task admit` leaves queued fleet-owned work even when no worker is ready.
+`task assign` records routing but is not delivery or acceptance. Only the
+manager delivers to the current assignment; the worker accepts and reports
+against that assignment. A check-in decision uses `task assign TASK_ID --bot
+WORKER --checkin ck_... --request-id ASSIGN_UUID` *after* the check-in decision
+has committed. Do not add `--checkin` to admit. The check-in skill owns the
+record-before-act sequence.
+
+If a write or send has an uncertain outcome, inspect `claudlobby --json request
+show UUID` and the relevant task, assignment, or message receipt. A committed
+fact or submitted send may already exist. Do not automatically resubmit with a
+new UUID or resend the delivery file. A historical dispatch reference is not
+an alias for either canonical ID; use the scoped hint from the read command.
+
+For an ordinary question that does not create work, use the message door:
+
+```bash
+claudlobby --json message send --to WORKER --text "What did the audit find?" --request-id MESSAGE_UUID
+claudlobby --json request show MESSAGE_UUID
+claudlobby --json message show MESSAGE_ID
 ```
 
-**Types:**
+Message recording, arrival proof, and any reply are separate observations.
+Do not turn a question into a task solely to deliver text. A worker answers a
+note that asked for no work with `fleet reports submit`, the explicitly unlinked
+report: it links no task and closes nothing.
 
-| Type | Purpose |
-|------|---------|
-| `task` | Implementation work — branch, code, PR |
-| `cancel` | Abort current task, discard WIP |
-| `compact` | Run `/compact` to free context |
-| `restart` | Wrap up, report back, expect session restart |
-| `query` | Answer inline — no branch, no PR |
+## Follow-up and re-check
 
-**Key-value pairs** (optional, pipe-delimited after summary):
-
-| Key | Values / format | Purpose |
-|-----|-----------------|---------|
-| `repo:<name>` | Repository name | Target repo for the work |
-| `branch:<name>` | Branch name | Specific branch to work on |
-| `report:<target>` | Bot name or channel | Where to send the `[BOTREPORT]` |
-| `priority:<level>` | `high` / `normal` / `low` | Task priority |
-| `ref:<url>` | Issue or PR URL | Originating issue or context link |
-| `workstream:<ws-id>` | Workstream id | Registry entry this task advances |
-| `project:<key>` | `projects.yaml` slug | The project this work belongs to — the well-defined bar. `dispatch-task.sh --project <key>` adds it to the envelope and stamps `project_key` on the plane work item, so a task can be read back per project. |
-| `task:<task-id>` | `t-<epoch>-<hex4>` | **Task identity** — minted by `dispatch-task.sh`, recorded in the dispatch ledger. The worker MUST echo it in every `[BOTREPORT]` for this task (pass `--task <id>` to `report-back.sh`): the overdue watchdog joins on it, and an id-less report can never close an id'd dispatch. |
+Read `claudlobby --json task show TASK_ID` or `claudlobby --json fleet inbox`
+for current state. `claudlobby --json brief` shows fleet-owned open work for a
+manager, including queued intake, with canonical IDs and explicit unresolved
+history. An absent deadline alert is not proof that work completed. Re-checks
+ask the current manager to inspect overdue or aged open tasks; use the task ID
+in the notice. An assignment a person made with no deadline is a standing goal:
+the re-check lists it by ID but never asks about it on age alone. A nudge asks
+for a decision and does not itself change task
+state. Use `task withdraw`, `task reassign`, or `task escalate` according to the
+current CLI help and retained request-ID policy. Escalation asks one concrete
+human decision; it is not a status poll. Do not silently convert an uncertain
+send into a second assignment or a second task.
 
 ### Always zone a timestamp
 
-**Never write a bare `HH:MM` to another bot. Always `10:47 EDT` or `14:47Z`.**
-
-The host clock runs UTC and bots report in local time, so a bare figure is
-ambiguous at the moment it is read and unrecoverable afterwards. It cost us
-twice in twelve hours: a four-hour margin was read as an eighteen-minute
-emergency, and a three-way roster is now permanently unreconcilable because each
-disclosure used a different zone and none of them said which.
-
-The second failure is the one that argues for the rule. A misread margin is
-caught the moment someone checks; a set of bare timestamps from different bots
-cannot be reconciled later at any effort, because the information needed to
-align them was never written down. Zone it at the point of writing or it is
-gone.
-
-### Examples
-
-**Task dispatch:**
-
-```
-[BOTCOMMAND] ari | task | Fix rate-limit bypass in auth middleware | repo:backend | priority:high | ref:https://github.com/org/backend/issues/42
-```
-
-**Cancel in-flight work:**
-
-```
-[BOTCOMMAND] ari | cancel | Dropping the auth refactor — scope changed
-```
-
-**Free context on a worker:**
-
-```
-[BOTCOMMAND] ari | compact | Free context before next task
-```
-
-**Restart a worker:**
-
-```
-[BOTCOMMAND] ari | restart | Rolling restart for config reload
-```
-
-**Query (no branch/PR):**
-
-```
-[BOTCOMMAND] ari | query | What's the current retry logic in payment_service.py? | repo:backend
-```
-
-## Sending a dispatch (socket-aware)
-
-Each bot runs on its **own** tmux server (a private `-L <socket>`), so a raw `tmux send-keys -t <worker> …` against the default per-user socket no longer reaches it. Dispatch through `lib/dispatch.sh`, which resolves the worker's socket from its session name and does the race-safe two-step send (text, pause, Enter) so Claude Code's TUI never swallows keystrokes during render:
-
-```bash
-$CLAUDLOBBY_ROOT/lib/dispatch.sh <worker> '[BOTCOMMAND] <manager> | task | <summary> | repo:<name>'
-```
-
-Full example:
-
-```bash
-$CLAUDLOBBY_ROOT/lib/dispatch.sh eng-1 '[BOTCOMMAND] ari | task | Run security audit on repo-a | repo:repo-a | priority:high | ref:https://github.com/org/repo-a/issues/99'
-```
-
-`dispatch.sh` prepends `set +H; ` itself, which means a message that begins with `/`, such as a file path, reaches the worker as text instead of running as a slash command; it leaves the prefix off a message that starts with a command word and has no `!`, which has to run as a command. (`set +H` is bash's switch for history expansion, which never happens at a Claude Code prompt.) It also sanitizes the input, and — on a miss (the worker's session is gone on its socket) — logs a `send_miss` event rather than silently dropping. You never hand-type `tmux send-keys -t`.
-
-## The plane receipt trailer (framework, not yours to type)
-
-A tracked send (dispatch-task, report-back, briefing) arrives at the worker with one extra final line the framework appended:
-
-```
-[BOTCOMMAND] ari | task | Run the audit | repo:repo-a
-⟦plane:msg_1f3c…⟧
-```
-
-That `⟦plane:<msg_id>⟧` line is a **delivery receipt token**, not part of the task. The receiving session's `UserPromptSubmit` hook (`plane-dispatch-in.sh`) reads it, records the byte length and sha256 of the message it actually got, and the plane then **proves** delivery (DELIVERED / ARRIVED SHORT / not-yet-confirmed) instead of inferring it from the sender's Enter — closing the "the send looked fine but the head was gone" class (#1493/#1501). It rides the **last** tmux chunk on purpose, so it survives the head loss that was the measured failure. **Ignore it** as an instruction: it is always on its OWN final line, so it never fuses with the task text, and it carries nothing you act on. You never type it — the framework appends it and strips nothing you sent; `body_sha256` is over the message proper, above the trailer.
-
-### When the harness frames part of a dispatch (#1876)
-
-Claude Code treats any single read of more than 800 bytes as a **paste**. On the fleet's sessions it submits a paste inside `<pasted_content id="…">` tags, and its harness then tells the model that framed text may carry instructions the user did not write. The 400-byte send chunk keeps a dispatch under that line while the receiver keeps up. A receiver that falls behind, or a send from an older host, can still arrive framed. The head, often the `[BOTCOMMAND]` envelope and task id, sits inside the tags and the rest follows them. When the last chunk was framed too, the trailer is inside the last block:
-
-```
-<pasted_content id="4c1f">
-set +H; [BOTCOMMAND] dara | task | …the first chunk…
-</pasted_content id="4c1f">
-
-…the rest of the dispatch… | task:t-1790000000-ab12
-⟦plane:msg_1f3c…⟧
-```
-
-The same harness puts a backslash into any literal tag in the text (`<\pasted_content`). That is its escaping, not the sender's.
-
-**The receiver verifies, then trusts.** The check and its scope are in every bot's composed `CLAUDE.md` (**Dispatches framed as pasted text**), so a bot that composes neither this protocol nor `worker-lifecycle` still has it. As the sender there is nothing to add: a receiver that cannot verify your send asks you back, with a `blocked` report naming the msg id.
-
-## Freeform fallback
-
-For ad-hoc prompts that don't fit the structured format (exploratory questions, multi-paragraph context), freeform dispatch still works — any dispatch without a `[BOTCOMMAND]` prefix is treated as a freeform task:
-
-```bash
-$CLAUDLOBBY_ROOT/lib/dispatch.sh eng-1 "Look at the flaky test in tests/test_auth.py -- it passes locally but fails in CI about 30% of the time. Root-cause it and fix."
-```
-
-Prefer `[BOTCOMMAND]` for anything with a clear type, repo, or priority. Use freeform for exploratory or context-heavy dispatches where the overhead of structured fields isn't worth it.
-
-After dispatch: workers do NOT post a Telegram ack — their first id-carrying `[BOTREPORT]` row is the acknowledgement (Worker Lifecycle, Step 2) — and they may go quiet during work before posting completion. Do not poll a **tracked** (id'd) dispatch; the watchdog section below covers it. An **untracked freeform send has no watchdog** — capturing the worker's pane if nothing comes back is your only net there.
-
-## Tracked dispatch & the overdue watchdog
-
-For tasks you want tracked, dispatch via `lib/dispatch-task.sh` instead of raw `send-keys` — and pass at least `--botcommand` (or any envelope flag: `--repo`, `--priority`, `--ref`, `--workstream`, `--project`) so the send mints a task id:
-
-```bash
-$CLAUDLOBBY_ROOT/lib/dispatch-task.sh --botcommand <worker> "<task>"
-$CLAUDLOBBY_ROOT/lib/dispatch-task.sh --repo <name> --workstream <ws-id> --project <key> <worker> "<task>"
-```
-
-### Sending a peer a message that asks nothing
-
-**Use `--type` for anything that is not a task, and the envelope stops minting.**
-
-```bash
-$CLAUDLOBBY_ROOT/lib/dispatch-task.sh --type query <bot> "<question answered inline>"
-```
-
-`--type task|cancel|compact|restart|query` (default `task`) implies `--botcommand` — which is now exactly `--type task`, kept as an alias — so you still get the `[BOTCOMMAND]` format — a finding, a relay, a retraction, a correction all read correctly as fleet messages. **Only `task` mints an id.**
-
-This exists because the two used to be one decision: `--botcommand` alone minted, so a peer note you sent in the fleet format became a tracked row that nothing had been asked to close, and it stayed open forever. Measured at 68 such rows on this host, 57 of them addressed to managers (#1187).
-
-**Pick the type by what you are asking for, not by how important the message is.** A `query` is answered inline, so nothing it produces can be *joined* against an id — which is not the same as producing nothing. It still files a terminal `[BOTREPORT]`: `worker-lifecycle` routes `query` to "skip to Step 8", and Step 8 *is* the terminal report. `restart` reports terminally too. If you are unsure, `query` is the safe way to be wrong: it costs an untracked message — which is what every raw send already is — where the reverse costs a row nobody can ever close. An unrecognised `--type` is refused rather than defaulted, so a typo will not quietly mint.
-
-**A non-`task` row records no `expected_by` either.** Withholding the id alone would be half a fix: the watchdog matches on the deadline, not on the id, so an id-less row that still carried one would go overdue and push a `[FLEET-PULSE]` alert naming nothing. Both are withheld together.
-
-**You do not have to do anything for the worker's answer to stay harmless, within the bounds below.** A terminal report carrying no id normally resolves to the bot's oldest open id'd dispatch (#835), which would silently close unrelated in-progress work as `completed`. That resolution is suppressed automatically while any non-`task` note sent to the bot through `dispatch-task.sh` has no id-less report from the bot after it — enforced in `dispatch-overdue.py`, not by worker discipline, so it holds for a bot that has not restarted since this landed. A report naming one of the bot's own tasks does not end it, and neither does a newer task. A report whose `--task` links to none of the bot's tasks (a typo, another bot's id) does end it: it links nothing, so it counts as id-less. So a peer note costs one un-auto-closed row at most, and its answer is never a false completion of an id'd task, provided it is the bot's first id-less report after the note. That one row is the remaining cost: the first id-less report resolves to no task, whatever it is, so if it was really finishing an id'd task, that task stays open and pages as overdue. The hold covers id'd rows only: if that report is terminal, it still closes the bot's open raw-text (id-less) dispatches, as any terminal report does. A note sent any other way (raw `dispatch.sh`, text typed into the pane) leaves the check no record to read. The safe answer to any note is `report-back.sh --no-task`, which resolves to no task and closes nothing.
-
-`task`-type envelope sends mint a `task:<id>`, record it (with a deadline from `OBSERVABILITY_DISPATCH_DEADLINE`, or `--deadline-min N`) on the plane as a work item + assignment, and transmit it — the overdue watchdog then joins on identity, and the worker's terminal report closes exactly that task. A bare `dispatch-task.sh <worker> <task…>` still works but stays id-less (matched by bot+time, one report closes all open dispatches for that bot) — prefer the id-minting form for anything you want individually tracked. The fleet pulse then watches it: if the deadline passes with no terminal `[BOTREPORT]` (completed/failed/blocked), it emits `overdue_dispatch` and pushes a debounced `[FLEET-PULSE]` note into **your** session. So you don't have to remember to poll — an unanswered task surfaces itself. **The page is gated, not unconditional**: recent progress from that bot, supersession, a worker respawn since dispatch, the age cap, an unreachable manager, or the debounce each suppress it — so the absence of a page is not proof all is well.
-
-When you get an `overdue_dispatch` alert: check the worker (cross-reference `activity_stuck` — it may be hung, see `fleet-observability`). Then recover it, re-dispatch/reassign if it's wedged or mis-scoped, or escalate to the human. The watchdog tells you *something is overdue*; the call on what to do is yours. A worker's terminal report closes the dispatch automatically — no manual bookkeeping.
-
-## The task loop: what to do with a row that is not moving
-
-Every tracked dispatch is a row with a deadline, and a row you never close is a row the fleet keeps carrying. **Four verbs close the loop, and every one of them is a plane fact** — no side ledger, nothing to remember:
-
-| Verb | Command | When |
-|------|---------|------|
-| **chase** | `$CLAUDLOBBY_ROOT/lib/dispatch-task.sh --type query <worker> "where are you on <task>?"` | You think the worker is alive and just quiet. Costs an untracked message, mints nothing. |
-| **supersede** | `$CLAUDLOBBY_ROOT/lib/dispatch-task.sh --supersedes <task-id> <worker> "<the new task>"` | The task was mis-scoped or overtaken. Retires the old row and opens the replacement in one act. |
-| **withdraw** | `$CLAUDLOBBY_ROOT/lib/task-act.sh withdraw <task-id> --reason "…"` | You no longer want it answered — the send never landed, or events overtook it. Terminal (`cancelled`). |
-| **escalate** | `$CLAUDLOBBY_ROOT/lib/task-act.sh escalate <task-id> "<the question>"` | You need a human to decide. **Non-terminal**: the row stays open and yours while they think. |
-
-`task-act.sh` resolves the row from the plane and **refuses an ambiguous task id** rather than guessing which worker you meant; the refusal names the rows, and `--assignment <asg_id>` picks one.
-
-**Escalation etiquette.** One escalation carries **one question**, phrased so it can be answered on Telegram in a sentence — the operator sees `NEEDS YOU (<fleet>): task <id> escalated by <you>: <question>` and nothing else about the row. Ask for a decision, not a status update. It is paged **once**: while the raise stands, no sweep repeats it, so re-escalating the same row to get attention buys nothing. **A nudge does not clear it** — a nudge is an ask, not an answer — but any real act does: progress, a terminal report, a withdrawal, a supersede. Do not escalate a row and then sit on it: the human's answer is the input to one of the other three verbs.
-
-**Re-checks arrive on their own.** Where a fleet has armed the `task-recheck` job, you will periodically receive one message listing your rows past deadline or older than the max age, with these four verbs, and asking what you did with each. **Answer it per row** — a row you leave untouched comes back next sweep, because nothing on the plane changed. **An already-escalated row is never in that list** — it is the human's to answer, not yours to be nagged about, so a re-check silently skips it (a one-line "waiting on the human: N row(s)" footer may say how many, with no verbs attached). The same list is always available by hand: `claudlobby brief --bot <you>` prints, under its own `dispatched` heading, every row you (as manager) dispatched that is still open — age, deadline, last progress, and whether anyone has escalated or nudged it — followed by this menu; your OWN open/overdue rows, if you also carry work as a worker, are a separate heading in the same brief.
-
-**A nudge from the operator.** A human can poke any open task — on the CLI as `claudlobby task nudge <task-id> "why" --as <who>`, or on Telegram by asking you to do it: a message like `nudge <task-id> [why]` means run that command for them (their name, not yours, in `--as`). **`--as` must be a safe alias** — letters, digits, `.`, `-`, `_` only, 64 chars max, because it mints a `human:<who>` plane identity — so map their display name down to one rather than passing it verbatim: `Chris R` → `chris-r` (or just their first name); a value with a space or other punctuation is refused, recording nothing. The nudge records who asked and why, and sends you the same one-row menu. Treat it as the operator saying "this one, now": act with one of the four verbs and report what you did.
+Never write a bare `HH:MM` to another bot. Use `10:47 EDT` or `14:47Z` so
+workers and managers can reconcile deadlines across host and local clocks.
 
 ## Preflight: ensure the worker is up under proper supervision
 
-Before dispatch, verify the target session exists. If it doesn't, **always bring it up via `lib/spin-up-bot.sh <bot-dir>`** — never `start-bot.sh` directly. `spin-up-bot.sh` is host-aware: it enrolls the bot as a systemd-user service on Linux or a launchd LaunchAgent on macOS, so the bot is supervised (auto-restart on crash, picked up by the fleet keepalive timer). `start-bot.sh` only spawns a raw tmux session — bots launched that way are invisible to the keepalive scope and won't survive a crash.
+Before dispatch, verify the target session exists. If it doesn't, the selected
+fleet manager uses `claudlobby --json bot start WORKER_ID`, replacing
+`WORKER_ID` with that declared bot's literal ID. This command checks the
+selected release and exact supervision unit, enrolling and starting the bot
+when needed; an already-ready session is left running. A raw `start-bot.sh`
+session is not supervised.
 
 ```bash
-# Idiomatic worker spin-up (idempotent: restarts if already enrolled):
-$CLAUDLOBBY_ROOT/lib/spin-up-bot.sh $CLAUDLOBBY_ROOT/local/<fleet>/runtime/bots/<bot>
+# Replace WORKER_ID with the target's literal declared bot ID.
+claudlobby --json bot start WORKER_ID
 ```
 
-To audit/repair an entire fleet's supervision state in one shot:
+Dispatch only after the result has `ok: true`, `data.state: "running"`,
+`data.native_outcome: "observed"`, and `data.readiness` of
+`current_session_ready`, `bridge_ready`, or `session_ready`. The first proves
+the existing supervised session, not bridge delivery; `session_ready` is the
+non-channel or intentionally tokenless outcome. On a conflict or unavailable
+result, inspect the exact unit and private session; do not fall back to a raw
+launcher or deliver into unknown readiness.
+
+To audit the selected fleet's supervision state, run:
 
 ```bash
-$CLAUDLOBBY_ROOT/lib/reconcile-fleet.sh <fleet>          # report only
-$CLAUDLOBBY_ROOT/lib/reconcile-fleet.sh <fleet> --enroll  # enroll orphans AND prune fleet-state — see below
+claudlobby --json fleet reconcile
 ```
 
-**`--enroll` also prunes the shared fleet-state, and that prune is scoped.**
-Alongside enrolling orphans it applies the fleet-state prune to
-`state/fleet-state.json` — one file shared by every fleet on the host (#892), so
-the scoping is what keeps one fleet from reaping another's rows. A row is yours
-to remove only when **all three** hold:
-
-1. your `fleet.yaml` no longer declares it — the reason to prune at all;
-2. **no** fleet on this host declares it — so a sibling's live bot is never
-   touched, and a bot that just moved via `claudlobby move-bot` survives even
-   though its stamp still names the old fleet;
-3. it is **stamped as yours** — a sibling's *departed* bot is still theirs.
-
-Anything else is reported and left alone. An unstamped row predates stamping and
-is **kept**, which makes that transition safe by construction rather than by
-migration.
-
-**What is still true of the flag.** It writes to a host-global file, so it is not
-a read-only operation confined to your own fleet. And it refuses rather than
-guesses: if any fleet's manifest cannot be parsed, the prune declines and touches
-nothing — a silently-empty roster would read as "no fleet declares this bot" and
-license exactly the deletion condition 2 exists to prevent (#1146).
-
-Consequences of a missing row are bounded: it degrades that bot's STATE to
-`unknown`, never `down`, `fleet-pulse` does not read the file, and rows
-regenerate on each bot's next start or report. Still reach for the bare form
-unless you actually intend to enroll — the flag reads like "also fix the orphans"
-and does more than that — but the blast radius is now your own fleet's departed
-rows, not the host.
-
-`reconcile-fleet.sh` reports five buckets: healthy (tmux + unit), orphan (tmux but no unit — unsupervised), missing (unit but no tmux — down), unsupervised-down (neither — declared but nothing running or supervised; keepalive cannot revive it), unbound (running but not in any fleet.yaml — investigate before killing).
+This reports discrepancies without changing enrollment or pruning state. A
+manager may explicitly start a declared worker with `claudlobby --json bot start
+BOT`; inspect its native outcome and readiness before delivery. Unknown
+ownership, unexpected units and retained undeclared directories require operator
+inspection. There is no public `--enroll` repair flag and no reason to invoke a
+private script from a bot session.
 
 ## Preflight: check shared knowledge before dispatch
 

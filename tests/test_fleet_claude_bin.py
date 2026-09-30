@@ -23,7 +23,7 @@ import pytest
 
 from tests.conftest import _scrubbed_env, _write_exec
 
-LIB = Path(__file__).resolve().parent.parent / "lib"
+LIB = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts"
 LINK_REL = Path("state/bin/claude")
 
 
@@ -224,7 +224,7 @@ def test_reload_fleet_updates_plugins_through_the_staged_link(tmp_path):
     root = tmp_path / "root"
     libdir = root / "lib"
     libdir.mkdir(parents=True)
-    for script in ("reload-fleet.sh", "lib-common.sh", "supervisor.sh"):
+    for script in ("reload-fleet.sh", "lib-common.sh", "supervisor.sh", "cli-context.sh"):
         _write_exec(libdir / script, (LIB / script).read_text())
     _write_exec(libdir / "check-npx-cache.sh", "#!/bin/bash\nexit 0\n")
     bindir = tmp_path / "bin"
@@ -240,16 +240,22 @@ def test_reload_fleet_updates_plugins_through_the_staged_link(tmp_path):
     (root / LINK_REL).symlink_to(staged)
     bot = root / "runtime" / "bots" / "tbot"
     bot.mkdir(parents=True)
-    (bot / "bot.conf").write_text('export FLEET_PLUGINS_REQUIRED="somepkg@Somewhere"\n')
+    (bot / "bot.conf").write_text('export BOT_SERVICE="test-tbot"\n')
     env = _scrubbed_env(
         CLAUDLOBBY_ROOT=str(root),
         CALL_LOG=str(tmp_path / "calls.log"),
+        CLAUDLOBBY_CLI=str(bindir / "claudlobby"),
+        CLAUDLOBBY_NATIVE_DIR=str(libdir),
+        CLAUDLOBBY_RELEASE_ID="selected",
+        CLAUDLOBBY_FLEET="test",
         PATH=f"{bindir}:{os.environ['PATH']}",
         TMUX_TMPDIR=str(tmp_path / "no-tmux"),
     )
     env.pop("CLAUDE_BIN", None)
     r = subprocess.run(
-        ["bash", str(libdir / "reload-fleet.sh")],
+        ["bash", str(libdir / "reload-fleet.sh"), "--selected-release", "selected",
+         "--fleet", "test", "--bots-dir", str(root / "runtime/bots"),
+         "--bot", "tbot", "--plugin", "somepkg@Somewhere"],
         env=env,
         capture_output=True,
         text=True,

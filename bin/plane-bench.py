@@ -52,7 +52,7 @@ def bench_cold(root: Path, n: int) -> list[float]:
         t0 = time.perf_counter()
         r = subprocess.run(
             [sys.executable, "-m", "claudlobby", "--root", str(root),
-             "emit", "task", "--json", "-"],
+             "plane", "emit", "task", "--file", "-"],
             input=payload, capture_output=True, text=True, cwd=REPO,
         )
         dt = time.perf_counter() - t0
@@ -258,14 +258,14 @@ def bench_burst(root: Path, n: int) -> dict:
 
 
 def bench_shim(root: Path, n: int) -> tuple[list[float], int, bool]:
-    """PR-B T10: the number a DOOR actually feels — one lib/plane-emit.sh
+    """PR-B T10: the number a DOOR actually feels — one claudlobby/_runtime_scripts/plane-emit.sh
     invocation per emit, through whichever rung answers. Returns (timings,
     fallback_count, daemon_was_serving). Budget (plan §5): p95 <= 200ms on
     the Pi, machine-checked when the daemon rung is the one measured."""
     from claudlobby.plane.daemon import probe_daemon
     from claudlobby.plane.db import connect, db_path
 
-    shim = REPO / "lib" / "plane-emit.sh"
+    shim = REPO / "claudlobby/_runtime_scripts" / "plane-emit.sh"
     sock = root / "state" / "plane" / "ingest.sock"
     # probe_daemon, not a bare connect (gauntlet round): this delivery added
     # the typed handshake precisely because connect-succeeds proves only that
@@ -377,7 +377,7 @@ def main() -> int:
                 verdict = " — BUDGET " + ("FAIL" if shim_gate_failed else "PASS") \
                     + " (door-felt p95 <= 200ms, plan §5; all rows"\
                     " landed-verified)"
-            print(f"- shim (lib/plane-emit.sh, {mode}): n={len(shim_ms)} "
+            print(f"- shim (claudlobby/_runtime_scripts/plane-emit.sh, {mode}): n={len(shim_ms)} "
                   f"p50={_pctl(shim_ms, 50):.1f}ms p95={_pctl(shim_ms, 95):.1f}ms "
                   f"max={max(shim_ms):.1f}ms{verdict}")
         if shim_inconclusive:

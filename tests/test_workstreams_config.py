@@ -8,11 +8,13 @@ from pathlib import Path
 
 from claudlobby.composer import compose_bot_conf
 from claudlobby.config import (
+    BotConfig,
     FleetConfig,
     WorkstreamsConfig,
     _coerce_workstreams,
     load_fleet,
 )
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 from claudlobby.validator import ValidationReport, _validate_workstreams
 
@@ -27,8 +29,11 @@ def _fleet_yaml(root: Path, workstreams_block: str = "") -> Path:
         "fleet:\n"
         "  name: test-fleet\n"
         "  service_prefix: com.test\n"
+        "  manager: lead\n"
         f"{workstreams_block}"
         "  bots:\n"
+        "    lead:\n"
+        "      expertise: [eng]\n"
         "    worker:\n"
         "      expertise: [eng]\n"
         "      telegram:\n"
@@ -76,7 +81,9 @@ class TestLoadFleet:
 class TestValidator:
     def _fleet(self, raw: dict) -> FleetConfig:
         return FleetConfig(
-            name="f", service_prefix="p", workstreams=WorkstreamsConfig(raw=raw)
+            name="f", service_prefix="p", manager="lead",
+            bots={"lead": BotConfig(bot_id="lead", name="lead", expertise=["eng"])},
+            workstreams=WorkstreamsConfig(raw=raw),
         )
 
     def test_bad_max_active_errors(self):
@@ -109,7 +116,7 @@ class TestValidator:
 
 class TestComposerEmit:
     def _paths(self, root: Path) -> Paths:
-        return Paths(root=root, fleet_dir=root)
+        return Paths(root=root, fleet_dir=root, package=source_package())
 
     def test_bot_conf_carries_configured_workstream_env(self, tmp_path: Path):
         root = tmp_path / "cl"

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tests/test_transcript_digest.sh — transcript-digest SessionEnd hook contract.
-# Real python3/awk + a stubbed model binary + a stubbed plane CLI: asserts the
+# Real python3/awk + a stubbed model binary + the real raw-stage shim: asserts the
 # three things that decide whether this is safe to run fleet-wide on every
 # session — WHAT reaches the model (quota + secrets), WHAT the model call loads
 # (no MCP server, plugin or hook: #1972) and WHAT lands on the PLANE (the
@@ -9,9 +9,9 @@
 # #1503 moved the SINK: the hook no longer appends a `transcript-digest-<date>`
 # JSONL row (the last production JSONL data record outside the plane). It emits
 # a `system` event (event=session_digest) on the bot's actor through the shim
-# (lib/plane-emit.sh). This suite captures the emitted batch via the cold-rung
-# stub (tests/plane_capture_cli.sh) driven through the real shim, and asserts on
-# the event and its `data` object — never a file, which it also proves is gone.
+# (claudlobby/_runtime_scripts/plane-emit.sh). With its socket deliberately down, this suite reads the
+# raw staged batch and asserts on its event and `data` object. Daemon replay and
+# capture policy are exercised by test_plane_daemon.py.
 #
 # The distinction this suite exists to protect: a `skipped` fact (below the
 # qualifying gate, emitted with ZERO model spend) and an `ok` fact whose rubric
@@ -19,15 +19,14 @@
 # different signals. Collapsing them would either blow the quota or blind the
 # monitor to idle bots.
 #
-# Fully hermetic: stubbed model, stubbed plane CLI, dead socket, scratch
+# Fully hermetic: stubbed model, dead socket, scratch
 # CLAUDLOBBY_ROOT, no network, no real `claude`/plane, no fleet notices.
 # Standalone bash (not pytest-collected); runs under macOS /bin/bash (3.2).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB_DIR="$SCRIPT_DIR/../lib"
+LIB_DIR="$SCRIPT_DIR/../claudlobby/_runtime_scripts"
 DIGEST="$LIB_DIR/transcript-digest.sh"
-CAPTURE_CLI="$SCRIPT_DIR/plane_capture_cli.sh"
 PASS=0; FAIL=0; TOTAL=0
 
 assert_eq() {
@@ -75,13 +74,24 @@ stub_model() {
     chmod +x "$T/bin/claude"
 }
 
-# run_digest <transcript> [env assignments...] -> the captured plane event
-# (one JSON line per emitted event; the hook emits one, so the last line is it).
-# The shim's socket rung fails against a dead socket and falls back to the cold
-# CLI, which is the capture stub — so this drives the REAL recording spine.
+# run_digest <transcript> [env assignments...] -> the raw staged plane event.
+# The socket is down; the real shim stages the batch for daemon replay.
+staged_event() {
+    python3 - "$T/root/state/plane/staged" <<'PY'
+import json, pathlib, sys
+files = list(pathlib.Path(sys.argv[1]).glob("*.batch"))
+if files:
+    assert len(files) == 1, files
+    envelope = json.loads(files[0].read_text())["events"][-1]
+    event = dict(envelope["payload"])
+    event["event_type"] = envelope["event_type"]
+    print(json.dumps(event))
+PY
+}
 run_digest() {
     local tx="$1"; shift
-    : > "$T/capture.jsonl"; : > "$T/err.txt"; rm -f "$T/prompt-seen.txt" "$T/argv-seen.bin"
+    rm -f "$T/root/state/plane/staged/"*.batch
+    : > "$T/err.txt"; rm -f "$T/prompt-seen.txt" "$T/argv-seen.bin"
     local pay
     pay="$(TX="$tx" python3 -c 'import json,os;print(json.dumps({"session_id":"sess-1","transcript_path":os.environ["TX"],"cwd":"/tmp","reason":"clear"}))')"
     # ENABLED=1 first so a caller's explicit assignment in "$@" still wins (env
@@ -90,27 +100,25 @@ run_digest() {
     printf '%s' "$pay" | env CLAUDLOBBY_ROOT="$T/root" BOT_ID=tbot CLAUDLOBBY_FLEET=tfleet \
         BOT_DIR="$T/botdir" PATH="$T/bin:/usr/bin:/bin" CLAUDE_BIN=claude \
         SESSION_DIGEST_ENABLED=1 \
-        PLANE_EMIT_CLI="bash $CAPTURE_CLI" PLANE_SOCKET="$T/root/state/plane/nope.sock" \
-        PLANE_CAPTURE="$T/capture.jsonl" \
+        PLANE_EMIT_DISABLED=0 PLANE_SOCKET="$T/root/state/plane/nope.sock" \
         "$@" bash "$DIGEST" >/dev/null 2>"$T/err.txt" || true
-    tail -n 1 "$T/capture.jsonl" 2>/dev/null || true
+    staged_event
 }
 
 # run_digest_unarmed <transcript> — no SESSION_DIGEST_ENABLED at all, i.e. what
 # an un-opted-in fleet actually runs after generate composes the hook.
 run_digest_unarmed() {
-    : > "$T/capture.jsonl"; rm -f "$T/prompt-seen.txt" "$T/argv-seen.bin"
+    rm -f "$T/root/state/plane/staged/"*.batch "$T/prompt-seen.txt" "$T/argv-seen.bin"
     local pay
     pay="$(TX="$1" python3 -c 'import json,os;print(json.dumps({"session_id":"sess-1","transcript_path":os.environ["TX"],"cwd":"/tmp","reason":"clear"}))')"
     printf '%s' "$pay" | env CLAUDLOBBY_ROOT="$T/root" BOT_ID=tbot CLAUDLOBBY_FLEET=tfleet \
         BOT_DIR="$T/botdir" PATH="$T/bin:/usr/bin:/bin" CLAUDE_BIN=claude \
-        PLANE_EMIT_CLI="bash $CAPTURE_CLI" PLANE_SOCKET="$T/root/state/plane/nope.sock" \
-        PLANE_CAPTURE="$T/capture.jsonl" \
+        PLANE_EMIT_DISABLED=0 PLANE_SOCKET="$T/root/state/plane/nope.sock" \
         bash "$DIGEST" >/dev/null 2>&1 || true
-    cat "$T/capture.jsonl" 2>/dev/null || true
+    staged_event
 }
 
-# field <event-json> <key>  — a TOP-LEVEL key on the captured event
+# field <event-json> <key>  — a TOP-LEVEL key on the staged event
 field() { ROW="$1" K="$2" python3 -c 'import json,os;print(json.loads(os.environ["ROW"]).get(os.environ["K"],""))' 2>/dev/null || true; }
 # dfield <event-json> <key> — a key inside the event's `data` object
 dfield() { ROW="$1" K="$2" python3 -c 'import json,os;print((json.loads(os.environ["ROW"]).get("data") or {}).get(os.environ["K"],""))' 2>/dev/null || true; }
@@ -189,7 +197,7 @@ assert_eq "session_uid carried from .plane-session" "$SESS_UID" "$(dfield "$row"
 # THE #1503 pin: the sink is the plane, NOT a JSONL file.
 assert_eq "NO transcript-digest-*.jsonl is written" yes "$(no_jsonl_written)"
 [ -n "$row" ] && r=yes || r=no
-assert_eq "the plane event actually landed"          yes "$r"
+assert_eq "the plane event was staged for replay"     yes "$r"
 
 # --- 2. tool_result + attachment must not reach the model --------------------
 # They dominate transcript bytes and carry the least digest signal per token.
@@ -337,33 +345,32 @@ assert_eq "absent model binary -> data.status=error" error "$(dfield "$row" stat
 stub_model "'{\"context\":\"c\"}'"
 
 pay='{"session_id":"s","transcript_path":"/nonexistent/nope.jsonl","cwd":"/tmp"}'
-: > "$T/capture.jsonl"
 printf '%s' "$pay" | env CLAUDLOBBY_ROOT="$T/root" BOT_ID=tbot CLAUDLOBBY_FLEET=tfleet BOT_DIR="$T/botdir" \
     PATH="$T/bin:/usr/bin:/bin" CLAUDE_BIN=claude SESSION_DIGEST_ENABLED=1 \
-    PLANE_EMIT_CLI="bash $CAPTURE_CLI" PLANE_SOCKET="$T/root/state/plane/nope.sock" \
-    PLANE_CAPTURE="$T/capture.jsonl" bash "$DIGEST" >/dev/null 2>&1; rc=$?
+    PLANE_EMIT_DISABLED=0 PLANE_SOCKET="$T/root/state/plane/nope.sock" \
+    bash "$DIGEST" >/dev/null 2>&1; rc=$?
 assert_eq "missing transcript still exits 0 (never blocks session end)" 0 "$rc"
 
 printf '%s' '' | env CLAUDLOBBY_ROOT="$T/root" BOT_ID=tbot CLAUDLOBBY_FLEET=tfleet BOT_DIR="$T/botdir" \
     PATH="$T/bin:/usr/bin:/bin" CLAUDE_BIN=claude SESSION_DIGEST_ENABLED=1 \
-    PLANE_EMIT_CLI="bash $CAPTURE_CLI" PLANE_SOCKET="$T/root/state/plane/nope.sock" \
-    PLANE_CAPTURE="$T/capture.jsonl" bash "$DIGEST" >/dev/null 2>&1; rc=$?
+    PLANE_EMIT_DISABLED=0 PLANE_SOCKET="$T/root/state/plane/nope.sock" \
+    bash "$DIGEST" >/dev/null 2>&1; rc=$?
 assert_eq "empty payload still exits 0" 0 "$rc"
 
-# --- 7b. a plane the shim cannot reach is DISCLOSED, hook still exits 0 -------
-# The cold rung fails (its command exits nonzero) after the dead socket; the
-# record is lost but SAID LOUDLY on stderr — never silently dropped — and the
-# SessionEnd hook must still exit 0 (non-blocking).
-printf '#!/bin/bash\nexit 1\n' > "$T/bin/failcli"; chmod +x "$T/bin/failcli"
+# --- 7b. a failed staged write is DISCLOSED, hook still exits 0 -------------
+# A regular file at the queue path makes the native staging leg refuse. The
+# record is lost but SAID LOUDLY on stderr, and SessionEnd remains non-blocking.
 stub_model "'{\"context\":\"c\",\"worked\":\"\",\"failed\":\"\",\"would_change\":\"\",\"reusable\":\"\"}'"
-: > "$T/capture.jsonl"; : > "$T/err.txt"
+mkdir -p "$T/bad-root/state/plane"
+: > "$T/bad-root/state/plane/staged"
+: > "$T/err.txt"
 pay="$(TX="$T/tx.jsonl" python3 -c 'import json,os;print(json.dumps({"session_id":"s","transcript_path":os.environ["TX"],"cwd":"/tmp"}))')"
-printf '%s' "$pay" | env CLAUDLOBBY_ROOT="$T/root" BOT_ID=tbot CLAUDLOBBY_FLEET=tfleet BOT_DIR="$T/botdir" \
+printf '%s' "$pay" | env CLAUDLOBBY_ROOT="$T/bad-root" BOT_ID=tbot CLAUDLOBBY_FLEET=tfleet BOT_DIR="$T/botdir" \
     PATH="$T/bin:/usr/bin:/bin" CLAUDE_BIN=claude SESSION_DIGEST_ENABLED=1 SESSION_DIGEST_MIN_TURNS=4 \
-    PLANE_EMIT_CLI="bash $T/bin/failcli" PLANE_SOCKET="$T/root/state/plane/nope.sock" \
-    PLANE_CAPTURE="$T/capture.jsonl" bash "$DIGEST" >/dev/null 2>"$T/err.txt"; rc=$?
+    PLANE_EMIT_DISABLED=0 PLANE_SOCKET="$T/bad-root/state/plane/nope.sock" \
+    bash "$DIGEST" >/dev/null 2>"$T/err.txt"; rc=$?
 assert_eq "plane failure: hook still exits 0" 0 "$rc"
-[ ! -s "$T/capture.jsonl" ] && r=yes || r=no
+[ -z "$(find "$T/bad-root/state/plane" -name '*.batch')" ] && r=yes || r=no
 assert_eq "plane failure: nothing was recorded" yes "$r"
 case "$(cat "$T/err.txt")" in *"plane record failed"*) r=yes ;; *) r=no ;; esac
 assert_eq "plane failure is DISCLOSED on stderr, not silent" yes "$r"

@@ -6,7 +6,7 @@ The CLI is absent on the fleet's primary Pi, where it read as "0 rows" and
 failed 22 checks with no reason given, while CI (whose image has it) passed.
 Worse is the other direction: a check expecting ABSENCE read the same empty
 answer as a pass. These tests run the reader block lifted verbatim from
-`lib/validate-bot-change.sh`, so they exercise the shipped text.
+`harness/validate-bot-change.sh`, so they exercise the shipped text.
 """
 
 from __future__ import annotations
@@ -17,8 +17,8 @@ import subprocess
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-HARNESS = REPO / "lib" / "validate-bot-change.sh"
-LIB_COMMON = REPO / "lib" / "lib-common.sh"
+HARNESS = REPO / "harness" / "validate-bot-change.sh"
+LIB_COMMON = REPO / "claudlobby/_runtime_scripts" / "lib-common.sh"
 F = "vf"
 
 
@@ -44,7 +44,7 @@ def _run(root: Path, body: str, **env: str) -> subprocess.CompletedProcess:
         ]
     )
     return subprocess.run(
-        ["bash", "-c", script, "_", str(LIB_COMMON), str(root), str(REPO / "lib")],
+        ["bash", "-c", script, "_", str(LIB_COMMON), str(root), str(REPO / "claudlobby/_runtime_scripts")],
         capture_output=True,
         text=True,
         env={**os.environ, **env},
@@ -140,11 +140,11 @@ def test_the_harness_invokes_no_sqlite3_cli():
 # The doors that read the plane: every lib script that loads plane-readers
 # (the reader itself included), found rather than listed, and the CLI verbs
 # that print plane rows.
-_DOORS = sorted(p.stem for p in (REPO / "lib").glob("*.py") if "plane-readers" in p.read_text())
+_DOORS = sorted(p.stem for p in (REPO / "claudlobby/_runtime_scripts").glob("*.py") if "plane-readers" in p.read_text())
 _DOOR = r"\b(?:" + "|".join(map(re.escape, _DOORS)) + r")\.py\b"
 _DOOR_CALL = re.compile(
     rf"python3\b[^|;]*{_DOOR}"
-    r'|"\$VAL_CLI"[^|;]*\b(?:checkins|events|report-back|workstreams|brief|uptime)\b'
+    r'|"\$VAL_CLI"[^|;]*\b(?:checkin|events|report-back|workstreams|brief|uptime)\b'
 )
 _HEREDOC = re.compile(r"<<-?'?(\w+)'?[^\n]*\n(.*?)\n\1\n", re.S)
 
@@ -249,7 +249,9 @@ def test_no_read_is_consumed_past_the_next_scenario_boundary():
     # A boundary drops every refusal a check has reported, so a check after it
     # that consumes an earlier read would score an unreadable read again.
     offenders, reads, bounds = _cross_boundary_consumers(HARNESS.read_text())
-    assert reads > 40 and bounds > 30, (reads, bounds)
+    # Retirement legitimately reduces scenario/read counts. Require that the
+    # scanner ran over real inputs, not a minimum size for the harness.
+    assert reads > 0 and bounds > 0, (reads, bounds)
     assert offenders == [], "\n".join(offenders)
 
 

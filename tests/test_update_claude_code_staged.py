@@ -34,10 +34,10 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import _write_exec, constructed_env, plane_emit_env
-from tests.test_maintenance_jobs import _captured, _signal_root
+from tests.conftest import _write_exec, constructed_env
+from tests.test_maintenance_jobs import _captured, _native_fixture, _signal_root
+from tests.test_plane_events_door import _serving
 from tests.test_update_claude_code_verify import (
-    SCRIPT,
     SUDO_STUB,
     _event_types,
     _path_without,
@@ -100,9 +100,11 @@ class StagedHost:
     fleet PATH, an npm that stages prefixes, the root's own plane and alert
     channel."""
 
-    def __init__(self, tmp_path, system: str | None = None):
+    def __init__(self, tmp_path, system: str | None = None, *, scratch_plane_env):
+        self.scratch_plane_env = scratch_plane_env
         self.tmp = tmp_path
         self.root = _signal_root(tmp_path)
+        self.script = _native_fixture(tmp_path, "update-claude-code.sh") / "update-claude-code.sh"
         self.home = tmp_path / "home"
         (self.home / ".local" / "bin").mkdir(parents=True)
         _write_exec(self.home / ".local" / "bin" / "npm", NPM_STUB)
@@ -117,6 +119,15 @@ class StagedHost:
         self.bodies.mkdir()
         self.calls = tmp_path / "npm.calls"
         self.sudo_calls = tmp_path / "sudo.calls"
+        self.proc_dir = None
+        if not Path("/proc/self/exe").exists():
+            # Exercise the prune planner on hosts without procfs. This models
+            # readable process evidence; it does not prove native macOS pruning.
+            self.proc_dir = tmp_path / "proc"
+            (self.proc_dir / "self").mkdir(parents=True)
+            (self.proc_dir / "self" / "exe").symlink_to("/bin/bash")
+            (self.proc_dir / "4242").mkdir()
+            (self.proc_dir / "4242" / "exe").symlink_to("/bin/bash")
 
     # --- layout ---------------------------------------------------------------
     @property
@@ -140,11 +151,10 @@ class StagedHost:
             _write_exec(dest, content)
 
     # --- running --------------------------------------------------------------
-    def env(self, latest="2.1.281", armed=True, **extra):
+    def env(self, latest="2.1.281", armed=True, *, socket=None, **extra):
         base = dict(
             PATH=self.path,
             HOME=self.home,
-            CLAUDLOBBY_ROOT=self.root,
             TG_CAPTURE=self.tmp / "tg-capture",
             NPM_CALLS=self.calls,
             SUDO_CALLS=self.sudo_calls,
@@ -153,21 +163,26 @@ class StagedHost:
             CLAUDE_UPDATE_FLEET_PATH=self.sysdir,
             CLAUDE_MIN_BINARY_BYTES=str(FLOOR),
             FLEET_EVENT_EMIT_TIMEOUT_S="120",
-            **plane_emit_env(),
+            **self.scratch_plane_env(self.root, socket=socket, initialize=socket is None),
         )
         if armed:
             base["CLAUDLOBBY_STAGED_CLAUDE_UPDATE_ENABLED"] = "1"
+        if self.proc_dir is not None:
+            base["CLAUDE_UPDATE_PROC_DIR"] = self.proc_dir
         base.update(extra)
         return constructed_env(**base)
 
     def run(self, latest="2.1.281", armed=True, **extra):
-        return subprocess.run(
-            ["bash", str(SCRIPT)],
-            env=self.env(latest, armed, **extra),
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
+        # The native emitter commits through the socket client, not the
+        # retired cold CLI path. Keep the real daemon alive for this tick.
+        with _serving(self.root, self.scratch_plane_env) as socket:
+            return subprocess.run(
+                ["bash", str(self.script)],
+                env=self.env(latest, armed, socket=socket, **extra),
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
 
     def log(self) -> str:
         p = self.root / "state" / "claude-update.log"
@@ -208,8 +223,8 @@ def _link_to(h: StagedHost, version: str) -> None:
 # --- the normal arm --------------------------------------------------------------
 
 
-def test_normal_arm_stages_verifies_and_links_without_sudo(tmp_path):
-    h = StagedHost(tmp_path, system=healthy("2.1.278"))
+def test_normal_arm_stages_verifies_and_links_without_sudo(tmp_path, *, scratch_plane_env):
+    h = StagedHost(tmp_path, system=healthy("2.1.278"), scratch_plane_env=scratch_plane_env)
     h.body("2.1.281", healthy_big("2.1.281"))
     r = h.run(latest="2.1.281")
 
@@ -233,8 +248,8 @@ def test_normal_arm_stages_verifies_and_links_without_sudo(tmp_path):
 # --- the stub arm: fails closed ------------------------------------------------
 
 
-def test_stub_arm_leaves_the_link_unmoved_and_alerts(tmp_path):
-    h = StagedHost(tmp_path)
+def test_stub_arm_leaves_the_link_unmoved_and_alerts(tmp_path, *, scratch_plane_env):
+    h = StagedHost(tmp_path, scratch_plane_env=scratch_plane_env)
     _link_to(h, "2.1.280")
     h.body("2.1.281", broken_stub("stderr"))  # the 09-23 shape: small AND failing
     r = h.run(latest="2.1.281")
@@ -258,10 +273,10 @@ def test_stub_arm_leaves_the_link_unmoved_and_alerts(tmp_path):
     assert "script_error" not in h.events(), h.events()
 
 
-def test_stub_arm_on_the_first_armed_run_creates_no_link(tmp_path):
+def test_stub_arm_on_the_first_armed_run_creates_no_link(tmp_path, *, scratch_plane_env):
     # Fleet still on the system binary: a failed first staging must not leave a
     # link behind, or bots would start launching something unverified.
-    h = StagedHost(tmp_path, system=healthy("2.1.278"))
+    h = StagedHost(tmp_path, system=healthy("2.1.278"), scratch_plane_env=scratch_plane_env)
     h.body("2.1.281", broken_stub("stdout"))
     r = h.run(latest="2.1.281")
 
@@ -273,9 +288,9 @@ def test_stub_arm_on_the_first_armed_run_creates_no_link(tmp_path):
 # --- each half of the verification, on its own -----------------------------------
 
 
-def test_a_binary_above_the_floor_that_cannot_run_is_not_linked(tmp_path):
+def test_a_binary_above_the_floor_that_cannot_run_is_not_linked(tmp_path, *, scratch_plane_env):
     # The size half alone passes this one: it is big. Only running it tells.
-    h = StagedHost(tmp_path)
+    h = StagedHost(tmp_path, scratch_plane_env=scratch_plane_env)
     _link_to(h, "2.1.280")
     h.body("2.1.281", padded(broken_stub("stderr")))
     r = h.run(latest="2.1.281")
@@ -285,9 +300,9 @@ def test_a_binary_above_the_floor_that_cannot_run_is_not_linked(tmp_path):
     assert "exited 1: Error: claude native binary not installed." in h.log()
 
 
-def test_a_binary_under_the_floor_is_not_linked_even_when_it_runs(tmp_path):
+def test_a_binary_under_the_floor_is_not_linked_even_when_it_runs(tmp_path, *, scratch_plane_env):
     # The run half alone passes this one: it prints a version and exits 0.
-    h = StagedHost(tmp_path)
+    h = StagedHost(tmp_path, scratch_plane_env=scratch_plane_env)
     _link_to(h, "2.1.280")
     h.body("2.1.281", healthy("2.1.281"))  # unpadded: under the floor
     r = h.run(latest="2.1.281")
@@ -300,8 +315,8 @@ def test_a_binary_under_the_floor_is_not_linked_even_when_it_runs(tmp_path):
 # --- the swap ---------------------------------------------------------------------
 
 
-def test_the_swap_keeps_the_previous_version(tmp_path):
-    h = StagedHost(tmp_path)
+def test_the_swap_keeps_the_previous_version(tmp_path, *, scratch_plane_env):
+    h = StagedHost(tmp_path, scratch_plane_env=scratch_plane_env)
     _link_to(h, "2.1.280")
     h.body("2.1.281", healthy_big("2.1.281"))
     r = h.run(latest="2.1.281")
@@ -315,8 +330,8 @@ def test_the_swap_keeps_the_previous_version(tmp_path):
     assert [p.name for p in h.link.parent.iterdir()] == ["claude"]
 
 
-def test_a_rerun_on_the_linked_version_is_a_no_op_that_keeps_the_rollback(tmp_path):
-    h = StagedHost(tmp_path)
+def test_a_rerun_on_the_linked_version_is_a_no_op_that_keeps_the_rollback(tmp_path, *, scratch_plane_env):
+    h = StagedHost(tmp_path, scratch_plane_env=scratch_plane_env)
     _link_to(h, "2.1.280")
     h.body("2.1.281", healthy_big("2.1.281"))
     assert h.run(latest="2.1.281").returncode == 0
@@ -331,11 +346,11 @@ def test_a_rerun_on_the_linked_version_is_a_no_op_that_keeps_the_rollback(tmp_pa
     assert h.exe("2.1.280").exists()
 
 
-def test_a_relink_of_the_linked_version_never_records_itself_as_the_rollback(tmp_path):
+def test_a_relink_of_the_linked_version_never_records_itself_as_the_rollback(tmp_path, *, scratch_plane_env):
     """Reachable when the linked binary fails its no-op check once and then passes
     the re-verify (a --version that flakes under load): the run re-links the SAME
     version, and must not overwrite the rollback with the version it replaces."""
-    h = StagedHost(tmp_path)
+    h = StagedHost(tmp_path, scratch_plane_env=scratch_plane_env)
     _link_to(h, "2.1.280")
     h.body("2.1.281", healthy_big("2.1.281"))
     assert h.run(latest="2.1.281").returncode == 0, h.log()
@@ -362,11 +377,11 @@ def test_a_relink_of_the_linked_version_never_records_itself_as_the_rollback(tmp
 
 
 @pytest.mark.skipif(not Path("/proc/self/exe").exists(), reason="needs /proc")
-def test_a_running_process_keeps_its_version_across_swaps_and_pruning(tmp_path):
+def test_a_running_process_keeps_its_version_across_swaps_and_pruning(tmp_path, *, scratch_plane_env):
     """A real executable (a copy of bash, which prints an X.Y.Z version and can
     run a loop without exec-ing away) stands in for claude.exe, so /proc/<pid>/exe
     names the versioned path exactly as a bot session's does."""
-    h = StagedHost(tmp_path)
+    h = StagedHost(tmp_path, scratch_plane_env=scratch_plane_env)
     for v in ("2.1.280", "2.1.281", "2.1.282"):
         h.body(v, copy_of="/bin/bash")
     assert h.run(latest="2.1.280").returncode == 0, h.log()
@@ -403,11 +418,11 @@ def test_a_running_process_keeps_its_version_across_swaps_and_pruning(tmp_path):
 
 
 @pytest.mark.skipif(not Path("/proc/self/exe").exists(), reason="needs /proc")
-def test_a_root_reached_through_a_symlink_still_protects_a_running_version(tmp_path):
+def test_a_root_reached_through_a_symlink_still_protects_a_running_version(tmp_path, *, scratch_plane_env):
     """The process table names an executable by its REAL path; the versions dir
     is spelled through CLAUDLOBBY_ROOT, which may run through a symlink. Compared
     raw, the two never match and a version a session runs would be deleted."""
-    h = StagedHost(tmp_path)
+    h = StagedHost(tmp_path, scratch_plane_env=scratch_plane_env)
     via = tmp_path / "via-link"
     via.symlink_to(h.root)
     for v in ("2.1.280", "2.1.281", "2.1.282"):
@@ -449,7 +464,7 @@ def _prunable(h: StagedHost, version: str) -> Path:
     ("real", "via-symlink"), ("via-symlink", "real"),
     ("real", "trailing-slash"), ("trailing-slash", "real"),
 ])
-def test_a_respelled_root_never_costs_the_linked_or_previous_version(tmp_path, first, second):
+def test_a_respelled_root_never_costs_the_linked_or_previous_version(tmp_path, first, second, *, scratch_plane_env):
     """Two runs link 2.1.280 then 2.1.281 through one spelling of the root, so the
     link AND .previous carry it; a no-op run then spells the root the other way.
     Nothing runs either version (the state right after a swap), so being
@@ -457,7 +472,7 @@ def test_a_respelled_root_never_costs_the_linked_or_previous_version(tmp_path, f
     each direction is an arm. The composer stamps the resolved root on the unit
     while lib-common keeps the logical pwd, so a hand run through a symlinked
     checkout spells it differently."""
-    h = StagedHost(tmp_path)
+    h = StagedHost(tmp_path, scratch_plane_env=scratch_plane_env)
     via = tmp_path / "via-link"
     via.symlink_to(h.root)
     spell = {"real": h.root, "via-symlink": via, "trailing-slash": f"{h.root}/"}
@@ -478,14 +493,14 @@ def test_a_respelled_root_never_costs_the_linked_or_previous_version(tmp_path, f
 
 
 @pytest.mark.parametrize("stray", [None, "2.1.280 copy", "2.1.280 (copy)", "backup"])
-def test_a_directory_the_job_never_staged_costs_nothing(tmp_path, stray):
+def test_a_directory_the_job_never_staged_costs_nothing(tmp_path, stray, *, scratch_plane_env):
     """ravi's third-round probe on #1784. The plan is read line by line in bash, so
     a name with a space split: `delete 2.1.280 copy` read as `delete 2.1.280`, and
     the LINKED version went. A Finder duplicate is `2.1.280 copy`, a GNOME one
     `2.1.280 (copy)`; `backup` is anything else a person parks there. The prune
     touches only names the job stages. POSITIVE CONTROL: a stale version, which
     must go in every arm, so a keep here cannot come from a prune that is dead."""
-    h = StagedHost(tmp_path)
+    h = StagedHost(tmp_path, scratch_plane_env=scratch_plane_env)
     h.body("2.1.280", healthy_big("2.1.280"))
     assert h.run(latest="2.1.280").returncode == 0, h.log()
     stale = _prunable(h, "2.1.270")
@@ -506,8 +521,8 @@ FAIL_CLOSED = ["absent", "unlistable", "no-readable-process", "reader-crashes",
 
 
 @pytest.mark.parametrize("arm", ["readable"] + FAIL_CLOSED)
-def test_a_prune_that_cannot_read_its_inputs_deletes_nothing(tmp_path, arm):
-    h = StagedHost(tmp_path)
+def test_a_prune_that_cannot_read_its_inputs_deletes_nothing(tmp_path, arm, *, scratch_plane_env):
+    h = StagedHost(tmp_path, scratch_plane_env=scratch_plane_env)
     for v in ("2.1.281", "2.1.282"):
         h.body(v, healthy_big(v))
         assert h.run(latest=v).returncode == 0, h.log()
@@ -558,8 +573,8 @@ def test_a_prune_that_cannot_read_its_inputs_deletes_nothing(tmp_path, arm):
 
 
 @pytest.mark.parametrize("link_dir", ["writable", "read-only"])
-def test_a_failed_swap_leaves_the_rollback_pointer_as_it_was(tmp_path, link_dir):
-    h = StagedHost(tmp_path)
+def test_a_failed_swap_leaves_the_rollback_pointer_as_it_was(tmp_path, link_dir, *, scratch_plane_env):
+    h = StagedHost(tmp_path, scratch_plane_env=scratch_plane_env)
     for v in ("2.1.280", "2.1.281", "2.1.282"):
         h.body(v, healthy_big(v))
     for v in ("2.1.280", "2.1.281"):
@@ -588,8 +603,8 @@ def test_a_failed_swap_leaves_the_rollback_pointer_as_it_was(tmp_path, link_dir)
 
 
 @pytest.mark.parametrize("value", [None, "", "0", "yes", "true"])
-def test_switch_off_is_the_in_place_job_unchanged(tmp_path, value):
-    h = StagedHost(tmp_path, system=healthy("2.1.278"))
+def test_switch_off_is_the_in_place_job_unchanged(tmp_path, value, *, scratch_plane_env):
+    h = StagedHost(tmp_path, system=healthy("2.1.278"), scratch_plane_env=scratch_plane_env)
     h.body("default", healthy_big("2.1.281"))
     _write_exec(tmp_path / "inplace", healthy("2.1.281"))
     extra = {"NPM_STAGE": tmp_path / "inplace", "NPM_STAGE_TARGET": h.system}
@@ -607,8 +622,8 @@ def test_switch_off_is_the_in_place_job_unchanged(tmp_path, value):
 
 def test_switch_off_with_a_staged_link_left_behind_installs_nothing_and_says_so(
     tmp_path,
-):
-    h = StagedHost(tmp_path, system=healthy("2.1.278"))
+*, scratch_plane_env):
+    h = StagedHost(tmp_path, system=healthy("2.1.278"), scratch_plane_env=scratch_plane_env)
     _link_to(h, "2.1.280")
     calls_before = h.npm_calls()
     r = h.run(armed=False)
@@ -624,8 +639,8 @@ def test_switch_off_with_a_staged_link_left_behind_installs_nothing_and_says_so(
     assert "UPDATE skipped" in h.log()
 
 
-def test_a_pinned_claude_bin_is_not_overridden_by_the_staged_update(tmp_path):
-    h = StagedHost(tmp_path)
+def test_a_pinned_claude_bin_is_not_overridden_by_the_staged_update(tmp_path, *, scratch_plane_env):
+    h = StagedHost(tmp_path, scratch_plane_env=scratch_plane_env)
     pinned = tmp_path / "pinned-claude"
     _write_exec(pinned, healthy("2.1.278"))
     r = h.run(CLAUDE_BIN=pinned)
@@ -639,8 +654,8 @@ def test_a_pinned_claude_bin_is_not_overridden_by_the_staged_update(tmp_path):
 # --- choosing the version ---------------------------------------------------------
 
 
-def test_an_unresolvable_version_alerts_and_moves_nothing(tmp_path):
-    h = StagedHost(tmp_path)
+def test_an_unresolvable_version_alerts_and_moves_nothing(tmp_path, *, scratch_plane_env):
+    h = StagedHost(tmp_path, scratch_plane_env=scratch_plane_env)
     _link_to(h, "2.1.280")
     r = h.run(NPM_VIEW_RC=1)
 
@@ -650,8 +665,8 @@ def test_an_unresolvable_version_alerts_and_moves_nothing(tmp_path):
     assert "could not resolve a version" in h.log()
 
 
-def test_a_pinned_version_is_staged_instead_of_latest(tmp_path):
-    h = StagedHost(tmp_path)
+def test_a_pinned_version_is_staged_instead_of_latest(tmp_path, *, scratch_plane_env):
+    h = StagedHost(tmp_path, scratch_plane_env=scratch_plane_env)
     h.body("2.1.279", healthy_big("2.1.279"))
     r = h.run(latest="2.1.281", CLAUDE_UPDATE_VERSION="2.1.279")
 
@@ -663,14 +678,14 @@ def test_a_pinned_version_is_staged_instead_of_latest(tmp_path):
 # --- two runs at once ---------------------------------------------------------------
 
 
-def test_a_concurrent_run_waits_rather_than_deleting_the_first_runs_staging(tmp_path):
+def test_a_concurrent_run_waits_rather_than_deleting_the_first_runs_staging(tmp_path, *, scratch_plane_env):
     """The start of a run clears staging a crashed run left behind; without the
     lock that would include the staging a LIVE run is installing into."""
-    h = StagedHost(tmp_path)
+    h = StagedHost(tmp_path, scratch_plane_env=scratch_plane_env)
     h.body("2.1.281", healthy_big("2.1.281"))
     started = tmp_path / "npm-started"
     first = subprocess.Popen(
-        ["bash", str(SCRIPT)],
+        ["bash", str(h.script)],
         env=h.env(NPM_SLEEP="4", NPM_STARTED=started),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -719,6 +734,7 @@ def _compose_update_unit(tmp_path, monkeypatch, resolved: dict) -> str:
     import claudlobby.env_tiers as et
     from claudlobby.composer import compose_host_timers
     from claudlobby.env_tiers import Resolution
+    from tests.package_fixtures import source_package
     from claudlobby.paths import Paths
 
     repo = Path(__file__).resolve().parent.parent
@@ -731,7 +747,7 @@ def _compose_update_unit(tmp_path, monkeypatch, resolved: dict) -> str:
     monkeypatch.setattr(et, "read_tiers", lambda paths, bot_name=None, fleet_name=None: [])
     monkeypatch.setattr(et, "cascade", lambda tiers: {
         k: Resolution(name=k, value=v, tier="host", path=None) for k, v in resolved.items()})
-    out = compose_host_timers(Paths(root=root))
+    out = compose_host_timers(Paths(root=root, package=source_package()))
     return (out / "claudlobby-claude-update.service").read_text()
 
 

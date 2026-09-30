@@ -1,7 +1,7 @@
-"""The package-side door onto `lib/mcp-package-grammar.py` (#1577).
+"""The package-side door onto the native MCP package grammar (#1577).
 
-**This module owns no grammar.** It asks the INSTALL's `lib/` copy — the same
-file `lib/check-npx-cache.sh` execs — so the compositor and the health probe
+**This module owns no grammar.** It asks the selected package's native copy —
+the same file `check-npx-cache.sh` execs — so the compositor and the health probe
 cannot disagree about which token of an MCP server's args names its package.
 That disagreement is not hypothetical: the grammar was forked three ways and
 exactly one copy knew `uvx` existed, which is how a uvx MCP server came to be
@@ -28,7 +28,7 @@ GRAMMAR_FILENAME = "mcp-package-grammar.py"
 
 
 class GrammarUnavailable(RuntimeError):
-    """The shared grammar could not be loaded from the install's `lib/`.
+    """The shared grammar could not be loaded from the package's native files.
 
     Raised, never swallowed into a default — see the module docstring.
     """

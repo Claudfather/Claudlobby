@@ -26,7 +26,7 @@ REPO = Path(__file__).resolve().parent.parent
 
 def _mod():
     spec = importlib.util.spec_from_file_location(
-        "plane_canary_compare", REPO / "lib" / "plane-canary-compare.py")
+        "plane_canary_compare", REPO / "harness" / "plane-canary-compare.py")
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     return m

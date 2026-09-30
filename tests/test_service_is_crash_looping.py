@@ -20,7 +20,7 @@ NRestarts 3 -> 0); that is accepted rather than carried over (#1801).
 Driven like `test_service_is_starting.py`: `systemctl` stubbed on PATH with the
 properties in a DELIBERATELY SHUFFLED order (real systemd does not answer in
 request order), `_OS` forced after sourcing. The real state machine is covered
-by `lib/validate-bot-change.sh` against a real failing unit.
+by `harness/validate-bot-change.sh` against a real failing unit.
 """
 
 import os
@@ -29,8 +29,8 @@ from pathlib import Path
 
 import pytest
 
-LIB_COMMON = Path(__file__).resolve().parent.parent / "lib" / "lib-common.sh"
-SUPERVISOR = Path(__file__).resolve().parent.parent / "lib" / "supervisor.sh"
+LIB_COMMON = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts" / "lib-common.sh"
+SUPERVISOR = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts" / "supervisor.sh"
 
 
 def _scene(tmp_path: Path, *, active: str, sub: str, nrestarts: str):
@@ -211,7 +211,7 @@ def test_fleet_pulse_critical_lists_are_registered_critical():
     from claudlobby.plane.registries import SYSTEM_EVENT_SEVERITY
 
     src = (
-        Path(__file__).resolve().parent.parent / "lib" / "fleet-pulse.sh"
+        Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts" / "fleet-pulse.sh"
     ).read_text()
     for var in ("_CRITICAL_ESCALATION_TYPES", "_CRITICAL_SUMMARY_TYPES"):
         m = re.search(rf'^{var}="([^"]*)"', src, re.M)

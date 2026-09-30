@@ -31,6 +31,9 @@ from pathlib import Path
 import pytest
 
 from claudlobby.commands.core import cmd_warm_cache
+from claudlobby.__main__ import main
+from claudlobby.paths import Paths
+from tests.package_fixtures import source_package
 from tests.conftest import (
     SubprocessRecorder,
     equip_bot_with_mcp,
@@ -45,6 +48,20 @@ GWS = {"command": "uvx", "args": ["workspace-mcp", "--tools", "gmail", "calendar
 GA4 = {"command": "uvx", "args": ["--from", "google-analytics-mcp==2.8.1", "ga4-mcp-server"]}
 NPXPKG = "demo-mcp@1.2.3"
 NPX = {"command": "npx", "args": ["-y", NPXPKG]}
+
+
+def test_public_host_cache_warm_dry_run_uses_package_grammar(fleet_dir, capsys, monkeypatch):
+    equip_bot_with_mcp(fleet_dir, {"npxdemo": NPX, "gws": GWS})
+    monkeypatch.setattr("claudlobby.context.resolve_paths",
+                        lambda **_kwargs: Paths(root=fleet_dir, package=source_package()))
+    assert main(["--root", str(fleet_dir), "host", "cache", "warm", "--dry-run", "--json"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["command"] == "host.cache.warm"
+    assert result["data"]["dry_run"] is True
+    assert result["data"]["packages"] == [
+        {"package": NPXPKG, "runtime": "npx"},
+        {"package": "workspace-mcp", "runtime": "uvx"},
+    ]
 
 
 class TestUvxFragmentsAreWarmedAtAll:

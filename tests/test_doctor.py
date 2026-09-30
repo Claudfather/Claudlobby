@@ -1,10 +1,13 @@
-"""Tests for claudlobby doctor — pre-flight fleet health diagnostic."""
+"""Tests for claudlobby host doctor — pre-flight fleet health diagnostic."""
 
 from __future__ import annotations
+
+from tests.plane_setup import initialize_plane
 
 import json
 import os
 import subprocess
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from textwrap import dedent
@@ -25,9 +28,34 @@ from claudlobby.doctor import (
     format_report,
     run_doctor,
 )
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 REPO = Path(__file__).resolve().parent.parent
+
+
+def test_generated_host_doctor_only_checks_its_fleet(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from claudlobby import context, doctor
+    from claudlobby.commands import host_doctor
+
+    root = tmp_path / "data"
+    own = root / "local" / "own"
+    own.mkdir(parents=True)
+    (root / "fleet.yaml").write_text(
+        "fleet:\n  name: rootfleet\n  manager: rootbot\n  bots:\n    rootbot:\n      expertise: [software-engineering]\n")
+    (own / "fleet.yaml").write_text(
+        "fleet:\n  name: own\n  manager: worker\n  bots:\n    worker:\n      expertise: [software-engineering]\n")
+    monkeypatch.setattr(context, "get_resources", source_package)
+    monkeypatch.setenv("FLEET_NAME", "own")
+    checked = []
+    monkeypatch.setattr(doctor, "run_doctor", lambda fleet, paths, **_:
+                        checked.append(fleet.name) or DoctorReport())
+    args = SimpleNamespace(root=root, fleet=None, seed=False, markdown=False,
+                           switches=False, delivery=False)
+    result = host_doctor.dispatch(args)
+    assert checked == ["own"]
+    assert [row["fleet"] for row in result.data["fleets"]] == ["own"]
 
 
 @pytest.fixture
@@ -39,6 +67,7 @@ def doctor_fleet(tmp_path: Path) -> tuple[Path, "FleetConfig", Paths]:
     (root / "fleet.yaml").write_text(
         dedent("""\
         fleet:
+          manager: worker
           name: test-fleet
           service_prefix: com.test
           bots:
@@ -84,7 +113,7 @@ def doctor_fleet(tmp_path: Path) -> tuple[Path, "FleetConfig", Paths]:
     (root / "runtime" / "bots").mkdir(parents=True)
     (root / "lib").mkdir()
 
-    paths = Paths(root=root, fleet_dir=root)
+    paths = Paths(root=root, fleet_dir=root, package=source_package())
     fleet, _md = load_fleet(root / "fleet.yaml")
     return root, fleet, paths
 
@@ -124,6 +153,9 @@ class TestCheckMcpConfigs:
 
     def test_fail_when_fragment_missing(self, doctor_fleet):
         root, fleet, paths = doctor_fleet
+        empty_base = root.parent / "package" / "library"
+        empty_base.mkdir(parents=True)
+        paths = replace(paths, package=replace(source_package(), library=empty_base))
         (root / "library" / "mcp" / "github.json").unlink()
         report = DoctorReport()
         check_mcp_configs(fleet, paths, report)
@@ -715,6 +747,7 @@ class TestCheckWorkstreamResidual:
         root, fleet, paths = self._fleet_and_paths(tmp_path)
         # anchor real identity for the fleet -- plane_workstreams refuses a
         # fleet the plane holds no bot of, same as any other plane door
+        initialize_plane(root)
         emit_batch(
             root,
             [
@@ -751,7 +784,7 @@ class TestCheckWorkstreamResidual:
         assert check.status == "fail"
         assert "2 row(s)" in check.detail
         assert "ws-one" in check.detail and "ws-two" in check.detail
-        assert "plane import-workstreams" in check.detail
+        assert "migration workstreams" in check.detail
 
     def test_passes_once_every_row_is_on_the_plane(self, tmp_path):
         from tests.plane_fixtures import F
@@ -759,6 +792,7 @@ class TestCheckWorkstreamResidual:
         from claudlobby.plane.emit_api import emit_batch
 
         root, fleet, paths = self._fleet_and_paths(tmp_path)
+        initialize_plane(root)
         emit_batch(
             root,
             [
@@ -836,7 +870,7 @@ class TestCheckWorkstreamResidual:
 
 
 class TestDoctorTimerScriptParity:
-    """`claudlobby doctor` mirrors `generate` for the L1 deny-by-default timer
+    """`claudlobby host doctor` mirrors `generate` for the L1 deny-by-default timer
     rule: a fleet job whose ``script`` is a foreign absolute fails the rollout
     `generate` (compose_fleet_timers), so doctor's fleet-yaml check must fail too.
     validate reads the jobs off ``fleet.defaults``, so every surface that runs it —
@@ -884,7 +918,7 @@ class TestCheckCredentialsScoping:
 
         Required by every test in this class that expects a value decision.
         `Paths.env_resolved` REFUSES rather than falling back when it cannot
-        reach `lib/env-tiers.sh`, so without this the function short-circuits to
+        reach `claudlobby/_runtime_scripts/env-tiers.sh`, so without this the function short-circuits to
         its resolver-unavailable branch and an absence-assertion passes for the
         wrong reason — which is exactly what happened while writing these.
         A stub resolver is not an option: it would certify a cascade the runtime
@@ -895,7 +929,7 @@ class TestCheckCredentialsScoping:
         # supervisor.sh is a third required sibling: lib-common.sh unconditionally
         # sources it from its own directory (#1573 task 6).
         for f in ("lib-common.sh", "env-tiers.sh", "supervisor.sh"):
-            (paths.root / "lib" / f).write_bytes((repo / "lib" / f).read_bytes())
+            (paths.root / "lib" / f).write_bytes((repo / "claudlobby/_runtime_scripts" / f).read_bytes())
         fake_home = paths.root.parent / "home"
         fake_home.mkdir(exist_ok=True)
         monkeypatch.setenv("HOME", str(fake_home))
@@ -1037,11 +1071,12 @@ class TestCheckCredentialsScoping:
         go and set a credential — and the runtime raises precisely so the
         distinction survives. Folding it into an empty mapping would recreate
         the unreachable-vs-empty defect inside a fix for its sibling. The
-        fixture deliberately does NOT stage lib/env-tiers.sh.
+        selected package deliberately has no native env-tiers.sh resolver.
         """
         _, fleet, paths = doctor_fleet
         self._no_network(monkeypatch)
         monkeypatch.setenv("GITHUB_PAT", "ghp_whatever")
+        paths = replace(paths, package=replace(paths.package, native=paths.root / "lib"))
 
         report = DoctorReport()
         from claudlobby.doctor import check_credentials
@@ -1068,6 +1103,7 @@ def _declare_railway(root: Path) -> "FleetConfig":  # noqa: F821
     (root / "fleet.yaml").write_text(
         dedent("""\
         fleet:
+          manager: worker
           name: test-fleet
           service_prefix: com.test
           bots:
@@ -1206,7 +1242,7 @@ class TestGoalBindingCheck:
     the check-in beat from producing work."""
 
     def _paths(self, fleet_dir: Path) -> Paths:
-        return Paths(root=fleet_dir, fleet_dir=fleet_dir)
+        return Paths(root=fleet_dir, fleet_dir=fleet_dir, package=source_package())
 
     def _scope(self, fleet_dir: Path, org: str, repos: list[str]) -> None:
         import re as _re
@@ -1280,7 +1316,7 @@ _BRIEFING_SLOT = (
 _NO_CHECKIN = "  system_defaults:\n    protocols: false\n"
 
 
-def _fleet_yaml(*, manager: bool = True, armed: bool = False, equipped: bool = True) -> str:
+def _fleet_yaml(*, leaf_manager: bool = True, armed: bool = False, equipped: bool = True) -> str:
     """A fleet manifest varying only the three facts #1680's rungs read.
 
     Written at zero indent: these strings are assembled by concatenation and
@@ -1288,9 +1324,10 @@ def _fleet_yaml(*, manager: bool = True, armed: bool = False, equipped: bool = T
     leading whitespace.
     """
     briefing = _BRIEFING_SLOT if armed else ""
-    if not manager:
+    if not leaf_manager:
         return (
             "fleet:\n"
+            "  manager: worker\n"
             "  name: solo-fleet\n"
             "  service_prefix: com.solo\n"
             "  bots:\n"
@@ -1299,6 +1336,7 @@ def _fleet_yaml(*, manager: bool = True, armed: bool = False, equipped: bool = T
         )
     return (
         "fleet:\n"
+        "  manager: lead\n"
         "  name: mgr-fleet\n"
         "  service_prefix: com.mgr\n"
         + ("" if equipped else _NO_CHECKIN)
@@ -1319,7 +1357,7 @@ def _fleet_yaml(*, manager: bool = True, armed: bool = False, equipped: bool = T
 def _doctor_root(tmp_path: Path, fleet_yaml: str) -> Path:
     """A throwaway fleet root complete enough for the WHOLE `run_doctor`.
 
-    Wires the repo's real `lib/` rather than stubbing the resolver: task-recheck
+    Wires the repo's real `claudlobby/_runtime_scripts/` rather than stubbing the resolver: task-recheck
     ships opt-out (on by default), so a resolver-unavailable fallback reads it
     as ARMED and every disarmed scenario in this file silently collapses to
     PASS. The `.env` then disarms it so "no door armed" is reachable at all.
@@ -1342,18 +1380,18 @@ def _doctor_root(tmp_path: Path, fleet_yaml: str) -> Path:
     (root / "runtime" / "bots").mkdir(parents=True, exist_ok=True)
     # Wire whatever is MISSING rather than keying on the directory's existence
     # (origin/main's fix for the same #1588 class, adopted here). `root`
-    # now ships a real `mcp-package-grammar.py`, so `lib/` EXISTS without being
+    # now ships a real `mcp-package-grammar.py`, so `claudlobby/_runtime_scripts/` EXISTS without being
     # wired, and an existence check skips the wiring silently: the switch
     # resolver then cannot read its doors, `task-recheck` falls back to ARMED
     # regardless of `.env`, and `_validate_ignition`'s early return makes every
     # scenario below pass vacuously.
     #
     # Per-entry links, never a whole-dir symlink: fixtures delete files under
-    # `lib/`, and through a directory symlink those unlinks reach the repo's
+    # `claudlobby/_runtime_scripts/`, and through a directory symlink those unlinks reach the repo's
     # own copies.
     lib = root / "lib"
     lib.mkdir(exist_ok=True)
-    for real in (REPO / "lib").iterdir():
+    for real in (REPO / "claudlobby/_runtime_scripts").iterdir():
         link = lib / real.name
         if not link.exists():
             link.symlink_to(real)
@@ -1361,12 +1399,17 @@ def _doctor_root(tmp_path: Path, fleet_yaml: str) -> Path:
     # (#1689). Testing for the FILE the resolver needs tests the proposition;
     # testing that a directory exists is the proxy that failed (#1588).
     assert (lib / "env-tiers.sh").is_file(), (
-        f"{lib} exists but does not carry the real lib/ — the switch resolver "
+        f"{lib} exists but does not carry the real claudlobby/_runtime_scripts/ — the switch resolver "
         f"cannot run, so TASK_RECHECK_ENABLED=0 never lands and task-recheck "
         f"reads ARMED. Every disarmed case here would measure the wrong state."
     )
     (root / "library" / "expertise" / "orchestration.md").write_text("# Mgr\n")
     (root / "library" / "expertise" / "software-engineering.md").write_text("# Eng\n")
+    fleet_ops = root / "library" / "skills" / "fleet-ops"
+    fleet_ops.mkdir()
+    (fleet_ops / "SKILL.md").write_bytes(
+        (REPO / "library" / "skills" / "fleet-ops" / "SKILL.md").read_bytes()
+    )
     for name in DEFAULT_GUARDRAILS:
         (root / "library" / "guardrails" / f"{name}.md").write_text(
             f"---\ntitle: {name}\n---\n\nDefault guardrail.\n"
@@ -1422,14 +1465,18 @@ def _doctor_rungs(tmp_path, monkeypatch, fleet_yaml: str, *, projects: bool = Fa
     monkeypatch.delenv("FLEET_NAME", raising=False)
     fleet, _md = load_fleet(root / "fleet.yaml")
     _pin_plugin_manifest(tmp_path, monkeypatch, fleet)
-    report = run_doctor(fleet, Paths(root=root, fleet_dir=root))
+    # This scaffold authors a minimal library and explicitly wires native
+    # peers. Select those assets so unrelated packaged MCP defaults cannot
+    # turn a work-dispatch warning test into a host npx-cache probe.
+    package = replace(source_package(), library=root / "library", native=root / "lib")
+    report = run_doctor(fleet, Paths(root=root, fleet_dir=root, package=package))
     return {c.name: c for c in report.checks}
 
 
 class TestCheckIgnition:
     """#1633: does anything give an idle bot on this fleet a turn?
 
-    Uses a real env-tiers resolver (the repo's own lib/, symlinked — the
+    Uses a real env-tiers resolver (the repo's own claudlobby/_runtime_scripts/, symlinked — the
     test_switches.py pattern) rather than stubbing it: task-recheck ships
     opt-out (on by default), so a resolver-unavailable fallback would read it
     as armed regardless of the scenario under test and every case here would
@@ -1438,6 +1485,7 @@ class TestCheckIgnition:
 
     _FLEET_NO_DOOR = """\
         fleet:
+          manager: mgr
           name: ign-fleet
           service_prefix: com.ign
           bots:
@@ -1450,6 +1498,7 @@ class TestCheckIgnition:
 
     _FLEET_BRIEFING_ARMED = """\
         fleet:
+          manager: mgr
           name: ign-fleet
           service_prefix: com.ign
           bots:
@@ -1466,7 +1515,8 @@ class TestCheckIgnition:
     def _check(self, tmp_path, fleet_yaml: str):
         root = _doctor_root(tmp_path, fleet_yaml)
         fleet, _md = load_fleet(root / "fleet.yaml")
-        paths = Paths(root=root, fleet_dir=root)
+        package = replace(source_package(), library=root / "library", native=root / "lib")
+        paths = Paths(root=root, fleet_dir=root, package=package)
         report = DoctorReport()
         check_ignition(fleet, paths, report)
         assert len(report.checks) == 1
@@ -1493,7 +1543,7 @@ class TestCheckIgnition:
 
 
 
-class TestRungAgreementOnAManagerLessFleet:
+class TestRungAgreementOnASingletonFleet:
     """#1680: `goal-binding` and `ignition` are two halves of one question —
     will this fleet ever do any work? — and they were built in parallel
     without seeing each other. On a fleet with no leaf manager they printed a
@@ -1510,7 +1560,7 @@ class TestRungAgreementOnAManagerLessFleet:
     def test_both_rungs_pass_and_give_the_same_not_applicable_reason(
         self, tmp_path, monkeypatch
     ):
-        by_name = _doctor_rungs(tmp_path, monkeypatch, _fleet_yaml(manager=False))
+        by_name = _doctor_rungs(tmp_path, monkeypatch, _fleet_yaml(leaf_manager=False))
         # Fail closed: a renamed or dropped rung must break this test rather
         # than make it vacuously true.
         assert {"goal-binding", "ignition"} <= set(by_name), sorted(by_name)
@@ -1523,25 +1573,25 @@ class TestRungAgreementOnAManagerLessFleet:
     ):
         """The tripwire the acceptance criterion asks for.
 
-        A fleet with no leaf manager has no dispatcher, so no rung may report
-        a *work-dispatch* gap on it as a finding. `services` is the one
+        A singleton manager has no workers, so no rung may report a
+        *work-dispatch* gap on it as a finding. `services` is the one
         legitimate warning on this fixture — bots exist and are not enrolled,
         which is true and unrelated. Any OTHER rung warning here is either
         the #1680 divergence rebuilt or a deliberate new finding; both need a
         human to look, which is what an allowlist that must be edited buys.
         """
-        by_name = _doctor_rungs(tmp_path, monkeypatch, _fleet_yaml(manager=False))
+        by_name = _doctor_rungs(tmp_path, monkeypatch, _fleet_yaml(leaf_manager=False))
         warned = {n for n, c in by_name.items() if c.status in ("warn", "fail")}
         assert warned <= {"services"}, {n: by_name[n].detail for n in warned}
 
-    def test_a_manager_less_fleet_with_projects_still_reports_them(
+    def test_a_singleton_fleet_with_projects_still_reports_them(
         self, tmp_path, monkeypatch
     ):
-        """The gate replaces the no-projects WARN only. A manager-less fleet
+        """The gate replaces the no-projects WARN only. A singleton fleet
         that HAS declared projects keeps its informative PASS — the gate is
         an applicability test, not a mute button."""
         by_name = _doctor_rungs(
-            tmp_path, monkeypatch, _fleet_yaml(manager=False), projects=True
+            tmp_path, monkeypatch, _fleet_yaml(leaf_manager=False), projects=True
         )
         goal = by_name["goal-binding"]
         assert goal.status == "pass", goal.detail
@@ -1640,7 +1690,7 @@ class TestCoRequisiteCrossReference:
         that order for both surfaces."""
         detail = _doctor_rungs(tmp_path, monkeypatch, _fleet_yaml())["ignition"].detail
         assert detail.index("co-requisite") < detail.index("Cheapest to arm:")
-        assert detail.rstrip().endswith("generate + lib/setup-fleet"), detail
+        assert detail.rstrip().endswith("host activate PLAN_ID --install-directory <native-user-unit-dir>"), detail
 
 
 class TestIgnitionGapIsTheRungsOwnPredicate:
@@ -1652,22 +1702,23 @@ class TestIgnitionGapIsTheRungsOwnPredicate:
     there."""
 
     @pytest.mark.parametrize(
-        "armed,manager",
+        "armed,leaf_manager",
         [(False, True), (True, True), (False, False), (True, False)],
     )
     def test_the_predicate_agrees_with_the_rung(
-        self, tmp_path, monkeypatch, armed, manager
+        self, tmp_path, monkeypatch, armed, leaf_manager
     ):
         from claudlobby.ignition import ignition_gap
 
-        root = _doctor_root(tmp_path, _fleet_yaml(manager=manager, armed=armed))
+        root = _doctor_root(tmp_path, _fleet_yaml(leaf_manager=leaf_manager, armed=armed))
         monkeypatch.delenv("FLEET_NAME", raising=False)
         fleet, _md = load_fleet(root / "fleet.yaml")
-        paths = Paths(root=root, fleet_dir=root)
+        package = replace(source_package(), library=root / "library", native=root / "lib")
+        paths = Paths(root=root, fleet_dir=root, package=package)
         report = DoctorReport()
         check_ignition(fleet, paths, report)
         rung_warns = report.checks[0].status == "warn"
-        assert rung_warns is (not armed and manager), report.checks[0].detail
+        assert rung_warns is (not armed and leaf_manager), report.checks[0].detail
         assert ignition_gap(fleet, paths) is rung_warns, report.checks[0].detail
 
 
@@ -1676,7 +1727,7 @@ class TestTheFixtureRefusesDeadWiring:
     must actually FIRE. An assertion nobody has watched fail is not a check —
     it is a comment that raises.
 
-    Reproduces the #1588 mechanism verbatim: a `lib/` that exists as a plain
+    Reproduces the #1588 mechanism verbatim: a `claudlobby/_runtime_scripts/` that exists as a plain
     DIRECTORY satisfies the `if not ... .exists()` guard, so the symlink is
     skipped, the switch resolver cannot run, task-recheck falls back to ARMED,
     and the disarmed scenarios in this file silently measure the opposite of
@@ -1691,7 +1742,7 @@ class TestTheFixtureRefusesDeadWiring:
 
     No shortcut for WHICH tests stay silent has survived: neither assertion
     shape (a presence assertion,
-    `test_a_manager_less_fleet_with_projects_still_reports_them`, is silent)
+    `test_a_singleton_fleet_with_projects_still_reports_them`, is silent)
     nor asserts-why-not-what. The only property that held is the near-tautology
     that a test is silent exactly when its expected outcome is identical under
     both wiring states. Hence a structural refusal, which needs no
@@ -1699,7 +1750,7 @@ class TestTheFixtureRefusesDeadWiring:
     """
 
     def test_a_pre_created_lib_directory_is_REPAIRED_not_skipped(self, tmp_path):
-        """The #1588 arming, verbatim: something creates `lib/` first. The old
+        """The #1588 arming, verbatim: something creates `claudlobby/_runtime_scripts/` first. The old
         guard skipped the wiring and the suite went quiet; the helper now wires
         whatever is missing, per entry, and the resolver is live afterwards."""
         (tmp_path / "r" / "lib").mkdir(parents=True)
@@ -1712,7 +1763,7 @@ class TestTheFixtureRefusesDeadWiring:
         repaired by a per-entry symlink — `link.exists()` is true, so nothing
         is wired — and `.is_file()` is the predicate that still catches it."""
         (tmp_path / "r" / "lib" / "env-tiers.sh").mkdir(parents=True)
-        with pytest.raises(AssertionError, match="does not carry the real lib"):
+        with pytest.raises(AssertionError, match="does not carry the real claudlobby/_runtime_scripts/"):
             _doctor_root(tmp_path, _fleet_yaml())
 
     def test_a_clean_build_is_wired_so_the_controls_are_not_vacuous(

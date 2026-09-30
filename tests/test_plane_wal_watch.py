@@ -21,6 +21,7 @@ from claudlobby.plane.db import db_path
 from claudlobby.plane.wal import (WAL_CEILING_BYTES, shm_file, snapshot_holders, wal_size,
                                   writer_pids)
 from claudlobby.plane.writer import PlaneWriter
+from tests.plane_setup import initialize_plane
 
 _HOLD = (
     "import sqlite3, sys\n"
@@ -57,8 +58,9 @@ def _batch(writer: PlaneWriter) -> None:
 def test_a_held_reader_is_named_while_the_wal_is_over_the_ceiling(tmp_path):
     root = tmp_path / "root"
     (root / "state" / "plane").mkdir(parents=True)
+    initialize_plane(root)
     writer = PlaneWriter(root)
-    writer.connection()  # migrate: a real plane db
+    writer.connection()  # open the explicitly initialized real plane
     reader = subprocess.Popen(
         [sys.executable, "-c", _HOLD, str(db_path(root))],
         stdin=subprocess.PIPE,
@@ -77,7 +79,7 @@ def test_a_held_reader_is_named_while_the_wal_is_over_the_ceiling(tmp_path):
         assert writer.checkpoint_busy > 0
 
         rc, line = _doctor(root)
-        assert rc == 1 and line.startswith("[ATTENTION] wal"), line
+        assert rc == 4 and line.startswith("[ATTENTION] wal"), line
         assert "over the 4.0 MB ceiling" in line, line
         if Path("/proc/locks").exists():
             assert f"pid {reader.pid}" in line, line  # the holder, by name
@@ -172,4 +174,3 @@ def test_the_host_card_verdict_is_the_apis():
     assert _wal_state(sample(WAL_CEILING_BYTES + 1)) == "over"
     assert _wal_state(sample(True)) is None              # not a size: no verdict
     assert _wal_state(sample("81.8 MB")) is None
-

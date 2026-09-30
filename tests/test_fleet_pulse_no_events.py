@@ -27,9 +27,10 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import _scrubbed_env, read_fleet_events
+from tests.test_plane_events_door import _serving
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-FLEET_PULSE = REPO_ROOT / "lib" / "fleet-pulse.sh"
+FLEET_PULSE = REPO_ROOT / "claudlobby/_runtime_scripts" / "fleet-pulse.sh"
 
 # --- end-to-end: the pulse survives a no-events bot ---------------------------
 
@@ -42,8 +43,8 @@ SOCKET = "pulse610"
 
 
 def _tmux_env(root: Path) -> dict:
-    """Pin the tmux rendezvous under the fixture root (per-test private)."""
-    return {**os.environ, "TMUX_TMPDIR": str(root / "tmux")}
+    """Use conftest's short private per-test directory (macOS sun_path limit)."""
+    return {**os.environ, "TMUX_TMPDIR": os.environ["TMPDIR"]}
 
 
 @pytest.fixture()
@@ -70,7 +71,7 @@ def pulse_fleet(tmp_path):
     # Only the 2-space `bots:` block and 4-space bot keys are read
     # (parse_fleet_bots).
     (root / "local" / fleet / "fleet.yaml").write_text(
-        "fleet:\n  bots:\n    aaa-idle:\n    zzz-logged:\n"
+        "fleet:\n  manager: aaa-idle\n  bots:\n    aaa-idle:\n    zzz-logged:\n"
     )
 
     (root / "tmux").mkdir()
@@ -97,9 +98,8 @@ def _run_pulse(root: Path, fleet: str, extra_env: dict) -> subprocess.CompletedP
     resolution) and HOME pointed away from the real ~/.env."""
     env = _scrubbed_env(
         HOME=str(root / "home"),
-        CLAUDLOBBY_ROOT=str(root),
-        TMUX_TMPDIR=str(root / "tmux"),
-        **extra_env,
+        TMUX_TMPDIR=_tmux_env(root)["TMUX_TMPDIR"],
+        **{"CLAUDLOBBY_ROOT": str(root), **extra_env},
     )
     return subprocess.run(
         ["bash", str(FLEET_PULSE), fleet],
@@ -132,7 +132,7 @@ def _script_errors(root: Path) -> str:
         ),
     ],
 )
-def test_pulse_completes_with_no_events_bot(pulse_fleet, extra_env):
+def test_pulse_completes_with_no_events_bot(pulse_fleet, extra_env, scratch_plane_env):
     """The pulse exits 0 with a full summary and no script_error, through both
     read-back sites (the plane's one read for the escalation window and for
     the summary span). With a chat id resolved, the escalation loop's site runs
@@ -142,7 +142,8 @@ def test_pulse_completes_with_no_events_bot(pulse_fleet, extra_env):
     ever changes.
     """
     root, fleet = pulse_fleet
-    proc = _run_pulse(root, fleet, extra_env)
+    with _serving(root, scratch_plane_env) as socket:
+        proc = _run_pulse(root, fleet, {**extra_env, **scratch_plane_env(root, socket=socket)})
     assert proc.returncode == 0, (
         f"pulse aborted (rc={proc.returncode})\nstdout:\n{proc.stdout}\n"
         f"stderr:\n{proc.stderr}\nscript_error events:\n{_script_errors(root)}"
@@ -154,7 +155,7 @@ def test_pulse_completes_with_no_events_bot(pulse_fleet, extra_env):
     assert _script_errors(root) == ""
 
 
-def test_a_healthy_bridge_check_fires_no_phantom_script_error(tmp_path):
+def test_a_healthy_bridge_check_fires_no_phantom_script_error(tmp_path, *, scratch_plane_env):
     """Live-found 2026-09-03/04 (~2,500 rows a day on a 9-bot fleet, one per
     live bot per sweep, every one `non-zero exit at line 387`): on bash 3.2
     a function that returns 1 as the LAST command inside a `$( )` fires the
@@ -162,7 +163,7 @@ def test_a_healthy_bridge_check_fires_no_phantom_script_error(tmp_path):
     bridge_down_state returns 1 on every HEALTHY bot. The demonstration runs
     the two shapes under the real trap installer; the shape pin guards the
     line in fleet-pulse.sh."""
-    src = (REPO_ROOT / "lib" / "fleet-pulse.sh").read_text()
+    src = (REPO_ROOT / "claudlobby/_runtime_scripts" / "fleet-pulse.sh").read_text()
     assert '_bridge_st=$(bridge_down_state "$bot_dir" "$_bridge_grace" || true)' in src
     assert 'if _bridge_st=$(bridge_down_state' not in src
     # The class is bash 3.2's (macOS /bin/bash — the Mini, where it was
@@ -179,22 +180,19 @@ def test_a_healthy_bridge_check_fires_no_phantom_script_error(tmp_path):
         root = tmp_path / shape
         (root / "bot" / "data").mkdir(parents=True)
         (root / "state").mkdir()
-        # the fleet event the trap emits goes through the shim; a counting CLI
-        # stub records each batch's event name (no plane needed — R1 writes no file)
-        seen = root / "emitted"
-        stub = root / "cli"
-        stub.write_text("#!/bin/bash\nf=\"${@: -1}\"; cat \"$f\" >> \"" + str(seen) + "\"; echo >> \"" + str(seen) + "\"\n")
-        stub.chmod(0o755)
-        env = {"PATH": "/usr/bin:/bin", "HOME": str(root), "CLAUDLOBBY_ROOT": str(root),
-               "BOT_DIR": str(root / "bot"), "BOT_ID": "b", "FLEET_NAME": "f",
-               "PLANE_EMIT_CLI": str(stub), "PLANE_SOCKET": str(root / "no.sock")}
-        r = subprocess.run(["/bin/bash", "-c",
-                            f'. "{REPO_ROOT}/lib/lib-common.sh"; install_error_trap "";'
-                            f' healthy() {{ return 1; }}; {body}; echo done'],
-                           capture_output=True, text=True, env=env, timeout=60)
+        # The native shim sends directly to the daemon. Keep the real trap
+        # shape and observe committed rows rather than a retired CLI callback.
+        with _serving(root, scratch_plane_env) as socket:
+            env = {"PATH": "/usr/bin:/bin", "HOME": str(root),
+                   **scratch_plane_env(root, socket=socket),
+                   "BOT_DIR": str(root / "bot"), "BOT_ID": "b", "FLEET_NAME": "f"}
+            r = subprocess.run(["/bin/bash", "-c",
+                                f'. "{REPO_ROOT}/claudlobby/_runtime_scripts/lib-common.sh"; install_error_trap "";'
+                                f' healthy() {{ return 1; }}; {body}; echo done'],
+                               capture_output=True, text=True, env=env, timeout=60)
         assert r.returncode == 0 and "done" in r.stdout, (shape, r.stderr)
-        rows = seen.read_text() if seen.exists() else ""
-        assert rows.count('"event": "script_error"') + rows.count('"event":"script_error"') == want, (shape, rows)
+        rows = read_fleet_events(root)
+        assert rows.count('"type":"script_error"') == want, (shape, rows, r.stderr)
 
 
 def test_the_handoff_status_is_captured_without_firing_the_trap():
@@ -202,7 +200,7 @@ def test_the_handoff_status_is_captured_without_firing_the_trap():
     shape (one phantom script_error per bot per restart, measured on the
     flip's rolling restart); the status is captured with `|| true` inside the
     substitution and judged by the predicate's own value table."""
-    src = (REPO_ROOT / "lib" / "pre-stop-handoff.sh").read_text()
+    src = (REPO_ROOT / "claudlobby/_runtime_scripts" / "pre-stop-handoff.sh").read_text()
     assert '_handoff_status="$(session_command_status "$_HANDOFF_CMD" "$BOT_DIR" || true)"' in src
     assert 'if _handoff_status="$(session_command_status' not in src
     assert "available|unverifiable)" in src

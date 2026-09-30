@@ -1,4 +1,4 @@
-"""Unit tests for lib/dispatch-overdue.py — the dispatch watchdog matcher,
+"""Unit tests for claudlobby/_runtime_scripts/dispatch-overdue.py — the dispatch watchdog matcher,
 including the P4 task-id join matrix (semantics: overdue_all docstring).
 
 THE PLANE IS THE ONLY SOURCE (F18 closure, R2a). Every fixture below is still
@@ -83,7 +83,7 @@ class _Plane:
     the live doors would have chosen."""
 
     def __init__(self, tmp_path: Path):
-        self.root = plane_root(tmp_path)
+        self.root = plane_root(tmp_path, initialize=True)
         self.n = 0
         self.by_id: dict[tuple[str, str], tuple[str, str, int]] = {}   # (bot, task_id) -> (wi, asg, at)
         self.idless: list[tuple[str, str, str, int]] = []              # (bot, wi, asg, at)

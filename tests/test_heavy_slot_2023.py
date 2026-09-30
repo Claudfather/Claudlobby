@@ -26,7 +26,7 @@ REPO = Path(__file__).resolve().parent.parent
 
 @pytest.fixture(scope="module")
 def hs():
-    spec = importlib.util.spec_from_file_location("heavy_slot", REPO / "lib" / "heavy-slot.py")
+    spec = importlib.util.spec_from_file_location("heavy_slot", REPO / "claudlobby/_runtime_scripts" / "heavy-slot.py")
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     return m

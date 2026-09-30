@@ -21,30 +21,32 @@ from __future__ import annotations
 import itertools
 import subprocess
 import textwrap
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from claudlobby.env_tiers import EnvTier, ResolverUnavailable, cascade, read_tiers
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-LIB = REPO_ROOT / "lib" / "lib-common.sh"
-RESOLVER = REPO_ROOT / "lib" / "env-tiers.sh"
+LIB = REPO_ROOT / "claudlobby/_runtime_scripts" / "lib-common.sh"
+RESOLVER = REPO_ROOT / "claudlobby/_runtime_scripts" / "env-tiers.sh"
 # lib-common.sh unconditionally sources supervisor.sh from its own directory
 # (#1573 task 6) -- a real-content copy of lib-common.sh written into a
 # throwaway estate now needs this sibling present too, exactly as it already
 # needs lib-common.sh itself.
-SUPERVISOR = REPO_ROOT / "lib" / "supervisor.sh"
+SUPERVISOR = REPO_ROOT / "claudlobby/_runtime_scripts" / "supervisor.sh"
 
 TIERS = ("host", "root", "fleet", "bot")
 
-#: Revisions of lib/start-bot.sh to scan for the legacy shape. Bounded so the
+#: Revisions of claudlobby/_runtime_scripts/start-bot.sh to scan for the legacy shape. Bounded so the
 #: test cannot walk an unbounded history; stated rather than silent, and the
 #: failure message names the bound it searched.
 _HISTORY_SCAN_CAP = 60
 
-# The pre-#1226 inline block from lib/start-bot.sh, transcribed verbatim.
+# The pre-#1226 inline block from claudlobby/_runtime_scripts/start-bot.sh, transcribed verbatim.
 # `test_the_transcription_is_faithful` pins it against git history so this
 # cannot quietly become a copy of the NEW behaviour and agree with itself.
 LEGACY_BLOCK = textwrap.dedent(
@@ -65,7 +67,7 @@ LEGACY_BLOCK = textwrap.dedent(
     """
 )
 
-FLEET_YAML = "fleet:\n  name: {name}\n  bots:\n    solo:\n      expertise: [x]\n"
+FLEET_YAML = "fleet:\n  manager: solo\n  name: {name}\n  bots:\n    solo:\n      expertise: [x]\n"
 
 
 def _bash(snippet: str, env: dict[str, str]) -> subprocess.CompletedProcess:
@@ -170,7 +172,7 @@ def test_the_transcription_is_faithful() -> None:
     drifted toward the new behaviour would make the agreement test compare the
     new door with itself — green, and evidence of nothing.
 
-    Asserts that SOME revision of ``lib/start-bot.sh`` carried all four legacy
+    Asserts that SOME revision of ``claudlobby/_runtime_scripts/start-bot.sh`` carried all four legacy
     lines together, rather than pinning one SHA. A single-SHA pin is only
     correct until this change lands (after which HEAD holds the new block) and
     ``git log -S`` returns the commit that INTRODUCED a string, which for these
@@ -191,7 +193,7 @@ def test_the_transcription_is_faithful() -> None:
     """
     log = subprocess.run(
         ["git", "-C", str(REPO_ROOT), "log", "--format=%H", "-n", str(_HISTORY_SCAN_CAP),
-         "--", "lib/start-bot.sh"],
+         "--", "claudlobby/_runtime_scripts/start-bot.sh"],
         capture_output=True, text=True, timeout=120,
     )
     if log.returncode != 0 or not log.stdout.strip():
@@ -207,7 +209,7 @@ def test_the_transcription_is_faithful() -> None:
         assert line in LEGACY_BLOCK, f"transcription lost: {line}"
     for sha in shas:
         blob = subprocess.run(
-            ["git", "-C", str(REPO_ROOT), "show", f"{sha}:lib/start-bot.sh"],
+            ["git", "-C", str(REPO_ROOT), "show", f"{sha}:claudlobby/_runtime_scripts/start-bot.sh"],
             capture_output=True, text=True, timeout=60,
         ).stdout
         if all(line in blob for line in wanted):
@@ -215,11 +217,11 @@ def test_the_transcription_is_faithful() -> None:
     if _history_is_truncated():
         pytest.skip(
             f"history is truncated (shallow clone; {len(shas)} revision(s) of "
-            f"lib/start-bot.sh reachable) — cannot distinguish a drifted "
+            f"claudlobby/_runtime_scripts/start-bot.sh reachable) — cannot distinguish a drifted "
             f"transcription from a block that predates the clone depth"
         )
     pytest.fail(
-        f"no revision among the last {len(shas)} touching lib/start-bot.sh carried "
+        f"no revision among the last {len(shas)} touching claudlobby/_runtime_scripts/start-bot.sh carried "
         f"the transcribed legacy block — the transcription has drifted"
     )
 
@@ -363,7 +365,8 @@ def test_ambient_env_cannot_redirect_the_answer(estate: Path, monkeypatch) -> No
     monkeypatch.setenv("FLEET_NAME", "not-acme")
     monkeypatch.setenv("CLAUDLOBBY_ROOT", str(decoy))
 
-    paths = Paths(root=estate, fleet_dir=estate / "local" / "acme")
+    paths = Paths(root=estate, fleet_dir=estate / "local" / "acme",
+                  package=replace(source_package(), native=estate / "lib"))
     (estate / "lib" / "env-tiers.sh").write_bytes(RESOLVER.read_bytes())
     (estate / "lib" / "lib-common.sh").write_bytes(LIB.read_bytes())
     (estate / "lib" / "supervisor.sh").write_bytes(SUPERVISOR.read_bytes())
@@ -377,7 +380,8 @@ def test_ambient_env_cannot_redirect_the_answer(estate: Path, monkeypatch) -> No
 def test_a_missing_resolver_raises_rather_than_guessing(estate: Path) -> None:
     """No fallback ordering. A fallback IS the second copy, consulted exactly
     when the two are most likely to have diverged."""
-    paths = Paths(root=estate, fleet_dir=estate / "local" / "acme")
+    paths = Paths(root=estate, fleet_dir=estate / "local" / "acme",
+                  package=replace(source_package(), native=estate / "lib"))
     with pytest.raises(ResolverUnavailable, match="will not substitute"):
         read_tiers(paths, bot_name="solo")
 
@@ -614,7 +618,7 @@ def wired(tmp_path: Path, monkeypatch) -> Path:
     # supervisor.sh is a third required sibling: lib-common.sh unconditionally
     # sources it from its own directory (#1573 task 6).
     for f in ("lib-common.sh", "env-tiers.sh", "supervisor.sh"):
-        (tmp_path / "lib" / f).write_bytes((REPO_ROOT / "lib" / f).read_bytes())
+        (tmp_path / "lib" / f).write_bytes((REPO_ROOT / "claudlobby/_runtime_scripts" / f).read_bytes())
     fleet_dir = tmp_path / "local" / "acme"
     (fleet_dir / "runtime" / "bots" / "solo").mkdir(parents=True)
     (fleet_dir / "fleet.yaml").write_text(FLEET_YAML.format(name="acme"))
@@ -625,7 +629,8 @@ def wired(tmp_path: Path, monkeypatch) -> Path:
 
 
 def _paths(root: Path) -> Paths:
-    return Paths(root=root, fleet_dir=root / "local" / "acme")
+    return Paths(root=root, fleet_dir=root / "local" / "acme",
+                 package=replace(source_package(), native=root / "lib"))
 
 
 def test_env_resolved_reads_all_four_tiers(wired: Path) -> None:

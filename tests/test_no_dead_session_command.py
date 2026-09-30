@@ -1,4 +1,4 @@
-"""CI guard: no dead session-skill slash command survives in a lib/ script.
+"""CI guard: no dead session-skill slash command survives in a claudlobby/_runtime_scripts/ script.
 
 clauDNA collapsed its three standalone session skills into one `/claudna:session`
 engine with SPACE-form subcommands (`/claudna:session resume|handoff|checkpoint|name`);
@@ -6,7 +6,7 @@ the old spellings were hard-removed. `start-bot.sh` and `pre-stop-handoff.sh` in
 these commands as live keystrokes into the bot's Claude REPL on restart/stop, so a dead
 spelling resolves to "Unknown command" and the restart silently loses its handoff (#543).
 
-Two dead spelling classes must never reappear in lib/:
+Two dead spelling classes must never reappear in claudlobby/_runtime_scripts/:
   - any namespaced hyphen-form `/claudna:session-<verb>` — a rename or a typo of
     the live space-form alike, and
   - the renamed-away standalone names from the canonical map (`/session-handoff`,
@@ -49,7 +49,7 @@ def test_no_dead_session_skill_ref(script):
         if _DEAD_SESSION_CMD.search(line)
     ]
     assert not hits, (
-        "Dead session-skill slash command in lib/ — restart/resume injects these "
+        "Dead session-skill slash command in claudlobby/_runtime_scripts/ — restart/resume injects these "
         "as live keystrokes, so the hyphen/old form loses the handoff (#543). "
         "Use the space-form `/claudna:session <verb>`:\n" + "\n".join(hits)
     )

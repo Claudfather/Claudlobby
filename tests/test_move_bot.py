@@ -1,594 +1,417 @@
-"""Tests for claudlobby move-bot command."""
+"""Focused contracts for selected-release bot relocation."""
 
 from __future__ import annotations
 
+from argparse import Namespace
+from dataclasses import replace
+import json
+import os
 from pathlib import Path
-
-from claudlobby.__main__ import main
-
-
-def _scaffold_fleet(
-    local_dir: Path,
-    fleet_name: str,
-    bots: list[str],
-    *,
-    service_prefix: str = "com.test",
-    telegram_group_chat_id: str | None = None,
-    create_bot_dirs: bool = True,
-) -> Path:
-    """Create a minimal fleet overlay with bot dirs."""
-    fleet_dir = local_dir / fleet_name
-    fleet_dir.mkdir(parents=True, exist_ok=True)
-
-    bots_yaml = "\n".join(
-        f"    {b}:\n      expertise: [eng]\n      telegram:\n        handle: {b}"
-        for b in bots
-    )
-    tg_line = (
-        f"\n  telegram_group_chat_id: '{telegram_group_chat_id}'"
-        if telegram_group_chat_id
-        else ""
-    )
-    (fleet_dir / "fleet.yaml").write_text(
-        f"fleet:\n  name: {fleet_name}\n  service_prefix: {service_prefix}{tg_line}\n  bots:\n{bots_yaml}\n"
-    )
-
-    if create_bot_dirs:
-        for bot in bots:
-            bot_dir = fleet_dir / "runtime" / "bots" / bot
-            bot_dir.mkdir(parents=True, exist_ok=True)
-            (bot_dir / "bot.conf").write_text(
-                f"BOT_NAME={bot}\nBOT_SERVICE={service_prefix}.{bot}\n"
-            )
-
-    return fleet_dir
-
-
-def _scaffold_root(tmp_path: Path) -> Path:
-    """Create a minimal claudlobby root with a working spin-up-bot.sh stub."""
-    root = tmp_path / "claudlobby"
-    (root / "library" / "expertise").mkdir(parents=True)
-    (root / "library" / "expertise" / "eng.md").write_text(
-        "---\ntitle: Engineering\ndescription: Software engineering\n---\n# Engineering\nBuild software.\n"
-    )
-    lib_dir = root / "lib"
-    lib_dir.mkdir()
-    # Create a stub spin-up-bot.sh that exits 0 (tests enrollment path)
-    stub = lib_dir / "spin-up-bot.sh"
-    stub.write_text("#!/bin/bash\nexit 0\n")
-    stub.chmod(0o755)
-    (root / "voices").mkdir()
-    (root / "templates").mkdir()
-    # Minimal template
-    (root / "templates" / "claude.md.j2").write_text("# {{ bot.name }}\n")
-    return root
-
-
-class TestMoveBotDryRun:
-    def test_auto_detects_source_fleet(self, tmp_path: Path):
-        root = _scaffold_root(tmp_path)
-        local = root / "local"
-        _scaffold_fleet(local, "fleet-a", ["mybot"])  # source: has bot dir + bot.conf
-
-        # Target: has stanza in fleet.yaml but no bot dir with bot.conf
-        _scaffold_fleet(local, "fleet-b", ["mybot"], create_bot_dirs=False)
-
-        rc = main(["--root", str(root), "move-bot", "mybot", "--to", "fleet-b"])
-        assert rc == 0  # dry run succeeds
-
-    def test_error_bot_not_found(self, tmp_path: Path):
-        """Bot not present in any fleet (no bot dir with bot.conf anywhere)."""
-        root = _scaffold_root(tmp_path)
-        local = root / "local"
-        _scaffold_fleet(local, "fleet-a", ["other"])
-        # fleet-b has stanza but no bot.conf dir — autodetect won't find 'ghost'
-        _scaffold_fleet(local, "fleet-b", ["otherbot"], create_bot_dirs=False)
-
-        rc = main(["--root", str(root), "move-bot", "ghost", "--to", "fleet-b"])
-        assert rc == 1
-
-    def test_error_same_fleet(self, tmp_path: Path):
-        root = _scaffold_root(tmp_path)
-        local = root / "local"
-        _scaffold_fleet(local, "fleet-a", ["mybot"])
-
-        rc = main(["--root", str(root), "move-bot", "mybot", "--to", "fleet-a"])
-        assert rc == 1
-
-    def test_error_not_in_target_fleet_yaml(self, tmp_path: Path):
-        root = _scaffold_root(tmp_path)
-        local = root / "local"
-        _scaffold_fleet(local, "fleet-a", ["mybot"])
-        _scaffold_fleet(local, "fleet-b", ["otherbot"])  # mybot not in target
-
-        rc = main(["--root", str(root), "move-bot", "mybot", "--to", "fleet-b"])
-        assert rc == 1
-
-    def test_error_target_fleet_missing(self, tmp_path: Path):
-        root = _scaffold_root(tmp_path)
-        local = root / "local"
-        _scaffold_fleet(local, "fleet-a", ["mybot"])
-
-        rc = main(["--root", str(root), "move-bot", "mybot", "--to", "nonexistent"])
-        assert rc == 1
-
-    def test_from_flag_overrides_autodetect(self, tmp_path: Path):
-        root = _scaffold_root(tmp_path)
-        local = root / "local"
-        _scaffold_fleet(local, "fleet-a", ["mybot"])
-        _scaffold_fleet(local, "fleet-b", ["mybot"])
-
-        # Explicit --from resolves the ambiguity
-        rc = main(
-            [
-                "--root",
-                str(root),
-                "move-bot",
-                "mybot",
-                "--to",
-                "fleet-b",
-                "--from",
-                "fleet-a",
-            ]
-        )
-        assert rc == 0
-
-    def test_error_ambiguous_without_from(self, tmp_path: Path):
-        root = _scaffold_root(tmp_path)
-        local = root / "local"
-        _scaffold_fleet(local, "fleet-a", ["mybot"])
-        _scaffold_fleet(local, "fleet-b", ["mybot"])
-
-        rc = main(["--root", str(root), "move-bot", "mybot", "--to", "fleet-b"])
-        assert rc == 1  # ambiguous — both fleets have bot dir
-
-    def test_wip_check_blocks(self, tmp_path: Path):
-        root = _scaffold_root(tmp_path)
-        local = root / "local"
-        _scaffold_fleet(local, "fleet-a", ["mybot"])
-        _scaffold_fleet(local, "fleet-b", ["mybot"])
-
-        # Create a project with uncommitted changes
-        projects = (
-            local / "fleet-a" / "runtime" / "bots" / "mybot" / "projects" / "repo"
-        )
-        projects.mkdir(parents=True)
-        import subprocess
-
-        subprocess.run(["git", "init", str(projects)], capture_output=True)
-        subprocess.run(
-            ["git", "commit", "--allow-empty", "-m", "init"],
-            cwd=projects,
-            capture_output=True,
-            env={
-                "GIT_AUTHOR_NAME": "test",
-                "GIT_AUTHOR_EMAIL": "t@t",
-                "GIT_COMMITTER_NAME": "test",
-                "GIT_COMMITTER_EMAIL": "t@t",
-                "HOME": str(tmp_path),
-                "PATH": "/usr/bin:/bin",
-            },
-        )
-        (projects / "dirty.txt").write_text("uncommitted")
-
-        rc = main(
-            [
-                "--root",
-                str(root),
-                "move-bot",
-                "mybot",
-                "--to",
-                "fleet-b",
-                "--from",
-                "fleet-a",
-                "--apply",
-            ]
-        )
-        assert rc == 1  # blocked by WIP
-
-
-class TestMoveBotApply:
-    def test_copies_env_and_memory(self, tmp_path: Path):
-        root = _scaffold_root(tmp_path)
-        local = root / "local"
-        src_fleet = _scaffold_fleet(local, "fleet-a", ["mybot"])
-        _scaffold_fleet(local, "fleet-b", ["mybot"], create_bot_dirs=False)
-
-        # Add .env and memory to source
-        src_bot = src_fleet / "runtime" / "bots" / "mybot"
-        (src_bot / ".env").write_text("SECRET=abc123\n")
-        (src_bot / ".env").chmod(0o600)
-        mem_dir = src_bot / "memory"
-        mem_dir.mkdir()
-        (mem_dir / "note.md").write_text("remember this")
-
-        rc = main(
-            [
-                "--root",
-                str(root),
-                "move-bot",
-                "mybot",
-                "--to",
-                "fleet-b",
-                "--from",
-                "fleet-a",
-                "--apply",
-            ]
-        )
-        assert rc == 0
-
-        target_bot = local / "fleet-b" / "runtime" / "bots" / "mybot"
-        assert (target_bot / ".env").read_text() == "SECRET=abc123\n"
-        assert (target_bot / "memory" / "note.md").read_text() == "remember this"
-
-    def test_cleanup_removes_source(self, tmp_path: Path, capsys):
-        root = _scaffold_root(tmp_path)
-        local = root / "local"
-        src_fleet = _scaffold_fleet(local, "fleet-a", ["mybot"])
-        _scaffold_fleet(local, "fleet-b", ["mybot"], create_bot_dirs=False)
-
-        src_bot = src_fleet / "runtime" / "bots" / "mybot"
-        assert src_bot.is_dir()
-
-        rc = main(
-            [
-                "--root",
-                str(root),
-                "move-bot",
-                "mybot",
-                "--to",
-                "fleet-b",
-                "--from",
-                "fleet-a",
-                "--apply",
-                "--cleanup-source",
-            ]
-        )
-        assert rc == 0
-        assert not src_bot.exists()
-        # With cleanup, there is no orphan — the warning must NOT appear.
-        assert "orphaned" not in capsys.readouterr().out
-
-    def test_leaves_source_warns_when_no_cleanup(self, tmp_path: Path, capsys):
-        """--apply without --cleanup-source keeps the source dir AND warns that
-        it is now an orphan, with the exact path and remediation — so operators
-        do not discover stale bot dirs weeks later (the craig/greg incident)."""
-        root = _scaffold_root(tmp_path)
-        local = root / "local"
-        src_fleet = _scaffold_fleet(local, "fleet-a", ["mybot"])
-        _scaffold_fleet(local, "fleet-b", ["mybot"], create_bot_dirs=False)
-
-        src_bot = src_fleet / "runtime" / "bots" / "mybot"
-
-        rc = main(
-            [
-                "--root",
-                str(root),
-                "move-bot",
-                "mybot",
-                "--to",
-                "fleet-b",
-                "--from",
-                "fleet-a",
-                "--apply",
-            ]
-        )
-        assert rc == 0
-        # Source dir survives (cleanup is opt-in) ...
-        assert src_bot.is_dir()
-        # ... and the orphan is made loud, with path + remediation.
-        out = capsys.readouterr().out
-        assert "orphaned" in out
-        assert str(src_bot) in out
-        assert "rm -rf" in out
-        # The prospective plan-time note is dry-run-only — on --apply the
-        # post-apply warning is the single source, not duplicated here.
-        assert "will be LEFT" not in out
-
-    def test_dryrun_notes_orphan_when_no_cleanup(self, tmp_path: Path, capsys):
-        """Dry-run (no --cleanup-source) previews the orphan up front so the
-        operator can add the flag before applying. This note is dry-run-only;
-        the apply path relies on the post-apply warning instead."""
-        root = _scaffold_root(tmp_path)
-        local = root / "local"
-        src_fleet = _scaffold_fleet(local, "fleet-a", ["mybot"])
-        _scaffold_fleet(local, "fleet-b", ["mybot"], create_bot_dirs=False)
-        src_bot = src_fleet / "runtime" / "bots" / "mybot"
-
-        rc = main(
-            [
-                "--root",
-                str(root),
-                "move-bot",
-                "mybot",
-                "--to",
-                "fleet-b",
-                "--from",
-                "fleet-a",
-            ]
-        )
-        assert rc == 0
-        assert src_bot.is_dir()  # dry-run mutates nothing
-        out = capsys.readouterr().out
-        assert "will be LEFT in place (orphaned)" in out
-        assert "Dry run" in out
-
-    def test_enrollment_runs_spin_up_bot(self, tmp_path: Path):
-        """spin-up-bot.sh is called and its exit code determines success."""
-        root = _scaffold_root(tmp_path)
-        local = root / "local"
-        _scaffold_fleet(local, "fleet-a", ["mybot"])
-        _scaffold_fleet(local, "fleet-b", ["mybot"], create_bot_dirs=False)
-
-        rc = main(
-            [
-                "--root",
-                str(root),
-                "move-bot",
-                "mybot",
-                "--to",
-                "fleet-b",
-                "--from",
-                "fleet-a",
-                "--apply",
-            ]
-        )
-        assert rc == 0  # stub exits 0
-
-    def test_enrollment_failure_returns_nonzero_and_warns_orphan(
-        self, tmp_path: Path, capsys
-    ):
-        """spin-up-bot.sh failure returns 1 AND states the source disposition —
-        the source is already orphaned, and the operator is distracted fixing
-        enrollment, which is exactly when a silent orphan gets forgotten (#546)."""
-        root = _scaffold_root(tmp_path)
-        local = root / "local"
-        src_fleet = _scaffold_fleet(local, "fleet-a", ["mybot"])
-        _scaffold_fleet(local, "fleet-b", ["mybot"], create_bot_dirs=False)
-        src_bot = src_fleet / "runtime" / "bots" / "mybot"
-
-        # Replace stub with one that fails
-        stub = root / "lib" / "spin-up-bot.sh"
-        stub.write_text("#!/bin/bash\necho 'enrollment failed' >&2\nexit 1\n")
-
-        rc = main(
-            [
-                "--root",
-                str(root),
-                "move-bot",
-                "mybot",
-                "--to",
-                "fleet-b",
-                "--from",
-                "fleet-a",
-                "--apply",
-            ]
-        )
-        assert rc == 1
-        assert src_bot.is_dir()
-        out = capsys.readouterr().out
-        assert "INCOMPLETE MIGRATION" in out
-        assert "orphaned" in out
-        assert str(src_bot) in out
-        assert "rm -rf" in out
-
-    def test_enrollment_failure_defers_cleanup(self, tmp_path: Path, capsys):
-        """--cleanup-source never removes the source of a half-done migration;
-        the deferral is stated instead of silently skipped (#546)."""
-        root = _scaffold_root(tmp_path)
-        local = root / "local"
-        src_fleet = _scaffold_fleet(local, "fleet-a", ["mybot"])
-        _scaffold_fleet(local, "fleet-b", ["mybot"], create_bot_dirs=False)
-        src_bot = src_fleet / "runtime" / "bots" / "mybot"
-
-        stub = root / "lib" / "spin-up-bot.sh"
-        stub.write_text("#!/bin/bash\nexit 1\n")
-
-        rc = main(
-            [
-                "--root",
-                str(root),
-                "move-bot",
-                "mybot",
-                "--to",
-                "fleet-b",
-                "--from",
-                "fleet-a",
-                "--apply",
-                "--cleanup-source",
-            ]
-        )
-        assert rc == 1
-        assert src_bot.is_dir()
-        out = capsys.readouterr().out
-        assert "--cleanup-source deferred" in out
-        assert str(src_bot) in out
-
-    def test_access_json_failure_still_warns_orphan(
-        self, tmp_path: Path, capsys, monkeypatch
-    ):
-        """The access.json INCOMPLETE MIGRATION exit happens after step 3 has
-        already ended source supervision — the disposition must print there
-        too, not only on the spin-up branches (#546)."""
-        monkeypatch.setenv("HOME", str(tmp_path))
-        root = _scaffold_root(tmp_path)
-        local = root / "local"
-        src_fleet = _scaffold_fleet(local, "fleet-a", ["mybot"])
-        _scaffold_fleet(
-            local,
-            "fleet-b",
-            ["mybot"],
-            create_bot_dirs=False,
-            telegram_group_chat_id="-100777",
-        )
-        src_bot = src_fleet / "runtime" / "bots" / "mybot"
-
-        channel_dir = tmp_path / ".claude" / "channels" / "telegram-mybot"
-        channel_dir.mkdir(parents=True)
-        (channel_dir / "access.json").write_text("{ not json")
-
-        rc = main(
-            [
-                "--root",
-                str(root),
-                "move-bot",
-                "mybot",
-                "--to",
-                "fleet-b",
-                "--from",
-                "fleet-a",
-                "--apply",
-            ]
-        )
-        assert rc == 1
-        assert src_bot.is_dir()
-        out = capsys.readouterr().out
-        assert "access.json update failed" in out
-        assert "orphaned" in out
-        assert str(src_bot) in out
-
-    def test_missing_spinup_still_warns_orphan(self, tmp_path: Path, capsys):
-        """The not-enrolled branch (spin-up-bot.sh absent) states the orphan
-        disposition too (#546)."""
-        root = _scaffold_root(tmp_path)
-        local = root / "local"
-        src_fleet = _scaffold_fleet(local, "fleet-a", ["mybot"])
-        _scaffold_fleet(local, "fleet-b", ["mybot"], create_bot_dirs=False)
-        src_bot = src_fleet / "runtime" / "bots" / "mybot"
-
-        (root / "lib" / "spin-up-bot.sh").unlink()
-
-        rc = main(
-            [
-                "--root",
-                str(root),
-                "move-bot",
-                "mybot",
-                "--to",
-                "fleet-b",
-                "--from",
-                "fleet-a",
-                "--apply",
-            ]
-        )
-        assert rc == 1
-        assert src_bot.is_dir()
-        out = capsys.readouterr().out
-        assert "not enrolled" in out
-        assert "orphaned" in out
-        assert str(src_bot) in out
-
-    def test_memory_copy_is_atomic(self, tmp_path: Path):
-        """Memory copy uses temp-dir-then-rename for rollback safety."""
-        root = _scaffold_root(tmp_path)
-        local = root / "local"
-        src_fleet = _scaffold_fleet(local, "fleet-a", ["mybot"])
-        _scaffold_fleet(local, "fleet-b", ["mybot"], create_bot_dirs=False)
-
-        # Create source memory
-        src_bot = src_fleet / "runtime" / "bots" / "mybot"
-        mem_dir = src_bot / "memory"
-        mem_dir.mkdir()
-        (mem_dir / "fact.md").write_text("important fact")
-
-        # Create existing target memory that should be replaced
-        target_bot = local / "fleet-b" / "runtime" / "bots" / "mybot"
-        target_bot.mkdir(parents=True, exist_ok=True)
-        target_mem = target_bot / "memory"
-        target_mem.mkdir()
-        (target_mem / "old.md").write_text("old data")
-
-        rc = main(
-            [
-                "--root",
-                str(root),
-                "move-bot",
-                "mybot",
-                "--to",
-                "fleet-b",
-                "--from",
-                "fleet-a",
-                "--apply",
-            ]
-        )
-        assert rc == 0
-        # New memory replaced old
-        assert (target_mem / "fact.md").read_text() == "important fact"
-        assert not (target_mem / "old.md").exists()
-        # No temp dir left behind
-        assert not (target_bot / ".memory_tmp").exists()
-
-    def test_validate_runs_before_mutation(self, tmp_path: Path):
-        """Validation failure should return 1 without stopping any service."""
-        root = _scaffold_root(tmp_path)
-        local = root / "local"
-        _scaffold_fleet(local, "fleet-a", ["mybot"])
-
-        # Target fleet references a nonexistent expertise — validation will fail
-        target = local / "fleet-b"
-        target.mkdir(parents=True, exist_ok=True)
-        (target / "fleet.yaml").write_text(
-            "fleet:\n  name: fleet-b\n"
-            "  service_prefix: com.test\n  bots:\n"
-            "    mybot:\n"
-            "      expertise: [nonexistent_expertise]\n"
-            "      telegram:\n        handle: mybot\n"
-        )
-
-        rc = main(
-            [
-                "--root",
-                str(root),
-                "move-bot",
-                "mybot",
-                "--to",
-                "fleet-b",
-                "--from",
-                "fleet-a",
-                "--apply",
-            ]
-        )
-        assert rc == 1  # validation error, no mutation occurred
-
-    def test_kills_source_tmux_server(self, tmp_path: Path, monkeypatch):
-        """move-bot --apply tears down the source bot's per-bot tmux server so the
-        move doesn't strand an orphaned server on the source host."""
-        root = _scaffold_root(tmp_path)
-        local = root / "local"
-        _scaffold_fleet(local, "fleet-a", ["mybot"])
-        _scaffold_fleet(local, "fleet-b", ["mybot"], create_bot_dirs=False)
-
-        import claudlobby.commands.move_bot as move_bot_mod
-
-        calls: list[list[str]] = []
-
-        def fake_run(cmd, *a, **k):
-            calls.append(cmd)
-
-            class _R:
-                returncode = 0
-                stdout = ""
-                stderr = ""
-
-            return _R()
-
-        monkeypatch.setattr(move_bot_mod.subprocess, "run", fake_run)
-
-        # --force skips the active-session pre-flight (the mock would otherwise
-        # report a live session and abort before teardown).
-        rc = main(
-            [
-                "--root",
-                str(root),
-                "move-bot",
-                "mybot",
-                "--to",
-                "fleet-b",
-                "--from",
-                "fleet-a",
-                "--apply",
-                "--force",
-            ]
-        )
-        assert rc == 0
-        assert ["tmux", "-L", "com.test.mybot", "kill-server"] in calls
+import subprocess
+from types import SimpleNamespace
+
+import pytest
+
+from claudlobby.command_result import CommandFailure
+from claudlobby.commands import move_bot
+from claudlobby.config import load_fleet_snapshot
+
+
+def _move(tmp_path: Path, *, channel: bool = False) -> move_bot.Move:
+    source_dir = tmp_path / "source" / "runtime" / "bots" / "worker"
+    target_dir = tmp_path / "target" / "runtime" / "bots" / "worker"
+    source_dir.mkdir(parents=True)
+    bot = SimpleNamespace(bot_id="worker", telegram=SimpleNamespace(handle="worker" if channel else None),
+                          channels=[])
+    source = SimpleNamespace(fleet=SimpleNamespace(name="source", bots={"worker": bot},
+                                           telegram_group_chat_id="-1001"),
+                             paths=SimpleNamespace(package=object()))
+    target = SimpleNamespace(fleet=SimpleNamespace(name="target", bots={"worker": bot},
+                                           telegram_group_chat_id="-1002"),
+                             paths=SimpleNamespace(package=source.paths.package))
+    return move_bot.Move(tmp_path, source, target, source_dir, target_dir,
+                         "r-selected", tmp_path / "units")
+
+
+def test_retained_copy_preserves_durable_paths_and_keeps_source(tmp_path):
+    move = _move(tmp_path)
+    (move.source_dir / ".env").write_text("TOKEN=private\n")
+    (move.source_dir / "memory").mkdir()
+    (move.source_dir / "memory" / "fact.md").write_text("remember")
+    (move.source_dir / "data").mkdir()
+    (move.source_dir / "data" / "record.json").write_text('{"kept":true}')
+    (move.source_dir / "projects" / "repo").mkdir(parents=True)
+    (move.source_dir / "projects" / "repo" / "README").write_text("project")
+    (move.source_dir / "projects" / "repo" / "linked").symlink_to("README")
+    (move.source_dir / ".claude").mkdir()
+    (move.source_dir / ".claude" / "session.md").write_text("handoff")
+    (move.target_dir / "memory").mkdir(parents=True)
+    (move.target_dir / "data" / "events").mkdir(parents=True)
+
+    move_bot.check_copy_destinations(move.source_dir, move.target_dir)
+    copied = move_bot.copy_retained(move)
+
+    assert copied == [str(move.target_dir / name) for name in move_bot._RETAINED]
+    assert (move.target_dir / ".env").read_text() == "TOKEN=private\n"
+    assert (move.target_dir / ".env").stat().st_mode & 0o777 == 0o600
+    assert (move.target_dir / "memory" / "fact.md").read_text() == "remember"
+    assert (move.target_dir / "data" / "record.json").read_text() == '{"kept":true}'
+    assert (move.target_dir / "data" / "events").is_dir()
+    assert (move.target_dir / "projects" / "repo" / "README").read_text() == "project"
+    assert (move.target_dir / "projects" / "repo" / "linked").is_symlink()
+    assert (move.target_dir / "projects" / "repo" / "linked").readlink() == Path("README")
+    assert (move.target_dir / ".claude" / "session.md").read_text() == "handoff"
+    assert (move.source_dir / "memory" / "fact.md").read_text() == "remember"
+
+
+def test_retained_copy_refuses_redirect_before_mutation(tmp_path):
+    move = _move(tmp_path)
+    move.target_dir.mkdir(parents=True)
+    (move.target_dir / ".env").symlink_to(tmp_path / "outside")
+    with pytest.raises(CommandFailure, match="redirected"):
+        move_bot.check_copy_destinations(move.source_dir, move.target_dir)
+    assert not (tmp_path / "outside").exists()
+
+
+def test_nonempty_target_retained_path_refuses_before_source_stop(tmp_path, monkeypatch):
+    from claudlobby import bot_operations
+
+    move = _move(tmp_path)
+    (move.source_dir / "data").mkdir()
+    (move.source_dir / "data" / "fact.md").write_text("source")
+    (move.target_dir / "data").mkdir(parents=True)
+    (move.target_dir / "data" / "fact.md").write_text("target")
+    monkeypatch.setattr(move_bot, "no_active_assignment", lambda *_: None)
+    monkeypatch.setattr(move_bot, "source_session", lambda *_, **__: None)
+    monkeypatch.setattr(bot_operations, "set_bot_running",
+                        lambda **_: pytest.fail("source stopped before retained conflict refusal"))
+
+    with pytest.raises(CommandFailure, match="target retained path is not empty"):
+        move_bot.apply_move(move, "worker", force=False, cleanup=True)
+    assert (move.target_dir / "data" / "fact.md").read_text() == "target"
+    assert (move.source_dir / "data" / "fact.md").read_text() == "source"
+
+
+def _git(repo, *args):
+    subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                    "-c", "commit.gpgsign=false", *args],
+                   cwd=repo, check=True, capture_output=True, text=True)
+
+
+def test_source_wip_refuses_unpublished_work_before_purge(tmp_path):
+    move = _move(tmp_path)
+    repo = move.source_dir / "projects" / "repo"
+    upstream = tmp_path / "upstream.git"
+    repo.mkdir(parents=True)
+    _git(tmp_path, "init", "--bare", "-q", str(upstream))
+    _git(repo, "init", "-q")
+    (repo / "README").write_text("one\n")
+    _git(repo, "add", "README")
+    _git(repo, "commit", "-q", "-m", "one")
+    _git(repo, "remote", "add", "origin", str(upstream))
+    with pytest.raises(CommandFailure, match="no upstream"):
+        move_bot.source_wip(move.source_dir)
+    _git(repo, "push", "-q", "-u", "origin", "HEAD")
+    move_bot.source_wip(move.source_dir)
+
+    (repo / "README").write_text("two\n")
+    _git(repo, "commit", "-q", "-am", "two")
+    with pytest.raises(CommandFailure, match="unpushed"):
+        move_bot.source_wip(move.source_dir)
+    _git(repo, "push", "-q")
+    _git(repo, "branch", "side")
+    _git(repo, "checkout", "-q", "side")
+    (repo / "README").write_text("side\n")
+    _git(repo, "commit", "-q", "-am", "side")
+    _git(repo, "checkout", "-q", "-")
+    with pytest.raises(CommandFailure, match="unpushed"):
+        move_bot.source_wip(move.source_dir)
+    _git(repo, "branch", "-q", "-D", "side")
+    move_bot.source_wip(move.source_dir)
+
+    (repo / "README").write_text("stashed\n")
+    _git(repo, "stash", "-q")
+    with pytest.raises(CommandFailure, match="stashed"):
+        move_bot.source_wip(move.source_dir)
+    _git(repo, "stash", "drop", "-q")
+    _git(repo, "checkout", "-q", "--detach")
+    with pytest.raises(CommandFailure, match="detached"):
+        move_bot.source_wip(move.source_dir)
+    assert (repo / "README").read_text() == "two\n"
+
+
+@pytest.mark.parametrize(("observed", "quiet", "force", "refusal"), [
+    ("absent", None, False, None),
+    ("ready", None, False, "live session"),
+    ("ready", None, True, None),
+    # A clean stop's leftover socket: only the kernel quiescence proof reads absent.
+    ("unknown", True, False, None),
+    ("unknown", False, True, "unknown"),
+])
+def test_source_session_uses_frozen_placement_for_stopped_source(tmp_path, monkeypatch,
+                                                                 observed, quiet, force, refusal):
+    from claudlobby import activation_runtime, bot_operations, supervision, supervision_inventory
+
+    proofs = []
+
+    def assert_quiescent(adapter, *, installed_file, target, socket_path):
+        proofs.append((installed_file, target, socket_path))
+        if not quiet:
+            raise activation_runtime.RuntimeEvidenceError("quiescence", target,
+                                                          "known socket still accepts connections")
+
+    monkeypatch.setattr(activation_runtime, "assert_quiescent", assert_quiescent)
+
+    move = replace(_move(tmp_path), installed=str(tmp_path / "units/worker.plist"),
+                   native_target="gui/501/worker")
+    calls = []
+
+    class Native:
+        def __init__(self, package):
+            assert package is move.source.paths.package
+
+        def read(self, function, *args):
+            calls.append((function, *args))
+            return observed + "\n"
+
+    monkeypatch.setattr(supervision, "build_supervision_spec", lambda *_: SimpleNamespace(
+        bot_dir=move.source_dir, label="worker", environment={"TMUX_TMPDIR": str(tmp_path)}))
+    monkeypatch.setattr(supervision_inventory, "Adapter", Native)
+    monkeypatch.setattr(bot_operations, "_selected_adapter", lambda _r, _f, _b, adapter: adapter)
+    if refusal:
+        with pytest.raises(CommandFailure, match=refusal):
+            move_bot.source_session(move, "worker", force=force)
+    else:
+        move_bot.source_session(move, "worker", force=force)
+    assert calls == [("svc_bot_session_observe", move.source_dir, "worker", str(tmp_path),
+                      move.installed, "gui/501/worker")]
+    assert proofs == ([] if quiet is None else [
+        (Path(move.installed), "gui/501/worker", tmp_path / f"tmux-{os.getuid()}" / "worker")])
+
+
+def test_source_session_refuses_without_frozen_placement(tmp_path):
+    with pytest.raises(CommandFailure, match="frozen native placement"):
+        move_bot.source_session(_move(tmp_path), "worker", force=True)
+
+
+def test_access_replaces_only_owned_source_group(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    move = _move(tmp_path, channel=True)
+    path = tmp_path / ".claude/channels/telegram-worker/access.json"
+    path.parent.mkdir(parents=True)
+    original = {"groups": {"-1001": {"allowFrom": ["42"], "requireMention": False}},
+                "other": "retained"}
+    path.write_text(json.dumps(original))
+    assert move_bot.update_access(move, "worker", dry_run=True) == str(path)
+    assert json.loads(path.read_text()) == original
+    move_bot.update_access(move, "worker")
+    assert json.loads(path.read_text()) == {
+        "groups": {"-1002": {"allowFrom": ["42"], "requireMention": False}},
+        "other": "retained",
+    }
+    path.write_text(json.dumps({"groups": {"-1003": {"allowFrom": []}}}))
+    with pytest.raises(CommandFailure, match="another group"):
+        move_bot.update_access(move, "worker", dry_run=True)
+
+
+def test_apply_stages_after_copy_and_reports_failed_activation(tmp_path, monkeypatch):
+    from claudlobby import activation, activation_state, bot_operations, config_plan, config_staging, releases
+
+    manifest, target_manifest = str(tmp_path / "source/fleet.yaml"), str(tmp_path / "target/fleet.yaml")
+    move = replace(_move(tmp_path), selected_plan_id="p-selected",
+                   move_inputs=((manifest, "reviewed"), (target_manifest, "reviewed")))
+    monkeypatch.setattr(config_plan, "read_plan", lambda _root, plan_id: (
+        SimpleNamespace(fleets=("source", "target"), inputs={manifest: {"state": "before"},
+                                                             target_manifest: {"state": "before"}})
+        if plan_id == "p-selected" else pytest.fail("unexpected plan read")))
+    (move.source_dir / ".env").write_text("TOKEN=private\n")
+    events = []
+    monkeypatch.setattr(move_bot, "no_active_assignment", lambda *_: events.append("assignment"))
+    monkeypatch.setattr(move_bot, "source_session", lambda *_, **__: events.append("session"))
+    monkeypatch.setattr(bot_operations, "set_bot_running", lambda **_: (events.append("stop") or SimpleNamespace(state="stopped")))
+    monkeypatch.setattr(releases, "read_release", lambda *_: SimpleNamespace(release_id="r-selected"))
+
+    def stage(*_):
+        assert (move.target_dir / ".env").read_text() == "TOKEN=private\n"
+        events.append("stage")
+        return SimpleNamespace(plan_id="p-staged", fleets=("source", "target"),
+                               inputs={manifest: {"state": "reviewed"},
+                                       target_manifest: {"state": "reviewed"}})
+
+    monkeypatch.setattr(config_staging, "stage_configuration", stage)
+    monkeypatch.setattr(move_bot, "declared_paths", lambda *_, **__: [object()])
+    monkeypatch.setattr(activation, "upgrade_activation", lambda *_: (events.append("activate") or (_ for _ in ()).throw(RuntimeError("failed"))))
+    monkeypatch.setattr(activation_state, "read_selection", lambda *_: None)
+    with pytest.raises(CommandFailure, match="incomplete") as caught:
+        move_bot.apply_move(move, "worker", force=False, cleanup=True)
+    assert events == ["assignment", "session", "stop", "stage", "activate"]
+    assert caught.value.data["plan_id"] == "p-staged"
+    assert caught.value.data["source_stopped"] is True
+    assert caught.value.data["source_retained"] is True
+    assert (move.source_dir / ".env").exists()
+
+
+def test_staged_move_plan_refuses_unrelated_authoring_before_activation(tmp_path, monkeypatch):
+    from claudlobby import config_plan
+
+    source_manifest, target_manifest = str(tmp_path / "source/fleet.yaml"), str(tmp_path / "target/fleet.yaml")
+    other, access = str(tmp_path / "other/fleet.yaml"), str(tmp_path / "home/access.json")
+    source_env, target_env = str(move_dirs(tmp_path)[0] / ".env"), str(move_dirs(tmp_path)[1] / ".env")
+    move = replace(_move(tmp_path), selected_plan_id="p-selected", access_input=access,
+                   move_inputs=((source_manifest, 2), (target_manifest, 2)))
+    selected = SimpleNamespace(fleets=("other", "source", "target"), inputs={
+        source_manifest: {"state": 1}, target_manifest: {"state": 1}, other: {"state": 1},
+        access: {"state": 1}, source_env: {"state": 1}})
+    monkeypatch.setattr(config_plan, "read_plan", lambda *_: selected)
+    # Exactly the move: reviewed manifests, its access rewrite, the source bot's
+    # tier gone and the retained target tier new.
+    own = SimpleNamespace(fleets=selected.fleets, inputs={
+        source_manifest: {"state": 2}, target_manifest: {"state": 2}, other: {"state": 1},
+        access: {"state": 2}, target_env: {"state": 3}})
+    move_bot.staged_scope(move, own)
+    for changed, reason in (({other: {"state": 2}}, "unrelated authoring"),
+                            ({str(tmp_path / "overlay/new-skill"): {"state": 1}}, "unrelated authoring"),
+                            ({source_manifest: {"state": 3}}, "after the move was reviewed")):
+        with pytest.raises(RuntimeError, match=reason):
+            move_bot.staged_scope(move, replace_inputs(own, changed))
+    with pytest.raises(RuntimeError, match="unrelated authoring"):
+        move_bot.staged_scope(move, SimpleNamespace(fleets=own.fleets, inputs={
+            key: value for key, value in own.inputs.items() if key != other}))
+    with pytest.raises(RuntimeError, match="fleet set"):
+        move_bot.staged_scope(move, SimpleNamespace(fleets=("source", "target"), inputs={}))
+    with pytest.raises(RuntimeError, match="fleet set"):
+        move_bot.staged_scope(replace(move, move_inputs=()), own)
+
+
+def move_dirs(tmp_path):
+    return (tmp_path / "source/runtime/bots/worker", tmp_path / "target/runtime/bots/worker")
+
+
+def replace_inputs(plan, changed):
+    return SimpleNamespace(fleets=plan.fleets, inputs={**plan.inputs, **changed})
+
+
+def test_preview_discloses_host_scope_without_effect(tmp_path, monkeypatch):
+    move = _move(tmp_path)
+    monkeypatch.setattr(move_bot, "preflight", lambda *_: move)
+    monkeypatch.setattr(move_bot, "apply_move", lambda *_args, **_kwargs: pytest.fail("preview mutated"))
+    args = Namespace(root=str(tmp_path), bot="worker", to="target", from_fleet="source",
+                     apply=False, cleanup_source=False, force=False)
+    result = move_bot.dispatch(args)
+    assert result.data["state"] == "preview"
+    assert result.data["host_restart_scope"] == "all_declared_fleets"
+    assert result.data["changed"] is False
+
+
+def _preflight_fixture(tmp_path, monkeypatch):
+    from claudlobby import activation_enrollment, activation_state, active_config
+    from claudlobby import config_plan, context, releases, supervision_inventory
+    from claudlobby.commands import _helpers
+    from claudlobby.commands import host
+    from claudlobby.paths import Paths
+
+    root = tmp_path / "host"
+    source_dir = root / "local/source"
+    target_dir = tmp_path / "external/target"
+    source_dir.mkdir(parents=True)
+    target_dir.mkdir(parents=True)
+    # Authored manifests on disk: exactly this move (worker leaves source and
+    # joins target). The frozen side parses the pre-move bytes with the same
+    # load_fleet_snapshot owner that context_from_plan uses.
+    (source_dir / "fleet.yaml").write_text(_fleet_yaml("source", "lead", LEAD, OTHER))
+    (target_dir / "fleet.yaml").write_text(_fleet_yaml("target", "boss", BOSS, WORKER))
+    package = SimpleNamespace(native=tmp_path / "sealed-native", artifact_id="artifact")
+    source_paths = Paths(root, package=package, fleet_dir=source_dir)
+    target_paths = Paths(root, package=package, fleet_dir=target_dir)
+    bot_dir = source_paths.bot_runtime("worker")
+    bot_dir.mkdir(parents=True)
+    (bot_dir / "bot.conf").write_text("BOT_ID=worker\n")
+    bot = SimpleNamespace(bot_id="worker")
+    source = SimpleNamespace(paths=source_paths, fleet=load_fleet_snapshot(
+        source_paths.fleet_yaml, _fleet_yaml("source", "lead", LEAD, WORKER, OTHER).encode(), None)[0])
+    frozen_target = SimpleNamespace(paths=target_paths, fleet=load_fleet_snapshot(
+        target_paths.fleet_yaml, _fleet_yaml("target", "boss", BOSS).encode(), None)[0])
+    effects = {"fleet_manifests": {"source": str(source_paths.fleet_yaml), "target": str(target_paths.fleet_yaml)},
+               "fleet_sources": {"source": {"fleet": {"path": str(source_paths.fleet_yaml), "sha256": "source-hash"}},
+                                 "target": {"fleet": {"path": str(target_paths.fleet_yaml), "sha256": "target-hash"}}}}
+    # Selected inputs: the two manifests as they were before this move's roster
+    # edits, and one unrelated host input that must still match.
+    host_input = root / "host-override.yaml"
+    host_input.write_text("reviewed: true\n")
+    inputs = {str(host_input): {"follow_links": True,
+                                "state": config_plan.path_state(host_input, source=True)}}
+    for manifest in (source_paths.fleet_yaml, target_paths.fleet_yaml):
+        inputs[str(manifest)] = {"follow_links": True, "state": {"node": {"kind": "file", "sha256": "old"}}}
+    plan = SimpleNamespace(fleets=("source", "target"), release_id="selected", release_seal="seal",
+                           effects=effects, inputs=inputs)
+    release = SimpleNamespace(release_id="selected", seal_sha256="seal", native_path=package.native,
+                              inputs=SimpleNamespace(artifact_id="artifact"))
+    monkeypatch.setattr(context, "resolve_paths", lambda **_: SimpleNamespace(root=root, package=package))
+    monkeypatch.setattr(activation_state, "read_selection", lambda *_: {"plan_id": "plan", "release_id": "selected"})
+    monkeypatch.setattr(config_plan, "read_plan", lambda *_: plan)
+    monkeypatch.setattr(releases, "read_release", lambda *_: release)
+    monkeypatch.setattr(active_config, "context_from_plan", lambda _plan, name, **_kwargs: (
+        source if name == "source" else frozen_target))
+    def authored_context(paths):
+        fleet, defaults = load_fleet_snapshot(paths.fleet_yaml, paths.fleet_yaml.read_bytes(), None)
+        return SimpleNamespace(paths=paths, fleet=fleet, defaults=defaults)
+
+    monkeypatch.setattr(context, "load_context", authored_context)
+    monkeypatch.setattr(_helpers, "_validation_gate", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(host, "_operator_shell", lambda *_: None)
+    monkeypatch.setattr(supervision_inventory, "Adapter", lambda *_: SimpleNamespace(read=lambda *_: ""))
+    monkeypatch.setattr(supervision_inventory, "_catalog", lambda *_: ("Linux", "", (), set(), {}))
+    monkeypatch.setattr(activation_enrollment, "selected_bot_entry", lambda *_: {"installed": str(root / "units/worker.service"),
+                                    "target": "worker.service"})
+    args = Namespace(root=str(root), bot="worker", to="target", from_fleet="source",
+                     apply=False, cleanup_source=False, force=False)
+    return args, host_input, (source_dir / "fleet.yaml", target_dir / "fleet.yaml")
+
+
+LEAD, BOSS = "    lead: {expertise: [lead]}\n", "    boss: {expertise: [lead]}\n"
+WORKER, OTHER = "    worker: {expertise: [build]}\n", "    other: {expertise: [review]}\n"
+
+
+def _fleet_yaml(name, manager, *bots, extra=""):
+    return (f"fleet:\n  name: {name}\n  manager: {manager}\n  system_defaults: false\n{extra}"
+            "  bots:\n" + "".join(bots))
+
+
+def test_preview_preflight_reads_frozen_manifest_paths_not_source_records(tmp_path, monkeypatch):
+    from claudlobby.config_plan import path_state
+
+    args, _, manifests = _preflight_fixture(tmp_path, monkeypatch)
+    preview = move_bot.dispatch(args)
+    assert preview.data["state"] == "preview"
+    assert preview.data["target_fleet"] == "target"
+    assert preview.data["changed"] is False
+    move = move_bot.preflight(args)
+    assert dict(move.move_inputs) == {str(path): path_state(path, source=True) for path in manifests}
+    assert move.selected_plan_id == "plan"
+    assert move.access_input == str(Path.home() / ".claude/channels/telegram-worker/access.json")
+
+
+def test_move_refuses_pending_unrelated_authoring_before_any_effect(tmp_path, monkeypatch):
+    args, host_input, _ = _preflight_fixture(tmp_path, monkeypatch)
+    host_input.write_text("reviewed: false\n")  # validated but never activated
+    with pytest.raises(CommandFailure, match="authored input changed") as refused:
+        move_bot.dispatch(args)
+    assert "host activate" in refused.value.error.hint
+
+
+@pytest.mark.parametrize(("side", "text", "changed"), [
+    # Another bot's declaration edited in the source manifest.
+    ("source", _fleet_yaml("source", "lead", LEAD, "    other: {expertise: [ship]}\n"), "source fleet.yaml has pending bots"),
+    # Another bot added to the target manifest alongside the move.
+    ("target", _fleet_yaml("target", "boss", BOSS, WORKER, OTHER), "target fleet.yaml has pending bots"),
+    # A fleet-level field edited in the target manifest.
+    ("target", _fleet_yaml("target", "boss", BOSS, WORKER, extra="  mission: pending edit\n"),
+     "target fleet.yaml has pending mission"),
+])
+def test_move_refuses_unrelated_semantic_edits_in_its_own_manifests(tmp_path, monkeypatch,
+                                                                    side, text, changed):
+    args, _, manifests = _preflight_fixture(tmp_path, monkeypatch)
+    manifests[0 if side == "source" else 1].write_text(text)
+    with pytest.raises(CommandFailure, match=changed) as refused:
+        move_bot.dispatch(args)
+    assert "host activate" in refused.value.error.hint

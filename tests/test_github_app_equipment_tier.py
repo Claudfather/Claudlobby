@@ -52,6 +52,7 @@ from claudlobby.composer import collect_env_contracts, scaffold_env_files
 from claudlobby.config import load_fleet
 from claudlobby.credentials import declared_for_fleet
 from claudlobby.mcp_resolve import required_vars
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 REPO = Path(__file__).resolve().parent.parent
@@ -66,6 +67,7 @@ APP_VARS = (
 _HEAD = (
     "fleet:\n"
     "  name: acme\n"
+    "  manager: beta\n"
     "  service_prefix: com.acme\n"
     "  defaults:\n"
     "    expertise: [x]\n"
@@ -102,7 +104,7 @@ def _build(tmp_path: Path, bots: str, *, fragment: str | None = None):
 
     (tmp_path / "fleet.yaml").write_text(_HEAD + bots)
     fleet, _ = load_fleet(tmp_path / "fleet.yaml")
-    paths = Paths(root=tmp_path, fleet_dir=tmp_path)
+    paths = Paths(root=tmp_path, fleet_dir=tmp_path, package=source_package())
     for name in fleet.bots:
         paths.bot_runtime(name).mkdir(parents=True, exist_ok=True)
     return fleet, paths

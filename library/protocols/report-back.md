@@ -4,22 +4,49 @@ title: Report-Back Protocol
 
 # Report-Back Protocol
 
-Workers report via `{{CLAUDLOBBY_ROOT}}/lib/report-back.sh`, which sends a structured message into the manager's tmux session:
+Use the canonical assignment and report commands in `/fleet-ops`. A task ID
+identifies fleet work; an **assignment ID** identifies your current claim on
+that work. Read `claudlobby --json assignment show ASSIGNMENT_ID` when the
+link is unclear. Retain a distinct request UUID for each operation.
 
-```
-[BOTREPORT] <bot> | <status> | <summary> [| pr:<url>] [| issues:<urls>] [| skill:<name>]
-```
-
-**Statuses:** `completed` / `progress` / `blocked` / `failed`.
+Accept the exact assignment when you receive it. Acceptance acknowledges the
+claim; it is not progress and does not complete the task:
 
 ```bash
-report-back.sh <your-bot-name> completed "Added rate-limit middleware" --pr https://github.com/org/repo/pull/123 --task t-1787000000-ab12
-report-back.sh <your-bot-name> blocked "Cannot find SLACK_TOKEN env var in .env" --task t-1787000000-ab12
+claudlobby --json assignment accept ASSIGNMENT_ID --request-id ACCEPT_UUID
 ```
 
-Pass `--task <id>` whenever the dispatch carried one — the watchdog closes your dispatch by that id, and an id-less report does not count for an id'd task (Worker Lifecycle, Step 2). Omit it only for genuinely id-less work.
+Report work against that same assignment:
 
-The manager parses immediately and decides next steps per its decision framework.
+```bash
+claudlobby --json assignment progress ASSIGNMENT_ID --summary "Review started; first check passed" --request-id PROGRESS_UUID
+claudlobby --json assignment complete ASSIGNMENT_ID --summary "Review complete; evidence in PR" --pr https://github.com/org/repo/pull/123 --pr-role reviewed --request-id COMPLETE_UUID
+claudlobby --json assignment block ASSIGNMENT_ID --reason "Missing required credential" --request-id BLOCK_UUID
+```
+
+`block` leaves the assignment with you while you await guidance. If you cannot
+keep ownership, return it; for terminal unsuccessful work, fail it:
+
+```bash
+claudlobby --json assignment return ASSIGNMENT_ID --reason "Cannot retain ownership" --request-id RETURN_UUID
+claudlobby --json assignment fail ASSIGNMENT_ID --reason "Verification failed" --request-id FAIL_UUID
+```
+
+`complete`, `fail`, and `return` are distinct lifecycle decisions. See
+`/fleet-ops` and each verb's `--help` for optional report evidence fields.
+
+If there is **no current assignment**, submit an explicitly unlinked report
+to your own fleet manager; it does not change a task:
+
+```bash
+claudlobby --json fleet reports submit --status completed --summary "Review complete" --request-id REPORT_UUID
+```
+
+A linked report records its task transition before manager notification. Read
+both outcomes; recording does not prove notification. Inspect `claudlobby
+--json request show UUID` after uncertainty. Reuse the same UUID only for the
+same intended operation, and never automatically resend or mint a replacement
+UUID to repeat an uncertain report.
 
 ## Keep `<summary>` to ~200 characters
 
@@ -29,14 +56,12 @@ A 2,500-character summary technically satisfies "one line" and defeats the purpo
 
 **Lead with the verdict**, then the one fact that changes what happens next:
 
-```bash
-# Good — verdict first, detail addressed
-report-back.sh <your-bot-name> completed "Request Changes on #943: search gate fails 2/3 of its own cases. Evidence in PR comment." --pr https://github.com/org/repo/pull/943 --task t-1787000000-ab12
-
-# Bad — correct format, unreadable payload
-report-back.sh <your-bot-name> completed "Reviewed #943. Ran the exact gh issue list command using naive phrasings of the three frictions, first hit at top of 6 results, second was present but buried at position 8 of 27, third returned 0 results because the actual title says hidden env-var feature switches and the word undiscoverable appears nowhere, therefore ..."
-```
+For example: `--summary "Request changes on #943: two search checks fail; evidence in PR comment"`
+routes the decision without pasting the entire review into the manager's
+notification.
 
 **Where the detail goes:** the PR or issue comment, a doc in your `data/` or the fleet's `shared/`, or the branch itself. Put it somewhere addressable *first*, then cite the address. If it has no address yet, that is what to fix — not the wording.
 
-**Never truncate these to fit:** the blocker itself on a `blocked` report, verbatim error output, and any substitution of the instrument or method from what was specified. If a blocker needs 400 characters to be actionable, use them.
+**Never truncate these to fit:** the blocker itself in `--reason`, verbatim
+error output, and any substitution of the instrument or method from what was
+specified. If a blocker needs 400 characters to be actionable, use them.

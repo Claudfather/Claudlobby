@@ -18,6 +18,7 @@ from claudlobby.mcp_resolve import (
     required_vars,
     resolve_placeholders,
 )
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 
@@ -129,6 +130,7 @@ class TestRoundTrip:
         (root / "fleet.yaml").write_text(
             dedent("""\
             fleet:
+              manager: worker
               name: test-fleet
               service_prefix: com.test
               bots:
@@ -197,7 +199,7 @@ class TestRoundTrip:
         (root / "voices").mkdir()
         (root / "runtime" / "bots").mkdir(parents=True)
 
-        return root, Paths(root=root, fleet_dir=None)
+        return root, Paths(root=root, fleet_dir=None, package=source_package())
 
     def test_required_vars_skips_provided_by_composer(self, tmp_path):
         """required_vars must exclude provided_by:composer vars — they are
@@ -301,6 +303,7 @@ class TestSecretAndSourceFields:
         (root / "fleet.yaml").write_text(
             dedent("""\
             fleet:
+              manager: w
               name: t
               service_prefix: com.t
               bots:
@@ -328,7 +331,7 @@ class TestSecretAndSourceFields:
             )
         )
         fleet, _ = load_fleet(root / "fleet.yaml")
-        paths = Paths(root=root)
+        paths = Paths(root=root, package=source_package())
         (req,) = required_vars(fleet.bots["w"], paths)
         assert req.origin == "mcp/acme"
         assert req.source == "cli:gh-token"

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import stat
 from pathlib import Path
 
 
@@ -31,11 +32,11 @@ def open_ro(root: Path, *, timeout: float = 5.0) -> tuple[sqlite3.Connection | N
     opened — the caller prints or degrades, never guesses. ``db_file`` is a
     pure join, so a refusal leaves no directory behind."""
     path = db_file(root)
-    if not path.is_file():
-        return None, f"no plane db at {path}"
     try:
         return connect_ro(path, timeout=timeout), None
-    except sqlite3.Error as exc:
+    except FileNotFoundError:
+        return None, f"no plane db at {path}"
+    except (OSError, sqlite3.Error) as exc:
         return None, f"plane db unreadable: {exc}"
 
 
@@ -49,8 +50,25 @@ def connect_ro(path: Path, *, timeout: float = 5.0) -> sqlite3.Connection:
     open, and while it does the daemon's checkpoint cannot reset the WAL
     (#1905). A loop over a live cursor keeps the statement open for the whole
     loop, so fetch the rows first and do the per-row work after."""
-    if not Path(path).is_file():
-        raise FileNotFoundError(path)
+    # Missing storage requires explicit initialization. An existing directory,
+    # device or FIFO is an unavailable database, never an empty host. Refuse
+    # before SQLite can block on a special file; emit retains its spool path.
+    try:
+        mode = Path(path).stat().st_mode
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        # A broken parent or denied stat is unavailable storage, not a missing
+        # schema. Keep the same operational classification SQLite open uses.
+        error = sqlite3.OperationalError("unable to open database file")
+        # Python 3.10 lacks the named error constants/attributes. Preserve its
+        # existing message-based infrastructure classification in that runtime.
+        if hasattr(sqlite3, "SQLITE_CANTOPEN"):
+            error.sqlite_errorcode = sqlite3.SQLITE_CANTOPEN
+        error.sqlite_errorname = "SQLITE_CANTOPEN"
+        raise error from exc
+    if not stat.S_ISREG(mode):
+        raise sqlite3.OperationalError("unable to open database file: not a regular file")
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=timeout)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA query_only = 1")

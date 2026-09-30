@@ -1,98 +1,92 @@
 # claudlobby/commands/checkins.py
-"""`claudlobby checkins` — the check-in's read door (manager check-in spec §11):
-the decision rows newest-first, plus `--summary` (chunk 3), which rolls the
-window up into FACTS ONLY -- actions, ask rate, considered lengths,
-unavailable frequencies, dispatch outcomes, grouped by project_key -- and
-never a verdict; that judgment is an operator ruling for the whole series, not
-this door's to make. `--limit`, and the `--since`/`--bot` window, are bound in
-SQL (chunk 4, `checkin_rows_sql` in plane/queries.py) rather than scanned in
-Python.
-
-Two connections, on purpose: `brief.plane_session` is THE reachability door for
-the package (no db / no fleet / a plane that has never seen the fleet all refuse
-with a note -- unreachable is not empty), but its connection yields TUPLES
-(plane-readers.py:53-58; status.py:218). The rows are read through
-`plane.db.open_ro`, which sets sqlite3.Row -- the `commands/task.py` pattern. The
-session is a context manager; it is probed and closed here on purpose (nothing is
-read through it), not entered.
-Usage errors (no fleet, an unparseable --since) are rc 2 -- dispatch-overdue.py's
-convention for a read door (2 = malformed call, 3 = cannot answer); report-back
-says 1 for the same case and task-act.sh's write ladder puts usage at 1 too.
-One convention for the plane's READ doors wins over matching either sibling."""
+"""Shared check-in row projection and factual summary for the public reader."""
 
 from __future__ import annotations
 
 import json
-import sys
+import re
 from datetime import datetime, timedelta, timezone
 
-from ..plane.db import open_ro
 from ..plane.queries import (
-    TASK_STATUS_SQL,
     checkin_dispatch_rows_sql,
     checkin_rows_sql,
     fleet_range_params,
 )
-from ._helpers import _resolve_paths, refuse_unreachable
+from ..task_state import TaskStateError, read_tasks
 
-# Raw TASK_STATUS_SQL status -> the bucket a reader acts on: these are
-# reader-facing groupings of the plane's raw task statuses. `cancelled` /
-# `superseded` / `reassigned` get their own `retired` bucket because a
-# withdrawal or a re-dispatch is neither a completion nor a failure. Any
-# arithmetic over these fields is a later, separate concern, and none lives
-# in this door. `dispatch_failed` is NOT a task event (it is derived from
-# transmissions): the send never landed, a failure to start. Anything
-# unmapped reads `open` -- bounded by test_every_terminal_task_event_has_a_bucket.
+# Assignment terminal events, never transmission verdicts, decide outcomes.
+# An unresolved canonical link is unknown rather than a healthy open task.
 _OUTCOME = {
     "completed": "completed",
     "returned_blocked": "blocked",
     "failed": "failed",
     "expired": "failed",
-    "dispatch_failed": "failed",
+    "rejected": "retired",
     "cancelled": "retired",
     "superseded": "retired",
     "reassigned": "retired",
 }
-OUTCOMES = ("completed", "blocked", "failed", "retired", "open", "unjoined")
-
-
-def _outcome_of(status: str | None) -> str:
-    """None = the join row names an assignment the plane does not hold: absence
-    inside a reachable source, reported as `unjoined`, never as `open`."""
-    return _OUTCOME.get(status, "open") if status else "unjoined"
+OUTCOMES = ("completed", "blocked", "failed", "retired", "open", "unknown", "unjoined")
 
 
 def _join_dispatches(conn, fleet: str, refs: list[str]) -> dict[str, list[dict]]:
-    """checkin_id -> its dispatches, resolved to the plane's own status. TWO
-    queries for the whole page, never one per row: the join rows for every id at
-    once, then TASK_STATUS_SQL narrowed by `WHERE a.assignment_id IN (...)` --
-    view.py's own pattern, the shipped constant APPENDED to and never copied."""
+    """Resolve one page's recorded links through one canonical task projection.
+
+    The caller owns the read transaction so the links and reducer share it.
+    """
+    if not conn.in_transaction:
+        raise TaskStateError("check-in join requires a read snapshot")
     ids = [r.split("checkin:", 1)[1] for r in refs if r and r.startswith("checkin:")]
     if not ids:
         return {}
     links = list(conn.execute(checkin_dispatch_rows_sql(len(ids)),
-                              (*fleet_range_params(fleet), *ids)))
-    asg = [r["assignment_id"] for r in links if r["assignment_id"]]
-    status: dict[str, tuple] = {}
-    if asg:
-        ph = ",".join("?" * len(asg))
-        status = {r["assignment_id"]: (r["status"], r["terminal_at"])
-                  for r in conn.execute(
-                      TASK_STATUS_SQL + f" WHERE a.assignment_id IN ({ph})", asg)}
+                              (fleet, *fleet_range_params(fleet), *ids)))
+    if not links:
+        return {}
+    fleet_row = conn.execute("SELECT uid FROM identity_registry WHERE kind='fleet' AND alias=?",
+                             (fleet,)).fetchone()
+    if fleet_row is None:
+        raise TaskStateError("selected fleet identity is unavailable")
+    fleet_uid = fleet_row[0]
+    snapshot = read_tasks(conn, fleet_uid=fleet_uid,
+                          task_ids=[r["work_item_id"] for r in links
+                                    if isinstance(r["work_item_id"], str) and r["work_item_id"]])
+    tasks = {task.task_id: task for task in snapshot.tasks}
+    assignments = {assignment.assignment_id: assignment
+                   for task in snapshot.tasks for assignment in task.assignments}
     out: dict[str, list[dict]] = {}
     for r in links:
-        st, at = status.get(r["assignment_id"], (None, None))
+        task = tasks.get(r["work_item_id"])
+        assignment = assignments.get(r["assignment_id"])
+        problem = ("missing_task" if task is None else
+                   "missing_assignment" if assignment is None else
+                   "mismatched_assignment_task" if assignment.task_id != task.task_id or
+                   assignment.fleet_uid != fleet_uid else
+                   "unresolved_task" if task.blockers or task.state is None else None)
+        terminal = assignment.terminal_event if assignment and problem is None else None
+        outcome = ("unjoined" if problem in {"missing_task", "missing_assignment",
+                                            "mismatched_assignment_task"} else
+                   "unknown" if problem or (terminal and terminal.event not in _OUTCOME) else
+                   _OUTCOME[terminal.event] if terminal else "open")
         out.setdefault(r["checkin_id"], []).append({
-            "assignment_id": r["assignment_id"], "work_item_id": r["work_item_id"],
-            "task_id": r["task_id"], "status": st, "outcome": _outcome_of(st),
-            "terminal_at": at, "occurred_at": r["occurred_at"],
+            "task_id": r["work_item_id"], "assignment_id": r["assignment_id"],
+            "historical_task_reference": r["task_id"],
+            "task_state": task.state if problem is None else None,
+            "assignment_state": assignment.state if problem is None else None,
+            "terminal_event": terminal.event if terminal else None,
+            "outcome": outcome, "link_issue": problem,
+            "delivery": "not_assessed",
+            "terminal_at": terminal.occurred_at if terminal else None,
+            "occurred_at": r["occurred_at"],
         })
     return out
 
 
 def _since(text: str) -> datetime:
-    """The `--since` grammar the read doors share: 24h, 7d, 30m, or an ISO
-    instant (`cmd_report_back` applies the same rule inline, core.py)."""
+    """Check-in `--since`: 24h, 7d, 30m, or an ISO instant.
+
+    Fleet report listing has its own RFC3339-with-offset contract.
+    """
     raw = (text or "").strip()
     now = datetime.now(timezone.utc)
     try:
@@ -102,14 +96,19 @@ def _since(text: str) -> datetime:
             return now - timedelta(days=int(raw[:-1]))
         if raw.endswith("m"):
             return now - timedelta(minutes=int(raw[:-1]))
-        got = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        # Python 3.10 accepts only 3 or 6 fractional-second digits. Normalize
+        # the ISO fraction before parsing so the same window works on every
+        # supported interpreter (plane samples shares this grammar).
+        instant = re.sub(r"(\d{2}:\d{2}:\d{2})[.,](\d+)",
+                         lambda m: m[1] + "." + m[2][:6].ljust(6, "0"), raw)
+        got = datetime.fromisoformat(instant.replace("Z", "+00:00"))
         return got if got.tzinfo else got.replace(tzinfo=timezone.utc)
     except ValueError:
         raise ValueError(f"cannot parse --since '{raw}' (use e.g. 24h, 7d, 30m, or ISO date)") from None
 
 
 def _bot_of(alias: str | None) -> str:
-    return alias.rsplit("/", 1)[-1] if alias else ""
+    return alias.rsplit("/", 1)[-1] if alias and alias.startswith("bot:") else ""
 
 
 def _row(r) -> dict:
@@ -123,7 +122,8 @@ def _row(r) -> dict:
     seen = g.get("inputs_seen") if isinstance(g.get("inputs_seen"), dict) else {}
     return {
         "checkin_id": g.get("checkin_id"), "prev_checkin_id": g.get("prev_checkin_id"),
-        "bot": _bot_of(r["subject_alias"]), "occurred_at": r["occurred_at"],
+        "actor": r["subject_alias"], "bot": _bot_of(r["subject_alias"]),
+        "occurred_at": r["occurred_at"],
         "action": g.get("action"), "project_key": g.get("project_key"),
         "raise": {"decided": bool(raise_.get("decided")), "reason": raise_.get("reason")},
         "rationale": g.get("rationale"),
@@ -134,7 +134,8 @@ def _row(r) -> dict:
 
 
 def collect_checkins(conn, fleet: str, *, since: datetime | None, bot: str | None,
-                     last: bool, raised: bool = False, limit: int | None = None) -> list[dict]:
+                     last: bool, raised: bool = False, limit: int | None = None,
+                     checkin_id: str | None = None) -> list[dict]:
     """Newest first by occurred_at. `since` None means no window (--last);
     `raised` keeps only rows whose raise.decided is true (the ask count).
 
@@ -147,32 +148,40 @@ def collect_checkins(conn, fleet: str, *, since: datetime | None, bot: str | Non
     the raise filter, or `--raised --limit N` would return N rows of which
     only some raised, not N raised rows. `out` is clamped to `limit` in
     Python either way, so the two paths cannot disagree."""
-    push_limit = limit is not None and not raised
-    sql = checkin_rows_sql(since=since is not None, bot=bool(bot), limit=push_limit)
-    params: list = list(fleet_range_params(fleet))
-    if bot:
-        # exact and case-sensitive -- fleet_alias_range's own rule, and
-        # byte-equivalent to PR 1's `_bot_of(...) != bot` given the fleet
-        # range above already holds
-        params.append(f"bot:{fleet}/{bot}")
-    if since is not None:
-        params.append(since.isoformat())
-    if push_limit:
-        params.append(limit)
-    out: list[dict] = []
-    for r in conn.execute(sql, params):
-        row = _row(r)
-        if raised and not row["raise"]["decided"]:
-            continue
-        out.append(row)
-        if last:
-            break
-    if limit is not None:
-        out = out[:limit]
-    joined = _join_dispatches(conn, fleet, [x["checkin_ref"] for x in out])
-    for row in out:
-        row["dispatches"] = joined.get((row["checkin_ref"] or "").split("checkin:", 1)[-1], [])
-    return out
+    own_snapshot = not conn.in_transaction
+    if own_snapshot:
+        conn.execute("BEGIN")
+    try:
+        push_limit = limit is not None and not raised
+        sql = checkin_rows_sql(since=since is not None, bot=bool(bot), limit=push_limit,
+                               checkin_id=checkin_id is not None)
+        params: list = [fleet, *fleet_range_params(fleet), *fleet_range_params(fleet)]
+        if checkin_id is not None:
+            params.append(f"checkin:{checkin_id}")
+        if bot:
+            # exact and case-sensitive -- fleet_alias_range's own rule.
+            params.append(f"bot:{fleet}/{bot}")
+        if since is not None:
+            params.append(since.isoformat())
+        if push_limit:
+            params.append(limit)
+        out: list[dict] = []
+        for r in conn.execute(sql, params):
+            row = _row(r)
+            if raised and not row["raise"]["decided"]:
+                continue
+            out.append(row)
+            if last:
+                break
+        if limit is not None:
+            out = out[:limit]
+        joined = _join_dispatches(conn, fleet, [x["checkin_ref"] for x in out])
+        for row in out:
+            row["dispatches"] = joined.get((row["checkin_ref"] or "").split("checkin:", 1)[-1], [])
+        return out
+    finally:
+        if own_snapshot:
+            conn.rollback()
 
 
 def _block(rows: list[dict]) -> dict:
@@ -189,7 +198,8 @@ def _block(rows: list[dict]) -> dict:
     unavailable: dict[str, int] = {}
     dispatches = 0
     dispatch_outcomes = {k: 0 for k in OUTCOMES}
-    dispatch_statuses: dict[str, int] = {}
+    assignment_states: dict[str, int] = {}
+    terminal_events: dict[str, int] = {}
     for r in rows:
         if r.get("action") in actions:
             actions[r["action"]] += 1
@@ -208,8 +218,12 @@ def _block(rows: list[dict]) -> dict:
         dispatches += len(row_dispatches)
         for d in row_dispatches:
             dispatch_outcomes[d["outcome"]] += 1
-            if d.get("status"):
-                dispatch_statuses[d["status"]] = dispatch_statuses.get(d["status"], 0) + 1
+            if d.get("assignment_state"):
+                state = d["assignment_state"]
+                assignment_states[state] = assignment_states.get(state, 0) + 1
+            if d.get("terminal_event"):
+                event = d["terminal_event"]
+                terminal_events[event] = terminal_events.get(event, 0) + 1
         if r.get("action") == "dispatch" and not row_dispatches:
             # the one place this door counts something the row list does not
             # contain: a dispatch decision with no join row at all -- a quiet
@@ -232,7 +246,8 @@ def _block(rows: list[dict]) -> dict:
         "unavailable": unavailable,
         "dispatches": dispatches,
         "dispatch_outcomes": dispatch_outcomes,
-        "dispatch_statuses": dispatch_statuses,
+        "assignment_states": assignment_states,
+        "terminal_events": terminal_events,
     }
 
 
@@ -251,136 +266,3 @@ def summarize(rows: list[dict]) -> dict:
     if None in groups:
         projects.append({"project_key": None, **_block(groups[None])})
     return {"totals": _block(rows), "projects": projects}
-
-
-def _format_block(block: dict) -> list[str]:
-    """The text rendering of one `_block` -- shared by the totals line and
-    every project group so the two can never drift apart in shape."""
-    c = block["considered"]
-    return [
-        f"    checkins: {block['checkins']}",
-        f"    actions: dispatch={block['actions']['dispatch']} ask={block['actions']['ask']}"
-        f" nothing={block['actions']['nothing']}",
-        f"    raised: {block['raised']} (ask_rate {block['ask_rate']})",
-        f"    no_record: {block['no_record']}",
-        f"    considered: rows={c['rows']} empty={c['empty']} min={c['min']} max={c['max']} mean={c['mean']}",
-        "    unavailable: " + (", ".join(f"{k}={v}" for k, v in block["unavailable"].items()) or "none"),
-        f"    dispatches: {block['dispatches']}",
-        "    dispatch_outcomes: " + " ".join(f"{k}={v}" for k, v in block["dispatch_outcomes"].items())
-        + " (unjoined also counts dispatch decisions that joined nothing, so this can sum to more than dispatches)",
-        "    dispatch_statuses: " + (", ".join(f"{k}={v}" for k, v in block["dispatch_statuses"].items()) or "none"),
-    ]
-
-
-def cmd_checkins(args) -> int:
-    paths = _resolve_paths(args)
-    from ..brief import TEXT_ROW_LIMIT, plane_session, resolve_fleet_name
-
-    fleet = getattr(args, "checkins_fleet", None) or resolve_fleet_name(paths)
-    if not fleet:
-        print("checkins: no fleet is named (--fleet <name>, or a fleet.yaml naming one)"
-              " — the plane's rows are per fleet", file=sys.stderr)
-        return 2
-    if args.limit is not None and args.limit <= 0:
-        # 0 is not silently "no rows" -- an operator's explicit bound must
-        # name at least one row or it is a typo, not a request
-        print(f"checkins: --limit must be a positive integer (got {args.limit})", file=sys.stderr)
-        return 2
-    if args.summary:
-        # both checked before the plane is opened -- a malformed call (rc 2)
-        # never needs a db connection to be recognized as malformed
-        if args.last:
-            print("checkins: --summary and --last are exclusive — a summary of one row states"
-                  " a window it did not read", file=sys.stderr)
-            return 2
-        if args.limit is not None:
-            print("checkins: --summary and --limit are exclusive — a summary over a truncated"
-                  " slice states a window it did not read", file=sys.stderr)
-            return 2
-    try:
-        since = None if args.last else _since(args.since)
-    except ValueError as exc:
-        print(f"checkins: {exc}", file=sys.stderr)
-        return 2
-    plane, note = plane_session(paths, fleet)
-    if plane is None:
-        return refuse_unreachable("checkins", note)
-    plane.close()
-    conn, reason = open_ro(paths.root)
-    if conn is None:
-        return refuse_unreachable("checkins", reason or "plane db unreadable")
-    try:
-        rows = collect_checkins(conn, fleet, since=since, bot=args.bot, last=args.last,
-                                raised=getattr(args, "raised", False), limit=args.limit)
-    finally:
-        conn.close()
-    scope = f"fleet {fleet}" + (f", bot {args.bot}" if args.bot else "") + \
-        (" (newest only)" if args.last else f", last {args.since}") + \
-        (" (asks only)" if getattr(args, "raised", False) else "") + \
-        (f", limit {args.limit}" if args.limit is not None else "")
-
-    if args.summary:
-        summary = summarize(rows)
-        if args.json:
-            print(json.dumps({"schema": 1, "fleet": fleet,
-                              "since": since.isoformat() if since else None,
-                              "scope": scope, **summary}, indent=2))
-            return 0
-        print(f"check-ins --summary — {scope}: {summary['totals']['checkins']}")
-        for line in _format_block(summary["totals"]):
-            print(line)
-        projects = summary["projects"]
-        for p in projects[:TEXT_ROW_LIMIT]:
-            key = p["project_key"] if p["project_key"] is not None else "(none)"
-            print(f"  [{key}]")
-            for line in _format_block(p):
-                print(line)
-        if len(projects) > TEXT_ROW_LIMIT:
-            # same disclosure rule as the row listing below: silent truncation
-            # reads as exhaustive coverage (brief.py's rows() rule)
-            print(f"  ... showing {TEXT_ROW_LIMIT} of {len(projects)} project groups — full list in --json")
-        return 0
-
-    if args.json:
-        # scope/limit disclosed here too -- the same Global Constraint
-        # --summary's --json envelope already honors: --limit is an
-        # operator's explicit bound, applied to BOTH surfaces and stated in
-        # the scope line, so a --json consumer must be able to tell "there
-        # were exactly N rows" from "there were more, cut to N" without
-        # falling back to the text listing
-        print(json.dumps({"schema": 1, "fleet": fleet,
-                          "since": since.isoformat() if since else None,
-                          "scope": scope, "limit": args.limit,
-                          "checkins": rows}, indent=2))
-        return 0
-    if not rows:
-        print(f"no check-ins — {scope}" + ("" if getattr(args, "last", False) else " (--last reads the newest row with no window)"))
-        return 0
-    print(f"check-ins — {scope}: {len(rows)}")
-    for r in rows[:TEXT_ROW_LIMIT]:
-        if r["truncated"]:
-            print(f"  {r['occurred_at']}  {r['bot']}  (record over the size cap — truncated at ingest)")
-            continue
-        if r["record"] is None:
-            print(f"  {r['occurred_at']}  {r['bot']}  (row carries no record)")
-            continue
-        raised = " · raised" if r["raise"]["decided"] else ""
-        proj = f" [{r['project_key']}]" if r["project_key"] else ""
-        print(f"  {r['occurred_at']}  {r['bot']}  {r['action']}{proj}{raised}  {r['checkin_id']}")
-        print(f"      {r['rationale']}")
-        print(f"      surfacing: {r['raise']['reason']}")
-        if r["considered"]:
-            print("      passed over: " + " · ".join(r["considered"]))
-        if r["unavailable"]:
-            print("      unavailable: " + ", ".join(r["unavailable"]))
-        for d in r["dispatches"]:
-            tid = d["task_id"] or "id-less"
-            when = f" ({d['terminal_at']})" if d["terminal_at"] else ""
-            print(f"      → {tid}  {d['outcome']} [{d['status'] or 'no assignment row'}]{when}"
-                  f"  {d['assignment_id']}")
-        if not r["dispatches"] and r["action"] == "dispatch":
-            print("      → no dispatch joined to this decision")
-    if len(rows) > TEXT_ROW_LIMIT:
-        # silent truncation reads as exhaustive coverage (brief.py's rows() rule)
-        print(f"  ... showing the newest {TEXT_ROW_LIMIT} of {len(rows)} — full list in --json")
-    return 0

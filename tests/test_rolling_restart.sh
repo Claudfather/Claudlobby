@@ -4,7 +4,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB_DIR="$SCRIPT_DIR/../lib"
+LIB_DIR="$SCRIPT_DIR/../claudlobby/_runtime_scripts"
 PASS=0; FAIL=0; TOTAL=0
 assert_eq() {
     TOTAL=$((TOTAL + 1)); local d="$1" e="$2" a="$3"
@@ -13,9 +13,11 @@ assert_eq() {
 
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 export CLAUDLOBBY_ROOT="$T"
+export HOME="$T/home"
+mkdir -p "$HOME/.config/systemd/user" "$HOME/Library/LaunchAgents"
 
 echo "=== bridge_fence_write + wait_bridge_ready — the marker-fenced gate ==="
-# shellcheck source=../lib/lib-common.sh
+# shellcheck source=../claudlobby/_runtime_scripts/lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 
 BOT="$T/bot"; mkdir -p "$BOT/logs"
@@ -68,7 +70,7 @@ echo "=== rolling-restart.sh — fleet enumeration + CLI guards ==="
 mkdir -p "$T/local/flatfleet" "$T/local/sysA/nestedfleet"
 printf 'fleet:\n  name: flatfleet\n' > "$T/local/flatfleet/fleet.yaml"
 printf 'fleet:\n  name: nestedfleet\n' > "$T/local/sysA/nestedfleet/fleet.yaml"
-# shellcheck source=../lib/rolling-restart.sh
+# shellcheck source=../claudlobby/_runtime_scripts/rolling-restart.sh
 . "$LIB_DIR/rolling-restart.sh"
 _fleets="$(rr_list_fleets | sort | tr '\n' ',')"
 assert_eq "rr_list_fleets finds flat + nested fleets" "flatfleet,nestedfleet," "$_fleets"
@@ -78,6 +80,7 @@ run_rc() { CLAUDLOBBY_ROOT="$T" bash "$LIB_DIR/rolling-restart.sh" "$@" >/dev/nu
 assert_eq "no fleet and no --all → usage error (2)"   "2" "$(run_rc)"
 assert_eq "unknown option → error (2)"                "2" "$(run_rc --bogus)"
 assert_eq "non-integer --ceiling → error (2)"         "2" "$(run_rc flatfleet --ceiling abc)"
+assert_eq "zero --ceiling → error (2)"                "2" "$(run_rc flatfleet --ceiling 0)"
 assert_eq "--workers-only + --managers-only → error (2)" "2" \
     "$(run_rc flatfleet --workers-only --managers-only)"
 
@@ -139,9 +142,8 @@ echo "=== rolling-restart.sh --managers-only — skips workers, restarts the man
 # A fleet of one manager (zzz-manager) and two workers, named so glob order
 # ("$bots_dir"/*/, alphabetical) processes the workers FIRST — proving both
 # are logged as skipped before the manager is ever reached. Hermetic per the
-# suite contract: pre-stop-handoff.sh and spin-up-bot.sh are stubbed onto a
-# private LIB_DIR override, so this never touches a real tmux session,
-# systemd unit, or launchd job.
+# The selected-release CLI is replaced by a shell function in this test; no
+# native operation or session is reached.
 MGR_BOTS_DIR="$T/local/mgrfleet/runtime/bots"
 mkdir -p "$MGR_BOTS_DIR/aaa-worker-1" "$MGR_BOTS_DIR/bbb-worker-2" "$MGR_BOTS_DIR/zzz-manager"
 cat > "$T/local/mgrfleet/fleet.yaml" <<'YAML'
@@ -155,41 +157,21 @@ fleet:
     zzz-manager:
       expertise: [orchestration]
 YAML
-printf 'BOT_ID=aaa-worker-1\nMANAGER_TMUX=zzz-manager\n' > "$MGR_BOTS_DIR/aaa-worker-1/bot.conf"
-printf 'BOT_ID=bbb-worker-2\nMANAGER_TMUX=zzz-manager\n' > "$MGR_BOTS_DIR/bbb-worker-2/bot.conf"
-printf 'BOT_ID=zzz-manager\nMANAGER_TMUX=zzz-manager\n' > "$MGR_BOTS_DIR/zzz-manager/bot.conf"
+printf 'BOT_ID=aaa-worker-1\nBOT_SERVICE=rr-aaa-worker-1\nMANAGER_TMUX=zzz-manager\n' > "$MGR_BOTS_DIR/aaa-worker-1/bot.conf"
+printf 'BOT_ID=bbb-worker-2\nBOT_SERVICE=rr-bbb-worker-2\nMANAGER_TMUX=zzz-manager\n' > "$MGR_BOTS_DIR/bbb-worker-2/bot.conf"
+printf 'BOT_ID=zzz-manager\nBOT_SERVICE=rr-zzz-manager\nMANAGER_TMUX=zzz-manager\n' > "$MGR_BOTS_DIR/zzz-manager/bot.conf"
+touch "$HOME/.config/systemd/user/rr-zzz-manager.service" "$HOME/Library/LaunchAgents/rr-zzz-manager.plist"
 
-STUB_LIB="$T/stub-lib"
-mkdir -p "$STUB_LIB"
-cat > "$STUB_LIB/pre-stop-handoff.sh" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-cat > "$STUB_LIB/spin-up-bot.sh" <<'SH'
-#!/usr/bin/env bash
-# Hermetic double: a real spin-up would talk to tmux/systemd/launchd. This
-# only satisfies the fence-then-BRIDGE_READY contract wait_bridge_ready reads.
-bot_dir="$1"
-mkdir -p "$bot_dir/logs"
-printf "STUB BRIDGE_READY\n" >> "$bot_dir/logs/startup.log"
-exit 0
-SH
-chmod +x "$STUB_LIB/pre-stop-handoff.sh" "$STUB_LIB/spin-up-bot.sh"
+claudlobby_cli() { printf '%s\n' "$*" >> "$T/restart-cli-calls"; return 0; }
 
-# rr_process_fleet and its lib-common dependents are already in this shell
-# from the source above; drive it directly rather than through rr_main so no
-# real tmux/systemd/launchd call is ever in reach. LIB_DIR is restored right
-# after so the weekly-worker-restart.sh check below still reads the real lib/.
-REAL_LIB_DIR="$LIB_DIR"
+# rr_process_fleet and its lib-common dependents are already in this shell.
 LOG="$T/rolling-restart-managers-only.log"
 RESTARTED=0; SKIPPED=0; FAILED=0
 # CEILING_SET=1 keeps the 0s budget an OPERATOR override here: without it the
 # per-bot derivation would hand this hermetic run a 210s wait if the stub ever
 # failed to write its BRIDGE_READY.
-WORKERS_ONLY=0; MANAGERS_ONLY=1; SKIP_HEALTHY=0; CONTINUE_ON_FAIL=0; CEILING=0; CEILING_SET=1
-LIB_DIR="$STUB_LIB"
+WORKERS_ONLY=0; MANAGERS_ONLY=1; SKIP_HEALTHY=0; CONTINUE_ON_FAIL=0; CEILING=1; CEILING_SET=1
 rr_process_fleet "mgrfleet" || true
-LIB_DIR="$REAL_LIB_DIR"
 
 assert_eq "--managers-only skips worker aaa-worker-1" "true" \
     "$(grep -q "SKIP (worker): aaa-worker-1" "$LOG" && echo true || echo false)"
@@ -201,6 +183,18 @@ assert_eq "--managers-only never skips the manager" "false" \
     "$(grep -q "SKIP (worker): zzz-manager" "$LOG" && echo true || echo false)"
 assert_eq "--managers-only skip count is 2 (both workers)" "2" "$SKIPPED"
 assert_eq "--managers-only restarted count is 1 (the manager)" "1" "$RESTARTED"
+assert_eq "manager restart uses one canonical CLI call with override" "1" \
+    "$(grep -c -- '--fleet mgrfleet bot restart zzz-manager --ceiling 1 --json' "$T/restart-cli-calls")"
+
+# Removing only the private installed definition models a deliberate bot stop.
+# A later fleet roll must not invoke spin-up and enroll it again.
+rm -f "$HOME/.config/systemd/user/rr-zzz-manager.service" "$HOME/Library/LaunchAgents/rr-zzz-manager.plist"
+LOG="$T/rolling-restart-de-enrolled.log"
+RESTARTED=0; SKIPPED=0; FAILED=0
+rr_process_fleet "mgrfleet" || true
+assert_eq "de-enrolled manager is skipped by the next roll" "true" \
+    "$(grep -q 'SKIP (de-enrolled): zzz-manager' "$LOG" && echo true || echo false)"
+assert_eq "de-enrolled manager is not restarted" "0" "$RESTARTED"
 
 echo ""
 echo "=== #1358: a stalled gate must NAME the auth-cache signature, not blame a slow bridge ==="
@@ -211,9 +205,8 @@ echo "=== #1358: a stalled gate must NAME the auth-cache signature, not blame a 
 # keepalive restarts, the restart re-reads the same cache, the poller is skipped
 # again. A fleet-wide rolling restart stalled on exactly this on 2026-09-19.
 #
-# Hermetic on the same suite contract as the section above: a STUB spin-up that
-# deliberately writes no BRIDGE_READY, so the gate fails by construction rather
-# than by timing. CLAUDE_CONFIG_DIR is pinned per-bot, which is also the branch
+# Hermetic on the same suite contract: a failed canonical CLI call is the
+# readiness failure; CLAUDE_CONFIG_DIR is pinned per-bot, which is also the branch
 # this caller needs -- rolling-restart runs at fleet level without the bot env,
 # so it must resolve the cache the BOT consults, not the operator one.
 AC_BOTS_DIR="$T/local/acfleet/runtime/bots"
@@ -226,13 +219,10 @@ fleet:
     acbot:
       expertise: [eng]
 YAML
-printf 'BOT_ID=acbot\nMANAGER_TMUX=acmgr\nCLAUDE_CONFIG_DIR="%s"\n' "$AC_CFG" > "$AC_BOTS_DIR/acbot/bot.conf"
+printf 'BOT_ID=acbot\nBOT_SERVICE=rr-acbot\nMANAGER_TMUX=acmgr\nCLAUDE_CONFIG_DIR="%s"\n' "$AC_CFG" > "$AC_BOTS_DIR/acbot/bot.conf"
+touch "$HOME/.config/systemd/user/rr-acbot.service" "$HOME/Library/LaunchAgents/rr-acbot.plist"
 
-AC_STUB="$T/stub-lib-ac"; mkdir -p "$AC_STUB"
-printf '#!/usr/bin/env bash\nexit 0\n' > "$AC_STUB/pre-stop-handoff.sh"
-# Writes NO BRIDGE_READY: the gate must time out. That is the whole scenario.
-printf '#!/usr/bin/env bash\nexit 0\n' > "$AC_STUB/spin-up-bot.sh"
-chmod +x "$AC_STUB/pre-stop-handoff.sh" "$AC_STUB/spin-up-bot.sh"
+claudlobby_cli() { printf '%s\n' "$*" >> "$T/restart-cli-calls"; return 1; }
 
 # rr_fail raises a real fleet alert. CLAUDLOBBY_ROOT is the throwaway $T, so the
 # tg-post.sh it reaches for does not exist and no send is possible; the fake
@@ -243,10 +233,8 @@ ac_run() {   # $1 = cache content written to the bot CLAUDE_CONFIG_DIR
     printf '%s' "$1" > "$AC_CFG/mcp-needs-auth-cache.json"
     LOG="$2"
     RESTARTED=0; SKIPPED=0; FAILED=0
-    WORKERS_ONLY=0; MANAGERS_ONLY=0; SKIP_HEALTHY=0; CONTINUE_ON_FAIL=1; CEILING=0
-    LIB_DIR="$AC_STUB"
+    WORKERS_ONLY=0; MANAGERS_ONLY=0; SKIP_HEALTHY=0; CONTINUE_ON_FAIL=1; CEILING=1
     rr_process_fleet "acfleet" || true
-    LIB_DIR="$REAL_LIB_DIR"
 }
 
 # NEGATIVE CONTROL FIRST, and it has to be first: the absence asserted here is
@@ -254,7 +242,7 @@ ac_run() {   # $1 = cache content written to the bot CLAUDE_CONFIG_DIR
 # all. An assertion on a silence never shown to be breakable passes forever.
 ac_run '{}' "$T/rr-authcache-clean.log"
 assert_eq "(clean cache) the gate still fails on its ceiling" "true" \
-    "$(grep -q 'FAILED: acbot — no BRIDGE_READY within' "$T/rr-authcache-clean.log" && echo true || echo false)"
+    "$(grep -q 'FAILED: acbot — restart or readiness proof failed' "$T/rr-authcache-clean.log" && echo true || echo false)"
 assert_eq "(clean cache) no AUTH_CACHE_ARMED line" "false" \
     "$(grep -q 'AUTH_CACHE_ARMED' "$T/rr-authcache-clean.log" && echo true || echo false)"
 assert_eq "(clean cache) the failure does not claim the cache is armed" "false" \
@@ -276,7 +264,7 @@ assert_eq "(armed cache) the FAILED line names the signature" "true" \
 assert_eq "(armed cache) the FAILED line strikes the keepalive remedy" "true" \
     "$(grep -q 'keepalive cannot heal this' "$T/rr-authcache-armed.log" && echo true || echo false)"
 assert_eq "(armed cache) the FAILED line still carries the ceiling it waited" "true" \
-    "$(grep -q 'FAILED: acbot — no BRIDGE_READY within' "$T/rr-authcache-armed.log" && echo true || echo false)"
+    "$(grep -q 'FAILED: acbot — restart or readiness proof failed' "$T/rr-authcache-armed.log" && echo true || echo false)"
 
 # UNDETERMINED: the third state. Malformed JSON is the realistic trigger -- the
 # cache is host-global and written by Claude Code at arbitrary moments, so a read
@@ -290,12 +278,42 @@ assert_eq "(unreadable cache) it does NOT claim the cache is armed" "false" \
 assert_eq "(unreadable cache) the FAILED line says an armed cache is not ruled out" "true" \
     "$(grep -q 'FAILED: acbot .* could NOT be read' "$T/rr-authcache-unknown.log" && echo true || echo false)"
 assert_eq "(unreadable cache) the gate still fails on its ceiling" "true" \
-    "$(grep -q 'FAILED: acbot — no BRIDGE_READY within' "$T/rr-authcache-unknown.log" && echo true || echo false)"
+    "$(grep -q 'FAILED: acbot — restart or readiness proof failed' "$T/rr-authcache-unknown.log" && echo true || echo false)"
 
 echo ""
-echo "=== weekly-worker-restart.sh rides the shared gate ==="
-assert_eq "weekly restart calls wait_bridge_ready" "true" \
-    "$(grep -q 'wait_bridge_ready' "$LIB_DIR/weekly-worker-restart.sh" && echo true || echo false)"
+echo "=== weekly-worker-restart.sh delegates the gated restart ==="
+WR_BOTS="$T/local/weeklyfleet/runtime/bots"
+mkdir -p "$WR_BOTS/worker" "$WR_BOTS/manager"
+cat > "$T/local/weeklyfleet/fleet.yaml" <<'YAML'
+fleet:
+  name: weeklyfleet
+  bots:
+    worker:
+      expertise: [eng]
+    manager:
+      expertise: [orchestration]
+YAML
+printf 'BOT_ID=worker\nBOT_SERVICE=rr-weekly-worker\nMANAGER_TMUX=manager\nRC_READY_TIMEOUT_S=090\n' > "$WR_BOTS/worker/bot.conf"
+printf 'BOT_ID=manager\nBOT_SERVICE=rr-weekly-manager\nMANAGER_TMUX=manager\n' > "$WR_BOTS/manager/bot.conf"
+touch "$HOME/.config/systemd/user/rr-weekly-worker.service" "$HOME/Library/LaunchAgents/rr-weekly-worker.plist"
+touch "$HOME/.config/systemd/user/rr-weekly-manager.service" "$HOME/Library/LaunchAgents/rr-weekly-manager.plist"
+cat > "$T/selected-cli" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$RR_CLI_LOG"
+SH
+chmod +x "$T/selected-cli"
+export RR_CLI_LOG="$T/weekly-cli-calls"
+CLAUDLOBBY_CLI="$T/selected-cli" PLANE_EMIT_DISABLED=1 \
+    bash "$LIB_DIR/weekly-worker-restart.sh" weeklyfleet
+assert_eq "weekly worker uses the selected CLI once with decimal timeout" \
+    "--root $T --fleet weeklyfleet bot restart worker --ceiling 210 --json" \
+    "$(cat "$RR_CLI_LOG")"
+assert_eq "weekly manager remains exempt" "true" \
+    "$(grep -q 'RESTART skip (manager): manager' "$T/state/weekly-worker-restart.log" && echo true || echo false)"
+assert_eq "weekly restart calls canonical bot restart" "true" \
+    "$(grep -q 'bot restart "\$bot_id" --ceiling' "$LIB_DIR/weekly-worker-restart.sh" && echo true || echo false)"
+assert_eq "weekly restart does not duplicate handoff" "false" \
+    "$(grep -q '\$LIB_DIR/pre-stop-handoff.sh' "$LIB_DIR/weekly-worker-restart.sh" && echo true || echo false)"
 
 # The same ceiling coupling as rr_bot_ceiling above, pinned by READING the
 # file rather than by driving it: weekly-worker-restart.sh is a top-level

@@ -787,13 +787,12 @@ def _validate_bots(
                     "checkin-role",
                     f"bot '{bot_name}': protocol 'checkin' declared, but "
                     "checkin is a leaf-manager default and this bot is a "
-                    "coordinator (every in-fleet report is itself a "
-                    "manager), so it does not receive it by default. "
+                    "manager with no local workers, so it does not "
+                    "receive it by default. "
                     "Because it is declared here, the skill links and the "
                     "beat WILL inject into it once the fleet arms "
                     "manager-checkin (the trigger selects manager + "
-                    "equipped), and a coordinator's check-in has only "
-                    "managers to dispatch to."
+                    "equipped), but it has no local workers to dispatch to."
                 )
             else:
                 report.warn(
@@ -928,8 +927,8 @@ def _validate_bots(
                     f"bot '{bot_name}': credential_sources['{var_name}'] = "
                     f"'mint:github-app' is RESERVED — no boot-time resolver "
                     f"reads it (deliberate; App-auth mints at use time via "
-                    f"lib/git-credential-github-app, see mcp: [github-app] "
-                    f"and lib/mint-github-token.sh). Supply {var_name} in a "
+                    f"claudlobby/_runtime_scripts/git-credential-github-app, see mcp: [github-app] "
+                    f"and claudlobby/_runtime_scripts/mint-github-token.sh). Supply {var_name} in a "
                     f".env tier or adopt App mode; the resolver arm belongs "
                     f"to #252's per-bot sidecar"
                 )
@@ -1161,7 +1160,7 @@ def _validate_bots(
                         f"bot '{bot_name}': github_app routing requires {var_name}, "
                         f"not set in any tier of .env — the composed helper will "
                         f"fail loudly (quit=1) at the first git auth; set it, or "
-                        f"run lib/setup-github-app.sh (its config-file fallback "
+                        f"run claudlobby host github-app setup (its config-file fallback "
                         f"covers operator/cron shells only, never bot sessions)"
                     )
                 if var_name in bot.env:
@@ -1183,7 +1182,7 @@ def _validate_bots(
                     f"bot '{bot_name}': github_app declares {have} without {need} — "
                     f"the App commit identity composes only when BOTH are set, so "
                     f"commits will carry the operator identity (get both from "
-                    f"lib/setup-github-app.sh output)"
+                    f"claudlobby host github-app setup output)"
                 )
             if git_identity_problem and not app.composes_identity:
                 shared.add(
@@ -2098,8 +2097,8 @@ def _validate_timers(fleet: FleetConfig, report: ValidationReport) -> None:
         report.warn(
             "job-inert",
             "manager-checkin is armed (defaults.jobs.manager-checkin.enroll: "
-            "true) but this fleet has no leaf manager — a manager with at "
-            "least one in-fleet report that is not itself a manager — so no "
+            "true) but this fleet has no local workers — its declared "
+            "manager is the only bot — so no "
             "unit is composed and nothing will fire."
         )
 
@@ -2121,7 +2120,8 @@ def _validate_timers(fleet: FleetConfig, report: ValidationReport) -> None:
             "default — no beat runs, and a check-in happens only when the "
             "operator sends /checkin by hand. Arm it with `defaults: { "
             "jobs: { manager-checkin: { enroll: true } } }` in fleet.yaml, "
-            "then `lib/setup-fleet <fleet>`."
+            "then stage with `config plan --release RELEASE_ID`, review with "
+            "`config diff PLAN_ID`, then ask the operator to apply with `claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir>`."
         )
 
 
@@ -2424,7 +2424,7 @@ def _warn_dead_flags(fleet_env: dict, paths: Paths, report: ValidationReport) ->
                 "dead-flag",
                 f"{paths.env_file}: {key} is a DEAD flag — no shipped door"
                 " reads it (every switch claudlobby ships is listed by"
-                " `claudlobby doctor --switches`); remove the line, or fix the"
+                " `claudlobby host doctor --switches`); remove the line, or fix the"
                 " spelling if you meant one of those"
             )
 
@@ -2467,7 +2467,7 @@ def _validate_mcp_packages(
         report.warn(
             "mcp-unchecked",
             "MCP package check did not run — the shared package grammar "
-            "(lib/mcp-package-grammar.py) could not be loaded from this root, "
+            "(claudlobby/_runtime_scripts/mcp-package-grammar.py) could not be loaded from this root, "
             "so whether the declared packages resolve is UNKNOWN"
         )
         return

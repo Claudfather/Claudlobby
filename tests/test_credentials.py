@@ -8,8 +8,13 @@ credential VALUE ever reaches the output.
 from __future__ import annotations
 
 import os
+import json
+from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from textwrap import dedent
+from types import SimpleNamespace
+import subprocess
 
 import pytest
 
@@ -17,6 +22,7 @@ from claudlobby import credentials as creds
 
 FLEET_YAML = dedent("""\
     fleet:
+      manager: worker
       name: t
       service_prefix: com.t
       accounts:
@@ -26,6 +32,29 @@ FLEET_YAML = dedent("""\
           expertise: [software-engineering]
           integrations: [acme]
 """)
+
+
+def test_generated_credentials_reconcile_selects_own_fleet(tmp_path, monkeypatch):
+    from claudlobby import context
+    from claudlobby.commands import host_credentials
+    from tests.package_fixtures import source_package
+
+    root = tmp_path / "data"
+    own = root / "local" / "own"
+    own.mkdir(parents=True)
+    (root / "fleet.yaml").write_text(FLEET_YAML)
+    (own / "fleet.yaml").write_text(FLEET_YAML.replace("name: t", "name: own"))
+    monkeypatch.setattr(context, "get_resources", source_package)
+    monkeypatch.setenv("FLEET_NAME", "own")
+    checked = []
+    monkeypatch.setattr(creds, "reconcile", lambda paths, fleet:
+                        (checked.append(fleet.name) or [], {}))
+    monkeypatch.setattr(creds, "format_report", lambda findings, scope: "checked")
+    args = SimpleNamespace(root=root, fleet=None, seed=False,
+                           public_command="host.credentials.reconcile")
+    result = host_credentials.dispatch(args)
+    assert checked == ["own"]
+    assert result.data["fleet"] == "own"
 
 INTEGRATION = dedent("""\
     ---
@@ -50,6 +79,7 @@ def estate(tmp_path: Path, monkeypatch):
     estate — impossible to write.
     """
     from claudlobby.config import load_fleet
+    from tests.package_fixtures import source_package
     from claudlobby.paths import Paths
 
     root = tmp_path / "claudlobby"
@@ -65,7 +95,7 @@ def estate(tmp_path: Path, monkeypatch):
     # supervisor.sh is a third required sibling: lib-common.sh unconditionally
     # sources it from its own directory (#1573 task 6).
     for f in ("lib-common.sh", "env-tiers.sh", "supervisor.sh"):
-        (root / "lib" / f).write_bytes((repo / "lib" / f).read_bytes())
+        (root / "lib" / f).write_bytes((repo / "claudlobby/_runtime_scripts" / f).read_bytes())
     # An isolated HOST tier. Without this the tests would read the developer's
     # own ~/.env — non-hermetic, and on a machine that happens to define one of
     # these vars the suite would go green for the wrong reason.
@@ -78,7 +108,8 @@ def estate(tmp_path: Path, monkeypatch):
     (fleet_dir / "fleet.yaml").write_text(FLEET_YAML)
 
     fleet, _ = load_fleet(fleet_dir / "fleet.yaml")
-    paths = Paths(root=root, fleet_dir=fleet_dir)
+    package = replace(source_package(), library=root / "library", native=root / "lib")
+    paths = Paths(root=root, fleet_dir=fleet_dir, package=package)
     return root, fleet_dir, fleet, paths
 
 
@@ -271,6 +302,141 @@ class TestRedaction:
         # ...while still naming the KEY, which is the actionable half.
         assert "ACME_TOKEN" in text
         assert "ORPHAN" in text
+
+    def test_public_reconcile_keeps_failures_and_unknown_without_values(
+        self, estate, monkeypatch, capsys
+    ):
+        from claudlobby import context
+        from claudlobby.__main__ import main
+
+        root, fleet_dir, _fleet, paths = estate
+        monkeypatch.setattr(context, "get_resources", lambda: paths.package)
+        _write_env(root / ".env", ACME_TOKEN="SUPERSECRETVALUE")
+        _write_env(fleet_dir / ".env", ORPHAN="ANOTHERSECRET")
+        assert main(["--root", str(root), "--fleet", "t", "host", "credentials",
+                     "reconcile", "--json"]) == 4
+        output = capsys.readouterr().out
+        result = json.loads(output)
+        assert result["command"] == "host.credentials.reconcile"
+        assert result["data"]["failed"] == 1
+        assert result["data"]["unknown"] == 1
+        assert {row["subject"] for row in result["data"]["findings"]} == {
+            "ACME_TOKEN", "ORPHAN", "acme"}
+        assert "SUPERSECRETVALUE" not in output and "ANOTHERSECRET" not in output
+        with pytest.raises(SystemExit):
+            main(["--root", str(root), "--fleet", "t", "creds-reconcile"])
+
+
+def test_selected_credential_check_passes_exact_fleet_and_refuses_foreign_bot(
+    tmp_path, monkeypatch
+):
+    from claudlobby import credential_check as check
+    from claudlobby.config import BotConfig, FleetConfig
+    from claudlobby.config_plan import path_state
+    from claudlobby.paths import Paths
+    from tests.package_fixtures import source_package
+
+    root = tmp_path / "root"
+    fleet_root = root / "local" / "f"
+    fleet_root.mkdir(parents=True)
+    manifest = fleet_root / "fleet.yaml"
+    manifest.write_text("fleet: {name: f}\n")
+    other_root = root / "local" / "g"
+    other_root.mkdir(parents=True)
+    other_manifest = other_root / "fleet.yaml"
+    other_manifest.write_text("fleet: {name: g}\n")
+    paths = Paths(root=root, fleet_dir=fleet_root, package=source_package())
+    other_paths = Paths(root=root, fleet_dir=other_root, package=source_package())
+    fleet = FleetConfig(name="f", manager="manager", service_prefix="test",
+                        bots={name: BotConfig(bot_id=name, name=name, expertise=["x"])
+                              for name in ("manager", "worker")})
+    destination = SimpleNamespace(paths=paths, fleet=fleet)
+    other_fleet = FleetConfig(name="g", manager="manager", service_prefix="test",
+                              bots={"manager": BotConfig(bot_id="manager", name="manager",
+                                                         expertise=["x"])})
+    other_destination = SimpleNamespace(paths=other_paths, fleet=other_fleet)
+    release_id = "r-" + "a" * 64
+    release = SimpleNamespace(release_id=release_id, native_path=paths.lib)
+    plan = SimpleNamespace(
+        effects={"fleet_sources": {"f": {"fleet": {"path": str(manifest)}},
+                                   "g": {"fleet": {"path": str(other_manifest)}}}},
+        inputs={str(path): {"state": path_state(path, source=True)}
+                for path in (manifest, other_manifest)},
+        frozen_input=lambda source, required: (
+            Path(source["path"]), Path(source["path"]).read_bytes()))
+
+    @contextmanager
+    def admitted(root, expected_release=None):
+        yield release
+
+    monkeypatch.setattr(check, "mutation_admission", admitted)
+    monkeypatch.setattr(check, "read_selection", lambda root: {
+        "release_id": release_id, "plan_id": "p"})
+    monkeypatch.setattr(check, "read_plan", lambda root, plan_id: plan)
+    monkeypatch.setattr(check, "native_environment", lambda paths: {
+        "CLAUDLOBBY_ROOT": str(root), "FLEET_ROOT": str(paths.fleet_config_dir),
+        "CLAUDLOBBY_NATIVE_DIR": str(paths.lib),
+        "CLAUDLOBBY_CLI": str(tmp_path / "selected-cli"),
+        "CLAUDLOBBY_RELEASE_ID": release_id})
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, "tick-complete\n", "")
+
+    monkeypatch.setattr(check.subprocess, "run", run)
+    monkeypatch.setattr(check, "resolve_operation_scope", lambda **kwargs: (
+        destination, SimpleNamespace(bot_id="worker")))
+    with pytest.raises(check.CredentialCheckError, match="only the selected fleet manager"):
+        check.check_credentials(root=root, fleet="f")
+    assert not calls
+
+    monkeypatch.setattr(check, "resolve_operation_scope", lambda **kwargs: (
+        destination, SimpleNamespace(bot_id="manager")))
+    result = check.check_credentials(root=root, fleet="f")
+    assert result.fleet == "f" and result.release_id == release_id
+    argv, kwargs = calls[0]
+    assert argv == [str(paths.lib / "creds-check.sh"), "--selected-release", release_id,
+                    "--fleet", "f", "--fleet-root", str(fleet_root),
+                    "--bots-dir", str(paths.runtime_bots),
+                    "--bot", "manager", "--bot", "worker"]
+    assert kwargs["env"]["FLEET_ROOT"] == str(fleet_root)
+    assert result.state_path == root / "state/creds-check/f.json"
+    assert kwargs["env"]["CLAUDLOBBY_CREDS_STATE"] == str(result.state_path)
+    monkeypatch.setattr(check, "resolve_operation_scope", lambda **kwargs: (
+        other_destination, SimpleNamespace(bot_id="manager")) if kwargs["fleet"] == "g" else (
+        destination, SimpleNamespace(bot_id="manager")))
+    other_result = check.check_credentials(root=root, fleet="g")
+    assert other_result.state_path == root / "state/creds-check/g.json"
+    assert calls[1][1]["env"]["CLAUDLOBBY_CREDS_STATE"] == str(other_result.state_path)
+    assert calls[1][1]["env"]["FLEET_ROOT"] == str(other_root)
+    assert other_result.state_path != result.state_path
+    manifest.write_text("fleet: {name: other}\n")
+    with pytest.raises(check.CredentialCheckError, match="source changed"):
+        check.check_credentials(root=root, fleet="f")
+    assert len(calls) == 2, "a changed source must be refused before another probe"
+
+
+def test_public_credential_check_reports_tick_not_health(estate, monkeypatch, capsys):
+    from claudlobby import context
+    from claudlobby.__main__ import main
+    from claudlobby import credential_check
+
+    root, _fleet_dir, _fleet, paths = estate
+    monkeypatch.setattr(context, "get_resources", lambda: paths.package)
+    monkeypatch.setattr(credential_check, "check_credentials", lambda **kwargs:
+                        SimpleNamespace(fleet="t", release_id="r-selected",
+                                        checks="tick_completed", health="unobserved",
+                                        state_path=root / "state/creds-check/t.json"))
+    assert main(["--root", str(root), "--fleet", "t", "host", "credentials",
+                 "check", "--json"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["command"] == "host.credentials.check"
+    assert result["data"]["credential_health"] == "unobserved"
+    assert result["data"]["state_path"] == str(root / "state/creds-check/t.json")
+    assert main(["--root", str(root), "--fleet", "t", "host", "credentials",
+                 "check"]) == 0
+    assert str(root / "state/creds-check/t.json") in capsys.readouterr().out
 
 
 class TestTierResolution:

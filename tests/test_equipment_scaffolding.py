@@ -21,11 +21,13 @@ import pytest
 
 from claudlobby.composer import collect_env_contracts, scaffold_env_files
 from claudlobby.config import load_fleet
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 FLEET = dedent("""\
     fleet:
       name: acme
+      manager: {manager}
       service_prefix: com.acme
       defaults:
         expertise: [x]
@@ -35,7 +37,7 @@ FLEET = dedent("""\
     """)
 
 
-def _build(tmp_path: Path, *, defaults: str = "", bots: str) -> tuple:
+def _build(tmp_path: Path, *, defaults: str = "", bots: str, manager: str = "beta") -> tuple:
     for kind in ("mcp", "integrations", "expertise", "skills"):
         (tmp_path / "library" / kind).mkdir(parents=True, exist_ok=True)
     (tmp_path / "lib").mkdir(exist_ok=True)
@@ -50,9 +52,9 @@ def _build(tmp_path: Path, *, defaults: str = "", bots: str) -> tuple:
         ' "_env_contract": {"NOTION_KEY": {"description": "Notion",'
         ' "default_tier": "fleet", "secret": true}}}'
     )
-    (tmp_path / "fleet.yaml").write_text(FLEET.format(defaults=defaults, bots=bots))
+    (tmp_path / "fleet.yaml").write_text(FLEET.format(defaults=defaults, bots=bots, manager=manager))
     fleet, _ = load_fleet(tmp_path / "fleet.yaml")
-    paths = Paths(root=tmp_path, fleet_dir=tmp_path)
+    paths = Paths(root=tmp_path, fleet_dir=tmp_path, package=source_package())
     for name in fleet.bots:
         paths.bot_runtime(name).mkdir(parents=True, exist_ok=True)
     return fleet, paths
@@ -123,7 +125,7 @@ def test_fleet_defaults_equipment_stays_fleet_tier(tmp_path: Path) -> None:
 
 def test_a_one_bot_fleet_is_fleet_tier_not_bot_tier(tmp_path: Path) -> None:
     """All-of-one is still all. The degenerate case must not invert the rule."""
-    fleet, paths = _build(tmp_path, bots="    solo:\n      expertise: [x]\n      mcp: [github]\n")
+    fleet, paths = _build(tmp_path, manager="solo", bots="    solo:\n      expertise: [x]\n      mcp: [github]\n")
     assert _tier_of(fleet, paths, "GITHUB_PAT") == "fleet"
 
 

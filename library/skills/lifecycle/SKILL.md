@@ -10,8 +10,8 @@ Full pipeline orchestrated by the manager bot.
 
 ## Flow
 
-1. Dispatch engineer to implement (via tmux send-keys)
-2. Wait for [BOTREPORT] with status
+1. Admit the task, assign the engineer, and deliver the recorded assignment using `fleet-ops`.
+2. Read the linked assignment report and verify its status and artifacts.
 3. Dispatch code reviewer for PR review
 4. If approved → merge PR
 5. If mechanical fixes needed → send back to engineer automatically

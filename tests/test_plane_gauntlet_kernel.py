@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.plane_setup import initialize_plane
+
 from claudlobby.plane import contracts, emit_api, ingest, migrations, queries
 from claudlobby.plane.contracts import (
     ContractViolation,
@@ -33,7 +35,7 @@ from claudlobby.plane.daemon import _recv_line
 from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import emit_batch
 
-LIB = Path(__file__).resolve().parent.parent / "lib"
+LIB = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts"
 H = "a" * 32
 
 
@@ -69,6 +71,7 @@ def _dispatch_triple():
 # Intra-batch duplicate event_id -> contract verdict, zero rows (S7)
 # ---------------------------------------------------------------------------
 def test_intra_batch_duplicate_id_is_a_contract_verdict(tmp_path):
+    initialize_plane(tmp_path)
     dup = "ev_" + "b" * 32
     with pytest.raises(ContractViolation, match="intra-batch duplicate"):
         emit_batch(tmp_path, [_sys_event(dup), _sys_event(dup)])
@@ -78,6 +81,7 @@ def test_intra_batch_duplicate_id_is_a_contract_verdict(tmp_path):
 
 
 def test_distinct_ids_still_land(tmp_path):
+    initialize_plane(tmp_path)
     out = emit_batch(tmp_path, [_sys_event(), _sys_event()])
     assert [o.status for o in out] == ["committed", "committed"]
 
@@ -86,18 +90,21 @@ def test_distinct_ids_still_land(tmp_path):
 # Per-batch identity memo (S11): one resolve per unique alias
 # ---------------------------------------------------------------------------
 def test_batch_resolves_each_alias_once(tmp_path, monkeypatch):
+    initialize_plane(tmp_path)
     calls = []
     real = ingest.resolve_party
 
-    def counting(conn, alias, now):
-        calls.append(alias)
-        return real(conn, alias, now)
+    def counting(conn, alias, now, parent_uid=None):
+        calls.append((alias, parent_uid))
+        return real(conn, alias, now, parent_uid)
 
     monkeypatch.setattr(ingest, "resolve_party", counting)
     emit_batch(tmp_path, _dispatch_triple())
     # 5 resolve sites (created_by, assignee, assigned_by, sender, recipient)
     # over 2 unique aliases -> exactly 2 calls, not 5.
-    assert sorted(set(calls)) == ["bot:f/lead", "bot:f/w1"]
+    assert sorted(alias for alias, _ in calls) == ["bot:f/lead", "bot:f/w1"]
+    assert all(parent_uid is not None for _, parent_uid in calls)
+    assert calls[0][1] == calls[1][1]  # both actors retain the same fleet parent
     assert len(calls) == 2
 
 
@@ -106,6 +113,7 @@ def test_batch_resolves_each_alias_once(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 class TestCaptureLoadOnce:
     def test_content_batch_loads_once(self, tmp_path, monkeypatch):
+        initialize_plane(tmp_path)
         calls = []
         real = emit_api._load_capture_config
 
@@ -118,6 +126,7 @@ class TestCaptureLoadOnce:
         assert len(calls) == 1  # work_item + communication share one load
 
     def test_content_free_batch_never_loads(self, tmp_path, monkeypatch):
+        initialize_plane(tmp_path)
         calls = []
         monkeypatch.setattr(
             emit_api, "_load_capture_config",
@@ -133,6 +142,7 @@ class TestCaptureLoadOnce:
         cfg = tmp_path / "state" / "plane"
         cfg.mkdir(parents=True)
         (cfg / "capture.json").write_text("{not json")
+        initialize_plane(tmp_path)
         out = emit_batch(tmp_path, [_sys_event()])
         assert out[0].status == "committed"
         with pytest.raises(emit_api.CaptureConfigError):
@@ -242,6 +252,7 @@ def test_carrier_accepted_reads_open_at_derivation(tmp_path):
     """The DDL matrix covers ingest; this covers the reducer: a telegram
     dispatch whose only activation evidence is carrier_accepted must read
     'open' in TASK_STATUS_SQL and stay OUT of attention."""
+    initialize_plane(tmp_path)
     emit_batch(tmp_path, _dispatch_triple() + [{
         "event_type": "transmission", "emitter": "gauntlet", "fleet": "f",
         "payload": {"msg_id": f"msg_{H}", "attempt_no": 1,

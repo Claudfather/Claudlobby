@@ -12,7 +12,7 @@ import os
 import subprocess
 from pathlib import Path
 
-LIB_COMMON = Path(__file__).resolve().parent.parent / "lib" / "lib-common.sh"
+LIB_COMMON = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts" / "lib-common.sh"
 
 
 def _verify(bot_dir: Path, *, state: str, timeout: int = 1):

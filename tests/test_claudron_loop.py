@@ -35,6 +35,7 @@ from claudlobby.composer import (
     compose_settings_local,
 )
 from claudlobby.config import BotConfig, FleetConfig, _coerce_bot
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 from claudlobby.validator import validate
 
@@ -63,11 +64,11 @@ def _paths(tmp_path: Path) -> Paths:
     root = tmp_path / "claudlobby"
     (root / "runtime" / "bots").mkdir(parents=True, exist_ok=True)
     (root / "lib").mkdir(exist_ok=True)
-    return Paths(root=root, fleet_dir=root)
+    return Paths(root=root, fleet_dir=root, package=source_package())
 
 
 def _fleet(bot: BotConfig) -> FleetConfig:
-    return FleetConfig(name="t", service_prefix="p", bots={bot.bot_id: bot})
+    return FleetConfig(manager=bot.bot_id, name="t", service_prefix="p", bots={bot.bot_id: bot})
 
 
 def _compose(tmp_path: Path, **bot_kw) -> tuple[dict, BotConfig]:
@@ -700,7 +701,7 @@ class TestSessionEndContention:
         #      rebases the live tree; SessionEnd only pushes. A clone whose push
         #      lost the race is diverged, so a full hook cycle leaves it stranded.
         #      Pinned so nobody re-reads the hooks as the recovery path: on a
-        #      multi-host estate, lib/vault-sync.sh (the scheduled `claudron sync`)
+        #      multi-host estate, claudlobby/_runtime_scripts/vault-sync.sh (the scheduled `claudron sync`)
         #      is what carries a raced capture home.
         for clone in clones:
             subprocess.run(start_argv, env=env, cwd=str(clone), input="{}", capture_output=True, text=True, timeout=60)
@@ -711,7 +712,7 @@ class TestSessionEndContention:
         )
 
         # (4b) Eventual consistency via the reconciliation door: a bounded
-        #      `claudron sync` over each clone — the exact command lib/vault-sync.sh
+        #      `claudron sync` over each clone — the exact command claudlobby/_runtime_scripts/vault-sync.sh
         #      runs — converges the remote to all N notes. Adds never conflict
         #      (distinct files), so one pass suffices; the loop is bounded. THIS is
         #      the recovery #682 says must actually run (reconcile_cycles >= 1).

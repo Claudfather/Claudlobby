@@ -99,7 +99,8 @@ def test_the_check_fires_on_each_shape_it_names():
 
 
 def test_no_plane_reader_holds_a_snapshot_across_per_row_work():
-    files = sorted(REPO.glob("claudlobby/**/*.py")) + sorted(REPO.glob("lib/*.py"))
+    # Runtime scripts live inside the package, so one scan covers both.
+    files = sorted(REPO.glob("claudlobby/**/*.py"))
     assert len(files) > 50, "the scan found almost nothing to scan"
     found = [
         o for f in files for o in offenders(f.read_text(), str(f.relative_to(REPO)))
