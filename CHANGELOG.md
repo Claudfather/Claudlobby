@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — composed Claudron hooks name the bot's vault with `--vault` (Claudron #183)
+
+Since Claudron v0.6.0 the engine's hook snippet names its vault in every command: `<exe> --vault <root> hook <event>` (Claudron #203). Walk-up binds only a directory carrying the `.claudron-vault` identity file, so a hook with no address finds a vault only when its session's environment or working directory happens to reach one. The composer renders a copy of that snippet behind the R3 drift gate, so each vault-wired bot's three hook commands now name that bot's own vault.
+
+- **Not a fix for a live failure on a claudlobby fleet.** A bot already reaches its vault through the `CLAUDRON_VAULT_PATH` export in `bot.conf`. The address keeps the rendered copy equal to the engine's snippet, and makes the hook independent of how its session was launched.
+- **The rendered root** is `claudron_vault_path` with `~` expanded, and anchored at the bot dir when it is relative. The engine reads the address as `Path(hint).resolve()` and never expands `~`, and a shell does not expand a quoted one. The root is shell-quoted and the executable is not, as in the engine.
+- **The address outranks the environment and the working directory.** The engine resolves `--vault` first, then `CLAUDRON_VAULT_PATH`, then walk-up from the working directory. A bot's `bot.conf` export already outranked its working directory, so the vault a bot syncs does not change. What changes: a session-level override of the variable no longer redirects the hooks.
+- **A loop with no vault composes no hooks.** An explicit `claudron_session_loop: true` with no `claudron_vault_path` has no address to render, and `claudlobby validate` already refuses that config.
+- **Nothing else moves.** The addressed form works on every engine back to the 0.4.0 floor, whose `hook` subcommand keeps the global `--vault`. The `hook <event>` identity suffix is unchanged, so clauDNA's PreCompact defer still finds the engine's entry.
+- **The `[vault]` pin moves from `v0.5.3` to Claudron `v0.6.0`,** the release that carries #203: in `pyproject.toml`, in the pin comment in `.github/workflows/conformance.yml`, and in `documentation/integrations/claudron-integration.md` (its headline, the write-lock line and the pin line; `tests/test_claudron_compat.py` holds the headline to the pin). The vault-mode CI lane installs the pinned engine, so the drift gate compares the composed hooks with v0.6.0's `settings_snippet(exe, vault)`.
+- **Tests** (`tests/test_claudron_loop.py`): every command ends `--vault <root> hook <event>`; a root that needs quoting survives the shell; `~` and relative roots; the drift gate against `settings_snippet(exe, vault)`; and end to end, the composed SessionStart command, run from outside a vault that walk-up cannot bind, resolves it, with the unaddressed command as the control.
+
 ### Fixed — the heavy-job slot classifier now matches pip/uv installs and sees through `flock`/`xargs`; a `pytest --collect-only` no longer takes the slot (#2023)
 
 Three gaps from the first cross-fleet canary of the heavy-job slot (#1686/#2015), now that the slot is armed on opted-in bots across every fleet:
