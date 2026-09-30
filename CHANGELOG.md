@@ -18,6 +18,121 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **The other caller #1536 names,** `lib/bench-cold-start.sh`, was deleted in #1858.
 - **`tests/test_cold_start_contract.py`** requires every `bridge_state` call in the setup skill to name the session and a non-empty token.
 
+### Fixed — `setup-fleet` stops filing a critical `script_error` every night on a fleet with no briefing timers (#1707)
+
+`reconcile_briefing_timers` lists the fleet's enrolled briefing timers with
+`systemctl --user list-unit-files`, which exits 1 when its pattern matches
+nothing. On a fleet with no briefing timers, that exit fired the errtrace ERR
+trap inside the process substitution, so the nightly `setup-fleet --jobs-only`
+filed a critical `script_error` at the function's first line. The function and
+the script both carried on correctly. It fired 6 nights of 7 on each of the two
+fleets with no briefing timers, in the week to 2026-09-29.
+
+- **The fix.** The guard moved inside the substitution:
+  `… | awk '{print $1}' || true)`. A guard outside cannot help, because the trap
+  fires in the substitution's own shell. An empty listing means nothing to
+  reconcile, so a real listing failure swallowed with it fails toward doing
+  nothing.
+- **The test harness now matches systemd.** The stub `systemctl` in
+  `tests/test_setup_backbone.py` exited 0 when a pattern matched nothing, which
+  is why no test saw this. It now exits 1 with no output, as systemd 252 does
+  (measured on the Pi). The harness also records every batch that reaches the
+  plane shim, so a test can assert what was filed.
+- **Tests.** `TestBriefingReconcileErrTrap` checks that the no-match case files
+  no row under the real `install_error_trap`. Its positive control checks that a
+  real failure in the same function (an orphan unit file that cannot be removed)
+  still files one.
+- **Not covered.** The class-level pass over `lib/` and its regression gate stay
+  with #1707.
+
+### Fixed — every bot is told what a dispatch's leading `set +H; ` is, and the dispatch protocol stops describing something it does not do
+
+`lib/dispatch.sh` puts `set +H; ` in front of every message except one that starts with a command word and has no `!`. Receivers flagged it as unexplained text at the head of their task. The one explanation lived in the dispatch protocol, which only managers compose, and the worker-lifecycle protocol, which is declared by only a few bots, did not mention it. The pasted-text section every bot composes (`templates/claude.md.j2`) now says what the prefix is and that there is nothing to run, and worker-lifecycle's RECEIVE step says the same beside the receipt-marker line. `tests/test_framed_dispatch_guidance.py` pins it for every composed bot; it fails on the previous template.
+
+**What the prefix does, checked against `lib/dispatch.sh` rather than inferred from its name:** a message that begins with `/`, such as a file path, arrives as text instead of running as a slash command, which is why `dispatch.sh` leaves the prefix off a message that starts with a command word and has no `!`: that one has to run. The code still calls it a history-expansion guard; it does not state this effect as a purpose, so the new text states it as an effect. `lib/start-bot.sh` puts the same prefix in front of the startup prompt, and the new text says so. `set +H` is bash's switch for history expansion, but nothing on this path expands history: `dispatch.sh` is a non-interactive script, where expansion is already off; the send types the bytes literally (`tmux send-keys -l`); and a Claude Code prompt is not a shell. So the dispatch protocol's "disabling bash history expansion, which silently mangles `!` in prompts" described nothing that happens here, and it now says what the prefix does. The history-expansion lesson (`library/lessons/tmux-dispatch-shell-expansion.md`), which most bots compose, gains one clause: it concerns the shell you type a send into, and it points at the new text for the receiving end, so the two no longer contradict each other.
+
+### Fixed — a control note holds the report resolver back again, and `report-back.sh --no-task` declares a report that answers no dispatch (#1981)
+
+Since #1491 a `query`, `cancel`, `compact` or `restart` note lands its
+communication alone, with no assignment. The resolver's guard read the bot's
+newest *assignment*, so a note stopped holding it back. The worker's id-less
+answer to the note was stamped with its live task and closed it as `completed`.
+This happened on the ai-platform fleet at 2026-09-29 04:23:57Z.
+
+- **The guard.** `plane-readers.head()` now also returns nothing while any
+  control note sent to the bot has no id-less report from the bot after it
+  (`answering_control_note`).
+  - The note is found by the dispatch door's provenance (`dispatch-log:`),
+    either through its recipient alias or through the door's `recipient_raw`
+    fallback.
+  - Only an id-less report releases it: one whose communication links no
+    assignment. A report naming one of the bot's own tasks, and a newer task,
+    do not: neither answers a note, and a wrong completion is worse than an
+    open row. A `--task` that links to none of the bot's tasks (a typo,
+    another bot's id) links nothing, so it counts as id-less and releases the
+    hold early. `--no-task` is the safe way to answer a note.
+  - The hold is on resolution only. A terminal report after a note still
+    closes the bot's open raw-text (id-less) dispatches, as any terminal
+    report does.
+  - The one cost: the first id-less report after a note resolves to no task,
+    whatever it is. If it was really finishing an id'd task, that task stays
+    open and pages as overdue, at most one row per note.
+  - Notes sent before the upgrade count too. Workers mostly report with
+    `--task`, so most bots hold a note with no id-less report after it, and
+    each one's next id-less report resolves to no task.
+  - #1491's rows are not brought back, and the `answering_idless` rule is
+    unchanged.
+- **The opt-out.** `report-back.sh --no-task` (or `--task -`) declares a
+  terminal report that answers no dispatch.
+  - It skips the resolver and the id-less closer, and its status marker records
+    `no_task`.
+  - It is the safe way to answer any note, and the only one when the guard
+    cannot see the note (a raw `dispatch.sh` send, or text typed into the
+    pane) or has already been released by another id-less report.
+  - It is refused beside a real `--task` id.
+- **The docs.** `dispatch.md` and `worker-lifecycle.md` now say which notes the
+  automatic guard sees, and when to use `--no-task`.
+- **Tests.**
+  - `tests/test_resolver_control_note_guard.py`, 22 tests, including both gap
+    orders: a report naming one of the bot's own tasks, and a newer task,
+    between a note and its answer.
+  - Two of #1491's pins in `tests/test_dispatch_type.py` asserted the defect: a
+    no-id report after a control note resolved the real row. Both are inverted
+    in place, over all four types. #1491's other property, that a control note
+    mints no assignment, stays pinned.
+  - A `validate-bot-change.sh` scenario that runs the 2026-09-29 sequence
+    through the real doors.
+
+### Fixed — the session digest's model call loads no MCP server, plugin or hook, so it no longer takes Telegram away from every bot on the host (#1972)
+
+`lib/transcript-digest.sh` runs its Haiku pass inside a bot's session end, in the
+bot's directory and with the bot's environment. With default settings, that
+`claude -p` loaded every MCP server and plugin the bot has. The Telegram channel
+plugin found the bot's live poller, deferred to it and exited. Claude Code then
+wrote a **host-global** needs-auth entry, and for the next 15 minutes every bot
+that started on the host skipped its own Telegram server (#1962). On the Pi, the 4
+ai-platform bots run the digest, so each of their session ends set that trap for
+all 21 bots.
+
+The pass now runs with `--strict-mcp-config`, an empty `--mcp-config` and
+`--setting-sources ''`. It loads no MCP server, no plugin and no user, project or
+local settings, so no hook runs either. The prompt, the model and the digest row
+are unchanged.
+
+- `tests/test_transcript_digest.sh` pins that the hook passes all three flags.
+  Each flag has its own assertion, and each was mutated and went red.
+- `tests/test_transcript_digest_isolation.py` runs the real hook with a real
+  `claude` in a throwaway HOME, at zero spend. Two fake plugins exit the way
+  Telegram does, one enabled at the user tier and one at the local tier. The
+  test checks that no needs-auth entry is written, no server starts and no hook
+  runs. A control arm strips only the three flags and must write the entries.
+  It is opt-in (`DIGEST_ISOLATION_REAL=1`), because CI has no `claude` binary.
+- Measured in that fixture on 2.1.281 and 2.1.283:
+  - With the old command line, both plugins wrote an entry. The same pass also
+    ran the directory's own SessionStart and UserPromptSubmit hooks.
+  - With either flag alone, no entry was written. Only `--setting-sources ''`
+    also stopped the hooks.
+
 ### Added — `claudlobby doctor` asks `claudron doctor` about each wired vault, and never applies `--fix` (Claudron #190, part C)
 
 Until now nothing in fleet health said a vault had fallen behind its engine. After the 0.5.2 upgrade, walk-up stopped finding a vault that lacked its identity file, and every hook that found the vault that way failed open without a word (Claudron #183). The Claudron section of `claudlobby doctor` now runs `claudron doctor --json --vault <vault>` for each wired vault this host holds, and adds:
