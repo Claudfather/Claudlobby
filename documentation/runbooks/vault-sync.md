@@ -89,12 +89,15 @@ is precisely the success-shaped output this program exists to end.
 
 ```
 FLEET ALERT vault_sync_failed — vault sync FAILED for vault:<name> (state=…):
-<detail> — run 'claudron sync --check' in that vault; this job never resolves
+<detail> — run 'claudron sync --check --vault <path>'; this job never resolves
 a conflict
 ```
 
-1. **Run the check it names**, in that vault: `claudron sync --check` (or
-   `claudron sync` on an engine without the flag) and read the refusal.
+1. **Run the check it names:** `claudron sync --check --vault <path>` (or
+   `claudron sync --vault <path>` on an engine without `--check`), and read the
+   refusal. Name the vault as the job does (#1993). The walk-up form,
+   `claudron sync --check` run inside the vault, finds nothing on a 0.5.2+
+   engine until the vault's `.claudron-vault` identity file is committed.
 2. **The job does not fix anything, by design.** It never resolves a conflict,
    aborts a rebase or expires a lock — Claudron's `sync` does those or refuses
    them, and a scheduled door that rewrites a tree under a running fleet is the

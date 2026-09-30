@@ -176,6 +176,13 @@ class Switch:
     #: loop), never merely a slower or quieter one.
     target_workflow: bool = False
     why_opt_in: str = ""  #: which of the four categories keeps it off
+    #: COMPOSE_BOT only: what to run after setting the key, and when what it
+    #: composes takes effect. The defaults are the deny-rule shape #1665 set;
+    #: a key whose file is read at SESSION START (#1604's .mcp.json) must say
+    #: restart, or the arm line promises something the key cannot do.
+    compose_steps: str = "claudlobby --fleet <fleet> generate --bot <bot>"
+    takes_effect: str = "it binds on that bot's next tool call, no restart"
+    takes_effect_off: str = "off on the next tool call, no restart"
 
     @property
     def default_on(self) -> bool:
@@ -212,11 +219,10 @@ def _carrier_lines(sw: Switch) -> tuple[str, str]:
     if sw.carrier == COMPOSE_BOT:
         return (
             f"bots.<bot>.{sw.config}: true in fleet.yaml for ONE bot first, then"
-            " claudlobby --fleet <fleet> generate --bot <bot> (it binds on that"
-            f" bot's next tool call, no restart); widen to defaults.{sw.config}"
-            " once it has run clean",
+            f" {sw.compose_steps} ({sw.takes_effect}); widen to"
+            f" defaults.{sw.config} once it has run clean",
             f"{sw.config}: false at bots.<bot> or defaults in fleet.yaml, then"
-            " generate (off on the next tool call, no restart)",
+            f" generate ({sw.takes_effect_off})",
         )
     if sw.carrier == ENROLL_HOST:
         key = sw.config or f"host.jobs.{sw.job}.enroll"
@@ -608,6 +614,31 @@ SWITCHES: tuple[Switch, ...] = (
              "user respects",
     ),
     Switch(
+        key="mcp-direct-launch",
+        scope=GENERATE,
+        polarity=OPT_IN,
+        carrier=COMPOSE_BOT,
+        config="mcp_direct_launch",
+        compose_steps=("claudlobby --fleet <fleet> warm-cache, then generate"
+                       " --bot <bot>"),
+        takes_effect=("it takes effect when that bot next restarts: .mcp.json is"
+                      " read at session start"),
+        takes_effect_off="back on npx at the bot's next restart",
+        why_opt_in="no deployment gate: .mcp.json is read at session start and "
+                   "sessions restart whether or not anyone chose to (keepalive, "
+                   "context restarts), so after the nightly reload-fleet "
+                   "generate a default-on change would reach every bot of every "
+                   "fleet with nobody choosing which went first, and it changes "
+                   "how every MCP server starts. The manifest is the only place "
+                   "one bot can go first",
+        what="launch each exactly pinned npx MCP server as `node <entry>` from "
+             "the copy warm-cache installs under state/mcp/npm, instead of "
+             "through npx, which keeps an idle `npm exec` wrapper resident as "
+             "the parent of every server (#1604: 41 of them held 1.4 GB, "
+             "mostly swap, on the Pi). A server that cannot launch directly "
+             "keeps npx, and generate says which and why",
+    ),
+    Switch(
         key="boot-brief",
         scope=DOOR,
         polarity=OPT_IN,
@@ -799,26 +830,37 @@ def _env_state(cascade, sw: Switch) -> tuple[bool | None, str]:
     return not resolves_to(cascade, sw.env, "0"), tier
 
 
+def _bot_config_value(bot, dotted: str) -> bool:
+    """A per-bot switch's value on one bot, by its manifest key's dotted path
+    (``isolation.shared_config`` -> ``bot.isolation.shared_config``). A path
+    that does not resolve raises: it is a registry typo, not an off switch."""
+    value = bot
+    for part in dotted.split("."):
+        value = getattr(value, part)
+    return value is True
+
+
 def _enroll_state(sw: Switch, host_jobs: dict, fleet_jobs: dict,
                   sweep_on: bool | None,
-                  isolation: tuple[list[str], int] | None = None,
+                  per_bot: dict[str, tuple[list[str], int]] | None = None,
                   ) -> tuple[bool | None, str]:
     """(enrolled, where) from the composed manifests' own config truth."""
     if sw.key == "code-audit-sweep":
         if sweep_on is None:
             return None, ""
         return sweep_on, "fleet.yaml sweep:"
-    if sw.key == "shared-config-isolation":
+    if sw.carrier == COMPOSE_BOT:
         # PER BOT, so neither an env var nor a job can say it: read every
         # bot's own resolved value. On means on for at least one bot, and the
         # source names which, because a canary is exactly one bot of many.
-        if isolation is None:
+        seen = (per_bot or {}).get(sw.key)
+        if seen is None:
             return None, ""
-        on, total = isolation
+        on, total = seen
         if not on:
             return False, "fleet.yaml"
         shown = ", ".join(on[:4]) + (f" (+{len(on) - 4} more)" if len(on) > 4 else "")
-        return True, (f"fleet.yaml isolation.shared_config — {len(on)} of"
+        return True, (f"fleet.yaml {sw.config} — {len(on)} of"
                       f" {total} bot(s): {shown}")
     if not sw.job:
         return None, ""
@@ -888,21 +930,26 @@ def resolve(
                             " is shown, not the shipped default")
     fleet_jobs: dict = {}
     sweep_on: bool | None = None
-    isolation: tuple[list[str], int] | None = None
+    per_bot: dict[str, tuple[list[str], int]] = {}
     if fleet is not None:
         # FleetConfig.defaults IS the merged system<fleet tier (config.py
         # writes it there), so a fleet's `enroll: true` override is already
         # folded in — re-merging here would be a second copy of that rule.
         fleet_jobs = (getattr(fleet, "defaults", None) or {}).get("jobs") or {}
         sweep_on = fleet.sweep_enabled()
-        isolation = (sorted(b.bot_id for b in fleet.bots.values()
-                            if b.isolation.shared_config), len(fleet.bots))
+        # Each per-bot switch's own key, off every bot's resolved config by the
+        # switch's dotted `config` path, so a new one needs no branch here.
+        for s in SWITCHES:
+            if s.carrier == COMPOSE_BOT:
+                per_bot[s.key] = (sorted(b.bot_id for b in fleet.bots.values()
+                                         if _bot_config_value(b, s.config)),
+                                  len(fleet.bots))
 
     rows: list[SwitchState] = []
     for sw in SWITCHES:
         env_on, tier = _env_state(cascade, sw)
         enrolled, where = _enroll_state(sw, host_jobs, fleet_jobs, sweep_on,
-                                        isolation)
+                                        per_bot)
 
         # A door runs only when BOTH gates allow it: the manifest may enroll a
         # unit whose script still no-ops on its own flag, and that combination
