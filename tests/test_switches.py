@@ -174,7 +174,13 @@ def test_exactly_the_categories_that_ship_off():
                       # four list: it deletes nothing, spends nothing, sends
                       # nothing, touches no operator source, and what it arms
                       # writes only under state/heavy-slot.
-                      "heavy-slot"}
+                      "heavy-slot",
+                      # the same arrival category: a composed hook refuses
+                      # GitHub writes on every bot the nightly generate composes
+                      # it for, so the manifest is where one bot goes first.
+                      # Nothing from the four list: it deletes, spends and
+                      # sends nothing, and writes only a visibility cache.
+                      "public-write-guard"}
     for s in sw.SWITCHES:
         if s.polarity == sw.OPT_IN:
             assert s.why_opt_in, f"{s.key} ships off with no stated reason"

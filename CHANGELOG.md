@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — an opt-in guard that refuses a GitHub write putting a listed term into a public repository
+
+A PreToolUse hook, `lib/public-write-guard.sh` (with its decider `lib/public-write-guard.py`), composed for a bot that sets `public_write_guard: true` (a strict bool, per bot or through `fleet.defaults`, like `heavy_slot`). It refuses, and never rewrites, a GitHub-bound write that would put a term from the host's list into a **public** repository. A private or internal repository is untouched.
+
+- **The list is host configuration:** `~/.config/claudlobby/public-write-terms`, one case-insensitive regular expression per line. It is never repository content, and the tests use invented terms.
+- **What it reads is what the write puts in the repository:**
+  - every `mcp__github__*` tool except `get_`/`list_`/`search_`;
+  - the `gh` issue, pr, release, gist, repo and label commands except their reads, and `gh api` with fields (not a GET, not a GraphQL query), including body files and standard input;
+  - `git commit`: messages and added lines;
+  - `git push`: the messages, added lines and new paths of every outgoing commit.
+
+  It does not read removed lines, a `cd` directory, a body file's path or the target's name, so a clean-up commit passes and so does a clean write made from a path that contains a term.
+- **Public is read live, only on a hit:** `gh api repos/OWNER/REPO`, cached for 10 minutes. An unknown answer is never cached.
+- **Failure directions:**
+  - no list: allow, plus a critical `public_write_guard_unarmed` event;
+  - a list that does not compile: refuse every guarded write;
+  - a payload that is not JSON: allow, with a `script_error` breadcrumb;
+  - a hit whose repository or visibility is unknown: refuse;
+  - content it cannot read (a missing body file, a program's output used as a body, a git command run from a directory it cannot name): counts as a hit.
+- **Its ceiling:** it does not follow `eval`, functions, backticks or scripts, and it does not read an annotated tag's own message. It keeps accidents out; it is not a boundary against a caller trying to get past it.
+- **Off switch:** `state/public-write-guard/disabled`, host-wide.
+- **Opt-in:** registered in the switch registry as opt-in for the `heavy_slot` reason. A composed hook has no deployment gate (#1310), so the manifest key is where one bot goes first.
+- **Tests:** `tests/test_public_write_guard.py` drives the real hook with a fake `gh` and real git repositories, in both directions for each shape; `tests/test_public_write_guard_compose.py` covers the composition.
+
 ### Changed — composed Claudron hooks name the bot's vault with `--vault` (Claudron #183)
 
 Since Claudron v0.6.0 the engine's hook snippet names its vault in every command: `<exe> --vault <root> hook <event>` (Claudron #203). Walk-up binds only a directory carrying the `.claudron-vault` identity file, so a hook with no address finds a vault only when its session's environment or working directory happens to reach one. The composer renders a copy of that snippet behind the R3 drift gate, so each vault-wired bot's three hook commands now name that bot's own vault.

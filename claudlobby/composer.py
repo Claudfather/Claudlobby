@@ -2268,6 +2268,12 @@ BRIEF_HOOK_TIMEOUT_S = 10
 #: are read per use from the install's lib/.
 HEAVY_SLOT_HOOK = "$CLAUDLOBBY_ROOT/lib/heavy-slot-guard.sh"
 
+#: The public-write guard's PreToolUse hook, composed for a bot that set
+#: `public_write_guard: true` and for no other. It matches Bash and every
+#: GitHub MCP tool; its script, its decider and the host's list are read per use.
+PUBLIC_WRITE_GUARD_HOOK = "$CLAUDLOBBY_ROOT/lib/public-write-guard.sh"
+PUBLIC_WRITE_GUARD_MATCHER = "Bash|mcp__.*github.*"
+
 
 @functools.cache
 def _brief_cli_probe() -> tuple[str | None, str]:
@@ -2362,6 +2368,21 @@ def _with_heavy_slot_hook(
     opt in runs no process for it at all."""
     out = {k: list(v) for k, v in hooks.items()}
     out.setdefault("PreToolUse", []).append({"command": HEAVY_SLOT_HOOK, "matcher": "Bash"})
+    return out
+
+
+def _with_public_write_guard_hook(
+    hooks: dict[str, list[dict[str, Any]]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Return a copy of the flat fleet.yaml-shaped hooks with the public-write
+    guard's PreToolUse entry appended, matched on Bash and the GitHub MCP tools.
+
+    Composed only for a bot whose ``public_write_guard`` is true, for the same
+    reason as the heavy-job slot: a composed hook is live on every bot the
+    moment ``generate`` writes it (#1310), so the manifest key is the canary."""
+    out = {k: list(v) for k, v in hooks.items()}
+    out.setdefault("PreToolUse", []).append(
+        {"command": PUBLIC_WRITE_GUARD_HOOK, "matcher": PUBLIC_WRITE_GUARD_MATCHER})
     return out
 
 
@@ -2988,6 +3009,8 @@ def compose_settings_local(
         )
     if bot.heavy_slot:
         bot_hooks = _with_heavy_slot_hook(bot_hooks)
+    if bot.public_write_guard:
+        bot_hooks = _with_public_write_guard_hook(bot_hooks)
     hooks = _compose_hooks(bot_hooks)
     # No vault, no hooks: an explicit `claudron_session_loop: true` with no
     # `claudron_vault_path` has no address to render. The engine refuses to

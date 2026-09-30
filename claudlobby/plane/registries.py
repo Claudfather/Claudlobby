@@ -173,6 +173,13 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "heavy_slot_refused": "notice",
     "heavy_slot_unreleased": "notice",
     "heavy_slot_unparsed": "notice",
+    # The public-write guard: a refused GitHub-bound write (the record), and an
+    # armed guard that found no host list. That one is critical because the
+    # protection someone armed is off until the list is written: it shows in
+    # `claudlobby events --critical` and under ALERTS in the bot's brief. It
+    # does not page (fleet-pulse pages a fixed list of types).
+    "public_write_refused": "notice",
+    "public_write_guard_unarmed": "critical",
 }
 
 # ---------------------------------------------------------------------------

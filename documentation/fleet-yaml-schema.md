@@ -244,6 +244,7 @@ Opt a fleet **out** of an on-by-default job the same way, with `enroll: false`.
 | `manager-checkin` | **off** — model spend — one manager turn per idle beat — and it injects into a live session | fleet job | fleet.yaml | defaults.jobs.manager-checkin.enroll: true in fleet.yaml, then generate + lib/setup-fleet |
 | `mcp-direct-launch` | **off** — no deployment gate: .mcp.json is read at session start and sessions restart whether or not anyone chose to (keepalive, context restarts), so after the nightly reload-fleet generate a default-on change would reach every bot of every fleet with nobody choosing which went first, and it changes how every MCP server starts. The manifest is the only place one bot can go first | generate | fleet.yaml bots.<bot> → generate | bots.<bot>.mcp_direct_launch: true in fleet.yaml for ONE bot first, then claudlobby --fleet <fleet> warm-cache, then generate --bot <bot> (it takes effect when that bot next restarts: .mcp.json is read at session start); widen to defaults.mcp_direct_launch once it has run clean |
 | `mcp-package-probe` | **off** — reaches the NETWORK on a compose. A generate must stay offline and fast by default, and a registry outage must never be the reason a fleet cannot compose. The offline half of the check (is the package pinned?) is unconditional and needs no flag | generate | fleet .env | CLAUDLOBBY_MCP_PROBE_ENABLED=1 in the fleet-tier .env |
+| `public-write-guard` | **off** — no deployment gate: a composed hook is live on every bot the next generate composes it for (#1310), with no restart in between, and this one refuses GitHub writes, so the manifest is the only place one bot can go first | generate | fleet.yaml bots.<bot> → generate | bots.<bot>.public_write_guard: true in fleet.yaml for ONE bot first, then claudlobby --fleet <fleet> generate --bot <bot> (it binds on that bot's next tool call, no restart); widen to defaults.public_write_guard once it has run clean |
 | `session-digest` | **off** — model spend (a Haiku pass per finished session) | door | fleet.yaml env: → bot.conf | SESSION_DIGEST_ENABLED=1 in fleet.yaml bots.NAME.env: (then generate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `shared-config-isolation` | **off** — no deployment gate: a composed deny binds on the bot's next tool call with no restart in between, and the nightly reload-fleet generate would carry a default-on rule set onto every bot of every fleet with nobody choosing to — the manifest is the only place one bot can go first | generate | fleet.yaml bots.<bot> → generate | bots.<bot>.isolation.shared_config: true in fleet.yaml for ONE bot first, then claudlobby --fleet <fleet> generate --bot <bot> (it binds on that bot's next tool call, no restart); widen to defaults.isolation.shared_config once it has run clean |
 | `weekly-worker-restart` | **off** — bounces live worker sessions (context is the thing this system exists to keep) | fleet job | fleet.yaml | defaults.jobs.weekly-worker-restart.enroll: true in fleet.yaml, then generate + lib/setup-fleet |
@@ -541,6 +542,42 @@ bots:
 - **It only counts bots that opted in.** A heavy job run by a bot without the key takes no slot and is refused by none.
 
 To arm one bot, set the key and run `claudlobby --fleet <fleet> generate --bot <bot>`. The hook binds on that bot's next tool call, with no restart; measured with a headless session on claude 2.1.281. To widen it, set `defaults.heavy_slot: true`. A bot's own `false` still opts that bot out.
+
+### `bots.<name>.public_write_guard` / `fleet.defaults.public_write_guard`
+
+Opt-in, off by default. A PreToolUse guard that refuses a GitHub-bound write when it would put a term from the host's list into a **public** repository. A private or internal repository is untouched: the terms are allowed there.
+
+```yaml
+bots:
+  scout:
+    public_write_guard: true   # STRICT bool: a typo string is a parse error, never an arming
+```
+
+- **The list is host configuration, never repository content.** It lives in `~/.config/claudlobby/public-write-terms`: one case-insensitive regular expression per line, with `#` comment lines. No term goes in a repository, test, issue, PR, commit or doc.
+- **What it reads is what the write puts in the repository:**
+  - an `mcp__github__*` tool that is not a read (`get_`, `list_`, `search_`): every string in its input except `owner` and `repo`;
+  - a `gh` command in the issue, pr, release, gist, repo or label group that is not a read (`view`, `list`, `status`, `diff`, `checks`, `checkout`, `download`, `clone`, `browse`): its own words, the files it names as a body, and its standard input. `gh api` counts when it sends fields, unless it is a GET or a GraphQL query;
+  - `git commit`: its messages, and the lines and new paths it adds;
+  - `git push`: the messages, added lines and new paths of every commit it would send. For git this is the complete check, since a commit publishes nothing until it is pushed.
+
+  It does not read a directory named by `cd`, a body file's path, or the target repository's name, so a clean write made from a path that contains a term passes. It does not read removed lines either, so a commit that takes a term out passes.
+- **Public means public at write time.** Only a hit asks where the write goes, so a write with no hit makes no call. The repository's visibility is read live (`gh api repos/OWNER/REPO`) and cached for 10 minutes in `state/public-write-guard/visibility.json`, so a repository made public is seen as public within 10 minutes. An unknown answer is never cached.
+- **It refuses with a reason and never rewrites.** The reason names the repository, its visibility and which part matched (the command, a body file, the staged changes, the commits to push), never the matched text.
+- **Failure directions**, each chosen on purpose:
+
+  | case | what happens |
+  |---|---|
+  | no list file | allow, and a critical `public_write_guard_unarmed` event in `claudlobby events` (it does not page) |
+  | a list that does not compile | refuse every guarded write, naming the error |
+  | a payload that is not JSON | allow, with a `script_error` breadcrumb |
+  | a hit whose repository cannot be named, or whose visibility cannot be read | refuse, saying which |
+  | content it cannot read: a missing body file, a program's output used as a body, a git command run from a directory it cannot name (a command substitution) | counts as a hit |
+  | a remote that is not github.com, or a repository with no remote | out of scope, allowed |
+
+- **Its ceiling.** It reads the shell as people write it. `eval`, a shell function, backticks, and a script file that runs `git` or `gh` are not followed, and an annotated tag's own message is not read. It keeps accidents out of public repositories; it is not a boundary against a caller trying to get past it.
+- **The off switch**, host-wide and instant: `touch $CLAUDLOBBY_ROOT/state/public-write-guard/disabled`.
+
+To arm one bot, write the host's list, set the key, and run `claudlobby --fleet <fleet> generate --bot <bot>`. The hook binds on that bot's next tool call.
 
 ### `bots.<name>.mcp_direct_launch` / `fleet.defaults.mcp_direct_launch`
 
