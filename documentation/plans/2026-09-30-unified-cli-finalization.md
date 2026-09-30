@@ -138,6 +138,75 @@ commit `12a1bcc6a9afc6a88af17a528fb1523c61aeed96`. Before that commit, current m
 was still `dd789c52` and the published #1989 head was still `cc63d665`. Hosted checks must be read from the current PR head; these local results do
 not establish a hosted pass.
 
+## Implementation batch above `2278690a`
+
+This batch is recorded in code commit `ac3ef171cb21d12b5ab15f96ec7a83c4cc926eff`,
+above `2278690a6141a2e34cfa8b48c699ce172769253d`. Its tested code tree is
+`b9855cbc4c1ed7bd1e08a747567e13a629b034b1`. Each finding was checked against source
+before acceptance. A static integration review of the staged diff found three
+issues, and all three were addressed before the final run:
+
+- a stale updater test string;
+- the check-in read order;
+- a stale-socket move refusal.
+
+### Lifecycle and move
+
+| Finding | Disposition |
+|---|---|
+| [S4b-06](https://github.com/Claudfather/Claudlobby/pull/1989#discussion_r4137332649) purge WIP | Corrected in code. The one shared `move_bot.source_wip` owner refuses before any deletion on a dirty tree, detached or unreadable HEAD, missing upstream, unpushed commits on any local branch, a stash, or any Git error or timeout. It strips inherited `GIT_*` variables. `bot remove --purge` reads WIP only after a quiet precondition, under the lifecycle lock ([`bot_remove.py`](../../claudlobby/commands/bot_remove.py) `_purge_quiet`): preflight must prove the native unit retired, and both the retained private socket and `.tmux-env` must be absent. Otherwise purge refuses, with `native_outcome: unattempted`, before WIP or teardown. `bot move` also refuses unpushed source work. **Limits:** detached processes outside tmux and the retired unit are not covered, matching `assert_quiescent`. Non-Git `projects/` directories and ignored files are not guarded. A socket file left by a clean tmux exit blocks purge until it is removed by hand. |
+| [S4a-03](https://github.com/Claudfather/Claudlobby/pull/1989#discussion_r4137319942) stale socket after stop | Corrected for `bot stop`. After the exact unit is disabled or booted out, `svc_bot_disenroll_exact` retires a stale private server only when tmux reports no server for that exact socket. A live server holding another session, or any other tmux failure, still refuses. `assert_quiescent` keeps its own socket probe. |
+| [S4b-02](https://github.com/Claudfather/Claudlobby/pull/1989#discussion_r4137332630) move from a stopped source | Corrected in code. Move observes the source through the frozen installed path and native target. `absent` needs no `--force`, and `--force` accepts only `ready`. When the adapter reports `unknown` after a clean stop that left a stale socket, move runs the existing `assert_quiescent` kernel proof. Only if that proof passes is the source treated as absent; nothing is cleaned up. Every other unknown result refuses, even with `--force`. The adapter classification was deliberately not changed. This is existing proof reused, **not** new native evidence, and the connect probe's behavior under a full listen backlog on macOS is unmeasured. |
+| [S4b-10](https://github.com/Claudfather/Claudlobby/pull/1989#discussion_r4137332673) fleet restart | Corrected in code. `fleet restart` records a de-enrolled bot as `skipped` (`reason: de_enrolled`) and continues. Every other refusal, effect or unavailable result still stops the sweep, and `start`/`stop` are unchanged. The skip reason appears only in JSON. |
+| [S4b-07](https://github.com/Claudfather/Claudlobby/pull/1989#discussion_r4137332659) lock contention | Minimum mapping. A busy host lifecycle lock returns a retryable `conflict` with nothing attempted. There is still one host-wide lock. `bot remove` under contention and the fleet-sweep busy message remain unchanged. |
+| [S4a-05](https://github.com/Claudfather/Claudlobby/pull/1989#discussion_r4137319964) missing timeout | Corrected in code. Without `timeout`/`gtimeout`, the updater logs a distinct skip, sends a `binary_update_skipped` notice naming coreutils, installs nothing and no longer reports a false unrunnable binary. Such hosts never update in place. |
+| [S4b-11](https://github.com/Claudfather/Claudlobby/pull/1989#discussion_r4137332679) move activates unreviewed host config | **Partial: risk reduction, not reviewed-plan binding.** Before any effect, move refuses when the target fleet is not selected, the fleet set differs, the source or target roster differs from the frozen roster beyond this bot's move, or any recorded selected input outside the source and target `fleet.yaml` fingerprints differently. After staging and before activation, it refuses a staged plan whose shared inputs differ outside those two files. **Limits:** the input owner is file-granular, so unrelated fleet-level fields, other bots' blocks or teams inside those two manifests remain unguarded. Inputs that appear only in the staged plan are allowed and are not all scoped to the move. `--apply` does not take a previewed plan ID. A bot-written env tier or a changed `~/.gitconfig` now causes a refusal. |
+
+### Setup and activation refusals
+
+| Finding | Disposition |
+|---|---|
+| [S3b-07](https://github.com/Claudfather/Claudlobby/pull/1989#discussion_r4137307952) | Corrected for handoff refusals. `ActivationRefusal` carries product-authored text only, and `host activate` discloses it as a conflict. Other activation errors still show only generic native results. With no activation record, the result says `recording: unchanged` and gives no resume advice. Timeouts are `unavailable`. Other pre-record refusals in `activation.py` remain generic, and on `--resume` a refusal gets a less specific message. |
+| [S3a-01](https://github.com/Claudfather/Claudlobby/pull/1989#discussion_r4137296113), [S3a-02](https://github.com/Claudfather/Claudlobby/pull/1989#discussion_r4137296129) | Corrected in code. `fleet setup` checks the authored name, the YAML and the selection before copying. It restores prior bytes on a staging failure, leaving a concurrent edit alone. It refuses system containers and nested or ambiguous destinations before any flat write. Nothing is restored once activation begins. Staging in the test is stubbed. |
+| [S3a-06](https://github.com/Claudfather/Claudlobby/pull/1989#discussion_r4137296154), [S3a-11](https://github.com/Claudfather/Claudlobby/pull/1989#discussion_r4137296198) | Corrected in code. Assembly failures disclose only allowlisted text, the step or the retained release path, never subprocess output. `host setup` requires `jq`. |
+| [S6-01](https://github.com/Claudfather/Claudlobby/pull/1989#discussion_r4137368228) | Documentation corrected. Getting started probes a real disposable venv and no longer exits the pasting shell. The mandatory cold-host onboarding run has **not** been performed. |
+
+### Read truthfulness and coaching
+
+| Finding | Disposition |
+|---|---|
+| [S5a-07](https://github.com/Claudfather/Claudlobby/pull/1989#discussion_r4137346532) | Corrected in code. Only a complete, clean scan of an existing trusted directory reports an idle bot as observed zero. Unavailable bot or fleet coverage refuses with `usage: null`. `brief --usage-since` still prints zeros beside `unavailable`. |
+| [S5a-05](https://github.com/Claudfather/Claudlobby/pull/1989#discussion_r4137346507), [S5a-06](https://github.com/Claudfather/Claudlobby/pull/1989#discussion_r4137346518) | Corrected in code. Board and stale-task arms join canonical task deliveries by task, assignment, recipient, fleet and host, preferring `dispatch_msg_id`. Overview attention and overdue use the board's own card owner and disclose their scopes and the 200-card cap. Per-poll cost has no Pi timing. The stdlib readers and the brief paths were not reviewed for the same join. |
+| [S2-05](https://github.com/Claudfather/Claudlobby/pull/1989#discussion_r4137294141), [S6-10](https://github.com/Claudfather/Claudlobby/pull/1989#discussion_r4137368255) residual | fleet-status, selfcheck, fleet-pulse and fleet-digest now use own-fleet public reads, with no tmux loops or `--fleet` grants. The check-in skill's `--fleet` grants and fleet-digest's scripted assembly step remain. |
+| [S2-02](https://github.com/Claudfather/Claudlobby/pull/1989#discussion_r4137294084) check-in residual | Corrected in code. Manager check-in scans the staged and spool queues (bounded) **before** the committed database read. This closes the commit-then-delete race in which ingest could land between the two reads. A pending, unreadable or over-bound queue skips the beat without firing or writing. Tokens are matched literally, quarantined batches are not consulted, and an emission that fails outright can still let the next beat fire. There is no retry, and O1 is unchanged. |
+
+### Batch validation
+
+All runs used private Git exports, a private HOME/TMPDIR, packaged resources and
+`PLANE_EMIT_DISABLED=1`, with no live or native services. The counts overlap; do
+not add them.
+
+- **First run, tree `dce1e5f1`:** 26 focused modules gave **542 passed, 2
+  failed, 2 skipped** in 157.61 seconds. The skips were Linux/proc-only cases on
+  macOS. The two failures:
+  - a move fixture lacked its frozen native target;
+  - an updater log literal tripped the version-reader guard.
+
+  The fixture and the log wording were corrected; no production refusal changed.
+- **Affected rerun, tree `74e93f4c`:** `test_move_bot.py` and
+  `test_claude_version.py` gave **75 passed** in 15.80 seconds.
+- **Shell suites:** the supervisor adapter passed **130/130**; the updater
+  passed **19/19**, including the rerun after the wording correction.
+- **Final follow-up, tree `b9855cbc`:** the move, bot-remove, bot-operations,
+  fleet-operations and manager check-in modules gave **83 passed** in 6.97
+  seconds.
+
+Hosted checks on `2278690a` are historical and do not certify this batch: six
+passed, while [Ubuntu/Python 3.10](https://github.com/Claudfather/Claudlobby/actions/runs/36729475605/job/109934938363)
+was cancelled after an hour in the apt prerequisites step. It never reached
+tests, so that lane remains unverified. No current-head review,
+real native or Pi proof, or production change exists for it.
+
 ## Host conversion and outstanding gates
 
 Fresh hosted checks and external review of the final commit are required; no
@@ -157,5 +226,16 @@ The following remain unverified:
 - interrupted native activation recovery, with no walk-back route;
 - normal-load timing;
 - narrow-grant session proof;
-- protected production adoption. Lumbergh's restart hold remains in force. No live checkout,
-fleet generation, service, deployment, GitHub comment or review request was made.
+- protected production adoption;
+- the mandatory cold-host onboarding run;
+- retirement of already-installed updaters and pullers on each host;
+- the remaining migration items: old-ingest drain and a public legacy preview;
+- a decision for S3b-06: activation still re-enrolls and starts a stopped bot that
+  has no work, so run intent must either be frozen or the effect documented;
+- runbook gaps (S9-05/S9-06/S9-09): the queue-drain step, reconciling open rows,
+  the `fleet.manager` and runner-marker preflight lines, and the pre-activation
+  rollback guidance.
+
+Lumbergh's restart hold remains in force. This record makes no claim that the
+branch is ready to merge or that the epic is complete. No live checkout, fleet
+generation, service, deployment, GitHub comment or review request was made.

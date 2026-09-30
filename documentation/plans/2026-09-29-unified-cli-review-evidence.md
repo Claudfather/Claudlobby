@@ -114,4 +114,11 @@ No production checkout, generated fleet, installed service or protected manager 
 
 ## Later evidence
 
-**Measured, recorded elsewhere:** the main-integration validation is in the [main-integration record](2026-09-30-unified-cli-main-integration.md#validation). The failed [run 36722345010](https://github.com/Claudfather/Claudlobby/actions/runs/36722345010) on `cc63d665` and the local correction selections are in the [finalization record](2026-09-30-unified-cli-finalization.md#ci-corrections-and-validation). This includes 116 activation, handoff, state, unit, inventory and host-command tests at tree `a1caca9d` covering the pre-pause handoff preflight; they used adapter fixtures, not native services. Those selections overlap and are not additive. Hosted CI on the next published head is still required.
+**Measured, recorded elsewhere:** the main-integration validation is in the [main-integration record](2026-09-30-unified-cli-main-integration.md#validation). The failed [run 36722345010](https://github.com/Claudfather/Claudlobby/actions/runs/36722345010) on `cc63d665` and the local correction selections are in the [finalization record](2026-09-30-unified-cli-finalization.md#ci-corrections-and-validation). This includes 116 activation, handoff, state, unit, inventory and host-command tests at tree `a1caca9d` covering the pre-pause handoff preflight; they used adapter fixtures, not native services. Those selections overlap and are not additive. The [implementation batch above `2278690a`](2026-09-30-unified-cli-finalization.md#batch-validation) records the following isolated local runs for code commit `ac3ef171`:
+
+- 542 passed, 2 failed and 2 Linux-only skips at first;
+- 75 passed on the affected rerun;
+- the 130/130 supervisor and 19/19 updater shell suites;
+- 83 passed in the final follow-up modules.
+
+These counts also overlap. The earlier hosted results on `2278690a` do not certify that batch. Hosted CI on the next published head is still required.
