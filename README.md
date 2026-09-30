@@ -253,3 +253,7 @@ Opt-in and dormant — a fleet that declares no `github_app:` is unaffected.
 This repo is in active migration from the older "one-dir-per-bot" template model to the compositor. The current layout is: `library/` (sources), `lib/` (lifecycle scripts), `runtime/` (output), `voices/` (overlays).
 
 PRs welcome.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE) for the notices that travel with it: the copyright notice, and the MIT License notice for three outside contributions made while the project declared MIT.

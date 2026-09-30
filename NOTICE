@@ -1,0 +1,47 @@
+Claudlobby
+Copyright 2026 Chris Rogers
+
+This product includes contributions by two outside contributors, named here
+by their GitHub handles. They were merged while the project's pyproject.toml
+declared the MIT License (license = { text = "MIT" }, from the first commit
+on 2026-05-07 until the move to the Apache License 2.0). The project had no
+license file at the time. The pull requests are in the Claudfather/Claudlobby
+repository on GitHub:
+
+- #190 by 0xbeamish changed lib/fleet-state-update.sh, lib/lib-common.sh and
+  lib/start-bot.sh.
+- #191 by 0xbeamish added library/protocols/direct-mention-response.md,
+  library/protocols/inbound-acknowledgment.md and
+  library/protocols/roster-awareness.md.
+- #271 by GHX5T-SOL changed claudlobby/__main__.py, claudlobby/diff.py,
+  claudlobby/newbot.py, claudlobby/paths.py and tests/test_newbot.py, and
+  added tests/test_paths.py.
+
+Later changes have modified or removed some of these lines. Each pull
+request's diff is the exact record of what it contributed.
+
+The portions of this software that come from these pull requests are
+accompanied by the following notice:
+
+MIT License
+
+Copyright (c) 2026 0xbeamish
+Copyright (c) 2026 GHX5T-SOL
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
