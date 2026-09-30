@@ -143,7 +143,8 @@ def test_a_taken_slot_refuses_the_call_before_anything_runs(se):
     assert decision["permissionDecision"] == "deny"
     reason = decision["permissionDecisionReason"]
     assert "NOT RUN" in reason and "(1 of 1)" in reason
-    assert "testfleet/alpha" in reason and "pytest -q" in reason
+    assert "testfleet/alpha" in reason and "pytest" in reason
+    assert "pytest -q" not in reason  # the refusal names the tool, never the command
     refused = [e for e in _events(se) if e["type"] == "heavy_slot_refused"]
     assert len(refused) == 1 and refused[0]["data"]["where"] == "hook"
     (se.tmp / "release").touch()
@@ -180,4 +181,4 @@ def test_the_rewritten_command_runs_the_job_under_the_slot(se):
     )
     assert p.returncode == 0 and list(se.tmp.glob("ran.*"))
     record = json.loads((se.state / "slot-0.lock").read_text())
-    assert record["command"] == "pytest -q" and record["state"] == "released"
+    assert record["shape"] == "pytest -q" and record["state"] == "released"

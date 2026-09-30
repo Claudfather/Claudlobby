@@ -141,7 +141,7 @@ class TestTheSlot:
         rec = _record(se)
         assert rec["state"] == "held"
         assert (rec["fleet"], rec["bot"]) == ("testfleet", "alpha")
-        assert rec["command"] == "pytest -q"
+        assert rec["shape"] == "pytest -q" and "command" not in rec
         assert rec["pid"] == p.pid and rec["slot"] == 0
         assert rec["boot_id"] == "this-boot" and rec["started_at"].endswith("Z")
         (se.tmp / "release").touch()
@@ -160,7 +160,8 @@ class TestTheSlot:
         r = _run(se, "pytest", BOT_ID="beta", STUB_DIR=second)
         assert r.returncode == 75
         assert "NOT RUN" in r.stderr and "(1 of 1)" in r.stderr
-        assert "testfleet/alpha" in r.stderr and "pytest -q" in r.stderr
+        assert "testfleet/alpha" in r.stderr and "pytest" in r.stderr
+        assert "pytest -q" not in r.stderr  # the refusal names the tool, never the command
         assert _ran(second) == []  # the refused job never started
         (se.tmp / "release").touch()
         p.wait(15)
@@ -203,7 +204,7 @@ class TestTheSlot:
         assert _run(se, "pytest").returncode == 0
         (ev,) = [e for e in _events(se) if e["type"] == "heavy_slot_unreleased"]
         assert ev["data"]["across_reset"] is True
-        assert ev["data"]["previous"]["command"] == "npm ci"
+        assert ev["data"]["previous"]["shape"] == "npm ci"
         assert _record(se)["state"] == "released"
 
     def test_two_slots_admit_two_holders_and_refuse_a_third(self, se):
@@ -262,7 +263,7 @@ class TestTheRecord:
         acquired, released = _events(se)
         assert acquired["type"] == "heavy_slot_acquired"
         assert (
-            acquired["data"]["command"] == "pytest -q" and acquired["data"]["slot"] == 0
+            acquired["data"]["shape"] == "pytest -q" and acquired["data"]["slot"] == 0
         )
         assert released["type"] == "heavy_slot_released"
         assert released["data"]["exit"] == 0
@@ -271,7 +272,7 @@ class TestTheRecord:
         p = _hold(se)
         _run(se, "pytest", BOT_ID="beta")
         (ev,) = [e for e in _events(se) if e["type"] == "heavy_slot_refused"]
-        assert ev["data"]["command"] == "pytest"
+        assert ev["data"]["shape"] == "pytest"
         assert [(h["fleet"], h["bot"]) for h in ev["data"]["holders"]] == [
             ("testfleet", "alpha")
         ]
