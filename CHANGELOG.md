@@ -33,6 +33,17 @@ the fourth did not, and a new user's first bot, `claudfather`, did not.
   list `status` gains the skill and its four grants. That takes effect the
   moment `generate` writes it (#1310). A manager that already lists it
   composes it once, as before.
+### Fixed — `/setup` asks `bridge_state` about claudfather's own session (#1536)
+
+**The old guidance could read `up` for a bridge that was going dark.** Step 5 told first-run operators to trust `bridge_state runtime/bots/claudfather` over the log. Without a session pid, that answers whether *a* poller holds the bot's Telegram slot, and during a restart the outgoing session's poller still does (#1530).
+
+- **Now:** the skill resolves claudfather's pane pid through the same helpers `start-bot.sh` uses (`tmux_socket_for_bot`, `tmux_session_name`, `bot_tmux`), and passes it. The pane runs Claude itself, so its pid is the session. The skill also explains `not_mine`.
+- **The token is passed too, and that is load-bearing.** `bridge_state` takes *any* second argument as the resolved token, so an empty `""` answers `no_token` for a healthy bot. Measured on a live bot:
+  - scoped with its own session: `up`;
+  - scoped with another pid: `not_mine`;
+  - with `""` as the token: `no_token`.
+- **The other caller #1536 names,** `lib/bench-cold-start.sh`, was deleted in #1858.
+- **`tests/test_cold_start_contract.py`** requires every `bridge_state` call in the setup skill to name the session and a non-empty token.
 
 ### Added — `claudlobby plane samples`: one metric family for one subject over a window, read-only (#1644)
 
