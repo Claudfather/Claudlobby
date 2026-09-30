@@ -76,7 +76,7 @@ permissions:
   #       instrument that catches vacuous tests: sed the file, run the suite,
   #       prove the test screams, revert. Denying writes under `projects/` does
   #       not merely inconvenience a reviewer — it removes the check that finds
-  #       checks which cannot fail. (clog cites merch-fleet#576, a
+  #       checks which cannot fail. (clog cites #576 in another fleet's repo, a
   #       URL-contract predicate where a bogus `.js` path passed with 0 FAIL;
   #       that repo is outside this fleet's scope and the example is
   #       attributed, not independently verified here.)

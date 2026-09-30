@@ -770,7 +770,7 @@ overlap as a matter of routine, and a sibling pass could rewrite the window
 inside this pass's read loop or delete it there. A rewrite sent nothing and
 said nothing: the pass read the other fleet's rows and skipped its own page. A
 deletion failed the loop's redirect and aborted the pass on a `script_error`,
-23 of them from 2026-09-25 to 09-27 on ai-platform and merch-fleet. Each
+23 of them from 2026-09-25 to 09-27 on ai-platform and another fleet. Each
 file is now the pass's own temporary file, which lib-common removes when the
 pass exits. A new test interleaves two fleets' passes at both points; the old
 code fails it both ways.

@@ -403,7 +403,7 @@ AVAILABILITY_GATES: dict[str, Callable[[Facts], bool]] = {
 #: three `Shared Documentation` headings with opposite instructions. Measured on
 #: a real compose, not reasoned about.
 #:
-#: `local/home/merch-fleet/fleet.yaml` declares `shared-documentation`
+#: Another fleet's `fleet.yaml` declares `shared-documentation`
 #: explicitly today. It is vault-less, so the defect is latent there rather than
 #: live — which is exactly the kind of thing that ships and then wakes up.
 #:
