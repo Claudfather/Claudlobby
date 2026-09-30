@@ -927,26 +927,29 @@ assert_eq "an absent key names nobody" "" "$(rrn_set '{"data":{"actor":"x"}}')"
 assert_eq "the output is sorted — it is a set, not the receipt's sequence" \
     "alpha zed" "$(rrn_raw '{"bots_rescued":["zed","alpha"]}')"
 
-# The live regression fixture: the two real fleet_rescue receipts written
-# during the 2026-09-20 host reboot, frozen verbatim rather than read from the
-# estate, so this test measures a fixed artifact and not today's state. They
-# carry BOTH circulating shapes (row 1 nests bots_rescued under `data`, row 2
-# puts it at top level) and both use the spaced `": ["` form. The expected
-# lists are the pre-fix parser's own output on these same two rows, measured
-# and sorted: the fix must reproduce them as SETS, adding and losing nothing.
-RRN_REAL="$SCRIPT_DIR/fixtures/rescue-receipts/fleet-2026-09-20-real.jsonl"
+# The regression fixture: two synthetic fleet_rescue receipts, a fixed
+# artifact rather than rows read from the estate, so this test measures the
+# fixture and not today's state. They keep the shapes of the two real receipts
+# written during the 2026-09-20 host reboot: every key in the same order, the
+# same nesting and the same prose around the names. Only the names, fleets and
+# actors are placeholders. They carry BOTH circulating shapes (row 1 nests
+# bots_rescued under `data`, row 2 puts it at top level) and both use the
+# spaced `": ["` form. The expected lists are each row's own bots_rescued,
+# sorted, which is also what the pre-fix parser returns on these rows: the fix
+# must reproduce them as SETS, adding and losing nothing.
+RRN_FIXTURE="$SCRIPT_DIR/fixtures/rescue-receipts/fleet-2026-09-20-synthetic.jsonl"
 assert_eq "the frozen receipt fixture is present and both rows are there" \
-    "2" "$(grep -c . "$RRN_REAL" 2>/dev/null || echo 0)"
-assert_eq "real receipt 1 (nested under data) is set-unchanged by the union" \
-    "cam craig greg kenny saul todd" "$(rrn_set "$(sed -n '1p' "$RRN_REAL")")"
-assert_eq "real receipt 2 (top level) is set-unchanged by the union" \
-    "alex ari astrid clog navi rajan" "$(rrn_set "$(sed -n '2p' "$RRN_REAL")")"
+    "2" "$(grep -c . "$RRN_FIXTURE" 2>/dev/null || echo 0)"
+assert_eq "receipt 1 (nested under data) is set-unchanged by the union" \
+    "charlie delta golf hotel juliett kilo" "$(rrn_set "$(sed -n '1p' "$RRN_FIXTURE")")"
+assert_eq "receipt 2 (top level) is set-unchanged by the union" \
+    "alfa bravo echo foxtrot india lima" "$(rrn_set "$(sed -n '2p' "$RRN_FIXTURE")")"
 # Prose in these rows names bots in passing — receipt 1's note lists seven bots
 # it did NOT touch. None of them may leak into the list: the parser matches the
 # key, and valid JSON escapes any quote inside a value, so a name-list-shaped
 # sentence cannot be read as one.
 assert_absent "a bot named only in the receipt's prose is not a rescued name" \
-    "branden" "$(rrn_set "$(sed -n '1p' "$RRN_REAL")")"
+    "mike" "$(rrn_set "$(sed -n '1p' "$RRN_FIXTURE")")"
 
 # ── Case 9: the WHOLE boot injection, not merely something startup-shaped ───
 # A boot is TWO sends: a bare `/claudna:session resume --auto` and then
