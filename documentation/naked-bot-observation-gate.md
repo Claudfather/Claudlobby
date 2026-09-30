@@ -159,9 +159,13 @@ catch, and reading `defaults.py` alone would never have shown it.
 
 ### 2. The per-entity-type opt-out surface does not exist for 11 of 12 types
 
-> **PARTLY RESOLVED — now 10 of 12.** `system_defaults.protocols` exists and is
+> **PARTLY RESOLVED — now 9 of 12.** `system_defaults.protocols` exists and is
 > measured working (`optout:protocols` and `control:kill-switch` are the only two
-> arms whose composed instructions move). Ten types still have no opt-out, and
+> arms whose composed instructions move). `system_defaults.skills` exists too
+> (#2010), but its only default is the manager role's `status`, and the
+> `optout:skills` arm composes a single non-manager bot, so the gate cannot see
+> that opt-out move; `tests/test_manager_status_default.py` pins it instead.
+> Nine types still have no opt-out, and
 > **an unrecognised key is still silently dropped**, so the "cannot tell a
 > working opt-out from a typo" half of this finding stands untouched.
 
