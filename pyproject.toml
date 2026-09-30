@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -9,7 +9,8 @@ description = "Compositor for Claude Code agent fleets — assembles bots from a
 authors = [{ name = "Chris Rogers" }]
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 dependencies = [
     "PyYAML>=6.0,<7",
     "Jinja2>=3.1,<4",

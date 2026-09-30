@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — Claudlobby is licensed under Apache-2.0
+
+The repository had no license file, while `pyproject.toml` declared MIT. It
+now carries the Apache License 2.0 (`LICENSE`, the unmodified text) and a
+`NOTICE` naming the copyright holder, which section 4(d) of the license carries
+into every redistribution.
+
+- `pyproject.toml` declares `license = "Apache-2.0"`, an SPDX expression
+  (PEP 639), and ships `LICENSE` and `NOTICE` as license files. The expression
+  form needs setuptools 77, so the build requirement moved from
+  `setuptools>=68` to `setuptools>=77`.
+- `README.md` has a License section.
+
 ### Fixed — every bot is told what a dispatch's leading `set +H; ` is, and the dispatch protocol stops describing something it does not do
 
 `lib/dispatch.sh` puts `set +H; ` in front of every message except one that starts with a command word and has no `!`. Receivers flagged it as unexplained text at the head of their task. The one explanation lived in the dispatch protocol, which only managers compose, and the worker-lifecycle protocol, which is declared by only a few bots, did not mention it. The pasted-text section every bot composes (`templates/claude.md.j2`) now says what the prefix is and that there is nothing to run, and worker-lifecycle's RECEIVE step says the same beside the receipt-marker line. `tests/test_framed_dispatch_guidance.py` pins it for every composed bot; it fails on the previous template.
