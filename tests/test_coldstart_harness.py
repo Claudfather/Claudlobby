@@ -214,6 +214,26 @@ class TestTheLaunchLineLoadsNoUserSettings:
         assert 'cd /tmp/some-tree && PATH="' in r.stdout
         assert f'{host["state"]}/fence:$PATH' in r.stdout
 
+    def test_prepare_writes_the_fence_and_prints_the_line_that_uses_it(self, host, tmp_path):
+        # `cmd_prepare` is the one place that joins the two: a fence it did not
+        # write would leave the printed line naming a directory with no `sudo`.
+        _stub(
+            host,
+            "git",
+            """case "$*" in
+  *"rev-parse --verify"*) exit 0 ;;
+  *"rev-parse"*) echo 0123456789abcdef0123456789abcdef01234567 ;;
+  *"archive"*) tar -c -T /dev/null ;;
+esac""",
+        )
+        r = _call(host, f'cmd_prepare --dir "{tmp_path / "tree"}"')
+        fence = host["state"] / "fence" / "sudo"
+        assert r.returncode == 0, r.stderr
+        assert fence.is_file() and os.access(fence, os.X_OK), "prepare did not write the fence"
+        assert f'PATH="{fence.parent}:$PATH" claude --setting-sources project,local --strict-mcp-config' in r.stdout, (
+            r.stdout
+        )
+
     def test_the_fence_refuses_sudo_loudly(self, host):
         # The harness runs under `set -e`, so capture the refusal's code with `||`.
         r = _call(host, 'write_fence; "$COLDSTART_STATE_DIR/fence/sudo" true || echo "rc=$?"')
@@ -222,8 +242,9 @@ class TestTheLaunchLineLoadsNoUserSettings:
 
 
 class TestPreflightNamesWhatALaunchWouldInherit:
-    def test_a_bare_bash_allow_rule_is_warned(self, host):
-        _settings(host, '{"permissions": {"allow": ["Bash(git *)", "Bash"]}}')
+    @pytest.mark.parametrize("rule", ["Bash", "Bash(*)", "Bash(:*)"])
+    def test_an_allow_every_command_rule_is_warned(self, host, rule):
+        _settings(host, '{"permissions": {"allow": ["Bash(git *)", "%s"]}}' % rule)
         r = _call(host, "preflight")
         assert "allow every shell command" in r.stdout
 
@@ -266,3 +287,13 @@ class TestStatusDoesNotTripTheErrorTrap:
         )
         assert "processes referencing the tree: 0" in r.stdout, r.stdout + r.stderr
         assert "SCRIPT_ERROR" not in r.stderr, r.stderr
+
+    def test_processes_referencing_the_tree_are_counted(self, host, tmp_path):
+        _stub(host, "pgrep", "printf '111\\n222\\n'")
+        snap = host["state"] / "snapshot"
+        snap.mkdir(parents=True)
+        for kind in ("units", "unitfiles", "sockets"):
+            (snap / f"{kind}.txt").write_text("")
+        (host["state"] / "run.env").write_text(f"tree={tmp_path / 'gone-tree'}\n")
+        r = _call(host, "cmd_status")
+        assert "processes referencing the tree: 2" in r.stdout, r.stdout + r.stderr

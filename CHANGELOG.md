@@ -19,9 +19,10 @@ So a blind run could have run `sudo`, or `lib/setup-system` (which calls sudo it
   - It loads no user settings and none of the user's MCP servers.
   - The fence is a refusing `sudo`, first on `PATH`, so a script that calls sudo fails loudly instead of acting as root.
   - Credentials still come from the Claude Code login.
-- **The preflight** now warns when user settings approve every shell command (a bare `Bash` allow rule, or `bypassPermissions`), and when `sudo -n true` succeeds.
+- **The preflight** now warns when user settings approve every shell command (a `Bash`, `Bash(*)` or `Bash(:*)` allow rule, or `bypassPermissions`), and when `sudo -n true` succeeds.
 - **`status` no longer records a false `script_error`.** Its process count was `$(pgrep -f "$tree" | wc -l)`. `pgrep` exits 1 when nothing matches, so under `pipefail` the substitution failed, and the inherited ERR trap recorded `non-zero exit at line 286` on every clean run. That landed in the plane of whatever root the harness resolved, which is the production plane when run from an install.
 - **Docs.** The skill, `validating-cold-start.md` and the `CLAUDE.md` row describe the new launch.
+- **Tests.** `tests/test_coldstart_harness.py` runs `prepare` itself (it must write the fence and print the line that uses it), each allow-everything spelling, and the status count with and without matching processes.
 
 ### Added — `claudlobby doctor` asks `claudron doctor` about each wired vault, and never applies `--fix` (Claudron #190, part C)
 
