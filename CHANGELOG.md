@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the README quickstart stops at a failed validate, and the install step states its measured time (#1681)
+
+- **The manual quickstart ran `lib/setup-fleet` even after `validate` failed.** It printed `claudlobby validate && claudlobby generate` and then `lib/setup-fleet` on a line of its own. On a first run with placeholders still in place, `validate` correctly fails, and `setup-fleet` then ran anyway and failed twice more. The line now continues the chain (`… && lib/setup-fleet`), under a comment saying `validate` stops it until every `REPLACE_ME` is filled in.
+- **The install step now states a duration**, in both README and getting-started.
+  - On one Raspberry Pi 5 whose pip config adds piwheels, 45 s to 61 s in four timed runs: 45 s from an empty pip cache, 52 s and 61 s with a warm cache, and 55 s with the cache state not recorded. Other hosts are unmeasured.
+  - One cold host was stopped after 8 minutes, and the cause was not recorded.
+  - `lib/setup-system` runs the same pip install with `--quiet`, so the pages now say to expect the same wait with no output.
+- **`tests/test_cold_start_contract.py`** runs the README's quickstart block with stubs: a failed `validate` must be the only call, and a passing one must run `generate` and `lib/setup-fleet`. On getting-started and the setup skill it fails if `lib/setup-fleet` starts the line after a `validate` chain. Its duration tests read both pages: the stated range must be the lowest and highest of the runs listed beside it, the run count must match, the range must name the one host it was measured on, and the stopped run and setup-system's wait must be stated as above.
+
 ### Fixed — `/setup` Step 0 proves this tree is installed, not only that its dependencies import (#2002)
 
 **The old check could pass with nothing installed.** It ran `python3 -c 'import claudlobby.composer'` from the repo root. Any Python imports the repo's own `claudlobby/` from the current directory, so that proved only that PyYAML and Jinja2 were importable. On the Linux cold run for #2002, a fresh export with no venv printed `INSTALLED`: the host had both packages in its user site, and its `claudlobby` command belonged to a different checkout. The cold session noticed on its own and checked where the module came from, and the skill now does the same.
@@ -47,6 +56,7 @@ Heavy jobs stacked across fleets stormed the primary host three times on 2026-09
 - **A dead holder cannot wedge it:** the kernel drops the lock with its holder. The next holder reports the unreleased record on the plane (`heavy_slot_unreleased`), and a changed boot id means the job was running when the host reset. That is the evidence #1644 lacks.
 - **Knobs, host-wide, read on every use:** `state/heavy-slot/slots` (default 1) and `state/heavy-slot/disabled`, which passes every call through at once. `lib/heavy-slot.py status` answers who holds each slot, or who held it last.
 - **It counts only bots that opted in.** The storms came from product fleets' heavy jobs, so the slot relieves them once those fleets' managers set the key on their bots.
+
 ### Added — the README says what setup changes on your machine and what bounds a bot (#1996)
 
 A stranger deciding whether to run Claudlobby could not find out what it does to their machine without reading the scripts. The README now has two sections above the quick start, and every line names the file it can be checked against.

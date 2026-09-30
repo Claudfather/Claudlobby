@@ -164,6 +164,101 @@ class TestDocumentedInstallPath:
         )
 
 
+class TestQuickstartStopsAtAFailedValidate:
+    """#1681: the README printed `claudlobby validate && claudlobby generate` and then
+    `lib/setup-fleet` on a line of its own. On a first run, with placeholders still in
+    place, validate correctly fails, and setup-fleet then ran anyway and failed twice
+    more. The conditional has to be written, not implied."""
+
+    @staticmethod
+    def _run_readme_chain(tmp_path: Path, validate_rc: int) -> tuple[list[str], str]:
+        """Run the README's quickstart block from the seed copies on, with stubs for
+        `claudlobby` and `lib/setup-fleet`, and return the calls in order."""
+        text = next(b for b in _FENCE_RE.findall(README.read_text()) if "claudlobby validate" in b)
+        text = text[text.index("cp fleet.yaml.seed") :]  # the part after the clone and install
+        (tmp_path / "bin").mkdir()
+        (tmp_path / "lib").mkdir()
+        log = tmp_path / "calls"
+
+        def stub(path: Path, body: str) -> None:
+            path.write_text("#!/bin/bash\n" + body + "\n")
+            path.chmod(0o755)
+
+        stub(tmp_path / "bin" / "claudlobby", f'echo "$1" >> {log}; [ "$1" = validate ] && exit {validate_rc}; exit 0')
+        stub(tmp_path / "lib" / "setup-fleet", f"echo setup-fleet >> {log}")
+        (tmp_path / "fleet.yaml.seed").write_text("")
+        (tmp_path / ".env.seed.example").write_text("")
+        env = {"PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin", "EDITOR": "true", "HOME": str(tmp_path)}
+        r = subprocess.run(["bash", "-c", text], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60)
+        return log.read_text().split(), r.stderr
+
+    def test_a_failed_validate_is_the_only_call_the_readme_chain_makes(self, tmp_path: Path):
+        calls, err = self._run_readme_chain(tmp_path, 1)
+        assert calls == ["validate"], (calls, err)
+
+    def test_a_passing_validate_runs_the_whole_readme_chain(self, tmp_path: Path):
+        calls, err = self._run_readme_chain(tmp_path, 0)
+        assert calls == ["validate", "generate", "setup-fleet"], (calls, err)
+
+    @pytest.mark.parametrize("doc", [GETTING_STARTED, SETUP_SKILL], ids=lambda p: p.name)
+    def test_setup_fleet_never_runs_on_its_own_line_after_a_validate_chain(self, doc: Path):
+        for block in _FENCE_RE.findall(doc.read_text()):
+            lines = [raw.split("#", 1)[0].rstrip() for raw in block.splitlines()]
+            lines = [line for line in lines if line.strip()]
+            for prev, line in zip(lines, lines[1:]):
+                if "claudlobby validate" in prev and not prev.endswith("\\"):
+                    assert not line.lstrip().startswith("lib/setup-fleet"), (doc.name, prev, line)
+
+
+class TestTheInstallStepSaysHowLongItTakes:
+    """#1681: on a cold host the install ran past eight minutes with no stated
+    duration, and `lib/setup-system` installs with `--quiet`. A stranger cannot tell
+    slow from stopped, which decides whether they wait or press Ctrl-C.
+
+    Each duration a page states is a measurement. The install time is the range of
+    the runs listed beside it, the stopped run is stated as the floor it is, and
+    setup-system's wait is tied to its running the same install."""
+
+    _COUNTS = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8}
+
+    @staticmethod
+    def _joined(doc: Path, section_only: bool = True) -> str:
+        """The install section (or the whole page), with blockquote markers and line wraps removed."""
+        text = doc.read_text()
+        if section_only:
+            start = text.find("python3 -m pip install -e '.[plane-ui]'")
+            assert start != -1, doc.name
+            end = text.find("\n## ", start)
+            text = text[start : end if end != -1 else len(text)]
+        return " ".join(line.lstrip("> ").strip() for line in text.splitlines())
+
+    @pytest.mark.parametrize("doc", [README, GETTING_STARTED], ids=lambda p: p.name)
+    def test_the_stated_range_is_the_range_of_the_listed_runs(self, doc: Path):
+        section = self._joined(doc)
+        m = re.search(r"took (\d+) s to (\d+) s in (\w+) timed runs: (.*?)\. ", section)
+        assert m, section[:800]
+        runs = [int(n) for n in re.findall(r"\b(\d+) s\b", m.group(4))]
+        assert len(runs) == self._COUNTS[m.group(3)], (m.group(3), runs)
+        assert (min(runs), max(runs)) == (int(m.group(1)), int(m.group(2))), (m.group(0), runs)
+
+    @pytest.mark.parametrize("doc", [README, GETTING_STARTED], ids=lambda p: p.name)
+    def test_the_range_names_the_one_host_it_was_measured_on(self, doc: Path):
+        # Without these two phrases the range reads as the install time on every host,
+        # which is the slow-or-stopped misreading #1681 is about.
+        section = self._joined(doc)
+        assert "On one Raspberry Pi 5, whose pip config adds piwheels," in section
+        assert "Other hosts are unmeasured." in section
+
+    @pytest.mark.parametrize("doc", [README, GETTING_STARTED], ids=lambda p: p.name)
+    def test_the_stopped_run_is_stated_as_a_floor(self, doc: Path):
+        assert "was stopped after 8 minutes, and the cause was not recorded" in self._joined(doc)
+
+    @pytest.mark.parametrize("doc", [README, GETTING_STARTED], ids=lambda p: p.name)
+    def test_setup_systems_wait_is_tied_to_the_same_install(self, doc: Path):
+        page = self._joined(doc, section_only=False)
+        assert "runs the same pip install with `--quiet`, so expect the same wait with no output" in page
+
+
 class TestCliResolutionProbe:
     """`claudlobby_cli` must not mistake an importable package for a usable one."""
 
