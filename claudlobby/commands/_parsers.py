@@ -36,6 +36,7 @@ from .plane import (
     cmd_plane_expire,
     cmd_plane_import_workstreams,
     cmd_plane_prune,
+    cmd_plane_samples,
     cmd_plane_registry,
     cmd_plane_schema,
     cmd_plane_open,
@@ -605,6 +606,24 @@ def register_subparsers(sub) -> None:
     pex.add_argument("--dry-run", action="store_true",
                      help="Report the count without emitting")
     pex.set_defaults(func=cmd_plane_expire)
+    psm = psub.add_parser(
+        "samples",
+        help="#1644: print one metric_samples family (host.load,"
+        " host.mem_available_mb, ...) for one subject over a window; read-only,"
+        " and the plane is released before anything prints")
+    psm.add_argument("metric", help="the family, e.g. host.mem_available_mb")
+    psm.add_argument("--subject", default=None,
+                     help="the subject's alias (default: the only one of its kind)")
+    psm.add_argument("--kind", default=None,
+                     help="the subject's kind (default: host for a host.* family)")
+    psm.add_argument("--since", default="1h",
+                     help="window start: 24h, 7d, 30m, or an ISO instant, a naive one"
+                     " being UTC (default 1h)")
+    psm.add_argument("--until", default=None,
+                     help="window end, same grammar (default: now)")
+    psm.add_argument("--json", action="store_true",
+                     help="one JSON object instead of text")
+    psm.set_defaults(func=cmd_plane_samples)
     piw = psub.add_parser(
         "import-workstreams",
         help="#1635: one-shot import of a pre-cutover workstreams.json into"
