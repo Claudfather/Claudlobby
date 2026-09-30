@@ -58,10 +58,14 @@ Failure directions, each chosen on purpose:
     REFUSE, saying which. Only a hit pays this, so the cost falls where the risk
     is.
   - content that cannot be read counts as a hit. That covers a body file that
-    is not there, a program's output piped or substituted into the write
-    (``$(...)`` or backticks, except ``cat`` of a file or of a heredoc), and a
-    git command run from a directory this guard cannot name (a command
-    substitution or a glob).
+    is not there, a program's output piped into the write or substituted into
+    its content (``$(...)`` or backticks, except ``cat`` of a file or of a
+    heredoc, in a commit message, a body, title, notes, subject, comment or
+    description flag, or a ``gh api`` field such as ``body`` or ``query``), and
+    a git command run from a directory this guard cannot name (a command
+    substitution or a glob). A substitution in any other flag, such as the sha
+    in ``--match-head-commit "$(gh api …)"``, is left as written: it is not
+    content.
 A remote that is not github.com, or a repository with no remote, is out of
 scope and allowed.
 
@@ -135,6 +139,37 @@ _API_SKIP = {
     "--cache",
 }
 _API_FIELDS = {"-f", "--raw-field", "-F", "--field"}
+# The flags whose value is text the write publishes. A command substitution there
+# is output this guard cannot read; in any other flag (a sha, a branch, a merge
+# method) it is left as written, since none of those is content.
+_GH_CONTENT_FLAGS = {
+    "-b",
+    "--body",
+    "-t",
+    "--title",
+    "-n",
+    "--notes",
+    "--subject",
+    "-c",
+    "--comment",
+    "-d",
+    "--description",
+    "--desc",
+}
+_API_CONTENT_KEYS = {
+    "body",
+    "title",
+    "message",
+    "commit_message",
+    "commit_title",
+    "description",
+    "notes",
+    "name",
+    "query",
+    "content",
+    "text",
+    "subject",
+}
 _PUSH_VALUES = {"-o", "--push-option", "--repo", "--receive-pack", "--exec"}
 _COMMIT_VALUES = {
     "--message",
@@ -686,9 +721,16 @@ class _Body:
         if _SUBST.search(text):
             self._cannot(f"the output of a command substitution in {label}")
 
-    def text(self, label: str, words: list[str]) -> None:
+    def text(
+        self, label: str, words: list[str], watched: list[str] | None = None
+    ) -> None:
+        """``watched``: the words whose command substitution makes the text
+        unreadable, when that is not all of them."""
         expanded = [_lenient(w, self.assigns) for w in words]
-        self._add(label, "\n".join(expanded))
+        self.parts.append((label, "\n".join(expanded)))
+        seen = expanded if watched is None else [_lenient(w, self.assigns) for w in watched]
+        if any(_SUBST.search(w) for w in seen):
+            self._cannot(f"the output of a command substitution in {label}")
         for w in expanded:
             for m in _CAT_SUBST.finditer(w):
                 self.file(m.group(1))
@@ -888,7 +930,7 @@ def _gh_write(
     here, assigns = st.here, dict(st.assigns)
     body = _Body(here, assigns, st.written)
     words, files = _content_words(args, _GH_TARGET_FLAGS, _GH_FILE_FLAGS)
-    body.text("the command", words)
+    body.text("the command", words, _flag_values(args, _GH_CONTENT_FLAGS))
     if group == "gist":
         if verb == "create":
             files += _positional(
@@ -942,6 +984,13 @@ def _gh_write(
     )
 
 
+def _api_key(field: str) -> str:
+    """A ``gh api`` field's own name: ``body`` for ``body=…`` and for
+    ``comments[][body]=…``."""
+    names = re.findall(r"[A-Za-z_]+", field.split("=", 1)[0])
+    return names[-1].lower() if names else ""
+
+
 def _gh_api(args: list[str], c: _Cmd, st: _State, pipe_in: _Cmd | None) -> Write | None:
     method = (_flag_values(args, {"-X", "--method"}) or ["POST"])[-1].upper()
     fields = _flag_values(args, _API_FIELDS)
@@ -953,7 +1002,11 @@ def _gh_api(args: list[str], c: _Cmd, st: _State, pipe_in: _Cmd | None) -> Write
     here, assigns = st.here, dict(st.assigns)
     body = _Body(here, assigns, st.written)
     files = [v.split("=@", 1)[1] for v in fields if "=@" in v] + inputs
-    body.text("the command", [v.split("=@", 1)[0] if "=@" in v else v for v in fields])
+    body.text(
+        "the command",
+        [v.split("=@", 1)[0] if "=@" in v else v for v in fields],
+        [v for v in fields if _api_key(v) in _API_CONTENT_KEYS],
+    )
     for f in files:
         body.file(f)
     body.attached(c)

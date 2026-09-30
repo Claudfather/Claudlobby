@@ -745,6 +745,23 @@ def test_a_programs_output_substituted_into_a_write_cannot_be_read(env, tmp_path
     assert bash(env, command.format(r="priv-org/priv-repo"), tmp_path)[0] == "allow"
 
 
+def test_a_substitution_in_a_flag_that_is_not_content_is_left_as_written(env, tmp_path):
+    """A sha read from GitHub is not content. This is the auto-merge recipe: the
+    replay of this host's recorded history found 91 merges of this shape, each
+    of which a rule on every word would have refused on a public repository."""
+    merge = ('PH=$(gh api repos/pub-org/pub-repo/pulls/5 --jq .head.sha); '
+             'gh pr merge 5 -R pub-org/pub-repo --squash --admin --match-head-commit "$PH"')
+    assert bash(env, merge, tmp_path)[0] == "allow"
+    api = ('gh api -X PUT repos/pub-org/pub-repo/pulls/5/merge '
+           '-f sha="$(git rev-parse HEAD)" -f merge_method=squash')
+    assert bash(env, api, tmp_path)[0] == "allow"
+    # the controls: the same writes with a program's output where content goes
+    body = 'gh pr merge 5 -R pub-org/pub-repo --squash --body "$(python3 gen.py)"'
+    assert bash(env, body, tmp_path)[0] == "deny"
+    field = 'gh api repos/pub-org/pub-repo/issues -f title=t -f body="$(python3 gen.py)"'
+    assert bash(env, field, tmp_path)[0] == "deny"
+
+
 def test_cat_of_a_file_or_a_heredoc_is_read_where_it_is_substituted(env, tmp_path):
     (tmp_path / "body.md").write_text("plain\n")
     for form in ('"$(cat body.md)"', '"$(< body.md)"', "\"$(cat <<'EOF'\nplain\nEOF\n)\""):
