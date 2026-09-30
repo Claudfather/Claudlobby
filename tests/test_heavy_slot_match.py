@@ -276,3 +276,67 @@ class TestTheWrappersOwnCheck:
     )
     def test_anything_else_is_refused(self, hs, argv):
         assert not hs.heavy_family(argv)
+
+
+# --- ravi #2015: the wrapper path may need quoting (a space or a single quote) ---
+
+import os      # noqa: E402
+import shlex   # noqa: E402
+import stat    # noqa: E402
+import subprocess  # noqa: E402
+
+
+def _exe(path: Path, body: str) -> Path:
+    path.write_text("#!/usr/bin/env bash\n" + body)
+    path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IRUSR)
+    return path
+
+
+class TestQuotingSurvivesAPathThatNeedsQuoting:
+    """The wrapper is `shlex.quote(<heavy-slot.py path>) + " run --"`. When the
+    install path has a space or a single quote, shlex.quote adds single quotes; if
+    the insertion point is inside a single-quoted `bash -c '...'` those quotes must
+    not close the outer string. These build the real wrapper from a space+quote
+    path and RUN the rewrite end to end, asserting the heavy job ran THROUGH the
+    wrapper (the marker files), not that the string merely parses."""
+
+    def _fixture(self, tmp_path):
+        # an install path that needs quoting: a space AND a single quote
+        install = tmp_path / "a b'c" / "lib"
+        install.mkdir(parents=True)
+        wmark = tmp_path / "wrapper.marker"
+        pmark = tmp_path / "pytest.marker"
+        # fake heavy-slot wrapper: record, drop `run --`, exec the real job
+        _exe(install / "heavy-slot.py",
+             f'printf w >> {shlex.quote(str(wmark))}\nshift 2\nexec "$@"\n')
+        # fake pytest on PATH: record it ran
+        bind = tmp_path / "bin"
+        bind.mkdir()
+        _exe(bind / "pytest", f'printf p >> {shlex.quote(str(pmark))}\n')
+        wrapper = shlex.quote(str(install / "heavy-slot.py")) + " run --"
+        env = {"PATH": f"{bind}:/usr/bin:/bin"}
+        return wrapper, wmark, pmark, env
+
+    def _run(self, rewritten, env):
+        subprocess.run(rewritten, shell=True, env=env, timeout=30,
+                       capture_output=True, text=True)
+
+    def test_single_quoted_bash_c_runs_through_the_wrapper(self, hs, tmp_path):
+        wrapper, wmark, pmark, env = self._fixture(tmp_path)
+        rewritten = hs.gate("bash -c 'pytest -q'", wrapper)
+        assert rewritten is not None
+        self._run(rewritten, env)
+        assert wmark.read_text() == "w", "wrapper did not run (quoting broke the rewrite)"
+        assert pmark.read_text() == "p", "pytest did not run through the wrapper"
+
+    def test_double_quoted_bash_c_runs_through_the_wrapper(self, hs, tmp_path):
+        wrapper, wmark, pmark, env = self._fixture(tmp_path)
+        rewritten = hs.gate('bash -c "pytest -q"', wrapper)
+        self._run(rewritten, env)
+        assert wmark.read_text() == "w" and pmark.read_text() == "p"
+
+    def test_top_level_runs_through_the_wrapper(self, hs, tmp_path):
+        wrapper, wmark, pmark, env = self._fixture(tmp_path)
+        rewritten = hs.gate("pytest -q", wrapper)
+        self._run(rewritten, env)
+        assert wmark.read_text() == "w" and pmark.read_text() == "p"

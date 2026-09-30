@@ -57,7 +57,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 EX_TEMPFAIL = 75  # every slot is taken: retry later
 COMMAND_CAP = 200  # characters of a command kept in a record or event
@@ -835,9 +835,14 @@ def _shell_string(words: List[Word]) -> Optional[Word]:
     return None
 
 
-def _insertions(command: str, base: int = 0) -> List[int]:
-    """Where the wrapper goes: the offset of each heavy command's first word."""
-    out: List[int] = []
+def _insertions(command: str, base: int = 0,
+                ctx: Tuple[str, ...] = ()) -> List[Tuple[int, Tuple[str, ...]]]:
+    """Where the wrapper goes: (offset of each heavy command's first word, the
+    tuple of enclosing `bash -c` quote characters from outermost to innermost).
+    The wrapper carries its own quotes (shlex.quote of a path with a space or a
+    single quote), so at each nesting level it must be re-escaped for that level's
+    quoting, innermost first, or a spliced quote would break the enclosing string.""" 
+    out: List[Tuple[int, Tuple[str, ...]]] = []
     for simple in _Scanner(command).parse():
         words = simple.words
         first = words[0]
@@ -874,13 +879,33 @@ def _insertions(command: str, base: int = 0) -> List[int]:
                 (raw[0] == raw[-1] == "'" and "'" not in inner)
                 or (raw[0] == raw[-1] == '"' and not any(ch in inner for ch in '\\$`"')))
             if maps:  # the string's value is its text, so offsets carry over
-                out += _insertions(inner, base + string.start + 1)
+                out += _insertions(inner, base + string.start + 1, ctx + (raw[0],))
             elif _HEAVY_WORD.search(raw):
                 raise Unsure("a shell -c string the matcher cannot map")
             continue
         if _classify([Tok(w.value, w.raw) for w in words], lenient=False):
-            out.append(base + first.start)
+            out.append((base + first.start, ctx))
     return out
+
+
+def _dq_escape(s: str) -> str:
+    """Escape a fragment so its literal value survives one level of double quotes."""
+    return (s.replace("\\", "\\\\").replace('"', '\\"')
+             .replace("$", "\\$").replace("`", "\\`"))
+
+
+def _escape_for_ctx(wrapper: str, ctx: Tuple[str, ...]) -> str:
+    """Re-quote the wrapper for its nesting: innermost quote level first. A single
+    quote in the path (via shlex.quote) breaks an enclosing `'...'`; the `"` that
+    shlex.quote then uses breaks an enclosing `"..."` — so each level gets the
+    escaping its own quote needs."""
+    w = wrapper
+    for quote in reversed(ctx):
+        if quote == "'":
+            w = w.replace("'", "'\\''")
+        elif quote == '"':
+            w = _dq_escape(w)
+    return w
 
 
 def gate(command: str, wrapper: str) -> Optional[str]:
@@ -889,8 +914,12 @@ def gate(command: str, wrapper: str) -> Optional[str]:
     points = sorted(set(_insertions(command)), reverse=True)
     if not points:
         return None
-    for p in points:
-        command = command[:p] + wrapper + " " + command[p:]
+    for p, ctx in points:
+        # The wrapper carries the shlex-quoted heavy-slot path; inside a quoted
+        # `bash -c` string its quotes must be re-escaped for that string, or they
+        # close it and the command becomes a different one that still parses.
+        w = _escape_for_ctx(wrapper, ctx)
+        command = command[:p] + w + " " + command[p:]
     return command
 
 
