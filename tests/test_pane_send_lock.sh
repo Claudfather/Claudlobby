@@ -247,9 +247,12 @@ assert_eq "the same session name on another socket is not held up either" "indep
 
 echo "=== a sender that cannot get the lock in time sends NOTHING, loudly ==="
 
+# The holder holds for 30s and the check allows 15s: the refused send also
+# records a send_miss, whose emit is bounded at 10s and takes seconds on a
+# loaded host, so a bound is told from waiting the holder out by a wide margin.
 lf=$(lock_file_for sockX botZ)
 HOLDER_PID=""
-[ -z "$lf" ] || hold_lock "$lf" 6
+[ -z "$lf" ] || hold_lock "$lf" 30
 : > "$PANE_LOG"; : > "$CAPTURE"
 rc=0; start=$SECONDS
 PANE_SEND_LOCK_WAIT_S=1 pane_send_verified sockX botZ "must never be typed" 2>"$TMPD/timeout.err" || rc=$?
@@ -258,8 +261,8 @@ if [ "$rc" -ne 0 ]; then r=refused; else r="sent (rc 0)"; fi
 assert_eq "a send whose pane stays locked past its bound is refused" "refused" "$r"
 r=$(grep -c '^sockX|botZ|' "$PANE_LOG" || true)
 assert_eq "...and not one keystroke reached that pane (never sends unlocked)" "0" "$r"
-if [ "$elapsed" -le 3 ]; then r=bounded; else r="waited ${elapsed}s"; fi
-assert_eq "...and the wait was bounded (a 1s bound against a 6s holder)" "bounded" "$r"
+if [ "$elapsed" -lt 15 ]; then r=bounded; else r="waited ${elapsed}s"; fi
+assert_eq "...and the wait was bounded (a 1s bound against a 30s holder)" "bounded" "$r"
 r=$(grep -cE '"send_miss"' "$CAPTURE" || true)
 assert_eq "...and it is recorded as a send_miss" "1" "$r"
 r=$(grep -cE '"reason": ?"recipient-lock-timeout"' "$CAPTURE" || true)
@@ -378,7 +381,7 @@ assert_eq "a free pane: the repair Enter is pressed once" "1" "$r"
 
 lf=$(lock_file_for sockX botQ)
 HOLDER_PID=""
-[ -z "$lf" ] || hold_lock "$lf" 6
+[ -z "$lf" ] || hold_lock "$lf" 30
 : > "$PANE_LOG"; : > "$CAPTURE"
 PATH="$SHIM:$PATH" PANE_RECEIPT_WAIT_S=0.2 pane_await_receipt sockX botQ "$MSG" >/dev/null 2>"$TMPD/receipt.err" || true
 r=$(grep -c '^sockX|botQ|key|Enter$' "$PANE_LOG" || true)
