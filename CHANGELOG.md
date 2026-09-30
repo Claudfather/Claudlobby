@@ -6,6 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — every manager gets `/status` by default, and so does the seed's claudfather (#2010)
+
+The `status` skill is the manager's readout for the human: what moved, and
+what is waiting on their decision. It reached a bot only when that bot's
+`fleet.yaml` listed it. On one host, three of the four managers had it and
+the fourth did not, and a new user's first bot, `claudfather`, did not.
+
+- **Every manager gets it.** `status` is now a role default on `skills`
+  (`defaults.REGISTRY["skills"].roles`), keyed to the `manager` role: every
+  bot a `teams:` or `manages:` names as a manager, including a coordinator
+  whose reports are all managers. The leaf-manager role that brings `checkin`
+  would have missed that coordinator. The skill's own grants come with it
+  (`Bash(claudlobby *)`, `Bash(gh *)`, the Telegram reply tool). One helper,
+  `composer.default_roles`, now derives a bot's roles for both the protocols
+  and the skills overlays.
+- **The seed lists it for claudfather.** claudfather is not a manager, since
+  it manages no bots, so the default never reaches it. The seed declares the
+  skill instead, and `/status` works on a new user's first bot.
+- **Opting out.** `system_defaults.skills: false` switches the default off for
+  a fleet, and `bots.<name>.system_defaults: {skills: false}` for one bot.
+  `skills` is the only per-bot key; any other key there, or a value that is
+  not a mapping, is refused instead of being dropped silently. Both switches
+  turn off the default only: a bot that lists `status` itself keeps it.
+- **What the next `generate` changes on a live host:** a manager that did not
+  list `status` gains the skill and its four grants. That takes effect the
+  moment `generate` writes it (#1310). A manager that already lists it
+  composes it once, as before.
+
 ### Added — `claudlobby plane samples`: one metric family for one subject over a window, read-only (#1644)
 
 The host probe records `host.load`, `host.mem_available_mb` and the other `host.*` facets every minute, but nothing read a window of them back. After a reset, the load and memory trajectory into it could only be read by opening the plane db by hand. `claudlobby plane samples <metric> [--subject ALIAS] [--kind KIND] [--since W] [--until W] [--json]` prints one family for one subject over a window, as text or JSON. In text, `host.load`'s one, five and fifteen print as pairs. The subject defaults to the only one of its kind, which on a host's own plane is the host.
