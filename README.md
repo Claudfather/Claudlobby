@@ -19,6 +19,65 @@ claudlobby flips that: every cross-cutting concern (a guardrail, a protocol, an 
 
 Add a 9th bot? Add 10 lines to `fleet.yaml`. Update a guardrail? Edit one file in `library/guardrails/`. Re-run `claudlobby generate`. Done.
 
+## What it changes on your machine
+
+The `/setup` skill runs three steps from your checkout: `lib/setup-system` once per host, `claudlobby generate`, and `lib/setup-fleet` once per fleet (`.claude/skills/setup/SKILL.md`). `lib/setup-system --dry-run` changes nothing and prints each change it would make, except the `apt-get update` it runs first on Linux. Each row names the file that makes the change.
+
+| Change | Where | Made by |
+|---|---|---|
+| **With `sudo`, Linux:** `apt-get update` on every run; `apt-get install` of tmux, jq and curl when missing; the GitHub CLI from GitHub's apt repository (a keyring and a source list); Node 20 from NodeSource (`curl … \| sudo -E bash -`) when node is missing or older than 18 | `/etc/apt/`, system packages | `lib/setup-system` (`phase_packages`, `phase_node`) |
+| **macOS:** Homebrew's installer when `brew` is missing, then `brew install` of tmux, jq, gh and node when missing | Homebrew | `lib/setup-system` (`phase_packages`, `phase_node`) |
+| Claude Code, when `claude` is missing: `npm install -g @anthropic-ai/claude-code` | npm's global prefix | `lib/setup-system` (`phase_claude`) |
+| Claude Code plugins, at user level: `telegram@claude-plugins-official`, and `claudna@Claudfather` from the `Claudfather/clauDNA` marketplace. Each bot start also installs or updates plugins | `~/.claude/plugins/` | `lib/setup-system` (`phase_plugins`); `plugin_ensure` in `lib/lib-common.sh`, run by `lib/start-bot.sh` |
+| **With `sudo`, on every run: managed settings.** Sets `allowedChannelPlugins` to the official Telegram plugin and Claudfather's fork, keeping any other keys. Managed settings bind every Claude Code session on the host, yours included, and this key replaces Claude Code's built-in list of approved channel plugins | `/etc/claude-code/managed-settings.json`; macOS: `/Library/Application Support/ClaudeCode/managed-settings.json` | `lib/setup-system` (`phase_managed_settings`) |
+| **Your own Claude Code settings.** Each bot start sets `skipAutoPermissionPrompt` and `skipDangerousModePermissionPrompt` to `true`, pre-accepting Claude Code's consent prompts for auto and bypass-permissions mode in your sessions as well as the bots'. If the file is not valid JSON, it is replaced by one holding only those two keys | `~/.claude/settings.json` (under `$CLAUDE_CONFIG_DIR` if set) | `lib/start-bot.sh` (the headless consent block) |
+| Each bot's Telegram access list (see [Safety model](#safety-model)) | `~/.claude/channels/telegram-<handle>/access.json` | `claudlobby generate` (`claudlobby/composer.py`) |
+| **With `sudo`, Linux, when linger is off:** `loginctl enable-linger $USER`, so your user units run at boot and after you log out | systemd-logind | `lib/setup-system` (`phase_systemd`) |
+| Units that run as you: a service per bot, each fleet's timers, and the host's `claudlobby-*` timers and services | `~/.config/systemd/user/`; macOS: `~/Library/LaunchAgents/` | `lib/install-bot-systemd.sh`, `lib/install-bot.sh`, `lib/install_fleet_timer.sh`, `lib/install_fleet_timer_launchd.sh` and `lib/install-host-service-systemd.sh`, run by `lib/setup-system` and `lib/setup-fleet` |
+| MCP server packages, fetched before the first boot | package caches in your home directory | `claudlobby warm-cache`, run by `lib/setup-fleet` |
+
+Setup writes nothing to `~/.config/claudlobby/`. A `system.yaml` there is your own override of the host jobs (`claudlobby/config.py`), and `github-app.conf` (mode 600) appears only if you run `lib/setup-github-app.sh` for a GitHub App identity.
+
+**After setup, jobs keep running.** `claudlobby/system.yaml` lists them (`host.jobs`, `defaults.jobs`) and whether each is on, and `claudlobby doctor --switches` prints the same for your host. Three act beyond the fleet:
+
+- `claude-update`, daily: `npm install -g @anthropic-ai/claude-code@latest`, with `sudo` when the `claude` it updates is a root-owned install under `/usr` (`lib/update-claude-code.sh`).
+- `reload-fleet`, daily: `claude plugin update`, `claudlobby generate`, then `lib/setup-fleet --jobs-only`, which enrolls any timer that newly composes (`lib/reload-fleet.sh`).
+- `orphan-browser-reaper`, daily: kills browser processes whose parent has exited (`lib/orphan-browser-reaper.sh`).
+
+The two jobs that pull new source into your checkouts, `pull-root` and `update-siblings`, stay off unless you turn them on. The plane serves a read-only web view on `127.0.0.1:8899` (`claudlobby/commands/_parsers.py`) and takes events on a Unix socket, `state/plane/ingest.sock` (`claudlobby/plane/daemon.py`).
+
+**Inside the checkout**, all gitignored (`.gitignore`): `.venv/`, `.env`, `state/` (the plane database `state/plane/plane.db`, fleet state, logs), and the generated bot directories under `runtime/` or `local/<fleet>/`.
+
+**Where secrets live**
+
+- `.env` files, read in this order with the most specific winning: `~/.env`, `<checkout>/.env`, `local/<fleet>/.env`, `<bot dir>/.env` (`lib/env-tiers.sh`). `/setup` writes the Telegram token, and a GitHub token if you give one, to `<checkout>/.env` (`.claude/skills/setup/SKILL.md`, Step 3). `claudlobby env-register` shows which file each value comes from.
+- Claude Code's login, in its config directory. Every bot on the `default` account uses yours (`accounts` in `fleet.yaml.seed`).
+- Your `gh` login. Every bot can use it, since every bot runs as you.
+- With a GitHub App identity: `~/.config/claudlobby/github-app.conf` and the App's private key (`documentation/runbooks/github-app-setup.md`).
+
+## Safety model
+
+**A bot is a Claude Code session that can run shell commands as you.** Trust it as you would a person with a shell on your account.
+
+**What a bot can do**
+
+- **Run shell commands without asking.** The default permission mode is `acceptEdits` (`claudlobby/composer.py`), but an allowed tool runs without a prompt. `allow_all: true` in `library/expertise/software-engineering.md` allows every tool, bare `Bash` included (`ALL_TOOLS` in `claudlobby/composer.py`), and the seed bot's `library/expertise/setup-assistant.md` allows `Bash` as well. `fleet.yaml` can also set `permission_mode: auto` or `dangerously_skip_permissions: true` (`fleet.yaml.example`).
+- **Act as your user.** Every bot's unit runs under your account (see the units above), so the operating system lets a bot read and change anything you can, other bots' files included.
+- **Use `sudo` wherever your account needs no password for it.** No composed rule denies `sudo`, so on a host where `sudo -n true` succeeds, every bot has root.
+- **Use every credential on the host.** Each bot's session exports the `.env` files above (`lib/start-bot.sh`), and it has your Claude Code and `gh` logins.
+- **Take instructions over Telegram.** Direct messages are accepted only from `human_telegram_id`. In a fleet's group, `generate` leaves `allowFrom` empty (`claudlobby/composer.py`), which the Telegram plugin reads as every member of the group (the plugin's `server.ts`).
+- **Follow your own Claude Code settings.** Bots on the `default` account read your `~/.claude/settings.json`, so an allow rule you add there, such as a bare `Bash`, applies to every bot.
+
+**What bounds them**
+
+- **Deny rules**, in each bot's `.claude/settings.local.json`. Every bot is denied Read and Edit of its fleet siblings' directories (`claudlobby/composer.py`), plus any `tools.deny` in `fleet.yaml`, and `isolation.shared_config: true` adds transcripts, credentials and the `.env` files (`claudlobby/isolation.py`). **These are not an operating-system boundary.** A deny rule gates Claude Code's own tool calls: the Read tool, and a shell command given a literal path. It does not stop an interpreter that opens a file itself, a path written through a variable, or any script, hook, timer or MCP server (`claudlobby/isolation.py`). Splitting bots off your account is tracked in #1606.
+- **Hooks on every bot** (`defaults.hooks` in `claudlobby/system.yaml`). `lib/gh-mention-guard.sh` rewrites `@` mentions out of GitHub-bound text, and `lib/vault-git-guard.sh` refuses git state rewrites (checkout, rebase, reset and the like) inside a Claudron vault. The rest record activity.
+- **Guardrails are instructions, not enforcement.** The seed's `no-push-main`, `no-destructive-git`, `pii-protection` and `no-fabrication` (`fleet.yaml.seed`) are text in each bot's `CLAUDE.md`, and none carries a deny rule (`library/guardrails/`). Only branch protection on your repository actually blocks a push to `main`.
+- **The sandbox is off in the seed** (`sandbox: enabled: false` in `fleet.yaml.seed`). The `sandbox:` block turns Claude Code's sandbox on (`documentation/fleet-yaml-schema.md`).
+- **Your tokens' scope.** A bot can do on GitHub, Telegram or any other service what the token it holds allows.
+
+To tighten it: run the fleet under a dedicated account that has no `sudo`, keep each fleet's Telegram group to people you would give a shell, give bots fine-grained tokens scoped to the fleet's repositories, and turn the sandbox on.
+
 ## Quick start
 
 **You need:** An Anthropic account (Claude Max, Team, or Enterprise — or an `ANTHROPIC_API_KEY`), [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed, and a Telegram account.

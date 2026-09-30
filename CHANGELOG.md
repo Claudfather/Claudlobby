@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — the README says what setup changes on your machine and what bounds a bot; `SECURITY.md` (#1996)
+
+A stranger deciding whether to run Claudlobby could not find out what it does to their machine without reading the scripts. The README now has two sections above the quick start, and every line names the file it can be checked against.
+
+- **What it changes on your machine:** every host change setup makes, and the script that makes it. That covers the `sudo` calls (apt packages, the GitHub CLI's apt repository, NodeSource, `loginctl enable-linger`, and Claude Code's managed settings, rewritten on every run), the units it installs, the two keys each bot start sets in your own `~/.claude/settings.json`, the Telegram access lists under `~/.claude/channels/`, the recurring jobs that act beyond the fleet, and where each secret lives.
+- **Safety model:** a bot can run shell commands as you. The expertise it is given can allow every tool, bare `Bash` included, and no composed rule denies `sudo`, so passwordless sudo on the host means root for every bot. Anyone in a fleet's Telegram group can instruct its bots. Bots also inherit your own Claude Code settings. What bounds a bot: deny rules that gate only Claude Code's own tool calls (they are not an operating-system boundary), two guard hooks, guardrails that are instructions rather than enforcement, the sandbox (off in the seed), and the scope of the tokens it holds.
+- **`SECURITY.md`:** report through GitHub's private vulnerability reporting, with no email address. If the button is missing, open a public issue that asks for contact and carries no details. The file also says what is in scope and what credentials a deployment holds.
+
 ### Fixed — a control note holds the report resolver back again, and `report-back.sh --no-task` declares a report that answers no dispatch (#1981)
 
 Since #1491 a `query`, `cancel`, `compact` or `restart` note lands its
