@@ -160,7 +160,7 @@ issues, and all three were addressed before the final run:
 | [S4b-10](https://github.com/Claudfather/Claudlobby/pull/1989#discussion_r4137332673) fleet restart | Corrected in code. `fleet restart` records a de-enrolled bot as `skipped` (`reason: de_enrolled`) and continues. Every other refusal, effect or unavailable result still stops the sweep, and `start`/`stop` are unchanged. The skip reason appears only in JSON. |
 | [S4b-07](https://github.com/Claudfather/Claudlobby/pull/1989#discussion_r4137332659) lock contention | Minimum mapping. A busy host lifecycle lock returns a retryable `conflict` with nothing attempted. There is still one host-wide lock. `bot remove` under contention and the fleet-sweep busy message remain unchanged. |
 | [S4a-05](https://github.com/Claudfather/Claudlobby/pull/1989#discussion_r4137319964) missing timeout | Corrected in code. Without `timeout`/`gtimeout`, the updater logs a distinct skip, sends a `binary_update_skipped` notice naming coreutils, installs nothing and no longer reports a false unrunnable binary. Such hosts never update in place. |
-| [S4b-11](https://github.com/Claudfather/Claudlobby/pull/1989#discussion_r4137332679) move activates unreviewed host config | **Partial: risk reduction, not reviewed-plan binding.** Before any effect, move refuses when the target fleet is not selected, the fleet set differs, the source or target roster differs from the frozen roster beyond this bot's move, or any recorded selected input outside the source and target `fleet.yaml` fingerprints differently. After staging and before activation, it refuses a staged plan whose shared inputs differ outside those two files. **Limits:** the input owner is file-granular, so unrelated fleet-level fields, other bots' blocks or teams inside those two manifests remain unguarded. Inputs that appear only in the staged plan are allowed and are not all scoped to the move. `--apply` does not take a previewed plan ID. A bot-written env tier or a changed `~/.gitconfig` now causes a refusal. |
+| [S4b-11](https://github.com/Claudfather/Claudlobby/pull/1989#discussion_r4137332679) move activates unreviewed host config | The initial file-level guard was partial. The later correction below compares both manifests with the shared frozen FleetConfig parser, refuses unrelated fields, binds staging to reviewed manifest states, and scopes added/removed inputs to the moved bot. It adds no CLI flag or separate plan-review subsystem. |
 
 ### Setup and activation refusals
 
@@ -206,6 +206,55 @@ passed, while [Ubuntu/Python 3.10](https://github.com/Claudfather/Claudlobby/act
 was cancelled after an hour in the apt prerequisites step. It never reached
 tests, so that lane remains unverified. No current-head review,
 real native or Pi proof, or production change exists for it.
+
+## Narrow follow-up: concrete failures, no new recovery framework
+
+Main #2034 (`030059de`) is integrated by `ed46a1f9`, preserving both changelog
+entries and the Claudron 0.6.1 pin. Compatibility/loop checks passed 71 tests;
+six optional-engine cases skipped because that private test environment has no
+Claudron installed. The hosted pinned-engine conformance lane remains required.
+
+Code commit `40a99d43` closes the demonstrated S4b-11 unrelated-config path:
+source and target declarations use the same `load_fleet_snapshot` model as the
+selected configuration. Only the moved bot, its team membership and a necessary
+source-manager replacement may differ. Staging must retain the exact reviewed
+manifest states. New inputs are limited to the target bot directory, removed
+inputs to the source directory; the moved bot's owned Telegram access rewrite is
+explicit. Other changes refuse. Moves requiring new external account/skill inputs
+or edits to other bots must activate those separately first.
+
+Private-export evidence:
+
+- Tree `cecc0419`: 71 activation, handoff, unit-journal and migration-apply tests
+  passed. The new malformed-handoff case uses real durable owners with a stubbed
+  native boundary and stops at the migration boundary.
+- Final tree `a2b704e6`: all 19 move tests passed. The authored fixture now parses
+  real manifest bytes rather than returning an empty roster, and its default
+  Telegram path assertion was corrected.
+- Against the previous `6a9fce58` move implementation, another bot's field edit
+  and a fleet mission edit both failed to raise a refusal. Restoring the correction
+  passed both cases. The third parameter already refused extra roster membership;
+  its old-version failure was message matching, not a new behavioral defect.
+
+The malformed-handoff test establishes a narrow existing repair-forward route:
+with pending `queues_classified`, correcting that bot's stale canonical handoff
+section and resuming the same activation ID reaches the migration boundary,
+preserves the notes and performs no repeated native pause/handoff/start. It does
+not prove completed migration, native recovery or a general rollback path. No
+production recovery code was added. Post-preflight task churn is not covered by
+this procedure; paused task writes still refuse.
+
+The existing Linux bootstrap fixture cannot represent populated legacy adoption
+without substantial new simulation. That simulation was not built. Ubuntu CI
+provides Linux x86_64 code/harness and offline release-assembly evidence; actual
+Pi/user-systemd adoption remains unproven. Tailscale discovery on September 30
+found the Pi offline with an expired node key, so no hardware canary ran.
+
+The merge standard is concrete failures and plausible dangerous paths plus a
+bounded real canary. Performance speculation, broad platform matrices and a
+general rollback framework are not automatic merge requirements. Remaining
+substantive findings still require an explicit fix or deferral; this is not a
+claim that all 199 findings are resolved.
 
 ## Host conversion and outstanding gates
 

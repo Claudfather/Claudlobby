@@ -162,6 +162,18 @@ There is no blanket rollback command for arbitrary unknown native effects.
 Do not invent a new activation ID, remove coordination files, restore old unit
 files over running candidate processes, or report an incomplete adoption as done.
 
+For the specific refusal "existing canonical handoff section is malformed" at
+pending step `queues_classified`, the journal supports repair-forward before
+migration. Preserve a copy of the named bot's `.claude/session.md`, retain its
+operator/session notes, and correct only the malformed stale canonical section.
+Inspect `host status` again and use the same plan, candidate, install directory
+and activation ID with the resume command above. Do not clear journals or invent
+another activation ID. A focused test exercises this exact repair through the
+migration boundary with no repeated native operations; it does not establish
+native recovery or completed adoption. This procedure does not cover a changed
+task assignment, missing manager, unknown handoff outcome or a later migration
+failure. Keep the host held when the recorded state does not match this case.
+
 If incompatible source has already been pulled, keep source updates disabled and
 preserve the observed state. Use the recorded activation owner where its evidence
 permits; recovery of an unrecorded partial estate requires a host-specific plan.
