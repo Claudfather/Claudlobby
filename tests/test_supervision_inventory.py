@@ -249,6 +249,8 @@ class Observations:
         self.search_dirs = [self.installed]
         self.package = source_package()
         self.declarations, self.properties, self.calls = [], {}, []
+        # Catalog rows/properties outside add(): ghosts, templates, instances.
+        self.rows, self.extra, self.failures = [], {}, {}
         self.manager, self.domain = "Linux", ""
         self.disabled = '\n\tdisabled services = {\n\t}\n'
         self.launchd = {}
@@ -306,6 +308,7 @@ class Observations:
             lines += [("710" if self.launchd_active.get(name, True) else "-") + "\t0\t" + name[:-6] for name in sorted(self.launchd)]
         else:
             lines += [f"{kind}\t{name}" for kind in ("installed", "loaded") for name in sorted(self.properties)]
+            lines += self.rows
         return "\n".join(lines) + "\n"
 
     def runner(self, command, **kwargs):
@@ -316,9 +319,13 @@ class Observations:
         assert function in {"svc_inventory_catalog", "svc_inventory_properties", "svc_inventory_disabled", "svc_bot_unit_owned_by"}
         if function == "svc_inventory_catalog":
             output, rc = self.catalog(), 0
+        elif function == "svc_inventory_properties" and args[0] in self.failures:
+            rc, stderr = self.failures[args[0]]
+            return subprocess.CompletedProcess(command, rc, "", stderr)
         elif function == "svc_inventory_properties":
             output = (self.launchd[args[0].split("/")[-1] + ".plist"] if self.manager == "Darwin" else
-                      "".join(f"{key}={value}\n" for key, value in self.properties[args[0]].items()))
+                      "".join(f"{key}={value}\n" for key, value in
+                              {**self.extra, **self.properties}[args[0]].items()))
             rc = 0
         elif function == "svc_inventory_disabled":
             assert args == ["gui/501"]
@@ -405,6 +412,82 @@ def test_linux_bootstrap_classifies_stock_alias_mask_and_shadowed_vendor_units(t
     with pytest.raises(InventoryError, match="owned consumer"):
         collect_enrollment(obs.root, (), package=obs.package, runner=obs.runner,
                            bootstrap_empty=True).require_complete()
+
+
+def test_linux_bootstrap_classifies_pi_ghost_special_template_and_continued_units(tmp_path):
+    """Classes observed read-only on a Raspberry Pi user manager (2026-09-30)."""
+    obs = Observations(tmp_path)
+    blank = {"WorkingDirectory": "", "Environment": "", "ActiveState": "inactive"}
+    # A dependency names a unit that exists nowhere; systemctl omits ExecStart.
+    ghost = "pipewire-media-session.service"
+    obs.rows.append(f"loaded\t{ghost}")
+    obs.extra[ghost] = {"Id": ghost, "LoadState": "not-found", "ActiveState": "inactive",
+                        "UnitFileState": "", "FragmentPath": "", "WorkingDirectory": "",
+                        "Environment": "", "DropInPaths": "", "NeedDaemonReload": "no",
+                        "Triggers": "", "TriggeredBy": ""}
+    # A valid special unit with [Service] but no ExecStart.
+    special = obs.add("systemd-exit.service", declared=False)
+    special.write_text("[Unit]\nDescription=Exit the Session\n[Service]\nType=oneshot\n")
+    obs.properties[special.name].update(blank)
+    del obs.properties[special.name]["ExecStart"]
+    # An uninstantiated template: show refuses the name, the file is still read.
+    template = obs.installed / "wireplumber@.service"
+    template.write_text("[Service]\nExecStart=/usr/bin/wireplumber\n")
+    obs.rows.append(f"installed\t{template.name}")
+    obs.failures[template.name] = (1, f"Failed to get properties: Unit name {template.name} "
+                                      "is neither a valid invocation ID nor unit name.")
+    instance = "wireplumber@main.service"
+    obs.rows.append(f"loaded\t{instance}")
+    obs.extra[instance] = {**obs.extra[ghost], "Id": instance, "LoadState": "loaded",
+                           "UnitFileState": "static", "FragmentPath": str(template),
+                           "ExecStart": "{ path=/usr/bin/wireplumber ; argv[]=/usr/bin/wireplumber ; }"}
+    # An unrelated oneshot whose ExecStart continues across lines.
+    story = obs.add("storydump-scheduling-monitor.service", declared=False)
+    continued = ("[Unit]\nDescription=monitor\n[Service]\nType=oneshot\n"
+                 "ExecStart=/usr/bin/python3 %h/ops/storydump/scripts/scheduling_monitor.py \\\n"
+                 "    --once \\\n    --quiet\n")
+    story.write_text(continued)
+    obs.properties[story.name].update(blank, ExecStart="{ path=/usr/bin/python3 ; }")
+
+    def bootstrap():
+        return collect_enrollment(obs.root, (), package=obs.package, runner=obs.runner,
+                                  bootstrap_empty=True).require_complete()
+
+    inventory = bootstrap()
+    assert set(inventory.foreign) == {str(special), str(template), str(story)}
+    assert any(item.path == str(template) for item in inventory.observed_files)
+    assert ("svc_inventory_properties", [template.name]) not in obs.calls
+    assert ("svc_inventory_properties", [instance]) in obs.calls
+
+    # Negative controls: each class still refuses when it could hide ownership.
+    obs.extra[instance]["ExecStart"] = f"{{ path={obs.root}/owned ; }}"
+    with pytest.raises(InventoryError, match=f"{instance}: owned consumer"):
+        bootstrap()
+    obs.extra[instance]["ExecStart"] = "{ path=/usr/bin/wireplumber ; }"
+    template.write_text(f"[Service]\nExecStart={obs.root}/owned\n")
+    with pytest.raises(InventoryError, match="wireplumber@.service: owned consumer"):
+        bootstrap()
+    template.write_text("[Service]\nExecStart=/usr/bin/wireplumber\n")
+    obs.extra[ghost]["ActiveState"] = "active"  # a running unit is never an absent reference
+    with pytest.raises(InventoryError, match=f"{ghost}: "):
+        bootstrap()
+    obs.extra[ghost]["ActiveState"] = "inactive"
+    for hidden in (continued + f"WorkingDirectory={obs.root} \\\n    /bots\n",
+                   continued.replace("    --once \\\n", "    --once \\\n# note\n")):
+        story.write_text(hidden)
+        with pytest.raises(InventoryError, match=f"{story.name}: installed ownership is unknown"):
+            bootstrap()
+    story.write_text(continued)
+    bootstrap()
+
+    # A declared unit never gets the empty-ExecStart reading.
+    (tmp_path / "declared").mkdir()
+    owned = Observations(tmp_path / "declared")
+    owned.add("owned.service")
+    owned.collect().require_complete()
+    del owned.properties["owned.service"]["ExecStart"]
+    with pytest.raises(InventoryError, match="missing/unknown native unit properties"):
+        owned.collect().require_complete()
 
 
 def test_empty_bootstrap_refuses_unknown_catalog_and_prior_selection(tmp_path):

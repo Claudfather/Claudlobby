@@ -251,6 +251,8 @@ class EnrollmentInventory:
 _NAME = re.compile(r"[A-Za-z0-9_.@:-]+")
 _SYSTEMD_NAME = re.compile(r"(?:[A-Za-z0-9_.@:-]|\\x[0-9a-fA-F]{2})+")
 _SUFFIXES = (".service", ".timer", ".socket", ".path", ".plist")
+# systemd template (prefix@.suffix): installable, never itself a loaded unit.
+_TEMPLATE = re.compile(r"(?:[A-Za-z0-9_.:-]|\\x[0-9a-fA-F]{2})+@\.(?:service|timer|socket|path)")
 
 
 def _directory_files(directory):
@@ -314,7 +316,7 @@ def _catalog(text):
     return manager, domain, directories, names, loaded
 
 
-def _properties(text):
+def _properties(text, *, foreign=False):
     result = {}
     for line in text.splitlines():
         key, separator, value = line.partition("=")
@@ -326,6 +328,16 @@ def _properties(text):
     service_fields = {"WorkingDirectory", "Environment", "ExecStart"}
     allowed = required | service_fields
     if result.get("Id", "").endswith(".service"):
+        # systemctl show omits an empty ExecStart list: a loaded special unit
+        # (systemd-exit.service) or an inactive not-found reference with no
+        # definition runs no command. Only foreign units get this reading;
+        # a declared unit must still show its exact command.
+        if (foreign and service_fields - result.keys() == {"ExecStart"}
+                and (result.get("LoadState") == "loaded"
+                     or result.get("LoadState") == "not-found"
+                     and result.get("ActiveState") == "inactive"
+                     and result.get("FragmentPath") == "")):
+            result["ExecStart"] = ""
         required |= service_fields
     if not required <= result.keys() or not result.keys() <= allowed:
         raise InventoryError("missing/unknown native unit properties")
@@ -761,8 +773,14 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
         for name in sorted(names | set(expected)):
             if not name.endswith(_SUFFIXES):
                 continue
+            if name not in expected and name not in loaded and _TEMPLATE.fullmatch(name):
+                # An uninstantiated template has no unit for systemctl show.
+                # Its installed bytes are still read, hashed and ownership-
+                # checked below; each loaded instance is its own catalog name.
+                continue
             try:
-                props = _properties(adapter.read("svc_inventory_properties", name))
+                props = _properties(adapter.read("svc_inventory_properties", name),
+                                    foreign=name not in expected)
                 if (props["Id"] != name and
                         (name in expected or not _SYSTEMD_NAME.fullmatch(props["Id"]))):
                     raise InventoryError("native identity is an unproved alias")
@@ -816,8 +834,12 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
 
     for name in sorted(names - set(expected)):
         props = properties.get(name, {})
+        # A dependency can name a unit that exists nowhere: not-found, inactive,
+        # no fragment and no installed file is an absent unit, not unknown.
+        ghost = (props.get("LoadState") == "not-found" and props.get("ActiveState") == "inactive"
+                 and props.get("FragmentPath") == "" and not installed.get(name))
         if (bootstrap_empty and manager == "Linux" and name in loaded
-                and props.get("LoadState") not in ("loaded", "masked")):
+                and props.get("LoadState") not in ("loaded", "masked") and not ghost):
             issues.append(f"{name}: loaded ownership is unknown")
         related = related_properties(props)
         if bootstrap_empty:

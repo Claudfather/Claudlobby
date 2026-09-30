@@ -25,18 +25,38 @@ class _NoWorkingDirectory(ValueError):
     """A valid systemd service with no directory cannot name a bot owner."""
 
 
+def _logical_lines(text: str):
+    """Yield (line, continued) as systemd joins backslash continuations.
+
+    A comment or blank line inside a continuation is version-dependent in
+    systemd, and a file ending mid-continuation is malformed: both refuse.
+    """
+    pending = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if pending is not None and (not line or line.startswith(("#", ";"))):
+            raise ValueError("comment or blank line inside a continuation")
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.endswith("\\\\"):
+            raise ValueError("escaped trailing backslash")  # not guessed
+        if line.endswith("\\"):
+            pending = (pending or "") + line[:-1] + " "
+            continue
+        if pending is not None:
+            yield pending + line, True
+            pending = None
+        else:
+            yield line, False
+    if pending is not None:
+        raise ValueError("unterminated continuation")
+
+
 def _systemd_directory(text: str) -> str:
     section = ""
     services = 0
     directories = []
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith(("#", ";")):
-            continue
-        if line.endswith("\\"):
-            # A previous directive can continue across a would-be ownership
-            # line. The composer emits no continuations, so refuse the unit.
-            raise ValueError("unsupported continuation")
+    for line, continued in _logical_lines(text):
         if line.startswith("["):
             if not line.endswith("]"):
                 raise ValueError("malformed section")
@@ -45,7 +65,9 @@ def _systemd_directory(text: str) -> str:
                 services += 1
             continue
         if section == "[Service]" and line.startswith("WorkingDirectory"):
-            if not line.startswith("WorkingDirectory="):
+            if continued or not line.startswith("WorkingDirectory="):
+                # The renderer never continues this line; do not guess the
+                # joined value an ownership decision would depend on.
                 raise ValueError("unsupported WorkingDirectory directive")
             directories.append(line.split("=", 1)[1].strip())
     if services == 1 and not directories:
