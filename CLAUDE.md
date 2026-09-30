@@ -228,6 +228,8 @@ No personally identifiable information in any checked-in file. This includes:
 
 Documentation and examples must use obviously fake placeholders (`ghp_xxxxxxxxxxxxxxxxxxxx`, `"-1001234567890"`, `8888888:AAAAAAAAAAAAAAAAAAAA`). If you need to reference a real service, use generic descriptions, not real account details.
 
+**This is enforced, not only stated (#2042).** The `leak-check` workflow fails a pull request that adds one of these classes, or a term from the operator's private list (the `LEAK_CHECK_TERMS` Actions secret). It prints only where, and which rule. A false positive gets an entry in `.github/leak-check-allow.txt` with a reason, and that entry is reviewed in the same diff.
+
 ### Before committing, always verify
 
 ```bash

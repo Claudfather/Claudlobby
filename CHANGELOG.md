@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — a blocking check on every pull request for use-case-specific data (#2042)
+
+`.github/actions/leak-check/`, a composite action (stdlib Python), reads a pull request's added lines and the paths it touches, and fails on use-case-specific data, whoever contributes it.
+
+- **Layer 1, generic patterns kept in the repository:** Telegram chat ids and bot tokens, GitHub and vendor API tokens, email addresses outside the reserved example domains, home paths, IPv4 addresses outside localhost and the documentation ranges, and UUIDs. The placeholders CLAUDE.md prescribes pass, and so do other obvious stand-ins.
+- **Layer 2, an operator's private list:** one case-insensitive pattern per line, from the `LEAK_CHECK_TERMS` Actions secret. If the secret is unset or empty, the check fails closed and says so.
+- **Output is a location and a rule, never what matched:** `path:line: <class>`, or `path:line: private term #<n>`. Logs on a public repository are world-readable, and masking hides only a secret's verbatim value.
+- **The escape is visible:** `.github/leak-check-allow.txt` (`<path glob> <class> <reason>`), read from the pull request itself, so an entry is reviewed in the same diff. The private list has no escape.
+- **Forks are checked too:** the workflow runs on `pull_request_target`, checks out the base commit and reads the head as git objects, so no code from the pull request runs. The other three repositories call the action pinned by sha.
+- **Tests:** `tests/test_leak_check.py` covers:
+  - a planted positive for each class, and an invented private term, each failing the check;
+  - the placeholders, passing;
+  - no matched text in any output;
+  - the fail-closed paths;
+  - the allowlist;
+  - `--git` mode.
+
 ### Fixed — `pr-review-state.py` reads a comment's verdict from its header only (#2029)
 
 The reader searched a comment's whole body, so a verdict named anywhere in it counted as the comment's own, in both directions. A note explaining someone else's block read as a block (#1757 read one live block too many). A note that mentions an earlier approve, once attributed to its writer, released that writer's real block. On a 677-PR corpus the old reader also took an approve from a table cell and from the word "approver", and a block from bold labels such as "Environment-blocked suites".

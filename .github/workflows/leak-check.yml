@@ -1,0 +1,27 @@
+name: leak-check
+
+# Every pull request's added lines, checked for use-case-specific data (#2042).
+# pull_request_target, so a pull request from a fork is checked against the
+# private list too: this job checks out the BASE commit, fetches the head as
+# git objects and diffs the two. Nothing from the pull request is checked out
+# or run. The action comes from the base checkout, so a pull request cannot
+# change the check that gates it; the other repositories pin it by sha.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  leak-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/leak-check
+        with:
+          private-terms: ${{ secrets.LEAK_CHECK_TERMS }}

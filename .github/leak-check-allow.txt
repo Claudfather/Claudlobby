@@ -1,0 +1,8 @@
+# leak-check's layer-1 allowlist (#2042): <path glob> <class> <reason>
+#
+# One entry per line. The class is one of: telegram-chat-id, telegram-bot-token,
+# github-token, api-token, email, home-path, ip-address, uuid. The reason is
+# required. The check reads this file from the pull request itself, so adding
+# an entry is part of the diff under review. The private list has no allowlist.
+library/skills/network/SKILL.md email LinkedIn's own sender addresses, which the skill sorts mail by
+tests/test_migrate_fleet_fileops.sh email a synthetic git identity for a throwaway repository
