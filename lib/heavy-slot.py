@@ -1078,9 +1078,96 @@ def _now_iso(t: Optional[float] = None) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
 
 
-def _shape(text: str) -> str:
-    text = " ".join(text.split())
+# --- what a record may hold of a command --------------------------------------
+# What the slot records of a job is kept in its lock file and in every
+# heavy_slot_* event, which the plane never prunes, and a holder's record
+# reaches the refusal another bot reads. So a record holds a job's SHAPE and
+# never its text (#2037): the tool, and the names of the flags it was given,
+# with no value, no positional word and no environment assignment.
+#
+# Redacting values in place is not enough on either side. The wrapper sees argv
+# after the shell expanded it, so a secret passed as "$VAR" arrives as a bare
+# word with nothing naming it. The hook sees the command as typed, and an
+# unparsed one can carry anything, heredoc bodies included. A shape keeps
+# neither.
+
+def _flag_name(word: Optional[str]) -> Optional[str]:
+    """A flag's name without its value: `--maxfail=2` gives `--maxfail`, and a
+    short flag keeps one letter, since `-kEXPR` glues the value on."""
+    if not word or not word.startswith("-") or word in ("-", "--"):
+        return None
+    m = re.match(r"(--[A-Za-z0-9][A-Za-z0-9-]{0,39}|-[A-Za-z0-9])", word)
+    return m.group(1) if m else None
+
+
+def _cap(text: str) -> str:
     return text if len(text) <= COMMAND_CAP else text[:COMMAND_CAP - 1] + "…"
+
+
+def _tool(argv: List[str]) -> str:
+    """What a job runs (`pytest`, `npm ci`, ...): the classifier's label, never
+    an argument."""
+    toks = _toks(argv)
+    try:
+        label = _classify(toks, lenient=True)
+        run = _strip_runners(toks)
+    except Exception:  # a record must still be written
+        label, run = None, toks
+    return label or (_base(run[0]) if run else None) or "?"
+
+
+def _shape_argv(argv: List[str]) -> str:
+    """A job's shape from the argv the wrapper runs: its tool, then the flag
+    names given to the tool (the runners in front of it are dropped)."""
+    try:
+        run = _strip_runners(_toks(argv))
+    except Exception:
+        run = _toks(argv)
+    flags = [f for f in (_flag_name(t.value) for t in run[1:]) if f]
+    return _cap(" ".join([_tool(argv)] + flags))
+
+
+_TOOL_WORDS = {"pytest", "py.test", "vitest", "next", "playwright", "npm", "pnpm", "yarn",
+               "npx", "pip", "pip3", "uv"} | set(_CHROMIUM)
+
+
+def _shape_text(text: str) -> str:
+    """A command's shape from its text as typed, which may not parse: the heavy
+    tool words and the flag names in it, and nothing else."""
+    words = []
+    for raw in text.split():
+        w = raw.strip("'\"`();&|{}<>")
+        base = w.rsplit("/", 1)[-1]
+        if base in _TOOL_WORDS or _PYTHON.match(base):
+            words.append(base)
+        else:
+            f = _flag_name(w)
+            if f:
+                words.append(f)
+    return _cap(" ".join(words)) or "?"
+
+
+def _tool_of(rec: dict) -> str:
+    """A holder's tool: its record's own. A record from before the field existed
+    gives the first tool word of its shape. Never its command."""
+    if isinstance(rec.get("tool"), str) and rec["tool"]:
+        return rec["tool"]
+    return _public(rec)["shape"].split(" ", 1)[0] or "a heavy job"
+
+
+def _public(rec: dict) -> dict:
+    """A record as it may be shown or emitted: a shape and no command. A record
+    written before shapes existed has its command reduced to one here."""
+    out = {k: v for k, v in rec.items() if k != "command"}
+    if not isinstance(out.get("shape"), str):
+        # such a command was one argv joined, so it is read back as one
+        text = rec.get("command") or ""
+        try:
+            words = shlex.split(text)
+        except ValueError:
+            words = None
+        out["shape"] = (_shape_argv(words) if words else _shape_text(text)) if text else ""
+    return out
 
 
 def _read(fd: int) -> dict:
@@ -1174,7 +1261,7 @@ def _holding(rec: dict, now: float) -> str:
         return "a holder that has not written its record yet"
     start = _epoch(rec, "started")
     mins = f" ({int((now - start) // 60)} min)" if start else ""
-    return f"{_who(rec)} running `{rec.get('command', '?')}` since {_clock(start)}{mins}"
+    return f"{_who(rec)} running {_tool_of(rec)} since {_clock(start)}{mins}"
 
 
 def refusal(holders: List[dict], n: int, now: Optional[float] = None) -> str:
@@ -1188,7 +1275,9 @@ def refusal(holders: List[dict], n: int, now: Optional[float] = None) -> str:
 
 
 def _holder_summary(rec: dict) -> dict:
-    return {k: rec.get(k) for k in ("slot", "fleet", "bot", "command", "started_at", "pid")}
+    out = {k: rec.get(k) for k in ("slot", "fleet", "bot", "started_at", "pid")}
+    out.update(tool=_tool_of(rec), shape=_public(rec)["shape"])
+    return out
 
 
 # --- the record on the plane ---------------------------------------------------
@@ -1246,7 +1335,7 @@ def cmd_hook() -> int:
     try:
         rewritten = gate(command, wrapper)
     except Unsure as why:
-        _emit("heavy_slot_unparsed", {"reason": str(why), "command": _shape(command)})
+        _emit("heavy_slot_unparsed", {"reason": str(why), "shape": _shape_text(command)})
         return 0
     if rewritten is None:
         return 0
@@ -1254,7 +1343,7 @@ def cmd_hook() -> int:
     slots = probe(d, n)
     if slots and all(held for _, held, _ in slots):
         holders = [rec for _, _, rec in slots]
-        _emit("heavy_slot_refused", {"where": "hook", "command": _shape(command),
+        _emit("heavy_slot_refused", {"where": "hook", "shape": _shape_text(command),
                                      "holders": [_holder_summary(h) for h in holders]})
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -1263,7 +1352,7 @@ def cmd_hook() -> int:
         return 0
     if not _syntax_ok(rewritten) and _syntax_ok(command):
         _emit("heavy_slot_unparsed", {"reason": "the rewrite does not parse",
-                                      "command": _shape(command)})
+                                      "shape": _shape_text(command)})
         return 0
     updated = dict(tool_input)
     updated["command"] = rewritten
@@ -1276,7 +1365,7 @@ def cmd_run(argv: List[str]) -> int:
     if not argv:
         print("usage: heavy-slot.py run -- COMMAND [ARGS...]", file=sys.stderr)
         return 2
-    shape = _shape(shlex.join(argv))
+    shape = _shape_argv(argv)
     if not heavy_family(argv):
         print(f"heavy-slot: `{shape}` is not a heavy job, so the slot does not run it; run it "
               "directly (#1686)", file=sys.stderr)
@@ -1288,7 +1377,7 @@ def cmd_run(argv: List[str]) -> int:
         slots = probe(d, n)
         holders = [rec for _, held, rec in slots if held] or [rec for _, _, rec in slots]
         print("heavy-slot: " + refusal(holders, n), file=sys.stderr)
-        _emit("heavy_slot_refused", {"where": "wrapper", "command": shape,
+        _emit("heavy_slot_refused", {"where": "wrapper", "shape": shape,
                                      "holders": [_holder_summary(h) for h in holders]})
         return EX_TEMPFAIL
     slot, fd = got
@@ -1318,19 +1407,20 @@ def cmd_run(argv: List[str]) -> int:
         # Its holder died without a release: killed this boot, or the host
         # reset under it. The record is the evidence; report it before it is
         # overwritten.
-        _emit("heavy_slot_unreleased", {"slot": slot, "previous": previous,
+        _emit("heavy_slot_unreleased", {"slot": slot, "previous": _public(previous),
                                         "across_reset": previous.get("boot_id") != boot})
     started = time.time()
     record = {
         "v": 1, "slot": slot, "slots": n, "state": "held",
         "fleet": os.environ.get("FLEET_NAME") or os.environ.get("CLAUDLOBBY_FLEET") or "",
         "bot": os.environ.get("BOT_ID") or os.environ.get("BOT_NAME") or "",
-        "command": shape, "cwd": os.getcwd(), "pid": os.getpid(), "host": socket.gethostname(),
+        "shape": shape, "tool": _tool(argv), "cwd": os.getcwd(), "pid": os.getpid(),
+        "host": socket.gethostname(),
         "boot_id": boot, "started_at": _now_iso(started), "started_epoch": int(started),
         "released_at": None, "exit": None,
     }
     _write(fd, record)
-    _emit("heavy_slot_acquired", {"slot": slot, "slots": n, "command": shape,
+    _emit("heavy_slot_acquired", {"slot": slot, "slots": n, "shape": shape,
                                   "started_at": record["started_at"]})
     delay = os.environ.get("HEAVY_SLOT_START_DELAY_S")  # test seam: hold the pre-start window open
     if delay:
@@ -1359,7 +1449,7 @@ def cmd_run(argv: List[str]) -> int:
                   duration_s=round(ended - started, 1))
     _write(fd, record)
     os.close(fd)
-    _emit("heavy_slot_released", {"slot": slot, "command": shape, "exit": status,
+    _emit("heavy_slot_released", {"slot": slot, "shape": shape, "exit": status,
                                   "started_at": record["started_at"],
                                   "duration_s": record["duration_s"]})
     if rc < 0:  # killed by a signal: end the same way, as a shell would report it
@@ -1375,7 +1465,7 @@ def _status_line(slot: int, held: bool, rec: dict, boot: str, now: float) -> str
         start = _epoch(rec, "started")
         mins = int((now - start) // 60) if start else "?"
         return (f"slot {slot}: HELD by {_who(rec)} since {_clock(start)} ({mins} min, pid "
-                f"{rec.get('pid', '?')}) — {rec.get('command', '?')}")
+                f"{rec.get('pid', '?')}) — {_public(rec)['shape'] or '?'}")
     if not rec:
         return f"slot {slot}: free — never used"
     start, end = _epoch(rec, "started"), _epoch(rec, "released")
@@ -1384,9 +1474,9 @@ def _status_line(slot: int, held: bool, rec: dict, boot: str, now: float) -> str
         how = ("before the host reset (it ran under an earlier boot)"
                if rec.get("boot_id") != boot else "its holder was killed this boot")
         return (f"slot {slot}: free — last holder NEVER RELEASED: {_who(rec)}, "
-                f"{rec.get('command', '?')}, since {when}; {how}")
+                f"{_public(rec)['shape'] or '?'}, since {when}; {how}")
     mins = f" ({int((end - start) // 60)} min)" if start and end else ""
-    return (f"slot {slot}: free — last: {_who(rec)}, {rec.get('command', '?')}, "
+    return (f"slot {slot}: free — last: {_who(rec)}, {_public(rec)['shape'] or '?'}, "
             f"{_clock(start)}–{_clock(end)}{mins}, exit {rec.get('exit', '?')}")
 
 
@@ -1398,7 +1488,7 @@ def cmd_status(args: List[str]) -> int:
     if "--json" in args:
         print(json.dumps({"dir": str(d), "slots_configured": n, "source": source,
                           "disabled": disabled,
-                          "slots": [{"slot": s, "held": h, "record": r} for s, h, r in slots]},
+                          "slots": [{"slot": s, "held": h, "record": _public(r)} for s, h, r in slots]},
                          sort_keys=True))
         return 0
     boot, now = boot_id(), time.time()

@@ -143,7 +143,8 @@ def test_a_taken_slot_refuses_the_call_before_anything_runs(se):
     assert decision["permissionDecision"] == "deny"
     reason = decision["permissionDecisionReason"]
     assert "NOT RUN" in reason and "(1 of 1)" in reason
-    assert "testfleet/alpha" in reason and "pytest -q" in reason
+    assert "testfleet/alpha" in reason and "pytest" in reason
+    assert "pytest -q" not in reason  # the refusal names the tool, never the command
     refused = [e for e in _events(se) if e["type"] == "heavy_slot_refused"]
     assert len(refused) == 1 and refused[0]["data"]["where"] == "hook"
     (se.tmp / "release").touch()
@@ -180,7 +181,7 @@ def test_the_rewritten_command_runs_the_job_under_the_slot(se):
     )
     assert p.returncode == 0 and list(se.tmp.glob("ran.*"))
     record = json.loads((se.state / "slot-0.lock").read_text())
-    assert record["command"] == "pytest -q" and record["state"] == "released"
+    assert record["shape"] == "pytest -q" and record["state"] == "released"
 
 
 def test_the_slot_lives_under_the_data_root_and_the_wrapper_is_the_native_code(se):
@@ -197,7 +198,7 @@ def test_the_slot_lives_under_the_data_root_and_the_wrapper_is_the_native_code(s
     )
     assert p.returncode == 0, p.stderr
     record = json.loads((root / "state" / "heavy-slot" / "slot-0.lock").read_text())
-    assert record["command"] == "pytest -q" and record["state"] == "released"
+    assert record["shape"] == "pytest -q" and record["state"] == "released"
     assert not (WRAPPER.parent.parent / "state" / "heavy-slot").exists()
 
 
@@ -213,3 +214,4 @@ def test_without_a_data_root_the_hook_fails_open_and_writes_no_slot(se):
                        capture_output=True, text=True, timeout=60)
     assert p.returncode == 2 and "CLAUDLOBBY_ROOT" in p.stderr
     assert not (WRAPPER.parent.parent / "state" / "heavy-slot").exists()
+
