@@ -12,6 +12,10 @@
 #                     Requires --pr. The fleet shares one GitHub login, so this
 #                     is the only place authorship is recorded at all -- GitHub
 #                     cannot answer it and nothing can backfill it later.
+#   --no-task         This report answers NO dispatch (#1981), also spelled
+#                     `--task -`: it resolves no task id and closes no id-less
+#                     row. For answering a note the plane never saw (a raw
+#                     dispatch.sh send, text typed into the pane).
 #
 # Example:
 #   report-back.sh "work-eng" completed "Fixed auth test" --pr https://github.com/org/repo/pull/42
@@ -62,6 +66,7 @@ ARTIFACTS=""
 PR_ROLE=""
 TASK_ID=""
 TASK_NAMED=""
+NO_TASK=""
 # Set when a SUPPLIED --task is not in the bot's open set (#1032). Recorded,
 # never acted on: the report still carries the id the caller gave.
 TASK_ANOMALY=""
@@ -105,10 +110,21 @@ while [ $# -gt 0 ]; do
         # overwrite TASK_ID, because afterwards the two are
         # indistinguishable -- and an attribution may only ride an id the
         # caller asserted, never one this script guessed.
-        --task)      TASK_ID="$2"; TASK_NAMED=1; shift 2 ;;
+        --task)
+            # `--task -` is `--no-task`: no task id is ever a bare dash.
+            if [ "${2:-}" = "-" ]; then NO_TASK=1; else TASK_ID="$2"; TASK_NAMED=1; fi
+            shift 2 ;;
+        --no-task)   NO_TASK=1; shift ;;
         *)           POSITIONAL_EXTRAS+=("$1"); shift ;;
     esac
 done
+
+# --no-task says this report answers no dispatch (#1981); an id beside it says
+# the opposite, so the call is refused before anything is sent.
+if [ -n "$NO_TASK" ] && [ -n "$TASK_ID" ]; then
+    echo "report-back: --no-task (or --task -) says this report answers no dispatch; drop it or drop --task $TASK_ID" >&2
+    exit 2
+fi
 
 # A role with no PR names nothing. The consumer joins role to PR through
 # pr_url, so a role recorded without one can never be read back -- refused
@@ -153,7 +169,8 @@ fi
 # watchdog helper was unavailable.
 case "$STATUS" in
     completed|failed|blocked)
-        if [ -z "$TASK_ID" ] && command -v python3 >/dev/null 2>&1; then
+        # --no-task (#1981) skips it: the caller says this report answers none.
+        if [ -z "$TASK_ID" ] && [ -z "$NO_TASK" ] && command -v python3 >/dev/null 2>&1; then
             # The resolver reads the plane of this fleet (F18 R2a) — no ledger
             # paths, no file-exists gate (a gate on the retired file once made
             # the resolver dead on a host whose files were gone).
@@ -365,7 +382,8 @@ _plane_emit_report_intent() {
         failed)    _idless_ev="failed" ;;
         blocked)   _idless_ev="returned_blocked" ;;
     esac
-    if [ -n "$_idless_ev" ]; then
+    # ...except a report declared with --no-task (#1981), which answers none.
+    if [ -n "$_idless_ev" ] && [ -z "$NO_TASK" ]; then
         _pairs=$(python3 -S -E "$(dirname "${BASH_SOURCE[0]}")/plane-lookup.py" \
             --root "${CLAUDLOBBY_ROOT:-}" --open-idless --fleet "${FLEET_NAME:-}" --bot "$BOT" \
             2>/dev/null || true)
@@ -397,6 +415,9 @@ EOF_IDLESS
     # tracked work and silently drop it for untracked -- leaving absent, the
     # state a consumer must refuse on, for a report that declared one.
     [ -n "$PR_ROLE" ] && _pr_frag="$_pr_frag,\"pr_role\":\"$PR_ROLE\""
+    # The marker says why nothing closed when the caller declared it (#1981).
+    _nt_frag=""
+    [ -n "$NO_TASK" ] && _nt_frag=",\"no_task\":true"
     # (alias-resolved at ingest), under the same report-back:<msg> ref, never
     # beside a task event (one fact).
     # CASE 1 (#1710): scoped to THIS report's own leg. The old test was a
@@ -409,7 +430,7 @@ EOF_IDLESS
     if [ "$_own_task_leg" -eq 0 ]; then
         case "$STATUS" in
             completed|failed|blocked|progress)
-                events="$events,{\"event_type\":\"system\",\"emitter\":\"report-back\",\"source_ref\":\"report-back:$PLANE_MSG_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"event\":\"report_status\",\"subject_kind\":\"actor\",\"subject\":\"$safe_sender\",\"data\":{\"status\":\"$STATUS\",\"msg_id\":\"$PLANE_MSG_ID\"${_pr_frag:-}}}}" ;;
+                events="$events,{\"event_type\":\"system\",\"emitter\":\"report-back\",\"source_ref\":\"report-back:$PLANE_MSG_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"event\":\"report_status\",\"subject_kind\":\"actor\",\"subject\":\"$safe_sender\",\"data\":{\"status\":\"$STATUS\",\"msg_id\":\"$PLANE_MSG_ID\"${_pr_frag:-}${_nt_frag:-}}}}" ;;
         esac
     elif [ -n "$_pr_frag" ] && [ -z "$TASK_NAMED" ]; then
         # The one path where declared PR fields reach no row: the link was

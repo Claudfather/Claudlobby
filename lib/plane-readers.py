@@ -23,6 +23,10 @@ This module is the stdlib twin of the package definitions — keep them in step
                       report door closes id-less assignments on the bot's next
                       terminal report (``plane-lookup.py --open-idless``), which
                       is what makes the guard answerable from the plane.
+- ``answering_control_note`` (#1981): the same guard for a CONTROL note, which
+                      lands no assignment since #1491 and so is invisible to
+                      ``answering_idless`` -- read off the note's COMMUNICATION
+                      instead, and held until an id-less report answers it.
 
 Read-only (``mode=ro`` + ``query_only``). A missing or unopenable db raises
 ``PlaneUnreachable`` — the caller refuses, it never falls back to the JSONL:
@@ -465,12 +469,81 @@ def answering_idless(conn: sqlite3.Connection, fleet: str, bot: str, at: Optiona
     return conn.execute(ASSIGNMENT_TERMINAL_SQL, (row[2], at, at)).fetchone() is None
 
 
+# The control-note guard (#1981). A `query` / `cancel` / `compact` / `restart`
+# note lands its COMMUNICATION alone (#1491: no assignment, so no row a report
+# could fail to close), and `answering_idless` reads the bot's newest
+# ASSIGNMENT, so a note stopped holding the resolver back: the worker's id-less
+# answer to it was stamped with the live task and closed it as `completed`
+# (ravi's #917 row, 2026-09-29). This reads the NOTE instead: the resolver is
+# held while ANY control note sent to the bot has no id-less report from the
+# bot after it, so the newest such note decides (a report after it is after
+# every older one). A report naming one of the bot's own tasks, and a newer
+# task, leave the hold standing: neither answers a note, and a wrong
+# completion is worse than an open row (the ruling on #1984). The cost is at
+# most one id-less report per note that resolves to no task; an id'd row it
+# was really finishing stays open and pages as overdue. The hold is on
+# RESOLUTION only: the report door's id-less closer still closes raw-text rows
+# on that report.
+# The note is selected by the dispatch door's provenance (`dispatch-log:`),
+# never by message class alone, since other doors send classes like `question`
+# too. Two arms, each on an index: the recipient alias the door records
+# whenever it resolves the worker (every dispatch on the live plane,
+# 2026-09-29), and `recipient_raw` in the sender's fleet, the door's disclosed
+# fallback when it cannot. A report is id-less when its communication carries
+# no `assignment_id`, which the report door sets whenever it links one, so a
+# `--task` that links to none of the bot's tasks counts as id-less and releases
+# the hold (measured on #1984). `--no-task` is the answer that never resolves.
+CONTROL_COMMANDS = ("query", "cancel", "compact", "restart")
+_NEWEST_NOTE_SQL = (
+    "SELECT occurred_at, ingest_seq FROM ("
+    "SELECT c.occurred_at, c.ingest_seq FROM communications c"
+    " WHERE c.recipient_fleet = ? AND c.recipient_uid IN (%s)"
+    " AND c.source_ref LIKE 'dispatch-log:%%' AND c.command_type IN (%s)"
+    " AND (? IS NULL OR c.occurred_at <= ?)"
+    " UNION ALL"
+    " SELECT c.occurred_at, c.ingest_seq FROM communications c"
+    " WHERE c.fleet_uid = ? AND c.recipient_alias IS NULL AND lower(c.recipient_raw) = ?"
+    " AND c.source_ref LIKE 'dispatch-log:%%' AND c.command_type IN (%s)"
+    " AND (? IS NULL OR c.occurred_at <= ?))"
+    " ORDER BY occurred_at DESC, ingest_seq DESC LIMIT 1"
+)
+_IDLESS_REPORT_SINCE_SQL = (
+    "SELECT 1 FROM communications r WHERE r.message_class = 'report' AND r.sender_uid IN (%s)"
+    " AND r.assignment_id IS NULL"
+    " AND (r.occurred_at > ? OR (r.occurred_at = ? AND r.ingest_seq > ?))"
+    " AND (? IS NULL OR r.occurred_at <= ?) LIMIT 1"
+)
+
+
+def answering_control_note(conn: sqlite3.Connection, fleet: str, bot: str,
+                           at: Optional[str] = None, *, entry: Optional[dict] = None) -> bool:
+    """True while any control note sent to the bot (as of *at*) has no id-less
+    report from the bot after it: the bot's next id-less report answers THAT
+    note, so the resolver must not hand it an open task (#1981)."""
+    entry = entry if entry is not None else bot_entry(conn, fleet, bot)
+    uids = (entry or {}).get("uids", [])
+    if not uids:
+        return False
+    marks, ctl = ",".join("?" * len(uids)), ",".join("?" * len(CONTROL_COMMANDS))
+    fleet_row = conn.execute(FLEET_UID_SQL, (fleet,)).fetchone()
+    note = conn.execute(_NEWEST_NOTE_SQL % (marks, ctl, ctl),
+                        (fleet, *uids, *CONTROL_COMMANDS, at, at,
+                         fleet_row[0] if fleet_row else None, bot.lower(),
+                         *CONTROL_COMMANDS, at, at)).fetchone()
+    if note is None:
+        return False
+    return conn.execute(_IDLESS_REPORT_SINCE_SQL % marks,
+                        (*uids, note[0], note[0], note[1], at, at)).fetchone() is None
+
+
 def head(conn: sqlite3.Connection, fleet: str, bot: str, at: Optional[str] = None,
          *, entry: Optional[dict] = None) -> Optional[str]:
     """The resolver's answer from the plane: the oldest open id'd dispatch,
-    or None — including None while an id-less dispatch is unanswered."""
+    or None — including None while an id-less dispatch or a control note is
+    unanswered."""
     entry = entry if entry is not None else bot_entry(conn, fleet, bot)
-    if entry is None or answering_idless(conn, fleet, bot, at, entry=entry):
+    if entry is None or answering_idless(conn, fleet, bot, at, entry=entry) \
+            or answering_control_note(conn, fleet, bot, at, entry=entry):
         return None
     rows = open_rows(conn, fleet, bot, at, entry=entry, idd_only=True)
     return rows[0][2] if rows else None
@@ -1195,7 +1268,7 @@ RECHECKED_SQL = (
     "SELECT c.source_ref, MAX(c.occurred_at) FROM communications c"
     " WHERE c.source_ref IN (%s)"
     " AND EXISTS (SELECT 1 FROM events x WHERE x.kind='transmission'"
-    "   AND x.msg_id = c.msg_id AND x.event='pane_submitted')"
+    "   AND x.msg_id = c.msg_id AND x.event IN ('pane_submitted','carrier_accepted'))"
     " GROUP BY c.source_ref"
 )
 # The FLEET's open rows: scoped by the assignment's own `fleet_uid`, which is
@@ -1266,6 +1339,22 @@ def menu_facts(conn: sqlite3.Connection, assignment_ids: list) -> dict[str, dict
                 out.setdefault(asg, {})["escalated"] = {
                     "question": question, "by": by, "at": at}
     return out
+
+
+# The bots `generate` COMPOSED for a fleet: the registry scan's `bot_instance`
+# rows (#2011). An alias is minted for whoever a door names as a sender, so
+# `roster()` (aliases) holds `bot:<fleet>/operator` when a human's dispatch was
+# recorded under BOT_ID=operator; only a composed bot has an instance.
+COMPOSED_BOTS_SQL = "SELECT alias FROM identity_registry WHERE kind='bot_instance' AND alias LIKE ?"
+
+
+def composed_bot_aliases(conn: sqlite3.Connection, fleet: str) -> list[str]:
+    """The aliases of the bots composed for *fleet*. Empty means the registry
+    scan has recorded none here: unknown, which the caller must not read as
+    "no bots"."""
+    prefix = f"bot:{fleet}/"
+    return [a for (a,) in conn.execute(COMPOSED_BOTS_SQL, (prefix + "%",))
+            if a.startswith(prefix)]
 
 
 def rechecked_at(conn: sqlite3.Connection, assignment_ids: list) -> dict[str, str]:
