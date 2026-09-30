@@ -1763,7 +1763,7 @@ class TestTheFixtureRefusesDeadWiring:
         repaired by a per-entry symlink — `link.exists()` is true, so nothing
         is wired — and `.is_file()` is the predicate that still catches it."""
         (tmp_path / "r" / "lib" / "env-tiers.sh").mkdir(parents=True)
-        with pytest.raises(AssertionError, match="does not carry the real lib"):
+        with pytest.raises(AssertionError, match="does not carry the real claudlobby/_runtime_scripts/"):
             _doctor_root(tmp_path, _fleet_yaml())
 
     def test_a_clean_build_is_wired_so_the_controls_are_not_vacuous(

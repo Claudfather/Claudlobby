@@ -2691,5 +2691,5 @@ class TestTheValidatorFixtureRefusesDeadWiring:
     ):
         (fleet_dir / "lib").mkdir(exist_ok=True)
         (fleet_dir / "lib" / "env-tiers.sh").mkdir()
-        with pytest.raises(AssertionError, match="does not carry the real lib"):
+        with pytest.raises(AssertionError, match="does not carry the real claudlobby/_runtime_scripts/"):
             _validate_with_real_resolver(fleet_dir, monkeypatch)

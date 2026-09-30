@@ -171,7 +171,7 @@ SKILLS = ["selfcheck", "review-status", "status-personal", "eng-status"]
 
 @pytest.mark.parametrize("skill", SKILLS)
 def test_skill_uses_the_door(skill):
-    p = DOOR.parent.parent / "library" / "skills" / skill / "SKILL.md"
+    p = DOOR.parents[2] / "library" / "skills" / skill / "SKILL.md"
     text = p.read_text()
     # Anchored, NOT a bare substring: `claude-claude-session-pid.sh` contains
     # `claude-session-pid.sh`, so the loose form passed for a full review round
@@ -188,7 +188,7 @@ def test_skill_has_no_process_scan_in_executable_lines(skill):
     defect in surrounding prose -- a naive whole-file grep would fail on the
     explanation and pass on a regression that omitted it.
     """
-    p = DOOR.parent.parent / "library" / "skills" / skill / "SKILL.md"
+    p = DOOR.parents[2] / "library" / "skills" / skill / "SKILL.md"
     in_fence = False
     offenders = []
     for i, line in enumerate(p.read_text().splitlines(), 1):
@@ -203,7 +203,7 @@ def test_skill_has_no_process_scan_in_executable_lines(skill):
 def test_the_prose_control_is_live():
     """Positive control for the test above: the explanation IS present, so the
     fence-scoping is doing real work rather than passing vacuously."""
-    p = DOOR.parent.parent / "library" / "skills" / "selfcheck" / "SKILL.md"
+    p = DOOR.parents[2] / "library" / "skills" / "selfcheck" / "SKILL.md"
     assert "pgrep -f 'claude' | head -1" in p.read_text(), (
         "explanatory prose missing -- the fence-scoped assertion would then "
         "pass for the wrong reason"
@@ -247,7 +247,7 @@ _LIB_REF = _re.compile(
 
 def _skill_lib_refs():
     """Every claudlobby/_runtime_scripts/ path referenced by any shipped skill, with its source line."""
-    skills = DOOR.parent.parent / "library" / "skills"
+    skills = DOOR.parents[2] / "library" / "skills"
     for path in sorted(skills.glob("*/SKILL.md")):
         for lineno, line in enumerate(path.read_text().splitlines(), 1):
             for m in _LIB_REF.finditer(line):
@@ -261,7 +261,7 @@ def test_every_lib_path_a_skill_references_exists_on_disk():
     Deliberately broader than the PR that added it -- the failure class is
     'the reference was never resolved', which is not specific to one door.
     """
-    repo = DOOR.parent.parent
+    repo = DOOR.parents[2]
     missing = [
         f"{p.relative_to(repo)}:{n}: {rel}"
         for p, n, rel, _ in _skill_lib_refs()
@@ -276,7 +276,7 @@ def test_the_existence_check_rejects_the_shape_that_shipped():
     A test that has never been shown to reject the real defect is
     indistinguishable from one that cannot. Feeds it the exact mangled name.
     """
-    repo = DOOR.parent.parent
+    repo = DOOR.parents[2]
     assert not (repo / "claudlobby/_runtime_scripts/claude-claude-session-pid.sh").exists()
     assert (repo / "claudlobby/_runtime_scripts/claude-session-pid.sh").exists()
     # and the substring form that passed for a whole review round:
@@ -295,7 +295,7 @@ def test_the_skill_line_actually_runs(skill):
     there is no Claude session in the ancestry, so the door correctly refuses
     with rc 3 and prints `unknown`. Both are healthy; a missing file is not.
     """
-    repo = DOOR.parent.parent
+    repo = DOOR.parents[2]
     path = repo / "library" / "skills" / skill / "SKILL.md"
     lines = [
         l.strip() for l in path.read_text().splitlines()
