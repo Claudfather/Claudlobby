@@ -1899,6 +1899,16 @@ def compose_access_json(bot: BotConfig, fleet: FleetConfig) -> dict | None:
 # ----------------------------------------------------------------------
 
 
+def default_roles(bot: BotConfig, fleet: FleetConfig, *, is_manager: bool) -> tuple[str, ...]:
+    """The roles a bot holds for the defaults registry's role overlays: every
+    manager, and the leaf managers among them (``defaults.DETECTABLE_ROLES``).
+    ONE derivation for every entity type's overlay, so the protocols and
+    skills defaults can never disagree about who is a manager."""
+    return ((defaults.ROLE_MANAGER,) if is_manager else ()) + (
+        (defaults.ROLE_LEAF_MANAGER,) if bot.bot_id in fleet.leaf_manager_bots() else ()
+    )
+
+
 def resolve_effective_protocols(
     bot: BotConfig, fleet: FleetConfig, paths: Paths, *, is_manager: bool
 ) -> list[str]:
@@ -1925,8 +1935,7 @@ def resolve_effective_protocols(
     protocol_names = list(bot.protocols)
     sd = fleet.system_defaults
     if sd.enabled and sd.protocols:
-        roles = ((defaults.ROLE_MANAGER,) if is_manager else ()) + (
-            (defaults.ROLE_LEAF_MANAGER,) if bot.bot_id in fleet.leaf_manager_bots() else ())
+        roles = default_roles(bot, fleet, is_manager=is_manager)
         for name in defaults.resolve("protocols", roles):
             if defaults.available(name, facts) and name not in protocol_names:
                 protocol_names.append(name)
@@ -1966,8 +1975,10 @@ def resolve_effective_skills(
     bot: BotConfig, fleet: FleetConfig, paths: Paths, *, is_manager: bool
 ) -> list[str]:
     """The skills a bot is ACTUALLY composed with: declared, plus ``briefing``
-    when it equips a ``briefing:`` stanza, plus every ``requires.skills`` entry
-    of its EFFECTIVE protocols (spec §10).
+    when it equips a ``briefing:`` stanza, plus the registry's skill defaults
+    for the bot's roles (``status`` for every manager, #2010) unless the fleet
+    or the bot switched them off, plus every ``requires.skills`` entry of its
+    EFFECTIVE protocols (spec §10).
 
     ONE definition, for the reason ``resolve_effective_protocols`` states two
     functions up: the compose path, the validator, freshbox and the plane's
@@ -1981,6 +1992,23 @@ def resolve_effective_skills(
     # skill Claude Code rejects the command locally and the send reads OK (#1819).
     if bot.briefing and bot.briefing.slots and "briefing" not in skills:
         skills.append("briefing")
+    sd = fleet.system_defaults
+    if sd.enabled and sd.skills and bot.system_defaults.skills:
+        # Gate each skill default on availability, as the protocol defaults are
+        # (resolve_effective_protocols): a role default naming a skill the
+        # library lacks must not compose, or it dangles and the validator flags
+        # skill-missing (#2010 follow-up). `status` is available only where the
+        # library provides it.
+        facts = defaults.Facts(
+            shared_docs=paths.shared_docs is not None,
+            vault_wired=bot_is_vault_wired(bot),
+            available_skills=frozenset(paths.expand_skill_folder("")),
+        )
+        for name in defaults.resolve(
+            "skills", default_roles(bot, fleet, is_manager=is_manager)
+        ):
+            if defaults.available(name, facts) and name not in skills:
+                skills.append(name)
     protocol_names = resolve_effective_protocols(
         bot, fleet, paths, is_manager=is_manager
     )
@@ -2234,6 +2262,11 @@ def _compose_hooks(hooks: dict[str, list[dict[str, Any]]]) -> dict[str, list]:
 # approaches this, the held #1123 lazy-import branch lands before arming).
 BRIEF_HOOK_TIMEOUT_S = 10
 
+#: The heavy-job slot's PreToolUse hook (#1686), composed for a bot that set
+#: `heavy_slot: true` and for no other. Its script and the wrapper it inserts
+#: are read per use from the install's lib/.
+HEAVY_SLOT_HOOK = "$CLAUDLOBBY_ROOT/lib/heavy-slot-guard.sh"
+
 
 @functools.cache
 def _brief_cli_probe() -> tuple[str | None, str]:
@@ -2313,6 +2346,21 @@ def _with_brief_boot_hook(
         entries.append(
             {"command": cmd, "matcher": matcher, "timeout": BRIEF_HOOK_TIMEOUT_S}
         )
+    return out
+
+
+def _with_heavy_slot_hook(
+    hooks: dict[str, list[dict[str, Any]]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Return a copy of the flat fleet.yaml-shaped hooks with the heavy-job
+    slot's PreToolUse entry appended, matcher ``Bash`` (#1686).
+
+    Composed only for a bot whose ``heavy_slot`` is true: a composed hook is
+    live on every bot the moment ``generate`` writes it (#1310), so composing
+    it per bot is what makes the manifest key a canary, and a bot that did not
+    opt in runs no process for it at all."""
+    out = {k: list(v) for k, v in hooks.items()}
+    out.setdefault("PreToolUse", []).append({"command": HEAVY_SLOT_HOOK, "matcher": "Bash"})
     return out
 
 
@@ -2912,6 +2960,8 @@ def compose_settings_local(
             exe,
             fleet=paths.fleet_dir.name if paths.fleet_dir else None,
         )
+    if bot.heavy_slot:
+        bot_hooks = _with_heavy_slot_hook(bot_hooks)
     hooks = _compose_hooks(bot_hooks)
     if _session_loop_enabled(bot):
         executable, warning = _resolve_claudron_executable()

@@ -49,7 +49,24 @@ NEW_INSTRUCT_DEFAULTS_WITH_GATE_EVIDENCE = {
         "existing (rootless) naked-probe shape is unaffected — the arm that "
         "actually exercises this entry is the new one Task 4 adds."
     ),
+    "status": (
+        "#2010 — the manager role overlay on `skills` "
+        "(defaults.REGISTRY['skills'].roles). The naked-bot gate's "
+        "`shape:leaf-manager` arm observes the manager, and its delta is "
+        "`.claude/skills/status` linked plus the skill's grants in "
+        "settings.local.json; every other arm composes one non-manager bot "
+        "and is unchanged. Delta named in the PR body."
+    ),
 }
+
+
+def _library_file(etype: str, entry: str) -> Path:
+    """Where a registry entry lives in `library/`. A skill is a directory
+    holding `SKILL.md` (what `composer.resolve_skill_sources` links); every
+    other entity type is one markdown file."""
+    if etype == "skills":
+        return LIBRARY / etype / entry / "SKILL.md"
+    return LIBRARY / etype / f"{entry}.md"
 
 
 def _library_entity_types() -> set[str]:
@@ -93,7 +110,7 @@ class TestCompleteness:
         # and they must be enumerable rather than discovered one at a time.
         unsettled = sorted(t for t, d in REGISTRY.items() if not d.settled)
         settled = sorted(t for t, d in REGISTRY.items() if d.settled)
-        assert settled == ["guardrails", "protocols"], (
+        assert settled == ["guardrails", "protocols", "skills"], (
             "the settled set moved. Every entry here changes what a bot composes "
             "on the default path, so it lands by editing this list deliberately — "
             f"never by a default arriving unannounced: {settled}"
@@ -292,7 +309,13 @@ class TestScopeBoundary:
         # no such guard: it is a predicate, so a bad `Paths` attribute raises at
         # compose time instead of reading falsy and suppressing the default on
         # every bot, which is why it is a predicate rather than an attribute name.
-        registered = {e for d in REGISTRY.values() for e in d.entries}
+        # A gate may key a role-scoped default (e.g. `status`), so a real entry
+        # is any global entry OR any role entry.
+        registered = {
+            e
+            for d in REGISTRY.values()
+            for e in (*d.entries, *(x for entries in d.roles.values() for x in entries))
+        }
         for entry, gate in defaults.AVAILABILITY_GATES.items():
             assert entry in registered, f"gate for unregistered entry: {entry}"
             assert callable(gate), f"gate for {entry} is not callable"
@@ -349,7 +372,7 @@ class TestScopeBoundary:
             f"{etype}/{entry}"
             for etype in REGISTRY
             for entry in set(resolve(etype)) | set(resolve(etype, all_roles))
-            if not (LIBRARY / etype / f"{entry}.md").is_file()
+            if not _library_file(etype, entry).is_file()
         ]
         assert not missing, f"registered but absent from library/: {missing}"
 

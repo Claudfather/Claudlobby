@@ -1268,7 +1268,7 @@ RECHECKED_SQL = (
     "SELECT c.source_ref, MAX(c.occurred_at) FROM communications c"
     " WHERE c.source_ref IN (%s)"
     " AND EXISTS (SELECT 1 FROM events x WHERE x.kind='transmission'"
-    "   AND x.msg_id = c.msg_id AND x.event='pane_submitted')"
+    "   AND x.msg_id = c.msg_id AND x.event IN ('pane_submitted','carrier_accepted'))"
     " GROUP BY c.source_ref"
 )
 # The FLEET's open rows: scoped by the assignment's own `fleet_uid`, which is
@@ -1339,6 +1339,22 @@ def menu_facts(conn: sqlite3.Connection, assignment_ids: list) -> dict[str, dict
                 out.setdefault(asg, {})["escalated"] = {
                     "question": question, "by": by, "at": at}
     return out
+
+
+# The bots `generate` COMPOSED for a fleet: the registry scan's `bot_instance`
+# rows (#2011). An alias is minted for whoever a door names as a sender, so
+# `roster()` (aliases) holds `bot:<fleet>/operator` when a human's dispatch was
+# recorded under BOT_ID=operator; only a composed bot has an instance.
+COMPOSED_BOTS_SQL = "SELECT alias FROM identity_registry WHERE kind='bot_instance' AND alias LIKE ?"
+
+
+def composed_bot_aliases(conn: sqlite3.Connection, fleet: str) -> list[str]:
+    """The aliases of the bots composed for *fleet*. Empty means the registry
+    scan has recorded none here: unknown, which the caller must not read as
+    "no bots"."""
+    prefix = f"bot:{fleet}/"
+    return [a for (a,) in conn.execute(COMPOSED_BOTS_SQL, (prefix + "%",))
+            if a.startswith(prefix)]
 
 
 def rechecked_at(conn: sqlite3.Connection, assignment_ids: list) -> dict[str, str]:

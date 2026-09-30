@@ -55,6 +55,10 @@ class TestSeedFleetConfig:
         assert "doctor" in skills
         assert "fleet-status" in skills
         assert "add-bot" in skills
+        # The bot a new user talks to answers /status out of the box (#2010).
+        # claudfather is not a manager, so the manager-role default never
+        # reaches it: the seed declares the skill instead.
+        assert "status" in skills
 
     def test_seed_bot_voice(self):
         fleet, _md = load_fleet(SEED_FLEET_YAML)
@@ -175,6 +179,12 @@ def _setup_seed_tree(tmp_path: Path) -> Path:
         (skill_dir / "SKILL.md").write_text(
             f"---\ntitle: {s}\ndescription: Skill\n---\n\n# {s}\n\nSkill.\n"
         )
+    # The real `status` skill, not a stub, so its real `tool_grants` are what
+    # a composed claudfather is granted.
+    shutil.copytree(
+        REPO_ROOT / "library" / "skills" / "status",
+        root / "library" / "skills" / "status",
+    )
 
     # Lesson stubs
     tg_lessons_dir = root / "library" / "lessons" / "telegram"
@@ -311,3 +321,26 @@ class TestComposeSeedBot:
         conf_text = bot_conf.read_text()
         assert "--dangerously-skip-permissions" not in conf_text
         assert "opus" in conf_text
+
+    def test_compose_seed_bot_links_status_with_its_grants(self, tmp_path):
+        """claudfather composes /status and the grants the skill declares (#2010)."""
+        from claudlobby.composer import compose_bot
+
+        root = _setup_seed_tree(tmp_path)
+        paths = Paths(root=root, seed=True)
+        fleet, _md = load_fleet(paths.fleet_yaml)
+        assert not fleet.manager_bots()  # declared, not reached by the manager default
+        compose_bot(fleet.bots["claudfather"], fleet, paths)
+
+        claude_dir = paths.bot_runtime("claudfather") / ".claude"
+        assert (claude_dir / "skills" / "status").is_symlink()
+        allow = json.loads((claude_dir / "settings.local.json").read_text())[
+            "permissions"
+        ]["allow"]
+        for grant in (
+            "Skill(status)",
+            "Bash(claudlobby *)",
+            "Bash(gh *)",
+            "mcp__plugin_telegram_telegram__reply",
+        ):
+            assert grant in allow, f"{grant} not granted"

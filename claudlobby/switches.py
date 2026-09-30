@@ -639,6 +639,25 @@ SWITCHES: tuple[Switch, ...] = (
              "keeps npx, and generate says which and why",
     ),
     Switch(
+        key="heavy-slot",
+        scope=GENERATE,
+        polarity=OPT_IN,
+        carrier=COMPOSE_BOT,
+        config="heavy_slot",
+        # Measured (#1686, claude 2.1.281, headless): a PreToolUse hook added to
+        # settings.local.json mid-session fired on the session's next Bash
+        # call, so the default "next tool call, no restart" holds for it.
+        why_opt_in="no deployment gate: a composed hook is live on every bot the "
+                   "next generate composes it for (#1310), with no restart in "
+                   "between, and this one rewrites the bot's heavy commands, so "
+                   "the manifest is the only place one bot can go first",
+        what="run the bot's heavy Bash commands (a whole pytest or vitest run, "
+             "an npm/pnpm/yarn install, a test or build script, next build, "
+             "Playwright, Chromium) under the host's heavy-job slot: one at a "
+             "time host-wide, a refused call names the holder, and the lock "
+             "file records what was running if the host resets (#1686)",
+    ),
+    Switch(
         key="boot-brief",
         scope=DOOR,
         polarity=OPT_IN,
