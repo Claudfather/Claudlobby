@@ -3,8 +3,9 @@ name: status
 description: "Manager readout for the human: what moved, and what is waiting on their decision. One line each, bounds stated. Consumes `claudlobby brief` and adds the PR surface brief does not carry."
 argument-hint: "[24h|7d|since <ISO>]"
 tool_grants:
-  - "Bash(claudlobby *)"
-  - "Bash(gh *)"
+  - "Bash(claudlobby --json brief)"
+  - "Bash(claudlobby --json fleet inbox)"
+  - "Bash(gh pr list *)"
   - "mcp__plugin_telegram_telegram__reply"
 ---
 
@@ -26,10 +27,11 @@ Anything failing both tests is context, and context goes in a pointer.
 ## Step 1 — read the shipped door, never raw state files
 
 ```bash
-claudlobby --fleet "$FLEET_NAME" brief --bot "$BOT_NAME" --json
+claudlobby --json brief
 ```
 
-The schema-1 result carries the schema-2 document in `data.brief`; check `ok`
+Run it as one literal command. The generated bot context selects your fleet and
+your bot, so there is no `--fleet` or `--bot` to add. The schema-1 result carries the schema-2 document in `data.brief`; check `ok`
 before reading it. `brief` is the fleet's one read door. **Do not hand-roll greps over `state/` — and there are no event files to grep: the events are on the plane** — a
 hand-rolled reader silently disagrees with the framework's own, and yours is the one that is wrong.
 
@@ -38,7 +40,7 @@ including queued manager intake), `work.issues` (unresolved history),
 assignment-keyed `work.items[].attention` (including overdue/orphaned or an
 explicit unknown), `workstreams`, `reports.unacked`,
 `alerts`, and — load-bearing — `degraded[]`.
-For current escalations use `claudlobby fleet inbox`; an empty brief work view
+For current escalations use `claudlobby --json fleet inbox`; an empty brief work view
 does not certify that no alert or question needs attention.
 
 If the command fails or the fleet has no brief, **say so and stop.** A readout assembled from a door

@@ -53,6 +53,27 @@ def resolve(
     return row["uid"]
 
 
+def lookup(conn: sqlite3.Connection, kind: str, alias: str) -> str | None:
+    """The uid an alias already has, or None. The read doors' half of
+    resolve(): it never mints, because a read must not create an identity."""
+    row = conn.execute(
+        "SELECT uid FROM identity_registry WHERE kind = ? AND alias = ?",
+        (kind, alias),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def aliases_of_kind(conn: sqlite3.Connection, kind: str) -> list[str]:
+    """Every alias recorded for one kind, sorted: what a read door offers
+    when its caller names no subject, or one the plane does not hold."""
+    return [
+        r[0]
+        for r in conn.execute(
+            "SELECT alias FROM identity_registry WHERE kind = ? ORDER BY alias", (kind,)
+        ).fetchall()
+    ]
+
+
 def resolve_fleet(
     conn: sqlite3.Connection, fleet_alias: str, now: str, host_uid: str,
 ) -> str:

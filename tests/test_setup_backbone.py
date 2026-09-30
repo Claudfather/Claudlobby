@@ -68,14 +68,18 @@ class Harness:
             '        grep -qx "${3:-}" "$STUB_ENROLLED" 2>/dev/null; exit $? ;;\n'
             # Emulate systemd glob expansion for list-unit-files: the last arg
             # may be a pattern (e.g. <prefix>.briefing-*.timer); a literal name
-            # still exact-matches, keeping existing callers unchanged.
+            # still exact-matches, keeping existing callers unchanged. Like
+            # systemd (252, measured), a pattern or name that matches nothing
+            # exits 1 with no output, which is what fires an unguarded
+            # caller's ERR trap (#1707).
             "    list-unit-files)\n"
+            "        _rc=1\n"
             "        while IFS= read -r _u; do\n"
             '            [ -n "$_u" ] || continue\n'
             "            # shellcheck disable=SC2254\n"
-            '            case "$_u" in ${!#}) echo "$_u enabled enabled" ;; esac\n'
+            '            case "$_u" in ${!#}) echo "$_u enabled enabled"; _rc=0 ;; esac\n'
             '        done < "$STUB_UNIT_FILES" 2>/dev/null\n'
-            "        exit 0 ;;\n"
+            "        exit $_rc ;;\n"
             "    is-active)\n"
             '        grep -qx "${!#}" "$STUB_ACTIVE" 2>/dev/null && exit 0\n'
             "        exit 3 ;;\n"

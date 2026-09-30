@@ -160,7 +160,16 @@ def test_exactly_the_categories_that_ship_off():
                       # let one bot go first. Nothing from the four list: it
                       # deletes nothing, spends nothing, sends nothing, and the
                       # install it arms writes only under state/mcp.
-                      "mcp-direct-launch"}
+                      "mcp-direct-launch",
+                      # #1686, the same arrival category again: a composed hook
+                      # reaches every bot the nightly generate composes it for,
+                      # with nobody choosing which goes first, and this one
+                      # rewrites the bot's heavy commands, so the manifest is
+                      # the one place one bot can go first. Nothing from the
+                      # four list: it deletes nothing, spends nothing, sends
+                      # nothing, touches no operator source, and what it arms
+                      # writes only under state/heavy-slot.
+                      "heavy-slot"}
     for s in sw.SWITCHES:
         if s.polarity == sw.OPT_IN:
             assert s.why_opt_in, f"{s.key} ships off with no stated reason"

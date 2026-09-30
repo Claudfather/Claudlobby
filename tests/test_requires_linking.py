@@ -72,6 +72,18 @@ def _equip(fleet_dir: Path, bot_id: str, **fields: list[str]) -> None:
     (fleet_dir / "fleet.yaml").write_text(text)
 
 
+def _no_skill_defaults(fleet_dir: Path) -> None:
+    """Switch off the registry's skill defaults for the fixture fleet, so a
+    test pins `requires:` linking alone. The manager role's `status` default
+    (#2010) would otherwise join a manager's effective set; it is pinned by
+    tests/test_manager_status_default.py."""
+    text = (fleet_dir / "fleet.yaml").read_text()
+    assert text.count("  accounts:\n") == 1
+    (fleet_dir / "fleet.yaml").write_text(
+        text.replace("  accounts:\n", "  system_defaults:\n    skills: false\n\n  accounts:\n")
+    )
+
+
 def _paths(fleet_dir: Path) -> Paths:
     # These tests deliberately replace package.library with their tiny
     # synthetic library. Carry the real universal skill into that isolated
@@ -193,6 +205,7 @@ class TestResolveEffectiveSkills:
         _write_skill(fleet_dir, "gadget", tool_grants=["Bash(gadget-tool *)"])
         _write_skill(fleet_dir, "widget")
         _equip(fleet_dir, "lead", protocols=["needs-gadget"], skills=["widget", "gadget"])
+        _no_skill_defaults(fleet_dir)
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         bot = fleet.bots["lead"]
         is_manager = bot.bot_id in fleet.manager_bots()
@@ -597,6 +610,7 @@ def test_a_fleet_with_no_requires_composes_exactly_the_declared_grants(fleet_dir
     _write_skill(fleet_dir, "gadget", tool_grants=["Bash(gadget-tool *)"])
     _write_skill(fleet_dir, "widget", tool_grants=["Bash(widget-tool *)"])
     _equip(fleet_dir, "lead", skills=["gadget", "widget"], channels=[])
+    _no_skill_defaults(fleet_dir)
     fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
     paths = _paths(fleet_dir)
     bot = fleet.bots["lead"]
@@ -768,7 +782,9 @@ def test_a_fleet_with_no_requires_composes_exactly_the_declared_grants(fleet_dir
 def test_effective_skills_adds_only_the_universal_default_without_protocol_requires(
     fleet_dir,
 ):
-    """Without protocol requirements, only fleet-ops joins declared skills."""
+    """Without protocol requirements or the registry's skill defaults, only
+    fleet-ops joins declared skills."""
+    _no_skill_defaults(fleet_dir)
     fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
     paths = _paths(fleet_dir)
     for bot_id in ("lead", "worker-1"):

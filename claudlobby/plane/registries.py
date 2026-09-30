@@ -177,6 +177,16 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # IS the point; nothing here pages.
     "checkin_decision": "notice",
     "checkin_dispatch": "notice",
+    # #1686: the host's heavy-job slot. A hold and its release, a call refused
+    # because every slot was taken, a hold whose holder died without a release
+    # (across_reset: it was running when the host reset, #1644's evidence), and
+    # a heavy-looking command the matcher would not parse. The record, never a
+    # page.
+    "heavy_slot_acquired": "notice",
+    "heavy_slot_released": "notice",
+    "heavy_slot_refused": "notice",
+    "heavy_slot_unreleased": "notice",
+    "heavy_slot_unparsed": "notice",
 }
 
 # ---------------------------------------------------------------------------

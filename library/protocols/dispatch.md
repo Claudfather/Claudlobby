@@ -46,7 +46,9 @@ claudlobby --json message show MESSAGE_ID
 ```
 
 Message recording, arrival proof, and any reply are separate observations.
-Do not turn a question into a task solely to deliver text.
+Do not turn a question into a task solely to deliver text. A worker answers a
+note that asked for no work with `fleet reports submit`, the explicitly unlinked
+report: it links no task and closes nothing.
 
 ## Follow-up and re-check
 
@@ -55,7 +57,9 @@ for current state. `claudlobby --json brief` shows fleet-owned open work for a
 manager, including queued intake, with canonical IDs and explicit unresolved
 history. An absent deadline alert is not proof that work completed. Re-checks
 ask the current manager to inspect overdue or aged open tasks; use the task ID
-in the notice. A nudge asks for a decision and does not itself change task
+in the notice. An assignment a person made with no deadline is a standing goal:
+the re-check lists it by ID but never asks about it on age alone. A nudge asks
+for a decision and does not itself change task
 state. Use `task withdraw`, `task reassign`, or `task escalate` according to the
 current CLI help and retained request-ID policy. Escalation asks one concrete
 human decision; it is not a status poll. Do not silently convert an uncertain

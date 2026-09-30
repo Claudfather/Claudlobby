@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # tests/test_transcript_digest.sh — transcript-digest SessionEnd hook contract.
 # Real python3/awk + a stubbed model binary + the real raw-stage shim: asserts the
-# two things that decide whether this is safe to run fleet-wide on every session
-# — WHAT reaches the model (quota + secrets) and WHAT lands on the PLANE (the
+# three things that decide whether this is safe to run fleet-wide on every
+# session — WHAT reaches the model (quota + secrets), WHAT the model call loads
+# (no MCP server, plugin or hook: #1972) and WHAT lands on the PLANE (the
 # monitor's substrate).
 #
 # #1503 moved the SINK: the hook no longer appends a `transcript-digest-<date>`
@@ -65,9 +66,11 @@ open(os.environ["TX"], "w").write("\n".join(json.dumps(r) for r in rows) + "\n")
 PY
 }
 
-# stub_model <body>
+# stub_model <body> — records the prompt (stdin) and its argv, NUL-separated so
+# an empty argument survives: `--setting-sources ''` is exactly one (#1972).
 stub_model() {
-    printf '#!/bin/bash\ncat > "%s/prompt-seen.txt"\nprintf "%%s" %s\n' "$T" "$1" > "$T/bin/claude"
+    printf '#!/bin/bash\nprintf "%%s\\0" "$@" > "%s/argv-seen.bin"\ncat > "%s/prompt-seen.txt"\nprintf "%%s" %s\n' \
+        "$T" "$T" "$1" > "$T/bin/claude"
     chmod +x "$T/bin/claude"
 }
 
@@ -88,7 +91,7 @@ PY
 run_digest() {
     local tx="$1"; shift
     rm -f "$T/root/state/plane/staged/"*.batch
-    : > "$T/err.txt"; rm -f "$T/prompt-seen.txt"
+    : > "$T/err.txt"; rm -f "$T/prompt-seen.txt" "$T/argv-seen.bin"
     local pay
     pay="$(TX="$tx" python3 -c 'import json,os;print(json.dumps({"session_id":"sess-1","transcript_path":os.environ["TX"],"cwd":"/tmp","reason":"clear"}))')"
     # ENABLED=1 first so a caller's explicit assignment in "$@" still wins (env
@@ -105,7 +108,7 @@ run_digest() {
 # run_digest_unarmed <transcript> — no SESSION_DIGEST_ENABLED at all, i.e. what
 # an un-opted-in fleet actually runs after generate composes the hook.
 run_digest_unarmed() {
-    rm -f "$T/root/state/plane/staged/"*.batch "$T/prompt-seen.txt"
+    rm -f "$T/root/state/plane/staged/"*.batch "$T/prompt-seen.txt" "$T/argv-seen.bin"
     local pay
     pay="$(TX="$1" python3 -c 'import json,os;print(json.dumps({"session_id":"sess-1","transcript_path":os.environ["TX"],"cwd":"/tmp","reason":"clear"}))')"
     printf '%s' "$pay" | env CLAUDLOBBY_ROOT="$T/root" BOT_ID=tbot CLAUDLOBBY_FLEET=tfleet \
@@ -121,6 +124,57 @@ field() { ROW="$1" K="$2" python3 -c 'import json,os;print(json.loads(os.environ
 dfield() { ROW="$1" K="$2" python3 -c 'import json,os;print((json.loads(os.environ["ROW"]).get("data") or {}).get(os.environ["K"],""))' 2>/dev/null || true; }
 # no_jsonl_written — the whole point of #1503: NO transcript-digest file exists
 no_jsonl_written() { [ -z "$(find "$T" -name 'transcript-digest-*.jsonl' 2>/dev/null)" ] && echo yes || echo no; }
+# argv_fact <fact> — one fact about the LAST model call's argv (#1972):
+#   strict      yes|no — `--strict-mcp-config` was passed
+#   mcp_servers N — servers declared across every `--mcp-config` value
+#               (no-config when none was passed)
+#   sources     the setting sources it loads, comma-joined; `none` for an empty
+#               list, `absent` when `--setting-sources` was not passed at all
+# Prints no-model-call when the model was never invoked, so no fact passes by
+# default.
+argv_fact() {
+    ARGV_FILE="$T/argv-seen.bin" FACT="$1" python3 - <<'PY' 2>/dev/null || true
+import json, os
+try:
+    raw = open(os.environ["ARGV_FILE"], "rb").read().decode()
+except OSError:
+    print("no-model-call")
+    raise SystemExit
+argv = raw.split("\0")[:-1]
+fact = os.environ["FACT"]
+if fact == "strict":
+    print("yes" if "--strict-mcp-config" in argv else "no")
+elif fact == "mcp_servers":
+    vals, i = [], 0
+    while i < len(argv):
+        if argv[i].startswith("--mcp-config="):
+            vals.append(argv[i].split("=", 1)[1])
+        elif argv[i] == "--mcp-config":  # variadic: every value up to the next flag
+            while i + 1 < len(argv) and not argv[i + 1].startswith("-"):
+                i += 1
+                vals.append(argv[i])
+        i += 1
+    n = 0
+    for v in vals:
+        try:
+            n += len(json.loads(v).get("mcpServers") or {})
+        except (ValueError, AttributeError):
+            n = "unreadable:" + v
+            break
+    print(n if vals else "no-config")
+elif fact == "sources":
+    val = None
+    for i, a in enumerate(argv):
+        if a.startswith("--setting-sources="):
+            val = a.split("=", 1)[1]
+        elif a == "--setting-sources" and i + 1 < len(argv):
+            val = argv[i + 1]
+    if val is None:
+        print("absent")
+    else:
+        print(",".join(x.strip() for x in val.split(",") if x.strip()) or "none")
+PY
+}
 
 echo "transcript-digest: hook contract"
 
@@ -215,6 +269,25 @@ case "$seen" in *"PATH=/usr/local/bin"*) r=yes ;; *) r=no ;; esac
 assert_eq "PATH= survives the generic rule"    yes "$r"
 case "$seen" in *"PATTERN=chromium"*) r=yes ;; *) r=no ;; esac
 assert_eq "PATTERN= survives the generic rule" yes "$r"
+
+# --- 3d. the model call loads no MCP server, no plugin and no hook (#1972) ----
+# The hook runs `claude -p` inside the bot's own session end, in the bot's
+# directory and with the bot's environment. On its defaults that session starts
+# every MCP server and plugin the bot has. The Telegram channel among them finds
+# the bot's live poller, defers and closes, and Claude Code then writes a
+# HOST-GLOBAL needs-auth entry, so every bot that starts in the next 15 minutes
+# skips its own Telegram server (#1962). The same session also fires the bot
+# directory's own hooks. The pass only distils a transcript excerpt and needs
+# none of this. This section pins that the hook passes the flags. What the real
+# binary does with them (no cache entry, no server, no hook) is pinned against
+# the real binary by tests/test_transcript_digest_isolation.py (opt-in: CI has
+# no `claude`).
+stub_model "'{\"context\":\"c\",\"worked\":\"\",\"failed\":\"\",\"would_change\":\"\",\"reusable\":\"\"}'"
+row="$(run_digest "$T/tx.jsonl" SESSION_DIGEST_MIN_TURNS=4)"
+assert_eq "model call is strict about MCP config (--strict-mcp-config)" yes "$(argv_fact strict)"
+assert_eq "model call's --mcp-config declares zero servers"             0   "$(argv_fact mcp_servers)"
+assert_eq "model call loads no setting source (no plugin, no hook)"     none "$(argv_fact sources)"
+assert_eq "... and the pass still records an ok digest" ok "$(dfield "$row" status)"
 
 # --- 4. the qualifying gate: a fact, at zero model cost ----------------------
 row="$(run_digest "$T/tx.jsonl" SESSION_DIGEST_MIN_TURNS=99)"

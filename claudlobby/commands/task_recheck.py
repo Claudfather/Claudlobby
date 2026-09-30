@@ -69,7 +69,8 @@ def _dispatch(args) -> CommandOutput:
                 raise CommandFailure("conflict", "frozen fleet identities differ from Plane")
             selection = select(conn, root=root, fleet_uid=bindings["fleet_uid"],
                                now=datetime.now(timezone.utc), max_age_h=args.max_age_h,
-                               repeat_h=args.repeat_h)
+                               repeat_h=args.repeat_h,
+                               bot_uids=frozenset(bindings["bots"].values()))
         if read_selection(root) != stamp:
             raise CommandFailure("conflict", "active task selection changed during preview")
         body = (digest(selection, fleet=selected.fleet.name, manager=selected.fleet.manager,
@@ -80,9 +81,10 @@ def _dispatch(args) -> CommandOutput:
                               "held": selection.held, "uncertain": selection.uncertain,
                               "uncertain_request_ids": list(selection.uncertain_request_ids),
                               "waiting": selection.waiting, "overflow": selection.overflow,
+                              "standing_task_ids": list(selection.standing_task_ids),
                               "issues": [asdict(issue) for issue in selection.issues],
                               "digest": body}, release_id=release_id,
-                             lines=(body or "recheck: no task is due",))
+                             lines=(body or "recheck: no task is due",) + _standing(selection))
 
     bound_release = os.environ.get("CLAUDLOBBY_RELEASE_ID") if origin is not None else None
     if origin is not None and not bound_release:
@@ -117,6 +119,7 @@ def _dispatch(args) -> CommandOutput:
             "uncertain_request_ids": list(result.selection.uncertain_request_ids),
             "waiting": None if result.replayed else result.selection.waiting,
             "overflow": None if result.replayed else result.selection.overflow,
+            "standing_task_ids": list(result.selection.standing_task_ids),
             "issues": [asdict(issue) for issue in result.selection.issues],
             "replayed": result.replayed, "recording": "committed",
             "message_id": result.message_id, "recipient_uid": result.recipient_uid,
@@ -134,7 +137,15 @@ def _dispatch(args) -> CommandOutput:
                  f" inspect request {ids}",)
     else:
         lines = (f"recheck: {len(result.task_ids)} task(s) named in one manager digest",)
-    return CommandOutput(data, release_id=release_id, lines=lines)
+    return CommandOutput(data, release_id=release_id, lines=lines + _standing(result.selection))
+
+
+def _standing(selection) -> tuple[str, ...]:
+    ids = selection.standing_task_ids
+    if not ids:
+        return ()
+    return (f"recheck: {len(ids)} standing goal(s) a person assigned without a deadline"
+            f" not re-checked: {', '.join(ids[:5])}{' …' if len(ids) > 5 else ''}",)
 
 
 def dispatch(args) -> CommandOutput:

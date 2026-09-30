@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import sqlite3
 from uuid import uuid4
 
@@ -161,3 +162,45 @@ def test_uncertain_digest_holds_new_uuid_and_escalated_work_is_waiting(active, m
     assert held["data"]["task_ids"] == [] and held["data"]["uncertain"] == 1
     assert held["data"]["uncertain_request_ids"] == [first["request_id"]]
     assert held["data"]["waiting"] == 1 and len(calls) == 1
+
+
+def test_a_persons_deadline_less_assignment_is_a_standing_goal(active, monkeypatch, capsys):  # noqa: F811
+    # #2011 on the canonical reducer: a person's promise decides. With no
+    # deadline their assignment is a disclosed standing goal, never re-asked on
+    # age; past its deadline it is due and named to the current fleet manager
+    # (the only recheck route; the assigner is never looked up as a pane).
+    root, _release = active
+    monkeypatch.setattr(operation_context, "_local_operator_alias", lambda: "human:operator")
+    goal = _admit(capsys, root, "Standing goal")
+    _call(capsys, root, "task", "assign", goal, "--bot", "worker", "--expected-by", "none",
+          "--request-id", str(uuid4()))
+    late = _admit(capsys, root, "Person deadline passed")
+    _call(capsys, root, "task", "assign", late, "--bot", "worker", "--expected-by",
+          (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+          "--request-id", str(uuid4()))
+    by_bot = _admit(capsys, root, "Manager open-ended work")
+    _call(capsys, root, "task", "assign", by_bot, "--bot", "worker", "--expected-by", "none",
+          "--by", "bot:example/manager", "--request-id", str(uuid4()))
+    preview = _recheck(capsys, root, dry_run=True)
+    assert preview["data"]["task_ids"] == [late, by_bot]
+    assert preview["data"]["standing_task_ids"] == [goal]
+    assert goal not in preview["data"]["digest"]
+
+    calls = []
+    strict = message_operations.send_committed_native_attempt
+
+    def send_once(*args, **kwargs):
+        def native(*_, **options):
+            calls.append(options["body"])
+            return TransportOutcome("submitted", "sha256:" + "c" * 64, 99, 0)
+        return strict(*args, transport=native, **kwargs)
+
+    monkeypatch.setattr(message_operations, "send_committed_native_attempt", send_once)
+    result = _recheck(capsys, root, expected=5)
+    assert result["data"]["task_ids"] == [late, by_bot]
+    assert result["data"]["standing_task_ids"] == [goal]
+    assert len(calls) == 1 and goal not in calls[0]
+    with sqlite3.connect(db_file(root)) as conn:
+        targets = conn.execute("SELECT DISTINCT recipient_alias FROM communications "
+                               "WHERE source_ref LIKE 'task-recheck:%'").fetchall()
+    assert targets == [("bot:example/manager",)]

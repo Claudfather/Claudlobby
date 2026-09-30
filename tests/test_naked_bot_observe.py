@@ -210,17 +210,18 @@ def test_declaring_a_list_does_not_act_as_an_opt_out(etype, monkeypatch):
 
 #: Entity types that have a `system_defaults.<type>` opt-out key today.
 #: Inverted one at a time as Phase 2 builds them — `guardrails` at Phase 1,
-#: `protocols` when `shared-documentation` was admitted to the registry.
-TYPES_WITH_AN_OPT_OUT = {"guardrails", "protocols"}
+#: `protocols` when `shared-documentation` was admitted to the registry,
+#: `skills` with the manager role's `status` default (#2010).
+TYPES_WITH_AN_OPT_OUT = {"guardrails", "protocols", "skills"}
 
 
-def test_the_opt_out_surface_does_not_exist_for_ten_of_twelve_types():
+def test_the_opt_out_surface_does_not_exist_for_nine_of_twelve_types():
     """MEASURED, and this test records a GAP rather than blessing it.
 
     `SystemDefaultsConfig` reads a FIXED set of keys, not one per entity type.
-    Ten of the twelve still have no opt-out, so the plan's checklist item — "for
+    Nine of the twelve still have no opt-out, so the plan's checklist item — "for
     each of the 12 types, `system_defaults.<type>: false` demonstrably removes
-    the default" — remains unsatisfiable for those ten.
+    the default" — remains unsatisfiable for those nine.
 
     Worse, and UNCHANGED by Phase 2 so far: an unrecognised key is accepted
     silently. `_coerce_system_defaults` drops it and `generate` exits 0, so a
@@ -248,8 +249,8 @@ def test_the_opt_out_surface_does_not_exist_for_ten_of_twelve_types():
         "the per-entity-type opt-out surface changed — re-run "
         "harness/naked-bot-observe.py and update the baseline record"
     )
-    assert still_on and len(still_on) == 10, (
-        f"expected ten types without an opt-out, got {len(still_on)}: {sorted(still_on)}"
+    assert still_on and len(still_on) == 9, (
+        f"expected nine types without an opt-out, got {len(still_on)}: {sorted(still_on)}"
     )
 
 

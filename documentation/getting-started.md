@@ -33,13 +33,25 @@ WORK="$HOME/.local/share/claudlobby-build"
 DATA="$HOME/.local/share/claudlobby-data"    # outside the checkout
 mkdir -p "$WORK/dist" "$WORK/wheelhouse"
 "$PYTHON" -m venv "$WORK/bootstrap"
-"$WORK/bootstrap/bin/python" -m pip install 'build>=1,<2' 'setuptools>=68' wheel
+"$WORK/bootstrap/bin/python" -m pip install 'build>=1,<2' 'setuptools>=77' wheel
 "$WORK/bootstrap/bin/python" -m build --wheel --no-isolation --outdir "$WORK/dist" .
 "$WORK/bootstrap/bin/python" -m pip download --only-binary=:all: \
   --dest "$WORK/wheelhouse" "$WORK"/dist/*.whl
 "$WORK/bootstrap/bin/python" -m pip install --no-index \
   --find-links "$WORK/wheelhouse" "$WORK"/dist/*.whl
 ```
+
+Verify the installed CLI from outside the source checkout before proceeding; a successful import from the checkout can hide a missing installation (#2004):
+
+```bash
+(cd / && "$WORK/bootstrap/bin/python" -I -c \
+  'import claudlobby.composer as c; print(c.__file__)')
+(cd / && "$WORK/bootstrap/bin/claudlobby" --help)
+```
+
+The printed module must belong to `WORK/bootstrap`, not the source checkout or another installation. Stop if either command fails. The virtualenv also avoids the externally-managed system Python restriction on macOS and Raspberry Pi OS.
+
+The older editable-install flow was measured at 45–61 seconds on one Raspberry Pi 5 in four runs (#2007); another cold run was stopped after eight minutes without a recorded cause. Those timings do not measure this sealed wheel/lock/assembly flow. Wheel availability, platform and cache state affect installation time; do not report an unmeasured time as a guarantee.
 
 The bootstrap venv runs the installed wheel. The target release is assembled separately under `DATA`. Prepare its hash lock from downloaded wheel metadata and bytes, excluding the Claudlobby wheel, which the assembler installs separately:
 
@@ -104,7 +116,7 @@ chmod 600 "$DATA/local/seed/.env"
 "${EDITOR:-vi}" "$DATA/local/seed/.env"
 ```
 
-Replace every `REPLACE_ME` in the manifest, including the Telegram handle and user/group IDs. Put the matching `TELEGRAM_TOKEN_CLAUDFATHER` in the fleet `.env`; a GitHub token is optional. The `.env` stays in the data overlay and is never passed as a CLI argument. Setup does not prewarm MCP packages; the first boot may download them. After authoring the manifest in the data root, `"$RELEASE_CLI" --root "$DATA" --fleet seed host cache warm` can prepare the declared caches explicitly.
+Replace every `REPLACE_ME` in the manifest, including the Telegram handle and user/group IDs. Use the actual Telegram group ID; `-1234567890` is a deliberately fake basic-group example, not a value to deploy. Put the matching `TELEGRAM_TOKEN_CLAUDFATHER` in the fleet `.env`; a GitHub token is optional. The `.env` stays in the data overlay and is never passed as a CLI argument. Setup does not prewarm MCP packages; the first boot may download them. After authoring the manifest in the data root, `"$RELEASE_CLI" --root "$DATA" --fleet seed host cache warm` can prepare the declared caches explicitly.
 
 ## 4. Activate and diagnose
 
@@ -118,12 +130,12 @@ case "$(uname -s)" in
 esac
 mkdir -p "$USER_UNIT_DIR"
 "$RELEASE_CLI" --root "$DATA" --fleet seed fleet setup \
-  --config "$WORK/fleet.yaml" --install-directory "$USER_UNIT_DIR"
+  --config "$WORK/fleet.yaml" --install-directory "$USER_UNIT_DIR" || exit
 "$RELEASE_CLI" --root "$DATA" host doctor
 "$RELEASE_CLI" --root "$DATA" host status
 ```
 
-`fleet setup` copies the authored manifest to `$DATA/local/seed/fleet.yaml`, stages all declared host fleets, and activates through the release owner. It may stop or start supervised processes, so run it when you intend to bring the fleet up. A different existing target manifest requires `--replace-config`; an unchanged, already active plan is not a new activation. A failed activation retains its recorded pending step for explicit repair. `host doctor` reports configuration and host checks; verify the bot's channel and response separately.
+`fleet setup` copies the authored manifest to `$DATA/local/seed/fleet.yaml`, stages all declared host fleets, and activates through the release owner. It may stop or start supervised processes, so run it when you intend to bring the fleet up. A different existing target manifest requires `--replace-config`; an unchanged, already active plan is not a new activation. A failed activation retains its recorded pending step for explicit repair. `host doctor` reports configuration and host checks; verify the bot's channel and response separately. Native startup checks `bridge_state` against the current session PID, not merely a poller occupying the Telegram slot (#2008). An old `BRIDGE_READY` log line or tmux session alone does not establish current inbound readiness.
 
 For later config changes, edit an authoring file and stage and activate through the sealed CLI. The retired checkout `generate`/fleet setup sequence is outside the selected activation journal. The [fleet schema](fleet-yaml-schema.md) documents each manifest field.
 

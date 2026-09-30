@@ -160,6 +160,29 @@ def register_subparsers(sub) -> None:
                        json_output=args.json)
 
     pex.set_defaults(func=_expire_dispatch, public_command="plane.expire")
+    psm = psub.add_parser(
+        "samples",
+        help="One metric_samples family (host.load, host.mem_available_mb, ...)"
+        " for one subject over a window; read-only, the plane released before"
+        " anything prints")
+    psm.add_argument("metric", help="the family, e.g. host.mem_available_mb")
+    psm.add_argument("--subject", default=None,
+                     help="the subject's alias (default: the only one of its kind)")
+    psm.add_argument("--kind", default=None,
+                     help="the subject's kind (default: host for a host.* family)")
+    psm.add_argument("--since", default="1h",
+                     help="window start: 24h, 7d, 30m, or an ISO instant, a naive one"
+                     " being UTC (default 1h)")
+    psm.add_argument("--until", default=None,
+                     help="window end, same grammar (default: now)")
+    psm.add_argument("--json", action="store_true", help="Schema-1 result")
+
+    def _samples_dispatch(args):
+        from ..command_result import execute
+        return execute("plane.samples", lambda: _command("plane", "samples_dispatch")(args),
+                       json_output=args.json)
+
+    psm.set_defaults(func=_samples_dispatch, public_command="plane.samples")
     prg = psub.add_parser(
         "registry",
         help="Registry lane reads: current state, history, changes, verify")

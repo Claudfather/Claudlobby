@@ -60,7 +60,7 @@ Driven by the **`simulate-cold-start`** skill, which wraps `harness/coldstart-ha
 
 ```bash
 harness/coldstart-harness.sh prepare       # preflight, export, host snapshot, launch command
-# ... run the cold arm in a NEW terminal: cd <tree> && claude, then /setup ...
+# ... run the cold arm in a NEW terminal with the launch line prepare prints, then /setup ...
 harness/coldstart-harness.sh status        # what did the run create?
 harness/coldstart-harness.sh reap          # tear down units, sockets, processes, tree
 harness/coldstart-harness.sh transcript    # harvest the session narrative
@@ -165,7 +165,12 @@ interactive session whose entire input is `/setup`.
 revealing that supervision exists. So snapshot the host, let the run do whatever it does, and
 diff. `reap` removes only what is *absent from the pre-run snapshot*, which is what makes this
 safe to run on a host carrying a production fleet. Fence only the irreversible: no `sudo`, no
-`--break-system-packages`, no writes outside the tree and the user unit directory.
+`--break-system-packages`, no writes outside the tree and the user unit directory. **Root is
+fenced structurally, because a prompt cannot be relied on:** `prepare`'s launch line loads no
+user settings (`--setting-sources project,local --strict-mcp-config`) and puts a refusing `sudo`
+first on `PATH`. On the #2002 host, Claude Code's default auto mode, a user-level bare `Bash`
+allow rule and passwordless sudo were all present at once; together they would have let a blind
+run act as root without asking.
 
 Stop at the credential gate. Needing real tokens is not a reason to skip the exercise —
 essentially every onboarding defect lives before it. Going *past* it exercises generate,

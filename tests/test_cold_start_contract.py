@@ -45,10 +45,14 @@ class TestDocumentedInstallPath:
     """The install commands the docs hand a user must work on a stock host."""
 
     def test_cold_host_docs_use_setup_then_activation(self):
+        # `lib/setup-fleet` is retired with `lib/setup-system`: `fleet setup`
+        # validates before it activates, so no doc may chain the old wrapper
+        # after a validate (#1681's quickstart shape).
         for doc in (README, GETTING_STARTED, SETUP_SKILL):
             text = doc.read_text()
             assert "host setup" in text and "fleet setup" in text, doc
             assert "lib/setup-system" not in text and "host-timers" not in text, doc
+            assert "lib/setup-fleet" not in text, doc
 
     @pytest.mark.parametrize(
         "doc", [README, GETTING_STARTED, CONTRIBUTOR_GUIDE], ids=lambda p: p.name
@@ -164,3 +168,27 @@ class TestSeedPlaceholderContract:
         joined = "\n".join(report.errors)
         for field in ("telegram_group_chat_id", "human_telegram_id", "telegram.handle"):
             assert field in joined, f"no placeholder error for {field}:\n{joined}"
+
+
+# --- Example IDs in the onboarding docs are obviously fake (#2002, finding F3) --
+
+_ID_RE = re.compile(r"(?<![\w.:/-])(-?\d{7,})(?![\w:])")
+
+
+def _obviously_fake(token: str) -> bool:
+    """An ascending run (`1234567890`, after an optional `-` or `-100`) or a
+    single repeated digit (`8888888`), the placeholder styles CLAUDE.md's PII
+    rule uses. Anything else could be someone's real chat or user ID."""
+    digits = token.lstrip("-")
+    if token.startswith("-100") and len(digits) > 10:
+        digits = digits[3:]
+    return "1234567890123456789".startswith(digits) or len(set(digits)) == 1
+
+
+@pytest.mark.parametrize("doc", [README, GETTING_STARTED, SETUP_SKILL], ids=lambda p: p.name)
+def test_example_ids_in_onboarding_docs_are_obviously_fake(doc: Path):
+    real_looking = [t for t in _ID_RE.findall(doc.read_text()) if not _obviously_fake(t)]
+    assert not real_looking, (
+        f"{doc.relative_to(REPO_ROOT)} carries ID-shaped numbers that are not obviously "
+        f"fake placeholders: {real_looking}"
+    )

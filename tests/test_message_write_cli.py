@@ -309,6 +309,14 @@ def test_bad_context_release_and_file_refuse_before_native(active, monkeypatch, 
 
 def test_unlinked_report_routes_to_own_manager_without_task_effect(active, monkeypatch, capsys):
     root, host = active
+    _generated(monkeypatch, root, host.release)
+    _ctx, task, assigned = _assigned(root)
+    with sqlite3.connect(db_file(root)) as conn:
+        before = conn.execute("SELECT event_id FROM events WHERE kind='task' ORDER BY ingest_seq").fetchall()
+        from claudlobby.task_state import read_tasks
+        task_before = next(item for item in read_tasks(conn, fleet_uid=_ctx.fleet_uid).tasks
+                           if item.task_id == task.task_id)
+        assert task_before.open and task_before.current_assignment.assignment_id == assigned.assignment_id
     _generated(monkeypatch, root, host.release, bot="worker")
     calls = []
     _native(monkeypatch, calls, operation="send_unlinked_report")
@@ -332,7 +340,11 @@ def test_unlinked_report_routes_to_own_manager_without_task_effect(active, monke
     replay = json.loads(capsys.readouterr().out)
     assert replay["data"]["replayed"] and len(calls) == 1
     with sqlite3.connect(db_file(root)) as conn:
-        assert conn.execute("SELECT count(*) FROM events WHERE kind='task'").fetchone()[0] == 0
+        assert conn.execute("SELECT event_id FROM events WHERE kind='task' ORDER BY ingest_seq").fetchall() == before
+        from claudlobby.task_state import read_tasks
+        still_open = next(item for item in read_tasks(conn, fleet_uid=_ctx.fleet_uid).tasks
+                          if item.task_id == task.task_id)
+        assert still_open == task_before
         row = conn.execute("SELECT message_class, work_item_id, assignment_id, body FROM communications "
                            "WHERE msg_id=?", (first["data"]["message_id"],)).fetchone()
         assert row[:3] == ("report", None, None)

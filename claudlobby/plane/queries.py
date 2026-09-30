@@ -1059,3 +1059,15 @@ def checkin_dispatch_rows_sql(n: int) -> str:
         f" AND json_extract({d}, '$.checkin_id') IN ({ph})"
         f" ORDER BY {_epoch('e.occurred_at')}, e.ingest_seq"
     )
+
+
+# #1644: one metric family for one subject over a window, oldest first. The
+# bounds go through julianday() rather than a text compare: ingest keeps the
+# offset an emitter gave (a `-04:00` instant is stored as `-04:00`), so a text
+# compare against UTC bounds drops in-window samples and misorders the series.
+METRIC_SERIES_SQL = (
+    "SELECT occurred_at, value, status FROM metric_samples"
+    " WHERE subject_uid = ? AND metric = ?"
+    "   AND julianday(occurred_at) BETWEEN julianday(?) AND julianday(?)"
+    " ORDER BY julianday(occurred_at), ingest_seq"
+)

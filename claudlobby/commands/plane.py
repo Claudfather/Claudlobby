@@ -399,6 +399,57 @@ def cmd_plane_doctor(args) -> int:
     return execute("plane.doctor", operation, json_output=getattr(args, "json", False))
 
 
+def _sample_text(value) -> str:
+    """A sample value for a line of text: an object reads as `key=value`
+    pairs (host.load's one/five/fifteen), anything else as is."""
+    if isinstance(value, dict):
+        return " ".join(f"{k}={v}" for k, v in value.items())
+    return json.dumps(value) if isinstance(value, (list, str)) else str(value)
+
+
+def samples_dispatch(args):
+    """#1644 `plane samples`: one metric family for one subject over a window.
+    The read owner (`plane/samples.py`) closes the plane before this returns,
+    so nothing renders while it is open. An empty window is an answer; an
+    unreachable plane, or one that records no subject of the kind, refuses."""
+    from ..command_result import CommandFailure, CommandOutput
+    from ..context import resolve_paths
+    from ..plane import samples
+    from .checkins import _since   # the read doors' one --since grammar
+
+    try:
+        kind = samples.subject_kind(args.metric, args.kind)
+        window = {}
+        for flag, raw in (("--since", args.since), ("--until", args.until)):
+            try:
+                # None is "not given" (--until's default, now); "" is a
+                # malformed bound, which _since refuses like any other.
+                window[flag] = _since(raw) if raw is not None else datetime.now(timezone.utc)
+            except ValueError:
+                raise CommandFailure("invalid_argument", f"cannot parse {flag} {raw!r} (use e.g."
+                                     " 24h, 30m, or an ISO instant; a naive one is UTC)") from None
+        since, until = window["--since"], window["--until"]
+        if since > until:
+            raise CommandFailure("invalid_argument", f"--since ({since.isoformat()}) is after"
+                                 f" --until ({until.isoformat()})")
+        root = resolve_paths(root=args.root, fleet=args.fleet, seed=args.seed).root
+        data = samples.read(root, args.metric, kind=kind, subject=args.subject,
+                            since=since, until=until)
+    except samples.SamplesError as exc:
+        raise CommandFailure(exc.code, str(exc)) from exc
+    except PendingMigrationError as exc:
+        raise CommandFailure("migration_required", f"plane samples refused: {exc}") from exc
+    except DowngradeError as exc:
+        raise CommandFailure("downgrade", f"plane samples refused: {exc}") from exc
+    lines = [f"{data['metric']} ({data['unit'] or ''}) for {data['kind']} {data['subject']},"
+             f" {data['since']} to {data['until']}: {len(data['samples'])} sample(s)"]
+    for sample in data["samples"]:
+        at = datetime.fromisoformat(sample["occurred_at"]).astimezone(timezone.utc)
+        flag = f"  [{sample['status']}]" if sample["status"] else ""
+        lines.append(f"  {at.strftime('%Y-%m-%dT%H:%M:%SZ')}  {_sample_text(sample['value'])}{flag}")
+    return CommandOutput(data, lines=tuple(lines))
+
+
 def cmd_plane_import_workstreams(args) -> int:
     """#1635: one-shot import of a pre-cutover `workstreams.json` into the
     plane -- the registry's write side moved with the F18 closure, the DATA

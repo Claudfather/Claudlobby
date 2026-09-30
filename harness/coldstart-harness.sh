@@ -199,6 +199,51 @@ new_since() {
     done
 }
 
+# ---------------------------------------------------------- launch and fence
+
+# user_settings_allow_everything — does the user-level Claude Code config
+# approve every shell command? A bare `Bash` allow rule does, and so does a
+# bypassPermissions default mode. Measured on the #2002 host: a bare `Bash`
+# rule, beside passwordless sudo, so a blind run could act as root unasked.
+user_settings_allow_everything() {
+    local f="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
+    [ -f "$f" ] || return 1
+    python3 - "$f" >/dev/null 2>&1 <<'PY'
+import json, sys
+try:
+    perms = json.load(open(sys.argv[1])).get("permissions") or {}
+except Exception:
+    sys.exit(1)
+allow = perms.get("allow") or []
+everything = any(r in ("Bash", "Bash(*)", "Bash(:*)") for r in allow)
+sys.exit(0 if everything or perms.get("defaultMode") == "bypassPermissions" else 1)
+PY
+}
+
+# The root fence. A cold session runs whatever its permission mode approves,
+# and a script it runs can call sudo where no prompt ever sees it. A refusing
+# `sudo` first on the launch PATH makes that structural rather than a hope.
+FENCE_DIR="$STATE_DIR/fence"
+
+write_fence() {
+    mkdir -p "$FENCE_DIR"
+    printf '%s\n' '#!/bin/sh' \
+        'echo "sudo: refused by the cold-start fence (no root during the cold run)" >&2' \
+        'exit 1' > "$FENCE_DIR/sudo"
+    chmod 755 "$FENCE_DIR/sudo"
+}
+
+# print_launch <tree> — the one line that starts the cold arm. It loads no user
+# settings (their allow rules, plugins, hooks and connectors are not a
+# stranger's) and puts the fence first on PATH. Credentials still come from the
+# host's Claude Code login.
+print_launch() {
+    printf '\n  Run the cold session in a NEW terminal:\n\n'
+    printf '    cd %s && PATH="%s:$PATH" claude --setting-sources project,local --strict-mcp-config\n\n' "$1" "$FENCE_DIR"
+    printf '  Then type /setup and nothing else.\n'
+    printf '  (No user settings, and sudo refused: a plain claude would inherit your allow rules and plugins.)\n\n'
+}
+
 # ------------------------------------------------------------------- preflight
 
 preflight() {
@@ -213,6 +258,20 @@ preflight() {
     fi
     if [ -f "$HOME/.claude/CLAUDE.md" ]; then
         say "WARN: a user-level ~/.claude/CLAUDE.md exists — it leaks context into the cold session"; bad=1
+    fi
+    # What a plain `claude` would inherit. The printed launch line loads no user
+    # settings and fences sudo, so these explain why it matters on this host.
+    if user_settings_allow_everything; then
+        say "WARN: your Claude Code user settings allow every shell command (a bare Bash allow rule, or bypassPermissions)."
+        say "      A cold session started with a plain 'claude' would run commands, host and fleet setup included, without asking."
+        say "      Use the launch line printed below: it loads no user settings."
+        bad=1
+    fi
+    if sudo -n true >/dev/null 2>&1; then
+        say "WARN: sudo runs here without a password (sudo -n true succeeded)."
+        say "      A script the cold session runs could change this host as root, and a permission prompt never sees it."
+        say "      The launch line printed below puts a refusing sudo first on PATH."
+        bad=1
     fi
     [ "$bad" -eq 0 ] && say "preflight: clean (no inherited root, vault or user CLAUDE.md)"
     return 0
@@ -265,7 +324,8 @@ cmd_prepare() {
     } > "$STATE_DIR/run.env"
 
     say "exported $ref -> $dir ($(find "$dir" -type f | wc -l | tr -d ' ') files, no history)"
-    printf '\n  Run the cold session in a NEW terminal:\n\n    cd %s && claude\n\n  Then type /setup and nothing else.\n\n' "$dir"
+    write_fence
+    print_launch "$dir"
     printf '  When it finishes (or you stop it):  %s reap\n\n' "$SCRIPT_DIR/coldstart-harness.sh"
 }
 
@@ -283,7 +343,10 @@ cmd_status() {
         new_since "$kind" | sed 's/^/      + /'
     done
     if [ -n "${tree:-}" ]; then
-        printf '  processes referencing the tree: %s\n' "$(pgrep -f "$tree" 2>/dev/null | wc -l | tr -d ' ')"
+        # pgrep exits 1 when nothing matches. Unguarded, pipefail failed the
+        # substitution and the inherited ERR trap recorded a false script_error
+        # on every clean run.
+        printf '  processes referencing the tree: %s\n' "$( { pgrep -f "$tree" 2>/dev/null || true; } | wc -l | tr -d ' ')"
     fi
 }
 

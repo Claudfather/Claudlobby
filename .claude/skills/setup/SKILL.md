@@ -12,10 +12,10 @@ For `--check-only`, check the host prerequisites and report what is missing with
 
 For setup, follow the walkthrough in order:
 
-1. Build a wheel, download dependency wheels, and construct the hash lock in a separate build directory. Verify the wheel and lock are present before assembly.
+1. Build a wheel, download dependency wheels, construct the hash lock, and install the bootstrap wheel in a separate build directory. Follow the walkthrough's outside-checkout installed-wheel check; stop on a missing or wrong installation. Verify the wheel and lock are present before assembly.
 2. Run the bootstrap wheel's `claudlobby --root DATA host setup --wheel WHEEL --dependency-lock LOCK --wheelhouse DIR --interpreter PYTHON --json`. Use the returned sealed CLI and native install directory; host setup assembles but does not select or start a release.
-3. Copy and complete `fleet.yaml.seed` and `.env.seed.example` in their authoring locations. Replace all placeholders and keep secrets in the fleet `.env`, never in CLI arguments.
+3. Copy and complete `fleet.yaml.seed` and `.env.seed.example` in their authoring locations. Replace all placeholders (`-1234567890` is only a fake group-ID example) and keep secrets in the fleet `.env`, never in CLI arguments.
 4. Run the returned release CLI's `claudlobby --root DATA --fleet NAME fleet setup --config FILE --install-directory DIR`. This stages the host and activates the fleet and host jobs through the recorded activation owner. A changed existing manifest needs `--replace-config`; an interrupted activation needs explicit inspection of `host status` before another attempt.
-5. Check `host doctor` and `host status`, then verify the bot's channel response separately. Report assembled, selected, active, and observed runtime states distinctly.
+5. Check `host doctor` and `host status`, then verify the current bot session's channel response separately; an old startup log or another session's poller is not readiness. Report assembled, selected, active, and observed runtime states distinctly.
 
 For later changes, use `config plan`, `config diff`, and `host activate` as documented in the walkthrough. Do not silently install host packages, plugins, or system configuration on the user's behalf outside the requested setup flow.

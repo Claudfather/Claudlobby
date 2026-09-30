@@ -310,3 +310,81 @@ def test_a_deliberate_override_still_wins_over_the_scrub(monkeypatch, tmp_path):
                       CLAUDLOBBY_ALERT_MANAGER="declared-should-win")
 
     assert e["CLAUDLOBBY_ALERT_MANAGER"] == "declared-should-win"
+
+
+def _discovery_stub(bindir: Path, calls: Path) -> Path:
+    """A `claudron` that finds its vault the way 0.5.2+ does (#1993).
+
+    `--vault <path>` (the global form or `sync`'s own) names the vault
+    outright. Without it the engine walks up from its cwd, and walk-up
+    binds a vault only when the committed `.claudron-vault` identity file is
+    there (Claudron #183). Otherwise it exits 3 with nothing on stdout and
+    the reason on stderr, which is what the job saw live on the Pi on
+    2026-09-29. Each call appends `<cwd>\\t<argv>` to `calls`.
+    """
+    bindir.mkdir(parents=True, exist_ok=True)
+    stub = bindir / "claudron"
+    check = json.dumps({"ok": True, "data": {"state": "clean"}})
+    stub.write_text(
+        "#!/bin/bash\n"
+        f'printf "%s\\t%s\\n" "$PWD" "$*" >> {shlex.quote(str(calls))}\n'
+        'vault=""; prev=""\n'
+        'for a in "$@"; do [ "$prev" = "--vault" ] && vault="$a"; prev="$a"; done\n'
+        'if [ -z "$vault" ]; then\n'
+        '  d="$PWD"\n'
+        '  while [ -n "$d" ] && [ "$d" != "/" ]; do\n'
+        '    [ -f "$d/.claudron-vault" ] && { vault="$d"; break; }\n'
+        '    d="$(dirname "$d")"\n'
+        '  done\n'
+        'fi\n'
+        'if [ -z "$vault" ]; then\n'
+        '  echo "no vault found -- $PWD looks like a vault without its identity file (.claudron-vault), which walk-up now requires" >&2\n'
+        '  exit 3\n'
+        'fi\n'
+        'for a in "$@"; do\n'
+        f'  [ "$a" = "--check" ] && {{ printf "%s" {shlex.quote(check)}; exit 0; }}\n'
+        'done\n'
+        f"printf '%s' {shlex.quote(OK)}\n"
+    )
+    stub.chmod(0o755)
+    return stub
+
+
+class TestTheVaultIsNamedNotDiscovered:
+    """#1993: the job already holds the vault's path (it read it from bot.conf),
+    so it names it with `--vault`, and nothing about walk-up or the identity
+    file can make it lose the vault. Under 0.5.2+'s strict cutover, walk-up
+    missed the vault between the CLI upgrade and `doctor --fix`, and the job
+    failed and paged for the whole gap."""
+
+    def test_the_stub_models_the_engine(self, tmp_path):
+        # The control: without it, a red run on main could be the stub's fault.
+        vault = tmp_path / "v"; vault.mkdir()
+        calls = tmp_path / "calls.txt"
+        stub = _discovery_stub(tmp_path / "bin", calls)
+        walk = subprocess.run([str(stub), "sync", "--check", "--json"], cwd=vault,
+                              capture_output=True, text=True)
+        assert walk.returncode == 3 and walk.stdout == "" and ".claudron-vault" in walk.stderr
+        named = subprocess.run([str(stub), "sync", "--check", "--json", "--vault", str(vault)],
+                               cwd=tmp_path, capture_output=True, text=True)
+        assert named.returncode == 0 and json.loads(named.stdout)["data"]["state"] == "clean"
+        (vault / ".claudron-vault").write_text("format: 2\n")
+        found = subprocess.run([str(stub), "sync", "--json"], cwd=vault,
+                               capture_output=True, text=True)
+        assert found.returncode == 0, "walk-up binds a vault that has its identity file"
+
+    def test_a_vault_without_its_identity_file_still_syncs(self, tmp_path):
+        vault = tmp_path / "v"
+        root = _root(tmp_path, {"w": str(vault)})
+        assert not (vault / ".claudron-vault").exists(), "precondition: no identity file"
+        calls = tmp_path / "calls.txt"
+        _discovery_stub(tmp_path / "bin", calls)
+        r = _run(root, tmp_path / "bin")
+        assert r.returncode == 0, r.stderr
+        log = (root / "state" / "vault-sync.log").read_text()
+        assert "ok=1" in log and "state=clean" in log, log
+        # Both calls name the vault: a fix to one of the two would still fail.
+        argv = [line.split("\t", 1)[1] for line in calls.read_text().splitlines()]
+        expect = f"--vault {vault.resolve()}"
+        assert any("--check" in a and expect in a for a in argv), argv
+        assert any("--check" not in a and expect in a for a in argv), argv

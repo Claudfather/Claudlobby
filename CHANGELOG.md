@@ -6,6 +6,314 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — main integration for the unified CLI (#1747, #1989)
+
+The aggregate incorporates main through `c2edc54b` without restoring retired
+entrypoints. The [port evidence](documentation/plans/2026-09-30-unified-cli-main-integration.md)
+records the current owners and tests for the upstream fixes listed below;
+older changelog entries describe their original implementation, not additional
+supported commands. In particular, `fleet reports submit` is explicitly unlinked,
+`task report` requires an explicit task, and canonical rechecks address the fleet's
+one current manager. Person-assigned work without a deadline stays a standing goal.
+
+Opted-in heavy-slot hooks use the selected release's native code and the host's
+mutable data root. `/status` remains a manager default with scoped CLI reads.
+Cold setup builds and checks a sealed wheel before activation. Existing hosts must
+follow the [conversion runbook](documentation/existing-host-release-conversion.md):
+hold their old source-puller, build separately, prove an independent canary, and
+adopt the complete host through `host activate`. There are no compatibility shims;
+the coordinator is host-wide and cannot bypass a protected busy bot's restart hold.
+
+### Fixed — the heavy-job slot classifier now matches pip/uv installs and sees through `flock`/`xargs`; a `pytest --collect-only` no longer takes the slot (#2023)
+
+Three gaps from the first cross-fleet canary of the heavy-job slot (#1686/#2015), now that the slot is armed on opted-in bots across every fleet:
+
+- **`pytest --collect-only` (and `--co`, `--version`, `--help`) no longer takes a slot.** It runs no tests, so gating it made a collect-only run wait behind a real suite or block one. Now not heavy.
+- **pip and uv installs are gated.** `pip install`, `python -m pip install`, `uv pip install`, `uv pip sync`, `uv sync` and `uv add` build or fetch — on a Pi as heavy as an `npm install`, and `python -m pip install -e '.[dev]'` is the documented dev setup. `--dry-run`/`--help`/`--version` stay light, and `pip`'s other subcommands (`list`, `show`, `uninstall`) are not gated. `uv add --frozen`, `--no-sync` and `--script` sync nothing, so they stay light too, unlike `uv sync --frozen`, which installs.
+- **`flock`, `xargs` (and the already-handled `sudo -u`, `sh -c`) no longer hide a heavy command.** `flock <lockfile> <suite>` — the habit the manual one-at-a-time rule taught — passed the suite through unslotted. `flock` and `xargs` are now unwrapped like `env`/`timeout`/`nice`: the slot wraps the whole command, and the wrapper's own re-check accepts it. `xargs -i`, `--replace` and `-l` take only an attached optional argument (GNU), so the word after them is read as the command. `flock <lockfile> -c '<suite>'` runs the string through a shell, so the wrapper goes inside the string, as for `bash -c`.
+
+**What this changes for an opted-in bot** (`heavy_slot: true`; the classifier is read on demand, so this is live at the next root pull with no restart): a `pip`/`uv` install, or a suite wrapped in `flock`/`xargs`, now takes the host's heavy-job slot and serializes with other heavy jobs instead of stacking; a `pytest --collect-only` no longer does. The classifier's false-positive discipline is unchanged — a run that names its test files, a dry-run, or a heavy word that is not the command is left alone; inside a construct the matcher does not parse (a backtick, an `eval`, a `sh -c` string it cannot map), `pip` and `uv` count only as words, so `pipe`, `pipefail` and `pipeline` do not make it give up on a command it used to wrap — and the zero-fork guard prefilter gains `pip`/`uv` (`flock`/`xargs`/`sh -c` need no entry: the heavy tool they wrap still names itself in the payload). Bounds: a `flock` on a contended lock blocks while holding the slot, the same as any wrapped command that blocks; the pip/uv weight is kev's estimate, not measured here.
+
+### Changed — Claudlobby is licensed under Apache-2.0
+
+The repository had no license file, while `pyproject.toml` declared MIT. It
+now carries the Apache License 2.0 (`LICENSE`, the unmodified text) and a
+`NOTICE`, which section 4(d) of the license carries into every redistribution.
+`NOTICE` names the copyright holder. It also credits the three outside
+contributions merged while `pyproject.toml` declared MIT (#190 and #191 by
+0xbeamish, #271 by GHX5T-SOL): it lists their files and carries the MIT
+License notice that accompanies them.
+
+- `pyproject.toml` declares `license = "Apache-2.0"`, an SPDX expression
+  (PEP 639), and ships `LICENSE` and `NOTICE` as license files. The expression
+  form needs setuptools 77, so the build requirement moved from
+  `setuptools>=68` to `setuptools>=77`. An isolated build (pip's default)
+  fetches it. A build with `--no-build-isolation` needs setuptools 77 or newer
+  installed first: with 66.1.1 it fails at metadata generation
+  (`invalid pyproject.toml config: project.license`).
+- `README.md` has a License section.
+
+### Fixed — a failed access.json write during `generate` is a named warning, not a traceback (#1683)
+
+`compose_bot` writes each Telegram bot's `access.json` into the host-global `~/.claude/channels/telegram-<handle>/`, outside the tree being composed. The invalid-handle branch beside it already warned and skipped, but this branch had no error handling. So a failed write aborted `generate` part-way with a raw traceback, and the fleet's later bots never composed. Causes include an unwritable or non-directory channel root, or a full disk.
+
+- **Now:** each affected bot gets one warning naming the path, the reason and what it means: the bot's Telegram group settings may be missing or stale until the path is fixed and `generate` re-runs. Composition continues.
+- **The write is whole or not at all.** `access.json` is written to a temporary name and renamed into place, at both write sites. A write that fails part-way, as on a full disk, leaves the old file and its runtime state (approved senders, pending pairings) untouched, or no file at all, and the next `generate` writes it.
+- **The file keeps its mode.** The rename would otherwise give `access.json` the default mode: a reconcile turned the plugin's 0600 file into 0644, readable by every local user who can reach the directory. The temporary file now takes the mode the file had, or 0600 for a new file, as the plugin creates it, before any text is written to it. It is a new, uniquely named file (`tempfile.mkstemp` in the same directory), not `access.json.tmp`: that is the plugin's own temporary name, so a plugin save during a `generate` could leave a 0644 `access.json` or a half-written read.
+- **Tests:** one bot, and a whole-fleet `compose_fleet` (the path `claudlobby generate` takes), each read from the logger, which is what the CLI shows. In both, the channel root is replaced by a regular file, so the write fails even when the suite runs as root. Two more simulate a write that stores 40 bytes and fails, on an existing file and on a first write. The mode tests: a 0600 and a 0640 file keep it through a reconcile, a first write creates the file 0600, and the text never reaches a file more open than the target; at both write sites, a plugin save in the middle of the write leaves the file 0600, and a temporary file the plugin left behind is left alone. The partial-write tests check that no `access.json.*.tmp` is left behind.
+- **Unchanged:** where the file lands (#1683 step 2). That remains a separate decision.
+
+### Fixed — the README quickstart stops at a failed validate, and the install step states its measured time (#1681)
+
+- **The manual quickstart ran `lib/setup-fleet` even after `validate` failed.** It printed `claudlobby validate && claudlobby generate` and then `lib/setup-fleet` on a line of its own. On a first run with placeholders still in place, `validate` correctly fails, and `setup-fleet` then ran anyway and failed twice more. The line now continues the chain (`… && lib/setup-fleet`), under a comment saying `validate` stops it until every `REPLACE_ME` is filled in.
+- **The install step now states a duration**, in both README and getting-started.
+  - On one Raspberry Pi 5 whose pip config adds piwheels, 45 s to 61 s in four timed runs: 45 s from an empty pip cache, 52 s and 61 s with a warm cache, and 55 s with the cache state not recorded. Other hosts are unmeasured.
+  - One cold host was stopped after 8 minutes, and the cause was not recorded.
+  - `lib/setup-system` runs the same pip install with `--quiet`, so the pages now say to expect the same wait with no output.
+- **`tests/test_cold_start_contract.py`** runs the README's quickstart block with stubs: a failed `validate` must be the only call, and a passing one must run `generate` and `lib/setup-fleet`. On getting-started and the setup skill it fails if `lib/setup-fleet` starts the line after a `validate` chain. Its duration tests read both pages: the stated range must be the lowest and highest of the runs listed beside it, the run count must match, the range must name the one host it was measured on, and the stopped run and setup-system's wait must be stated as above.
+
+### Fixed — `/setup` Step 0 proves this tree is installed, not only that its dependencies import (#2002)
+
+**The old check could pass with nothing installed.** It ran `python3 -c 'import claudlobby.composer'` from the repo root. Any Python imports the repo's own `claudlobby/` from the current directory, so that proved only that PyYAML and Jinja2 were importable. On the Linux cold run for #2002, a fresh export with no venv printed `INSTALLED`: the host had both packages in its user site, and its `claudlobby` command belonged to a different checkout. The cold session noticed on its own and checked where the module came from, and the skill now does the same.
+
+- **How the check works now.** It asks the repo venv's Python, from `/`, where `claudlobby.composer` comes from, and passes only when the answer is this tree's `claudlobby/composer.py`.
+- **How it is tested.** `tests/test_cold_start_contract.py` runs the skill's own command against three fixture trees:
+  - no venv, while the current directory's import succeeds: `MISSING`;
+  - a venv that resolves to this tree: `INSTALLED`;
+  - a venv that resolves to another tree: `MISSING`.
+  A variant that runs from the repo root instead of `/` fails the third.
+- **The command Step 0 names for "show the user the real error"** now asks the venv's Python the same way, from `/`, and prints where `claudlobby.composer` comes from or the error that stops it importing. The old command, run from the repo root, printed nothing in the two states the new check exists for. Tests run it in three states: another tree (it names that tree's `composer.py`), no `claudlobby` in the venv (`No module named 'claudlobby'`), and no venv (a non-zero exit with the error).
+- **The basic-group example ID** in the setup skill is now the obviously fake `-1234567890`, per the PII rule. A new test holds every ID-shaped number in README, getting-started and the setup skill to an obviously fake form: an ascending run, or a single repeated digit.
+
+### Fixed — the cold-start harness launches the cold arm without the operator's settings, and fences root (#2002)
+
+The documented launch was a bare `claude` in the exported tree, and a bare `claude` loads the user's settings. On the #2002 host those held three things at once:
+- a bare `Bash` allow rule, which approves every shell command;
+- `defaultMode: auto`, which Claude Code now uses by default anyway;
+- passwordless sudo, beside those settings.
+
+So a blind run could have run `sudo`, or `lib/setup-system` (which calls sudo itself), without a single prompt. The skill's fence, "tell the human to decline `sudo`", assumed a prompt that need not appear.
+
+- **The launch line.** `prepare` now prints `cd <tree> && PATH="<state>/fence:$PATH" claude --setting-sources project,local --strict-mcp-config`.
+  - It loads no user settings and none of the user's MCP servers.
+  - The fence is a refusing `sudo`, first on `PATH`, so a script that calls sudo fails loudly instead of acting as root.
+  - Credentials still come from the Claude Code login.
+- **The preflight** now warns when user settings approve every shell command (a `Bash`, `Bash(*)` or `Bash(:*)` allow rule, or `bypassPermissions`), and when `sudo -n true` succeeds.
+- **`status` no longer records a false `script_error`.** Its process count was `$(pgrep -f "$tree" | wc -l)`. `pgrep` exits 1 when nothing matches, so under `pipefail` the substitution failed, and the inherited ERR trap recorded `non-zero exit at line 286` on every clean run. That landed in the plane of whatever root the harness resolved, which is the production plane when run from an install.
+- **Docs.** The skill, `validating-cold-start.md` and the `CLAUDE.md` row describe the new launch.
+- **Tests.** `tests/test_coldstart_harness.py` runs `prepare` itself (it must write the fence and print the line that uses it), each allow-everything spelling, and the status count with and without matching processes.
+
+
+### Added — the host's heavy-job slot: heavy Bash commands run one at a time host-wide, opt-in per bot (#1686)
+
+Heavy jobs stacked across fleets stormed the primary host three times on 2026-09-29 (load 25 to 57, iowait up to 66%, swap full), and a prose rule saying "one at a time" cannot hold across a score of bots in four fleets. A bot with `heavy_slot: true` in `fleet.yaml` now gets a PreToolUse hook, `lib/heavy-slot-guard.sh`, composed for that bot and no other.
+
+- **What it gates:** a whole pytest or vitest run (a run that names its test files is not gated), an npm/pnpm/yarn install, a `test` or `build` package script, `next build`, Playwright and Chromium. It recognises them through `npx`, `pnpm exec`/`dlx`, `yarn`, `env`, `timeout`, `nice`, `nohup`, `uv run` and `bash -c`. The matcher reads the command as the shell does: an argument, a quoted string, a heredoc body or a comment never matches. A construct it does not parse is left untouched and counted, because a rewrite at a guessed position would corrupt the command.
+- **How it holds the slot:** the hook puts `lib/heavy-slot.py run --` in front of each heavy command and leaves every other byte alone. The wrapper takes a non-blocking `flock` on `state/heavy-slot/slot-N.lock`, writes the holder into the file, runs the job, and writes the release.
+- **A refusal names the holder:** when every slot is taken the call is denied before anything runs, with the holder's fleet, bot, command and start time, so the bot retries later instead of hanging behind a 15-minute suite.
+- **A dead holder cannot wedge it:** the kernel drops the lock with its holder. The next holder reports the unreleased record on the plane (`heavy_slot_unreleased`), and a changed boot id means the job was running when the host reset. That is the evidence #1644 lacks.
+- **Knobs, host-wide, read on every use:** `state/heavy-slot/slots` (default 1) and `state/heavy-slot/disabled`, which passes every call through at once. `lib/heavy-slot.py status` answers who holds each slot, or who held it last.
+- **It counts only bots that opted in.** The storms came from product fleets' heavy jobs, so the slot relieves them once those fleets' managers set the key on their bots.
+
+### Added — the README says what setup changes on your machine and what bounds a bot (#1996)
+
+A stranger deciding whether to run Claudlobby could not find out what it does to their machine without reading the scripts. The README now has two sections above the quick start, and every line names the file it can be checked against.
+
+- **What it changes on your machine:** every host change setup makes, and the script that makes it. That covers the `sudo` calls (apt packages, the GitHub CLI's apt repository, NodeSource, `loginctl enable-linger`, and Claude Code's managed settings, rewritten on every run), the units it installs, the two keys each bot start sets in your own `~/.claude/settings.json`, the Telegram access lists under `~/.claude/channels/`, the recurring jobs that act beyond the fleet, and where each secret lives.
+- **Safety model:** a bot can run shell commands as you. The expertise it is given can allow every tool, bare `Bash` included, and no composed rule denies `sudo`, so passwordless sudo on the host means root for every bot. Anyone in a fleet's Telegram group can instruct its bots. Bots also inherit your own Claude Code settings. What bounds a bot: deny rules that gate only Claude Code's own tool calls (they are not an operating-system boundary), two guard hooks, guardrails that are instructions rather than enforcement, the sandbox (off in the seed), and the scope of the tokens it holds.
+
+### Fixed — task re-check routes a person's stale rows to Telegram, and leaves their standing goals alone (#2011)
+
+`claudlobby task recheck` re-checked every open row past a deadline by pushing a message into the assignee's manager's tmux pane. But a row a *person* assigned is minted `bot:<fleet>/operator` by `dispatch-task.sh` (which names its sender from whoever ran it), and a person has no pane — so one such row (`t-1789966048-473b`, which carries no deadline) was re-checked every 6 hours, forever, into a pane nobody has. The assigner's kind is now read from the plane's own registry (`plane-readers.composed_bot_aliases`: a `bot:` alias is a bot only when `generate` composed a `bot_instance` for it), never inferred from "no tmux session". A person's rows go to the fleet's Telegram through `resolve_alert_target`'s (chat, sender) pair with their own delivery evidence — a `carrier_accepted` transmission, which `RECHECKED_SQL` now counts as landed beside the pane route's `pane_submitted` — so the repeat-window debounce holds on the non-tmux route too. The plane records the person's OWN per-row text (the fragment they received on Telegram), not the bot-pane wording, so the recorded ask matches what the human saw. A person's stale row past its deadline is chased once per window and no oftener; a person's row with **no** deadline is a standing goal — disclosed in the run, not re-checked; and a recipient who cannot be reached is named and fails the run, never a silent drop. Verified on this host's plane (read-only snapshot): the motivating row now classifies as a standing goal and is not sent.
+
+### Added — every manager gets `/status` by default, and so does the seed's claudfather (#2010)
+
+The `status` skill is the manager's readout for the human: what moved, and
+what is waiting on their decision. It reached a bot only when that bot's
+`fleet.yaml` listed it. On one host, three of the four managers had it and
+the fourth did not, and a new user's first bot, `claudfather`, did not.
+
+- **Every manager gets it.** `status` is now a role default on `skills`
+  (`defaults.REGISTRY["skills"].roles`), keyed to the `manager` role: every
+  bot a `teams:` or `manages:` names as a manager, including a coordinator
+  whose reports are all managers. The leaf-manager role that brings `checkin`
+  would have missed that coordinator. The skill's own grants come with it
+  (`Bash(claudlobby *)`, `Bash(gh *)`, the Telegram reply tool). One helper,
+  `composer.default_roles`, now derives a bot's roles for both the protocols
+  and the skills overlays.
+- **The seed lists it for claudfather.** claudfather is not a manager, since
+  it manages no bots, so the default never reaches it. The seed declares the
+  skill instead, and `/status` works on a new user's first bot.
+- **Opting out.** `system_defaults.skills: false` switches the default off for
+  a fleet, and `bots.<name>.system_defaults: {skills: false}` for one bot.
+  `skills` is the only per-bot key; any other key there, or a value that is
+  not a mapping, is refused instead of being dropped silently. Both switches
+  turn off the default only: a bot that lists `status` itself keeps it.
+- **What the next `generate` changes on a live host:** a manager that did not
+  list `status` gains the skill and its four grants. That takes effect the
+  moment `generate` writes it (#1310). A manager that already lists it
+  composes it once, as before.
+
+### Fixed — `/setup` asks `bridge_state` about claudfather's own session (#1536)
+
+**The old guidance could read `up` for a bridge that was going dark.** Step 5 told first-run operators to trust `bridge_state runtime/bots/claudfather` over the log. Without a session pid, that answers whether *a* poller holds the bot's Telegram slot, and during a restart the outgoing session's poller still does (#1530).
+
+- **Now:** the skill resolves claudfather's pane pid through the same helpers `start-bot.sh` uses (`tmux_socket_for_bot`, `tmux_session_name`, `bot_tmux`), and passes it. The pane runs Claude itself, so its pid is the session. The skill also explains `not_mine`.
+- **The token is passed too, and that is load-bearing.** `bridge_state` takes *any* second argument as the resolved token, so an empty `""` answers `no_token` for a healthy bot. Measured on a live bot:
+  - scoped with its own session: `up`;
+  - scoped with another pid: `not_mine`;
+  - with `""` as the token: `no_token`.
+- **The other caller #1536 names,** `lib/bench-cold-start.sh`, was deleted in #1858.
+- **`tests/test_cold_start_contract.py`** requires every `bridge_state` call in the setup skill to name the session and a non-empty token.
+
+### Added — `claudlobby plane samples`: one metric family for one subject over a window, read-only (#1644)
+
+The host probe records `host.load`, `host.mem_available_mb` and the other `host.*` facets every minute, but nothing read a window of them back. After a reset, the load and memory trajectory into it could only be read by opening the plane db by hand. `claudlobby plane samples <metric> [--subject ALIAS] [--kind KIND] [--since W] [--until W] [--json]` prints one family for one subject over a window, as text or JSON. In text, `host.load`'s one, five and fifteen print as pairs. The subject defaults to the only one of its kind, which on a host's own plane is the host.
+
+- **Read-only by construction, and the plane is released before anything prints.** It opens through `open_ro` (`mode=ro` plus `query_only`) and never runs `migrate()`. It fetches every row and closes the connection before the first line prints, a refusal included, so it never holds a snapshot that keeps the daemon's checkpoint from resetting the WAL (#1905, #1912). A test fails if anything prints to either stream while the connection is open, after a failed read as well as a good one.
+- **The window compares times, not text.** Ingest keeps the offset an emitter gave: a `-04:00` instant is stored as `-04:00`. A text compare against UTC bounds would drop in-window samples, so the query goes through `julianday()`, and a mixed-offset test pins that.
+- **Refusals name the fix, and a refusal is never read as an answer.** An unknown family lists the known ones, an unknown subject lists the recorded ones, and two subjects of one kind with no `--subject` names both. A window bound that does not parse is refused at rc 2, an empty one included, so `--since "$UNSET"` is not read as now. An unreachable plane refuses at rc 3 and creates nothing, and so does a plane that records no subject of the kind, because a wrong root is not an empty window. Every refusal goes to stderr and leaves stdout empty, `--json` included. An empty window is an answer (rc 0).
+- `plane.identity` gains `lookup()`, the read half of `resolve()`, which now calls it: a read door must not mint an identity.
+
+### Fixed — `setup-fleet` stops filing a critical `script_error` every night on a fleet with no briefing timers (#1707)
+
+`reconcile_briefing_timers` lists the fleet's enrolled briefing timers with
+`systemctl --user list-unit-files`, which exits 1 when its pattern matches
+nothing. On a fleet with no briefing timers, that exit fired the errtrace ERR
+trap inside the process substitution, so the nightly `setup-fleet --jobs-only`
+filed a critical `script_error` at the function's first line. The function and
+the script both carried on correctly. It fired 6 nights of 7 on each of the two
+fleets with no briefing timers, in the week to 2026-09-29.
+
+- **The fix.** The guard moved inside the substitution:
+  `… | awk '{print $1}' || true)`. A guard outside cannot help, because the trap
+  fires in the substitution's own shell. An empty listing means nothing to
+  reconcile, so a real listing failure swallowed with it fails toward doing
+  nothing.
+- **The test harness now matches systemd.** The stub `systemctl` in
+  `tests/test_setup_backbone.py` exited 0 when a pattern matched nothing, which
+  is why no test saw this. It now exits 1 with no output, as systemd 252 does
+  (measured on the Pi). The harness also records every batch that reaches the
+  plane shim, so a test can assert what was filed.
+- **Tests.** `TestBriefingReconcileErrTrap` checks that the no-match case files
+  no row under the real `install_error_trap`. Its positive control checks that a
+  real failure in the same function (an orphan unit file that cannot be removed)
+  still files one.
+- **Not covered.** The class-level pass over `lib/` and its regression gate stay
+  with #1707.
+
+### Fixed — every bot is told what a dispatch's leading `set +H; ` is, and the dispatch protocol stops describing something it does not do
+
+`lib/dispatch.sh` puts `set +H; ` in front of every message except one that starts with a command word and has no `!`. Receivers flagged it as unexplained text at the head of their task. The one explanation lived in the dispatch protocol, which only managers compose, and the worker-lifecycle protocol, which is declared by only a few bots, did not mention it. The pasted-text section every bot composes (`templates/claude.md.j2`) now says what the prefix is and that there is nothing to run, and worker-lifecycle's RECEIVE step says the same beside the receipt-marker line. `tests/test_framed_dispatch_guidance.py` pins it for every composed bot; it fails on the previous template.
+
+**What the prefix does, checked against `lib/dispatch.sh` rather than inferred from its name:** a message that begins with `/`, such as a file path, arrives as text instead of running as a slash command, which is why `dispatch.sh` leaves the prefix off a message that starts with a command word and has no `!`: that one has to run. The code still calls it a history-expansion guard; it does not state this effect as a purpose, so the new text states it as an effect. `lib/start-bot.sh` puts the same prefix in front of the startup prompt, and the new text says so. `set +H` is bash's switch for history expansion, but nothing on this path expands history: `dispatch.sh` is a non-interactive script, where expansion is already off; the send types the bytes literally (`tmux send-keys -l`); and a Claude Code prompt is not a shell. So the dispatch protocol's "disabling bash history expansion, which silently mangles `!` in prompts" described nothing that happens here, and it now says what the prefix does. The history-expansion lesson (`library/lessons/tmux-dispatch-shell-expansion.md`), which most bots compose, gains one clause: it concerns the shell you type a send into, and it points at the new text for the receiving end, so the two no longer contradict each other.
+
+### Fixed — a control note holds the report resolver back again, and `report-back.sh --no-task` declares a report that answers no dispatch (#1981)
+
+Since #1491 a `query`, `cancel`, `compact` or `restart` note lands its
+communication alone, with no assignment. The resolver's guard read the bot's
+newest *assignment*, so a note stopped holding it back. The worker's id-less
+answer to the note was stamped with its live task and closed it as `completed`.
+This happened on the ai-platform fleet at 2026-09-29 04:23:57Z.
+
+- **The guard.** `plane-readers.head()` now also returns nothing while any
+  control note sent to the bot has no id-less report from the bot after it
+  (`answering_control_note`).
+  - The note is found by the dispatch door's provenance (`dispatch-log:`),
+    either through its recipient alias or through the door's `recipient_raw`
+    fallback.
+  - Only an id-less report releases it: one whose communication links no
+    assignment. A report naming one of the bot's own tasks, and a newer task,
+    do not: neither answers a note, and a wrong completion is worse than an
+    open row. A `--task` that links to none of the bot's tasks (a typo,
+    another bot's id) links nothing, so it counts as id-less and releases the
+    hold early. `--no-task` is the safe way to answer a note.
+  - The hold is on resolution only. A terminal report after a note still
+    closes the bot's open raw-text (id-less) dispatches, as any terminal
+    report does.
+  - The one cost: the first id-less report after a note resolves to no task,
+    whatever it is. If it was really finishing an id'd task, that task stays
+    open and pages as overdue, at most one row per note.
+  - Notes sent before the upgrade count too. Workers mostly report with
+    `--task`, so most bots hold a note with no id-less report after it, and
+    each one's next id-less report resolves to no task.
+  - #1491's rows are not brought back, and the `answering_idless` rule is
+    unchanged.
+- **The opt-out.** `report-back.sh --no-task` (or `--task -`) declares a
+  terminal report that answers no dispatch.
+  - It skips the resolver and the id-less closer, and its status marker records
+    `no_task`.
+  - It is the safe way to answer any note, and the only one when the guard
+    cannot see the note (a raw `dispatch.sh` send, or text typed into the
+    pane) or has already been released by another id-less report.
+  - It is refused beside a real `--task` id.
+- **The docs.** `dispatch.md` and `worker-lifecycle.md` now say which notes the
+  automatic guard sees, and when to use `--no-task`.
+- **Tests.**
+  - `tests/test_resolver_control_note_guard.py`, 22 tests, including both gap
+    orders: a report naming one of the bot's own tasks, and a newer task,
+    between a note and its answer.
+  - Two of #1491's pins in `tests/test_dispatch_type.py` asserted the defect: a
+    no-id report after a control note resolved the real row. Both are inverted
+    in place, over all four types. #1491's other property, that a control note
+    mints no assignment, stays pinned.
+  - A `validate-bot-change.sh` scenario that runs the 2026-09-29 sequence
+    through the real doors.
+
+### Fixed — the session digest's model call loads no MCP server, plugin or hook, so it no longer takes Telegram away from every bot on the host (#1972)
+
+`lib/transcript-digest.sh` runs its Haiku pass inside a bot's session end, in the
+bot's directory and with the bot's environment. With default settings, that
+`claude -p` loaded every MCP server and plugin the bot has. The Telegram channel
+plugin found the bot's live poller, deferred to it and exited. Claude Code then
+wrote a **host-global** needs-auth entry, and for the next 15 minutes every bot
+that started on the host skipped its own Telegram server (#1962). On the Pi, the 4
+ai-platform bots run the digest, so each of their session ends set that trap for
+all 21 bots.
+
+The pass now runs with `--strict-mcp-config`, an empty `--mcp-config` and
+`--setting-sources ''`. It loads no MCP server, no plugin and no user, project or
+local settings, so no hook runs either. The prompt, the model and the digest row
+are unchanged.
+
+- `tests/test_transcript_digest.sh` pins that the hook passes all three flags.
+  Each flag has its own assertion, and each was mutated and went red.
+- `tests/test_transcript_digest_isolation.py` runs the real hook with a real
+  `claude` in a throwaway HOME, at zero spend. Two fake plugins exit the way
+  Telegram does, one enabled at the user tier and one at the local tier. The
+  test checks that no needs-auth entry is written, no server starts and no hook
+  runs. A control arm strips only the three flags and must write the entries.
+  It is opt-in (`DIGEST_ISOLATION_REAL=1`), because CI has no `claude` binary.
+- Measured in that fixture on 2.1.281 and 2.1.283:
+  - With the old command line, both plugins wrote an entry. The same pass also
+    ran the directory's own SessionStart and UserPromptSubmit hooks.
+  - With either flag alone, no entry was written. Only `--setting-sources ''`
+    also stopped the hooks.
+
+### Added — `claudlobby doctor` asks `claudron doctor` about each wired vault, and never applies `--fix` (Claudron #190, part C)
+
+Until now nothing in fleet health said a vault had fallen behind its engine. After the 0.5.2 upgrade, walk-up stopped finding a vault that lacked its identity file, and every hook that found the vault that way failed open without a word (Claudron #183). The Claudron section of `claudlobby doctor` now runs `claudron doctor --json --vault <vault>` for each wired vault this host holds, and adds:
+
+- **`claudron-doctor`.** It lists pending migrations (D001) with their ids and titles, and the command a human runs: `claudron doctor --vault <vault> --fix`. On a current vault it is a pass that counts every other finding and names the command that shows them. A vault whose format differs from the engine's while nothing is pending, which is what an unreadable identity file looks like, is a warn, never a pass.
+- **`claudron-doctor: D007`** and **`claudron-doctor: D008`:** the engine's own message, verbatim.
+
+The rules it keeps:
+
+- **It never passes `--fix`.** A test records every call to pin this.
+- **It gates on `"doctor"` in the capability probe's `data.capabilities`, never on `engine_version`.** `_claudron_probe` now hands back its envelope's `data` for that.
+- **The engine is the only source of findings.** Nothing here reads the vault itself.
+- **It waits `CLAUDRON_DOCTOR_TIMEOUT_S` (60 s).** Until Claudron #201 lands, a doctor that walks a vault root holding large ignored trees takes minutes. When it runs out of time, the row says *unknown* and names #201. On the estate's Pi, that is today's answer for the live vault: 65 s end to end, nothing left running, the vault untouched.
+- **`_run` reports a timeout as 124, not 1.** `claudron doctor` exits 1 when it has error findings, so the old code blurred the two.
+- **It is warn-level,** like the rest of the section.
+
+### Fixed — `vault-sync` names its vault with `--vault` instead of finding it by walk-up (#1993)
+
+`lib/vault-sync.sh` ran `cd "$vault" && claudron sync …`, so Claudron found the vault by walk-up. Since 0.5.2, walk-up binds a vault only once its committed `.claudron-vault` identity file exists (Claudron #183). During the v0.5.3 Pi rollout, the CLI was upgraded 30 minutes before the migration wrote that file. The job failed on every run in between (`ok=0 … no envelope (rc=3)`) and paged at 19:01Z, while `claudron sync --check --vault <path>` returned clean the whole time.
+
+- **Both calls now pass `--vault "$vault"`:** the `--check` verdict and the sync itself. The job already holds the path it read from bot.conf. It no longer depends on walk-up, on the identity file, or on the order of a rollout's steps.
+- **The page's remedy names the vault too:** `claudron sync --check --vault <path>`. The old remedy, run inside the vault, hit the same walk-up failure. The runbook says the same.
+- **Test:** a stub engine with 0.5.2+ discovery (walk-up needs the identity file; `--vault` does not) and a vault without the file. The job must record `ok=1`, with `--vault` on both calls. It is red on `main` with the live symptom, and a control test pins the stub's model.
+
 ### Added — pinned MCP servers launch without npx's npm wrapper, opt-in per bot (#1604)
 
 `npx -y <pkg>@<version>` keeps an `npm exec` process resident as the parent of every MCP server it starts, with a `sh -c` shim between the two. Measured on the Pi on 2026-09-29, while the host was out of swap: 41 wrappers, 1,173 MB RSS but only 58 MB PSS. What they actually held was 45 MB private and 1,388 MB of swap, a third of the swap file.

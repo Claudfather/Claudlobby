@@ -243,6 +243,16 @@ disagree on the same fleet. Details: `documentation/runbooks/plane-view.md`.
   grid + one live pane, trust/gaps, SSE off the ingest-ledger cursor, `/healthz`.
   Composed as the dormant `claudlobby-plane-view` host service; Tailscale Serve
   fronts it.
+- **`plane samples <metric>`** (#1644) — one `metric_samples` family for one
+  subject over `--since`/`--until`, as text or `--json`; the host probe's
+  `host.*` families by default (`host.load`, `host.mem_available_mb`, …), the
+  subject being the only one of its kind unless `--subject` names it. It is
+  read-only by construction: `open_ro`, no `migrate()`, and every row is
+  fetched and the connection closed before anything prints. The window
+  compares instants through `julianday()`, because ingest keeps each sample's
+  own offset. JSON uses the schema-1 command result; malformed arguments exit 2,
+  and unavailable storage or no recorded subject exits 6. This is how a host's
+  load and memory into a reset are read back.
 - **`plane status` / `plane doctor`** — the health page and the pre-flight
   rungs (schema, provisional actors, tombstone validity, reconciliation, the
   WAL against its ceiling).

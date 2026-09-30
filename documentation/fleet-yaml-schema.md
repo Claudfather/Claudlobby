@@ -197,11 +197,14 @@ fleet:
     observability: true    # merge system.yaml observability defaults
     guardrails: true       # apply default guardrails (e.g. claudlobby-dev-in-projects)
     protocols: true        # apply default protocols, including the leaf-manager checkin default
+    skills: true           # apply default skills: the status skill on every manager
 ```
 
 Omit the field entirely for the common case — everything defaults to `true`. Useful for a fleet that wants to supply its own hooks/observability tuning without the package defaults layered underneath.
 
 `protocols: false` is also how a fleet opts out of the leaf-manager check-in default (see `fleet.teams`, below) — and opting out of the protocol drops the `checkin` skill its `requires:` block links too, unless the bot declares that skill directly. It drops every default protocol for every bot — `shared-documentation` / `shared-documentation-vault` included — and there is no per-bot opt-out.
+
+`skills: false` switches off the default skills: today, the `status` skill the configured `fleet.manager` gets, with the grants its frontmatter declares. **One bot can opt out on its own** with `bots.<name>.system_defaults: {skills: false}`. That is the only per-bot key, and any other key there is refused rather than ignored. Both switches turn off the DEFAULT only: a bot that lists `status` in its own `skills:` keeps it.
 
 ### `fleet.defaults`
 
@@ -240,6 +243,7 @@ Opt a fleet **out** of an on-by-default job the same way, with `enroll: false`.
 | `boot-brief` | **off** — standing context per session; rollout operator-held pending ratified cost | door | fleet.yaml | bots.<bot>.brief.on_start: true in fleet.yaml, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> |
 | `boot-capture-stamp` | **off** — no deployment gate, and more sharply than boot-capture: this half has no enrollment step at all, so a root pull reaches every bot start immediately | door | fleet.yaml env: → bot.conf | BOOT_CAPTURE_ENABLED=1 in fleet.yaml bots.NAME.env: (then config plan and host activate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `code-audit-sweep` | **off** — model spend + outbound GitHub issues | fleet job | fleet.yaml | sweep.enabled: true in fleet.yaml (plus owner_bot and repos), then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> |
+| `heavy-slot` | **off** — no deployment gate: a composed hook is live on every bot the next generate composes it for (#1310), with no restart in between, and this one rewrites the bot's heavy commands, so the manifest is the only place one bot can go first | composition | fleet.yaml bots.<bot> → activated composition | bots.<bot>.heavy_slot: true in fleet.yaml on an independent canary root with ONE armed bot first, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> (activation can restart selected bots; the deny then binds on the next tool call); widen to defaults.heavy_slot once it has run clean |
 | `manager-checkin` | **off** — model spend — one manager turn per idle beat — and it injects into a live session | fleet job | fleet.yaml | defaults.jobs.manager-checkin.enroll: true in fleet.yaml, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> |
 | `mcp-direct-launch` | **off** — changes how every MCP server starts; warm the pinned cache and activate an independent canary root with one armed bot before widening the manifest | composition | fleet.yaml bots.<bot> → activated composition | bots.<bot>.mcp_direct_launch: true in fleet.yaml on an independent canary root with ONE armed bot first, then claudlobby --root <data-root> --fleet <fleet> host cache warm, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> (it takes effect when that bot next restarts: .mcp.json is read at session start); widen to defaults.mcp_direct_launch once it has run clean |
 | `mcp-package-probe` | **off** — reaches the NETWORK on a compose. Planning must stay offline and fast by default, and a registry outage must never be the reason a fleet cannot compose. The offline half of the check (is the package pinned?) is unconditional and needs no flag | composition | fleet .env | CLAUDLOBBY_MCP_PROBE_ENABLED=1 in the fleet-tier .env |
@@ -538,6 +542,24 @@ mcp:
 This emits one `.mcp.json` server per instance — `notion` (the `default`) and `notion-work` — and namespaces each instance's env-var placeholders by an uppercased prefix: the `default` instance keeps `NOTION_` (so it reads `NOTION_TOKEN`), while `work` becomes `NOTION_WORK_` (so it reads `NOTION_WORK_TOKEN`). Set one env var per instance in `.env`. Parsed by `config.py` (`_parse_mcp_list` → `McpEntry`); placeholder resolution lives in `claudlobby/mcp_resolve.py`. See the Notion integration guide for a worked example.
 
 `integrations:` lists usage docs from `library/integrations/`. By default, integrations are **auto-paired with mcp** — listing `mcp: [github]` automatically pulls in `library/integrations/github.md` (when it exists). Override by setting `integrations:` explicitly.
+
+### `bots.<name>.heavy_slot` / `fleet.defaults.heavy_slot`
+
+Opt-in, off by default (#1686). Heavy jobs stacked across fleets have stormed the primary host: load 25 to 57, iowait up to 66%, swap full. With `heavy_slot: true`, the bot's heavy Bash commands take a host-wide slot, and a call made while every slot is taken is refused before it runs. The refusal names the holder, so the bot retries later instead of hanging behind someone else's suite.
+
+```yaml
+bots:
+  ravi:
+    heavy_slot: true   # STRICT bool: a typo string is a parse error, never an arming
+```
+
+- **What counts as heavy:** a whole pytest or vitest run (a run that names its test files is not gated), a pip/uv/npm/pnpm/yarn install, a `test` or `build` package script, `next build`, Playwright, and Chromium. They are recognised through `npx`, `pnpm exec`/`dlx`, `yarn`, `timeout`, `env`, `nice`, `nohup`, `flock`, `xargs`, `uv run` and `bash -c '…'`. `--collect-only` pytest calls do not take a slot. Bash tool calls only: a heavy job started from inside a script is not seen.
+- **How:** configuration staging composes a PreToolUse hook, `lib/heavy-slot-guard.sh`, for this bot and for no other. It puts `lib/heavy-slot.py run --` in front of each heavy command and leaves every other byte of the command alone.
+- **The slot** is a `flock` on `$CLAUDLOBBY_ROOT/state/heavy-slot/slot-N.lock`, whose contents name the holder: fleet, bot, command, start and, once it ends, release and exit code. The kernel drops the lock when its holder dies, so a dead holder never wedges the slot. The next holder records the unreleased hold on the plane (`heavy_slot_unreleased`); a different boot id means the job was running when the host reset (#1644).
+- **Knobs, host-wide, read on every use:** `state/heavy-slot/slots` holds the slot count (1 when absent). `state/heavy-slot/disabled`, when it exists, makes the hook pass every call through at once, with no generate and no restart. `lib/heavy-slot.py status` answers who holds each slot, or who held it last.
+- **It only counts bots that opted in.** A heavy job run by a bot without the key takes no slot and is refused by none.
+
+To arm one canary bot, set the key in an independent canary manifest, review `config plan` and `config diff PLAN_ID`, then use `host activate PLAN_ID --install-directory PATH`. Activation is host-wide; do not use a production manifest to simulate a one-bot canary. Hooks are read on demand once delivered, so the activation boundary is essential. The earlier hook mechanism was measured with a headless session on Claude 2.1.281; that is not proof of this release's activation. To widen it, set `defaults.heavy_slot: true`. A bot's own `false` still opts that bot out.
 
 ### `bots.<name>.mcp_direct_launch` / `fleet.defaults.mcp_direct_launch`
 

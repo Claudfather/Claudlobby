@@ -38,6 +38,7 @@ class RecheckSelection:
     overflow: int
     issues: tuple[TaskIssue, ...]
     uncertain_request_ids: tuple[str, ...] = ()
+    standing_task_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -96,27 +97,70 @@ def _latest_asks(conn: sqlite3.Connection, fleet_uid: str,
     return latest
 
 
-def _due(task: Task, now: datetime, max_age_s: float) -> bool:
+def _due(task: Task, now: datetime, max_age_s: float, *, by_person: bool = False) -> bool:
+    """A person's assignment is due only on its own deadline (#2011): with none
+    it is a standing goal, never re-asked on age alone."""
     assignment = task.current_assignment
     deadline = _instant(assignment.expected_by) if assignment else None
     if deadline is not None and deadline <= now:
         return True
+    if by_person:
+        return False
     started = _instant(assignment.occurred_at if assignment else task.occurred_at)
     return started is not None and (now - started).total_seconds() > max_age_s
 
 
+def _person_assigners(conn: sqlite3.Connection, fleet_uid: str, tasks: list[Task],
+                      bot_uids: frozenset[str]) -> set[str]:
+    """Assigner UIDs that are not a bot of this fleet or another, read from the
+    registry: `human:` actors and a `bot:<fleet>/` alias this fleet never bound
+    (a person's historical `bot:<fleet>/operator`). An unregistered UID keeps the
+    age rule; unknown is not a person."""
+    uids = sorted({task.current_assignment.assigned_by_uid for task in tasks
+                   if task.current_assignment} - bot_uids)
+    if not uids:
+        return set()
+    row = conn.execute("SELECT alias FROM identity_registry WHERE kind='fleet' AND uid=?",
+                       (fleet_uid,)).fetchone()
+    own = f"bot:{row[0]}/" if row else None
+    people = set()
+    for start in range(0, len(uids), 300):
+        chunk = uids[start:start + 300]
+        slots = ",".join("?" for _ in chunk)
+        for uid, alias in conn.execute(
+                f"SELECT uid, alias FROM identity_registry WHERE kind='actor' AND uid IN ({slots})",
+                chunk):
+            if alias.startswith("human:") or (own is not None and alias.startswith(own)):
+                people.add(uid)
+    return people
+
+
 def select(conn: sqlite3.Connection, *, root, fleet_uid: str, now: datetime,
            max_age_h: float = DEFAULT_MAX_AGE_H,
-           repeat_h: float = DEFAULT_REPEAT_H) -> RecheckSelection:
-    """One reducer snapshot; committed asks debounce by task and current link."""
+           repeat_h: float = DEFAULT_REPEAT_H,
+           bot_uids: frozenset[str] | None = None) -> RecheckSelection:
+    """One reducer snapshot; committed asks debounce by task and current link.
+    With the fleet's bound `bot_uids`, a person's deadline-less assignment is a
+    disclosed standing goal rather than a due row (#2011)."""
     if max_age_h < 0 or repeat_h < 0:
         raise ValueError("recheck windows must be nonnegative")
     snapshot = read_tasks(conn, fleet_uid=fleet_uid)
     if any(issue.blocking for issue in snapshot.issues):
         raise RecheckUnresolved(snapshot.issues)
     escalated = {row.task_id for row in task_escalations_from_snapshot(snapshot).items}
-    due = [task for task in sorted(snapshot.tasks, key=lambda item: (item.ingest_seq, item.task_id))
-           if task.open and _due(task, now, max_age_h * 3600)]
+    ordered = [task for task in sorted(snapshot.tasks, key=lambda item: (item.ingest_seq, item.task_id))
+               if task.open]
+    people = (_person_assigners(conn, fleet_uid, ordered, bot_uids)
+              if bot_uids is not None else set())
+
+    def by_person(task: Task) -> bool:
+        return task.current_assignment is not None and task.current_assignment.assigned_by_uid in people
+
+    standing = tuple(task.task_id for task in ordered
+                     if by_person(task) and task.task_id not in escalated
+                     and _instant(task.current_assignment.expected_by) is None)
+    due = [task for task in ordered
+           if _due(task, now, max_age_h * 3600, by_person=by_person(task))]
     asks = _latest_asks(conn, fleet_uid, due)
     receipts = {}
     eligible, held, uncertain, waiting = [], 0, 0, 0
@@ -159,7 +203,7 @@ def select(conn: sqlite3.Connection, *, root, fleet_uid: str, now: datetime,
         eligible.append(task)
     return RecheckSelection(tuple(eligible[:MAX_ROWS]), held, uncertain, waiting,
                             max(0, len(eligible) - MAX_ROWS), snapshot.issues,
-                            tuple(sorted(uncertain_requests)))
+                            tuple(sorted(uncertain_requests)), standing)
 
 
 def _clip(value: str, length: int = 80) -> str:
@@ -240,7 +284,8 @@ def recheck(ctx: TaskOperationContext, request_id: str, *, route, max_age_h: flo
                     conn.execute("BEGIN")
                     selection = select(conn, root=ctx.root, fleet_uid=ctx.fleet_uid,
                                        now=datetime.now(timezone.utc), max_age_h=max_age_h,
-                                       repeat_h=repeat_h)
+                                       repeat_h=repeat_h,
+                                       bot_uids=frozenset(bot.uid for bot in ctx.bots.values()))
                     conn.rollback()  # Proof reads after emit must see the newly committed facts.
                     if not selection.rows:
                         provenance = _provenance(ctx, conn, by)
