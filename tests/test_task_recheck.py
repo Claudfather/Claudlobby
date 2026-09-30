@@ -81,14 +81,16 @@ def _stem(seed: str) -> str:
 
 
 def _seed_row(root, *, task_id, bot="ramanujan", mgr="erlich", fleet=F,
-              title="port the parser", dispatched, expected_by=None):
-    """One dispatched row on the plane, at the instants given."""
+              title="port the parser", dispatched, expected_by=None, assigned_by=None):
+    """One dispatched row on the plane, at the instants given. `assigned_by`
+    overrides the manager's bot alias (a human, or a bot nobody composed)."""
     stem = _stem(task_id)
     wi, asg = "wi_" + stem, "asg_" + stem
     base = {"emitter": "t", "fleet": fleet, "source_ref": f"dispatch-log:{task_id}",
             "occurred_at": dispatched}
     payload = {"assignment_id": asg, "work_item_id": wi,
-               "assignee": f"bot:{fleet}/{bot}", "assigned_by": f"bot:{fleet}/{mgr}"}
+               "assignee": f"bot:{fleet}/{bot}",
+               "assigned_by": assigned_by or f"bot:{fleet}/{mgr}"}
     if expected_by:
         payload["expected_by"] = expected_by
     emit_batch(root, [
@@ -598,3 +600,142 @@ def test_a_row_whose_dispatch_instant_is_unreadable_is_not_due():
     assert not task_cmd.row_is_due({"occurred_at": "not-an-instant"},
                                    now=now, max_age_s=1)
     assert not task_cmd.row_is_due({"occurred_at": None}, now=now, max_age_s=1)
+
+
+# --- who assigned it: a composed bot, or not (#2011) --------------------------
+#
+# The live row that failed the unit 27 times was recorded `assigned_by` =
+# `bot:ai-platform/operator`: `dispatch-task.sh` minted a bot alias for a human's
+# standing goal. So the alias prefix alone cannot tell a human from a bot. The
+# registry can: `generate` records one `bot_instance` per bot it composed, and
+# neither a `human:` alias nor a bot alias nobody composed has one.
+
+
+def _compose(root, *names, fleet=F):
+    """The registry scan's record of the bots `generate` composed."""
+    events = []
+    for name in names:
+        alias = f"bot:{fleet}/{name}"
+        events.append({
+            "event_type": "registry_snapshot", "emitter": "t", "fleet": fleet,
+            "payload": {"entity_type": "bot", "entity_alias": alias,
+                        "cause": "generate", "scan_id": "s1",
+                        "payload": {"alias": alias, "account": "a", "service": "svc",
+                                    "model": "opus", "equipment": {},
+                                    "posture": {"permissions_mode": "plan",
+                                                "tool_allow": [], "tool_deny": []},
+                                    "org": {}, "composed_hashes": {},
+                                    "declared_hash": "d", "schema_version": "1"}}})
+    emit_batch(root, events)
+
+
+@pytest.fixture()
+def told(monkeypatch):
+    """The Telegram route's seam: (fleet, message) per send; answers delivered."""
+    calls = []
+
+    def fake(paths, fleet, message):
+        calls.append((fleet, message))
+        return 0, "", "tg:555"
+
+    monkeypatch.setattr(task_cmd, "send_to_human", fake, raising=False)
+    return calls
+
+
+def _asks(root):
+    return [c for c in _comms(root) if (c["source_ref"] or "").startswith("task-recheck:")]
+
+
+def test_a_bot_the_fleet_composed_is_asked_in_its_pane(tmp_path, sent, told):
+    _compose(tmp_path, "erlich", "ramanujan")
+    _seed_row(tmp_path, task_id="t-1", dispatched=_ago(100))
+    assert task_cmd.cmd_task_recheck(_Args(tmp_path)) == 0
+    assert [b for b, _, _ in sent] == ["erlich"] and told == []
+
+
+def test_a_standing_goal_a_human_assigned_is_not_rechecked(tmp_path, sent, told, capsys):
+    _compose(tmp_path, "erlich", "ramanujan")
+    _seed_row(tmp_path, task_id="t-goal", dispatched=_ago(100), assigned_by="human:chris")
+    assert task_cmd.cmd_task_recheck(_Args(tmp_path)) == 0
+    assert sent == [] and told == [] and _asks(tmp_path) == []
+    out = capsys.readouterr().out
+    assert "standing goal" in out and "chris" in out
+
+
+def test_the_2011_row_a_bot_alias_nobody_composed_is_a_standing_goal(
+        tmp_path, sent, told, capsys):
+    # The live shape: assigned by `bot:<fleet>/operator`, no deadline, 2 days old.
+    # No tmux send is attempted, because no bot named operator was composed.
+    _compose(tmp_path, "erlich", "ramanujan")
+    _seed_row(tmp_path, task_id="t-1789966048-473b", dispatched=_ago(100),
+              assigned_by=f"bot:{F}/operator")
+    assert task_cmd.cmd_task_recheck(_Args(tmp_path)) == 0
+    assert sent == [] and told == []
+    assert "operator" in capsys.readouterr().out
+
+
+def test_with_no_composed_bots_on_the_plane_a_bot_alias_is_trusted(
+        tmp_path, sent, told, capsys):
+    # No bot_instance at all: the registry scan never ran here, which is
+    # unknown, not "no bots". Today's behaviour, and the log says so.
+    _seed_row(tmp_path, task_id="t-2", dispatched=_ago(100), assigned_by=f"bot:{F}/operator")
+    task_cmd.cmd_task_recheck(_Args(tmp_path))
+    assert [b for b, _, _ in sent] == ["operator"] and told == []
+    captured = capsys.readouterr()
+    assert "no composed bot" in captured.out + captured.err
+
+
+def test_a_human_past_their_deadline_is_asked_on_the_fleet_telegram(
+        tmp_path, sent, told):
+    _compose(tmp_path, "erlich", "ramanujan")
+    asg = _seed_row(tmp_path, task_id="t-3", dispatched=_ago(20), expected_by=_ago(10),
+                    assigned_by="human:chris", title="ship the launch post")
+    assert task_cmd.cmd_task_recheck(_Args(tmp_path)) == 0
+    assert sent == []
+    ((fleet, message),) = told
+    assert fleet == F and "chris" in message and "ship the launch post" in message
+    assert "past" in message and "deadline" in message
+    (ask,) = _asks(tmp_path)
+    assert ask["source_ref"] == f"task-recheck:{asg}"
+    assert ask["recipient_alias"] == "human:chris"
+    assert (ask["msg_id"], "carrier_accepted") in [
+        (x["msg_id"], x["event"]) for x in _transmissions(tmp_path)]
+
+
+def test_a_landed_telegram_ask_debounces_like_a_pane_one(tmp_path, sent, told, capsys):
+    _compose(tmp_path, "erlich", "ramanujan")
+    _seed_row(tmp_path, task_id="t-4", dispatched=_ago(20), expected_by=_ago(10),
+              assigned_by="human:chris")
+    task_cmd.cmd_task_recheck(_Args(tmp_path))
+    assert len(told) == 1
+    assert task_cmd.cmd_task_recheck(_Args(tmp_path)) == 0
+    assert len(told) == 1  # inside the repeat window: not asked again
+
+
+def test_an_unreachable_human_is_named_and_fails_the_unit(tmp_path, sent, monkeypatch, capsys):
+    _compose(tmp_path, "erlich", "ramanujan")
+    _seed_row(tmp_path, task_id="t-5", dispatched=_ago(20), expected_by=_ago(10),
+              assigned_by="human:chris")
+    calls = []
+
+    def refused(paths, fleet, message):
+        calls.append(message)
+        return 3, "no Telegram target: the fleet chat has no sender", None
+
+    monkeypatch.setattr(task_cmd, "send_to_human", refused, raising=False)
+    assert task_cmd.cmd_task_recheck(_Args(tmp_path)) == 1
+    err = capsys.readouterr().err
+    assert "chris" in err and "no Telegram target" in err
+    (ask,) = _asks(tmp_path)
+    assert (ask["msg_id"], "failed") in [(x["msg_id"], x["event"]) for x in _transmissions(tmp_path)]
+    assert task_cmd.cmd_task_recheck(_Args(tmp_path)) == 1
+    assert len(calls) == 2  # a failed ask is not a debounced one
+
+
+def test_a_human_row_with_a_deadline_still_ahead_is_not_due(tmp_path, sent, told):
+    # The human set the promise, so the promise decides: age alone does not.
+    _compose(tmp_path, "erlich", "ramanujan")
+    _seed_row(tmp_path, task_id="t-6", dispatched=_ago(100), expected_by=_ahead(10),
+              assigned_by="human:chris")
+    assert task_cmd.cmd_task_recheck(_Args(tmp_path)) == 0
+    assert sent == [] and told == []
