@@ -38,11 +38,12 @@ PLANE_EMIT_CLASS=hook   # a live Claude Code turn waits on this hook (#1693)
 
 # --- the prefilter: no python for a call that names no heavy tool ------------
 # It over-matches on purpose (`npm` in a description, `next build` in a
-# heredoc): a false positive costs one python start, a false negative is a
-# stacked heavy job.
+# heredoc, `pip`/`uv` as a substring): a false positive costs one python start,
+# a false negative is a stacked heavy job. flock/xargs/sh -c wrappers need no
+# entry of their own: the heavy tool they wrap still names itself in the payload.
 payload="$(cat)"
 case "$payload" in
-*pytest* | *py.test* | *vitest* | *npm* | *yarn* | *npx* | *"next build"* | *playwright* | *chrom*) ;;
+*pytest* | *py.test* | *vitest* | *npm* | *yarn* | *npx* | *"next build"* | *playwright* | *chrom* | *pip* | *uv*) ;;
 *) exit 0 ;;
 esac
 case "$payload" in
