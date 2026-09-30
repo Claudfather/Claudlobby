@@ -110,3 +110,8 @@ The isolated delegated implementation builds on the locally validated assignment
 - `git diff --check` and `/bin/bash -n lib/plane-dispatch-in.sh` passed. The parent verified integrated implementation bytes against the tested worker checkout.
 
 No production checkout, generated fleet, installed service or protected manager was changed. No new migration harness was added. Hosted CI and current-revision external coverage are pending for the resulting aggregate commit. Real Linux/Pi and protected production adoption remain separate gates.
+
+
+## Later evidence
+
+**Measured, recorded elsewhere:** the main-integration validation is in the [main-integration record](2026-09-30-unified-cli-main-integration.md#validation). The failed [run 36722345010](https://github.com/Claudfather/Claudlobby/actions/runs/36722345010) on `cc63d665` and the local correction selections are in the [finalization record](2026-09-30-unified-cli-finalization.md#ci-corrections-and-validation). This includes 116 activation, handoff, state, unit, inventory and host-command tests at tree `a1caca9d` covering the pre-pause handoff preflight; they used adapter fixtures, not native services. Those selections overlap and are not additive. Hosted CI on the next published head is still required.
