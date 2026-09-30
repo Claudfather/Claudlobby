@@ -16,6 +16,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Tests:** one bot, and a whole-fleet `compose_fleet` (the path `claudlobby generate` takes), each read from the logger, which is what the CLI shows. In both, the channel root is replaced by a regular file, so the write fails even when the suite runs as root. Two more simulate a write that stores 40 bytes and fails, on an existing file and on a first write. Five check the mode: a 0600 and a 0640 file keep it through a reconcile, a stale temporary file does not pass its own on, a first write creates the file 0600, and the text never reaches a file more open than the target.
 - **Unchanged:** where the file lands (#1683 step 2). That remains a separate decision.
 
+### Fixed — task re-check routes a person's stale rows to Telegram, and leaves their standing goals alone (#2011)
+
+`claudlobby task recheck` re-checked every open row past a deadline by pushing a message into the assignee's manager's tmux pane. But a row a *person* assigned is minted `bot:<fleet>/operator` by `dispatch-task.sh` (which names its sender from whoever ran it), and a person has no pane — so one such row (`t-1789966048-473b`, which carries no deadline) was re-checked every 6 hours, forever, into a pane nobody has. The assigner's kind is now read from the plane's own registry (`plane-readers.composed_bot_aliases`: a `bot:` alias is a bot only when `generate` composed a `bot_instance` for it), never inferred from "no tmux session". A person's rows go to the fleet's Telegram through `resolve_alert_target`'s (chat, sender) pair with their own delivery evidence — a `carrier_accepted` transmission, which `RECHECKED_SQL` now counts as landed beside the pane route's `pane_submitted` — so the repeat-window debounce holds on the non-tmux route too. The plane records the person's OWN per-row text (the fragment they received on Telegram), not the bot-pane wording, so the recorded ask matches what the human saw. A person's stale row past its deadline is chased once per window and no oftener; a person's row with **no** deadline is a standing goal — disclosed in the run, not re-checked; and a recipient who cannot be reached is named and fails the run, never a silent drop. Verified on this host's plane (read-only snapshot): the motivating row now classifies as a standing goal and is not sent.
+
+### Added — every manager gets `/status` by default, and so does the seed's claudfather (#2010)
+
+The `status` skill is the manager's readout for the human: what moved, and
+what is waiting on their decision. It reached a bot only when that bot's
+`fleet.yaml` listed it. On one host, three of the four managers had it and
+the fourth did not, and a new user's first bot, `claudfather`, did not.
+
+- **Every manager gets it.** `status` is now a role default on `skills`
+  (`defaults.REGISTRY["skills"].roles`), keyed to the `manager` role: every
+  bot a `teams:` or `manages:` names as a manager, including a coordinator
+  whose reports are all managers. The leaf-manager role that brings `checkin`
+  would have missed that coordinator. The skill's own grants come with it
+  (`Bash(claudlobby *)`, `Bash(gh *)`, the Telegram reply tool). One helper,
+  `composer.default_roles`, now derives a bot's roles for both the protocols
+  and the skills overlays.
+- **The seed lists it for claudfather.** claudfather is not a manager, since
+  it manages no bots, so the default never reaches it. The seed declares the
+  skill instead, and `/status` works on a new user's first bot.
+- **Opting out.** `system_defaults.skills: false` switches the default off for
+  a fleet, and `bots.<name>.system_defaults: {skills: false}` for one bot.
+  `skills` is the only per-bot key; any other key there, or a value that is
+  not a mapping, is refused instead of being dropped silently. Both switches
+  turn off the default only: a bot that lists `status` itself keeps it.
+- **What the next `generate` changes on a live host:** a manager that did not
+  list `status` gains the skill and its four grants. That takes effect the
+  moment `generate` writes it (#1310). A manager that already lists it
+  composes it once, as before.
+
 ### Fixed — `/setup` asks `bridge_state` about claudfather's own session (#1536)
 
 **The old guidance could read `up` for a bridge that was going dark.** Step 5 told first-run operators to trust `bridge_state runtime/bots/claudfather` over the log. Without a session pid, that answers whether *a* poller holds the bot's Telegram slot, and during a restart the outgoing session's poller still does (#1530).
