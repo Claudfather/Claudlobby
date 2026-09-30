@@ -82,6 +82,10 @@ GATED = [
         'W env -i HOME="$HOME" PATH="$PWD/.venv/bin:/usr/bin" ./.venv/bin/pytest -q',
     ),
     ("uv run pytest", "W uv run pytest"),
+    ("flock /tmp/x.lock pytest", "W flock /tmp/x.lock pytest"),
+    ("flock /tmp/x.lock -c 'pytest -q'", "flock /tmp/x.lock -c 'W pytest -q'"),
+    ("xargs pytest", "W xargs pytest"),
+    ("sudo -u ci pytest -q", "W sudo -u ci pytest -q"),
     ("nice -n 10 npm ci", "W nice -n 10 npm ci"),
     ("xvfb-run -a npx playwright test", "W xvfb-run -a npx playwright test"),
     # bash -c: rewritten INSIDE the string, so the wrapper never wraps a shell
@@ -92,6 +96,11 @@ GATED = [
     ("npm i -D vitest", "W npm i -D vitest"),
     ("npm --prefix app ci", "W npm --prefix app ci"),
     ("pnpm install --frozen-lockfile", "W pnpm install --frozen-lockfile"),
+    # pip and uv installs fetch or build (#2023)
+    ("pip install pytest", "W pip install pytest"),
+    ("python3 -m pip install -e '.[dev]'", "W python3 -m pip install -e '.[dev]'"),
+    ("uv pip install -e .", "W uv pip install -e ."),
+    ("uv sync", "W uv sync"),
     ("yarn", "W yarn"),
     ("yarn install", "W yarn install"),
     # the scripts that are these jobs in product repos (#1686 plan: `build`
@@ -149,9 +158,15 @@ NOT_GATED = [
     "vitest run shopify",
     "vitest related src/a.ts",
     "npm test -- src/a.test.ts",
-    # informational
+    # informational / lists nothing (#2023)
     "pytest --version",
     "pytest -h",
+    "pytest --collect-only -q",
+    "pytest --co",
+    "pip install --dry-run pytest",
+    "uv sync --dry-run",
+    "flock /tmp/x.lock ls -la",
+    "xargs rm -f",
     "npm --version",
     "npm -v",
     "yarn --version",
@@ -173,7 +188,6 @@ NOT_GATED = [
     "playwright show-report",
     "npx playwright codegen",
     "npx tsc --noEmit",
-    "pip install pytest",
     "pytest-watch",
     "sudo apt install chromium",
     # heavy words that are not the command

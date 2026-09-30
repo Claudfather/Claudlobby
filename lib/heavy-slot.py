@@ -71,7 +71,7 @@ class Unsure(Exception):
 
 # Only a region that could hold a heavy command makes an unparsed construct a
 # problem worth refusing to guess about.
-_HEAVY_WORD = re.compile(r"pytest|py\.test|vitest|npm|pnpm|yarn|npx|next|playwright|chrom")
+_HEAVY_WORD = re.compile(r"pytest|py\.test|vitest|npm|pnpm|yarn|npx|next|playwright|chrom|pip|uv")
 _ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=")
 _REDIR = re.compile(r"(\d+|\{[A-Za-z_][A-Za-z0-9_]*\})?(<<<|<<-|<<|<>|<&|>&|>>|>\||&>>|&>|<|>)")
 _META = set(" \t\n;&|()<>")
@@ -520,6 +520,9 @@ _PNPM_VALUE = {"--filter", "-F", "-C", "--dir", "--workspace-dir"}
 _YARN_INSTALL = {"install", "add", "upgrade", "up"}
 _YARN_NOT_A_JOB = {"why", "info", "list", "ls", "config", "cache", "remove", "dev", "start",
                    "serve", "lint", "outdated", "audit", "init"}
+_PIP_VALUE = {"--log", "--proxy", "--timeout", "--retries", "--cache-dir", "--python"}
+_UV_VALUE = {"--project", "--directory", "--python", "-p", "--config-file",
+             "--cache-dir", "--color", "--index", "--default-index", "--index-url"}
 
 
 class Tok:
@@ -584,6 +587,19 @@ def _strip_runners(args: List[Tok]) -> List[Tok]:
             i = _skip_opts(args, i + 2, {"--with", "--python", "-p", "--project",
                                          "--directory", "--extra", "--group", "--env-file",
                                          "--index"})
+        elif b == "flock":
+            # flock [opts] <lockfile> <cmd>...: the command runs under the lock. Skip flock,
+            # its options and the one lockfile positional. The `-c STRING` form runs the string
+            # through a shell and is handled in _insertions (a runner-strip cannot re-parse it).
+            j = _skip_opts(args, i + 1, {"-w", "--timeout", "-E", "--conflict-exit-code"})
+            if j < len(args) and args[j].value and not args[j].value.startswith("-"):
+                j += 1  # the lockfile (or an fd number)
+            i = j
+        elif b == "xargs":
+            i = _skip_opts(args, i + 1, {"-a", "--arg-file", "-E", "-d", "--delimiter",
+                                         "-I", "-i", "--replace", "-L", "-l", "-n",
+                                         "--max-args", "-P", "--max-procs", "-s",
+                                         "--max-chars"})
         else:
             break
     return args[i:]
@@ -609,10 +625,11 @@ def _positionals(args: List[Tok], value_opts: set) -> List[Optional[str]]:
 
 
 def _pytest(args: List[Tok], lenient: bool) -> Optional[str]:
+    if any(a.value in ("--version", "-V", "--help", "-h", "--collect-only", "--co")
+           for a in args):
+        return None  # lists or reports; runs no tests
     if lenient:
         return "pytest"
-    if any(a.value in ("--version", "-V", "--help", "-h") for a in args):
-        return None
     pos = _positionals(args, _PYTEST_VALUE)
     if pos and all(p is not None and (p.endswith(".py") or "::" in p) for p in pos):
         return None  # a targeted run names its files
@@ -750,6 +767,8 @@ def _python(args: List[Tok], lenient: bool) -> Optional[str]:
             module, rest = args[i + 1].value, args[i + 2:]
             if module in ("pytest", "py.test"):
                 return _pytest(rest, lenient)
+            if module == "pip":
+                return _pip(rest, lenient)
             if module == "playwright":
                 return _playwright(rest, lenient)
             return None
@@ -765,6 +784,36 @@ def _playwright(args: List[Tok], lenient: bool) -> Optional[str]:
     if pos and pos[0] in ("test", "install", "install-deps"):
         return "playwright"
     return "playwright" if lenient and pos else None
+
+
+def _pip(args: List[Tok], lenient: bool) -> Optional[str]:
+    """pip / pip3: heavy when it installs (fetch or build), not --dry-run/--help."""
+    i = _skip_opts(args, 0, _PIP_VALUE)
+    if i >= len(args) or args[i].value != "install":
+        return None
+    rest = args[i + 1:]
+    if not lenient and any(a.value in ("--dry-run", "--help", "-h") for a in rest):
+        return None
+    return "pip install"
+
+
+def _uv(args: List[Tok], lenient: bool) -> Optional[str]:
+    """uv sync / uv pip install (uv run is a runner, stripped upstream)."""
+    i = _skip_opts(args, 0, _UV_VALUE)
+    if i >= len(args) or args[i].value is None:
+        return None
+    sub, rest = args[i].value, args[i + 1:]
+
+    def light(a: List[Tok]) -> bool:
+        return not lenient and any(t.value in ("--dry-run", "--help", "-h") for t in a)
+
+    if sub == "sync":
+        return None if light(rest) else "uv sync"
+    if sub == "pip":
+        j = _skip_opts(rest, 0, set())
+        if j < len(rest) and rest[j].value == "install":
+            return None if light(rest[j + 1:]) else "uv pip install"
+    return None
 
 
 def _classify(args: List[Tok], lenient: bool, allow_pm: bool = True) -> Optional[str]:
@@ -788,6 +837,10 @@ def _classify(args: List[Tok], lenient: bool, allow_pm: bool = True) -> Optional
         return "chromium"
     if _PYTHON.match(b):
         return _python(rest, lenient)
+    if b in ("pip", "pip3"):
+        return _pip(rest, lenient)
+    if b == "uv":
+        return _uv(rest, lenient)
     if b == "npx":
         return _npx(rest, lenient)
     if not allow_pm:
@@ -832,6 +885,21 @@ def _shell_string(words: List[Word]) -> Optional[Word]:
                 j += 1
             return words[j] if j < len(words) else None
         i += 1
+    return None
+
+
+def _flock_c_string(words: List[Word]) -> Optional[Word]:
+    """For `flock [opts] <lockfile> -c STRING`: the word holding STRING (the `-c`
+    form runs it through a shell), or None for the command form."""
+    toks = [Tok(w.value, w.raw) for w in words]
+    i = _skip_opts(toks, 1, {"-w", "--timeout", "-E", "--conflict-exit-code"})
+    if i < len(toks) and toks[i].value and not toks[i].value.startswith("-"):
+        i += 1  # the lockfile
+    if i < len(toks) and toks[i].value in ("-c", "--command"):
+        j = i + 1
+        while j < len(toks) and (toks[j].value or "").startswith("-"):
+            j += 1
+        return words[j] if j < len(words) else None
     return None
 
 
@@ -883,6 +951,18 @@ def _insertions(command: str, base: int = 0,
             elif _HEAVY_WORD.search(raw):
                 raise Unsure("a shell -c string the matcher cannot map")
             continue
+        if first.value is not None and first.value.rsplit("/", 1)[-1] == "flock":
+            fstr = _flock_c_string(words)
+            if fstr is not None:  # the -c form; the command form falls through to _classify
+                raw, inner = fstr.raw, fstr.raw[1:-1]
+                maps = len(raw) >= 2 and (
+                    (raw[0] == raw[-1] == "'" and "'" not in inner)
+                    or (raw[0] == raw[-1] == '"' and not any(ch in inner for ch in '\\$`"')))
+                if maps:
+                    out += _insertions(inner, base + fstr.start + 1, ctx + (raw[0],))
+                elif _HEAVY_WORD.search(raw):
+                    raise Unsure("a flock -c string the matcher cannot map")
+                continue
         if _classify([Tok(w.value, w.raw) for w in words], lenient=False):
             out.append((base + first.start, ctx))
     return out

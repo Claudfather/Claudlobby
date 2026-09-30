@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the heavy-job slot classifier now matches pip/uv installs and sees through `flock`/`xargs`; a `pytest --collect-only` no longer takes the slot (#2023)
+
+Three gaps from the first cross-fleet canary of the heavy-job slot (#1686/#2015), now that the slot is armed on opted-in bots across every fleet:
+
+- **`pytest --collect-only` (and `--co`, `--version`, `--help`) no longer takes a slot.** It runs no tests, so gating it made a collect-only run wait behind a real suite or block one. Now not heavy.
+- **pip and uv installs are gated.** `pip install`, `python -m pip install`, `uv pip install` and `uv sync` build or fetch — on a Pi as heavy as an `npm install`, and `python -m pip install -e '.[dev]'` is the documented dev setup. `--dry-run`/`--help`/`--version` stay light, and `pip`'s other subcommands (`list`, `show`, `uninstall`) are not gated.
+- **`flock`, `xargs` (and the already-handled `sudo -u`, `sh -c`) no longer hide a heavy command.** `flock <lockfile> <suite>` — the habit the manual one-at-a-time rule taught — passed the suite through unslotted. `flock` and `xargs` are now unwrapped like `env`/`timeout`/`nice`: the slot wraps the whole command, and the wrapper's own re-check accepts it. `flock <lockfile> -c '<suite>'` runs the string through a shell, so the wrapper goes inside the string, as for `bash -c`.
+
+**What this changes for an opted-in bot** (`heavy_slot: true`; the classifier is read on demand, so this is live at the next root pull with no restart): a `pip`/`uv` install, or a suite wrapped in `flock`/`xargs`, now takes the host's heavy-job slot and serializes with other heavy jobs instead of stacking; a `pytest --collect-only` no longer does. The classifier's false-positive discipline is unchanged — a run that names its test files, a dry-run, or a heavy word that is not the command is left alone — and the zero-fork guard prefilter gains `pip`/`uv` (`flock`/`xargs`/`sh -c` need no entry: the heavy tool they wrap still names itself in the payload). Bounds: a `flock` on a contended lock blocks while holding the slot, the same as any wrapped command that blocks; the pip/uv weight is kev's estimate, not measured here.
+
+
 ### Fixed — a failed access.json write during `generate` is a named warning, not a traceback (#1683)
 
 `compose_bot` writes each Telegram bot's `access.json` into the host-global `~/.claude/channels/telegram-<handle>/`, outside the tree being composed. The invalid-handle branch beside it already warned and skipped, but this branch had no error handling. So a failed write aborted `generate` part-way with a raw traceback, and the fleet's later bots never composed. Causes include an unwritable or non-directory channel root, or a full disk.
