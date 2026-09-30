@@ -14,6 +14,7 @@ import pytest
 
 from claudlobby.command_result import CommandFailure
 from claudlobby.commands import move_bot
+from claudlobby.config import load_fleet_snapshot
 
 
 def _move(tmp_path: Path, *, channel: bool = False) -> move_bot.Move:
@@ -216,10 +217,12 @@ def test_access_replaces_only_owned_source_group(tmp_path, monkeypatch):
 def test_apply_stages_after_copy_and_reports_failed_activation(tmp_path, monkeypatch):
     from claudlobby import activation, activation_state, bot_operations, config_plan, config_staging, releases
 
-    manifest = str(tmp_path / "source" / "fleet.yaml")
-    move = replace(_move(tmp_path), selected_plan_id="p-selected", move_inputs=(manifest,))
+    manifest, target_manifest = str(tmp_path / "source/fleet.yaml"), str(tmp_path / "target/fleet.yaml")
+    move = replace(_move(tmp_path), selected_plan_id="p-selected",
+                   move_inputs=((manifest, "reviewed"), (target_manifest, "reviewed")))
     monkeypatch.setattr(config_plan, "read_plan", lambda _root, plan_id: (
-        SimpleNamespace(fleets=("source", "target"), inputs={manifest: {"state": "before"}})
+        SimpleNamespace(fleets=("source", "target"), inputs={manifest: {"state": "before"},
+                                                             target_manifest: {"state": "before"}})
         if plan_id == "p-selected" else pytest.fail("unexpected plan read")))
     (move.source_dir / ".env").write_text("TOKEN=private\n")
     events = []
@@ -232,7 +235,8 @@ def test_apply_stages_after_copy_and_reports_failed_activation(tmp_path, monkeyp
         assert (move.target_dir / ".env").read_text() == "TOKEN=private\n"
         events.append("stage")
         return SimpleNamespace(plan_id="p-staged", fleets=("source", "target"),
-                               inputs={manifest: {"state": "after"}})
+                               inputs={manifest: {"state": "reviewed"},
+                                       target_manifest: {"state": "reviewed"}})
 
     monkeypatch.setattr(config_staging, "stage_configuration", stage)
     monkeypatch.setattr(move_bot, "declared_paths", lambda *_, **__: [object()])
@@ -250,20 +254,37 @@ def test_apply_stages_after_copy_and_reports_failed_activation(tmp_path, monkeyp
 def test_staged_move_plan_refuses_unrelated_authoring_before_activation(tmp_path, monkeypatch):
     from claudlobby import config_plan
 
-    manifest, other = str(tmp_path / "source/fleet.yaml"), str(tmp_path / "other/fleet.yaml")
-    move = replace(_move(tmp_path), selected_plan_id="p-selected", move_inputs=(manifest,))
-    selected = SimpleNamespace(fleets=("other", "source", "target"),
-                               inputs={manifest: {"state": 1}, other: {"state": 1}})
+    source_manifest, target_manifest = str(tmp_path / "source/fleet.yaml"), str(tmp_path / "target/fleet.yaml")
+    other, access = str(tmp_path / "other/fleet.yaml"), str(tmp_path / "home/access.json")
+    source_env, target_env = str(move_dirs(tmp_path)[0] / ".env"), str(move_dirs(tmp_path)[1] / ".env")
+    move = replace(_move(tmp_path), selected_plan_id="p-selected", access_input=access,
+                   move_inputs=((source_manifest, 2), (target_manifest, 2)))
+    selected = SimpleNamespace(fleets=("other", "source", "target"), inputs={
+        source_manifest: {"state": 1}, target_manifest: {"state": 1}, other: {"state": 1},
+        access: {"state": 1}, source_env: {"state": 1}})
     monkeypatch.setattr(config_plan, "read_plan", lambda *_: selected)
-    own = SimpleNamespace(fleets=selected.fleets, inputs={manifest: {"state": 2}, other: {"state": 1},
-                                                          str(move.target_dir / ".env"): {"state": 3}})
+    # Exactly the move: reviewed manifests, its access rewrite, the source bot's
+    # tier gone and the retained target tier new.
+    own = SimpleNamespace(fleets=selected.fleets, inputs={
+        source_manifest: {"state": 2}, target_manifest: {"state": 2}, other: {"state": 1},
+        access: {"state": 2}, target_env: {"state": 3}})
     move_bot.staged_scope(move, own)
+    for changed, reason in (({other: {"state": 2}}, "unrelated authoring"),
+                            ({str(tmp_path / "overlay/new-skill"): {"state": 1}}, "unrelated authoring"),
+                            ({source_manifest: {"state": 3}}, "after the move was reviewed")):
+        with pytest.raises(RuntimeError, match=reason):
+            move_bot.staged_scope(move, replace_inputs(own, changed))
     with pytest.raises(RuntimeError, match="unrelated authoring"):
-        move_bot.staged_scope(move, replace_inputs(own, {other: {"state": 2}}))
+        move_bot.staged_scope(move, SimpleNamespace(fleets=own.fleets, inputs={
+            key: value for key, value in own.inputs.items() if key != other}))
     with pytest.raises(RuntimeError, match="fleet set"):
         move_bot.staged_scope(move, SimpleNamespace(fleets=("source", "target"), inputs={}))
     with pytest.raises(RuntimeError, match="fleet set"):
         move_bot.staged_scope(replace(move, move_inputs=()), own)
+
+
+def move_dirs(tmp_path):
+    return (tmp_path / "source/runtime/bots/worker", tmp_path / "target/runtime/bots/worker")
 
 
 def replace_inputs(plan, changed):
@@ -294,8 +315,11 @@ def _preflight_fixture(tmp_path, monkeypatch):
     target_dir = tmp_path / "external/target"
     source_dir.mkdir(parents=True)
     target_dir.mkdir(parents=True)
-    (source_dir / "fleet.yaml").write_text("name: source\n")
-    (target_dir / "fleet.yaml").write_text("name: target\n")
+    # Authored manifests on disk: exactly this move (worker leaves source and
+    # joins target). The frozen side parses the pre-move bytes with the same
+    # load_fleet_snapshot owner that context_from_plan uses.
+    (source_dir / "fleet.yaml").write_text(_fleet_yaml("source", "lead", LEAD, OTHER))
+    (target_dir / "fleet.yaml").write_text(_fleet_yaml("target", "boss", BOSS, WORKER))
     package = SimpleNamespace(native=tmp_path / "sealed-native", artifact_id="artifact")
     source_paths = Paths(root, package=package, fleet_dir=source_dir)
     target_paths = Paths(root, package=package, fleet_dir=target_dir)
@@ -303,10 +327,10 @@ def _preflight_fixture(tmp_path, monkeypatch):
     bot_dir.mkdir(parents=True)
     (bot_dir / "bot.conf").write_text("BOT_ID=worker\n")
     bot = SimpleNamespace(bot_id="worker")
-    source = SimpleNamespace(paths=source_paths, fleet=SimpleNamespace(name="source", bots={"worker": bot}))
-    authored_source = SimpleNamespace(paths=source_paths, fleet=SimpleNamespace(name="source", manager="lead", bots={}))
-    target = SimpleNamespace(paths=target_paths, fleet=SimpleNamespace(name="target", bots={"worker": bot}))
-    frozen_target = SimpleNamespace(paths=target_paths, fleet=SimpleNamespace(name="target", bots={}))
+    source = SimpleNamespace(paths=source_paths, fleet=load_fleet_snapshot(
+        source_paths.fleet_yaml, _fleet_yaml("source", "lead", LEAD, WORKER, OTHER).encode(), None)[0])
+    frozen_target = SimpleNamespace(paths=target_paths, fleet=load_fleet_snapshot(
+        target_paths.fleet_yaml, _fleet_yaml("target", "boss", BOSS).encode(), None)[0])
     effects = {"fleet_manifests": {"source": str(source_paths.fleet_yaml), "target": str(target_paths.fleet_yaml)},
                "fleet_sources": {"source": {"fleet": {"path": str(source_paths.fleet_yaml), "sha256": "source-hash"}},
                                  "target": {"fleet": {"path": str(target_paths.fleet_yaml), "sha256": "target-hash"}}}}
@@ -328,7 +352,11 @@ def _preflight_fixture(tmp_path, monkeypatch):
     monkeypatch.setattr(releases, "read_release", lambda *_: release)
     monkeypatch.setattr(active_config, "context_from_plan", lambda _plan, name, **_kwargs: (
         source if name == "source" else frozen_target))
-    monkeypatch.setattr(context, "load_context", lambda paths: authored_source if paths.fleet_yaml == source_paths.fleet_yaml else target)
+    def authored_context(paths):
+        fleet, defaults = load_fleet_snapshot(paths.fleet_yaml, paths.fleet_yaml.read_bytes(), None)
+        return SimpleNamespace(paths=paths, fleet=fleet, defaults=defaults)
+
+    monkeypatch.setattr(context, "load_context", authored_context)
     monkeypatch.setattr(_helpers, "_validation_gate", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(host, "_operator_shell", lambda *_: None)
     monkeypatch.setattr(supervision_inventory, "Adapter", lambda *_: SimpleNamespace(read=lambda *_: ""))
@@ -337,19 +365,30 @@ def _preflight_fixture(tmp_path, monkeypatch):
                                     "target": "worker.service"})
     args = Namespace(root=str(root), bot="worker", to="target", from_fleet="source",
                      apply=False, cleanup_source=False, force=False)
-    return args, host_input, target
+    return args, host_input, (source_dir / "fleet.yaml", target_dir / "fleet.yaml")
+
+
+LEAD, BOSS = "    lead: {expertise: [lead]}\n", "    boss: {expertise: [lead]}\n"
+WORKER, OTHER = "    worker: {expertise: [build]}\n", "    other: {expertise: [review]}\n"
+
+
+def _fleet_yaml(name, manager, *bots, extra=""):
+    return (f"fleet:\n  name: {name}\n  manager: {manager}\n  system_defaults: false\n{extra}"
+            "  bots:\n" + "".join(bots))
 
 
 def test_preview_preflight_reads_frozen_manifest_paths_not_source_records(tmp_path, monkeypatch):
-    args, _, _ = _preflight_fixture(tmp_path, monkeypatch)
+    from claudlobby.config_plan import path_state
+
+    args, _, manifests = _preflight_fixture(tmp_path, monkeypatch)
     preview = move_bot.dispatch(args)
     assert preview.data["state"] == "preview"
     assert preview.data["target_fleet"] == "target"
     assert preview.data["changed"] is False
     move = move_bot.preflight(args)
-    assert set(move.move_inputs) == {str(tmp_path / "host/local/source/fleet.yaml"),
-                                     str(tmp_path / "external/target/fleet.yaml")}
+    assert dict(move.move_inputs) == {str(path): path_state(path, source=True) for path in manifests}
     assert move.selected_plan_id == "plan"
+    assert move.access_input == str(Path.home() / ".claude/channels/telegram-worker/access.json")
 
 
 def test_move_refuses_pending_unrelated_authoring_before_any_effect(tmp_path, monkeypatch):
@@ -360,8 +399,19 @@ def test_move_refuses_pending_unrelated_authoring_before_any_effect(tmp_path, mo
     assert "host activate" in refused.value.error.hint
 
 
-def test_move_refuses_other_roster_edits_in_its_own_manifests(tmp_path, monkeypatch):
-    args, _, target = _preflight_fixture(tmp_path, monkeypatch)
-    target.fleet.bots["newcomer"] = SimpleNamespace(bot_id="newcomer")
-    with pytest.raises(CommandFailure, match="rosters differ"):
+@pytest.mark.parametrize(("side", "text", "changed"), [
+    # Another bot's declaration edited in the source manifest.
+    ("source", _fleet_yaml("source", "lead", LEAD, "    other: {expertise: [ship]}\n"), "source fleet.yaml has pending bots"),
+    # Another bot added to the target manifest alongside the move.
+    ("target", _fleet_yaml("target", "boss", BOSS, WORKER, OTHER), "target fleet.yaml has pending bots"),
+    # A fleet-level field edited in the target manifest.
+    ("target", _fleet_yaml("target", "boss", BOSS, WORKER, extra="  mission: pending edit\n"),
+     "target fleet.yaml has pending mission"),
+])
+def test_move_refuses_unrelated_semantic_edits_in_its_own_manifests(tmp_path, monkeypatch,
+                                                                    side, text, changed):
+    args, _, manifests = _preflight_fixture(tmp_path, monkeypatch)
+    manifests[0 if side == "source" else 1].write_text(text)
+    with pytest.raises(CommandFailure, match=changed) as refused:
         move_bot.dispatch(args)
+    assert "host activate" in refused.value.error.hint

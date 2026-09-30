@@ -29,6 +29,7 @@ from claudlobby.supervision_inventory import FileSnapshot
 from tests.test_releases import installed
 from tests.test_migration_plan import _database, _event_request, _pending
 from tests.test_task_audit import _insert
+from tests.test_activation_units import _prepare as _prepare_pause, enrollment  # noqa: F401
 
 
 @pytest.fixture
@@ -701,3 +702,118 @@ def test_candidate_caller_refuses_before_sql_config_or_activation_prepare(cold, 
     assert not db_file(root).exists() and not (root / "runtime/bots").exists()
     assert not list((root / "state/activations").glob("*/activation.json"))
     assert host.starts == [] and list(host.directory.iterdir()) == []
+
+
+def test_quiesced_handoff_refusal_repairs_forward_with_same_activation_id(enrollment, monkeypatch):
+    """Post-pause, pre-migration handoff refusal: repair the input, resume the same ID.
+
+    Real activation, unit-pause and canonical-handoff journals; the native
+    boundary and migration manifest are stubs. Nothing is replayed natively.
+    """
+    from dataclasses import asdict
+    from claudlobby import activation_units as units
+    from claudlobby.plane.migrations import migrate
+    from claudlobby.task_audit import audit_tasks
+
+    inventory, phases, plan, adapter, _, _ = enrollment
+    root = inventory.data_root
+    directory = Path(inventory.catalog.split("directory\t", 1)[1].splitlines()[0])
+    release = state.read_release(root, plan.release_id)
+    package = SimpleNamespace(native=release.native_path, artifact_id=release.inputs.artifact_id)
+    adapter.package = package
+    monkeypatch.setattr(activation, "get_resources", lambda: package)
+    monkeypatch.setattr(activation.RuntimeIdentity, "current", classmethod(lambda cls:
+        activation.RuntimeIdentity(release.cli_path, release.native_path, release.inputs.artifact_id)))
+    monkeypatch.setattr(activation.sys, "executable", str(release.directory / release.paths.interpreter))
+
+    # Seeded Plane: the old member bot holds one current assignment.
+    host, fleet, member = "host_" + "1" * 32, "fleet_" + "2" * 32, "actor_" + "4" * 32
+    task, assignment = "wi_" + "7" * 32, "asg_" + "9" * 32
+    db_file(root).parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(db_file(root), isolation_level=None)
+    try:
+        migrate(connection)
+        for uid, kind, alias, parent in ((host, "host", "host", None), (fleet, "fleet", "alpha", host),
+                                         (member, "actor", "bot:alpha/member", fleet)):
+            connection.execute("INSERT INTO identity_registry (uid, kind, alias, parent_uid, provisional,"
+                               " first_seen, last_seen) VALUES (?, ?, ?, ?, 0, 't', 't')",
+                               (uid, kind, alias, parent))
+        _insert(connection, "work_items", work_item_id=task, fleet_uid=fleet,
+                title="Held work", created_by_uid=member)
+        _insert(connection, "assignments", assignment_id=assignment, work_item_id=task,
+                fleet_uid=fleet, assignee_uid=member, assigned_by_uid=member)
+        connection.row_factory = sqlite3.Row
+        task_audit = asdict(audit_tasks(connection))
+    finally:
+        connection.close()
+    identity = root / "state/host-uid"
+    identity.write_text(host + "\n")
+    identity.chmod(0o600)
+
+    # The old bot's session appended notes after a previous canonical section.
+    member_dir = next(unit.declaration.working_directory for unit in inventory.units
+                      if unit.declaration.scope == "bot")
+    handoff = member_dir / ".claude/session.md"
+    handoff.parent.mkdir(parents=True, exist_ok=True)
+    notes = b"---\nlast_updated: 2020-01-01T00:00:00Z\n---\n\n## Next Steps\n- held note\n"
+    malformed = notes + b"\n\n" + _HANDOFF_BEGIN + b"\n```json\n{}\n```\n" + _HANDOFF_END + b"\n\n## Later\n"
+    handoff.write_bytes(malformed)
+
+    with state.locked_activation(root) as store:
+        store.prepare("previous", plan, recovery_release_id=release.release_id,
+                      enrollment_digest=inventory.digest)
+        for step in state.STEPS:
+            store.begin("previous", step)
+            if step == "selection_switched":
+                store.select("previous")
+            else:
+                store.complete("previous", step, evidence_digest="a" * 64)
+        _prepare_pause(store, inventory, phases, plan, adapter, install_directory=directory)
+        for phase, step in (("producers", "producers_paused"), (None, "sessions_handed_off"),
+                            ("bots", "sessions_quiesced"), ("ingest", "ingest_quiesced")):
+            store.begin("cutover", step)
+            evidence = units.pause_phase(store, "cutover", phase, adapter=adapter).digest if phase else "a" * 64
+            store.complete("cutover", step, evidence_digest=evidence)
+
+    # Stub native/quiescence observations and the candidate roster; the
+    # migration manifest is a stub bound to the seeded audit.
+    monkeypatch.setattr(activation, "_legacy_bot_socket", lambda *_args, **_kwargs: (root / "absent.sock", False))
+    monkeypatch.setattr(activation, "_legacy_quiet", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(activation, "_probe", lambda _root: None)
+    monkeypatch.setattr(activation, "planned_units", lambda _plan, _manager: ())
+    contexts = (SimpleNamespace(fleet=SimpleNamespace(name="alpha", manager="member", bots=("member",))),)
+    monkeypatch.setattr(activation, "_roster", lambda *_args: ({}, contexts))
+    monkeypatch.setattr(activation, "_source_handoff_roster",
+                        lambda *_args: {"alpha": ("member", ("member",))})
+    manifest = SimpleNamespace(blockers=(), task_audit=task_audit, manifest_id="m-" + "c" * 64)
+    monkeypatch.setattr(activation, "build_migration_manifest", lambda *_args, **_kwargs: manifest)
+
+    class MigrationReached(Exception):
+        pass
+
+    def migration(_store, identifier, applied):
+        assert identifier == "cutover" and applied is manifest
+        raise MigrationReached
+
+    monkeypatch.setattr(activation, "apply_migration", migration)
+    calls = list(adapter.calls)
+
+    with pytest.raises(state.ActivationError, match="existing canonical handoff section is malformed"):
+        activation.resume_activation(root, "cutover", plan.plan_id, directory, adapter=adapter)
+    refused = state.read_activation(root, "cutover")
+    assert refused.status == "activating" and refused.body["pending"] == "queues_classified"
+    assert activation.resumable_running_step(refused) == "queues_classified"
+    assert handoff.read_bytes() == malformed
+
+    # Operator repair: keep the session notes, drop only the stale section.
+    handoff.write_bytes(notes)
+    with pytest.raises(MigrationReached):
+        activation.resume_activation(root, "cutover", plan.plan_id, directory, adapter=adapter)
+    resumed = state.read_activation(root, "cutover")
+    assert "queues_classified" in resumed.body["completed"]
+    assert resumed.body["pending"] == "backup_saved"
+    assert state.read_selection(root)["activation_id"] == "previous"
+    repaired = handoff.read_bytes()
+    assert notes in repaired and repaired.rstrip().endswith(_HANDOFF_END)
+    assert task.encode() in repaired and assignment.encode() in repaired
+    assert adapter.calls == calls  # no native pause, handoff or start replay

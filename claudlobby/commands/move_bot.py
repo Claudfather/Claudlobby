@@ -31,22 +31,63 @@ class Move:
     installed: str = ""
     native_target: str = ""
     selected_plan_id: str = ""
-    move_inputs: tuple[str, ...] = ()
+    # (path, reviewed path_state) for the source and target fleet.yaml.
+    move_inputs: tuple[tuple[str, dict], ...] = ()
+    # The moved bot's Telegram access file, which the move itself rewrites.
+    access_input: str = ""
 
 
 _PENDING_REMEDY = ("review pending authoring with config plan and config diff, activate it "
                    "with host activate, then retry the move")
 
 
-def selected_inputs_fresh(plan, source, authored_source, target, candidates, bot, package):
+def _manifest_change(frozen, authored, bot, *, source):
+    """Name the first semantic difference that is not this bot's move, else None.
+
+    Both sides are FleetConfig values from the same load_fleet_snapshot parser.
+    Only the moving bot's roster entry, its team membership and, when it was
+    the source manager, an explicit replacement manager may differ.
+    """
+    from dataclasses import fields
+
+    if source and bot in authored.bots or not source and (bot in frozen.bots or bot not in authored.bots):
+        return "bots"
+    manager = {}
+    if source and frozen.manager == bot:
+        if authored.manager not in frozen.bots or authored.manager == bot:
+            return "manager"
+        manager = {bot: authored.manager}
+    for item in fields(frozen):
+        name = item.name
+        before, after = getattr(frozen, name), getattr(authored, name)
+        if name == "bots":
+            before = {key: value for key, value in before.items() if key != bot}
+            after = {key: value for key, value in after.items() if key != bot}
+        elif name == "manager":
+            before = manager.get(before, before)
+        elif name == "teams":
+            before = {key: (manager.get(team.manager, team.manager),
+                            [worker for worker in team.workers if worker != bot])
+                      for key, team in before.items()}
+            after = {key: (team.manager, [worker for worker in team.workers if worker != bot])
+                     for key, team in after.items()}
+        elif name == "projects" and frozen.projects_derived and authored.projects_derived:
+            continue  # derived from the bots compared above
+        if before != after:
+            return name
+    return None
+
+
+def selected_inputs_fresh(plan, source, target, candidates, bot, package):
     """Refuse authoring the move's host-wide activation would ship unreviewed.
 
-    The selected plan's recorded inputs are the fingerprints. Only the source
-    and target fleet.yaml may differ, and their rosters only by this bot. That
-    owner is file-granular: other edits inside those two files are not told
-    apart here. Returns the two manifest inputs the move may change.
+    The selected plan's recorded inputs are the fingerprints. The source and
+    target fleet.yaml may change only semantically by this move; their exact
+    reviewed states are returned so staging can be bound to them.
     """
     from ..active_config import context_from_plan
+    from ..composer import telegram_channel_rel, telegram_handle
+    from ..config import load_fleet_snapshot
     from ..config_plan import path_state
 
     if target.fleet.name not in plan.fleets:
@@ -55,34 +96,66 @@ def selected_inputs_fresh(plan, source, authored_source, target, candidates, bot
     if {context.fleet.name for context in candidates} != set(plan.fleets):
         raise CommandFailure("conflict", "authored fleets differ from the selected configuration",
                              hint=_PENDING_REMEDY)
-    frozen_target = context_from_plan(plan, target.fleet.name, package=package).fleet
-    if (set(authored_source.bots) != set(source.fleet.bots) - {bot}
-            or set(target.fleet.bots) != set(frozen_target.bots) | {bot}):
-        raise CommandFailure("conflict", "authored rosters differ from the selected configuration "
-                             "by more than this bot", hint=_PENDING_REMEDY)
     manifests = plan.effects.get("fleet_manifests", {})
     if not all(isinstance(manifests.get(name), str) for name in (source.fleet.name, target.fleet.name)):
         raise CommandFailure("conflict", "selected configuration lacks the source or target manifest")
-    allowed = tuple(os.path.abspath(manifests[name])
-                    for name in (source.fleet.name, target.fleet.name))
+    reviewed = []
+    for name, is_source in ((source.fleet.name, True), (target.fleet.name, False)):
+        manifest = Path(os.path.abspath(manifests[name]))
+        state = path_state(manifest, source=True)
+        content = manifest.read_bytes()
+        projects = manifest.parent / "projects.yaml"
+        project_content = projects.read_bytes() if projects.is_file() else None
+        if path_state(manifest, source=True) != state:
+            raise CommandFailure("conflict", f"fleet manifest changed while reviewing the move: {manifest}")
+        authored, _ = load_fleet_snapshot(manifest, content, project_content)
+        frozen = context_from_plan(plan, name, package=package).fleet
+        changed = _manifest_change(frozen, authored, bot, source=is_source)
+        if changed is not None:
+            raise CommandFailure("conflict", f"{name} fleet.yaml has pending {changed} changes beyond this move",
+                                 hint=_PENDING_REMEDY)
+        reviewed.append((str(manifest), state))
+    handle = telegram_handle(source.fleet.bots[bot])
+    access = (os.path.abspath(Path.home() / telegram_channel_rel(handle) / "access.json")
+              if handle is not None else "")
+    exempt = {path for path, _ in reviewed} | {access}
     for path, recorded in plan.inputs.items():
-        if path in allowed:
+        if path in exempt:
             continue
         if path_state(Path(path), source=recorded["follow_links"]) != recorded["state"]:
             raise CommandFailure("conflict", f"authored input changed since the selected configuration: {path}",
                                  hint=_PENDING_REMEDY)
-    return allowed
+    return tuple(reviewed), access
 
 
 def staged_scope(move, staged):
-    """The staged plan may differ from the selected one only in the move's inputs."""
+    """The staged plan may differ from the selected one only by this move.
+
+    The two manifests must be exactly the reviewed bytes; the moved bot's
+    access file may change; inputs may appear only under the target bot
+    directory (its retained .env tier or relative account) and disappear only
+    under the source bot directory. Anything else refuses before activation.
+    """
     from ..config_plan import read_plan
 
     selected = read_plan(move.root, move.selected_plan_id)
-    if not move.move_inputs or tuple(staged.fleets) != tuple(selected.fleets):
+    reviewed = dict(move.move_inputs)
+    if len(reviewed) != 2 or tuple(staged.fleets) != tuple(selected.fleets):
         raise RuntimeError("staged move plan changes the active fleet set")
-    for path in staged.inputs.keys() & selected.inputs.keys():
-        if path not in move.move_inputs and staged.inputs[path] != selected.inputs[path]:
+    for path in staged.inputs.keys() | selected.inputs.keys():
+        before, after = selected.inputs.get(path), staged.inputs.get(path)
+        if path in reviewed:
+            if after is None or after["state"] != reviewed[path]:
+                raise RuntimeError(f"fleet manifest changed after the move was reviewed: {path}")
+        elif before == after:
+            continue
+        elif path == move.access_input and before is not None and after is not None:
+            continue
+        elif before is None and Path(path).is_relative_to(move.target_dir):
+            continue
+        elif after is None and Path(path).is_relative_to(move.source_dir):
+            continue
+        else:
             raise RuntimeError(f"staged move plan includes unrelated authoring: {path}")
 
 
@@ -187,8 +260,8 @@ def preflight(args):
     for context in candidates:
         if not _validation_gate(context.fleet, context.paths, context="retry bot move"):
             raise CommandFailure("conflict", "authored fleet validation failed")
-    move_inputs = selected_inputs_fresh(plan, source, authored_source, target, candidates,
-                                        args.bot, package)
+    move_inputs, access_input = selected_inputs_fresh(plan, source, target, candidates,
+                                                      args.bot, package)
 
     source_dir = source.paths.bot_runtime(args.bot)
     target_dir = target.paths.bot_runtime(args.bot)
@@ -206,7 +279,8 @@ def preflight(args):
     entry = selected_bot_entry(root, source.fleet.name, args.bot, manager)
     move = Move(root, source, target, source_dir, target_dir,
                 release.release_id, Path(entry["installed"]).parent, external,
-                entry["installed"], entry["target"], selected["plan_id"], move_inputs)
+                entry["installed"], entry["target"], selected["plan_id"], move_inputs,
+                access_input)
     if getattr(args, "apply", False):
         update_access(move, args.bot, dry_run=True)
     return move
