@@ -531,7 +531,10 @@ parse_env_file() {
     local file="${1:?Usage: parse_env_file /path/to/.env}"
     [ -f "$file" ] || return 0
     local line key value
+    # Positional parameters cannot be overwritten by accepted KEY assignments.
+    set -- "$file" 0
     while IFS= read -r line || [ -n "$line" ]; do
+        set -- "$1" "$(($2 + 1))"
         # Skip comments and blank lines
         case "$line" in
             ''|\#*) continue ;;
@@ -544,12 +547,12 @@ parse_env_file() {
         esac
         # Only accept KEY=VALUE where KEY is a valid shell identifier
         if ! printf '%s' "$line" | grep -qE '^[A-Za-z_][A-Za-z0-9_]*='; then
-            echo "parse_env_file: skipping invalid line in $file: ${line:0:40}" >&2
+            printf 'parse_env_file: %s:%s: invalid assignment\n' "$1" "$2" >&2
             continue
         fi
         # Reject lines with command substitution, backticks, pipes, semicolons
         if printf '%s' "$line" | grep -qE '(\$\(|`|\||\;)'; then
-            echo "parse_env_file: rejecting dangerous line in $file: ${line:0:40}" >&2
+            printf 'parse_env_file: %s:%s: disallowed shell syntax\n' "$1" "$2" >&2
             continue
         fi
         key="${line%%=*}"
