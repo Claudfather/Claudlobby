@@ -56,20 +56,28 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# The sibling suite's hermetic identity and plane capture: every emit lands in
-# CAPTURE through a stub cold rung, never in a real ledger or plane.
+# The sibling suite's hermetic identity and plane capture: the socket is dead,
+# so every emit is staged as a raw batch under the scratch root, never in a real
+# plane, and cap_refresh copies the staged events into CAPTURE for the asserts.
 SYNTH_ID="synthetic.lockprobe"
 export BOT_DIR="$TMPD/synth-bot" BOT_ID="$SYNTH_ID"
 export CLAUDLOBBY_ROOT="$TMPD/synth-root"
-mkdir -p "$BOT_DIR/data" "$CLAUDLOBBY_ROOT"
+mkdir -p "$BOT_DIR/data" "$CLAUDLOBBY_ROOT/state"
 export FLEET_NAME="synthetic-fleet"
 export PLANE_SOCKET="$TMPD/no-daemon.sock"
 CAPTURE="$TMPD/plane-capture.jsonl"
 : > "$CAPTURE"
-PLANE_EMIT_CLI="$TMPD/capture-cli"
-export PLANE_EMIT_CLI
-printf '%s\n' '#!/bin/bash' 'f="${@: -1}"' 'cat "$f" >> "'"$CAPTURE"'"' 'echo >> "'"$CAPTURE"'"' > "$PLANE_EMIT_CLI"
-chmod +x "$PLANE_EMIT_CLI"
+export PLANE_EMIT_DISABLED=0
+cap_reset() { rm -f "$CLAUDLOBBY_ROOT/state/plane/staged/"*.batch; : > "$CAPTURE"; }
+cap_refresh() {
+    python3 - "$CLAUDLOBBY_ROOT/state/plane/staged" "$CAPTURE" <<'PY'
+import json, pathlib, sys
+with open(sys.argv[2], "w") as out:
+    for path in sorted(pathlib.Path(sys.argv[1]).glob("*.batch")):
+        for event in json.loads(path.read_text())["events"]:
+            out.write(json.dumps(event) + "\n")
+PY
+}
 
 # Every keystroke any fake pane receives, one line each, in arrival order:
 #   <socket>|<target>|chunk|<bytes>   a typed chunk
@@ -253,7 +261,7 @@ echo "=== a sender that cannot get the lock in time sends NOTHING, loudly ==="
 lf=$(lock_file_for sockX botZ)
 HOLDER_PID=""
 [ -z "$lf" ] || hold_lock "$lf" 30
-: > "$PANE_LOG"; : > "$CAPTURE"
+: > "$PANE_LOG"; cap_reset
 rc=0; start=$SECONDS
 PANE_SEND_LOCK_WAIT_S=1 pane_send_verified sockX botZ "must never be typed" 2>"$TMPD/timeout.err" || rc=$?
 elapsed=$((SECONDS - start))
@@ -263,9 +271,9 @@ r=$(grep -c '^sockX|botZ|' "$PANE_LOG" || true)
 assert_eq "...and not one keystroke reached that pane (never sends unlocked)" "0" "$r"
 if [ "$elapsed" -lt 15 ]; then r=bounded; else r="waited ${elapsed}s"; fi
 assert_eq "...and the wait was bounded (a 1s bound against a 30s holder)" "bounded" "$r"
-r=$(grep -cE '"send_miss"' "$CAPTURE" || true)
+cap_refresh; r=$(grep -cE '"send_miss"' "$CAPTURE" || true)
 assert_eq "...and it is recorded as a send_miss" "1" "$r"
-r=$(grep -cE '"reason": ?"recipient-lock-timeout"' "$CAPTURE" || true)
+cap_refresh; r=$(grep -cE '"reason": ?"recipient-lock-timeout"' "$CAPTURE" || true)
 assert_eq "...whose reason is recipient-lock-timeout" "1" "$r"
 r=$(grep -c 'external-holder' "$TMPD/timeout.err" || true)
 [ "$r" -ge 1 ] && r=named || r="not named"
@@ -333,7 +341,7 @@ echo "=== a lock that cannot be taken does not strand the fleet ==="
 # send goes out, loudly, rather than every dispatch and startup prompt on the
 # host stopping at once.
 : > "$TMPD/not-a-dir"
-: > "$PANE_LOG"; : > "$CAPTURE"
+: > "$PANE_LOG"; cap_reset
 rc=0
 PANE_SEND_LOCK_DIR="$TMPD/not-a-dir/locks" pane_send_verified sockX botF "sent unlocked" 2>"$TMPD/unlocked.err" || rc=$?
 r=$(submitted sockX botF)
@@ -342,7 +350,7 @@ assert_eq "...and reports success" "0" "$rc"
 r=$(grep -c 'WITHOUT' "$TMPD/unlocked.err" || true)
 [ "$r" -ge 1 ] && r=loud || r=quiet
 assert_eq "...and says on stderr that it went WITHOUT the lock" "loud" "$r"
-r=$(grep -cE '"send_unlocked"' "$CAPTURE" || true)
+cap_refresh; r=$(grep -cE '"send_unlocked"' "$CAPTURE" || true)
 assert_eq "...and records a send_unlocked" "1" "$r"
 
 # The same for a lock helper that cannot run (here: its python fails).
@@ -360,12 +368,12 @@ esac
 exec "$REAL_PY" "\$@"
 SHIMEOF
 chmod +x "$SHIM/python3"
-: > "$PANE_LOG"; : > "$CAPTURE"
+: > "$PANE_LOG"; cap_reset
 rc=0
 PATH="$SHIM:$PATH" LOCK_PY_FAIL=1 pane_send_verified sockX botP "sent anyway" 2>"$TMPD/pyfail.err" || rc=$?
 r=$(submitted sockX botP)
 assert_eq "a lock helper that fails: the send still goes out" "sent anyway" "$r"
-r=$(grep -cE '"send_unlocked"' "$CAPTURE" || true)
+cap_refresh; r=$(grep -cE '"send_unlocked"' "$CAPTURE" || true)
 assert_eq "...and records a send_unlocked" "1" "$r"
 
 echo "=== the receipt's repair Enter goes under the same lock ==="
@@ -374,7 +382,7 @@ echo "=== the receipt's repair Enter goes under the same lock ==="
 # one runtime-script keystroke outside pane_send_verified, and an Enter landing inside
 # another sender's chunks submits that sender's payload half-typed.
 MSG="msg_0123456789abcdef0123456789abcdef"
-: > "$PANE_LOG"; : > "$CAPTURE"
+: > "$PANE_LOG"; cap_reset
 PATH="$SHIM:$PATH" PANE_RECEIPT_WAIT_S=0.2 pane_await_receipt sockX botQ "$MSG" >/dev/null 2>&1 || true
 r=$(grep -c '^sockX|botQ|key|Enter$' "$PANE_LOG" || true)
 assert_eq "a free pane: the repair Enter is pressed once" "1" "$r"
@@ -382,11 +390,11 @@ assert_eq "a free pane: the repair Enter is pressed once" "1" "$r"
 lf=$(lock_file_for sockX botQ)
 HOLDER_PID=""
 [ -z "$lf" ] || hold_lock "$lf" 30
-: > "$PANE_LOG"; : > "$CAPTURE"
+: > "$PANE_LOG"; cap_reset
 PATH="$SHIM:$PATH" PANE_RECEIPT_WAIT_S=0.2 pane_await_receipt sockX botQ "$MSG" >/dev/null 2>"$TMPD/receipt.err" || true
 r=$(grep -c '^sockX|botQ|key|Enter$' "$PANE_LOG" || true)
 assert_eq "a pane another send holds: the repair Enter is NOT pressed into it" "0" "$r"
-r=$(grep -cE '"reason": ?"recipient-lock-timeout"' "$CAPTURE" || true)
+cap_refresh; r=$(grep -cE '"reason": ?"recipient-lock-timeout"' "$CAPTURE" || true)
 assert_eq "...and the skipped Enter is recorded (recipient-lock-timeout)" "1" "$r"
 [ -z "$HOLDER_PID" ] || kill "$HOLDER_PID" 2>/dev/null || true
 
