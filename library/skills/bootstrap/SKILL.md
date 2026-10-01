@@ -6,7 +6,10 @@ argument-hint: "[<fleet-name>]"
 
 # Bootstrap
 
-Walk the user through creating and launching a fleet. Resume-aware: probe each layer before starting and skip completed steps.
+Walk the user through creating and activating a fleet. Resume-aware: inspect the
+authored source, sealed release and selected activation before starting. Keep
+the data root outside the source checkout. Use the exact release CLI returned
+by `host setup`; a fresh host does not have one yet.
 
 ## State Assessment
 
@@ -14,11 +17,11 @@ Before starting, check what already exists. Assign each step a status:
 
 | Step | Check | NOT_STARTED | PARTIAL | COMPLETE |
 |------|-------|-------------|---------|----------|
-| Fleet directory | `test -d local/<fleet>` | Dir missing | Dir exists, no fleet.yaml | fleet.yaml present |
-| Fleet config | `test -f local/<fleet>/fleet.yaml` | No file | File exists, no bots defined | Has bots stanza |
-| Credentials | Read `local/<fleet>/.env` | No .env | .env exists but has placeholder values | All token env vars filled with real values |
-| Generation | `test -d local/<fleet>/runtime/bots/` | No runtime dir | Dir exists but stale (older than fleet.yaml) | Fresh, matches fleet.yaml |
-| Enrollment | `tmux list-sessions` | No sessions | Some bots alive, some missing | All bots have tmux sessions |
+| Host release | `host releases` from the bootstrap CLI when installed | No sealed release | Release exists but is not selected | Exact sealed CLI and release ID known |
+| Fleet source | Authored manifest and `$DATA/local/<fleet>/fleet.yaml` | No source | Draft or differing source | Intended source is explicit |
+| Credentials | Check `$DATA/local/<fleet>/.env` locally without printing values | No .env | Placeholders remain | Required values supplied |
+| Activation | `"$RELEASE_CLI" --root "$DATA" host status` | No selected release | Pending activation | Selected activation is active |
+| Runtime | `"$RELEASE_CLI" --root "$DATA" --fleet <fleet> fleet status` | Not selected | Native or session state unknown | Exact bots observed running |
 
 **Placeholder detection:** a value is a placeholder if it contains `xxxx`, `AAAA`, `your_token_here`, `REPLACE`, `ghp_xxxxxxxxxxxxxxxxxxxx`, or `8888888:AAAAAAAAAAAAAAAAAAAA`. Report the first incomplete step and offer to resume from there.
 
@@ -31,12 +34,12 @@ Ask the user:
 1. **Fleet name** — lowercase, hyphenated (e.g., `my-fleet`). Used as the directory name under `local/`.
 2. **Service prefix** — reverse-domain format (e.g., `com.myname.fleet`). Used for systemd/launchd unit names.
 
-Create the fleet directory:
-
-```bash
-mkdir -p local/<fleet-name>
-cp fleet.yaml.example local/<fleet-name>/fleet.yaml
-```
+Choose an absolute `$DATA` directory outside the checkout. For a first fleet,
+copy the packaged `fleet.yaml.seed` to an authoring file outside `$DATA` and
+edit its fleet name, service prefix and bots. Follow
+[`documentation/getting-started.md`](../../../documentation/getting-started.md)
+for the wheel, dependency lock, wheelhouse and seed paths. `fleet.yaml.example`
+is a field reference, not the minimal first-fleet template.
 
 ## Step 2: Define Bots
 
@@ -55,10 +58,12 @@ For each bot the user wants to create, collect:
 4. **Model** — Explain the trade-offs: Opus (most capable, highest cost), Sonnet (balanced), Haiku (fastest, cheapest). Default: Sonnet.
 5. **Timezone** — Ask: "What timezone are you in? e.g., America/New_York, Europe/London, Asia/Tokyo". Used for human-friendly timestamps in bot output. Set as `env: { TZ: "<value>" }` in the bot's fleet.yaml stanza.
 
-Use `claudlobby new-bot` to add each bot:
+Edit the authoring manifest for the initial bots. After the fleet is active,
+`bot create` can author another bot in `$DATA/local/<fleet-name>/fleet.yaml`;
+stage and activate that source edit separately:
 
 ```bash
-claudlobby --fleet <name> new-bot \
+"$RELEASE_CLI" --root "$DATA" --fleet <name> bot create \
   --name <bot-name> \
   --expertise <areas> \
   --model <model> \
@@ -86,7 +91,8 @@ For each bot that needs a Telegram presence:
 4. If the fleet doesn't have the human's user ID:
    - Send any message to @userinfobot
 
-Write all credentials to `local/<fleet-name>/.env`:
+Create `$DATA/local/<fleet-name>/` before writing the private fleet-tier
+credentials file. Write values to `.env` without printing them:
 
 ```bash
 TELEGRAM_TOKEN_<BOT_UPPER>=<token>
@@ -94,11 +100,40 @@ TELEGRAM_TOKEN_<BOT_UPPER>=<token>
 
 Patch `fleet.yaml` with the group chat ID, human Telegram ID, and timezone (if collected). The timezone goes in each bot's `env:` block as `TZ: "<value>"`.
 
-## Step 4: Validate + Generate
+## Step 4: Seal and hand off activation
+
+If no sealed release exists, ask the operator to run `host setup --json` from their shell with the candidate wheel, locked
+dependency wheelhouse and bootstrap interpreter as shown in
+[`documentation/getting-started.md`](../../../documentation/getting-started.md).
+Have the operator provide `data.cli` and `data.release_id` from its result; set `RELEASE_CLI` to that
+reported path. Do not guess an installed CLI or write generated runtime files
+from the checkout.
+
+For a first fleet, give the operator the sealed CLI path and this command to run from their shell outside the generated bot session:
 
 ```bash
-claudlobby --fleet <fleet-name> validate
-claudlobby --fleet <fleet-name> generate
+"$RELEASE_CLI" --root "$DATA" --fleet <fleet-name> fleet setup \
+  --config "$AUTHORING_FLEET_YAML" --install-directory "$USER_UNIT_DIR"
+```
+
+`fleet setup` copies the authored manifest, validates and stages all declared
+host fleets, then activates the plan. An already present *different* destination
+manifest needs an explicit `--replace-config` decision. If activation reports
+a pending step, diagnose that journal before another attempt.
+
+For later edits to `$DATA/local/<fleet-name>/fleet.yaml`, use the selected
+release ID and review the staged host-wide plan:
+
+```bash
+"$RELEASE_CLI" --root "$DATA" --fleet <fleet-name> config validate
+"$RELEASE_CLI" --root "$DATA" config plan --release <RELEASE_ID>
+"$RELEASE_CLI" --root "$DATA" config diff <PLAN_ID>
+```
+
+Give the operator the reviewed plan ID and this command to run from their shell outside the generated bot session:
+
+```bash
+"$RELEASE_CLI" --root "$DATA" host activate <PLAN_ID> --install-directory "$USER_UNIT_DIR"
 ```
 
 If validation fails, read the error and help fix it. Common issues:
@@ -106,22 +141,18 @@ If validation fails, read the error and help fix it. Common issues:
 - Missing env var → guide the user to add it to `.env`
 - Invalid YAML → identify the syntax issue
 
-## Step 5: Warm Cache + Spin Up
+## Step 5: Warm cache and verify
 
 ```bash
-claudlobby --fleet <fleet-name> warm-cache 2>&1 || true
+"$RELEASE_CLI" --root "$DATA" --fleet <fleet-name> host cache warm
 ```
 
-Then enroll and start each bot:
+`fleet setup` or `host activate` owns enrollment and bot starts. Check recorded
+selection and observed bot state before claiming that the fleet is running:
 
 ```bash
-lib/spin-up-bot.sh local/<fleet-name>/runtime/bots/<bot-name>
-```
-
-After each spin-up, verify:
-
-```bash
-tmux has-session -t <bot-name> 2>/dev/null && echo "alive" || echo "dead"
+"$RELEASE_CLI" --root "$DATA" host status
+"$RELEASE_CLI" --root "$DATA" --fleet <fleet-name> fleet status
 ```
 
 If a bot fails to start, check:
@@ -133,16 +164,19 @@ If a bot fails to start, check:
 Confirm all bots are alive on Telegram. Suggest:
 
 - Send a test message in the Telegram group
-- Run `/doctor` to see a full health report
-- Read `documentation/getting-started.md` for iteration workflow (edit fleet.yaml → validate → generate → restart)
+- Run `host doctor` to see host and fleet checks
+- Read `documentation/getting-started.md` for the sealed-release bootstrap and
+  staged configuration workflow
 
 Remind the user:
 
-> Your `.env` and `local/<fleet>/` directory are not committed to git. Back them up separately.
+> Your `$DATA/local/<fleet>/` directory, including `.env`, is not committed to
+> the source checkout. Back it up separately.
 
 ## Rules
 
 - Never skip credential validation. A bad token wastes 10 minutes of debugging later.
 - Don't rush. Explain concepts as they come up — the user is learning claudlobby.
 - If a step fails, diagnose before retrying. Read the error output.
-- Always use `--fleet <name>` for overlay mode. Never write to root `fleet.yaml`.
+- Keep authoring files separate from the data root until `fleet setup` copies
+  them. For later edits, change the selected fleet source and activate a plan.

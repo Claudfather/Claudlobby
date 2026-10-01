@@ -8,7 +8,7 @@ absolute path the compose writes under the root (``CLAUDLOBBY_ROOT`` in
 ``bot.conf``, the unit log paths) reads as another fleet's path and ``generate``
 refuses. CI checks out elsewhere and never sees it.
 
-``lib/naked-bot-observe.py`` avoids this by exporting a named ref with
+``harness/naked-bot-observe.py`` avoids this by exporting a named ref with
 ``git archive``. A test cannot do that: it has to compose the tree it is
 testing, uncommitted edits included, or it is testing the last commit. So this
 copies the tree as git sees it — tracked files, plus untracked files that are

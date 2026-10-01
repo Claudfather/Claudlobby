@@ -25,6 +25,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -36,7 +37,7 @@ from claudlobby import mcp_packages as mp  # noqa: E402
 
 def _grammar():
     spec = importlib.util.spec_from_file_location(
-        "mcp_package_grammar", REPO_ROOT / "lib" / "mcp-package-grammar.py"
+        "mcp_package_grammar", REPO_ROOT / "claudlobby/_runtime_scripts" / "mcp-package-grammar.py"
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -301,10 +302,6 @@ class TestTheRungIsAWarningNeverAnError:
 
         mcp_dir = tmp_path / "library" / "mcp"
         mcp_dir.mkdir(parents=True)
-        # The REAL shared grammar, not a stand-in: mcp_grammar refuses rather
-        # than falling back, so a test root without lib/ exercises the refusal
-        # path instead of the rung.
-        (tmp_path / "lib").symlink_to(REPO_ROOT / "lib")
         for name, body in fragments.items():
             (mcp_dir / f"{name}.json").write_text(json.dumps(body))
         bot = BotConfig(
@@ -313,12 +310,13 @@ class TestTheRungIsAWarningNeverAnError:
             expertise=["software-engineering"],
             mcp=[McpEntry(name=n) for n in fragments],
         )
-        return FleetConfig(
+        return FleetConfig(manager="alpha",
             name="probe", service_prefix="com.example.probe", bots={"alpha": bot}
         )
 
     def test_an_unpinned_declaration_warns_and_never_errors(self, tmp_path, monkeypatch):
         from claudlobby import validator
+        from tests.package_fixtures import source_package
         from claudlobby.paths import Paths
 
         fleet = self._fleet(
@@ -328,7 +326,7 @@ class TestTheRungIsAWarningNeverAnError:
                 "solid": {"solid": {"command": "npx", "args": ["-y", "solid-pkg@1.0.0"]}},
             },
         )
-        paths = Paths(root=tmp_path)
+        paths = Paths(root=tmp_path, package=source_package())
         report = validator.ValidationReport()
         # Disarmed: the offline signal must stand on its own, with the
         # resolution probe never invoked. Guarding `_probe` rather than
@@ -358,15 +356,19 @@ class TestTheRungIsAWarningNeverAnError:
         """
         from claudlobby.config import BotConfig, FleetConfig
         from claudlobby import validator
+        from tests.package_fixtures import source_package
         from claudlobby.paths import Paths
 
-        # No lib/, no library/ — the grammar cannot load from this root at all.
+        # No native directory or library — the grammar cannot load at all.
         bot = BotConfig(bot_id="alpha", name="alpha", expertise=["x"], mcp=[])
-        fleet = FleetConfig(
+        fleet = FleetConfig(manager="alpha",
             name="probe", service_prefix="com.example.probe", bots={"alpha": bot}
         )
         report = validator.ValidationReport()
-        validator._validate_mcp_packages(fleet, Paths(root=tmp_path), report)
+        paths = Paths(root=tmp_path, package=replace(
+            source_package(), library=tmp_path / "library",
+            native=tmp_path / "missing-native"))
+        validator._validate_mcp_packages(fleet, paths, report)
 
         assert report.warnings == []
         assert report.errors == []
@@ -376,6 +378,7 @@ class TestTheRungIsAWarningNeverAnError:
         must not interpolate a filesystem path (see the regression above)."""
         from claudlobby.config import BotConfig, FleetConfig, McpEntry
         from claudlobby import validator
+        from tests.package_fixtures import source_package
         from claudlobby.paths import Paths
 
         mcp_dir = tmp_path / "library" / "mcp"
@@ -386,11 +389,14 @@ class TestTheRungIsAWarningNeverAnError:
         bot = BotConfig(
             bot_id="alpha", name="alpha", expertise=["x"], mcp=[McpEntry(name="ghost")]
         )
-        fleet = FleetConfig(
+        fleet = FleetConfig(manager="alpha",
             name="probe", service_prefix="com.example.probe", bots={"alpha": bot}
         )
         report = validator.ValidationReport()
-        validator._validate_mcp_packages(fleet, Paths(root=tmp_path), report)
+        paths = Paths(root=tmp_path, package=replace(
+            source_package(), library=tmp_path / "library",
+            native=tmp_path / "missing-native"))
+        validator._validate_mcp_packages(fleet, paths, report)
 
         assert len(report.warnings) == 1
         assert "UNKNOWN" in report.warnings[0]
@@ -402,13 +408,14 @@ class TestTheRungIsAWarningNeverAnError:
         self, tmp_path, monkeypatch
     ):
         from claudlobby import validator
+        from tests.package_fixtures import source_package
         from claudlobby.paths import Paths
 
         fleet = self._fleet(
             tmp_path, {"ghost": {"ghost": {"command": "npx", "args": ["-y", "ghost-pkg"]}}}
         )
         (tmp_path / ".env").write_text(f"{mp.PROBE_FLAG}=1\n")
-        paths = Paths(root=tmp_path)
+        paths = Paths(root=tmp_path, package=source_package())
         report = validator.ValidationReport()
 
         seen = []

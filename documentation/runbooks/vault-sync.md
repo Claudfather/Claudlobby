@@ -25,25 +25,23 @@ host:
       enroll: true
 ```
 
-then:
-
-```
-lib/setup-system
-systemctl --user list-timers | grep vault-sync      # Linux
-```
+then stage with `config plan`, inspect `config diff`, and apply with
+`host activate` from the sealed release. On Linux, inspect the enrolled
+timer with `systemctl --user list-timers | grep vault-sync`.
 
 Arm **one** host, watch `vault.sync_ok` for a week, then arm the second.
-`claudlobby doctor --switches` lists the job either way, so the off state is
+`claudlobby host doctor --switches` lists the job either way, so the off state is
 visible rather than merely documented.
 
-**Backout:** `enroll: false` + `lib/setup-system` — the unit disappears.
+**Backout:** set `enroll: false`, stage and inspect a new plan, then
+`host activate` removes the unit.
 
 **If you arm this once the engine carries `sync --check`, read the first few
 `vault.state` samples yourself and confirm they carry the verdict you expect
 before trusting the quiet.** That is the whole ask; the rest of this block is why.
 
 **The rehearsal has never run the state you will be in.** All five scenarios in
-`lib/rehearse-vault-sync.sh` drive a stub whose `--check` arm exits 2
+`harness/rehearse-vault-sync.sh` drive a stub whose `--check` arm exits 2
 unconditionally, so **every** scenario runs with `state=unknown` and **none has
 ever seen an rc-0 verdict**. That was harmless while no engine had the flag. It
 stops being harmless the moment the engine carrying `sync --check` is pulled here
@@ -124,7 +122,7 @@ It is **recorded, not lost**: every tick writes a `vault.state` sample, so the
 change is on the plane and queryable —
 
 ```
-claudlobby --fleet <name> events --type vault_sync --tail 50   # the failures
+claudlobby --fleet <name> event list --type vault_sync --limit 50   # the failures
 ```
 
 — and the samples themselves (`vault.state`) carry the verdict per run. If you
@@ -156,7 +154,7 @@ verdict will be a real one.
 ## Reading the history
 
 ```
-claudlobby --fleet <name> events --type vault_sync --tail 50
+claudlobby --fleet <name> event list --type vault_sync --limit 50
 ```
 
 The samples answer "when did this vault last sync successfully, and how often
@@ -164,7 +162,7 @@ does it fail" — the denominator the hook-only path never had.
 
 ## Rehearsing it
 
-`bash lib/rehearse-vault-sync.sh` drives the real job through clean → wedged →
+`bash harness/rehearse-vault-sync.sh` drives the real job through clean → wedged →
 still-wedged → recovered against a real plane in a throwaway root, with a
 stubbed engine and a fake escalation chat. It carries a positive control: a
 *changed* failure state must page again, or the debounce is muting rather than

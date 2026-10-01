@@ -8,6 +8,7 @@ resolved — so the shadowing tests here are the point of the file, and the
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from textwrap import dedent
 
@@ -15,12 +16,15 @@ import pytest
 
 from claudlobby import env_register as reg
 from claudlobby.config import load_fleet
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
+from claudlobby.__main__ import main
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 FLEET = dedent("""\
     fleet:
+      manager: solo
       name: acme
       service_prefix: com.acme
       defaults:
@@ -41,7 +45,7 @@ def world(tmp_path: Path, monkeypatch):
     # supervisor.sh is a third required sibling: lib-common.sh unconditionally
     # sources it from its own directory (#1573 task 6).
     for f in ("lib-common.sh", "env-tiers.sh", "supervisor.sh"):
-        (tmp_path / "lib" / f).write_bytes((REPO_ROOT / "lib" / f).read_bytes())
+        (tmp_path / "lib" / f).write_bytes((REPO_ROOT / "claudlobby/_runtime_scripts" / f).read_bytes())
     (tmp_path / "library" / "expertise" / "x.md").write_text("---\ntitle: x\n---\n# x\n")
     (tmp_path / "library" / "mcp" / "github.json").write_text(
         json.dumps(
@@ -67,13 +71,112 @@ def world(tmp_path: Path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     fleet, _ = load_fleet(fleet_dir / "fleet.yaml")
-    paths = Paths(root=tmp_path, fleet_dir=fleet_dir)
+    package = replace(source_package(), library=tmp_path / "library", native=tmp_path / "lib")
+    paths = Paths(root=tmp_path, fleet_dir=fleet_dir, package=package)
     paths.bot_runtime("solo").mkdir(parents=True)
     return fleet, paths, fleet_dir, home
 
 
 def _row(r, name="GITHUB_PAT"):
     return next(x for x in r.rows if x.name == name)
+
+
+def test_public_host_env_tiers_uses_runtime_order_without_values(world, capsys, monkeypatch):
+    _fleet, paths, fleet_dir, home = world
+    monkeypatch.setattr("claudlobby.context.resolve_paths", lambda **_kwargs: paths)
+    (home / ".env").write_text("export GITHUB_PAT=secret\n")
+    (fleet_dir / ".env").write_text("export GITHUB_PAT=\n")
+    assert main(["--root", str(paths.root), "--fleet", "acme", "host", "env", "tiers",
+                 "--json"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["command"] == "host.env.tiers"
+    assert [row["tier"] for row in result["data"]["tiers"]] == ["host", "root", "fleet", "bot"]
+    assert [row["state"] for row in result["data"]["tiers"]] == ["present", "absent", "present", "unresolved"]
+    assert "secret" not in json.dumps(result)
+
+
+def test_public_config_explain_names_blanked_source_without_values(world, capsys, monkeypatch):
+    _fleet, paths, fleet_dir, home = world
+    monkeypatch.setattr("claudlobby.context.resolve_paths", lambda **_kwargs: paths)
+    (home / ".env").write_text("export GITHUB_PAT=upstream-secret\n")
+    (fleet_dir / ".env").write_text("export GITHUB_PAT=\n")
+    argv = ["--root", str(paths.root), "--fleet", "acme", "--json",
+            "config", "explain", "GITHUB_PAT", "--bot", "solo"]
+    assert main(argv) == 4
+    output = capsys.readouterr()
+    result = json.loads(output.out)
+    assert result["command"] == "config.explain" and result["schema_version"] == 1
+    assert result["data"]["items"][0]["blanked"] == ["host"]
+    assert result["data"]["items"][0]["tier"] == "fleet"
+    assert "upstream-secret" not in output.out + output.err
+    (fleet_dir / ".env").write_text("export GITHUB_PAT=corrected-secret\n")
+    assert main(argv) == 0
+    output = capsys.readouterr()
+    assert json.loads(output.out)["data"]["items"][0]["state"] == "SET"
+    assert "corrected-secret" not in output.out + output.err
+
+
+def test_public_config_explain_resolves_undeclared_key_and_refuses_unknown_bot(world, capsys, monkeypatch):
+    _fleet, paths, fleet_dir, _home = world
+    monkeypatch.setattr("claudlobby.context.resolve_paths", lambda **_kwargs: paths)
+    (fleet_dir / ".env").write_text("export LOCAL_SETTING=private-value\n")
+    argv = ["--root", str(paths.root), "--fleet", "acme", "--json", "config", "explain"]
+    assert main([*argv, "LOCAL_SETTING"]) == 0
+    output = capsys.readouterr()
+    row = json.loads(output.out)["data"]["items"][0]
+    assert row["declared_by"] == "operator (undeclared)" and row["tier"] == "fleet"
+    assert "private-value" not in output.out + output.err
+    assert main([*argv, "UNKNOWN_SETTING"]) == 3
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "not_found"
+    assert main([*argv, "LOCAL_SETTING", "--bot", "not-a-bot"]) == 3
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "not_found"
+
+
+def test_config_explain_scalar_sources_follow_loader_without_values(world, capsys, monkeypatch):
+    _fleet, paths, fleet_dir, _home = world
+    monkeypatch.setattr("claudlobby.context.resolve_paths", lambda **_kwargs: paths)
+    manifest = fleet_dir / "fleet.yaml"
+    manifest.write_text(FLEET.replace("mcp: [github]", "mcp: [github]\n    model: fleet-private-model")
+                        .replace("solo:\n      expertise: [x]", "solo:\n      expertise: [x]\n      model: bot-private-model"))
+    argv = ["--root", str(paths.root), "--fleet", "acme", "--json", "config", "explain"]
+
+    assert main([*argv, "fleet.manager"]) == 0
+    fleet_result = json.loads(capsys.readouterr().out)["data"]
+    assert (fleet_result["kind"], fleet_result["source"], fleet_result["declaration"]) == (
+        "configuration", "fleet", "fleet.manager")
+
+    assert main([*argv, "bot.model", "--bot", "solo"]) == 0
+    output = capsys.readouterr()
+    bot_result = json.loads(output.out)["data"]
+    assert (bot_result["source"], bot_result["declaration"], bot_result["state"]) == (
+        "bot", "fleet.bots.solo.model", "set")
+    assert "private-model" not in output.out + output.err
+
+    manifest.write_text(manifest.read_text().replace("      model: bot-private-model\n", ""))
+    assert main([*argv, "model", "--bot", "solo"]) == 0
+    inherited = json.loads(capsys.readouterr().out)["data"]
+    assert (inherited["source"], inherited["declaration"]) == (
+        "fleet.defaults", "fleet.defaults.model")
+
+    manifest.write_text(manifest.read_text().replace("    model: fleet-private-model\n", ""))
+    assert main([*argv, "bot.model", "--bot", "solo"]) == 0
+    fallback = json.loads(capsys.readouterr().out)["data"]
+    assert (fallback["source"], fallback["state"], fallback["declaration"]) == (
+        "built_in", "unset", None)
+
+
+def test_config_explain_refuses_unsupported_or_unknown_config_paths(world, capsys, monkeypatch):
+    _fleet, paths, _fleet_dir, _home = world
+    monkeypatch.setattr("claudlobby.context.resolve_paths", lambda **_kwargs: paths)
+    argv = ["--root", str(paths.root), "--fleet", "acme", "--json", "config", "explain"]
+    assert main([*argv, "bot.env", "--bot", "solo"]) == 6
+    assert "unsupported" in json.loads(capsys.readouterr().out)["error"]["message"]
+    assert main([*argv, "fleet.defaults.env"]) == 6
+    assert "unsupported" in json.loads(capsys.readouterr().out)["error"]["message"]
+    assert main([*argv, "fleet.unknown_field"]) == 3
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "not_found"
+    assert main([*argv, "bot.model"]) == 2
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "invalid_argument"
 
 
 def test_a_var_set_once_reports_set(world) -> None:
@@ -167,7 +270,7 @@ def test_the_bot_tier_is_reported_unresolved_without_a_bot(world) -> None:
 def test_the_register_refuses_rather_than_guessing(world) -> None:
     """Its whole claim is that it reports what a boot would actually find."""
     fleet, paths, _, _ = world
-    (paths.root / "lib" / "env-tiers.sh").unlink()
+    (paths.lib / "env-tiers.sh").unlink()
     with pytest.raises(reg.ResolverUnavailable):
         reg.build(fleet, paths, bot="solo")
 

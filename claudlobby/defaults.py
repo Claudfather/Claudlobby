@@ -191,11 +191,14 @@ REGISTRY: dict[str, Disposition] = {
             "fourth did not. 'No bot is made to do something surprising by "
             "having it': a skill is a verb the bot runs only when invoked, "
             "and it composes no CLAUDE.md instruction. What it does add is "
-            "the grants its own `tool_grants` declare, `Bash(claudlobby *)`, "
-            "`Bash(gh *)` and the Telegram reply tool, composed only beside "
-            "the skill, so either opt-out removes both. `Bash(gh *)` is "
-            "broader than the read the skill needs; narrowing it is the "
-            "skill's frontmatter to change, not this registry's.\n\n"
+            "the grants its own `tool_grants` declare: the bot's own-context "
+            "reads `Bash(claudlobby --json brief)` and "
+            "`Bash(claudlobby --json fleet inbox)` (exact commands in the "
+            "fleet-ops style, no `--fleet` target and no CLI wildcard), the "
+            "PR read `Bash(gh pr list *)` and the Telegram reply tool, "
+            "composed only beside the skill, so either opt-out removes both. "
+            "Widening them is the skill's frontmatter to argue, not this "
+            "registry's.\n\n"
             "OPT-OUT: `system_defaults.skills: false` for the fleet, or "
             "`bots.<name>.system_defaults: {skills: false}` for one bot. "
             "Either switches off the DEFAULT only: a bot that lists `status` "
@@ -403,7 +406,7 @@ AVAILABILITY_GATES: dict[str, Callable[[Facts], bool]] = {
 #: three `Shared Documentation` headings with opposite instructions. Measured on
 #: a real compose, not reasoned about.
 #:
-#: `local/home/tl-enterprises/fleet.yaml` declares `shared-documentation`
+#: `local/home/acme-fleet/fleet.yaml` declares `shared-documentation`
 #: explicitly today. It is vault-less, so the defect is latent there rather than
 #: live — which is exactly the kind of thing that ships and then wakes up.
 #:

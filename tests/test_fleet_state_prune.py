@@ -25,16 +25,20 @@ CI runs pytest only, so the bash is exercised via subprocess.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
+import time
+from uuid import uuid4
 
 import pytest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-LIB_COMMON = REPO_ROOT / "lib" / "lib-common.sh"
-UPDATER = REPO_ROOT / "lib" / "fleet-state-update.sh"
-RECONCILE = REPO_ROOT / "lib" / "reconcile-fleet.sh"
+LIB_COMMON = REPO_ROOT / "claudlobby/_runtime_scripts" / "lib-common.sh"
+UPDATER = REPO_ROOT / "claudlobby/_runtime_scripts" / "fleet-state-update.sh"
+RECONCILE = REPO_ROOT / "claudlobby/_runtime_scripts" / "reconcile-fleet.sh"
 
 # Attribution matters now: prune is SCOPED, so a row's owning fleet decides
 # whether this fleet may remove it. "a0" is f-alpha's own departed bot — the one
@@ -65,10 +69,10 @@ def _host(
         "fleet:\n  name: f-alpha\n  bots:\n" + alpha_bots
     )
     (tmp_path / "local" / "sys" / "f-beta" / "fleet.yaml").write_text(
-        "fleet:\n  name: f-beta\n  bots:\n    b1:\n      expertise: [x]\n"
+        "fleet:\n  manager: b1\n  name: f-beta\n  bots:\n    b1:\n      expertise: [x]\n"
     )
     (tmp_path / "local" / "f-gamma" / "fleet.yaml").write_text(
-        "fleet:\n  name: f-gamma\n  bots:\n    g1:\n      expertise: [x]\n"
+        "fleet:\n  manager: g1\n  name: f-gamma\n  bots:\n    g1:\n      expertise: [x]\n"
     )
     return tmp_path
 
@@ -94,13 +98,36 @@ def _prune(
         ["bash", str(UPDATER), "prune", str(root / yaml), *args],
         capture_output=True,
         text=True,
-        env={
+        env={"PLANE_EMIT_DISABLED": "1",
             "PATH": "/usr/bin:/bin:/usr/local/bin",
             "HOME": str(root),
             "CLAUDLOBBY_ROOT": str(root),
             "FLEET_STATE_PATH": str(root / "state" / "fleet-state.json"),
         },
     )
+
+
+def test_delete_protects_same_named_foreign_fleet_row(tmp_path: Path) -> None:
+    root = _host(tmp_path)
+    state = _seed_state(root, {
+        "worker": {"fleet": "f-beta", "status": "working",
+                   "autonomous_runner_pause": {"reason": "operator hold"}},
+        "own": {"fleet": "f-alpha", "status": "idle"},
+    })
+    env = {"PLANE_EMIT_DISABLED": "1", "PATH": "/usr/bin:/bin:/usr/local/bin",
+           "HOME": str(root), "CLAUDLOBBY_ROOT": str(root),
+           "FLEET_STATE_PATH": str(state)}
+    refused = subprocess.run(["bash", str(UPDATER), "delete", "--fleet", "f-alpha",
+                              "worker", "own"], env=env, capture_output=True, text=True)
+    assert refused.returncode == 3
+    assert "worker: belongs to f-beta" in refused.stderr
+    assert set(json.loads(state.read_text())["bots"]) == {"worker", "own"}
+    removed = subprocess.run(["bash", str(UPDATER), "delete", "--fleet", "f-alpha",
+                              "own"], env=env, capture_output=True, text=True)
+    assert removed.returncode == 0, removed.stderr
+    assert json.loads(state.read_text())["bots"] == {
+        "worker": {"fleet": "f-beta", "status": "working",
+                   "autonomous_runner_pause": {"reason": "operator hold"}}}
 
 
 # --- the host-wide fleet enumeration the message needs -----------------------
@@ -113,7 +140,7 @@ def test_discover_fleet_manifests_finds_flat_and_nested(tmp_path: Path) -> None:
         ["bash", "-c", f'. "{LIB_COMMON}"; discover_fleet_manifests'],
         capture_output=True,
         text=True,
-        env={"PATH": "/usr/bin:/bin", "HOME": str(root), "CLAUDLOBBY_ROOT": str(root)},
+        env={"PLANE_EMIT_DISABLED": "1", "PATH": "/usr/bin:/bin", "HOME": str(root), "CLAUDLOBBY_ROOT": str(root)},
     )
     found = {line.split("\t")[0] for line in proc.stdout.strip().splitlines() if line}
     assert found == {"f-alpha", "f-beta", "f-gamma"}, proc.stdout
@@ -222,7 +249,7 @@ def test_zero_extraction_refuses_and_touches_nothing(tmp_path: Path) -> None:
     """
     root = _host(tmp_path, alpha_bots="    a1:\n      expertise: [x]\n")
     (root / "local" / "f-alpha" / "drift.yaml").write_text(
-        "fleet:\n  name: f-alpha\n  bots:  # my bots\n    a1:\n      expertise: [x]\n"
+        "fleet:\n  manager: a1\n  name: f-alpha\n  bots:  # my bots\n    a1:\n      expertise: [x]\n"
     )
     state = _seed_state(root)
     before = state.read_bytes()
@@ -257,6 +284,65 @@ def _update(root: Path, *args: str, fleet: str | None = None):
     )
 
 
+def test_automation_and_shell_status_writers_preserve_each_other_under_shared_lock(tmp_path: Path) -> None:
+    from claudlobby.automation_state import AutomationStateError, mutate, record_input, status
+    from claudlobby.plane.workstream_import import registry_lock
+
+    root = _host(tmp_path)
+    state = _seed_state(root)
+    lock = Path(f"{state}.lock")
+    env = {"PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(root),
+           "CLAUDLOBBY_ROOT": str(root), "FLEET_STATE_PATH": str(state),
+           "FLEET_NAME": "f-alpha"}
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with registry_lock(lock):
+            shell = subprocess.Popen(["bash", str(UPDATER), "a1", "working", "task-one"],
+                                     env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     text=True)
+            future = pool.submit(mutate, root, "f-alpha", "a1", "pause",
+                                 actor="bot:f-alpha/a1", request_id=str(uuid4()),
+                                 payload={"reason": "Need input"})
+            time.sleep(0.2)
+            assert shell.poll() is None and not future.done(), "writers bypassed the shared lock"
+        outcome = future.result(timeout=10)
+        stdout, stderr = shell.communicate(timeout=10)
+    assert shell.returncode == 0, (stdout, stderr)
+    assert outcome["state"]["paused"] is True
+    saved = json.loads(state.read_text())
+    assert saved["bots"]["a1"]["status"] == "working"
+    assert saved["bots"]["a1"]["current_task"] == "task-one"
+    assert saved["bots"]["a1"]["autonomous_runner_pause"]["reason"] == "Need input"
+    assert saved["bots"]["b1"] == SEED_ROWS["b1"]
+    assert status(root, "f-alpha", "a1", configured=True)["eligible"] is False
+
+    run_id = str(uuid4())
+    payload = {"outcome": "blocked", "pr_url": None, "issue_url": None}
+    assert mutate(root, "f-alpha", "a1", "record", actor="bot:f-alpha/a1",
+                  request_id=run_id, payload=payload, target_repo="owner/repo")["recording"] == "committed"
+    assert mutate(root, "f-alpha", "a1", "record", actor="bot:f-alpha/a1",
+                  request_id=run_id, payload=payload, target_repo="owner/repo")["replayed"] is True
+    assert _update(root, "a1", "idle", fleet="f-alpha").returncode == 0
+    saved = json.loads(state.read_text())
+    assert len(saved["bots"]["a1"]["autonomous_runner_runs"]) == 1
+    assert saved["bots"]["a1"]["autonomous_runner_pause"]["reason"] == "Need input"
+    with pytest.raises(AutomationStateError, match="documented runner outcome"):
+        record_input("succeeded", None, None, "owner/repo")
+    with pytest.raises(AutomationStateError, match="owner/repo pull URL"):
+        record_input("partial", "https://github.com/other/repo/pull/1", None, "owner/repo")
+
+
+def test_portable_lock_timeout_never_executes_an_unlocked_state_write(tmp_path: Path) -> None:
+    lock = tmp_path / "fleet-state.json.lock"
+    touched = tmp_path / "touched"
+    script = (f'. "{LIB_COMMON}"; _FLOCK_BIN=; WITH_LOCK_WAIT_S=0; '
+              f'with_lock "{lock}" touch "{touched}"')
+    with lock.open("w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert proc.returncode != 0 and "could not acquire" in proc.stderr
+    assert not touched.exists(), "timed-out lock ran its callback without exclusion"
+
+
 @pytest.mark.parametrize(
     "row,why",
     [
@@ -284,7 +370,7 @@ def test_sibling_rows_are_byte_identical_after_a_prune(tmp_path: Path) -> None:
 
 
 def test_a_row_that_moved_fleets_is_not_reaped_by_its_old_one(tmp_path: Path) -> None:
-    """`claudlobby move-bot` leaves a window where the row still carries the OLD
+    """`claudlobby bot move` leaves a window where the row still carries the OLD
     fleet while the manifests already say the new one. Attribution alone would
     delete a live bot that had just moved away; the host-wide declaration check
     is what closes it."""
@@ -346,7 +432,7 @@ def _break_sibling(root: Path, how: str) -> Path:
     if how == "crlf":
         man.write_bytes(man.read_text().replace("\n", "\r\n").encode())
     elif how == "indent":
-        man.write_text("fleet:\n    name: f-beta\n    bots:\n        b1:\n            expertise: [x]\n")
+        man.write_text("fleet:\n    manager: b1\n    name: f-beta\n    bots:\n        b1:\n            expertise: [x]\n")
     else:  # pragma: no cover - guard against a typo in a parametrisation
         raise AssertionError(f"unknown fault: {how}")
     return man

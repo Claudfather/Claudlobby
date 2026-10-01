@@ -19,7 +19,7 @@ import subprocess
 from pathlib import Path
 
 
-LIB_COMMON = Path(__file__).resolve().parent.parent / "lib" / "lib-common.sh"
+LIB_COMMON = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts" / "lib-common.sh"
 
 
 def _service_is_active(

@@ -56,14 +56,14 @@ confusing, circular, or missing a step.
 
 ## Level 2 — a real cold run (for any onboarding change)
 
-Driven by the **`simulate-cold-start`** skill, which wraps `lib/coldstart-harness.sh`:
+Driven by the **`simulate-cold-start`** skill, which wraps `harness/coldstart-harness.sh`:
 
 ```bash
-lib/coldstart-harness.sh prepare       # preflight, export, host snapshot, launch command
+harness/coldstart-harness.sh prepare       # preflight, export, host snapshot, launch command
 # ... run the cold arm in a NEW terminal with the launch line prepare prints, then /setup ...
-lib/coldstart-harness.sh status        # what did the run create?
-lib/coldstart-harness.sh reap          # tear down units, sockets, processes, tree
-lib/coldstart-harness.sh transcript    # harvest the session narrative
+harness/coldstart-harness.sh status        # what did the run create?
+harness/coldstart-harness.sh reap          # tear down units, sockets, processes, tree
+harness/coldstart-harness.sh transcript    # harvest the session narrative
 ```
 
 **Export, do not clone.** A `git clone` carries `.git`, and your own commit messages describe the
@@ -134,7 +134,7 @@ env "${UNSET_ARGS[@]}" -u GITHUB_PAT -u TELEGRAM_BOT_TOKEN bash
 Confirmed live on the same reference bot: `RAILWAY_API_TOKEN` survives every name above, because
 this fleet has a Railway integration this recipe doesn't know about. Any fleet-specific credential
 your own `.env` declares needs its own `-u`, or check what's actually resolving with
-`claudlobby creds-reconcile` before trusting the scrub blind.
+`claudlobby host credentials reconcile` before trusting the scrub blind.
 
 **This only applies to running the exercise from inside an existing bot session** — the only
 case where any of this can leak, because it's the only case with a `bot.conf` to leak from. A
@@ -208,7 +208,7 @@ about whether your changes caused the success.
 
 Seven defects, two of them blockers at the first command; six further findings from the blind
 arms, **two of which were defects the fix itself had just introduced** — a doc promoting
-`lib/setup-system` without disclosing that it needs `sudo`, and prose ambiguous enough that a
+`claudlobby host setup` without disclosing that it needs `sudo`, and prose ambiguous enough that a
 fresh reader ran `generate` to test it.
 
 That last pair is the argument for Level 3 in one line: **the person fixing the docs is the

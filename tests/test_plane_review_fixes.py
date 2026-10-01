@@ -18,6 +18,8 @@ F13 headline claims unpinned (SQLITE_FULL path, fsync spies, batch rollback)
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 import json
 import os
 import sqlite3
@@ -159,6 +161,7 @@ def test_f3_absent_config_takes_the_shipped_default_full(tmp_path: Path):
     """An ABSENT file is the documented default, and since 2026-09-20 that
     default is `full`: the channel is the product, and a stripped body cannot
     be recovered from an append-only ledger."""
+    initialize_plane(tmp_path)
     emit(tmp_path, _comm())
     conn = connect(db_path(tmp_path))
     row = conn.execute("SELECT body, privacy FROM communications").fetchone()
@@ -170,6 +173,7 @@ def test_f3_star_metadata_is_the_opt_out_and_still_strips(tmp_path: Path):
     """The opt-out an operator reaches for now. Same door, same proof triple —
     only the default moved, never the stripping mechanism."""
     _capture_path(tmp_path).write_text('{"*": "metadata"}')
+    initialize_plane(tmp_path)
     emit(tmp_path, _comm())
     conn = connect(db_path(tmp_path))
     row = conn.execute(
@@ -217,6 +221,7 @@ def test_f3_overcap_work_item_body_rejects(tmp_path: Path):
 # --- F4: versioned wire + spool --------------------------------------------
 
 def test_f4_emit_stamps_and_stores_schema_version(tmp_path: Path):
+    initialize_plane(tmp_path)
     emit(tmp_path, _comm())
     conn = connect(db_path(tmp_path))
     v = conn.execute("SELECT schema_version FROM communications").fetchone()[0]
@@ -284,6 +289,7 @@ def test_f5_dead_pid_inflight_recovered_and_replayed(env):
 
 def test_f6_replay_under_other_family_is_conflict_not_duplicate(tmp_path: Path):
     eid = mint_event_id()
+    initialize_plane(tmp_path)
     emit(tmp_path, {**_comm(), "event_id": eid})
     task = {
         "event_type": "task",
@@ -303,6 +309,7 @@ def test_f6_replay_under_other_family_is_conflict_not_duplicate(tmp_path: Path):
 def test_f6_same_family_replay_still_reports_duplicate(tmp_path: Path):
     eid = mint_event_id()
     req = {**_comm(), "event_id": eid}
+    initialize_plane(tmp_path)
     assert emit(tmp_path, req).status == "committed"
     assert emit(tmp_path, req).status == "duplicate"
 
@@ -340,6 +347,7 @@ def _seed_assignment(root: Path, *, dispatch_msg, tx_events=()) -> str:
              "payload": {"msg_id": dispatch_msg, "attempt_no": attempt_no,
                          "carrier": "tmux", "destination": "w1",
                          "state": state}})
+    initialize_plane(root)
     emit_batch(root, batch)
     return aid
 
@@ -473,14 +481,14 @@ def _run(args, stdin=None):
 
 @pytest.mark.parametrize("payload", ["[]", "null", "42", '"x"'])
 def test_f9_wrong_shape_single_request_exits_2(tmp_path: Path, payload):
-    r = _run(["--root", str(tmp_path), "emit", "communication", "--json", "-"],
+    r = _run(["--root", str(tmp_path), "plane", "emit", "communication", "--file", "-"],
              stdin=payload)
     assert r.returncode == 2, r.stderr
     assert "Traceback" not in r.stderr
 
 
 def test_f9_wrong_shape_batch_member_exits_2(tmp_path: Path):
-    r = _run(["--root", str(tmp_path), "emit-batch", "--json", "-"],
+    r = _run(["--root", str(tmp_path), "plane", "emit-batch", "--file", "-"],
              stdin='{"events": [42]}')
     assert r.returncode == 2, r.stderr
     assert "Traceback" not in r.stderr
@@ -493,12 +501,12 @@ def _make_newer_db(root: Path) -> None:
     conn.close()
 
 
-def test_f9_status_and_retry_exit_4_on_newer_db(tmp_path: Path):
+def test_f9_status_refuses_newer_db_and_retry_requires_selection(tmp_path: Path):
     _make_newer_db(tmp_path)
-    for cmd in (["plane", "status"], ["plane", "spool", "retry"]):
-        r = _run(["--root", str(tmp_path), *cmd])
-        assert r.returncode == 4, (cmd, r.returncode, r.stderr)
-        assert "Traceback" not in r.stderr
+    status = _run(["--root", str(tmp_path), "plane", "status"])
+    assert status.returncode == 4 and "Traceback" not in status.stderr
+    retry = _run(["--root", str(tmp_path), "plane", "spool", "retry"])
+    assert retry.returncode == 7 and "spool retry refused" in retry.stderr
 
 
 # --- F10: raced migration downgrade bypass ---------------------------------
@@ -589,21 +597,66 @@ def test_f11_spool_inspect_prints_entry_with_history(env):
     assert "history" in r.stdout and "locked" in r.stdout
 
 
-def test_f11_doctor_healthy_0_quarantine_1(tmp_path: Path):
+def test_spool_reads_do_not_create_storage_at_wrong_root(tmp_path):
+    from types import SimpleNamespace
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.commands import plane_maintenance
+
+    for args in (("list",), ("inspect", "ev_" + "a" * 32 + ".json")):
+        call = SimpleNamespace(spool_action=args[0], name=args[1] if len(args) > 1 else None)
+        with pytest.raises(CommandFailure) as failure:
+            # Resolve the explicit, valid host root without invoking a different
+            # tree's installed package through subprocess test setup.
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(plane_maintenance, "_root", lambda _args: tmp_path)
+                plane_maintenance.spool(call)
+        assert failure.value.error.code == "unavailable"
+        assert not (tmp_path / "state").exists()
+
+
+def test_spool_retry_requires_selected_release_before_drain(env):
+    root, _conn, _host = env
+    name = "ev_" + "a" * 32 + ".json"
+    (spool_dir(root) / name).write_text("[]")
+    r = _run(["--root", str(root), "plane", "spool", "retry", "--json"])
+    body = json.loads(r.stdout)
+    assert r.returncode == 7
+    assert body["command"] == "plane.spool" and body["error"]["code"] == "release_mismatch"
+    assert (spool_dir(root) / name).exists() and not (quarantine_dir(root) / name).exists()
+
+
+def test_spool_quarantine_json_and_wrong_name_refusal(env):
+    root, _conn, _host = env
+    name = "ev_" + "b" * 32 + ".json"
+    source = spool_dir(root) / name
+    source.write_text("{}")
+    refused = _run(["--root", str(root), "plane", "spool", "quarantine", "../" + name,
+                    "--json"])
+    assert refused.returncode == 2 and json.loads(refused.stdout)["error"]["code"] == "invalid_argument"
+    assert source.exists()
+    moved = _run(["--root", str(root), "plane", "spool", "quarantine", name, "--json"])
+    assert moved.returncode == 7 and json.loads(moved.stdout)["error"]["code"] == "release_mismatch"
+    assert source.exists() and not (quarantine_dir(root) / name).exists()
+
+
+def test_f11_doctor_healthy_0_quarantine_attention(tmp_path: Path):
+    initialize_plane(tmp_path)
     emit(tmp_path, _comm())
     r = _run(["--root", str(tmp_path), "plane", "doctor"])
-    assert r.returncode == 0, r.stdout + r.stderr
+    # No daemon serves this initialized root, so the doctor exits 4 on the
+    # daemon rung (S5a-02); the quarantine rung is what this test pins.
+    assert "[ok] quarantine — 0" in r.stdout, r.stdout + r.stderr
     qname = "ev_" + "d" * 32 + ".json"
     (quarantine_dir(tmp_path) / qname).write_text("{}")
     r = _run(["--root", str(tmp_path), "plane", "doctor"])
-    assert r.returncode == 1
-    assert "quarantine" in r.stdout
+    assert r.returncode == 4
+    assert "[ATTENTION] quarantine — 1" in r.stdout
 
 
 def test_f11_doctor_flags_broken_capture_config(tmp_path: Path):
     _capture_path(tmp_path).write_text('{"*": "ful"}')
     r = _run(["--root", str(tmp_path), "plane", "doctor"])
-    assert r.returncode == 1
+    assert r.returncode == 4
     assert "capture config" in r.stdout
 
 
@@ -635,10 +688,18 @@ class _FullError(sqlite3.OperationalError):
 def test_f13_emit_under_sqlite_full_spools_by_error_code(tmp_path: Path, monkeypatch):
     from claudlobby.plane import emit_api
 
+    initialize_plane(tmp_path)
+    full = _FullError("synthetic full condition")
+
     def full_ingest(conn, items, *, host_uid):
-        raise _FullError("synthetic full condition")
+        raise full
 
     monkeypatch.setattr(emit_api, "ingest_many", full_ingest)
+    with pytest.raises(_FullError) as refused:
+        emit_batch(tmp_path, [_comm()], require_commit=True)
+    assert refused.value is full, "preserve the storage failure, not an unchanged result"
+    assert not (tmp_path / "state" / "plane" / "spool").exists()
+    assert not (tmp_path / "state" / "plane" / "staged").exists()
     out = emit(tmp_path, _comm())
     assert out.status == "spooled"
     monkeypatch.undo()
@@ -670,6 +731,7 @@ def test_f13_spool_write_fsyncs_file_and_directory(env, monkeypatch):
 
 def test_f13_batch_second_item_failure_rolls_back_first(tmp_path: Path):
     taken = mint_event_id()
+    initialize_plane(tmp_path)
     emit(tmp_path, {**_comm("3"), "event_id": taken})
     fresh = mint_event_id()
     batch = [
@@ -678,11 +740,17 @@ def test_f13_batch_second_item_failure_rolls_back_first(tmp_path: Path):
          "event_id": taken,              # collides AND conflicts cross-family
          "payload": {"work_item_id": mint_work_item_id(), "event": "progress"}},
     ]
-    with pytest.raises((ContractViolation, RuntimeError)):
-        emit_batch(tmp_path, batch)
-    conn = connect(db_path(tmp_path))
-    n = conn.execute(
-        "SELECT COUNT(*) FROM communications WHERE event_id = ?", (fresh,)
-    ).fetchone()[0]
-    conn.close()
-    assert n == 0, "item 1 must roll back when item 2 fails (one transaction)"
+    for require_commit in (False, True):
+        with pytest.raises((ContractViolation, RuntimeError)):
+            emit_batch(tmp_path, batch, require_commit=require_commit)
+        conn = connect(db_path(tmp_path))
+        try:
+            for table in ("communications", "ingest_ledger"):
+                n = conn.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE event_id = ?", (fresh,)
+                ).fetchone()[0]
+                assert n == 0, "item 1 must roll back when item 2 fails (one transaction)"
+        finally:
+            conn.close()
+        assert not (tmp_path / "state" / "plane" / "spool").exists()
+        assert not (tmp_path / "state" / "plane" / "staged").exists()

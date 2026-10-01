@@ -6,6 +6,8 @@ documentation/plans/2026-08-24-observable-plane-phase2-ingest.md §6b."""
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 from pathlib import Path
 
 import pytest
@@ -53,6 +55,7 @@ def _seed(root: Path, *, expected_by: str | None = FUTURE,
              "payload": {"msg_id": msg, "attempt_no": attempt_no,
                          "carrier": "tmux", "destination": "w1",
                          "state": state}})
+    initialize_plane(root)
     emit_batch(root, batch)
     return aid
 
@@ -128,6 +131,7 @@ def test_supplied_id_not_open_ingests_as_task_fact(tmp_path: Path):
     """§6b #6: the join anomaly our tooling already records deliberately
     becomes a first-class token instead of degrading silently."""
     wi = mint_work_item_id()
+    initialize_plane(tmp_path)
     emit_batch(tmp_path, [
         {"event_type": "work_item", "emitter": "6b", "fleet": "example-fleet",
          "payload": {"work_item_id": wi, "title": "t",

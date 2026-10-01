@@ -3,31 +3,23 @@
 The busy/idle series is the plane's ``bot.heartbeat`` samples (F18 closure
 R2b: ``claudlobby.plane.utilization.heartbeat_series`` is the ONE reader,
 shared with the operator plane's surface; keepalive.log is gone), joined with
-fleet-state.json for the declared status and current task. No new data
+the canonical Task snapshot for current assignments. No new data
 collection — pure aggregation of recorded samples.
 
-Two access paths, deliberately distinct:
-
-1. ``claudlobby status`` calls ``compute_bot_utilization`` directly, recomputing
-   at display time to render its BUSY%/IDLE/TASK-AGE columns. It does NOT read
-   the JSON below — its numbers never depend on that file being fresh.
-2. ``fleet-utilization.sh`` persists the rollup to
-   ``state/fleet-utilization.json`` (``--summary`` emits a one-line digest).
-   That file is the intended feed for a manager-bot dispatch consumer that is
-   not yet wired; until that consumer exists the writer stays on-demand — no
-   timer schedules it and nothing reads the file.
+`fleet utilization` and the status/Plane views recompute from the same reader.
+No cached JSON registry or second writer is maintained.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .paths import Paths
+from .task_work_queries import BotWork, CurrentWork, read_fleet_work
 from .uptime import _MAX_INTERVAL_SECS, _fmt_duration
 
 log = logging.getLogger("claudlobby.utilization")
@@ -62,28 +54,30 @@ class BotUtilization:
     name: str
     busy_pct_24h: float = 0.0
     busy_pct_7d: float = 0.0
+    observed_secs_24h: float = 0.0
+    observed_secs_7d: float = 0.0
     idle_since: datetime | None = None
-    current_task_age_secs: int | None = None
+    # Observed heartbeat BUSY streak, not assignment age.
+    busy_age_secs: int | None = None
     current_task: str | None = None
     state: str = "unknown"
     stall: bool = False
+    work_assignments: tuple[CurrentWork, ...] = ()
+    work_issues: tuple[dict, ...] = ()
+    work_unavailable: str = ""
+
+    @property
+    def work_unresolved(self) -> bool:
+        return any(issue["blocking"] for issue in self.work_issues)
 
 
-def _compute_busy_pct(
-    entries: list[tuple[datetime, str]],
-    window: timedelta,
-    now: datetime,
-) -> float:
-    """Compute busy % from keepalive entries over a time window.
-
-    Busy % = BUSY seconds / (BUSY + IDLE seconds). Excludes downtime
-    (gaps > 10 min) and UNKNOWN/RESTART from both numerator and denominator
-    so the metric reflects how the bot spends its *up* time.
-    """
+def _busy_durations(entries: list[tuple[datetime, str]], window: timedelta,
+                    now: datetime) -> tuple[float, float]:
+    """Observed BUSY/IDLE seconds; gaps are capped, UNKNOWN is unobserved."""
     cutoff = now - window
     windowed = [(ts, state) for ts, state in entries if ts >= cutoff]
     if not windowed:
-        return 0.0
+        return 0.0, 0.0
 
     busy_secs = 0.0
     idle_secs = 0.0
@@ -104,10 +98,17 @@ def _compute_busy_pct(
         elif state == "IDLE":
             idle_secs += duration
 
-    total = busy_secs + idle_secs
-    if total == 0:
-        return 0.0
-    return round((busy_secs / total) * 100, 1)
+    return busy_secs, idle_secs
+
+
+def _busy_percentage(busy: float, idle: float) -> float:
+    return round(100 * busy / (busy + idle), 1) if busy + idle else 0.0
+
+
+def _compute_busy_pct(entries: list[tuple[datetime, str]], window: timedelta,
+                      now: datetime) -> float:
+    """Busy share of observed BUSY/IDLE time, excluding unobserved intervals."""
+    return _busy_percentage(*_busy_durations(entries, window, now))
 
 
 def _find_state_transition(
@@ -134,26 +135,10 @@ def _find_state_transition(
     return transition_ts
 
 
-def load_fleet_state(paths: Paths) -> dict:
-    """Read fleet-state.json. Returns empty dict on missing/corrupt."""
-    state_path = Path(
-        os.environ.get(
-            "FLEET_STATE_PATH",
-            str(paths.root / "state" / "fleet-state.json"),
-        )
-    )
-    if not state_path.is_file():
-        return {}
-    try:
-        return json.loads(state_path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return {}
-
-
 def compute_bot_utilization(
     bot_name: str,
     entries: list[tuple[datetime, str]],
-    fleet_state_bot: dict,
+    work: BotWork | None = None,
     now: datetime | None = None,
 ) -> BotUtilization:
     """Compute utilization for a single bot from its (instant, state) series
@@ -171,36 +156,41 @@ def compute_bot_utilization(
         for ts, state in entries
     ]
 
-    busy_today = _compute_busy_pct(entries, timedelta(hours=24), now)
-    busy_7d = _compute_busy_pct(entries, timedelta(days=7), now)
+    today = _busy_durations(entries, timedelta(hours=24), now)
+    week = _busy_durations(entries, timedelta(days=7), now)
 
-    state = fleet_state_bot.get("status", "unknown")
-    current_task = fleet_state_bot.get("current_task")
+    state = "unknown"
+    if entries and (now - entries[-1][0]).total_seconds() <= _MAX_INTERVAL_SECS:
+        state = {"BUSY": "working", "IDLE": "idle"}.get(entries[-1][1], "unknown")
 
     idle_since = None
-    if entries and entries[-1][1] == "IDLE":
+    if state == "idle":
         idle_since = _find_state_transition(entries, "IDLE")
 
-    current_task_age_secs = None
-    if entries and entries[-1][1] == "BUSY":
+    busy_age_secs = None
+    if state == "working":
         ts = _find_state_transition(entries, "BUSY")
         if ts:
-            current_task_age_secs = int((now - ts).total_seconds())
+            busy_age_secs = int((now - ts).total_seconds())
 
     stall = (
-        current_task_age_secs is not None
-        and current_task_age_secs > _STALL_THRESHOLD_SECS
+        busy_age_secs is not None
+        and busy_age_secs > _STALL_THRESHOLD_SECS
     )
 
     return BotUtilization(
         name=bot_name,
-        busy_pct_24h=busy_today,
-        busy_pct_7d=busy_7d,
+        busy_pct_24h=_busy_percentage(*today),
+        busy_pct_7d=_busy_percentage(*week),
+        observed_secs_24h=sum(today),
+        observed_secs_7d=sum(week),
         idle_since=idle_since,
-        current_task_age_secs=current_task_age_secs,
-        current_task=current_task,
+        busy_age_secs=busy_age_secs,
+        current_task=work.current_task if work else None,
         state=state,
         stall=stall,
+        work_assignments=work.assignments if work else (),
+        work_unavailable=work.unavailable if work else "",
     )
 
 
@@ -222,78 +212,42 @@ def compute_fleet_utilization(
     plane, note = plane_session(paths, fleet=fleet)     # the ONE plane door (root mode resolves its fleet)
     if plane is None:
         raise PlaneUnreachable(note)
+    if bot_names is None:
+        bot_names = (
+            sorted(d.name for d in bots_dir.iterdir() if d.is_dir() and (d / "bot.conf").is_file())
+            if bots_dir.is_dir() else []
+        )
     try:
         series = fleet_heartbeat_series(plane.conn, plane.fleet, now)
+        work = read_fleet_work(plane.conn, fleet_uid=plane.pr.fleet_uid(plane.conn, plane.fleet),
+                               fleet=plane.fleet, bot_names=bot_names)
     except Exception as exc:                          # a schema the reader cannot use: refuse
         raise PlaneUnreachable(f"the plane could not answer: {exc}") from exc
     finally:
         plane.close()
 
-    fleet_state = load_fleet_state(paths)
-    bots_state = fleet_state.get("bots", {})
-
     results: list[BotUtilization] = []
-    if bot_names is None:
-        bot_names = (
-            sorted(
-                d.name
-                for d in bots_dir.iterdir()
-                if d.is_dir() and (d / "bot.conf").is_file()
-            )
-            if bots_dir.is_dir()
-            else []
-        )
-
     for name in bot_names:
         util = compute_bot_utilization(name, series.get(name.lower(), []),
-                                       bots_state.get(name, {}), now=now)
+                                       work.bots[name], now=now)
+        util.work_issues = tuple(asdict(issue) for issue in work.issues)
         results.append(util)
 
     return results
-
-
-def write_utilization_json(
-    results: list[BotUtilization],
-    paths: Paths,
-    now: datetime | None = None,
-) -> Path:
-    """Write fleet-utilization.json to the state directory."""
-    if now is None:
-        now = datetime.now(timezone.utc)
-
-    state_dir = paths.runtime / "state"
-    state_dir.mkdir(parents=True, exist_ok=True)
-    out_path = state_dir / "fleet-utilization.json"
-
-    data: dict = {
-        "updated": now.isoformat(),
-        "bots": {},
-    }
-    for u in results:
-        data["bots"][u.name] = {
-            "busy_pct_24h": u.busy_pct_24h,
-            "busy_pct_7d": u.busy_pct_7d,
-            "idle_since": u.idle_since.isoformat() if u.idle_since else None,
-            "current_task_age_secs": u.current_task_age_secs,
-            "current_task": u.current_task,
-            "state": u.state,
-            "stall": u.stall,
-        }
-
-    out_path.write_text(json.dumps(data, indent=2) + "\n")
-    return out_path
 
 
 def format_utilization_summary(results: list[BotUtilization]) -> str:
     """One-line fleet summary for Telegram digest."""
     parts: list[str] = []
     for u in results:
-        if u.state == "working" and u.current_task_age_secs is not None:
-            age = _fmt_duration(u.current_task_age_secs)
+        if u.state == "working" and u.busy_age_secs is not None:
+            age = _fmt_duration(u.busy_age_secs)
             parts.append(f"{u.name} heads-down {age}")
         elif u.idle_since:
             idle_secs = (datetime.now(timezone.utc) - u.idle_since).total_seconds()
             parts.append(f"{u.name} idle {_fmt_duration(int(idle_secs))}")
+        elif u.observed_secs_24h == 0:
+            parts.append(f"{u.name} unknown")
         else:
             parts.append(f"{u.name} {int(u.busy_pct_24h)}% busy")
     return "team utilization: " + ", ".join(parts) if parts else "no bots"

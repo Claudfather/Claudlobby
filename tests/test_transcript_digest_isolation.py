@@ -1,6 +1,6 @@
 """A real digest run leaves no needs-auth cache entry behind (#1972), on the REAL binary.
 
-``tests/test_transcript_digest.sh`` pins that ``lib/transcript-digest.sh`` passes
+``tests/test_transcript_digest.sh`` pins that ``claudlobby/_runtime_scripts/transcript-digest.sh`` passes
 the isolation flags. What the flags DO is Claude Code's behaviour, and no stub
 can show it: the needs-auth cache writer lives inside the binary. So this runs
 the real hook with the real ``claude``, at zero spend, in a throwaway HOME built
@@ -39,8 +39,7 @@ import pytest
 from tests.conftest import constructed_env
 
 REPO = Path(__file__).resolve().parent.parent
-DIGEST = REPO / "lib" / "transcript-digest.sh"
-CAPTURE_CLI = REPO / "tests" / "plane_capture_cli.sh"
+DIGEST = REPO / "claudlobby/_runtime_scripts" / "transcript-digest.sh"
 
 # Not conftest.realboot_skip_reason: that gate requires host auth, jq and claudron,
 # and this test needs none of them (zero spend, no credential, no vault).
@@ -140,22 +139,26 @@ def _run_digest(tmp: Path, bot: Path, model_bin: str, arm: str) -> dict:
     tx.write_text("".join(
         json.dumps({"type": role, "message": {"content": f"{role} turn {i}"}}) + "\n"
         for i in range(3) for role in ("user", "assistant")))
-    root, capture = tmp / f"{arm}-root", tmp / f"{arm}-capture.jsonl"
+    root = tmp / f"{arm}-root"
     (root / "state" / "plane").mkdir(parents=True)
+    # The socket is down, so the real shim stages the batch for daemon replay;
+    # the row is read back from there, as tests/test_transcript_digest.sh does.
     env = _env(
         tmp, CLAUDLOBBY_ROOT=root, BOT_ID="tbot", CLAUDLOBBY_FLEET="tfleet", BOT_DIR=bot,
         SESSION_DIGEST_ENABLED="1", SESSION_DIGEST_MIN_TURNS="1",
         SESSION_DIGEST_TIMEOUT=str(MODEL_TIMEOUT_S), CLAUDE_BIN=model_bin, REAL_CLAUDE=CLAUDE,
-        PLANE_EMIT_CLI=f"bash {CAPTURE_CLI}", PLANE_SOCKET=root / "state" / "plane" / "no.sock",
-        PLANE_CAPTURE=capture,
+        PLANE_EMIT_DISABLED="0", PLANE_SOCKET=root / "state" / "plane" / "no.sock",
     )
     payload = json.dumps({"session_id": f"sess-{arm}", "transcript_path": str(tx),
                           "cwd": str(bot), "reason": "clear"})
     r = subprocess.run(["bash", str(DIGEST)], input=payload, cwd=bot, env=env,
                        capture_output=True, text=True, timeout=MODEL_TIMEOUT_S + 90)
     assert r.returncode == 0, f"{arm}: a SessionEnd hook must exit 0:\n{r.stderr}"
-    rows = capture.read_text().splitlines() if capture.exists() else []
-    return json.loads(rows[-1]) if rows else {}
+    batches = sorted((root / "state" / "plane" / "staged").glob("*.batch"))
+    if not batches:
+        return {}
+    envelope = json.loads(batches[-1].read_text())["events"][-1]
+    return {**envelope["payload"], "event_type": envelope["event_type"]}
 
 
 @pytest.mark.skipif(bool(SKIP), reason=SKIP)

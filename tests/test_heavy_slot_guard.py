@@ -24,8 +24,8 @@ import pytest
 from tests.conftest import constructed_env
 
 REPO = Path(__file__).resolve().parent.parent
-GUARD = REPO / "lib" / "heavy-slot-guard.sh"
-WRAPPER = REPO / "lib" / "heavy-slot.py"
+GUARD = REPO / "claudlobby/_runtime_scripts" / "heavy-slot-guard.sh"
+WRAPPER = REPO / "claudlobby/_runtime_scripts" / "heavy-slot.py"
 W = shlex.quote(str(WRAPPER.resolve())) + " run --"
 BASH = shutil.which("bash")
 
@@ -182,3 +182,35 @@ def test_the_rewritten_command_runs_the_job_under_the_slot(se):
     assert p.returncode == 0 and list(se.tmp.glob("ran.*"))
     record = json.loads((se.state / "slot-0.lock").read_text())
     assert record["shape"] == "pytest -q" and record["state"] == "released"
+
+
+def test_the_slot_lives_under_the_data_root_and_the_wrapper_is_the_native_code(se):
+    # A sealed release is code only: the wrapper the hook inserts is this
+    # native file, and the slot it takes is host state under CLAUDLOBBY_ROOT.
+    root = se.tmp / "data-root"
+    env = {k: v for k, v in se.env.items() if k != "HEAVY_SLOT_DIR"}
+    env["CLAUDLOBBY_ROOT"] = str(root)
+    _, out, _ = _hook(se, "pytest -q", env=env)
+    command = json.loads(out)["hookSpecificOutput"]["updatedInput"]["command"]
+    assert command == f"{W} pytest -q"
+    p = subprocess.run(
+        [BASH, "-c", command], env=env, capture_output=True, text=True, timeout=60
+    )
+    assert p.returncode == 0, p.stderr
+    record = json.loads((root / "state" / "heavy-slot" / "slot-0.lock").read_text())
+    assert record["shape"] == "pytest -q" and record["state"] == "released"
+    assert not (WRAPPER.parent.parent / "state" / "heavy-slot").exists()
+
+
+def test_without_a_data_root_the_hook_fails_open_and_writes_no_slot(se):
+    # No HEAVY_SLOT_DIR and no absolute CLAUDLOBBY_ROOT: never fall back to a
+    # slot beside the code; let the call through untouched.
+    env = {k: v for k, v in se.env.items()
+           if k not in ("HEAVY_SLOT_DIR", "CLAUDLOBBY_ROOT")}
+    assert _hook(se, "npm ci", env=env)[:2] == (0, "")
+    # A relative root is no root either (status only reads, so nothing lands).
+    p = subprocess.run([str(WRAPPER), "status"],
+                       env={**env, "CLAUDLOBBY_ROOT": "relative/root"},
+                       capture_output=True, text=True, timeout=60)
+    assert p.returncode == 2 and "CLAUDLOBBY_ROOT" in p.stderr
+    assert not (WRAPPER.parent.parent / "state" / "heavy-slot").exists()

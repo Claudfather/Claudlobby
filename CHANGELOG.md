@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added — an opt-in guard that refuses a GitHub write putting a listed term into a public repository
 
-A PreToolUse hook, `lib/public-write-guard.sh` (with its decider `lib/public-write-guard.py`), composed for a bot that sets `public_write_guard: true` (a strict bool, per bot or through `fleet.defaults`, like `heavy_slot`). It refuses, and never rewrites, a GitHub-bound write that would put a term from the host's list into a **public** repository. A private or internal repository is untouched.
+A PreToolUse hook, `claudlobby/_runtime_scripts/public-write-guard.sh` (with its decider `claudlobby/_runtime_scripts/public-write-guard.py`), composed for a bot that sets `public_write_guard: true` (a strict bool, per bot or through `fleet.defaults`, like `heavy_slot`). It refuses, and never rewrites, a GitHub-bound write that would put a term from the host's list into a **public** repository. A private or internal repository is untouched.
 
 - **The list is host configuration:** `~/.config/claudlobby/public-write-terms`, one case-insensitive regular expression per line. It is never repository content, and the tests use invented terms.
 - **What it reads is what the write puts in the repository:**
@@ -27,9 +27,27 @@ A PreToolUse hook, `lib/public-write-guard.sh` (with its decider `lib/public-wri
   - content it cannot read counts as a hit: a missing body file, a program's output piped into the write or substituted into its content (`$(...)` or backticks, except `cat` of a file or of a heredoc, in a commit message, a body, title, notes, subject, comment or description flag, or a `gh api` field such as `body` or `query`), a git command run from a directory it cannot name. A substitution in any other flag, such as the sha in `--match-head-commit "$(gh api …)"`, is left as written: it is not content.
 - **Its events name the bot**, the refusal, the no-list alarm and the fail-open breadcrumb alike, so `claudlobby events --bot <bot>` and the bot's brief see them.
 - **Its ceiling:** it does not follow `eval`, functions, aliases or scripts, and it does not read an annotated tag's own message. Three writes publish content that is not a word of the command, and are not read: `gh pr create --fill` (its title and body come from commits already pushed), `gh repo create --source --push` (the local history), and the asset files of `gh release create` and `upload`. It keeps accidents out; it is not a boundary against a caller trying to get past it.
-- **Off switch:** `state/public-write-guard/disabled`, host-wide. `python3 lib/public-write-guard.py --check` says whether a host's guard is armed, the list and the off switch, without printing a term.
+- **Off switch:** `state/public-write-guard/disabled`, host-wide. `python3 claudlobby/_runtime_scripts/public-write-guard.py --check` says whether a host's guard is armed, the list and the off switch, without printing a term.
 - **Opt-in:** registered in the switch registry as opt-in for the `heavy_slot` reason. A composed hook has no deployment gate (#1310), so the manifest key is where one bot goes first.
 - **Tests:** `tests/test_public_write_guard.py` drives the real hook with a fake `gh` and real git repositories, in both directions for each shape; `tests/test_public_write_guard_compose.py` covers the composition.
+
+### Changed — main integration for the unified CLI (#1747, #1989)
+
+The aggregate incorporates main through `dd789c52` without restoring retired
+entrypoints. The [port evidence](documentation/plans/2026-09-30-unified-cli-main-integration.md)
+records the current owners and tests for the upstream fixes listed below;
+older changelog entries describe their original implementation, not additional
+supported commands. In particular, `fleet reports submit` is explicitly unlinked,
+`task report` requires an explicit task, and canonical rechecks address the fleet's
+one current manager. Person-assigned work without a deadline stays a standing goal.
+
+Opted-in heavy-slot hooks use the selected release's native code and the host's
+mutable data root. `/status` remains a manager default with scoped CLI reads.
+Cold setup builds and checks a sealed wheel before activation. Existing hosts must
+follow the [conversion runbook](documentation/existing-host-release-conversion.md):
+hold their old source-puller, build separately, prove an independent canary, and
+adopt the complete host through `host activate`. There are no compatibility shims;
+the coordinator is host-wide and cannot bypass a protected busy bot's restart hold.
 
 ### Fixed — `pr-review-state.py` reads a comment's verdict from its header only (#2029)
 
@@ -40,6 +58,7 @@ The reader searched a comment's whole body, so a verdict named anywhere in it co
 - **Never silent.** A line elsewhere whose opening bold span holds a verdict word is not read, and is reported verbatim as `UNPARSED-HEADER`, so a block written below the header reaches a human. Fenced code, blockquotes and table rows are not reported.
 - **Measured.** Over the corpus, 54 comments change reading. 36 are now reported rather than read. The 18 dropped without a report are prose, quotes, bullets, relayed verdicts or restatements, plus two approvals written in prose (the safe direction); no block is dropped silently. Of the 11 open PRs carrying a verdict, 9 read the same and 2 lose only false reads (#1160: two blocks and an approve from prose; #1989: a block from a bold label), keeping every real block.
 - CLI flags, output format and exit codes are unchanged. Tests: `tests/test_pr_review_state.py` (`TestTheVerdictIsTheCommentsHeaderLine`, `TestOutsideTheHeaderIsReportedNeverRead`); the two doc-example tests read each example as a reviewer posts it, with unchanged counts.
+- **In the unified CLI (#1989).** `lib/pr-review-state.py` is retired; the same rule lives in `claudlobby/review_rules.py`, which `claudlobby task reviews` reads. There is no script, self-test or `--payload-json` entry point.
 
 ### Fixed — the heavy-job slot records a job's shape, never its text (#2037)
 
@@ -76,6 +95,7 @@ A shape keeps neither.
 - An ordinary command keeps its tool and flags.
 
 All 15 of the secret cases fail on the previous code.
+
 
 ### Changed — the `[vault]` extra pins Claudron v0.6.1
 
@@ -440,6 +460,47 @@ Changes on the Claudlobby side:
 - `paths.detect_vault()`'s no-Claudron fallback follows the same rule: the identity file on walk-up, plus the addressed path itself when it has a hub.
 - The validator message now names the identity file.
 - The freshbox and boot-sampler scratch vaults, and the N-bot contention test's seed vault, now carry `.claudron-vault`.
+
+### Changed — unified public CLI and selected releases (#1747, #1989)
+
+Operators and agents use one public `claudlobby` command surface. Configuration,
+skills and permissions are staged with `config plan`, inspected with `config diff`,
+and applied through whole-host `host activate`; immutable releases keep code and
+native assets together. Test changes first in an independent canary data root.
+
+Existing checkout-based hosts must stop and disable their old `pull-root` timer
+before merging this change into the branch it follows. The root-pulling operation
+is removed; build from a separate source checkout and use explicit release
+activation. See the [conversion prerequisite](documentation/existing-host-release-conversion.md).
+
+Breaking replacements (no compatibility aliases or shims):
+
+| Retired entry | Supported entry |
+|---|---|
+| `generate`, `host-timers` | `config plan` → `config diff` → operator `host activate` |
+| `validate`, `freshbox` | `config validate`, `config validate --runtime` |
+| `promote` | inspect `config diff`, edit authored source, then stage and activate |
+| `status`, `uptime`, `events`, `report-back` | `fleet status`, `fleet uptime`, `event list/show`, `fleet reports list` |
+| top-level `emit`, `emit-batch` | `plane emit`, `plane emit-batch` (private hot paths use the daemon/spool) |
+| old converter/scaffolder names | `migration …`, `library create`, `bot create` |
+| `lib/setup-system`, `lib/setup-fleet`, `lib/setup-fleets` | `host setup`, `fleet setup` |
+| `lib/migrate-fleet-to-system.sh` | `fleet move` for cold, unselected authoring only; active flat fleets stay flat |
+| `lib/fleet-utilization.sh` | `fleet utilization` |
+
+Tasks are fleet-owned with separate admission, assignment and delivery; only the
+assigned bot accepts. Ordinary messages and unlinked reports may send with an
+explicit degraded recording result and an independent fleet alert. Task changes
+and linked reports still require committed recording; uncertain sends are not
+silently retried. Default fleet-ops coaching and grants accompany the CLI.
+
+`--warn-baseline` differences now exit 4, unavailable input exits 6; Plane doctor
+and registry attention exit 4. Scheduled repo pulls skip dirty/untracked or
+symlinked checkouts. macOS browser reaping is disabled pending an ownership-safe
+predicate. Log reads are bounded (1–200 lines, 64 KiB per file) and disclose partial
+sources. `host.unit_prefix` isolates canary host units. Source-only instruments
+live in `harness/` and do not ship in release wheels.
+
+- Restored explicit `host channels check` and `host channels approve` operator commands for official and fork Telegram approvals in Claude Code's OS managed settings; approval preserves existing policy and requires administrator write access.
 
 ### Changed — `[vault]` pin bumped to Claudron v0.5.1; `vault-sync` never leaves a vault mid-rebase (Claudron #193)
 
@@ -940,7 +1001,7 @@ overlap as a matter of routine, and a sibling pass could rewrite the window
 inside this pass's read loop or delete it there. A rewrite sent nothing and
 said nothing: the pass read the other fleet's rows and skipped its own page. A
 deletion failed the loop's redirect and aborted the pass on a `script_error`,
-23 of them from 2026-09-25 to 09-27 on ai-platform and tl-enterprises. Each
+23 of them from 2026-09-25 to 09-27 on ai-platform and acme-fleet. Each
 file is now the pass's own temporary file, which lib-common removes when the
 pass exits. A new test interleaves two fleets' passes at both points; the old
 code fails it both ways.

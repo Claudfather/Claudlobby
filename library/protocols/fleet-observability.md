@@ -11,19 +11,20 @@ Pull-based observability for fleet managers. Two writers produce events; manager
 
 | Writer | Script | Runs when | Source field |
 |--------|--------|-----------|--------------|
-| Bot vitals | `lib/bot-vitals.sh` | Every tool call (Claude Code hook) | `vitals` |
-| Fleet pulse | `lib/fleet-pulse.sh` | Cron (every 5 min) | `pulse` |
-| Keepalive | `lib/keepalive.sh` | Every keepalive run (60s timer) | `keepalive` — `bot.heartbeat` / `bot.session_up` samples and `keepalive_*` and `bridge_heal` events on the plane, plus the `data/.idle` marker |
+| Bot vitals | `claudlobby/_runtime_scripts/bot-vitals.sh` | Every tool call (Claude Code hook) | `vitals` |
+| Fleet pulse | `claudlobby fleet pulse` (private `claudlobby/_runtime_scripts/fleet-pulse.sh` sweep) | Cron (every 5 min) | `pulse` |
+| Keepalive | `claudlobby/_runtime_scripts/keepalive.sh` | Every keepalive run (60s timer) | `keepalive` — `bot.heartbeat` / `bot.session_up` samples and `keepalive_*` and `bridge_heal` events on the plane, plus the `data/.idle` marker |
 
-Every writer lands on the plane through `emit_fleet_event`; managers read one door, `claudlobby events`, regardless of writer. The idle marker is a special case: keepalive touches `data/.idle` when it classifies a pane as IDLE and removes it on BUSY. Fleet-pulse compares `.idle` mtime vs `.last-tool-call` mtime to determine idle state without parsing panes.
+Every writer lands on the plane through `emit_fleet_event`; managers read one door, `claudlobby event list`, regardless of writer. The idle marker is a special case: keepalive touches `data/.idle` when it classifies a pane as IDLE and removes it on BUSY. Fleet-pulse compares `.idle` mtime vs `.last-tool-call` mtime to determine idle state without parsing panes.
 
 ## Where to Read
 
 Every bot's events are recorded on the plane — the host's flight recorder,
 `$CLAUDLOBBY_ROOT/state/plane/plane.db` — and nowhere else (F18 closure: the
 per-bot `data/events/*.jsonl` files are gone). Read them through
-`claudlobby events` (`--fleet <fleet> events --since 24h [--bot <bot>] [--json]`),
-which renders the same `{ts, bot, type, source, data}` rows the ledgers had.
+`claudlobby --json event list --since 24h` with the fleet selected. Its single
+schema-1 result has bounded `data.items`, `data.next_cursor`, and `data.coverage`;
+each item names an `event_id`, `occurred_at`, `bot`, `type`, `source`, and `data`.
 Never open the database by hand from a session; `resolve_bots_dir` stays the
 right tool for cases that only need bot *names* (e.g. enumerating who exists).
 
@@ -48,18 +49,18 @@ Read bot event logs at these natural decision points — not continuously, not o
 | **Before dispatch** | Check target worker health before sending work |
 | **Review routing** | Pick the healthiest available reviewer |
 | **Idle / between tasks** | Proactive fleet health scan |
-| **On BOTREPORT receipt** | Cross-reference report with recent events for context |
+| **On linked-report receipt** | Cross-reference report with recent events for context |
 
 ## Decision Table
 
 | Event type | Source | Manager action |
 |------------|--------|---------------|
 | `activity_stuck` | pulse | Bot has made **no tool call** for longer than its threshold AND keepalive has not classified it as idle (no recent `data/.idle` marker). Uses marker-file mtime comparison, not pane regex. Investigate; restart only if `safe-worker-restart` guards pass. |
-| `overdue_dispatch` | pulse | A task you dispatched to this bot passed its deadline with no terminal `[BOTREPORT]`. Check the bot (cross-reference `activity_stuck`): if hung, recover it; if mis-scoped or wedged, re-dispatch or reassign; if it needs a human, escalate. Don't silently wait. |
+| `overdue_dispatch` | pulse | A task you dispatched to this bot passed its deadline with no terminal linked report. Check the bot (cross-reference `activity_stuck`): if hung, recover it; if mis-scoped or wedged, re-dispatch or reassign; if it needs a human, escalate. Don't silently wait. |
 | `pane_stuck` (>5 min) | pulse | Investigate pane content, restart if confirmed stuck. Note: a live spinner animates the pane, so an animated-but-hung bot shows up as `activity_stuck`, not `pane_stuck`. |
-| `crash_loop` | pulse | The unit is **failing its start over and over** and systemd is already restarting it (`restarts` in the payload is how many times running). **Do NOT restart it** — another restart only zeroes the counter; the unit is enrolled, so `spin-up-bot.sh` is not the fix either. The cause is in the bot's `logs/startup.log` (on 2026-09-23 it was a broken `claude` install, printed on every attempt). Fix the cause, or escalate to the human. Before #1769 this read as "boot in flight" indefinitely and paged no one. |
-| `service_down` | pulse | Re-enroll via `lib/spin-up-bot.sh <bot-dir>` |
-| `session_missing` | pulse | Re-enroll via `lib/spin-up-bot.sh <bot-dir>` |
+| `crash_loop` | pulse | The unit is **failing its start over and over** and systemd is already restarting it (`restarts` in the payload is how many times running). **Do NOT restart it** — another restart only zeroes the counter; the unit is enrolled, so `bot start` is not the fix either. The cause is in the bot's `logs/startup.log` (on 2026-09-23 it was a broken `claude` install, printed on every attempt). Fix the cause, or escalate to the human. Before #1769 this read as "boot in flight" indefinitely and paged no one. |
+| `service_down` | pulse | If the bot is meant to run, the selected manager calls `claudlobby --json bot start BOT_ID` with its literal declared ID; inspect state and readiness. |
+| `session_missing` | pulse | If the bot is meant to run, the selected manager calls `claudlobby --json bot start BOT_ID` with its literal declared ID; inspect state and readiness. |
 | `wip_uncommitted` | pulse | Do NOT restart — task is in flight. **Decide on the payload's `paths`, never on `dirty_files`**: a count cannot separate `M lib/foo.py` from `?? .venv/`, and reading it as a count is what made this alert fire forever and get skipped (#1728). `dirty_tracked`/`dirty_untracked` are facts to read, not a filter — an unadded new source file is untracked and is the unrecoverable case. `unchanged_for_s` is a floor measured from the sweep's first sighting; past ~2h on a source path, check for staleness. |
 | `session_event` | vitals | Informational — log awareness of session lifecycle |
 | `audit_selected` | audit | Informational — the rolling sweep picked this repo as stalest. |
@@ -69,6 +70,14 @@ Read bot event logs at these natural decision points — not continuously, not o
 | `audit_completed` | audit | Informational — the audit finished and filed `auto-audit`-labelled issues. |
 | `audit_failed` | audit | The audit could not dispatch or run. Investigate the owner bot / `gh` auth. |
 
+For `bot start`, `ok: true`, `data.state: "running"`, and
+`data.native_outcome: "observed"` confirm the supervised result;
+`data.readiness` distinguishes an existing session (`current_session_ready`),
+new bridge readiness (`bridge_ready`), and non-channel or intentionally
+tokenless session readiness (`session_ready`). If the CLI refuses or readiness
+is unknown, report the failure and inspect the selected unit and private
+session. Do not fall back to a raw launcher.
+
 ## Active Notifications (push)
 
 Reading events at decision points is the default, but silent stalls — the reason `activity_stuck` exists — are exactly the case where a manager *can't* rely on remembering to poll. So `fleet-pulse.sh` also **pushes** a one-line note into your tmux session for high-severity events (`activity_stuck`, `session_missing`, `service_down`, `crash_loop`), debounced to once per episode:
@@ -77,7 +86,7 @@ Reading events at decision points is the default, but silent stalls — the reas
 [FLEET-PULSE] <bot> activity_stuck — no tool calls for 11400s while not idle (likely hung mid-task)
 ```
 
-Treat a `[FLEET-PULSE]` line like a `[BOTREPORT]`: look up the event in the table above and act. The push tells you *something needs attention*; the decision (investigate, restart, escalate to the human via Telegram) is still yours.
+Treat a `[FLEET-PULSE]` line like a linked report: look up the event in the table above and act. The push tells you *something needs attention*; the decision (investigate, restart, escalate to the human via Telegram) is still yours.
 
 **Not yet captured via hooks:** several fleet-health signals are not derivable from the Claude Code PreToolUse/PostToolUse hook payload. Managers must use live checks for these until the hook schema exposes them:
 
@@ -88,7 +97,8 @@ Treat a `[FLEET-PULSE]` line like a `[BOTREPORT]`: look up the event in the tabl
   this host: `history_size` is **0** on every bot pane while `history-limit`
   reads `2000`, and `capture-pane -S -` returns exactly `pane_height` lines —
   the current frame, with nothing behind it. There is no durable trace either;
-  `lib/transcript-usage.py` measures spend, not position against a ceiling.
+  `claudlobby --json fleet usage --since 24h` reads covered transcript token
+  counts, not position against a provider ceiling.
   **A limit that actually trips announces itself** and needs no instrument —
   that is the signal to act on. Anything short of it is a *sighting*: label it
   as one, use it to raise a question, never as a measurement — the frame is
@@ -129,7 +139,7 @@ that trips; treat everything else as a sighting.
 
 ## Reading Events
 
-Use `claudlobby events` — never a hand-rolled loop over bot directories. This is **not** a fix
+Use `claudlobby event list` — never a hand-rolled loop over bot directories. This is **not** a fix
 for a live break: run verbatim on an armed bot, the loop below still works, including for denied
 siblings — confirmed directly, independently, by two different bots on two different sessions.
 The mechanism (otis, `shared/planning/active/2026-08-27-deny-bypass-probe.md`): the permission
@@ -146,46 +156,44 @@ That is exactly the problem. **It works by accident**, on some permission-matche
 by design — and the same evasion is why it's silent in the reassuring direction if the matcher
 is ever tightened: an event sweep that stops resolving would return no events, indistinguishable
 from a healthy fleet, with no warning that anything changed. Separately from permissions entirely,
-`claudlobby events` is also just the better tool for this: it's the same door `brief.py`'s alerts
+`claudlobby event list` is also just the better tool for this: it's the same door `brief.py`'s alerts
 section already consumes, and it adds type/critical filtering and coverage-honesty disclosure a
 hand-rolled loop doesn't have.
 
 Tail today's events across the fleet:
 
 ```bash
-claudlobby --fleet "$FLEET_NAME" events --tail 50
+claudlobby --json event list --limit 50
 ```
 
-Scope to one bot — e.g. before dispatch, or cross-referencing a `[BOTREPORT]`:
+Scope to one bot — e.g. before dispatch, or cross-referencing a linked report:
 
 ```bash
-claudlobby --fleet "$FLEET_NAME" events --bot "$BOT_NAME" --tail 20
+claudlobby --json event list --bot "$BOT_NAME" --limit 20
 ```
 
 Filter for actionable events:
 
 ```bash
-claudlobby --fleet "$FLEET_NAME" events --critical --tail 200
+claudlobby --json event list --critical --limit 200
 ```
 
-**Always pass an explicit `--tail` with `--critical`.** `--tail` defaults to 50 and `--critical`
-inherits that default silently — the output states no bound and gives no hint that anything was
-dropped. Measured: the same query returned 50 rows at the default and 500 at `--tail 500`, with
-no disclosure either way. That is the exact silent-cap shape this codebase's own coverage-honesty
-discipline forbids, sitting in a shipped door; treat the default as unsafe until it's fixed
-upstream and always size `--tail` explicitly instead of relying on it.
+**Always inspect `data.next_cursor` before claiming a complete sweep.** `--limit`
+defaults to 50; a nonempty cursor means more matching events remain. Continue
+with `--cursor TOKEN` and the same filters. Set an explicit limit when scanning
+a large window.
 
-**`--critical` also does not cover every actionable type in the decision table above.** It matches a
-fixed, hand-maintained set (`session_missing`, `service_down`, `activity_stuck`, `script_error`,
+**`--critical` also does not cover every actionable type in the decision table above.** It follows
+the Plane severity registry (`session_missing`, `service_down`, `activity_stuck`, `script_error`,
 `overdue_dispatch`, `bridge_down`, `reload_failed`, `restart_failed`, `rc_timeout`, `crash_loop`) that omits
 `pane_stuck`, `wip_uncommitted`, `sweep_repo_unreachable`, and `audit_failed` — all actionable per
 the table above. Same hand-maintained-list gap `brief.py`'s alerts section already discloses
 (#903); this protocol inherits it rather than reintroducing it. Until #903 closes, pair
-`--critical` with either a periodic unfiltered `--tail N` sweep, or explicit per-type calls:
+`--critical` with either a periodic unfiltered `--limit N` sweep, or explicit per-type calls:
 
 ```bash
 for t in pane_stuck wip_uncommitted sweep_repo_unreachable audit_failed; do
-    claudlobby --fleet "$FLEET_NAME" events --type "$t" --tail 10
+    claudlobby --json event list --type "$t" --limit 10
 done
 ```
 
@@ -194,13 +202,13 @@ so it is unaffected by path-scoped deny rules regardless of arming.)
 
 ## Cross-Fleet Reads
 
-A top-level manager can read any bot's events across sub-fleets. Use `claudlobby events` with
-`--fleet` rather than reading the sibling fleet's bot directories directly — same reasoning as
-above, and it works the same way whether or not the target fleet has armed.
+A cross-fleet event read requires an operator shell with an explicit `--fleet` selector;
+the generated manager grant is scoped to its own fleet. Use `claudlobby event list` rather
+than reading the sibling fleet's bot directories directly.
 
 ```bash
-# Read events for a bot in a different fleet
-claudlobby --fleet "other-fleet" events --bot "some-bot" --tail 20
+# Operator shell: read events for a bot in a different fleet
+claudlobby --fleet "other-fleet" --json event list --bot "some-bot" --limit 20
 ```
 
 ## Retention
@@ -219,9 +227,9 @@ bots:
   worker-bot:
     hooks:
       PreToolUse:
-        - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"
+        - command: "$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh"
       PostToolUse:
-        - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"
+        - command: "$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh"
 ```
 
 Workers emit events but never read them. Managers read events but hooks are optional on them (useful if the manager also does tool work).

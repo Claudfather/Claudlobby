@@ -18,7 +18,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 
 def _load():
     spec = importlib.util.spec_from_file_location(
-        "vault_git_base_rate", _ROOT / "lib" / "vault-git-base-rate.py")
+        "vault_git_base_rate", _ROOT / "harness" / "vault-git-base-rate.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -48,7 +48,7 @@ class TestTheDenominatorIsIndependentOfTheGuard:
         blind spot is a quoted body, which tokenizes as one string. Pinned in
         both directions because an over-stated blind spot argues for changes the
         guard does not need, and an under-stated one hides the ceiling."""
-        guard = bx._load_guard(_ROOT / "lib")
+        guard = bx._load_guard(_ROOT / "claudlobby/_runtime_scripts")
         for seen in ('git checkout main',
                      'X=$(git checkout main)',
                      'echo a | xargs git reset --hard'):
@@ -68,7 +68,7 @@ class TestTheDefectsThatProducedTheWrongReadings:
 
     def test_a_grep_FOR_a_git_string_is_not_an_invocation(self, bx):
         assert not bx._is_state_changing(bx._strip_heredocs(
-            "grep -rn 'git push' lib/"))
+            "grep -rn 'git push' claudlobby/_runtime_scripts/"))
 
     def test_a_READ_ONLY_conditional_verb_is_not_state_changing(self, bx):
         """Reading 2, 82.8%: `branch`/`commit`/`push`/`pull` are dangerous only
@@ -115,7 +115,7 @@ class TestTheDefectsThatProducedTheWrongReadings:
         same as `git branch -D` -- every safe bare use of a conditional verb
         inflated the numerator, which inflates the rate. The denominator
         already got this right (reading 3); the numerator never did."""
-        guard = bx._load_guard(_ROOT / "lib")
+        guard = bx._load_guard(_ROOT / "claudlobby/_runtime_scripts")
         for safe in ('git branch -v',
                      'git branch --show-current',
                      'git commit -m "ordinary"',
@@ -126,7 +126,7 @@ class TestTheDefectsThatProducedTheWrongReadings:
     def test_the_same_conditional_verbs_STILL_count_with_their_flag(self, bx):
         """The other half -- without this the previous test is satisfied by a
         rule that stopped seeing CONDITIONAL verbs at all."""
-        guard = bx._load_guard(_ROOT / "lib")
+        guard = bx._load_guard(_ROOT / "claudlobby/_runtime_scripts")
         for dangerous in ('git branch -D old-thing',
                            'git commit --amend --no-edit',
                            'git push --force origin main',

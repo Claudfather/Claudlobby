@@ -1,4 +1,4 @@
-"""App-auth P2 (#1272): lib/github-app-mcp-wrapper.py behavioral battery.
+"""App-auth P2 (#1272): claudlobby/_runtime_scripts/github-app-mcp-wrapper.py behavioral battery.
 
 Real wrapper under subprocess; the mint CLI and the npx child are stubs on a
 private PATH (Lane-A). The child stub appends the token it received per
@@ -25,7 +25,7 @@ from pathlib import Path
 from tests.conftest import _write_exec, booby_trap_git, constructed_env
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-WRAPPER = REPO_ROOT / "lib" / "github-app-mcp-wrapper.py"
+WRAPPER = REPO_ROOT / "claudlobby/_runtime_scripts" / "github-app-mcp-wrapper.py"
 
 
 def _stub_mint(bindir: Path) -> Path:

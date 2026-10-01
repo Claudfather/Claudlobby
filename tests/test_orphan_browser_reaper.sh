@@ -14,8 +14,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB_DIR="$SCRIPT_DIR/../lib"
-REAPER="$LIB_DIR/orphan-browser-reaper.sh"
+LIB_DIR="$SCRIPT_DIR/../claudlobby/_runtime_scripts"
 PASS=0; FAIL=0; TOTAL=0
 
 assert_eq() {
@@ -28,15 +27,25 @@ assert_eq() {
 }
 
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
-mkdir -p "$T/bin" "$T/root/lib"
+mkdir -p "$T/bin" "$T/native" "$T/root/state/logs"
+for helper in orphan-browser-reaper.sh lib-common.sh supervisor.sh cli-context.sh plane-emit.sh plane-socket-client.py; do
+    if [ "$helper" = plane-socket-client.py ]; then
+        # Resolve the shared policy beside the real client, as an installed pair.
+        ln -s "$LIB_DIR/$helper" "$T/native/$helper"
+    else
+        cp "$LIB_DIR/$helper" "$T/native/$helper"
+    fi
+done
+REAPER="$T/native/orphan-browser-reaper.sh"
 ROOT="$T/root"
-LOG="$ROOT/lib/orphan-browser-reaper.log"
+LOG="$ROOT/state/logs/orphan-browser-reaper.log"
 
 # Stub ps. Two call shapes must be told apart:
 #   ps -o ppid= -p <pid>                       (ancestor walk) -> empty, ends the walk
 #   ps -u <user> -o pid=,ppid=,etime=,rss=,comm=  (the snapshot) -> $PSTABLE
 cat > "$T/bin/ps" <<'STUB'
 #!/bin/bash
+printf '%s\n' "$*" >> "${PS_CALLS:-/dev/null}"
 for a in "$@"; do
     if [ "$a" = "-p" ]; then exit 0; fi
 done
@@ -44,15 +53,20 @@ printf '%s\n' "${PSTABLE:-}"
 STUB
 # Stub the alert path so a regression can never reach a real session/token.
 printf '#!/bin/bash\nexit 0\n' > "$T/bin/tmux"
-printf '#!/bin/bash\nexit 0\n' > "$T/bin/tg-post.sh"
-chmod +x "$T/bin/ps" "$T/bin/tmux" "$T/bin/tg-post.sh"
+printf '#!/bin/bash\nexit 0\n' > "$T/native/tg-post.sh"
+cat > "$T/bin/uname" <<'STUB'
+#!/bin/bash
+printf '%s\n' "${TEST_UNAME:-Linux}"
+STUB
+chmod +x "$T/bin/ps" "$T/bin/tmux" "$T/bin/uname" "$T/native/tg-post.sh"
 
 # run_case <ps-table> [extra args...] -> log text on stdout
 run_case() {
     local table="$1"; shift
     : > "$LOG"
-    env -i HOME="$T" PATH="$T/bin:/usr/bin:/bin" CLAUDLOBBY_ROOT="$ROOT" \
-        PSTABLE="$table" \
+    : > "$T/ps-calls"
+    env -i PLANE_EMIT_DISABLED=1 HOME="$T" PATH="$T/bin:/usr/bin:/bin" CLAUDLOBBY_ROOT="$ROOT" \
+        PSTABLE="$table" TEST_UNAME="${TEST_UNAME:-Linux}" PS_CALLS="$T/ps-calls" \
         bash "$REAPER" --dry-run "$@" >/dev/null 2>&1 || true
     cat "$LOG"
 }
@@ -101,10 +115,32 @@ assert_eq "chrome-notes.sh is NOT selected"  no "$(selected "$out" 4030)"
 assert_eq "playwright-tests is NOT selected" no "$(selected "$out" 4031)"
 assert_eq "not-chromium is NOT selected"     no "$(selected "$out" 4032)"
 
-# --- 5. macOS reports comm as a full path, sometimes with spaces -------------
+# --- 5. launchd ancestry cannot prove a browser is orphaned ------------------
+# On the real host, the former ppid=1 rule selected desktop Google Chrome,
+# ChatGPT for Chrome and crashpad helpers. Even --pattern must not re-arm it.
 TABLE_MACOS=' 4040     1 10:00:00 512000 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
-out=$(run_case "$TABLE_MACOS")
-assert_eq "macOS full-path comm matches on its basename" yes "$(selected "$out" 4040)"
+out=$(TEST_UNAME=Darwin run_case "$TABLE_MACOS" --pattern '.*')
+assert_eq "Darwin desktop Chrome is never selected" no "$(selected "$out" 4040)"
+case "$out" in
+    *"Darwin"*"disabled"*) assert_eq "Darwin no-op is diagnosed" yes yes ;;
+    *)                       assert_eq "Darwin no-op is diagnosed" yes no ;;
+esac
+assert_eq "Darwin no-op does not inspect the process table" "" "$(cat "$T/ps-calls")"
+
+# The scheduled job does not pass --dry-run. Exercise that path too with a
+# nonexistent pid, so even a regression cannot signal a real desktop process.
+: > "$LOG"
+: > "$T/ps-calls"
+env -i PLANE_EMIT_DISABLED=1 HOME="$T" PATH="$T/bin:/usr/bin:/bin" CLAUDLOBBY_ROOT="$ROOT" \
+    PSTABLE=' 99999999 1 10:00:00 512000 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome' \
+    TEST_UNAME=Darwin PS_CALLS="$T/ps-calls" \
+    bash "$REAPER" --pattern '.*' >/dev/null 2>&1
+out=$(cat "$LOG")
+case "$out" in
+    *"Darwin"*"disabled"*) assert_eq "Darwin scheduled run is a diagnosed no-op" yes yes ;;
+    *)                       assert_eq "Darwin scheduled run is a diagnosed no-op" yes no ;;
+esac
+assert_eq "Darwin scheduled run does not inspect processes" "" "$(cat "$T/ps-calls")"
 
 # --- 6. descendants go with the root ----------------------------------------
 # The #807 leak was 18 processes in one tree. Renderers/crashpad helpers point at

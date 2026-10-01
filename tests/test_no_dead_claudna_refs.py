@@ -3,7 +3,7 @@
 The clauDNA #165 consolidation collapsed the hyphenated skills into positional
 multiplexers (``/claudna:audit security``, ``/claudna:session handoff``, …)
 with no aliases. Library fragments compose into live bot CLAUDE.md files and
-lib/ scripts inject skill keystrokes into live sessions, so a dead name here
+claudlobby/_runtime_scripts/ scripts inject skill keystrokes into live sessions, so a dead name here
 becomes a dead runtime affordance in every fleet. Both the plugin-namespaced
 form (``/claudna:security-audit``) and the bare doc-idiom form
 (``/security-audit``) are banned.
@@ -21,7 +21,7 @@ SCAN_GLOBS = (
     ("library", "*.md"),
     ("documentation", "*.md"),
     ("templates", "*.j2"),
-    ("lib", "*.sh"),
+    ("claudlobby/_runtime_scripts", "*.sh"),
 )
 
 # Files allowed to keep /snowflake-* refs only: snowflake skills have no

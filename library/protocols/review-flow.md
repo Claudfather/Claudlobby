@@ -10,7 +10,7 @@ For every PR:
 2. Read the diff with that in mind. Does the code actually do what's claimed?
 3. **Mutation-test the assertions.** If the PR claims "fixes bug X," mentally revert the fix — would tests still pass? Yes → tests are decoys.
 4. Check for: scope creep, missing tests, dead code, naming clarity, error handling at boundaries.
-5. Post a verdict comment with a first-line marker: bracket-tag your identity and anchor the commit you reviewed — `lib/pr-review-state.py` reads this header to attribute the verdict and tell whether it's still live against a moved head:
+5. Post a verdict comment with a first-line marker: bracket-tag your identity and anchor the commit you reviewed. Record the review-role fleet report; `claudlobby --json task reviews OWNER/REPO --pr N` matches that evidence and checks the verdict against the current head:
    - `**[alex] [VERDICT] ship it** — reviewed at a1b2c3d` — approve
    - `**[alex] [VERDICT] mechanical fixes** — reviewed at a1b2c3d` — small, obvious
    - `**[alex] [VERDICT] request changes** — reviewed at a1b2c3d` — substantive, must address

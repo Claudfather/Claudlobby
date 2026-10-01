@@ -30,9 +30,10 @@ from claudlobby.config import BotConfig, FleetConfig
 def _setup(tmp_path: Path):
     root = tmp_path / "claudlobby"
     (root / "runtime" / "bots").mkdir(parents=True)
+    from tests.package_fixtures import source_package
     from claudlobby.paths import Paths
 
-    return root, Paths(root=root, fleet_dir=root)
+    return root, Paths(root=root, fleet_dir=root, package=source_package())
 
 
 def _write_skill(root: Path, name: str, fm: str = "") -> None:
@@ -53,7 +54,9 @@ def _bot(bot_id: str = "w", **kw) -> BotConfig:
 
 
 def _single_bot_fleet(bot: BotConfig) -> FleetConfig:
-    return FleetConfig(name="t", service_prefix="p", bots={bot.bot_id: bot})
+    return FleetConfig(
+        name="t", service_prefix="p", manager=bot.bot_id, bots={bot.bot_id: bot}
+    )
 
 
 # ── _resolve_skill_grants — additive tool_grants from equipped skills ──
@@ -162,7 +165,7 @@ class TestComposeWiresNewLayers:
     def _sibling_deny(self, tmp_path):
         root, paths = _setup(tmp_path)
         bots = {b: _bot(b) for b in ("bot-a", "bot-b")}
-        fleet = FleetConfig(name="t", service_prefix="p", bots=bots)
+        fleet = FleetConfig(name="t", service_prefix="p", manager="bot-b", bots=bots)
         deny = compose_settings_local(bots["bot-a"], fleet, paths)["permissions"][
             "deny"
         ]

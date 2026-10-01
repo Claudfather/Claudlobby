@@ -245,7 +245,7 @@ def cmd_lessons_migrate(args) -> int:
     plan = build_capture_plan(lessons_dir, fleet=fleet)
     tier = f"fleet '{fleet}'" if fleet else "_shared/"
 
-    log.info("=== lessons-migrate plan ===")
+    log.info("=== migration lessons plan ===")
     log.info("lessons dir: %s", lessons_dir)
     log.info("target tier: %s", tier)
     log.info(

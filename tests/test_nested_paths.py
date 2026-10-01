@@ -15,7 +15,9 @@ the flat assertions guard against regression.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -23,12 +25,13 @@ import pytest
 from claudlobby.__main__ import main
 from claudlobby.commands._helpers import _resolve_paths
 from claudlobby.config import load_fleet
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths, _find_fleet_dir
 from claudlobby.validator import validate
 
 
 def _make_root(base: Path) -> Path:
-    """A claudlobby root carrying the detection markers (library/ + lib/)."""
+    """A claudlobby root carrying the detection markers (library/ + claudlobby/_runtime_scripts/)."""
     root = base / "claudlobby"
     (root / "library").mkdir(parents=True)
     (root / "lib").mkdir()
@@ -46,13 +49,36 @@ def test_nested_fleet_resolves_one_level_under_a_system_container(tmp_path: Path
     nested.mkdir(parents=True)
     (nested / "fleet.yaml").write_text("fleet:\n  name: fleetA\n")
 
-    paths = Paths.detect(hint=root, fleet="fleetA")
+    paths = Paths.detect(hint=root, fleet="fleetA", package=source_package())
 
     assert paths.fleet_dir == nested
     assert paths.fleet_yaml == nested / "fleet.yaml"
     assert paths.runtime == nested / "runtime"
     assert paths.shared_docs == nested / "shared"
     assert paths.bot_runtime("botA") == nested / "runtime" / "bots" / "botA"
+
+
+def test_native_fleet_resolution_keeps_flat_priority_and_unique_nested_owner(tmp_path: Path):
+    root = _make_root(tmp_path)
+    lib = Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts/lib-common.sh"
+
+    def resolve(command):
+        return subprocess.run(["/bin/bash", "-c", '. "$1"; "$2" fleetA', "test", str(lib), command],
+                              env={**os.environ, "CLAUDLOBBY_ROOT": str(root)},
+                              capture_output=True, text=True)
+
+    nested = root / "local/sys1/fleetA"
+    nested.mkdir(parents=True)
+    (nested / "fleet.yaml").write_text("fleet:\n  name: fleetA\n")
+    assert resolve("resolve_fleet_dir").stdout.strip() == str(nested)
+    assert resolve("resolve_bots_dir").stdout == str(nested / "runtime/bots")
+    second = root / "local/sys2/fleetA"
+    second.mkdir(parents=True)
+    (second / "fleet.yaml").write_text("fleet:\n  name: fleetA\n")
+    assert resolve("resolve_fleet_dir").returncode == 1
+    flat = root / "local/fleetA"
+    flat.mkdir()
+    assert resolve("resolve_fleet_dir").stdout.strip() == str(flat)
 
 
 def test_flat_fleet_resolves_at_depth_one(tmp_path: Path):
@@ -62,7 +88,7 @@ def test_flat_fleet_resolves_at_depth_one(tmp_path: Path):
     flat.mkdir(parents=True)
     (flat / "fleet.yaml").write_text("fleet:\n  name: fleetX\n")
 
-    paths = Paths.detect(hint=root, fleet="fleetX")
+    paths = Paths.detect(hint=root, fleet="fleetX", package=source_package())
 
     assert paths.fleet_dir == flat
     assert paths.fleet_yaml == flat / "fleet.yaml"
@@ -81,7 +107,7 @@ def test_flat_bare_dir_without_fleet_yaml_still_resolves(tmp_path: Path):
     bare = root / "local" / "bare-fleet"
     bare.mkdir(parents=True)
 
-    paths = Paths.detect(hint=root, fleet="bare-fleet")
+    paths = Paths.detect(hint=root, fleet="bare-fleet", package=source_package())
 
     assert paths.fleet_dir == bare
 
@@ -92,7 +118,7 @@ def test_unknown_fleet_still_raises_filenotfound(tmp_path: Path):
     (root / "local").mkdir()
 
     with pytest.raises(FileNotFoundError, match="Fleet overlay not found"):
-        Paths.detect(hint=root, fleet="ghost")
+        Paths.detect(hint=root, fleet="ghost", package=source_package())
 
 
 # --- (c): the cross-fleet collision scan sees a NESTED sibling fleet ---
@@ -123,7 +149,7 @@ def test_collision_scan_sees_a_nested_fleet(fleet_dir, monkeypatch):
     (other_bots / "bot.conf").write_text("BOT_NAME=lead\n")
 
     fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-    report = validate(fleet, Paths(root=fleet_dir, fleet_dir=my_fleet))
+    report = validate(fleet, Paths(root=fleet_dir, fleet_dir=my_fleet, package=source_package()))
 
     assert any(
         "lead" in w and "other-fleet" in w and "collide" in w
@@ -144,7 +170,7 @@ def test_collision_scan_flat_sibling_unchanged(fleet_dir, monkeypatch):
     (other_bots / "bot.conf").write_text("BOT_NAME=lead\n")
 
     fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-    report = validate(fleet, Paths(root=fleet_dir, fleet_dir=my_fleet))
+    report = validate(fleet, Paths(root=fleet_dir, fleet_dir=my_fleet, package=source_package()))
 
     assert any(
         "lead" in w and "other-fleet" in w and "collide" in w
@@ -166,7 +192,7 @@ def test_name_at_both_depths_raises_global_unique_violation(tmp_path: Path):
     (nested / "fleet.yaml").write_text("fleet:\n  name: dup\n")
 
     with pytest.raises(ValueError, match="globally unique"):
-        Paths.detect(hint=root, fleet="dup")
+        Paths.detect(hint=root, fleet="dup", package=source_package())
 
 
 # --- F5 husk tolerance: a bare flat husk must yield to a real nested fleet ---
@@ -253,7 +279,7 @@ def test_detect_falls_back_to_root_mode_when_fleet_names_root_manifest(
     root = _make_root(tmp_path)
     (root / "fleet.yaml").write_text("fleet:\n  name: solo\n")
 
-    paths = Paths.detect(hint=root, fleet="solo")
+    paths = Paths.detect(hint=root, fleet="solo", package=source_package())
 
     assert paths.fleet_dir is None
     assert paths.fleet_yaml == root / "fleet.yaml"
@@ -267,7 +293,7 @@ def test_detect_still_refuses_a_different_fleet_name(tmp_path: Path):
     (root / "fleet.yaml").write_text("fleet:\n  name: solo\n")
 
     with pytest.raises(FileNotFoundError, match="Fleet overlay not found"):
-        Paths.detect(hint=root, fleet="other")
+        Paths.detect(hint=root, fleet="other", package=source_package())
 
 
 def test_overlay_wins_when_root_manifest_also_names_the_fleet(tmp_path: Path):
@@ -280,7 +306,7 @@ def test_overlay_wins_when_root_manifest_also_names_the_fleet(tmp_path: Path):
     overlay.mkdir(parents=True)
     (overlay / "fleet.yaml").write_text("fleet:\n  name: shared\n")
 
-    paths = Paths.detect(hint=root, fleet="shared")
+    paths = Paths.detect(hint=root, fleet="shared", package=source_package())
 
     assert paths.fleet_dir == overlay
 
@@ -293,7 +319,7 @@ def test_root_manifest_malformed_yaml_still_refuses(tmp_path: Path):
     (root / "fleet.yaml").write_text("fleet: [this is not a mapping\n")
 
     with pytest.raises(FileNotFoundError, match="Fleet overlay not found"):
-        Paths.detect(hint=root, fleet="solo")
+        Paths.detect(hint=root, fleet="solo", package=source_package())
 
 
 def test_root_manifest_without_fleet_name_still_refuses(tmp_path: Path):
@@ -303,12 +329,12 @@ def test_root_manifest_without_fleet_name_still_refuses(tmp_path: Path):
     (root / "fleet.yaml").write_text("fleet:\n  service_prefix: com.test\n")
 
     with pytest.raises(FileNotFoundError, match="Fleet overlay not found"):
-        Paths.detect(hint=root, fleet="solo")
+        Paths.detect(hint=root, fleet="solo", package=source_package())
 
     (root / "fleet.yaml").write_text("not_fleet: true\n")
 
     with pytest.raises(FileNotFoundError, match="Fleet overlay not found"):
-        Paths.detect(hint=root, fleet="solo")
+        Paths.detect(hint=root, fleet="solo", package=source_package())
 
 
 def test_detect_root_fallback_logs_an_info_line(tmp_path: Path, caplog):
@@ -318,7 +344,7 @@ def test_detect_root_fallback_logs_an_info_line(tmp_path: Path, caplog):
     (root / "fleet.yaml").write_text("fleet:\n  name: solo\n")
 
     with caplog.at_level(logging.INFO):
-        Paths.detect(hint=root, fleet="solo")
+        Paths.detect(hint=root, fleet="solo", package=source_package())
 
     assert "solo" in caplog.text
     assert "root mode" in caplog.text
@@ -359,8 +385,8 @@ def test_end_to_end_root_flag_own_name_runs_like_bare_call(fleet_dir, monkeypatc
     local/<fleet>/ overlay) named 'test-fleet'."""
     _prime_tokens(monkeypatch)
 
-    bare_rc = main(["--root", str(fleet_dir), "validate"])
-    named_rc = main(["--root", str(fleet_dir), "--fleet", "test-fleet", "validate"])
+    bare_rc = main(["--root", str(fleet_dir), "config", "validate"])
+    named_rc = main(["--root", str(fleet_dir), "--fleet", "test-fleet", "config", "validate"])
 
     assert bare_rc == 0
     assert named_rc == 0

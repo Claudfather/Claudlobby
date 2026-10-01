@@ -1,12 +1,12 @@
 ---
 name: add-bot
-description: "Conversational bot creation. Collects requirements interactively, runs claudlobby new-bot, generates, enrolls, and verifies."
+description: "Conversational bot creation. Authors one bot, then stages and activates the reviewed fleet configuration."
 argument-hint: "[--fleet <name>] [--name <bot-name>]"
 ---
 
 # Add Bot
 
-Guide the user through adding a new bot to their fleet. Collect requirements conversationally, scaffold the bot via `claudlobby new-bot`, generate, enroll, and verify.
+Guide the user through adding a new bot to their fleet. Collect requirements conversationally, author the bot via `claudlobby bot create`, then stage and activate the reviewed fleet configuration.
 
 ## Procedure
 
@@ -17,10 +17,10 @@ Ask the user (or parse from arguments if provided). Do not dump all questions at
 - **Bot name** — lowercase, alphanumeric + hyphens. Suggest a name based on the described role if the user does not have one.
 - **What should the bot do?** — Map to expertise areas from `library/expertise/`. List available options:
   ```bash
-  ls {{CLAUDLOBBY_ROOT}}/library/expertise/
+  claudlobby library list
   ```
   Read frontmatter descriptions to help the user choose.
-- **What personality?** — List voices from `{{CLAUDLOBBY_ROOT}}/voices/` if available. Preview a sample line from each voice file so the user can pick. Voice is optional.
+- **What personality?** — Use the voices listed by `claudlobby library list`, which includes the selected package and fleet overlay. Voice is optional.
 - **What model?** — sonnet for cost-efficiency, opus for complex tasks. Default: inherit from fleet defaults.
 - **What repos should it work on?** — These become `scope.repos` in the bot's fleet.yaml stanza.
 - **Does it need Telegram?** — If yes, guide through @BotFather setup (see Step 3).
@@ -29,15 +29,15 @@ Provide sensible defaults based on the described role. A code-review bot default
 
 ### Step 2: Create the bot
 
-Run `claudlobby new-bot` with the collected inputs. This appends a bot stanza to fleet.yaml.
+Run `claudlobby bot create` with the collected inputs. This authors a bot stanza in fleet.yaml without generating or enrolling a runtime bot.
 
 ```bash
-claudlobby new-bot
+claudlobby bot create --interactive
 # Or with fleet overlay:
-claudlobby --fleet <name> new-bot
+claudlobby --fleet <name> bot create --interactive
 ```
 
-If `new-bot` prompts interactively, feed the collected answers. Verify the new stanza was appended to fleet.yaml by reading the file afterward.
+For a noninteractive invocation, provide `--name`, `--expertise` and `--yes` (or `--dry-run`). Verify the new stanza in fleet.yaml afterward.
 
 ### Step 3: Telegram setup (if applicable)
 
@@ -55,36 +55,32 @@ Guide the user through creating a Telegram bot:
 
 If the user does not have a Telegram token yet, that is fine. The bot can be started without Telegram and configured later.
 
-### Step 4: Generate
+### Step 4: Stage and hand off activation
 
 ```bash
-claudlobby generate
-# Or with fleet overlay:
-claudlobby --fleet <name> generate
+claudlobby --root <data-root> config plan --release <release-id>
+claudlobby --root <data-root> config diff <plan-id>
 ```
 
-Verify the new bot's directory was created under `runtime/bots/<name>/` (or `local/<fleet>/runtime/bots/<name>/`).
-
-### Step 5: Enroll and start
+Review the plan, then give the operator the plan ID and this exact command to run from an operator shell outside the generated bot session:
 
 ```bash
-{{CLAUDLOBBY_ROOT}}/lib/spin-up-bot.sh <bot-dir>
+claudlobby --root <data-root> host activate <plan-id> --install-directory <user-unit-directory>
 ```
 
-This is idempotent -- it enrolls the bot as a supervised service and starts it.
+Activation owns composition and native enrollment; `bot create` only writes source. Verify the selected bot through `claudlobby --fleet <name> bot status <bot-name>` afterward.
 
-### Step 6: Verify
+### Step 5: Verify
 
-1. Check tmux session exists: `tmux has-session -t <bot-name>`
-2. Check service is registered: `systemctl --user is-active <bot-name>` (Linux) or `launchctl list | grep <bot-name>` (macOS)
-3. If Telegram is configured, confirm the bot responds to a test prompt.
+1. Inspect `claudlobby --fleet <name> bot status <bot-name>` for the selected bot's native and session state.
+2. If Telegram is configured, confirm the bot responds to a test prompt.
 
 ## Instructions
 
 1. Guide conversationally. Ask one or two questions at a time, not all at once.
 2. Provide sensible defaults based on the described role.
 3. If the user does not have a Telegram token yet, skip Step 3 and note they can configure it later.
-4. After spin-up, poll for the bot's tmux session readiness (look for the session to exist and the pane to show activity).
+4. After activation, check the bot's native enrollment and session readiness before reporting it as running.
 5. Report success with the new bot's name, expertise, model, and directory path.
 
 $ARGUMENTS

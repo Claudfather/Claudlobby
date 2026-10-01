@@ -1,0 +1,66 @@
+gui/501/com.fixture.observed = {
+	active count = 0
+	path = <redacted>
+	type = LaunchAgent
+	state = not running
+
+	program = <redacted>
+	arguments = {
+		<redacted>
+		<redacted>
+	}
+
+	working directory = <redacted>
+
+	inherited environment = {
+		SSH_AUTH_SOCK => <redacted>
+	}
+
+	default environment = {
+		PATH => <redacted>
+	}
+
+	environment = {
+		OSLogRateLimit => <redacted>
+		CLAUDLOBBY_FLEET => <redacted>
+		PATH => <redacted>
+		PLANE_EMIT_ENABLED => <redacted>
+		CLAUDLOBBY_ROOT => <redacted>
+		TELEGRAM_GROUP_CHAT_ID => <redacted>
+		XPC_SERVICE_NAME => <redacted>
+	}
+
+	domain = <redacted>
+	asid = <redacted>
+	minimum runtime = 10
+	exit timeout = 5
+	runs = 8508
+	last exit code = 0
+
+	resource coalition = {
+		ID = <redacted>
+		type = resource
+		state = active
+		active count = 1
+		name = <redacted>
+	}
+
+	jetsam coalition = {
+		ID = <redacted>
+		type = jetsam
+		state = active
+		active count = 1
+		name = <redacted>
+	}
+
+	spawn type = <redacted>
+	jetsam priority = <redacted>
+	jetsam memory limit (active) = <redacted>
+	jetsam memory limit (inactive) = <redacted>
+	jetsamproperties category = <redacted>
+	jetsam thread limit = <redacted>
+	cpumon = <redacted>
+	run interval = <redacted>
+
+	properties = <redacted>
+}

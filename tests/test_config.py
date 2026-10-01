@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from textwrap import dedent
 
 import pytest
+import yaml
 
 from claudlobby.config import (
     DEFAULT_MARKETPLACES,
@@ -13,11 +15,87 @@ from claudlobby.config import (
     AutonomousRunnerBypass,
     AutonomousRunnerConfig,
     AutonomousRunnerPicker,
+    FleetConfig,
     _coerce_bot,
     _coerce_plugins,
     load_fleet,
 )
 from claudlobby.path_audit import ExternalDecl
+
+
+class TestFleetManager:
+    @staticmethod
+    def _raw():
+        return {
+            "name": "manager-contract",
+            "manager": "lead",
+            "bots": {
+                "lead": {"expertise": ["orchestration"], "manages": ["worker"]},
+                "worker": {"expertise": ["software-engineering"]},
+                "coordinator": {
+                    "expertise": ["orchestration"],
+                    "manages": ["other-fleet-manager"],
+                },
+            },
+            "teams": {"engineering": {"manager": "lead", "workers": ["worker"]}},
+        }
+
+    @staticmethod
+    def _load(tmp_path, raw):
+        manifest = tmp_path / "fleet.yaml"
+        manifest.write_text(yaml.safe_dump({"fleet": raw}))
+        return load_fleet(manifest)[0]
+
+    def test_missing_manager_is_not_inferred_from_teams_or_manages(self, tmp_path):
+        raw = self._raw()
+        del raw["manager"]
+        with pytest.raises(ValueError, match="fleet.manager is required"):
+            self._load(tmp_path, raw)
+
+    @pytest.mark.parametrize("manager", [None, "", " ", True, 42, ["lead"], {}, "missing"])
+    def test_manager_must_name_one_existing_local_bot(self, tmp_path, manager):
+        raw = self._raw()
+        raw["manager"] = manager
+        with pytest.raises(ValueError, match="fleet.manager"):
+            self._load(tmp_path, raw)
+
+    def test_team_cannot_introduce_a_competing_manager(self, tmp_path):
+        raw = self._raw()
+        raw["teams"]["engineering"]["manager"] = "coordinator"
+        with pytest.raises(ValueError, match="must match fleet.manager 'lead'"):
+            self._load(tmp_path, raw)
+
+    def test_direct_model_construction_also_rejects_an_absent_manager(self):
+        with pytest.raises(ValueError, match="not in fleet.bots"):
+            FleetConfig(name="manager-contract", service_prefix="test", manager="missing")
+
+    def test_reporting_metadata_does_not_grant_fleet_task_ownership(self, tmp_path):
+        fleet = self._load(tmp_path, self._raw())
+        assert fleet.manager == "lead"
+        assert fleet.manager_bots() == {"lead"}
+        assert fleet.leaf_manager_bots() == {"lead"}
+        assert fleet.bots["coordinator"].manages == ["other-fleet-manager"]
+
+    def test_local_workers_need_no_redundant_team_or_reporting_edges(self, tmp_path):
+        raw = self._raw()
+        del raw["teams"]
+        del raw["bots"]["lead"]["manages"]
+        fleet = self._load(tmp_path, raw)
+        assert fleet.manager_bots() == fleet.leaf_manager_bots() == {"lead"}
+
+    def test_singleton_cross_fleet_coordinator_is_not_a_leaf_manager(self, tmp_path):
+        raw = self._raw()
+        raw["manager"] = "coordinator"
+        raw["bots"] = {"coordinator": raw["bots"]["coordinator"]}
+        del raw["teams"]
+        fleet = self._load(tmp_path, raw)
+        assert fleet.manager_bots() == {"coordinator"}
+        assert fleet.leaf_manager_bots() == set()
+
+    @pytest.mark.parametrize("template", ["fleet.yaml.seed", "fleet.yaml.example"])
+    def test_cold_fleet_templates_declare_a_local_manager(self, template):
+        fleet, _ = load_fleet(Path(__file__).resolve().parents[1] / template)
+        assert fleet.manager in fleet.bots
 
 
 class TestCoercePlugins:
@@ -769,6 +847,7 @@ class TestObservabilityConfig:
             dedent("""\
                 fleet:
                   name: test-fleet
+                  manager: lead
                   service_prefix: com.test
                   defaults:
                     observability:
@@ -802,6 +881,7 @@ class TestGitCredentialsParsing:
             dedent(f"""\
                 fleet:
                   name: test-fleet
+                  manager: lead
                   service_prefix: com.test
                   bots:
                     lead:
@@ -819,6 +899,7 @@ class TestGitCredentialsParsing:
             dedent("""\
                 fleet:
                   name: test-fleet
+                  manager: lead
                   service_prefix: com.test
                   defaults:
                     git_credentials:
@@ -843,6 +924,7 @@ class TestGitCredentialsParsing:
             dedent("""\
                 fleet:
                   name: test-fleet
+                  manager: lead
                   service_prefix: com.test
                   defaults:
                     git_credentials:
@@ -903,6 +985,7 @@ class TestGitCredentialsParsing:
             dedent("""\
                 fleet:
                   name: test-fleet
+                  manager: lead
                   service_prefix: com.test
                   defaults:
                     git_credentials:

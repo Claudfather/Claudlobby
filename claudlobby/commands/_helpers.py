@@ -8,54 +8,18 @@ import sys
 from pathlib import Path
 
 from .. import dotenv
-from ..config import load_fleet
-from ..paths import Paths, _find_fleet_dir, _root_manifest_names_fleet
+from ..context import load_context, resolve_paths
+from ..paths import Paths
 
 log = logging.getLogger("claudlobby")
 
 
 def _resolve_paths(args) -> Paths:
-    fleet = getattr(args, "fleet", None)
-    seed = getattr(args, "seed", False)
-    if seed and fleet:
-        log.error("--seed and --fleet are mutually exclusive")
-        sys.exit(1)
-    if seed:
-        root = Path(args.root).resolve() if args.root else Paths.detect().root
-        return Paths(root=root, seed=True)
-    if args.root:
-        root = Path(args.root).resolve()
-        # Resolve the fleet at flat OR nested depth (local/<fleet>/ or
-        # local/<system>/<fleet>/), mirroring Paths.detect().
-        try:
-            fleet_dir = _find_fleet_dir(root / "local", fleet) if fleet else None
-        except ValueError as e:
-            log.error("%s", e)
-            sys.exit(1)
-        if fleet and fleet_dir is None:
-            if _root_manifest_names_fleet(root, fleet):
-                # --fleet names the root manifest's own fleet, not an
-                # overlay: resolve to root mode instead of refusing.
-                log.info(
-                    "--fleet %s names the root fleet.yaml's own fleet; "
-                    "running in root mode",
-                    fleet,
-                )
-                return Paths(root=root)
-            log.error(
-                "fleet overlay not found: %s — run `claudlobby new-fleet %s` to scaffold"
-                " (or remove --fleet to use root mode)",
-                root / "local" / fleet,
-                fleet,
-            )
-            sys.exit(1)
-        return Paths(root=root, fleet_dir=fleet_dir)
-    # Default branch: Paths.detect() resolves the fleet via _find_fleet_dir too,
-    # which raises ValueError on an F5 collision — guard it the same way as the
-    # --root twin above so a genuine collision exits cleanly, not as a traceback.
     try:
-        return Paths.detect(fleet=fleet)
-    except ValueError as e:
+        return resolve_paths(root=getattr(args, "root", None),
+                             fleet=getattr(args, "fleet", None),
+                             seed=getattr(args, "seed", False))
+    except (OSError, ValueError, RuntimeError) as e:
         log.error("%s", e)
         sys.exit(1)
 
@@ -63,7 +27,7 @@ def _resolve_paths(args) -> Paths:
 def _load_env(paths: Paths) -> None:
     """Load .env file into os.environ (without overriding existing vars).
     Handles both `VAR=value` and `export VAR=value` formats — the latter is
-    what env-migrate writes and what hand-edited .env files commonly use."""
+    what migration env writes and what hand-edited .env files commonly use."""
     for k, v in dotenv.read(paths.env_file).items():
         if k not in os.environ:
             os.environ[k] = v
@@ -78,7 +42,8 @@ def _load_fleet_or_exit(paths: Paths) -> tuple["FleetConfig", dict]:
     import yaml
 
     try:
-        return load_fleet(paths.fleet_yaml)
+        context = load_context(paths)
+        return context.fleet, context.merged_defaults
     except FileNotFoundError as e:
         log.error("%s", e)
         sys.exit(1)
@@ -94,7 +59,7 @@ def _validation_gate(fleet: "FleetConfig", paths: Paths, *, context: str) -> boo
     """Run validate() and report; return True when composing may proceed.
 
     The shared load->validate->log gate for every command that composes
-    outside `claudlobby generate` (new-bot --auto-generate, move-bot).
+    outside the private compositor (currently move-bot).
     Warnings are surfaced (not just errors) so did-you-mean hints reach
     the user on these paths too.
     """
@@ -144,26 +109,6 @@ def _migration_preamble(
         sys.exit(1)
 
     return paths, fleet, source_dir, rename_map
-
-
-def _add_migration_args(parser) -> None:
-    """Add the common --source, --map, --apply args shared by all migration commands."""
-    parser.add_argument(
-        "--source",
-        required=True,
-        help="Path to existing bot fleet dir (e.g. ~/my-bots)",
-    )
-    parser.add_argument(
-        "--map",
-        action="append",
-        default=[],
-        help="Rename a fleet bot to its legacy dir (e.g. --map clog=assistant). Repeatable.",
-    )
-    parser.add_argument(
-        "--apply",
-        action="store_true",
-        help="Write changes (default: dry-run preview only)",
-    )
 
 
 def refuse_unreachable(command: str, note: str) -> int:

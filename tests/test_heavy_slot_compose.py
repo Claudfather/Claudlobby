@@ -15,7 +15,7 @@ import pytest
 
 from tests.conftest import load_test_fleet, make_paths
 
-HOOK = "$CLAUDLOBBY_ROOT/lib/heavy-slot-guard.sh"
+HOOK = "$CLAUDLOBBY_NATIVE_DIR/heavy-slot-guard.sh"
 
 
 def _arm(fleet_dir: Path, *, where: str = "lead", value: str = "true") -> None:

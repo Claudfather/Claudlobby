@@ -9,6 +9,8 @@ destinations resolved through channels.json); SSE cursor semantics.
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 import json
 from pathlib import Path
 
@@ -18,6 +20,7 @@ fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from claudlobby.plane.emit_api import emit_batch  # noqa: E402
+from tests.package_fixtures import source_package  # noqa: E402
 from claudlobby.plane.view import create_app  # noqa: E402
 
 H = "a" * 32
@@ -35,6 +38,7 @@ def _seed_conversation(root: Path) -> None:
     reports progress, completes — plus one telegram notice."""
     _full_capture(root)
     mgr, worker = "bot:f/erlich", "bot:f/ramanujan"
+    initialize_plane(root)
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "t", "fleet": "f",
          "payload": {"work_item_id": f"wi_{H}", "title": "Review PR #7768",
@@ -76,7 +80,7 @@ def _seed_conversation(root: Path) -> None:
 
 @pytest.fixture()
 def client(tmp_path: Path) -> TestClient:
-    return TestClient(create_app(tmp_path))
+    return TestClient(create_app(tmp_path, package=source_package()))
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +88,7 @@ def client(tmp_path: Path) -> TestClient:
 # ---------------------------------------------------------------------------
 
 def test_no_write_routes_exist(tmp_path):
-    app = create_app(tmp_path)
+    app = create_app(tmp_path, package=source_package())
     for route in app.routes:
         methods = getattr(route, "methods", None)
         if methods:
@@ -125,7 +129,7 @@ def test_dir_at_db_path_is_absent_not_unreadable(tmp_path):
     gauntlet)."""
     (tmp_path / "state" / "plane").mkdir(parents=True)
     (tmp_path / "state" / "plane" / "plane.db").mkdir()  # a dir, not a db
-    body = TestClient(create_app(tmp_path)).get("/api/summary").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/summary").json()
     assert body["state"] == "absent"
 
 
@@ -136,7 +140,7 @@ def test_unreadable_db_is_distinct_from_absent(tmp_path):
     db.write_bytes(b"x")
     db.chmod(0)  # exists, cannot be opened
     try:
-        body = TestClient(create_app(tmp_path)).get("/api/summary").json()
+        body = TestClient(create_app(tmp_path, package=source_package())).get("/api/summary").json()
     finally:
         db.chmod(0o600)
     assert body["state"] == "unreadable"
@@ -150,9 +154,10 @@ def test_healthz_503_when_absent(client):
 
 def test_ok_with_empty_data_is_ok(tmp_path):
     _full_capture(tmp_path)
+    initialize_plane(tmp_path)
     emit_batch(tmp_path, [{"event_type": "system", "emitter": "t",
                            "payload": {"event": "daemon_started"}}])
-    body = TestClient(create_app(tmp_path)).get("/api/channel").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/channel").json()
     assert body["state"] == "ok"
     assert body["data"]["threads"] == []  # legitimately idle — UI's word
 
@@ -163,7 +168,7 @@ def test_ok_with_empty_data_is_ok(tmp_path):
 
 def test_channel_threads_the_whole_conversation(tmp_path):
     _seed_conversation(tmp_path)
-    body = TestClient(create_app(tmp_path)).get("/api/channel").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/channel").json()
     assert body["state"] == "ok"
     threads = body["data"]["threads"]
     wi = [t for t in threads if t["work_item_id"] == f"wi_{H}"]
@@ -191,7 +196,7 @@ def test_telegram_destination_resolves_to_name_never_raw_id(tmp_path):
     _seed_conversation(tmp_path)
     (tmp_path / "state" / "plane" / "channels.json").write_text(
         json.dumps({"-100999": "Engineering group"}))
-    body = TestClient(create_app(tmp_path)).get("/api/channel").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/channel").json()
     notice = [m for t in body["data"]["threads"] for m in t["messages"]
               if m["message_class"] == "notice"][0]
     assert notice["recipient_short"] == "Engineering group"
@@ -199,7 +204,7 @@ def test_telegram_destination_resolves_to_name_never_raw_id(tmp_path):
 
 def test_unmapped_telegram_destination_is_generic_not_raw(tmp_path):
     _seed_conversation(tmp_path)
-    body = TestClient(create_app(tmp_path)).get("/api/channel").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/channel").json()
     notice = [m for t in body["data"]["threads"] for m in t["messages"]
               if m["message_class"] == "notice"][0]
     assert notice["recipient_short"] == "Telegram"    # never "-100999"
@@ -211,16 +216,18 @@ def test_unmapped_telegram_destination_is_generic_not_raw(tmp_path):
 
 def test_tasks_carry_status_and_attention(tmp_path):
     _seed_conversation(tmp_path)
-    body = TestClient(create_app(tmp_path)).get("/api/tasks").json()
-    rows = body["data"]["assignments"]
-    assert rows[0]["status"] == "completed"
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/tasks").json()
+    rows = body["data"]["tasks"]
+    assert rows[0]["state"] == "completed"
+    assert rows[0]["task_id"] == f"wi_{H}"
     assert rows[0]["attention"] is False
-    assert rows[0]["assignee_short"] == "ramanujan"
+    assert rows[0]["current_assignment"] is None
+    assert rows[0]["assignment_history"][0]["assignee_short"] == "ramanujan"
 
 
 def test_identities_are_alias_first(tmp_path):
     _seed_conversation(tmp_path)
-    body = TestClient(create_app(tmp_path)).get("/api/identities").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/identities").json()
     shorts = {i["short"] for i in body["data"]["identities"]}
     assert {"erlich", "ramanujan"} <= shorts
 
@@ -240,7 +247,7 @@ def _first_sse_chunk(client, url):
 
 def test_stream_replays_rows_past_cursor(tmp_path):
     _seed_conversation(tmp_path)
-    payload = _first_sse_chunk(TestClient(create_app(tmp_path)),
+    payload = _first_sse_chunk(TestClient(create_app(tmp_path, package=source_package())),
                                "/api/stream?cursor=0&once=1")
     assert payload is not None
     assert payload["rows"][0]["ingest_seq"] == 1
@@ -254,7 +261,7 @@ def test_stream_at_head_pings_not_replays(tmp_path):
     head = conn.execute("SELECT MAX(ingest_seq) FROM ingest_ledger"
                         ).fetchone()[0]
     conn.close()
-    payload = _first_sse_chunk(TestClient(create_app(tmp_path)),
+    payload = _first_sse_chunk(TestClient(create_app(tmp_path, package=source_package())),
                                f"/api/stream?cursor={head}&once=1")
     assert payload is None  # nothing to replay — a ping, never stale rows
 
@@ -266,6 +273,7 @@ def test_stream_at_head_pings_not_replays(tmp_path):
 def _seed_one_sided(root, tagged_side):
     _full_capture(root)
     wi = "wi_" + "e" * 32
+    initialize_plane(root)
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "t", "fleet": "f",
          "payload": {"work_item_id": wi, "title": "One-sided tag",
@@ -288,7 +296,7 @@ def _seed_one_sided(root, tagged_side):
 @pytest.mark.parametrize("tagged_side", ["dispatch", "reply"])
 def test_one_sided_work_item_still_one_thread(tmp_path, tagged_side):
     _seed_one_sided(tmp_path, tagged_side)
-    body = TestClient(create_app(tmp_path)).get("/api/channel").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/channel").json()
     threads = body["data"]["threads"]
     assert len(threads) == 1, f"{tagged_side}-tagged pair split the story"
     assert threads[0]["work_item_id"] == "wi_" + "e" * 32
@@ -304,7 +312,7 @@ def test_terminal_stamp_is_first_terminal_monotone(tmp_path):
         {"event_type": "task", "emitter": "t", "fleet": "f",
          "payload": {"event": "superseded", "work_item_id": f"wi_{H}",
                      "assignment_id": f"asg_{H}"}}])
-    body = TestClient(create_app(tmp_path)).get("/api/channel").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/channel").json()
     t = [x for x in body["data"]["threads"]
          if x["work_item_id"] == f"wi_{H}"][0]
     assert t["terminal"] == "completed"  # first terminal wins, always
@@ -324,26 +332,28 @@ def test_body_words_strips_real_door_shapes():
 
 
 def test_tasks_restriction_matches_unrestricted_derivation(tmp_path):
-    """The IN-restriction is an efficiency append; output must be
-    byte-identical to the unrestricted one-definition queries."""
+    """Lifecycle comes from the Task reducer; current-assignment attention
+    remains the one SQL arm projection."""
     import sqlite3 as _sq
 
     from claudlobby.plane import view
-    from claudlobby.plane.queries import ATTENTION_SQL as A, TASK_STATUS_SQL as T
+    from claudlobby.plane.queries import ATTENTION_SQL as A
     from claudlobby.plane.queries import attention_params
+    from claudlobby.task_state import read_tasks
 
     _seed_conversation(tmp_path)
-    body = TestClient(create_app(tmp_path)).get("/api/tasks").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/tasks").json()
     conn = _sq.connect(tmp_path / "state" / "plane" / "plane.db")
     conn.row_factory = _sq.Row
-    unrestricted = {r["assignment_id"]: r["status"]
-                    for r in conn.execute(T)}
+    fleet_uid = conn.execute("SELECT uid FROM identity_registry WHERE kind='fleet' AND alias='f'").fetchone()[0]
+    lifecycle = {task.task_id: task.state for task in read_tasks(conn, fleet_uid=fleet_uid).tasks}
     unrestricted_att = {r[0] for r in conn.execute(
         A, attention_params(view._now_iso()))}
     conn.close()
-    for r in body["data"]["assignments"]:
-        assert r["status"] == unrestricted[r["assignment_id"]]
-        assert r["attention"] == (r["assignment_id"] in unrestricted_att)
+    for r in body["data"]["tasks"]:
+        assert r["state"] == lifecycle[r["task_id"]]
+        aid = r["current_assignment"]["assignment_id"] if r["current_assignment"] else None
+        assert r["attention"] == (aid in unrestricted_att)
 
 
 def test_spool_count_excludes_quarantine_and_sidecars(tmp_path):
@@ -355,7 +365,7 @@ def test_spool_count_excludes_quarantine_and_sidecars(tmp_path):
     q.mkdir()
     (q / "ev_b.json").write_text("{}")
     (q / "ev_b.json.reason").write_text("poison")
-    body = TestClient(create_app(tmp_path)).get("/api/summary").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/summary").json()
     assert body["data"]["spool_files"] == 1  # pending only, doctor's number
     assert body["data"]["spool_oldest_at"] == "2026-01-01T00:00:00"
 
@@ -365,14 +375,14 @@ def test_summary_honors_plane_socket_override(tmp_path, monkeypatch):
     override = tmp_path / "elsewhere.sock"
     override.write_text("")  # present (a stale FILE — liveness must not lie)
     monkeypatch.setenv("PLANE_SOCKET", str(override))
-    body = TestClient(create_app(tmp_path)).get("/api/summary").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/summary").json()
     assert body["data"]["ingest_socket_present"] is True
     assert body["data"]["daemon_serving"] is False  # probe, not presence
 
 
 def test_healthz_ok_is_one_envelope_with_summary(tmp_path):
     _seed_conversation(tmp_path)
-    r = TestClient(create_app(tmp_path)).get("/healthz")
+    r = TestClient(create_app(tmp_path, package=source_package())).get("/healthz")
     assert r.status_code == 200
     data = r.json()["data"]
     from claudlobby.plane.migrations import SCHEMA_USER_VERSION
@@ -382,7 +392,7 @@ def test_healthz_ok_is_one_envelope_with_summary(tmp_path):
 
 
 def test_index_served_from_package_data(tmp_path):
-    r = TestClient(create_app(tmp_path)).get("/")
+    r = TestClient(create_app(tmp_path, package=source_package())).get("/")
     assert r.status_code == 200
     assert "observable plane" in r.text
     assert r.headers.get("cache-control") == "no-store"
@@ -391,7 +401,7 @@ def test_index_served_from_package_data(tmp_path):
 
 
 def test_app_js_import_is_cache_busted(tmp_path):
-    r = TestClient(create_app(tmp_path)).get("/app.js")
+    r = TestClient(create_app(tmp_path, package=source_package())).get("/app.js")
     assert r.status_code == 200
     assert r.headers.get("cache-control") == "no-store"
     assert "/panel-state.js?v=" in r.text  # intra-module import busts too
@@ -401,14 +411,14 @@ def test_stream_defaults_to_head_never_replays(tmp_path):
     """Gauntlet consensus (3 reviewers, measured): a cursor-less connect used
     to replay the ENTIRE ledger per viewer per reconnect."""
     _seed_conversation(tmp_path)
-    payload = _first_sse_chunk(TestClient(create_app(tmp_path)),
+    payload = _first_sse_chunk(TestClient(create_app(tmp_path, package=source_package())),
                                "/api/stream?once=1")
     assert payload is None  # at head: a ping, never a replay
 
 
 def test_stream_honors_last_event_id(tmp_path):
     _seed_conversation(tmp_path)
-    client = TestClient(create_app(tmp_path))
+    client = TestClient(create_app(tmp_path, package=source_package()))
     with client.stream("GET", "/api/stream?once=1",
                        headers={"Last-Event-ID": "1"}) as r:
         payload = None
@@ -459,6 +469,7 @@ def _seed_twins(root: Path) -> None:
     _full_capture(root)
     for fleet, h in (("engineering", "a"), ("data", "b")):
         mgr, worker = f"bot:{fleet}/mgr", f"bot:{fleet}/one"
+        initialize_plane(root)
         emit_batch(root, [
             {"event_type": "work_item", "emitter": "t", "fleet": fleet,
              "payload": {"work_item_id": "wi_" + h * 32,
@@ -497,7 +508,7 @@ def test_fleets_door_lists_registry_fleets_beyond_the_rail_window(tmp_path):
         "event_type": "metric_sample", "emitter": "probe", "fleet": "_host",
         "payload": {"subject_kind": "host", "subject": "h1",
                     "metric": "host.job_ran", "value": 1}}])
-    client = TestClient(create_app(tmp_path))
+    client = TestClient(create_app(tmp_path, package=source_package()))
     rail = client.get("/api/identities").json()["data"]["identities"]
     rail_fleets = {r["alias"] for r in rail if r["kind"] == "fleet"}
     assert "data" not in rail_fleets           # the window dropped it (premise)
@@ -513,11 +524,12 @@ def test_fleets_default_is_the_room_that_moved_last(tmp_path):
     """The first-visit tab: the fleet whose room (sent BY it or TO it)
     carries the newest message — data's human notice landed last."""
     _seed_twins(tmp_path)
-    fl = TestClient(create_app(tmp_path)).get("/api/fleets").json()["data"]
+    fl = TestClient(create_app(tmp_path, package=source_package())).get("/api/fleets").json()["data"]
     assert fl["default"] == "data"
     # silence everywhere: alphabetical, and an empty plane has no default
     empty = tmp_path / "empty"
     _full_capture(empty)
+    initialize_plane(empty)
     emit_batch(empty, [{"event_type": "metric_sample", "emitter": "p",
                         "fleet": "zeta", "payload": {
                             "subject_kind": "host", "subject": "h",
@@ -526,23 +538,22 @@ def test_fleets_default_is_the_room_that_moved_last(tmp_path):
                         "fleet": "alpha", "payload": {
                             "subject_kind": "host", "subject": "h",
                             "metric": "host.job_ran", "value": 1}}])
-    fl = TestClient(create_app(empty)).get("/api/fleets").json()["data"]
+    fl = TestClient(create_app(empty, package=source_package())).get("/api/fleets").json()["data"]
     assert fl["default"] == "alpha"
     assert all(f["last_comm_at"] is None for f in fl["fleets"])
 
 
 def test_tasks_and_identities_follow_the_fleet_and_qualify_twins(tmp_path):
-    """Every per-fleet board filters on the same axis (the assignee's /
-    participant's fleet), and the host-wide read labels twins fleet/name
+    """The board scopes by work ownership, and the host read labels twins fleet/name
     through inventory's ONE rule."""
     _seed_twins(tmp_path)
-    client = TestClient(create_app(tmp_path))
+    client = TestClient(create_app(tmp_path, package=source_package()))
     eng = client.get("/api/tasks?fleet=engineering").json()["data"]
-    assert [a["title"] for a in eng["assignments"]] == ["work for engineering"]
-    assert eng["assignments"][0]["assignee_short"] == "one"   # bare in its room
-    host = client.get("/api/tasks").json()["data"]["assignments"]
-    assert sorted(a["assignee_short"] for a in host) == ["data/one",
-                                                          "engineering/one"]
+    assert [a["title"] for a in eng["tasks"]] == ["work for engineering"]
+    assert eng["tasks"][0]["current_assignment"]["assignee_short"] == "one"
+    host = client.get("/api/tasks").json()["data"]["tasks"]
+    assert sorted(a["current_assignment"]["assignee_short"] for a in host) == [
+        "data/one", "engineering/one"]
     # a fleet the plane holds no identity for is a typed refusal naming the
     # fleets it does hold — never a healthy empty room (plane-lookup's rule)
     none = client.get("/api/tasks?fleet=nonexistent").json()
@@ -552,7 +563,7 @@ def test_tasks_and_identities_follow_the_fleet_and_qualify_twins(tmp_path):
     # neither absorb another's bots nor pass as one
     assert client.get("/api/tasks?fleet=e_gineering").json()["state"] == "unknown"
     # an empty axis is the host-wide read on every route, not a refusal
-    assert len(client.get("/api/tasks?fleet=").json()["data"]["assignments"]) == 2
+    assert len(client.get("/api/tasks?fleet=").json()["data"]["tasks"]) == 2
 
     data = client.get("/api/identities?fleet=data").json()["data"]["identities"]
     aliases = {r["alias"] for r in data}
@@ -595,6 +606,7 @@ def _seed_cross_fleet(root: Path) -> None:
     the data -> eng report) plus one INTRA-fleet eng thread."""
     _full_capture(root)
     wi = "wi_" + "e" * 32
+    initialize_plane(root)
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "t", "fleet": "engineering",
          "payload": {"work_item_id": wi, "title": "cross",
@@ -633,7 +645,7 @@ def test_channel_stamps_fleets_and_marks_cross_fleet_threads(tmp_path):
     and renders `eng/lead -> data/worker` in EVERY room, while an intra-
     fleet thread keeps short names in its own room."""
     _seed_cross_fleet(tmp_path)
-    client = TestClient(create_app(tmp_path))
+    client = TestClient(create_app(tmp_path, package=source_package()))
     for room in ("engineering", "data", None):
         x = _threads(client, room)["wi_" + "e" * 32]
         assert x["cross_fleet"] is True, room
@@ -678,6 +690,7 @@ def _seed_twins_with_deadlines(root: Path) -> None:
                            "expected_by": due}}
         if fleet == "engineering":
             asg["source_ref"] = "dispatch-log:t-1-aaaa"
+        initialize_plane(root)
         emit_batch(root, [
             {"event_type": "work_item", "emitter": "t", "fleet": fleet,
              "payload": {"work_item_id": "wi_" + h * 32,
@@ -713,9 +726,9 @@ def test_all_tab_never_collapses_twins_in_channel_attention_or_search(tmp_path):
         "payload": {"msg_id": "msg_" + "b" * 32, "attempt_no": 1,
                     "carrier": "tmux", "destination": "one",
                     "state": "failed"}}])
-    client = TestClient(create_app(tmp_path))
+    client = TestClient(create_app(tmp_path, package=source_package()))
     host = client.get("/api/tasks").json()["data"]
-    attn = sorted(a["assignee_short"] for a in host["assignments"]
+    attn = sorted(a["current_assignment"]["assignee_short"] for a in host["tasks"]
                   if a["attention"])
     assert attn == ["data/one", "engineering/one"]     # two cards, never one
     assert host["attention_count"] == 2
@@ -764,7 +777,7 @@ def test_overview_is_one_row_per_fleet_plus_the_host(tmp_path):
     the ONE rule — and a figure whose source is missing is None with a
     reason, never a zero (orphan-ness needs the bot's directory)."""
     _seed_twins_with_deadlines(tmp_path)
-    client = TestClient(create_app(tmp_path, sampler=_TwinSampler()))
+    client = TestClient(create_app(tmp_path, sampler=_TwinSampler(), package=source_package()))
     ov = client.get("/api/overview").json()
     assert ov["state"] == "ok", ov
     rows = {r["alias"]: r for r in ov["data"]["fleets"]}
@@ -802,7 +815,8 @@ def test_overview_is_one_row_per_fleet_plus_the_host(tmp_path):
     spawn = (tmp_path / "local" / "engineering" / "runtime" / "bots" / "one"
              / "data" / ".spawn")
     spawn.write_text("")
-    import os, time
+    import os
+    import time
     later = time.time() + 5          # the restart landed AFTER the dispatch
     os.utime(spawn, (later, later))
     rows = {r["alias"]: r
@@ -821,7 +835,7 @@ def test_overview_discloses_a_missing_live_poll_and_a_malformed_policy(tmp_path)
     class _NoSampler(_TwinSampler):
         available = False
 
-    client = TestClient(create_app(tmp_path, sampler=_NoSampler()))
+    client = TestClient(create_app(tmp_path, sampler=_NoSampler(), package=source_package()))
     rows = {r["alias"]: r
             for r in client.get("/api/overview").json()["data"]["fleets"]}
     assert rows["engineering"]["presence"]["live_poll"] == "unavailable"
@@ -869,10 +883,8 @@ def _dispatch(root: Path, h: str, *, expected_by: str | None,
     optionally one transmission row in *tx_state* (None = no transmission).
     Returns the assignment id.
 
-    A BROADCAST is several of these: same manager, same words, one instant,
-    N recipients — and, as the real door does it, a FRESH work item for
-    every send. `title=None` emits the assignment with no work item behind
-    it (the row the board renders wordless); `at` stamps the dispatch
+    `title=None` emits an orphan assignment without a work item; the task
+    reducer exposes that as an issue, not a Task card. `at` stamps the dispatch
     instant (default: whatever ingest stamps).
 
     *h* seeds every id, so ids stay distinct per row; `(h * 32)[:32]` keeps
@@ -892,6 +904,7 @@ def _dispatch(root: Path, h: str, *, expected_by: str | None,
                   "payload": asg}
     if at:
         assignment["occurred_at"] = at
+    initialize_plane(root)
     emit_batch(root, ([] if title is None else [
         {"event_type": "work_item", "emitter": "t", "fleet": fleet,
          "payload": {"work_item_id": "wi_" + stem, "title": title,
@@ -912,9 +925,8 @@ def _dispatch(root: Path, h: str, *, expected_by: str | None,
 
 
 def test_tasks_payload_stamps_the_terminal_instant_and_the_attention_reason(tmp_path):
-    """Chunk L (#1479): a finished task carries `terminal_at` (the first
-    terminal task event — the row TASK_STATUS_SQL names) so the card reads
-    "completed 1m ago" instead of a deadline it no longer has; an attention
+    """A finished task carries the reducer's first terminal event so its card
+    reads "completed 1m ago" instead of a deadline it no longer has; an attention
     row carries WHY (`attention_reason`: never_activated / overdue, primary
     first) and since when; an open, delivered, not-yet-due row carries
     neither."""
@@ -925,22 +937,23 @@ def test_tasks_payload_stamps_the_terminal_instant_and_the_attention_reason(tmp_
               tx_state="pane_submitted")                            # delivered, not due
     _dispatch(tmp_path, "3", expected_by="2020-01-01T00:00:00+00:00",
               tx_state="pane_submitted")                            # delivered, overdue
-    rows = {r["assignment_id"]: r for r in
-            TestClient(create_app(tmp_path)).get("/api/tasks").json()["data"]["assignments"]}
+    rows = _tasks(tmp_path)
     done = rows[f"asg_{H}"]
-    assert done["status"] == "completed" and done["terminal_at"]
+    assert done["state"] == "completed" and done["terminal_event"]["occurred_at"]
+    assert done["current_assignment"] is None
     assert done["attention"] is False and done["attention_reason"] == []
     assert done["attention_since"] is None
     queued = rows["asg_" + "1" * 32]
-    assert queued["attention"] is True and queued["terminal_at"] is None
+    assert queued["attention"] is True and queued["terminal_event"] is None
     assert queued["attention_reason"] == ["never_activated", "overdue"]
-    assert queued["attention_since"] == queued["occurred_at"]    # since the dispatch
+    assert queued["attention_since"] == queued["current_assignment"]["occurred_at"]
     fine = rows["asg_" + "2" * 32]
     assert fine["attention"] is False and fine["attention_reason"] == []
-    assert fine["terminal_at"] is None and fine["expected_by"].startswith("2099")
+    assert fine["terminal_event"] is None
+    assert fine["current_assignment"]["expected_by"].startswith("2099")
     late = rows["asg_" + "3" * 32]
     assert late["attention"] is True and late["attention_reason"] == ["overdue"]
-    assert late["attention_since"] == late["expected_by"]         # since the deadline
+    assert late["attention_since"] == late["current_assignment"]["expected_by"]
 
 
 def test_ui_reads_in_the_operators_language():
@@ -961,11 +974,11 @@ def test_ui_reads_in_the_operators_language():
     assert "renderHeader(null)" in js and "renderHostFacts(null)" in js
     assert "hostFacts" not in js              # the dead module state is gone
     # no copied vocabulary, no client-side re-derivation (folds F4 + F7)
-    assert "TERMINAL_STATUSES" not in js      # endedness is `terminal_at`
-    assert "r.terminal_at" in js
+    assert "TERMINAL_STATUSES" not in js
+    assert "r.terminal_event?.occurred_at" in js
     assert 'dueLabel(r.expected_by).replace' not in js
     assert "attention_since" in js and "never delivered" in js
-    assert "chase the worker" in js and "send failed" in js
+    assert "check the worker" in js and "send failed" in js
     # the clamp: ONE number, read by the stylesheet; the toggle finds its
     # body by structure and remembers what the operator opened
     assert "--clamp-lines" in js and "openBodies" in js
@@ -979,9 +992,10 @@ def test_ui_reads_in_the_operators_language():
 # --- chunk L, the fold: one row, the queue's own arms, totals with caveats --
 
 def _tasks(root: Path) -> dict:
-    return {r["assignment_id"]: r for r in
-            TestClient(create_app(root)).get("/api/tasks")
-            .json()["data"]["assignments"]}
+    return {assignment["assignment_id"]: task
+            for task in TestClient(create_app(root, package=source_package()))
+            .get("/api/tasks").json()["data"]["tasks"]
+            for assignment in task["assignment_history"]}
 
 
 def test_status_and_its_instant_come_from_the_same_terminal_row(tmp_path):
@@ -1001,8 +1015,8 @@ def test_status_and_its_instant_come_from_the_same_terminal_row(tmp_path):
             "payload": {"event": event, "work_item_id": wid,
                         "assignment_id": aid}}])
     row = _tasks(tmp_path)[aid]
-    assert row["status"] == "completed"
-    assert row["terminal_at"] == later      # never the superseded's earlier one
+    assert row["state"] == "completed"
+    assert row["terminal_event"]["occurred_at"] == later
 
 
 def test_every_attention_arm_is_stamped_by_the_query_that_selected_it(tmp_path):
@@ -1018,21 +1032,86 @@ def test_every_attention_arm_is_stamped_by_the_query_that_selected_it(tmp_path):
     rows = _tasks(tmp_path)
     failed = rows["asg_" + "5" * 32]
     assert failed["attention_reason"] == ["send_failed"]
-    assert failed["attention_since"] == failed["occurred_at"]
+    assert failed["attention_since"] == failed["current_assignment"]["occurred_at"]
     queued = rows["asg_" + "6" * 32]
     assert queued["attention_reason"] == ["never_activated"]
-    assert queued["attention_since"] == queued["occurred_at"]
+    assert queued["attention_since"] == queued["current_assignment"]["occurred_at"]
     late = rows["asg_" + "7" * 32]
     assert late["attention_reason"] == ["overdue"]     # no transmission = silence
-    assert late["attention_since"] == late["expected_by"]
+    assert late["attention_since"] == late["current_assignment"]["expected_by"]
     both = rows["asg_" + "8" * 32]
     assert both["attention_reason"] == ["send_failed", "overdue"]
-    assert both["attention_since"] == both["occurred_at"]   # the primary arm
+    assert both["attention_since"] == both["current_assignment"]["occurred_at"]
     # the arms EXHAUST attention, which is what makes the card's bare
     # "needs you" fallback unreachable
     assert all(r["attention_reason"] for r in rows.values() if r["attention"])
     assert not any(r["attention_reason"] for r in rows.values()
                    if not r["attention"])
+
+
+def _canonical_delivery(root: Path, h: str, *, tx_state: str | None,
+                        fleet: str = "f", recipient: str | None = None) -> str:
+    """The `assignment deliver` shape: the assignment row carries NO
+    dispatch_msg_id; the task communication links task + assignment."""
+    stem = (h * 32)[:32]
+    mgr, worker = f"bot:{fleet}/erlich", f"bot:{fleet}/ramanujan"
+    initialize_plane(root)
+    emit_batch(root, [
+        {"event_type": "work_item", "emitter": "t", "fleet": fleet,
+         "payload": {"work_item_id": "wi_" + stem, "title": f"task {h}",
+                     "created_by": mgr}},
+        {"event_type": "assignment", "emitter": "t", "fleet": fleet,
+         "payload": {"assignment_id": "asg_" + stem, "work_item_id": "wi_" + stem,
+                     "assignee": worker, "assigned_by": mgr,
+                     "expected_by": FUTURE}},
+        {"event_type": "communication", "emitter": "t", "fleet": fleet,
+         "payload": {"msg_id": "msg_" + stem, "sender": mgr,
+                     "recipient": recipient or worker, "message_class": "task_request",
+                     "command_type": "task", "work_item_id": "wi_" + stem,
+                     "assignment_id": "asg_" + stem, "body": f"go {h}"}}])
+    if tx_state:
+        emit_batch(root, [{
+            "event_type": "transmission", "emitter": "t", "fleet": fleet,
+            "payload": {"msg_id": "msg_" + stem, "attempt_no": 1, "carrier": "tmux",
+                        "destination": "ramanujan", "state": tx_state}}])
+    return "asg_" + stem
+
+
+def test_board_joins_canonical_task_delivery_not_only_dispatch_msg_id(tmp_path):
+    """S5a-05: canonical delivery never writes assignments.dispatch_msg_id, so
+    its failed send must still raise send_failed and fill the delivery field;
+    a queued one stays never_activated and a submitted one stays quiet. A task
+    communication addressed to someone else is not this assignment's delivery."""
+    failed = _canonical_delivery(tmp_path, "c1", tx_state="failed")
+    queued = _canonical_delivery(tmp_path, "c2", tx_state="carrier_queued")
+    fine = _canonical_delivery(tmp_path, "c3", tx_state="pane_submitted")
+    stray = _canonical_delivery(tmp_path, "c4", tx_state="failed",
+                                recipient="bot:f/someone-else")
+    rows = _tasks(tmp_path)
+    assert rows[failed]["attention_reason"] == ["send_failed"]
+    assert rows[failed]["delivery"]["message_id"] == "msg_" + ("c1" * 16)
+    assert rows[failed]["current_assignment"]["dispatch_message_id"] == "msg_" + ("c1" * 16)
+    assert rows[queued]["attention_reason"] == ["never_activated"]
+    assert rows[fine]["attention"] is False
+    assert rows[fine]["delivery"]["integrity"] == "unconfirmed"
+    assert rows[stray]["attention"] is False and rows[stray]["delivery"] is None
+
+
+def test_overview_attention_is_the_boards_owning_fleet_count(tmp_path):
+    """S5a-06: the strip and the board count the same cards. Work fleet `a`
+    owns but assigned a bot of fleet `b` is `a`'s attention on both surfaces;
+    the assignee axis stays `open`, disclosed as such."""
+    _dispatch(tmp_path, "a1", fleet="a", worker="bot:b/ramanujan",
+              expected_by=PAST, tx_state=None)
+    _dispatch(tmp_path, "b1", fleet="b", expected_by=FUTURE, tx_state="pane_submitted")
+    client = TestClient(create_app(tmp_path, package=source_package()))
+    fleets = {r["alias"]: r for r in client.get("/api/overview").json()["data"]["fleets"]}
+    for alias in ("a", "b"):
+        board = client.get(f"/api/tasks?fleet={alias}").json()["data"]
+        assert fleets[alias]["attention"] == board["attention_count"]
+        assert fleets[alias]["attention_scope"] == "owning_fleet_tasks"
+    assert (fleets["a"]["attention"], fleets["b"]["attention"]) == (1, 0)
+    assert fleets["b"]["open_scope"] == "assigned_to_fleet_bots"
 
 
 def test_the_arms_query_selects_exactly_the_attention_query(tmp_path):
@@ -1063,7 +1142,7 @@ def test_the_header_totals_ship_with_their_disclosures(tmp_path):
     what the page dropped when it summed the cards itself — the unconfirmed
     share of the bot count and the worst live-poll state on the host."""
     _seed_twins_with_deadlines(tmp_path)
-    client = TestClient(create_app(tmp_path, sampler=_TwinSampler()))
+    client = TestClient(create_app(tmp_path, sampler=_TwinSampler(), package=source_package()))
     data = client.get("/api/overview").json()["data"]
     cards, t = data["fleets"], data["totals"]
     assert t["fleets"] == 2
@@ -1075,7 +1154,7 @@ def test_the_header_totals_ship_with_their_disclosures(tmp_path):
     class _NoSampler(_TwinSampler):
         available = False
 
-    degraded = TestClient(create_app(tmp_path, sampler=_NoSampler())) \
+    degraded = TestClient(create_app(tmp_path, sampler=_NoSampler(), package=source_package())) \
         .get("/api/overview").json()["data"]["totals"]
     assert degraded["live_poll"] == "unavailable"   # never swallowed by a sum
 
@@ -1084,198 +1163,119 @@ def test_totals_of_a_plane_with_no_fleet_are_zero_fleets_not_four_zeros(tmp_path
     """A host that has recorded nothing under a fleet says so — the header
     reads "no fleet recorded" rather than four confident zeros."""
     _full_capture(tmp_path)
+    initialize_plane(tmp_path)
     emit_batch(tmp_path, [{"event_type": "system", "emitter": "t",
                            "payload": {"event": "daemon_started"}}])
-    body = TestClient(create_app(tmp_path)).get("/api/overview").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/overview").json()
     assert body["state"] == "ok"
     assert body["data"]["fleets"] == [] and body["data"]["totals"]["fleets"] == 0
 
 
-# --- item 6 (#1479): one broadcast, one card; the rail groups by fleet ------
+# --- one canonical Task card, with lifecycle separate from delivery --------
 
-NOTE = "stand down and report"
+def test_board_keeps_queued_and_reassigned_work_under_its_owning_fleet(tmp_path):
+    from claudlobby.task_state import TASK_EMITTER
 
+    _full_capture(tmp_path)
+    initialize_plane(tmp_path)
+    queued = "wi_" + "1" * 32
+    moved = "wi_" + "2" * 32
+    first, second = "asg_" + "1" * 32, "asg_" + "2" * 32
+    emit_batch(tmp_path, [
+        {"event_type": "work_item", "emitter": TASK_EMITTER, "fleet": "f",
+         "payload": {"work_item_id": queued, "title": "Unassigned intake",
+                     "created_by": "bot:f/mgr"}},
+        {"event_type": "work_item", "emitter": TASK_EMITTER, "fleet": "f",
+         "payload": {"work_item_id": moved, "title": "Move this task",
+                     "created_by": "bot:f/mgr"}},
+        {"event_type": "assignment", "emitter": TASK_EMITTER, "fleet": "f",
+         "payload": {"assignment_id": first, "work_item_id": moved,
+                     "assignee": "bot:g/worker", "assigned_by": "bot:f/mgr"}},
+        {"event_type": "task", "emitter": TASK_EMITTER, "fleet": "f",
+         "payload": {"work_item_id": queued, "event": "escalated",
+                     "actor": "bot:f/mgr", "question": "Which priority?", "by": "mgr"}},
+        {"event_type": "communication", "emitter": "t", "fleet": "g",
+         "payload": {"msg_id": "msg_" + "9" * 32, "sender": "bot:g/worker",
+                     "recipient": "bot:g/mgr", "message_class": "chat",
+                     "body": "fleet g is recorded"}},
+    ], require_commit=True)
+    client = TestClient(create_app(tmp_path, package=source_package()))
+    room = client.get("/api/tasks?fleet=f").json()["data"]
+    assert {r["task_id"] for r in room["tasks"]} == {queued, moved}
+    intake = next(r for r in room["tasks"] if r["task_id"] == queued)
+    assert intake["state"] == "queued" and intake["current_assignment"] is None
+    assert intake["attention"] is True and intake["attention_reason"] == ["escalated"]
+    assert intake["attention_question"] == "Which priority?"
+    routed = next(r for r in room["tasks"] if r["task_id"] == moved)
+    assert routed["state"] == "assigned"
+    assert routed["current_assignment"]["assignment_id"] == first
+    assert routed["current_assignment"]["assignee_alias"] == "bot:g/worker"
+    other = client.get("/api/tasks?fleet=g").json()
+    assert other["state"] == "ok"
+    assert moved not in {r["task_id"] for r in other["data"]["tasks"]}
 
-def _note(root: Path, tag: str, worker: str, at: str, **kw) -> str:
-    """One dispatch of the shared note to *worker* at *at* — `_dispatch`
-    with the broadcast defaults (a queued send with a live deadline, so the
-    row is in the attention queue on the `never_activated` arm)."""
-    kw.setdefault("expected_by", FUTURE)
-    kw.setdefault("tx_state", "carrier_queued")
-    kw.setdefault("title", NOTE)
-    return _dispatch(root, tag, worker=f"bot:f/{worker}", at=at, **kw)
+    emit_batch(tmp_path, [
+        {"event_type": "task", "emitter": TASK_EMITTER, "fleet": "f",
+         "payload": {"work_item_id": moved, "assignment_id": first,
+                     "event": "returned_blocked", "actor": "bot:g/worker"}},
+        {"event_type": "assignment", "emitter": TASK_EMITTER, "fleet": "f",
+         "payload": {"assignment_id": second, "work_item_id": moved,
+                     "assignee": "bot:f/worker", "assigned_by": "bot:f/mgr"}},
+    ], require_commit=True)
+    card = next(r for r in client.get("/api/tasks?fleet=f").json()["data"]["tasks"]
+                if r["task_id"] == moved)
+    assert card["state"] == "assigned" and card["assignment_count"] == 2
+    assert card["current_assignment"]["assignment_id"] == second
+    assert [a["assignment_id"] for a in card["assignment_history"]] == [first, second]
+    emit_batch(tmp_path, [{"event_type": "task", "emitter": TASK_EMITTER, "fleet": "f",
+                          "payload": {"work_item_id": moved, "assignment_id": second,
+                                      "event": "completed", "actor": "bot:f/worker"}}], require_commit=True)
+    closed = next(r for r in client.get("/api/tasks?fleet=f").json()["data"]["tasks"]
+                  if r["task_id"] == moved)
+    assert closed["state"] == "completed" and closed["current_assignment"] is None
+    assert closed["terminal_event"]["event"] == "completed"
+    assert closed["attention"] is False and closed["assignment_count"] == 2
 
-
-def test_one_note_to_four_bots_carries_one_broadcast_key(tmp_path):
-    """Item 6 (#1479): a note dispatched to four bots rendered four identical
-    attention cards. The rows share no id — every send mints its own work item
-    — so the API keys them by what a broadcast actually shares: the sender,
-    the words, the state, the arm, and a dispatch instant inside a minute. The
-    key names the cluster's earliest member, so it is stable across refreshes;
-    two unrelated rows never share one."""
-    base = "2026-01-01T00:00:0"
-    for i, bot in enumerate(("jian-yang", "issey", "damodaran", "ramanujan")):
-        _note(tmp_path, f"{i+1}a", bot, f"{base}{i * 2}+00:00")
-    _note(tmp_path, "5a", "erlich", f"{base}0+00:00",
-          title="a different note entirely")
-    _note(tmp_path, "6a", "gilfoyle", f"{base}0+00:00", title="and another")
-    rows = _tasks(tmp_path)
-    note = [r for r in rows.values() if r["title"] == NOTE]
-    assert len(note) == 4 and all(r["attention"] for r in note)
-    assert len({r["work_item_id"] for r in note}) == 4      # no shared id
-    assert len({r["broadcast_key"] for r in note}) == 1
-    assert note[0]["broadcast_key"] == "bc:asg_" + "1a" * 16   # earliest member
-    others = [r for r in rows.values() if r["title"] != NOTE]
-    assert len(others) == 2 and all(r["attention"] for r in others)
-    assert [r["broadcast_key"] for r in others] == [None, None]
-
-
-def test_a_broadcast_never_groups_what_it_cannot_show_is_one(tmp_path):
-    """The key's bounds, each its own remedy on the card: a send an hour later
-    is its own dispatch; a different reason is a different remedy; a different
-    STATE is a different status pill, which one card cannot show twice; a
-    different sender is a different broadcast; a row with no words cannot be
-    shown to be the same NOTE. All five fall out of the cluster rather than
-    into it — the unprovable renders exactly as it does today."""
-    at = "2026-01-01T00:00:00+00:00"
-    _note(tmp_path, "1b", "jian-yang", at)
-    _note(tmp_path, "2b", "issey", at)
-    late = _note(tmp_path, "3b", "damodaran", "2026-01-01T01:00:00+00:00")
-    arm = _note(tmp_path, "4b", "ramanujan", at,
-                expected_by=PAST, tx_state=None)          # overdue, not queued
-    who = _note(tmp_path, "5b", "gilfoyle", at, mgr="bot:f/dinesh")
-    # TWO wordless rows, so the guard is what keeps them apart rather than
-    # their being alone: without it they are one key and one card
-    none = _note(tmp_path, "6b", "bighead", at, title=None)
-    none2 = _note(tmp_path, "8b", "jared", at, title=None)
-    # same words, same manager, same arm — but this one has been accepted, so
-    # its card carries a different status pill
-    seen = _note(tmp_path, "7b", "monica", at)
-    emit_batch(tmp_path, [{
-        "event_type": "task", "emitter": "t", "fleet": "f",
-        "payload": {"event": "accepted", "assignment_id": seen,
-                    "work_item_id": "wi_" + seen[len("asg_"):]}}])
-    rows = _tasks(tmp_path)
-    pair = {rows["asg_" + "1b" * 16]["broadcast_key"],
-            rows["asg_" + "2b" * 16]["broadcast_key"]}
-    assert pair == {"bc:asg_" + "1b" * 16}
-    for aid in (late, arm, who, none, none2, seen):
-        assert rows[aid]["attention"] is True
-        assert rows[aid]["broadcast_key"] is None, aid
-    kept = rows["asg_" + "1b" * 16]
-    assert rows[seen]["attention_reason"] == kept["attention_reason"]
-    assert rows[seen]["status"] != kept["status"]          # the pill differs
-
-
-def test_the_arm_that_queued_a_row_is_part_of_its_broadcast_key(tmp_path):
-    """Fold F4: the ARMS axis, pinned. Four rows agreeing on sender, words,
-    instant and status, differing only in WHY they need you — two queued
-    with a live deadline (`never_activated`), two queued past one
-    (`never_activated`, `overdue`). The card shows ONE reason line, so those
-    are two broadcasts and two cards. A build that dropped `attention_reason`
-    from the key survived every other pin here."""
-    at = "2026-01-01T00:00:00+00:00"
-    live = [_note(tmp_path, t, b, at) for t, b in
-            (("1e", "jian-yang"), ("2e", "issey"))]
-    past = [_note(tmp_path, t, b, at, expected_by=PAST) for t, b in
-            (("3e", "damodaran"), ("4e", "ramanujan"))]
-    rows = _tasks(tmp_path)
-    assert [rows[a]["attention_reason"] for a in live] == [["never_activated"]] * 2
-    assert [rows[a]["attention_reason"] for a in past] == \
-        [["never_activated", "overdue"]] * 2
-    # everything else the key holds AGREES across the four — only the arm moves
-    assert len({rows[a]["status"] for a in live + past}) == 1
-    assert len({rows[a]["assigned_by_uid"] for a in live + past}) == 1
-    assert len({rows[a]["title"] for a in live + past}) == 1
-    keys = {tuple(sorted(rows[a]["broadcast_key"] for a in pair))
-            for pair in (live, past)}
-    assert all(k[0] == k[1] and k[0] for k in keys)      # each pair is one card
-    assert len(keys) == 2                                # and they are two
+    # The capped latest slice cannot certify that older intake needs nothing.
+    emit_batch(tmp_path, [
+        {"event_type": "work_item", "emitter": TASK_EMITTER, "fleet": "f",
+         "payload": {"work_item_id": f"wi_{i:032x}", "title": f"Later {i}",
+                     "created_by": "bot:f/mgr"}}
+        for i in range(201)], require_commit=True)
+    capped = client.get("/api/tasks?fleet=f").json()["data"]
+    assert len(capped["tasks"]) == 200 and capped["truncated"] is True
+    assert queued not in {card["task_id"] for card in capped["tasks"]}
+    assert capped["attention_count"] == 0  # only the visible slice is counted
 
 
-def test_the_broadcast_key_is_the_stored_title_not_the_rendered_one(tmp_path):
-    """Fold F3: `body_words` strips a trailing `| key:value`, so two reviews
-    of DIFFERENT pull requests RENDER identical words. Keyed on the render,
-    they grouped — one card naming a PR half its recipients were never sent
-    (reproduced). The key is the work item's title as STORED."""
-    at = "2026-01-01T00:00:00+00:00"
-    stem = "review the branch"
-    one = [_note(tmp_path, t, b, at,
-                 title=f"{stem} | ref:https://example.invalid/o/r/pull/1")
-           for t, b in (("1f", "jian-yang"), ("2f", "issey"))]
-    two = [_note(tmp_path, t, b, at,
-                 title=f"{stem} | ref:https://example.invalid/o/r/pull/2")
-           for t, b in (("3f", "damodaran"), ("4f", "ramanujan"))]
-    rows = _tasks(tmp_path)
-    # the RENDER is identical — which is exactly what made this invisible
-    assert {rows[a]["title"] for a in one + two} == {stem}
-    assert rows[one[0]]["broadcast_key"] == rows[one[1]]["broadcast_key"]
-    assert rows[two[0]]["broadcast_key"] == rows[two[1]]["broadcast_key"]
-    assert rows[one[0]]["broadcast_key"] != rows[two[0]]["broadcast_key"]
-    assert rows[one[0]]["broadcast_key"] and rows[two[0]]["broadcast_key"]
+def test_board_discloses_unknown_task_history_without_an_all_clear(tmp_path):
+    from claudlobby.task_state import TASK_EMITTER
 
-
-def test_a_re_dispatch_to_the_same_bot_is_not_a_second_recipient(tmp_path):
-    """Fold F1: a broadcast has ONE row per recipient. Two open dispatches of
-    the same words to the SAME bot inside the window — the estate's common
-    re-dispatch — read "→ issey, issey · 2 bots". The first row per assignee
-    is the member; a later one is a re-dispatch and renders as its own card.
-    A cluster of one DISTINCT recipient is not a broadcast at all, so both of
-    its rows render exactly as they did before item 6."""
-    base = "2026-01-01T00:00:"
-    # ONE bot, twice, 10s apart: two plain cards, no key
-    twice = [_note(tmp_path, "aa", "issey", f"{base}00+00:00"),
-             _note(tmp_path, "ab", "issey", f"{base}10+00:00")]
-    # three bots and a duplicate of the first: a 3-bot card + one plain card
-    crew = [_note(tmp_path, t, b, f"{base}00+00:00", title="all hands")
-            for t, b in (("ac", "jian-yang"), ("ad", "damodaran"),
-                         ("ae", "ramanujan"))]
-    dup = _note(tmp_path, "af", "jian-yang", f"{base}10+00:00",
-                title="all hands")
-    rows = _tasks(tmp_path)
-    assert all(rows[a]["attention"] for a in twice + crew + [dup])
-    assert [rows[a]["broadcast_key"] for a in twice] == [None, None]
-    keyed = {rows[a]["broadcast_key"] for a in crew}
-    assert len(keyed) == 1 and keyed != {None}
-    assert rows[dup]["broadcast_key"] is None      # a re-dispatch, not a member
-    # and the count the card shows is DISTINCT recipients
-    card = [r for r in rows.values() if r["broadcast_key"] in keyed]
-    assert len(card) == 3
-    assert len({r["assignee_uid"] for r in card}) == 3
-
-
-def test_the_broadcast_window_is_anchored_to_the_dispatch_it_names(tmp_path):
-    """Three sends 50s apart are not one broadcast. The window is measured
-    from the cluster's FIRST row, so 0s and 50s group and 1m40s starts its
-    own; chaining to the previous row would let a trickle drift arbitrarily
-    far from the dispatch it claims to be part of."""
-    a = _note(tmp_path, "1d", "jian-yang", "2026-01-01T00:00:00+00:00")
-    b = _note(tmp_path, "2d", "issey", "2026-01-01T00:00:50+00:00")
-    c = _note(tmp_path, "3d", "damodaran", "2026-01-01T00:01:40+00:00")
-    rows = _tasks(tmp_path)
-    assert rows[a]["broadcast_key"] == rows[b]["broadcast_key"] == "bc:" + a
-    assert rows[c]["broadcast_key"] is None
-
-
-def test_only_the_rows_that_need_you_join_a_broadcast(tmp_path):
-    """The card lists the recipients that NEED you: a member that has since
-    been answered leaves the cluster (2 of 4 still queued must never read
-    "4 bots"), and every row carries the field so the page never guesses."""
-    at = "2026-01-01T00:00:00+00:00"
-    crew = ("jian-yang", "issey", "damodaran", "ramanujan")
-    ids = [_note(tmp_path, f"{i + 1}c", b, at) for i, b in enumerate(crew)]
-    for aid in ids[2:]:
-        emit_batch(tmp_path, [{
-            "event_type": "task", "emitter": "t", "fleet": "f",
-            "payload": {"event": "completed", "assignment_id": aid,
-                        "work_item_id": "wi_" + aid[len("asg_"):]}}])
-    rows = _tasks(tmp_path)
-    keyed = [r for r in rows.values() if r["broadcast_key"]]
-    assert {r["assignment_id"] for r in keyed} == set(ids[:2])
-    assert all(r["attention"] for r in keyed)
-    done = [rows[aid] for aid in ids[2:]]
-    assert all(r["status"] == "completed" and r["attention"] is False
-               and r["broadcast_key"] is None for r in done)
+    _full_capture(tmp_path)
+    initialize_plane(tmp_path)
+    task_id = "wi_" + "9" * 32
+    ambiguous = "wi_" + "8" * 32
+    emit_batch(tmp_path, [{"event_type": "work_item", "emitter": "claudlobby.tasks.v999",
+                          "fleet": "f", "payload": {"work_item_id": task_id,
+                                                     "title": "Unknown producer",
+                                                     "created_by": "bot:f/mgr"}},
+                         {"event_type": "work_item", "emitter": TASK_EMITTER, "fleet": "f",
+                          "payload": {"work_item_id": ambiguous, "title": "Ambiguous workers",
+                                      "created_by": "bot:f/mgr"}},
+                         *({"event_type": "assignment", "emitter": TASK_EMITTER, "fleet": "f",
+                            "payload": {"assignment_id": "asg_" + stem * 32,
+                                        "work_item_id": ambiguous,
+                                        "assignee": "bot:f/" + bot,
+                                        "assigned_by": "bot:f/mgr"}}
+                           for stem, bot in (("8", "one"), ("7", "two")))], require_commit=True)
+    data = TestClient(create_app(tmp_path, package=source_package())).get("/api/tasks").json()["data"]
+    cards = {card["task_id"]: card for card in data["tasks"]}
+    assert cards[task_id]["state"] is None
+    assert cards[task_id]["resolved"] is False and cards[task_id]["attention"] is True
+    assert "unknown_task_producer" in {issue["code"] for issue in cards[task_id]["issues"]}
+    assert cards[ambiguous]["state"] is None and cards[ambiguous]["current_assignment"] is None
+    assert "multiple_current_assignments" in {issue["code"] for issue in cards[ambiguous]["issues"]}
+    assert data["issue_count"] >= 2 and data["attention_count"] == 2
 
 
 def test_a_rail_row_carries_the_fleet_the_server_says_it_belongs_to(tmp_path):
@@ -1285,109 +1285,26 @@ def test_a_rail_row_carries_the_fleet_the_server_says_it_belongs_to(tmp_path):
     `fleet_of` takes the LAST. A fleet identity is its own fleet; a human
     belongs to none, being a participant of every room."""
     _seed_twins(tmp_path)
-    rail = {r["alias"]: r for r in TestClient(create_app(tmp_path))
+    rail = {r["alias"]: r for r in TestClient(create_app(tmp_path, package=source_package()))
             .get("/api/identities").json()["data"]["identities"]}
     assert rail["bot:data/one"]["fleet"] == "data"
     assert rail["bot:engineering/one"]["fleet"] == "engineering"
     assert rail["data"]["kind"] == "fleet" and rail["data"]["fleet"] == "data"
     assert rail["human:chris"]["fleet"] is None
-    room = TestClient(create_app(tmp_path)) \
+    room = TestClient(create_app(tmp_path, package=source_package())) \
         .get("/api/identities?fleet=data").json()["data"]["identities"]
     assert {r["fleet"] for r in room} == {"data", None}   # the fleet + a human
 
 
-def test_ui_renders_one_card_per_broadcast_and_a_header_per_fleet():
-    """Structural (item 6, #1479 + its fold): the page groups ONLY what the
-    API keyed and parses no alias of its own, the card names the recipients,
-    the header count stays the number of rows that need you, the roster
-    groups by fleet under `all` and not in a room, ONE group-by serves both,
-    and the reason line is free to wrap."""
-    from importlib.resources import files
-    ui = files("claudlobby.plane").joinpath("ui")
-    js = ui.joinpath("app.js").read_text()
-    # the grouping is the server's fact; the page never derives one
-    assert "r.broadcast_key" in js and "groupBroadcasts(attn)" in js
-    assert "r.title ===" not in js       # never keyed on the words here
-    # ONE group-by, two callers (fold F6)
-    assert js.count("function groupBy(") == 1
-    assert js.count("byKey.set(") == 1   # the only grouping loop in the file
-    assert "groupBy(rows, (a) => a.fleet" in js
-    # the fleet is the SERVER's stamp — no alias parsing left on the page
-    assert "railFleetOf" not in js
-    assert "a.alias.indexOf" not in js
-    # the badge counts ROWS, so the header and the rail agree
-    assert "badge.textContent = attn.length" in js
-    # the roster: a header per fleet, only when the read spans more than one
-    assert "rail-head" in js and "fleets.size < 2" in js
-    css = ui.joinpath("style.css").read_text()
-    assert ".rail-head" in css
-    # the nit: the reason line wraps rather than clipping at the rail's edge
-    why = css[css.index(".card .why"):]
-    why = why[:why.index("}")]
-    assert "nowrap" not in why and "ellipsis" not in why
-    assert "overflow: hidden" not in why and "overflow-wrap" in why
-
-
-def _js_function(src: str, name: str) -> str:
-    """One `function <name>(…) {…}` lifted VERBATIM from a shipped file.
-    Brace-matched rather than retyped: a pin carrying its own copy of the
-    code pins the copy, and this one has to run what ships."""
-    i = src.index("function %s(" % name)
-    depth, j = 0, src.index("{", i)
-    for k in range(j, len(src)):
-        depth += (src[k] == "{") - (src[k] == "}")
-        if depth == 0:
-            return src[i:k + 1]
-    raise AssertionError("unbalanced braces in " + name)
-
-
-def test_the_page_groups_and_elides_what_the_operator_actually_reads(tmp_path):
-    """BEHAVIORAL (fold F9), run in node: the two pure page functions on real
-    inputs, because every other pin on them is a substring of the source and
-    a substring cannot tell a working grouper from a broken one. Four rows —
-    two sharing a key, two unkeyed — must render three cards in payload
-    order, the keyed one holding its two members; seven recipients must elide
-    at six names while the COUNT stays whole."""
-    import shutil
-    import subprocess
-    if not shutil.which("node"):
-        pytest.skip("node is not installed on this host")
-    import re
+def test_ui_renders_one_card_per_task_and_keeps_roster_fleet_grouping():
     from importlib.resources import files
     js = files("claudlobby.plane").joinpath("ui/app.js").read_text()
-    shown = re.search(r"^const NAMES_SHOWN = .*$", js, re.M)
-    assert shown, "NAMES_SHOWN is the elision boundary and must be readable"
-    # `esc` is panel-state's and pinned there; this pin is about grouping and
-    # elision, so it runs against a pass-through and never re-tests escaping
-    driver = "\n".join([
-        'const esc = (s) => String(s ?? "");',
-        shown.group(0),
-        _js_function(js, "groupBy"),
-        _js_function(js, "groupBroadcasts"),
-        _js_function(js, "recipientsLine"),
-        """
-const row = (n, key) => ({ assignee_short: n, broadcast_key: key });
-const rows = [row("one", "bc:1"), row("solo", null),
-              row("three", "bc:1"), row("other", null)];
-const groups = groupBroadcasts(rows);
-const many = Array.from({ length: 7 }, (_, i) => row("bot" + i, "bc:2"));
-console.log(JSON.stringify({
-  shape: groups.map((g) => g.map((r) => r.assignee_short)),
-  line: recipientsLine(groups[0]),
-  elided: recipientsLine(many),
-}));
-""",
-    ])
-    pin = tmp_path / "pin.mjs"
-    pin.write_text(driver)
-    out = subprocess.run(["node", str(pin)], capture_output=True, text=True)
-    assert out.returncode == 0, out.stderr
-    got = json.loads(out.stdout)
-    # three cards, in the payload's order, the keyed one holding both members
-    assert got["shape"] == [["one", "three"], ["solo"], ["other"]]
-    assert got["line"] == "→ one, three · 2 bots"
-    # the names elide, the count never does
-    assert got["elided"] == "→ bot0, bot1, bot2, bot3, bot4, bot5 … · 7 bots"
+    assert "env.data.tasks" in js and "r.current_assignment" in js
+    assert "task ${esc(r.task_id)}" in js
+    assert "groupBroadcasts" not in js and "broadcast_key" not in js
+    assert "groupBy(rows, (a) => a.fleet" in js
+    assert "taskIssueNote(r)" in js and "Message delivery:" in js
+    assert "Older work may still need attention" in js
 
 
 # --- the task loop's human arms (chunk M-A, #1481) ---------------------------
@@ -1417,7 +1334,7 @@ def test_an_escalation_is_attention_with_its_question_and_its_own_instant(tmp_pa
     assert row["attention_since"] == "2026-01-01T00:00:00+00:00"
     assert row["attention_question"] == "ship it without the migration?"
     assert row["attention_by"] == "erlich"
-    assert row["status"] == "escalated"          # non-terminal, still live work
+    assert row["state"] == "assigned"          # escalation is attention, not lifecycle
 
 
 def test_a_later_act_clears_the_escalation_with_no_second_door(tmp_path):
@@ -1439,7 +1356,7 @@ def test_a_later_act_clears_the_escalation_with_no_second_door(tmp_path):
     _task_event(tmp_path, "b", "cancelled", at="2026-01-01T03:00:00+00:00",
                 reason="overtaken by events", by="erlich")
     withdrawn = _tasks(tmp_path)["asg_" + ("b" * 32)]
-    assert withdrawn["attention"] is False and withdrawn["status"] == "cancelled"
+    assert withdrawn["attention"] is False and withdrawn["state"] == "cancelled"
 
 
 def test_a_nudge_is_quiet_inside_its_grace_and_attention_past_it(tmp_path):
@@ -1488,11 +1405,11 @@ def test_the_overview_counts_the_human_arms_through_the_same_columns(tmp_path):
     """The strip reads attention off ATTENTION_ARMS_SQL, so a new arm reaches
     the header count without a second derivation (the fold's F2)."""
     _dispatch(tmp_path, "f", expected_by=FUTURE, tx_state="pane_submitted")
-    before = TestClient(create_app(tmp_path)).get("/api/overview").json()
+    before = TestClient(create_app(tmp_path, package=source_package())).get("/api/overview").json()
     assert sum(r["attention"] for r in before["data"]["fleets"]) == 0
     _task_event(tmp_path, "f", "escalated", at="2026-01-01T00:00:00+00:00",
                 question="?", by="erlich")
-    after = TestClient(create_app(tmp_path)).get("/api/overview").json()
+    after = TestClient(create_app(tmp_path, package=source_package())).get("/api/overview").json()
     fleets = {r["alias"]: r for r in after["data"]["fleets"]}
     assert fleets["f"]["attention"] == 1 and fleets["f"]["overdue"] == 0
 
@@ -1608,18 +1525,14 @@ def test_every_arm_carries_its_own_date_column(tmp_path):
     # send_failed leads here, so the card dates from the DISPATCH
     got = _tasks(tmp_path)["asg_" + ("3" * 32)]
     assert got["attention_reason"][0] == "send_failed"
-    assert got["attention_since"] == got["occurred_at"]
+    assert got["attention_since"] == got["current_assignment"]["occurred_at"]
 
 
-def test_the_page_speaks_exactly_the_arms_and_the_task_vocabulary():
-    """FOLD F13: `app.js` hand-writes an arm→wording map and a status→label
-    map. Neither is generated, so a new arm renders as nothing and a new task
-    event renders as its raw token — both silent. Pinned against the two
-    SSOTs (the suite already reads app.js text elsewhere)."""
+def test_the_page_speaks_exactly_the_arms_and_canonical_task_states():
+    """Attention names SQL arms; lifecycle labels name only reducer states."""
     import re
     from pathlib import Path as _P
 
-    from claudlobby.plane.contracts import TASK_EVENTS
     from claudlobby.plane.queries import ATTENTION_ARMS
 
     src = (_P(__file__).resolve().parent.parent / "claudlobby" / "plane" / "ui"
@@ -1629,19 +1542,6 @@ def test_the_page_speaks_exactly_the_arms_and_the_task_vocabulary():
         {name for name, _s, _a, _w in ATTENTION_ARMS}
     status = src.split("const TASK_STATUS = {", 1)[1].split("\n};", 1)[0]
     labelled = set(re.findall(r"^  (\w+):", status, re.M))
-    # nothing dead: every label is a real task event or one of the ladder's
-    # own derived statuses (`TASK_STATUS_SQL` returns the newest task event
-    # verbatim otherwise), so a typo'd or retired token cannot linger
-    derived = {"open", "pending_unacknowledged", "dispatch_failed",
-               "created_not_sent"}
-    assert labelled <= set(TASK_EVENTS) | derived
-    # ...and nothing NEW goes unlabelled: this is the set the page renders as
-    # a raw token today (a pre-existing gap, out of M-A's scope). It is
-    # FROZEN, so the next task event added has to be labelled or listed here
-    # deliberately — which is the drift the pin exists to catch.
-    assert set(TASK_EVENTS) - labelled == {
-        "deadline_changed", "dispatch_intended", "dispatch_submitted",
-        "orphaned_by_session_loss", "recovered_after_restart", "rejected",
-        "retry_created", "supplied_id_not_open", "transmission_failed",
-    }
-    assert {"escalated", "nudged"} <= labelled     # the M-A pair IS labelled
+    assert labelled == {"queued", "assigned", "active", "blocked",
+                        "completed", "failed", "cancelled"}
+    assert "state unknown" in src

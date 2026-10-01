@@ -1,50 +1,21 @@
-"""Unit tests for lib/who-reviewed.py — attributing a PR review to the bot that
+"""Unit tests for review_queries — attributing a PR review to the bot that
 wrote it, when a shared GitHub PAT makes every review read `chrisrogers37`.
 
 The two rules under test are the ones that came from the manual version failing:
 a bare number must never match, and the report lands seconds after the review so
 an exact-equality join finds nothing.
 
-F18 closure (R2b): the plane is the module's ONLY source. The join is pure over
-row dicts, so the rule pins below feed it rows directly; the CLI pins land a
-report on a throwaway plane as the report door lands it. Deleted with the
-ledgers: TestLedgerLoading (test_bad_lines_counted_not_silently_dropped,
-test_missing_ledger_reports_unreadable, test_fleet_marker_attached),
-TestDiscovery (test_finds_flat_nested_and_root_layouts,
-test_no_ledgers_is_empty_not_error).
+The Plane is the only attribution source. Pure matching tests retain the
+historical report-row examples; the current query tests explicit review roles.
 """
 
 from __future__ import annotations
 
-import sys
-
-import subprocess
-
-import json
-
-import pytest
-
-from tests.conftest import load_lib_module, report_row as _report
-from tests.plane_fixtures import _dispatch, _report as _land_report, plane_root
-
-who = load_lib_module("who-reviewed")
+from tests.conftest import report_row as _report
+from claudlobby import review_queries as who, review_rules
 
 REPO = "Claudfather/Claudlobby"
 URL = f"https://github.com/{REPO}/pull/1046"
-
-
-# One review at the instant of the real #1046 pair (14:22:05Z), as `gh` renders it.
-_PAYLOAD = {
-    "reviews": [
-        {
-            "submittedAt": "2026-08-06T14:22:05Z",
-            "state": "COMMENTED",
-            "author": {"login": "chrisrogers37"},
-            "body": "verdict",
-        }
-    ],
-    "comments": [],
-}
 
 
 def _rows(*rows):
@@ -158,25 +129,23 @@ class TestPrReferenceMatching:
         assert not word_boundary.search("pull/1046a")
 
     def test_longer_owner_ending_in_ours_is_not_qualified(self):
-        """The case the qualified lookbehind must still block. `(?<!\\w)` allows
-        the `/` that always precedes the owner in a URL, but a longer owner ends
-        in a word character and is correctly refused a qualified match."""
+        """A longer owner cannot turn a structured foreign URL into a hit."""
         q, b = who.pr_patterns(REPO, 1046)
         row = _report(
             "vera",
             "2026-08-06T14:22:17Z",
             pr_url="https://github.com/NotClaudfather/Claudlobby/pull/1046",
         )
-        assert who.row_pr_match(row, q, b) == ("pr_url", False)
+        assert who.row_pr_match(row, q, b) is None
 
-    def test_other_repo_is_bare_not_qualified(self):
+    def test_explicit_other_repo_does_not_become_an_unqualified_hit(self):
         q, b = who.pr_patterns(REPO, 1046)
         row = _report(
             "vera",
             "2026-08-06T14:22:17Z",
             pr_url="https://github.com/Other/Repo/pull/1046",
         )
-        assert who.row_pr_match(row, q, b) == ("pr_url", False)
+        assert who.row_pr_match(row, q, b) is None
 
     def test_qualified_beats_prose(self):
         q, b = who.pr_patterns(REPO, 1046)
@@ -269,7 +238,7 @@ class TestRefusals:
         """Bot-name collision across fleets (#526) must not silently resolve."""
         rows = _rows(
             (_report("vera", "2026-08-06T14:22:17Z", pr_url=URL), "ai-platform"),
-            (_report("vera", "2026-08-06T14:22:20Z", pr_url=URL), "tl-enterprises"),
+            (_report("vera", "2026-08-06T14:22:20Z", pr_url=URL), "acme-fleet"),
         )
         out = who.attribute([_event("2026-08-06T14:22:05Z")], rows, REPO, 1046)
         assert out[0]["verdict"] == "AMBIGUOUS"
@@ -301,116 +270,59 @@ class TestPayloadNormalization:
                 }
             ],
         }
-        events = who.events_from_payload(payload)
-        assert [e["kind"] for e in events] == ["review", "comment"]
-        assert events[0]["excerpt"] == "**Request Changes**"
+        events = review_rules.events_from_payload(payload)
+        assert [e["surface"] for e in events] == ["reviews", "comments"]
+        assert events[0]["body"] == "**Request Changes**\nbody"
 
     def test_empty_payload_is_no_events(self):
-        assert who.events_from_payload({}) == []
+        assert review_rules.events_from_payload({}) == []
 
 
-class TestCli:
-    def test_refuses_without_a_root(self, capsys, monkeypatch, tmp_path):
-        """Refusing beats reporting every review as UNKNOWN — a false all-clear
-        is exactly the wrong-attribution class this module exists to stop."""
-        monkeypatch.delenv("CLAUDLOBBY_ROOT", raising=False)
-        payload = tmp_path / "p.json"
-        payload.write_text(json.dumps({"reviews": [], "comments": []}), encoding="utf-8")
-        rc = who.main([REPO, "1046", "--reviews-json", str(payload), "--root", ""])
-        assert rc == 4
-        assert "refusing" in capsys.readouterr().err
+def test_host_review_rows_keep_only_explicit_review_role_and_both_report_legs(tmp_path):
+    """One host snapshot: linked + unlinked reviewed, authored excluded.
 
-    def test_unreachable_plane_refuses_not_unknown(self, capsys, tmp_path):
-        """A root with no plane db is UNREACHABLE — not a fleet that never
-        reported. rc 4, empty stdout, the reason on stderr."""
-        root = tmp_path / "root"
-        (root / "state" / "plane").mkdir(parents=True)
-        payload = tmp_path / "p.json"
-        payload.write_text(json.dumps(_PAYLOAD), encoding="utf-8")
-        rc = who.main([REPO, "1046", "--reviews-json", str(payload), "--root", str(root), "--json"])
-        captured = capsys.readouterr()
-        assert rc == 4 and captured.out == "" and "unreachable" in captured.err
+    Both reviewers matching one PR remain ambiguous even when one report lands
+    after the other. A missing role cannot be retroactively called reviewed.
+    """
+    import sqlite3
+    from claudlobby.plane.emit_api import emit_batch
+    from tests.plane_fixtures import _scene, F
 
-    def test_end_to_end_json(self, capsys, tmp_path):
-        """The regression pair, landed as the report door lands it: the review
-        posts at 14:22:05Z, vera's report lands at 14:22:17Z (+12s)."""
-        root = plane_root(tmp_path)
-        wi, asg = _dispatch(root, "1", "t-1-aaaa", "2026-08-06T14:00:00Z", bot="vera")
-        _land_report(root, wi, asg, "2026-08-06T14:22:17Z", bot="vera",
-                     extra={"pr_url": URL, "summary": "Request Changes on #1046"})
-        payload = tmp_path / "p.json"
-        payload.write_text(json.dumps(_PAYLOAD), encoding="utf-8")
-        rc = who.main([REPO, "1046", "--reviews-json", str(payload), "--root", str(root), "--json"])
-        assert rc == 0
-        result = json.loads(capsys.readouterr().out)
-        event = result["events"][0]
-        assert event["verdict"] == "MATCH"
-        assert (event["bot"], event["fleet"], event["basis"]["delta_s"]) == ("vera", "f", 12)
-        assert event["basis"]["field"] == "pr_url" and event["basis"]["repo_qualified"] is True
-        assert result["scope"]["rows"] == 1 and result["scope"]["fleets"] == ["f"]
-        assert result["scope"]["source"] == "plane" and result["scope"]["plane"].endswith("plane.db")
-
-    def test_text_scope_names_the_plane_and_the_fleets(self, capsys, tmp_path):
-        root = plane_root(tmp_path)
-        wi, asg = _dispatch(root, "1", "t-1-aaaa", "2026-08-06T14:00:00Z", bot="vera")
-        _land_report(root, wi, asg, "2026-08-06T14:22:17Z", bot="vera",
-                     extra={"pr_url": URL, "summary": "x"})
-        payload = tmp_path / "p.json"
-        payload.write_text(json.dumps(_PAYLOAD), encoding="utf-8")
-        assert who.main([REPO, "1046", "--reviews-json", str(payload), "--root", str(root)]) == 0
-        out = capsys.readouterr().out
-        assert "plane: " in out and "plane.db" in out and "fleets: f" in out
-        assert "→ vera (f)" in out and "report 2026-08-06T14:22:17Z (+12s)" in out
-
-    def test_the_retired_source_seam_is_refused(self, tmp_path):
-        """`--source` and `--ledger` went with the ledgers (F18 R2b); a stale
-        caller must hear it rather than be silently served the plane."""
-        for stale in (["--source", "plane"], ["--ledger", "/x.jsonl"]):
-            with pytest.raises(SystemExit) as exc:
-                who.main([REPO, "1046", *stale, "--root", str(tmp_path)])
-            assert exc.value.code == 2
-
-    def test_bad_repo_arg_rejected(self, capsys):
-        assert who.main(["notarepo", "1046"]) == 2
-
-
-# --- the plane join, moved from tests/test_plane_cutover_retire.py (dissolved in R3) ---
-from claudlobby.plane.emit_api import emit_batch
-from tests.plane_fixtures import F as PLANE_FLEET, REPO as REPO_ROOT, _rrow, _scene
-
-
-def test_who_reviewed_attributes_from_the_plane_like_the_ledger(tmp_path):
-    wr = who
-    root, paths, _, r = _scene(tmp_path)
+    root, _paths, _dispatch_rows, _reports = _scene(tmp_path)
+    url = "https://github.com/org/repo/pull/1046"
     ts = "2026-09-02T14:00:00Z"
-    emit_batch(root, [{"event_type": "task", "emitter": "report-back", "fleet": PLANE_FLEET,
-                       "source_ref": f"report-back:msg_{'5':0>32}", "occurred_at": ts,
-                       "payload": {"work_item_id": f"wi_{'2':0>32}", "assignment_id": f"asg_{'2':0>32}",
-                                   "event": "completed", "actor": f"bot:{PLANE_FLEET}/w1",
-                                   "pr_url": "https://github.com/org/repo/pull/1046", "summary": "Request Changes on #1046"}}])
-    ledger_rows = [{**_rrow(ts, "t-2-bbbb", "completed", pr_url="https://github.com/org/repo/pull/1046",
-                            summary="Request Changes on #1046"), "_fleet": PLANE_FLEET, "_ledger": "ledger"}]
-    plane_rows, why = wr.load_plane_rows(str(root))
-    assert why is None and len(plane_rows) == 1
-    assert {k: plane_rows[0][k] for k in ("bot", "pr_url", "task_id", "status", "_fleet")} == \
-        {"bot": "w1", "pr_url": "https://github.com/org/repo/pull/1046", "task_id": "t-2-bbbb",
-         "status": "completed", "_fleet": PLANE_FLEET}
-    events = [{"ts": "2026-09-02T13:59:52Z", "state": "CHANGES_REQUESTED", "kind": "review"}]
-    from_ledger = wr.attribute(events, ledger_rows, "org/repo", 1046)
-    from_plane = wr.attribute(events, plane_rows, "org/repo", 1046)
-    assert from_ledger[0]["verdict"] == from_plane[0]["verdict"] == "MATCH"
-    assert from_plane[0]["candidates"][0]["bot"] == "w1"
-    reviews = tmp_path / "reviews.json"
-    reviews.write_text(json.dumps({"reviews": [], "comments": []}))
-    ok = subprocess.run([sys.executable, str(REPO_ROOT / "lib" / "who-reviewed.py"), "org/repo", "1046",
-                         "--root", str(root), "--reviews-json", str(reviews), "--json"],
-                        capture_output=True, text=True, timeout=60)
-    assert ok.returncode == 0, ok.stderr
-    assert json.loads(ok.stdout)["scope"]["source"] == "plane"
-    (root / "state" / "plane" / "plane.db").unlink()
-    rows, why = wr.load_plane_rows(str(root))
-    assert rows == [] and "no plane db" in why                                     # unreachable ≠ empty
-    gone = subprocess.run([sys.executable, str(REPO_ROOT / "lib" / "who-reviewed.py"), "org/repo", "1046",
-                           "--root", str(root), "--reviews-json", str(reviews)],
-                          capture_output=True, text=True, timeout=60)
-    assert gone.returncode == 4 and gone.stdout == "" and "unreachable" in gone.stderr
+    emit_batch(root, [
+        {"event_type": "task", "emitter": "report-back", "fleet": F,
+         "source_ref": f"report-back:msg_{'5':0>32}", "occurred_at": ts,
+         "payload": {"work_item_id": f"wi_{'2':0>32}", "assignment_id": f"asg_{'2':0>32}",
+                     "event": "completed", "actor": f"bot:{F}/w1",
+                     "pr_url": url, "pr_role": "reviewed"}},
+        {"event_type": "system", "emitter": "report-back", "fleet": F,
+         "source_ref": f"report-back:msg_{'6':0>32}", "occurred_at": ts,
+         "payload": {"event": "report_status", "subject_kind": "actor",
+                     "subject": f"bot:{F}/w2",
+                     "data": {"status": "completed", "pr_url": url,
+                              "pr_role": "reviewed"}}},
+        {"event_type": "system", "emitter": "report-back", "fleet": F,
+         "source_ref": f"report-back:msg_{'7':0>32}", "occurred_at": ts,
+         "payload": {"event": "report_status", "subject_kind": "actor",
+                     "subject": f"bot:{F}/w1",
+                     "data": {"status": "completed", "pr_url": url,
+                              "pr_role": "authored"}}},
+    ])
+    payload = {"number": 1046, "title": "review", "headRefOid": "b27ffc2c16e9dc3972332a550925b33f1b6143b1",
+               "reviews": [{"submittedAt": "2026-09-02T13:59:52Z",
+                            "body": "**[w1] [VERDICT] request-changes** reviewed against b27ffc2"}],
+               "comments": [{"createdAt": "2026-09-02T13:59:52Z",
+                             "body": "**[w1] [VERDICT] approve** reviewed against b27ffc2"}]}
+    with sqlite3.connect(root / "state/plane/plane.db") as conn:
+        result = who.assess_payloads(conn, [payload], "org/repo")
+    assert result["rows"] == 2
+    events = result["attribution_events"][0]["events"]
+    assert [event["verdict"] for event in events] == ["AMBIGUOUS", "AMBIGUOUS"]
+    assert {c["actor"] for c in events[0]["candidates"]} == {f"bot:{F}/w1", f"bot:{F}/w2"}
+    assert result["prs"][0]["blocking"]  # copied header cannot clear an unresolved block
+    assert result["prs"][0]["observed_attribution"]["complete"] is False
+    assert result["prs"][0]["attribution"]["ambiguous"] == 2
+    assert "identity is AMBIGUOUS" in review_rules.attribution_advice(
+        result["prs"][0]["attribution"])

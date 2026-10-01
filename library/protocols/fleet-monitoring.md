@@ -95,13 +95,13 @@ The monitor reads **only** pre-aggregated sources:
 
 | Source | Path | Shape |
 |---|---|---|
-| Transcript digests | `claudlobby events --type session_digest` (the plane; #1503 — no longer a file) | one `session_digest` event per finished session |
-| Bot events | `claudlobby events` (the one door for bot events — never open `state/plane/plane.db` by hand; see `fleet-observability`, whose composed recipe this used to duplicate and now defers to) | see `fleet-observability` |
-| Rollups | `claudlobby uptime` · `utilization` · `report-back` | fleet-level aggregates |
+| Transcript digests | `claudlobby event list --type session_digest` (the plane; #1503 — no longer a file) | one `session_digest` event per finished session |
+| Bot events | `claudlobby event list` (the one door for bot events — never open `state/plane/plane.db` by hand; see `fleet-observability`, whose composed recipe this used to duplicate and now defers to) | see `fleet-observability` |
+| Rollups | `claudlobby fleet uptime` · `utilization` · `--json fleet reports list` | fleet-level measures and paginated reports; inspect `ok` and follow `next_cursor` |
 
 ### Digest row contract
 
-Emitted by `lib/transcript-digest.sh` (`SessionEnd`) as a `session_digest` system
+Emitted by `claudlobby/_runtime_scripts/transcript-digest.sh` (`SessionEnd`) as a `session_digest` system
 event on the plane (`bot` and `ts` on the row, the fleet from the query scope;
 the rest ride `.data`, which `/fleet-digest` lifts up). Fields the monitor depends
 on:
@@ -132,7 +132,9 @@ where cost grows silently with time.
 
 - **Budget before you read.** Estimate at **≈4 characters per token** to size a
   window before committing to it. That heuristic is for *planning* a pass; for
-  reporting actual spend use `lib/transcript-usage.py`, which reads real usage.
+  reporting observed Claude token counts use `claudlobby --json fleet usage --since 7d`.
+  Its coverage names missing or partial transcripts; it does not measure money
+  or remaining subscription quota.
 - **Bound the window, then say what you bounded.** A pass that covers seven days
   says seven days. A pass that dropped rows to fit says how many and why.
 - **Aggregate before reasoning.** `/fleet-digest` reduces the raw log to a

@@ -1,4 +1,4 @@
-"""#843 boot-strand sampler — pytest wrapper for lib/boot-strand-sampler.sh.
+"""#843 boot-strand sampler — pytest wrapper for harness/boot-strand-sampler.sh.
 
 Two tiers, mirroring tests/test_freshbox_boot_harness.py:
 
@@ -23,6 +23,8 @@ Two tiers, mirroring tests/test_freshbox_boot_harness.py:
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 import json
 import os
 import re
@@ -35,13 +37,14 @@ from tests.conftest import (
     constructed_env,
     load_lib_module,
     realboot_skip_reason,
+    REALBOOT_HOST_CREDS,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SAMPLER = REPO_ROOT / "lib" / "boot-strand-sampler.sh"
+SAMPLER = REPO_ROOT / "harness" / "boot-strand-sampler.sh"
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "pane-states"
 
-summary = load_lib_module("boot-strand-summary")
+summary = load_lib_module("boot-strand-summary", directory="harness")
 
 # A stranded STARTUP_PROMPT payload, passed in FULL exactly as pane_send_verified
 # now passes it (#1082). It used to be truncated to 60 chars here, mirroring the
@@ -194,9 +197,29 @@ class TestSummarize:
 _skip = realboot_skip_reason("BOOT_SAMPLER_REALBOOT", extra_bins=("tmux",))
 
 
+@pytest.mark.parametrize("entrypoint", [
+    "test_real_boot_smoke_one_boot",
+    "test_strand_under_load_is_never_reported_as_a_clean_send",
+])
+def test_realboot_wrapper_keeps_checked_auth_path_with_private_home(monkeypatch, tmp_path, entrypoint):
+    class Captured(Exception):
+        pass
+
+    def capture(_argv, **kwargs):
+        assert kwargs["env"]["HOME"] == str(tmp_path)
+        assert kwargs["env"]["CLAUDLOBBY_REALBOOT_HOST_CREDS"] == str(REALBOOT_HOST_CREDS)
+        raise Captured
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(subprocess, "run", capture)
+    with pytest.raises(Captured):
+        globals()[entrypoint]()
+
+
 @pytest.mark.skipif(bool(_skip), reason=_skip)
 def test_real_boot_smoke_one_boot():
-    env = {**os.environ, "CLAUDLOBBY_SRC": str(REPO_ROOT)}
+    env = {**os.environ, "CLAUDLOBBY_SRC": str(REPO_ROOT),
+           "CLAUDLOBBY_REALBOOT_HOST_CREDS": str(REALBOOT_HOST_CREDS)}
     result = subprocess.run(
         ["bash", str(SAMPLER), "-n", "1", "--deadline", "90"],
         capture_output=True,
@@ -241,7 +264,8 @@ _load_skip = _skip or (
 
 @pytest.mark.skipif(bool(_load_skip), reason=_load_skip)
 def test_strand_under_load_is_never_reported_as_a_clean_send():
-    env = {**os.environ, "CLAUDLOBBY_SRC": str(REPO_ROOT)}
+    env = {**os.environ, "CLAUDLOBBY_SRC": str(REPO_ROOT),
+           "CLAUDLOBBY_REALBOOT_HOST_CREDS": str(REALBOOT_HOST_CREDS)}
     burners = os.environ.get("BOOT_SAMPLER_LOAD_BURNERS", "20")
     result = subprocess.run(
         [
@@ -411,7 +435,7 @@ class TestKnobDisclosure:
         # knob be scrubbed silently. The regex reads `${PANE_X...}` expansion
         # reads — a bare `$PANE_X` read would escape it, which is accepted as
         # the floor (lib-common uses braced reads for every current knob).
-        lib_common = (REPO_ROOT / "lib" / "lib-common.sh").read_text(encoding="utf-8")
+        lib_common = (REPO_ROOT / "claudlobby/_runtime_scripts" / "lib-common.sh").read_text(encoding="utf-8")
         actual = set(re.findall(r"\$\{(PANE_[A-Z0-9_]+)", lib_common))
         declared = set(
             call_script_fn(
@@ -428,7 +452,7 @@ class TestKnobDisclosure:
         # call sites. If this pin fails, start-bot now honors an inherited
         # value — update knob_disclosure's INERT branch (and this pin), or the
         # disclosure starts lying in the safe-but-wrong direction.
-        start_bot = (REPO_ROOT / "lib" / "start-bot.sh").read_text(encoding="utf-8")
+        start_bot = (REPO_ROOT / "claudlobby/_runtime_scripts" / "start-bot.sh").read_text(encoding="utf-8")
         arming = re.findall(
             r'PANE_READY_TICKS="\$_PANE_READY_TICKS_BOOT"\s*\\\s*\n\s*pane_send_verified',
             start_bot,
@@ -457,7 +481,7 @@ def _arm_record(**overrides) -> dict:
 
 
 def _lib_common() -> str:
-    return (REPO_ROOT / "lib" / "lib-common.sh").read_text(encoding="utf-8")
+    return (REPO_ROOT / "claudlobby/_runtime_scripts" / "lib-common.sh").read_text(encoding="utf-8")
 
 
 def _lib_common_constants() -> dict[str, str]:
@@ -1230,7 +1254,7 @@ class TestSummaryExitPropagation:
     def _run(tmp_path: Path, exit_code: int) -> subprocess.CompletedProcess:
         """Drive emit_summary against a stub summarizer that exits `exit_code`.
 
-        LIB_DIR is overridden AFTER sourcing so the real python3 still runs the
+        HARNESS_DIR is overridden AFTER sourcing so the real python3 still runs the
         stub — the exit path under test is the shell's, not python's.
         """
         (tmp_path / "boot-strand-summary.py").write_text(
@@ -1243,7 +1267,7 @@ class TestSummaryExitPropagation:
             [
                 "bash",
                 "-c",
-                f'. "{SAMPLER}"; LIB_DIR="{tmp_path}"; emit_summary "$1"',
+                f'. "{SAMPLER}"; HARNESS_DIR="{tmp_path}"; emit_summary "$1"',
                 "_",
                 str(rows),
             ],
@@ -1376,7 +1400,7 @@ class TestCountSendRetriesReadsThePlane:
         bot_dir.mkdir(parents=True)
         (bot_dir / "bot.conf").write_text(f'BOT_ID="{bot}"\nFLEET_NAME="{fleet}"\n')
         if not (root / "lib").exists():
-            (root / "lib").symlink_to(REPO_ROOT / "lib")
+            (root / "lib").symlink_to(REPO_ROOT / "claudlobby/_runtime_scripts")
         return bot_dir
 
     @staticmethod
@@ -1390,6 +1414,7 @@ class TestCountSendRetriesReadsThePlane:
                    "payload": {"event": etype, "subject_kind": "actor", "subject": f"bot:{fleet}/{bot}",
                                "data": {"source": "start-bot", "legacy_ts": f"2026-08-06T12:4{i}:00Z",
                                         "data": {"attempt": i}}}} for i in range(n)]
+        initialize_plane(root)
         out = emit_batch(root, events)
         assert all(o.status == "committed" for o in out), out
 
@@ -1429,7 +1454,7 @@ class TestSummaryDisclosesUnknownRetries:
         rows[3]["retry_fired"] = 2
         import importlib.util
 
-        spec = importlib.util.spec_from_file_location("bss_summary", REPO_ROOT / "lib" / "boot-strand-summary.py")
+        spec = importlib.util.spec_from_file_location("bss_summary", REPO_ROOT / "harness" / "boot-strand-summary.py")
         summary_mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(summary_mod)
         lines, _machine, _k, _valid = summary_mod.arm_block(rows, None)

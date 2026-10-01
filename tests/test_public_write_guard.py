@@ -1,4 +1,4 @@
-"""The public-write guard, through the REAL hook script (lib/public-write-guard.sh).
+"""The public-write guard, through the REAL hook script (claudlobby/_runtime_scripts/public-write-guard.sh).
 
 It refuses a GitHub-bound write that would put a term from the host's list into a
 PUBLIC repository, and lets the same write through to a private one. The terms
@@ -19,7 +19,8 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
-HOOK = REPO / "lib" / "public-write-guard.sh"
+SCRIPTS = REPO / "claudlobby" / "_runtime_scripts"
+HOOK = SCRIPTS / "public-write-guard.sh"
 TERMS = "# invented terms for the tests\nzephyr[ ._-]?widgets\nquillon[ ._-]?media\n"
 HIT = "notes about Zephyr-Widgets"
 VIS = {
@@ -615,7 +616,7 @@ def test_a_redirect_is_not_a_ref_to_push(env, tmp_path):
 
 def test_check_reports_the_list_without_printing_a_term(env, tmp_path):
     def check():
-        p = subprocess.run(["python3", str(REPO / "lib" / "public-write-guard.py"), "--check"],
+        p = subprocess.run(["python3", str(SCRIPTS / "public-write-guard.py"), "--check"],
                            capture_output=True, text=True, env=env, timeout=30)
         return p.returncode, p.stdout
 
@@ -637,7 +638,7 @@ def issue(owner, repo, body=HIT):
 
 
 def check_list(env):
-    p = subprocess.run(["python3", str(REPO / "lib" / "public-write-guard.py"), "--check"],
+    p = subprocess.run(["python3", str(SCRIPTS / "public-write-guard.py"), "--check"],
                        capture_output=True, text=True, env=env, timeout=30)
     return p.returncode, p.stdout
 
@@ -1098,3 +1099,47 @@ def test_the_merge_gate_refuses_only_a_merge_that_carries_a_term(env, tmp_path):
         assert bash(env, f'{merge} {flag} "{HIT}"', tmp_path)[0] == "deny", flag
     with_term = MERGE_LADDER.replace("--match-head-commit", f'--subject "{HIT}" --match-head-commit')
     assert bash(env, with_term, tmp_path)[0] == "deny"
+
+
+# --- host state belongs to the data root, never to the release's code ------------------------
+
+
+def _hook_at(hook: Path, env, command: str, cwd):
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(cwd)})
+    p = subprocess.run(["bash", str(hook)], input=payload, capture_output=True, text=True,
+                       env=env, cwd=cwd, timeout=60)
+    assert p.returncode == 0, p.stderr
+    return "deny" if '"permissionDecision": "deny"' in p.stdout else "allow"
+
+
+def test_the_cache_and_the_off_switch_live_under_the_data_root(env, tmp_path):
+    """A release is code only: the visibility cache lands under CLAUDLOBBY_ROOT, and the
+    off switch there is the one the hook reads."""
+    root = Path(env["CLAUDLOBBY_ROOT"])
+    e = {k: v for k, v in env.items() if k != "PUBLIC_WRITE_GUARD_CACHE"}
+    pub = repo(tmp_path, e, "pub-org/pub-repo")
+    assert bash(e, f'gh issue comment 5 --body "{HIT}"', pub)[0] == "deny"
+    assert (root / "state" / "public-write-guard" / "visibility.json").is_file()
+    assert not (SCRIPTS.parent / "state").exists()
+    (root / "state" / "public-write-guard" / "disabled").write_text("")
+    assert bash(e, f'gh issue comment 5 --body "{HIT}"', pub)[0] == "allow"
+
+
+@pytest.mark.parametrize("root", [None, "relative/root"])
+def test_an_off_switch_beside_the_release_is_never_read(env, tmp_path, root):
+    """A copy of the release's scripts with a switch in the directory above them: with no
+    absolute data root there is no switch to read, so the guard still guards."""
+    native = tmp_path / "release" / "native"
+    shutil.copytree(SCRIPTS, native)
+    beside = native.parent / "state" / "public-write-guard"
+    beside.mkdir(parents=True)
+    (beside / "disabled").write_text("")
+    e = {k: v for k, v in env.items() if k != "CLAUDLOBBY_ROOT"}
+    if root:
+        e["CLAUDLOBBY_ROOT"] = root
+    pub = repo(tmp_path, env, "pub-org/pub-repo")
+    assert _hook_at(native / "public-write-guard.sh", e, f'gh issue comment 5 --body "{HIT}"', pub) == "deny"
+    p = subprocess.run(["python3", str(native / "public-write-guard.py"), "--check"],
+                       capture_output=True, text=True, env=e, timeout=60)
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert "no CLAUDLOBBY_ROOT data directory" in p.stdout and "set, so every call" not in p.stdout

@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-LIB = REPO_ROOT / "lib" / "lib-common.sh"
+LIB = REPO_ROOT / "claudlobby/_runtime_scripts" / "lib-common.sh"
 
 MANIFEST = textwrap.dedent(
     """\
@@ -44,7 +44,7 @@ def _run(root: Path, snippet: str) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
         timeout=60,
-        env={"CLAUDLOBBY_ROOT": str(root), "HOME": str(root), "PATH": "/usr/bin:/bin"},
+        env={"PLANE_EMIT_DISABLED": "1", "CLAUDLOBBY_ROOT": str(root), "HOME": str(root), "PATH": "/usr/bin:/bin"},
     )
 
 

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import shutil
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from claudlobby.commands import lessons_migrate as lm
+from claudlobby import context
+from tests.package_fixtures import source_package
 
 REPO_LESSONS = Path(__file__).resolve().parent.parent / "library" / "lessons"
 
@@ -121,14 +124,17 @@ def _repo_root() -> Path:
 # ── the freeze catches an unclassified new note ──────────────────────────
 
 
-def test_unclassified_note_is_rejected(tmp_path):
+def test_unclassified_note_is_rejected(tmp_path, monkeypatch):
     fake_root = tmp_path / "claudlobby"
-    (fake_root / "library").mkdir(parents=True)
-    shutil.copytree(REPO_LESSONS, fake_root / "library" / "lessons")
-    (fake_root / "library" / "lessons" / "brand-new-lesson.md").write_text(
+    fake_root.mkdir()
+    library = tmp_path / "package-library"
+    shutil.copytree(REPO_LESSONS, library / "lessons")
+    (library / "lessons" / "brand-new-lesson.md").write_text(
         "---\ntitle: Brand new\n---\n\nbody\n"
     )
-    assert lm._classify(fake_root / "library" / "lessons") == ["brand-new-lesson.md"]
+    monkeypatch.setattr(context, "get_resources", lambda: replace(
+        source_package(), library=library))
+    assert lm._classify(library / "lessons") == ["brand-new-lesson.md"]
     assert lm.cmd_lessons_migrate(_args(fake_root)) == 1
 
 

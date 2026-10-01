@@ -1,6 +1,6 @@
 ---
 name: selfcheck
-description: "Manager self-diagnostic (formerly /status). Reports session health, MCP connectivity, tmux fleet state, and fleet-state ledger. Generic — no host-specific or personal paths."
+description: "Manager self-diagnostic (formerly /status). Reports session health, MCP connectivity, and own-fleet state from claudlobby fleet status. Generic — no host-specific or personal paths."
 argument-hint: "[full|mcp|telegram]"
 ---
 
@@ -14,8 +14,7 @@ Self-diagnostic for the manager. Checks session health, MCP connections, fleet h
 ### 1. Session Info
 
 ```bash
-"$CLAUDLOBBY_ROOT/lib/claude-session-pid.sh" --summary
-tmux list-sessions 2>/dev/null
+"$CLAUDLOBBY_NATIVE_DIR/claude-session-pid.sh" --summary
 ```
 
 *Identity comes from the session you are running **inside**, via the shipped
@@ -47,22 +46,27 @@ Report pass/fail per server.
 
 ### 3. Fleet Health
 
-List tmux sessions; compare against expected workers. For each worker, capture the last few pane lines so you can see if anyone is stuck or erroring.
+Read your own fleet through the public CLI; the generated context selects it.
+Run each command as one literal Bash call and read the JSON directly.
 
 ```bash
-tmux list-sessions
-for bot in <WORKER_LIST>; do
-  echo "=== $bot ==="
-  tmux capture-pane -t "$bot" -p 2>/dev/null | tail -3 || echo "  (dead)"
-done
+claudlobby --json fleet status
 ```
 
-Also consult the fleet-state ledger (if wired):
+`data.bots[]` carries every declared bot's private-session, supervision and
+recorded-heartbeat observations, and its current work. Do not list tmux
+sessions: bots run on the fleet's private socket, so the default socket shows
+none of them. An unknown observation is unknown, not dead.
+
+For a worker that looks stuck, down or unknown, read it by its literal declared
+ID:
 
 ```bash
-jq '.bots | to_entries | map({bot: .key, status: .value.status, task: .value.current_task})' \
-  ~/claudlobby/state/fleet-state.json
+claudlobby --json bot session WORKER
+claudlobby --json bot logs WORKER --lines 20
 ```
+
+Quote only the single relevant log line if you find an error.
 
 ### 4. Telegram Connectivity
 
@@ -106,7 +110,7 @@ Send via `mcp__plugin_telegram_telegram__reply` to chat_id `$TELEGRAM_GROUP_CHAT
 4. If you notice a degradation symptom (`context-management`), call it out with
    the token `context-degraded` and say whether a restart is safe right now.
    Never substitute a guessed percentage for that.
-5. Keep the output under ~20 lines. Don't dump full pane captures — only the single relevant line if you found an error.
+5. Keep the output under ~20 lines. Don't dump full logs — only the single relevant line if you found an error.
 6. Default to "full" if no argument is provided.
 
 $ARGUMENTS

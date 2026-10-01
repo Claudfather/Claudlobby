@@ -15,7 +15,9 @@ def test_the_three_doors_are_unknown_subcommands(tmp_path):
     root, _paths, _, _ = _scene(tmp_path)
     for door in ("cutover", "parity", "import"):
         r = _cli(root, door)
-        assert r.returncode == 2 and "invalid choice" in r.stderr, (
+        assert (r.returncode == 2
+                and "invalid argument: command syntax" in r.stderr
+                and "inspect claudlobby plane --help" in r.stderr), (
             door,
             r.returncode,
             r.stderr[-300:],

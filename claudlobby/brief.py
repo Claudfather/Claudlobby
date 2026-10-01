@@ -1,15 +1,15 @@
 """claudlobby brief — one read door over the state the fleet already writes.
 
-``claudlobby brief --bot X [--json] [--ack]`` composes five sections off the
+``claudlobby brief [--bot X] [--json]`` composes five sections off the
 plane (once five unrelated files, read by hand-rolled jq against stale schemas):
-mission pointers, dispatches, workstreams, unacked reports, and recent critical
+mission pointers, canonical fleet work, workstreams, unacked reports, and recent critical
 events. Skills consume THIS, never the plane db by hand — that is the coupling
-the door exists to kill.
+the door exists to kill. Explicit ``--usage-since`` adds a bounded transcript
+count for the selected viewer; default and boot reads do not scan transcripts.
 
-Read-only by construction. The whole module performs exactly one EMISSION:
-``--ack`` records a ``reports_acked`` system event on the plane (chunk K,
-#1467) — the viewer's read position is a plane fact, not a cursor file. No
-ledger, registry, or event file is written by any path here.
+Read-only by construction. Report acknowledgements use
+``claudlobby fleet reports ack``; the pure ``ack_request`` encoder remains
+here for the plane event's established shape.
 
 THE TRUST RULE (epic #1102 phase R0)
 ------------------------------------
@@ -45,7 +45,7 @@ class of untruth it was added to prevent:
       that symbol existing, so it clears when the SSOT lands and not before.
 
   ``#891`` uptime windows
-      OMITTED. ``claudlobby uptime`` counts missing keepalive history as
+      OMITTED. ``claudlobby fleet uptime`` counts missing keepalive history as
       downtime, so its percentages are retention artifacts. The cost/utilization
       section is cut from v1 for that reason and the YAGNI one (nothing
       meaningfully writes the utilization file). Recorded as an explicit
@@ -59,26 +59,18 @@ class of untruth it was added to prevent:
 
 CONSUMING THE SHARED DOORS
 --------------------------
-The dispatch sections come from ``lib/dispatch-overdue.py`` rather than a second
-join, which is correct and non-negotiable. Since the F18 closure (R2a) those
-doors read the PLANE and nothing else, and they refuse rather than answer when
-they cannot reach it — no db, no schema, a plane that holds no bot of the
-fleet — so the one failure mode left is the loud one. This module opens ONE
-plane session for the section (``open_plane`` → ``_classify_all`` +
-``open_dispatches``, ``plane=`` shared) and, when the matcher refuses or the
-install's matcher predates the plane-only reader, withholds the WHOLE section
-with all three fields named in ``degraded[]``: not zero, which is a false
-all-clear, and not everything, which is a wall of finished work presented as
-outstanding.
+Canonical fleet work comes from ``task_state.read_tasks`` in one snapshot.
+The native watchdog contributes deadline, progress-grace and restart observations
+by current assignment ID; it does not decide task lifecycle. Missing timing
+evidence is disclosed separately from the canonical open set.
 
 The reports, alerts and workstreams sections read the plane through the same
 rule (``plane_conn``: no flag, no retirement fact, no file; unreachable is not
 empty) and OMIT with the note when it cannot answer — ``unacked (0)`` from a
 plane that could not be read would be #949 and #1024 exactly, re-created by
-the surface built to close them. Orphan classification still returns a clean
-empty set when it has no bots dir to read ``.spawn`` mtimes from (#1014's
-family), which is indistinguishable from "no work was lost to a restart" —
-labeled, since open and overdue stay sound.
+the surface built to close them. A missing bots directory prevents reading
+``.spawn`` mtimes (#1014); affected assignment attention is labeled unknown
+rather than claiming that no work was lost to a restart.
 """
 
 from __future__ import annotations
@@ -86,7 +78,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -99,7 +91,23 @@ from .source_state import (
     probe_source,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+
+class BriefIdentityMismatch(ValueError):
+    """The Plane view does not match the selected activation's identity."""
+
+
+def _assert_selected_identity(plane, fleet: str, bot_id: str,
+                              expected: tuple[str, str]) -> None:
+    """Check frozen fleet and viewer IDs in the already-open Plane snapshot."""
+    try:
+        fleet_uid = plane.pr.fleet_uid(plane.conn, fleet)
+    except plane.pr.PlaneUnreachable as exc:
+        raise BriefIdentityMismatch("selected fleet identity is absent from the Plane") from exc
+    entry = plane.roster.get(bot_id.lower())
+    if fleet_uid != expected[0] or entry is None or entry.get("actor") != expected[1]:
+        raise BriefIdentityMismatch("Plane fleet or viewer identity differs from selected activation")
 
 # Critical-event lookback. Fleet events carry no resolution state, so recency is
 # the only available proxy for "still unresolved" — which is why the rendered
@@ -121,30 +129,12 @@ ALERT_WINDOW_H = 24
 # longest is the #1024 incident shape, not the one that just arrived.
 TEXT_ROW_LIMIT = 10
 
-# Workstream staleness window, in days. Matches lib/workstream-update.sh:56's
-# default; a read-side threshold that disagreed with the writer's lease would
-# flag as stalled exactly the workstreams the writer still considers fresh.
+# Workstream staleness window, in days, shared with selected fleet policy.
 DEFAULT_LEASE_DAYS = 14
 
 
 def _lease_days(fleet) -> int:
-    """Lease window in days, resolved the way the writer resolves it.
-
-    ``WORKSTREAM_LEASE_DAYS`` wins because that is the only thing
-    ``workstream-update.sh`` reads — inside a bot session it is the composed
-    value, and if it has been overridden there, the lease actually written was
-    the override. A bare CLI run has no bot.conf sourced, so it falls back to
-    ``fleet.workstreams.lease_days``, which is what the composer emits into
-    that variable in the first place.
-    """
-    raw = os.environ.get("WORKSTREAM_LEASE_DAYS")
-    if raw is not None:
-        try:
-            val = int(raw)
-            if val > 0:
-                return val
-        except ValueError:
-            pass
+    """Lease window from selected fleet policy, the canonical writer's input."""
     configured = getattr(getattr(fleet, "workstreams", None), "lease_days", None)
     return (
         configured
@@ -190,7 +180,7 @@ class Degradation:
 
 # Re-exported from ``source_state``, which owns the rule now that five other
 # readers need it too (#1216/#1014). Aliases rather than fresh literals so the
-# two can never drift: these strings are emitted verbatim in the schema-1
+# two can never drift: these strings are emitted verbatim in the schema-2
 # envelope (``provenance.*.state``) and asserted on by tests, so a second
 # definition would be a wire-format fork waiting to happen.
 def _iso(epoch: int | None) -> str | None:
@@ -214,7 +204,7 @@ def _epoch(ts: str | None) -> int | None:
 
 
 def load_dispatch_doors(paths: Paths):
-    """Import ``lib/dispatch-overdue.py`` as a module, or None when unreadable.
+    """Import ``claudlobby/_runtime_scripts/dispatch-overdue.py`` as a module, or None when unreadable.
 
     The same ``spec_from_file_location`` seam ``tests/conftest.py`` uses: those
     doors are a standalone stdlib script with no package, and re-implementing
@@ -223,8 +213,8 @@ def load_dispatch_doors(paths: Paths):
     are open.
 
     None (rather than a raise) when the file is missing, because the caller has
-    a better answer than a traceback: an unavailable door degrades the dispatch
-    section *loudly*. Printing "0 open" because the matcher could not be loaded
+    a better answer than a traceback: an unavailable door degrades work
+    *loudly*. Printing "0 open" because the matcher could not be loaded
     would be the exact failure this door exists to prevent.
     """
     return load_lib_module(paths.lib, "dispatch-overdue.py")
@@ -250,12 +240,12 @@ def resolve_fleet_name(paths: Paths) -> str | None:
 
 
 def plane_session(paths: Paths, fleet: str | None = None):
-    """(plane, note): the matcher's plane session (`lib/dispatch-overdue.py`'s
+    """(plane, note): the matcher's plane session (`claudlobby/_runtime_scripts/dispatch-overdue.py`'s
     `open_plane` — connection, the stdlib readers, the resolved fleet and its
     roster, a context manager) when the plane can answer for this fleet, else
     (None, note). ONE door for every plane read in the package (F18 closure,
     R2b-1): no flag, no retirement fact, no file to fall back on — and
-    unreachable is not empty. No db, no schema, an unreadable lib/, no fleet
+    unreachable is not empty. No db, no schema, an unreadable claudlobby/_runtime_scripts/, no fleet
     name, a matcher that predates the plane-only reader, or a plane that holds
     no bot of the fleet (a wrong root is not "nothing recorded" — the
     matcher's rule, #1014's class) all return the note, and the caller omits
@@ -268,7 +258,7 @@ def plane_session(paths: Paths, fleet: str | None = None):
     doors = load_dispatch_doors(paths)
     if doors is None or not hasattr(doors, "open_plane"):
         if not db.is_file():
-            return None, (f"no plane db at {db} and no lib/dispatch-overdue.py under {paths.root} —"
+            return None, (f"no plane db at {db} and no claudlobby/_runtime_scripts/dispatch-overdue.py under {paths.root} —"
                           " a wrong root (restore state/plane/plane.db, or name the right root)")
         return None, (f"the matcher installed at {paths.lib / 'dispatch-overdue.py'} is unreadable or"
                       " predates the plane-only reader — pull the install and re-run")
@@ -297,28 +287,13 @@ def plane_conn(paths: Paths, fleet: str | None = None):
 # `load_lib_module` now lives in `paths.py` — three consumers, one loader.
 
 
-# --- the ack (the module's only emission) --------------------------------------
-
-
-@dataclass
-class AckOutcome:
-    """What became of an ack: `recorded` (the plane holds it — committed, or a
-    duplicate of an earlier attempt), `spooled` (the plane could not take it now
-    and the spool holds it until `plane spool retry`; the reports read unacked
-    until then), or `failed` (nothing holds it — a failed emit is a failed ack)."""
-
-    status: str
-    detail: str = ""
-
-    @property
-    def recorded(self) -> bool:
-        return self.status == "recorded"
+# --- report acknowledgement event encoder -------------------------------------
 
 
 def ack_request(fleet: str, bot: str, *, acked_through_seq: int, acked_through_ts: str,
                 count: int) -> dict:
-    """The ONE event `--ack` records: `reports_acked` on the viewer's own actor
-    (the manager acks from its own session), its detail the plane's ordering
+    """Encode `reports_acked` on the viewer's own actor,
+    with detail containing the plane's ordering
     authority — the `ingest_seq` the ack reaches (§4) — with the legacy-form
     ts riding for the render and the count for the story."""
     return {
@@ -328,31 +303,6 @@ def ack_request(fleet: str, bot: str, *, acked_through_seq: int, acked_through_t
                     "data": {"acked_through_seq": int(acked_through_seq),
                              "acked_through_ts": acked_through_ts, "count": int(count)}},
     }
-
-
-def record_ack(paths: Paths, fleet: str, bot: str, *, acked_through_seq: int,
-               acked_through_ts: str, count: int) -> AckOutcome:
-    """Record the ack through the package's cold emit door — `emit_batch`
-    (validate, one transaction, the spool as its own floor), the door the
-    registry lane, the expiry sweep and `claudlobby emit-batch` use; the daemon
-    runs the same door, so a second writer on the WAL is the designed case. A
-    silenced plane (`PLANE_EMIT_DISABLED=1`, the harness exemption) is a FAILED
-    ack: the plane is the only record, so an ack it will not hold marks
-    nothing. Every verdict or failure is likewise a failed ack, said by name."""
-    if os.environ.get("PLANE_EMIT_DISABLED") == "1":
-        return AckOutcome("failed", "PLANE_EMIT_DISABLED=1 — the plane is silenced, nothing records an ack")
-    from .plane.emit_api import emit_batch
-
-    try:
-        out = emit_batch(paths.root, [ack_request(
-            fleet, bot, acked_through_seq=acked_through_seq,
-            acked_through_ts=acked_through_ts, count=count)])
-    except Exception as exc:  # noqa: BLE001 — every verdict is a failed ack, said by name
-        return AckOutcome("failed", f"{type(exc).__name__}: {exc}")
-    status = out[0].status if out else ""
-    return AckOutcome("recorded" if status in ("committed", "duplicate") else
-                      "spooled" if status == "spooled" else "failed",
-                      out[0].detail if out and out[0].detail else status)
 
 
 # --- sections -----------------------------------------------------------------
@@ -395,282 +345,104 @@ def _mission_section(fleet, bot, paths: Paths) -> dict:
     }
 
 
-def _dispatch_section(
-    doors, paths: Paths, bot_id: str, now: int, degraded: list[Degradation],
-    fleet_name: str | None = None, plane=None,
+def _work_section(
+    doors, paths: Paths, fleet, bot_id: str, now: int,
+    degraded: list[Degradation], *, plane,
 ) -> dict:
-    """open / overdue / orphaned / dispatched.
+    """Fleet-owned open work from the canonical reducer, with watchdog attention."""
+    import sqlite3
+    from .task_state import TaskStateError, read_tasks
 
-    The first three are the #835 doors' own axis — what was assigned TO this
-    bot. ``dispatched`` (the fold's F2) is the other direction — what this bot
-    assigned to others, as a manager — from ``fleet_open_rows`` rather than a
-    second definition of open: three surfaces (the re-check digest's overflow
-    line, the dispatch protocol, ``observable-plane.md`` §6) told a manager
-    ``claudlobby brief --bot <manager>`` would list the rows it dispatched,
-    and this section had only ever answered "what was assigned to me"
-    (reproduced: briefing a manager holding three open dispatches rendered an
-    empty section).
-
-    ``doors`` is passed in rather than loaded here: importing the matcher
-    executes a module, and the caller needs it too.
-
-    OPEN is deadline-blind and therefore a superset of OVERDUE; a row can be
-    open and past its deadline without appearing under overdue, because the
-    watchdog additionally applies the progress-grace window, the max-age expiry
-    cap, and the orphan split. The rendered ``past_due`` flag means literally
-    ``now > expected_by`` and is not a claim that the watchdog is alarming.
-    """
-    from .plane.inventory import short_alias as _alias_of
-
-    # THE PLANE IS THE ONLY SOURCE (F18 R2a). The two ledgers this section once
-    # probed — omitting itself when either was absent, because the matcher
-    # failed OPEN on a missing report ledger and served a wall of finished
-    # work as outstanding — no longer exist. The matcher now refuses when the
-    # plane cannot answer (PlaneUnreachable), and this section OMITS on that,
-    # with the remedy named: never zero (a false all-clear), never a guess.
-    if doors is None:
-        degraded.append(
-            Degradation(
-                field="dispatches",
-                mode="omitted",
-                reason=(
-                    f"the shared matcher at {paths.lib / 'dispatch-overdue.py'} "
-                    "could not be loaded; dispatch state is unknown, and an empty "
-                    "list would read as 'nothing open'"
-                ),
-                issue="#835",
-            )
-        )
-        return {}
-
-    # probe_dir, not is_dir(): a bots dir that stats fine and raises on listing
-    # makes every .spawn lookup fail, so orphan detection returns empty for a
-    # reason that has nothing to do with the fleet.
-    _bots_probe = probe_dir(paths.runtime_bots)
-    bots_dir = (
-        str(paths.runtime_bots) if _bots_probe.state == SOURCE_OK else None
-    )
-
-    # Resolve the expiry cap the way the CLI does. The matcher's Python API
-    # takes max_age as a defaulted argument and only its main() consults
-    # DISPATCH_OVERDUE_MAX_AGE_S, so a fleet that tunes the cap would get a
-    # brief disagreeing with the watchdog it is supposed to mirror — and
-    # "byte-consistent with dispatch-overdue.py --all" is the contract. .env is
-    # already loaded into the environment by the caller.
-    max_age = getattr(
-        doors, "_resolve_max_age", lambda: doors.DEFAULT_OVERDUE_MAX_AGE_S
-    )()
-
-    # Both sets and the open list from ONE plane session: the matcher's
-    # providers are plane-only (F18 R2a) and `_classify_all` is "THE
-    # in-process door when a caller wants both sets" — the underscore is
-    # scope, not privacy. The fleet the matcher reads: the overlay's, else
-    # the manifest's (root mode names its fleet in fleet.yaml alone), else
-    # the carriers inside the matcher itself.
-    plane_ctx = {"fleet": paths.fleet_name or fleet_name, "root": str(paths.root)}
-    fields = ("dispatches.overdue", "dispatches.orphaned", "dispatches.open")
-
-    def _withhold(reason: str, issue: str) -> dict:
-        # Every list is named and the WHOLE section is withheld: three empty
-        # lists would render as "0 open", a false all-clear — the shape the
-        # renderer reads as "unavailable" is the empty dict. A field neither
-        # present nor listed does not exist, so the three are always named
-        # together (the structural lens found a second open's failure naming
-        # one of them).
-        for field in fields:
-            degraded.append(Degradation(field=field, mode="omitted", reason=reason, issue=issue))
-        return {}
-
-    # The matcher is resolved from the INSTALL's lib/, not from wherever this
-    # package was imported from — deliberately, since the door and the watchdog
-    # must agree byte-for-byte. The two therefore version independently: a
-    # root whose lib/ predates the plane-only reader has none of these doors,
-    # and calling its ledger-era signatures would raise out of a read-only
-    # command on a fleet whose install is simply a few pulls behind.
-    missing = [n for n in ("open_plane", "PlaneUnreachable", "_classify_all", "open_dispatches")
-               if not hasattr(doors, n)]
-    if missing:
-        return _withhold(
-            f"the matcher installed at {paths.lib / 'dispatch-overdue.py'} predates the"
-            f" plane-only reader (no {', '.join(missing)}) — pull the install and re-run,"
-            " so no dispatch state is served rather than a wrong one", "#1467")
-    menu: dict = {}
-    menu_ready = True
-    dispatched_ready = False
-    dispatched_raw: list[dict] = []
     try:
-        # the caller's session when it holds one (build_brief opens ONE plane
-        # for every section), else this section's own
-        with (contextlib.nullcontext(plane) if plane is not None
-              else doors.open_plane(**plane_ctx)) as session:
-            over, orph = doors._classify_all(now, max_age, bots_dir, plane=session)
-            menu_ready = hasattr(session.pr, "open_assignment_ids")
-            entry = session.roster.get(bot_id.lower()) if menu_ready else None
-            # F7 (M-B fold, #1481): ONE read of the bot's own open set serves
-            # both the row list and the (dispatched_at, task_id) ->
-            # assignment_id index `menu_facts` keys on below — this used to
-            # run the bot's OPEN_SQL twice, once through the shared matcher
-            # door and again through `open_assignment_ids`, for the identical
-            # (fleet, bot_id) pair. `open_rows_indexed` is the single-read
-            # twin of the two calls it replaces; an install whose readers
-            # predate it, or whose entry the plane cannot name, falls back to
-            # the original two-call shape unchanged.
-            index: dict = {}
-            if menu_ready and entry is not None and hasattr(session.pr, "open_rows_indexed"):
-                open_rows, index = session.pr.open_rows_indexed(
-                    session.conn, session.fleet, bot_id, entry=entry)
-            else:
-                open_rows = doors.open_dispatches(bot_id, plane=session)
-                if menu_ready and entry is not None:
-                    index = session.pr.open_assignment_ids(
-                        session.conn, session.fleet, bot_id, entry=entry)
-            # M5 (chunk M-B, #1481): the MENU facts, from the same session and
-            # the same readers — a manager running `/brief` by hand must see
-            # what the re-check timer would send it, and neither may re-derive
-            # "open" or "escalated" beside the other. Keyed by (dispatched_at,
-            # task_id), the pair the tuples above are keyed by: a task id may
-            # legitimately repeat across a re-dispatch, and picking the newest
-            # would attach one row's escalation to another's line.
-            if menu_ready:
-                facts = session.pr.menu_facts(session.conn, list(index.values()))
-                menu = {k: facts.get(asg, {}) for k, asg in index.items()}
-            # F2 (M-B fold, #1481): what THIS bot DISPATCHED, as a manager.
-            # `fleet_open_rows` is already scoped to the DISPATCHING fleet, so
-            # filtering its `assigned_by` down to this bot's own alias is the
-            # manager's list — never a second definition of "open".
-            dispatched_ready = menu_ready and hasattr(session.pr, "fleet_open_rows")
-            if dispatched_ready:
-                who = bot_id.lower()
-                dispatched_raw = [
-                    r for r in session.pr.fleet_open_rows(session.conn, session.fleet)
-                    if (_alias_of(r.get("assigned_by")) or "").lower() == who
-                ]
-    except doors.PlaneUnreachable as exc:
-        return _withhold(
-            f"the plane cannot answer: {exc} — restore the plane db (state/plane/plane.db)"
-            f" under {paths.root} or name the right root, so no dispatch state is served"
-            " rather than a wrong one", "#1467")
-    overdue_rows = over.get(bot_id.lower(), [])
-    orphan_rows = orph.get(bot_id.lower(), [])
+        fleet_uid = plane.pr.fleet_uid(plane.conn, plane.fleet)
+        snapshot = read_tasks(plane.conn, fleet_uid=fleet_uid)
+    except (sqlite3.Error, TaskStateError, ValueError, doors.PlaneUnreachable) as exc:
+        degraded.append(Degradation(
+            field="work", mode="omitted", issue="#1747",
+            reason=f"canonical fleet work cannot be read: {exc}; no empty list is served"))
+        return {}
 
-    # Orphan classification reads .spawn mtimes, and the matcher returns a clean
-    # EMPTY set when it has no bots dir to read them from (#1014's family) —
-    # indistinguishable from "no work was lost to a restart". Labeled rather
-    # than omitted, because open and overdue are still sound without it.
-    if bots_dir is None:
-        degraded.append(
-            Degradation(
-                field="dispatches.orphaned",
-                mode="labeled",
-                reason=(
-                    (
-                        f"no bots directory at {paths.runtime_bots}"
-                        if _bots_probe.state == SOURCE_ABSENT
-                        else f"the bots directory at {paths.runtime_bots} "
-                        "exists but cannot be listed"
-                    )
-                    + ", so respawn cannot be detected and the orphaned list "
-                    "is empty by construction rather than by measurement"
-                ),
-                issue="#1014",
-            )
-        )
+    manager = bot_id == fleet.manager
+    entry = plane.roster.get(bot_id.lower())
+    bot_uids = set((entry or {}).get("uids", ()))
+    if not manager and not bot_uids:
+        degraded.append(Degradation(
+            field="work", mode="omitted", issue="#1747",
+            reason=f"selected worker {bot_id} has no resolved fleet actor; "
+                   "its assignments cannot be selected by UID"))
+        return {}
 
-    if not menu_ready:
-        # The keys are ADDITIVE, so their absence is invisible unless it is
-        # said: a field neither present nor listed does not exist (the module's
-        # own rule). The rows themselves are sound, so this is `labeled`, not a
-        # withheld section.
-        degraded.append(
-            Degradation(
-                field="dispatches",
-                mode="labeled",
-                reason=(
-                    f"the readers installed at {paths.lib / 'plane-readers.py'} predate "
-                    "the task-loop menu, so the rows carry no last_progress_at, "
-                    "escalated or nudged fact — pull the install and re-run"
-                ),
-                issue="#1481",
-            )
-        )
-    elif not dispatched_ready:
-        # menu_ready without dispatched_ready means an install between the
-        # menu (`open_assignment_ids`/`menu_facts`) and `fleet_open_rows` —
-        # both landed together in this chunk, so this is a defensive label
-        # for a partial pull rather than an expected steady state.
-        degraded.append(
-            Degradation(
-                field="dispatches",
-                mode="labeled",
-                reason=(
-                    f"the readers installed at {paths.lib / 'plane-readers.py'} predate "
-                    "fleet_open_rows, so rows this bot dispatched as a manager are not "
-                    "listed under dispatched — pull the install and re-run"
-                ),
-                issue="#1481",
-            )
-        )
+    tasks = sorted(
+        (task for task in snapshot.tasks if task.open and
+         (manager or (task.current_assignment is not None
+                      and task.current_assignment.assignee_uid in bot_uids))),
+        key=lambda task: (task.ingest_seq, task.task_id))
+    observations: dict = {}
+    assigned_tasks = [task for task in tasks if task.current_assignment is not None]
+    if not hasattr(doors, "assignment_attention"):
+        if assigned_tasks:
+            degraded.append(Degradation(
+                field="work.attention", mode="labeled", issue="#1747",
+                reason="installed native watchdog has no assignment-keyed attention reader; "
+                       "deadline and restart observations are unavailable"))
+    else:
+        probe = probe_dir(paths.runtime_bots)
+        bots_dir = str(paths.runtime_bots) if probe.state == SOURCE_OK else None
+        max_age = getattr(doors, "_resolve_max_age",
+                          lambda: doors.DEFAULT_OVERDUE_MAX_AGE_S)()
+        try:
+            observations = doors.assignment_attention(
+                plane, assigned_tasks, now=now, max_age=max_age, bots_dir=bots_dir)
+        except (sqlite3.Error, ValueError, OSError, doors.PlaneUnreachable) as exc:
+            degraded.append(Degradation(
+                field="work.attention", mode="labeled", issue="#1747",
+                reason=f"assignment attention could not be read: {exc}"))
+        if bots_dir is None:
+            degraded.append(Degradation(
+                field="work.attention", mode="labeled", issue="#1014",
+                reason=(f"no bots directory at {paths.runtime_bots}"
+                        if probe.state == SOURCE_ABSENT else
+                        f"bots directory at {paths.runtime_bots} cannot be listed")
+                       + "; session-restart observations are unavailable"))
 
-    def _menu(da: int, tid: str | None) -> dict:
-        """The row's own menu facts, or nothing. `-` is the id-less marker the
-        matcher prints; the index keys those rows under None."""
-        f = menu.get((da, tid if tid and tid != "-" else None), {})
-        return {
-            "age_s": max(0, now - da),
-            "last_progress_at": f.get("last_progress_at"),
-            "escalated": f.get("escalated"),
-            "nudged": f.get("nudged"),
-        } if menu_ready else {"age_s": max(0, now - da)}
-
-    def _dispatched_entry(r: dict) -> dict:
-        """One row THIS bot dispatched, `fleet_open_rows`'s own dict shape —
-        already carrying the menu facts, so no second `_menu` join is needed
-        here the way the tuple-shaped open/overdue rows require one."""
-        da = _epoch(r.get("occurred_at"))
-        exp = _epoch(r.get("expected_by"))
-        return {
-            "task_id": r.get("task_id") or "-",
-            "assignee": _alias_of(r.get("assignee")) or r.get("assignee") or "unknown",
-            "dispatched_at": _iso(da),
-            "expected_by": _iso(exp),
-            "past_due": exp is not None and now > exp,
-            "age_s": max(0, now - da) if da is not None else None,
-            "last_progress_at": r.get("last_progress_at"),
-            "escalated": r.get("escalated"),
-            "nudged": r.get("nudged"),
-        }
-
+    items = []
+    missing_attention = False
+    unknown_attention: set[str] = set()
+    for task in tasks:
+        assignment = task.current_assignment
+        attention = observations.get(assignment.assignment_id) if assignment else None
+        if assignment and attention is None:
+            missing_attention = True
+        if attention and attention.get("status") == "unknown":
+            unknown_attention.add(attention.get("reason") or "unspecified")
+        items.append({
+            "task_id": task.task_id, "title": task.title, "state": task.state,
+            "admitted_at": task.occurred_at,
+            "deadline": assignment.expected_by if assignment else None,
+            "assignment": ({
+                "assignment_id": assignment.assignment_id,
+                "assignee_uid": assignment.assignee_uid,
+                "assigned_by_uid": assignment.assigned_by_uid,
+                "state": assignment.state,
+                "dispatched_at": assignment.occurred_at,
+            } if assignment else None),
+            "attention": attention,
+            "historical_references": list(task.display_ids),
+            "issues": [asdict(issue) for issue in task.issues],
+        })
+    if missing_attention and not any(d.field == "work.attention" for d in degraded):
+        degraded.append(Degradation(
+            field="work.attention", mode="labeled", issue="#1747",
+            reason="one or more current assignments have no native attention observation; "
+                   "their status is unknown"))
+    if unknown_attention and not any(d.field == "work.attention" for d in degraded):
+        degraded.append(Degradation(
+            field="work.attention", mode="labeled", issue="#1014",
+            reason="assignment attention is unknown: "
+                   + ", ".join(sorted(unknown_attention))))
     return {
-        "open": [
-            {
-                "task_id": tid,
-                "dispatched_at": _iso(da),
-                "expected_by": _iso(exp),
-                "past_due": exp is not None and now > exp,
-                **_menu(da, tid),
-            }
-            for da, exp, tid in open_rows
-        ],
-        "overdue": [
-            {
-                "task_id": tid,
-                "dispatched_at": _iso(da),
-                "expected_by": _iso(exp),
-                "overdue_by_s": elapsed,
-                **_menu(da, tid),
-            }
-            for da, exp, elapsed, tid in overdue_rows
-        ],
-        "orphaned": [
-            {
-                "task_id": tid,
-                "dispatched_at": _iso(da),
-                "expected_by": _iso(exp),
-                "overdue_by_s": elapsed,
-            }
-            for da, exp, elapsed, tid in orphan_rows
-        ],
-        "dispatched": [_dispatched_entry(r) for r in dispatched_raw],
+        "scope": "fleet" if manager else "assigned", "items": items,
+        "issues": [asdict(issue) for issue in snapshot.issues],
     }
 
 
@@ -683,11 +455,11 @@ def _workstream_section(
     and nothing here writes it back. ``stalled`` means no progress within the lease window; ``lease
     expired`` means the lease itself has run out. They are independent — a
     renewed workstream keeps its lease while its ``last_progress_ts`` stays put
-    (``lib/workstream-update.sh:249`` is explicit that renew does not advance
+    (the workstream operation is explicit that renew does not advance
     progress), which is exactly the state worth surfacing.
     """
-    from .workstreams import plane_workstreams
-    workstreams, note = plane_workstreams(paths, plane=plane)   # the plane, the only source (F18 R2b)
+    from .workstreams import blocked_waits, plane_workstreams
+    workstreams, note = plane_workstreams(paths, plane=plane, lease_days=_lease_days(fleet))
     if workstreams is None:
         # 'no workstreams' from a plane that could not be read is the silent
         # drop this door exists to refuse: omitted, with the note.
@@ -714,7 +486,8 @@ def _workstream_section(
         active.append(entry)
         if entry["stalled"] or entry["lease_expired"]:
             stalled.append(entry)
-    return {"active": active, "stalled": stalled}
+    return {"active": active, "stalled": stalled,
+            "blocked": blocked_waits(workstreams, now)}
 
 
 def _reports_section(
@@ -723,8 +496,8 @@ def _reports_section(
 ) -> dict:
     """Terminal reports newer than the viewer's newest ack — fleet-wide, on purpose.
 
-    Note the deliberate asymmetry with the sections above: dispatches and
-    mission are *about* ``--bot X``, while this one is *for* ``--bot X to act
+    Note the deliberate asymmetry with work: selected work is *about*
+    ``--bot X``, while this one is *for* ``--bot X to act
     on*. The question #1024 and #949 left unanswered is "what did my workers
     finish that I have not acted on", so filtering to the viewer's own reports
     would answer the wrong one. Every row carries ``bot``, so a consumer that
@@ -773,7 +546,7 @@ def _reports_section(
          "task_id": r["task_id"], "summary": r["summary"], "pr_url": r["pr_url"]}
         for r in session.pr.unacked_rows(rows, ack["seq"] if ack else None, terminal)
     ]
-    # schema-1 keeps its three keys (`cursor` = the ack's legacy-form ts);
+    # The reports section keeps its three keys (`cursor` = the ack's legacy-form ts);
     # the card, not the brief, carries when and by whom. Keys INSIDE a row may
     # be added (additive; `seq` is one); the top-level key set is the contract.
     return {"cursor": ack["ts"] if ack else None, "unacked": unacked, "source": "plane"}
@@ -854,8 +627,9 @@ def _alerts_section(
 # --- composition --------------------------------------------------------------
 
 
-def build_brief(fleet, paths: Paths, bot_id: str, now: int) -> dict:
-    """Compose the schema-1 envelope for one bot.
+def build_brief(fleet, paths: Paths, bot_id: str, now: int, *,
+                selected_identity: tuple[str, str] | None = None) -> dict:
+    """Compose the schema-2 brief document for one bot.
 
     ``now`` is injected rather than read here so the whole door is a pure
     function of (the plane, clock) and every section is testable without
@@ -872,19 +646,25 @@ def build_brief(fleet, paths: Paths, bot_id: str, now: int) -> dict:
     # ONE plane session for every section (a brief once opened the plane five
     # times and exec'd the readers six — the R2b-1 simplify lens); a plane that
     # cannot answer omits every plane-served section, each field named.
-    plane, note = plane_session(paths)      # the overlay's fleet, else the manifest's (resolve_fleet_name)
+    plane, note = plane_session(paths, fleet.name)
     if plane is None:
-        for field in ("dispatches.overdue", "dispatches.orphaned", "dispatches.open",
-                      "workstreams", "reports", "alerts"):
+        for field in ("work", "workstreams", "reports", "alerts"):
             degraded.append(Degradation(field=field, mode="omitted", issue="#1467",
                                         reason=f"the plane cannot answer: {note} — no state is"
                                                " served rather than a wrong one"))
-        sections = {"dispatches": {}, "workstreams": {}, "reports": {}, "alerts": []}
+        sections = {"work": {}, "workstreams": {}, "reports": {}, "alerts": []}
     else:
         with plane:
+            # The native adapter caches a roster before entering the context.
+            # Pin the actual read snapshot, then refresh that roster within it
+            # so the identity guard and every section see the same Plane state.
+            plane.conn.execute("BEGIN")
+            plane.roster = plane.pr.roster(plane.conn, plane.fleet)
+            if selected_identity is not None:
+                _assert_selected_identity(plane, fleet.name, bot_id, selected_identity)
             sections = {
-                "dispatches": _dispatch_section(doors, paths, bot_id, now, degraded,
-                                                fleet_name=fleet.name, plane=plane),
+                "work": _work_section(doors, paths, fleet, bot_id, now, degraded,
+                                      plane=plane),
                 "workstreams": _workstream_section(fleet, paths, now, degraded, plane=plane),
                 "reports": _reports_section(paths, bot_id, terminal, degraded, plane=plane),
                 "alerts": _alerts_section(paths, bot_id, now, degraded, plane=plane),
@@ -925,40 +705,6 @@ def _short(ts: str | None) -> str:
     return (ts or "—")[:19].replace("T", " ")
 
 
-def _verb_menu_line() -> str:
-    """The four verbs and their commands, from the ONE definition (M5, #1481).
-
-    Imported here rather than at module scope: `commands/task.py` reaches back
-    into this module for the plane session, and a top-level import in both
-    directions is a cycle waiting for the first person who imports them in the
-    unlucky order."""
-    from .commands.task import verb_commands
-
-    return verb_commands("<task-id>", "<assignee>")
-
-
-def _menu_suffix(row: dict) -> str:
-    """What a dispatch row says about itself beyond its clock: whether anyone
-    is waiting on the human, whether anyone has poked it, and whether it has
-    moved at all. Rendered only when the fact exists — an absent key means the
-    install's readers predate the menu (said in `degraded[]`), and a `None`
-    means the plane holds no such fact, which is not the same as `no`."""
-    bits = []
-    esc = row.get("escalated") or None
-    if esc:
-        q = " ".join((esc.get("question") or "").split()) or "question not recorded"
-        bits.append(f"ESCALATED by {esc.get('by') or 'unknown'}: {q}")
-    nud = row.get("nudged") or None
-    if nud:
-        bits.append(f"nudged by {nud.get('by') or 'someone'} {_short(nud.get('at'))}")
-    if "last_progress_at" in row:
-        bits.append(
-            f"last progress {_short(row['last_progress_at'])}"
-            if row.get("last_progress_at") else "no progress on this row"
-        )
-    return ("  | " + " | ".join(bits)) if bits else ""
-
-
 def format_brief(brief: dict) -> str:
     """Sectioned plain text. Degraded fields are marked at the section header
     AND listed in full at the end — the inline marker is where the reader's eye
@@ -967,8 +713,8 @@ def format_brief(brief: dict) -> str:
 
     def mark(section: str) -> str:
         """Marker for a section header, covering its sub-fields too — the
-        scope rule (a degradation on ``dispatches.open`` still degrades the
-        DISPATCHES header) lives in ``_section_degraded``, shared with the
+        scope rule (a degradation on ``work.attention`` still degrades the
+        WORK header) lives in ``_section_degraded``, shared with the
         boot renderer: a separately-worded copy per renderer is how that
         invariant dies in one of them silently."""
         entries = _section_degraded(deg, section)
@@ -1012,94 +758,58 @@ def format_brief(brief: dict) -> str:
         out.append(f"  project:  {p['project']} -> {p['mission_file']}")
     out.append("")
 
-    d = brief.get("dispatches")
-    out.append(f"DISPATCHES{mark('dispatches')}")
-    if not d:
-        # Carry the count up to the section, not just into the degraded block:
-        # "unavailable" alone reads identically whether it is hiding nothing or
-        # hiding a dispatch that has been rotting for a day.
-        n = next(
-            (
-                e["count"]
-                for e in deg
-                if e["field"] == "dispatches"
-                and e["mode"] == "omitted"
-                and e.get("count")
-            ),
-            None,
-        )
-        if n:
-            out.append(
-                f"  (unavailable — {n} row(s) past deadline, status "
-                f"undeterminable; see DEGRADED)"
-            )
-        else:
-            out.append("  (unavailable — see DEGRADED)")
+    work = brief.get("work")
+    out.append(f"WORK{mark('work')}")
+    if not work:
+        out.append("  (unavailable — see DEGRADED)")
     else:
-        shown, more = rows(d["open"])
-        out.append(f"  open ({len(d['open'])})")
-        for r in shown:
-            flag = "  PAST DUE" if r["past_due"] else ""
+        items = work["items"]
+        scope = "fleet intake" if work["scope"] == "fleet" else "assigned to this bot"
+        out.append(f"  {scope}: {len(items)} open task(s)")
+        shown, more = rows(items)
+        for item in shown:
             out.append(
-                f"    {r['task_id']:<26} sent {_short(r['dispatched_at'])}"
-                f"  due {_short(r['expected_by'])}{flag}{_menu_suffix(r)}"
+                f"    {item['task_id']}  {item['state']}  {item['title']}"
             )
+            assignment = item["assignment"]
+            if assignment:
+                attention = item["attention"]
+                status = attention["status"] if attention else "unavailable"
+                out.append(
+                    f"      assignment {assignment['assignment_id']}"
+                    f"  due {_short(item['deadline'])}  attention {status}"
+                )
+                if attention and attention.get("past_due"):
+                    out.append("      PAST DUE (literal deadline; watchdog status above)")
+            if item["historical_references"]:
+                out.append(
+                    "      historical references: "
+                    + ", ".join(item["historical_references"])
+                )
         out.extend(more)
-        shown, more = rows(d["overdue"])
-        out.append(f"  overdue ({len(d['overdue'])})")
-        for r in shown:
-            out.append(
-                f"    {r['task_id']:<26} sent {_short(r['dispatched_at'])}"
-                f"  +{r['overdue_by_s'] // 60}m past deadline{_menu_suffix(r)}"
-            )
-        out.extend(more)
-        # `orphaned` rows carry no assignment_id in the matcher's own tuple
-        # shape (dispatched_at, expected_by, elapsed, task_id) — there is
-        # nothing to key `menu_facts` on, so `_menu_suffix` would silently
-        # render an escalated orphan as if nobody had raised it (the fold's
-        # F7, reproduced: no key means no bit rendered and no disclosure
-        # either). Omitted rather than faked.
-        shown, more = rows(d["orphaned"])
-        out.append(f"  orphaned ({len(d['orphaned'])})")
-        for r in shown:
-            out.append(
-                f"    {r['task_id']:<26} sent {_short(r['dispatched_at'])}"
-                f"  +{r['overdue_by_s'] // 60}m past deadline"
-            )
-        out.extend(more)
-        # THE MENU, ONCE (M5, #1481) — the same four verbs and the same
-        # commands the re-check timer sends, from the one definition in
-        # `commands/task.py`, so a manager reading `/brief` by hand sees
-        # exactly what the timer would have said. Under the section rather
-        # than per row: repeating four commands per row is the wall of text
-        # the brief's own capping rule exists to prevent.
-        out.append(f"  act on a row: {_verb_menu_line()}")
-        # F2 (M-B fold, #1481): the OTHER axis — what this bot DISPATCHED, as
-        # a manager. `open`/`overdue`/`orphaned` above answer "what was
-        # assigned to me"; three surfaces told a manager this door would list
-        # what it sent out, and it never had (reproduced: `--bot <manager>`
-        # rendered an empty section for a manager holding open dispatches).
-        dispatched = d.get("dispatched", [])
-        shown, more = rows(dispatched)
-        out.append(f"  dispatched by you ({len(dispatched)})")
-        for r in shown:
-            flag = "  PAST DUE" if r["past_due"] else ""
-            out.append(
-                f"    {r['task_id']:<26} to {r['assignee']:<12}"
-                f" sent {_short(r['dispatched_at'])}"
-                f"  due {_short(r['expected_by'])}{flag}{_menu_suffix(r)}"
-            )
-        out.extend(more)
-        out.append(f"  act on a row you dispatched: {_verb_menu_line()}")
+        issues = work["issues"]
+        if issues:
+            out.append(f"  unresolved history: {len(issues)} issue(s)")
+            shown_issues, more_issues = rows(issues)
+            for issue in shown_issues:
+                out.append(
+                    f"    {issue['code']} task={issue['task_id']}"
+                    f" assignment={issue['assignment_id'] or '—'}"
+                )
+            out.extend(more_issues)
+        if items:
+            out.append("  inspect: claudlobby task show TASK_ID")
+            out.append("           claudlobby assignment show ASSIGNMENT_ID")
+    out.append("  current escalations: claudlobby fleet inbox")
     out.append("")
 
     w = brief.get("workstreams") or {}
     out.append(f"WORKSTREAMS{mark('workstreams')}")
     if not w:
         out.append("  (unavailable — see DEGRADED)")
-    elif not w.get("active"):
-        out.append("  (none active)")
     else:
+        if not w.get("active"):
+            out.append("  (none active)")
         shown, more = rows(w["active"])
         for e in shown:
             flags = []
@@ -1113,6 +823,12 @@ def format_brief(brief: dict) -> str:
                 f"next: {e['next'] or '—'}{suffix}"
             )
         out.extend(more)
+        if w.get("blocked"):
+            out.append("  BLOCKED WAITS")
+            for item in w["blocked"]:
+                age = f"{item['age_seconds']}s" if item["age_seconds"] is not None else "unknown age"
+                out.append(f"  {item['id']} waiting_on={item['waiting_on'] or 'unknown'} "
+                           f"age={age} note={item['note'] or '—'}")
     out.append("")
 
     r = brief.get("reports") or {}
@@ -1134,18 +850,38 @@ def format_brief(brief: dict) -> str:
             )
         out.extend(more)
         if unacked:
-            out.append(f"  -> claudlobby brief --bot {brief['bot']} --ack   to clear")
+            out.append("  -> claudlobby --json fleet reports list --unacknowledged")
+            out.append("     claudlobby fleet reports ack --through ACK_CURSOR --request-id UUID")
     out.append("")
 
     alerts = brief.get("alerts", [])
-    out.append(
-        f"ALERTS — critical events, last {ALERT_WINDOW_H}h ({len(alerts)}){mark('alerts')}"
-    )
-    shown, more = rows(alerts)
-    for a in shown:
-        out.append(f"  {_short(a['ts'])}  {a['type']:<20} {a.get('source') or ''}")
-    out.extend(more)
+    if any(entry["mode"] == "omitted" for entry in _section_degraded(deg, "alerts")):
+        out.append(f"ALERTS{mark('alerts')}")
+        out.append("  (unavailable — see DEGRADED)")
+    else:
+        out.append(
+            f"ALERTS — critical events, last {ALERT_WINDOW_H}h ({len(alerts)}){mark('alerts')}"
+        )
+        shown, more = rows(alerts)
+        for a in shown:
+            out.append(f"  {_short(a['ts'])}  {a['type']:<20} {a.get('source') or ''}")
+        out.extend(more)
     out.append("")
+    if "usage" in brief:
+        usage = brief["usage"]
+        counts = usage["usage"]
+        coverage = usage["coverage"]
+        out.append("USAGE — Claude transcript token counts")
+        out.append(f"  {usage['window']['since']} to {usage['window']['until']}")
+        out.append(f"  input={counts['input_tokens']} output={counts['output_tokens']} "
+                   f"cache-write={counts['cache_creation_input_tokens']} "
+                   f"cache-read={counts['cache_read_input_tokens']} "
+                   f"turns={counts['turns']}")
+        out.append(f"  coverage={coverage['status']} files={coverage['files_read']} "
+                   f"skipped>={coverage['files_skipped_at_least']} "
+                   f"issues={','.join(coverage['issues']) or '-'}")
+        out.append("  quota=unavailable (no provider observation)")
+        out.append("")
     if deg:
         out.append("DEGRADED — fields this door will not serve as plain truth")
         for e in deg:
@@ -1162,7 +898,7 @@ def _section_degraded(deg: list[dict], section: str) -> list[dict]:
     """Degradations scoped to ``section``, INCLUDING its sub-fields.
 
     The prefix match is the load-bearing half: a degradation scoped to
-    ``dispatches.open`` still degrades the DISPATCHES section — without it a
+    ``work.attention`` still degrades the WORK section — without it a
     clean header floats above a zero that is not a measurement at all, the one
     output this door must never produce. Both renderers consume this; a
     separately-worded copy in each is how the invariant dies in one of them
@@ -1189,7 +925,7 @@ def _degraded_mark(entries: list[dict]) -> str:
 # arithmetic. The constant lives here, alone, so the canary can move it.
 BOOT_CHAR_BUDGET = 1000
 
-# Detail rows the boot payload will print across all dispatch classes.
+# Detail rows the boot payload will print across all work states.
 # Priority when over: ORPHANED first (the respawned session reading this
 # payload is the ONLY natural consumer of the orphan door — dispatch delivery
 # is ephemeral tmux and the party that should act no longer exists anywhere
@@ -1197,157 +933,140 @@ BOOT_CHAR_BUDGET = 1000
 BOOT_DETAIL_LIMIT = 3
 
 
-def boot_provenance(paths: Paths, now: int) -> dict:
-    """The door-side facts the boot payload's empty-state line renders.
-
-    Interim for #1122: the never-vs-quiet distinction ("no work in flight" vs
-    "no recorded fleet history" — different answers, and the gap between them
-    is the motivating incident) is not expressible in the schema-1 envelope,
-    so the boot mode computes it here. When #1122 lands these facts move into
-    the envelope and this helper is deleted.
-
-    Both facts come from the PLANE (F18 closure, R2b): the dispatches the
-    dispatch door landed for the fleet's bots — ever, and in a fixed 24h
-    window, a human-scale recency fact deliberately NOT the watchdog's expiry
-    mirror — and the workstream registry's entry count. Same read discipline
-    as the door: a plane that cannot answer reports its state, never a zero.
-    """
-    plane, note = plane_session(paths)
-    if plane is None:
-        return {"dispatches": {"state": "unreachable", "note": note},
-                "registry": {"present": False, "note": note}}
+def boot_provenance(paths: Paths, now: int, *, fleet_name: str | None = None,
+                    viewer: str | None = None,
+                    selected_identity: tuple[str, str] | None = None) -> dict:
+    """Canonical task history and registry facts for the boot no-work line."""
+    from .task_state import read_tasks
     from .workstreams import lease_days_env
+
+    plane, note = plane_session(paths, fleet_name)
+    if plane is None:
+        return {"work": {"state": "unreachable", "note": note},
+                "registry": {"present": False, "note": note}}
     conn, pr, fleet = plane.conn, plane.pr, plane.fleet
     try:
-        uids = [u for e in plane.roster.values() for u in e["uids"]]
-        marks = ",".join("?" * len(uids))
-        since = datetime.fromtimestamp(now - 24 * 3600, timezone.utc).isoformat()
-        ever = conn.execute(f"SELECT COUNT(*) FROM assignments WHERE assignee_uid IN ({marks})",
-                            uids).fetchone()[0]
-        recent = conn.execute(f"SELECT COUNT(*) FROM assignments WHERE assignee_uid IN ({marks})"
-                              " AND occurred_at >= ?", (*uids, since)).fetchone()[0]
-        entries = len(pr.workstream_registry(conn, fleet,
-                                             lease_days=lease_days_env()).get("workstreams", {}))
+        conn.execute("BEGIN")
+        plane.roster = pr.roster(conn, fleet)
+        if selected_identity is not None:
+            if viewer is None:
+                raise ValueError("selected brief provenance requires a viewer")
+            _assert_selected_identity(plane, fleet, viewer, selected_identity)
+        snapshot = read_tasks(conn, fleet_uid=pr.fleet_uid(conn, fleet))
+        ever = len(snapshot.tasks)
+        recent = sum(
+            1 for task in snapshot.tasks
+            if (epoch := _epoch(task.occurred_at)) is not None
+            and epoch >= now - 24 * 3600
+        )
+        entries = len(pr.workstream_registry(
+            conn, fleet, lease_days=lease_days_env()).get("workstreams", {}))
+    except BriefIdentityMismatch:
+        raise
     except Exception as exc:
-        return {"dispatches": {"state": "unreachable", "note": str(exc)},
+        return {"work": {"state": "unreachable", "note": str(exc)},
                 "registry": {"present": False, "note": str(exc)}}
     finally:
         conn.close()
-    return {"dispatches": {"state": "ok", "rows_ever": ever, "rows_24h": recent},
+    return {"work": {"state": "ok", "tasks_ever": ever, "tasks_24h": recent,
+                     "history_issues": len(snapshot.issues)},
             "registry": {"present": True, "entries": entries}}
 
 
-def _boot_detail_lines(d: dict, now: int) -> tuple[list[str], int]:
-    """(detail lines in priority order, hidden-count) for the dispatch section."""
-    # The door's `open` is deliberately a SUPERSET (deadline-blind, #904), so a
-    # row can appear as both overdue and open; the boot payload shows each task
-    # once, at its highest-priority class.
-    seen: set = set()
-    prioritized = []
-    for label, rows_ in (
-        ("ORPHANED", d["orphaned"]),
-        ("overdue", d["overdue"]),
-        ("open", sorted(d["open"], key=lambda r: r["dispatched_at"] or "")),
-    ):
-        for r in rows_:
-            if r["task_id"] in seen:
-                continue
-            seen.add(r["task_id"])
-            prioritized.append((label, r))
+def _boot_detail_lines(work: dict, now: int) -> tuple[list[str], int]:
+    """At most three canonical tasks, with the most urgent observations first."""
+    def priority(item: dict) -> int:
+        if item["state"] == "queued":
+            return 2
+        observation = item["attention"] or {}
+        return {
+            "orphaned": 0, "overdue": 1, "unknown": 3,
+            "past_due": 4, "not_due": 5,
+        }.get(observation.get("status"), 3)
+
+    ordered = sorted(work["items"], key=lambda item: (priority(item), item["admitted_at"]))
     lines = []
-    for label, r in prioritized[:BOOT_DETAIL_LIMIT]:
-        age_s = max(0, now - (_epoch(r.get("dispatched_at")) or now))
+    for item in ordered[:BOOT_DETAIL_LIMIT]:
+        assignment = item["assignment"]
+        observation = item["attention"] or {}
+        status = "queued" if assignment is None else observation.get("status", "attention unavailable")
+        sent_at = assignment["dispatched_at"] if assignment else item["admitted_at"]
+        age_s = max(0, now - (_epoch(sent_at) or now))
         age = f"{age_s // 3600}h" if age_s >= 3600 else f"{age_s // 60}m"
+        assignment_id = f" / {assignment['assignment_id']}" if assignment else ""
         note = ""
-        if label == "ORPHANED":
+        if status == "orphaned":
             note = " (issued pre-restart; may need re-issue)"
-        elif label == "overdue":
-            note = f" (+{r.get('overdue_by_s', 0) // 60}m past due)"
-        lines.append(f"  {label} {r['task_id']} — sent {age} ago{note}")
-    return lines, max(0, len(prioritized) - BOOT_DETAIL_LIMIT)
+        elif status == "overdue":
+            overdue_s = observation.get("elapsed_past_deadline_s") or 0
+            note = f" (+{overdue_s // 60}m past deadline)"
+        lines.append(f"  {status.upper()} {item['task_id']}{assignment_id} — {age} old{note}")
+    return lines, max(0, len(ordered) - BOOT_DETAIL_LIMIT)
 
 
 def format_boot_brief(brief: dict, prov: dict) -> str:
-    """The SessionStart boot payload — the locked O-B+r shape, and nothing else.
-
-    Deliberately NOT ``format_brief``: that renderer is the on-demand full view
-    (wall-capable — a live run rendered 335 report lines). This one is standing
-    context re-read for the life of every session that carries it, so it is
-    pointer-first, hard-capped, and mission-free (mission is already composed
-    into every bot's CLAUDE.md — injecting it again is duplicate spend).
-
-    The empty state is the point, not a collapse case (fork R3-F1, #1102): an
-    all-quiet boot renders WHY it is quiet, with source provenance — never
-    silence, never a bare zero. "0 open (plane: N dispatches ever)" and "no
-    recorded fleet history" are different answers; the motivating incident was
-    the gap between them.
-    """
+    """Bounded SessionStart pointer to canonical work and its read limitations."""
     bot = brief["bot"]
-    door = f"full state: claudlobby brief --bot {bot} [--json]"
+    door = (f"full state: claudlobby brief --bot {bot} [--json]"
+            " | current escalations and unseen reports: claudlobby fleet inbox")
     header = (
         f"fleet-brief — {bot} @ {brief['fleet']} "
         f"(as of {_short(brief['generated_at'])}, schema {brief['schema']})"
     )
-
-    d_deg = _section_degraded(brief.get("degraded", []), "dispatches")
-    issues = ", ".join(sorted({e["issue"] for e in d_deg}))
+    work_deg = _section_degraded(brief.get("degraded", []), "work")
+    issues = ", ".join(sorted({entry["issue"] for entry in work_deg}))
     mark = f" [degraded: {issues}]" if issues else ""
-    d = brief.get("dispatches")
-
+    work = brief.get("work")
     exempt: list[str] = [header]
     detail: list[str] = []
 
-    if not d:
-        # OMITTED by the door's trust rule. "Nothing to say" and "nothing
-        # served" are textually identical unless degraded[] is consulted, so
-        # this branch synthesizes its line from there — rendering a zero here
-        # would re-manufacture the false all-clear the door refuses to emit.
+    if not work:
         exempt.append(
-            f"dispatches UNAVAILABLE — {issues or 'see door'} "
+            f"work UNAVAILABLE — {issues or 'see door'} "
             "(fail-closed, not zero) — see door"
         )
     else:
-        n_open, n_over, n_orph = len(d["open"]), len(d["overdue"]), len(d["orphaned"])
-        if n_open or n_over or n_orph:
+        items = work["items"]
+        queued = sum(item["state"] == "queued" for item in items)
+        overdue = sum(
+            (item["attention"] or {}).get("status") == "overdue" for item in items)
+        orphaned = sum(
+            (item["attention"] or {}).get("status") == "orphaned" for item in items)
+        history_issues = len(work["issues"])
+        if items or history_issues:
             exempt.append(
-                f"dispatches: {n_open} open, {n_over} overdue, {n_orph} orphaned{mark}"
+                f"work: {len(items)} open, {queued} queued, {overdue} overdue, "
+                f"{orphaned} orphaned, {history_issues} history issue(s){mark}"
             )
-            lines, hidden = _boot_detail_lines(d, _epoch(brief["generated_at"]) or 0)
-            detail.extend(lines)
+            detail, hidden = _boot_detail_lines(work, _epoch(brief["generated_at"]) or 0)
             if hidden:
                 exempt.append(f"  (+{hidden} more — door)")
+            if history_issues:
+                exempt.append("  unresolved history — inspect full state")
         else:
-            # The all-quiet line, with provenance. Never a bare zero.
-            dl = prov.get("dispatches", {})
-            if dl.get("state") == "ok":
-                led = (
-                    f"plane: {dl.get('rows_ever', 0)} dispatches ever, "
-                    f"{dl.get('rows_24h', 0)} in 24h"
+            history = prov.get("work", {})
+            if history.get("state") == "ok":
+                source = (
+                    f"plane: {history.get('tasks_ever', 0)} tasks ever, "
+                    f"{history.get('tasks_24h', 0)} in 24h"
                 )
             else:
-                led = f"plane: {dl.get('state', 'unknown')}"
-            reg = prov.get("registry", {})
-            if reg.get("present"):
-                entries = reg.get("entries")
-                reg_txt = (
+                source = f"plane: {history.get('state', 'unknown')}"
+            registry = prov.get("registry", {})
+            if registry.get("present"):
+                entries = registry.get("entries")
+                registry_text = (
                     f"registry: {entries} entr{'y' if entries == 1 else 'ies'}"
-                    if entries is not None
-                    else "registry: present (unreadable)"
+                    if entries is not None else "registry: present (unreadable)"
                 )
             else:
-                reg_txt = "registry: unreachable"
+                registry_text = "registry: unreachable"
             exempt.append(
-                f"all quiet for this bot: 0 open dispatches ({led}); {reg_txt}{mark}"
+                f"no open tasks for this bot ({source}); "
+                f"{registry_text}{mark}"
             )
 
-    # Token cap, enforced in characters at render time (the line cap alone
-    # disagrees with the token cap ~2x at real path density). Detail lines
-    # drop lowest-priority-first into the disclosed remainder, so truncation
-    # is never silent. Re-rendering per drop is deliberate: the remainder
-    # line's own width changes with the count, so measuring the real artifact
-    # cannot drift the way an arithmetic model of it would.
     dropped = 0
-
     def _render() -> str:
         parts = list(exempt) + detail
         if dropped:
@@ -1356,6 +1075,6 @@ def format_boot_brief(brief: dict, prov: dict) -> str:
         return "\n".join(parts)
 
     while len(_render()) > BOOT_CHAR_BUDGET and detail:
-        detail.pop()  # lowest priority is last
+        detail.pop()
         dropped += 1
     return _render()

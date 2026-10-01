@@ -9,12 +9,12 @@ tool_grants:
 Wire config: `library/mcp/github-app.json` — the GitHub MCP server authenticated as the
 fleet's **GitHub App** with ~1h installation tokens minted at use time, instead of a
 long-lived `${GITHUB_PAT}`. Reference via `mcp: [github-app]`; tools are
-`mcp__github-app__*`. The token refresh wrapper (`lib/github-app-mcp-wrapper.py`)
+`mcp__github-app__*`. The token refresh wrapper (`claudlobby/_runtime_scripts/github-app-mcp-wrapper.py`)
 re-mints and respawns the server every ~50 minutes — token expiry never requires a bot
 restart, and in-flight MCP requests fail for ~2s during a respawn (retry on transient
 MCP errors).
 
-Setup: run `lib/setup-github-app.sh` once per host (validates the App credentials end
+Setup: run `claudlobby host github-app setup` once per host (validates the App credentials end
 to end and prints the fleet `.env` names), then set `GITHUB_APP_ID`,
 `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY_PATH` in the fleet `.env`.
 
@@ -24,12 +24,14 @@ Skills and shell calls that need the App identity mint per call — never a boot
 export, the token dies in about an hour:
 
 ```bash
-GH_TOKEN=$("$CLAUDLOBBY_ROOT"/lib/mint-github-token.sh) gh pr list
+GH_TOKEN=$("$CLAUDLOBBY_NATIVE_DIR"/mint-github-token.sh) gh pr list
 ```
 
 The composed `tools/gh` shim makes this mechanical inside a bot session: `gh` on an
 App bot already mints and runs as the App, so a bare `gh pr list` is enough there. The
-explicit mint above is for skills that build their own env, and for your own shell.
+explicit native mint above is for skills that build their own env. From an
+operator shell, use `GH_TOKEN=$(claudlobby host github-app token) gh pr list`;
+`--json` on the token command deliberately includes the secret in its result.
 
 #### Identity — why the App, not a PAT
 
@@ -71,7 +73,7 @@ erases the cache and re-mints, at the cost of one failed round trip. Nothing to 
 
 #### MCP respawn caveat
 
-`lib/github-app-mcp-wrapper.py` respawns the MCP server every ~50 minutes to rotate the
+`claudlobby/_runtime_scripts/github-app-mcp-wrapper.py` respawns the MCP server every ~50 minutes to rotate the
 token; in-flight MCP requests fail for ~2s per respawn (retry on transient MCP errors).
 Respawn transparency is validated against the pinned server package only — a server swap
 re-validates post-respawn tool calls.

@@ -4,7 +4,7 @@ The (instant, state) pairs come from the plane alone (F18 closure R2b): the
 ``bot.heartbeat`` samples keepalive records each tick (BUSY / IDLE / UNKNOWN),
 the ``bot.session_up = false`` fact of a dead session (DOWN — no uptime, like
 the log's gap once was) and the ``keepalive_restart`` fleet events (RESTART),
-through ``lib/plane-readers.py::keepalive_entries``. Computes:
+through ``claudlobby/_runtime_scripts/plane-readers.py::keepalive_entries``. Computes:
 - Uptime percentage over configurable windows (24h / 7d / 30d)
 - Restart count and MTBR (mean time between restarts)
 - Time-in-BUSY vs time-in-IDLE breakdown

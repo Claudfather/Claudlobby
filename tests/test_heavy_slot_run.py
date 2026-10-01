@@ -23,7 +23,7 @@ import pytest
 from tests.conftest import constructed_env
 
 REPO = Path(__file__).resolve().parent.parent
-WRAPPER = REPO / "lib" / "heavy-slot.py"
+WRAPPER = REPO / "claudlobby/_runtime_scripts" / "heavy-slot.py"
 
 # The stub job: records that it ran, traps TERM, waits for a file when asked,
 # exits with a chosen code.

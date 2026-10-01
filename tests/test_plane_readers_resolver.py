@@ -106,7 +106,7 @@ def test_sha256_hex32_is_the_content_key_and_fails_loudly_without_a_tool(tmp_pat
     than mint junk — the door then discloses and emits the communication only."""
     import hashlib
     import subprocess
-    lib = REPO / "lib" / "lib-common.sh"
+    lib = REPO / "claudlobby/_runtime_scripts" / "lib-common.sh"
     line = '{"ts":"2026-09-02T10:00:00Z","task":"do \\"the\\" thing\\\\n","x":1}'
     ok = subprocess.run(["bash", "-c", f'source "{lib}"; sha256_hex32 "$1"', "_", line],
                         capture_output=True, text=True, timeout=30)

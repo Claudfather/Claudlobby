@@ -6,7 +6,7 @@ title: Context Management
 
 - **After each completed task** → `/compact`
 - **Switching repos / projects** → `/clear`
-- **Stuck > 3 min** → stop, run `report-back.sh <your-bot-name> blocked "<reason>"` (`--task <id>` when id'd), don't spin
+- **Stuck > 3 min** → stop and record `claudlobby --json assignment block ASSIGNMENT_ID --reason "<reason>" --request-id BLOCK_UUID`; with no current assignment, use an unlinked `fleet reports submit` (see `/fleet-ops`). Don't spin.
 
 ## Never state a context percentage you have not seen
 
@@ -78,12 +78,12 @@ into a score:
 
 ## Your duty when you notice one
 
-**Say so at your next report-back, in plain words, including the literal token
+**Say so in your next linked progress report, in plain words, including the literal token
 `context-degraded`.** That token is what your manager routes on — it is
-greppable in the ledger in a way a prose hedge is not.
+searchable in the recorded report in a way a prose hedge is not.
 
 ```bash
-report-back.sh <your-bot-name> progress "context-degraded — re-read auth.py twice this session; 3 units done. Safe to restart, no WIP." --task <id>
+claudlobby --json assignment progress ASSIGNMENT_ID --summary "context-degraded — re-read auth.py twice this session; 3 units done. Safe to restart, no WIP." --request-id PROGRESS_UUID
 ```
 
 Then state whether a restart is safe **right now**: is your work committed, is

@@ -1,4 +1,4 @@
-"""Python-wrapped bash test for lib/manager-checkin.sh (manager check-in PR 2,
+"""Python-wrapped bash test for claudlobby/_runtime_scripts/manager-checkin.sh (manager check-in PR 2,
 chunk 2: the trigger). Spec: documentation/plans/2026-09-13-manager-checkin-design.md
 section 5.
 
@@ -35,7 +35,7 @@ from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parents[1]
-TRIGGER = REPO / "lib" / "manager-checkin.sh"
+TRIGGER = REPO / "claudlobby/_runtime_scripts" / "manager-checkin.sh"
 
 DEFAULT_MIN_GAP_S = 2700
 
@@ -147,6 +147,12 @@ hits = os.environ.get("STUB_PLANE_HITS", "")
 if hits:
     sys.stdout.write(hits)
 
+# Ingest landing just after this committed read answered empty: the queued
+# entry is committed, then deleted, so a later queue scan would find nothing.
+ingested = os.environ.get("STUB_PLANE_INGEST_AFTER_READ")
+if ingested and os.path.exists(ingested):
+    os.unlink(ingested)
+
 sys.exit(int(os.environ.get("STUB_PLANE_RC", "0")))
 """
 
@@ -159,7 +165,7 @@ def _run(
     extra_args: list[str] | None = None,
     env_extra: dict | None = None,
     roster_bad: list[str] | None = None,
-) -> tuple[int, str, str]:
+scratch_plane_env) -> tuple[int, str, str]:
     libdir = tmp_path / "lib"
     libdir.mkdir(exist_ok=True)
     (libdir / "lib-common.sh").write_text(STUB_LIB_COMMON)
@@ -226,7 +232,7 @@ def _run(
     env.pop("CLAUDLOBBY_FLEET", None)
     env.pop("CHECKIN_MIN_GAP_S", None)
     env.pop("FLEET_NAME", None)
-    env.pop("PLANE_EMIT_DISABLED", None)
+    env.update(scratch_plane_env(tmp_path))
     if env_extra:
         env.update(env_extra)
 
@@ -298,18 +304,18 @@ def _since_epoch(argv: list[str]) -> float:
     )
 
 
-def test_an_equipped_idle_manager_gets_slash_checkin_in_its_own_session(tmp_path):
-    rc, _out, err = _run(tmp_path, bots=[{"dir": "mgr", "fleet": "f"}])
+def test_an_equipped_idle_manager_gets_slash_checkin_in_its_own_session(tmp_path, *, scratch_plane_env):
+    rc, _out, err = _run(tmp_path, bots=[{"dir": "mgr", "fleet": "f"}], scratch_plane_env=scratch_plane_env)
     assert rc == 0, err
     assert _dispatched(tmp_path) == "mgr\t/checkin"
     events = _events(tmp_path)
     assert [e["type"] for e in events] == ["checkin_triggered"]
 
 
-def test_the_plane_row_is_anchored_on_BOT_ID_not_the_directory_name(tmp_path):
+def test_the_plane_row_is_anchored_on_BOT_ID_not_the_directory_name(tmp_path, *, scratch_plane_env):
     rc, _out, err = _run(
         tmp_path, bots=[{"dir": "mgrdir", "fleet": "f", "bot_id": "lead"}]
-    )
+    , scratch_plane_env=scratch_plane_env)
     assert rc == 0, err
     session, message = _dispatched(tmp_path).split("\t")
     assert session == "mgrdir"
@@ -320,51 +326,51 @@ def test_the_plane_row_is_anchored_on_BOT_ID_not_the_directory_name(tmp_path):
     assert events[0]["bot_id"] == "lead"
 
 
-def test_the_triggered_row_anchors_on_the_argv_fleet_not_an_ambient_one(tmp_path):
+def test_the_triggered_row_anchors_on_the_argv_fleet_not_an_ambient_one(tmp_path, *, scratch_plane_env):
     rc, _out, err = _run(
         tmp_path,
         bots=[{"dir": "mgr", "fleet": "f"}],
         env_extra={"FLEET_NAME": "otherfleet"},
-    )
+    scratch_plane_env=scratch_plane_env)
     assert rc == 0, err
     events = _events(tmp_path)
     assert [e["type"] for e in events] == ["checkin_triggered"]
     assert events[0]["fleet_name_env"] == "f"
 
 
-def test_a_worker_is_never_injected_into(tmp_path):
+def test_a_worker_is_never_injected_into(tmp_path, *, scratch_plane_env):
     rc, _out, err = _run(
         tmp_path, bots=[{"dir": "w1", "fleet": "f", "manager": False}]
-    )
+    , scratch_plane_env=scratch_plane_env)
     assert rc == 0, err
     assert _dispatched(tmp_path) == ""
     assert _events(tmp_path) == []
 
 
-def test_a_manager_without_the_composed_skill_symlink_is_skipped_silently(tmp_path):
+def test_a_manager_without_the_composed_skill_symlink_is_skipped_silently(tmp_path, *, scratch_plane_env):
     rc, _out, err = _run(
         tmp_path, bots=[{"dir": "mgr", "fleet": "f", "equip": "none"}]
-    )
+    , scratch_plane_env=scratch_plane_env)
     assert rc == 0, err
     assert _dispatched(tmp_path) == ""
     assert _events(tmp_path) == []
 
 
-def test_a_dangling_skill_symlink_counts_as_unequipped(tmp_path):
+def test_a_dangling_skill_symlink_counts_as_unequipped(tmp_path, *, scratch_plane_env):
     rc, _out, err = _run(
         tmp_path, bots=[{"dir": "mgr", "fleet": "f", "equip": "dangling"}]
-    )
+    , scratch_plane_env=scratch_plane_env)
     assert rc == 0, err
     assert _dispatched(tmp_path) == ""
     assert _events(tmp_path) == []
 
 
-def test_a_manager_whose_session_is_down_is_recorded_not_injected(tmp_path):
+def test_a_manager_whose_session_is_down_is_recorded_not_injected(tmp_path, *, scratch_plane_env):
     rc, _out, err = _run(
         tmp_path,
         bots=[{"dir": "mgr", "fleet": "f"}],
         env_extra={"STUB_SESSION_RC": "1"},
-    )
+    scratch_plane_env=scratch_plane_env)
     assert rc == 0, err
     assert _dispatched(tmp_path) == ""
     events = _events(tmp_path)
@@ -373,12 +379,12 @@ def test_a_manager_whose_session_is_down_is_recorded_not_injected(tmp_path):
     assert events[0]["data"]["reason"] == "session_down"
 
 
-def test_a_busy_manager_is_never_injected_into_mid_turn(tmp_path):
+def test_a_busy_manager_is_never_injected_into_mid_turn(tmp_path, *, scratch_plane_env):
     rc, _out, err = _run(
         tmp_path,
         bots=[{"dir": "mgr", "fleet": "f"}],
         env_extra={"STUB_BUSY_RC": "0"},
-    )
+    scratch_plane_env=scratch_plane_env)
     assert rc == 0, err
     assert _dispatched(tmp_path) == ""
     events = _events(tmp_path)
@@ -387,7 +393,7 @@ def test_a_busy_manager_is_never_injected_into_mid_turn(tmp_path):
     assert events[0]["data"]["reason"] == "busy"
 
 
-def test_a_manager_idle_at_the_gate_but_busy_at_the_send_gets_no_dispatch(tmp_path):
+def test_a_manager_idle_at_the_gate_but_busy_at_the_send_gets_no_dispatch(tmp_path, *, scratch_plane_env):
     # A4: the plane rate-limit read sits between the gate check and the send,
     # so a re-check immediately before dispatch.sh catches a manager that went
     # busy in that window -- idle on the first bot_is_busy call, busy on the
@@ -396,7 +402,7 @@ def test_a_manager_idle_at_the_gate_but_busy_at_the_send_gets_no_dispatch(tmp_pa
         tmp_path,
         bots=[{"dir": "mgr", "fleet": "f"}],
         env_extra={"STUB_BUSY_RC": "1", "STUB_BUSY_RC_2": "0"},
-    )
+    scratch_plane_env=scratch_plane_env)
     assert rc == 0, err
     assert _dispatched(tmp_path) == ""
     events = _events(tmp_path)
@@ -404,20 +410,20 @@ def test_a_manager_idle_at_the_gate_but_busy_at_the_send_gets_no_dispatch(tmp_pa
     assert events[0]["data"]["reason"] == "busy"
 
 
-def test_a_recent_trigger_inside_the_min_gap_suppresses_the_beat(tmp_path):
+def test_a_recent_trigger_inside_the_min_gap_suppresses_the_beat(tmp_path, *, scratch_plane_env):
     rc, _out, err = _run(
         tmp_path,
         bots=[{"dir": "mgr", "fleet": "f"}],
         env_extra={"STUB_PLANE_HITS": '{"ts":"2026-09-18T00:00:00Z"}\n'},
-    )
+    scratch_plane_env=scratch_plane_env)
     assert rc == 0, err
     assert _dispatched(tmp_path) == ""
     assert _events(tmp_path) == []
 
 
-def test_the_rate_limit_read_names_the_manager_the_type_and_the_window(tmp_path):
+def test_the_rate_limit_read_names_the_manager_the_type_and_the_window(tmp_path, *, scratch_plane_env):
     before = time.time()
-    rc, _out, err = _run(tmp_path, bots=[{"dir": "lead", "fleet": "f"}])
+    rc, _out, err = _run(tmp_path, bots=[{"dir": "lead", "fleet": "f"}], scratch_plane_env=scratch_plane_env)
     assert rc == 0, err
     argv = _plane_argv(tmp_path)
     assert "--events" in argv
@@ -428,13 +434,13 @@ def test_the_rate_limit_read_names_the_manager_the_type_and_the_window(tmp_path)
     assert abs(since_epoch - (before - DEFAULT_MIN_GAP_S)) <= 2
 
 
-def test_the_min_gap_is_overridable_by_flag_and_by_env(tmp_path):
+def test_the_min_gap_is_overridable_by_flag_and_by_env(tmp_path, *, scratch_plane_env):
     before_env = time.time()
     rc, _out, err = _run(
         tmp_path,
         bots=[{"dir": "lead", "fleet": "f"}],
         env_extra={"CHECKIN_MIN_GAP_S": "60"},
-    )
+    scratch_plane_env=scratch_plane_env)
     assert rc == 0, err
     since_env = _since_epoch(_plane_argv(tmp_path))
     assert abs(since_env - (before_env - 60)) <= 2
@@ -445,31 +451,82 @@ def test_the_min_gap_is_overridable_by_flag_and_by_env(tmp_path):
         bots=[{"dir": "lead", "fleet": "f"}],
         extra_args=["--min-gap-s", "60"],
         env_extra={"CHECKIN_MIN_GAP_S": "9999"},
-    )
+    scratch_plane_env=scratch_plane_env)
     assert rc == 0, err
     since_flag = _since_epoch(_plane_argv(tmp_path))
     assert abs(since_flag - (before_flag - 60)) <= 2
 
 
-def test_a_min_gap_that_is_not_a_number_is_a_usage_refusal_at_rc_2(tmp_path):
-    rc, _out, err = _run(tmp_path, bots=[], extra_args=["--min-gap-s", "later"])
+def test_a_min_gap_that_is_not_a_number_is_a_usage_refusal_at_rc_2(tmp_path, *, scratch_plane_env):
+    rc, _out, err = _run(tmp_path, bots=[], extra_args=["--min-gap-s", "later"], scratch_plane_env=scratch_plane_env)
     assert rc == 2, err
     assert _dispatched(tmp_path) == ""
 
 
-def test_an_unreachable_plane_does_not_fire(tmp_path):
+def test_an_unreachable_plane_does_not_fire(tmp_path, *, scratch_plane_env):
     rc, _out, err = _run(
         tmp_path,
         bots=[{"dir": "mgr", "fleet": "f"}],
         env_extra={"STUB_PLANE_RC": "3"},
-    )
+    scratch_plane_env=scratch_plane_env)
     assert rc == 0, err
     assert _dispatched(tmp_path) == ""
     assert _events(tmp_path) == []
     assert "unreachable" in _log(tmp_path)
 
 
-def test_a_disabled_plane_emit_warns_the_trigger_was_not_recorded(tmp_path):
+def _pending_trigger(tmp_path: Path, queue: str, name: str, subject: str) -> None:
+    """A checkin_triggered batch a daemon outage left durable but unrecorded,
+    in the shape emit_fleet_event stages it."""
+    d = tmp_path / "state" / "plane" / queue
+    d.mkdir(parents=True, exist_ok=True)
+    (d / name).write_text(json.dumps({"events": [{
+        "event_type": "system", "emitter": "manager-checkin", "fleet": "f",
+        "payload": {"event": "checkin_triggered", "subject_kind": "actor",
+                    "subject": subject, "data": {}}}]}))
+
+
+def test_a_staged_trigger_during_an_outage_does_not_refire(tmp_path, *, scratch_plane_env):
+    # S2-02: the committed read is empty while the last trigger sits staged;
+    # pending is not recorded, but it is not absent either -- no second /checkin.
+    _pending_trigger(tmp_path, "staged", "a.batch", "bot:f/mgr")
+    rc, _out, err = _run(tmp_path, bots=[{"dir": "mgr", "fleet": "f"}],
+                         scratch_plane_env=scratch_plane_env)
+    assert rc == 0, err
+    assert _dispatched(tmp_path) == ""
+    assert _events(tmp_path) == []
+    assert "pending Plane ingest" in _log(tmp_path)
+
+
+def test_ingest_between_the_two_reads_cannot_let_the_trigger_refire(tmp_path, *, scratch_plane_env):
+    # Integration review: ingest commits a queued trigger, then deletes it. Had
+    # the committed read run first (empty) and the queue scan second (entry
+    # gone), both would miss it. The queue scan runs first, so the trigger is
+    # seen while still queued and the committed read is never consulted.
+    _pending_trigger(tmp_path, "staged", "a.batch", "bot:f/mgr")
+    entry = tmp_path / "state" / "plane" / "staged" / "a.batch"
+    rc, _out, err = _run(tmp_path, bots=[{"dir": "mgr", "fleet": "f"}],
+                         env_extra={"STUB_PLANE_INGEST_AFTER_READ": str(entry)},
+                         scratch_plane_env=scratch_plane_env)
+    assert rc == 0, err
+    assert _dispatched(tmp_path) == ""
+    assert _events(tmp_path) == []
+    assert _plane_argv(tmp_path) == []      # skipped before the committed read
+    assert entry.exists()
+    assert "pending Plane ingest" in _log(tmp_path)
+
+
+def test_a_spooled_trigger_for_another_manager_does_not_block_this_one(tmp_path, *, scratch_plane_env):
+    _pending_trigger(tmp_path, "spool", "b.json", "bot:f/someone-else")
+    _pending_trigger(tmp_path, "spool", "c.json", "bot:g/mgr")
+    rc, _out, err = _run(tmp_path, bots=[{"dir": "mgr", "fleet": "f"}],
+                         scratch_plane_env=scratch_plane_env)
+    assert rc == 0, err
+    assert _dispatched(tmp_path) == "mgr\t/checkin"
+    assert [e["type"] for e in _events(tmp_path)] == ["checkin_triggered"]
+
+
+def test_a_disabled_plane_emit_warns_the_trigger_was_not_recorded(tmp_path, *, scratch_plane_env):
     # A2: PLANE_EMIT_DISABLED=1 is the one signal a real emit_fleet_event call
     # returns 0 without ever recording anything (plane_armed's early return) --
     # the only failure this door can actually see from outside emit_fleet_event,
@@ -479,39 +536,39 @@ def test_a_disabled_plane_emit_warns_the_trigger_was_not_recorded(tmp_path):
         tmp_path,
         bots=[{"dir": "mgr", "fleet": "f"}],
         env_extra={"PLANE_EMIT_DISABLED": "1"},
-    )
+    scratch_plane_env=scratch_plane_env)
     assert rc == 0, err
     log = _log(tmp_path)
     assert "WARN" in log
     assert "not recorded" in log
 
 
-def test_a_clean_emit_writes_no_warn(tmp_path):
-    rc, _out, err = _run(tmp_path, bots=[{"dir": "mgr", "fleet": "f"}])
+def test_a_clean_emit_writes_no_warn(tmp_path, *, scratch_plane_env):
+    rc, _out, err = _run(tmp_path, bots=[{"dir": "mgr", "fleet": "f"}], scratch_plane_env=scratch_plane_env)
     assert rc == 0, err
     assert "WARN" not in _log(tmp_path)
 
 
-def test_a_failed_send_records_no_trigger_so_the_next_beat_retries(tmp_path):
+def test_a_failed_send_records_no_trigger_so_the_next_beat_retries(tmp_path, *, scratch_plane_env):
     rc, _out, err = _run(
         tmp_path,
         bots=[{"dir": "mgr", "fleet": "f"}],
         env_extra={"STUB_DISPATCH_RC": "1"},
-    )
+    scratch_plane_env=scratch_plane_env)
     assert rc == 0, err
     events = _events(tmp_path)
     assert [e["type"] for e in events] == ["checkin_skipped"]
     assert events[0]["data"]["reason"] == "send_failed"
 
 
-def test_a_bot_of_another_fleet_is_not_touched(tmp_path):
+def test_a_bot_of_another_fleet_is_not_touched(tmp_path, *, scratch_plane_env):
     rc, _out, err = _run(
         tmp_path,
         bots=[
             {"dir": "w1", "fleet": "g"},
             {"dir": "lead", "fleet": "f"},
         ],
-    )
+    scratch_plane_env=scratch_plane_env)
     assert rc == 0, err
     assert _dispatched(tmp_path) == "lead\t/checkin"
     events = _events(tmp_path)
@@ -520,27 +577,27 @@ def test_a_bot_of_another_fleet_is_not_touched(tmp_path):
     assert events[0]["bot_id"] == "lead"
 
 
-def test_an_empty_roster_injects_nothing(tmp_path):
-    rc, _out, err = _run(tmp_path, bots=[])
+def test_an_empty_roster_injects_nothing(tmp_path, *, scratch_plane_env):
+    rc, _out, err = _run(tmp_path, bots=[], scratch_plane_env=scratch_plane_env)
     assert rc == 0, err
     assert _dispatched(tmp_path) == ""
     assert _events(tmp_path) == []
 
 
-def test_a_bad_sibling_manifest_is_disclosed_and_the_good_fleet_still_fires(tmp_path):
+def test_a_bad_sibling_manifest_is_disclosed_and_the_good_fleet_still_fires(tmp_path, *, scratch_plane_env):
     rc, _out, err = _run(
         tmp_path,
         bots=[{"dir": "mgr", "fleet": "f"}],
         roster_bad=["/nonexistent/other-fleet/fleet.yaml\tunreadable"],
-    )
+    scratch_plane_env=scratch_plane_env)
     assert rc == 0, err
     assert "manager-checkin: roster:" in err
     assert "unreadable" in err
     assert _dispatched(tmp_path) == "mgr\t/checkin"
 
 
-def test_no_fleet_named_is_a_usage_refusal_at_rc_2(tmp_path):
-    rc, _out, err = _run(tmp_path, bots=[], fleet=None)
+def test_no_fleet_named_is_a_usage_refusal_at_rc_2(tmp_path, *, scratch_plane_env):
+    rc, _out, err = _run(tmp_path, bots=[], fleet=None, scratch_plane_env=scratch_plane_env)
     assert rc == 2, err
     assert _dispatched(tmp_path) == ""
 
@@ -563,7 +620,7 @@ def test_neither_nonzero_expecting_call_runs_in_a_command_substitution():
 # PR 2 chunk 2 — the composed fleet job (system.yaml defaults.jobs) and its
 # switch row (switches.py). These exercise the PYTHON composer, not the bash
 # trigger above: real load_fleet + compose_fleet_timers against a throwaway
-# fleet.yaml with the real lib/ symlinked in — never a hand-built FleetConfig
+# fleet.yaml with the real claudlobby/_runtime_scripts/ symlinked in — never a hand-built FleetConfig
 # or a stubbed env_tiers resolver — the test_switches.py `_root` shape, so
 # what these prove is the shipped composer against the shipped system.yaml,
 # not a copy of either.
@@ -577,6 +634,7 @@ def test_neither_nonzero_expecting_call_runs_in_a_command_substitution():
 #: on purpose — compose_fleet_timers never resolves it.
 _CHECKIN_FLEET = """\
 fleet:
+  manager: lead
   name: checkin-fleet
   service_prefix: com.checkin
   teams:
@@ -592,21 +650,22 @@ fleet:
 
 
 def _checkin_timers(tmp_path: Path, extra: str = "") -> Path:
-    """Compose a throwaway fleet's timers: real lib/, real load_fleet, real
+    """Compose a throwaway fleet's timers: real claudlobby/_runtime_scripts/, real load_fleet, real
     compose_fleet_timers. `extra` is raw YAML appended under `fleet:` at its
     own 2-space indent, for a `defaults.jobs.manager-checkin.enroll`
     override (the TestTaskRecheckTimer shape in tests/test_composer.py)."""
     from claudlobby.composer import compose_fleet_timers
     from claudlobby.config import load_fleet
+    from tests.package_fixtures import source_package
     from claudlobby.paths import Paths
 
     root = tmp_path / "r"
     root.mkdir(parents=True, exist_ok=True)
     if not (root / "lib").exists():
-        (root / "lib").symlink_to(REPO / "lib")
+        (root / "lib").symlink_to(REPO / "claudlobby/_runtime_scripts")
     (root / "fleet.yaml").write_text(_CHECKIN_FLEET + extra)
     fleet, merged = load_fleet(root / "fleet.yaml")
-    paths = Paths(root=root, fleet_dir=root)
+    paths = Paths(root=root, fleet_dir=root, package=source_package())
     return compose_fleet_timers(fleet, paths, merged)
 
 
@@ -640,14 +699,14 @@ def test_arming_the_job_takes_it_out_of_the_dormant_manifest(tmp_path):
     # Not just present: composed from the REAL system.yaml job (script +
     # fleet argument), not a fleet-only stub the override happened to create
     # with no script of its own.
-    assert "lib/manager-checkin.sh checkin-fleet" in service.read_text()
+    assert "claudlobby/_runtime_scripts/manager-checkin.sh checkin-fleet" in service.read_text()
     assert "com.checkin.manager-checkin" not in _dormant_entries(timers)
 
 
 def test_the_unit_execs_the_trigger_with_the_fleet_as_its_argument(tmp_path):
     timers = _checkin_timers(tmp_path)
     service = (timers / "com.checkin.manager-checkin.service").read_text()
-    assert "lib/manager-checkin.sh checkin-fleet" in service
+    assert "claudlobby/_runtime_scripts/manager-checkin.sh checkin-fleet" in service
 
 
 def test_the_beat_is_fifteen_minutes(tmp_path):
@@ -671,4 +730,4 @@ def test_the_arm_line_is_the_enroll_carrier():
 
     s = sw.by_key("manager-checkin")
     assert "defaults.jobs.manager-checkin.enroll: true" in s.arm
-    assert "lib/setup-fleet" in s.arm
+    assert "host activate PLAN_ID" in s.arm
