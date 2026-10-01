@@ -279,7 +279,9 @@ def _bot(**overrides):
 
 
 def _fleet():
-    return FleetConfig(name="tl", service_prefix="com.crog.tl")
+    return FleetConfig(
+        name="tl", service_prefix="com.crog.tl", manager="kev", bots={"kev": _bot()}
+    )
 
 
 class TestAuditBotSourcesWalk:
@@ -562,8 +564,11 @@ class TestEnvAnchorEmissionSafety:
         )
 
     def _audit(self, env):
-        fleet = FleetConfig(name="t", service_prefix="com.t")
-        return audit_bot_sources(self._bot(env), fleet)
+        bot = self._bot(env)
+        fleet = FleetConfig(
+            name="t", service_prefix="com.t", manager="b", bots={"b": bot}
+        )
+        return audit_bot_sources(bot, fleet)
 
     def test_command_subst_after_anchor_denied(self):
         f = self._audit({"X": "${FLEET_ROOT}/$(echo INJECTED > pwned.txt)/x"})

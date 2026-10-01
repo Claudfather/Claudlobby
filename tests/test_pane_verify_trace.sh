@@ -14,7 +14,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB_DIR="$SCRIPT_DIR/../lib"
+LIB_DIR="$SCRIPT_DIR/../claudlobby/_runtime_scripts"
 FIXTURES="$SCRIPT_DIR/fixtures/pane-states"
 PASS=0; FAIL=0; TOTAL=0
 
@@ -29,7 +29,7 @@ export PANE_SEND_SETTLE_S=0 PANE_SEND_VERIFY_TICKS=2
 export PANE_READY_POLL_S=0.02 PANE_READY_TICKS=6 PANE_RECOVER_TICKS=2
 export _PANE_VERIFY_POLL_S=0
 
-# shellcheck source=../lib/lib-common.sh
+# shellcheck source=../claudlobby/_runtime_scripts/lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 
 TMPD=$(mktemp -d); trap 'rm -rf "$TMPD"' EXIT
@@ -91,8 +91,11 @@ first_pane=$(cat "$TRACE_DIR/tick-1.pane" 2>/dev/null || printf 'MISSING')
 expected_pane=$(cat "$FIXTURES/input-clean-submit.txt")
 assert_eq "tick-1.pane is the frame verbatim, not a derived record" \
     "$(printf '%s' "$expected_pane" | cksum)" "$(printf '%s' "$first_pane" | cksum)"
-assert_eq "the tick file holds no derived fields" "no" \
-    "$(case "$first_pane" in *candidate*|*ge_floor*|*substr*) echo yes ;; *) echo no ;; esac)"
+derived=no
+if [[ "$first_pane" == *candidate* || "$first_pane" == *ge_floor* || "$first_pane" == *substr* ]]; then
+    derived=yes
+fi
+assert_eq "the tick file holds no derived fields" "no" "$derived"
 
 echo "== each candidate classifies distinctly =="
 # no-region: pre-draw pane, no glyph at all -> the render-lag shape

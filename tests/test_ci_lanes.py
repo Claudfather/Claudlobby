@@ -35,7 +35,7 @@ import yaml
 REPO = Path(__file__).resolve().parent.parent
 WORKFLOWS = REPO / ".github" / "workflows"
 CONFIG = REPO / "pyproject.toml"
-CONFTEST = REPO / "tests" / "conftest.py"
+QUARANTINE_POLICY = REPO / "tests" / "quarantine_policy.py"
 
 # (workflow file, job id) for each lane.
 PYTEST = ("test.yml", "pytest")
@@ -128,8 +128,8 @@ def _expression(lane):
 def _probe_dir(tmp_path, source=PROBE):
     probe = tmp_path / "probe"
     probe.mkdir()
-    # The REAL conftest, so the quarantine check under test is the shipped one.
-    shutil.copy(CONFTEST, probe / "conftest.py")
+    # The real collection policy, without unrelated application-origin checks.
+    shutil.copy(QUARANTINE_POLICY, probe / "conftest.py")
     (probe / "test_probe.py").write_text(source)
     return probe
 

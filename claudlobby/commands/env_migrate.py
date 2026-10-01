@@ -54,8 +54,8 @@ def _extract_secrets(
             continue
         try:
             mcp_data = _json.loads(mcp_path.read_text())
-        except _json.JSONDecodeError as e:
-            log.warning("failed to parse %s: %s", mcp_path, e)
+        except _json.JSONDecodeError:
+            log.warning("failed to parse %s", mcp_path)
             continue
         for _, srv in mcp_data.get("mcpServers", {}).items():
             for k, v in srv.get("env", {}).items():
@@ -174,7 +174,10 @@ def _apply_env_migration(
         bot_env_path = paths.bot_runtime(fleet_bot_name) / ".env"
         if not bot_env_path.parent.is_dir():
             log.error(
-                "SKIP %s: runtime dir missing — run `claudlobby generate` first",
+                "SKIP %s: runtime dir missing — stage with `claudlobby --root "
+                "<data-root> config plan --release <sealed-release-id>`, then "
+                "activate the returned plan with `claudlobby --root <data-root> "
+                "host activate <plan-id> --install-directory <native-user-unit-dir>`",
                 fleet_bot_name,
             )
             continue
@@ -229,12 +232,7 @@ def cmd_env_migrate(args) -> int:
         paths.fleet_dir / ".env" if paths.fleet_dir else paths.root / ".env"
     )
 
-    def _redact(v: str) -> str:
-        if len(v) <= 8:
-            return "***"
-        return f"{v[:4]}…{v[-2:]}"
-
-    log.info("=== env-migrate plan ===")
+    log.info("=== migration env plan ===")
     log.info("source: %s", source_dir)
     log.info("fleet:  %s", fleet.name)
     log.info("discovered legacy bot dirs: %s", sorted(bot_dir_map.keys()))
@@ -244,7 +242,7 @@ def cmd_env_migrate(args) -> int:
     if fleet_vars:
         log.info("FLEET-LEVEL (%d vars) → %s", len(fleet_vars), fleet_env_path)
         for k in sorted(fleet_vars):
-            log.info("  %s=%s", k, _redact(fleet_vars[k]))
+            log.info("  %s=<set>", k)
     else:
         log.info("FLEET-LEVEL: (no fleet-shared vars to migrate)")
 
@@ -254,7 +252,7 @@ def cmd_env_migrate(args) -> int:
             bot_env_path = paths.bot_runtime(fleet_bot_name) / ".env"
             log.info("  %s → %s", fleet_bot_name, bot_env_path)
             for k in sorted(bot_vars[fleet_bot_name]):
-                log.info("    %s=%s", k, _redact(bot_vars[fleet_bot_name][k]))
+                log.info("    %s=<set>", k)
     else:
         log.info("BOT-LEVEL: (no per-bot tokens resolved)")
 

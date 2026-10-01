@@ -7,7 +7,7 @@ mid-start, so an absent tmux session is expected rather than actionable.
 Sibling of `test_service_is_active.py` and driven the same way — `systemctl`
 stubbed on PATH, `_OS` forced after sourcing — because the real state machine
 needs a live systemd user bus, which macOS (the documented baseline host) does
-not have. `lib/validate-bot-change.sh` covers the state machine against a real
+not have. `harness/validate-bot-change.sh` covers the state machine against a real
 unit and SKIPs where the bus is absent; this file covers the parsing, the state
 matching and the grace arithmetic everywhere, always.
 
@@ -21,11 +21,11 @@ import os
 import subprocess
 from pathlib import Path
 
-LIB_COMMON = Path(__file__).resolve().parent.parent / "lib" / "lib-common.sh"
+LIB_COMMON = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts" / "lib-common.sh"
 # lib-common.sh unconditionally sources supervisor.sh from its own directory
 # (#1573 task 6) -- the patched copy below needs this sibling staged next to
 # it too, exactly as it already needs lib-common.sh itself.
-SUPERVISOR = Path(__file__).resolve().parent.parent / "lib" / "supervisor.sh"
+SUPERVISOR = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts" / "supervisor.sh"
 
 
 def _run(

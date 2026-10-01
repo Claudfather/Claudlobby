@@ -1,202 +1,28 @@
-"""Core compositor commands: validate, generate, list-library, diff, promote, status, doctor, report-back, uptime, warm-cache."""
+"""Core compositor commands still used by private composition and fleet operations."""
 
 from __future__ import annotations
 
 import json as _json
 import logging
 import subprocess
-import sys
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .. import mcp_direct
 from ..mcp_grammar import GrammarUnavailable, grammar
 from ..composer import compose_bot, compose_fleet
-from ..diff import diff_bot, promote_bot
 from ..source_state import (
     SOURCE_ABSENT,
-    UNREACHABLE_REMEDIES,
-    probe_dir,
     probe_source,
-    scan_dir,
     unreachable_line,
 )
 from ..validator import WARNING_CATEGORIES, render_warnings, validate, warning_summary
 from ._helpers import _load_env, _load_fleet_or_exit, _resolve_paths
-from ._helpers import refuse_unreachable
 
 log = logging.getLogger("claudlobby")
 
 
-def cmd_doctor(args) -> int:
-    """Pre-flight fleet health diagnostic."""
-    from ..doctor import format_report, run_doctor
-
-    paths = _resolve_paths(args)
-    _load_env(paths)
-    if getattr(args, "switches", False):
-        # The table ALONE — the form lib/setup-fleet and lib/setup-system
-        # call, so their closing summary and this command's rung come from
-        # one renderer rather than a bash copy that drifts. Deliberately
-        # cheap: no service probes, no credential curls, no npx cache walk.
-        #
-        # The fleet is OPTIONAL here, which the full doctor's is not:
-        # lib/setup-system runs once per HOST and a host with overlay fleets
-        # has no root fleet.yaml at all, so requiring one would have made the
-        # host door print nothing — the exact silence this chunk exists to
-        # remove. Without a fleet the fleet-scoped rows fall back to their
-        # shipped defaults and the host rows are still true.
-        from .. import switches as _sw
-        from ..config import load_fleet
-        if getattr(args, "markdown", False):
-            # The doc blocks, for regeneration. The three schema/architecture
-            # tables used to be a fourth hand-kept copy of the registry; they
-            # are now a generated block, pinned by test, and this is the door
-            # the failure message points at. Deliberately state-FREE: a doc
-            # must describe what ships, never what this host happens to have.
-            for doc, kw in _sw.DOC_BLOCKS.items():
-                print(f"--- {doc}")
-                print(_sw.format_markdown(**kw))
-                print()
-            return 0
-        try:
-            fleet, _md = load_fleet(paths.fleet_yaml)
-        except Exception:  # noqa: BLE001 — no fleet is a host run, not an error
-            fleet = None
-        print(_sw.format_table(_sw.resolve(paths, fleet)))
-        return 0
-    fleet, _md = _load_fleet_or_exit(paths)
-    report = run_doctor(fleet, paths, delivery=getattr(args, "delivery", True))
-    print(format_report(report))
-    return 1 if report.has_failures else 0
-
-
-def cmd_freshbox(args) -> int:
-    """Fresh-box self-containment audit (#644 P4): every grant traces to an
-    equipped source's contract (no over-grant/orphan), the composed allow covers
-    every declared grant (no under-grant), and the Tier-A settings surface
-    (enabledPlugins/skip-flags/sandbox) is composed per-bot, not global-inherited.
-    """
-    from ..freshbox import (
-        audit_bot,
-        audit_fleet,
-        exits_nonzero,
-        format_report,
-        reap_orphan_units,
-    )
-
-    paths = _resolve_paths(args)
-    _load_env(paths)
-    fleet, _md = _load_fleet_or_exit(paths)
-
-    bot = None
-    if args.bot:
-        bot = fleet.bots.get(args.bot)
-        if bot is None:
-            log.error("no such bot: %s", args.bot)
-            return 1
-
-    # Reap before auditing so the report reflects the cleaned state.
-    if args.reap:
-        removed = reap_orphan_units(fleet, paths, [bot] if bot else None)
-        for p in removed:
-            print(f"reaped orphan unit: {p}")
-        if not removed:
-            print("no orphan units to reap")
-
-    # The CLI opts into scanning the operator's host-tier ~/.env (a WARN surface);
-    # the library default (home=None) never reaches into a personal home.
-    home = Path.home()
-    findings = (
-        audit_bot(bot, fleet, paths, home=home)
-        if bot
-        else audit_fleet(fleet, paths, home=home)
-    )
-    print(format_report(fleet, findings))
-    return 1 if exits_nonzero(findings, strict=args.strict) else 0
-
-
-def cmd_creds_reconcile(args) -> int:
-    """Reconcile declared credentials against values against equipped bots (#1104).
-
-    Answers shape 1 (declared, no value) and shape 2 (value, no equipped
-    consumer). Shape 3 — a declaration and its consumer naming DIFFERENT keys —
-    is deliberately not attempted and reports UNKNOWN by name, because deciding
-    it means reading a sibling plugin's source, which is assertion rather than
-    contract. UNKNOWN is printed and counted; a silent omission would recreate
-    the very defect this exists to remove.
-    """
-    from ..credentials import exits_nonzero, format_report, reconcile
-    from ..env_tiers import ResolverUnavailable
-
-    paths = _resolve_paths(args)
-    _load_env(paths)
-    fleet, _ = _load_fleet_or_exit(paths)
-
-    try:
-        findings, scope = reconcile(paths, fleet)
-    except ResolverUnavailable as exc:
-        # Refuse rather than fall back to a narrower reader. Falling back is how
-        # this command came to report a host-tier credential as "absent from
-        # every tier" — a wrong answer is worse than no answer here, because it
-        # sends someone to provision a credential that already exists.
-        print(f"cannot reconcile: {exc}")
-        return 2
-    print(format_report(findings, scope))
-    return 1 if exits_nonzero(findings) else 0
-
-
-def cmd_env_register(args) -> int:
-    """The derived credential register (#1214 F6 / #1226).
-
-    DERIVED rather than written: a hand-kept note of "things that work this way"
-    is stale the first time someone adds an integration and forgets, and its
-    staleness is invisible because it still reads like an answer.
-
-    Reports SHADOWING, not merely resolution. A var resolving to the empty
-    string from a more specific tier while a real value sits upstream is
-    invisible to every other check — the key is set, so nothing calls it
-    missing; a value exists, so nothing calls it unconfigured — and it is the
-    state that motivated the whole workstream.
-    """
-    from ..env_register import ResolverUnavailable, build, exits_nonzero, format_report
-
-    paths = _resolve_paths(args)
-    _load_env(paths)
-    fleet, _ = _load_fleet_or_exit(paths)
-
-    try:
-        reg = build(fleet, paths, bot=getattr(args, "bot", None))
-    except ResolverUnavailable as exc:
-        # Refuse rather than answer from a copy of the tier order. A register
-        # that guessed would be worse than none: its whole claim is that it
-        # reports what a boot would actually find.
-        print(f"cannot derive the register: {exc}")
-        return 2
-
-    if getattr(args, "json", False):
-        import json
-
-        print(
-            json.dumps(
-                {
-                    "bot": reg.bot,
-                    "tiers": [
-                        {"tier": t, "path": p, "state": st} for t, p, st in reg.tiers
-                    ],
-                    "vars": [r._asdict() for r in reg.rows],
-                    "undeclared": list(reg.undeclared),
-                },
-                indent=2,
-            )
-        )
-    else:
-        print(format_report(reg))
-    return 1 if exits_nonzero(reg) else 0
-
-
 def _warn_baseline_gate(report, path: Path, *, write: bool) -> int:
-    """``validate --warn-baseline``: fail only on a warning category that is
+    """``config validate --warn-baseline``: fail only on a warning category that is
     new, or has more warnings than the baseline recorded (#1663).
 
     ``--strict`` fails on every warning, so a fleet that has accepted some can
@@ -218,7 +44,7 @@ def _warn_baseline_gate(report, path: Path, *, write: bool) -> int:
         return 0
     probe = probe_source(path)
     if probe.unreachable:
-        remedy = (f"record one with `claudlobby validate --warn-baseline {path} --write`"
+        remedy = (f"record one with `claudlobby config validate --warn-baseline {path} --write`"
                   if probe.state == SOURCE_ABSENT else "")
         log.error("%s", unreachable_line("the warning baseline", probe, remedy=remedy))
         return 2
@@ -248,37 +74,6 @@ def _warn_baseline_gate(report, path: Path, *, write: bool) -> int:
     if grew:
         return 1
     log.info("warning baseline %s: no category is new or grew", path)
-    return 0
-
-
-def cmd_validate(args) -> int:
-    paths = _resolve_paths(args)
-    baseline = getattr(args, "warn_baseline", None)
-    write = getattr(args, "write", False)
-    if write and not baseline:
-        log.error("--write needs --warn-baseline FILE — it names the file to write")
-        return 2
-    _load_env(paths)
-    fleet, _ = _load_fleet_or_exit(paths)
-    report = validate(fleet, paths)
-
-    for e in report.errors:
-        log.error("%s", e)
-    for line in render_warnings(report):
-        log.warning("%s", line)
-    if report.warnings:
-        log.info("%s", warning_summary(report))
-    gate = _warn_baseline_gate(report, Path(baseline), write=write) if baseline else 0
-
-    if args.strict and report.has_issues:
-        log.error("--strict: warnings count as errors")
-        return 1
-    if report.has_errors:
-        return 1
-    if gate:
-        return gate
-    if not report.has_issues:
-        log.info("fleet.yaml OK (%d bots, %d teams)", len(fleet.bots), len(fleet.teams))
     return 0
 
 
@@ -365,536 +160,7 @@ def cmd_generate(args) -> int:
     return 0
 
 
-def cmd_host_timers(args) -> int:
-    """Compose host-global timer units from system.yaml host.jobs.
-
-    Needs no fleet.yaml — host jobs are package-owned. setup-system runs this
-    before enrollment so a cold host (no fleet composed yet) still gets its
-    host units.
-    """
-    from ..composer import (
-        compose_host_timers,
-    )
-
-    paths = _resolve_paths(args)
-    host_timers_dir = compose_host_timers(paths)
-    if host_timers_dir.is_dir():
-        log.info("composed host timers → %s", host_timers_dir)
-    else:
-        log.info("no host jobs declared — nothing composed")
-    return 0
-
-
-def cmd_host_job(args) -> int:
-    """Print one host job as THIS host runs it: the packaged config with the
-    host override applied (``config.load_host_jobs``), as JSON.
-
-    The read door for a hold's reason (#865: a reader inspecting the state can
-    recover why a job is held) and the one pull-root reads its hold through,
-    so the job and an operator see the same merge.
-    """
-    from ..config import load_host_jobs
-
-    jobs = load_host_jobs()
-    if args.name not in jobs:
-        print(f"no host job {args.name!r}; this install ships: {', '.join(sorted(jobs))}",
-              file=sys.stderr)
-        return 2
-    # default=str: YAML reads an unquoted `until: 2026-10-03` as a date, the
-    # natural way to write a hold; it renders as the same ISO string.
-    print(_json.dumps(jobs[args.name], sort_keys=True, default=str))
-    return 0
-
-
-def cmd_list_library(args) -> int:
-    paths = _resolve_paths(args)
-
-    def _list_md(label: str, kind: str):
-        """Walk overlay → base recursively. Display nested files as `dir/name`."""
-        log.info("%s:", label)
-        seen: dict[str, str] = {}  # rel_key (no .md) → "[overlay]" or "[base]"
-        for d in paths.library_search_dirs(kind):
-            if not d.is_dir():
-                continue
-            tag = (
-                "[overlay]"
-                if (paths.overlay_library and d == paths.overlay_library / kind)
-                else "[base]"
-            )
-            for p in sorted(d.rglob("*.md")):
-                if p.stem.lower().startswith("readme"):
-                    continue
-                rel_key = str(p.relative_to(d).with_suffix(""))
-                if rel_key not in seen:
-                    seen[rel_key] = tag
-        for rel_key, tag in sorted(seen.items()):
-            marker = " (override)" if tag == "[overlay]" else ""
-            log.info("  %s%s", rel_key, marker)
-
-    _list_md("Expertise", "expertise")
-
-    log.info("MCP fragments (base only):")
-    if paths.base_mcp.is_dir():
-        for p in sorted(paths.base_mcp.glob("*.json")):
-            log.info("  %s", p.stem)
-
-    _list_md("Integrations", "integrations")
-    _list_md("Protocols", "protocols")
-    _list_md("Guardrails", "guardrails")
-    _list_md("Resources", "resources")
-    _list_md("Lessons", "lessons")
-    _list_md("Post-actions", "post_actions")
-
-    log.info("Skills:")
-    seen_skills: dict[str, str] = {}  # rel_key → tag
-    for d in paths.library_search_dirs("skills"):
-        if not d.is_dir():
-            continue
-        tag = (
-            "[overlay]"
-            if (paths.overlay_library and d == paths.overlay_library / "skills")
-            else "[base]"
-        )
-        for sub in sorted(d.rglob("*")):
-            if not sub.is_dir():
-                continue
-            if not (sub / "SKILL.md").is_file():
-                continue
-            rel_key = str(sub.relative_to(d))
-            if rel_key not in seen_skills:
-                seen_skills[rel_key] = tag
-    for rel_key, tag in sorted(seen_skills.items()):
-        marker = " (override)" if tag == "[overlay]" else ""
-        log.info("  %s%s", rel_key, marker)
-
-    log.info("Tools:")
-    for name, is_overlay in sorted(
-        paths.library_dir_names("tools", "tool.yaml").items()
-    ):
-        log.info("  %s%s", name, " (override)" if is_overlay else "")
-
-    log.info("Voices:")
-    seen_voices: dict[str, Path] = {}
-    if paths.overlay_voices and paths.overlay_voices.is_dir():
-        for p in sorted(paths.overlay_voices.rglob("*.md")):
-            seen_voices[p.name] = p
-    if paths.base_voices.is_dir():
-        for p in sorted(paths.base_voices.rglob("*.md")):
-            seen_voices.setdefault(p.name, p)
-    for name in sorted(seen_voices):
-        p = seen_voices[name]
-        try:
-            tag = (
-                " (override)"
-                if (paths.overlay_voices and p.is_relative_to(paths.overlay_voices))
-                else ""
-            )
-        except ValueError:
-            tag = ""
-        log.info("  %s%s", p.relative_to(paths.root), tag)
-
-    if paths.fleet_dir:
-        log.info("[fleet overlay: %s]", paths.fleet_dir.relative_to(paths.root))
-    else:
-        log.info("[no fleet overlay — root mode. Use --fleet <name> for overlay mode.]")
-    return 0
-
-
-def cmd_diff(args) -> int:
-    from ..diff import diff_fleet_timers
-
-    paths = _resolve_paths(args)
-    _load_env(paths)
-    fleet, merged_defaults = _load_fleet_or_exit(paths)
-    # #1722: the inputs-moved line comes FIRST and exactly once, whether one bot
-    # or the whole fleet is being diffed — it is a fact about the fleet's
-    # manifest, not about any bot.
-    from ..diff import manifest_header
-    sys.stdout.write(manifest_header(fleet, paths))
-    if args.bot:
-        sys.stdout.write(diff_bot(args.bot, fleet, paths))
-    else:
-        for name in fleet.bots:
-            sys.stdout.write(diff_bot(name, fleet, paths))
-        # Fleet-level timer drift
-        timer_drift = diff_fleet_timers(fleet, paths, merged_defaults)
-        if timer_drift:
-            sys.stdout.write(timer_drift)
-    return 0
-
-
-def cmd_promote(args) -> int:
-    paths = _resolve_paths(args)
-    fleet, _md = _load_fleet_or_exit(paths)
-    sys.stdout.write(promote_bot(args.bot, fleet, paths))
-    return 0
-
-
-def cmd_status(args) -> int:
-    """Fleet health dashboard — live snapshot from tmux, systemd, fleet-state."""
-    from ..status import (
-        collect_fleet_status,
-        format_bot_detail,
-        format_json,
-        format_table,
-    )
-
-    paths = _resolve_paths(args)
-    _load_env(paths)
-    fleet, _md = _load_fleet_or_exit(paths)
-
-    bot_filter = getattr(args, "bot", None)
-    use_json = getattr(args, "json", False)
-
-    statuses = collect_fleet_status(fleet, paths)
-    # A disabled reaction must never be silent (the defaults ruling). Resolving
-    # the switches shells the env-tier resolver once; a failure leaves the
-    # header unchanged rather than taking the dashboard down with it.
-    try:
-        from .. import switches as _sw
-        switch_states = _sw.resolve(paths, fleet)
-    except Exception:  # noqa: BLE001 — status must render regardless
-        switch_states = None
-
-    if bot_filter:
-        matches = [bs for bs in statuses if bs.name == bot_filter]
-        if not matches:
-            log.error("bot %r not found in fleet %r", bot_filter, fleet.name)
-            return 1
-        if use_json:
-            sys.stdout.write(format_json(matches, fleet.name, switch_states))
-        else:
-            sys.stdout.write(format_bot_detail(matches[0]))
-        return 0
-
-    if use_json:
-        sys.stdout.write(format_json(statuses, fleet.name, switch_states))
-    else:
-        sys.stdout.write(format_table(statuses, fleet.name, switch_states))
-    return 0
-
-
-def _coverage_line(plane, window_s, family=None) -> str:
-    """The coverage statement for an OPEN plane session (#1658).
-
-    Every windowed door in this package routes through here so the wording is
-    written once; the derivation and the wording both live in
-    `lib/plane-readers.py`, beside the plane's other SQL.
-
-    Degrades to a plain note rather than raising: a door must not lose its
-    answer because the sentence describing that answer could not be built. An
-    install whose readers predate `coverage()` says so, which is the same
-    shape `brief` uses for a matcher older than its caller.
-    """
-    try:
-        first, last, rows = plane.pr.coverage(plane.conn, family)
-        return plane.pr.coverage_line(first, last, rows, window_s)
-    except AttributeError:
-        return ("coverage: unknown — the readers installed at this root predate"
-                " the coverage derivation (#1658)")
-    except Exception as exc:                       # pragma: no cover - defensive
-        return f"coverage: unknown — {exc}"
-
-
-def cmd_report_back(args) -> int:
-    """Query the fleet's reports on the plane — a human-readable table of bot work events.
-
-    #1216: an unreachable ledger and a ledger with no matching rows must not
-    render alike. They did — both were an ``INFO`` line on *stderr* and rc 0 with
-    **zero bytes on stdout** — and the composed manager guidance told managers to
-    decide worker restarts on this command's output, without ``--fleet``. Run that
-    way it resolves the ROOT tier, finds nothing, and reads as "this worker is
-    fresh". Measured on the reporting host: a manager followed its own
-    instructions for a day and read zero completed while three bots sat at 6, 6
-    and 9; the fleet-tier ledger held 34 rows for the bot in question the whole
-    time.
-
-    The remedy is rc **and** stdout, because they cover different readers: rc is
-    invisible to a human at a terminal, and a stdout line is invisible to a
-    script. Nothing parses this command's stdout (it is a human table; the one
-    documented pipe is into ``grep``), which is what makes stdout safe here and
-    is *not* true of ``dispatch-overdue.py`` — see ``source_state``.
-    """
-    paths = _resolve_paths(args)
-
-    # Parse --since into a cutoff timestamp
-    cutoff = None
-    if args.since:
-        raw = args.since.strip()
-        now = datetime.now(timezone.utc)
-        if raw.endswith("h"):
-            cutoff = now - timedelta(hours=int(raw[:-1]))
-        elif raw.endswith("d"):
-            cutoff = now - timedelta(days=int(raw[:-1]))
-        elif raw.endswith("m"):
-            cutoff = now - timedelta(minutes=int(raw[:-1]))
-        else:
-            try:
-                cutoff = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-            except ValueError:
-                log.error(
-                    "cannot parse --since '%s' (use e.g. 24h, 7d, 30m, or ISO date)",
-                    raw,
-                )
-                return 1
-
-    # The window the caller actually asked for, in seconds, so the coverage
-    # line compares like with like. None when no --since was given: the answer
-    # then spans whatever exists and there is no window to fall short of.
-    window_s = (now - cutoff).total_seconds() if cutoff else None
-
-    # The plane, the only source (F18 R2b): no ledger probe, no retirement
-    # fact, no file. An unreachable plane REFUSES (rc 3) with the remedy —
-    # never an empty table, which would read as "this worker is fresh"
-    # (#1216's incident, re-created).
-    from ..brief import plane_session
-    plane, note = plane_session(paths)
-    if plane is None:
-        return refuse_unreachable("report-back", note)
-    try:
-        rows = plane.pr.report_rows(plane.conn, plane.fleet, since=cutoff.isoformat() if cutoff else None)
-        # #1658: derived INSIDE the session, from the same connection that
-        # served the rows -- a coverage line fetched from a second open could
-        # describe a different plane than the one the numbers came from.
-        cov = _coverage_line(plane, window_s)
-    except Exception as exc:
-        return refuse_unreachable("report-back", f"the plane cannot answer: {exc}")
-    finally:
-        plane.close()
-    source = f"the plane (fleet {plane.fleet})"
-    total_rows = len(rows)
-    entries = [plane.pr.public(r) for r in rows
-               if (not args.bot or r.get("bot") == args.bot)
-               and (not args.status or r.get("status") == args.status)]
-
-    if not entries:
-        # Emptiness is stated POSITIVELY, naming the source that was read and
-        # how many rows it holds. "0 matched of 34 rows" cannot be confused with
-        # "cannot read the plane", which is the whole point: the reader learns
-        # the instrument worked and the filter is what excluded everything. Left
-        # on stderr under --json so an empty JSONL stream stays empty.
-        stream = sys.stderr if args.json else sys.stdout
-        print(f"0 event(s) matched — read {total_rows} row(s) from {source}",
-              file=stream)
-        print(cov, file=stream)
-        return 0
-
-    if args.json:
-        for e in entries:
-            print(_json.dumps(e))
-        # stdout is a JSONL stream something parses; the coverage statement
-        # rides stderr for the same reason source_state.py puts a refusal there.
-        print(cov, file=sys.stderr)
-        return 0
-
-    # Table output
-    print(f"{'TIMESTAMP':<22} {'BOT':<12} {'STATUS':<10} {'SUMMARY':<50} {'PR'}")
-    print("-" * 110)
-    for e in entries:
-        ts = e.get("ts", "")[:19]
-        bot = e.get("bot", "")[:11]
-        status = e.get("status", "")[:9]
-        summary = e.get("summary", "")[:49]
-        pr = e.get("pr_url", "")
-        print(f"{ts:<22} {bot:<12} {status:<10} {summary:<50} {pr}")
-
-    print(f"\n{len(entries)} event(s)")
-    print(cov)
-    return 0
-
-
-def cmd_brief(args) -> int:
-    """The fleet's one read door — composed state for one bot.
-
-    Read-only apart from a single emission: ``--ack`` records that viewer's
-    read position on the plane (a `reports_acked` system event, chunk K).
-    Everything else it touches is the plane, opened read-only.
-    """
-    from ..brief import (
-        boot_provenance,
-        build_brief,
-        format_boot_brief,
-        format_brief,
-        record_ack,
-    )
-
-    paths = _resolve_paths(args)
-    _load_env(paths)  # WORKSTREAM_LEASE_DAYS / DISPATCH_* knobs live in .env
-    fleet, _md = _load_fleet_or_exit(paths)
-
-    bot_id = args.bot
-    if bot_id not in fleet.bots:
-        log.error("bot %r not found in fleet %r", bot_id, fleet.name)
-        return 1
-
-    # getattr, not args.boot: argparse always supplies the flag, but three
-    # hand-built test Namespaces across two authors now call cmd_brief
-    # directly — the defensive default is cheaper than coordinating them.
-    boot = getattr(args, "boot", False)
-    if boot and (args.json or args.ack):
-        # The boot payload is a render mode, not a session: it must never ack
-        # (a hook that advances the cursor marks unread work handled on every
-        # boot), and its JSON is the plain envelope --json already serves.
-        log.error("--boot is mutually exclusive with --json and --ack")
-        return 1
-
-    now = int(datetime.now(timezone.utc).timestamp())
-    brief = build_brief(fleet, paths, bot_id, now)
-
-    if boot:
-        print(format_boot_brief(brief, boot_provenance(paths, now)))
-        return 0
-
-    if args.json:
-        print(_json.dumps(brief, indent=2))
-    else:
-        sys.stdout.write(format_brief(brief))
-
-    if args.ack:
-        reports = brief.get("reports") or {}
-        if not reports:
-            # The section was omitted, so the ledger could not be read. Refusing
-            # is the whole point: advancing a cursor past reports nobody could
-            # see would mark unread work as handled, permanently. "Nothing to
-            # ack" would be a claim we are in no position to make.
-            log.error(
-                "refusing to ack for %s — the report section was not served "
-                "(see the degraded block); nothing was read, so nothing can be "
-                "marked seen",
-                bot_id,
-            )
-            return 1
-        # Ack exactly what was rendered — the newest row the caller was just
-        # shown, by the plane's own ordering — never a row that arrived mid-run.
-        unacked = reports.get("unacked", [])
-        if unacked:
-            newest = unacked[-1]   # sorted by (ts, seq): the last is the newest
-            outcome = record_ack(paths, fleet.name, bot_id,
-                                 acked_through_seq=newest.get("seq") or 0,
-                                 acked_through_ts=newest["ts"], count=len(unacked))
-            if outcome.status == "failed":
-                # A failed emit is a failed ack: the plane is the only record,
-                # so nothing was marked seen — the reports read unacked again.
-                log.error(
-                    "did NOT record the ack for %s (%s) — %d report(s) still"
-                    " read unacked; there is no other record",
-                    bot_id, outcome.detail, len(unacked),
-                )
-                return 1
-            if outcome.status == "spooled":
-                log.warning(
-                    "ack for %s spooled (%s) — the plane holds it after `claudlobby plane"
-                    " spool retry`; until then the %d report(s) still read unacked",
-                    bot_id, outcome.detail, len(unacked),
-                )
-            else:
-                log.info(
-                    "acked %d report(s) for %s — recorded on the plane (%s) through seq %s",
-                    len(unacked), bot_id, outcome.detail, newest.get("seq"),
-                )
-        else:
-            log.info("nothing to ack for %s", bot_id)
-    return 0
-
-
-def cmd_workstreams(args) -> int:
-    """Read-only view of the fleet workstream registry. Writes go exclusively
-    through lib/workstream-update.sh and the /workstream manager skill."""
-    from ..workstreams import format_list, format_show
-
-    paths = _resolve_paths(args)
-
-    # The plane, the only source (F18 R2b): an unreachable plane refuses (rc 3)
-    # with the note — never "No workstreams." from a registry that could not be
-    # read (#1216's class).
-    from ..workstreams import plane_workstreams
-    workstreams, note = plane_workstreams(paths)
-    if workstreams is None:
-        return refuse_unreachable("workstreams", note)
-
-    if getattr(args, "ws_command", "list") == "show":
-        entry = workstreams.get(args.id)
-        if not entry:
-            log.error("no such workstream: %s", args.id)
-            return 1
-        print(format_show(entry))
-    else:
-        print(format_list(workstreams))
-    return 0
-
-
-def cmd_uptime(args) -> int:
-    """Per-bot uptime, MTBR, and restart-rate metrics from the plane's
-    heartbeat samples and restart transitions (F18 closure R2b)."""
-    from ..uptime import WINDOWS, aggregate_fleet, format_json, format_table
-
-    paths = _resolve_paths(args)
-    bots_dir = paths.runtime_bots
-    # probe_dir, never is_dir()+glob: an unreadable bots dir (or ancestor)
-    # made a live fleet render as successful emptiness — "No bots found" at
-    # rc 0, the unreachable-vs-empty collapse this module exists to kill
-    # (external round 2, probed; source_state named this caller and the
-    # audit found it had never been wired).
-    # scan_dir, and the returned list IS what aggregate_fleet consumes — a
-    # probe followed by aggregate_fleet's own glob re-opened the directory,
-    # and glob swallows a mid-iteration OSError: a LIVE bot behind a benign
-    # entry vanished at rc 0 (external round 4, probed).
-    probe, bot_dirs = scan_dir(bots_dir)
-    if not probe.reachable:
-        line = unreachable_line("the runtime bots dir", probe)
-        print(line, file=sys.stderr if args.json else sys.stdout)
-        return 1
-
-    windows = [args.window] if args.window else list(WINDOWS.keys())
-    # F18 closure R2b: the plane is the ONLY source — the heartbeat samples,
-    # the dead-session fact and the restart transitions keepalive lands
-    # there; no keepalive.log, no retirement fact. A plane that cannot
-    # answer REFUSES (rc 3): an empty table would read as a fleet that never
-    # ran. The readers are the install's own stdlib script, like the bash
-    # doors' (never this checkout's copy).
-    import sqlite3
-
-    from ..brief import plane_session
-    from ..uptime import entries_from_plane
-    plane, note = plane_session(paths)
-    if plane is None:
-        return refuse_unreachable("uptime", note)
-    since = (datetime.now(timezone.utc) - max(WINDOWS.values())).isoformat()
-
-    def entries_for(bot_dir):
-        return entries_from_plane(plane.pr, plane.conn, plane.fleet, bot_dir.name, since)
-    # #1658: the coverage line is per RENDERED window, not per widest window.
-    # `uptime` reads back to the widest of 24h/7d/30d and then renders one of
-    # them, so a single line derived from `since` above would describe a window
-    # the table is not showing -- the same confusion the line exists to remove.
-    covs: dict[str, str] = {}
-    try:
-        results = aggregate_fleet(bots_dir, windows=windows, bot_filter=args.bot,
-                                  bot_dirs=bot_dirs, entries_for=entries_for)
-        for w in windows:
-            covs[w] = _coverage_line(plane, WINDOWS[w].total_seconds())
-    except (plane.pr.PlaneUnreachable, sqlite3.Error) as exc:
-        return refuse_unreachable("uptime", f"the plane could not answer ({exc})")
-    finally:
-        plane.close()
-
-    if not results:
-        log.info("No bots found in %s", bots_dir)
-        return 0
-
-    if args.json:
-        sys.stdout.write(format_json(results) + "\n")
-        # one per window rendered, on stderr so stdout stays parseable JSON
-        for w in windows:
-            print(f"{w}: {covs.get(w, 'coverage: unknown')}", file=sys.stderr)
-    else:
-        display_window = args.window or "24h"
-        sys.stdout.write(format_table(results, window=display_window) + "\n")
-        sys.stdout.write(covs.get(display_window, "coverage: unknown") + "\n")
-    return 0
-
-
-def cmd_warm_cache(args) -> int:
+def cmd_warm_cache(args, *, paths=None, fleet=None, summary=None) -> int:
     """Pre-download the packages referenced by MCP fragments.
 
     Scans every MCP fragment the fleet uses and runs each package's own
@@ -908,12 +174,13 @@ def cmd_warm_cache(args) -> int:
     than a nice-to-have.
 
     Which token of a server's args names its package is NOT decided here: that
-    grammar is `lib/mcp-package-grammar.py`, shared with the composer's binary
+    grammar is `claudlobby/_runtime_scripts/mcp-package-grammar.py`, shared with the composer's binary
     swap and with `check-npx-cache.sh`, the probe that gates this command.
     """
-    paths = _resolve_paths(args)
+    paths = paths if paths is not None else _resolve_paths(args)
     _load_env(paths)
-    fleet, _md = _load_fleet_or_exit(paths)
+    if fleet is None:
+        fleet, _md = _load_fleet_or_exit(paths)
     try:
         g = grammar(paths)
     except GrammarUnavailable as e:
@@ -963,6 +230,11 @@ def cmd_warm_cache(args) -> int:
             len(unreadable),
             ", ".join(sorted(unreadable)),
         )
+
+    if summary is not None:
+        summary.update(packages=[{"package": pkg, "runtime": runtime}
+                                 for (runtime, _prefix), pkg in sorted(targets.items())],
+                       unreadable=sorted(unreadable), failed=[], dry_run=args.dry_run)
 
     if not targets:
         log.info("no npx- or uvx-based MCP packages found in fleet")
@@ -1044,19 +316,17 @@ def cmd_warm_cache(args) -> int:
     if args.dry_run:
         log.info("(dry run — no downloads)")
     elif failed or install_failed:
+        if summary is not None:
+            summary["failed"] = sorted(set(failed + install_failed))
         if failed:
             log.warning(
                 "%d of %d packages failed to warm: %s",
-                len(failed),
-                len(targets),
-                ", ".join(failed),
+                len(failed), len(targets), ", ".join(failed),
             )
         if install_failed:
             log.warning(
                 "%d of %d direct-launch copies failed to install: %s",
-                len(install_failed),
-                len(direct),
-                ", ".join(install_failed),
+                len(install_failed), len(direct), ", ".join(install_failed),
             )
         # Exit non-zero so a caller cannot read silence as success. Note what
         # this still cannot tell you: a non-zero child does NOT prove the cache

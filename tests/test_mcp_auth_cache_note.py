@@ -32,7 +32,7 @@ from pathlib import Path
 
 import pytest
 
-LIB_COMMON = Path(__file__).resolve().parent.parent / "lib" / "lib-common.sh"
+LIB_COMMON = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts" / "lib-common.sh"
 
 # Copied byte-for-byte from a cache observed armed on a live host at
 # 2026-09-20T09:49:01-04:00, rather than invented: the parse is then exercised

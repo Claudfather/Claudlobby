@@ -16,6 +16,10 @@ import sqlite3
 from .ids import mint_uid
 
 
+class IdentityConflict(ValueError):
+    """An alias is already bound to another parent; never silently re-parent."""
+
+
 def resolve(
     conn: sqlite3.Connection,
     kind: str,
@@ -36,12 +40,21 @@ def resolve(
         " VALUES (?, ?, ?, ?, 1, ?, ?)",
         (candidate, kind, alias, parent_uid, now, now),
     )
-    uid = lookup(conn, kind, alias)
+    row = conn.execute(
+        "SELECT uid, parent_uid FROM identity_registry WHERE kind = ? AND alias = ?",
+        (kind, alias),
+    ).fetchone()
+    if (parent_uid is not None and row["parent_uid"] is not None
+            and row["parent_uid"] != parent_uid):
+        raise IdentityConflict(f"conflicting parent for {kind} identity {alias!r}")
+    # Earlier alias sightings may have minted this row without a parent.
+    # Attach an authoritative parent without changing an existing binding.
     conn.execute(
-        "UPDATE identity_registry SET last_seen = ? WHERE uid = ?",
-        (now, uid),
+        "UPDATE identity_registry SET last_seen = ?,"
+        " parent_uid = COALESCE(parent_uid, ?) WHERE uid = ?",
+        (now, parent_uid, row["uid"]),
     )
-    return uid
+    return row["uid"]
 
 
 def lookup(conn: sqlite3.Connection, kind: str, alias: str) -> str | None:
@@ -65,8 +78,10 @@ def aliases_of_kind(conn: sqlite3.Connection, kind: str) -> list[str]:
     ]
 
 
-def resolve_fleet(conn: sqlite3.Connection, fleet_alias: str, now: str) -> str:
-    return resolve(conn, "fleet", fleet_alias, now=now)
+def resolve_fleet(
+    conn: sqlite3.Connection, fleet_alias: str, now: str, host_uid: str,
+) -> str:
+    return resolve(conn, "fleet", fleet_alias, now=now, parent_uid=host_uid)
 
 
 def resolve_party(

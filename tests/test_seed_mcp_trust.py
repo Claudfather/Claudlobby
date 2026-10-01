@@ -29,7 +29,7 @@ from pathlib import Path
 
 import pytest
 
-LIB = Path(__file__).resolve().parent.parent / "lib" / "lib-common.sh"
+LIB = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts" / "lib-common.sh"
 
 # jq is the seeding helpers' only external dependency (settings.local.json merge).
 pytestmark = pytest.mark.skipif(
@@ -181,6 +181,23 @@ def test_seed_all_checkouts_noop_when_home_has_no_allowlist(tmp_path):
     r = _run_lib_fn("seed_all_checkouts", str(home))
     assert r.returncode == 0, r.stderr
     assert not (co / ".claude" / "settings.local.json").exists()  # nothing to trust
+
+
+def test_seed_all_checkouts_no_allowlist_is_silent_under_errtrace(tmp_path):
+    home = _write_home_settings(tmp_path / "bot", None)
+    (home / "projects").mkdir()
+    script = r'''
+. "$1"
+set -E
+trap 'printf "phantom script_error\n" >&2' ERR
+seed_all_checkouts "$2"
+'''
+    result = subprocess.run(
+        ["/bin/bash", "-c", script, "_", str(LIB), str(home)],
+        capture_output=True, text=True, timeout=15, env=dict(os.environ),
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
 
 
 # --- composer-sole-deriver: propagate, never re-derive ----------------------

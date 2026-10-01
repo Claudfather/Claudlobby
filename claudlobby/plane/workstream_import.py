@@ -11,7 +11,7 @@ clean epoch), so this is a repair tool, not archaeology.
 Two rules this module exists to honour, both from the naive-import failure
 mode #1635 names explicitly as the wrong turn:
 
-  * ORIGINAL INSTANTS. `lib/plane-readers.py::workstream_registry` RECOMPUTES
+  * ORIGINAL INSTANTS. `claudlobby/_runtime_scripts/plane-readers.py::workstream_registry` RECOMPUTES
     a never-renewed lease as opened + WORKSTREAM_LEASE_DAYS, and re-derives
     it on every `progressed` event from THAT event's own `occurred_at` — so
     a constructs-only import re-leases every stale row from the import
@@ -43,11 +43,11 @@ Two hazards the R1 gauntlet already found in the WRITE door
     exactly the writer's own carried-forward fix for this.
 
   * The registry must be materialized INSIDE the caller's lock, never
-    before it. Two concurrent writers (a live `workstream-update.sh open`
+    before it. Two concurrent writers (a canonical `workstream open`
     racing this import) must dedup against the plane as it is when their
     turn comes, not a snapshot taken before the wait. This module does not
     hold the lock itself — `import_workstreams` in `commands/plane.py` does,
-    mirroring `with_lock "$(_ws_lock)" _open_ws` — but `plan()` is written
+    sharing the canonical writer's registry lock — but `plan()` is written
     pure specifically so the caller can materialize-then-plan atomically
     under the lock without this module reaching for a connection itself.
 
@@ -95,41 +95,16 @@ LOCK_WAIT_S = 30.0
 
 @contextmanager
 def registry_lock(lock_path: Path, *, wait_s: float = LOCK_WAIT_S):
-    """Exclusive lock on the SAME name `lib/workstream-update.sh` locks
-    (`<fleet runtime>/workstreams.lock`, `_ws_lock`) — but WHICH mechanism
-    depends on the host, and it must match the shell's choice or the two
-    writers do not exclude each other at all (#1748 review).
+    """Exclusive lock on `<fleet runtime>/workstreams.lock` during import.
 
-    `with_lock` (`lib-common.sh`) resolves `flock` via `command -v flock`
-    and, when that is empty, falls back to an mkdir spinlock on a
-    DIFFERENT PATH (`<lockfile>.d`) — `_FLOCK_BIN`'s own comment: "resolved
-    path to flock (empty on stock macOS)". `fcntl.flock` on `lock_path`
-    only interoperates with the shell's FIRST branch: on a host taking the
-    fallback, a real `flock(2)` on a file nothing else opens excludes
-    nothing, silently, on exactly the platform the shell's own comment
-    names. So this resolves `flock` in Python the same way the shell
-    resolves it in bash, and takes whichever mechanism a shell writer on
-    THIS host would take — never both, never a guess.
-
-    One deliberate divergence, disclosed rather than silent: `with_lock`'s
-    own fallback gives up after its budget and runs UNLOCKED ("a waiter
-    that gives up runs unlocked" — measured by the R1 gauntlet as the
-    correct choice for a small jq+mv critical section). This is a one-shot
-    migration into an append-only ledger, where racing an unprotected
-    write is worse than asking the operator to retry, so this raises
-    TimeoutError instead of proceeding — a stricter EXIT, never a looser
-    EXCLUSION.
+    The old `workstream-update.sh` writer is retired; keep the shared lockfile
+    protocol for any shell holder of this path. Refuse after a bounded wait.
 
     The caller is expected to materialize the existing registry AND emit
     its plan's events while holding this — see the module docstring's
     second R1-gauntlet hazard (materialize-before-lock)."""
-    import shutil
-
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    if shutil.which("flock"):
-        yield from _flock_lock(lock_path, wait_s)
-    else:
-        yield from _mkdir_lock(lock_path, wait_s)
+    yield from _flock_lock(lock_path, wait_s)
 
 
 def _flock_lock(lock_path: Path, wait_s: float):
@@ -144,7 +119,7 @@ def _flock_lock(lock_path: Path, wait_s: float):
                 if time.monotonic() >= deadline:
                     raise TimeoutError(
                         f"could not acquire {lock_path} within {wait_s}s"
-                        " -- another workstream-update.sh call may be running"
+                        " -- another workstream operation may be running"
                     ) from None
                 time.sleep(0.1)
         yield
@@ -153,36 +128,6 @@ def _flock_lock(lock_path: Path, wait_s: float):
             fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
-
-
-def _mkdir_lock(lock_path: Path, wait_s: float):
-    """The SAME fallback `with_lock` takes when no `flock` binary is on
-    PATH: an atomic `mkdir` on `<lock_path>.d` (POSIX guarantees mkdir is
-    atomic on every filesystem the shell targets) -- same suffix, same
-    parent directory, so a shell writer's spinlock and this one contend
-    for the SAME directory rather than two unrelated ones."""
-    lockdir = Path(f"{lock_path}.d")
-    deadline = time.monotonic() + wait_s
-    while True:
-        try:
-            lockdir.mkdir()
-            break
-        except FileExistsError:
-            if time.monotonic() >= deadline:
-                raise TimeoutError(
-                    f"could not acquire {lockdir} within {wait_s}s"
-                    " -- another workstream-update.sh call may be running"
-                    " (this host has no flock binary, so both writers use"
-                    " the mkdir-spinlock fallback)"
-                ) from None
-            time.sleep(0.05)
-    try:
-        yield
-    finally:
-        try:
-            lockdir.rmdir()
-        except OSError:
-            pass
 
 
 #: The four statuses the writer's own vocabulary recognises
@@ -239,7 +184,7 @@ def _project_key(raw: Optional[str]) -> Optional[str]:
 
 
 def _plus_days_iso(ts: str, days: int) -> str:
-    """The SAME derivation `lib/plane-readers.py::_plus_days` uses on the
+    """The SAME derivation `claudlobby/_runtime_scripts/plane-readers.py::_plus_days` uses on the
     read side. Both `progress` and `renew` compute their lease target as
     call-time + WORKSTREAM_LEASE_DAYS (`_lease_expiry_iso` in the shell
     writer) — the two verbs share one formula — so a `renewals[]` entry's

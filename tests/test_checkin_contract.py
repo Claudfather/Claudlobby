@@ -1,20 +1,19 @@
 # tests/test_checkin_contract.py
-"""The schema-1 decision record (manager check-in spec §7): lib/checkin-contract.py
+"""The schema-1 decision record (manager check-in spec §7): checkin_contract.py
 (stdlib, the dispatch-overdue.py precedent) and the two severity registrations."""
 
 import importlib.util
-import json
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
+
+from tests.plane_setup import initialize_plane
 
 from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import emit_batch
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CONTRACT = REPO_ROOT / "lib" / "checkin-contract.py"
+CONTRACT = REPO_ROOT / "claudlobby" / "checkin_contract.py"
 CK = "ck_" + "a" * 32
 PREV = "ck_" + "b" * 32
 
@@ -114,7 +113,8 @@ def test_a_missing_list_key_is_a_defect_not_an_empty_list():
         with pytest.raises(cc.ContractError) as exc:
             cc.normalize(d, checkin_id=CK)
         assert any(f"inputs_seen.{key} required" in r for r in exc.value.reasons)
-    d = _decision(); d["inputs_seen"]["unavailable"] = []       # present and empty is fine
+    d = _decision()
+    d["inputs_seen"]["unavailable"] = []       # present and empty is fine
     assert cc.normalize(d, checkin_id=CK)["inputs_seen"]["unavailable"] == []
 
 
@@ -204,24 +204,9 @@ def test_every_defect_is_reported_not_just_the_first():
     assert len(exc.value.reasons) >= 2
 
 
-def test_the_cli_is_a_filter():
-    ok = subprocess.run([sys.executable, str(CONTRACT), "--checkin-id", CK],
-                        input=json.dumps(_decision()), capture_output=True, text=True)
-    assert ok.returncode == 0, ok.stderr
-    assert json.loads(ok.stdout)["checkin_id"] == CK
-    bad = subprocess.run([sys.executable, str(CONTRACT), "--checkin-id", CK], input="not json",
-                         capture_output=True, text=True)
-    assert bad.returncode == 2 and "not JSON" in bad.stderr
-    bad = subprocess.run([sys.executable, str(CONTRACT), "--checkin-id", CK],
-                         input=json.dumps(_decision(action="coffee")), capture_output=True, text=True)
-    assert bad.returncode == 2 and "checkin-contract: action must be one of" in bad.stderr and bad.stdout == ""
-    bad = subprocess.run([sys.executable, str(CONTRACT), "--checkin-id", "nope"],
-                         input=json.dumps(_decision()), capture_output=True, text=True)
-    assert bad.returncode == 2 and "checkin_id" in bad.stderr
-
-
 @pytest.mark.parametrize("kind", ["checkin_decision", "checkin_dispatch"])
 def test_the_two_kinds_carry_notice_severity(tmp_path, kind):
+    initialize_plane(tmp_path)
     emit_batch(tmp_path, [{
         "event_type": "system", "emitter": "t", "fleet": "f",
         "payload": {"event": kind, "subject_kind": "actor", "subject": "bot:f/mgr", "data": {"schema": 1}}}])

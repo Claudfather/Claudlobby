@@ -1,4 +1,4 @@
-"""Python-wrapped bash test for lib/briefing-trigger.sh (#627 P3).
+"""Python-wrapped bash test for claudlobby/_runtime_scripts/briefing-trigger.sh (#627 P3).
 
 The composed per-(bot,slot) briefing timer runs
 ``briefing-trigger.sh <fleet> <bot> <slot>``; it must deliver ``/briefing <slot>``
@@ -24,8 +24,8 @@ import pytest
 
 
 REPO = Path(__file__).resolve().parents[1]
-TRIGGER = REPO / "lib" / "briefing-trigger.sh"
-LIB_COMMON = REPO / "lib" / "lib-common.sh"
+TRIGGER = REPO / "claudlobby/_runtime_scripts" / "briefing-trigger.sh"
+LIB_COMMON = REPO / "claudlobby/_runtime_scripts" / "lib-common.sh"
 
 # Stub lib-common: every helper briefing-trigger.sh sources, reduced to a
 # controllable no-tmux shim. Return codes are driven by env so each test steers

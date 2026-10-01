@@ -18,7 +18,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-LIB_COMMON = Path(__file__).resolve().parent.parent / "lib" / "lib-common.sh"
+LIB_COMMON = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts" / "lib-common.sh"
 
 
 def _extract_strict(conf: Path, var: str) -> tuple[str, int]:

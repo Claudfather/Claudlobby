@@ -1,0 +1,1012 @@
+#!/usr/bin/env python3
+"""The #1168 Phase 3 naked-bot observation gate.
+
+Compose a fleet that declares NOTHING and record what a bot receives anyway —
+observed, never reasoned about. Phase 2 populates ``DEFAULT_*`` one entity type
+per PR; this is what those PRs diff against, so a default that lands is visible
+as a delta rather than argued about in a review thread.
+
+WHY A HARNESS AND NOT A ONE-OFF READING. A baseline captured by hand is a claim
+about a moment nobody can re-enter. Phase 2's whole gate is "any INSTRUCT-class
+addition must be present in this diff", which needs the *same* observation
+re-derivable on demand at a later commit. So the reading and the record are one
+mechanism.
+
+TWO SURFACES, DELIBERATELY NOT MERGED (the reason the gate exists at all). A
+skill symlink that exists but composes no instruction is a DIFFERENT OUTCOME
+from one that adds a section, and only reading the composed ``CLAUDE.md``
+distinguishes them. ``SURFACES`` below therefore records, per entity type, the
+file artifact AND the instruction section separately; a type that lands in one
+and not the other is the interesting case, not a rounding error.
+
+WHY ``claudlobby config validate --runtime`` IS NOT SUFFICIENT HERE, though the
+plan names its fresh-box audit as the primary instrument. Measured on the naked
+fleet: that audit passes while the bot carries a protocol it never declared.
+It audits GRANTS — ``settings.local.json``, ``.mcp.json``, ``bot.conf``,
+rendered ``tools/`` — and never opens ``CLAUDE.md`` (zero matches in
+``freshbox.py``). Composed prose is not a grant, so freshbox is blind to the
+INSTRUCT tier BY CONSTRUCTION — precisely the tier Phase 3 gates. Freshbox
+remains the right instrument for the WIRE/RESTRICT half and this harness runs
+it; it is a floor, not the gate.
+
+WHY THE TREE IS EXPORTED RATHER THAN COMPOSED IN PLACE. Two independent
+reasons, and each one alone would force it:
+
+  * A checkout under a bot's ``projects/`` dir sits inside ``…/runtime/bots/…``,
+    which ``path_audit._fleet_layout_needles`` matches as fleet-owned BY SHAPE.
+    ``CLAUDLOBBY_ROOT`` then reads as a cross-fleet leak and ``generate`` fails
+    on a bot that is perfectly well-formed. That is an artifact of where the
+    repo happens to live, and composing in place would report it as a defect of
+    the probe.
+  * The gate must observe a NAMED REF, not a working tree. ``git archive``
+    gives a history-free tree at an exact commit, so a baseline is attributable
+    to a SHA instead of to whatever was uncommitted that afternoon.
+
+THE ASSERTION THAT MAKES THE RESULT MEAN ANYTHING (``_assert_compositor``).
+Build the export into a wheel in a separate, history-free indexed copy, then
+install it into a private venv. Every arm invokes that venv's absolute CLI;
+package paths, artifact identity and selected CLI are checked before composing.
+The export itself keeps no Git index/history. Build tools and the candidate's
+dependency closure must already be installed in the invoking development
+environment: setup copies the required installed distributions and never fetches
+a new dependency graph. An ambient editable install supplies neither code nor
+resources. Defaults are read from the same installed candidate that generates.
+
+Standalone stdlib module (the ``dispatch-overdue.py`` / ``who-reviewed.py``
+precedent), so the parsing and diffing are unit-testable without composing
+anything. Wrapped by ``tests/test_naked_bot_observe.py``.
+"""
+
+from __future__ import annotations
+
+import argparse
+from email.parser import BytesParser
+from importlib import metadata as importlib_metadata
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import zipfile
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+
+#: Schema version of the emitted inventory. Bump when a consumer would have to
+#: change; a baseline recorded under an older version is not silently comparable.
+#: v2 added `composed_content` (the mcp/permissions blind spot). Adding a field
+#: WITHOUT bumping this let the version guard pass and `diff_reports` then
+#: KeyError'd on the older record — caught in development, and the reason the
+#: field access below is `.get` rather than `[]`.
+#: v3 added `Arm.teams` / `Arm.observed_bot` (PR4 chunk 4) — the `shape:
+#: leaf-manager` arm composes a SECOND bot, so a v2 record has no
+#: `observed_bot` to compare against and no arm to compare it with.
+SCHEMA = 3
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+# --------------------------------------------------------------------- surfaces
+
+
+@dataclass(frozen=True)
+class Surface:
+    """Where one entity type would become visible, if it defaulted to anything.
+
+    ``section`` is the ``## <label>`` heading the template renders for this type
+    (``templates/claude.md.j2``, ``render_section``). ``None`` means the type has
+    NO instruction surface at all — it cannot add prose to ``CLAUDE.md`` however
+    it is populated.
+
+    ``artifacts`` are bot-dir-relative globs the type writes to. ``None`` means
+    it writes no file of its own.
+
+    A type with a section and no artifact (``protocols``) can change behaviour
+    while leaving the directory byte-identical. A type with an artifact and no
+    section (``skills``, ``mcp``, ``tools``) can do the reverse. Recording one
+    number for both is how a gate misses half of what it was built to catch.
+
+    ``content_keys`` names a JSON file whose KEYS must be read, because the file
+    exists on a naked bot either way. ``skills`` and ``tools`` write one artifact
+    PER ENTRY, so a path inventory sees their defaults arrive; ``mcp`` and
+    ``permissions`` write into a single always-present file, so a path-only
+    inventory would report "no change" for a default that landed inside it —
+    silently blind for two of twelve, in exactly the direction that reads clean.
+    """
+
+    section: str | None
+    artifacts: tuple[str, ...] = ()
+    #: (path, json-pointer-ish accessor) — the keys to record from a file that
+    #: is present regardless of whether this type defaulted to anything.
+    content_keys: tuple[str, str] | None = None
+
+
+#: Derived by reading `templates/claude.md.j2` (the eight `render_section` calls)
+#: and the composer's per-type emitters. Pinned by
+#: `test_surface_sections_match_the_template`, so the template moving without
+#: this map moving is a test failure rather than a silently blind gate.
+SURFACES: dict[str, Surface] = {
+    # INSTRUCT — every one of these can add prose to a bot that did not ask.
+    "expertise": Surface(section=None),  # composes as the title + body, not a section
+    "skills": Surface(section=None, artifacts=(".claude/skills/*",)),
+    "protocols": Surface(section="Protocols"),
+    "principles": Surface(section="Principles"),
+    "post_actions": Surface(section="Post-actions"),
+    # RESTRICT
+    "guardrails": Surface(section="Guardrails"),
+    "permissions": Surface(
+        section="Permissions",
+        artifacts=(".claude/settings.local.json",),
+        content_keys=(".claude/settings.local.json", "permissions.allow"),
+    ),
+    # WIRE
+    "mcp": Surface(
+        section=None,
+        artifacts=(".mcp.json",),
+        content_keys=(".mcp.json", "mcpServers"),
+    ),
+    "tools": Surface(section=None, artifacts=("tools/*",)),
+    "integrations": Surface(section="Integrations"),
+    "resources": Surface(section="Resources"),
+    "lessons": Surface(section="Lessons"),
+}
+
+
+# ------------------------------------------------------------------ pure parsing
+
+
+def parse_sections(markdown: str) -> dict[str, list[str]]:
+    """Map each ``## H2`` in a composed CLAUDE.md to its ``### H3`` titles.
+
+    Fenced code blocks are skipped: composed library content routinely contains
+    ``#``-commented shell inside a fence, and counting those as headings would
+    invent sections that no entity type produced. Both fence markers are honoured
+    (``` and ~~~) because library authors use each.
+    """
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
+    fence: str | None = None
+    for raw in markdown.splitlines():
+        stripped = raw.strip()
+        if fence is not None:
+            if stripped.startswith(fence):
+                fence = None
+            continue
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            fence = stripped[:3]
+            continue
+        if raw.startswith("## ") and not raw.startswith("###"):
+            current = raw[3:].strip()
+            sections.setdefault(current, [])
+        elif raw.startswith("### ") and current is not None:
+            sections[current].append(raw[4:].strip())
+    return sections
+
+
+def inventory_dir(bot_dir: Path) -> list[str]:
+    """Bot-dir-relative paths of everything composed, sorted and stable.
+
+    Symlinks are recorded as ``path -> target`` because a skill arrives as a
+    symlink and "the link exists" is the fact worth diffing. Directories are
+    recorded with a trailing ``/`` so an EMPTY ``.claude/skills/`` (what a naked
+    bot gets) stays distinguishable from the directory being absent — those are
+    different states and Phase 2 moves between them.
+    """
+    out: list[str] = []
+    for p in sorted(bot_dir.rglob("*")):
+        rel = p.relative_to(bot_dir).as_posix()
+        if p.is_symlink():
+            out.append(f"{rel} -> {os.readlink(p)}")
+        elif p.is_dir():
+            out.append(f"{rel}/")
+        else:
+            out.append(rel)
+    return out
+
+
+def match_artifacts(entries: list[str], globs: tuple[str, ...]) -> list[str]:
+    """Entries from :func:`inventory_dir` matching any of *globs*.
+
+    Matching is on the path portion only, so a symlink's ``-> target`` suffix
+    never has to be encoded into a pattern.
+    """
+    import fnmatch
+
+    hits: list[str] = []
+    for e in entries:
+        path = e.split(" -> ", 1)[0].rstrip("/")
+        if any(fnmatch.fnmatch(path, g) for g in globs):
+            hits.append(e)
+    return hits
+
+
+@dataclass
+class TypeObservation:
+    """What one entity type actually produced on one arm."""
+
+    tier: str
+    #: Entries the registry resolves for this type — the DECLARED intent.
+    registry_entries: list[str]
+    #: `### ` titles under this type's `## ` section. `None` = type has no
+    #: instruction surface; `[]` = it has one and composed nothing into it.
+    composed_instructions: list[str] | None
+    #: Bot-dir entries this type produced.
+    composed_artifacts: list[str]
+    #: Keys read from an always-present file (see `Surface.content_keys`).
+    #: `None` = this type has no such file.
+    composed_content: list[str] | None = None
+
+    @property
+    def instructs(self) -> bool:
+        """True when this type put prose in front of the bot on this arm."""
+        return bool(self.composed_instructions)
+
+    @property
+    def inert(self) -> bool:
+        """The registry declares entries and NOTHING of this type composed.
+
+        This is the state that makes a Phase 2 PR look landed while changing no
+        bot: populating ``REGISTRY[<type>].entries`` moves the constant, but
+        ``config.py`` consumes only ``DEFAULT_GUARDRAILS`` — nothing feeds
+        ``resolve(<type>)`` into the merge for the other eleven. Measured: a
+        REAL skill (`doctor`) placed in the registry composed no symlink, while
+        the same skill DECLARED in fleet.yaml composed one. So the registry is
+        the source of the DECISION but not yet of the BEHAVIOUR, and a gate that
+        only diffed composed output would report that PR as a clean no-op
+        instead of as an unwired default.
+        """
+        return bool(self.registry_entries) and not (
+            self.composed_instructions or self.composed_artifacts
+        )
+
+
+@dataclass
+class Arm:
+    """One composed observation: a fleet variant and everything it produced."""
+
+    label: str
+    #: The `system_defaults:` block under test, verbatim, or None for baseline.
+    system_defaults: str | None
+    #: Entity types this arm DECLARED (to test that declaring is not opting out).
+    declared: dict[str, list[str]] = field(default_factory=dict)
+    #: Wire the probe bot to a Claudron vault. A FLEET-SHAPE axis, not a
+    #: `system_defaults` one: some defaults are conditional on how the fleet is
+    #: wired rather than on what it switched off, and an inventory that only
+    #: varies opt-outs cannot see them (#1172).
+    vault_wired: bool = False
+    #: A THIRD fleet-shape axis, after `declared` and `vault_wired`: a `teams:`
+    #: block naming a two-bot fleet (a manager and one in-fleet report that is
+    #: not itself a manager) instead of the one-bot fleet every other arm
+    #: composes. `teams:`/multi-bot fleets were named as open generalisation
+    #: the day `shape:vault-wired` landed ("What the gate does NOT cover") —
+    #: this is that generalisation, scoped to the one shape a role overlay
+    #: needs to become visible at all. `False` for every arm that predates it,
+    #: so their composed fleet stays byte-identical to what it composed before
+    #: this field existed.
+    teams: bool = False
+    #: Which bot's directory this arm observes. Every arm before this one only
+    #: ever composed `nakedbot`, so `observe_arm` could hardcode the literal; a
+    #: `teams` arm composes a SECOND bot (the manager), and the manager — not
+    #: the worker — is the one whose role overlay is under test.
+    observed_bot: str = "nakedbot"
+    generate_rc: int = -1
+    generate_stderr_tail: str = ""
+    sections: dict[str, list[str]] = field(default_factory=dict)
+    dir_entries: list[str] = field(default_factory=list)
+    types: dict[str, TypeObservation] = field(default_factory=dict)
+
+    def instructing_types(self) -> list[str]:
+        return sorted(t for t, o in self.types.items() if o.instructs)
+
+
+# ------------------------------------------------------------------ composition
+
+
+def export_tree(ref: str, dest: Path, repo: Path = REPO_ROOT) -> str:
+    """History-free export of *ref* into *dest*. Returns the resolved SHA.
+
+    ``git archive``, not ``clone`` — the same mechanism ``coldstart-harness.sh
+    prepare`` uses and what the cold-start gate in ``CLAUDE.md`` prescribes. The
+    absence of ``.git`` is asserted rather than trusted: an export that quietly
+    carried history would let a later step read the very commits describing the
+    defects being measured.
+    """
+    dest.mkdir(parents=True, exist_ok=True)
+    sha = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", ref],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    archive = subprocess.run(
+        ["git", "-C", str(repo), "archive", sha],
+        capture_output=True,
+        check=True,
+    ).stdout
+    subprocess.run(["tar", "-x", "-C", str(dest)], input=archive, check=True)
+    if (dest / ".git").exists():
+        raise RuntimeError(f"export at {dest} carries .git — not history-free")
+    return sha
+
+
+#: The probe's expertise. `expertise` is a REQUIRED field, so a fleet declaring
+#: literally nothing does not validate — the naked bot is "one bot, one
+#: expertise, nothing else", and that requirement is itself part of the baseline.
+#: Content is a single sentinel line so that ANY other prose in the composed
+#: CLAUDE.md is attributable to a default or the template, never to the role we
+#: happened to pick.
+PROBE_EXPERTISE = """---
+title: probe-minimal
+description: Minimal expertise for the #1168 Phase 3 naked-bot observation gate.
+---
+
+# probe-minimal
+
+PROBE_EXPERTISE_SENTINEL — the only content this fleet declares.
+"""
+
+FLEET_TEMPLATE = """# NAKED PROBE — generated by harness/naked-bot-observe.py (#1168 Phase 3).
+fleet:
+  name: naked-probe
+  manager: {manager}
+  service_prefix: com.example.nakedprobe
+  telegram_group_chat_id: "-1001234567890"
+{system_defaults}
+  accounts:
+    default: ~/.claude
+
+  bots:
+    nakedbot:
+      name: nakedbot
+      expertise: [probe-minimal]
+{declared}{teams}"""
+
+
+def write_probe(root: Path, arm: Arm) -> None:
+    """Write the probe fleet for *arm* into the exported tree at *root*."""
+    overlay = root / "local" / "naked-probe"
+    (overlay / "library" / "expertise").mkdir(parents=True, exist_ok=True)
+    (overlay / "library" / "expertise" / "probe-minimal.md").write_text(PROBE_EXPERTISE)
+    sd = ""
+    if arm.system_defaults is not None:
+        sd = "\n  system_defaults:\n" + "".join(
+            f"    {line}\n" for line in arm.system_defaults.splitlines()
+        )
+    declared = ""
+    for etype, names in sorted(arm.declared.items()):
+        declared += f"      {etype}: [{', '.join(names)}]\n"
+    if arm.vault_wired:
+        # A path, not a real vault. The composer branches on the field being
+        # SET; nothing here reads the tree, and pointing at a real vault would
+        # make the observation depend on the host's knowledge corpus.
+        declared += f"      claudron_vault_path: {root / 'state' / 'probe-vault'}\n"
+    teams = ""
+    if arm.teams:
+        # A SECOND bot, sibling to `nakedbot` under `bots:` (same 4-space
+        # indent), plus a top-level `teams:` block naming it manager of the
+        # first. Empty string for every arm that does not opt in, so the
+        # `{teams}` slot is inert and every pre-existing arm's fleet.yaml
+        # stays byte-identical (controller ruling).
+        teams = (
+            "    nakedmgr:\n"
+            "      name: nakedmgr\n"
+            "      expertise: [probe-minimal]\n"
+            "\n"
+            "  teams:\n"
+            "    core:\n"
+            "      manager: nakedmgr\n"
+            "      workers: [nakedbot]\n"
+        )
+    (overlay / "fleet.yaml").write_text(
+        FLEET_TEMPLATE.format(system_defaults=sd, declared=declared, teams=teams,
+                              manager="nakedmgr" if arm.teams else "nakedbot")
+    )
+
+
+@dataclass(frozen=True)
+class Candidate:
+    """One installed probe artifact, independent of the invoking interpreter."""
+
+    cli: Path
+    package: Path
+    artifact_id: str
+    registry: dict[str, dict]
+
+
+def _probe_env(root: Path) -> dict[str, str]:
+    """Only owned state enters build, provenance and composition processes."""
+    env = {"PATH": os.defpath, "LANG": "C.UTF-8", "PLANE_EMIT_DISABLED": "1",
+           "PYTHONNOUSERSITE": "1", "PIP_CONFIG_FILE": os.devnull,
+           "PIP_DISABLE_PIP_VERSION_CHECK": "1", "CLAUDLOBBY_ROOT": str(root)}
+    for key, name in (("HOME", "home"), ("TMPDIR", "tmp"),
+                      ("XDG_CONFIG_HOME", "config"), ("XDG_CACHE_HOME", "cache"),
+                      ("XDG_DATA_HOME", "data"), ("XDG_STATE_HOME", "state")):
+        directory = root / ".probe-env" / name
+        directory.mkdir(parents=True, exist_ok=True)
+        env[key] = str(directory)
+    env["CLAUDLOBBY_HOST_SYSTEM_YAML"] = str(root / ".probe-env" / "no-host-override.yaml")
+    return env
+
+
+def _checked(args, root: Path) -> str:
+    result = subprocess.run([str(arg) for arg in args], cwd=root,
+                            env=_probe_env(root), capture_output=True,
+                            text=True, timeout=180)
+    if result.returncode:
+        raise RuntimeError(f"Probe setup failed: {args!r}\n{result.stdout}{result.stderr}")
+    return result.stdout.strip()
+
+
+def _copy_dependencies(wheel: Path, installed: Path) -> None:
+    """Copy only the wheel's installed core dependency closure, offline.
+
+    A nested system-site-packages venv cannot see its parent's venv packages.
+    Follow distribution RECORDs instead; never add ambient sys.path entries or
+    copy the invoking checkout. This is the installed-artifact test's pattern.
+    """
+    from packaging.requirements import Requirement
+    from packaging.utils import canonicalize_name
+
+    with zipfile.ZipFile(wheel) as archive:
+        metadata_file, = [name for name in archive.namelist()
+                          if name.endswith(".dist-info/METADATA")]
+        metadata = BytesParser().parsebytes(archive.read(metadata_file))
+    pending = [Requirement(value) for value in metadata.get_all("Requires-Dist", [])
+               if Requirement(value).marker is None
+               or Requirement(value).marker.evaluate({"extra": ""})]
+    copied, expanded = set(), set()
+    while pending:
+        requirement = pending.pop()
+        name = canonicalize_name(requirement.name)
+        if name == "claudlobby":
+            raise RuntimeError("Dependency closure must not copy ambient Claudlobby")
+        distribution = importlib_metadata.distribution(requirement.name)
+        if not requirement.specifier.contains(distribution.version, prereleases=True):
+            raise RuntimeError(f"Installed {name}=={distribution.version} does not satisfy {requirement}")
+        if name not in copied:
+            source_root = Path(distribution.locate_file("")).resolve()
+            files = distribution.files
+            if files is None or not any(str(p).endswith(".dist-info/WHEEL") for p in files):
+                raise RuntimeError(f"{name} must have an installed wheel file inventory")
+            for entry in files:
+                relative = Path(entry)
+                if (relative.is_absolute() or ".." in relative.parts
+                        or "__pycache__" in relative.parts or relative.suffix in {".pyc", ".pyo"}):
+                    continue
+                source = Path(distribution.locate_file(entry)).resolve()
+                destination = installed / relative
+                if not source.is_relative_to(source_root) or not source.is_file():
+                    raise RuntimeError(f"Invalid installed dependency file: {name}/{entry}")
+                if not destination.resolve().is_relative_to(installed.resolve()):
+                    raise RuntimeError(f"Dependency destination escapes installation: {entry}")
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if destination.exists():
+                    if destination.read_bytes() != source.read_bytes():
+                        raise RuntimeError(f"Dependency files conflict at {entry}")
+                else:
+                    shutil.copy2(source, destination)
+            copied.add(name)
+        for extra in {"", *requirement.extras}:
+            if (name, extra) in expanded:
+                continue
+            expanded.add((name, extra))
+            for value in distribution.requires or []:
+                dependency = Requirement(value)
+                if dependency.marker is None or dependency.marker.evaluate({"extra": extra}):
+                    pending.append(dependency)
+
+
+def prepare_candidate(root: Path) -> Candidate:
+    """Install this history-free export once; leave source and live state alone."""
+    root = root.resolve()
+    if (root / ".git").exists() or (root / ".probe-release").exists():
+        raise RuntimeError("Probe candidate needs a fresh history-free export")
+    (root / ".claudlobby-harness-root").write_text(str(root) + "\n")
+    release = root / ".probe-release"
+    with tempfile.TemporaryDirectory(prefix="naked-bot-build-", dir=root.parent) as tmp:
+        source = Path(tmp) / "source"
+        shutil.copytree(root, source, symlinks=True)
+        # The index is build inventory only, in a separate disposable copy.
+        # No commit, remote, operator source or history reaches the probe.
+        _checked(["git", "init", "--quiet", source], root)
+        _checked(["git", "-C", source, "add", "--force", "--all"], root)
+        dist = Path(tmp) / "dist"
+        _checked([sys.executable, "-m", "build", "--no-isolation", "--wheel",
+                  "--outdir", dist, source], root)
+        wheel, = dist.glob("*.whl")
+        with zipfile.ZipFile(wheel) as archive:
+            artifact_id = json.loads(archive.read("claudlobby/_artifact.json"))["artifact_id"]
+        _checked([sys.executable, "-m", "venv", release], root)
+        python = release / "bin" / "python"
+        _checked([python, "-m", "pip", "install", "--no-index", "--no-deps",
+                  "--no-compile", wheel], root)
+        installed = Path(_checked([python, "-I", "-c",
+                                   "import sysconfig; print(sysconfig.get_path('purelib'))"], root))
+        _copy_dependencies(wheel, installed)
+    cli = release / "bin" / "claudlobby"
+    package = installed / "claudlobby"
+    registry = _assert_compositor(root, python, cli, package, artifact_id)
+    if (root / ".git").exists():
+        raise RuntimeError("Probe export acquired a Git index during setup")
+    return Candidate(cli, package, artifact_id, registry)
+
+
+def _assert_compositor(root: Path, python: Path, cli: Path, package: Path,
+                       artifact_id: str) -> dict[str, dict]:
+    """Measure code, assets, CLI and defaults in the same isolated candidate."""
+    script = """import json
+import claudlobby
+from claudlobby import defaults
+from claudlobby.resources import get_resources, selected_cli
+r = get_resources()
+print(json.dumps({'module': claudlobby.__file__, 'cli': str(selected_cli()),
+    'artifact_id': r.artifact_id,
+    'assets': [str(p) for p in (r.library, r.voices, r.templates, r.seeds, r.native, r.system_yaml)],
+    'registry': {name: {'tier': d.tier.value, 'entries': list(defaults.resolve(name))}
+                 for name, d in defaults.REGISTRY.items()}}))
+"""
+    got = json.loads(_checked([python, "-I", "-c", script], root))
+    if (Path(got["module"]).resolve() != (package / "__init__.py").resolve()
+            or Path(got["cli"]).absolute() != cli.absolute()
+            or got["artifact_id"] != artifact_id
+            or any(not Path(path).resolve().is_relative_to(package.resolve())
+                   for path in got["assets"])):
+        raise RuntimeError("REFUSING TO OBSERVE: package, assets or CLI do not match the installed candidate")
+    return got["registry"]
+
+
+def scrub(text: str, root: Path, package: Path | None = None) -> str:
+    """Replace the run's temp export path with a stable token.
+
+    The recorded inventory is COMMITTED and diffed by hand as well as by
+    :func:`diff_reports`. A per-run ``mktemp`` path (and the log timestamps
+    beside it) makes two observations of the SAME commit differ, which trains a
+    reader to skim past drift in the one artifact whose entire job is to make
+    drift visible.
+
+    Replaces BOTH the literal form of *root* and its RESOLVED form
+    (``root.resolve()``), longest candidate first — never just the literal
+    one. A symlink'd tempdir is not a corner case: on macOS ``$TMPDIR`` lives
+    under ``/var``, itself a symlink to ``/private/var``, and
+    ``composer.py``'s ``src.resolve()`` writes every skill symlink's target
+    fully resolved. Where the resolved form CONTAINS the literal one as a
+    substring (exactly the ``/private`` + literal shape above), replacing the
+    literal one first still finds and replaces that embedded substring —
+    ``str.replace`` does not care that the match sits inside a longer one —
+    which strands the extra prefix (``/private$EXPORT/...``) instead of
+    consuming the whole path. Longest-first consumes the longer form in one
+    pass, so nothing survives to be found (or half-found) afterward. Fixed
+    only after a baseline recorded on macOS reported spurious drift when
+    self-checked, since the same commit observed on a host whose tempdir does
+    not resolve through ``/private`` would have recorded the clean form —
+    two observations of the SAME commit must be byte-identical regardless of
+    which host recorded them, not only within one.
+    """
+    candidates = {str(root): "$EXPORT", str(root.resolve()): "$EXPORT"}
+    if package is not None:
+        candidates.update({str(package): "$PACKAGE", str(package.resolve()): "$PACKAGE"})
+    for candidate in sorted(candidates, key=len, reverse=True):
+        text = text.replace(candidate, candidates[candidate])
+    return text
+
+
+def scrub_record(obj, root: Path, package: Path | None = None):
+    """Recursively scrub every string in a dict/list tree against *root*.
+
+    The generic backstop behind the hand-applied `scrub()` call sites above
+    (`run_generate`'s stderr tail, `run_freshbox`'s output, `observe_arm`'s
+    `dir_entries`): each of those exists because ONE specific field was
+    found, once, to carry this run's export path into a committed record —
+    and this file was bitten TWICE in one cycle that way. `arm.sections`
+    (and, through it, `composed_instructions`) was never run through `scrub`
+    at all; it happened to carry no root-shaped path in practice, which is
+    exactly what let the gap stand unnoticed. Rather than keep auditing
+    fields one at a time as new ones are added, `build_report` walks the
+    WHOLE assembled tree once here, so a string the export path can reach
+    through is scrubbed regardless of which field carries it. The per-field
+    calls stay — existing tests observe `Arm` objects directly, before this
+    function ever runs — and this is the net underneath them, applied once
+    at the point the report is assembled.
+    """
+    if isinstance(obj, str):
+        return scrub(obj, root, package)
+    if isinstance(obj, dict):
+        return {k: scrub_record(v, root, package) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [scrub_record(v, root, package) for v in obj]
+    return obj
+
+
+def find_unscrubbed_path(obj, root: Path, path: str = "report") -> str | None:
+    """The dotted/bracketed field path of the first string in *obj* that
+    still contains the literal or resolved form of *root*, or ``None`` when
+    the whole tree is clean.
+
+    The record-wide assertion behind :func:`scrub_record`: a scrub that
+    silently missed something (a future field, a third path form, an
+    encoding surprise) must refuse the record rather than let a run-specific
+    path reach a committed baseline unnoticed. Names WHERE, not just THAT —
+    the whole point of asserting record-wide is to say what to go fix.
+    """
+    candidates = (str(root), str(root.resolve()))
+    if isinstance(obj, str):
+        return path if any(c in obj for c in candidates) else None
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            hit = find_unscrubbed_path(v, root, f"{path}.{k}")
+            if hit:
+                return hit
+        return None
+    if isinstance(obj, list):
+        for i, v in enumerate(obj):
+            hit = find_unscrubbed_path(v, root, f"{path}[{i}]")
+            if hit:
+                return hit
+        return None
+    return None
+
+
+def run_generate(root: Path, candidate: Candidate) -> tuple[int, str]:
+    """``claudlobby --fleet naked-probe generate`` inside the exported tree.
+
+    The output tail is kept ONLY on failure. On success it is a timestamped
+    progress log that says nothing the per-type observation does not, and
+    committing it would put unstable noise in a baseline.
+    """
+    env = _probe_env(root)
+    env["CLAUDLOBBY_CLI"] = str(candidate.cli)
+    proc = subprocess.run(
+        [str(candidate.cli.parent / "python"), str(root / "harness" / "compose.py"),
+         "--root", str(root), "--fleet", "naked-probe", "--installed"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True, timeout=180,
+    )
+    if proc.returncode == 0:
+        return 0, ""
+    tail = "\n".join((proc.stderr or proc.stdout).strip().splitlines()[-6:])
+    return proc.returncode, scrub(tail, root, candidate.package)
+
+
+def run_freshbox(root: Path, candidate: Candidate) -> tuple[int, str]:
+    """``claudlobby config validate --runtime --strict`` on the composed probe.
+
+    Recorded as evidence for the WIRE/RESTRICT half AND as the standing
+    demonstration of its bound: it passes while an undeclared protocol composes.
+    """
+    env = _probe_env(root)
+    env["CLAUDLOBBY_CLI"] = str(candidate.cli)
+    proc = subprocess.run(
+        [str(candidate.cli), "--root", str(root), "--fleet", "naked-probe",
+         "config", "validate", "--runtime", "--strict"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True, timeout=180,
+    )
+    return proc.returncode, scrub((proc.stdout or proc.stderr).strip(), root, candidate.package)
+
+
+def read_content_keys(bot_dir: Path, probe: tuple[str, str] | None) -> list[str] | None:
+    """Keys at a dotted path inside a composed JSON file, sorted.
+
+    Unreadable or missing is recorded as a sentinel rather than as ``[]``: an
+    empty list means "the file said nothing was configured", which is a real
+    observation, and a parse failure must never be able to impersonate it.
+    """
+    if probe is None:
+        return None
+    rel, dotted = probe
+    path = bot_dir / rel
+    if not path.is_file():
+        return ["<ABSENT>"]
+    try:
+        node = json.loads(path.read_text())
+        for part in dotted.split("."):
+            node = node[part]
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        return [f"<UNREADABLE: {type(exc).__name__}>"]
+    if isinstance(node, dict):
+        return sorted(node)
+    if isinstance(node, list):
+        return sorted(str(x) for x in node)
+    return [str(node)]
+
+
+def observe_arm(root: Path, candidate: Candidate, arm: Arm) -> Arm:
+    """Compose one arm and fill in everything it produced."""
+    write_probe(root, arm)
+    arm.generate_rc, arm.generate_stderr_tail = run_generate(root, candidate)
+    bot_dir = root / "local" / "naked-probe" / "runtime" / "bots" / arm.observed_bot
+    if arm.generate_rc != 0 or not bot_dir.is_dir():
+        return arm  # a failed arm records its rc and stays empty, never green
+
+    # `scrub`, not raw `inventory_dir`: a skill symlink's target is an ABSOLUTE
+    # path (`composer.py`'s `src.resolve()`), and until the `shape:
+    # leaf-manager` arm no arm ever composed one — `skills` has no registry
+    # default and no prior arm declares a skill directly, so this call site
+    # never needed it before. Without this, two observations of the SAME
+    # commit differ on every run (a fresh `mktemp` export path baked into the
+    # target), which is exactly what `scrub` exists to prevent everywhere else
+    # it is already applied (`run_generate`, `run_freshbox`). Measured via the
+    # self-check this arm's own baseline recording is required to pass clean.
+    arm.dir_entries = [scrub(e, root, candidate.package) for e in inventory_dir(bot_dir)]
+    arm.sections = scrub_record(parse_sections((bot_dir / "CLAUDE.md").read_text()),
+                                root, candidate.package)
+
+    for etype, surface in sorted(SURFACES.items()):
+        disp = candidate.registry.get(etype)
+        arm.types[etype] = TypeObservation(
+            tier=disp["tier"] if disp else "UNREGISTERED",
+            registry_entries=disp["entries"] if disp else [],
+            composed_instructions=(
+                arm.sections.get(surface.section, [])
+                if surface.section is not None
+                else None
+            ),
+            composed_artifacts=match_artifacts(arm.dir_entries, surface.artifacts),
+            composed_content=scrub_record(read_content_keys(bot_dir, surface.content_keys),
+                                          root, candidate.package),
+        )
+    return arm
+
+
+def build_arms(types: list[str]) -> list[Arm]:
+    """Baseline, one opt-out arm per entity type, plus the two control arms.
+
+    The two controls are not decoration. ``guardrails`` is the ONLY type with a
+    populated default today, so it is the only arm that can demonstrate the
+    probe detects a working opt-out at all — without it, twelve no-ops read as
+    twelve findings instead of one finding plus a broken instrument. The bogus
+    key separates "this opt-out is unimplemented" from "unknown keys are
+    rejected", which have opposite remedies.
+    """
+    arms = [Arm(label="baseline", system_defaults=None)]
+    for t in types:
+        arms.append(Arm(label=f"optout:{t}", system_defaults=f"{t}: false"))
+    arms.append(Arm(label="control:kill-switch", system_defaults="enabled: false"))
+    arms.append(Arm(label="control:unknown-key", system_defaults="not_a_type: false"))
+    # Declaring a list must NOT suppress the default. Only a type with a
+    # non-empty default can show this at compose time; the property is pinned
+    # for all twelve at the merge layer in tests/test_naked_bot_observe.py.
+    arms.append(
+        Arm(
+            label="declared:guardrails",
+            system_defaults=None,
+            declared={"guardrails": ["no-push-main"]},
+        )
+    )
+    # A SECOND FLEET SHAPE, not a second opt-out. Every arm above varies what the
+    # fleet switched OFF; this one varies how it is WIRED, which is a different
+    # axis and the one the inventory was blind to. #1172 lived exactly there: a
+    # vault-wired bot composed the template's "never open the tree by hand"
+    # section beside a protocol telling it to hand-scan that tree, and no arm
+    # could see it because all 16 were vault-less. The two `shared-documentation`
+    # forms are mutually exclusive, so this arm is also what would catch a gate
+    # regression that composed both or neither.
+    arms.append(Arm(label="shape:vault-wired", system_defaults=None, vault_wired=True))
+    # A THIRD fleet shape: `teams:` naming a manager (`nakedmgr`) over one
+    # in-fleet report (`nakedbot`) that is not itself a manager — a leaf
+    # manager (`FleetConfig.leaf_manager_bots()`). Exists because a role
+    # overlay (`Disposition.roles`) is the one thing no arm above can see: all
+    # seventeen compose a single non-manager bot, so `REGISTRY["protocols"]
+    # .roles = {"leaf-manager": ("checkin",)}` (Task 3) would certify a fleet
+    # nobody runs until this arm existed. Observes the MANAGER, not the
+    # worker, since the manager is the bot the role overlay actually reaches.
+    arms.append(
+        Arm(
+            label="shape:leaf-manager",
+            system_defaults=None,
+            teams=True,
+            observed_bot="nakedmgr",
+        )
+    )
+    return arms
+
+
+# ---------------------------------------------------------------------- reporting
+
+
+def build_report(sha: str, arms: list[Arm], freshbox: tuple[int, str], root: Path) -> dict:
+    baseline = next(a for a in arms if a.label == "baseline")
+    report = {
+        "schema": SCHEMA,
+        "ref": sha,
+        "freshbox": {"rc": freshbox[0], "output": freshbox[1]},
+        "baseline_instructing_types": baseline.instructing_types(),
+        # Types whose registry entry composed NOTHING — an unwired default. A
+        # non-empty list here means a Phase 2 PR moved a constant and changed no
+        # bot; see `TypeObservation.inert`.
+        "baseline_inert_defaults": sorted(
+            t for t, o in baseline.types.items() if o.inert
+        ),
+        "arms": [asdict(a) for a in arms],
+    }
+    # The one place the report is assembled — scrub the WHOLE tree once,
+    # generically, rather than trusting that every field which might carry
+    # this run's export path was hand-scrubbed at its own call site.
+    report = scrub_record(report, root)
+    remnant = find_unscrubbed_path(report, root)
+    if remnant:
+        raise RuntimeError(
+            f"REFUSING TO EMIT: the export path survived scrubbing at "
+            f"{remnant} — a remnant would leak this run's local filesystem "
+            "layout into a committed record."
+        )
+    return report
+
+
+def diff_reports(old: dict, new: dict) -> list[str]:
+    """Human-readable drift between two inventories, or [] when identical.
+
+    Compares the ARMS, not the ref: the point is that composing the same naked
+    fleet at a later commit yields the same thing, and the SHA is expected to
+    move. Reported per (arm, entity type) so a Phase 2 PR sees exactly which
+    type it changed.
+    """
+    if old.get("schema") != new.get("schema"):
+        return [
+            f"schema changed {old.get('schema')} -> {new.get('schema')}; "
+            "baselines across schema versions are not comparable"
+        ]
+    out: list[str] = []
+    old_arms = {a["label"]: a for a in old.get("arms", [])}
+    new_arms = {a["label"]: a for a in new.get("arms", [])}
+    for label in sorted(set(old_arms) | set(new_arms)):
+        if label not in old_arms:
+            out.append(f"[{label}] NEW ARM")
+            continue
+        if label not in new_arms:
+            out.append(f"[{label}] ARM REMOVED")
+            continue
+        o, n = old_arms[label], new_arms[label]
+        if o["generate_rc"] != n["generate_rc"]:
+            out.append(
+                f"[{label}] generate rc {o['generate_rc']} -> {n['generate_rc']}"
+            )
+        for etype in sorted(set(o["types"]) | set(n["types"])):
+            ot, nt = o["types"].get(etype), n["types"].get(etype)
+            if ot is None or nt is None:
+                out.append(f"[{label}] {etype}: type appeared/disappeared")
+                continue
+            for fld in (
+                "registry_entries",
+                "composed_instructions",
+                "composed_artifacts",
+                "composed_content",
+            ):
+                # `.get`, never `[]`: a record written before a field existed
+                # must degrade to a reported difference, not a traceback. The
+                # schema guard above is the first line of defence; this is the
+                # second, because forgetting to bump it is the likely slip — and
+                # it is exactly the slip that happened while building this.
+                if ot.get(fld) != nt.get(fld):
+                    out.append(
+                        f"[{label}] {etype}.{fld}: {ot.get(fld)!r} -> {nt.get(fld)!r}"
+                    )
+    return out
+
+
+def render_text(report: dict) -> str:
+    lines = [
+        f"Naked-bot observation gate (#1168 Phase 3) — ref {report['ref'][:12]}",
+        "",
+        "A fleet declaring one bot, one expertise, and NOTHING else.",
+        "",
+    ]
+    baseline = next(a for a in report["arms"] if a["label"] == "baseline")
+
+    def cell(text: str, width: int) -> str:
+        """Pad to *width*, or truncate with an ellipsis that SAYS it truncated.
+
+        A silently clipped cell reads as the whole value, which is the coverage
+        dishonesty this repo's guardrail names outright. The untruncated value
+        is always in `--json`.
+        """
+        return text.ljust(width) if len(text) <= width else text[: width - 2] + "… "
+
+    lines.append("BASELINE — what a naked bot receives")
+    lines.append(
+        f"  {'type':<14}{'tier':<10}{'registry':<30}{'instructions':<46}artifacts"
+    )
+    for etype, o in sorted(baseline["types"].items()):
+        instr = o["composed_instructions"]
+        shown = (
+            "(no instruction surface)"
+            if instr is None
+            else (", ".join(instr) if instr else "-")
+        )
+        lines.append(
+            f"  {cell(etype, 14)}{cell(o['tier'], 10)}"
+            f"{cell(', '.join(o['registry_entries']) or '-', 30)}"
+            f"{cell(shown, 46)}{', '.join(o['composed_artifacts']) or '-'}"
+        )
+    lines += ["", "OPT-OUT ARMS — does system_defaults.<type>: false remove it?"]
+    for a in report["arms"]:
+        if not a["label"].startswith(("optout:", "control:", "declared:")):
+            continue
+        instructing = (
+            ",".join(
+                sorted(t for t, o in a["types"].items() if o["composed_instructions"])
+            )
+            or "-"
+        )
+        lines.append(
+            f"  {a['label']:<26} rc={a['generate_rc']}  instructing={instructing}"
+        )
+    inert = report.get("baseline_inert_defaults") or []
+    lines += [
+        "",
+        f"config validate --runtime --strict: rc={report['freshbox']['rc']} — "
+        f"{report['freshbox']['output'].splitlines()[-1].strip() if report['freshbox']['output'] else ''}",
+        "  NOTE: freshbox audits GRANTS and never opens CLAUDE.md, so it cannot",
+        "  see the INSTRUCT tier. A green line above is not a clean gate.",
+        "",
+        "UNWIRED DEFAULTS — registry declares entries, nothing composed: "
+        + (", ".join(inert) if inert else "none"),
+    ]
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--ref", default="HEAD", help="commit to export and observe")
+    ap.add_argument("--json", action="store_true", help="emit the inventory as JSON")
+    ap.add_argument(
+        "--baseline",
+        type=Path,
+        help="compare against a recorded inventory; exit 1 on drift",
+    )
+    ap.add_argument("--keep", action="store_true", help="keep the exported tree")
+    args = ap.parse_args(argv)
+
+    workdir = Path(tempfile.mkdtemp(prefix="naked-bot-observe-"))
+    # An export path that itself traverses `/runtime/bots/` would trip the very
+    # L2 shape guard this harness exports to avoid, so refuse rather than
+    # produce a run that fails for a reason unrelated to what it measures.
+    if "/runtime/bots/" in f"{workdir}/":
+        shutil.rmtree(workdir, ignore_errors=True)
+        print(
+            f"REFUSING: temp dir {workdir} sits inside a bot runtime tree; "
+            "set TMPDIR elsewhere.",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        root = workdir / "export"
+        sha = export_tree(args.ref, root)
+        candidate = prepare_candidate(root)
+
+        arms = [
+            observe_arm(root, candidate, arm)
+            for arm in build_arms(sorted(SURFACES))
+        ]
+        # Freshbox is run on the baseline arm, so recompose it before asking.
+        observe_arm(
+            root, candidate, Arm(label="baseline", system_defaults=None)
+        )
+        report = build_report(sha, arms, run_freshbox(root, candidate), root)
+    finally:
+        if not args.keep:
+            shutil.rmtree(workdir, ignore_errors=True)
+        else:
+            print(f"kept: {workdir}", file=sys.stderr)
+
+    if args.baseline:
+        recorded = json.loads(args.baseline.read_text())
+        drift = diff_reports(recorded, report)
+        if drift:
+            print(f"DRIFT vs {args.baseline} ({len(drift)} difference(s)):")
+            for d in drift:
+                print(f"  {d}")
+            return 1
+        print(f"No drift vs {args.baseline}.")
+        return 0
+
+    print(json.dumps(report, indent=2) if args.json else render_text(report))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

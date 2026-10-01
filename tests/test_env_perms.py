@@ -14,11 +14,12 @@ from textwrap import dedent
 
 from claudlobby.config import FleetConfig, BotConfig, TelegramConfig, load_fleet
 from claudlobby.composer import scaffold_env_files
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 
 def _make_paths(root: Path) -> Paths:
-    return Paths(root=root, fleet_dir=root)
+    return Paths(root=root, fleet_dir=root, package=source_package())
 
 
 class TestScaffoldEnvFilePermissions:
@@ -32,6 +33,7 @@ class TestScaffoldEnvFilePermissions:
         (root / "fleet.yaml").write_text(
             dedent("""\
             fleet:
+              manager: worker
               name: test-fleet
               service_prefix: com.test
               bots:
@@ -99,6 +101,7 @@ class TestScaffoldEnvFilePermissions:
         (root / "fleet.yaml").write_text(
             dedent("""\
             fleet:
+              manager: worker
               name: test-fleet
               service_prefix: com.test
               bots:
@@ -147,7 +150,7 @@ class TestEnvMigratePermissions:
         (root / "runtime" / "bots" / "worker").mkdir(parents=True)
         paths = _make_paths(root)
 
-        fleet = FleetConfig(
+        fleet = FleetConfig(manager="worker",
             name="test-fleet",
             service_prefix="com.test",
             bots={
@@ -179,7 +182,7 @@ class TestEnvMigratePermissions:
         (root / "runtime" / "bots" / "worker").mkdir(parents=True)
         paths = _make_paths(root)
 
-        fleet = FleetConfig(
+        fleet = FleetConfig(manager="worker",
             name="test-fleet",
             service_prefix="com.test",
             bots={

@@ -36,6 +36,7 @@ from pathlib import Path
 import pytest
 
 from claudlobby.config import BotConfig, FleetConfig, TeamConfig
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 from claudlobby.supervision import (
     RETIRED_IN_PR_B,
@@ -55,6 +56,7 @@ def _fixture_fleet() -> FleetConfig:
     return FleetConfig(
         name="fixture-fleet",
         service_prefix="com.fixture",
+        manager="lead",
         bots={
             "lead": BotConfig(bot_id="lead", name="lead", expertise=["orchestration"]),
             "w1": BotConfig(bot_id="w1", name="w1", expertise=["eng"]),
@@ -69,7 +71,7 @@ def _fixture_paths(tmp_path) -> Paths:
     for bot_id in _BOT_IDS:
         (root / "runtime" / "bots" / bot_id).mkdir(parents=True)
     (root / "lib").mkdir()
-    return Paths(root=root, fleet_dir=root)
+    return Paths(root=root, fleet_dir=root, package=source_package())
 
 
 # ----------------------------------------------------------------------
@@ -200,6 +202,26 @@ def spec_from_launchd(parsed: dict, fallback: SupervisionSpec) -> SupervisionSpe
 
 
 class TestSupervisionRoundtrip:
+    def test_selected_release_context_survives_both_renderers(self, tmp_path, monkeypatch):
+        from claudlobby import context
+
+        selected = tmp_path / "release" / "bin" / "claudlobby"
+        monkeypatch.setattr(context, "selected_cli", lambda: selected)
+        fleet = _fixture_fleet()
+        paths = _fixture_paths(tmp_path)
+        spec = build_supervision_spec(fleet.bots["lead"], fleet, paths)
+        expected = {
+            "CLAUDLOBBY_ROOT": str(paths.root),
+            "FLEET_ROOT": str(paths.fleet_config_dir),
+            "CLAUDLOBBY_NATIVE_DIR": str(paths.package.native),
+            "CLAUDLOBBY_LIBRARY_DIR": str(paths.package.library),
+            "CLAUDLOBBY_CLI": str(selected),
+            "CLAUDLOBBY_ARTIFACT_ID": paths.package.artifact_id,
+        }
+        assert expected.items() <= spec.environment.items()
+        assert spec_from_systemd(parse_systemd_unit(render_systemd_unit(spec)), spec) == spec
+        assert spec_from_launchd(parse_launchd_plist(render_launchd_plist(spec)), spec) == spec
+
     @pytest.mark.parametrize("bot_id", _BOT_IDS)
     def test_systemd_round_trips(self, tmp_path, bot_id):
         fleet = _fixture_fleet()
@@ -287,7 +309,7 @@ class TestFormatSpecificAllowances:
 
 
 class TestLabelMatchesBotService:
-    """`svc_unit_name` and the installers (lib/supervisor.sh,
+    """`svc_unit_name` and the installers (claudlobby/_runtime_scripts/supervisor.sh,
     lib/install-bot*.sh) rely on one invariant: the label a rendered unit
     answers to is the SAME string bot.conf's BOT_SERVICE= names. Before this
     test nothing pinned the two together -- `build_supervision_spec`'s

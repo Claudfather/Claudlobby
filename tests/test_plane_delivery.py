@@ -15,6 +15,9 @@ SHORT by N bytes", UNCONFIRMED -> "sent, not yet confirmed").
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
+from tests.package_fixtures import source_package
 import hashlib
 import sqlite3
 
@@ -93,6 +96,7 @@ def _seed(root):
     trunc = BODY[:-10]                       # a strict prefix -> shorter
     altered = BODY[:-1] + "Z"                # SAME length, different sha
     longer = BODY + " and then some more"    # LONGER, different sha
+    initialize_plane(root)
     emit_batch(root, [
         _comm(_mid("1"), BODY), _submitted(_mid("1"), BODY), _received(_mid("1"), BODY),
         _comm(_mid("2"), BODY), _submitted(_mid("2"), BODY), _received(_mid("2"), trunc),
@@ -201,6 +205,7 @@ def test_newest_received_wins(tmp_path):
     """A later `received` supersedes an earlier one for the same msg_id — the
     MAX(ingest_seq) rule (defensive; a re-send mints a fresh id in practice)."""
     _full_capture(tmp_path)
+    initialize_plane(tmp_path)
     emit_batch(tmp_path, [_comm(_mid("9"), BODY), _submitted(_mid("9"), BODY),
                           _received(_mid("9"), BODY[:-5])])   # first: short
     emit_batch(tmp_path, [_received(_mid("9"), BODY)])        # then: whole
@@ -218,7 +223,7 @@ def _channel(root):
     from fastapi.testclient import TestClient
 
     from claudlobby.plane.view import create_app
-    body = TestClient(create_app(root)).get("/api/channel").json()
+    body = TestClient(create_app(root, package=source_package())).get("/api/channel").json()
     msgs = {}
     for t in body["data"]["threads"]:
         for m in t["messages"]:

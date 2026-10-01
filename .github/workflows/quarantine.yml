@@ -23,8 +23,13 @@ jobs:
           python-version: '3.11'
       - name: Install system deps
         run: sudo apt-get update && sudo apt-get install -y tmux
-      - name: Install package
-        run: pip install -e '.[dev]'
+      - name: Install isolated package
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -e '.[dev]'
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+      - name: Prepare installed resources in disposable checkout
+        run: .venv/bin/python tests/prepare_resources.py --disposable-checkout "$GITHUB_WORKSPACE"
       - name: Run the quarantined tests
         # pytest exits 5 when nothing is selected: an empty quarantine is the
         # goal, not a failure.

@@ -1,4 +1,4 @@
-"""Tests for lib/ab-comms-eval.sh — the #729 stage-C A/B comms-eval harness
+"""Tests for harness/ab-comms-eval.sh — the #729 stage-C A/B comms-eval harness
 scaffolding (F2/F4-independent).
 
 Wrapped in Python so CI enforces it (the shell-tests-not-in-CI lesson). Two
@@ -17,10 +17,70 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
+import pytest
+
+
 REPO_DIR = Path(__file__).resolve().parent.parent
-SCRIPT = REPO_DIR / "lib" / "ab-comms-eval.sh"
+SCRIPT = REPO_DIR / "harness" / "ab-comms-eval.sh"
+
+
+@pytest.fixture
+def _selected_built_cli(built_test_cli, monkeypatch):
+    monkeypatch.setenv("CLAUDLOBBY_CLI", str(built_test_cli))
+
+
+def test_private_compose_refuses_selected_data_root(tmp_path):
+    root = tmp_path / "data"
+    (root / "state").mkdir(parents=True)
+    (root / "state" / "selected-release.json").write_text("{}")
+    result = subprocess.run(
+        [sys.executable, str(REPO_DIR / "harness" / "compose.py"), "--root", str(root)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 2
+    assert "active or unreadable release selection" in result.stderr
+    assert not (root / "local").exists()
+
+
+@pytest.mark.parametrize("marker", [None, "wrong-root", "symlink"])
+def test_private_compose_refuses_unowned_data_root(tmp_path, marker):
+    root = tmp_path / "data"
+    bot = root / "runtime/bots/worker"
+    bot.mkdir(parents=True)
+    config = bot / "bot.conf"
+    config.write_text("operator-owned\n")
+    stamp = root / ".claudlobby-harness-root"
+    if marker == "symlink":
+        target = tmp_path / "marker"
+        target.write_text(str(root))
+        stamp.symlink_to(target)
+    elif marker:
+        stamp.write_text(marker)
+    result = subprocess.run(
+        [sys.executable, str(REPO_DIR / "harness/compose.py"), "--root", str(root)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 2
+    assert "marked disposable harness directory" in result.stderr
+    assert config.read_text() == "operator-owned\n"
+
+
+def test_private_compose_refuses_an_unbound_history_free_source(tmp_path):
+    tree = tmp_path / "unbound"
+    (tree / "harness").mkdir(parents=True)
+    script = tree / "harness/compose.py"
+    shutil.copy2(REPO_DIR / "harness/compose.py", script)
+    root = tmp_path / "data"
+    root.mkdir()
+    (root / ".claudlobby-harness-root").write_text(str(root.resolve()))
+    result = subprocess.run([sys.executable, str(script), "--root", str(root)],
+                            capture_output=True, text=True)
+    assert result.returncode == 2
+    assert "no built artifact or Git revision identity" in result.stderr
+    assert not (root / "runtime").exists()
 
 
 def _run(*args):
@@ -65,7 +125,7 @@ def _pair(task, rep, ps_wo, ps_wi, cw_wo, cw_wi):
     ]
 
 
-VERDICT_MODULE = REPO_DIR / "lib" / "ab-comms-verdict.py"
+VERDICT_MODULE = REPO_DIR / "harness" / "ab-comms-verdict.py"
 
 
 def _module_verdict(tmp_path, name, rows, *flags):
@@ -95,6 +155,7 @@ def _module_verdict(tmp_path, name, rows, *flags):
     return json.loads(out.read_text())
 
 
+@pytest.mark.usefixtures("_selected_built_cli")
 class TestDryRun:
     def test_exits_zero_all_checks_pass_verdict_inconclusive(self):
         r = _run("--dry-run", "--keep", "--tasks", "2", "--reps", "2")
@@ -129,6 +190,7 @@ class TestDryRun:
             shutil.rmtree(root, ignore_errors=True)
 
 
+@pytest.mark.usefixtures("_selected_built_cli")
 class TestChannelBrevityDryRun:
     """#728 P1 gate wiring (--experiment channel-brevity), CI-safe dry path."""
 

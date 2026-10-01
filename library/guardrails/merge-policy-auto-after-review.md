@@ -23,13 +23,13 @@ The manager auto-merges PRs when ALL of:
 
    This rung is a **mechanism, not a reminder**: telling an operator to anchor their evidence to a head cannot help when the surface they are told to read reports the head wrongly.
 
-1. **Peer review posted** — a reviewer has posted an `APPROVE` verdict (or `COMMENT` with a `**[<bot>] [VERDICT] approve**` verdict line under same-identity fallback; the bracket-tag, anchored header `lib/pr-review-state.py` reads).
+1. **Peer review posted** — a reviewer has posted an `APPROVE` verdict (or `COMMENT` with a `**[<bot>] [VERDICT] approve**` verdict line anchored to the reviewed SHA under same-identity fallback). Read `claudlobby --json task reviews OWNER/REPO --pr N` for current-head verdicts and recorded reviewer attribution; this read does not authorize merging.
 
    **MULTIPLE VERDICTS RESOLVE PER REVIEWER, NEVER GLOBAL-LATEST.** Each reviewer's own latest verdict stands, and the PR is blocked while **any** reviewer's latest is `REQUEST-CHANGES`.
 
    Global-latest is the intuitive rule and it is wrong in one specific, silent way: with reviewer A blocking and reviewer B approving later, newest-on-the-PR reports `APPROVE` **over an unresolved block**. It is correct only while a PR has exactly one reviewer — which is why it survives so long on a fleet where that is usually true, and why it fails the first time two people review.
 
-   **This codebase already settled it, so read the rule from the tool rather than from here:** `lib/pr-review-state.py` documents the prototype's global-latest, the reversed-reviewers counterexample, and its own resolution, and `test_reversing_the_reviewers_flips_the_answer` pins it. If this paragraph and that tool ever disagree, the tool is right — it is the thing with a test.
+   **Read the recorded state from `claudlobby --json task reviews OWNER/REPO --pr N`.** It resolves each reviewer's latest verdict, not the globally latest verdict, and reports unknown attribution or an unanchored verdict explicitly. The read does not authorize a merge.
 
 2. **CI green — the repo's DECLARED required checks, BY NAME, never by count.** Verify that every check **this repo declares as required** appears in the status rollup by name, and that every one is `SUCCESS`.
 

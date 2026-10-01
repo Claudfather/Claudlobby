@@ -25,11 +25,12 @@ import pytest
 
 from claudlobby.composer import compose_settings_local
 from claudlobby.config import BotConfig, FleetConfig, ScopeConfig
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 
 def _fleet(bot: BotConfig) -> FleetConfig:
-    return FleetConfig(
+    return FleetConfig(manager=bot.bot_id,
         name="test-fleet",
         service_prefix="com.test",
         bots={bot.bot_id: bot},
@@ -51,7 +52,7 @@ def _bot(**kw) -> BotConfig:
 @pytest.fixture
 def paths(tmp_path) -> Paths:
     (tmp_path / "lib").mkdir()
-    return Paths(root=tmp_path, fleet_dir=None)
+    return Paths(root=tmp_path, fleet_dir=None, package=source_package())
 
 
 @pytest.fixture
@@ -62,7 +63,7 @@ def overlay_paths(tmp_path) -> Paths:
     (tmp_path / "lib").mkdir()
     fleet_dir = tmp_path / "local" / "home" / "eng-overlay"
     fleet_dir.mkdir(parents=True)
-    return Paths(root=tmp_path, fleet_dir=fleet_dir)
+    return Paths(root=tmp_path, fleet_dir=fleet_dir, package=source_package())
 
 
 def _session_start(settings: dict) -> list:
@@ -239,22 +240,35 @@ class TestConfigParse:
 
 class TestRealProbe:
     """The probe itself, unstubbed — cache bypassed via __wrapped__ so each
-    leg probes its own PATH (the @functools.cache is process-scoped by
-    design; these tests must not share one memoized verdict)."""
+    leg probes its selected release (the cache is process-scoped)."""
 
-    def _probe_with_path(self, monkeypatch, path_value: str):
+    def _probe_selected(self, monkeypatch, selected, path_value: str):
         import claudlobby.composer as composer_mod
 
+        monkeypatch.setattr(composer_mod, "selected_cli", lambda: selected)
         monkeypatch.setenv("PATH", path_value)
         return composer_mod._brief_cli_probe.__wrapped__()
 
-    def test_missing_binary_refuses(self, monkeypatch, tmp_path):
-        exe, why = self._probe_with_path(monkeypatch, str(tmp_path))
-        assert exe is None
-        assert "PATH" in why
+    def test_missing_selected_release_refuses_without_path_fallback(self, monkeypatch, tmp_path):
+        import claudlobby.composer as composer_mod
 
-    def test_stale_install_refuses_with_its_own_error(self, monkeypatch, tmp_path):
-        fake = tmp_path / "claudlobby"
+        ambient = tmp_path / "claudlobby"
+        ambient.write_text('#!/bin/sh\necho "usage: ... --boot ..."\n')
+        ambient.chmod(0o755)
+        monkeypatch.setenv("PATH", str(tmp_path))
+
+        def missing_release():
+            raise RuntimeError("Selected release has no CLI entrypoint: /missing/claudlobby")
+
+        monkeypatch.setattr(composer_mod, "selected_cli", missing_release)
+        exe, why = composer_mod._brief_cli_probe.__wrapped__()
+        assert exe is None
+        assert "Selected release has no CLI entrypoint" in why
+
+    def test_stale_selected_release_refuses_with_its_own_error(self, monkeypatch, tmp_path):
+        selected = tmp_path / "selected"
+        selected.mkdir()
+        fake = selected / "claudlobby"
         fake.write_text(
             "#!/bin/sh\n"
             'if [ "$1" = "brief" ]; then\n'
@@ -264,18 +278,26 @@ class TestRealProbe:
             "exit 0\n"
         )
         fake.chmod(0o755)
-        exe, why = self._probe_with_path(monkeypatch, f"{tmp_path}:/usr/bin:/bin")
+        ambient = tmp_path / "claudlobby"
+        ambient.write_text('#!/bin/sh\necho "usage: ... --boot ..."\n')
+        ambient.chmod(0o755)
+        exe, why = self._probe_selected(monkeypatch, fake, f"{tmp_path}:/usr/bin:/bin")
         assert exe is None
         assert "invalid choice" in why
 
-    def test_current_install_certifies_the_resolved_exe(self, monkeypatch, tmp_path):
-        fake = tmp_path / "claudlobby"
+    def test_current_selected_release_ignores_stale_path_cli(self, monkeypatch, tmp_path):
+        selected = tmp_path / "selected"
+        selected.mkdir()
+        fake = selected / "claudlobby"
         fake.write_text(
             "#!/bin/sh\n"
             'if [ "$1" = "brief" ]; then echo "usage: ... --boot ..."; exit 0; fi\n'
             "exit 0\n"
         )
         fake.chmod(0o755)
-        exe, why = self._probe_with_path(monkeypatch, f"{tmp_path}:/usr/bin:/bin")
+        stale = tmp_path / "claudlobby"
+        stale.write_text('#!/bin/sh\necho "stale PATH CLI" >&2\nexit 2\n')
+        stale.chmod(0o755)
+        exe, why = self._probe_selected(monkeypatch, fake, f"{tmp_path}:/usr/bin:/bin")
         assert exe == str(fake)
         assert why == ""

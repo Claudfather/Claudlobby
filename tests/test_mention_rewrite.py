@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-_SRC = Path(__file__).resolve().parent.parent / "lib" / "mention-rewrite.py"
+_SRC = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts" / "mention-rewrite.py"
 _spec = importlib.util.spec_from_file_location("mention_rewrite", _SRC)
 mr = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(mr)

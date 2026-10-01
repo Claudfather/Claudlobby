@@ -19,9 +19,8 @@ touch nothing: no non-GET route exists (pinned by
 ## Run it
 
 ```bash
-python3 -m pip install -e '.[plane-ui]'   # FastAPI/uvicorn — part of the documented install
-claudlobby plane view                     # binds 127.0.0.1:8899
-claudlobby plane open                     # print/launch the URL (§17's open verb)
+claudlobby plane view  # use the sealed release CLI with the [plane-ui] extra
+claudlobby plane open  # print/launch the URL (§17's open verb)
 ```
 
 `/healthz` is a **data-freshness probe**: it answers 503 whenever the plane
@@ -30,8 +29,8 @@ recorder simply has not written yet — so wire monitors accordingly. The
 header's recorder pill is a live daemon PROBE (typed handshake), never
 socket-file presence.
 
-Supervised: **enrolled by default since chunk N** — `plane-view` composes
-its units and `lib/setup-system` enrolls them, because a read-only localhost
+Supervised: **enrolled by default since chunk N** — activation composes and
+enrolls its units, because a read-only localhost
 UI reaches none of the four categories the defaults rule reserves for opt-in.
 Exposing it beyond the host (Tailscale Serve, below) stays deliberately your
 step. To turn it off, set `plane-view.enroll: false` under `host.jobs` in
@@ -42,13 +41,13 @@ only.
 
 **It needs the `[plane-ui]` extra, and the compositor checks.** Where fastapi
 and uvicorn do not import in the install's venv, `generate` composes **no**
-view unit at all and `claudlobby doctor --switches` renders `plane-view` off
-with `pip install -e '.[plane-ui]'` as its arm line. That is the fold's F1:
+view unit at all and `claudlobby host doctor --switches` renders `plane-view` off
+with the `[plane-ui]` release extra as its arm line. That is the fold's F1:
 "the unit exits saying so" is an honest failure for a hand run and a **crash
 loop every 5s, forever** under `Restart=always` — and enrolling by default is
-what turns the first into the second. `lib/setup-system` installs the extra
-(first install and upgrade both), so a host that followed the documented path
-has it.
+what turns the first into the second. Build the wheel with the `[plane-ui]`
+extra in its offline dependency wheelhouse before `host setup`; the
+[cold-host walkthrough](../getting-started.md) shows that preparation.
 
 ## Front it with Tailscale Serve (the ruled exposure)
 
@@ -141,68 +140,50 @@ channel (one card per fleet, one host card), and every board scoped to the tab.
   120s, stamped by the API), and the host probe's newest facets (load, RAM, disk,
   thermal, under-voltage) — `null` until `plane-host-probe` has ever recorded.
   A figure whose source is absent is `null` with a reason, never `0`.
-- **Unacked reports (chunk K).** `claudlobby brief --ack` records the viewer's read
-  position as a plane fact — one `reports_acked` system event on the manager's actor,
-  its detail the `ingest_seq` the ack reaches — through the cold emit door (so `--ack`
-  is the one brief door that writes, and it runs `migrate()`). A fleet's reports are ONE
-  definition (`queries.FLEET_REPORTS_SQL`): report-class communications on its room
+- **Unacked reports (chunk K).** A generated viewer runs
+  `claudlobby --json fleet reports list --unacknowledged` and then
+  `claudlobby fleet reports ack --through ACK_CURSOR --request-id UUID`, using the
+  `ack_cursor` returned by the list. The ack records the viewer's read position
+  as one `reports_acked` plane event on its actor; the event detail carries the
+  `ingest_seq` reached. `claudlobby brief` remains a read-only view. A fleet's
+  reports are ONE definition (`queries.FLEET_REPORTS_SQL`): report-class communications on its room
   axis, sent by the fleet or addressed to it. The card counts, through the same rule
   the brief lists (`plane-readers.unacked_rows`: terminal or status-less reports past
   the fleet's newest readable ack by any of its actors; a `progress` note never),
   "N unacked · acked by <bot> 2h ago"; a fleet that has never acked reads
   `no ack recorded` (`null` + reason), never a count of everything ever; a
-  `reports_acked` row with no readable cursor is skipped, not a reset. No cursor file
-  exists any more: a failed emit is a failed ack (rc 1, said on stderr), a spooled one
-  is disclosed and takes effect when the spool drains, and `PLANE_EMIT_DISABLED=1`
-  refuses to ack.
+  `reports_acked` row with no readable cursor is skipped, not a reset. The ack
+  validates the served report prefix before recording and requires a committed
+  plane fact; an uncertain recording must be inspected through its request UUID.
 
 ## The attention rail
 
-A card says WHY it needs you and what clears it — the arm that put it in the
-queue (`escalated` / `send_failed` / `never_activated` / `nudged` / `overdue`,
-in the operator's priority order), dated by the server's own instant.
+`/api/tasks` shows one card per canonical fleet-owned Task, including queued
+intake. Its task ID, state, and title come from the Task reducer; a current
+assignment may add a deadline. The current assignment, prior assignments, and
+message delivery evidence are shown separately: assignment or delivery status
+is not task completion. Cards are not grouped by similar prose or dispatch
+time. A queued Task has no current assignee and appears as fleet intake.
 
-Two of those arms are HUMAN acts rather than machine faults (chunk M-A,
-#1481). `escalated` is a manager asking you a question — the card reads
-`needs you: <question> — asked by <manager> 5m ago`, and the task stays OPEN
-while you decide, so nothing is lost by taking your time; answer on Telegram
-and the manager's next act (a re-dispatch, a withdrawal, or the worker's next
-report) clears the card by itself. `nudged` is your own nudge gone
-unanswered for half an hour: `nudged 40m ago by chris, no act yet`. Both hold
-only while they are the assignment's newest task event, so there is no
-"un-escalate" button to remember and none to forget. The doors are
-`lib/task-act.sh` (a manager's `withdraw` / `escalate`), `claudlobby task
-nudge <task-id>` and Telegram; **the page stays read-only** until the
-exposure walk lands a write path with a principal on every request. A card
-whose question reads "not recorded" is a fleet on metadata capture, which
-drops authored prose at the door — the arm and the person still stand. **One note dispatched to N bots is one card**: the rows share no
-id (every send mints its own work item), so `/api/tasks` keys a broadcast by
-what it really shares — sender, the words AS STORED, status, arm, and a
-dispatch instant inside a minute — and the card reads `→ jian-yang, issey,
-damodaran, ramanujan · 4 bots` above the one reason line, dated by its worst
-member. Only rows that still need you join a card, so the recipients listed
-are the ones to chase, not everyone the note reached, and **one row per
-recipient**: a second open dispatch of the same words to the same bot is a
-re-dispatch, not a member, and keeps its own card. Anything the API cannot
-show is one broadcast — a different sender, arm, status or instant, a row
-with no words, or two notes told apart only by a trailing `| ref:…` the card
-does not render — stays its own card.
+The rail shows cards with attention reasons, dated by recorded events or
+deadlines. It can show a manager's escalation, failed or never-activated delivery,
+overdue or stale work, a waiting blocker, or an unanswered nudge. Under metadata
+capture a question may be withheld; the recorded attention reason remains.
+Inspect the canonical Task with `claudlobby --json task show TASK_ID` and, when
+a delivery message exists, its proof with
+`claudlobby --json message receipt MESSAGE_ID`. A manager can explicitly
+withdraw or reassign open work through `claudlobby task withdraw` or
+`claudlobby task reassign`, using each command's required reason and fresh
+request UUID. **The page itself is read-only.**
 
-Two things the counts are NOT. The `attention` badge counts ROWS, not cards,
-so it agrees with the header's "N need you" — a four-bot card is four. And
-every count on this page is **per board window and per room**: `/api/tasks`
-reads the newest 200 assignments of the fleet you are in, so a fleet busier
-than that window, or work sitting in another fleet's room, is outside what
-the rail can count. Use `claudlobby brief --bot <manager>` for the fleet's
-whole open set.
-
-The 60s window is measured, not assumed: on the production plane (2026-09-05)
-the widest real multi-recipient spread was 28s and a six-recipient broadcast
-spread 5–6s, about a second per recipient. It is a constant, not a knob. The
-inference retires entirely the day `lib/dispatch-task.sh` reuses one work
-item across a fan-out — the schema already allows N assignments per work item
-— because then the view groups by `work_item_id` and the window goes with the
-guess.
+The attention badge counts Task cards needing attention, not assignment rows
+or inferred broadcasts. `/api/tasks` selects the newest 200 Tasks in the
+selected fleet room (or across fleets in the host view), so the badge and cards
+describe that displayed window. `truncated` warns that older work may still
+need attention. `issue_count` and the labeled `issues` disclose unresolved
+Task history; at most the first 50 issues are shown, and `issue_scope` says
+whether they cover displayed Tasks or the selected fleet. A zero card count
+does not establish that older work or unresolved history is clear.
 
 ## The grid shows raw terminals — operators only (ruling 2026-08-29)
 

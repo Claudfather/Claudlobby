@@ -3,8 +3,8 @@
 brief Step 4 / controller correction 6, invoked from the Global Constraint
 "nothing composes differently on a fleet without a leaf manager").
 
-Composes one of three fleet SHAPES that have no leaf manager at all (``solo``,
-``worker-only``, ``coordinator-only`` — see ``_SHAPES``) twice: once with
+Composes one of three singleton fleet SHAPES with no local workers (``solo``,
+``cross-fleet-worker``, ``cross-fleet-coordinator`` — see ``_SHAPES``) twice: once with
 task 3's two changes neutralised (``--before``, simulating the code as it
 stood at the end of task 2) and once with the code exactly as committed
 (``--after``). The CLI prints a sorted, deterministic manifest of every file
@@ -33,8 +33,8 @@ several shapes back to back without leaking state between them:
   before this task (dormant, unconditionally) rather than being gated.
 
 Neither of the three shapes has a leaf manager, so in practice the registry
-toggle is inert for THESE runs (the role never applies to a bot that holds no
-role) — what the bots-tree comparison actually proves is that task 3 changed
+toggle is inert for THESE runs (the leaf-manager role never applies without a
+local worker) — what the bots-tree comparison actually proves is that task 3 changed
 NOTHING about bot composition on a fleet that cannot use the thing it added.
 The job-gate toggle is what makes the timers-dir difference observable at
 all: it is the one axis on which the two runs are meant to differ.
@@ -50,48 +50,40 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 
-#: The three no-leaf-manager shapes (controller correction 6). Bot ids and
-#: the fleet name are obviously fake (the repo is public).
+#: Each shape has one declared manager and no other local bot. Cross-fleet
+#: reporting metadata does not create another owner or a local worker.
 _SHAPES: dict[str, str] = {
     # One bot, no team at all.
     "solo": """\
 fleet:
   name: ck4-shape-solo
   service_prefix: com.ck4.solo
+  manager: solo-bot
   bots:
     solo-bot:
       expertise: [software-engineering]
 """,
-    # Two bots, neither manages the other — no manager at all.
-    "worker-only": """\
+    # A worker in the wider organization still owns its singleton fleet.
+    "cross-fleet-worker": """\
 fleet:
-  name: ck4-shape-worker-only
-  service_prefix: com.ck4.wonly
+  name: ck4-shape-cross-fleet-worker
+  service_prefix: com.ck4.crossworker
+  manager: peon-a
   bots:
     peon-a:
       expertise: [software-engineering]
-    peon-b:
-      expertise: [software-engineering]
+      reports_to: elsewhere-manager
 """,
-    # coord's only report is midlead, itself a manager -> coord not leaf.
-    # midlead's team has NO workers -> midlead not leaf either (no in-fleet
-    # report at all). Two managers, zero leaf managers.
-    "coordinator-only": """\
+    # The coordinator's only report belongs to another fleet.
+    "cross-fleet-coordinator": """\
 fleet:
-  name: ck4-shape-coordinator-only
-  service_prefix: com.ck4.coordonly
-  teams:
-    outer:
-      manager: topcoord
-      workers: [midlead]
-    inner:
-      manager: midlead
-      workers: []
+  name: ck4-shape-cross-fleet-coordinator
+  service_prefix: com.ck4.crosscoord
+  manager: topcoord
   bots:
     topcoord:
       expertise: [orchestration]
-    midlead:
-      expertise: [orchestration]
+      manages: [elsewhere-manager]
 """,
 }
 
@@ -192,14 +184,17 @@ def compose_shape(
     """
     from claudlobby.composer import compose_fleet, compose_fleet_timers
     from claudlobby.config import load_fleet
+    from tests.package_fixtures import source_package
     from claudlobby.paths import Paths
 
     fleet_yaml = _write_shape(fleet_dir, shape)
-    paths = Paths(root=root, fleet_dir=fleet_dir)
+    paths = Paths(root=root, fleet_dir=fleet_dir, package=source_package())
     if paths.runtime_bots.is_dir():
         shutil.rmtree(paths.runtime_bots)
     with _toggled(before):
         fleet, merged = load_fleet(fleet_yaml)
+        assert fleet.manager in fleet.bots
+        assert fleet.leaf_manager_bots() == set(), "shape must have no local workers"
         compose_fleet(fleet, paths, log=lambda _m: None)
         compose_fleet_timers(fleet, paths, merged)
     timers_dir = paths.runtime_fleet / "timers"

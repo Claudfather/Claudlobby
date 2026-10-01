@@ -16,12 +16,14 @@ from textwrap import dedent
 
 from claudlobby.config import SweepConfig, _coerce_sweep, load_fleet
 from claudlobby.composer import compose_bot_conf, compose_fleet_timers
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 from claudlobby.validator import validate
+from tests.test_plane_events_door import _serving
 
 
 def _make_paths(root: Path) -> Paths:
-    return Paths(root=root, fleet_dir=root)
+    return Paths(root=root, fleet_dir=root, package=source_package())
 
 
 def _write(root: Path, body: str) -> Path:
@@ -47,6 +49,7 @@ def _env_val(conf: str, key: str) -> str | None:
 # A fleet with an enabled sweep block pointing at owner bot "astrid".
 _SWEEP_FLEET = """\
     fleet:
+      manager: mason
       name: test-fleet
       service_prefix: com.test
       system_defaults: false
@@ -67,6 +70,7 @@ _SWEEP_FLEET = """\
 # A fleet with no sweep block at all (opt-out).
 _NO_SWEEP_FLEET = """\
     fleet:
+      manager: astrid
       name: test-fleet
       service_prefix: com.test
       system_defaults: false
@@ -122,7 +126,7 @@ class TestSweepTimerEmission:
         # schedule flows through to OnCalendar
         assert "OnCalendar=*-*-* 02:30:00" in timer.read_text()
         # the unit runs the selector script
-        assert "lib/code-audit-sweep.sh" in svc.read_text()
+        assert "claudlobby/_runtime_scripts/code-audit-sweep.sh" in svc.read_text()
 
     def test_no_units_when_no_sweep_block(self, tmp_path):
         root = tmp_path / "f"
@@ -155,6 +159,7 @@ class TestSweepBotConf:
     def test_repos_default_to_owner_scope(self, tmp_path):
         body = """\
             fleet:
+              manager: astrid
               name: test-fleet
               service_prefix: com.test
               system_defaults: false
@@ -182,6 +187,7 @@ class TestSweepValidation:
     def test_unknown_owner_errors(self, tmp_path):
         body = """\
             fleet:
+              manager: astrid
               name: test-fleet
               service_prefix: com.test
               system_defaults: false
@@ -198,6 +204,7 @@ class TestSweepValidation:
     def test_no_repos_no_scope_errors(self, tmp_path):
         body = """\
             fleet:
+              manager: astrid
               name: test-fleet
               service_prefix: com.test
               system_defaults: false
@@ -213,6 +220,7 @@ class TestSweepValidation:
     def test_bad_repo_format_warns(self, tmp_path):
         body = """\
             fleet:
+              manager: astrid
               name: test-fleet
               service_prefix: com.test
               system_defaults: false
@@ -229,6 +237,7 @@ class TestSweepValidation:
     def test_disabled_sweep_no_sweep_errors(self, tmp_path):
         body = """\
             fleet:
+              manager: astrid
               name: test-fleet
               service_prefix: com.test
               system_defaults: false
@@ -244,16 +253,16 @@ class TestSweepValidation:
 
 
 class TestSweepSelector:
-    """Hermetic end-to-end of lib/code-audit-sweep.sh with gh + tmux shimmed.
+    """Hermetic end-to-end of claudlobby/_runtime_scripts/code-audit-sweep.sh with gh + tmux shimmed.
 
     Runs the real selector (and real bot-sweep-cron.sh) against a fixture fleet:
     `gh` returns canned staleness (acme/beta oldest ⇒ stalest) and `tmux` fakes
     an idle session. No live GitHub or real bot — so it runs in CI offline.
     """
 
-    def _run(self, tmp_path: Path):
+    def _run(self, tmp_path: Path, *, scratch_plane_env):
         repo_root = Path(__file__).resolve().parents[1]
-        selector = repo_root / "lib" / "code-audit-sweep.sh"
+        selector = repo_root / "claudlobby/_runtime_scripts" / "code-audit-sweep.sh"
 
         root = tmp_path / "root"
         owner = root / "local" / "tf" / "runtime" / "bots" / "owner"
@@ -302,28 +311,29 @@ class TestSweepSelector:
         gh.chmod(0o755)
         tmux.chmod(0o755)
 
-        from tests.conftest import plane_emit_env, read_fleet_events
+        from tests.conftest import read_fleet_events
         env = dict(os.environ)
         env["CLAUDLOBBY_ROOT"] = str(root)
         env["CLAUDLOBBY_FLEET"] = "tf"          # the fleet job's carrier: the sweep's events anchor on bot:tf/owner
         env["PATH"] = f"{bindir}:{env['PATH']}"
         env["TMUX_BIN"] = str(tmux)
-        env.update(plane_emit_env())
-        proc = subprocess.run(
-            ["bash", str(selector), "tf"],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
+        env.update(scratch_plane_env(root, initialize=True))
+        with _serving(root, scratch_plane_env) as socket:
+            proc = subprocess.run(
+                ["bash", str(selector), "tf"],
+                env={**env, "PLANE_SOCKET": str(socket)},
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
         # F18 R1: the sweep's events land on the plane, never in a per-bot file;
         # rendered back as the legacy rows (or None when nothing was recorded)
         assert not list((owner / "data" / "events").glob("fleet-*.jsonl"))
         events = read_fleet_events(root)
         return proc, (events or None)
 
-    def test_selects_stalest_and_dispatches(self, tmp_path):
-        proc, log = self._run(tmp_path)
+    def test_selects_stalest_and_dispatches(self, tmp_path, *, scratch_plane_env):
+        proc, log = self._run(tmp_path, scratch_plane_env=scratch_plane_env)
         assert proc.returncode == 0, proc.stderr
         assert log is not None, f"no event recorded on the plane: {proc.stderr}"
         assert '"bot":"owner"' in log                    # anchored on the owner bot

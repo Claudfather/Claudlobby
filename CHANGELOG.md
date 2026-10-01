@@ -15,13 +15,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Output is a location and a rule, never what matched:** `path:line: <class>`, or `path:line: private term #<n>`. Logs on a public repository are world-readable, and masking hides only a secret's verbatim value.
 - **The escape is visible:** `.github/leak-check-allow.txt` (`<path glob> <class> <reason>`), read from the pull request itself, so an entry is reviewed in the same diff. The private list has no escape.
 - **Forks are checked too:** the workflow runs on `pull_request_target`, checks out the base commit and reads the head as git objects, so no code from the pull request runs. The other three repositories call the action pinned by sha.
+- **The diff is read by its own structure:** each hunk by its line counts, and in `--git` mode every path from git's own list, renames and binary files included. A binary file's bytes are checked against the private list only.
 - **Tests:** `tests/test_leak_check.py` covers:
   - a planted positive for each class, and an invented private term, each failing the check;
   - the placeholders, passing;
   - no matched text in any output;
   - the fail-closed paths;
   - the allowlist;
-  - `--git` mode.
+  - `--git` mode, renames and binary files;
+  - a diff crafted to steer the reader (a line shaped like a file header, a carriage return, a hunk that does not match its counts).
+
+### Changed — main integration for the unified CLI (#1747, #1989)
+
+The aggregate incorporates main through `dd789c52` without restoring retired
+entrypoints. The [port evidence](documentation/plans/2026-09-30-unified-cli-main-integration.md)
+records the current owners and tests for the upstream fixes listed below;
+older changelog entries describe their original implementation, not additional
+supported commands. In particular, `fleet reports submit` is explicitly unlinked,
+`task report` requires an explicit task, and canonical rechecks address the fleet's
+one current manager. Person-assigned work without a deadline stays a standing goal.
+
+Opted-in heavy-slot hooks use the selected release's native code and the host's
+mutable data root. `/status` remains a manager default with scoped CLI reads.
+Cold setup builds and checks a sealed wheel before activation. Existing hosts must
+follow the [conversion runbook](documentation/existing-host-release-conversion.md):
+hold their old source-puller, build separately, prove an independent canary, and
+adopt the complete host through `host activate`. There are no compatibility shims;
+the coordinator is host-wide and cannot bypass a protected busy bot's restart hold.
 
 ### Fixed — `pr-review-state.py` reads a comment's verdict from its header only (#2029)
 
@@ -32,6 +52,7 @@ The reader searched a comment's whole body, so a verdict named anywhere in it co
 - **Never silent.** A line elsewhere whose opening bold span holds a verdict word is not read, and is reported verbatim as `UNPARSED-HEADER`, so a block written below the header reaches a human. Fenced code, blockquotes and table rows are not reported.
 - **Measured.** Over the corpus, 54 comments change reading. 36 are now reported rather than read. The 18 dropped without a report are prose, quotes, bullets, relayed verdicts or restatements, plus two approvals written in prose (the safe direction); no block is dropped silently. Of the 11 open PRs carrying a verdict, 9 read the same and 2 lose only false reads (#1160: two blocks and an approve from prose; #1989: a block from a bold label), keeping every real block.
 - CLI flags, output format and exit codes are unchanged. Tests: `tests/test_pr_review_state.py` (`TestTheVerdictIsTheCommentsHeaderLine`, `TestOutsideTheHeaderIsReportedNeverRead`); the two doc-example tests read each example as a reviewer posts it, with unchanged counts.
+- **In the unified CLI (#1989).** `lib/pr-review-state.py` is retired; the same rule lives in `claudlobby/review_rules.py`, which `claudlobby task reviews` reads. There is no script, self-test or `--payload-json` entry point.
 
 ### Fixed — the heavy-job slot records a job's shape, never its text (#2037)
 
@@ -68,6 +89,7 @@ A shape keeps neither.
 - An ordinary command keeps its tool and flags.
 
 All 15 of the secret cases fail on the previous code.
+
 
 ### Changed — the `[vault]` extra pins Claudron v0.6.1
 
@@ -432,6 +454,47 @@ Changes on the Claudlobby side:
 - `paths.detect_vault()`'s no-Claudron fallback follows the same rule: the identity file on walk-up, plus the addressed path itself when it has a hub.
 - The validator message now names the identity file.
 - The freshbox and boot-sampler scratch vaults, and the N-bot contention test's seed vault, now carry `.claudron-vault`.
+
+### Changed — unified public CLI and selected releases (#1747, #1989)
+
+Operators and agents use one public `claudlobby` command surface. Configuration,
+skills and permissions are staged with `config plan`, inspected with `config diff`,
+and applied through whole-host `host activate`; immutable releases keep code and
+native assets together. Test changes first in an independent canary data root.
+
+Existing checkout-based hosts must stop and disable their old `pull-root` timer
+before merging this change into the branch it follows. The root-pulling operation
+is removed; build from a separate source checkout and use explicit release
+activation. See the [conversion prerequisite](documentation/existing-host-release-conversion.md).
+
+Breaking replacements (no compatibility aliases or shims):
+
+| Retired entry | Supported entry |
+|---|---|
+| `generate`, `host-timers` | `config plan` → `config diff` → operator `host activate` |
+| `validate`, `freshbox` | `config validate`, `config validate --runtime` |
+| `promote` | inspect `config diff`, edit authored source, then stage and activate |
+| `status`, `uptime`, `events`, `report-back` | `fleet status`, `fleet uptime`, `event list/show`, `fleet reports list` |
+| top-level `emit`, `emit-batch` | `plane emit`, `plane emit-batch` (private hot paths use the daemon/spool) |
+| old converter/scaffolder names | `migration …`, `library create`, `bot create` |
+| `lib/setup-system`, `lib/setup-fleet`, `lib/setup-fleets` | `host setup`, `fleet setup` |
+| `lib/migrate-fleet-to-system.sh` | `fleet move` for cold, unselected authoring only; active flat fleets stay flat |
+| `lib/fleet-utilization.sh` | `fleet utilization` |
+
+Tasks are fleet-owned with separate admission, assignment and delivery; only the
+assigned bot accepts. Ordinary messages and unlinked reports may send with an
+explicit degraded recording result and an independent fleet alert. Task changes
+and linked reports still require committed recording; uncertain sends are not
+silently retried. Default fleet-ops coaching and grants accompany the CLI.
+
+`--warn-baseline` differences now exit 4, unavailable input exits 6; Plane doctor
+and registry attention exit 4. Scheduled repo pulls skip dirty/untracked or
+symlinked checkouts. macOS browser reaping is disabled pending an ownership-safe
+predicate. Log reads are bounded (1–200 lines, 64 KiB per file) and disclose partial
+sources. `host.unit_prefix` isolates canary host units. Source-only instruments
+live in `harness/` and do not ship in release wheels.
+
+- Restored explicit `host channels check` and `host channels approve` operator commands for official and fork Telegram approvals in Claude Code's OS managed settings; approval preserves existing policy and requires administrator write access.
 
 ### Changed — `[vault]` pin bumped to Claudron v0.5.1; `vault-sync` never leaves a vault mid-rebase (Claudron #193)
 

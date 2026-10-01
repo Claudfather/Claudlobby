@@ -5,20 +5,22 @@ drives the REAL keepalive.sh and fleet-pulse.sh against a systemctl stub that an
 from a scene's unit state and logs every `restart` with the counter it would zero.
 
 Every scenario is hermetic: temp HOME/root, PLANE_EMIT_DISABLED=1, a stub curl, no network.
-The emit=True scenes are the one exception to the middle of that: they arm the plane shim and
-point its cold rung at a recorder, so the events the scripts raise can be read back.
+The emit=True scenes are the one exception: they arm the Plane shim against a
+dead private socket and inspect its durable raw staged batch.
 """
 
 import json
 import platform
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+from tests.fixtures.native_admission import admit_watchdog_fixture
 
 
 REPO = Path(__file__).resolve().parent.parent
-LIB = REPO / "lib"
+LIB = REPO / "claudlobby/_runtime_scripts"
 
 # The scenes drive the systemd branch of the real scripts and read /proc/uptime; on
 # macOS service_is_crash_looping answers "unknown" by design, so they cannot hold.
@@ -51,12 +53,19 @@ exit 0
 class Scene:
     def __init__(
         self, tmp, *, active, sub, nr, age_s=2, marker=False, emit=False,
-    ):
+    scratch_plane_env):
+        self.scratch_plane_env = scratch_plane_env
         self.tmp = Path(tmp)
         self.home = self.tmp / "home"
         self.root = self.tmp / "root"
         self.bin = self.tmp / "bin"
         self.bin.mkdir()
+        self.lib = self.tmp / "native"
+        shutil.copytree(LIB, self.lib)
+        # The stdlib client imports its package's shared capture policy.
+        (self.lib / "plane-socket-client.py").unlink()
+        (self.lib / "plane-socket-client.py").symlink_to(Path(LIB) / "plane-socket-client.py")
+        self.admission_calls = admit_watchdog_fixture(self.lib)
         (self.tmp / "tmux").mkdir()
         unit = self.home / ".config/systemd/user/probe1774svc.service"
         unit.parent.mkdir(parents=True)
@@ -71,14 +80,7 @@ class Scene:
         self.calls.write_text("")
         self.emit_dir = None
         if emit:
-            # Arms the plane shim and points its cold rung at a recorder that keeps each batch
-            # it is handed (test_fleet_pulse_no_events.py's idiom): no plane, no daemon, and
-            # the events the scripts raise can be read back with emitted().
-            self.emit_dir = self.tmp / "emitted"
-            self.emit_dir.mkdir()
-            rec = self.bin / "plane-cli"
-            rec.write_text('#!/bin/bash\ncp "${@: -1}" "$EMIT_DIR/$(date +%s%N).json"\n')
-            rec.chmod(0o755)
+            self.emit_dir = self.root / "state/plane/staged"
         for name, body in (
             ("systemctl", SYSTEMCTL),
             ("curl", '#!/bin/bash\nprintf "%s" \'{"ok":false}\'\n'),
@@ -108,21 +110,19 @@ class Scene:
             "TELEGRAM_STATE_DIR": str(self.tmp / "tg"),
         }
         if self.emit_dir:
-            del env["PLANE_EMIT_DISABLED"]
-            env["PLANE_EMIT_CLI"] = str(self.bin / "plane-cli")
-            env["PLANE_SOCKET"] = str(self.tmp / "no-daemon.sock")
-            env["EMIT_DIR"] = str(self.emit_dir)
+            env.update(self.scratch_plane_env(self.root))
         return env
 
     def keepalive(self):
         r = subprocess.run(
-            ["bash", str(LIB / "keepalive.sh"), str(self.bot)],
+            ["bash", str(self.lib / "keepalive.sh"), str(self.bot)],
             env=self.env(),
             capture_output=True,
             text=True,
             errors="replace",
             timeout=90,
         )
+        assert self.admission_calls.read_text().endswith("keepalive\n"), r.stderr
         log = (
             (self.bot / "keepalive.log").read_text(errors="replace")
             if (self.bot / "keepalive.log").exists()
@@ -151,9 +151,9 @@ class Scene:
         return sorted(p.name for p in self.pulse_state.glob("b.*"))
 
     def emitted(self, name):
-        """The plane events called `name` that the scripts handed the shim (emit=True scenes)."""
+        """Raw pending Plane events; daemon replay/capture is tested separately."""
         rows = []
-        for f in sorted(self.emit_dir.glob("*.json")):
+        for f in sorted(self.emit_dir.glob("*.batch")):
             rows += [e["payload"] for e in json.loads(f.read_text())["events"]]
         return [p for p in rows if p.get("event") == name]
 
@@ -161,8 +161,8 @@ class Scene:
 # --- keepalive -----------------------------------------------------------------------------
 
 
-def test_K1_a_loop_is_named_and_never_restarted(tmp_path):
-    s = Scene(tmp_path, active="activating", sub="auto-restart", nr=3, age_s=2)
+def test_K1_a_loop_is_named_and_never_restarted(tmp_path, *, scratch_plane_env):
+    s = Scene(tmp_path, active="activating", sub="auto-restart", nr=3, age_s=2, scratch_plane_env=scratch_plane_env)
     r, log = s.keepalive()
     assert "SKIP — crash loop (3 automatic restarts" in log, (log, r.stderr[-400:])
     assert s.restarts() == [], "keepalive stacked a restart on a crash loop"
@@ -170,8 +170,8 @@ def test_K1_a_loop_is_named_and_never_restarted(tmp_path):
     assert r.returncode == 0, (r.returncode, r.stderr[-400:])
 
 
-def test_K4_a_settled_unit_with_a_stale_counter_still_restarts(tmp_path):
-    s = Scene(tmp_path, active="active", sub="exited", nr=1971, age_s=5000)
+def test_K4_a_settled_unit_with_a_stale_counter_still_restarts(tmp_path, *, scratch_plane_env):
+    s = Scene(tmp_path, active="active", sub="exited", nr=1971, age_s=5000, scratch_plane_env=scratch_plane_env)
     r, log = s.keepalive()
     assert "RESTART" in log, (log, r.stderr[-400:])
     assert s.restarts() == ["restart nr_before=1971"], s.restarts()
@@ -180,8 +180,8 @@ def test_K4_a_settled_unit_with_a_stale_counter_still_restarts(tmp_path):
 # --- fleet-pulse ---------------------------------------------------------------------------
 
 
-def test_P1_a_loop_raises_its_own_page_and_replaces_session_missing(tmp_path):
-    s = Scene(tmp_path, active="activating", sub="auto-restart", nr=3, age_s=2)
+def test_P1_a_loop_raises_its_own_page_and_replaces_session_missing(tmp_path, *, scratch_plane_env):
+    s = Scene(tmp_path, active="activating", sub="auto-restart", nr=3, age_s=2, scratch_plane_env=scratch_plane_env)
     r, summary = s.pulse()
     assert "b.crashloop_alerted" in s.markers(), (s.markers(), r.stderr[-500:])
     assert not [
@@ -190,21 +190,21 @@ def test_P1_a_loop_raises_its_own_page_and_replaces_session_missing(tmp_path):
     assert "crash-loop" in summary, summary
 
 
-def test_P2_a_settled_unit_clears_the_page(tmp_path):
-    s = Scene(tmp_path, active="active", sub="exited", nr=1971, age_s=5000, marker=True)
+def test_P2_a_settled_unit_clears_the_page(tmp_path, *, scratch_plane_env):
+    s = Scene(tmp_path, active="active", sub="exited", nr=1971, age_s=5000, marker=True, scratch_plane_env=scratch_plane_env)
     s.pulse()
     assert "b.crashloop_alerted" not in s.markers(), s.markers()
 
 
-def test_P4_a_healthy_boot_raises_nothing(tmp_path):
-    s = Scene(tmp_path, active="activating", sub="start-pre", nr=0, age_s=20)
+def test_P4_a_healthy_boot_raises_nothing(tmp_path, *, scratch_plane_env):
+    s = Scene(tmp_path, active="activating", sub="start-pre", nr=0, age_s=20, scratch_plane_env=scratch_plane_env)
     r, summary = s.pulse()
     assert "b.crashloop_alerted" not in s.markers(), s.markers()
     assert "crash-loop" not in summary, summary
 
 
-def test_P6_a_loop_records_one_crash_loop_event_with_its_keys(tmp_path):
-    s = Scene(tmp_path, active="activating", sub="auto-restart", nr=3, age_s=2, emit=True)
+def test_P6_a_loop_records_one_crash_loop_event_with_its_keys(tmp_path, *, scratch_plane_env):
+    s = Scene(tmp_path, active="activating", sub="auto-restart", nr=3, age_s=2, emit=True, scratch_plane_env=scratch_plane_env)
     s.pulse()
     events = s.emitted("crash_loop")
     assert len(events) == 1, events
@@ -216,8 +216,8 @@ def test_P6_a_loop_records_one_crash_loop_event_with_its_keys(tmp_path):
 
 # --- controls: the AGE plumbing itself (a young phase is a boot in flight) ---
 
-def test_C1_a_young_start_after_one_retry_is_a_boot_in_flight_not_a_restart(tmp_path):
-    s = Scene(tmp_path, active="activating", sub="start-pre", nr=1, age_s=20)
+def test_C1_a_young_start_after_one_retry_is_a_boot_in_flight_not_a_restart(tmp_path, *, scratch_plane_env):
+    s = Scene(tmp_path, active="activating", sub="start-pre", nr=1, age_s=20, scratch_plane_env=scratch_plane_env)
     r, log = s.keepalive()
     assert "SKIP — boot in flight" in log, (log, r.stderr[-300:])
     assert s.restarts() == []

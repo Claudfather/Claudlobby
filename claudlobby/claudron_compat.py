@@ -1,7 +1,7 @@
 """Claudron compatibility floor — machine-readable SSOT.
 
 Maps each claudlobby integration surface to the minimum Claudron capability
-it needs. ``claudlobby doctor``'s claudron check (``doctor.check_claudron``)
+it needs. ``claudlobby host doctor``'s claudron check (``doctor.check_claudron``)
 reads this table; ``documentation/integrations/claudron-integration.md`` is the
 human-readable rendering and must be updated when this table changes (a unit
 test asserts the doc stays in sync).
@@ -53,7 +53,7 @@ COMPAT_FLOOR: tuple[ClaudronCapability, ...] = (
         probe=PROBE_API,
     ),
     ClaudronCapability(
-        feature="CLI query wedge (dispatch-task.sh preflight)",
+        feature="Agent vault lookup (composed instructions and check-in skill)",
         requires="claudron lookup CLI",
         # 0.3.0, not 0.2.0: post-L1 the wedge relies on the CLI reading
         # CLAUDRON_VAULT_PATH (dropped the explicit --vault), which landed in

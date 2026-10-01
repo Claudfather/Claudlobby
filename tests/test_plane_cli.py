@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from claudlobby.plane.db import connect, db_path
-from claudlobby.plane.migrations import migrate
+from tests.plane_setup import initialize_plane
 
 
 def _run(args: list[str], stdin: str | None = None, cwd: Path | None = None):
@@ -34,7 +34,8 @@ def _intent_json() -> str:
 
 
 def test_emit_commits_and_prints_event_id(tmp_path: Path):
-    r = _run(["--root", str(tmp_path), "emit", "communication", "--json", "-"],
+    initialize_plane(tmp_path)
+    r = _run(["--root", str(tmp_path), "plane", "emit", "communication", "--file", "-"],
              stdin=_intent_json())
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip().startswith("ev_")
@@ -43,10 +44,23 @@ def test_emit_commits_and_prints_event_id(tmp_path: Path):
     conn.close()
 
 
+def test_plane_emit_json_result_and_retired_spelling(tmp_path: Path):
+    initialize_plane(tmp_path)
+    r = _run(["--root", str(tmp_path), "plane", "emit", "communication",
+              "--file", "-", "--json"], stdin=_intent_json())
+    assert r.returncode == 0, r.stderr
+    result = json.loads(r.stdout)
+    assert result["command"] == "plane.emit" and result["ok"] is True
+    assert result["data"]["outcomes"][0]["status"] == "committed"
+    old = _run(["--root", str(tmp_path), "emit", "communication", "--file", "-"],
+               stdin=_intent_json())
+    assert old.returncode == 2
+
+
 def test_emit_contract_violation_exits_2(tmp_path: Path):
     bad = json.loads(_intent_json())
     bad["payload"]["message_class"] = "yell"
-    r = _run(["--root", str(tmp_path), "emit", "communication", "--json", "-"],
+    r = _run(["--root", str(tmp_path), "plane", "emit", "communication", "--file", "-"],
              stdin=json.dumps(bad))
     assert r.returncode == 2
     assert "message_class" in r.stderr
@@ -63,8 +77,9 @@ def test_capture_modes_per_family(tmp_path: Path):
     cap = tmp_path / "state" / "plane"
     cap.mkdir(parents=True)
     (cap / "capture.json").write_text('{"*": "metadata"}')
+    initialize_plane(tmp_path)
     # communication: body dropped, proof triple kept
-    r = _run(["--root", str(tmp_path), "emit", "communication", "--json", "-"],
+    r = _run(["--root", str(tmp_path), "plane", "emit", "communication", "--file", "-"],
              stdin=_intent_json())
     assert r.returncode == 0, r.stderr
     from claudlobby.plane.db import connect, db_path
@@ -75,7 +90,7 @@ def test_capture_modes_per_family(tmp_path: Path):
     wi = {"event_type": "work_item", "emitter": "t", "fleet": "example-fleet",
           "payload": {"work_item_id": "wi_" + "5" * 32, "title": "x",
                        "created_by": "bot:example-fleet/alpha", "body": "secret"}}
-    r = _run(["--root", str(tmp_path), "emit", "work_item", "--json", "-"],
+    r = _run(["--root", str(tmp_path), "plane", "emit", "work_item", "--file", "-"],
              stdin=_json.dumps(wi))
     assert r.returncode == 0, r.stderr
     assert conn.execute("SELECT body FROM work_items").fetchone()["body"] is None
@@ -83,7 +98,7 @@ def test_capture_modes_per_family(tmp_path: Path):
     te = {"event_type": "task", "emitter": "t", "fleet": "example-fleet",
           "payload": {"work_item_id": "wi_" + "5" * 32, "event": "progress",
                        "summary": "secret detail"}}
-    r = _run(["--root", str(tmp_path), "emit", "task", "--json", "-"],
+    r = _run(["--root", str(tmp_path), "plane", "emit", "task", "--file", "-"],
              stdin=_json.dumps(te))
     assert r.returncode == 0, r.stderr
     detail = conn.execute("SELECT detail FROM events WHERE kind='task'").fetchone()["detail"]
@@ -94,7 +109,7 @@ def test_capture_modes_per_family(tmp_path: Path):
     comm2 = _json.loads(_intent_json())
     comm2["payload"]["msg_id"] = "msg_" + "6" * 32
     comm2["payload"]["body"] = "full-mode communication body"
-    _run(["--root", str(tmp_path), "emit", "communication", "--json", "-"],
+    _run(["--root", str(tmp_path), "plane", "emit", "communication", "--file", "-"],
          stdin=_json.dumps(comm2))
     row2 = conn.execute(
         "SELECT body, privacy FROM communications ORDER BY ingest_seq DESC"
@@ -102,13 +117,13 @@ def test_capture_modes_per_family(tmp_path: Path):
     assert row2["body"] == "full-mode communication body" and row2["privacy"] == "full"
     wi2 = {**wi, "payload": {**wi["payload"], "work_item_id": "wi_" + "6" * 32,
                               "body": "full-mode objective body"}}
-    _run(["--root", str(tmp_path), "emit", "work_item", "--json", "-"],
+    _run(["--root", str(tmp_path), "plane", "emit", "work_item", "--file", "-"],
          stdin=_json.dumps(wi2))
     assert conn.execute(
         "SELECT body FROM work_items ORDER BY ingest_seq DESC"
     ).fetchone()["body"] == "full-mode objective body"
     te2 = {**te, "payload": {**te["payload"], "summary": "kept"}}
-    _run(["--root", str(tmp_path), "emit", "task", "--json", "-"], stdin=_json.dumps(te2))
+    _run(["--root", str(tmp_path), "plane", "emit", "task", "--file", "-"], stdin=_json.dumps(te2))
     kept = conn.execute(
         "SELECT detail FROM events WHERE kind='task' ORDER BY ingest_seq DESC"
     ).fetchone()["detail"]
@@ -117,7 +132,8 @@ def test_capture_modes_per_family(tmp_path: Path):
 
 
 def test_plane_status_reports(tmp_path: Path):
-    _run(["--root", str(tmp_path), "emit", "communication", "--json", "-"],
+    initialize_plane(tmp_path)
+    _run(["--root", str(tmp_path), "plane", "emit", "communication", "--file", "-"],
          stdin=_intent_json())
     r = _run(["--root", str(tmp_path), "plane", "status"])
     assert r.returncode == 0
@@ -149,8 +165,9 @@ def test_a_spooled_batch_exits_6_not_0(tmp_path: Path):
         d["payload"]["msg_id"] = "msg_" + n * 32     # distinct: a repeat is a
         return _json.dumps(d)                        # UNIQUE violation, not a spool
 
-    # First emit creates the db and the directory tree.
-    r = _run(["--root", str(tmp_path), "emit", "communication", "--json", "-"],
+    # Explicit fixture setup admits the first ordinary emit.
+    initialize_plane(tmp_path)
+    r = _run(["--root", str(tmp_path), "plane", "emit", "communication", "--file", "-"],
              stdin=_intent("a"))
     assert r.returncode == 0, r.stderr
 
@@ -165,7 +182,7 @@ def test_a_spooled_batch_exits_6_not_0(tmp_path: Path):
     for p in originals:
         os.chmod(p, 0o444)
     try:
-        r = _run(["--root", str(tmp_path), "emit", "communication", "--json", "-"],
+        r = _run(["--root", str(tmp_path), "plane", "emit", "communication", "--file", "-", "--json"],
                  stdin=_intent("b"))
     finally:
         for p, mode in originals.items():            # or tmp_path cleanup fails
@@ -175,7 +192,9 @@ def test_a_spooled_batch_exits_6_not_0(tmp_path: Path):
         f"spooled batch exited {r.returncode}; 0 asserts 'recorded' about a row "
         f"no reader can see. stderr={r.stderr}"
     )
-    assert "SPOOLED" in r.stderr
+    result = _json.loads(r.stdout)
+    assert result["ok"] is False and result["error"]["code"] == "spooled"
+    assert result["data"]["outcomes"][0]["status"] == "spooled"
     # The batch really is on disk — durable, just not in the plane.
     assert list((plane_dir / "spool").rglob("*.json")), "nothing was actually spooled"
 
@@ -183,7 +202,27 @@ def test_a_spooled_batch_exits_6_not_0(tmp_path: Path):
 def test_a_committed_batch_still_exits_0(tmp_path: Path):
     """Positive control for the test above. Without it, a change that returns 6
     unconditionally passes the spool test and breaks every door on the host."""
-    r = _run(["--root", str(tmp_path), "emit", "communication", "--json", "-"],
+    initialize_plane(tmp_path)
+    r = _run(["--root", str(tmp_path), "plane", "emit", "communication", "--file", "-"],
              stdin=_intent_json())
     assert r.returncode == 0, r.stderr
     assert "SPOOLED" not in r.stderr
+
+
+def test_require_commit_refuses_without_spooling(tmp_path: Path):
+    import os
+    import stat
+
+    initialize_plane(tmp_path)
+    db = tmp_path / "state" / "plane" / "plane.db"
+    mode = stat.S_IMODE(db.stat().st_mode)
+    os.chmod(db, 0o444)
+    try:
+        r = _run(["--root", str(tmp_path), "plane", "emit", "communication",
+                  "--file", "-", "--require-commit", "--json"], stdin=_intent_json())
+    finally:
+        os.chmod(db, mode)
+    assert r.returncode == 5
+    result = json.loads(r.stdout)
+    assert result["error"]["code"] == "commit_unknown"
+    assert not list((tmp_path / "state" / "plane" / "spool").rglob("*.json"))

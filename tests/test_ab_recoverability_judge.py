@@ -1,6 +1,6 @@
-"""Tests for lib/ab-recoverability-judge.py — the #881 A2 semantic judge.
+"""Tests for harness/ab-recoverability-judge.py — the #881 A2 semantic judge.
 
-The judge fills the slot lib/ab-recoverability-scorer.py left open: it emits
+The judge fills the slot harness/ab-recoverability-scorer.py left open: it emits
 judgements, the scorer consumes them, and neither decides anything. These tests
 pin the properties that keep that true:
 
@@ -14,7 +14,7 @@ pin the properties that keep that true:
   4. No threshold, no PASS/FAIL — same posture as the scorer.
   5. Round-trip: what the judge writes is what the scorer reads.
 
-Loaded by path because lib/ filenames are hyphenated (ab-comms-verdict.py
+Loaded by path because claudlobby/_runtime_scripts/ filenames are hyphenated (ab-comms-verdict.py
 precedent). No test here makes a model call.
 """
 
@@ -27,8 +27,8 @@ import sys
 from pathlib import Path
 
 REPO_DIR = Path(__file__).resolve().parent.parent
-JUDGE_PATH = REPO_DIR / "lib" / "ab-recoverability-judge.py"
-SCORER_PATH = REPO_DIR / "lib" / "ab-recoverability-scorer.py"
+JUDGE_PATH = REPO_DIR / "harness" / "ab-recoverability-judge.py"
+SCORER_PATH = REPO_DIR / "harness" / "ab-recoverability-scorer.py"
 FIXTURES = REPO_DIR / "tests" / "fixtures"
 PAIRS = FIXTURES / "a2_calibration_pairs.jsonl"
 GOLD = FIXTURES / "a2_calibration_gold.jsonl"

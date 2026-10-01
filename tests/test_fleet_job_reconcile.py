@@ -26,10 +26,11 @@ import pytest
 from claudlobby.composer import _reconcile_fleet_job_units, compose_fleet_timers
 from claudlobby.config import load_fleet
 from claudlobby.paths import Paths
+from tests.package_fixtures import source_package
 
 
 def _make_paths(root: Path) -> Paths:
-    return Paths(root=root, fleet_dir=root)
+    return Paths(root=root, fleet_dir=root, package=source_package())
 
 
 def _write(root: Path, body: str) -> Path:
@@ -51,6 +52,7 @@ _FLEET = """\
     fleet:
       name: test-fleet
       service_prefix: com.test
+      manager: kev
       bots:
         kev:
           expertise: [eng]
@@ -68,6 +70,7 @@ _FLEET_NO_TIMERS = """\
     fleet:
       name: test-fleet
       service_prefix: com.test
+      manager: solo
       system_defaults: false
       bots:
         solo:
@@ -198,6 +201,7 @@ _FLEET_WANTS_TIMERS = """\
     fleet:
       name: test-fleet
       service_prefix: com.test
+      manager: solo
       bots:
         solo:
           expertise: [eng]
@@ -210,6 +214,7 @@ _FLEET_WANTS_TIMERS_AND_BRIEFS = """\
     fleet:
       name: test-fleet
       service_prefix: com.test
+      manager: solo
       bots:
         solo:
           expertise: [eng]
@@ -284,6 +289,7 @@ class TestTornDeclarationRefuses:
                 fleet:
                   name: test-fleet
                   service_prefix: com.test
+                  manager: solo
                   system_defaults:
                     timers: false
                   bots:
@@ -342,9 +348,10 @@ class TestLoaderRefusesATornRead:
         with pytest.raises(RuntimeError, match="system.yaml is missing"):
             config_mod._load_system_defaults()
 
-    def test_empty_system_yaml_raises(self, stub_pkg_dir):
+    @pytest.mark.parametrize("contents", ["", "- malformed-defaults\n"])
+    def test_empty_system_yaml_raises(self, stub_pkg_dir, contents):
         pkg, config_mod, _ = stub_pkg_dir
-        (pkg / "system.yaml").write_text("")
+        (pkg / "system.yaml").write_text(contents)
         with pytest.raises(RuntimeError, match="empty or parses to nothing"):
             config_mod._load_system_defaults()
 
@@ -394,6 +401,7 @@ class TestAnOptedOutFleetIsNotCollateral:
         fleet:
           name: optout
           service_prefix: com.optout
+          manager: solo
           system_defaults: false
           bots:
             solo:
@@ -431,7 +439,10 @@ class TestSystemYamlIsPackaged:
         # The measured route into the torn state: system.yaml was absent from
         # package-data, so a built wheel shipped without it and every
         # non-editable install read empty system defaults.
-        import tomllib
+        try:
+            import tomllib
+        except ModuleNotFoundError:  # supported Python 3.10; declared dev extra
+            import tomli as tomllib
 
         root = Path(__file__).resolve().parent.parent
         data = tomllib.loads((root / "pyproject.toml").read_text())
@@ -468,6 +479,7 @@ class TestDormantJobsSurviveThePrune:
         fleet:
           name: test-fleet
           service_prefix: com.test
+          manager: solo
           defaults:
             jobs:
               keepalive:
@@ -519,7 +531,7 @@ class TestDiscriminatorReadsTheUnfilteredSet:
         "defaults:\n"
         "  jobs:\n"
         "    manager-checkin:\n"
-        "      script: $CLAUDLOBBY_ROOT/lib/manager-checkin.sh\n"
+        "      script: $CLAUDLOBBY_NATIVE_DIR/manager-checkin.sh\n"
         "      interval: 900\n"
         "      type: oneshot\n"
     )
@@ -531,6 +543,7 @@ class TestDiscriminatorReadsTheUnfilteredSet:
         fleet:
           name: test-fleet
           service_prefix: com.test
+          manager: solo
           bots:
             solo:
               expertise: [eng]
@@ -584,10 +597,11 @@ class TestOwnershipAndDeclaredCount:
             fleet:
               name: test-fleet
               service_prefix: com.test
+              manager: solo
               defaults:
                 jobs:
                   code-audit-sweep:
-                    script: $CLAUDLOBBY_ROOT/lib/code-audit-sweep.sh
+                    script: $CLAUDLOBBY_NATIVE_DIR/code-audit-sweep.sh
                     schedule: "*-*-* 03:00:00"
                     type: oneshot
               sweep:

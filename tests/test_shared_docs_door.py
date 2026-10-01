@@ -12,6 +12,7 @@ from pathlib import Path
 
 from claudlobby.composer import compose_claude_md
 from claudlobby.config import BotConfig, FleetConfig
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 from tests.conftest import install_real_template
 
@@ -24,7 +25,7 @@ def _setup(tmp_path: Path) -> Paths:
     install_real_template(root)
     (root / "runtime" / "bots").mkdir(parents=True)
     (root / "voices").mkdir()
-    return Paths(root=root, fleet_dir=root)
+    return Paths(root=root, fleet_dir=root, package=source_package())
 
 
 # The exact legacy block — the non-vault branch must reproduce it verbatim.
@@ -48,14 +49,14 @@ class TestNonVaultRawTree:
     def test_raw_tree_block_is_byte_identical(self, tmp_path):
         paths = _setup(tmp_path)
         bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
         md = compose_claude_md(bot, fleet, paths)
         assert _expected_raw_tree_block(str(paths.shared_docs)) in md
 
     def test_no_door_language(self, tmp_path):
         paths = _setup(tmp_path)
         bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
         md = compose_claude_md(bot, fleet, paths)
         assert "Navigate for config, query for knowledge" not in md
         assert "CLAUDRON_VAULT_PATH" not in md
@@ -71,7 +72,7 @@ class TestVaultWiredDoor:
             expertise=["eng"],
             claudron_vault_path="/opt/vaults/acme",
         )
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
         return compose_claude_md(bot, fleet, paths)
 
     def test_door_named(self, tmp_path):

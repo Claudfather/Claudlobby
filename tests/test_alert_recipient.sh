@@ -15,12 +15,12 @@
 # pass a weaker test and leave the auditability requirement unmet.
 #
 # Hermetic without env -i: CLAUDLOBBY_ROOT is a temp estate, PLANE_SOCKET is a
-# dead path, and the plane's cold rung is the suite's capture shim -- so no real
+# dead path. The real shim stages raw events under the scratch root, so no real
 # fleet, daemon or unit is reachable. Standalone bash; macOS /bin/bash (3.2).
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB_DIR="$SCRIPT_DIR/../lib"
+LIB_DIR="$SCRIPT_DIR/../claudlobby/_runtime_scripts"
 PASS=0; FAIL=0; TOTAL=0
 assert_eq() {
     TOTAL=$((TOTAL + 1)); local d="$1" e="$2" a="$3"
@@ -29,11 +29,20 @@ assert_eq() {
 
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 export CLAUDLOBBY_ROOT="$T"
-export PLANE_EMIT_CLI="$SCRIPT_DIR/plane_capture_cli.sh"
 export PLANE_SOCKET="$T/no.sock"
-export PLANE_CAPTURE="$T/plane-capture.jsonl"; : > "$PLANE_CAPTURE"
-cap_count() { grep -c "$1" "$PLANE_CAPTURE" 2>/dev/null | tr -d ' '; }
-cap_reset() { : > "$PLANE_CAPTURE"; }
+export PLANE_EMIT_DISABLED=0
+PLANE_CAPTURE="$T/plane-capture.jsonl"
+cap_refresh() {
+    python3 - "$T/state/plane/staged" "$PLANE_CAPTURE" <<'PY'
+import json, pathlib, sys
+with open(sys.argv[2], "w") as out:
+    for path in sorted(pathlib.Path(sys.argv[1]).glob("*.batch")):
+        for event in json.loads(path.read_text())["events"]:
+            out.write(json.dumps(event, separators=(",", ":")) + "\n")
+PY
+}
+cap_count() { cap_refresh; grep -c "$1" "$PLANE_CAPTURE" 2>/dev/null | tr -d ' '; }
+cap_reset() { rm -f "$T/state/plane/staged/"*.batch; : > "$PLANE_CAPTURE"; }
 
 # A NESTED estate (local/<system>/<fleet>/), which is the layout the flat glob
 # misses and the nested one matches. "ai-platform" sorts before "zeta" -- the

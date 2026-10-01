@@ -15,6 +15,7 @@ from tests.conftest import MINIMAL_FLEET_YAML, install_real_template
 
 from claudlobby.composer import compose_bot_conf, compose_claude_md
 from claudlobby.config import load_fleet
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 from claudlobby.validator import validate
 
@@ -56,7 +57,7 @@ def _load(fleet_dir: Path):
 
 
 def _paths(fleet_dir: Path) -> Paths:
-    return Paths(root=fleet_dir, fleet_dir=fleet_dir)
+    return Paths(root=fleet_dir, fleet_dir=fleet_dir, package=source_package())
 
 
 # --- config: loading -----------------------------------------------------------
@@ -312,29 +313,30 @@ def test_root_mode_projects_yaml_is_gitignored():
     )
 
 
-def test_new_bot_auto_generate_refuses_on_validation_errors(fleet_dir):
-    # scaffolding --auto-generate must gate on validate() like generate does;
-    # an invalid tier must block composition, not reach bot.conf verbatim.
+def test_bot_create_has_no_auto_generate_path(fleet_dir):
+    # Source authoring cannot compose a bot as a side effect; the retired flag
+    # is a syntax error even if a caller tries it with a complete request.
     from claudlobby.__main__ import main
 
     _write_projects(
         fleet_dir,
         "projects:\n  p:\n    repos: [a/b]\n    validation: {tier: revew}\n",
     )
-    rc = main(
-        [
+    original = (fleet_dir / "fleet.yaml").read_text()
+    with pytest.raises(SystemExit) as exc:
+        main([
             "--root",
             str(fleet_dir),
-            "new-bot",
+            "bot", "create",
             "--name",
             "newbie",
             "--expertise",
             "orchestration",
             "--auto-generate",
             "--yes",
-        ]
-    )
-    assert rc != 0, "auto-generate must refuse while validate() reports errors"
+        ])
+    assert exc.value.code == 2, "auto-generate must no longer be a bot-create option"
+    assert (fleet_dir / "fleet.yaml").read_text() == original
     assert not (fleet_dir / "runtime" / "bots" / "newbie" / "bot.conf").exists()
 
 
@@ -456,7 +458,7 @@ def test_fleet_yaml_example_cross_references_projects_yaml():
 
 # --- timer-script parity on the shared compose gate (#735 follow-up) ------------
 # validate reads timer jobs off fleet.defaults, so the shared compose-outside-
-# generate gate (new-bot, move-bot) catches a denied timer script with no extra
+# generate gate (move-bot) catches a denied timer script with no extra
 # threading — the same L1 rule generate enforces via compose_fleet_timers.
 
 
@@ -619,25 +621,8 @@ def test_a_slug_that_would_start_with_a_digit_is_prefixed(fleet_dir):
     assert fleet.projects["p-30-day-abs"].repos == ["acme/30-day-abs"]
 
 
-def test_every_derived_slug_passes_the_three_shipped_slug_gates(fleet_dir):
-    """The validator's _PROJECT_KEY_RE, lib/checkin-contract.py's SLUG_RE and
-    dispatch-task.sh's --project check are three independent copies of one
-    rule. A derived key that any of them refuses is a table row nobody can
-    dispatch — acceptance criterion 3 of #1634.
-
-    BOUND — read this before trusting the third gate. Only TWO of the three are
-    exercised against the derived keys: `_PROJECT_KEY_RE` and the contract's
-    SLUG_RE are compiled and matched here. The shell gate is NOT executed; the
-    `shell_src` assertion is a **drift tripwire** that fails if
-    dispatch-task.sh's rule literal moves, and nothing more. It does not prove a
-    derived slug survives the shell path end to end, and a reader who takes it
-    that way will over-credit this test.
-
-    That end-to-end evidence exists, but it is not here: the door was driven for
-    real (`lib/dispatch-task.sh --project <slug> ...`) with derived slugs passing
-    the gate and the unprefixed control refused by name, recorded in the #1634 PR
-    body. If that path is ever made cheap to exercise in-process, promote it into
-    this test and delete this paragraph."""
+def test_every_derived_slug_passes_the_shipped_validators(fleet_dir):
+    """Derived keys satisfy config and check-in slug validation."""
     import re as _re
 
     from claudlobby.validator import _PROJECT_KEY_RE
@@ -645,12 +630,18 @@ def test_every_derived_slug_passes_the_three_shipped_slug_gates(fleet_dir):
     contract_slug = _re.compile(
         _re.search(
             r'SLUG_RE = re\.compile\(r"([^"]+)"',
-            (REPO_DIR / "lib" / "checkin-contract.py").read_text(),
+            (REPO_DIR / "claudlobby" / "checkin_contract.py").read_text(),
         ).group(1)
     )
-    shell_src = (REPO_DIR / "lib" / "dispatch-task.sh").read_text()
-    assert "[a-z][a-z0-9-]*" in shell_src, "dispatch-task's --project rule moved"
-
+    cli_slugs = [
+        _re.compile(_re.search(pattern, (REPO_DIR / path).read_text()).group(1))
+        for path, pattern in (
+            ("claudlobby/commands/task_write.py",
+             r'_optional\(args\.project, "--project", r"([^"]+)"\)'),
+            ("claudlobby/commands/workstream.py",
+             r're\.fullmatch\(r"([^"]+)", data\["project"\]\)'),
+        )
+    ]
     _write_fleet(
         fleet_dir,
         _with_scope(
@@ -663,6 +654,8 @@ def test_every_derived_slug_passes_the_three_shipped_slug_gates(fleet_dir):
     for key in fleet.projects:
         assert _PROJECT_KEY_RE.match(key), f"validator would reject derived key {key!r}"
         assert contract_slug.match(key), f"checkin-contract would reject derived key {key!r}"
+        for slug in cli_slugs:
+            assert slug.fullmatch(key), f"public CLI would reject derived key {key!r}"
 
 
 def test_no_scope_repos_derives_nothing(fleet_dir):

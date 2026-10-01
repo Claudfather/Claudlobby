@@ -1,4 +1,4 @@
-"""#1493 send-size probe — pytest wrapper for lib/send-size-probe.sh.
+"""#1493 send-size probe — pytest wrapper for harness/send-size-probe.sh.
 
 Two tiers, the tests/test_boot_strand_sampler.py shape:
 
@@ -35,7 +35,7 @@ import pytest
 from tests.conftest import call_script_fn, constructed_env
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-PROBE = REPO_ROOT / "lib" / "send-size-probe.sh"
+PROBE = REPO_ROOT / "harness" / "send-size-probe.sh"
 
 
 def _fn(name: str, *args: str) -> str:

@@ -1,5 +1,5 @@
 """Parse gate: every shipped bash script must survive `bash -n` under the
-system bash — lib/ plus any helper a library/ item ships (e.g. a skill's
+system bash — claudlobby/_runtime_scripts/ plus any helper a library/ item ships (e.g. a skill's
 executable, which is symlinked into the bot dir and run as-is).
 
 macOS /bin/bash is bash 3.2 — the shebang target of every lib script, so a
@@ -19,10 +19,10 @@ REPO_DIR = Path(__file__).resolve().parent.parent
 
 
 def _lib_scripts() -> list[Path]:
-    """Every lib/ file that is bash: *.sh plus suffix-less scripts whose
+    """Every claudlobby/_runtime_scripts/ file that is bash: *.sh plus suffix-less scripts whose
     shebang names bash."""
-    scripts = set((REPO_DIR / "lib").glob("*.sh"))
-    for p in (REPO_DIR / "lib").iterdir():
+    scripts = set((REPO_DIR / "claudlobby/_runtime_scripts").glob("*.sh"))
+    for p in (REPO_DIR / "claudlobby/_runtime_scripts").iterdir():
         if p.is_file() and p.suffix == "":
             try:
                 first = p.open("rt", errors="ignore").readline()
@@ -33,20 +33,21 @@ def _lib_scripts() -> list[Path]:
     return sorted(scripts)
 
 
-# lib/ only. Kept as its own set because tests/test_no_dead_session_command.py
+# claudlobby/_runtime_scripts/ only. Kept as its own set because tests/test_no_dead_session_command.py
 # imports it for a guard that is deliberately lib/-scoped (it is about the
 # slash commands start-bot.sh and pre-stop-handoff.sh inject as keystrokes).
 # Widening the parse gate below must not silently widen that guard.
 LIB_SCRIPTS = _lib_scripts()
 
-# The parse gate's own set: lib/ plus any *.sh a library/ item ships. A skill's
+# The parse gate's own set: claudlobby/_runtime_scripts/ plus any *.sh a library/ item ships. A skill's
 # helper is symlinked into the bot dir rather than rendered, so a syntax error
 # in one reaches the bot verbatim — same trust properties as lib/.
-SHIPPED_SCRIPTS = sorted(set(LIB_SCRIPTS) | set((REPO_DIR / "library").rglob("*.sh")))
+SHIPPED_SCRIPTS = sorted(set(LIB_SCRIPTS) | set((REPO_DIR / "library").rglob("*.sh"))
+                         | set((REPO_DIR / "harness").rglob("*.sh")))
 
 
 def _script_id(p: Path) -> str:
-    # Repo-relative: bare names now collide across lib/ and library/.
+    # Repo-relative: bare names now collide across claudlobby/_runtime_scripts/ and library/.
     return str(p.relative_to(REPO_DIR))
 
 

@@ -43,7 +43,7 @@ Record `email`, `orgName` and `subscriptionType` **now**. This is the only cheap
 # must not follow you into this shell. $sources is deliberately UNQUOTED on the
 # grep line: those are globs and must expand. `/dev/null` keeps grep off stdin
 # if the resolver ever returns nothing.
-sources=$(. "$CLAUDLOBBY_ROOT/lib/lib-common.sh" >/dev/null 2>&1; \
+sources=$(. "$CLAUDLOBBY_NATIVE_DIR/lib-common.sh" >/dev/null 2>&1; \
           host_bots_dirs | sed 's:$:/*/bot.conf:')
 
 # A resolver that returned nothing has queried nothing. That is a TOTAL failure,
@@ -129,7 +129,7 @@ sleep 1
 tmux -L relog send-keys Enter
 ```
 
-**Enter goes as a separate call, after a settle.** Sending the code and Enter in one `send-keys` submits before the TUI has registered the input, and the keystroke is lost — the same race `lib/lib-common.sh::pane_send_verified` exists to handle for bot startup. Here it is a hand-driven one-off, so the settle is manual.
+**Enter goes as a separate call, after a settle.** Sending the code and Enter in one `send-keys` submits before the TUI has registered the input, and the keystroke is lost — the same race `claudlobby/_runtime_scripts/lib-common.sh::pane_send_verified` exists to handle for bot startup. Here it is a hand-driven one-off, so the settle is manual.
 
 **Never store, log, or echo the code.** Do not write it to a file, do not put it in a report, do not repeat it back on the channel. It is a short-lived credential-exchange token — it belongs in exactly one `send-keys` and nowhere else.
 

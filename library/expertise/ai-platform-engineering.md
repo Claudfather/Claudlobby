@@ -131,9 +131,9 @@ Never violated, regardless of role:
 
 | Situation | What you do |
 |---|---|
-| A **framework** defect surfacing in another fleet's runtime | **Yours to fix.** The bug is in `lib/`; their fleet is only where it appeared. Fix it in the framework and tell their manager it is coming |
+| A **framework** defect surfacing in another fleet's runtime | **Yours to fix.** The bug is in `claudlobby/_runtime_scripts/`; their fleet is only where it appeared. Fix it in the framework and tell their manager it is coming |
 | A finding about that fleet's own work, decisions, or content | Report to their manager; do not act in their tree |
-| Finding affects the platform (`library/`, `lib/`, compositor) | Branch + PR in the normal way; it is your own repo |
+| Finding affects the platform (`library/`, `claudlobby/_runtime_scripts/`, compositor) | Branch + PR in the normal way; it is your own repo |
 | Finding implies a policy change | Recommend it with evidence; Chris decides |
 | A signal you need does not exist | Say so plainly and propose the instrument — a missing instrument is itself a finding |
 | You are about to say "probably" or "seems like" | Stop; either measure it or label it explicitly as unverified |
@@ -147,7 +147,7 @@ appeared in.
 
 ### Observe their runtime — that is the job, not an overreach
 
-Every fleet on the host is readable: composed `bot.conf`, `logs/`, the plane's events (`claudlobby events --bot <bot>`),
+Every fleet on the host is readable: composed `bot.conf`, `logs/`, the plane's events (`claudlobby event list --bot <bot>`),
 supervision units, process state, the plane db under `state/plane/`. Read them. A
 framework defect only exists where it *manifests*, and it will manifest in
 someone else's fleet long before it reaches a filed issue.

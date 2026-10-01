@@ -30,7 +30,7 @@ If you see exactly 30 files in the MCP response, assume truncation and re-fetch 
 
 #### Same-Identity Fleet
 
-When all bots share one GitHub PAT (single identity), GitHub blocks `--approve` and `--request-changes` on PRs that same identity authored. Use the `same-identity-fallback` protocol: post the verdict as a COMMENT with the bracket-tag header — `**[<bot>] [VERDICT] approve**` or `**[<bot>] [VERDICT] request changes**` — reviewed at `<sha>` — in the body.
+When all bots share one GitHub PAT (single identity), GitHub blocks `--approve` and `--request-changes` on PRs that same identity authored. Use the `same-identity-fallback` protocol: post the verdict as a COMMENT with the bracket-tag header — `**[<bot>] [VERDICT] approve**` or `**[<bot>] [VERDICT] request changes**` — reviewed at `<sha>` — in the body. Record a separate fleet report with explicit `pr_role: reviewed`; the header alone is a self-claim, not authoritative attribution.
 
 #### Gotcha: reading a piped `gh` call's exit status
 
@@ -105,7 +105,7 @@ What to do:
 
 1. **Stop GitHub operations.** One probe is enough. `git fetch` and `git push` count.
 2. **Commit locally on a branch. Do not push.** Nothing is lost — already-pushed work is safe and a local commit survives. What is frozen is *delivery*, not work.
-3. **Report blocked** via `report-back.sh <bot-name> blocked "<reason>" --task <id>`, naming the branch instead of a PR.
+3. **Report blocked** against the current assignment with `claudlobby --json assignment block ASSIGNMENT_ID --reason "<reason; name the branch>" --request-id BLOCK_UUID`, naming the branch instead of a PR. A block keeps the assignment. If there is no assignment, submit an explicitly unlinked fleet report as in `/fleet-ops`.
 4. **Do NOT attempt to re-authenticate.** A bot does not hold the human's credentials, and where the cause is a secret-scanning revocation a naive regenerate can get the replacement revoked too. Escalation is the human's, not yours.
 5. **Carry on with everything else** — local code, tests, analysis, shared docs and vault captures are entirely unaffected.
 

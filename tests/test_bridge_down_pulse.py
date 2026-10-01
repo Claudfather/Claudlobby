@@ -10,7 +10,7 @@ import subprocess
 import time
 from pathlib import Path
 
-LIB_COMMON = Path(__file__).resolve().parent.parent / "lib" / "lib-common.sh"
+LIB_COMMON = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts" / "lib-common.sh"
 
 
 def _bridge_down_state(bot_dir: Path, home: Path, grace: int = 300) -> tuple[str, int]:

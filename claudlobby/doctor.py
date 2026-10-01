@@ -1,4 +1,4 @@
-"""claudlobby doctor — pre-flight fleet health diagnostic.
+"""claudlobby host doctor — pre-flight fleet health diagnostic.
 
 Consolidates checks from creds-check.sh, check-npx-cache.sh, and
 reconcile-fleet.sh into a single Python entry point with structured output.
@@ -23,6 +23,7 @@ from .claudron_compat import (
     PROBE_VERB_PREFIX,
 )
 from .config import FleetConfig
+from .context import native_environment
 from .paths import Paths, tmux_socket_for_bot, vault_api_available
 from .validator import validate, warning_summary
 
@@ -165,7 +166,7 @@ def check_mcp_packages(fleet: FleetConfig, paths: Paths, report: DoctorReport) -
     The offline half of the package check, and the half worth a doctor rung:
     it costs no network call, and on the shared library every declaration found
     dead so far was an unpinned one. Deliberately does NOT probe the registry —
-    `claudlobby doctor` is run to answer a question quickly, and the network
+    `claudlobby host doctor` is run to answer a question quickly, and the network
     signal is opt-in at compose time where its cost is a considered choice.
 
     WARN, never fail. An unpinned package is unverified, not broken: measured
@@ -251,6 +252,12 @@ def check_npx_cache(paths: Paths, report: DoctorReport) -> None:
             text=True,
             timeout=30,
             cwd=str(paths.root),
+            env={
+                **os.environ,
+                **native_environment(paths),
+                "FLEET_NAME": paths.fleet_name or "",
+                "BOT_DIR": "",
+            },
         )
         if result.returncode == 0:
             report.add("npx-cache", "pass", "all MCP packages cached (npx + uvx)")
@@ -272,9 +279,9 @@ def _check_composed_launches(fleet: FleetConfig, paths: Paths, report: DoctorRep
 
     A `node` entry inside a `state/mcp/npm/` copy whose script is gone is a
     server that will not start at the bot's next session, and nothing else says
-    so: the plan below reads what `generate` would compose NOW, which is the npx
+    so: the plan below reads what config staging would compose NOW, which is the npx
     fallback. Every bot is read, armed or not, because a bot disarmed without a
-    regenerate still launches whatever its file names. A fleet with no composed
+    new activation still launches whatever its file names. A fleet with no composed
     direct launch adds no line."""
     from . import mcp_direct
 
@@ -307,8 +314,9 @@ def _check_composed_launches(fleet: FleetConfig, paths: Paths, report: DoctorRep
         shown = ", ".join(dead[:4]) + (f" (+{len(dead) - 4} more)" if len(dead) > 4 else "")
         report.add("mcp-launch-composed", "fail",
                    f"{len(dead)} composed MCP server(s) will not start: the state/mcp copy"
-                   f" they launch is gone: {shown} — run `claudlobby warm-cache` for this"
-                   " fleet, then generate (generate alone falls back to npx)")
+                   f" they launch is gone: {shown} — inspect the owned copy;"
+                   " `host cache warm` may report it unusable, so stage and activate"
+                   " a config plan to publish the npx fallback if it cannot be restored")
     elif seen:
         report.add("mcp-launch-composed", "pass",
                    f"{seen} composed direct launch(es): every entry point exists")
@@ -319,7 +327,7 @@ def check_mcp_launch(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> 
     still carrying an npm wrapper and why.
 
     It reads the composer's own plan (`mcp_launch_plan`), so doctor and
-    generate cannot disagree. No armed bot adds no line: off is the shipped
+    config staging cannot disagree. No armed bot adds no line: off is the shipped
     default, and the switches rung already names it with its arm line. The
     composed files are read first and separately (`mcp-launch-composed`),
     because the plan cannot see a copy removed after compose."""
@@ -347,7 +355,8 @@ def check_mcp_launch(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> 
                    f"{len(armed)} armed bot(s): every npx server launches directly")
         return
     shown = ", ".join(left[:6]) + (f" (+{len(left) - 6} more)" if len(left) > 6 else "")
-    fix = " — run `claudlobby warm-cache` for this fleet, then generate" if fixable else ""
+    fix = (" — run `claudlobby --fleet <fleet> host cache warm`, then stage and activate"
+           " a new config plan" if fixable else "")
     report.add("mcp-launch", "warn",
                f"{len(left)} server(s) on armed bot(s) still launch through npx: {shown}{fix}")
 
@@ -488,12 +497,12 @@ _CREDENTIAL_PROBES: dict[str, tuple[str, str]] = {
 #:
 #: A CREDENTIAL HAS AN IDENTITY AND A REACH; THEY ARE INDEPENDENT. An identity
 #: endpoint answers nothing about access -- probe the OPERATION you need. The
-#: GitHub App branch in `lib/creds-check.sh` already embodies this (it probes
+#: GitHub App branch in `claudlobby/_runtime_scripts/creds-check.sh` already embodies this (it probes
 #: `/installation/repositories` because a `ghs_` token 403s on `/user`, D13).
 #: Durable home for the rule: Claudlobby#1400.
 #:
 #: KNOWN DUPLICATION, named rather than left to be rediscovered. This table
-#: also exists in bash, as `_railway_token_specs` in `lib/creds-check.sh`, and
+#: also exists in bash, as `_railway_token_specs` in `claudlobby/_runtime_scripts/creds-check.sh`, and
 #: the two cannot share a literal across languages. A previous version carried
 #: the comment "matches creds-check.sh" -- a copy kept in sync by hand, which
 #: went stale the moment the bash side was fixed, and that is how `doctor` came
@@ -1017,7 +1026,7 @@ def check_workstream_residual(fleet: FleetConfig, paths: Paths, report: DoctorRe
     empty answer for this fleet's workstreams is LEGITIMATE on its own --
     nothing downstream can raise it from inside that read -- only a
     comparison against the file can. Outlives the importer
-    (`claudlobby plane import-workstreams`): once every fleet is imported
+    (`claudlobby migration workstreams`): once every fleet is imported
     this rung goes quiet, and it is what catches the NEXT stranded file
     from the next store that moves without its data.
 
@@ -1071,7 +1080,7 @@ def check_workstream_residual(fleet: FleetConfig, paths: Paths, report: DoctorRe
             "fail",
             f"{len(missing)} row(s) in {resid.name} the plane does not hold"
             f" ({', '.join(missing[:3])}{', ...' if len(missing) > 3 else ''})"
-            f" -- run `claudlobby --fleet {fleet.name} plane import-workstreams`",
+            f" -- run `claudlobby --fleet {fleet.name} migration workstreams --apply`",
         )
     else:
         report.add(
@@ -1322,21 +1331,20 @@ def check_manifest_provenance(
     # silent for a fleet with no vault-wired bot: there is no runtime whose
     # inputs could have moved, and "regenerate to record what this runtime was
     # composed from" is nonsense addressed to a runtime that does not exist.
-    # doctor already has rungs for "you have not generated yet".
+    # doctor already has rungs for a fleet with no activated runtime yet.
     if not paths.runtime_bots.is_dir() or not any(paths.runtime_bots.iterdir()):
         return
 
     prov = read_manifest_provenance(paths)
     if prov is None:
         report.add("manifest-provenance", "warn",
-                   "composed by a claudlobby without provenance — run `generate` "
-                   "to record what this runtime was composed from")
+                   "composed by a claudlobby without provenance — stage `claudlobby --root <data-root> config plan --release <sealed-release-id>` and activate the returned plan with `claudlobby --root <data-root> host activate <plan-id> --install-directory <native-user-unit-dir>` to record its source")
         return
     if prov.get("schema") != MANIFEST_PROVENANCE_SCHEMA:
         report.add("manifest-provenance", "warn",
                    f"provenance schema {prov.get('schema')!r} is not the "
                    f"{MANIFEST_PROVENANCE_SCHEMA} this build reads — not "
-                   "interpreting it; run `generate` to re-record")
+                   "interpreting it; stage a config plan for a sealed release and activate the returned plan to re-record")
         return
 
     changed = changed_manifest_inputs(fleet, paths, prov)
@@ -1348,8 +1356,7 @@ def check_manifest_provenance(
                    f"manifest changed since the running fleet was composed "
                    f"({', '.join(changed)}; composed {prov.get('composed_at')})"
                    + (f"; {how}" if how else "") +
-                   " — run `generate`, then restart the bots that read it at "
-                   "session start (bot.conf and CLAUDE.md are read once, at startup)")
+                   " — stage `claudlobby --root <data-root> config plan --release <sealed-release-id>` and activate the returned plan with `claudlobby --root <data-root> host activate <plan-id> --install-directory <native-user-unit-dir>`; activation restarts bots that read bot.conf and CLAUDE.md at session start")
         return
 
     # Compose-time conditions are reported even when nothing has changed since:
@@ -1380,7 +1387,7 @@ def check_fleet_validation(
         report.add(
             "fleet-yaml",
             "warn",
-            f"{warning_summary(val_report)} — `claudlobby validate` prints each",
+            f"{warning_summary(val_report)} — `claudlobby config validate` prints each",
         )
     else:
         report.add("fleet-yaml", "pass", "fleet.yaml valid")
@@ -1454,7 +1461,7 @@ def run_doctor(fleet: FleetConfig, paths: Paths, *,
     report = DoctorReport()
     # Resolved ONCE for the three rungs that ask the same question (#1680):
     # ignition_doors goes through the switch cascade, which shells out to
-    # lib/env-tiers.sh. Falling back to None rather than guarding here keeps
+    # claudlobby/_runtime_scripts/env-tiers.sh. Falling back to None rather than guarding here keeps
     # the HOIST itself from becoming a new failure point — where a resolver
     # failure surfaces is then whatever it is on main. Deliberately not a
     # claim about WHICH rung that is: on a fleet with a leaf manager
@@ -1486,7 +1493,7 @@ def run_doctor(fleet: FleetConfig, paths: Paths, *,
 
 def format_report(report: DoctorReport) -> str:
     """Format the doctor report for terminal output."""
-    lines = ["", "=== claudlobby doctor ===", ""]
+    lines = ["", "=== claudlobby host doctor ===", ""]
     for check in report.checks:
         if check.status == "pass":
             icon = "PASS"

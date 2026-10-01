@@ -95,7 +95,7 @@ The brain of the fleet. Converses freely, delegates to workers, monitors health.
 
 Equip via `fleet.yaml` — never a hand-installed cron (see
 [`fleet-yaml-schema.md`](fleet-yaml-schema.md#botsbotbriefing)). Each slot becomes a composed
-per-(bot,slot) timer whose `ExecStart` runs `lib/briefing-trigger.sh <fleet> <bot> <slot>`,
+per-(bot,slot) timer whose `ExecStart` runs `claudlobby/_runtime_scripts/briefing-trigger.sh <fleet> <bot> <slot>`,
 delivering `/briefing <slot>` into the bot's own session:
 
 ```yaml

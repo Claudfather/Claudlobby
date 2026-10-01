@@ -32,7 +32,7 @@ import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parent.parent
-LIB = REPO / "lib"
+LIB = REPO / "claudlobby/_runtime_scripts"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("bash") is None, reason="bash not installed"
@@ -401,8 +401,8 @@ def test_a_verdict_is_not_an_arm(tmp_path):
 #   hook       a live Claude Code turn: every tool call, prompt, reply, turn end
 #   background nothing reads the result (and plane_emit_bounded, i.e. every
 #              emit_fleet_event, defaults to it)
-#   door       a door whose outcome turns on the result: three refuse on a
-#              non-zero rc, two disclose it and proceed
+#   door       the default for explicit shim calls; task/check-in/workstream
+#              mutations now commit through their Python operation owners
 CLASSES = {
     "bot-vitals.sh": "hook",
     "plane-telegram-in.sh": "hook",
@@ -416,11 +416,6 @@ CLASSES = {
     "tg-post.sh": "background",
     "briefing-trigger.sh": "background",
     "vault-sync.sh": "background",
-    "task-act.sh": "door",
-    "checkin-record.sh": "door",
-    "workstream-update.sh": "door",
-    "dispatch-task.sh": "door",
-    "report-back.sh": "door",
 }
 # Callers that deliberately keep the default: the shim itself, the helpers'
 # home, and two harnesses that measure the default.
@@ -472,7 +467,10 @@ def test_every_composed_turn_hook_that_emits_is_a_hook():
         if event not in turn:
             continue
         for entry in entries:
-            m = re.search(r"/lib/([\w.-]+\.sh)", entry["command"])
+            # Hooks resolve the script from the activated release at runtime.
+            m = re.search(
+                r"\$CLAUDLOBBY_NATIVE_DIR/([\w.-]+\.sh)(?:\s|$)", entry["command"]
+            )
             if m and EMITS.search(_code(LIB / m.group(1))):
                 seen.add(m.group(1))
                 assert CLASSES.get(m.group(1)) == "hook", m.group(1)

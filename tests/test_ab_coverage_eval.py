@@ -14,13 +14,18 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
+from tests.test_ab_comms_eval import _selected_built_cli  # noqa: F401
+
+
 
 from tests.conftest import load_lib_module
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-HARNESS = REPO_ROOT / "lib" / "ab-comms-eval.sh"
+HARNESS = REPO_ROOT / "harness" / "ab-comms-eval.sh"
 
-verdict = load_lib_module("ab-coverage-verdict")
+verdict = load_lib_module("ab-coverage-verdict", directory="harness")
 
 
 def _sourced(body: str, *args: str) -> str:
@@ -193,6 +198,7 @@ class TestAnalyzer:
         assert "t3_median=none" in text
 
 
+@pytest.mark.usefixtures("_selected_built_cli")
 def test_dry_run_end_to_end(tmp_path):
     env = {**os.environ, "HOME": os.environ["HOME"]}
     result = subprocess.run(
@@ -236,6 +242,7 @@ def test_dry_run_end_to_end(tmp_path):
         shutil.rmtree(root, ignore_errors=True)
 
 
+@pytest.mark.usefixtures("_selected_built_cli")
 def test_token_efficiency_dry_run_untouched():
     result = subprocess.run(
         ["bash", str(HARNESS), "--dry-run", "--tasks", "1", "--reps", "1"],

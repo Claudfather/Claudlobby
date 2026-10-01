@@ -1,8 +1,7 @@
 #!/bin/bash
-# tests/plane_capture_cli.sh — a stand-in for the plane CLI's cold rung, for the
-# hermetic bash suites (F18 closure R1: no door writes a file any more, so a
-# suite that used to grep a bot's events file captures the batches instead).
-# The shim (lib/plane-emit.sh) hands the finalized batch file as the LAST
+# tests/plane_capture_cli.sh — batch renderer for hermetic emission-boundary
+# fixtures. This is not a cold-CLI fallback and does not prove commitment.
+# The fixture hands its captured batch file as the LAST
 # argument; this renders every event in it as the LEGACY ledger row the file
 # once held — {"ts","bot","type","source","data"} for a fleet event, the raw
 # payload otherwise — and appends it to $PLANE_CAPTURE (one row per line).
