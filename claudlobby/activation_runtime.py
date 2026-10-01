@@ -190,8 +190,10 @@ def start_unit(store: ActivationStore, activation_id: str, *, installed_file: Pa
         # launchctl bootstrap/kickstart acknowledges a request before the
         # spawned wrapper reaches its release-bound admission. A native PID
         # snapshot can therefore see that wrapper while it is still doomed to
-        # exit when this one-shot grant closes. Scheduled timers do not run at
-        # enrollment; their later ticks use ordinary selected admission.
+        # exit when this one-shot grant closes. A timer is not awaited here, but
+        # an already due one can fire at once: its Linux service never uses this
+        # grant and instead waits for the lock, then ordinary selected admission
+        # (runtime_admission._scheduled_candidate).
         immediate = unit.mode == "exec" or file.suffix == ".service"
         if file.suffix == ".plist" and not immediate:
             try:

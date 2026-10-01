@@ -157,6 +157,33 @@ def test_scheduled_siblings_require_effective_and_selected_enrollment(tmp_path, 
     with pytest.raises(updates.HostUpdateError, match="switch differs"):
         updates.run_host_update(root, "runtime", scheduled=True)
 
+    # Selected metadata from the real unit owner keeps the composed switch the
+    # unit runs with (Pi 2026-10-01: =1 in the unit, missing from metadata), and
+    # still no other environment value.
+    import plistlib
+    from claudlobby.config_units import unit_family
+    from claudlobby.runtime_admission import wrap_unit_argv
+    flag = "CLAUDLOBBY_STAGED_CLAUDE_UPDATE_ENABLED"
+    unit_env = {"CLAUDLOBBY_ROOT": str(root), "CLAUDLOBBY_RELEASE_ID": "r-" + "a" * 64,
+                "CLAUDLOBBY_CLI": str(tmp_path / "selected/bin/claudlobby"), flag: "1",
+                "PRIVATE_TOKEN": "never-metadata"}
+    argv = wrap_unit_argv(unit_env, unit="claudlobby-claude-update", phase="producers",
+                          mode="oneshot", argv=[str(native / "update-claude-code.sh")])
+    items = unit_family({"claudlobby-claude-update.plist": (plistlib.dumps({
+        "Label": "claudlobby-claude-update", "WorkingDirectory": str(root),
+        "EnvironmentVariables": unit_env, "ProgramArguments": list(argv)}), 0o644),
+        "claudlobby-claude-update.service": (b"[Service]\n", 0o644)},
+        destination=native, scope="host", phase="producers", release_id=unit_env["CLAUDLOBBY_RELEASE_ID"])
+    selected = next(item for item in items if item["source"].endswith(".plist"))
+    assert selected["environment"][flag] == "1" and "PRIVATE_TOKEN" not in selected["environment"]
+    monkeypatch.setattr(updates, "selected_phase_entries", lambda *a: [selected])
+    monkeypatch.setenv(flag, "1")
+    ran = []
+    monkeypatch.setattr(updates.subprocess, "run", lambda argv, **kwargs: (
+        ran.append(kwargs["env"]) or subprocess.CompletedProcess(argv, 0, "", "")))
+    updates.run_host_update(root, "runtime", scheduled=True)
+    assert ran[-1][flag] == "1"
+
 
 @pytest.mark.parametrize(("script", "command"), [
     ("update-claude-code.sh", "runtime"), ("update-siblings.sh", "siblings")])

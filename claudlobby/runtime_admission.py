@@ -20,14 +20,18 @@ import socket
 import stat
 import struct
 import subprocess
+import sys
 import threading
 import time
 
-from .activation_state import ActivationError, ActivationStore, read_activation, read_selection
+from .activation_state import STEPS, ActivationError, ActivationStore, read_activation, read_selection
 from .releases import ReleaseManifest, read_release
 
 
 RESIDENT_UNIT_PHASES = {"plane-daemon": "ingest"}
+# A due timer can fire while its own candidate still starts producers (Pi
+# 2026-10-01: a 44-timer phase took about 55 seconds). Its one-shot waits.
+_SCHEDULED_WAIT = 180.0
 _UNIT_PREFIX = ("-I", "-B", "-m", "claudlobby.runtime_admission", "unit-start")
 
 
@@ -458,6 +462,56 @@ def _peer_pid(connection):
     return None
 
 
+def _scheduled_candidate(target: UnitStart) -> dict | None:
+    """The selected verified candidate's own frozen Linux timer service, else None.
+
+    Read-only identification before waiting, never admission: after the lock
+    frees, the unchanged selected-active check decides. Only the exact service
+    member of an enrolled producer timer family qualifies; it never uses a
+    start grant (its timer shares that family's admission argv).
+    """
+    if not sys.platform.startswith("linux") or target.phase != "producers" or target.mode != "oneshot":
+        return None
+    from .config_plan import PlanError, read_plan
+    from .config_units import planned_units
+    try:
+        selected = read_selection(target.root)
+        record = read_activation(target.root, selected["activation_id"]) if selected else None
+        body = record.body if record else {}
+        if (record is None or selected["release_id"] != target.release_id
+                or body["intent"]["release_id"] != target.release_id
+                or body["intent"]["plan_id"] != selected["plan_id"]
+                or (record.status, body["pending"], body["completed"]) not in (
+                    ("activating", "producers_resumed", list(STEPS[:-1])), ("active", None, list(STEPS)))):
+            return None
+        units = planned_units(read_plan(target.root, selected["plan_id"]), "Linux")
+    except (ActivationError, PlanError, OSError, ValueError, KeyError, TypeError):
+        return None
+    timed = {d.service for d, item in units
+             if item["enroll"] and item["phase"] == "producers" and d.source.suffix == ".timer"}
+    return selected if any(
+        d.source.suffix == ".service" and d.source.name in timed and d.source.stem == target.unit
+        and item["enroll"] and item["phase"] == "producers"
+        and item["admission"]["argv"] == list(target.argv) for d, item in units) else None
+
+
+def _await_scheduled(target: UnitStart, fd: int, selected: dict) -> None:
+    """Poll the existing SH lock; no body runs, nothing is recorded or resent."""
+    deadline = time.monotonic() + _SCHEDULED_WAIT
+    while True:
+        time.sleep(0.5)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise ActivationError("scheduled producer was not admitted before its wait ended; no job ran")
+            continue
+        _native_lock(target.root, fd, os.getppid())
+        if read_selection(target.root) != selected:
+            raise ActivationError("selected activation changed while the scheduled producer waited; no job ran")
+        return
+
+
 def run_unit(argv, *, identity: RuntimeIdentity | None = None, environment=None,
              execer=os.execvpe, runner=subprocess.run) -> int:
     """Private native unit boundary, not a readiness or lifetime writer claim.
@@ -488,7 +542,12 @@ def run_unit(argv, *, identity: RuntimeIdentity | None = None, environment=None,
         try:
             fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
         except BlockingIOError:
-            _request_start(target.root, {**_unit_request(target, identity), "pid": os.getpid()}, 2.0)
+            selected = _scheduled_candidate(target)
+            if selected is None:
+                _request_start(target.root, {**_unit_request(target, identity), "pid": os.getpid()}, 2.0)
+            else:
+                _await_scheduled(target, fd, selected)
+                _selected_active(target.root, identity, target.release_id)
         else:
             _selected_active(target.root, identity, target.release_id)
         # These are startup definitions, never ambient Python/shell injection.
