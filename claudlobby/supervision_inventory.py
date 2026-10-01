@@ -367,8 +367,9 @@ def legacy_linux_declarations(plan) -> tuple[UnitDeclaration, ...]:
     from .config_units import planned_units
 
     plan.check_fresh()
-    result = []
-    for declaration, _ in planned_units(plan, "Linux"):
+    result, services, timers = [], {}, []
+    planned = tuple(declaration for declaration, _ in planned_units(plan, "Linux"))
+    for declaration in planned:
         source = declaration.source
         if not source.exists() and not source.is_symlink():
             continue
@@ -404,6 +405,7 @@ def legacy_linux_declarations(plan) -> tuple[UnitDeclaration, ...]:
                     or any(group == "Service" for group, _ in fields)):
                 raise InventoryError("legacy Linux timer has a different service owner")
             # The paired service supplies the environment and working directory.
+            timers.append((len(result), declaration.service))
             result.append(replace(declaration, release_id="", environment=tuple(sorted(selected.items()))))
             continue
         if fields.get(("Service", "WorkingDirectory")) != [str(declaration.working_directory)]:
@@ -419,13 +421,30 @@ def legacy_linux_declarations(plan) -> tuple[UnitDeclaration, ...]:
                 if not separator or key in environment:
                     raise InventoryError("legacy Linux service environment is ambiguous")
                 environment[key] = item
+        if "FLEET_ROOT" in selected and "FLEET_ROOT" not in environment:
+            # Old compositor units predate FLEET_ROOT. Only its absence is
+            # legacy; a present different value still refuses below. The fleet
+            # owner is then CLAUDLOBBY_FLEET (fleet) or the exact unshared bot
+            # working directory (bot), and the returned declaration claims
+            # only assignments the source really carries.
+            if declaration.scope == "bot" and (
+                    declaration.working_directory.resolve() == Path(plan.data_root).resolve()
+                    or sum(item.working_directory.resolve() == declaration.working_directory.resolve()
+                           for item in planned if not item.service) != 1):
+                raise InventoryError("legacy Linux bot without fleet root has no unique working directory")
+            del selected["FLEET_ROOT"]
         if any(environment.get(key) != value for key, value in selected.items()):
             raise InventoryError("legacy Linux service has a different root or fleet owner")
         if declaration.scope == "bot":
             if not environment.get("TMUX_TMPDIR"):
                 raise InventoryError("legacy Linux bot has no tmux owner")
             selected["TMUX_TMPDIR"] = environment["TMUX_TMPDIR"]
-        result.append(replace(declaration, release_id="", environment=tuple(sorted(selected.items()))))
+        services[declaration.source.name] = tuple(sorted(selected.items()))
+        result.append(replace(declaration, release_id="", environment=services[declaration.source.name]))
+    for index, service in timers:
+        # A timer binds exactly the environment proven for its paired service.
+        if service in services:
+            result[index] = replace(result[index], environment=services[service])
     if not result:
         raise InventoryError("no reviewed legacy Linux unit sources were found")
     plan.check_fresh()
@@ -941,7 +960,8 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                         if props["Triggers"].split() != [declaration.service] or not installed.get(declaration.service):
                             raise InventoryError("timer activates a different service")
                     elif (Path(props["WorkingDirectory"]).resolve() != declaration.working_directory.resolve()
-                          or any(_environment(props["Environment"]).get(key) != value for key, value in declaration.environment)):
+                          or any(_environment(props["Environment"]).get(key) != value for key, value in declaration.environment)
+                          or "FLEET_ROOT" in _environment(props["Environment"]).keys() - dict(declaration.environment).keys()):
                         raise InventoryError("loaded data/fleet/release identity differs")
                 elif name in loaded or props["LoadState"] != "not-found":
                     raise InventoryError("loaded consumer lacks installed source bytes")
