@@ -33,14 +33,15 @@ class PlaneUnreachable(RuntimeError):
     empty (#1216)."""
 
 
-def fleet_heartbeat_series(conn, fleet: str, now: datetime) -> dict[str, list[tuple[datetime, str]]]:
-    """``{bot name (lower-cased): [(instant, state), ...]}`` for one fleet from
-    the plane — the alias's tail is the bot's name, matched case-insensitively
-    like every per-bot plane read (a case-variant alias mints a second
-    identity; the series are merged in time order)."""
+def fleet_heartbeat_series(conn, fleet: str, now: datetime,
+                           bot: str | None = None) -> dict[str, list[tuple[datetime, str]]]:
+    """``{bot name (lower-cased): [(instant, state), ...]}`` for one fleet (or
+    its one ``bot``) from the plane — the alias's tail is the bot's name,
+    matched case-insensitively like every per-bot plane read (a case-variant
+    alias mints a second identity; the series are merged in time order)."""
     from .plane.utilization import heartbeat_series      # lazy: that module imports the math from here
     out: dict[str, list[tuple[datetime, str]]] = {}
-    for alias, entries in heartbeat_series(conn, now=now, fleet=fleet).items():
+    for alias, entries in heartbeat_series(conn, now=now, fleet=fleet, bot=bot).items():
         out.setdefault(alias.rsplit("/", 1)[-1].lower(), []).extend(entries)
     for entries in out.values():
         entries.sort(key=lambda e: e[0])

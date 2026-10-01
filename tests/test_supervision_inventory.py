@@ -624,6 +624,52 @@ def test_unsealed_linux_sources_preserve_owned_host_fleet_bot_and_foreign_units(
         legacy_linux_declarations(plan)
 
 
+def test_legacy_linux_units_without_fleet_root_adopt_only_proven_environment(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from claudlobby import config_units
+
+    # 8bc588a-generated fleet and bot units carry no FLEET_ROOT; the candidate
+    # roster still declares one.
+    obs = Observations(tmp_path)
+    fleet_root = str(obs.root / "local/alpha")
+    obs.env = {"CLAUDLOBBY_ROOT": str(obs.root), "CLAUDLOBBY_FLEET": "alpha"}
+    obs.add("alpha-sweep.service", scope="fleet", working=obs.root)
+    obs.add("alpha-sweep.timer", scope="fleet", working=obs.root, service="alpha-sweep.service")
+    obs.env = {"CLAUDLOBBY_ROOT": str(obs.root), "TMUX_TMPDIR": "/tmp"}
+    bot = obs.add("alpha.worker.service", scope="bot")
+    candidate = [replace(item, environment=(*item.environment, ("FLEET_ROOT", fleet_root)))
+                 for item in obs.declarations]
+    plan = SimpleNamespace(data_root=obs.root, check_fresh=lambda: None)
+    monkeypatch.setattr(config_units, "planned_units", lambda _plan, manager:
+                        tuple((item, {}) for item in candidate) if manager == "Linux" else ())
+    declarations = legacy_linux_declarations(plan)
+    assert all("FLEET_ROOT" not in dict(item.environment) for item in declarations)
+    inventory = collect_enrollment(obs.root, declarations, package=obs.package,
+                                   runner=obs.runner, legacy_source=True).require_complete()
+    assert {unit.target for unit in inventory.units} == {
+        "alpha-sweep.service", "alpha-sweep.timer", "alpha.worker.service"}
+
+    # An effective FLEET_ROOT the reviewed source does not carry is not adopted.
+    effective = obs.properties["alpha.worker.service"]["Environment"]
+    obs.properties["alpha.worker.service"]["Environment"] = effective + " FLEET_ROOT=/other"
+    with pytest.raises(InventoryError, match="loaded data/fleet/release identity differs"):
+        collect_enrollment(obs.root, declarations, package=obs.package,
+                           runner=obs.runner, legacy_source=True).require_complete()
+    obs.properties["alpha.worker.service"]["Environment"] = effective
+
+    # A present but different fleet root still refuses.
+    source = obs.root / "generated/alpha.worker.service"
+    source.write_bytes(source.read_bytes() + b"Environment=FLEET_ROOT=/other\n")
+    with pytest.raises(InventoryError, match="different root or fleet owner"):
+        legacy_linux_declarations(plan)
+    source.write_bytes(bot.read_bytes())
+
+    # Without FLEET_ROOT, a bot working directory shared with another unit is ambiguous.
+    candidate.append(replace(candidate[-1], source=obs.root / "generated/alpha.other.service", bot="other"))
+    with pytest.raises(InventoryError, match="no unique working directory"):
+        legacy_linux_declarations(plan)
+
+
 def test_all_scopes_bytes_links_and_exact_candidate_cleanup(tmp_path):
     obs = Observations(tmp_path)
     obs.add("host.service")

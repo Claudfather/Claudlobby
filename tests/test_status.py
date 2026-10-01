@@ -541,6 +541,49 @@ class TestCollectFleetStatus:
         assert "plane is unreachable" in table and "restore state/plane/plane.db" in table
         assert "plane unreachable" in format_bot_detail(alice)
 
+    def test_one_bot_probes_and_reads_only_that_bot(self, mock_fleet, mock_paths):
+        """`bot status B` once probed every bot's tmux/service and read the
+        heartbeats twice; now B's probes alone, one heartbeat read, B's row."""
+        import subprocess
+        import claudlobby.status as status_mod
+
+        _land_heartbeats(mock_paths.root, "test-fleet", "alice", ["BUSY"])
+        _land_heartbeats(mock_paths.root, "test-fleet", "bob", ["IDLE", "BUSY"])
+        reads, probes = [], []
+        real_rows, real_run = status_mod._newest_heartbeat_rows, subprocess.run
+
+        def _spy(conn, fleet_name, names=None):
+            got = real_rows(conn, fleet_name, names)
+            reads.append(set(got))
+            return got
+
+        def _run(argv, *a, **kw):              # the native probes, recorded at the process boundary
+            if argv and argv[0] in ("tmux", "systemctl", "launchctl"):
+                probes.append(argv)
+                return subprocess.CompletedProcess(
+                    argv, 0, stdout="ActiveState=active\nSubState=running\n", stderr="")
+            return real_run(argv, *a, **kw)
+        with (
+            patch("claudlobby.status.subprocess.run", _run),
+            patch("claudlobby.status.platform.system", return_value="Linux"),
+            patch("claudlobby.status._newest_heartbeat_rows", _spy),
+        ):
+            results = collect_fleet_status(mock_fleet, mock_paths, only="bob")
+        assert [bs.name for bs in results] == ["bob"]
+        assert {p[0] for p in probes} == {"tmux", "systemctl"}, probes
+        assert all("bob" in " ".join(p) and "alice" not in " ".join(p) for p in probes), probes
+        assert reads == [{"bob"}]                       # ONE read; only bob's row kept
+        assert results[0].tmux_alive and results[0].service_active
+        assert results[0].pane_state == "BUSY" and results[0].state == "working"
+        # the scoped series is exactly the fleet read's bob, matched case-insensitively
+        from claudlobby.utilization import fleet_heartbeat_series
+        from tests.plane_fixtures import ro
+        now = datetime.now(timezone.utc)
+        with ro(mock_paths.root) as conn:
+            full = fleet_heartbeat_series(conn, "test-fleet", now)
+            one = fleet_heartbeat_series(conn, "test-fleet", now, "BOB")
+        assert set(full) == {"alice", "bob"} and one == {"bob": full["bob"]}
+
     def test_the_plane_serves_heartbeat_pane_state_and_utilization(self, mock_fleet, mock_paths):
         """With a plane: alice's newest sample is BUSY (heartbeat + pane state),
         her series rolls up to 100% busy; bob, never recorded, is blank."""

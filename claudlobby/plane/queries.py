@@ -897,18 +897,24 @@ REG_INVALID_TOMBSTONES_SQL = (
 # Presence itself is NEVER a table (spec §9b: an in-memory derivation over
 # the latest samples plus a live poll); this query is only its recorded
 # input.
+#
+# Per identity it SEEKS the newest ingest_seq on idx_samples_subject
+# (subject_uid, metric, ingest_seq) rather than window-ranking every heartbeat
+# the host ever recorded: the ranked form scanned and temp-sorted the whole
+# history (measured on a ~625MiB plane) to keep one row per identity. It still
+# visits every identity (callers filter by alias); an identity with no
+# heartbeat yields no row, as before. Rows come in uid order, explicitly, so a
+# caller's tie between case-variant aliases resolves the same way every read.
 LATEST_HEARTBEAT_SQL = (
-    "WITH latest AS ("
-    " SELECT subject_uid, value, ingest_seq, occurred_at,"
-    "  ROW_NUMBER() OVER (PARTITION BY subject_uid"
-    "    ORDER BY ingest_seq DESC) AS rn"
-    " FROM metric_samples WHERE metric='bot.heartbeat')"
-    " SELECT i.alias AS alias, l.value AS value, g.ingested_at AS ingested_at,"
-    "  l.occurred_at AS occurred_at"
-    " FROM latest l"
-    " JOIN identity_registry i ON i.uid = l.subject_uid"
-    " JOIN ingest_ledger g ON g.ingest_seq = l.ingest_seq"
-    " WHERE l.rn = 1"
+    "SELECT i.alias AS alias, s.value AS value, g.ingested_at AS ingested_at,"
+    "  s.occurred_at AS occurred_at"
+    " FROM identity_registry i"
+    " JOIN metric_samples s ON s.ingest_seq = ("
+    "  SELECT m.ingest_seq FROM metric_samples m"
+    "  WHERE m.subject_uid = i.uid AND m.metric = 'bot.heartbeat'"
+    "  ORDER BY m.ingest_seq DESC LIMIT 1)"
+    " JOIN ingest_ledger g ON g.ingest_seq = s.ingest_seq"
+    " ORDER BY i.uid"
 )
 
 RECONCILIATION_SQL = (

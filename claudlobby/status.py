@@ -120,17 +120,17 @@ class BotStatus:
         return self.service_sub == _SVC_UNDETERMINED
 
 
-def _check_tmux_sessions(fleet, paths) -> set[str]:
+def _check_tmux_sessions(fleet, paths, bots=None) -> set[str]:
     """Live bot session names across every per-bot tmux server.
 
     Each bot runs its own server (``tmux -L <socket>``, socket == BOT_SERVICE),
     so a single global ``tmux ls`` is blind to every other socket. Query each
-    declared bot's own socket and union the live sessions. Relies on the pinned
-    TMUX_TMPDIR (=/tmp, tmux's own default) so a socket name resolves to the
-    server start-bot.sh created it on.
+    declared bot's own socket (or only ``bots``) and union the live sessions.
+    Relies on the pinned TMUX_TMPDIR (=/tmp, tmux's own default) so a socket
+    name resolves to the server start-bot.sh created it on.
     """
     alive: set[str] = set()
-    for bot_id in fleet.bots:
+    for bot_id in (fleet.bots if bots is None else bots):
         try:
             socket = tmux_socket_for_bot(paths.bot_runtime(bot_id)) or (
                 f"{fleet.service_prefix}.{bot_id}"
@@ -208,7 +208,7 @@ def _check_launchd_service(bot_id: str, service_label: str) -> tuple[bool, str]:
         return False, _SVC_UNDETERMINED
 
 
-def _newest_heartbeat_rows(conn, fleet_name: str) -> dict[str, dict]:
+def _newest_heartbeat_rows(conn, fleet_name: str, names=None) -> dict[str, dict]:
     """``{bot name (lower-cased): winning row}`` — the fleet's newest
     ``bot.heartbeat`` row per bot, with **case-variant alias collision resolved
     once, here**.
@@ -227,6 +227,10 @@ def _newest_heartbeat_rows(conn, fleet_name: str) -> dict[str, dict]:
     very collision the sibling path had already been fixed for. One scan, one
     rule, two projections below — the divergence is now unavailable rather
     than merely tested against.
+
+    ``names`` (lower-cased bot names) keeps only those bots' rows from the
+    one read; the collision rule is per bot, so this cannot change a kept
+    bot's pick.
     """
     from .plane.queries import LATEST_HEARTBEAT_SQL
     import sqlite3
@@ -238,6 +242,9 @@ def _newest_heartbeat_rows(conn, fleet_name: str) -> dict[str, dict]:
         alias = str(row["alias"] or "")
         if not alias.lower().startswith(prefix):
             continue
+        key = alias[len(prefix):].lower()
+        if names is not None and key not in names:
+            continue
         stamp = row["occurred_at"] or row["ingested_at"]
         try:
             ts = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
@@ -245,7 +252,6 @@ def _newest_heartbeat_rows(conn, fleet_name: str) -> dict[str, dict]:
             continue
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
-        key = alias[len(prefix):].lower()
         if key not in best or ts > best[key][0]:
             best[key] = (ts, {"alias": alias, "value": row["value"],
                               "ingested_at": row["ingested_at"],
@@ -253,7 +259,7 @@ def _newest_heartbeat_rows(conn, fleet_name: str) -> dict[str, dict]:
     return {k: v[1] for k, v in best.items()}
 
 
-def _presence_rows(conn, fleet_name: str) -> list[dict]:
+def _presence_rows(conn, fleet_name: str, rows: dict | None = None) -> list[dict]:
     """The collision-resolved rows in the shape `derive_presence` documents.
 
     One row per bot, so `derive_presence` cannot emit two `Presence` entries
@@ -267,19 +273,27 @@ def _presence_rows(conn, fleet_name: str) -> list[dict]:
     recorded one `working`, the live-only one `unknown` -- and the collapse
     then picked by `sorted()` order again. Both halves are keyed the same way
     below, so the union is one entry per bot by construction.
+
+    ``rows`` is an already-read `_newest_heartbeat_rows` result, so a caller
+    projecting both digests reads the plane once.
     """
     prefix = f"bot:{fleet_name}/".lower()
-    return [dict(row, alias=prefix + key)
-            for key, row in _newest_heartbeat_rows(conn, fleet_name).items()]
+    if rows is None:
+        rows = _newest_heartbeat_rows(conn, fleet_name)
+    return [dict(row, alias=prefix + key) for key, row in rows.items()]
 
 
-def _latest_heartbeats(conn, fleet_name: str) -> dict[str, tuple[datetime, str]]:
+def _latest_heartbeats(conn, fleet_name: str,
+                       rows: dict | None = None) -> dict[str, tuple[datetime, str]]:
     """``{bot name (lower-cased): (instant, BUSY|IDLE|UNKNOWN)}`` — the digest
     TMUX reads, projected from `_newest_heartbeat_rows` so it shares the
     case-variant collision rule with the presence path rather than repeating
-    it. Presence keeps the ingest clock for freshness; this is the pick."""
+    it. Presence keeps the ingest clock for freshness; this is the pick.
+    ``rows`` as in `_presence_rows`."""
+    if rows is None:
+        rows = _newest_heartbeat_rows(conn, fleet_name)
     out: dict[str, tuple[datetime, str]] = {}
-    for key, row in _newest_heartbeat_rows(conn, fleet_name).items():
+    for key, row in rows.items():
         stamp = row["occurred_at"] or row["ingested_at"]
         try:
             ts = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
@@ -313,10 +327,14 @@ def _read_service_label(bot_dir: Path) -> str:
 def collect_fleet_status(
     fleet: FleetConfig,
     paths: Paths,
+    only: str | None = None,
 ) -> list[BotStatus]:
-    """Collect status for all bots in the fleet."""
+    """Collect status for all bots in the fleet, or for the declared bot
+    ``only``: its native tmux/service probes and its heartbeat alone, while
+    the Task snapshot stays fleet-wide so work facts read the same either way."""
     from .utilization import compute_bot_utilization, fleet_heartbeat_series
-    tmux_sessions = _check_tmux_sessions(fleet, paths)
+    bots = list(fleet.bots) if only is None else [only]
+    tmux_sessions = _check_tmux_sessions(fleet, paths, bots)
     is_linux = platform.system() == "Linux"
     now = datetime.now(timezone.utc)
 
@@ -333,8 +351,9 @@ def collect_fleet_status(
     plane, plane_unreachable = plane_session(paths)      # the overlay's fleet, else the manifest's
     if plane is not None:
         try:
-            heartbeats = _latest_heartbeats(plane.conn, plane.fleet)
-            series = fleet_heartbeat_series(plane.conn, plane.fleet, now)
+            newest = _newest_heartbeat_rows(plane.conn, plane.fleet, {b.lower() for b in bots})
+            heartbeats = _latest_heartbeats(plane.conn, plane.fleet, newest)
+            series = fleet_heartbeat_series(plane.conn, plane.fleet, now, only)
             # #1615: STATE comes from the SAME verdict TMUX does, so one row can
             # no longer carry two different "idle"s. derive_presence is the one
             # definition (plane/presence.py); liveness is this command's own
@@ -344,9 +363,9 @@ def collect_fleet_status(
             # recorded one mints a second, heartbeat-less verdict.
             _live = [{"fleet": plane.fleet.lower(), "bot": b.lower(),
                       "status": "up" if b in tmux_sessions else "down"}
-                     for b in fleet.bots]
+                     for b in bots]
             presence = {pz.alias.lower(): pz for pz in derive_presence(
-                _presence_rows(plane.conn, plane.fleet), _live, now=now)}
+                _presence_rows(plane.conn, plane.fleet, newest), _live, now=now)}
             plane_fleet = plane.fleet
         except Exception as exc:                 # a schema the reader cannot use: say so, never blank
             plane_unreachable = f"the plane could not answer: {exc}"
@@ -362,7 +381,7 @@ def collect_fleet_status(
 
     results: list[BotStatus] = []
 
-    for bot_id in fleet.bots:
+    for bot_id in bots:
         bs = BotStatus(name=bot_id)
         bot_dir = paths.bot_runtime(bot_id)
 
