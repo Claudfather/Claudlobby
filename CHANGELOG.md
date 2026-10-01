@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — the root CLAUDE.md is an index again, and AGENTS.md mirrors every CLAUDE.md for Codex (#2035)
+
+The root `CLAUDE.md` had grown to 168k characters, past Claude Code's 150k warning, almost all of it the scripts table. Every session in this checkout loads it whole, and so does every bot: bot directories sit under the root, and Claude Code reads the `CLAUDE.md` of each parent directory. Codex reads `AGENTS.md` within one 32 KiB budget for the whole chain from the root to the folder it starts in (measured). The root is now a ~27k index with one line per runtime script (all 74). The full reference moved verbatim: the runtime and CLI rows to `claudlobby/_runtime_scripts/CLAUDE.md`, which loads only when a session opens a file there, and the harness rows to a new `harness/CLAUDE.md`, which also indexes all 26 harness scripts. The Python module map moved to `documentation/architecture/module-map.md`, which keeps the Codex chain into `_runtime_scripts/` within budget; the test-suite guidance to `documentation/test-suite.md`; and the full text of the sections the root now summarises to `documentation/validating-bot-changes.md` and `documentation/fleet-update-lifecycle.md`.
+
+- Every `CLAUDE.md` has a committed `AGENTS.md` beside it that is a byte-for-byte copy, and each `.agents/skills/<name>/` is a copy of `.claude/skills/<name>/`, so Claude Code and Codex read the same text. Copies, not symlinks: `tests/prepare_resources.py` refuses a symlink in the index, and Codex's skill loader skips a symlinked `SKILL.md` file (measured). Codex reads `AGENTS.md` at the root and nested, within one shared 32 KiB budget (measured).
+- `tests/test_instruction_budget.py` fails a PR when a Codex chain to any folder's rules passes 32 KiB, a nested instruction file passes 150k characters (naming the rows to move), an index misses, duplicates or invents a script or holds anything but one-line entries, or an `AGENTS.md` or Codex skill differs from its Claude source.
+- `tests/test_supervisor_ratchet.py` skips `.md` files: prose that names `systemctl` is not a call site, and the moved reference quotes three.
+- `claudlobby library list` and the `bot create --interactive` voice picker no longer offer `voices/CLAUDE.md`, or its new `AGENTS.md`, as a voice, and the generate-time skill-reference scan skips an `AGENTS.md` that mirrors the `CLAUDE.md` beside it, so each reference is reported once.
+
 ### Changed — main integration for the unified CLI (#1747, #1989)
 
 The aggregate incorporates main through `dd789c52` without restoring retired

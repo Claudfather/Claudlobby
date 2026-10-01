@@ -58,6 +58,25 @@ For a selected throwaway bot, first remove its declaration from authored `fleet.
 
 Cite the observation in the PR body — claimed evidence is not evidence. See `library/lessons/review/empirical-verification.md`; reviewers gate bot-behavior PRs on a cited Observe step, not on "the composer test passes."
 
+## The gate as the root CLAUDE.md stated it
+
+The root `CLAUDE.md` stated this gate in full until #2035; it now keeps a summary.
+
+Any change that affects **how a bot behaves at runtime** (claudlobby/_runtime_scripts/ supervision & observability scripts, hooks, skills, protocols, guardrails, principles, composed `bot.conf` env) must be **empirically validated** before merge. Unit tests prove *composition* — that the env var lands in `bot.conf`. Only running the code proves *behavior* — that the event actually fires, the alert actually sends, the bot actually does the thing. Follow the loop:
+
+1. **Deliver** — make the code/library change.
+2. **Add config** — set the relevant field(s) in the canary's authored `fleet.yaml`.
+3. **Stage in an independent canary root** — assemble the candidate with `host setup`, then `config plan --release RELEASE_ID` and `config diff PLAN_ID`. Use distinct fleet/bot labels, host `unit_prefix`, Plane state and throwaway channels. Confirm config, skills and permissions in the staged output. An operator activates with `host activate PLAN_ID --install-directory PATH`; this is a whole-host operation, so never use a production root to simulate a single-bot canary.
+4. **Observe** — run it and watch the real behavior:
+   - For observability/trust-loop behaviors: `bash harness/validate-bot-change.sh` stands up a throwaway bot + tmux sessions and asserts the events fire end-to-end. Extend it when you add a new event/check.
+   - For other behavior: use the canary's sealed CLI to drive the affected path, then inspect `event list --bot BOT` and the receiving session. Keep existing production no-restart holds in force.
+
+**Cite the observation in the PR body** ("ran `validate-bot-change.sh` → activity_stuck + overdue_dispatch fired; manager notified") — claimed evidence is not evidence.
+
+**When a change matches an externally produced shape** (a plugin's injection, a carrier's response, a tool's output), ground the canonical fixture in a **live capture** — a transcript or real response — never in reading the producer's source; and commit the capture's **shape, never its identifiers** (the repo is public). Four gauntlet rounds on the Telegram carrier (#1404/#1411) each found the same class: fixtures certifying a shape reality does not produce, the last one shipped and silently dropped the operator's first live message. This is also how latent bugs surface: the harness above caught a `fleet-pulse.sh` sweep-abort that every unit test missed.
+
+**This gate proves the code; it does not prove the rollout.** Clearing it is mandatory for every runtime change. Separately, when a change to the framework itself (claudlobby, clauDNA, claudron) ships **live fleet-wide** — supervision/`lib` scripts, plugins, the bridge, composed `bot.conf` — the manager should *by default* validate an independent canary root before coordinated production activation: a strong default for fleet-wide framework changes, not a universal mandate (skip it for single-bot, product-repo, or non-runtime work). See the `canary-rollout` protocol.
+
 ## Boundary: this is not Claudosseum
 
 This loop is **pre-merge change validation** — does *this* change work. It's a claudlobby dev/operator discipline. **Longitudinal scoring** of which behaviors actually perform across hundreds of real runs ("trials and combat") is Claudosseum's job; claudlobby only *emits* the structured telemetry (the plane's rows, the same the fleet's own doors read) for it to consume. See `PROJECT_MISSION.md` sibling boundaries.
