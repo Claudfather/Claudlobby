@@ -127,8 +127,12 @@ def _file(unit: dict) -> str:
     return unit["installed"][0]["path"]
 
 
-def _call(adapter, function, *args):
-    result = adapter.call(function, *args)
+_PAUSE_TIMEOUT = 120  # a finite native stop (TimeoutStopSec=90s) plus helper overhead
+
+
+def _call(adapter, function, *args, timeout=None):
+    # Reads and other calls keep the adapter's default deadline.
+    result = adapter.call(function, *args) if timeout is None else adapter.call(function, *args, timeout=timeout)
     if result.returncode:
         raise ActivationError(f"{function} refused ({result.returncode}): {result.stderr.strip()}")
     return result.stdout.strip()
@@ -385,7 +389,7 @@ def pause_phase(store: ActivationStore, activation_id: str, phase: str, *, adapt
     apply_config(store.root, identifier)  # sole filesystem writer; resumes partial swaps
     for unit in pause.units(phase):
         _call(adapter, "svc_activation_pause", _file(unit), unit["target"],
-              _native_saved(unit, scheduled), str(os.getpid()))
+              _native_saved(unit, scheduled), str(os.getpid()), timeout=_PAUSE_TIMEOUT)
     _darwin_check(adapter, pause.enrollment)
     return UnitPhaseEvidence(phase, identifier, pause.plan(phase).plan_id,
                              tuple(unit["target"] for unit in pause.units(phase)), "paused")

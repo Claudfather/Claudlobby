@@ -44,7 +44,9 @@ class RecordedAdapter:
         assert result.returncode == 0
         return result.stdout
 
-    def call(self, function, *args):
+    def call(self, function, *args, timeout=None):
+        # Only the native pause waits for a finite stop; other calls keep the default.
+        assert timeout == (120 if function == "svc_activation_pause" else None)
         if function == "svc_inventory_disabled":
             output = '\n\tdisabled services = {\n' + ''.join(f'\t\t"{key}" => {value}\n' for key, value in self.overrides.items()) + '\t}\n'
             return subprocess.CompletedProcess([function, *args], 0, output, "")
@@ -335,9 +337,9 @@ def test_running_resume_before_selection_reparks_without_repeating_handoff(enrol
     live = {"member.service": True}
     recorded = adapter.call
 
-    def call(function, *args, timeout=30):
+    def call(function, *args, timeout=None):
         if function not in ("svc_activation_handoff", "svc_activation_stop_private_server"):
-            return recorded(function, *args)
+            return recorded(function, *args, timeout=timeout)
         adapter.calls.append((function, args[1]))
         if function == "svc_activation_stop_private_server":
             live["member.service"] = False

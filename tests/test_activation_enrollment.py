@@ -27,7 +27,7 @@ class Manager(RecordedAdapter):
         self.declarations = {d.source.name: (d, item) for d, item in planned_units(plan, "Linux")}
         self.loaded_foreign = set()
 
-    def call(self, function, *args):
+    def call(self, function, *args, **kwargs):
         if function == "svc_inventory_catalog":
             text = f"manager\tLinux\ndirectory\t{self.directory}\n"
             text += ''.join(f"installed\t{p.name}\n" for p in sorted(self.directory.iterdir())
@@ -49,7 +49,7 @@ class Manager(RecordedAdapter):
                           "Triggers": declaration.service or ""}
             text = ''.join(f"{key}={value}\n" for key, value in properties.items())
         else:
-            return super().call(function, *args)
+            return super().call(function, *args, **kwargs)
         self.calls.append((function, tuple(map(str, args))))
         return subprocess.CompletedProcess([function, *args], 0, text, "")
 
