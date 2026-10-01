@@ -21,7 +21,7 @@ import json
 import os
 from pathlib import Path
 
-from .activation_state import ActivationError, ActivationStore, read_activation, read_selection
+from .activation_state import ActivationError, ActivationRefusal, ActivationStore, read_activation, read_selection
 from .config_install import apply_config, prepare_config, read_config_install, rollback_config
 from .config_plan import ConfigPlan, ConfigPlanBuilder, read_plan
 from .releases import read_release
@@ -77,23 +77,68 @@ def _saved(unit: dict) -> str:
         raise ActivationError("incomplete saved native state") from exc
 
 
-def _same_enrollment(saved: str, observed: str, *, producer: bool) -> bool:
-    """A scheduled producer may run or exit between two native snapshots."""
-    if saved == observed:
-        return True
+_TICKING = frozenset({"active", "activating", "inactive"})
+
+
+def _same_enrollment(saved: str, observed: str, *, scheduled: bool) -> bool:
+    """A timer-owned service may start, still run, or exit between snapshots.
+
+    Its timer, not its own activity, is the enrollment state. Timers, resident
+    services, bots and ingest stay exact; failed or other states refuse.
+    """
+    if not scheduled:
+        return saved == observed
+    # Checked even when equal: a failed or unknown activity is never restorable.
     before, after = saved.split(), observed.split()
-    return (producer and len(before) == len(after) == 3
-            and before[:2] == after[:2]
-            and before[2] in {"active", "inactive"}
-            and after[2] in {"active", "inactive"})
+    return (len(before) == len(after) == 3 and before[:2] == after[:2]
+            and before[2] in _TICKING and after[2] in _TICKING)
+
+
+def _scheduled_services(enrollment: dict, phases: dict) -> set[str]:
+    """Producer services named by a frozen producer timer declaration.
+
+    A launchd producer is its own schedule: its PID comes and goes with each
+    tick, and its native pause/resume read only load state.
+    """
+    producers = set(phases["producers"])
+    if enrollment["manager"] == "Darwin":
+        return producers
+    return {unit["declaration"]["service"] for unit in enrollment["units"]
+            if unit["target"] in producers and unit["target"].endswith(".timer")
+            and unit["declaration"]["service"] in producers}
+
+
+def _native_saved(unit: dict, scheduled: set[str]) -> str:
+    """The state the native owner pauses from and restores to.
+
+    The frozen snapshot stays the raw record. A timer-owned service is restored
+    inactive for its timer to trigger: never resent as one-shot work, and never
+    an `activating` snapshot the native owner cannot restore.
+    """
+    saved = _saved(unit)
+    if unit["target"] not in scheduled:
+        return saved
+    file_state, load, active = saved.split()
+    if active not in _TICKING:
+        raise ActivationError(f"timer-owned service has no restorable state: {unit['target']}")
+    return f"{file_state} {load} inactive"
+
+
+def _timers_last(units) -> list[dict]:
+    # Resume a scheduled service before its timer can trigger it again.
+    return sorted(units, key=lambda unit: unit["target"].endswith(".timer"))
 
 
 def _file(unit: dict) -> str:
     return unit["installed"][0]["path"]
 
 
-def _call(adapter, function, *args):
-    result = adapter.call(function, *args)
+_PAUSE_TIMEOUT = 120  # a finite native stop (TimeoutStopSec=90s) plus helper overhead
+
+
+def _call(adapter, function, *args, timeout=None):
+    # Reads and other calls keep the adapter's default deadline.
+    result = adapter.call(function, *args) if timeout is None else adapter.call(function, *args, timeout=timeout)
     if result.returncode:
         raise ActivationError(f"{function} refused ({result.returncode}): {result.stderr.strip()}")
     return result.stdout.strip()
@@ -248,10 +293,11 @@ def prepare_unit_pause(store: ActivationStore, activation_id: str,
     # Finish every external-caller check before preparing any parking write.
     for unit in enrolled:
         _call(adapter, "svc_activation_assert_external", _file(unit), unit["target"], str(os.getpid()))
+    scheduled = _scheduled_services(enrollment, membership)
     for unit in enrolled:
         if not _same_enrollment(_saved(unit),
                                 _call(adapter, "svc_activation_snapshot", _file(unit), unit["target"]),
-                                producer=unit["target"] in membership["producers"]):
+                                scheduled=unit["target"] in scheduled):
             raise ActivationError(f"native enrollment changed: {unit['target']}")
     _darwin_check(adapter, enrollment, original_load=True)
     plans = []
@@ -275,9 +321,13 @@ def prepare_unit_pause(store: ActivationStore, activation_id: str,
     return load_unit_pause(store, activation_id)
 
 
-def load_unit_pause(store: ActivationStore, activation_id: str) -> UnitPause:
-    """Recover frozen membership, saved states and file backups via their owners."""
-    record = _record(store, activation_id)
+def load_unit_pause(store: ActivationStore, activation_id: str, *, terminal: bool = False) -> UnitPause:
+    """Recover frozen membership, saved states and file backups via their owners.
+
+    ``terminal`` is only for rechecking a verified early adoption abort.
+    """
+    store.assert_locked()
+    record = read_activation(store.root, activation_id) if terminal else _record(store, activation_id)
     plans = []
     shared = None
     for phase in PHASES:
@@ -319,7 +369,8 @@ def pause_phase(store: ActivationStore, activation_id: str, phase: str, *, adapt
     and producer/writer processes still require the coordinator's own proof.
     """
     record = _record(store, activation_id)
-    if phase not in PHASES or record.body["pending"] != _PAUSE_STEPS[phase]:
+    if (phase not in PHASES or record.body["pending"] != _PAUSE_STEPS[phase]
+            or "adoption_abort" in record.body):
         raise ActivationError("unit pause phase is not the admitted activation step")
     pause = load_unit_pause(store, activation_id)
     adapter = adapter or Adapter()
@@ -328,6 +379,7 @@ def pause_phase(store: ActivationStore, activation_id: str, phase: str, *, adapt
         _check_source(unit["generated"])
     _external(adapter, pause)
     _darwin_check(adapter, pause.enrollment)
+    scheduled = _scheduled_services(pause.enrollment, pause.phases)
     for unit in pause.units():
         # A previously parked node may be absent on retry. ConfigInstall proves
         # whether that absence belongs to its interrupted swap; never recreate
@@ -337,15 +389,115 @@ def pause_phase(store: ActivationStore, activation_id: str, phase: str, *, adapt
             _check_source(unit["installed"][0])
             if not _same_enrollment(_saved(unit),
                                     _call(adapter, "svc_activation_snapshot", path, unit["target"]),
-                                    producer=unit["target"] in pause.phases["producers"]):
+                                    scheduled=unit["target"] in scheduled):
                 raise ActivationError(f"native enrollment changed before parking: {unit['target']}")
     identifier = journal_id(activation_id, phase)
     apply_config(store.root, identifier)  # sole filesystem writer; resumes partial swaps
     for unit in pause.units(phase):
-        _call(adapter, "svc_activation_pause", _file(unit), unit["target"], _saved(unit), str(os.getpid()))
+        _call(adapter, "svc_activation_pause", _file(unit), unit["target"],
+              _native_saved(unit, scheduled), str(os.getpid()), timeout=_PAUSE_TIMEOUT)
     _darwin_check(adapter, pause.enrollment)
     return UnitPhaseEvidence(phase, identifier, pause.plan(phase).plan_id,
                              tuple(unit["target"] for unit in pause.units(phase)), "paused")
+
+
+def _producer_restored(saved: str, observed: str, *, scheduled: bool) -> bool:
+    return _same_enrollment(saved, observed, scheduled=scheduled)
+
+
+def abort_early_adoption(store: ActivationStore, activation_id: str, *, reason: str, release,
+                         sql_user_version: int, adapter=None) -> UnitPhaseEvidence:
+    """Explicit operator abort of a Linux first adoption stopped in producers_paused.
+
+    Restores only the producer parking journal and producers' saved native
+    states. Bots, ingest, selection and SQL are untouched, and later parking
+    journals must be unstarted. Any refusal or unknown leaves the durable abort
+    marker, so forward activation stays refused; an explicit rerun reconciles.
+    """
+    store.assert_locked()
+    record = read_activation(store.root, activation_id)
+    terminal = record.status == "rolled_back"
+    if terminal:
+        # Only the verified receipt of this sole first adoption may be rechecked.
+        from .activation import _completed_adoption_abort
+        others = {path.parent.name for path in (store.root / "state/activations").glob("*/activation.json")}
+        if (not _completed_adoption_abort(store.root, record) or others != {activation_id}
+                or read_selection(store.root) is not None
+                or record.body["adoption_abort"]["sql_user_version"] != sql_user_version):
+            raise ActivationRefusal("terminal recheck requires the sole verified early abort and its SQL precondition")
+    else:
+        record = _record(store, activation_id)
+    pause = load_unit_pause(store, activation_id, terminal=terminal)
+    if pause.enrollment["manager"] != "Linux" or not pause.enrollment.get("legacy_source"):
+        raise ActivationRefusal("early abort supports only a Linux legacy enrollment")
+    for phase in ("bots", "ingest"):
+        journal = read_config_install(store.root, journal_id(activation_id, phase))
+        if journal.status != "prepared" or any(row != "pending" for row in journal.progress):
+            raise ActivationRefusal("a later parking phase has begun; early abort is not admitted")
+    from .migration_apply import read_migration
+    if read_migration(store.root, activation_id) is not None:
+        raise ActivationRefusal("activation has a migration journal; early abort is not admitted")
+    identifier = journal_id(activation_id, "producers")
+    if terminal and read_config_install(store.root, identifier).status != "rolled_back":
+        raise ActivationRefusal("terminal recheck requires the restored producer journal")
+    adapter = adapter or Adapter()
+    if not terminal:
+        # Ineligible records refuse before any native read.
+        store.check_adoption_abort(activation_id, sql_user_version=sql_user_version)
+    if not terminal and "adoption_abort" not in record.body:
+        # First attempt: read-only proofs before the durable marker, so a
+        # changed source or hosted caller leaves the record unchanged.
+        for unit in pause.enrollment["units"]:
+            _check_source(unit["generated"])
+        for unit in pause.units():
+            if Path(_file(unit)).exists() or Path(_file(unit)).is_symlink():
+                _check_source(unit["installed"][0])
+        _external(adapter, pause)
+    if not terminal:
+        store.begin_adoption_abort(activation_id, reason=reason, release_id=release.release_id,
+                                   artifact_id=release.inputs.artifact_id,
+                                   sql_user_version=sql_user_version)
+    for unit in pause.enrollment["units"]:
+        _check_source(unit["generated"])
+    if read_config_install(store.root, identifier).status in ("rolling_back", "rolled_back"):
+        # A prior attempt restored bytes; expose them before frozen-placement reads.
+        _call(adapter, "svc_activation_reload")
+    _external(adapter, pause)
+    if not terminal:
+        rollback_config(store.root, identifier)
+    for unit in pause.units():
+        _check_source(unit["installed"][0])
+    if not terminal:
+        _call(adapter, "svc_activation_reload")
+    resumed, cleared = [], []
+    scheduled = _scheduled_services(pause.enrollment, pause.phases)
+    for unit in _timers_last(pause.units("producers")):
+        target, saved, native = unit["target"], _saved(unit), _native_saved(unit, scheduled)
+        ticks = target in scheduled
+        if not _producer_restored(saved, _call(adapter, "svc_activation_snapshot", _file(unit), target),
+                                  scheduled=ticks):
+            if terminal:  # a recheck never resumes or starts
+                raise ActivationError(f"restored native state differs: {target}")
+            _call(adapter, "svc_activation_resume", _file(unit), target, native)
+            resumed.append(target)
+            if not _producer_restored(saved, _call(adapter, "svc_activation_snapshot", _file(unit), target),
+                                      scheduled=ticks):
+                raise ActivationError(f"restored native state differs: {target}")
+        # A restored higher-priority file can hide a surviving runtime mask.
+        if (dict(unit["properties"])["LoadState"] == "loaded"
+                and _call(adapter, "svc_activation_clear_runtime_mask", _file(unit), target, native) == "removed"):
+            cleared.append(target)
+    evidence = UnitPhaseEvidence("producers", identifier, pause.plan("producers").plan_id,
+                                 tuple(unit["target"] for unit in pause.units("producers")),
+                                 "rechecked" if terminal else "aborted")
+    if terminal:
+        store.record_adoption_abort_recheck(activation_id, reason=reason, release_id=release.release_id,
+                                            artifact_id=release.inputs.artifact_id,
+                                            evidence_digest=evidence.digest, cleared=cleared)
+    else:
+        store.finish_adoption_abort(record.activation_id, evidence_digest=evidence.digest,
+                                    resumed=resumed, cleared=cleared)
+    return evidence
 
 
 def restore_phase(store: ActivationStore, activation_id: str, phase: str, *, adapter=None) -> UnitPhaseEvidence:
@@ -369,12 +521,14 @@ def restore_phase(store: ActivationStore, activation_id: str, phase: str, *, ada
     _darwin_check(adapter, pause.enrollment)
     identifier = journal_id(activation_id, phase)
     rollback_config(store.root, identifier)
-    for unit in pause.units(phase):
+    scheduled = _scheduled_services(pause.enrollment, pause.phases)
+    for unit in _timers_last(pause.units(phase)):
         _check_source(unit["installed"][0])
         _darwin_check(adapter, pause.enrollment, {unit["target"]})
-        _call(adapter, "svc_activation_resume", _file(unit), unit["target"], _saved(unit))
+        _call(adapter, "svc_activation_resume", _file(unit), unit["target"], _native_saved(unit, scheduled))
         _darwin_check(adapter, pause.enrollment, {unit["target"]}, original_load=True)
-        if _call(adapter, "svc_activation_snapshot", _file(unit), unit["target"]) != _saved(unit):
+        if not _same_enrollment(_saved(unit), _call(adapter, "svc_activation_snapshot", _file(unit), unit["target"]),
+                                scheduled=unit["target"] in scheduled):
             raise ActivationError(f"restored native state differs: {unit['target']}")
     return UnitPhaseEvidence(phase, identifier, pause.plan(phase).plan_id,
                              tuple(unit["target"] for unit in pause.units(phase)), "restored")

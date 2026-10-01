@@ -17,7 +17,7 @@ systemctl() {
     if [ "$1" = show ]; then
         [ "$QUERY_FAIL" = 0 ] || return 7
         local fragment="$file"
-        [ "$load" != masked ] || fragment=/dev/null
+        [ "$load" != masked ] || fragment="${MASK_FRAGMENT:-/dev/null}"
         if [ "$active" = deactivating ] && [ -f "$SETTLE_FILE" ]; then
             pending=$(cat "$SETTLE_FILE")
             pending=$((pending - 1)); printf '%s' "$pending" > "$SETTLE_FILE"
@@ -31,12 +31,13 @@ systemctl() {
     [ "$1" != "$FAIL_ACTION" ] || return 9
     case "$1" in
         mask) if [ "$SHADOW" = 0 ]; then load=masked; enabled=masked-runtime; fi ;;
-        stop) if [ "$STOP_SETTLE" -gt 0 ]; then active=deactivating; else active=inactive; fi ;;
-        unmask) load=loaded; enabled="$old_enabled" ;;
+        stop) if [ "$STOP_SETTLE" -gt 0 ]; then active=deactivating; else active="${STOP_RESULT:-inactive}"; fi ;;
+        unmask) load=loaded; enabled="$old_enabled"; rm -f "${XDG_RUNTIME_DIR:-$T/no-runtime}/systemd/user/$target" ;;
         start) active=active ;;
         disable) active=inactive ;;
         enable) active=active ;;
-        daemon-reload|reset-failed) ;;
+        reset-failed) [ "$active" != failed ] || active=inactive ;;
+        daemon-reload) ;;
         *) return 98 ;;
     esac
 }
@@ -108,6 +109,25 @@ expect 0 svc_activation_pause "$file" "$target" "$saved"
 [ "$(cat "$SETTLE_FILE")" -le 0 ]
 rm "$SETTLE_FILE"
 STOP_SETTLE=0
+# Parking its service first leaves the stopped, masked timer failed ("Unit to
+# trigger vanished"). Only that exact timer's failure is reset, then verified.
+file="$T/vanished.timer"; target=vanished.timer; : > "$file"; : > "$TRACE"
+enabled=enabled; old_enabled=enabled; load=loaded; active=active; group=""
+saved=$(svc_activation_snapshot "$file" "$target")
+STOP_RESULT=failed
+expect 0 svc_activation_pause "$file" "$target" "$saved"
+[ "$(cat "$TRACE")" = "$(printf 'mask --runtime vanished.timer\nstop vanished.timer\nreset-failed vanished.timer')" ]
+[ "$load:$active" = masked:inactive ]
+load=loaded; enabled=enabled; active=active; : > "$TRACE"; FAIL_ACTION=reset-failed
+expect 9 svc_activation_pause "$file" "$target" "$saved"  # a failed reset still refuses
+FAIL_ACTION=""
+# A service left failed after stop is never reset; pause refuses.
+file="$T/vanished.service"; target=vanished.service; : > "$file"; : > "$TRACE"
+load=loaded; enabled=enabled; active=active; group=/user.slice/vanished.service
+saved=$(svc_activation_snapshot "$file" "$target")
+expect 3 svc_activation_pause "$file" "$target" "$saved" 2>/dev/null
+if grep -q reset-failed "$TRACE"; then echo 'FAIL: service failure was reset' >&2; exit 1; fi
+STOP_RESULT=""
 # An inactive, disabled timer stays inactive and disabled after restoration.
 file="$T/worker.timer"; target=worker.timer; : > "$file"; : > "$TRACE"
 enabled=disabled; old_enabled=disabled; load=loaded; active=inactive; group=""
@@ -147,6 +167,44 @@ loop_result=$(svc_bot_disenroll_exact "$loop_source" "$loop_installed" "$target"
 expect 0 svc_bot_enroll_exact "$loop_source" "$loop_installed" "$target"
 [ -f "$loop_installed" ]
 [ "$(cat "$TRACE")" = "$(printf 'daemon-reload\nreset-failed worker.service\nenable --now worker.service')" ]
+
+# systemd reports a runtime mask by its own link. Only this user's exact
+# runtime link to /dev/null for the named target counts as masked.
+export XDG_RUNTIME_DIR="$T/run"; mkdir -p "$XDG_RUNTIME_DIR/systemd/user" "$T/foreign-run"
+file="$T/worker.service"; target=worker.service; load=masked; enabled=masked-runtime
+active=inactive; sub=dead; group=""; old_enabled=enabled
+MASK_FRAGMENT="$XDG_RUNTIME_DIR/systemd/user/worker.service"
+ln -s "$file" "$MASK_FRAGMENT"
+expect 3 svc_activation_snapshot "$file" "$target"
+MASK_FRAGMENT="$T/foreign-run/worker.service"; ln -s /dev/null "$MASK_FRAGMENT"
+expect 3 svc_activation_snapshot "$file" "$target"
+MASK_FRAGMENT="$XDG_RUNTIME_DIR/systemd/user/worker.service"
+rm "$MASK_FRAGMENT"; ln -s /dev/null "$MASK_FRAGMENT"
+[ "$(svc_activation_snapshot "$file" "$target")" = 'masked-runtime masked inactive' ]
+: > "$TRACE"; expect 0 svc_activation_resume "$file" "$target" 'enabled loaded active'
+[ "$(cat "$TRACE")" = "$(printf 'unmask --runtime worker.service\nstart worker.service')" ]
+# Residue: the restored higher-priority file loads, hiding a surviving runtime
+# mask link. Only that exact link is removed; nothing is started.
+ln -s /dev/null "$MASK_FRAGMENT"
+[ "$(svc_activation_snapshot "$file" "$target")" = 'enabled loaded active' ]
+: > "$TRACE"; [ "$(svc_activation_clear_runtime_mask "$file" "$target" 'enabled loaded active')" = removed ]
+[ "$(cat "$TRACE")" = 'unmask --runtime worker.service' ] && [ ! -L "$MASK_FRAGMENT" ]
+: > "$TRACE"; [ "$(svc_activation_clear_runtime_mask "$file" "$target" 'enabled loaded active')" = absent ]; unchanged
+ln -s "$file" "$MASK_FRAGMENT"
+expect 3 svc_activation_clear_runtime_mask "$file" "$target" 'enabled loaded active' 2>/dev/null; unchanged
+expect 3 svc_activation_clear_runtime_mask "$file" "$target" 'masked-runtime masked inactive' 2>/dev/null; unchanged
+rm "$MASK_FRAGMENT"
+# Publication owns hidden-mask removal; start never starts over a surviving one.
+ln -s /dev/null "$MASK_FRAGMENT"; active=inactive; : > "$TRACE"
+expect 3 svc_activation_start "$file" "$target" 2>/dev/null
+[ "$(cat "$TRACE")" = daemon-reload ] && [ -L "$MASK_FRAGMENT" ]
+rm "$MASK_FRAGMENT"; : > "$TRACE"
+[ "$(svc_activation_start "$file" "$target")" = start-requested ]
+[ "$(cat "$TRACE")" = "$(printf 'daemon-reload\nstart worker.service')" ]
+unset MASK_FRAGMENT XDG_RUNTIME_DIR
+# The abort reload helper only reloads the user manager; it is Linux-only.
+: > "$TRACE"; expect 0 svc_activation_reload; [ "$(cat "$TRACE")" = daemon-reload ]
+: > "$TRACE"; _OS=Darwin; expect 3 svc_activation_reload 2>/dev/null; unchanged; _OS=Linux
 
 _OS=Darwin; file="$T/fleet.keepalive.plist"; target=gui/501/fleet.keepalive
 : > "$file"; : > "$TRACE"

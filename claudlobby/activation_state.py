@@ -291,7 +291,7 @@ class ActivationStore:
         record = read_activation(self.root, activation_id)
         body = record.body
         steps = ROLLBACK_STEPS if body["status"] == "rolling_back" else STEPS
-        if (body["status"] in {"active", "rolled_back"}
+        if (body["status"] in {"active", "rolled_back"} or "adoption_abort" in body
                 or len(body["completed"]) >= len(steps)
                 or steps[len(body["completed"])] != step
                 or body["pending"] not in (None, step)):
@@ -456,6 +456,8 @@ class ActivationStore:
         body = record.body
         if body["pending"] != step or not re.fullmatch(r"[0-9a-f]{64}", evidence_digest):
             raise ActivationError("only a started step with verified evidence can complete")
+        if "adoption_abort" in body:
+            raise ActivationError("early adoption abort is in progress; forward steps are refused")
         body["completed"].append(step)
         body["evidence"][step] = evidence_digest
         body["pending"] = None
@@ -493,6 +495,81 @@ class ActivationStore:
         record.body["forward"] = {key: record.body[key] for key in
                                   ("status", "completed", "pending", "evidence")}
         record.body.update(status="rolling_back", completed=[], pending=None, evidence={})
+        return self._save(record)
+
+    def begin_adoption_abort(self, activation_id: str, *, reason: str, release_id: str,
+                             artifact_id: str, sql_user_version: int) -> ActivationRecord:
+        """Durably mark an operator's early first-adoption abort before any effect.
+
+        Only an unsealed first adoption still inside producers_paused qualifies.
+        The marker refuses every forward step; only verified producer restoration
+        ends it. SQL user_version is the operator's preflight precondition, not
+        a baseline this journal froze; a retry must name the same value.
+        """
+        self.assert_locked()
+        record = read_activation(self.root, activation_id)
+        body = record.body
+        prior = self._admit_adoption_abort(record, sql_user_version)
+        attempt = {"reason": reason, "release_id": release_id, "artifact_id": artifact_id}
+        if prior is None:
+            body["forward"] = {key: body[key] for key in ("status", "completed", "pending", "evidence")}
+            body["adoption_abort"] = {**attempt, "sql_user_version": sql_user_version,
+                                      "attempts": [attempt], "result": None}
+        else:
+            prior["attempts"].append(attempt)
+        return self._save(record)
+
+    def check_adoption_abort(self, activation_id: str, *, sql_user_version: int) -> None:
+        """Side-effect-free eligibility, before native reads; begin repeats it."""
+        self.assert_locked()
+        self._admit_adoption_abort(read_activation(self.root, activation_id), sql_user_version)
+
+    def _admit_adoption_abort(self, record: ActivationRecord, sql_user_version: int) -> dict | None:
+        body = record.body
+        if (body["intent"].get("source_kind") != "legacy-unsealed"
+                or body["intent"].get("source_release_id") is not None):
+            raise ActivationRefusal("early abort is only for an unsealed first adoption")
+        if (body["status"] != "activating" or body["completed"] != []
+                or body["pending"] != "producers_paused" or body["evidence"]
+                or body.get("handoff_effects", {}) or body.get("start_effects", {})
+                or body.get("start_phases", {}) or "identity_bindings" in body
+                or body["previous_selection"] is not None or read_selection(self.root) is not None):
+            raise ActivationRefusal("activation is past its producer pause; early abort is not admitted")
+        prior = body.get("adoption_abort")
+        if prior is None:
+            if "forward" in body:
+                raise ActivationRefusal("activation already has recovery history")
+        elif prior["sql_user_version"] != sql_user_version or prior["result"] is not None:
+            raise ActivationRefusal("early abort SQL precondition differs from its recorded intent")
+        return prior
+
+    def record_adoption_abort_recheck(self, activation_id: str, *, reason: str, release_id: str,
+                                      artifact_id: str, evidence_digest: str,
+                                      cleared: list[str]) -> ActivationRecord:
+        """Append a verified terminal recheck; the original result stays unchanged."""
+        self.assert_locked()
+        record = read_activation(self.root, activation_id)
+        abort = record.body.get("adoption_abort")
+        if (record.status != "rolled_back" or not isinstance(abort, dict) or abort.get("result") is None
+                or not re.fullmatch(r"[0-9a-f]{64}", evidence_digest)):
+            raise ActivationError("only a completed early adoption abort can be rechecked")
+        abort.setdefault("rechecks", []).append(
+            {"reason": reason, "release_id": release_id, "artifact_id": artifact_id,
+             "evidence": evidence_digest, "cleared": list(cleared)})
+        return self._save(record)
+
+    def finish_adoption_abort(self, activation_id: str, *, evidence_digest: str,
+                              resumed: list[str], cleared: list[str] = ()) -> ActivationRecord:
+        """Terminalize only after exact producer files and native states were verified."""
+        self.assert_locked()
+        record = read_activation(self.root, activation_id)
+        abort = record.body.get("adoption_abort")
+        if (abort is None or abort["result"] is not None or record.status != "activating"
+                or record.body["pending"] != "producers_paused"
+                or not re.fullmatch(r"[0-9a-f]{64}", evidence_digest)):
+            raise ActivationError("early adoption abort is not in progress")
+        abort["result"] = {"evidence": evidence_digest, "resumed": list(resumed), "cleared": list(cleared)}
+        record.body.update(status="rolled_back", pending=None)
         return self._save(record)
 
     def restore_selection(self, activation_id: str) -> ActivationRecord:

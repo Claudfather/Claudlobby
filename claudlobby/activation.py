@@ -13,6 +13,7 @@ import json
 import os
 from dataclasses import replace
 from pathlib import Path
+import re
 import socket
 import stat
 import subprocess
@@ -601,6 +602,61 @@ def _quiesce_running(root, store, activation_id, pause, old_units, adapter):
     return sockets
 
 
+def _completed_adoption_abort(root: Path, record: ActivationRecord) -> bool:
+    """A verified early first-adoption abort left no candidate effect behind.
+
+    Only its owner's terminal receipt qualifies; a fresh adoption still
+    re-enrolls, re-plans and re-previews SQL from scratch under a new ID.
+    """
+    body = record.body
+    abort = body.get("adoption_abort")
+    result = abort.get("result") if isinstance(abort, dict) else None
+    return (record.status == "rolled_back"
+            and body["intent"].get("source_kind") == "legacy-unsealed"
+            and body["intent"].get("source_release_id") is None
+            and body["previous_selection"] is None
+            and body["completed"] == [] and body["pending"] is None and body["evidence"] == {}
+            and body.get("forward") == {"status": "activating", "completed": [],
+                                        "pending": "producers_paused", "evidence": {}}
+            and isinstance(result, dict)
+            and isinstance(result.get("evidence"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", result["evidence"]) is not None
+            and not body.get("handoff_effects") and not body.get("start_effects")
+            and not body.get("start_phases") and "identity_bindings" not in body
+            and read_migration(root, record.activation_id) is None)
+
+
+def _cancelled_before_effects(root: Path, record: ActivationRecord) -> bool:
+    """cancel_prepared's receipt for a first adoption, its journals still unstarted.
+
+    The owner proved zero effects when it wrote the receipt; this read-only
+    recheck only confirms the named journals were not started since.
+    """
+    body = record.body
+    cancellation = body.get("cancellation")
+    if not (record.status == "rolled_back"
+            and body["intent"].get("source_kind") == "legacy-unsealed"
+            and body["intent"].get("source_release_id") is None
+            and body["previous_selection"] is None
+            and isinstance(cancellation, dict)
+            and cancellation.get("kind") == "prepared-before-effects"
+            and cancellation.get("selection_sha256") == _digest(None)
+            and isinstance(cancellation.get("journals"), list)
+            and body["completed"] == [] and body["pending"] is None and body["evidence"] == {}
+            and not body.get("handoff_effects") and not body.get("start_effects")
+            and not body.get("start_phases") and "identity_bindings" not in body
+            and "forward" not in body and "adoption_abort" not in body
+            and read_migration(root, record.activation_id) is None):
+        return False
+    try:
+        journals = [config_install.read_config_install(root, identifier)
+                    for identifier in cancellation["journals"]]
+    except (config_install.ConfigInstallError, TypeError, ValueError):
+        return False
+    return all(journal.status == "prepared" and all(row == "pending" for row in journal.progress)
+               for journal in journals)
+
+
 def _running_activation(root: Path, activation_id: str, plan_id: str,
                         install_directory: Path, *, legacy_source: bool,
                         adapter: Adapter | None = None) -> ActivationRecord:
@@ -635,7 +691,9 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
             record = read_activation(root, prior.parent.name)
             if record.status not in {"active", "rolled_back"}:
                 raise ActivationError(f"existing activation {record.activation_id} requires explicit repair")
-            if legacy_source:
+            if legacy_source and (record.activation_id == activation_id
+                                  or not (_completed_adoption_abort(root, record)
+                                          or _cancelled_before_effects(root, record))):
                 raise ActivationError(f"existing activation {record.activation_id} requires explicit repair")
         plan.check_fresh()
         source = source_plan = None
@@ -928,7 +986,10 @@ _RUNNING_QUIESCE_STEPS = _BOOTSTRAP_EMPTY_STEPS
 def resumable_running_step(record: ActivationRecord) -> str | None:
     """Return a supported same-ID stage; a missing start journal never implies no effect."""
     completed = record.body["completed"]
-    if (record.status != "activating" or completed != list(STEPS[:len(completed)])
+    # An early adoption abort in progress refuses forward steps; only its
+    # explicit abort-adoption rerun can continue that record.
+    if (record.status != "activating" or "adoption_abort" in record.body
+            or completed != list(STEPS[:len(completed)])
             or not isinstance(record.body["intent"].get("install_directory"), str)
             or len(completed) >= len(STEPS)):
         return None

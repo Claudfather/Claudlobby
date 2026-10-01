@@ -202,6 +202,17 @@ def register_release_subparsers(sub):
     repair.add_argument("--fleet", dest="repair_fleet", required=True, metavar="FLEET")
     repair.add_argument("--bot", required=True, metavar="BOT")
     repair.add_argument("--reason", required=True, metavar="TEXT")
+    abort = _route(hosts, "abort-adoption", "host.abort-adoption",
+                   "Abort an unsealed first adoption stopped while pausing producers")
+    abort.description = ("Operator-only, from a sealed release CLI. Restores only the original producer "
+                         "files and native states of a Linux first adoption with no completed step, "
+                         "handoff, start, selection or migration. Not general rollback: bots, ingest, "
+                         "selection and SQL are untouched.")
+    abort.set_defaults(func=_dispatch_host)
+    abort.add_argument("abort_activation_id", metavar="ACTIVATION_ID")
+    abort.add_argument("--reason", required=True, metavar="TEXT", help="Recorded operator reason")
+    abort.add_argument("--expected-sql-version", required=True, type=int, metavar="INT",
+                       help="Plane user_version from the operator's retained pre-activation preflight")
 
     config = sub.add_parser("config", help="Stage and inspect configuration proposals")
     configs = config.add_subparsers(dest="config_command", required=True)

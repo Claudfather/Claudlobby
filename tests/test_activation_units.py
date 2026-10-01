@@ -1,5 +1,7 @@
 """Original-unit pause/recovery with private files and a recording adapter."""
 
+from dataclasses import replace
+import json
 import os
 from pathlib import Path
 import plistlib
@@ -22,6 +24,13 @@ class RecordedAdapter:
         self.manager = inventory.manager
         self.original = {unit.target: " ".join(dict(unit.properties)[key] for key in
                          ("UnitFileState", "LoadState", "ActiveState")) for unit in inventory.units}
+        scheduled = {unit.declaration.service for unit in inventory.units
+                     if unit.target.endswith(".timer") and unit.declaration.service}
+        if self.manager == "Darwin":  # fixtures enroll launchd jobs as their own-schedule producers
+            scheduled = set(self.original)
+        # A timer-owned service or launchd producer is paused from and restored to inactive.
+        self.native = {target: " ".join(saved.split()[:2] + ["inactive"]) if target in scheduled else saved
+                       for target, saved in self.original.items()}
         self.states = dict(self.original)
         self.files = {unit.target: unit.installed[0] for unit in inventory.units}
         self.calls = []
@@ -29,6 +38,7 @@ class RecordedAdapter:
         self.pause_failure = None
         self.resume_failure = None
         self.overrides = {}
+        self.hidden_masks = set()
         self.binding_changed = False
 
     def read(self, function, *args):
@@ -36,7 +46,9 @@ class RecordedAdapter:
         assert result.returncode == 0
         return result.stdout
 
-    def call(self, function, *args):
+    def call(self, function, *args, timeout=None):
+        # Only the native pause waits for a finite stop; other calls keep the default.
+        assert timeout == (120 if function == "svc_activation_pause" else None)
         if function == "svc_inventory_disabled":
             output = '\n\tdisabled services = {\n' + ''.join(f'\t\t"{key}" => {value}\n' for key, value in self.overrides.items()) + '\t}\n'
             return subprocess.CompletedProcess([function, *args], 0, output, "")
@@ -47,6 +59,10 @@ class RecordedAdapter:
             if self.binding_changed:
                 output = output.replace("\tprogram = ", "\tprogram = /foreign", 1)
             return subprocess.CompletedProcess([function, *args], 0, output, "")
+        if function == "svc_activation_reload":
+            assert not args
+            self.calls.append((function, None))
+            return subprocess.CompletedProcess([function], 0, "", "")
         file, target = Path(args[0]), args[1]
         self.calls.append((function, target))
         rc, output = 0, ""
@@ -59,18 +75,23 @@ class RecordedAdapter:
             output = self.states[target] + "\n"
         elif function == "svc_activation_pause":
             assert not file.exists() and not file.is_symlink(), "adapter saw unparked installed source"
-            assert args[2] == self.original[target]
+            assert args[2] == self.native[target]
             if target == self.pause_failure:
                 rc = 3
             else:
                 self.states[target] = "unchanged unloaded inactive" if self.manager == "Darwin" else "masked-runtime masked inactive"
         elif function == "svc_activation_resume":
             assert FileSnapshot.read(file) == self.files[target], "resume happened before exact restoration"
-            assert args[2] == self.original[target]
+            assert args[2] == self.native[target]
             if target == self.resume_failure:
                 rc = 3
-            else:
-                self.states[target] = self.original[target]
+            else:  # a bootstrapped launchd job resumes its own schedule
+                self.states[target] = self.original[target] if self.manager == "Darwin" else self.native[target]
+        elif function == "svc_activation_clear_runtime_mask":
+            # Abort restores from the native saved state; publication from its fresh snapshot.
+            assert args[2] in (self.native[target], self.states[target]) and file.is_file()
+            output = "removed\n" if target in self.hidden_masks else "absent\n"
+            self.hidden_masks.discard(target)
         else:
             raise AssertionError(f"unexpected native operation: {function}")
         return subprocess.CompletedProcess([function, *args], rc, output, "recorded unknown" if rc else "")
@@ -319,9 +340,9 @@ def test_running_resume_before_selection_reparks_without_repeating_handoff(enrol
     live = {"member.service": True}
     recorded = adapter.call
 
-    def call(function, *args, timeout=30):
+    def call(function, *args, timeout=None):
         if function not in ("svc_activation_handoff", "svc_activation_stop_private_server"):
-            return recorded(function, *args)
+            return recorded(function, *args, timeout=timeout)
         adapter.calls.append((function, args[1]))
         if function == "svc_activation_stop_private_server":
             live["member.service"] = False
@@ -424,7 +445,8 @@ def test_phases_park_exact_nodes_then_restore_original_state_and_links(enrollmen
             store.complete("cutover", step, evidence_digest=result.digest)
         assert state.read_activation(store.root, "cutover").status == "rolled_back"
     inventory.check_files()
-    assert adapter.states == adapter.original  # disabled/inactive bot stays so
+    # Disabled/inactive bot stays so; the timer-owned service waits for its timer.
+    assert adapter.states == {**adapter.original, "scheduled.service": "enabled loaded inactive"}
     assert foreign.read_bytes() == before_foreign
     assert os.readlink(wants / "collector.service") == "../collector.service"
 
@@ -546,6 +568,226 @@ def test_interrupted_parking_and_partial_native_pause_resume_from_existing_owner
         # Later-phase source remains intact throughout the interrupted producer pause.
         assert Path(inventory.units[2].installed[0].path).is_file()
         assert Path(inventory.units[3].installed[0].path).is_file()
+
+
+def _legacy(inventory):
+    return replace(inventory, legacy_source=True, units=tuple(
+        replace(unit, declaration=replace(unit.declaration, release_id=None)) for unit in inventory.units))
+
+
+def test_legacy_early_abort_restores_only_producer_pause_after_verified_retry(enrollment):
+    inventory, phases, plan, adapter, _, _ = enrollment
+    inventory = _legacy(inventory)
+    root = inventory.data_root
+    release = state.read_release(root, plan.release_id)
+
+    def abort(store, reason, sql=12):
+        return units.abort_early_adoption(store, "cutover", reason=reason, release=release,
+                                          sql_user_version=sql, adapter=adapter)
+
+    with state.locked_activation(root) as store:
+        _prepare(store, inventory, phases, plan, adapter)
+        store.begin("cutover", "producers_paused")
+        # First producer masked, then the coordinator stopped on the next one.
+        adapter.pause_failure = "scheduled.service"
+        with pytest.raises(state.ActivationError, match="refused.*3"):
+            units.pause_phase(store, "cutover", "producers", adapter=adapter)
+        assert adapter.states["clock.timer"] == "masked-runtime masked inactive"
+        assert not Path(inventory.units[0].installed[0].path).exists()
+        adapter.pause_failure = None
+        # A hosted caller is refused by read-only proofs before any abort marker.
+        adapter.refusal["collector.service"] = 1
+        with pytest.raises(state.ActivationError, match="svc_activation_assert_external refused"):
+            abort(store, "hosted")
+        assert "adoption_abort" not in state.read_activation(root, "cutover").body
+        adapter.refusal.clear()
+        adapter.resume_failure = "clock.timer"
+        with pytest.raises(state.ActivationError, match="svc_activation_resume refused"):
+            abort(store, "masked reader refused")
+        record = state.read_activation(root, "cutover")
+        assert record.status == "activating" and record.body["adoption_abort"]["result"] is None
+        # Status never advertises a forward resume while the abort is in progress.
+        body = {**record.body, "intent": {**record.body["intent"], "install_directory": "/units"}}
+        assert activation.resumable_running_step(state.ActivationRecord("cutover", root, body)) is None
+        unmarked = {key: value for key, value in body.items() if key != "adoption_abort"}
+        assert activation.resumable_running_step(state.ActivationRecord("cutover", root, unmarked)) == "producers_paused"
+        # A half-restored host can neither continue forward nor change its SQL precondition.
+        with pytest.raises(state.ActivationError, match="out of order"):
+            store.begin("cutover", "producers_paused")
+        with pytest.raises(state.ActivationError, match="not the admitted"):
+            units.pause_phase(store, "cutover", "producers", adapter=adapter)
+        with pytest.raises(state.ActivationRefusal, match="SQL precondition"):
+            abort(store, "retry", sql=13)
+        adapter.resume_failure = None
+        adapter.calls.clear()
+        # The timer-owned service ticked off meanwhile: its frozen timer declares
+        # it, so that is restored state. A resident service gets no such tolerance.
+        adapter.states["scheduled.service"] = "enabled loaded inactive"
+        pause = units.load_unit_pause(store, "cutover")
+        assert units._scheduled_services(pause.enrollment, pause.phases) == {"scheduled.service"}
+        assert units._producer_restored("enabled loaded active", "enabled loaded inactive", scheduled=True)
+        assert not units._producer_restored("enabled loaded active", "enabled loaded inactive", scheduled=False)
+        assert not units._producer_restored("enabled loaded failed", "enabled loaded failed", scheduled=True)
+        evidence = abort(store, "retry")
+        assert evidence.operation == "aborted" and evidence.targets == ("clock.timer", "scheduled.service")
+        # Retry reloads before reading restored bytes, then once after restoration;
+        # the untouched producer is not restarted and no bot or ingest resumes.
+        assert [call for call in adapter.calls if call[0] in ("svc_activation_reload", "svc_activation_resume")] == [
+            ("svc_activation_reload", None), ("svc_activation_reload", None),
+            ("svc_activation_resume", "clock.timer")]
+        assert adapter.states == {**adapter.original, "scheduled.service": "enabled loaded inactive"}
+        assert all(FileSnapshot.read(Path(unit.installed[0].path)) == unit.installed[0] for unit in inventory.units)
+        for phase in ("bots", "ingest"):
+            assert config_install.read_config_install(root, units.journal_id("cutover", phase)).status == "prepared"
+        record = state.read_activation(root, "cutover")
+        assert record.status == "rolled_back" and record.body["completed"] == []
+        assert record.body["forward"] == {"status": "activating", "completed": [],
+                                          "pending": "producers_paused", "evidence": {}}
+        recorded = record.body["adoption_abort"]
+        assert recorded["sql_user_version"] == 12 and recorded["release_id"] == release.release_id
+        assert [item["reason"] for item in recorded["attempts"]] == ["masked reader refused", "retry"]
+        assert recorded["result"] == {"evidence": evidence.digest, "resumed": ["clock.timer"], "cleared": []}
+        assert state.read_selection(root) is None
+        # Residue: the restored higher-priority file hides a surviving runtime mask,
+        # so the snapshot matches. A terminal recheck clears only that mask, never
+        # resumes or starts, and appends history beside the unchanged result.
+        adapter.hidden_masks.add("scheduled.service")
+        adapter.calls.clear()
+        with pytest.raises(state.ActivationRefusal, match="SQL precondition"):
+            abort(store, "residue", sql=13)
+        recheck = abort(store, "residue")
+        assert recheck.operation == "rechecked" and adapter.hidden_masks == set()
+        assert not any(function == "svc_activation_resume" for function, _ in adapter.calls)
+        rechecked = state.read_activation(root, "cutover").body["adoption_abort"]
+        assert rechecked["result"] == recorded["result"] and rechecked["attempts"] == recorded["attempts"]
+        assert [(item["reason"], item["cleared"]) for item in rechecked["rechecks"]] == [
+            ("residue", ["scheduled.service"])]
+        adapter.states["clock.timer"] = "enabled loaded inactive"  # drift is refused, not restarted
+        with pytest.raises(state.ActivationError, match="restored native state differs: clock.timer"):
+            abort(store, "drift")
+        assert not any(function == "svc_activation_resume" for function, _ in adapter.calls)
+
+
+@pytest.mark.parametrize("case", ["sealed_identity", "handed_off", "selected"])
+def test_early_abort_refuses_wrong_identity_or_progressed_adoption(enrollment, case):
+    inventory, phases, plan, adapter, _, _ = enrollment
+    if case != "sealed_identity":
+        inventory = _legacy(inventory)
+    root = inventory.data_root
+    release = state.read_release(root, plan.release_id)
+    with state.locked_activation(root) as store:
+        _prepare(store, inventory, phases, plan, adapter)
+        store.begin("cutover", "producers_paused")
+        if case == "handed_off":
+            result = units.pause_phase(store, "cutover", "producers", adapter=adapter)
+            store.complete("cutover", "producers_paused", evidence_digest=result.digest)
+            store.begin("cutover", "sessions_handed_off")
+        if case == "selected":
+            (root / "state/selected-release.json").write_text(json.dumps(
+                {"schema": 1, "activation_id": "other", "release_id": plan.release_id, "plan_id": plan.plan_id}))
+        before, calls = state.read_activation(root, "cutover").body, len(adapter.calls)
+        with pytest.raises(state.ActivationRefusal):
+            units.abort_early_adoption(store, "cutover", reason="r", release=release,
+                                       sql_user_version=12, adapter=adapter)
+        assert state.read_activation(root, "cutover").body == before
+        assert adapter.calls[calls:] == []
+
+
+@pytest.mark.parametrize("frozen_active", ["active", "activating"])
+def test_timer_owned_oneshot_mid_run_parks_and_restores_without_resend(enrollment, frozen_active):
+    inventory, phases, plan, adapter, _, _ = enrollment
+    # The inventory itself may be taken while the timer-owned oneshot executes.
+    inventory = _legacy(replace(inventory, units=tuple(
+        replace(unit, properties=tuple((key, frozen_active if key == "ActiveState" else value)
+                                       for key, value in unit.properties))
+        if unit.target == "scheduled.service" else unit for unit in inventory.units)))
+    root = inventory.data_root
+    release = state.read_release(root, plan.release_id)
+    with state.locked_activation(root) as store:
+        # The timer-owned oneshot is executing at the preparation snapshot.
+        adapter.states["scheduled.service"] = "enabled loaded activating"
+        _prepare(store, inventory, phases, plan, adapter)
+        store.begin("cutover", "producers_paused")
+        # The same transition on a timer or an ingest service is drift, before parking.
+        for target in ("clock.timer", "collector.service"):
+            adapter.states[target] = "enabled loaded activating"
+            with pytest.raises(state.ActivationError, match=f"changed before parking: {target}"):
+                units.pause_phase(store, "cutover", "producers", adapter=adapter)
+            adapter.states[target] = adapter.original[target]
+        adapter.states["scheduled.service"] = "enabled loaded failed"
+        with pytest.raises(state.ActivationError, match="changed before parking: scheduled.service"):
+            units.pause_phase(store, "cutover", "producers", adapter=adapter)
+        inventory.check_files()
+        adapter.states["scheduled.service"] = "enabled loaded activating"
+        units.pause_phase(store, "cutover", "producers", adapter=adapter)
+        assert adapter.states["scheduled.service"] == "masked-runtime masked inactive"
+        adapter.calls.clear()
+        units.abort_early_adoption(store, "cutover", reason="probe ran mid-snapshot", release=release,
+                                   sql_user_version=12, adapter=adapter)
+    # The service is restored before its timer, inactive: its next tick, not a resend, runs it.
+    assert [target for function, target in adapter.calls if function == "svc_activation_resume"] == [
+        "scheduled.service", "clock.timer"]
+    assert adapter.states == {**adapter.original, "scheduled.service": "enabled loaded inactive"}
+    assert state.read_activation(root, "cutover").status == "rolled_back"
+    # The frozen enrollment keeps the raw observed state; only the native argument differs.
+    journal = config_install.read_config_install(root, units.journal_id("cutover", "producers"))
+    frozen = state.read_plan(root, journal.plan_id).effects["enrollment"]["units"]
+    assert dict(next(unit for unit in frozen if unit["target"] == "scheduled.service")["properties"])[
+        "ActiveState"] == frozen_active
+
+
+class TickingAdapter(RecordedAdapter):
+    """launchctl print agrees with the current running/idle state."""
+
+    def call(self, function, *args, **kwargs):
+        if function == "svc_inventory_properties":
+            target = args[0]
+            source = plistlib.loads(self.files[target].content)
+            running = self.states[target].split()[2] == "active"
+            output = observed_print(target, source, Path(self.files[target].path), active=running)
+            return subprocess.CompletedProcess([function, *args], 0, output, "")
+        return super().call(function, *args, **kwargs)
+
+
+def _ticking_darwin(installed, tmp_path, frozen_active):
+    root, inputs, paths, _, _ = installed
+    release = r.seal_release(root, inputs, paths)
+    env = {"CLAUDLOBBY_ROOT": str(root), "FLEET_ROOT": str(root),
+           "CLAUDLOBBY_NATIVE_DIR": str(release.native_path), "CLAUDLOBBY_CLI": str(release.cli_path),
+           "CLAUDLOBBY_ARTIFACT_ID": release.inputs.artifact_id}
+    source = root / "fixture.plist"
+    source.write_bytes(plistlib.dumps({"Label": "fixture", "ProgramArguments": ["/bin/sleep", "60"],
+                                      "StartInterval": 60,
+                                      "WorkingDirectory": str(root), "EnvironmentVariables": env}))
+    directory = tmp_path / "LaunchAgents"
+    directory.mkdir()
+    target = directory / "fixture.plist"
+    target.write_bytes(source.read_bytes())
+    declaration = UnitDeclaration(source, "host", root, release.release_id, tuple(env.items()))
+    props = {"UnitFileState": "unchanged", "LoadState": "loaded", "ActiveState": frozen_active,
+             "DisabledOverride": "unset", "EnabledState": "enabled"}
+    entry = EnrolledUnit(declaration, "gui/501/fixture", FileSnapshot.read(source),
+                         (FileSnapshot.read(target),), tuple(props.items()))
+    catalog = f"manager\tDarwin\ndomain\tgui/501\ndirectory\t{directory}\nPID\tStatus\tLabel\n710\t0\tfixture\n"
+    inventory = EnrollmentInventory(root, "Darwin", catalog, (entry,), entry.installed, (), ())
+    plan = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, (), effects={}).seal()
+    return root, inventory, plan, TickingAdapter(inventory), {"producers": [entry.target], "bots": [], "ingest": []}
+
+
+def test_darwin_producer_finished_between_inventory_and_prepare(installed, tmp_path):
+    root, inventory, plan, adapter, phases = _ticking_darwin(installed, tmp_path, "active")
+    adapter.states["gui/501/fixture"] = "unchanged loaded inactive"  # its tick exited
+    with state.locked_activation(root) as store:
+        _prepare(store, inventory, phases, plan, adapter)
+
+
+def test_darwin_producer_started_between_prepare_and_pause(installed, tmp_path):
+    root, inventory, plan, adapter, phases = _ticking_darwin(installed, tmp_path, "inactive")
+    with state.locked_activation(root) as store:
+        _prepare(store, inventory, phases, plan, adapter)
+        store.begin("cutover", "producers_paused")
+        adapter.states["gui/501/fixture"] = "unchanged loaded active"  # its next tick began
+        units.pause_phase(store, "cutover", "producers", adapter=adapter)
 
 
 def test_fresh_caller_and_native_state_are_rechecked_before_effects(enrollment):

@@ -61,7 +61,7 @@ def candidate(installed, monkeypatch, tmp_path):
 
 
 def test_host_help_and_parse_are_lazy_and_global_scope_order_is_explicit(tmp_path, monkeypatch, capsys):
-    for route in ("status", "activate"):
+    for route in ("status", "activate", "abort-adoption"):
         result = _run(PARSE, "host", route, "--help", tmp_path=tmp_path)
         assert result.returncode == 0, result.stderr
     result = _run(PARSE, "--json", "host", "activate", "p-secret", tmp_path=tmp_path)
@@ -233,6 +233,49 @@ def test_activate_resume_reuses_recorded_id_and_reports_unsupported_start_stage(
     assert refusal["request_id"] == "interrupted"
 
 
+def test_abort_adoption_binds_id_and_sql_precondition_before_owner(candidate, monkeypatch, capsys):
+    import sqlite3
+    from claudlobby import activation_units
+    root, release, plan, _ = candidate
+    with state.locked_activation(root) as store:
+        store.prepare("adopt", plan, recovery_release_id=release.release_id,
+                      enrollment_digest="1" * 64, legacy_source=True)
+        store.begin("adopt", "producers_paused")
+    database = root / "state/plane/plane.db"
+    database.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    conn = sqlite3.connect(database)
+    conn.execute("PRAGMA user_version=12")
+    conn.close()
+    calls = []
+
+    def abort(store, activation_id, *, reason, release, sql_user_version):
+        # Native/file restoration belongs to the separately tested owner; keep
+        # its real durable record transitions for this CLI boundary.
+        calls.append((activation_id, reason, release.release_id, sql_user_version))
+        store.begin_adoption_abort(activation_id, reason=reason, release_id=release.release_id,
+                                   artifact_id=release.inputs.artifact_id,
+                                   sql_user_version=sql_user_version)
+        store.finish_adoption_abort(activation_id, evidence_digest="3" * 64, resumed=[])
+        return SimpleNamespace(targets=("clock.timer",), operation="aborted")
+
+    monkeypatch.setattr(activation_units, "abort_early_adoption", abort)
+    argv = ["--root", str(root), "--json", "host", "abort-adoption", "adopt",
+            "--reason", "masked reader refused", "--expected-sql-version"]
+    before = snapshot(root)
+    wrong = call(capsys, argv + ["13"], 4)
+    assert wrong["request_id"] is None and wrong["data"]["activation_id"] == "adopt"
+    assert "preflight expectation" in wrong["error"]["message"]
+    assert calls == [] and snapshot(root) == before
+    result = call(capsys, argv + ["12"])
+    assert result["request_id"] is None and result["release_id"] == release.release_id
+    assert result["data"]["activation_id"] == "adopt"
+    assert calls == [("adopt", "masked reader refused", release.release_id, 12)]
+    assert result["data"]["recording"] == "committed"
+    assert result["data"]["recorded_activation"]["status"] == "rolled_back"
+    assert result["data"]["restored_targets"] == ["clock.timer"]
+    assert state.read_activation(root, "adopt").body["adoption_abort"]["sql_user_version"] == 12
+
+
 def test_generated_context_and_existing_estate_refuse_with_inspection_guidance(candidate, monkeypatch, capsys):
     root, release, plan, directory = candidate
     calls = []
@@ -260,6 +303,14 @@ def test_generated_context_and_existing_estate_refuse_with_inspection_guidance(c
     native = call(capsys, argv, 4)
     assert native["error"]["message"] == "conflict: svc_activation_pause refused (3)"
     assert "SECRET-value" not in json.dumps(native) and snapshot(root) == before
+    # The owner's drift refusal names its frozen target; anything else stays generic.
+    for text, shown in (("native enrollment changed: com.example.creds-check.service",
+                         "native enrollment changed since inventory: com.example.creds-check.service"),
+                        ("native enrollment changed: x SECRET-value", "activation did not complete")):
+        monkeypatch.setattr(activation, "bootstrap_activation",
+                            lambda *_, text=text: (_ for _ in ()).throw(state.ActivationError(text)))
+        drift = call(capsys, argv, 4)
+        assert shown in drift["error"]["message"] and "SECRET-value" not in json.dumps(drift)
 
 
 def test_activate_discloses_lock_preflight_without_claiming_a_pending_step(candidate, monkeypatch, capsys):
