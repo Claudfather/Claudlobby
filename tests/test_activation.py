@@ -311,15 +311,23 @@ def test_first_adoption_refuses_to_start_deliberately_stopped_bot_before_record(
 
 
 @pytest.mark.parametrize("prior", ["early_abort", "same_id_abort", "unfinished_abort",
-                                   "unproven_abort", "ordinary_rolled_back"])
+                                   "unproven_abort", "cancelled_before_effects", "same_id_cancelled",
+                                   "naked_rolled_back"])
 def test_fresh_adoption_admits_only_a_verified_early_abort_prior_record(cold, monkeypatch, prior):
+    from claudlobby import config_install
     root, _, plan, host = cold
-    old = "cutover" if prior == "same_id_abort" else "aborted"
+    old = "cutover" if prior.startswith("same_id") else "aborted"
     with state.locked_activation(root) as store:
         store.prepare(old, plan, recovery_release_id=plan.release_id,
                       enrollment_digest="1" * 64, legacy_source=True)
-        if prior == "ordinary_rolled_back":
-            store.cancel_prepared(old)
+        if prior in ("cancelled_before_effects", "same_id_cancelled", "naked_rolled_back"):
+            # The owner's receipt names this unstarted configuration journal.
+            config_install.prepare_config(plan, old)
+            record = store.cancel_prepared(old)
+            assert record.body["cancellation"]["journals"] == [old]
+            if prior == "naked_rolled_back":
+                del record.body["cancellation"]
+                store._save(record)
         else:
             store.begin(old, "producers_paused")
             store.begin_adoption_abort(old, reason="early abort", release_id=plan.release_id,
@@ -333,7 +341,7 @@ def test_fresh_adoption_admits_only_a_verified_early_abort_prior_record(cold, mo
     # The deliberately stopped bot is the first refusal after the prior-record gate.
     units = _legacy_handoff_estate(root, ("manager",), assigned=False, stopped=("worker",))
     adopt = _adopt_legacy(root, plan, host, monkeypatch, units)
-    if prior == "early_abort":
+    if prior in ("early_abort", "cancelled_before_effects"):
         with pytest.raises(state.ActivationRefusal, match="deliberately stopped bots"):
             adopt()
         _no_activation_effect(root, host)

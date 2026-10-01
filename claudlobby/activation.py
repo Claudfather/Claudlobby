@@ -625,6 +625,37 @@ def _completed_adoption_abort(root: Path, record: ActivationRecord) -> bool:
             and read_migration(root, record.activation_id) is None)
 
 
+def _cancelled_before_effects(root: Path, record: ActivationRecord) -> bool:
+    """cancel_prepared's receipt for a first adoption, its journals still unstarted.
+
+    The owner proved zero effects when it wrote the receipt; this read-only
+    recheck only confirms the named journals were not started since.
+    """
+    body = record.body
+    cancellation = body.get("cancellation")
+    if not (record.status == "rolled_back"
+            and body["intent"].get("source_kind") == "legacy-unsealed"
+            and body["intent"].get("source_release_id") is None
+            and body["previous_selection"] is None
+            and isinstance(cancellation, dict)
+            and cancellation.get("kind") == "prepared-before-effects"
+            and cancellation.get("selection_sha256") == _digest(None)
+            and isinstance(cancellation.get("journals"), list)
+            and body["completed"] == [] and body["pending"] is None and body["evidence"] == {}
+            and not body.get("handoff_effects") and not body.get("start_effects")
+            and not body.get("start_phases") and "identity_bindings" not in body
+            and "forward" not in body and "adoption_abort" not in body
+            and read_migration(root, record.activation_id) is None):
+        return False
+    try:
+        journals = [config_install.read_config_install(root, identifier)
+                    for identifier in cancellation["journals"]]
+    except (config_install.ConfigInstallError, TypeError, ValueError):
+        return False
+    return all(journal.status == "prepared" and all(row == "pending" for row in journal.progress)
+               for journal in journals)
+
+
 def _running_activation(root: Path, activation_id: str, plan_id: str,
                         install_directory: Path, *, legacy_source: bool,
                         adapter: Adapter | None = None) -> ActivationRecord:
@@ -660,7 +691,8 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
             if record.status not in {"active", "rolled_back"}:
                 raise ActivationError(f"existing activation {record.activation_id} requires explicit repair")
             if legacy_source and (record.activation_id == activation_id
-                                  or not _completed_adoption_abort(root, record)):
+                                  or not (_completed_adoption_abort(root, record)
+                                          or _cancelled_before_effects(root, record))):
                 raise ActivationError(f"existing activation {record.activation_id} requires explicit repair")
         plan.check_fresh()
         source = source_plan = None

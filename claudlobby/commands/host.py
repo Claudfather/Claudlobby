@@ -160,8 +160,12 @@ def _activate(args, root):
             # Native stderr can contain arbitrary text. Disclose only the
             # operation and rc from the product-owned refusal envelope.
             refusal = re.match(r"\A(svc_activation_[a-z_]+) refused \(([0-9]{1,3})\):", str(exc))
-            code, message = "conflict", (f"conflict: {refusal[1]} refused ({refusal[2]})"
-                                         if refusal else f"conflict: activation did not complete; {pending}")
+            # The owner's own drift refusal names one frozen enrollment target.
+            changed = re.fullmatch(r"native enrollment changed: ([A-Za-z0-9_.@:/-]{1,200})", str(exc))
+            code, message = "conflict", (
+                f"conflict: {refusal[1]} refused ({refusal[2]})" if refusal else
+                f"conflict: native enrollment changed since inventory: {changed[1]}; {pending}" if changed else
+                f"conflict: activation did not complete; {pending}")
             if getattr(args, "resume", None) and data["recorded_activation"]:
                 from ..activation import resumable_running_step
                 from ..activation_state import read_activation

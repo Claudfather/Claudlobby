@@ -266,6 +266,14 @@ def test_generated_context_and_existing_estate_refuse_with_inspection_guidance(c
     native = call(capsys, argv, 4)
     assert native["error"]["message"] == "conflict: svc_activation_pause refused (3)"
     assert "SECRET-value" not in json.dumps(native) and snapshot(root) == before
+    # The owner's drift refusal names its frozen target; anything else stays generic.
+    for text, shown in (("native enrollment changed: com.example.creds-check.service",
+                         "native enrollment changed since inventory: com.example.creds-check.service"),
+                        ("native enrollment changed: x SECRET-value", "activation did not complete")):
+        monkeypatch.setattr(activation, "bootstrap_activation",
+                            lambda *_, text=text: (_ for _ in ()).throw(state.ActivationError(text)))
+        drift = call(capsys, argv, 4)
+        assert shown in drift["error"]["message"] and "SECRET-value" not in json.dumps(drift)
 
 
 def test_activate_discloses_lock_preflight_without_claiming_a_pending_step(candidate, monkeypatch, capsys):
