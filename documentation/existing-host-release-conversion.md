@@ -234,7 +234,8 @@ claudlobby --root "$DATA" host repair-start "$ACTIVATION_ID" \
 It refuses unless all of these hold: this activation is selected and pending
 `bots_started`; the named bot has a start intent with no result; its source and
 installed unit bytes match the frozen start; and its unit is inactive with no
-accepting private tmux server. The old attempt, its fence and the dead evidence
+accepting private tmux server. It checks that the caller runs outside every
+unit this activation recorded, not the ordinary unit inventory. The old attempt, its fence and the dead evidence
 stay in the activation record under `start_repairs`; other receipts are not
 changed. Then run the sealed candidate's `--resume` command above once. That
 command gives the bot a fresh fence and starts it. Nothing retries

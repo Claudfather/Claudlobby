@@ -1013,6 +1013,14 @@ def repair_failed_bot_start(root: Path, activation_id: str, *, fleet: str, bot: 
                 or effect["sha256"] != entry["after"]["sha256"] or effect["sha256"] != item["sha256"]
                 or not isinstance(effect.get("fence"), dict)):
             raise ActivationRefusal("recorded start intent differs from frozen publication")
+        # Native ancestry over this activation's recorded placements, as activation
+        # itself checks; ordinary inventory cannot classify a partial start.
+        for phase in enrollment.PHASES:
+            for placement in enrollment.candidate_entries(store, activation_id, phase):
+                if adapter.call("svc_activation_assert_external", placement["installed"],
+                                placement["target"], str(os.getpid())).returncode:
+                    raise ActivationRefusal("repair caller is hosted or cannot be proved external; "
+                                            "use an operator shell")
         installed = Path(entry["installed"])
         try:
             content = installed.read_bytes()

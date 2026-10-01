@@ -247,8 +247,7 @@ def dispatch(args):
                                  hint=f"supply claudlobby --root PATH {args.public_command.replace('.', ' ')}")
         root = _host_root(args)
         if repairing:
-            _operator_shell(root)  # The repair has no native ancestry check of its own.
-            return _repair_start(args, root)
+            return _repair_start(args, root)  # The backend checks recorded native ancestry.
         return _activate(args, root) if activating else _status(args, root)
     except CommandFailure as exc:
         if activating:

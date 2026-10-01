@@ -77,7 +77,7 @@ def test_host_help_and_parse_are_lazy_and_global_scope_order_is_explicit(tmp_pat
     assert list(tmp_path.iterdir()) == []
 
 
-def test_repair_start_routes_through_rooted_operator_guard_and_discloses_unknown_write(
+def test_repair_start_routes_through_environment_guard_and_discloses_unknown_write(
         candidate, monkeypatch, capsys):
     from claudlobby.commands import operator_context
     root, release, plan, directory = candidate
@@ -103,7 +103,8 @@ def test_repair_start_routes_through_rooted_operator_guard_and_discloses_unknown
     monkeypatch.delenv("BOT_ID")
     monkeypatch.setattr(operator_context, "require_operator_context", guarded.append)
     body = call(capsys, argv)
-    assert guarded[-1] == root and calls[0][0] == (root, "act-1")
+    # Only the environment guard runs here; the backend owns native ancestry.
+    assert guarded == [None] and calls[0][0] == (root, "act-1")
     assert calls[0][1] == {"fleet": "example", "bot": "worker", "reason": "exited before bridge"}
     assert body["data"]["recording"] == "committed"
     assert body["data"]["target_release_id"] == release.release_id

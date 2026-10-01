@@ -762,11 +762,15 @@ def _failed_worker_start(cold):
     return record
 
 
-@pytest.mark.parametrize("case", ["active", "unknown", "fleet", "bot", "succeeded", "reason"])
+@pytest.mark.parametrize("case", ["active", "unknown", "fleet", "bot", "succeeded", "reason",
+                                  "hosted", "ancestry-unknown"])
 def test_start_repair_refuses_live_unknown_wrong_identity_and_recorded_success(cold, case):
     root, _, _, host = cold
     before = _failed_worker_start(cold).body
     host.quiet_unknown = case == "unknown"
+    if case in ("hosted", "ancestry-unknown"):
+        host.dead.add(_WORKER_UNIT)  # Otherwise repairable: only native ancestry refuses.
+        host.external_result = 1 if case == "hosted" else 3
     fleet = "other" if case == "fleet" else "example"
     bot = "manager" if case == "succeeded" else "nobody" if case == "bot" else "worker"
     starts = list(host.starts)
