@@ -998,3 +998,103 @@ def test_the_guards_events_land_on_the_plane_anchored_on_the_bot(env, tmp_path):
     assert run(failing, "mcp__github__create_issue", issue("pub-org", "pub-repo"), tmp_path)[0] == "allow"
     crumbs = landed("--type", "script_error")
     assert len(crumbs) == 1 and "INACTIVE" in crumbs[0]["data"]["message"]
+
+
+# --- a URL a write's text mentions is text; only a URL given as the target is one ---------
+
+PRIV_URL = "https://github.com/priv-org/priv-repo/issues/3"
+PUB_URL = "https://github.com/pub-org/pub-repo/pull/9"
+
+URL_ROWS = [
+    # The target is the checkout's repository whatever a text flag's value mentions.
+    (f'gh issue comment 5 --body "{HIT} see {PRIV_URL}"', "pub", "deny"),
+    (f'gh pr comment 5 -b "{HIT} see {PRIV_URL}"', "pub", "deny"),
+    (f'gh issue create --title "{PRIV_URL} {HIT}" --body "plain"', "pub", "deny"),
+    (f'gh issue create --title "{HIT}" --body "{PRIV_URL}"', "pub", "deny"),
+    # -c, --comment and -d are switches in these commands, so the next word is a flag.
+    (f'gh pr review 5 --comment --body "{HIT} see {PRIV_URL}"', "pub", "deny"),
+    (f'gh pr review 5 -c -b "{HIT} see {PRIV_URL}"', "pub", "deny"),
+    (f'gh pr create -d --title "{HIT}" --body "{PRIV_URL}"', "pub", "deny"),
+    (f'gh pr merge 5 -d --body "{HIT} see {PRIV_URL}"', "pub", "deny"),
+    # In these the same flags take a value: the comment is text, even a bare URL.
+    (f'gh issue close 5 --comment "{HIT} see {PRIV_URL}"', "pub", "deny"),
+    (f'gh pr close 5 -d -c "{HIT} see {PRIV_URL}"', "pub", "deny"),
+    (f'gh issue reopen 5 -c "{PRIV_URL}" --comment "{HIT}"', "pub", "deny"),
+    # The mirror: a private checkout's write that mentions a public URL.
+    (f'gh issue comment 5 --body "{HIT} see {PUB_URL}"', "priv", "allow"),
+    (f'gh pr review 5 --comment --body "{HIT} see {PUB_URL}"', "priv", "allow"),
+    # No listed term: never refused, whatever the text mentions.
+    (f'gh issue comment 5 --body "plain see {PRIV_URL}"', "pub", "allow"),
+    (f'gh pr review 5 --comment --body "plain see {PRIV_URL}"', "pub", "allow"),
+    # A URL given AS the target still decides where the write goes, after any other word.
+    (f'gh issue comment {PRIV_URL} --body "{HIT}"', "pub", "allow"),
+    (f'gh issue close --reason completed {PRIV_URL} --comment "{HIT}"', "pub", "allow"),
+    # A switch never swallows the URL after it: read as a value flag, it would leave the
+    # private checkout as the target of a write that goes to the public pull request.
+    (f'gh pr merge -d {PUB_URL} --body "{HIT}"', "priv", "deny"),
+    (f'gh pr review -c {PUB_URL} --body "{HIT}"', "priv", "deny"),
+    (f'gh pr close -d {PUB_URL} -c "{HIT}"', "priv", "deny"),
+    # A word is the target only as a whole URL, even in the value of a flag this guard
+    # does not list.
+    (f'gh issue edit 5 --milestone "Q4 {PRIV_URL}" --body "{HIT}"', "pub", "deny"),
+]
+
+
+@pytest.mark.parametrize("command,where,want", URL_ROWS, ids=[str(i) for i in range(len(URL_ROWS))])
+def test_a_url_in_a_write_s_text_is_never_its_target(env, tmp_path, command, where, want):
+    """A body that cites another repository's issue is everyday text. Read as the target, it
+    sent a write with a listed term from a public checkout to a private repository's verdict."""
+    checkout = repo(tmp_path, env, {"pub": "pub-org/pub-repo", "priv": "priv-org/priv-repo"}[where])
+    assert bash(env, command, checkout)[0] == want
+
+
+def test_a_clean_write_by_url_to_a_repository_named_like_a_term_passes(env, tmp_path):
+    """The repository's name says where a write goes, not what it publishes: by -R, by the
+    checkout and by URL alike."""
+    issue_url = "https://github.com/pub-org/zephyr-widgets/issues/5"
+    pull_url = "https://github.com/pub-org/zephyr-widgets/pull/5"
+    for command in (
+        f'gh issue comment {issue_url} --body "plain words"',
+        f"gh issue close {issue_url}",
+        f"gh pr ready {pull_url}",
+        f"gh pr merge {pull_url} --squash --admin --match-head-commit " + "0" * 40,
+    ):
+        assert bash(env, command, tmp_path)[0] == "allow", command
+    assert lookups(env) == []  # no hit, so no visibility call
+    assert bash(env, f'gh issue comment {issue_url} --body "{HIT}"', tmp_path)[0] == "deny"
+
+
+MERGE_LADDER = (
+    "REPO=pub-org/pub-repo; N=5\n"
+    'BR=$(gh pr view "$N" --repo "$REPO" --json headRefName --jq .headRefName)\n'
+    'PH=$(gh api "repos/$REPO/pulls/$N" --jq .head.sha)\n'
+    'RH=$(gh api "repos/$REPO/git/ref/heads/$BR" --jq .object.sha)\n'
+    '[ "$PH" = "$RH" ] || { echo "REFUSE: head mismatch"; exit 1; }\n'
+    "DELETE=--delete-branch\n"
+    '[ -n "$BR" ] && STACKED=$(gh pr list --repo "$REPO" --base "$BR" --state open --json number '
+    "--jq '.[].number') && [ -z \"$STACKED\" ] || { DELETE=\"\"; echo \"KEEPING $BR\"; }\n"
+    '[ -n "$REPO" ] && [ -n "$N" ] && [ -n "$PH" ] || { echo "REFUSE: not all set"; exit 1; }\n'
+    'gh pr merge "$N" --repo "$REPO" --squash --admin $DELETE --match-head-commit "$PH"'
+)
+
+
+def test_the_merge_gate_refuses_only_a_merge_that_carries_a_term(env, tmp_path):
+    """Every merge runs `gh pr merge`, so a clean one must never be refused: plain, in the
+    one-call ladder with its substitutions, or with no answer from GitHub at all."""
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    merge = f"gh pr merge 5 -R pub-org/pub-repo --squash --admin --delete-branch --match-head-commit {sha}"
+    (tmp_path / "clean.md").write_text("plain words\n")
+    for command in (
+        merge,
+        merge.replace("-R ", "--repo "),
+        merge.replace(sha, '"$(gh pr view 5 --json headRefOid --jq .headRefOid)"'),
+        f'SHA=$(gh api repos/pub-org/pub-repo/pulls/5 --jq .head.sha); {merge.split(" --match")[0]} --match-head-commit "$SHA"',
+        merge + " --body-file " + str(tmp_path / "clean.md"),
+        MERGE_LADDER,
+    ):
+        assert bash(env, command, tmp_path)[0] == "allow", command
+    assert lookups(env) == []
+    for flag in ("--subject", "--body"):
+        assert bash(env, f'{merge} {flag} "{HIT}"', tmp_path)[0] == "deny", flag
+    with_term = MERGE_LADDER.replace("--match-head-commit", f'--subject "{HIT}" --match-head-commit')
+    assert bash(env, with_term, tmp_path)[0] == "deny"

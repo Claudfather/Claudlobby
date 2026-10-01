@@ -156,6 +156,19 @@ _GH_CONTENT_FLAGS = {
     "--description",
     "--desc",
 }
+# In these commands a flag above is a switch that takes no value, so the word after
+# it is not its value: from each command's --help, gh 2.92.0. Elsewhere -c and
+# --comment carry a closing comment, and -d a description.
+_GH_SWITCHES = {
+    ("issue", "develop"): {"-c"},
+    ("pr", "close"): {"-d"},
+    ("pr", "create"): {"-d"},
+    ("pr", "merge"): {"-d"},
+    ("pr", "revert"): {"-d"},
+    ("pr", "review"): {"-c", "--comment"},
+    ("release", "create"): {"-d"},
+    ("repo", "create"): {"-c"},
+}
 _API_CONTENT_KEYS = {
     "body",
     "title",
@@ -201,8 +214,10 @@ _SUBST = re.compile(r"\$@@pwg-subst-(\d+)@@")
 _READABLE_SUBST = re.compile(
     r"\s*(?:(?:cat\s+|<\s*)[^\s()|;&<>]+|cat\s*<<-?\s*@@pwg-heredoc-\d+@@)\s*"
 )
-_ISSUE_URL = re.compile(
-    r"://(?P<host>[^/\s]+)/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)/(?:issues|pull)/\d+"
+# an issue or pull request URL, as a whole word
+_TARGET_URL = re.compile(
+    r"https?://(?P<host>[^/\s]+)/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)"
+    r"/(?:issues|pull)/\d+(?:[/?#]\S*)?"
 )
 _VISIBILITIES = ("public", "private", "internal")
 # a line that matches any of these with zero width matches at every position of
@@ -634,6 +649,31 @@ def _positional(args: list[str], value_flags: set[str]) -> list[str]:
     return out
 
 
+def _target_url(
+    args: list[str], group: str, verb: str, assigns: dict[str, str]
+) -> tuple[int, re.Match] | None:
+    """(index, match) of the issue or pull request a gh write names by URL: the first
+    positional word after the verb that IS such a URL. A text flag's value is never a
+    positional, so a URL a body, a title or a comment mentions is text, not the target."""
+    if group not in ("issue", "pr"):
+        return None
+    values = _GH_TARGET_FLAGS | _GH_CONTENT_FLAGS | _GH_FILE_FLAGS
+    values -= _GH_SWITCHES.get((group, verb), set())
+    seen, k = 0, 0
+    while k < len(args):
+        a = args[k]
+        if a in values:
+            k += 2
+            continue
+        if a == "-" or not a.startswith("-"):
+            seen += 1
+            m = _TARGET_URL.fullmatch(_lenient(a, assigns)) if seen > 2 else None
+            if m:  # past the group and the verb
+                return k, m
+        k += 1
+    return None
+
+
 def _flag_values(args: list[str], names: set[str]) -> list[str]:
     vals = []
     for k, a in enumerate(args):
@@ -929,7 +969,10 @@ def _gh_write(
     verb = pos[1]
     here, assigns = st.here, dict(st.assigns)
     body = _Body(here, assigns, st.written)
-    words, files = _content_words(args, _GH_TARGET_FLAGS, _GH_FILE_FLAGS)
+    url_at = _target_url(args, group, verb, assigns)
+    # a URL given as the target says where the write goes, not what it publishes
+    kept = args if url_at is None else args[: url_at[0]] + args[url_at[0] + 1 :]
+    words, files = _content_words(kept, _GH_TARGET_FLAGS, _GH_FILE_FLAGS)
     body.text("the command", words, _flag_values(args, _GH_CONTENT_FLAGS))
     if group == "gist":
         if verb == "create":
@@ -957,13 +1000,12 @@ def _gh_write(
         flag = _flag_values(args, {"-R", "--repo"})
         if flag:
             return _parse_repo(_expand(flag[-1], assigns))
-        for a in pos[2:] if group in ("issue", "pr") else []:
-            m = _ISSUE_URL.search(_lenient(a, assigns))
-            if m:  # gh writes where the URL points, whatever directory it runs in
-                host = m.group("host").lower()
-                if host != "github.com" and not host.endswith(".github.com"):
-                    return ("", "")  # another host
-                return (m.group("owner"), m.group("repo"))
+        if url_at:  # gh writes where the URL points, whatever directory it runs in
+            m = url_at[1]
+            host = m.group("host").lower()
+            if host != "github.com" and not host.endswith(".github.com"):
+                return ("", "")  # another host
+            return (m.group("owner"), m.group("repo"))
         if group == "repo" and len(pos) > 2:
             if verb == "create":
                 return ("(new)", pos[2])
