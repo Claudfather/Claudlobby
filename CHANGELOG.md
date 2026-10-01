@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — composed bots exclude the data root's developer instructions (#2057)
+
+Every bot's local settings exclude the exact absolute data-root `CLAUDE.md` path,
+so new sessions use their composed instructions without inheriting the checkout's
+developer guide outside release activation. Bot and project instruction files
+remain eligible to load. The exclusion takes effect at the next session start.
+
 ### Fixed — a broken link and three stale lines in the moved script reference (#2035 follow-up)
 
 - `documentation/test-suite.md` links `testing-plane-isolation.md` from its own folder. The link moved one folder down with its text in #2035 and pointed at `documentation/documentation/`.

@@ -410,6 +410,17 @@ class TestComposeSettingsLocal:
             bots=bots,
         )
 
+    @pytest.mark.parametrize("overlay", [False, True], ids=["root", "fleet-overlay"])
+    def test_every_bot_excludes_only_data_root_instructions(self, tmp_path, overlay):
+        root = tmp_path / "data"
+        fleet_dir = root / "local" / "example" if overlay else root
+        paths = Paths(root=root, fleet_dir=fleet_dir, package=source_package())
+        fleet = self._make_fleet_with_bots("lead", "worker", manager="lead")
+        for bot in fleet.bots.values():
+            settings = compose_settings_local(bot, fleet, paths)
+            assert settings["claudeMdExcludes"] == [str(root / "CLAUDE.md")]
+            assert Path(settings["claudeMdExcludes"][0]).is_absolute()
+
     def test_no_tools_no_siblings(self, tmp_path):
         # channels=[] — a bot with no Telegram channel; see #1107.
         paths = self._make_paths_with_runtime(tmp_path)
