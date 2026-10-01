@@ -506,8 +506,23 @@ class ActivationStore:
             prior["attempts"].append(attempt)
         return self._save(record)
 
+    def record_adoption_abort_recheck(self, activation_id: str, *, reason: str, release_id: str,
+                                      artifact_id: str, evidence_digest: str,
+                                      cleared: list[str]) -> ActivationRecord:
+        """Append a verified terminal recheck; the original result stays unchanged."""
+        self.assert_locked()
+        record = read_activation(self.root, activation_id)
+        abort = record.body.get("adoption_abort")
+        if (record.status != "rolled_back" or not isinstance(abort, dict) or abort.get("result") is None
+                or not re.fullmatch(r"[0-9a-f]{64}", evidence_digest)):
+            raise ActivationError("only a completed early adoption abort can be rechecked")
+        abort.setdefault("rechecks", []).append(
+            {"reason": reason, "release_id": release_id, "artifact_id": artifact_id,
+             "evidence": evidence_digest, "cleared": list(cleared)})
+        return self._save(record)
+
     def finish_adoption_abort(self, activation_id: str, *, evidence_digest: str,
-                              resumed: list[str]) -> ActivationRecord:
+                              resumed: list[str], cleared: list[str] = ()) -> ActivationRecord:
         """Terminalize only after exact producer files and native states were verified."""
         self.assert_locked()
         record = read_activation(self.root, activation_id)
@@ -516,7 +531,7 @@ class ActivationStore:
                 or record.body["pending"] != "producers_paused"
                 or not re.fullmatch(r"[0-9a-f]{64}", evidence_digest)):
             raise ActivationError("early adoption abort is not in progress")
-        abort["result"] = {"evidence": evidence_digest, "resumed": list(resumed)}
+        abort["result"] = {"evidence": evidence_digest, "resumed": list(resumed), "cleared": list(cleared)}
         record.body.update(status="rolled_back", pending=None)
         return self._save(record)
 

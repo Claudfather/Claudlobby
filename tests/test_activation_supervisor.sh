@@ -32,7 +32,7 @@ systemctl() {
     case "$1" in
         mask) if [ "$SHADOW" = 0 ]; then load=masked; enabled=masked-runtime; fi ;;
         stop) if [ "$STOP_SETTLE" -gt 0 ]; then active=deactivating; else active=inactive; fi ;;
-        unmask) load=loaded; enabled="$old_enabled" ;;
+        unmask) load=loaded; enabled="$old_enabled"; rm -f "${XDG_RUNTIME_DIR:-$T/no-runtime}/systemd/user/$target" ;;
         start) active=active ;;
         disable) active=inactive ;;
         enable) active=active ;;
@@ -163,6 +163,17 @@ rm "$MASK_FRAGMENT"; ln -s /dev/null "$MASK_FRAGMENT"
 [ "$(svc_activation_snapshot "$file" "$target")" = 'masked-runtime masked inactive' ]
 : > "$TRACE"; expect 0 svc_activation_resume "$file" "$target" 'enabled loaded active'
 [ "$(cat "$TRACE")" = "$(printf 'unmask --runtime worker.service\nstart worker.service')" ]
+# Residue: the restored higher-priority file loads, hiding a surviving runtime
+# mask link. Only that exact link is removed; nothing is started.
+ln -s /dev/null "$MASK_FRAGMENT"
+[ "$(svc_activation_snapshot "$file" "$target")" = 'enabled loaded active' ]
+: > "$TRACE"; [ "$(svc_activation_clear_runtime_mask "$file" "$target" 'enabled loaded active')" = removed ]
+[ "$(cat "$TRACE")" = 'unmask --runtime worker.service' ] && [ ! -L "$MASK_FRAGMENT" ]
+: > "$TRACE"; [ "$(svc_activation_clear_runtime_mask "$file" "$target" 'enabled loaded active')" = absent ]; unchanged
+ln -s "$file" "$MASK_FRAGMENT"
+expect 3 svc_activation_clear_runtime_mask "$file" "$target" 'enabled loaded active' 2>/dev/null; unchanged
+expect 3 svc_activation_clear_runtime_mask "$file" "$target" 'masked-runtime masked inactive' 2>/dev/null; unchanged
+rm "$MASK_FRAGMENT"
 unset MASK_FRAGMENT XDG_RUNTIME_DIR
 # The abort reload helper only reloads the user manager; it is Linux-only.
 : > "$TRACE"; expect 0 svc_activation_reload; [ "$(cat "$TRACE")" = daemon-reload ]

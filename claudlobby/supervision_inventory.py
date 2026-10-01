@@ -53,6 +53,7 @@ class Adapter:
         "svc_inventory_catalog", "svc_inventory_properties", "svc_inventory_disabled", "svc_inventory_state", "svc_bot_unit_owned_by",
         "svc_activation_snapshot", "svc_activation_assert_external",
         "svc_activation_pause", "svc_activation_resume", "svc_activation_reload",
+        "svc_activation_clear_runtime_mask",
         "svc_activation_start", "svc_activation_quiet", "svc_activation_bot_fence",
         "svc_activation_bot_ready", "svc_activation_handoff",
         "svc_activation_stop_private_server",

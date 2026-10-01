@@ -275,9 +275,13 @@ def prepare_unit_pause(store: ActivationStore, activation_id: str,
     return load_unit_pause(store, activation_id)
 
 
-def load_unit_pause(store: ActivationStore, activation_id: str) -> UnitPause:
-    """Recover frozen membership, saved states and file backups via their owners."""
-    record = _record(store, activation_id)
+def load_unit_pause(store: ActivationStore, activation_id: str, *, terminal: bool = False) -> UnitPause:
+    """Recover frozen membership, saved states and file backups via their owners.
+
+    ``terminal`` is only for rechecking a verified early adoption abort.
+    """
+    store.assert_locked()
+    record = read_activation(store.root, activation_id) if terminal else _record(store, activation_id)
     plans = []
     shared = None
     for phase in PHASES:
@@ -370,8 +374,20 @@ def abort_early_adoption(store: ActivationStore, activation_id: str, *, reason: 
     journals must be unstarted. Any refusal or unknown leaves the durable abort
     marker, so forward activation stays refused; an explicit rerun reconciles.
     """
-    record = _record(store, activation_id)
-    pause = load_unit_pause(store, activation_id)
+    store.assert_locked()
+    record = read_activation(store.root, activation_id)
+    terminal = record.status == "rolled_back"
+    if terminal:
+        # Only the verified receipt of this sole first adoption may be rechecked.
+        from .activation import _completed_adoption_abort
+        others = {path.parent.name for path in (store.root / "state/activations").glob("*/activation.json")}
+        if (not _completed_adoption_abort(store.root, record) or others != {activation_id}
+                or read_selection(store.root) is not None
+                or record.body["adoption_abort"]["sql_user_version"] != sql_user_version):
+            raise ActivationRefusal("terminal recheck requires the sole verified early abort and its SQL precondition")
+    else:
+        record = _record(store, activation_id)
+    pause = load_unit_pause(store, activation_id, terminal=terminal)
     if pause.enrollment["manager"] != "Linux" or not pause.enrollment.get("legacy_source"):
         raise ActivationRefusal("early abort supports only a Linux legacy enrollment")
     for phase in ("bots", "ingest"):
@@ -381,37 +397,54 @@ def abort_early_adoption(store: ActivationStore, activation_id: str, *, reason: 
     from .migration_apply import read_migration
     if read_migration(store.root, activation_id) is not None:
         raise ActivationRefusal("activation has a migration journal; early abort is not admitted")
-    store.begin_adoption_abort(activation_id, reason=reason, release_id=release.release_id,
-                               artifact_id=release.inputs.artifact_id,
-                               sql_user_version=sql_user_version)
+    identifier = journal_id(activation_id, "producers")
+    if terminal and read_config_install(store.root, identifier).status != "rolled_back":
+        raise ActivationRefusal("terminal recheck requires the restored producer journal")
+    if not terminal:
+        store.begin_adoption_abort(activation_id, reason=reason, release_id=release.release_id,
+                                   artifact_id=release.inputs.artifact_id,
+                                   sql_user_version=sql_user_version)
     adapter = adapter or Adapter()
     for unit in pause.enrollment["units"]:
         _check_source(unit["generated"])
-    identifier = journal_id(activation_id, "producers")
     if read_config_install(store.root, identifier).status in ("rolling_back", "rolled_back"):
         # A prior attempt restored bytes; expose them before frozen-placement reads.
         _call(adapter, "svc_activation_reload")
     _external(adapter, pause)
-    rollback_config(store.root, identifier)
+    if not terminal:
+        rollback_config(store.root, identifier)
     for unit in pause.units():
         _check_source(unit["installed"][0])
-    _call(adapter, "svc_activation_reload")
-    resumed = []
+    if not terminal:
+        _call(adapter, "svc_activation_reload")
+    resumed, cleared = [], []
     scheduled = _scheduled_services(pause)
     for unit in pause.units("producers"):
         target, saved = unit["target"], _saved(unit)
         ticks = target in scheduled
-        if _producer_restored(saved, _call(adapter, "svc_activation_snapshot", _file(unit), target),
-                              scheduled=ticks):
-            continue  # untouched or already restored: no gratuitous restart
-        _call(adapter, "svc_activation_resume", _file(unit), target, saved)
-        resumed.append(target)
         if not _producer_restored(saved, _call(adapter, "svc_activation_snapshot", _file(unit), target),
                                   scheduled=ticks):
-            raise ActivationError(f"restored native state differs: {target}")
+            if terminal:  # a recheck never resumes or starts
+                raise ActivationError(f"restored native state differs: {target}")
+            _call(adapter, "svc_activation_resume", _file(unit), target, saved)
+            resumed.append(target)
+            if not _producer_restored(saved, _call(adapter, "svc_activation_snapshot", _file(unit), target),
+                                      scheduled=ticks):
+                raise ActivationError(f"restored native state differs: {target}")
+        # A restored higher-priority file can hide a surviving runtime mask.
+        if (dict(unit["properties"])["LoadState"] == "loaded"
+                and _call(adapter, "svc_activation_clear_runtime_mask", _file(unit), target, saved) == "removed"):
+            cleared.append(target)
     evidence = UnitPhaseEvidence("producers", identifier, pause.plan("producers").plan_id,
-                                 tuple(unit["target"] for unit in pause.units("producers")), "aborted")
-    store.finish_adoption_abort(record.activation_id, evidence_digest=evidence.digest, resumed=resumed)
+                                 tuple(unit["target"] for unit in pause.units("producers")),
+                                 "rechecked" if terminal else "aborted")
+    if terminal:
+        store.record_adoption_abort_recheck(activation_id, reason=reason, release_id=release.release_id,
+                                            artifact_id=release.inputs.artifact_id,
+                                            evidence_digest=evidence.digest, cleared=cleared)
+    else:
+        store.finish_adoption_abort(record.activation_id, evidence_digest=evidence.digest,
+                                    resumed=resumed, cleared=cleared)
     return evidence
 
 

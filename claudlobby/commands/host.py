@@ -275,9 +275,12 @@ def _abort(args, root):
         raise CommandFailure("conflict", "conflict: abort owner did not confirm rolled_back state",
                              data={**data, "recorded_activation": saved, "recording": "unknown"},
                              release_id=executing)
-    data.update(recorded_activation=saved, recording="committed", restored_targets=list(evidence.targets))
+    data.update(recorded_activation=saved, recording="committed", restored_targets=list(evidence.targets),
+                operation=evidence.operation)
+    done = ("terminal early abort rechecked; hidden runtime masks cleared" if evidence.operation == "rechecked"
+            else "early adoption aborted")
     return CommandOutput(data, executing, (
-        f"Activation {args.activation_id}: early adoption aborted; original producer files and states "
+        f"Activation {args.activation_id}: {done}; original producer files and states "
         "verified. Bots, ingest, selection and SQL were not touched.",))
 
 

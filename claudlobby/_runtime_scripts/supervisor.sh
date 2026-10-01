@@ -718,6 +718,29 @@ svc_activation_reload() {
     systemctl --user daemon-reload
 }
 
+# Early adoption abort only: a restored higher-priority installed file hides a
+# surviving runtime mask from load state. Remove only this user's exact mask
+# link for an originally unmasked TARGET; never start, stop or retry.
+svc_activation_clear_runtime_mask() {
+    local file="$1" target="$2" saved="$3" link
+    [ "$_OS" = Linux ] || { _svc_activation_unknown "runtime masks are Linux-only"; return 3; }
+    _svc_activation_saved "$saved" || return 3
+    [ "$SVC_ACT_OLD_LOAD" = loaded ] || { _svc_activation_unknown "$target was not originally unmasked"; return 3; }
+    _svc_activation_read "$file" "$target" || return 3
+    [ "$SVC_ACT_LOAD" = loaded ] || { _svc_activation_unknown "$target restored file does not load"; return 3; }
+    link="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/systemd/user/$target"
+    if [ -e "$link" ] || [ -L "$link" ]; then
+        _svc_activation_runtime_mask "$link" "$target" || { _svc_activation_unknown "$target runtime node is not a mask"; return 3; }
+        systemctl --user unmask --runtime "$target" || return $?
+        [ ! -e "$link" ] && [ ! -L "$link" ] || { _svc_activation_unknown "$target runtime mask remains"; return 3; }
+        printf 'removed\n'
+    else
+        printf 'absent\n'
+    fi
+    _svc_activation_read "$file" "$target" || return 3
+    [ "$SVC_ACT_FILE_STATE $SVC_ACT_LOAD" = "$SVC_ACT_OLD_FILE $SVC_ACT_OLD_LOAD" ]
+}
+
 _svc_activation_read() {
     local file="$1" target="$2" output key value seen=" " uid manager pid status label extra count=0
     case "$file" in /*) ;; *) _svc_activation_unknown "installed path is not absolute"; return 3 ;; esac

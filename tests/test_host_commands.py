@@ -220,7 +220,7 @@ def test_abort_adoption_binds_id_and_sql_precondition_before_owner(candidate, mo
                                    artifact_id=release.inputs.artifact_id,
                                    sql_user_version=sql_user_version)
         store.finish_adoption_abort(activation_id, evidence_digest="3" * 64, resumed=[])
-        return SimpleNamespace(targets=("clock.timer",))
+        return SimpleNamespace(targets=("clock.timer",), operation="aborted")
 
     monkeypatch.setattr(activation_units, "abort_early_adoption", abort)
     argv = ["--root", str(root), "--json", "host", "abort-adoption", "adopt",

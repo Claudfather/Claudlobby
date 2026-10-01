@@ -219,6 +219,17 @@ condition, then rerun the same command; the rerun reconciles evidence before
 any native action. This is not a general rollback and makes no SQL restore
 claim.
 
+A restored higher-priority unit file can hide a surviving runtime mask: the unit
+loads normally, but a fresh inventory refuses the competing definitions. The
+abort removes such an exact `/dev/null` runtime link for each originally
+unmasked producer. To clean up an abort that already ended as `rolled_back`,
+rerun the same command with the same `--expected-sql-version`. It is admitted
+only for the sole recorded activation, with no selection or migration. This
+recheck verifies the restored producer files and states. It removes only
+hidden runtime masks and never resumes or starts a unit; any drift is refused.
+The original result stays unchanged, and the recheck is appended to the
+record's history.
+
 ## 5. Verify before releasing the source hold
 
 ```bash

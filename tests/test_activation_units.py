@@ -31,6 +31,7 @@ class RecordedAdapter:
         self.pause_failure = None
         self.resume_failure = None
         self.overrides = {}
+        self.hidden_masks = set()
         self.binding_changed = False
 
     def read(self, function, *args):
@@ -77,6 +78,10 @@ class RecordedAdapter:
                 rc = 3
             else:
                 self.states[target] = self.original[target]
+        elif function == "svc_activation_clear_runtime_mask":
+            assert args[2] == self.original[target] and file.is_file()
+            output = "removed\n" if target in self.hidden_masks else "absent\n"
+            self.hidden_masks.discard(target)
         else:
             raise AssertionError(f"unexpected native operation: {function}")
         return subprocess.CompletedProcess([function, *args], rc, output, "recorded unknown" if rc else "")
@@ -617,10 +622,26 @@ def test_legacy_early_abort_restores_only_producer_pause_after_verified_retry(en
         recorded = record.body["adoption_abort"]
         assert recorded["sql_user_version"] == 12 and recorded["release_id"] == release.release_id
         assert [item["reason"] for item in recorded["attempts"]] == ["masked reader refused", "retry"]
-        assert recorded["result"] == {"evidence": evidence.digest, "resumed": ["clock.timer"]}
+        assert recorded["result"] == {"evidence": evidence.digest, "resumed": ["clock.timer"], "cleared": []}
         assert state.read_selection(root) is None
-        with pytest.raises(state.ActivationError, match="terminal"):
-            abort(store, "again")
+        # Residue: the restored higher-priority file hides a surviving runtime mask,
+        # so the snapshot matches. A terminal recheck clears only that mask, never
+        # resumes or starts, and appends history beside the unchanged result.
+        adapter.hidden_masks.add("scheduled.service")
+        adapter.calls.clear()
+        with pytest.raises(state.ActivationRefusal, match="SQL precondition"):
+            abort(store, "residue", sql=13)
+        recheck = abort(store, "residue")
+        assert recheck.operation == "rechecked" and adapter.hidden_masks == set()
+        assert not any(function == "svc_activation_resume" for function, _ in adapter.calls)
+        rechecked = state.read_activation(root, "cutover").body["adoption_abort"]
+        assert rechecked["result"] == recorded["result"] and rechecked["attempts"] == recorded["attempts"]
+        assert [(item["reason"], item["cleared"]) for item in rechecked["rechecks"]] == [
+            ("residue", ["scheduled.service"])]
+        adapter.states["clock.timer"] = "enabled loaded inactive"  # drift is refused, not restarted
+        with pytest.raises(state.ActivationError, match="restored native state differs: clock.timer"):
+            abort(store, "drift")
+        assert not any(function == "svc_activation_resume" for function, _ in adapter.calls)
 
 
 @pytest.mark.parametrize("case", ["sealed_identity", "handed_off", "selected"])
