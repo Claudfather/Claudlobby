@@ -422,8 +422,9 @@ class ActivationStore:
                 or "bots_started" in body["completed"] or not isinstance(repairs, list)
                 or effect is None or effect["phase"] != "bots" or effect["result"] is not None
                 or effect["target"] != target or effect["sha256"] != sha256 or effect["fence"] != fence
-                or not isinstance(reason, str) or not reason.strip()):
-            raise ActivationError("bot start repair is not the admitted unresolved start")
+                or not isinstance(reason, str) or not reason.strip() or not reason.isprintable()):
+            # Raised before the single write, so nothing changed.
+            raise ActivationRefusal("bot start repair is not the admitted unresolved start")
         repairs.append({"source": source, "attempt": effect, "dead_evidence": evidence,
                         "reason": reason, "repair_artifact": repair_artifact})
         del body["start_effects"][source]

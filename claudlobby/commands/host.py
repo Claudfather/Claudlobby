@@ -211,11 +211,15 @@ def _repair_start(args, root):
         record = repair_failed_bot_start(root, args.repair_activation_id, fleet=args.repair_fleet,
                                          bot=args.bot, reason=args.reason)
     except ActivationRefusal as exc:
-        # Every product refusal is raised before the single journal write.
-        raise CommandFailure("conflict", f"conflict: start repair refused: {exc}; no change recorded",
+        # The backend raises every failure before its single journal write as a refusal.
+        held = str(exc) == "another host activation holds the lock"
+        raise CommandFailure("conflict", "conflict: host activation lock is held; no change recorded" if held
+                             else f"conflict: start repair refused: {exc}; no change recorded",
                              data={**data, "recorded_activation": _recorded(root, args.repair_activation_id)},
-                             release_id=executing, hint=_hint(root)) from exc
-    except (ActivationError, OSError) as exc:
+                             release_id=executing,
+                             hint="inspect running host operations and activation.lock holders before retrying"
+                             if held else _hint(root)) from exc
+    except (ActivationError, ValueError, OSError) as exc:
         # The atomic replace may have landed before its fsync or reread failed.
         raise CommandFailure("unavailable", "unavailable: start repair outcome is unknown",
                              data={**data, "recording": "unknown",

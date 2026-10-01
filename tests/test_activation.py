@@ -1,5 +1,6 @@
 """Cold-host activation with real durable owners and a private native manager."""
 
+from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import replace
 import json
@@ -8,6 +9,7 @@ from pathlib import Path
 import plistlib
 import shlex
 import shutil
+import socket
 import sqlite3
 import subprocess
 from types import SimpleNamespace
@@ -29,7 +31,7 @@ from claudlobby.supervision_inventory import FileSnapshot
 from tests.test_releases import installed
 from tests.test_migration_plan import _database, _event_request, _pending
 from tests.test_task_audit import _insert
-from tests.test_activation_units import _prepare as _prepare_pause, enrollment  # noqa: F401
+from tests.test_activation_units import _pause_all, _prepare as _prepare_pause, enrollment  # noqa: F401
 
 
 @pytest.fixture
@@ -763,7 +765,7 @@ def _failed_worker_start(cold):
 
 
 @pytest.mark.parametrize("case", ["active", "unknown", "fleet", "bot", "succeeded", "reason",
-                                  "hosted", "ancestry-unknown"])
+                                  "multiline", "hosted", "ancestry-unknown", "missing", "locked"])
 def test_start_repair_refuses_live_unknown_wrong_identity_and_recorded_success(cold, case):
     root, _, _, host = cold
     before = _failed_worker_start(cold).body
@@ -774,11 +776,93 @@ def test_start_repair_refuses_live_unknown_wrong_identity_and_recorded_success(c
     fleet = "other" if case == "fleet" else "example"
     bot = "manager" if case == "succeeded" else "nobody" if case == "bot" else "worker"
     starts = list(host.starts)
-    with pytest.raises(state.ActivationRefusal):
-        activation.repair_failed_bot_start(root, "cold", fleet=fleet, bot=bot,
-                                           reason=" " if case == "reason" else "exited", adapter=host)
+    reason = " " if case == "reason" else "exited\nbefore bridge" if case == "multiline" else "exited"
+    message = {"active": "unit is not verified inactive", "locked": "holds the lock",
+               "missing": "could not verify the recorded activation"}.get(case)
+    with state.locked_activation(root) if case == "locked" else nullcontext():
+        with pytest.raises(state.ActivationRefusal, match=message):
+            activation.repair_failed_bot_start(root, "absent" if case == "missing" else "cold",
+                                               fleet=fleet, bot=bot, reason=reason, adapter=host)
     assert state.read_activation(root, "cold").body == before
     assert host.starts == starts
+
+
+def test_start_repair_accepts_stale_refused_private_socket(cold):
+    root, _, _, host = cold
+    _failed_worker_start(cold)
+    host.dead.add(_WORKER_UNIT)
+    stale = host.tmux_dir / f"tmux-{os.getuid()}" / "com.example.worker"
+    if len(str(stale)) > 100:
+        pytest.skip("AF_UNIX path limit; run with a short private TMPDIR")
+    stale.parent.mkdir(parents=True)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+        server.bind(str(stale))  # Bound, never listening: an unclean tmux exit's leftover.
+    repaired = activation.repair_failed_bot_start(root, "cold", fleet="example", bot="worker",
+                                                  reason="exited", adapter=host)
+    assert repaired.body["start_repairs"][0]["dead_evidence"]["details"]["socket_state"] == "refused"
+    assert stale.exists()  # Evidence is observed, never removed.
+
+
+def test_legacy_adoption_resume_after_start_repair_reproves_old_bot_quiet(enrollment, monkeypatch):
+    inventory, phases, plan, adapter, _, _ = enrollment
+    # First adoption: unsealed original declarations, no prior selection or active record.
+    inventory = replace(inventory, legacy_source=True, units=tuple(
+        replace(unit, declaration=replace(unit.declaration, release_id="")) for unit in inventory.units))
+    root = inventory.data_root
+    directory = Path(inventory.catalog.split("directory\t", 1)[1].splitlines()[0])
+    release = state.read_release(root, plan.release_id)
+    package = type("Package", (), {"native": release.native_path, "artifact_id": release.inputs.artifact_id})()
+    adapter.package = package
+    monkeypatch.setattr(activation, "get_resources", lambda: package)
+    monkeypatch.setattr(activation.RuntimeIdentity, "current", classmethod(lambda cls:
+        activation.RuntimeIdentity(release.cli_path, release.native_path, release.inputs.artifact_id)))
+    monkeypatch.setattr(activation.sys, "executable", str(release.directory / release.paths.interpreter))
+    bot = next(unit for unit in inventory.units if unit.declaration.scope == "bot")
+    builder = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, ("alpha",), effects={})
+    builder.file(Path(bot.generated.path), bot.generated.content, mode=bot.generated.mode)
+    candidate_plan = builder.seal()
+    item = {"enroll": True, "phase": "bots", "sha256": bot.generated.sha256}
+    monkeypatch.setattr(activation, "planned_units", lambda _plan, _manager: ((bot.declaration, item),))
+    monkeypatch.setattr(activation, "validate_unit_admission", lambda *_args: object())
+    monkeypatch.setattr(activation, "_roster", lambda *_args: ({}, ()))
+    fence = {"ceiling": 210, "fence": "RR_FENCE_member"}
+    with state.locked_activation(root) as store:
+        assert state.read_selection(root) is None
+        _prepare_pause(store, inventory, phases, candidate_plan, adapter, install_directory=directory)
+        intent = state.read_activation(root, "cutover").body["intent"]
+        assert intent["source_kind"] == "legacy-unsealed" and intent["source_release_id"] is None
+        _pause_all(store, adapter)
+        for step in ("backup_saved", "migration_applied", "selection_switched",
+                     "configuration_applied", "ingest_started"):
+            store.begin("cutover", step)
+            if step == "selection_switched":
+                store.select("cutover")
+            else:
+                store.complete("cutover", step, evidence_digest="a" * 64)
+        store.begin("cutover", "bots_started")
+        store.record_start_phase("cutover", phase="bots", publication_digest="b" * 64, registry=[])
+        store.record_start_intent("cutover", phase="bots", source=str(bot.declaration.source),
+                                  target=bot.target, sha256=bot.generated.sha256, fence=fence)
+        # The journal owner's archive; the old bot is no longer exempt as a started candidate.
+        archived = store.archive_failed_bot_start(
+            "cutover", source=str(bot.declaration.source), target=bot.target,
+            sha256=bot.generated.sha256, fence=fence, evidence={"details": {}, "digest": "c" * 64},
+            reason="exited before bridge", repair_artifact=release.inputs.artifact_id).body["start_repairs"]
+    accepting, quiet = [True], []
+    monkeypatch.setattr(activation, "_legacy_bot_socket",
+                        lambda *_args, **_kwargs: (root / "old.sock", accepting[0]))
+    monkeypatch.setattr(activation, "assert_quiescent",
+                        lambda _adapter, **kwargs: quiet.append(kwargs["target"]))
+    monkeypatch.setattr(activation, "_finish_running_activation",
+                        lambda *_args, **_kwargs: state.read_activation(root, "cutover"))
+    calls_before = list(adapter.calls)
+    with pytest.raises(state.ActivationError, match="old private bot server is present"):
+        activation.resume_activation(root, "cutover", candidate_plan.plan_id, directory, adapter=adapter)
+    accepting[0] = False
+    resumed = activation.resume_activation(root, "cutover", candidate_plan.plan_id, directory, adapter=adapter)
+    assert resumed.body["start_repairs"] == archived and resumed.body["start_effects"] == {}
+    assert bot.target in quiet  # The repaired bot's old unit is proved quiet again.
+    assert adapter.calls == calls_before  # No native start or handoff replay.
 
 
 def test_start_repair_archives_dead_attempt_then_resume_starts_it_once(cold):

@@ -15,6 +15,7 @@ from dataclasses import replace
 from pathlib import Path
 import socket
 import stat
+import subprocess
 import sys
 import time
 
@@ -972,13 +973,33 @@ def repair_failed_bot_start(root: Path, activation_id: str, *, fleet: str, bot: 
     only reads the target's frozen plan/release and observes the named unit
     through its own adapter. It does not alter the seal, readiness or any other
     receipt. The sealed candidate's explicit ``--resume`` performs the fresh start.
+
+    Every failure before the single journal write is an ``ActivationRefusal``
+    (nothing changed); a failure after entering the write keeps its own type,
+    because the atomic replace may already have landed.
     """
+    writing = []
+    try:
+        return _repair_failed_bot_start(root, activation_id, fleet, bot, reason, adapter, writing)
+    except ActivationRefusal:
+        raise
+    except (ActivationError, ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as exc:
+        if writing:
+            raise
+        if str(exc) == "another host activation holds the lock":
+            raise ActivationRefusal("another host activation holds the lock") from exc
+        raise ActivationRefusal("start repair could not verify the recorded activation "
+                                f"({type(exc).__name__})") from exc
+
+
+def _repair_failed_bot_start(root, activation_id, fleet, bot, reason, adapter, writing):
     root = Path(root).expanduser()
     if not root.is_absolute() or not root.is_dir():
         raise ActivationRefusal("start repair requires an explicit existing absolute data root")
     root = root.resolve()
-    if not isinstance(reason, str) or not reason.strip() or len(reason) > 500:
-        raise ActivationRefusal("start repair requires a short explicit reason")
+    if (not isinstance(reason, str) or not reason.strip() or len(reason) > 500
+            or not reason.isprintable()):
+        raise ActivationRefusal("start repair requires a short reason on one printable line")
     package = get_resources()
     adapter = adapter if adapter is not None else Adapter(package)
     with locked_activation(root) as store:
@@ -1036,9 +1057,15 @@ def repair_failed_bot_start(root: Path, activation_id: str, *, fleet: str, bot: 
             dead = assert_quiescent(adapter, installed_file=installed, target=entry["target"],
                                     socket_path=socket_path)
         except ActivationError as exc:
-            raise ActivationRefusal("named bot is not verified dead; inspect it before repair") from exc
+            if "socket" in getattr(exc, "detail", ""):
+                raise ActivationRefusal("named bot's private tmux server still accepts or cannot be "
+                                        "observed; inspect that server before repair") from exc
+            raise ActivationRefusal("named bot's unit is not verified inactive; if it is active "
+                                    "(exited) or restarting, explicitly stop that exact verified "
+                                    "bot unit, then retry") from exc
         if dead.details["socket_state"] not in {"absent", "refused"}:
             raise ActivationRefusal("named bot's private tmux server is not verified absent")
+        writing.append(True)
         return store.archive_failed_bot_start(
             activation_id, source=source, target=entry["target"], sha256=effect["sha256"],
             fence=effect["fence"], evidence={"details": dead.details, "digest": dead.digest},
