@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the brief says what each open row asks (#2044)
+
+After a respawn, a worker's brief named its open rows by id alone, so nothing it could read said what they asked: two bots hand-rolled a plane read for the text in one hour. The work item's title is the dispatch text, and the brief's `work` section already reads it from the canonical reducer in the same session, so no second read is added.
+
+- **Text mode:** each WORK row ends with its title on one line, clipped to 80 characters by `task_recheck._clip`, the helper the re-check digest uses, so the two cannot drift. A long or multi-line title no longer spills across the section.
+- **The boot brief:** each SessionStart detail line now ends with the same clipped title, the case the issue is about. Three titled rows still fit the 1,000-character budget.
+- **Both views:** a worker's own rows and a manager's fleet view, which holds the rows it dispatched, carry the same text the same way.
+- **`--json`:** unchanged; every `work.items[]` row already carried `title`, whole. Schema-1's top-level keys are unchanged.
+- **A row with no recorded title** renders as `(title not recorded)` and is disclosed in `degraded[]` as `work.title`, never as a blank. The contract refuses an empty title at ingest, so this covers a row whatever left it so.
+
 ### Fixed — composed bots exclude the data root's developer instructions (#2057)
 
 Every bot's local settings exclude the exact absolute data-root `CLAUDE.md` path,
