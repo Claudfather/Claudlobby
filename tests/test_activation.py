@@ -49,6 +49,7 @@ class NativeHost:
         self.registry = []
         self.external_result = 0
         self.fail_bot = None
+        self.dead, self.quiet_unknown = set(), False
         self.ready_kind = "bridge-ready"
         self.by_name = {d.source.name: (d, item) for d, item in planned_units(plan, "Linux")}
 
@@ -85,6 +86,13 @@ class NativeHost:
             else:
                 self.ready.append(bot)
                 output = self.ready_kind
+        elif function == "svc_activation_quiet":
+            if self.quiet_unknown:
+                rc = 3
+            elif args[1] in self.dead or self.states.get(args[1], "inactive").split()[-1] != "active":
+                output = "inactive\tno-cgroup-witness"
+            else:
+                output = "active\tcgroup-populated"
         elif function == "svc_activation_start":
             file, target = Path(args[0]), args[1]
             assert file.is_file()
@@ -431,13 +439,14 @@ def cold(installed, monkeypatch, tmp_path):
            "CLAUDLOBBY_NATIVE_DIR": str(release.native_path),
            "CLAUDLOBBY_LIBRARY_DIR": str(directory / "library"),
            "CLAUDLOBBY_ARTIFACT_ID": release.inputs.artifact_id}
+    tmux_dir = tmp_path / "private-tmux"  # Never the host's shared /tmp sockets.
     for stem, phase, bot in (("claudlobby-plane-daemon", "ingest", None),
                              ("com.example.worker", "bots", "worker"),
                              ("com.example.manager", "bots", "manager"),
                              ("claudlobby-keepalive", "producers", None)):
         working = root / "runtime/bots" / bot if bot else root
         destination = working if bot else root / "runtime/_host/timers"
-        unit_env = {**env, **({"TMUX_TMPDIR": "/tmp"} if bot else {})}
+        unit_env = {**env, **({"TMUX_TMPDIR": str(tmux_dir)} if bot else {})}
         command = ([str(release.native_path / "start-bot.sh"), str(working)] if bot else
                    [str(release.native_path / "keepalive-all.sh")] if phase == "producers" else
                    [str(release.native_path / "plane-daemon.sh")])
@@ -446,7 +455,7 @@ def cold(installed, monkeypatch, tmp_path):
         files = {stem + ".plist": (plistlib.dumps({"Label": stem, "WorkingDirectory": str(working),
                     "EnvironmentVariables": unit_env, "ProgramArguments": list(argv)}), 0o644),
                  stem + ".service": ((f"[Service]\nWorkingDirectory={working}\n"
-                    + ("Environment=TMUX_TMPDIR=/tmp\n" if bot else "") +
+                    + (f"Environment=TMUX_TMPDIR={tmux_dir}\n" if bot else "") +
                     f"ExecStart={admission.unit_systemd_command(argv)}\n" +
                     ("" if phase == "producers" else "[Install]\nWantedBy=default.target\n")).encode(), 0o644)}
         if phase == "producers":
@@ -464,6 +473,7 @@ def cold(installed, monkeypatch, tmp_path):
     native_directory = tmp_path / "private-native-user"
     native_directory.mkdir()
     host = NativeHost(root, release, plan, native_directory, package)
+    host.tmux_dir = tmux_dir
     monkeypatch.setattr(activation, "get_resources", lambda: package)
     monkeypatch.setattr(admission.RuntimeIdentity, "current", classmethod(lambda cls:
         admission.RuntimeIdentity(release.cli_path, release.native_path, release.inputs.artifact_id)))
@@ -522,11 +532,11 @@ def test_upgrade_binds_applied_selected_plan_as_exact_source(cold, monkeypatch, 
                            if d.bot == "manager" and d.source.suffix in (".plist", ".service"))
         assert "TMUX_TMPDIR" not in dict(declaration.environment)
         installed = FileSnapshot.read(declaration.source)
-        environment = {**dict(declaration.environment), "TMUX_TMPDIR": "/tmp"}
+        environment = {**dict(declaration.environment), "TMUX_TMPDIR": str(host.tmux_dir)}
         unit = SimpleNamespace(declaration=declaration, installed=(installed,),
                                properties=(("Environment", " ".join(
                                    f"{key}={shlex.quote(value)}" for key, value in environment.items())),))
-        assert activation._original_bot_tmpdir(unit) == "/tmp"
+        assert activation._original_bot_tmpdir(unit) == str(host.tmux_dir)
 
     if same_release:
         candidate = source
@@ -737,6 +747,90 @@ def test_bootstrap_resume_reconciles_started_unit_without_native_resend(cold, fa
     assert host.starts == ["claudlobby-plane-daemon.service", "com.example.manager.service",
                            "com.example.worker.service", "claudlobby-keepalive.timer"]
     assert tuple(resumed.body["completed"]) == state.STEPS
+
+
+_WORKER_UNIT = "com.example.worker.service"
+
+
+def _failed_worker_start(cold):
+    root, _, plan, host = cold
+    host.fail_bot = "worker"
+    with pytest.raises(state.ActivationError):
+        activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    record = state.read_activation(root, "cold")
+    assert record.body["pending"] == "bots_started"
+    return record
+
+
+@pytest.mark.parametrize("case", ["active", "unknown", "fleet", "bot", "succeeded", "reason"])
+def test_start_repair_refuses_live_unknown_wrong_identity_and_recorded_success(cold, case):
+    root, _, _, host = cold
+    before = _failed_worker_start(cold).body
+    host.quiet_unknown = case == "unknown"
+    fleet = "other" if case == "fleet" else "example"
+    bot = "manager" if case == "succeeded" else "nobody" if case == "bot" else "worker"
+    starts = list(host.starts)
+    with pytest.raises(state.ActivationRefusal):
+        activation.repair_failed_bot_start(root, "cold", fleet=fleet, bot=bot,
+                                           reason=" " if case == "reason" else "exited", adapter=host)
+    assert state.read_activation(root, "cold").body == before
+    assert host.starts == starts
+
+
+def test_start_repair_archives_dead_attempt_then_resume_starts_it_once(cold):
+    root, _, plan, host = cold
+    failed = _failed_worker_start(cold).body
+    source, attempt = next((s, e) for s, e in failed["start_effects"].items() if e["target"] == _WORKER_UNIT)
+    others = {s: e for s, e in failed["start_effects"].items() if s != source}
+    host.dead.add(_WORKER_UNIT)
+    starts = list(host.starts)
+    repaired = activation.repair_failed_bot_start(root, "cold", fleet="example", bot="worker",
+                                                  reason="exited before bridge", adapter=host)
+    assert host.starts == starts  # The repair itself starts nothing.
+    archived = repaired.body["start_repairs"]
+    assert len(archived) == 1 and archived[0]["attempt"] == attempt and archived[0]["source"] == source
+    assert archived[0]["dead_evidence"]["details"]["native"] == "inactive\tno-cgroup-witness"
+    assert archived[0]["dead_evidence"]["details"]["socket_state"] == "absent"
+    assert Path(archived[0]["dead_evidence"]["details"]["socket_path"]).parent.parent == host.tmux_dir
+    assert repaired.body["start_effects"] == others
+    assert {k: v for k, v in repaired.body.items() if k not in ("start_effects", "start_repairs")} == {
+        k: v for k, v in failed.items() if k != "start_effects"}
+    with pytest.raises(state.ActivationRefusal):  # No intent left to repair until resume fences one.
+        activation.repair_failed_bot_start(root, "cold", fleet="example", bot="worker",
+                                           reason="again", adapter=host)
+    host.fail_bot = None
+    resumed = activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    assert resumed.status == "active"
+    assert host.starts == starts + [_WORKER_UNIT, "claudlobby-keepalive.timer"]
+    assert resumed.body["start_repairs"] == archived
+    assert resumed.body["start_effects"][source]["result"] is not None
+    assert all(resumed.body["start_effects"][s] == e for s, e in others.items() if e["phase"] != "producers")
+
+
+def test_start_repair_interruption_keeps_history(cold, monkeypatch):
+    root, _, plan, host = cold
+    failed = _failed_worker_start(cold).body
+    host.dead.add(_WORKER_UNIT)
+    original_write = state._write
+
+    def interrupted(path, value):
+        raise OSError("interrupted before replace")
+
+    monkeypatch.setattr(state, "_write", interrupted)
+    with pytest.raises(OSError):
+        activation.repair_failed_bot_start(root, "cold", fleet="example", bot="worker",
+                                           reason="exited", adapter=host)
+    assert state.read_activation(root, "cold").body == failed
+    monkeypatch.setattr(state, "_write", original_write)
+    archived = activation.repair_failed_bot_start(root, "cold", fleet="example", bot="worker",
+                                                  reason="exited", adapter=host).body["start_repairs"]
+    # The fresh start fails too: the archive survives beside the new unresolved intent.
+    with pytest.raises(state.ActivationError):
+        activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    record = state.read_activation(root, "cold").body
+    assert record["start_repairs"] == archived and record["pending"] == "bots_started"
+    fresh = [e for e in record["start_effects"].values() if e["target"] == _WORKER_UNIT]
+    assert len(fresh) == 1 and fresh[0]["result"] is None
 
 
 def test_selected_bindings_refuse_loss_foreign_scope_and_ambiguous_actors(cold):

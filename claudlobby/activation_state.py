@@ -404,6 +404,31 @@ class ActivationStore:
         effect["result"] = {"details": details, "digest": digest}
         return self._save(record)
 
+    def archive_failed_bot_start(self, activation_id: str, *, source: str, target: str,
+                                 sha256: str, fence: dict, evidence: dict, reason: str,
+                                 repair_artifact: str) -> ActivationRecord:
+        """Archive one verified-dead, unresolved bot start for an explicit operator.
+
+        The attempt, its original fence and the dead evidence move together into
+        ``start_repairs`` in one atomic write; the resume owner can then fence one
+        fresh start. Every other receipt, step and the selection stay unchanged.
+        """
+        self.assert_locked()
+        record = read_activation(self.root, activation_id)
+        body = record.body
+        effect = body.get("start_effects", {}).get(source)
+        repairs = body.setdefault("start_repairs", [])
+        if (record.status != "activating" or body["pending"] != "bots_started"
+                or "bots_started" in body["completed"] or not isinstance(repairs, list)
+                or effect is None or effect["phase"] != "bots" or effect["result"] is not None
+                or effect["target"] != target or effect["sha256"] != sha256 or effect["fence"] != fence
+                or not isinstance(reason, str) or not reason.strip()):
+            raise ActivationError("bot start repair is not the admitted unresolved start")
+        repairs.append({"source": source, "attempt": effect, "dead_evidence": evidence,
+                        "reason": reason, "repair_artifact": repair_artifact})
+        del body["start_effects"][source]
+        return self._save(record)
+
     def record_identity_bindings(self, activation_id: str, bindings: dict, *, package) -> ActivationRecord:
         """Persist verified IDs once, before the first candidate bot can start."""
         self.assert_locked()

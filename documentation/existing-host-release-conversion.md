@@ -222,6 +222,24 @@ There is no blanket rollback command for arbitrary unknown native effects.
 Do not invent a new activation ID, remove coordination files, restore old unit
 files over running candidate processes, or report an incomplete adoption as done.
 
+If one candidate bot's start at pending `bots_started` has no result because
+that bot died, and it is verified dead, an operator may archive that one attempt.
+The command starts nothing. It can run from a newer CLI:
+
+```bash
+claudlobby --root "$DATA" host repair-start "$ACTIVATION_ID" \
+  --fleet "$FLEET" --bot "$BOT" --reason "session exited before bridge"
+```
+
+It refuses unless all of these hold: this activation is selected and pending
+`bots_started`; the named bot has a start intent with no result; its source and
+installed unit bytes match the frozen start; and its unit is inactive with no
+accepting private tmux server. The old attempt, its fence and the dead evidence
+stay in the activation record under `start_repairs`; other receipts are not
+changed. Then run the sealed candidate's `--resume` command above once. That
+command gives the bot a fresh fence and starts it. Nothing retries
+automatically, so each further repair needs the command again.
+
 For the specific refusal "existing canonical handoff section is malformed" at
 pending step `queues_classified`, the journal supports repair-forward before
 migration. Preserve a copy of the named bot's `.claude/session.md`, retain its
