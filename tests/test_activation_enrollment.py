@@ -23,13 +23,14 @@ from tests.test_releases import installed, r
 class Manager(RecordedAdapter):
     def __init__(self, inventory, plan):
         super().__init__(inventory)
-        self.directory = _catalog(inventory.catalog)[2][0]
+        self.directories = _catalog(inventory.catalog)[2]
+        self.directory = self.directories[0]
         self.declarations = {d.source.name: (d, item) for d, item in planned_units(plan, "Linux")}
         self.loaded_foreign = set()
 
     def call(self, function, *args, **kwargs):
         if function == "svc_inventory_catalog":
-            text = f"manager\tLinux\ndirectory\t{self.directory}\n"
+            text = "manager\tLinux\n" + "".join(f"directory\t{path}\n" for path in self.directories)
             text += ''.join(f"installed\t{p.name}\n" for p in sorted(self.directory.iterdir())
                             if p.suffix in (".service", ".timer"))
             text += ''.join(f"loaded\t{name}\n" for name in sorted(set(self.states) | self.loaded_foreign))
@@ -198,6 +199,72 @@ def test_bootstrap_candidate_publishes_new_units_then_removes_only_its_files(emp
         assert foreign_link.readlink() == Path("../foreign.service")
         assert foreign.read_bytes() == original
         assert not any(call[0] in ("svc_activation_resume", "svc_enroll") for call in adapter.calls)
+
+
+def test_original_pause_runtime_mask_is_owned_only_for_exact_original_target(
+        enrollment, installed, monkeypatch, tmp_path):
+    inventory, phases, _, _, foreign, wants = enrollment
+    masks = tmp_path / "private-runtime/systemd/user"
+    masks.mkdir(parents=True)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(masks.parent.parent))
+    config = _catalog(inventory.catalog)[2][0]
+    # The runtime directory is a lower-priority verified search path.
+    inventory = replace(inventory, catalog=inventory.catalog.replace(
+        f"directory\t{config}\n", f"directory\t{config}\ndirectory\t{masks}\n", 1))
+    plan, old, _ = _candidate_plan(installed)
+    adapter = Manager(inventory, plan)
+    monkeypatch.setattr(runtime_admission, "validate_unit_admission", lambda *_: None, raising=False)
+    case = (inventory, phases, plan, adapter, foreign, wants, old, [])
+    with state.locked_activation(inventory.data_root) as store:
+        prepared(case, store)
+        mask = masks / "scheduled.service"
+
+        def refused(match):
+            with pytest.raises(state.ActivationError, match=match):
+                publish.prepare_candidate_enrollment(store, "cutover", configuration_journal="generated-config",
+                                                     install_directory=adapter.directory, adapter=adapter)
+            assert not (store.root / "state/activations" / publish.journal_id("cutover", "directories")).exists()
+
+        mask.symlink_to(config / "scheduled.service")  # a wrong link is never the pause's mask
+        refused("foreign or changed candidate collision")
+        mask.unlink()
+        (masks / "added.service").symlink_to("/dev/null")  # a new identity has no original pause
+        refused("foreign or changed candidate collision")
+        (masks / "added.service").unlink()
+        # The pause's own mask on the exact original, still masked and inactive.
+        mask.symlink_to("/dev/null")
+        assert adapter.states["scheduled.service"] == "masked-runtime masked inactive"
+        plans = publish.prepare_candidate_enrollment(store, "cutover", configuration_journal="generated-config",
+                                                     install_directory=adapter.directory, adapter=adapter)
+        assert len(plans) == 3 and mask.is_symlink()  # preparation leaves it untouched
+        assert not any(call[0] in ("svc_activation_reload", "svc_activation_clear_runtime_mask")
+                       for call in adapter.calls)
+        recorded = adapter.call
+
+        def native(function, *args, **kwargs):
+            if function == "svc_activation_reload":
+                # The published file now supersedes the mask: a loaded, inactive paired service.
+                adapter.states["scheduled.service"] = "static loaded inactive"
+            elif function == "svc_activation_clear_runtime_mask":
+                assert args[1] == "scheduled.service"
+                (masks / args[1]).unlink()  # the native owner's exact unmask
+            return recorded(function, *args, **kwargs)
+
+        adapter.call = native
+        for step, phase in (("ingest_started", "ingest"), ("bots_started", "bots")):
+            store.begin("cutover", step)
+            publish.install_candidate_units(store, "cutover", phase, adapter=adapter)
+            _complete_pending(store, step)
+            assert mask.is_symlink()  # another phase's mask stays until its own publication
+        _complete(store, "verified")
+        store.begin("cutover", "producers_resumed")
+        publish.install_candidate_units(store, "cutover", "producers", adapter=adapter)
+        # The paired service is never started directly; publication removed its mask.
+        assert not mask.exists() and not mask.is_symlink()
+        assert [call[0] for call in adapter.calls if call[0] in (
+            "svc_activation_reload", "svc_activation_clear_runtime_mask")] == [
+            "svc_activation_reload", "svc_activation_clear_runtime_mask"]
+    assert not any(call[0] == "svc_activation_start" for call in adapter.calls)
 
 
 def test_phase_publication_retry_and_owned_cleanup_preserve_foreign(case, monkeypatch):

@@ -194,6 +194,13 @@ ln -s "$file" "$MASK_FRAGMENT"
 expect 3 svc_activation_clear_runtime_mask "$file" "$target" 'enabled loaded active' 2>/dev/null; unchanged
 expect 3 svc_activation_clear_runtime_mask "$file" "$target" 'masked-runtime masked inactive' 2>/dev/null; unchanged
 rm "$MASK_FRAGMENT"
+# Publication owns hidden-mask removal; start never starts over a surviving one.
+ln -s /dev/null "$MASK_FRAGMENT"; active=inactive; : > "$TRACE"
+expect 3 svc_activation_start "$file" "$target" 2>/dev/null
+[ "$(cat "$TRACE")" = daemon-reload ] && [ -L "$MASK_FRAGMENT" ]
+rm "$MASK_FRAGMENT"; : > "$TRACE"
+[ "$(svc_activation_start "$file" "$target")" = start-requested ]
+[ "$(cat "$TRACE")" = "$(printf 'daemon-reload\nstart worker.service')" ]
 unset MASK_FRAGMENT XDG_RUNTIME_DIR
 # The abort reload helper only reloads the user manager; it is Linux-only.
 : > "$TRACE"; expect 0 svc_activation_reload; [ "$(cat "$TRACE")" = daemon-reload ]

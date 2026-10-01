@@ -1060,6 +1060,12 @@ svc_activation_start() {
                 systemctl --user unmask --runtime "$target" || return $?
                 systemctl --user daemon-reload || return $?
             fi
+            # Publication removes the original pause's hidden runtime masks; a
+            # surviving runtime node under a loaded candidate is never started.
+            local link="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/systemd/user/$target"
+            [ ! -e "$link" ] && [ ! -L "$link" ] || {
+                _svc_activation_unknown "$target runtime mask survives publication"; return 3;
+            }
             _svc_activation_read "$file" "$target" || return 3
             [ "$SVC_ACT_LOAD $SVC_ACT_ACTIVE" = 'loaded inactive' ] || return 3
             systemctl --user start "$target" || return $?

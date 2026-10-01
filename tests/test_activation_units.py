@@ -86,7 +86,8 @@ class RecordedAdapter:
             else:
                 self.states[target] = self.native[target]
         elif function == "svc_activation_clear_runtime_mask":
-            assert args[2] == self.native[target] and file.is_file()
+            # Abort restores from the native saved state; publication from its fresh snapshot.
+            assert args[2] in (self.native[target], self.states[target]) and file.is_file()
             output = "removed\n" if target in self.hidden_masks else "absent\n"
             self.hidden_masks.discard(target)
         else:
