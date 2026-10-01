@@ -23,12 +23,13 @@ from claudlobby.composer import (
     compose_fleet_timers,
 )
 from claudlobby.config import BriefingConfig, _coerce_bot, load_fleet
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 from claudlobby.validator import validate
 
 
 def _make_paths(root: Path) -> Paths:
-    return Paths(root=root, fleet_dir=root)
+    return Paths(root=root, fleet_dir=root, package=source_package())
 
 
 def _write(root: Path, body: str) -> Path:
@@ -50,6 +51,7 @@ def _env_val(conf: str, key: str) -> str | None:
 # sources, plus an mcp source so the coverage validator stays quiet.
 _BRIEFING_FLEET = """\
     fleet:
+      manager: mason
       name: test-fleet
       service_prefix: com.test
       system_defaults: false
@@ -167,6 +169,7 @@ class TestBriefingConfigCoercion:
     def test_briefing_enabled_false_when_none(self, tmp_path):
         body = """\
             fleet:
+              manager: solo
               name: t
               service_prefix: com.test
               system_defaults: false
@@ -236,7 +239,7 @@ class TestBriefingTimerComposition:
     def test_execstart_passes_fleet_bot_slot(self, tmp_path):
         timers = self._compose(tmp_path)
         svc = (timers / "com.test.briefing-kev-morning.service").read_text()
-        assert "lib/briefing-trigger.sh" in svc
+        assert "claudlobby/_runtime_scripts/briefing-trigger.sh" in svc
         assert "test-fleet kev morning" in svc
 
     def test_plist_passes_fleet_bot_slot(self, tmp_path):
@@ -253,6 +256,7 @@ class TestBriefingTimerComposition:
     def test_no_briefing_bots_no_units(self, tmp_path):
         body = """\
             fleet:
+              manager: solo
               name: t
               service_prefix: com.test
               system_defaults: false
@@ -371,7 +375,7 @@ class TestBriefingReconcile:
 
     def test_generate_writes_briefing_expected_manifest(self, tmp_path):
         # generate emits a config-truth BRIEFING_EXPECTED manifest (DORMANT
-        # precedent) listing every declared (bot,slot) unit, so setup-fleet's
+        # precedent) listing every declared (bot,slot) unit, so composition's
         # reconcile has an independent count to catch a partial/torn timers dir.
         fleet, md = load_fleet(_write(tmp_path / "f", _BRIEFING_FLEET))
         paths = _make_paths(tmp_path / "f")
@@ -389,13 +393,14 @@ class TestBriefingReconcile:
 
     def test_briefing_manifest_removed_when_stanza_gone(self, tmp_path):
         # A fleet that once equipped briefing but no longer declares any: the
-        # manifest must report zero expected units so setup-fleet allows the
+        # manifest must report zero expected units so composition allows the
         # full teardown (composed 0 == expected 0 → prune, not abort).
         fleet, md = load_fleet(
             _write(
                 tmp_path / "f",
                 """\
                 fleet:
+                  manager: kev
                   name: t
                   service_prefix: com.test
                   system_defaults: false
@@ -445,6 +450,7 @@ class TestBriefingValidator:
     def test_briefing_without_source_warns(self, tmp_path):
         body = """\
             fleet:
+              manager: kev
               name: t
               service_prefix: com.test
               system_defaults: false

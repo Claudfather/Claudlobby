@@ -4,7 +4,6 @@ anything prints (the #1905/#1912 rule)."""
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import io
 import json
@@ -18,6 +17,7 @@ import pytest
 
 from claudlobby.plane.db import db_file
 from claudlobby.plane.emit_api import emit_batch
+from tests.plane_setup import initialize_plane
 
 WINDOW = ("--since", "2026-09-29T07:30:00-04:00", "--until", "2026-09-29T07:47:30-04:00")
 
@@ -26,6 +26,7 @@ def _root(tmp_path: Path) -> Path:
     root = tmp_path / "root"
     (root / "state" / "plane").mkdir(parents=True)
     (root / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
+    initialize_plane(root)
     return root
 
 
@@ -59,13 +60,16 @@ def test_a_window_prints_its_samples_oldest_first_bounds_included(plane: Path) -
     assert lines[0].startswith("host.mem_available_mb (MB) for host probe-host,") and lines[0].endswith(": 3 sample(s)")
     assert lines[1:] == ["  2026-09-29T11:30:06Z  4800", "  2026-09-29T11:40:06Z  900", "  2026-09-29T11:47:06Z  150"]
     edge = _cli(plane, "host.mem_available_mb", "--since", "2026-09-29T11:30:06.5Z", "--until", "2026-09-29T11:30:06.5Z")
+    assert edge.returncode == 0, edge.stderr
     assert edge.stdout.splitlines()[1:] == ["  2026-09-29T11:30:06Z  4800"]
 
 
 def test_an_object_value_reads_as_pairs_and_json_keeps_it_whole(plane: Path) -> None:
     run = _cli(plane, "host.load", *WINDOW)
     assert run.stdout.splitlines()[-1] == "  2026-09-29T11:47:06Z  one=56.0 five=28.0 fifteen=14.0"
-    out = json.loads(_cli(plane, "host.load", *WINDOW, "--json").stdout)
+    result = json.loads(_cli(plane, "host.load", *WINDOW, "--json").stdout)
+    assert result["ok"] is True and result["command"] == "plane.samples"
+    out = result["data"]
     assert (out["metric"], out["kind"], out["subject"], out["unit"]) == ("host.load", "host", "probe-host", "load")
     assert [s["value"]["one"] for s in out["samples"]] == [4.0, 20.0, 56.0]
 
@@ -116,8 +120,9 @@ def test_two_hosts_and_no_subject_names_both(plane: Path) -> None:
 @pytest.mark.parametrize("as_json", [False, True])
 def test_a_plane_with_no_subject_of_the_kind_refuses_rather_than_answering_empty(tmp_path: Path, as_json) -> None:
     # A plane that never recorded a host is a wrong root or an emitter that never
-    # ran, not a quiet window: rc 3 with stdout empty, so neither a script that
-    # reads rc nor one that parses --json can take it for "no samples".
+    # ran, not a quiet window: `unavailable` (rc 6), never an ok result, so
+    # neither a script that reads rc nor one that parses --json takes it for
+    # "no samples".
     root = _root(tmp_path)
     emit_batch(root, [{
         "event_type": "metric_sample", "emitter": "vault-sync", "fleet": "_host",
@@ -126,14 +131,20 @@ def test_a_plane_with_no_subject_of_the_kind_refuses_rather_than_answering_empty
     control = _cli(root, "vault.behind", "--kind", "vault", *WINDOW)   # the plane itself answers
     assert control.returncode == 0 and control.stdout.rstrip().endswith("11:35:00Z  0"), control.stdout
     run = _cli(root, "host.load", *WINDOW, *(("--json",) if as_json else ()))
-    assert run.returncode == 3 and run.stdout == "", (run.returncode, run.stdout)
-    assert "the plane cannot answer: it records no host subject" in run.stderr, run.stderr
+    assert run.returncode == 6, (run.returncode, run.stdout, run.stderr)
+    if as_json:
+        result = json.loads(run.stdout)
+        assert result["ok"] is False and result["error"]["code"] == "unavailable"
+        assert "the plane cannot answer: it records no host subject" in result["error"]["message"]
+    else:
+        assert run.stdout == ""
+        assert "the plane cannot answer: it records no host subject" in run.stderr, run.stderr
 
 
 def test_an_unreachable_plane_refuses_and_creates_nothing(tmp_path: Path) -> None:
     root = tmp_path / "no-plane"
     run = _cli(root, "host.load")
-    assert run.returncode == 3 and "the plane cannot answer: no plane db" in run.stderr
+    assert run.returncode == 6 and "the plane cannot answer: no plane db" in run.stderr
     assert not db_file(root).exists() and not (root / "state").exists()
 
 
@@ -146,9 +157,10 @@ def test_the_read_changes_nothing_in_the_plane(plane: Path) -> None:
 @pytest.mark.parametrize("fails", [False, True])
 def test_the_plane_is_released_before_anything_prints(plane: Path, monkeypatch, fails) -> None:
     # Both streams, and the refusal a failed read prints as well as the rows.
-    import claudlobby.commands.plane as plane_cmd
+    import claudlobby.plane.samples as samples_read
+    from claudlobby.__main__ import main
 
-    real_open_ro = plane_cmd.open_ro
+    real_open_ro = samples_read.open_ro
     state = {"closed": False, "writes_while_open": 0}
 
     class Watched:
@@ -175,12 +187,12 @@ def test_the_plane_is_released_before_anything_prints(plane: Path, monkeypatch, 
             return super().write(text)
 
     out, err = Watching(), Watching()
-    monkeypatch.setattr(plane_cmd, "open_ro", watched_open_ro)
+    monkeypatch.setattr(samples_read, "open_ro", watched_open_ro)
     monkeypatch.setattr(sys, "stdout", out)
     monkeypatch.setattr(sys, "stderr", err)
-    args = argparse.Namespace(root=str(plane), fleet=None, seed=False, metric="host.mem_available_mb", subject=None,
-                              kind=None, since="2026-09-29T11:00:00Z", until="2026-09-29T12:00:00Z", json=False)
-    assert plane_cmd.cmd_plane_samples(args) == (3 if fails else 0)
+    argv = ["--root", str(plane), "plane", "samples", "host.mem_available_mb",
+            "--since", "2026-09-29T11:00:00Z", "--until", "2026-09-29T12:00:00Z"]
+    assert main(argv) == (6 if fails else 0)
     assert state["closed"] and state["writes_while_open"] == 0
     if fails:
         assert out.getvalue() == "" and "the plane cannot answer: disk I/O error" in err.getvalue()

@@ -22,6 +22,7 @@ plans: `2026-08-2x-observable-plane-phase-*.md`; the cutover walk:
 | `state/plane/plane.db` (+ `-wal`, `-shm`) | the database, WAL mode |
 | `state/plane/capture.json` | per-fleet capture policy: `full` (the shipped default — bodies recorded) or `metadata` (the opt-out — bodies stripped at the door, proof triple kept). A named fleet beats `*`; a malformed file fails loud and resolves to no mode at all |
 | `state/plane/ingest.sock` | the ingest daemon's socket (`claudlobby plane serve`) |
+| `state/plane/staged/` | bounded policy-applied batches pending daemon recording; never committed proof |
 | `state/plane/spool/` | the filesystem spool — the valve that must not depend on the db it protects |
 
 One database per host. A fleet is a partition inside it (the `fleet_uid`
@@ -65,7 +66,7 @@ message from a bot the registry has not seen creates a PROVISIONAL actor that
 the next `generate` (the registry scan) confirms or tombstones; `plane doctor`
 counts the provisional ones. Session uids are transcript-stable
 (`sess_` + sha256 of the platform session id — the bash derivation in
-`lib/plane-session-start.sh` is pinned byte-identical to `ids.derive_session_uid`).
+`claudlobby/_runtime_scripts/plane-session-start.sh` is pinned byte-identical to `ids.derive_session_uid`).
 
 ## The write spine
 
@@ -73,12 +74,15 @@ counts the provisional ones. Session uids are transcript-stable
 programmatic write: validate the RAW envelope, apply the capture policy,
 validate the captured form, then one transaction per batch (`ingest.py`) with
 dedupe on `event_id` — a batch that mixes duplicates and new rows is REFUSED
-("mixed state") rather than half-applied. Every bash door reaches it through
-`lib/plane-emit.sh`, a ladder: the daemon's socket (`lib/plane-socket-client.py`
-pre-mints event ids into a finalized file BEFORE the first attempt, so a commit
-whose ack was lost classifies as duplicate, never a second row) → the cold CLI
-(`claudlobby emit-batch`) → the spool (`claudlobby plane spool retry` drains
-it). The daemon (`plane serve`, composed as the dormant `claudlobby-plane-daemon`
+("mixed state") rather than half-applied. Public ingest uses
+`claudlobby plane emit FAMILY --file FILE|-` or
+`claudlobby plane emit-batch --file FILE|-`; `--json` selects the common result.
+Exit 0 means committed or already present, while exit 6 means durably spooled
+and still pending. Conditional writes can use `--require-commit` to refuse
+spooling; an uncertain commit must be reconciled by event ID before retrying.
+The hot bash path stays on `claudlobby/_runtime_scripts/plane-emit.sh`: its stdlib socket client
+pre-mints event IDs and durably stages an unacknowledged batch for daemon
+replay without starting the full CLI. The daemon (`plane serve`, composed as the dormant `claudlobby-plane-daemon`
 host service) owns INGEST AND NOTHING ELSE. `PLANE_EMIT_DISABLED=1` is the
 harness exemption (a byte-identical no-op); every door calls the shim `|| log`
 and never blocks its real action on it.
@@ -113,25 +117,24 @@ passthrough arm carries **2 and 3 only**; a `4` there was dead code. A
 CLI's rc verbatim — there the install itself is behind the db and no rung can
 help.
 
-**Cooldown staging (#1657).** Under load that cooldown did not damp: each
-diverted emission spawned the package-importing cold CLI (`claudlobby --help`
-alone took 1.8–4.9 s at load ~20 on the Pi), and those spawns kept the CPU the
-daemon needed pegged, so it kept missing its deadline. The three emitters that
-never read the result — `plane_emit_bounded` (every `emit_fleet_event`),
-keepalive's heartbeat and the host probe — set `PLANE_EMIT_COOLDOWN_STAGE=1`,
-and in a cooldown `plane-socket-client.py --stage-to` leaves their finalized
-batch in `state/plane/staged/` instead (rc 6: durable, not yet in the plane).
-The daemon replays staged batches on each loop tick through the same
-`emit_batch()` a socket request runs, never through the spool's `drain()`,
-which ingests its entries as-is because they are stored policy-applied and so
-would skip the capture policy for a raw batch. The client stages only when that
-directory exists (the daemon creates it at startup, so an older daemon never
-gets one) and a connect probe finds a listener; otherwise it takes the cold
-rung as before. Doors that read a non-zero rc as "not recorded" never opt in.
-Staged depth is not yet a `plane doctor` rung. A stage killed before its rename
-leaves `.<event id>.tmp` (plane_emit_bounded's 10 s reaper, inside the stage's
-fsync), and the daemon replays one once it is an hour old: it is a finished
-batch with pre-minted ids (#1657).
+**Durable staging (#1657, unified CLI).** A socket miss or cooldown leaves a
+finalized, capture-policy-applied batch in `state/plane/staged/`. This is
+pending, not committed recording. The stdlib client imports the same capture
+policy as the daemon in its existing process; it never starts a cold CLI on
+this path. Missing or invalid policy refuses staging explicitly.
+
+The queue accepts at most 2,000 batches or 32 MiB at each admission check;
+concurrent producers can overshoot by their simultaneous batches. A full or
+unwritable queue refuses and records a best-effort `.emit-losses` breadcrumb.
+Daemon replay uses the normal `emit_batch()` owner, at most 200 batches or
+0.5 seconds per serving tick. Invalid capture configuration or an existing identity-parent conflict leaves
+batches pending for later repair instead of quarantining them. An interrupted stage's
+`.<event id>.tmp` becomes eligible for replay after an hour.
+
+`plane doctor`, `plane status`, and the trust panel expose staged depth.
+Doctor flags unreadable, full, stale, or undrainable pending data. An
+initialized plane with a never-started daemon needs attention. A staged batch
+never satisfies a linked/task operation's committed-recording requirement.
 
 **The deadline follows who waits (#1693).** The client's total deadline is
 1.0 s unless the caller's class says otherwise. `PLANE_EMIT_CLASS` is `hook`
@@ -199,19 +202,20 @@ program keeps refusing.
 | Door | Records | Silenced by |
 |---|---|---|
 | `lib/dispatch-task.sh` | for a TRACKED shape (a `task`, and a raw-text send which inherits type=task) work_item + assignment + communication; for a CONTROL type (`query` / `cancel` / `compact` / `restart`) the communication ALONE — an open assignment for a note that asks nothing is a row no report can close and it blanks the resolver head (#1491), so a control type mints none. Both carry the `pane_submitted` / `carrier_queued` / `failed` transmission after the send, and `--supersedes` sets `supersedes_msg_id` and a terminal `superseded` on the retired assignment whatever the type (the note retires its target even though the note itself is untracked); a raw-text dispatch is keyed by the content hash of its dispatch row | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
-| `lib/report-back.sh` | the report as a communication; task events on the assignment the legacy task id resolves to (`lib/plane-lookup.py`); an id-less terminal report closes the bot's open id-less dispatches | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
-| `lib/keepalive.sh` | `bot.heartbeat` + `bot.session_up` metric samples per tick (presence's recorded half) | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
-| `lib/plane-telegram-in.sh` / `-out.sh` / `plane-rc-relay-out.sh` (hooks) | the operator's inbound messages, the bot's replies, RC-relayed final answers, with honest transmission states (carrier `telegram-bridge`) | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
-| `lib/tg-post.sh` | a `notice` communication + its transmission for every fleet post to Telegram (carrier `telegram-tgpost`, intent before the send, the outcome after) | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
-| `lib/plane-session-start.sh` (hook) | the session uid + a per-process uid to `$BOT_DIR/data/.plane-session` | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
-| `lib/plane-host-probe.sh` (host timer) | `host.*` metric samples (load, RAM, disk, Pi thermals) | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
-| `lib/transcript-digest.sh` (SessionEnd hook) | one `session_digest` system event per finished session on the bot's actor — the capture rubric (context/worked/failed/would_change/reusable), session id + uid, model, turn/tool counts, all in `data`; a `skipped` variant at zero model cost, distinct from an `ok` with empty fields (#1503 moved it off `transcript-digest-<date>.jsonl`, the last production JSONL data record) | `SESSION_DIGEST_ENABLED=1` per fleet (dormant by default); `PLANE_EMIT_DISABLED=1` |
+| `lib/report-back.sh` | the report as a communication; task events on the assignment the legacy task id resolves to (`claudlobby/_runtime_scripts/plane-lookup.py`); an id-less terminal report closes the bot's open id-less dispatches | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
+| `claudlobby/_runtime_scripts/keepalive.sh` | `bot.heartbeat` + `bot.session_up` metric samples per tick (presence's recorded half) | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
+| `claudlobby/_runtime_scripts/plane-telegram-in.sh` / `-out.sh` / `plane-rc-relay-out.sh` (hooks) | the operator's inbound messages, the bot's replies, RC-relayed final answers, with honest transmission states (carrier `telegram-bridge`) | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
+| `claudlobby/_runtime_scripts/plane-dispatch-in.sh` (UserPromptSubmit hook) | a `received` transmission for a tracked dispatch, report, or briefing whose final-line plane marker reaches the receiving bot; records the received wire byte count and hash so delivery can be checked against the sender's proof, while ordinary prompts record nothing | `PLANE_EMIT_DISABLED=1` |
+| `claudlobby/_runtime_scripts/tg-post.sh` | a `notice` communication + its transmission for every fleet post to Telegram (carrier `telegram-tgpost`, intent before the send, the outcome after) | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
+| `claudlobby/_runtime_scripts/plane-session-start.sh` (hook) | the session uid + a per-process uid to `$BOT_DIR/data/.plane-session` | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
+| `claudlobby/_runtime_scripts/plane-host-probe.sh` (host timer) | `host.*` metric samples (load, RAM, disk, Pi thermals) | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
+| `claudlobby/_runtime_scripts/transcript-digest.sh` (SessionEnd hook) | one `session_digest` system event per finished session on the bot's actor — the capture rubric (context/worked/failed/would_change/reusable), session id + uid, model, turn/tool counts, all in `data`; a `skipped` variant at zero model cost, distinct from an `ok` with empty fields (#1503 moved it off `transcript-digest-<date>.jsonl`, the last production JSONL data record) | `SESSION_DIGEST_ENABLED=1` per fleet (dormant by default); `PLANE_EMIT_DISABLED=1` |
 | `claudlobby generate` (`registry_emit.py`) | registry keyframes for every composed entity; the `scan_completed` declaration that validates its tombstones | dormant until `PLANE_EMIT_ENABLED` in the fleet `.env` tier (the tier cascade, not `fleet.yaml env:`) — the flag's only meaning since the closure |
-| `lib/workstream-update.sh`, `lib/briefing-trigger.sh` | workstream construct + verb events; briefing communications | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
+| `lib/workstream-update.sh`, `claudlobby/_runtime_scripts/briefing-trigger.sh` | workstream construct + verb events; briefing communications | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
 | `claudlobby plane expire` (host timer) | a terminal `expired` on assignments overdue past the horizon — a Lane-B fact through normal ingest | `PLANE_EXPIRE_ENABLED` |
-| `lib/task-act.sh` | a manager's act on ONE open task: a terminal `cancelled` (`withdraw`) or a non-terminal `escalated` (`escalate`) on the assignment its key resolves to. The key is a task id, an id-less row's `sha:<hex32>` content key, or the `asg_` id the re-check digest hands out (#1492) — an `asg_` id resolves via `plane-lookup.py --by-assignment` to the row's own `source_ref` (so the act stamps the real key, never `dispatch-log:asg_…`); `--task-id … --all-open` REFUSES an id matching two open rows, and an `asg_` naming no OPEN row is refused actionably with the row's `sha:` key + the close command | `PLANE_EMIT_DISABLED=1` — and unlike the dispatch door it then REFUSES (rc 3): the act IS the record, so there is nothing left to have done |
-| `claudlobby task nudge` | the operator's non-terminal `nudged` on one assignment (actor `human:<who>`), then an id-less re-check to the task's manager (`assigned_by`) through `lib/dispatch.sh` — the record first, so a failed send never leaves a delivered nudge untraced | `PLANE_EMIT_DISABLED=1` — refuses (rc 3) and sends nothing |
-| `claudlobby task recheck` (fleet timer, `lib/task-recheck.sh`) | one id-less re-check per MANAGER covering their stale rows, recorded as one `task_request` communication PER ROW (sender `system:task-recheck`, `source_ref = task-recheck:<assignment_id>`) plus its transmission | `TASK_RECHECK_ENABLED` (and `enroll: true`); `PLANE_EMIT_DISABLED=1` refuses (rc 3) |
+| `claudlobby task withdraw` / `task escalate` | Fleet-owned acts on a canonical work item: a withdrawal records a terminal `cancelled` task event, and an escalation records a non-terminal question that remains visible while the work is open. Both accept queued work and use a durable request UUID; historical dispatch display and assignment IDs are not aliases. The granted bot forms use `claudlobby --json task ...`. | No action is claimed if the Plane write fails; a replay with the same request UUID returns the prior result. |
+| `claudlobby task nudge` | non-terminal `nudged` on canonical open work, including queued intake, plus a linked request from the actual caller to the selected fleet's implicit manager; both commit before shared native notification. `--by` is provenance. Request replay never resends | Recording or request persistence unavailable: refuses before notification; a later transport failure leaves the committed fact intact |
+| `claudlobby task recheck` (fleet timer invokes the selected CLI) | One digest to the current implicit fleet manager for up to eight overdue or ageing canonical open tasks, including queued work. The actual caller records one ask per named task before transport; only the primary digest message has a transmission and receiver proof. A request UUID freezes the selection, and a no-op sweep records a system fact so replay cannot acquire new work. | `TASK_RECHECK_ENABLED=0` skips the timer tick loudly; recording failure prevents the send. |
 
 Dormancy is a compose-time fact where the composer can make it one (an unarmed
 `unit: service` job composes NO units) and a self-gate where it cannot (host
@@ -246,19 +250,28 @@ disagree on the same fleet. Details: `documentation/runbooks/plane-view.md`.
   read-only by construction: `open_ro`, no `migrate()`, and every row is
   fetched and the connection closed before anything prints. The window
   compares instants through `julianday()`, because ingest keeps each sample's
-  own offset. This is how a host's load and memory into a reset are read back.
+  own offset. JSON uses the schema-1 command result; malformed arguments exit 2,
+  and unavailable storage or no recorded subject exits 6. This is how a host's
+  load and memory into a reset are read back.
 - **`plane status` / `plane doctor`** — the health page and the pre-flight
   rungs (schema, provisional actors, tombstone validity, reconciliation, the
   WAL against its ceiling).
-  **These RUN
-  `migrate()` and are therefore not read-only — and so do `plane registry`,
-  `plane prune`, `plane expire` and `spool retry`** — a newer db refuses them
-  (`DowngradeError`, rc 4) and an unmerged package's doctor (or registry read)
-  will migrate a live db. Verify a branch on a live host only through the
-  doors that open read-only: `brief`, `plane view`, `plane samples`,
-  and the stdlib readers below.
-- **The stdlib readers** (`lib/plane-readers.py`, `lib/plane-lookup.py`,
-  `lib/who-reviewed.py`) — the
+  These diagnostics open the database read-only and require the selected schema;
+  they do not migrate it. `plane prune` and `spool retry` are explicit
+  maintenance mutations; a newer db refuses them (`DowngradeError`, rc 4).
+  Both support `--json` with the common command result. A spool retry reports
+  committed, duplicate, quarantined and still-pending entries separately;
+  quarantine or pending entries do not return a clean success. Spool retry,
+  operator quarantine and live prune require selected-release mutation
+  admission; spool inspection and prune dry runs remain diagnostic reads.
+- **`plane registry`** — lists recorded registry rows and their history or
+  changes, with `--json` returning one schema-1 result. `--verify` compares
+  authored fleet configuration with the recorded Plane projection. Incomplete
+  authored enumeration or drift is a conflict, never a match; even a match
+  does not prove that the reviewed plan was activated or is running. Review
+  authored changes with `config plan` and activate the reviewed plan with
+  `host activate`.
+- **The stdlib readers** (`claudlobby/_runtime_scripts/plane-readers.py`, `claudlobby/_runtime_scripts/plane-lookup.py`) — the
   plane answered from bash doors without paying the package import: the open
   list and the overdue set (SQL pinned byte-identical to
   `queries.OPEN_ASSIGNMENTS_AT_SQL`), the resolver, the legacy-id join, the
@@ -266,7 +279,8 @@ disagree on the same fleet. Details: `documentation/runbooks/plane-view.md`.
   URI first, and on CANTOPEN a plain connection held read-only by `PRAGMA
   query_only` — under the system `python3` the doors run, a read-only URI
   cannot open a WAL database whose writer has closed (it cannot create the
-  shared-memory file), which is what a daemon restart looks like.
+  shared-memory file), which is what a daemon restart looks like. Review
+  attribution now lives in `claudlobby task reviews` (`claudlobby/review_queries.py`).
 - **A read pins the WAL while its statement is open (#1905).** The daemon's
   checkpoint cannot reset the WAL past a reader's snapshot, and a loop over a
   live cursor keeps its statement open for the whole loop, so readers fetch
@@ -288,25 +302,27 @@ bookkeeping surface to reconcile.
 
 1. **Every id'd dispatch gets a deadline** (24h by default, per fleet), so the
    watchdog and the re-check have a clock.
-2. **The manager can end a row without a report.** `task-act.sh withdraw <id>
-   --reason …` closes it (`cancelled`, terminal for every reader); a
+2. **The manager can end a row without a report.** `claudlobby --json task
+   withdraw TASK_ID --reason "…" --request-id UUID` closes canonical work
+   (`cancelled`, terminal for every reader); a
    re-dispatch with `--supersedes` retires it and opens the replacement.
-3. **The manager can ask you a question about a row** — `task-act.sh escalate
-   <id> "…"` — and the row STAYS OPEN while you decide, and is EXEMPT from the
-   re-check timer below (item 5): it is the human's to answer, not the
-   manager's to be nagged about (the M-B fold's F5). Each escalation is paged
+3. **The manager can ask you a question about a task** — `claudlobby --json task
+   escalate TASK_ID --question "…" --request-id UUID` — and the work STAYS OPEN while you decide, and is EXEMPT from the
+   re-check timer below (item 5) once assigned: it is the human's to answer, not the
+   manager's to be nagged about (the M-B fold's F5). Queued work can be escalated too. Each recorded raise is paged
    to the fleet's Telegram chat exactly ONCE, by fleet-pulse, as
    `NEEDS YOU (<fleet>): task <id> escalated by <manager>: <question>`, keyed
-   by assignment id in a PER-FLEET seen-file (`state/pulse/<fleet>.escalated`
+   by event id in a PER-FLEET seen-file (`state/pulse/<fleet>.escalated`
    — the fold's F1: `state/pulse/` is host-global, one root composing several
    fleets, so a single shared marker directory let one fleet's forget-loop
    erase another's markers and re-page its whole backlog). The page is keyed
-   by the row, not by a clock: it goes quiet when any act clears the raise
+   by the raise, not by a clock: it goes quiet when a later task act clears the raise
    (progress, a report, a withdrawal, a supersede) and speaks again if the
    manager raises the row afresh. A nudge does not clear it.
-4. **You can poke a row** — `claudlobby task nudge <id> "why"` records who
-   asked and sends that task's own manager a one-row re-check. From Telegram,
-   ask the manager to run it for you ("nudge <task-id> …").
+4. **You can poke open work** — `claudlobby --json task nudge TASK_ID
+   --reason "why" --request-id UUID` records the nudge and asks the selected
+   fleet's manager to revisit it. From Telegram, ask the manager to run it
+   with your provenance in `--by`; the bot remains the actual caller.
 5. **The clock pokes for you.** Where a fleet arms `task-recheck`, every 6h
    each manager gets ONE message listing their rows past deadline or older
    than 48h — id, title (clipped to ~80 chars, the fold's F6: the id already
@@ -317,13 +333,14 @@ bookkeeping surface to reconcile.
    count where a digest is already going out for other reasons. A row already
    named inside the repeat window (24h) is skipped, and that skip is a PLANE
    READ: the ask itself is recorded per row, stamped
-   `source_ref = task-recheck:<assignment_id>`, so there is no timer state
-   file to lose, to stale, or to lie — **and the stamp counts only when the
-   ask LANDED** (the fold's F4): the ask is recorded before the send, so
-   `rechecked_at` additionally requires that same communication's `msg_id` to
-   carry a `pane_submitted` transmission, never a `failed` one. A row nobody
-   asked about — because the send failed, or the plane refused the record —
-   comes back next sweep, which is the safe direction.
+   `source_ref = task-recheck:<task_id>:<current_assignment_id|queued>:<request_id>`,
+   so there is no timer state file to lose. Each named row has a committed
+   communication fact, but only the primary digest has a physical transmission;
+   the other rows have no individual delivery proof. A known failed send is
+   eligible on the next tick. A submitted digest holds rows for the repeat
+   window; an uncertain attempt or missing readable receipt holds them for
+   inspection rather than implying delivery. Replaying the same request UUID
+   never sends again.
 6. **The same list by hand.** `claudlobby brief --bot <manager>` renders, under
    its own `dispatched` heading, the rows the manager assigned that are still
    open, with those facts, and prints the same four verbs once under that
@@ -365,19 +382,19 @@ does is any of those — it records, it reads, and its one DELETE is family-scop
 metric-sample retention.
 
 <!-- BEGIN GENERATED: switches -->
-<!-- Generated from claudlobby/switches.py — do not hand-edit. Regenerate: claudlobby doctor --switches --markdown -->
+<!-- Generated from claudlobby/switches.py — do not hand-edit. Regenerate: claudlobby host doctor --switches --markdown -->
 
 | Switch | Ships | Scope | Carrier | Flip it with |
 |---|---|---|---|---|
-| `manager-checkin` | **off** — model spend — one manager turn per idle beat — and it injects into a live session | fleet job | fleet.yaml | defaults.jobs.manager-checkin.enroll: true in fleet.yaml, then generate + lib/setup-fleet |
+| `manager-checkin` | **off** — model spend — one manager turn per idle beat — and it injects into a live session | fleet job | fleet.yaml | defaults.jobs.manager-checkin.enroll: true in fleet.yaml, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> |
 | `plane-prune-system-events` | **off** — deletes data — and unlike the sample lane beside it, this one could delete a RECORD rather than a sample, which is why it is an allowlist: a wrongly-pruned type breaks selfstart-snapshot.sh's boot gate, which fails closed on an unreachable receipt read but reads an ABSENT receipt as a certain no-receipt | door | host/root .env | PLANE_PRUNE_SYSTEM_EVENTS_ENABLED=1 in the host or root .env |
-| `plane-daemon` | **on** | host service | system.yaml enroll | host.jobs.plane-daemon.enroll: false in this host's override, ~/.config/claudlobby/system.yaml, then generate (composes no unit) + lib/setup-system (walks back the installed one) |
+| `plane-daemon` | **on** | host service | system.yaml enroll | host.jobs.plane-daemon.enroll: false in this host's override, ~/.config/claudlobby/system.yaml, then config plan + config diff + host activate (removes the installed unit) |
 | `plane-expire` | **on** | host job | host/root .env | PLANE_EXPIRE_ENABLED=0 in the host or root .env |
-| `plane-host-probe` | **on** | host job | system.yaml enroll | host.jobs.plane-host-probe.enroll: false in this host's override, ~/.config/claudlobby/system.yaml, then generate (composes no unit) + lib/setup-system (walks back the installed one) |
+| `plane-host-probe` | **on** | host job | system.yaml enroll | host.jobs.plane-host-probe.enroll: false in this host's override, ~/.config/claudlobby/system.yaml, then config plan + config diff + host activate (removes the installed unit) |
 | `plane-prune` | **on** | host job | host/root .env | PLANE_PRUNE_ENABLED=0 in the host or root .env |
 | `plane-recording` | **on** | door | fleet .env | PLANE_EMIT_DISABLED=1 in the fleet-tier .env — the ruled harness exemption; silences EVERY door at once |
-| `plane-view` | **on** | host service | system.yaml enroll | host.jobs.plane-view.enroll: false in this host's override, ~/.config/claudlobby/system.yaml, then generate (composes no unit) + lib/setup-system (walks back the installed one) |
-| `registry-scan` | **on** | generate | fleet .env | PLANE_EMIT_ENABLED=0 in the fleet-tier .env |
+| `plane-view` | **on** | host service | system.yaml enroll | host.jobs.plane-view.enroll: false in this host's override, ~/.config/claudlobby/system.yaml, then config plan + config diff + host activate (removes the installed unit) |
+| `registry-scan` | **on** | composition | fleet .env | PLANE_EMIT_ENABLED=0 in the fleet-tier .env |
 | `task-recheck` | **on** | fleet job | fleet .env | TASK_RECHECK_ENABLED=0 in the fleet-tier .env |
 
 <!-- END GENERATED: switches -->
@@ -387,7 +404,7 @@ spending job that merely reports through the plane, not a plane door
 declining to record. `claudlobby plane doctor` prints this table
 with each row's live state and the tier that set it — for the fleet it was
 given; without a `--fleet` the fleet-scoped rows read `unknown` and say so
-rather than reporting a scope nobody read. `claudlobby doctor --switches`
+rather than reporting a scope nobody read. `claudlobby host doctor --switches`
 prints the whole estate's. `plane-view` needs the `[plane-ui]` extra: where it
 does not import, no unit is composed at all and the table's arm line is the
 `pip install` — a supervised unit that cannot start is a crash loop, not an
@@ -412,17 +429,19 @@ is the one definition of what a flag value means; the registry of switches is
 `claudlobby/switches.py`, and every surface above derives from it.
 
 **Migrations** — `claudlobby/plane/migrations/NNNN_*.sql`, `user_version`-gated
-(`migrations.py`); the daemon migrates at start, and so do `plane status` /
-`plane doctor` / `plane registry` / `plane prune` / `plane expire` / `spool retry` /
-`claudlobby task nudge` (its cold `emit_batch` opens the plane like any other
-writer). 0001 kernel · 0002 task-status index · 0003/0004
+(`migrations.py`); `migration apply` owns initialization and schema changes.
+The daemon, normal writers and Plane diagnostics require a prepared schema;
+they do not migrate as a side effect. The early migration history is:
+0001 kernel · 0002 task-status index · 0003/0004
 the fleet room · 0005 FTS · 0006 the registry lane · 0007 `assignments(source_ref)`
 (the legacy join) · 0008 `events(actor_uid, occurred_at)` (progress grace, the
-resolver's guard) · 0009 `events(fleet_uid, occurred_at) WHERE kind='system'` (Phase B: the fleet-events readers and the escalation window) · 0010 the task vocabulary widened for `escalated` and `nudged` (chunk M-A). A newer db refuses older code (rc 4), never downgrades — and a refusing *daemon* exits so its supervisor relaunches it on the current install (#1485, the write-spine section above). **0010 is the estate's first table REBUILD** — SQLite cannot ALTER a CHECK, so widening the task-event list means the documented 12-step copy of `events`, paid once by whichever door opens the plane first after the upgrade (it needs the table's size again in free space while it runs — and on a WAL database that means the WAL's copy TOO: an 80 MB plane whose `events` is 67 MB needs ~67 MB of WAL on top of the new table's ~67 MB, so a host at 90% full passes the naive check and fails the real one). It also holds the write lock for SECONDS rather than the milliseconds every earlier migration took, which is long enough for a second migrator's `BEGIN IMMEDIATE` to exceed `busy_timeout` and raise on a benign race — `migrate()` therefore re-reads `user_version` after WAITING for the write lock, so the loser no-ops on the winner's result. The O(1) alternative, a `PRAGMA writable_schema` edit of `sqlite_master`, corrupts the schema outright when the SQL is wrong, which is a worse failure than a slow start on the one database the estate keeps its history in.
+resolver's guard) · 0009 `events(fleet_uid, occurred_at) WHERE kind='system'` (Phase B: the fleet-events readers and the escalation window) · 0010 the task vocabulary widened for `escalated` and `nudged` (chunk M-A). A newer db refuses older code (rc 4), never downgrades — and a refusing *daemon* exits so its supervisor relaunches it on the current install (#1485, the write-spine section above). **0010 is the estate's first table REBUILD** — SQLite cannot ALTER a CHECK, so widening the task-event list means the documented 12-step copy of `events`, paid by explicit migration before activating the upgraded writers (it needs the table's size again in free space while it runs — and on a WAL database that means the WAL's copy TOO: an 80 MB plane whose `events` is 67 MB needs ~67 MB of WAL on top of the new table's ~67 MB, so a host at 90% full passes the naive check and fails the real one). It also holds the write lock for SECONDS rather than the milliseconds every earlier migration took, which is long enough for a second migrator's `BEGIN IMMEDIATE` to exceed `busy_timeout` and raise on a benign race — `migrate()` therefore re-reads `user_version` after WAITING for the write lock, so the loser no-ops on the winner's result. The O(1) alternative, a `PRAGMA writable_schema` edit of `sqlite_master`, corrupts the schema outright when the SQL is wrong, which is a worse failure than a slow start on the one database the estate keeps its history in.
 
 **Retention** — `plane prune` ages `metric_samples` past 30 days by
-`ingested_at` (the incident-join window); nothing else is ever deleted; no
-VACUUM against a live daemon. `plane expire` is the attention queue's aging
+`ingested_at` (the incident-join window). The separately armed system-event
+lane deletes only its two allowlisted event types in the same transaction;
+neither lane touches the ingest ledger. There is no VACUUM against a live
+daemon. `plane expire` is the attention queue's aging
 sweep (7-day horizon), idempotent by construction.
 
 **The rule every reader follows** — unreachable is not empty. A missing or

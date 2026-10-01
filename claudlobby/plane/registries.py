@@ -8,6 +8,19 @@ SYSTEM_EVENT_TYPES and METRIC_NAMES join in Phase 2b.
 
 from __future__ import annotations
 
+#: Who the reporter was TO THE PR they are citing (#1666). A CLOSED vocabulary
+#: rather than free text, and the closure is the point: the consumer of this
+#: field decides whether a bot may merge, so an unrecognised value must be a
+#: refusal at the door rather than a string nobody can classify later.
+#:
+#: **There is deliberately no "unknown" member.** Absent (None) IS the third
+#: state, and it has to stay distinguishable from `reviewed`: 19% of in-epoch
+#: PRs have no citing report at all, and rung 1 must REFUSE for those rather
+#: than read "no role recorded" as "not an author" and pass. A member spelled
+#: `unknown` would invite a writer to record one, which converts an absence the
+#: consumer can refuse on into a value it might accept.
+PR_ROLES = ("authored", "reviewed")
+
 # (family, field) -> {class: CONTENT|SENSITIVE|DIAGNOSTIC|METADATA,
 #                     cap: bytes, proof: keep sha/bytes triple on drop}
 FIELD_POLICY: dict[tuple[str, str], dict] = {
@@ -52,6 +65,7 @@ FIELD_POLICY: dict[tuple[str, str], dict] = {
     # re-entering through its own remedy. Closed Literal, so no cap.
     ("task", "pr_attribution_withheld"): {"class": "METADATA"},
     ("workstream_event", "note"): {"class": "CONTENT", "cap": 4_096},
+    ("workstream_event", "waiting_on"): {"class": "METADATA"},
     ("workstream_event", "next_step"): {"class": "CONTENT", "cap": 4_096},
     ("transmission", "destination"): {"class": "SENSITIVE"},   # rides detail
     ("system", "data"): {"class": "DIAGNOSTIC", "cap": 16_384},
@@ -74,6 +88,8 @@ def cap_for(family: str, field: str) -> int:
 # registry (F19: unknown tokens still INGEST — they just carry NULL severity
 # until the registry learns them).
 SYSTEM_EVENT_SEVERITY: dict[str, str] = {
+    "fleet_alert": "critical",
+    "fleet_notice": "notice",
     "daemon_started": "notice",
     "daemon_stopping": "notice",
     "spool_drain_completed": "notice",
@@ -109,9 +125,7 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # gate had been reading as "boot in flight" forever. Critical so the
     # escalation read (severity = 'critical') can page it.
     "crash_loop": "critical",
-    # #1924: a launchd job whose changed plist setup-fleet could not apply,
-    # because the job itself was running the enrollment. A notice: nothing is
-    # broken yet, the job runs its old definition until someone applies it.
+    # #1924: historical launchd reenrollment deferral, retained for old facts.
     "job_reenroll_deferred": "notice",
     "alert_delivery_failed": "notice",
     "dispatch_orphaned": "notice",
@@ -154,7 +168,7 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "keepalive_reload": "notice",
     "tool_call": "notice",
     "session_event": "notice",
-    # chunk K (#1467): `claudlobby brief --ack` records the viewer's read
+    # chunk K (#1467): `claudlobby fleet reports ack` records the viewer's read
     # position as a plane fact — informational, never an alert
     "reports_acked": "notice",
     # #1503: the per-finished-session digest (transcript-digest.sh SessionEnd

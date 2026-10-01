@@ -5,7 +5,7 @@ reporting to a log inside the vault it is failing to sync. When a live host
 wedged, every sync refused for twelve days printing success-shaped output and
 nothing scheduled ever looked. This job is the thing that notices.
 
-Every test drives the REAL `lib/vault-sync.sh` with a stubbed `claudron` whose
+Every test drives the REAL `claudlobby/_runtime_scripts/vault-sync.sh` with a stubbed `claudron` whose
 envelope the test controls — the script's contract is that it parses that
 envelope and never the text, so the stub is the whole seam.
 """
@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
-SCRIPT = REPO / "lib" / "vault-sync.sh"
+SCRIPT = REPO / "claudlobby/_runtime_scripts" / "vault-sync.sh"
 
 
 def _claudron_stub(bindir: Path, *, sync_json: str, sync_rc: int = 0,
@@ -78,7 +78,7 @@ def _root(tmp_path: Path, vaults: dict[str, str]) -> Path:
 # session silently substitutes the CALLING bot's fleet for the shape under test --
 # measured by the reviewer, whose contaminated run anchored the event on their own
 # fleet while the scrubbed run anchored it on the host. A test that inherits them
-# passes by contamination. `lib/rehearse-vault-sync.sh::run_job` scrubs the same
+# passes by contamination. `harness/rehearse-vault-sync.sh::run_job` scrubs the same
 # five; this is the Python half of one rule.
 _BOT_IDENTITY_VARS = (
     "FLEET_NAME",
@@ -268,7 +268,7 @@ class TestItShipsDormant:
         job = d["host"]["jobs"]["vault-sync"]
         assert job["enroll"] is False, (
             "armed, this job commits and pushes on every host it runs on")
-        assert job["script"].endswith("lib/vault-sync.sh")
+        assert job["script"] == "$CLAUDLOBBY_NATIVE_DIR/vault-sync.sh"
 
     def test_the_switch_row_exists_so_doctor_can_SEE_the_off_door(self):
         """Without the row the switches rung cannot list it, and a door nobody

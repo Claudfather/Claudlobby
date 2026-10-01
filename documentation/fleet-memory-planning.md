@@ -6,7 +6,7 @@ description: Per-bot RSS estimates and host sizing guidelines for claudlobby fle
 # Fleet Memory Planning
 
 This document covers how to estimate per-bot memory usage, size your host for a
-given fleet configuration, and use `lib/fleet-memory-check.sh` to monitor RSS
+given fleet configuration, and use `claudlobby/_runtime_scripts/fleet-memory-check.sh` to monitor RSS
 in production.
 
 ## Per-Bot Memory Estimates
@@ -73,22 +73,17 @@ on a fast SD card or USB SSD) to absorb peaks.
 `keepalive-all.sh` add overhead. Profile before pushing beyond 25 concurrent
 bots on a single host.
 
-## Running the Memory Check Script
+## Running the Memory Check
 
 ```bash
-# One-shot check, print to stdout and log
-lib/fleet-memory-check.sh
-
-# With a fleet overlay
-lib/fleet-memory-check.sh --fleet my-fleet
-
-# Custom threshold (warn at 85% instead of 80%)
-lib/fleet-memory-check.sh --threshold 85
-
-# Scheduling: runs daily as the fleet-memory-check host job
-# (system.yaml host.jobs, enrolled once per host by setup-system).
-# Manual/ad-hoc runs work anytime with the flags above.
+# From an operator shell, request the selected, enabled host job once.
+claudlobby host job run fleet-memory-check
 ```
+
+The check is also scheduled by the selected host configuration. The public
+job route does not take the old script's `--fleet` or `--threshold` flags;
+review the configured job instead of treating an ad-hoc flag as a lasting
+threshold change.
 
 The script:
 
@@ -130,20 +125,20 @@ Reserving 20% covers:
 | Mac Mini / server, always-on production      | 80% (default)         |
 | Dev box, can tolerate OOM killer             | 90%                   |
 
-To change the default, pass `--threshold N`.
-There is intentionally no config file — the threshold is a single call-site
-decision.
+The public job route has no threshold override. The percentages above describe
+the private check's policy, not flags to pass to `host job run`.
 
 ## What to Do When the Alert Fires
 
-1. Check which bots are idle: `lib/reconcile-fleet.sh <fleet>`
-2. Check the candidate bot for uncommitted WIP (its `projects/` checkouts), then
-   spin it down: `lib/spin-down-bot.sh <bot-dir>`. De-enrolment is the one thing
-   keepalive cannot walk back; `reconcile-fleet.sh` reports the bot as
-   `unsupervised-down` (#828) until spun back up. Do **not** use
-   `systemctl --user stop` to free RAM — the 60s keepalive restarts a stopped
-   bot within a minute, so it frees nothing and the cold boot briefly spikes
-   above the steady state it replaced.
+1. Check selected supervision and session state with `claudlobby --fleet FLEET
+   fleet reconcile` and `claudlobby --fleet FLEET fleet status`.
+2. Check the candidate bot for uncommitted WIP in its `projects/` checkouts,
+   then run `claudlobby --fleet FLEET bot stop BOT`. This de-enrolls and stops
+   the declared bot while retaining its identity and directory; keepalive
+   cannot restart it. Use `bot start BOT` when ready to bring it back.
+   For permanent retirement, omit the bot from authored configuration,
+   activate that plan, then use `bot remove BOT`. Do not use a raw
+   `systemctl --user stop` as a substitute for de-enrollment.
 3. If all bots are active, defer new dispatches until at least one completes.
 4. Consider scaling to a host with more RAM if alerts are frequent.
 5. Review MCP server counts — each unnecessary MCP adds ~70 MB.
@@ -152,11 +147,11 @@ decision.
 
 | Script                      | What it monitors         | Alert channel  |
 |-----------------------------|--------------------------|----------------|
-| `lib/disk-monitor.sh`       | Disk usage %             | FLEET ALERT    |
-| `lib/fleet-memory-check.sh` | Fleet RSS %              | FLEET ALERT    |
-| `lib/keepalive.sh`          | Bot session liveness     | Log only       |
-| `lib/reconcile-fleet.sh`    | Supervision state        | stdout         |
-| `lib/creds-check.sh`        | Token expiry             | Log + Telegram (on ok↔fail transition) |
+| `claudlobby/_runtime_scripts/disk-monitor.sh`       | Disk usage %             | FLEET ALERT    |
+| `claudlobby/_runtime_scripts/fleet-memory-check.sh` | Fleet RSS %              | FLEET ALERT    |
+| `claudlobby/_runtime_scripts/keepalive.sh`          | Bot session liveness     | Log only       |
+| `claudlobby fleet reconcile` | Supervision state      | CLI result     |
+| `claudlobby/_runtime_scripts/creds-check.sh`        | Token expiry             | Log + Telegram (on ok↔fail transition) |
 
-Run `disk-monitor.sh` and `fleet-memory-check.sh` together in the same cron
-block for a complete host-health snapshot.
+The selected host configuration schedules these checks; inspect it with
+`claudlobby host job list` before requesting a one-shot `host job run`.

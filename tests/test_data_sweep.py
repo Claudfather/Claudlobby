@@ -18,7 +18,7 @@ def test_rc_relay_markers_age_out_and_durable_files_do_not(tmp_path):
     root = tmp_path / "root"
     data = root / "local" / "f" / "runtime" / "bots" / "erlich" / "data"
     data.mkdir(parents=True)
-    (root / "lib").symlink_to(REPO / "lib")
+    (root / "lib").symlink_to(REPO / "claudlobby/_runtime_scripts")
     old = data / ".plane-rc-relay-aaaa"; old.write_text("")
     fresh = data / ".plane-rc-relay-bbbb"; fresh.write_text("")
     durable = data / "notes.md"; durable.write_text("keep")
@@ -26,7 +26,7 @@ def test_rc_relay_markers_age_out_and_durable_files_do_not(tmp_path):
     os.utime(old, (stale, stale)); os.utime(durable, (stale, stale))
     env = dict(os.environ, CLAUDLOBBY_ROOT=str(root), HOME=str(tmp_path),
                PATH="/usr/bin:/bin:/usr/sbin:/sbin")
-    r = subprocess.run(["bash", str(REPO / "lib" / "data-sweep.sh"), "f",
+    r = subprocess.run(["bash", str(REPO / "claudlobby/_runtime_scripts" / "data-sweep.sh"), "f",
                         "--purge", "--days", "30"],
                        capture_output=True, text=True, env=env, timeout=120)
     assert r.returncode == 0, r.stderr + r.stdout
@@ -43,14 +43,14 @@ def test_a_leftover_events_file_is_not_the_sweeps_to_delete(tmp_path):
     root = tmp_path / "root"
     data = root / "local" / "f" / "runtime" / "bots" / "erlich" / "data"
     (data / "events").mkdir(parents=True)
-    (root / "lib").symlink_to(REPO / "lib")
+    (root / "lib").symlink_to(REPO / "claudlobby/_runtime_scripts")
     leftover = data / "events" / "fleet-2020-01-01.jsonl"; leftover.write_text('{"type":"x"}\n')
     marker = data / ".plane-rc-relay-cccc"; marker.write_text("")
     stale = time.time() - 40 * 86400
     os.utime(leftover, (stale, stale)); os.utime(marker, (stale, stale))
     env = dict(os.environ, CLAUDLOBBY_ROOT=str(root), HOME=str(tmp_path),
                PATH="/usr/bin:/bin:/usr/sbin:/sbin")
-    r = subprocess.run(["bash", str(REPO / "lib" / "data-sweep.sh"), "f", "--purge", "--days", "30"],
+    r = subprocess.run(["bash", str(REPO / "claudlobby/_runtime_scripts" / "data-sweep.sh"), "f", "--purge", "--days", "30"],
                        capture_output=True, text=True, env=env, timeout=120)
     assert r.returncode == 0, r.stderr + r.stdout
     assert leftover.exists()           # not the sweep's pattern any more
@@ -62,9 +62,9 @@ def test_tail_fleet_events_is_refused_with_the_pointer(tmp_path):
     the plane, and the refusal names the door (rc 2), never a silent no-op."""
     root = tmp_path / "root"
     (root / "local" / "f" / "runtime" / "bots").mkdir(parents=True)
-    (root / "lib").symlink_to(REPO / "lib")
+    (root / "lib").symlink_to(REPO / "claudlobby/_runtime_scripts")
     env = dict(os.environ, CLAUDLOBBY_ROOT=str(root), HOME=str(tmp_path),
                PATH="/usr/bin:/bin:/usr/sbin:/sbin")
-    r = subprocess.run(["bash", str(REPO / "lib" / "tail-fleet.sh"), "--fleet", "f", "--events"],
+    r = subprocess.run(["bash", str(REPO / "claudlobby/_runtime_scripts" / "tail-fleet.sh"), "--fleet", "f", "--events"],
                        capture_output=True, text=True, env=env, timeout=60)
-    assert r.returncode == 2 and "claudlobby events --bot" in r.stderr, (r.returncode, r.stderr)
+    assert r.returncode == 2 and "claudlobby event list --bot" in r.stderr, (r.returncode, r.stderr)

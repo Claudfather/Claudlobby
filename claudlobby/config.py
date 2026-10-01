@@ -197,7 +197,7 @@ class FleetPulseConfig:
     """Fleet-pulse escalation knobs — the alert-volume controls (#1120).
 
     **Fleet-scoped, not per-bot**, and that is what decides the transport.
-    ``lib/fleet-pulse.sh`` resolves these once at top level, outside its per-bot
+    ``claudlobby/_runtime_scripts/fleet-pulse.sh`` resolves these once at top level, outside its per-bot
     loop, so ``bot.conf`` — the tier ``bridge_heal`` and ``unassigned_check``
     use, per the note on :class:`ObservabilityConfig` — cannot carry them
     without electing an arbitrary bot's conf. That is precisely the
@@ -239,7 +239,7 @@ class SweepConfig:
     """Fleet rolling code-audit sweep — opt-in via the fleet.yaml `sweep:` block.
 
     A fleet-level nightly job like fleet-pulse/creds-check: the no-LLM selector
-    lib/code-audit-sweep.sh picks the stalest repo by GitHub `auto-audit` issue
+    claudlobby/_runtime_scripts/code-audit-sweep.sh picks the stalest repo by GitHub `auto-audit` issue
     timestamps and dispatches the audit into the owner bot's session.  Presence
     of the block is opt-in; absence ⇒ FleetConfig.sweep is None ⇒ nothing
     emitted (no env, no timer).
@@ -393,7 +393,7 @@ def _coerce_project(key: Any, d: Any) -> ProjectConfig:
 
 # A derived project key must satisfy every slug gate the estate already
 # ships, or the derivation hands out a key the doors refuse: the validator's
-# _PROJECT_KEY_RE, lib/checkin-contract.py's SLUG_RE and dispatch-task.sh's
+# _PROJECT_KEY_RE, checkin_contract.SLUG_RE and dispatch-task.sh's
 # --project check are three independent copies of ^[a-z][a-z0-9-]*$.
 _DERIVED_SLUG_PREFIX = "p-"
 
@@ -454,7 +454,7 @@ def derive_projects(bots: dict[str, "BotConfig"]) -> dict[str, ProjectConfig]:
 
     # Two orgs holding one repo NAME collide on the short slug. Qualify EVERY
     # member of a colliding group, not just the later one: an asymmetric pair
-    # ('tl-enterprises' and 'other-tl-enterprises') reads as if the first owns
+    # ('acme-fleet' and 'other-acme-fleet') reads as if the first owns
     # the plain name, which is exactly the ambiguity the qualification exists
     # to remove.
     by_short: dict[str, list[str]] = {}
@@ -502,6 +502,10 @@ def load_projects(projects_yaml: Path) -> dict[str, ProjectConfig]:
         return {}
     with projects_yaml.open() as f:
         doc = yaml.safe_load(f)
+    return _project_document(projects_yaml, doc)
+
+
+def _project_document(projects_yaml: Path, doc) -> dict[str, ProjectConfig]:
     if doc is None:
         return {}  # an all-comments file is still an optional file
     if not isinstance(doc, dict) or "projects" not in doc:
@@ -846,7 +850,7 @@ class WorkstreamsConfig:
     """fleet.workstreams knobs — the anti-rot bounds for the P5 registry.
 
     max_active: the manager-attention-span cap on concurrently active
-    workstreams (`workstream-update.sh open` refuses past it). lease_days:
+    workstreams (the canonical workstream open/unblock operations refuse past it). lease_days:
     how long a workstream keeps its slot without progress before the
     (follow-up PR) fleet-pulse stall check will flag it. Both compose into
     every bot.conf as WORKSTREAM_MAX_ACTIVE / WORKSTREAM_LEASE_DAYS so the
@@ -863,6 +867,7 @@ class WorkstreamsConfig:
 class FleetConfig:
     name: str
     service_prefix: str
+    manager: str
     telegram_group_chat_id: str | None = None
     human_telegram_id: str | None = None
     accounts: dict[str, str] = field(default_factory=lambda: {"default": "~/.claude"})
@@ -890,6 +895,20 @@ class FleetConfig:
     # fleet omits the block) so the composer can emit WORKSTREAM_* unconditionally.
     workstreams: WorkstreamsConfig = field(default_factory=WorkstreamsConfig)
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.manager, str) or not self.manager.strip():
+            raise ValueError("fleet.manager is required and must be a local bot ID")
+        if self.manager not in self.bots:
+            raise ValueError(
+                f"fleet.manager '{self.manager}' is not in fleet.bots"
+            )
+        for team in self.teams.values():
+            if team.manager != self.manager:
+                raise ValueError(
+                    f"team '{team.name}': manager '{team.manager}' must match "
+                    f"fleet.manager '{self.manager}'"
+                )
+
     def sweep_enabled(self) -> bool:
         """True when the opt-in code-audit sweep is configured and enabled."""
         return bool(self.sweep and self.sweep.enabled)
@@ -899,54 +918,22 @@ class FleetConfig:
         return any(b.briefing and b.briefing.slots for b in self.bots.values())
 
     def manager_bots(self) -> set[str]:
-        """Bot names that manage anyone — a team in this fleet, or bots anywhere.
+        """The declared owner of this fleet's intake, routing and follow-up.
 
-        Two declarations, because a manager's reports are not always in the same
-        fleet. ``teams:`` names a within-fleet manager and answers "does a team
-        here name this bot". ``bots.<id>.manages:`` names the reports directly,
-        and is the only one of the two that can express a CROSS-FLEET report — a
-        top-level coordinator whose reports are themselves managers of other
-        fleets is named by no ``teams:`` block anywhere, and so was invisible
-        here despite the fleet declaring exactly who it manages.
-
-        That is not a stretch of the schema: ``_validate_teams`` already warns
-        rather than errors on a ``manages`` target outside ``fleet.bots``,
-        precisely because "bot_ids may reference other fleets".
-
-        Widely consumed, including by guards where a missing bot silently loses
-        a protection rather than merely being mislabelled — so widen it here,
-        once, rather than special-casing whichever consumer notices first.
+        Teams group workers under this manager. ``manages`` and ``reports_to``
+        retain reporting metadata, including cross-fleet relationships, without
+        granting another bot ownership of this fleet's tasks.
         """
-        from_teams = {team.manager for team in self.teams.values()}
-        # An empty or absent `manages:` list is not a claim to manage anyone.
-        from_manages = {name for name, bot in self.bots.items() if bot.manages}
-        return from_teams | from_manages
+        return {self.manager}
 
     def leaf_manager_bots(self) -> set[str]:
-        """Managers at least one of whose IN-FLEET reports is not itself a manager.
+        """The fleet manager when it has at least one other local bot to route.
 
-        The second detectable role (spec §10). ``manager_bots()`` is true for a
-        coordinator too, and the composed ``MANAGER_TMUX`` self-pointer follows the
-        same set, so ``bot_is_manager`` cannot tell the two apart at runtime either
-        — the distinction has to be made at compose time.
-
-        A CROSS-FLEET ``manages:`` target does NOT make a manager leaf (F5, ruled):
-        ``manages:`` exists precisely to express a coordinator whose reports are
-        managers of other fleets, so an unresolvable target is evidence of a
-        coordinator rather than of a worker. Out-of-fleet names are dropped BEFORE
-        the test, never counted as non-managers; for a money-spending default the
-        conservative direction is not to equip. A manager with no in-fleet report
-        at all is likewise not leaf.
+        Every other local bot belongs to this manager, whether grouped into a
+        team or not. A singleton fleet with only cross-fleet reporting links has
+        no local worker and does not receive the leaf-manager defaults.
         """
-        managers = self.manager_bots()
-        leaf: set[str] = set()
-        for name in managers:
-            reports = {w for t in self.teams.values() if t.manager == name for w in t.workers}
-            reports |= set((self.bots[name].manages or []) if name in self.bots else [])
-            in_fleet = {r for r in reports if r in self.bots}
-            if in_fleet - managers:
-                leaf.add(name)
-        return leaf
+        return {self.manager} if self.bots.keys() - {self.manager} else set()
 
     def teams_for_manager(self, bot_name: str) -> list[TeamConfig]:
         return [team for team in self.teams.values() if team.manager == bot_name]
@@ -1316,7 +1303,7 @@ def is_pos_int(v: object) -> bool:
 
 def _coerce_workstreams(raw: dict | None) -> WorkstreamsConfig:
     """Parse fleet.workstreams. Tolerant: a bad value falls back to the default
-    so `generate` never crashes — `claudlobby validate` surfaces the error."""
+    so `generate` never crashes — `claudlobby config validate` surfaces the error."""
     if not raw:
         return WorkstreamsConfig()
 
@@ -1400,7 +1387,7 @@ def _merge_tool_permissions(
 # reaper); the F18 closure (#1467) removed the files and the reapers with them,
 # and the plane's `plane prune` retention took over. A manifest that still sets
 # one is not refused (the loader must not crash on an old fleet.yaml) — it is
-# RECORDED here and `claudlobby validate` warns, naming the key.
+# RECORDED here and `claudlobby config validate` warns, naming the key.
 _RETIRED_OBSERVABILITY_KEYS: dict[str, str] = {
     "reap_days": "no reader since the F18 closure (#1467) — the event files it aged are gone;"
                  " the plane's `plane prune` retention replaced them",
@@ -1740,6 +1727,15 @@ def _parse_enum(label: str, value: str | None, known: frozenset[str]) -> str | N
     return value
 
 
+def _select_bot_scalar(raw: dict, defaults: dict, key: str, fallback=None) -> tuple[Any, str]:
+    """The presence-based scalar choice shared by coercion and provenance."""
+    if key in raw:
+        return raw[key], "bot"
+    if key in defaults:
+        return defaults[key], "fleet.defaults"
+    return fallback, "built_in"
+
+
 def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> BotConfig:
     raw = raw or {}
     tg_defaults = defaults.get("telegram", {}) or {}
@@ -1756,18 +1752,10 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         raise ValueError(f"bot '{name}': missing required field 'expertise'")
 
     def _bool(key: str, fallback: bool) -> bool:
-        if key in raw:
-            return bool(raw[key])
-        if key in defaults:
-            return bool(defaults[key])
-        return fallback
+        return bool(_select_bot_scalar(raw, defaults, key, fallback)[0])
 
     def _str(key: str, fallback: str) -> str:
-        if key in raw:
-            return str(raw[key])
-        if key in defaults:
-            return str(defaults[key])
-        return fallback
+        return str(_select_bot_scalar(raw, defaults, key, fallback)[0])
 
     def _tristate(key: str) -> bool | None:
         """Presence-based tri-state: an explicit *non-null* bot/fleet value wins,
@@ -1813,10 +1801,10 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         model_strategy=_coerce_model_strategy(
             raw.get("model_strategy") or defaults.get("model_strategy")
         ),
-        account=raw.get("account", defaults.get("account", "default")),
-        model=raw.get("model", defaults.get("model")),
+        account=_select_bot_scalar(raw, defaults, "account", "default")[0],
+        model=_select_bot_scalar(raw, defaults, "model")[0],
         effort=_parse_enum(
-            "effort", raw.get("effort", defaults.get("effort")), KNOWN_EFFORTS
+            "effort", _select_bot_scalar(raw, defaults, "effort")[0], KNOWN_EFFORTS
         ),
         remote_control=_bool("remote_control", True),
         dangerously_skip_permissions=_bool("dangerously_skip_permissions", False),
@@ -2057,7 +2045,7 @@ def _load_system_defaults(_cache: dict = {}) -> dict:  # noqa: B006
                 f"{Path(__file__).parent / 'system.yaml'} is missing -- "
                 f"{_SYSTEM_YAML_REFUSAL} Likely an incomplete or non-editable "
                 "install, or a pull interrupted mid-write; reinstall the "
-                "package (pip install -e .)."
+                "package from its pinned release artifact."
             )
         try:
             with path.open() as f:
@@ -2071,9 +2059,9 @@ def _load_system_defaults(_cache: dict = {}) -> dict:  # noqa: B006
                 f"{_SYSTEM_YAML_REFUSAL} Check the file's permissions and that "
                 "it holds valid YAML."
             ) from exc
-        if not data:
+        if not isinstance(data, dict) or not data:
             raise RuntimeError(
-                f"{path} is empty or parses to nothing -- "
+                f"{path} is empty or parses to nothing (expected a nonempty mapping) -- "
                 f"{_SYSTEM_YAML_REFUSAL} Likely a truncated write or a corrupted "
                 "checkout; restore the file or reinstall the package."
             )
@@ -2084,6 +2072,8 @@ def _load_system_defaults(_cache: dict = {}) -> dict:  # noqa: B006
 #: Names a different host override file (the test suite points it at nothing,
 #: so the suite never reads the operator's real one).
 HOST_OVERRIDE_ENV = "CLAUDLOBBY_HOST_SYSTEM_YAML"
+_HOST_UNIT_PREFIX = "claudlobby"
+_HOST_UNIT_PREFIX_RE = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,47}")
 
 
 def host_override_path() -> Path:
@@ -2102,7 +2092,7 @@ def host_override_path() -> Path:
 def load_host_jobs() -> dict:
     """Return ``host.jobs`` from system.yaml, with THIS host's override applied.
 
-    Host jobs are host-global singletons (one instance per host, fixed
+    Host jobs are host-global singletons (one instance per host, default
     ``claudlobby-<name>`` unit identity) and deliberately bypass the fleet
     defaults merge -- a fleet does not override platform equipment. A host
     does, through ``host_override_path()``; every reader of host jobs comes
@@ -2112,6 +2102,43 @@ def load_host_jobs() -> dict:
     """
     packaged = (_load_system_defaults().get("host") or {}).get("jobs") or {}
     return _apply_host_override(packaged, host_override_path())
+
+
+def load_host_unit_prefix() -> str:
+    """Validated native namespace for this host's singleton jobs."""
+    return _read_host_override(host_override_path())[1]
+
+
+def host_unit_name(name: str, *, prefix: str | None = None) -> str:
+    """One native label codec for host jobs, preserving the shipped default."""
+    prefix = load_host_unit_prefix() if prefix is None else prefix
+    if not isinstance(prefix, str) or not _HOST_UNIT_PREFIX_RE.fullmatch(prefix):
+        raise RuntimeError("host.unit_prefix must be 1-48 ASCII letters, digits or hyphens, starting with a letter")
+    if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9-]*", name):
+        raise RuntimeError(f"invalid host job name {name!r}")
+    return f"{prefix}-{name}"
+
+
+def _read_host_override(path: Path) -> tuple[dict, str]:
+    if not path.is_file():
+        return {}, _HOST_UNIT_PREFIX
+    where = f"{path} (this host's override of system.yaml host)"
+    try:
+        with path.open() as f:
+            override = yaml.safe_load(f) or {}
+    except yaml.YAMLError as exc:
+        raise RuntimeError(f"{where} does not parse: {exc}") from exc
+    host = override.get("host") or {} if isinstance(override, dict) else None
+    if not (isinstance(host, dict) and set(override) <= {"host"}
+            and set(host) <= {"jobs", "unit_prefix"}):
+        raise RuntimeError(f"{where}: only host.jobs and host.unit_prefix are read")
+    prefix = host.get("unit_prefix", _HOST_UNIT_PREFIX)
+    if not isinstance(prefix, str) or not _HOST_UNIT_PREFIX_RE.fullmatch(prefix):
+        raise RuntimeError(f"{where}: host.unit_prefix must be 1-48 ASCII letters, digits or hyphens, starting with a letter")
+    jobs = host.get("jobs") or {}
+    if not isinstance(jobs, dict):
+        raise RuntimeError(f"{where}: host.jobs must map job names to their fields")
+    return jobs, prefix
 
 
 def _apply_host_override(packaged: dict, path: Path) -> dict:
@@ -2133,20 +2160,11 @@ def _apply_host_override(packaged: dict, path: Path) -> dict:
     and ignored, not refused: the file outlives the install it was written
     against, and a pull that retires a job must not stop every host-timers run.
     """
-    if not path.is_file():
-        return packaged
     where = f"{path} (this host's override of system.yaml host.jobs)"
-    try:
-        with path.open() as f:
-            override = yaml.safe_load(f) or {}
-    except yaml.YAMLError as exc:
-        raise RuntimeError(f"{where} does not parse: {exc}") from exc
-    host = override.get("host") or {} if isinstance(override, dict) else None
-    if not (isinstance(host, dict) and set(override) <= {"host"} and set(host) <= {"jobs"}):
-        raise RuntimeError(f"{where}: only host.jobs is read, as host: {{jobs: {{<job>: {{<field>: <value>}}}}}}")
-    jobs = host.get("jobs") or {}
-    if not isinstance(jobs, dict):
-        raise RuntimeError(f"{where}: host.jobs must map job names to their fields")
+    jobs, prefix = _read_host_override(path)
+    names = [host_unit_name(name, prefix=prefix) for name in packaged]
+    if len(set(names)) != len(names):
+        raise RuntimeError(f"{where}: host unit labels collide")
     fields_known = {"enroll"}.union(*(cfg.keys() for cfg in packaged.values()))
     merged = {name: dict(cfg) for name, cfg in packaged.items()}
     for name, fields in jobs.items():
@@ -2217,13 +2235,71 @@ def _merge_system_into_defaults(system: dict, defaults: dict) -> dict:
     return merged
 
 
-def load_fleet(fleet_yaml: Path) -> tuple[FleetConfig, dict]:
+def load_fleet(fleet_yaml: Path, *, projects_yaml: Path | None = None) -> tuple[FleetConfig, dict]:
     """Parse fleet.yaml into a FleetConfig; returns (fleet, merged_defaults)."""
     if not fleet_yaml.is_file():
         raise FileNotFoundError(f"fleet.yaml not found at {fleet_yaml}")
 
     with fleet_yaml.open() as f:
         doc = yaml.safe_load(f)
+    return _fleet_document(fleet_yaml, doc, lambda: load_projects(
+        projects_yaml if projects_yaml is not None else fleet_yaml.parent / "projects.yaml"))
+
+
+_EXPLAIN_FLEET_SCALARS = frozenset({
+    "name", "service_prefix", "manager", "telegram_group_chat_id",
+    "human_telegram_id", "mission", "mission_file",
+})
+_EXPLAIN_BOT_INHERITED_SCALARS = frozenset({
+    "account", "model", "effort", "remote_control", "dangerously_skip_permissions",
+    "skip_auto_permission_prompt", "skip_dangerous_mode_permission_prompt",
+    "prompt_suggestions", "disable_nonessential_traffic", "spinner_tips_enabled",
+    "preferred_notif_channel", "prefers_reduced_motion",
+})
+_EXPLAIN_BOT_LOCAL_SCALARS = frozenset({"name", "voice", "reports_to", "startup_prompt"})
+
+
+def scalar_config_origin(fleet_yaml: Path, merged_defaults: dict, field: str,
+                         *, bot: str | None = None) -> tuple[str, str | None]:
+    """Name the authored source of supported scalar fields; never return values.
+
+    Only fields with a simple, known selection path are covered. Complex
+    unions, per-field mappings and composer-resolved defaults need their own
+    operation owner; callers must report those as unsupported.
+    """
+    with fleet_yaml.open() as source:
+        raw_fleet = yaml.safe_load(source)["fleet"]
+    if bot is None:
+        if field not in _EXPLAIN_FLEET_SCALARS:
+            raise NotImplementedError
+        return ("fleet", f"fleet.{field}") if field in raw_fleet else ("built_in", None)
+    raw_bot = (raw_fleet.get("bots") or {}).get(bot) or {}
+    if field in _EXPLAIN_BOT_INHERITED_SCALARS:
+        _, source = _select_bot_scalar(raw_bot, merged_defaults, field)
+        if source == "fleet.defaults" and field not in (raw_fleet.get("defaults") or {}):
+            source = "system_defaults"
+        declaration = (f"fleet.bots.{bot}.{field}" if source == "bot" else
+                       f"fleet.defaults.{field}" if source == "fleet.defaults" else
+                       f"system.yaml.defaults.{field}" if source == "system_defaults" else None)
+        return source, declaration
+    if field in _EXPLAIN_BOT_LOCAL_SCALARS:
+        return ("bot", f"fleet.bots.{bot}.{field}") if field in raw_bot else ("built_in", None)
+    raise NotImplementedError
+
+
+def load_fleet_snapshot(fleet_yaml: Path, fleet_content: bytes,
+                        projects_content: bytes | None) -> tuple[FleetConfig, dict]:
+    """Decode sealed active inputs with the same model/defaults as authoring.
+
+    No mutable source is read. System defaults remain owned by the executing
+    sealed package; callers must bind that package to the active plan.
+    """
+    return _fleet_document(fleet_yaml, yaml.safe_load(fleet_content), lambda: _project_document(
+        fleet_yaml.parent / "projects.yaml",
+        yaml.safe_load(projects_content) if projects_content is not None else None))
+
+
+def _fleet_document(fleet_yaml: Path, doc, projects_reader) -> tuple[FleetConfig, dict]:
 
     if not isinstance(doc, dict) or "fleet" not in doc:
         raise ValueError(f"{fleet_yaml}: top-level key 'fleet' missing")
@@ -2296,7 +2372,7 @@ def load_fleet(fleet_yaml: Path) -> tuple[FleetConfig, dict]:
     # wrote one still gets a registry derived from the repos its bots already
     # declare, so the check-in's `dispatch` action (which needs --project) is
     # available. Replacement, never a merge — see derive_projects.
-    projects = load_projects(fleet_yaml.parent / "projects.yaml")
+    projects = projects_reader()
     projects_derived = not projects
     if projects_derived:
         projects = derive_projects(bots)
@@ -2304,6 +2380,7 @@ def load_fleet(fleet_yaml: Path) -> tuple[FleetConfig, dict]:
     fleet_cfg = FleetConfig(
         name=fleet.get("name", "unnamed-fleet"),
         service_prefix=fleet.get("service_prefix", "claudlobby"),
+        manager=fleet.get("manager"),
         telegram_group_chat_id=fleet.get("telegram_group_chat_id"),
         human_telegram_id=fleet.get("human_telegram_id"),
         accounts=fleet.get("accounts", {"default": "~/.claude"})

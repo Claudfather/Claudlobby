@@ -31,6 +31,7 @@
 
 fleet:
   name: example-fleet
+  manager: lead                            # required local bot ID; owns all fleet tasks
   service_prefix: com.example.claudlobby
   telegram_group_chat_id: "-1001234567890"   # replace with your group ID
   # human_telegram_id: "1234567890"          # your Telegram user ID — enables DM allowlisting for all bots
@@ -77,7 +78,7 @@ fleet:
     # github_app:                              # OPTIONAL — GitHub App git auth (App-auth P3 #1273).
     #   slug: my-fleet-app                     # BOTH slug + bot_user_id -> commits as <slug>[bot];
     #   bot_user_id: 1234567                   # omit both to keep the operator identity. Values from
-    #   # orgs: [MyOrg]                        # lib/setup-github-app.sh. orgs: scopes the App helper
+    #   # orgs: [MyOrg]                        # host github-app setup. orgs: scopes the App helper
     #                                          # (else all of github.com). Restart-not-reload applies.
     #                                          # Credentials ride GITHUB_APP_* in the fleet .env.
     telegram:                                  # telegram defaults — bot stanza overrides per field
@@ -112,7 +113,7 @@ fleet:
     #   # strand outliving the window goes quiet again — set 0 to refuse that.
     #   unassigned_max_age: 86400    # stop reporting past this age (default 86400 = 24h; <=0 never stops)
 
-  teams:
+  teams:                                    # optional groups; each names the fleet manager
     engineering:
       manager: lead
       workers: [eng-1, reviewer-1]
@@ -175,7 +176,7 @@ fleet:
 #     # lessons — library/lessons/ is FROZEN (L3). Existing referential lessons still
 #     # compose for non-vault fleets; a vault-wired fleet reaches them via `claudron recall`
 #     # instead. New behavior rules → protocols/guardrails; new referential findings → the
-#     # vault (`claudlobby lessons-migrate`, /claudna:capture). See library/lessons/README.md.
+#     # vault (`claudlobby migration lessons`, /claudna:capture). See library/lessons/README.md.
 #     lessons:
 #       - review/empirical-verification
 #       - telegram/mcp-drops
@@ -231,7 +232,7 @@ fleet:
 #     # as the same user (a script, `python3 -c "open(...)"`, a `$HOME/...` path
 #     # the matcher cannot resolve) is not stopped. A composed deny binds on the
 #     # bot's NEXT tool call with no restart, so arm one bot, run a real turn,
-#     # then widen to `defaults:`. `claudlobby freshbox` and `validate` name
+#     # then widen to `defaults:`. `claudlobby config validate --runtime` and `config validate` name
 #     # every composed file that still tells the bot to `source ~/.env`.
 #     # `exempt` restores a READ only: account_config | env_host.
 #     isolation:
@@ -240,11 +241,11 @@ fleet:
 #
 #     # briefing — equippable scheduled briefing (#627). Each slot becomes a
 #     # composed per-(bot,slot) OnCalendar timer that dispatches /briefing <slot>
-#     # into THIS bot's session via lib/briefing-trigger.sh — never hand-install
+#     # into THIS bot's session via claudlobby/_runtime_scripts/briefing-trigger.sh — never hand-install
 #     # cron. Slot names must be shell identifiers (they become the
 #     # BRIEFING_SECTIONS_<SLOT> env suffix); values are systemd OnCalendar, NOT
 #     # 5-field cron. BRIEFING_* lands in bot.conf for the /briefing skill; the
-#     # timers enroll on `setup-fleet` and prune when a slot is removed.
+#     # timers enroll on host activation and retire when a slot is removed.
 #     briefing:
 #       slots:
 #         morning: "*-*-* 08:30:00"          # daily 08:30
@@ -353,15 +354,6 @@ fleet:
 #     # vault-wired bot that should reach the vault by hand-run CLI alone.
 #     # `claudron_session_loop: true` with no claudron_vault_path is a validate error.
 #     claudron_session_loop: true
-#
-#     # Vault-wired MANAGER bots can also opt into the Claudron query-before
-#     # preflight: dispatch-task.sh prepends fleet-memory pointers (titles +
-#     # paths from `claudron lookup`) to every dispatched task. Needs the
-#     # claudron CLI on the host PATH. Off unless set — see
-#     # documentation/integrations/claudron-integration.md.
-#     env:
-#       CLAUDRON_QUERY_BEFORE: "1"
-#       CLAUDRON_QUERY_LIMIT: "3"                  # max pointers per dispatch (default 3)
 #
 #     # autonomous_runner — turns a bot into an Autonomous Worker that picks
 #     # GitHub issues from a target repo per a cadence and runs a clauDNA --auto

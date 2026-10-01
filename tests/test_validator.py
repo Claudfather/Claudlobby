@@ -12,6 +12,7 @@ import pytest
 from claudlobby import validator as validator_module
 from claudlobby.config import load_fleet
 from claudlobby.known_values import _AUTO_ELIGIBLE_RENAMES
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 from claudlobby.validator import _grant_wellformed, validate
 
@@ -19,7 +20,7 @@ REPO = Path(__file__).resolve().parent.parent
 
 
 def _make_paths(root: Path) -> Paths:
-    return Paths(root=root, fleet_dir=None)
+    return Paths(root=root, fleet_dir=None, package=source_package())
 
 
 def _ignition_warnings(report) -> list[str]:
@@ -46,7 +47,7 @@ def _arm_briefing(text: str) -> str:
 def _validate_with_real_resolver(
     fleet_dir, monkeypatch, *, env_text: str = "TASK_RECHECK_ENABLED=0\n"
 ):
-    """`validate()` with the repo's REAL `lib/` wired (#1633/#1680).
+    """`validate()` with the repo's REAL `claudlobby/_runtime_scripts/` wired (#1633/#1680).
 
     task-recheck ships opt-out, so a resolver-unavailable fallback reads it as
     ARMED and every disarmed ignition case collapses to silence; the `.env`
@@ -58,18 +59,18 @@ def _validate_with_real_resolver(
     monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
     # Wire whatever is MISSING rather than keying on the directory's existence
     # (origin/main's fix for the same #1588 class, adopted here). `fleet_dir`
-    # now ships a real `mcp-package-grammar.py`, so `lib/` EXISTS without being
+    # now ships a real `mcp-package-grammar.py`, so `claudlobby/_runtime_scripts/` EXISTS without being
     # wired, and an existence check skips the wiring silently: the switch
     # resolver then cannot read its doors, `task-recheck` falls back to ARMED
     # regardless of `.env`, and `_validate_ignition`'s early return makes every
     # scenario below pass vacuously.
     #
     # Per-entry links, never a whole-dir symlink: fixtures delete files under
-    # `lib/`, and through a directory symlink those unlinks reach the repo's
+    # `claudlobby/_runtime_scripts/`, and through a directory symlink those unlinks reach the repo's
     # own copies.
     lib = fleet_dir / "lib"
     lib.mkdir(exist_ok=True)
-    for real in (REPO / "lib").iterdir():
+    for real in (REPO / "claudlobby/_runtime_scripts").iterdir():
         link = lib / real.name
         if not link.exists():
             link.symlink_to(real)
@@ -77,7 +78,7 @@ def _validate_with_real_resolver(
     # (#1689). Testing for the FILE the resolver needs tests the proposition;
     # testing that a directory exists is the proxy that failed (#1588).
     assert (lib / "env-tiers.sh").is_file(), (
-        f"{lib} exists but does not carry the real lib/ — the switch resolver "
+        f"{lib} exists but does not carry the real claudlobby/_runtime_scripts/ — the switch resolver "
         f"cannot run, so TASK_RECHECK_ENABLED=0 never lands and task-recheck "
         f"reads ARMED. Every disarmed case here would measure the wrong state."
     )
@@ -256,13 +257,12 @@ class TestValidate:
         # Verify the warning was emitted via logging
         assert "skipping" in caplog.text
 
-    def test_empty_bots_is_error(self, fleet_dir):
-        (fleet_dir / "fleet.yaml").write_text("fleet:\n  name: empty\n  bots: {}\n")
-        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        paths = _make_paths(fleet_dir)
-        report = validate(fleet, paths)
-        assert report.has_errors
-        assert any("empty" in e for e in report.errors)
+    def test_empty_bots_is_rejected_while_loading(self, fleet_dir):
+        (fleet_dir / "fleet.yaml").write_text(
+            "fleet:\n  name: empty\n  manager: lead\n  bots: {}\n"
+        )
+        with pytest.raises(ValueError, match=r"fleet.manager.*not in fleet.bots"):
+            load_fleet(fleet_dir / "fleet.yaml")
 
     def test_reports_to_invalid_ref_is_warning(self, fleet_dir, monkeypatch):
         monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
@@ -693,7 +693,7 @@ class TestCrossFleetCollisions:
         (other_bots / "bot.conf").write_text("BOT_NAME=lead\n")
 
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        paths = Paths(root=fleet_dir, fleet_dir=my_fleet)
+        paths = Paths(root=fleet_dir, fleet_dir=my_fleet, package=source_package())
         report = validate(fleet, paths)
         assert any(
             "lead" in w and "other-fleet" in w and "collide" in w
@@ -713,7 +713,7 @@ class TestCrossFleetCollisions:
         (other_bots / "bot.conf").write_text("BOT_NAME=unique-bot\n")
 
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        paths = Paths(root=fleet_dir, fleet_dir=my_fleet)
+        paths = Paths(root=fleet_dir, fleet_dir=my_fleet, package=source_package())
         report = validate(fleet, paths)
         assert not any("collide" in w for w in report.warnings)
 
@@ -726,7 +726,7 @@ class TestCrossFleetCollisions:
         (own_bots / "bot.conf").write_text("BOT_NAME=lead\n")
 
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        paths = Paths(root=fleet_dir, fleet_dir=my_fleet)
+        paths = Paths(root=fleet_dir, fleet_dir=my_fleet, package=source_package())
         report = validate(fleet, paths)
         assert not any("collide" in w for w in report.warnings)
 
@@ -734,7 +734,7 @@ class TestCrossFleetCollisions:
         """No local/ directory at all — should not crash."""
         self._env_patch(monkeypatch)
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        paths = Paths(root=fleet_dir, fleet_dir=None)
+        paths = Paths(root=fleet_dir, fleet_dir=None, package=source_package())
         report = validate(fleet, paths)
         assert not any("collide" in w for w in report.warnings)
 
@@ -1579,7 +1579,10 @@ class TestManagerCheckinArmedLeaflessWarning:
         self, fleet_dir, monkeypatch
     ):
         fleet, paths = self._load(fleet_dir, monkeypatch)
-        fleet.teams = {}  # no team names a manager -> no leaf manager
+        # No other local bot exists for the declared manager to route.
+        fleet.teams = {}
+        fleet.bots = {fleet.manager: fleet.bots[fleet.manager]}
+        fleet.bots[fleet.manager].manages = []
         assert fleet.leaf_manager_bots() == set()
         fleet.defaults["jobs"] = {
             **fleet.defaults.get("jobs", {}),
@@ -1588,9 +1591,8 @@ class TestManagerCheckinArmedLeaflessWarning:
         report = validate(fleet, paths)
         matches = [w for w in report.warnings if "manager-checkin" in w]
         assert len(matches) == 1, report.warnings
-        assert "no leaf manager" in matches[0]
-        # names what WOULD make it fire
-        assert "in-fleet report" in matches[0] and "not itself a manager" in matches[0]
+        assert "no local workers" in matches[0]
+        assert "declared manager is the only bot" in matches[0]
 
     def test_armed_with_a_leaf_manager_stays_silent(self, fleet_dir, monkeypatch):
         fleet, paths = self._load(fleet_dir, monkeypatch)
@@ -1601,13 +1603,15 @@ class TestManagerCheckinArmedLeaflessWarning:
         }
         report = validate(fleet, paths)
         assert not any(
-            "manager-checkin" in w and "no leaf manager" in w
+            "manager-checkin" in w and "no local workers" in w
             for w in report.warnings
         ), report.warnings
 
     def test_unarmed_and_leafless_stays_silent(self, fleet_dir, monkeypatch):
         fleet, paths = self._load(fleet_dir, monkeypatch)
         fleet.teams = {}
+        fleet.bots = {fleet.manager: fleet.bots[fleet.manager]}
+        fleet.bots[fleet.manager].manages = []
         assert fleet.leaf_manager_bots() == set()
         fleet.defaults["jobs"] = {
             **fleet.defaults.get("jobs", {}),
@@ -1615,7 +1619,7 @@ class TestManagerCheckinArmedLeaflessWarning:
         }
         report = validate(fleet, paths)
         assert not any(
-            "manager-checkin" in w and "no leaf manager" in w
+            "manager-checkin" in w and "no local workers" in w
             for w in report.warnings
         ), report.warnings
 
@@ -1656,7 +1660,7 @@ class TestManagerCheckinUnarmedLeafWarning:
             "defaults: { jobs: { manager-checkin: { enroll: true } } }"
             in matches[0]
         )
-        assert "lib/setup-fleet" in matches[0]
+        assert "host activate PLAN_ID" in matches[0]
 
     def test_leaf_manager_and_armed_stays_silent(self, fleet_dir, monkeypatch):
         fleet, paths = self._load(fleet_dir, monkeypatch)
@@ -1676,6 +1680,8 @@ class TestManagerCheckinUnarmedLeafWarning:
         # — this one only ever fires when a leaf manager was actually equipped.
         fleet, paths = self._load(fleet_dir, monkeypatch)
         fleet.teams = {}
+        fleet.bots = {fleet.manager: fleet.bots[fleet.manager]}
+        fleet.bots[fleet.manager].manages = []
         assert fleet.leaf_manager_bots() == set()
         fleet.defaults["jobs"] = {
             **fleet.defaults.get("jobs", {}),
@@ -2273,7 +2279,7 @@ class TestGoalBinding:
         monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
         monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        return fleet, Paths(root=fleet_dir, fleet_dir=fleet_dir_path)
+        return fleet, Paths(root=fleet_dir, fleet_dir=fleet_dir_path, package=source_package())
 
     @staticmethod
     def _scope(text: str, bot: str, org: str, repos: list[str]) -> str:
@@ -2343,7 +2349,7 @@ class TestGoalBinding:
         self._sibling(
             fleet_dir,
             "other-fleet",
-            "fleet:\n  name: other-fleet\n  bots:\n    bee:\n"
+            "fleet:\n  name: other-fleet\n  manager: bee\n  bots:\n    bee:\n"
             "      expertise: [x]\n      scope:\n        org: acme\n"
             "        repos: [storefront]\n",
         )
@@ -2365,7 +2371,9 @@ class TestGoalBinding:
             )
         )
         sib = self._sibling(
-            fleet_dir, "other-fleet", "fleet:\n  name: other-fleet\n  bots: {}\n"
+            fleet_dir, "other-fleet",
+            "fleet:\n  name: other-fleet\n  manager: bee\n  bots:\n"
+            "    bee:\n      expertise: [x]\n",
         )
         (sib / "projects.yaml").write_text(
             "projects:\n  shop:\n    title: Shop\n    repos: [acme/storefront]\n"
@@ -2383,7 +2391,7 @@ class TestGoalBinding:
         self._sibling(
             fleet_dir,
             "other-fleet",
-            "fleet:\n  name: other-fleet\n  bots:\n    bee:\n"
+            "fleet:\n  name: other-fleet\n  manager: bee\n  bots:\n    bee:\n"
             "      expertise: [x]\n      scope:\n        org: zenith\n"
             "        repos: [something-else]\n",
         )
@@ -2425,7 +2433,7 @@ class TestGoalBinding:
         nested = fleet_dir / "local" / "home" / "other-fleet"
         nested.mkdir(parents=True)
         (nested / "fleet.yaml").write_text(
-            "fleet:\n  name: other-fleet\n  bots:\n    bee:\n"
+            "fleet:\n  name: other-fleet\n  manager: bee\n  bots:\n    bee:\n"
             "      expertise: [x]\n      scope:\n        org: acme\n"
             "        repos: [storefront]\n"
         )
@@ -2486,9 +2494,9 @@ class TestIgnitionValidation:
     """#1633: the same composite ignition question as doctor's check_ignition,
     at validate() time too. `fleet_dir`'s `lead`/`worker-1` team already makes
     `lead` a leaf manager, so these tests need only control which door is
-    armed — but the shared fixture carries no `lib/`, and task-recheck ships
+    armed — but the shared fixture carries no `claudlobby/_runtime_scripts/`, and task-recheck ships
     opt-out (on by default), so a resolver-unavailable fallback reads it as
-    armed regardless of scenario. Wire the repo's real lib/ (the
+    armed regardless of scenario. Wire the repo's real claudlobby/_runtime_scripts/ (the
     test_switches.py / test_doctor.py pattern) so "off" is reachable at all.
     """
 
@@ -2548,7 +2556,7 @@ class TestGoalBindingAndIgnitionNameEachOther:
 
     `fleet_dir`'s lead/worker-1 team already makes `lead` a leaf manager and
     the fixture declares no projects; what varies below is only which of the
-    two conditions is fixed. The repo's real lib/ is wired (the
+    two conditions is fixed. The repo's real claudlobby/_runtime_scripts/ is wired (the
     TestIgnitionValidation pattern) because task-recheck ships opt-out and a
     resolver-unavailable fallback reads it as ARMED, which would collapse
     every disarmed case here to silence.
@@ -2641,7 +2649,7 @@ class TestGoalBindingAndIgnitionNameEachOther:
     ):
         ignition = self._ignition(self._report(fleet_dir, monkeypatch))
         assert ignition.index("co-requisite") < ignition.index("Cheapest to arm:")
-        assert ignition.rstrip().endswith("generate + lib/setup-fleet"), ignition
+        assert ignition.rstrip().endswith("host activate PLAN_ID --install-directory <native-user-unit-dir>"), ignition
 
 
 class TestTheValidatorFixtureRefusesDeadWiring:
@@ -2656,10 +2664,10 @@ class TestTheValidatorFixtureRefusesDeadWiring:
         self, fleet_dir, monkeypatch
     ):
         """Armed with the REAL shipped armer rather than a synthetic
-        directory: `conftest.equip_grammar` plants a one-file `lib/` for the
+        directory: `conftest.equip_grammar` plants a one-file `claudlobby/_runtime_scripts/` for the
         modules that need the package grammar, and its own docstring records
         that thirteen helpers key on `(root / "lib").exists()` — so a partial
-        `lib/` makes that check answer yes, skip, and run the test against
+        `claudlobby/_runtime_scripts/` makes that check answer yes, skip, and run the test against
         doors it cannot read. A module that equips the grammar and then calls
         this helper is the live pairing, and it must be repaired, not skipped.
         """
@@ -2668,7 +2676,7 @@ class TestTheValidatorFixtureRefusesDeadWiring:
         equip_grammar(fleet_dir)
         assert (fleet_dir / "lib").exists(), "precondition: the armer ran"
         assert not (fleet_dir / "lib" / "env-tiers.sh").exists(), (
-            "precondition: lib/ must be PARTIAL — that is the case an "
+            "precondition: claudlobby/_runtime_scripts/ must be PARTIAL — that is the case an "
             "existence-keyed guard gets wrong"
         )
         report, _fleet = _validate_with_real_resolver(fleet_dir, monkeypatch)
@@ -2683,5 +2691,5 @@ class TestTheValidatorFixtureRefusesDeadWiring:
     ):
         (fleet_dir / "lib").mkdir(exist_ok=True)
         (fleet_dir / "lib" / "env-tiers.sh").mkdir()
-        with pytest.raises(AssertionError, match="does not carry the real lib"):
+        with pytest.raises(AssertionError, match="does not carry the real claudlobby/_runtime_scripts/"):
             _validate_with_real_resolver(fleet_dir, monkeypatch)

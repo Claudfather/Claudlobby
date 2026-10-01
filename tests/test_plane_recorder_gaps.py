@@ -12,6 +12,8 @@ created through the real emit spine so /api/overview has something to open.
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -21,11 +23,13 @@ fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from claudlobby.plane.emit_api import emit_batch  # noqa: E402
+from tests.package_fixtures import source_package
 from claudlobby.plane.view import create_app  # noqa: E402
 
 
 def _seed_db(root: Path) -> None:
     # one real event so the read-only view has a db to open
+    initialize_plane(root)
     emit_batch(root, [{"event_type": "work_item", "emitter": "t", "fleet": "f",
                        "occurred_at": datetime.now(timezone.utc).isoformat(),
                        "payload": {"work_item_id": "wi_" + "a" * 32,
@@ -40,7 +44,7 @@ def _spool(root: Path) -> Path:
 
 def _gaps(root: Path) -> list:
     _seed_db(root)
-    return TestClient(create_app(root)).get(
+    return TestClient(create_app(root, package=source_package())).get(
         "/api/overview").json()["data"]["totals"]["recorder_gaps"]
 
 
@@ -89,7 +93,7 @@ def test_header_gap_count_agrees_with_the_trust_panel(tmp_path):
         (q / f"ev_{i}.json").write_text("{}")
         (q / f"ev_{i}.json.reason").write_text("poison")
     _seed_db(tmp_path)
-    client = TestClient(create_app(tmp_path))
+    client = TestClient(create_app(tmp_path, package=source_package()))
     ov = client.get("/api/overview").json()["data"]["totals"]["recorder_gaps"]
     trust = client.get("/api/trust").json()["data"]
     hdr = next(g["count"] for g in ov if g["kind"] == "quarantined")

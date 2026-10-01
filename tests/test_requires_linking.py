@@ -7,6 +7,7 @@ cycle-1 review B8 regression this task exists to close)."""
 from __future__ import annotations
 
 import json
+from fnmatch import fnmatchcase
 from dataclasses import replace
 from pathlib import Path
 from textwrap import dedent
@@ -22,6 +23,7 @@ from claudlobby.composer import (
 from claudlobby.config import load_fleet
 from claudlobby.freshbox import audit_bot
 from claudlobby.loader import iter_library_requires, library_requires
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 from claudlobby.plane.registry_emit import bot_payload
 from claudlobby.validator import validate
@@ -84,7 +86,15 @@ def _no_skill_defaults(fleet_dir: Path) -> None:
 
 
 def _paths(fleet_dir: Path) -> Paths:
-    return Paths(root=fleet_dir, fleet_dir=fleet_dir)
+    # These tests deliberately replace package.library with their tiny
+    # synthetic library. Carry the real universal skill into that isolated
+    # fixture so the effective-skill resolver can link and grant it.
+    source = source_package()
+    skill = fleet_dir / "library" / "skills" / "fleet-ops" / "SKILL.md"
+    skill.parent.mkdir(parents=True, exist_ok=True)
+    skill.write_bytes((source.library / "skills" / "fleet-ops" / "SKILL.md").read_bytes())
+    return Paths(root=fleet_dir, fleet_dir=fleet_dir,
+                 package=replace(source, library=fleet_dir / "library"))
 
 
 # ---------------------------------------------------------------------------
@@ -152,12 +162,12 @@ class TestIterLibraryRequires:
         (tmp_path / "library" / "protocols" / "sprocket.md").write_text(
             "---\ntitle: Sprocket\nrequires:\n  skills: [gadget]\n---\n\n# Sprocket\n"
         )
-        paths = Paths(root=tmp_path, fleet_dir=None)
+        paths = Paths(root=tmp_path, fleet_dir=None, package=source_package())
         pairs = iter_library_requires(paths, "protocols", ["sprocket"])
         assert pairs == [("sprocket", {"skills": ["gadget"]})]
 
     def test_missing_entry_yields_empty_dict_not_skipped(self, tmp_path):
-        paths = Paths(root=tmp_path, fleet_dir=None)
+        paths = Paths(root=tmp_path, fleet_dir=None, package=source_package())
         assert iter_library_requires(paths, "protocols", ["ghost"]) == [("ghost", {})]
 
     def test_folder_expansion_resolves_members(self, tmp_path):
@@ -167,7 +177,7 @@ class TestIterLibraryRequires:
             "---\ntitle: One\nrequires:\n  skills: [a]\n---\n\n# One\n"
         )
         (d / "two.md").write_text("---\ntitle: Two\n---\n\n# Two\n")
-        paths = Paths(root=tmp_path, fleet_dir=None)
+        paths = Paths(root=tmp_path, fleet_dir=None, package=source_package())
         pairs = dict(iter_library_requires(paths, "protocols", ["pack/"]))
         assert pairs == {"pack/one": {"skills": ["a"]}, "pack/two": {}}
 
@@ -205,7 +215,7 @@ class TestResolveEffectiveSkills:
         )
         # declared entries keep their order and come first; the requirement
         # (already declared) is not appended a second time.
-        assert result == ["widget", "gadget"]
+        assert result == ["widget", "gadget", "fleet-ops"]
 
     def test_opting_out_of_the_protocol_drops_its_requirement(self, tmp_path, monkeypatch):
         root = _make_minimal_root(tmp_path)
@@ -219,7 +229,7 @@ class TestResolveEffectiveSkills:
             "protocols",
             replace(defaults.REGISTRY["protocols"], entries=("needs-gadget",)),
         )
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
 
         fleet_on, _ = load_fleet(_write_fleet_yaml(root, protocols_default=True))
         bot_on = fleet_on.bots["worker"]
@@ -242,7 +252,7 @@ class TestResolveEffectiveSkills:
             "protocols",
             replace(defaults.REGISTRY["protocols"], entries=("needs-gadget",)),
         )
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
         fleet_path = _write_fleet_yaml(root, protocols_default=False, worker_skills=["gadget"])
         fleet, _ = load_fleet(fleet_path)
         bot = fleet.bots["worker"]
@@ -275,6 +285,7 @@ def _write_fleet_yaml(
         dedent(f"""\
         fleet:
           name: test-fleet
+          manager: worker
           service_prefix: com.test
           system_defaults:
             protocols: {str(protocols_default).lower()}
@@ -292,6 +303,144 @@ def _write_fleet_yaml(
 
 
 class TestGrantUnion:
+    def test_status_coaching_uses_own_fleet_public_reads(self):
+        """S2-05/S6-10: equipped status skills read liveness through the public
+        CLI in the composed own-fleet shape. Default-socket tmux sees no bot on
+        the fleet's private socket, and a `--fleet *` read matches no composed
+        grant, so neither may appear in a runnable fence or a grant."""
+        skills = source_package().library / "skills"
+        for name in ("fleet-status", "selfcheck", "fleet-pulse", "fleet-digest"):
+            text = (skills / name / "SKILL.md").read_text()
+            front, body = text.split("---", 2)[1:]
+            assert "--fleet" not in front, name
+            fenced, in_fence = [], False
+            for line in body.splitlines():
+                if line.strip().startswith("```"):
+                    in_fence = not in_fence
+                elif in_fence:
+                    fenced.append(line.strip())
+            assert not any("tmux " in line for line in fenced), name
+            assert not any("claudlobby --fleet" in line for line in fenced), name
+            assert "tmux capture-pane" not in body and "tmux list-sessions" not in body, name
+        assert "claudlobby --json fleet status" in (skills / "fleet-status" / "SKILL.md").read_text()
+        assert "claudlobby --json fleet status" in (skills / "selfcheck" / "SKILL.md").read_text()
+        assert "claudlobby --json bot session BOT_ID" in (
+            skills / "fleet-pulse" / "SKILL.md").read_text()
+
+    def test_default_fleet_ops_is_usable_without_worker_admin_grants(self, fleet_dir):
+        # Exercise the actual manager role as well as the universal skill; a
+        # blanket role grant would otherwise mask an unsafe default.
+        role = source_package().library / "expertise" / "orchestration.md"
+        (fleet_dir / "library" / "expertise" / "orchestration.md").write_bytes(role.read_bytes())
+        text = (fleet_dir / "fleet.yaml").read_text().replace(
+            "  accounts:\n", "  system_defaults: false\n\n  accounts:\n", 1
+        )
+        (fleet_dir / "fleet.yaml").write_text(text)
+        (fleet_dir / "library" / "guardrails" / "no-push-main.md").write_text(
+            '---\ntitle: No push to main\npermissions:\n  deny: ["Bash(git push *)"]\n---\n'
+        )
+        fleet, _ = load_fleet(fleet_dir / "fleet.yaml")
+        paths = _paths(fleet_dir)
+        for bot_id in ("lead", "worker-1"):
+            bot = fleet.bots[bot_id]
+            assert "fleet-ops" not in bot.skills  # no manual equipment
+            compose_bot(bot, fleet, paths, log=lambda m: None)
+            assert (paths.bot_runtime(bot_id) / ".claude" / "skills" / "fleet-ops").is_symlink()
+            settings = json.loads(
+                (paths.bot_runtime(bot_id) / ".claude" / "settings.local.json").read_text()
+            )
+            allow = settings["permissions"]["allow"]
+            deny = settings["permissions"]["deny"]
+            assert {
+                "Skill(fleet-ops)",
+                "Skill(fleet-ops:*)",
+                "Bash(claudlobby --json brief)",
+                "Bash(claudlobby --json brief *)",
+                "Bash(claudlobby --json fleet inbox)",
+                "Bash(claudlobby --json fleet inbox *)",
+                "Bash(claudlobby --json task list)",
+                "Bash(claudlobby --json task list *)",
+                "Bash(claudlobby --json config validate)",
+                "Bash(claudlobby --json task admit *)",
+                "Bash(claudlobby --json assignment accept *)",
+                "Bash(claudlobby --json assignment progress *)",
+                "Bash(claudlobby --json assignment block *)",
+                "Bash(claudlobby --json assignment return *)",
+                "Bash(claudlobby --json assignment complete *)",
+                "Bash(claudlobby --json assignment fail *)",
+                "Bash(claudlobby --json bot status *)",
+                "Bash(claudlobby --json fleet status)",
+                "Bash(claudlobby --json fleet uptime)",
+                "Bash(claudlobby --json fleet uptime *)",
+                "Bash(claudlobby --json fleet utilization)",
+                "Bash(claudlobby --json bot usage *)",
+                "Bash(claudlobby --json bot automation status *)",
+                "Bash(claudlobby --json bot automation pause *)",
+                "Bash(claudlobby --json bot automation resume *)",
+                "Bash(claudlobby --json bot automation record *)",
+                "Bash(claudlobby --json fleet usage)",
+                "Bash(claudlobby --json fleet usage *)",
+                "Bash(claudlobby --json workstream list)",
+                "Bash(claudlobby --json workstream show *)",
+            } <= set(allow)
+            assert "Bash(git push *)" in deny
+            assert "Bash" not in allow
+            assert "Bash(uuidgen)" in allow
+            operator_commands = (
+                "host activate plan", "host job run sample", "host supervision reap-orphans",
+                "host repos pull", "bot remove worker-1 --purge", "bot move worker-1 --to other",
+                "bot create new", "library create skill new", "fleet setup new", "fleet move other",
+                "config plan", "config diff plan", "migration apply plan", "plane emit --file request.json",
+                "plane emit-batch --file request.json", "_task-recheck-tick",
+            )
+            patterns = [rule[5:-1] for rule in allow if rule.startswith("Bash(") and rule.endswith(")")]
+            for command in operator_commands:
+                assert not any(fnmatchcase("claudlobby --json " + command, pattern)
+                               for pattern in patterns), command
+            cli_patterns = [p for p in patterns if p.startswith("claudlobby ")]
+            assert not any("--fleet" in p or "--root" in p for p in cli_patterns)
+            assert not any("systemctl" in grant or "launchctl" in grant for grant in allow)
+            lifecycle = {grant for grant in allow
+                         if grant.startswith("Bash(claudlobby --json bot ")
+                         and any(f" bot {verb} " in grant for verb in ("start", "stop", "restart"))}
+            assert {f"Bash(claudlobby bot {verb} --help)"
+                    for verb in ("start", "stop", "restart")} <= set(allow)
+            if bot_id == "lead":
+                assert "Bash(claudlobby --json fleet reload)" in allow
+                assert lifecycle == {
+                    "Bash(claudlobby --json bot restart lead)",
+                    "Bash(claudlobby --json bot start worker-1)",
+                    "Bash(claudlobby --json bot stop worker-1)",
+                    "Bash(claudlobby --json bot restart worker-1)",
+                    "Bash(claudlobby --json bot restart worker-1 --ceiling *)",
+                }
+            else:
+                assert "Bash(claudlobby --json fleet reload)" not in allow
+                assert lifecycle == {"Bash(claudlobby --json bot restart worker-1)"}
+            assert not [
+                f for f in audit_bot(bot, fleet, paths)
+                if f.kind in {"orphan_grant", "under_grant"}
+            ], bot_id
+            manager_grants = {
+                "Bash(claudlobby --json task assign *)",
+                "Bash(claudlobby --json assignment deliver *)",
+                "Bash(claudlobby --json task withdraw *)",
+                "Bash(claudlobby --json task reassign *)",
+                "Bash(claudlobby --json task escalate *)",
+                "Bash(claudlobby --json task nudge *)",
+                "Bash(claudlobby --json workstream open *)",
+                "Bash(claudlobby --json workstream progress *)",
+                "Bash(claudlobby --json workstream renew *)",
+                "Bash(claudlobby --json workstream block *)",
+                "Bash(claudlobby --json workstream unblock *)",
+                "Bash(claudlobby --json workstream close *)",
+                "Bash(claudlobby --json workstream prune *)",
+            }
+            if bot_id == "lead":
+                assert manager_grants <= set(allow)
+            else:
+                assert manager_grants.isdisjoint(allow)
+
     def test_a_required_skill_is_symlinked(self, fleet_dir):
         _write_protocol(fleet_dir, "needs-gadget", requires_skills=["gadget"])
         _write_skill(fleet_dir, "gadget", tool_grants=["Bash(gadget-tool *)"])
@@ -485,7 +634,7 @@ def test_freshbox_traces_a_required_skills_grants(fleet_dir):
 
 
 # ---------------------------------------------------------------------------
-# Every existing fleet composes unchanged
+# Existing declared skills keep their order beside the universal default
 # ---------------------------------------------------------------------------
 
 
@@ -499,8 +648,8 @@ def test_a_fleet_with_no_requires_composes_exactly_the_declared_grants(fleet_dir
     This pins the FULL composed permissions.allow LITERALLY instead: no
     protocol in scope declares `requires:` (report-back, the only one this
     fleet composes by default, does not), so every entry below must trace to
-    the two skills declared directly. `channels: []` suppresses the default
-    Telegram plugin grants so the list stays short and exact."""
+    the two declared skills or the universal fleet-ops skill and its role
+    grants. `channels: []` suppresses the default Telegram plugin grants."""
     _write_skill(fleet_dir, "gadget", tool_grants=["Bash(gadget-tool *)"])
     _write_skill(fleet_dir, "widget", tool_grants=["Bash(widget-tool *)"])
     _equip(fleet_dir, "lead", skills=["gadget", "widget"], channels=[])
@@ -521,33 +670,173 @@ def test_a_fleet_with_no_requires_composes_exactly_the_declared_grants(fleet_dir
         "Skill(gadget:*)",
         "Skill(widget)",
         "Skill(widget:*)",
+        "Skill(fleet-ops)",
+        "Skill(fleet-ops:*)",
         "Bash(gadget-tool *)",
         "Bash(widget-tool *)",
-        # #1633: no custom startup_prompt -> the default read-then-act boot
-        # prompt names this exact read, and compose_settings_local grants it.
-        "Bash(claudlobby --fleet claudlobby brief --bot lead)",
+        "Bash(uuidgen)",
+        "Bash(claudlobby --help)",
+        "Bash(claudlobby brief --help)",
+        "Bash(claudlobby library list --help)",
+        "Bash(claudlobby config explain --help)",
+        "Bash(claudlobby task list --help)",
+        "Bash(claudlobby task show --help)",
+        "Bash(claudlobby task reviews --help)",
+        "Bash(claudlobby task admit --help)",
+        "Bash(claudlobby task assign --help)",
+        "Bash(claudlobby task withdraw --help)",
+        "Bash(claudlobby task reassign --help)",
+        "Bash(claudlobby task escalate --help)",
+        "Bash(claudlobby task nudge --help)",
+        "Bash(claudlobby workstream --help)",
+        "Bash(claudlobby bot status --help)",
+        "Bash(claudlobby bot session --help)",
+        "Bash(claudlobby bot logs --help)",
+        "Bash(claudlobby fleet status --help)",
+        "Bash(claudlobby fleet logs --help)",
+        "Bash(claudlobby fleet uptime --help)",
+        "Bash(claudlobby fleet utilization --help)",
+        "Bash(claudlobby bot usage --help)",
+        "Bash(claudlobby bot start --help)",
+        "Bash(claudlobby bot stop --help)",
+        "Bash(claudlobby bot restart --help)",
+        "Bash(claudlobby bot handoff --help)",
+        "Bash(claudlobby bot interrupt --help)",
+        "Bash(claudlobby bot compact --help)",
+        "Bash(claudlobby bot automation --help)",
+        "Bash(claudlobby fleet usage --help)",
+        "Bash(claudlobby fleet start --help)",
+        "Bash(claudlobby fleet stop --help)",
+        "Bash(claudlobby fleet restart --help)",
+        "Bash(claudlobby fleet reconcile --help)",
+        "Bash(claudlobby fleet reload --help)",
+        "Bash(claudlobby fleet pulse --help)",
+        "Bash(claudlobby fleet notify --help)",
+        "Bash(claudlobby event list --help)",
+        "Bash(claudlobby event show --help)",
+        "Bash(claudlobby assignment show --help)",
+        "Bash(claudlobby assignment accept --help)",
+        "Bash(claudlobby assignment deliver --help)",
+        "Bash(claudlobby assignment progress --help)",
+        "Bash(claudlobby assignment block --help)",
+        "Bash(claudlobby assignment return --help)",
+        "Bash(claudlobby assignment complete --help)",
+        "Bash(claudlobby assignment fail --help)",
+        "Bash(claudlobby message show --help)",
+        "Bash(claudlobby message receipt --help)",
+        "Bash(claudlobby message wait --help)",
+        "Bash(claudlobby message send --help)",
+        "Bash(claudlobby message reply --help)",
+        "Bash(claudlobby fleet reports submit --help)",
+        "Bash(claudlobby fleet reports list --help)",
+        "Bash(claudlobby fleet reports ack --help)",
+        "Bash(claudlobby fleet inbox --help)",
+        "Bash(claudlobby request show --help)",
+        "Bash(claudlobby --json context show)",
+        "Bash(claudlobby --json library list)",
+        "Bash(claudlobby --json config explain)",
+        "Bash(claudlobby --json config explain *)",
+        "Bash(claudlobby --json brief)",
+        "Bash(claudlobby --json brief *)",
+        "Bash(claudlobby --json task list)",
+        "Bash(claudlobby --json task list *)",
+        "Bash(claudlobby --json task show *)",
+        "Bash(claudlobby --json task reviews *)",
+        "Bash(claudlobby --json assignment show *)",
+        "Bash(claudlobby --json message show *)",
+        "Bash(claudlobby --json message receipt *)",
+        "Bash(claudlobby --json message wait *)",
+        "Bash(claudlobby --json message send *)",
+        "Bash(claudlobby --json message reply *)",
+        "Bash(claudlobby --json fleet reports submit *)",
+        "Bash(claudlobby --json fleet reports list)",
+        "Bash(claudlobby --json fleet reports list *)",
+        "Bash(claudlobby --json fleet reports ack *)",
+        "Bash(claudlobby --json fleet inbox)",
+        "Bash(claudlobby --json fleet inbox *)",
+        "Bash(claudlobby --json request show *)",
+        "Bash(claudlobby --json workstream list)",
+        "Bash(claudlobby --json workstream show *)",
+        "Bash(claudlobby --json bot status *)",
+        "Bash(claudlobby --json fleet status)",
+        "Bash(claudlobby --json fleet uptime)",
+        "Bash(claudlobby --json fleet uptime *)",
+        "Bash(claudlobby --json fleet utilization)",
+        "Bash(claudlobby --json bot usage *)",
+        "Bash(claudlobby --json bot automation status *)",
+        "Bash(claudlobby --json bot automation pause *)",
+        "Bash(claudlobby --json bot automation resume *)",
+        "Bash(claudlobby --json bot automation record *)",
+        "Bash(claudlobby --json fleet usage)",
+        "Bash(claudlobby --json fleet usage *)",
+        "Bash(claudlobby --json fleet reconcile)",
+        "Bash(claudlobby --json config validate)",
+        "Bash(claudlobby --json task admit *)",
+        "Bash(claudlobby --json assignment accept *)",
+        "Bash(claudlobby --json assignment progress *)",
+        "Bash(claudlobby --json assignment block *)",
+        "Bash(claudlobby --json assignment return *)",
+        "Bash(claudlobby --json assignment complete *)",
+        "Bash(claudlobby --json assignment fail *)",
+        "Bash(claudlobby --json task assign *)",
+        "Bash(claudlobby --json assignment deliver *)",
+        "Bash(claudlobby --json task withdraw *)",
+        "Bash(claudlobby --json task reassign *)",
+        "Bash(claudlobby --json task escalate *)",
+        "Bash(claudlobby --json task nudge *)",
+        "Bash(claudlobby --json workstream open *)",
+        "Bash(claudlobby --json workstream progress *)",
+        "Bash(claudlobby --json workstream renew *)",
+        "Bash(claudlobby --json workstream block *)",
+        "Bash(claudlobby --json workstream unblock *)",
+        "Bash(claudlobby --json workstream close *)",
+        "Bash(claudlobby --json workstream prune *)",
+        "Bash(claudlobby --json fleet reload)",
+        "Bash(claudlobby --json fleet pulse)",
+        "Bash(claudlobby --json event list)",
+        "Bash(claudlobby --json event list *)",
+        "Bash(claudlobby --json event show *)",
+        "Bash(claudlobby --json fleet logs)",
+        "Bash(claudlobby --json fleet logs --lines *)",
+        "Bash(claudlobby --json fleet notify --level * --event * --message *)",
+        "Bash(claudlobby --json fleet start --workers)",
+        "Bash(claudlobby --json fleet stop --workers)",
+        "Bash(claudlobby --json fleet restart --workers)",
+        "Bash(claudlobby --json bot session worker-1)",
+        "Bash(claudlobby --json bot logs worker-1)",
+        "Bash(claudlobby --json bot logs worker-1 --lines *)",
+        "Bash(claudlobby --json bot handoff worker-1)",
+        "Bash(claudlobby --json bot interrupt worker-1)",
+        "Bash(claudlobby --json bot compact worker-1)",
+        "Bash(claudlobby --json bot start worker-1)",
+        "Bash(claudlobby --json bot stop worker-1)",
+        "Bash(claudlobby --json bot restart worker-1)",
+        "Bash(claudlobby --json bot restart worker-1 --ceiling *)",
+        "Bash(claudlobby --json bot session lead)",
+        "Bash(claudlobby --json bot logs lead)",
+        "Bash(claudlobby --json bot logs lead --lines *)",
+        "Bash(claudlobby --json bot restart lead)",
     ]
     linked = sorted(
         p.name for p in (paths.bot_runtime("lead") / ".claude" / "skills").iterdir()
     )
-    assert linked == ["gadget", "widget"]
+    assert linked == ["fleet-ops", "gadget", "widget"]
 
 
-def test_effective_skills_is_a_no_op_when_no_effective_protocol_declares_requires(
+def test_effective_skills_adds_only_the_universal_default_without_protocol_requires(
     fleet_dir,
 ):
-    """The identity property underlying the byte-identical proof above,
-    isolated: with no `requires:` anywhere in the effective protocol set,
-    resolve_effective_skills reduces to exactly bot.skills."""
+    """Without protocol requirements or the registry's skill defaults, only
+    fleet-ops joins declared skills."""
     _no_skill_defaults(fleet_dir)
     fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
     paths = _paths(fleet_dir)
     for bot_id in ("lead", "worker-1"):
         bot = fleet.bots[bot_id]
         is_manager = bot.bot_id in fleet.manager_bots()
-        assert resolve_effective_skills(bot, fleet, paths, is_manager=is_manager) == list(
-            bot.skills
-        )
+        assert resolve_effective_skills(bot, fleet, paths, is_manager=is_manager) == [
+            *bot.skills, "fleet-ops"
+        ]
 
 
 def test_a_briefing_stanza_equips_the_skill_its_timers_fire(fleet_dir):

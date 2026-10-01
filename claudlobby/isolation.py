@@ -69,8 +69,8 @@ CLASSES: dict[str, str] = {
     ACCOUNT_CONFIG: "the account config, .config.json* and .claude.json* (Read + Edit)",
     ENV: "every .env tier: host, root, each fleet and each bot, its own included"
     " (Read + Edit)",
-    INSTALL_ROOT: "the install's code: lib/, claudlobby/, library/, templates/,"
-    " voices/ and bin/ (Edit only)",
+    INSTALL_ROOT: "the installed package's code and assets, release store and"
+    " retained release targets (Edit only)",
     TELEGRAM: "other bots' Telegram state dirs, token included (Read + Edit)",
     CONFIG_SURFACES: "the shared config that runs or instructs in every session:"
     " settings, CLAUDE.md, hooks/, skills/, plugins/, agents/,"
@@ -86,7 +86,6 @@ EXEMPTIONS: dict[str, str] = {
     " overlay still tells its bot to source it",
 }
 
-INSTALL_ROOT_DIRS = ("lib", "claudlobby", "library", "templates", "voices", "bin")
 CONFIG_SURFACE_FILES = ("settings.json", "settings.local.json", "CLAUDE.md")
 CONFIG_SURFACE_DIRS = ("hooks", "skills", "plugins", "agents", "commands")
 
@@ -98,7 +97,7 @@ def transcript_slug(path: object) -> str:
     """The name Claude Code gives a session's transcript dir: the session's cwd
     with every non-alphanumeric character replaced by ``-``.
 
-    The one Python copy. ``lib/transcript-digest.sh`` carries the same rule as
+    The one Python copy. ``claudlobby/_runtime_scripts/transcript-digest.sh`` carries the same rule as
     its fallback (its primary input is the hook payload's ``transcript_path``)
     and cross-references this one. A copy that drifted would aim every row-A
     rule at directories that do not exist, and nothing would say so."""
@@ -221,7 +220,7 @@ def host_roster(fleet: FleetConfig, paths: Paths, *, home: Path) -> Roster:
         ):
             unreadable.append(str(manifest))
             continue
-        other_paths = _Paths(root=paths.root, fleet_dir=fleet_dir)
+        other_paths = _Paths(root=paths.root, fleet_dir=fleet_dir, package=paths.package)
         bots.extend(host_bot(b, other, other_paths, home) for b in other.bots.values())
     return Roster(tuple(bots), tuple(fleet_dirs), tuple(unreadable))
 
@@ -355,10 +354,12 @@ def layer0b(
             both(ENV, f"{b.bot_dir}/.env", "env_bot", b.name)
             both(ENV, f"{b.bot_dir}/.env.*", "env_bot", b.name)
 
-    # F. The install's code, Edit only: a Read deny there would stop a
-    # platform bot checking which version is live.
-    for name in INSTALL_ROOT_DIRS:
-        rules.append(Rule(INSTALL_ROOT, "Edit", f"{root}/{name}/**"))
+    # F. The selected package and every retained release, including recovery.
+    # Share the writable-path guard's owner so a release alias and its resolved
+    # target stay protected together; data/source overlays remain writable.
+    # Edit only: Read must remain available for platform diagnostics.
+    for immutable_root in paths.immutable_roots:
+        rules.append(Rule(INSTALL_ROOT, "Edit", f"{immutable_root}/**"))
 
     # G. Other bots' Telegram state dirs, keyed by handle.
     from .composer import telegram_channel_rel

@@ -423,5 +423,10 @@ def test_unopenable_db_spools(tmp_path: Path):
     # A directory where the db file should be → connect raises → spool.
     (tmp_path / "state" / "plane").mkdir(parents=True)
     (tmp_path / "state" / "plane" / "plane.db").mkdir()
+    with pytest.raises(sqlite3.OperationalError):
+        emit(tmp_path, _mk_request(2), require_commit=True)
+    assert not (tmp_path / "state" / "plane" / "spool").exists()
+    assert not (tmp_path / "state" / "plane" / "staged").exists()
     outcome = emit(tmp_path, _mk_request(2))
     assert outcome.status == "spooled"
+    assert len(list((tmp_path / "state" / "plane" / "spool").glob("*.json"))) == 1

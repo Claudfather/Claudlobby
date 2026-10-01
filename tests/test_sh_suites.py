@@ -33,7 +33,7 @@ TESTS_DIR = Path(__file__).resolve().parent
 SH_SUITES = sorted(p.name for p in TESTS_DIR.glob("test_*.sh"))
 
 # bash's exact wording when a SOURCED file fails to parse (final wave item 8).
-# A syntax error inside lib/supervisor.sh (sourced by lib-common.sh, sourced
+# A syntax error inside claudlobby/_runtime_scripts/supervisor.sh (sourced by lib-common.sh, sourced
 # by nearly every suite here) does abort the whole suite under its
 # `set -euo pipefail` -- but MEASURED (bash 3.2.57, macOS): a suite that also
 # sets `trap '...' EXIT` (mktemp-dir cleanup, the common idiom in these

@@ -84,7 +84,7 @@ Examples:
 
 ### Verdict
 
-A review bot's overall assessment of the plan. **Bold the bracket tag and anchor the commit you reviewed** — this is the same header `lib/pr-review-state.py` reads on a code PR to attribute a verdict and tell whether it's still live; unbolded or unanchored, it is invisible to that tool:
+A review bot's overall assessment of the plan. **Bold the bracket tag and anchor the commit you reviewed** — this is the same header `claudlobby task reviews` parses on a code PR to assess the verdict and its current-head anchor; unbolded or unanchored, it cannot prove a live verdict. Record a separate review-role fleet report for actor attribution:
 
 ```
 **[<bot-name>] [VERDICT] <approve|request-changes|comment>** — reviewed at `<sha>` — <one-line summary>
@@ -98,7 +98,7 @@ A review bot's overall assessment of the plan. **Bold the bracket tag and anchor
 
 `<sha>` is the commit you reviewed (a plan PR's `headRefOid`, same as any other PR) — carry it even on a `comment` verdict, so a later reader can tell whether the plan has moved on since.
 
-**Known limitation:** `comment` is not a verdict `lib/pr-review-state.py` gates on — bracket-tagging it still reads as vocabulary drift (`UNPARSED-HEADER`, the PR reported as not assessed), the same as any header shape the tool does not recognize, until #1923 teaches it to read `comment` as a neutral, non-gating verdict. `approve` and `request-changes` are unaffected.
+**Known limitation:** `comment` is not a verdict `claudlobby task reviews` gates on — bracket-tagging it still reads as vocabulary drift (`UNPARSED-HEADER`, the PR reported as not assessed), the same as any header shape the tool does not recognize, until #1923 teaches it to read `comment` as a neutral, non-gating verdict. `approve` and `request-changes` are unaffected.
 
 Examples:
 

@@ -20,10 +20,16 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
 import subprocess
 import textwrap
+from pathlib import Path
 
 import pytest
+
+from tests.conftest import constructed_env
+from tests.fixtures.native_admission import admit_watchdog_fixture
+from tests.test_plane_events_door import _serving
 
 from claudlobby.composer import (
     compose_bot_conf,
@@ -31,13 +37,14 @@ from claudlobby.composer import (
     compose_systemd_unit,
 )
 from claudlobby.config import load_fleet
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths, tmux_socket_for_bot
 
 
 # Resolve relative to this file so the test exercises the checkout's
 # lib-common.sh, not the shared install's.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LIB_DIR = os.path.join(_REPO_ROOT, "lib")
+LIB_DIR = os.path.join(_REPO_ROOT, "claudlobby", "_runtime_scripts")
 
 
 # --- bash-helper harness (mirrors test_lifecycle_names.py) ------------------
@@ -45,7 +52,7 @@ LIB_DIR = os.path.join(_REPO_ROOT, "lib")
 
 def _run_bash(script, env=None):
     """Run a bash snippet against lib-common.sh; return (stdout, stderr, rc)."""
-    merged_env = {**os.environ, **(env or {})}
+    merged_env = constructed_env(**(env or {}))
     r = subprocess.run(
         ["bash", "-c", script],
         capture_output=True,
@@ -250,16 +257,18 @@ class TestSocketWrappers:
         assert rc != 0
         assert "refusing" in err.lower()
 
-    def test_bot_tmux_send_logs_send_miss_on_empty_socket(self, tmp_path):
+    def test_bot_tmux_send_logs_send_miss_on_empty_socket(self, tmp_path, *, scratch_plane_env):
         """A cross-socket send with no resolvable socket must emit a send_miss
         event (observable) and return non-zero — never a silent drop."""
-        from tests.conftest import plane_emit_env, read_fleet_events
+        from tests.conftest import read_fleet_events
         d = _write_bot_conf(tmp_path / "alpha")
-        out, err, rc = _run_bash(
-            _src('bot_tmux_send "" lead "hello there"'),
-            env={"BOT_DIR": str(d), "BOT_ID": "alpha", "FLEET_NAME": "fleet-a",
-                 "CLAUDLOBBY_ROOT": str(tmp_path), **plane_emit_env()},
-        )
+        with _serving(tmp_path, scratch_plane_env) as socket:
+            out, err, rc = _run_bash(
+                _src('bot_tmux_send "" lead "hello there"'),
+                env={"BOT_DIR": str(d), "BOT_ID": "alpha", "FLEET_NAME": "fleet-a",
+                     "CLAUDLOBBY_ROOT": str(tmp_path),
+                     **scratch_plane_env(tmp_path, socket=socket)},
+            )
         assert rc != 0
         assert "dropped" in err.lower()
         # The send_miss event landed on the plane (F18 R1: no ledger file),
@@ -274,6 +283,7 @@ class TestSocketWrappers:
 
 _FLEET = """\
     fleet:
+      manager: lead
       name: test-fleet
       service_prefix: com.test
       system_defaults: false
@@ -290,7 +300,7 @@ _FLEET = """\
 
 
 def _make_paths(root):
-    return Paths(root=root, fleet_dir=root)
+    return Paths(root=root, fleet_dir=root, package=source_package())
 
 
 def _conf_val(conf, key):
@@ -374,9 +384,19 @@ class TestLifecycleScriptExitGuards:
     @pytest.mark.parametrize("script", ["keepalive.sh", "pre-stop-handoff.sh"])
     def test_fails_fast_on_unresolvable_socket(self, tmp_path, script):
         d = self._misconfigured_bot(tmp_path)
+        native = Path(LIB_DIR)
+        calls = None
+        if script == "keepalive.sh":
+            native = tmp_path / "native"
+            shutil.copytree(LIB_DIR, native)
+            calls = admit_watchdog_fixture(native)
         _, err, rc = _run_bash(
-            f'bash "{LIB_DIR}/{script}" "{d}"',
+            f'bash "{native / script}" "{d}"',
             env={"FLEET_NAME": "test-fleet"},
         )
+        if calls is not None:
+            assert calls.read_text() == "keepalive\n"
         assert rc != 0
         assert "cannot resolve tmux socket" in err.lower()
+        assert not list(tmp_path.rglob("plane.db*"))
+        assert not list(tmp_path.rglob("spool"))

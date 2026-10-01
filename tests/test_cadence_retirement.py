@@ -33,7 +33,6 @@ KEEP = {
     "protocols/inbound-acknowledgment.md": "inbound reply loop -- a human is waiting on this turn",
     "protocols/comms-topology.md": "the bullet LABEL stays; the mandate sentence after it is gone",
     "protocols/checkin.md": "the precedence preamble names the retired rules so a fleet-local copy that still carries one knows it yields",
-    "skills/autonomous-runner/SKILL.md": "quota beacon is an urgency-floor event, not a cadence",
     "skills/cross-fleet-initiative/SKILL.md": "GATE.md project milestones -- not a posting cadence",
 }
 

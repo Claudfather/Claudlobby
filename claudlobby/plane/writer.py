@@ -32,8 +32,8 @@ import sqlite3
 import time
 from pathlib import Path
 
-from .db import connect, db_path
-from .migrations import migrate
+from .db import connect, db_file
+from .schema_state import preflight_schema, require_current_schema
 
 #: Explicit rather than passive. SQLite's auto-checkpoint is "it will try", and
 #: a held reader defeats it silently; an explicit call returns a result we can
@@ -80,7 +80,7 @@ class PlaneWriter:
     # --- identity -----------------------------------------------------------
     def _identity(self) -> tuple[int, int] | None:
         try:
-            st = os.stat(db_path(self.root))
+            st = os.stat(db_file(self.root))
             return (st.st_dev, st.st_ino)
         except OSError:
             return None
@@ -114,12 +114,17 @@ class PlaneWriter:
             except sqlite3.Error:
                 pass                # the old handle may be unusable; that is why we are here
             self._conn = None
-        conn = connect(db_path(self.root), synchronous="FULL")
+        preflight_schema(self.root)
+        conn = connect(db_file(self.root), synchronous="FULL")
         # SQLite's own auto-checkpoint runs INSIDE the commit, so before the
         # daemon can reply (#1693). The cadence below is the only checkpoint
         # this connection runs, and the daemon runs it after the reply.
-        conn.execute("PRAGMA wal_autocheckpoint = 0")
-        migrate(conn)               # DowngradeError propagates — the daemon exits 4 on it
+        try:
+            require_current_schema(conn)
+            conn.execute("PRAGMA wal_autocheckpoint = 0")
+        except BaseException:
+            conn.close()
+            raise
         self._conn = conn
         self._ident = self._identity()
         self._since_checkpoint = 0
@@ -145,7 +150,7 @@ class PlaneWriter:
         the file is what that budget is about.
         """
         try:
-            return os.path.getsize(str(db_path(self.root)) + "-wal")
+            return os.path.getsize(str(db_file(self.root)) + "-wal")
         except OSError:
             return 0
 

@@ -13,23 +13,63 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB_DIR="$SCRIPT_DIR/../lib"
+LIB_DIR="$SCRIPT_DIR/../claudlobby/_runtime_scripts"
 PASS=0; FAIL=0; TOTAL=0
 assert_eq() {
     TOTAL=$((TOTAL + 1)); local d="$1" e="$2" a="$3"
     if [ "$e" = "$a" ]; then echo "  PASS: $d"; PASS=$((PASS + 1)); else echo "  FAIL: $d (expected '$e', got '$a')"; FAIL=$((FAIL + 1)); fi
 }
 
-T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
+# A UNIX socket is exercised below; pytest TMPDIR can exceed sun_path.
+T="$(mktemp -d /tmp/clbrc.XXXXXX)"; trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bin"
-# The receipt's record is the plane (F18 closure R1); the CLI rung is stood in
-# for by tests/plane_capture_cli.sh, which renders each batch as the legacy row.
+# Capture at the emission boundary. C3 has no cold CLI rung to intercept;
+# this suite checks teardown's payload and ordering, not transport commitment
+# (the real socket/staging contract is covered by test_plane_emit.sh).
 CAPTURE="$T/plane-capture.jsonl"; : > "$CAPTURE"
-# Stubs: nothing may reach the host's real systemd or any tmux server.
-printf '#!/bin/bash\nexit 0\n' > "$T/bin/systemctl"
-printf '#!/bin/bash\nexit 0\n' > "$T/bin/tmux"
+SOURCE_LIB="$LIB_DIR"; LIB_DIR="$T/lib"; mkdir -p "$LIB_DIR"
+for script in spin-down-bot.sh lib-common.sh supervisor.sh fleet-state-update.sh; do
+    cp "$SOURCE_LIB/$script" "$LIB_DIR/$script"
+done
+cat > "$LIB_DIR/plane-emit.sh" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+batch="${PLANE_CAPTURE}.batch"
+trap 'rm -f "$batch"' EXIT
+cat > "$batch"
+bash "$PLANE_CAPTURE_BATCH" "$batch"
+EOF
+chmod +x "$LIB_DIR/plane-emit.sh"
+# Pin the supervision branch to Linux: the production Darwin reaper uses an
+# absolute /bin/launchctl, which PATH cannot intercept. The dedicated lifecycle
+# matrix covers Darwin through an explicit seam in a test-only script copy.
+# No service operation may reach the host from this receipt-focused suite.
+cat > "$T/bin/uname" <<'EOF'
+#!/bin/bash
+printf '%s\n' Linux
+EOF
+chmod +x "$T/bin/uname"
+cat > "$T/bin/systemctl" <<'EOF'
+#!/bin/bash
+if [ "${1:-}" = --user ] && [ "${2:-}" = list-unit-files ] && [ "${NATIVE_OCCUPIED:-0}" = 1 ]; then
+    printf '%s enabled\n' "${NATIVE_UNIT:?}"
+fi
+exit 0
+EOF
+cat > "$T/bin/systemd-analyze" <<'EOF'
+#!/bin/bash
+printf '%s/.config/systemd/user\n' "$HOME"
+EOF
+cat > "$T/bin/tmux" <<'EOF'
+#!/bin/bash
+if [ "${TMUX_STALE:-0}" = 1 ] && [ "${3:-}" = list-sessions ]; then
+    printf 'no server running on %s/tmux-%s/%s\n' "$TMUX_TMPDIR" "$(id -u)" "$2" >&2
+    exit 1
+fi
+exit 0
+EOF
 printf '#!/bin/bash\nexit 0\n' > "$T/bin/launchctl"
-chmod +x "$T/bin/systemctl" "$T/bin/tmux" "$T/bin/launchctl"
+chmod +x "$T/bin/systemctl" "$T/bin/systemd-analyze" "$T/bin/tmux" "$T/bin/launchctl"
 
 ROOT="$T/root"
 
@@ -42,10 +82,11 @@ spin_down() {
     mkdir -p "$bdir"
     printf 'export BOT_NAME=%s\nexport BOT_SERVICE=t.p.%s\nexport TMUX_SOCKET=t.p.%s\nexport FLEET_STATE_PATH=%s\n' \
         "$bot" "$bot" "$bot" "$ROOT/state/fleet-state.json" > "$bdir/bot.conf"
-    env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T" CLAUDLOBBY_ROOT="$ROOT" USER=testuser \
+    env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T" TMPDIR="$T" CLAUDLOBBY_ROOT="$ROOT" USER=testuser \
         FLEET_NAME=f1 SPINDOWN_ACTOR="${SPINDOWN_ACTOR:-}" \
         SPINDOWN_RECEIPT_ENABLED="${SPINDOWN_RECEIPT_ENABLED-1}" \
-        PLANE_EMIT_CLI="$SCRIPT_DIR/plane_capture_cli.sh" PLANE_CAPTURE="$CAPTURE" PLANE_SOCKET="$T/no.sock" \
+        NATIVE_OCCUPIED="${NATIVE_OCCUPIED:-0}" NATIVE_UNIT="t.p.$bot.service" TMUX_STALE="${TMUX_STALE:-0}" \
+        PLANE_EMIT_DISABLED=0 PLANE_CAPTURE_BATCH="$SCRIPT_DIR/plane_capture_cli.sh" PLANE_CAPTURE="$CAPTURE" PLANE_SOCKET="$T/no.sock" \
         bash "$LIB_DIR/spin-down-bot.sh" "$bdir" "$@" 2>&1 || true
 }
 
@@ -60,6 +101,35 @@ field() { ROW="$1" K="$2" python3 -c 'import json,os;d=json.loads(os.environ["RO
 reset() { rm -rf "$ROOT"; : > "$CAPTURE"; }
 
 echo "=== spin-down teardown-receipt contract ==="
+
+# A retained bot is eligible only after activation retired its native label.
+# A new occupant of that label is never reaped or recorded as a teardown.
+reset
+NATIVE_OCCUPIED=1 spin_down retired --retired-service t.p.retired --purge >/dev/null
+assert_eq "retired label collision preserves bot directory" "yes" \
+    "$([ -d "$ROOT/local/f1/runtime/bots/retired" ] && echo yes || echo no)"
+assert_eq "retired label collision emits no teardown receipt" "" "$(receipt_row)"
+reset
+spin_down retiredclean --retired-service t.p.retiredclean --expected-return none --purge >/dev/null
+assert_eq "retired cleanup removes only its directory" "no" \
+    "$([ -d "$ROOT/local/f1/runtime/bots/retiredclean" ] && echo yes || echo no)"
+assert_eq "retired cleanup records permanent removal" "none" "$(field "$(receipt_row)" expected_return)"
+
+# A socket file plus tmux's exact no-server text can also mean a live server
+# with a full backlog. Retain the directory on explicit purge for inspection.
+reset
+mkdir -p "$T/tmux-$(id -u)"
+python3 - "$T/tmux-$(id -u)/t.p.stale" <<'PY'
+import socket, sys
+sock = socket.socket(socket.AF_UNIX)
+sock.bind(sys.argv[1])
+sock.close()
+PY
+out="$(TMUX_STALE=1 spin_down stale --retired-service t.p.stale --purge)"
+assert_eq "ambiguous retired socket refuses purge with inspection hint" yes \
+    "$(printf '%s\n' "$out" | grep -q 'liveness is unverified; inspect' && echo yes || echo no)"
+assert_eq "ambiguous retired socket retains the bot directory" yes \
+    "$([ -d "$ROOT/local/f1/runtime/bots/stale" ] && echo yes || echo no)"
 
 # --- a plain teardown records actor, action, and explicit absences ------------
 reset
@@ -116,7 +186,7 @@ assert_eq "no receipt for a bot that was never there" "" "$(receipt_row)"
 
 # --- the rollout contract: an opt-OUT since chunk N -------------------------
 # REWRITTEN: this block pinned the OPPOSITE polarity (dormant until a fleet
-# armed it, because lib/ is a shared install and a root-pull must not activate
+# armed it, because claudlobby/_runtime_scripts/ is a shared install and a root-pull must not activate
 # new behavior on a destructive door). Chunk N flipped it and left the pin
 # behind. The argument that moved: the door is no longer new, and the receipt
 # is the part of a destructive teardown an operator most needs -- it is the
@@ -170,6 +240,23 @@ assert_eq "a broken hostname still tears the bot down" "yes" \
 assert_eq "and the receipt degrades rather than failing" "unknown" \
     "$(field "$(receipt_row)" actor | cut -d@ -f2)"
 rm -f "$T/bin/hostname"
+
+# Purge checks nested repositories after the native stop and refuses local
+# commits that a clean `git status --porcelain` does not reveal.
+reset
+repo="$ROOT/local/f1/runtime/bots/worker/projects/org/repo"
+mkdir -p "$repo"
+git -C "$repo" init -q
+git -C "$repo" config user.name Test
+git -C "$repo" config user.email test@example.invalid
+printf 'local work\n' > "$repo/work.txt"
+git -C "$repo" add work.txt
+git -C "$repo" commit -qm local-only
+out="$(spin_down worker --purge)"
+assert_eq "purge refuses a nested repo with an unpushed commit" yes \
+    "$(printf '%s\n' "$out" | grep -q 'purge refused: unpushed commits' && echo yes || echo no)"
+assert_eq "refused purge retains the local commit" yes \
+    "$([ -f "$repo/work.txt" ] && echo yes || echo no)"
 
 echo ""
 echo "=== $PASS/$TOTAL passed ==="

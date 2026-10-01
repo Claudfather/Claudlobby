@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 
 REPO_DIR = Path(__file__).resolve().parent.parent
-LIB_DIR = REPO_DIR / "lib"
+LIB_DIR = REPO_DIR / "claudlobby/_runtime_scripts"
 FIXTURES = REPO_DIR / "tests" / "fixtures" / "pane-states"
 
 # Pane texts come from the same fixtures the bash harness

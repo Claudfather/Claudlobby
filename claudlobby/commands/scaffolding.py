@@ -1,4 +1,4 @@
-"""Scaffolding commands: new-bot, new-skill, new-guardrail."""
+"""Source scaffolding commands; bot create does not compose or enroll."""
 
 from __future__ import annotations
 
@@ -12,257 +12,121 @@ log = logging.getLogger("claudlobby")
 _SLUG_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 
 
-def cmd_new_skill(args) -> int:
-    """Interactive (or flag-driven) skill scaffolding."""
-    from ..newskill import interactive_collect, render_skill
+def cmd_new_bot(args):
+    """Author one bot declaration through the existing stanza and voice owners."""
+    import sys
+    import yaml
+    from ..command_result import CommandFailure, CommandOutput
+    from ..context import generated_selectors, load_context, resolve_paths
+    from ..newbot import (FleetYamlEditError, NewBotInputs, insert_bot_stanza,
+                          interactive_collect, materialize_voice, render_stanza,
+                          write_token_to_env)
+    from ..paths import InvalidPathSelector
 
-    paths = _resolve_paths(args)
-
-    if args.interactive or not args.name:
-        name, description, argument_hint = interactive_collect()
+    if args.seed:
+        raise CommandFailure("conflict", "seed fleet source cannot be edited")
+    if args.json and args.interactive:
+        raise CommandFailure("invalid_argument", "JSON bot creation requires complete flags")
+    if args.voice and args.voice_text:
+        raise CommandFailure("invalid_argument", "choose --voice or --voice-text")
+    if args.interactive or (not args.name and not args.json and sys.stdin.isatty()):
+        interactive = True
     else:
-        name = args.name
-        description = args.description or ""
-        argument_hint = args.argument_hint
-        if not description:
-            log.error("--description is required in non-interactive mode")
-            return 1
+        interactive = False
+        if not args.name or not args.expertise:
+            raise CommandFailure("invalid_argument", "--name and --expertise are required")
+        if not args.dry_run and not args.yes and (args.json or not sys.stdin.isatty()):
+            raise CommandFailure("invalid_argument", "noninteractive creation requires --yes or --dry-run")
 
-    if not _SLUG_RE.match(name):
-        log.error(
-            "name must be lowercase, start with a letter, only [a-z0-9_-]: %r", name
-        )
-        return 1
+    try:
+        fleet, _ = generated_selectors(fleet=args.fleet, seed=False)
+        paths = resolve_paths(root=args.root, fleet=fleet, seed=False)
+        context = load_context(paths, fleet=fleet)
+    except InvalidPathSelector as exc:
+        raise CommandFailure("invalid_argument", "invalid root or fleet selector") from exc
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        raise CommandFailure("conflict", "fleet source cannot be loaded") from exc
 
-    # Determine target directory (overlay if fleet, else base)
-    if paths.overlay_library:
-        skill_dir = paths.overlay_library / "skills" / name
+    if interactive:
+        try:
+            inp = interactive_collect(paths)
+        except (EOFError, KeyboardInterrupt) as exc:
+            raise CommandFailure("invalid_argument", "interactive bot creation was interrupted") from exc
     else:
-        skill_dir = paths.base_skills / name
-
-    if skill_dir.exists():
-        log.error("skill already exists: %s", skill_dir)
-        return 1
-
-    content = render_skill(name, description, argument_hint)
-
-    if args.dry_run:
-        print(f"\n=== Would create {skill_dir}/SKILL.md ===\n")
-        print(content)
-        return 0
-
-    skill_dir.mkdir(parents=True, exist_ok=True)
-    (skill_dir / "SKILL.md").write_text(content)
-    log.info("created %s/SKILL.md", skill_dir)
-    log.info("next: edit %s/SKILL.md to flesh out the skill behavior", skill_dir)
-    return 0
-
-
-def cmd_new_guardrail(args) -> int:
-    """Interactive (or flag-driven) guardrail scaffolding."""
-    from ..newguardrail import interactive_collect, render_guardrail
-
-    paths = _resolve_paths(args)
-
-    if args.interactive or not args.name:
-        name, title, description = interactive_collect()
-    else:
-        name = args.name
-        title = args.title or name.replace("-", " ").title()
-        description = args.description or ""
-        if not description:
-            log.error("--description is required in non-interactive mode")
-            return 1
-
-    if not _SLUG_RE.match(name):
-        log.error(
-            "name must be lowercase, start with a letter, only [a-z0-9_-]: %r", name
-        )
-        return 1
-
-    # Determine target directory (overlay if fleet, else base)
-    if paths.overlay_library:
-        guardrail_path = paths.overlay_library / "guardrails" / f"{name}.md"
-    else:
-        guardrail_path = paths.base_guardrails / f"{name}.md"
-
-    if guardrail_path.exists():
-        log.error("guardrail already exists: %s", guardrail_path)
-        return 1
-
-    content = render_guardrail(name, title, description)
-
-    if args.dry_run:
-        print(f"\n=== Would create {guardrail_path} ===\n")
-        print(content)
-        return 0
-
-    guardrail_path.parent.mkdir(parents=True, exist_ok=True)
-    guardrail_path.write_text(content)
-    log.info("created %s", guardrail_path)
-    log.info("next: edit %s to add specific rules and examples", guardrail_path)
-    return 0
-
-
-def cmd_new_bot(args) -> int:
-    """Interactive (or flag-driven) bot creation."""
-    from ..newbot import (
-        NewBotInputs,
-        insert_bot_stanza,
-        interactive_collect,
-        materialize_voice,
-        render_stanza,
-    )
-
-    paths = _resolve_paths(args)
-
-    # Pick mode. If --name given without --interactive, run non-interactive.
-    if args.interactive or not args.name:
-        inp = interactive_collect(paths)
-    else:
-        # Non-interactive: build from flags.
-        def _csv(s: str | None) -> list[str] | None:
-            if not s:
-                return None
-            return [x.strip() for x in s.split(",") if x.strip()]
+        def csv(value):
+            return [item.strip() for item in value.split(",") if item.strip()] if value else None
 
         inp = NewBotInputs(
-            name=args.name,
-            expertise=_csv(args.expertise) or [],
-            voice=args.voice,
-            mission=args.mission,
-            model=args.model,
-            effort=args.effort,
-            account=args.account,
-            mcp=_csv(args.mcp),
-            skills=_csv(args.skills),
-            guardrails=_csv(args.guardrails),
-            protocols=_csv(args.protocols),
-            resources=_csv(args.resources),
-            lessons=_csv(args.lessons),
-            integrations=_csv(args.integrations),
+            name=args.name, expertise=csv(args.expertise) or [], voice=args.voice,
+            mission=args.mission, model=args.model, effort=args.effort, account=args.account,
+            mcp=csv(args.mcp), skills=csv(args.skills), guardrails=csv(args.guardrails),
+            protocols=csv(args.protocols), resources=csv(args.resources),
+            lessons=csv(args.lessons), integrations=csv(args.integrations),
             remote_control=False if args.no_remote_control else None,
-            dangerously_skip_permissions=True
-            if args.dangerously_skip_permissions
-            else None,
-            extra_flags=_csv(args.extra_flags),
-            scope_org=args.scope_org,
-            scope_repos=_csv(args.scope_repos),
-            scope_snowflake_targets=_csv(args.scope_snowflake_targets),
-            team=args.team,
+            dangerously_skip_permissions=True if args.dangerously_skip_permissions else None,
+            extra_flags=csv(args.extra_flags), scope_org=args.scope_org,
+            scope_repos=csv(args.scope_repos),
+            scope_snowflake_targets=csv(args.scope_snowflake_targets), team=args.team,
             telegram_handle=args.telegram_handle,
-            token_env=args.token_env
-            or (
+            token_env=args.token_env or (
                 f"TELEGRAM_TOKEN_{args.name.upper().replace('-', '_')}"
-                if args.name
-                else None
-            ),
-            require_mention=args.require_mention
-            if args.require_mention is not None
-            else True,
-            chat_id=args.chat_id,
-            startup_prompt=args.startup_prompt,
+                if args.telegram_handle else None),
+            require_mention=(args.require_mention if args.require_mention is not None
+                             else True if args.telegram_handle else None),
+            chat_id=args.chat_id, startup_prompt=args.startup_prompt,
         )
-        # If --voice-text passed, write it now.
         if args.voice_text:
-            inp.voice = materialize_voice(paths, inp.name, None, args.voice_text)
+            inp.voice_text = args.voice_text
+            inp.voice = f"voices/{inp.name}.md"
 
-    # Validation: required fields
-    if not inp.name:
-        log.error("--name is required")
-        return 1
-    if not inp.expertise:
-        log.error("at least one --expertise is required")
-        return 1
+    if not inp.name or not _SLUG_RE.fullmatch(inp.name) or not inp.expertise:
+        raise CommandFailure("invalid_argument", "bot name or expertise is invalid")
+    if inp.name in context.fleet.bots:
+        raise CommandFailure("conflict", f"bot is already declared: {inp.name}")
+    if inp.team and inp.team not in context.fleet.teams:
+        raise CommandFailure("invalid_argument", f"team is not declared: {inp.team}")
+    try:
+        paths.assert_writable(paths.fleet_yaml)
+        backup = paths.fleet_yaml.with_suffix(".yaml.bak")
+        paths.assert_writable(backup)
+        if paths.fleet_yaml.resolve() != paths.fleet_yaml or backup.resolve() != backup:
+            raise CommandFailure("conflict", "fleet source or backup is redirected")
+        if inp.voice_text:
+            voice_path = paths.overlay_voices / f"{inp.name}.md"
+            paths.assert_writable(voice_path)
+            if voice_path.resolve() != voice_path or voice_path.exists() or voice_path.is_symlink():
+                raise CommandFailure("conflict", "fleet voice source already exists")
+        if inp.telegram_token:
+            paths.assert_writable(paths.env_file)
+            if paths.env_file.resolve() != paths.env_file:
+                raise CommandFailure("conflict", "fleet token tier is redirected")
+        stanza = render_stanza(inp)
+        new_text = insert_bot_stanza(paths.fleet_yaml, stanza, team=inp.team)
+        yaml.safe_load(new_text)
+    except (ValueError, OSError, FleetYamlEditError, yaml.YAMLError) as exc:
+        raise CommandFailure("conflict", "bot declaration cannot be authored in the selected fleet") from exc
 
-    # Render the stanza
-    stanza = render_stanza(inp)
-
-    print("\n=== Stanza to be added to fleet.yaml ===\n")
-    print(stanza)
-
-    if inp.team:
-        log.info("  → will also be added to team '%s'.workers", inp.team)
-
+    guidance = (f"Review {paths.fleet_yaml}, then stage with `claudlobby --root {paths.root} "
+                f"config plan --release <release-id>` and activate the reviewed plan with "
+                f"`claudlobby --root {paths.root} host activate <plan-id> "
+                "--install-directory <native-user-unit-dir>` from an operator shell.")
+    data = {"fleet": context.fleet.name, "bot": inp.name, "fleet_yaml": str(paths.fleet_yaml),
+            "stanza": stanza, "dry_run": args.dry_run, "written": False,
+            "voice_path": str(paths.overlay_voices / f"{inp.name}.md") if inp.voice_text else None,
+            "next_step": guidance}
     if args.dry_run:
-        log.info(
-            "--dry-run: no changes written. Stanza above would be inserted into fleet.yaml."
-        )
-        return 0
+        return CommandOutput(data, lines=(stanza.rstrip(), "dry run: no source written", guidance))
+    if not args.yes and input("\nWrite to fleet.yaml? [Y/n]: ").strip().lower() not in ("", "y", "yes"):
+        raise CommandFailure("conflict", "bot creation declined; no source written")
 
-    # Confirm
-    if not args.yes:
-        ans = input("\nWrite to fleet.yaml? [Y/n]: ").strip().lower()
-        if ans and ans not in ("y", "yes"):
-            log.info("Aborted.")
-            return 1
-
-    # Backup fleet.yaml
-    backup = paths.fleet_yaml.with_suffix(".yaml.bak")
-    backup.write_text(paths.fleet_yaml.read_text())
-    log.info("  ✓ Backup: %s", backup)
-
-    # Insert
-    new_text = insert_bot_stanza(paths.fleet_yaml, stanza, team=inp.team)
-    paths.fleet_yaml.write_text(new_text)
-    log.info("  ✓ Updated %s", paths.fleet_yaml)
-
-    # Auto-generate — gate on validate() like `claudlobby generate` does;
-    # composing past validation errors writes bad config (e.g. an invalid
-    # project tier) verbatim into bot.conf.
-    if args.auto_generate:
-        log.info("=== Running `claudlobby generate --bot %s` ===", inp.name)
-        from ..composer import compose_bot
-        from ._helpers import _load_fleet_or_exit, _validation_gate
-
-        fleet, _md = _load_fleet_or_exit(paths)
-        if not _validation_gate(
-            fleet, paths, context=f"run `claudlobby generate --bot {inp.name}`"
-        ):
-            return 1
-        bot = fleet.bots.get(inp.name)
-        if bot is None:
-            log.error("bot '%s' not found in fleet.yaml after insertion", inp.name)
-            return 1
-        out_dir = compose_bot(bot, fleet, paths)
-        log.info("  ✓ Composed to %s", out_dir)
-
-    # Next steps
-    log.info("=== Next steps ===")
-    log.info("  1. Review %s", paths.fleet_yaml)
-    if inp.token_env:
-        env_set = (
-            paths.env_file.is_file() and inp.token_env in paths.env_file.read_text()
-        )
-        if env_set:
-            log.info("  2. Token already in .env ✓")
-        else:
-            log.info("  2. Add %s=<your-token> to %s", inp.token_env, paths.env_file)
-    log.info("  3. Run: claudlobby validate")
-    if not args.auto_generate:
-        log.info("  4. Run: claudlobby generate --bot %s", inp.name)
-    log.info("  5. Install service:")
-    log.info(
-        "     # Linux: sudo ln -sf %s/%s.service /etc/systemd/system/",
-        paths.bot_runtime(inp.name),
-        inp.name,
-    )
-    log.info(
-        "     #        sudo systemctl daemon-reload && sudo systemctl enable --now %s.service",
-        inp.name,
-    )
-    log.info(
-        "     # macOS: ln -sf %s/%s.plist ~/Library/LaunchAgents/",
-        paths.bot_runtime(inp.name),
-        inp.name,
-    )
-    # The other bots' composed deny rules name this one only once THEIR fleet
-    # regenerates: Layer 0 for this fleet, Layer 0b's host roster for every
-    # fleet that arms it (#1665). The nightly reload-fleet does it within a day.
-    log.info(
-        "  6. Run: claudlobby generate (this fleet), and generate each other"
-        " fleet that arms isolation.shared_config, so their bots' deny rules"
-        " name '%s'",
-        inp.name,
-    )
-    return 0
+    try:
+        backup.write_text(paths.fleet_yaml.read_text())
+        if inp.voice_text:
+            materialize_voice(paths, inp.name, None, inp.voice_text)
+        if inp.telegram_token:
+            write_token_to_env(paths.env_file, inp.token_env, inp.telegram_token)
+        paths.fleet_yaml.write_text(new_text)
+    except OSError as exc:
+        raise CommandFailure("unavailable", "bot source write did not complete; inspect authored files") from exc
+    data["written"] = True
+    return CommandOutput(data, lines=(stanza.rstrip(), f"updated {paths.fleet_yaml}", guidance))

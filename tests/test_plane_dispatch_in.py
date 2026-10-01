@@ -1,5 +1,5 @@
-"""chunk P (#1501) + fold F1: the receiver hook lib/plane-dispatch-in.sh, end to
-end through the real cold emit root (the test_plane_telegram_hooks.py shape).
+"""chunk P (#1501) + fold F1: the receiver hook claudlobby/_runtime_scripts/plane-dispatch-in.sh, end to
+end through a private serving Plane root (the test_plane_telegram_hooks.py shape).
 
 The load-bearing laws, all pinned here:
   * STDOUT IS EMPTY on every path (UserPromptSubmit stdout feeds the model).
@@ -24,6 +24,9 @@ the identifiers are faked (public repo). It is NOT hand-written from the contrac
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+from tests.test_plane_events_door import _serving
+
 import hashlib
 import json
 import os
@@ -36,8 +39,8 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
-HOOK = REPO / "lib" / "plane-dispatch-in.sh"
-LIB = REPO / "lib"
+HOOK = REPO / "claudlobby/_runtime_scripts" / "plane-dispatch-in.sh"
+LIB = REPO / "claudlobby/_runtime_scripts"
 
 # a real minted-shape id (msg_ + 32 hex), value faked
 MSGID = "msg_1f3c9a7b2e5d4068a1b2c3d4e5f60718"
@@ -54,11 +57,11 @@ def _root(tmp_path: Path) -> Path:
     return root
 
 
-def _env(root: Path, **extra) -> dict:
+def _env(root: Path, *, scratch_plane_env, **extra) -> dict:
     env = {
         "PATH": f"{REPO}/.venv/bin:" + os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": os.environ.get("HOME", "/tmp"),
-        "CLAUDLOBBY_ROOT": str(root),
+        **scratch_plane_env(root),
         "FLEET_NAME": FLEET,
         "BOT_ID": BOT,
     }
@@ -70,6 +73,12 @@ def _run(stdin: str, env: dict) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["bash", str(HOOK)], input=stdin, capture_output=True, text=True,
         env=env, timeout=60)
+
+
+def _run_committed(stdin: str, env: dict, root: Path, scratch_plane_env) -> subprocess.CompletedProcess:
+    """Run a receipt-producing hook through the real private daemon."""
+    with _serving(root, scratch_plane_env) as socket:
+        return _run(stdin, {**env, "PLANE_SOCKET": str(socket)})
 
 
 def _rows(root: Path, sql: str):
@@ -153,12 +162,13 @@ _SHAPES = {
 
 @pytest.mark.parametrize("shape", sorted(_SHAPES))
 @pytest.mark.parametrize("ensure_ascii", [True, False], ids=["escaped", "literal"])
-def test_received_equals_the_wire_proof_for_every_shape(tmp_path, shape, ensure_ascii):
+def test_received_equals_the_wire_proof_for_every_shape(tmp_path, shape, ensure_ascii, *, scratch_plane_env):
     body = _SHAPES[shape]
     payload = "set +H; " + body                # what dispatch.sh sends for prose
     sha, safe, nbytes = _wire_proof(payload)
     root = _root(tmp_path)
-    r = _run(_hookjson(_arrival(safe), ensure_ascii=ensure_ascii), _env(root))
+    initialize_plane(root)
+    r = _run_committed(_hookjson(_arrival(safe), ensure_ascii=ensure_ascii), _env(root, scratch_plane_env=scratch_plane_env), root, scratch_plane_env)
     assert r.returncode == 0
     assert r.stdout == ""                      # THE law: stdout feeds the model
     rows = _received_row(root)
@@ -170,19 +180,20 @@ def test_received_equals_the_wire_proof_for_every_shape(tmp_path, shape, ensure_
     assert d["received_bytes"] == nbytes
 
 
-def test_a_slash_command_briefing_carries_no_prefix_and_still_round_trips(tmp_path):
+def test_a_slash_command_briefing_carries_no_prefix_and_still_round_trips(tmp_path, *, scratch_plane_env):
     """report-back and a `/briefing` send go through bot_tmux_send directly (no
     `set +H; `), so the hook must round-trip a trailer-only wire form too."""
     sha, safe, nbytes = _wire_proof("/briefing morning")
     root = _root(tmp_path)
-    r = _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root))
+    initialize_plane(root)
+    r = _run_committed(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env), root, scratch_plane_env)
     assert r.returncode == 0 and r.stdout == ""
     d = json.loads(_received_row(root)[0]["detail"])
     assert d["received_sha256"] == sha
     assert d["received_bytes"] == nbytes
 
 
-def test_a_whole_multiline_dispatch_reads_DELIVERED_through_the_join(tmp_path):
+def test_a_whole_multiline_dispatch_reads_DELIVERED_through_the_join(tmp_path, *, scratch_plane_env):
     """The acceptance test F1 exists for: a fully-delivered MULTI-LINE dispatch
     classifies DELIVERED, not ALTERED. Real sanitize + real hook land the
     `received`; a seeded pane_submitted carries the same wire proof; the JOIN
@@ -195,6 +206,7 @@ def test_a_whole_multiline_dispatch_reads_DELIVERED_through_the_join(tmp_path):
     payload = "set +H; Do X.\n\nThen Y across\nseveral lines."
     sha, safe, nbytes = _wire_proof(payload)
     root = _root(tmp_path)
+    initialize_plane(root)
     emit_batch(root, [
         {"event_type": "communication", "emitter": "t", "fleet": FLEET,
          "payload": {"msg_id": MSGID, "sender": f"bot:{FLEET}/mgr",
@@ -206,7 +218,7 @@ def test_a_whole_multiline_dispatch_reads_DELIVERED_through_the_join(tmp_path):
                      "destination": BOT, "state": "pane_submitted",
                      "wire_sha256": sha, "wire_bytes": nbytes}},
     ])
-    r = _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root))
+    r = _run_committed(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env), root, scratch_plane_env)
     assert r.returncode == 0 and r.stdout == ""
     db = root / "state" / "plane" / "plane.db"
     conn = connect(str(db)); migrate(conn); conn.row_factory = sqlite3.Row
@@ -214,7 +226,7 @@ def test_a_whole_multiline_dispatch_reads_DELIVERED_through_the_join(tmp_path):
     assert row["delivery"] == "delivered"
 
 
-def test_a_genuinely_shortened_arrival_reads_TRUNCATED_through_the_join(tmp_path):
+def test_a_genuinely_shortened_arrival_reads_TRUNCATED_through_the_join(tmp_path, *, scratch_plane_env):
     """TRUNCATED is reserved for REAL tail loss: the wire proof is the whole
     message, the arrival is a strict prefix of it (the trailer still rode the
     last chunk), so received_bytes < wire_bytes and the JOIN reads truncated."""
@@ -226,6 +238,7 @@ def test_a_genuinely_shortened_arrival_reads_TRUNCATED_through_the_join(tmp_path
     payload = "set +H; " + BODY
     sha, safe, nbytes = _wire_proof(payload)
     root = _root(tmp_path)
+    initialize_plane(root)
     emit_batch(root, [
         {"event_type": "communication", "emitter": "t", "fleet": FLEET,
          "payload": {"msg_id": MSGID, "sender": f"bot:{FLEET}/mgr",
@@ -238,7 +251,7 @@ def test_a_genuinely_shortened_arrival_reads_TRUNCATED_through_the_join(tmp_path
                      "wire_sha256": sha, "wire_bytes": nbytes}},
     ])
     # a shortened arrival: drop the tail of the wire form, keep the trailer
-    r = _run(_hookjson(_arrival(safe[:-12]), ensure_ascii=False), _env(root))
+    r = _run_committed(_hookjson(_arrival(safe[:-12]), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env), root, scratch_plane_env)
     assert r.returncode == 0 and r.stdout == ""
     db = root / "state" / "plane" / "plane.db"
     conn = connect(str(db)); migrate(conn); conn.row_factory = sqlite3.Row
@@ -248,7 +261,7 @@ def test_a_genuinely_shortened_arrival_reads_TRUNCATED_through_the_join(tmp_path
 
 # --- the prefilter / recogniser ---------------------------------------------
 
-def test_an_untokened_prompt_records_nothing_and_stdout_is_empty(tmp_path):
+def test_an_untokened_prompt_records_nothing_and_stdout_is_empty(tmp_path, *, scratch_plane_env):
     root = _root(tmp_path)
     for prompt in (
         "fix the flaky test in tests/test_auth.py",
@@ -257,27 +270,28 @@ def test_an_untokened_prompt_records_nothing_and_stdout_is_empty(tmp_path):
         # a marker-shaped tail that is NOT a minted trailer: recorded as nothing
         "do the thing\n⟦plane:not-a-real-id⟧",
     ):
-        r = _run(_hookjson(prompt, ensure_ascii=False), _env(root))
+        r = _run(_hookjson(prompt, ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env))
         assert r.returncode == 0
         assert r.stdout == ""
     assert not (root / "state" / "plane" / "plane.db").exists()
 
 
-def test_a_marker_shaped_but_invalid_trailer_is_disclosed_never_recorded(tmp_path):
+def test_a_marker_shaped_but_invalid_trailer_is_disclosed_never_recorded(tmp_path, *, scratch_plane_env):
     root = _root(tmp_path)
-    r = _run(_hookjson("do the thing\n⟦plane:msg_short⟧", ensure_ascii=False), _env(root))
+    r = _run(_hookjson("do the thing\n⟦plane:msg_short⟧", ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env))
     assert r.returncode == 0 and r.stdout == ""
     assert not (root / "state" / "plane" / "plane.db").exists()
     assert "did not parse" in r.stderr or "not recorded" in r.stderr
 
 
-def test_a_trailing_marker_wins_even_if_the_body_quotes_one(tmp_path):
+def test_a_trailing_marker_wins_even_if_the_body_quotes_one(tmp_path, *, scratch_plane_env):
     """The end anchor: a body that mentions a marker mid-text does not confuse
     the real trailer at the tail."""
     body = "explain ⟦plane:msg_00000000000000000000000000000000⟧ to a new hire"
     sha, safe, nbytes = _wire_proof(body)
     root = _root(tmp_path)
-    r = _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root))
+    initialize_plane(root)
+    r = _run_committed(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env), root, scratch_plane_env)
     assert r.returncode == 0 and r.stdout == ""
     row = _received_row(root)[0]
     assert row["msg_id"] == MSGID          # the TAIL trailer, not the quoted one
@@ -287,43 +301,57 @@ def test_a_trailing_marker_wins_even_if_the_body_quotes_one(tmp_path):
 
 # --- dormancy / arming ------------------------------------------------------
 
-def test_disabled_exemption_silences_it(tmp_path):
+def test_disabled_exemption_silences_it(tmp_path, *, scratch_plane_env):
     _, safe, _ = _wire_proof("set +H; " + BODY)
     root = _root(tmp_path)
     r = _run(_hookjson(_arrival(safe), ensure_ascii=False),
-             _env(root, PLANE_EMIT_DISABLED="1"))
+             _env(root, PLANE_EMIT_DISABLED="1", scratch_plane_env=scratch_plane_env))
     assert r.returncode == 0 and r.stdout == ""
     assert not (root / "state" / "plane" / "plane.db").exists()
 
 
-def test_records_with_no_plane_flag_at_all(tmp_path):
+def test_records_with_no_plane_flag_at_all(tmp_path, *, scratch_plane_env):
     """F18 R1 always-on: no PLANE_EMIT_* flag -> still recorded."""
     _, safe, _ = _wire_proof("set +H; " + BODY)
     root = _root(tmp_path)
-    r = _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root))
+    initialize_plane(root)
+    r = _run_committed(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, PLANE_EMIT_DISABLED=None, scratch_plane_env=scratch_plane_env), root, scratch_plane_env)
     assert r.returncode == 0 and r.stdout == ""
     assert len(_received_row(root)) == 1
 
 
-def test_missing_identity_does_not_record(tmp_path):
+def test_a_receipt_staged_while_ingest_is_down_is_disclosed_as_pending(tmp_path, *, scratch_plane_env):
+    """plane-emit rc 6 is durable pending, never a lost receipt."""
     _, safe, _ = _wire_proof("set +H; " + BODY)
     root = _root(tmp_path)
-    env = _env(root)
+    r = _run(_hookjson(_arrival(safe), ensure_ascii=False),
+             _env(root, PLANE_SOCKET=str(tmp_path / "absent.sock"), scratch_plane_env=scratch_plane_env))
+    assert r.returncode == 0 and r.stdout == ""
+    assert "receipt staged for Plane ingest (pending)" in r.stderr
+    assert "not recorded" not in r.stderr
+    assert any((root / "state" / "plane" / "staged").iterdir())
+    assert _received_row(root) == []
+
+
+def test_missing_identity_does_not_record(tmp_path, *, scratch_plane_env):
+    _, safe, _ = _wire_proof("set +H; " + BODY)
+    root = _root(tmp_path)
+    env = _env(root, scratch_plane_env=scratch_plane_env)
     del env["BOT_ID"]
     r = _run(_hookjson(_arrival(safe), ensure_ascii=False), env)
     assert r.returncode == 0 and r.stdout == ""
     assert not (root / "state" / "plane" / "plane.db").exists()
 
 
-def test_broken_stdin_is_silent(tmp_path):
+def test_broken_stdin_is_silent(tmp_path, *, scratch_plane_env):
     root = _root(tmp_path)
     for garbage in ("", "not json", '{"prompt":'):
-        r = _run(garbage, _env(root))
+        r = _run(garbage, _env(root, scratch_plane_env=scratch_plane_env))
         assert r.returncode == 0 and r.stdout == ""
     assert not (root / "state" / "plane" / "plane.db").exists()
 
 
-def test_a_held_box_gets_one_more_enter_and_stays_loud_if_still_held(tmp_path):
+def test_a_held_box_gets_one_more_enter_and_stays_loud_if_still_held(tmp_path, *, scratch_plane_env):
     """#1099/#1236, the failure that happened: a tracked dispatch sat in an idle
     recipient's box, its Enter turned into a newline, and the pane-reading
     verify called it a clean send. The dispatch door now asks the RECEIVER:
@@ -332,10 +360,11 @@ def test_a_held_box_gets_one_more_enter_and_stays_loud_if_still_held(tmp_path):
     the REAL hook on the held prompt, as UserPromptSubmit would -- and the REAL
     plane-lookup.py reads what that hook wrote."""
     root = _root(tmp_path)
-    env = _env(root, FLEET_EVENT_EMIT_TIMEOUT_S="60", PANE_RECEIPT_WAIT_S="0.3")
+    initialize_plane(root)
+    env = _env(root, FLEET_EVENT_EMIT_TIMEOUT_S="60", PANE_RECEIPT_WAIT_S="0.3", scratch_plane_env=scratch_plane_env)
     _, safe, _ = _wire_proof("set +H; " + BODY)
     # An earlier dispatch was received, so this recipient's hook is armed.
-    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), env).returncode == 0
+    assert _run_committed(_hookjson(_arrival(safe), ensure_ascii=False), env, root, scratch_plane_env).returncode == 0
     prog = ('. "$LIB/lib-common.sh"; set +e; '
             'bot_tmux() { case "$*" in *capture-pane*) return 0;; esac;'  # a read, not a key
             ' echo "$*"; [ "$TUI" = submits ] || return 0;'
@@ -343,9 +372,11 @@ def test_a_held_box_gets_one_more_enter_and_stays_loud_if_still_held(tmp_path):
             'pane_await_receipt sock "${DEST:-$BOT_ID}" "$MSG"')
 
     def gate(msgid, tui, dest=BOT):   # -> (rc, the keys the stub TUI was sent, stderr)
-        r = subprocess.run(["bash", "-c", prog], capture_output=True, text=True, timeout=120,
-                           env={**env, "LIB": str(LIB), "TUI": tui, "MSG": msgid, "DEST": dest,
-                                "PROMPT": _hookjson(_arrival(safe, msgid), ensure_ascii=False)})
+        with _serving(root, scratch_plane_env) as socket:
+            r = subprocess.run(["bash", "-c", prog], capture_output=True, text=True, timeout=120,
+                               env={**env, "PLANE_SOCKET": str(socket), "LIB": str(LIB),
+                                    "TUI": tui, "MSG": msgid, "DEST": dest,
+                                    "PROMPT": _hookjson(_arrival(safe, msgid), ensure_ascii=False)})
         return r.returncode, r.stdout.splitlines(), r.stderr
 
     held, stuck = "msg_" + "a" * 32, "msg_" + "b" * 32
@@ -353,7 +384,7 @@ def test_a_held_box_gets_one_more_enter_and_stays_loud_if_still_held(tmp_path):
     assert gate(held, "submits")[:2] == (0, [f"sock send-keys -t {BOT} Enter"])
     # A prompt elsewhere that merely quotes the trailer files a receipt under
     # ANOTHER bot (fold F3): it must not read as this one's.
-    assert _run(_hookjson(_arrival(safe, stuck), ensure_ascii=False), {**env, "BOT_ID": "gilfoyle"}).returncode == 0
+    assert _run_committed(_hookjson(_arrival(safe, stuck), ensure_ascii=False), {**env, "BOT_ID": "gilfoyle"}, root, scratch_plane_env).returncode == 0
     rc, keys, err = gate(stuck, "holds")
     assert (rc, len(keys)) == (1, 1) and f"no receipt from {BOT}" in err
     assert [tuple(r) for r in _rows(root, (
@@ -367,16 +398,17 @@ def test_a_held_box_gets_one_more_enter_and_stays_loud_if_still_held(tmp_path):
     assert (rc, keys) == (0, []) and "plane-lookup" not in err, err
 
 
-def test_a_queued_delivery_is_not_a_miss(tmp_path):
+def test_a_queued_delivery_is_not_a_miss(tmp_path, *, scratch_plane_env):
     """#1099 review (vera, 8 of the 16 would-be misses): a recipient that starts a
     turn after the door's idle probe QUEUES the prompt, and its receipt lands only
     when that turn ends. That is not a held box, so a missing receipt from a busy
     recipient gets no Enter and no send_miss -- checked before the Enter, and again
     before the verdict, since the turn may start while the gate waits."""
     root = _root(tmp_path)
-    env = _env(root, FLEET_EVENT_EMIT_TIMEOUT_S="60", PANE_RECEIPT_WAIT_S="0.3")
+    initialize_plane(root)
+    env = _env(root, FLEET_EVENT_EMIT_TIMEOUT_S="60", PANE_RECEIPT_WAIT_S="0.3", scratch_plane_env=scratch_plane_env)
     _, safe, _ = _wire_proof("set +H; " + BODY)
-    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), env).returncode == 0  # armed
+    assert _run_committed(_hookjson(_arrival(safe), ensure_ascii=False), env, root, scratch_plane_env).returncode == 0  # armed
     flag = tmp_path / "turn-started"
     prog = ('. "$LIB/lib-common.sh"; set +e; '
             'bot_tmux() { case "$*" in'
@@ -387,8 +419,10 @@ def test_a_queued_delivery_is_not_a_miss(tmp_path):
     def gate(msgid, turn):   # -> (rc, the keys the stub TUI was sent)
         if turn == "running":
             flag.touch()
-        r = subprocess.run(["bash", "-c", prog], capture_output=True, text=True, timeout=120,
-                           env={**env, "LIB": str(LIB), "MSG": msgid, "TURN": turn, "FLAG": str(flag)})
+        with _serving(root, scratch_plane_env) as socket:
+            r = subprocess.run(["bash", "-c", prog], capture_output=True, text=True, timeout=120,
+                               env={**env, "PLANE_SOCKET": str(socket), "LIB": str(LIB),
+                                    "MSG": msgid, "TURN": turn, "FLAG": str(flag)})
         flag.unlink(missing_ok=True)
         return r.returncode, r.stdout.splitlines()
 
@@ -401,13 +435,14 @@ def test_a_queued_delivery_is_not_a_miss(tmp_path):
         == [("send_retry", late)]                                            # no verdict for either
 
 
-def test_a_zero_wait_in_any_spelling_turns_the_gate_off(tmp_path):
+def test_a_zero_wait_in_any_spelling_turns_the_gate_off(tmp_path, *, scratch_plane_env):
     """PANE_RECEIPT_WAIT_S=0 is the off switch; `0.0` must not read as on (#1099 review)."""
     root = _root(tmp_path)
+    initialize_plane(root)
     _, safe, _ = _wire_proof("set +H; " + BODY)
-    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root)).returncode == 0  # armed
+    assert _run_committed(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env), root, scratch_plane_env).returncode == 0  # armed
     for zero in ("0", "0.0"):
-        env = _env(root, FLEET_EVENT_EMIT_TIMEOUT_S="60", PANE_RECEIPT_WAIT_S=zero)
+        env = _env(root, FLEET_EVENT_EMIT_TIMEOUT_S="60", PANE_RECEIPT_WAIT_S=zero, scratch_plane_env=scratch_plane_env)
         r = subprocess.run(["bash", "-c", '. "$LIB/lib-common.sh"; set +e; bot_tmux() { echo "$*"; }; '
                             'pane_await_receipt sock "$BOT_ID" msg_' + "f" * 32],
                            capture_output=True, text=True, timeout=60, env={**env, "LIB": str(LIB)})
@@ -425,7 +460,7 @@ def _pasted(text: str, at: int) -> str:
 
 
 @pytest.mark.parametrize("where", ["splits-the-trailer", "before-the-trailer"])
-def test_a_pasted_arrival_is_received_as_the_wire_form(tmp_path, where):
+def test_a_pasted_arrival_is_received_as_the_wire_form(tmp_path, where, *, scratch_plane_env):
     """#1099: the TUI wraps a pasted run in <pasted_content> tags. Where the
     boundary split the trailer, the hook recorded NO receipt for a prompt that
     WAS submitted (9 tracked prompts, 2026-09-20..24); where it fell before the
@@ -436,7 +471,8 @@ def test_a_pasted_arrival_is_received_as_the_wire_form(tmp_path, where):
     arrival = _arrival(safe)
     at = len(arrival) - 10 if where == "splits-the-trailer" else len(safe)
     root = _root(tmp_path)
-    r = _run(_hookjson(_pasted(arrival, at), ensure_ascii=False), _env(root))
+    initialize_plane(root)
+    r = _run_committed(_hookjson(_pasted(arrival, at), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env), root, scratch_plane_env)
     assert r.returncode == 0 and r.stdout == ""
     rows = _received_row(root)
     assert len(rows) == 1 and rows[0]["msg_id"] == MSGID
@@ -451,7 +487,7 @@ def test_a_pasted_arrival_is_received_as_the_wire_form(tmp_path, where):
 # must print `delivered <sender>`. Every framing and escaping shape below is a
 # live capture from a receiver with the framing flag on (claude 2.1.281).
 
-LOOKUP = REPO / "lib" / "plane-lookup.py"
+LOOKUP = REPO / "claudlobby/_runtime_scripts" / "plane-lookup.py"
 OPENER, CLOSER = '<pasted_content id="0a1b">', '</pasted_content id="0a1b">'
 
 
@@ -465,6 +501,7 @@ def _seed_send(root: Path, payload: str, sender: str = "mgr") -> tuple[str, int]
     from claudlobby.plane.emit_api import emit_batch
 
     sha, safe, nbytes = _wire_proof(payload)
+    initialize_plane(root)
     emit_batch(root, [
         {"event_type": "communication", "emitter": "t", "fleet": FLEET,
          "payload": {"msg_id": MSGID, "sender": f"bot:{FLEET}/{sender}",
@@ -489,7 +526,9 @@ def _verdict(root: Path, *extra: str, dest: str | None = BOT,
 
 @pytest.mark.parametrize("trailer_framed", [False, True],
                          ids=["trailer-typed", "trailer-framed"])
-def test_a_framed_dispatch_that_quotes_the_tag_verifies_as_delivered(tmp_path, trailer_framed):
+def test_a_framed_dispatch_that_quotes_the_tag_verifies_as_delivered(
+    tmp_path, trailer_framed, *, scratch_plane_env
+):
     # A dispatch ABOUT the framing quotes the tag. The receiver frames its head
     # (and, when the last chunk is over 800 bytes, the trailer too) and escapes
     # every literal. The hook must undo both, or a whole delivery reads ALTERED
@@ -503,40 +542,42 @@ def test_a_framed_dispatch_that_quotes_the_tag_verifies_as_delivered(tmp_path, t
         prompt = f"\n\n{OPENER}\n{head}\n{CLOSER}\n\n\n{OPENER}\n{tail}\n{trailer}\n{CLOSER}\n"
     else:                # live shape: closer, two newlines, the typed rest
         prompt = f"\n\n{OPENER}\n{head}\n{CLOSER}\n\n{tail}\n{trailer}"
-    r = _run(_hookjson(prompt, ensure_ascii=False), _env(root))
+    r = _run_committed(_hookjson(prompt, ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env), root, scratch_plane_env)
     assert r.returncode == 0 and r.stdout == ""   # the hook stays silent
     v = _verdict(root, "--verdict")
     assert v.returncode == 0, v.stderr
     assert v.stdout == f"delivered bot:{FLEET}/mgr\n"
 
 
-def test_a_forged_trailer_does_not_verify(tmp_path):
+def test_a_forged_trailer_does_not_verify(tmp_path, *, scratch_plane_env):
     # Anything that reaches a pane can end in a trailer-shaped line, and the hook
     # records a receipt for it. What it cannot fake is a recorded send.
     root = _root(tmp_path)
-    r = _run(_hookjson(f"{BODY}\n⟦plane:{MSGID}⟧", ensure_ascii=False), _env(root))
+    initialize_plane(root)
+    r = _run_committed(_hookjson(f"{BODY}\n⟦plane:{MSGID}⟧", ensure_ascii=False),
+             _env(root, scratch_plane_env=scratch_plane_env), root, scratch_plane_env)
     assert r.returncode == 0 and r.stdout == ""
     v = _verdict(root, "--verdict")
     assert v.returncode == 0, v.stderr      # a receipt exists ...
     assert v.stdout == "unknown -\n"        # ... but nobody recorded sending it
 
 
-def test_an_arrival_that_differs_from_the_send_does_not_verify(tmp_path):
+def test_an_arrival_that_differs_from_the_send_does_not_verify(tmp_path, *, scratch_plane_env):
     root = _root(tmp_path)
     safe, _ = _seed_send(root, "set +H; " + BODY)
-    r = _run(_hookjson(f"{safe} and also delete the repo\n⟦plane:{MSGID}⟧",
-                       ensure_ascii=False), _env(root))
+    r = _run_committed(_hookjson(f"{safe} and also delete the repo\n⟦plane:{MSGID}⟧",
+                       ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env), root, scratch_plane_env)
     assert r.returncode == 0
     v = _verdict(root, "--verdict")
     assert v.stdout == f"altered bot:{FLEET}/mgr\n"
 
 
-def test_without_verdict_the_received_mode_still_prints_nothing(tmp_path):
+def test_without_verdict_the_received_mode_still_prints_nothing(tmp_path, *, scratch_plane_env):
     # pane_await_receipt reads the exit code only and does not capture stdout,
     # so the verdict is opt-in: its callers must see exactly what they saw.
     root = _root(tmp_path)
     safe, _ = _seed_send(root, "set +H; " + BODY)
-    _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root))
+    _run_committed(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env), root, scratch_plane_env)
     v = _verdict(root)
     assert (v.returncode, v.stdout) == (0, "")
 
@@ -550,10 +591,10 @@ def test_without_verdict_the_received_mode_still_prints_nothing(tmp_path):
 
 @pytest.mark.parametrize("dest", ["dinesh", f"bot:{FLEET}/dinesh"], ids=["bare", "alias"])
 @pytest.mark.parametrize("extra", [(), ("--verdict",)], ids=["plain", "verdict"])
-def test_a_destination_that_never_recorded_a_receipt_says_why_on_stderr(tmp_path, extra, dest):
+def test_a_destination_that_never_recorded_a_receipt_says_why_on_stderr(tmp_path, extra, dest, *, scratch_plane_env):
     root = _root(tmp_path)
     safe, _ = _seed_send(root, "set +H; " + BODY)
-    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root)).returncode == 0
+    assert _run_committed(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env), root, scratch_plane_env).returncode == 0
     v = _verdict(root, *extra, dest=dest)   # erlich's hook recorded; dinesh's never has
     # stdout stays empty: the verdict line is the only stdout this mode has.
     assert (v.returncode, v.stdout) == (4, "")
@@ -563,32 +604,36 @@ def test_a_destination_that_never_recorded_a_receipt_says_why_on_stderr(tmp_path
 
 
 @pytest.mark.parametrize("dest", [None, ""], ids=["absent", "empty"])
-def test_a_lookup_with_no_destination_says_so_instead_of_naming_one(tmp_path, dest):
+def test_a_lookup_with_no_destination_says_so_instead_of_naming_one(tmp_path, dest, *, scratch_plane_env):
     root = _root(tmp_path)
     safe, _ = _seed_send(root, "set +H; " + BODY)
-    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root)).returncode == 0
+    assert _run_committed(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env), root, scratch_plane_env).returncode == 0
     v = _verdict(root, "--verdict", dest=dest)
     assert (v.returncode, v.stdout) == (4, "")
     [line] = v.stderr.splitlines()
     assert "--destination" in line and "None" not in line, line
 
 
-def test_quiet_withholds_the_rc4_note_and_nothing_else(tmp_path):
+def test_quiet_withholds_the_rc4_note_and_nothing_else(tmp_path, *, scratch_plane_env):
     # The dispatch door's receipt gate reads the exit code alone and passes --quiet.
     # It must still hear an unreachable plane: that is a refusal, not an absence.
     root = _root(tmp_path)
     safe, _ = _seed_send(root, "set +H; " + BODY)
-    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root)).returncode == 0
+    assert _run_committed(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env), root, scratch_plane_env).returncode == 0
     v = _verdict(root, "--quiet", dest="dinesh")
     assert (v.returncode, v.stdout, v.stderr) == (4, "", "")
     v = _verdict(tmp_path / "no-plane-here", "--quiet")
     assert v.returncode == 3 and "unreachable" in v.stderr, v.stderr
 
 
-def test_the_receivers_plane_alias_finds_the_receipt_its_hook_recorded(tmp_path):
+def test_the_receivers_plane_alias_finds_the_receipt_its_hook_recorded(tmp_path, *, scratch_plane_env):
     root = _root(tmp_path)
     safe, _ = _seed_send(root, "set +H; " + BODY)
-    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root)).returncode == 0
+    foreign = _env(root, scratch_plane_env=scratch_plane_env, FLEET_NAME="other-fleet")
+    assert _run_committed(_hookjson(_arrival(safe), ensure_ascii=False), foreign, root, scratch_plane_env).returncode == 0
+    v = _verdict(root, "--verdict", dest=f"bot:{FLEET}/{BOT}")
+    assert v.returncode == 4 and v.stdout == "", v
+    assert _run_committed(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env), root, scratch_plane_env).returncode == 0
     v = _verdict(root, "--verdict", dest=f"bot:{FLEET}/{BOT}")
     assert v.returncode == 0, v.stderr
     assert v.stdout == f"delivered bot:{FLEET}/mgr\n"
@@ -609,20 +654,20 @@ def test_the_receivers_plane_alias_finds_the_receipt_its_hook_recorded(tmp_path)
     "msg_" + "g" + MSGID[5:],      # non-hex character
     "t-1234567890-ab12",           # a task id, not a message id, passed by mistake
 ], ids=["missing-prefix", "one-short", "one-long", "uppercase", "non-hex", "wrong-kind"])
-def test_a_received_id_that_is_not_msg_plus_32_hex_is_refused_as_usage(tmp_path, bad):
+def test_a_received_id_that_is_not_msg_plus_32_hex_is_refused_as_usage(tmp_path, bad, *, scratch_plane_env):
     root = _root(tmp_path)
     safe, _ = _seed_send(root, "set +H; " + BODY)
-    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root)).returncode == 0
+    assert _run_committed(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env), root, scratch_plane_env).returncode == 0
     v = _verdict(root, received=bad)
     assert (v.returncode, v.stdout) == (2, ""), v.stderr
     assert repr(bad) in v.stderr, v.stderr                    # names the bad value
     assert "msg_" in v.stderr and "32" in v.stderr, v.stderr  # names the expected shape
 
 
-def test_a_malformed_received_id_is_refused_before_any_wait(tmp_path):
+def test_a_malformed_received_id_is_refused_before_any_wait(tmp_path, *, scratch_plane_env):
     root = _root(tmp_path)
     safe, _ = _seed_send(root, "set +H; " + BODY)
-    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root)).returncode == 0
+    assert _run_committed(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env), root, scratch_plane_env).returncode == 0
     start = time.monotonic()
     v = _verdict(root, "--wait", "5", received=MSGID[len("msg_"):])
     elapsed = time.monotonic() - start
@@ -630,7 +675,7 @@ def test_a_malformed_received_id_is_refused_before_any_wait(tmp_path):
     assert elapsed < 2, f"refused after {elapsed:.2f}s against --wait 5 -- waited instead of refusing"
 
 
-def test_a_freshly_minted_msg_id_is_never_refused_by_the_shape_check(tmp_path):
+def test_a_freshly_minted_msg_id_is_never_refused_by_the_shape_check(tmp_path, *, scratch_plane_env):
     """Drift guard: the local shape check must accept whatever the package's
     OWN minter actually produces, not just a string that happens to look
     right today. The minted id was never sent, so it gets the ordinary
@@ -640,6 +685,6 @@ def test_a_freshly_minted_msg_id_is_never_refused_by_the_shape_check(tmp_path):
     from claudlobby.plane.ids import mint_msg_id
     root = _root(tmp_path)
     safe, _ = _seed_send(root, "set +H; " + BODY)
-    assert _run(_hookjson(_arrival(safe), ensure_ascii=False), _env(root)).returncode == 0
+    assert _run_committed(_hookjson(_arrival(safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env), root, scratch_plane_env).returncode == 0
     v = _verdict(root, "--wait", "0", received=mint_msg_id(), dest="nobody-armed")
     assert v.returncode == 4, (v.returncode, v.stdout, v.stderr)

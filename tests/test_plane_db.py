@@ -7,6 +7,7 @@ import pytest
 
 from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.migrations import SCHEMA_USER_VERSION, migrate
+from tests.plane_setup import initialize_plane
 
 
 @pytest.fixture()
@@ -252,13 +253,30 @@ def test_duplicate_event_id_rejected_by_ledger(conn):
         )
 
 
+def test_registry_bootstrap_never_mistakes_retained_history_for_new_storage(conn):
+    from claudlobby.plane.registry_emit import _has_ingest_history
+
+    assert not _has_ingest_history(conn)
+    # Retention can leave every family empty but NEVER deletes its ledger.
+    conn.execute(
+        "INSERT INTO ingest_ledger (event_id, family, ingested_at)"
+        " VALUES ('ev_' || printf('%032x', 1), 'metric_sample', 't')"
+    )
+    assert _has_ingest_history(conn)
+    # Even outside the supported retention contract, a cleared ledger must
+    # not authorize a new identity over its persistent sequence watermark.
+    conn.execute("DELETE FROM ingest_ledger")
+    assert _has_ingest_history(conn)
+
+
 def test_concurrent_first_emitters_on_a_fresh_plane_all_land_none_spooled(tmp_path):
     """Two or three cold CLIs racing the very first write of a plane used to
     lose one batch to the spool ("database is locked" — the fresh-file case
     SQLite refuses to wait on, busy_timeout or not; measured 3 of 10 pairs).
     Phase B makes the pair routine: a door's detached fleet event lands
     beside the door's own emission. A retryable lock is retried in-process;
-    the spool stays the last resort."""
+    the spool stays the last resort. SQL is initialized explicitly before
+    the first concurrent writers; ordinary emitters never migrate it."""
     import json
     import subprocess
     import sys
@@ -267,8 +285,9 @@ def test_concurrent_first_emitters_on_a_fresh_plane_all_land_none_spooled(tmp_pa
     for trial in range(4):
         root = tmp_path / f"t{trial}" / "root"
         (root / "state" / "plane").mkdir(parents=True)
+        initialize_plane(root)
         (root / "local" / "f").mkdir(parents=True)
-        (root / "local" / "f" / "fleet.yaml").write_text("fleet:\n  name: f\n  bots:\n    w1:\n")
+        (root / "local" / "f" / "fleet.yaml").write_text("fleet:\n  manager: w1\n  name: f\n  bots:\n    w1:\n")
         files = []
         for i in range(3):
             batch = {"events": [{"event_type": "system", "emitter": "t", "fleet": "f",
@@ -276,7 +295,7 @@ def test_concurrent_first_emitters_on_a_fresh_plane_all_land_none_spooled(tmp_pa
             f = root / f"batch{i}.json"
             f.write_text(json.dumps(batch))
             files.append(f)
-        procs = [subprocess.Popen([str(cli), "--root", str(root), "emit-batch", "--json", str(f)],
+        procs = [subprocess.Popen([str(cli), "--root", str(root), "plane", "emit-batch", "--file", str(f)],
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for f in files]
         errs = [p.communicate()[1] for p in procs]
         assert all(p.returncode == 0 for p in procs), errs

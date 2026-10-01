@@ -2,19 +2,18 @@
 
 Two-layer model:
 
-  1. **Public base** — `library/`, `voices/`, etc., at the claudlobby
-     repo root. Open-source, generic content.
-  2. **Fleet overlay** — `local/<fleet>/library/`, `local/<fleet>/voices/`,
-     etc. User's fleet-specific content. Gitignored.
+  1. **Package base** — immutable library, voices, templates and native code
+     selected explicitly through PackageResources.
+  2. **Source overlay** — writable content beside the selected fleet.yaml,
+     including library/ and voices/ in a root-mode data directory.
 
 Library files are looked up in the overlay first, falling back to the
 public base. Voices the same. fleet.yaml lives at the overlay root
 (`local/<fleet>/fleet.yaml`); runtime output goes to
 `local/<fleet>/runtime/bots/`.
 
-If no `--fleet` flag is given, paths default to the repo root —
-fleet.yaml at root, runtime/ at root, no overlay. This preserves the
-"single fleet at the root" mode used by the public example fleets.
+The host data root contains configuration and mutable state, never an implicit
+source of package code. Root-mode fleets keep fleet.yaml and runtime/ there.
 
 Vault integration:
 
@@ -31,13 +30,24 @@ import logging
 import os
 from collections.abc import Iterator
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+
+from .resources import PackageResources
 
 if TYPE_CHECKING:
     from .env_tiers import EnvTier, Resolution
 
 log = logging.getLogger(__name__)
+
+
+class InvalidPathSelector(ValueError):
+    """Invalid selector syntax, distinguished from stored configuration errors."""
+
+    def __init__(self, selector: str, message: str):
+        super().__init__(message)
+        self.selector = selector
+
 
 try:
     from claudron.vault import detect as _claudron_detect
@@ -69,7 +79,7 @@ def _read_claudron_config(path: Path) -> dict[str, str]:
 def tmux_socket_for_bot(bot_dir: Path) -> str:
     """Resolve a bot's per-bot tmux server socket name from its ``bot.conf``.
 
-    Mirrors the bash SSOT ``tmux_socket_for_bot`` (lib/lib-common.sh): prefer the
+    Mirrors the bash SSOT ``tmux_socket_for_bot`` (claudlobby/_runtime_scripts/lib-common.sh): prefer the
     explicit ``TMUX_SOCKET`` field, fall back to ``BOT_SERVICE`` (equal by
     construction). When neither resolves (an un-regenerated or missing
     ``bot.conf``):
@@ -316,29 +326,31 @@ def _root_manifest_names_fleet(root: Path, fleet: str) -> bool:
 
 @dataclass(frozen=True)
 class Paths:
-    """Path resolution. `root` is the claudlobby repo root.
+    """Mutable host/fleet paths with an explicitly selected package base.
 
-    `fleet_dir` is None for root-mode, or `local/<fleet>/` for overlay-mode.
-    `seed` is True when operating on the built-in seed fleet (fleet.yaml.seed).
-    `vault_root` is set when a ``.claudron`` config points to a vault.
+    ``root`` is the host data root. ``fleet_dir`` may be flat, nested or in a
+    vault; None selects root mode. A seed reads its package template while all
+    writable source and output paths still belong to the selected data root.
+    Tests may inject source resources explicitly; discovery never selects them.
     """
 
     root: Path
+    package: PackageResources = field(kw_only=True)
     fleet_dir: Path | None = None
     seed: bool = False
     vault_root: Path | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.root, Path):
-            object.__setattr__(self, "root", Path(self.root))
+        for name in ("root", "fleet_dir", "vault_root"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, Path(value).expanduser().resolve())
 
-    # --- public base (always at repo root) ---
-    # Use these for callers, such as new-bot scaffolding, that intentionally
-    # want public-base-only lookup instead of overlay-merged content.
+    # --- immutable package base ---
 
     @property
     def base_library(self) -> Path:
-        return self.root / "library"
+        return self.package.library
 
     @property
     def base_expertise(self) -> Path:
@@ -374,17 +386,75 @@ class Paths:
 
     @property
     def base_voices(self) -> Path:
-        return self.root / "voices"
-
-    # --- overlay (when fleet_dir is set) ---
+        return self.package.voices
 
     @property
-    def overlay_library(self) -> Path | None:
-        return (self.fleet_dir / "library") if self.fleet_dir else None
+    def base_templates(self) -> Path:
+        return self.package.templates
+
+    # --- writable source overlay, including root mode ---
 
     @property
-    def overlay_voices(self) -> Path | None:
-        return (self.fleet_dir / "voices") if self.fleet_dir else None
+    def source_dir(self) -> Path:
+        return self.fleet_dir if self.fleet_dir is not None else self.root
+
+    @property
+    def overlay_library(self) -> Path:
+        return self.source_dir / "library"
+
+    @property
+    def overlay_voices(self) -> Path:
+        return self.source_dir / "voices"
+
+    @property
+    def overlay_templates(self) -> Path:
+        return self.source_dir / "templates"
+
+    @property
+    def release_store(self) -> Path:
+        """Host-owned immutable releases; activation, never composition, writes here."""
+        return self.root / "state" / "releases"
+
+    @property
+    def immutable_roots(self) -> tuple[Path, ...]:
+        """Code/assets and retained release targets protected from source edits."""
+        roots = [
+            Path(__file__).resolve().parent,
+            self.package.system_yaml.parent,
+            self.package.library, self.package.voices, self.package.templates,
+            self.package.seeds, self.package.native, self.release_store,
+        ]
+        if self.release_store.is_dir():
+            roots.extend(child for child in self.release_store.iterdir() if child.is_dir())
+        return tuple(dict.fromkeys([self.release_store, *(path.resolve() for path in roots)]))
+
+    def assert_writable(self, path: Path, *, output_root: Path | None = None) -> Path:
+        """Resolve a source/output destination or refuse a package/scope escape.
+
+        Call immediately before a write, including writes to descendants of a
+        symlinked directory. An explicit output_root permits staging without
+        changing the data paths baked into generated configuration. This is a
+        path ownership check, not protection against another process changing
+        symlinks after the check.
+        """
+        destination = Path(path).expanduser().resolve()
+        for owned in self.immutable_roots:
+            if destination.is_relative_to(owned) or owned.is_relative_to(destination):
+                raise ValueError(
+                    f"refusing writable destination {path}: overlaps package-owned "
+                    f"path {owned}; select a separate data root or source overlay"
+                )
+        allowed = [self.root.resolve(), self.source_dir.resolve()]
+        if output_root is not None:
+            allowed.append(Path(output_root).expanduser().resolve())
+        # Physical ownership accepts aliases such as /tmp -> /private/tmp;
+        # a symlink is an escape only when its target leaves all selected roots.
+        if not any(destination.is_relative_to(root) for root in allowed):
+            raise ValueError(
+                f"refusing writable destination {path}: resolves outside selected "
+                f"data/source/output roots: {', '.join(map(str, allowed))}"
+            )
+        return destination
 
     # --- effective paths (overlay-aware lookup) ---
     # These return BOTH dirs (overlay first, base second) for callers
@@ -485,17 +555,15 @@ class Paths:
     def find_voice_file(self, rel_path: str) -> Path | None:
         """Voice file lookup. `rel_path` is relative to voices/ (e.g. 'erlich-bachman.md').
 
-        Accepts either a bare name or 'voices/<name>.md' for backward compat.
+        Accepts a bare voice name or a source-relative 'voices/<name>.md'.
         """
         # Strip leading "voices/" if present
         clean = rel_path.removeprefix("voices/")
         candidates = []
-        if self.overlay_voices:
-            candidates.append(self.overlay_voices / clean)
-            # Also support legacy form: full path under fleet_dir
-            candidates.append(self.fleet_dir / rel_path)
+        candidates.append(self.overlay_voices / clean)
+        # Also support a path relative to the selected fleet source directory.
+        candidates.append(self.source_dir / rel_path)
         candidates.append(self.base_voices / clean)
-        candidates.append(self.root / rel_path)  # legacy: voices/<x>.md from repo root
         for c in candidates:
             if c.is_file():
                 return c
@@ -515,24 +583,24 @@ class Paths:
     @property
     def fleet_yaml(self) -> Path:
         if self.seed:
-            return self.root / "fleet.yaml.seed"
+            return self.package.seeds / "fleet.yaml.seed"
         if self.fleet_dir:
             return self.fleet_dir / "fleet.yaml"
         return self.root / "fleet.yaml"
 
     @property
     def projects_yaml(self) -> Path:
-        """projects.yaml sits beside fleet.yaml — the one home for that
-        co-location rule (load_fleet derives it from the raw fleet.yaml
-        path; every Paths-aware consumer should use this property)."""
+        """Project declarations belong to writable fleet configuration.
+
+        Selecting a packaged seed template does not move this write/read target
+        into the package. Every Paths-aware consumer uses this property.
+        """
         return self.fleet_config_dir / "projects.yaml"
 
     @property
     def fleet_config_dir(self) -> Path:
-        """The directory holding fleet.yaml — the base every fleet-relative
-        config path (mission_file, projects.yaml) resolves against, across
-        root/overlay/seed/vault modes."""
-        return self.fleet_yaml.parent
+        """Writable fleet configuration directory, separate from a seed input."""
+        return self.source_dir
 
     @property
     def env_file(self) -> Path:
@@ -555,7 +623,7 @@ class Paths:
     def env_tiers(self, bot_name: str | None = None) -> list["EnvTier"]:
         """The four ``.env`` tiers in runtime sourcing order, least specific first.
 
-        Answered by ``lib/env-tiers.sh`` — the runtime's own resolver — not by a
+        Answered by ``claudlobby/_runtime_scripts/env-tiers.sh`` — the runtime's own resolver — not by a
         copy of its order kept here. Pass *bot_name* to include that bot's tier;
         without it the bot tier reports ``unresolved`` rather than guessing.
         """
@@ -607,7 +675,7 @@ class Paths:
 
     @property
     def lib(self) -> Path:
-        return self.root / "lib"
+        return self.package.native
 
     def bot_runtime(self, bot_name: str) -> Path:
         return self.runtime_bots / bot_name
@@ -615,39 +683,42 @@ class Paths:
     # --- detection ---
 
     @classmethod
-    def detect(cls, hint: Path | None = None, fleet: str | None = None) -> "Paths":
-        """Find the claudlobby root, walking up from the detection start.
+    def detect(
+        cls, hint: Path | None = None, fleet: str | None = None, *,
+        package: PackageResources, seed: bool = False,
+    ) -> "Paths":
+        """Resolve data scope with explicit root > environment > known layout.
 
-        Start precedence: explicit `hint` > ``CLAUDLOBBY_ROOT`` env var > CWD.
-        Supervised contexts (timer units, bot sessions) run from an arbitrary
-        cwd but export CLAUDLOBBY_ROOT, so the env var beats the cwd walk-up.
-
-        Marker: a directory containing both `library/` and `lib/`.
-
-        If `fleet` is given, first check ``.claudron`` config at claudlobby root
-        for a vault path. If the vault contains a fleet overlay for *fleet*,
-        use that. Otherwise fall back to ``local/`` — resolving the fleet at
-        flat (``<root>/local/<fleet>/``) OR nested
-        (``<root>/local/<system>/<fleet>/``) depth.
+        An explicit root is authoritative, including an empty/new data directory;
+        never walk from it to another installation. Cwd discovery requires one
+        existing host layout, not a nearby checkout or a lone fleet manifest.
         """
-        start = Path(hint or os.environ.get("CLAUDLOBBY_ROOT") or Path.cwd()).resolve()
-        root = None
-        for candidate in [start] + list(start.parents):
-            if (candidate / "library").is_dir() and (candidate / "lib").is_dir():
-                root = candidate
-                break
-        if root is None:
-            source = (
-                "hint"
-                if hint
-                else "CLAUDLOBBY_ROOT env"
-                if os.environ.get("CLAUDLOBBY_ROOT")
-                else "cwd"
-            )
-            raise FileNotFoundError(
-                f"Could not find claudlobby root (looked for library/ + lib/) "
-                f"starting at {start} (from {source})"
-            )
+        if seed and fleet:
+            raise InvalidPathSelector("seed", "--seed and --fleet are mutually exclusive")
+        if fleet is not None and (
+            not fleet or fleet in (".", "..") or Path(fleet).name != fleet
+        ):
+            raise InvalidPathSelector("fleet", "--fleet must name one fleet, not a filesystem path")
+        if hint is not None:
+            if str(hint) == "":
+                raise InvalidPathSelector("root", "--root is empty; supply --root DATA_ROOT")
+            root = Path(hint).expanduser().resolve()
+        elif "CLAUDLOBBY_ROOT" in os.environ:
+            value = os.environ["CLAUDLOBBY_ROOT"]
+            if not value:
+                raise ValueError("CLAUDLOBBY_ROOT is empty; supply --root DATA_ROOT")
+            root = Path(value).expanduser().resolve()
+        else:
+            start = Path.cwd().resolve()
+            candidates = [p for p in (start, *start.parents) if _is_host_data_root(p)]
+            if len(candidates) != 1:
+                raise FileNotFoundError(
+                    f"Cannot determine one host data root from cwd {start}; "
+                    "supply --root DATA_ROOT (a fleet.yaml alone is ambiguous)"
+                )
+            root = candidates[0]
+        if root.exists() and not root.is_dir():
+            raise InvalidPathSelector("root", f"data root {root} is not a directory; supply --root DATA_ROOT")
 
         fleet_dir = None
         vault_root = None
@@ -668,22 +739,55 @@ class Paths:
                             "running in root mode",
                             fleet,
                         )
-                        return cls(root=root)
+                        _refuse_checkout_root(root)
+                        return cls(root=root, package=package)
                     flat = root / "local" / fleet
                     raise FileNotFoundError(
                         f"Fleet overlay not found: {flat} (run `claudlobby new-fleet {fleet}` to scaffold)"
                     )
 
-        return cls(root=root, fleet_dir=fleet_dir, vault_root=vault_root)
+        if fleet_dir is None and not seed:
+            _refuse_checkout_root(root)
+        return cls(root=root, package=package, fleet_dir=fleet_dir,
+                   vault_root=vault_root, seed=seed)
 
 
-# --- importing the INSTALL's stdlib lib/*.py doors --------------------------
+def _refuse_checkout_root(root: Path) -> None:
+    """A root-mode fleet makes root/library|templates|voices overlays that
+    outrank the sealed release. On a source checkout that would silently shadow
+    the release with the working tree, so refuse that fleet. A checkout kept as
+    the data root with fleets under local/ (and host-level scope) stays valid.
+    """
+    if not (root / "fleet.yaml").is_file():
+        return
+    # A native helper alone can belong to a legitimate data overlay. The
+    # Python source package distinguishes a source tree from that layout.
+    if (root / "claudlobby" / "__init__.py").is_file():
+        raise InvalidPathSelector(
+            "root",
+            f"data root {root} is a Claudlobby source checkout with a root-mode fleet.yaml; "
+            "its library/templates would shadow the selected release. Move that fleet.yaml "
+            "into local/<fleet>/ (the checkout may stay the data root)",
+        )
+
+
+def _is_host_data_root(path: Path) -> bool:
+    """Existing host-scoped state/layout, never package/source markers."""
+    return (
+        (path / "state" / "plane").is_dir()
+        or (path / "state" / "fleet-state.json").is_file()
+        or bool(_read_claudron_config(path / ".claudron").get("vault"))
+        or any((p / "fleet.yaml").is_file() for p in _iter_fleet_dirs(path / "local"))
+    )
+
+
+# --- importing the INSTALL's stdlib claudlobby/_runtime_scripts/*.py doors --------------------------
 
 _LIB_MODULES: dict[tuple[str, float], object] = {}
 
 
 def load_lib_module(lib_dir: Path, filename: str):
-    """Import one of the INSTALL's stdlib ``lib/*.py`` scripts as a module, or
+    """Import one of the INSTALL's stdlib ``claudlobby/_runtime_scripts/*.py`` scripts as a module, or
     None when unreadable.
 
     Lives here rather than in any one consumer because three of them now exist
@@ -691,7 +795,7 @@ def load_lib_module(lib_dir: Path, filename: str):
     bash side which execs the same files directly), and a private copy of a
     loading mechanism is how the *next* consumer ends up loading from somewhere
     else. Memoized on (path, mtime): a brief once exec'd ``plane-readers.py``
-    six times per call; a re-installed ``lib/`` changes the mtime and is
+    six times per call; a re-installed ``claudlobby/_runtime_scripts/`` changes the mtime and is
     re-read.
 
     Returning None rather than raising is deliberate and is NOT a fallback —

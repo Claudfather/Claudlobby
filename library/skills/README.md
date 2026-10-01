@@ -79,9 +79,9 @@ Two things `tools/` does for free that a skill-dir helper owns itself:
 
 **Execute bit.** `tools/` chmods its rendered output 0755; a skill is *symlinked*, so the helper runs at whatever mode git recorded — checked in 100644 it cannot run on a fresh clone. Verify with `git ls-files -s library/skills/<name>/`, fix with `git update-index --chmod=+x <path>`, and pin it in a test so the next author does not have to remember.
 
-**Audit surface.** `claudlobby freshbox` audits rendered `tools/`; a skill-dir helper sits outside that sweep. If `SKILL.md` declares `tool_grants` for the helper, scope them (`Bash(<cmd> *)`, never bare `Bash`) and re-run `claudlobby --fleet <f> freshbox` to confirm no `orphan_grant` or over-grant finding.
+**Audit surface.** `claudlobby config validate --runtime` audits rendered `tools/`; a skill-dir helper sits outside that sweep. If `SKILL.md` declares `tool_grants` for the helper, scope them (`Bash(<cmd> *)`, never bare `Bash`) and re-run `claudlobby --fleet <f> config validate --runtime` to confirm no `orphan_grant` or over-grant finding.
 
-The parse gate you get for free either way: `tests/test_bash_parse.py` runs `bash -n` over `lib/` **and** every `library/**/*.sh`. Just mind the bash 3.2 rule from the root CLAUDE.md — no apostrophes in comments inside `$( )`, because macOS `/bin/bash` does not strip them and one corrupts quoting for the rest of the file.
+The parse gate you get for free either way: `tests/test_bash_parse.py` runs `bash -n` over `claudlobby/_runtime_scripts/` **and** every `library/**/*.sh`. Just mind the bash 3.2 rule from the root CLAUDE.md — no apostrophes in comments inside `$( )`, because macOS `/bin/bash` does not strip them and one corrupts quoting for the rest of the file.
 
 **Test the helper, and wire it into pytest.** A shell suite that CI never runs is not a gate. Ship the suite next to the helper, then pick the right runner:
 

@@ -10,13 +10,13 @@ You handle visual + UX work in the frontend stack: React, Tailwind, Figma refere
 
 ## Workflow
 
-1. **Engage** — for an id'd `task` dispatch, your first `[BOTREPORT]` row is the ack (Worker Lifecycle, Step 2): if any tool call will precede your terminal report — or you are uncertain — make `report-back.sh <bot-name> progress "Acked: <summary>" --task <id>` your first tool call. No Telegram ack.
+1. **Engage** — inspect the current `ASSIGNMENT_ID` and record `claudlobby --json assignment accept ASSIGNMENT_ID --request-id ACCEPT_UUID` before work. Acceptance is separate from progress; see Worker Lifecycle and `/fleet-ops`. No Telegram ack.
 2. **Crawl** — for design audits, use the `/visual-crawl` skill: screenshot at multiple viewports, compare against design tokens.
 3. **Plan** — outline visual changes before editing. Reference the design system if one exists.
 4. **Implement** — Tailwind first, custom CSS as fallback. Match existing patterns; don't introduce a third button style.
 5. **Screenshot** — before/after in Telegram for every visual change.
 6. **PR** — branch, push, open PR with screenshots in the body. Same lifecycle as engineering.
-7. **Report back** — `report-back.sh <bot-name> completed "<summary>" --pr <pr-url> --task <id>`.
+7. **Report back** — `claudlobby --json assignment complete ASSIGNMENT_ID --summary "<summary>" --pr <pr-url> --pr-role authored --request-id COMPLETE_UUID`. Inspect recording and manager notification separately. With no current assignment, use an unlinked fleet report.
 
 ## Telegram Output
 

@@ -4,9 +4,12 @@ math over the plane's heartbeat series — one definition)."""
 
 from __future__ import annotations
 
+from tests.package_fixtures import source_package
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from tests.plane_setup import initialize_plane
 
 from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import emit_batch
@@ -43,6 +46,7 @@ def _root(tmp_path: Path) -> Path:
     root = tmp_path / "root"
     (root / "state" / "plane").mkdir(parents=True)
     (root / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
+    initialize_plane(root)
     return root
 
 
@@ -186,14 +190,14 @@ def test_endpoints_and_typed_absence(tmp_path):
     root = _root(tmp_path)
     emit_batch(root, [_fleet_kf([{"bot": "erlich", "reports_to": None}]), _done()])
     _hb(root, "erlich", ["BUSY", "IDLE"], NOW - timedelta(minutes=3))
-    c = TestClient(create_app(root))
+    c = TestClient(create_app(root, package=source_package()))
     org = c.get("/api/org", params={"fleet": F}).json()
     assert org["state"] == "ok" and org["data"]["roots"][0]["bot"] == "erlich"
     util = c.get("/api/utilization", params={"fleet": F}).json()
     assert util["state"] == "ok" and util["data"][0]["short"] == "erlich"
     miss = c.get("/api/org", params={"fleet": "nope"}).json()
     assert miss["state"] == "unknown"       # never another fleet's tree under this name
-    empty = TestClient(create_app(tmp_path / "none")).get("/api/org").json()
+    empty = TestClient(create_app(tmp_path / "none", package=source_package())).get("/api/org").json()
     assert empty["state"] == "absent" and "data" not in empty
 
 
@@ -273,7 +277,7 @@ def test_malformed_org_edges_are_skipped_and_disclosed_never_a_500(tmp_path):
         {"bot": 42, "reports_to": "erlich"},              # int bot
         {"bot": "gilfoyle", "reports_to": "erlich"}],
         roster=["erlich", "dinesh", "gilfoyle"]), _done()])
-    body = TestClient(create_app(root), raise_server_exceptions=False).get(
+    body = TestClient(create_app(root, package=source_package()), raise_server_exceptions=False).get(
         "/api/org", params={"fleet": F}).json()
     assert body["state"] == "ok"
     d = body["data"]
@@ -344,7 +348,7 @@ def test_org_route_follows_the_requested_fleet_never_the_default(tmp_path):
     g["fleet"] = "g"; g["payload"]["entity_alias"] = "g"; g["payload"]["payload"]["alias"] = "g"
     d = _done(); d["fleet"] = "g"; d["payload"]["scope"] = "g"
     emit_batch(root, [g, d])
-    client = TestClient(create_app(root))
+    client = TestClient(create_app(root, package=source_package()))
     picked = client.get("/api/org?fleet=g").json()
     assert picked["state"] == "ok" and picked["data"]["fleet"] == "g"
     assert [n["bot"] for n in picked["data"]["roots"]] == ["y"]
@@ -364,7 +368,7 @@ def test_overview_row_for_a_keyframe_only_fleet_is_quiet_not_absent(tmp_path):
 
     root = _root(tmp_path)
     emit_batch(root, [_fleet_kf([{"bot": "x", "reports_to": None}]), _done()])
-    ov = TestClient(create_app(root)).get("/api/overview").json()
+    ov = TestClient(create_app(root, package=source_package())).get("/api/overview").json()
     assert ov["state"] == "ok"
     (row,) = ov["data"]["fleets"]
     assert row["alias"] == F

@@ -1,51 +1,26 @@
-"""claudlobby emit / claudlobby plane — the kernel's CLI surface.
+"""Plane diagnostics and foreground commands.
 
-Failure taxonomy is CENTRAL, not per-command: every plane door maps
-ContractViolation -> 2, SpoolWriteError -> 3, DowngradeError -> 4 through the
-same guard, so a wrong-shape request or a newer db exits by contract instead
-of escaping as a traceback from whichever command happened to touch it.
+Public ingest and maintenance use separate common-result adapters.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import re
 import sqlite3
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ._helpers import _load_fleet_or_exit, _resolve_paths
+from ._helpers import _resolve_paths
 from ..plane.contracts import ContractViolation, export_schemas
-from ..plane.db import connect, db_file, db_path, open_ro
-from ..plane.emit_api import (
-    emit,
-    emit_batch,
-    _load_capture_config,
-    capture_mode,
-    DEFAULT_CAPTURE,
-)
+from ..plane.db import connect_ro, db_file, open_ro
+from ..plane.emit_api import _load_capture_config, capture_mode, DEFAULT_CAPTURE, emit_batch
 from ..plane.identity import provisional_actors
-from ..plane.ids import ensure_host_uid
-from ..plane.migrations import DowngradeError, SCHEMA_USER_VERSION, migrate
-from ..plane.spool import (
-    SpoolWriteError, drain, oldest_spooled_at, quarantine_dir,
-    quarantine_entry, scan_spool, spool_dir, spool_entries,
-)
-
-_FAMILY_COUNTS = {
-    "communication": ("communications", None),
-    "transmission": ("events", "transmission"),
-    "work_item": ("work_items", None),
-    "assignment": ("assignments", None),
-    "task": ("events", "task"),
-}
-
-_SPOOL_NAME_RE = re.compile(r"ev_[0-9a-f]{32}\.json")
-
-
+from ..plane.migrations import DowngradeError, SCHEMA_USER_VERSION
+from ..plane.schema_state import PendingMigrationError, require_current_schema
+from ..plane.spool import SpoolWriteError, oldest_spooled_at, scan_spool
 
 #: #1711. A spooled batch is ACCEPTED and DURABLE but not RECORDED — it is on
 #: disk and invisible to every reader until a drain. It needs a code of its own
@@ -56,8 +31,8 @@ RC_SPOOLED = 6
 
 def _guarded(label: str, fn) -> int:
     """THE exception-to-exit mapping (one copy). DowngradeError is caught for
-    every door — plane status and spool retry run migrate() too, and a newer
-    db must refuse at 4 from any of them, never traceback at 1."""
+    every door. Ordinary readers/writers require explicit migration first;
+    they never create or advance the schema while answering a diagnostic."""
     try:
         return fn()
     except ContractViolation as exc:
@@ -68,198 +43,14 @@ def _guarded(label: str, fn) -> int:
     except SpoolWriteError as exc:
         print(f"{label}: TOTAL FAILURE — {exc}", file=sys.stderr)
         return 3
+    except PendingMigrationError as exc:
+        print(f"{label}: REFUSED — {exc}", file=sys.stderr)
+        return 7
     except DowngradeError as exc:
         # Never spooled (round-2 F6): a newer db is an operator condition,
         # not transient infrastructure — retrying it forever helps no one.
         print(f"{label}: REFUSED — {exc}", file=sys.stderr)
         return 4
-
-
-def _require_object(obj, where: str) -> dict:
-    """Valid JSON is not yet a valid request: [] / null / 42 / "x" used to
-    escape as TypeError tracebacks past the JSONDecodeError catch."""
-    if not isinstance(obj, dict):
-        raise ContractViolation(
-            [{"loc": (where,),
-              "msg": f"request must be a JSON object, got {type(obj).__name__}"}]
-        )
-    return obj
-
-
-def cmd_emit(args) -> int:
-    root = _resolve_paths(args).root
-    try:
-        raw = sys.stdin.read() if args.json == "-" else Path(args.json).read_text()
-        request = json.loads(raw)
-    except (OSError, json.JSONDecodeError) as exc:
-        print(f"emit: unreadable request: {exc}", file=sys.stderr)
-        return 2
-
-    def run() -> int:
-        req = _require_object(request, "request")
-        req["event_type"] = args.event_type
-        outcome = emit(root, req)
-        print(outcome.event_id)
-        if outcome.status == "spooled":
-            # #1711, same collapse as cmd_emit_batch. Found by the test rather
-            # than by reading: the first patch covered emit-batch alone because
-            # that is the door the shim uses, and `claudlobby emit` is a second
-            # public door with the identical defect.
-            print(f"plane: db unavailable — SPOOLED {outcome.detail} "
-                  f"(durable on disk, NOT in the plane until a drain)",
-                  file=sys.stderr)
-            return RC_SPOOLED
-        return 0
-
-    return _guarded("emit", run)
-
-
-def cmd_emit_batch(args) -> int:
-    """One atomic unit of work: {"events": [...]} or a bare JSON array (F4)."""
-    root = _resolve_paths(args).root
-    try:
-        raw = sys.stdin.read() if args.json == "-" else Path(args.json).read_text()
-        parsed = json.loads(raw)
-        requests = parsed["events"] if isinstance(parsed, dict) else parsed
-        assert isinstance(requests, list) and requests
-    except (OSError, json.JSONDecodeError, KeyError, AssertionError) as exc:
-        print(f"emit-batch: unreadable request: {exc}", file=sys.stderr)
-        return 2
-
-    def run() -> int:
-        members = [
-            _require_object(r, f"events[{i}]") for i, r in enumerate(requests)
-        ]
-        outcomes = emit_batch(root, members)
-        for o in outcomes:
-            print(o.event_id)
-        if outcomes and outcomes[0].status == "spooled":
-            # #1711. Symmetric with lib/plane-socket-client.py: a spooled batch
-            # is durable on disk and ABSENT from the plane, so rc 0 — which the
-            # shim and every door read as "recorded" — asserted something false.
-            # RC_SPOOLED is a verdict: the batch is already written, and the
-            # shim must not replay it down another rung.
-            print(f"plane: db unavailable — SPOOLED {outcomes[0].detail} "
-                  f"(durable on disk, NOT in the plane until a drain)",
-                  file=sys.stderr)
-            return RC_SPOOLED
-        return 0
-
-    return _guarded("emit-batch", run)
-
-
-
-def cmd_plane_status(args) -> int:
-    root = _resolve_paths(args).root
-
-    def run() -> int:
-        path = db_path(root)
-        print(f"db: {path} ({'present' if path.exists() else 'absent'})")
-        if path.exists():
-            conn = connect(path)
-            try:
-                migrate(conn)
-                version = conn.execute("PRAGMA user_version").fetchone()[0]
-                print(f"schema user_version: {version}")
-                top = conn.execute(
-                    "SELECT COALESCE(MAX(ingest_seq), 0) FROM ingest_ledger"
-                ).fetchone()[0]
-                print(f"ingest_seq high-water: {top}")
-                for family, (table, kind) in _FAMILY_COUNTS.items():
-                    if kind is None:
-                        n = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                    else:
-                        n = conn.execute(
-                            "SELECT COUNT(*) FROM events WHERE kind = ?", (kind,)
-                        ).fetchone()[0]
-                    print(f"  {family}: {n}")
-                prov = provisional_actors(conn)
-                print(f"provisional actors: {len(prov)}")
-            finally:
-                conn.close()
-        # scan_spool — THE shared spool definition (external round 4: this
-        # command printed 'spool: 0 pending' for a tree /api/trust called
-        # unreadable; a numeric zero from an unenumerable dir is the lie).
-        sc = scan_spool(root)
-        if sc.spool_state == "unreadable":
-            print("spool: unreadable — cannot count (a gap, not a zero)")
-        else:
-            oldest_at = oldest_spooled_at(sc.pending)
-            oldest = ""
-            if oldest_at:
-                age = (datetime.now(timezone.utc)
-                       - datetime.fromisoformat(oldest_at))
-                oldest = f", oldest {int(age.total_seconds())}s"
-            print(f"spool: {len(sc.pending)} pending{oldest}")
-        if sc.quarantine_state == "unreadable":
-            print("quarantine: unreadable — cannot count")
-        else:
-            print(f"quarantine: {len(sc.quarantined)}")
-        return 0
-
-    return _guarded("plane status", run)
-
-
-def cmd_plane_spool(args) -> int:
-    root = _resolve_paths(args).root
-
-    def run() -> int:
-        if args.spool_action == "list":
-            for e in spool_entries(root):
-                print(
-                    f"{e['_file']}  events={e.get('event_ids')}"
-                    f"  attempts={e.get('attempts')}"
-                )
-            return 0
-        if args.spool_action == "inspect":
-            if not _SPOOL_NAME_RE.fullmatch(args.name or ""):
-                print(f"invalid spool entry name: {args.name!r}", file=sys.stderr)
-                return 1
-            src = spool_dir(root) / args.name
-            if not src.exists():
-                src = quarantine_dir(root) / args.name
-                if not src.exists():
-                    print(f"no such spool entry: {args.name}", file=sys.stderr)
-                    return 1
-                reason = src.with_name(src.name + ".reason")
-                if reason.exists():
-                    print(f"quarantined: {reason.read_text().strip()}", file=sys.stderr)
-            try:
-                entry = json.loads(src.read_text())
-            except (OSError, json.JSONDecodeError) as exc:
-                print(f"unreadable spool entry: {exc}", file=sys.stderr)
-                return 1
-            print(json.dumps(entry, indent=2, sort_keys=True, default=str))
-            return 0
-        if args.spool_action == "retry":
-            conn = connect(db_path(root))
-            try:
-                migrate(conn)
-                host = ensure_host_uid(root / "state")
-                report = drain(root, conn, host)
-            finally:
-                conn.close()
-            print(
-                f"ingested={report.ingested} duplicates={report.duplicates}"
-                f" quarantined={report.quarantined} remaining={report.remaining}"
-            )
-            return 0
-        if args.spool_action == "quarantine":
-            if not _SPOOL_NAME_RE.fullmatch(args.name or ""):
-                # Round-2 F9: the name is a filesystem operand — only validated
-                # spool basenames, never path components.
-                print(f"invalid spool entry name: {args.name!r}", file=sys.stderr)
-                return 1
-            src = spool_dir(root) / args.name
-            if not src.exists():
-                print(f"no such spool entry: {args.name}", file=sys.stderr)
-                return 1
-            quarantine_entry(root, src, "operator")
-            print(f"quarantined {args.name}")
-            return 0
-        return 1
-
-    return _guarded("plane spool", run)
 
 
 def _switch_fleet(paths):
@@ -281,30 +72,38 @@ def _switch_fleet(paths):
 
 def cmd_plane_doctor(args) -> int:
     """Kernel-scoped health rungs (§10/§17 — the golden-path doctor grows in
-    Phase 2; these are the checks the kernel alone can answer). Exit 0 when
-    every rung passes, 1 when any needs attention; version refusals still
-    exit 4 through the guard."""
-    paths = _resolve_paths(args)
-    root = paths.root
+    Phase 2; these are the checks the kernel alone can answer)."""
+    from ..command_result import CommandFailure, CommandOutput, execute
+    from ..context import resolve_paths
+
+    rungs: list[dict] = []
+    lines: list[str] = []
 
     def run() -> int:
+        paths = resolve_paths(root=getattr(args, "root", None),
+                              fleet=getattr(args, "fleet", None),
+                              seed=getattr(args, "seed", False))
+        root = paths.root
         failing = 0
 
         def rung(ok: bool, label: str, detail: str = "") -> None:
             nonlocal failing
             mark = "ok" if ok else "ATTENTION"
             suffix = f" — {detail}" if detail else ""
-            print(f"[{mark}] {label}{suffix}")
+            rungs.append({"name": label, "status": "ok" if ok else "attention",
+                          "detail": detail})
+            lines.append(f"[{mark}] {label}{suffix}")
             if not ok:
                 failing += 1
 
         path = db_file(root)
         if not path.exists():
-            rung(True, "db", f"absent (not yet used): {path}")
+            rung(True, "db", f"absent — recording blocked until host activation"
+                             f" initializes the plane: {path}")
         else:
-            conn = connect(path)
+            conn = connect_ro(path)
             try:
-                migrate(conn)   # DowngradeError -> 4 via the guard
+                require_current_schema(conn)   # DowngradeError -> 4 via the guard
                 version = conn.execute("PRAGMA user_version").fetchone()[0]
                 rung(version == SCHEMA_USER_VERSION, "schema",
                      f"user_version {version} (code supports {SCHEMA_USER_VERSION})")
@@ -399,11 +198,12 @@ def cmd_plane_doctor(args) -> int:
         except ContractViolation as exc:
             errors = getattr(exc, "errors", None)
             rung(False, "capture config", str(errors[0] if errors else exc))
-        # Daemon rung (PR-B T9): three-state, evidence-based — never assume a
-        # daemon SHOULD run. Serving = ok. Never-started + no socket = ok
-        # (unarmed; doors fall back to the cold CLI by design). Started
-        # historically but not serving = ATTENTION with the corrective command
-        # (§17 direction: symptom -> exact command).
+        # Daemon rung (PR-B T9): three-state, evidence-based. Serving = ok.
+        # Started historically but not serving = ATTENTION with the corrective
+        # command (§17 direction: symptom -> exact command). Never started is
+        # ok only before the plane exists: once it does, the daemon is the only
+        # recorder for hooks and timers and the only replayer of what they
+        # stage, so its absence is ATTENTION, never a green "unarmed" (S5a-02).
         from ..plane.daemon import probe_daemon, socket_path
 
         # Honor PLANE_SOCKET like the shim does (gauntlet round): doctor used
@@ -416,7 +216,7 @@ def cmd_plane_doctor(args) -> int:
         started = 0
         last_ingest = None
         if path.exists():
-            conn = connect(path)
+            conn = connect_ro(path)
             try:
                 started = conn.execute(
                     "SELECT COUNT(*) FROM events WHERE kind='system'"
@@ -434,10 +234,20 @@ def cmd_plane_doctor(args) -> int:
                  f"started {started}x historically but not serving — check:"
                  " systemctl --user status claudlobby-plane-daemon.service"
                  " (macOS: launchctl print gui/$UID/claudlobby-plane-daemon);"
-                 " doors are falling back to the cold CLI meanwhile")
+                 " doors stage input for daemon replay meanwhile (pending, not committed)")
+        elif path.exists():
+            rung(False, "daemon",
+                 "never armed — hook and timer emits stage for daemon replay and are"
+                 " NOT recorded until a plane daemon serves (host.jobs.plane-daemon)")
         else:
-            rung(True, "daemon", "never armed (doors fall back to cold CLI)")
+            rung(True, "daemon", "never armed (plane not initialized)")
         rung(True, "last ingest", str(last_ingest or "none yet"))
+        # The staged queue (S5a-02): the only record a hook or timer has while
+        # the daemon cannot answer. Non-empty with no serving daemon, full, or
+        # stale is ATTENTION; unreadable is a gap, never a zero.
+        from ..plane.health import scan_staged, staged_rung
+        staged_ok, staged_detail = staged_rung(scan_staged(root), serving)
+        rung(staged_ok, "staged depth", staged_detail)
         # scan_spool — the same shared definition the trust panel and
         # status consume; an unreadable enumeration is a FAILING rung and a
         # nonzero exit, never a green zero (external round 4, probed).
@@ -488,7 +298,15 @@ def cmd_plane_doctor(args) -> int:
                                " Each is a batch whose commit is UNDETERMINED:"
                                " re-emitting is safe (ingest dedupes on the"
                                " pre-minted event id)")
-                rung(not reaps, "emit losses", detail)
+                # A batch the client refused to stage (full queue, untrusted
+                # capture policy, failed write): its fate is known — NOT
+                # recorded — and it must not hide behind a green rung (S5a-01).
+                refused = [r for r in rows if "\treap\t" not in r]
+                if refused:
+                    kinds = sorted({r.split("\t")[1] for r in refused if len(r.split("\t")) > 1})
+                    detail += (f"; {len(refused)} emit(s) NOT recorded"
+                               f" ({', '.join(kinds)}) — see state/plane/.emit-losses")
+                rung(not reaps and not refused, "emit losses", detail)
 
         # The breaker's own state. Not a defect in itself — measured on this
         # estate it damps (89% of episodes are a single arming) and nothing is
@@ -503,8 +321,8 @@ def cmd_plane_doctor(args) -> int:
             try:
                 age = int(time.time() - wedged.stat().st_mtime)
                 rung(True, "socket breaker",
-                     f"ARMED {age}s ago — doors take the cold CLI until it"
-                     " expires. Recorded, not lost; see #1693 for the cause")
+                     f"ARMED {age}s ago — doors stage input until it"
+                     " expires. Pending, not committed; see #1693 for the cause")
             except OSError as exc:
                 rung(False, "socket breaker", f"UNREADABLE — {exc}")
         # The WAL (#1905). A reader holding a snapshot keeps the daemon's
@@ -543,7 +361,7 @@ def cmd_plane_doctor(args) -> int:
              " the read-only estate-vs-scan check (doctor stays lightweight;"
              " re-derivation is that door's job)")
         # The plane-scoped switch subset — the same registry and the same
-        # renderer `claudlobby doctor` uses, filtered to the plane's own doors.
+        # renderer `claudlobby host doctor` uses, filtered to the plane's own doors.
         # A plane whose daemon, probe, retention or expiry sweep is off is not
         # BROKEN, so this is never a failing rung: it is the answer to "why is
         # the Host card empty / why does nothing expire", which is otherwise a
@@ -560,390 +378,96 @@ def cmd_plane_doctor(args) -> int:
             _rows = _sw.resolve(paths, _switch_fleet(paths))
             rung(True, "switches", _sw.summary_line(
                 [r for r in _rows if r.switch.plane]))
-            print(_sw.format_table(_rows, plane_only=True))
+            lines.append(_sw.format_table(_rows, plane_only=True))
         except Exception as exc:  # noqa: BLE001 — a health command never crashes
-            rung(True, "switches", f"unavailable: {exc}")
-        return 0 if failing == 0 else 1
+            rung(False, "switches", f"unavailable: {exc}")
+        return failing
 
-    return _guarded("plane doctor", run)
+    def operation() -> CommandOutput:
+        def refuse(code: str, message: str):
+            if not getattr(args, "json", False):
+                if lines:
+                    print("\n".join(lines))
+            raise CommandFailure(code, message,
+                                 data={"status": "refused", "rungs": rungs,
+                                       "attention_count": sum(row["status"] == "attention" for row in rungs)})
 
-
-def cmd_plane_registry(args) -> int:
-    """The registry lane's read door (chunk B): current state, SCD history,
-    field-level changes, and --verify (projection vs re-derived estate).
-    Every answer is F11-validated — a tombstone counts only when its scan's
-    completion says complete=true — because queries.py's shared CTE is the
-    single place that rule lives."""
-    paths = _resolve_paths(args)
-    root = paths.root
-
-    def run() -> int:
-        from ..plane import registry_read as rr
-
-        path = db_file(root)
-        if not path.exists():
-            print(f"registry: no plane db at {path} — no scan has run here"
-                  " (arm PLANE_EMIT_ENABLED=1 in the fleet-tier .env and"
-                  " run generate)", file=sys.stderr)
-            return 1
-        conn = connect(path)
         try:
-            migrate(conn)
-        except Exception:
-            conn.close()
-            raise
-        try:
-            if args.verify:
-                # --verify re-derives the estate through the fleet config —
-                # root-mode fleet.yaml or the global --fleet overlay;
-                # _load_fleet_or_exit owns that resolution and its errors
-                from ._helpers import _load_fleet_or_exit
-                from ..plane.registry_emit import (
-                    _vault_rev, assemble_entities)
-                fleet, _ = _load_fleet_or_exit(paths)
-                # READ the host identity the ingest path recorded — never
-                # mint. ensure_host_uid(root) here minted a FRESH uid at
-                # the wrong path, scoping the projection to nothing: a
-                # healthy estate read as 100% phantom drift, and a read
-                # door left a write behind (r3 BLOCKER, probed; the pin
-                # drives THIS door, not the API — the rehearse-env-cascade
-                # lesson).
-                uid_file = root / "state" / "host-uid"
-                try:
-                    this_host = uid_file.read_text().strip()
-                except FileNotFoundError:
-                    this_host = ""
-                except OSError as exc:
-                    # unreachable ≠ absent (r4): a perms failure must not
-                    # read as "no scan yet" — opposite remedies
-                    print(f"registry --verify: host identity UNREADABLE"
-                          f" at {uid_file} ({exc})", file=sys.stderr)
-                    return 1
-                if not this_host:
-                    print(f"registry --verify: no host identity at"
-                          f" {uid_file} — no scan has recorded here yet",
-                          file=sys.stderr)
-                    return 1
-                assembled, complete = assemble_entities(
-                    paths, fleet, _vault_rev(paths))
-                rep = rr.verify_current(conn, assembled, fleet=fleet.name,
-                                        host_uid=this_host)
-                print(f"checked {rep.checked} entities"
-                      + ("" if complete else
-                         "  [enumeration INCOMPLETE — drift below is"
-                         " partial evidence]"))
-                for label, keys in (("DRIFT", rep.drifted),
-                                    ("missing from db", rep.missing_from_db),
-                                    ("missing from estate",
-                                     rep.missing_from_estate)):
-                    for etype, alias in keys:
-                        print(f"  [{label}] {etype} {alias}")
-                if rep.ok:
-                    print("projection matches the estate")
-                return 0 if rep.ok else 1
-            if args.history:
-                rows = rr.entity_history(conn, args.history)
-                if not rows:
-                    print(f"no registry rows for {args.history!r}",
-                          file=sys.stderr)
-                    return 1
-                for r in rows:
-                    state = "TOMBSTONE" if r["tombstone"] else \
-                        (r["payload_hash"] or "")[:12]
-                    until = r["valid_to"] or "now"
-                    print(f"{r['valid_from']} -> {until}  {state}"
-                          f"  cause={r['cause']} scan={r['scan_id']}")
-                return 0
-            if args.changes is not None:
-                changes = rr.recent_changes(conn, limit=args.changes)
-                if not changes:
-                    print("no registry changes recorded yet",
-                          file=sys.stderr)
-                    return 0
-                for c in changes:
-                    print(f"{c['occurred_at']}  {c['entity_type']}"
-                          f" {c['entity_alias']}  {c['change']}")
-                    for fld, (old, new) in sorted(c["fields"].items()):
-                        print(f"    {fld}: {old!r} -> {new!r}")
-                return 0
-            if args.show:
-                rows = [r for r in rr.current_entities(conn)
-                        if r["entity_alias"] == args.show
-                        or r["entity_uid"] == args.show]
-                if not rows:
-                    print(f"{args.show!r} is not in the current registry"
-                          " (deleted, never scanned, or a typo — try"
-                          " --history)", file=sys.stderr)
-                    return 1
-                for r in rows:
-                    print(json.dumps(
-                        {k: r[k] for k in ("entity_type", "entity_alias",
-                                           "entity_uid", "payload",
-                                           "payload_hash", "cause",
-                                           "scan_id", "occurred_at")},
-                        indent=2, ensure_ascii=False))
-                return 0
-            rows = rr.current_entities(conn, entity_type=args.type,
-                                       fleet=args.scope_fleet)
-            # the trust line PRECEDES the empty early-return: one unhonored
-            # tombstone deleting your only entity must not read as silence
-            # (gauntlet, probed)
-            inv = rr.invalid_tombstones(conn)
-            if inv:
-                print(f"[trust] {len(inv)} tombstone(s) NOT honored —"
-                      " no complete same-scan_id scan_completed"
-                      " (run plane doctor)", file=sys.stderr)
-            if not rows:
-                print("registry is empty for this filter (no completed"
-                      " scan, or nothing matches)", file=sys.stderr)
-                return 0
-            for r in rows:
-                print(f"{r['entity_type']:13} {r['entity_alias']:44}"
-                      f" {(r['payload_hash'] or '')[:12]}"
-                      f"  {r['occurred_at']}")
-            return 0
-        except (sqlite3.Error, ValueError) as exc:
-            # a read door must not traceback on one corrupt row (r3,
-            # probed: malformed declaration detail killed the whole
-            # command) — refuse loudly instead, rc 1
-            print(f"registry unreadable: {exc}", file=sys.stderr)
-            return 1
-        finally:
-            conn.close()
+            failing = run()
+        except PendingMigrationError:
+            refuse("migration_required", "plane doctor: explicit Plane migration is required")
+        except DowngradeError:
+            refuse("downgrade", "plane doctor: Plane storage is newer than this release")
+        except sqlite3.Error:
+            refuse("unavailable", "plane doctor: Plane storage cannot be read")
+        except (OSError, ImportError):
+            refuse("unavailable", "plane doctor: host data or dependencies are unavailable")
+        except RuntimeError:
+            refuse("unavailable", "plane doctor: installed release resources are unavailable")
+        except ValueError:
+            refuse("invalid_argument", "plane doctor: invalid host or fleet selection")
+        except ContractViolation:
+            refuse("conflict", "plane doctor: Plane contract is invalid")
+        data = {"status": "attention" if failing else "ok", "rungs": rungs,
+                "attention_count": failing}
+        if failing:
+            if not getattr(args, "json", False):
+                print("\n".join(lines))
+            raise CommandFailure("conflict", f"plane doctor: {failing} rung(s) need attention", data=data)
+        return CommandOutput(data, lines=tuple(lines))
 
-    return _guarded("plane registry", run)
+    return execute("plane.doctor", operation, json_output=getattr(args, "json", False))
 
 
-def cmd_plane_prune(args) -> int:
-    """Age out raw metric_samples past the retention window (chunk 3a;
-    spec §F20: 30-day raws, the incident-join window). Family-scoped — the
-    ONLY DELETE the plane performs, and it never touches the ledger (the
-    dedupe horizon). Runs from a composed timer, NOT the ingest-only
-    daemon. `--dry-run` reports the count without deleting."""
-    root = _resolve_paths(args).root
-
-    def run() -> int:
-        from ..plane.retention import (
-            DEFAULT_RETENTION_DAYS, PRUNABLE_SYSTEM_EVENTS,
-            prune_metric_samples, prune_system_events)
-
-        path = db_file(root)
-        if not path.exists():
-            print(f"prune: no plane db at {path} — nothing to age out",
-                  file=sys.stderr)
-            return 0
-        days = args.days if args.days is not None else DEFAULT_RETENTION_DAYS
-        if days < 0:
-            # a negative window's future cutoff would delete EVERYTHING — a
-            # clean contract refusal (rc 2), never a raw traceback (gauntlet)
-            raise ContractViolation(
-                [{"loc": ("days",), "msg": "retention days cannot be"
-                  " negative (a future cutoff would delete all samples)"}])
-        conn = connect(path)
-        try:
-            migrate(conn)   # DowngradeError -> 4 via the guard
-            res = prune_metric_samples(conn, days=days,
-                                       dry_run=args.dry_run)
-            # #1659, the SECOND lane, OFF unless this host arms it. Inside this
-            # job rather than beside it because it shares the window and the
-            # connection; gated separately because it deletes a different
-            # thing. Measured before shipping: 15,422 system events in one day
-            # here, 98% of them the two allowlisted types.
-            sys_deleted = None
-            if _switch_on("PLANE_PRUNE_SYSTEM_EVENTS_ENABLED"):
-                if args.dry_run:
-                    marks = ",".join("?" for _ in PRUNABLE_SYSTEM_EVENTS)
-                    sys_deleted = conn.execute(
-                        f"SELECT COUNT(*) FROM events WHERE kind='system'"
-                        f" AND event IN ({marks}) AND ingested_at < ?",
-                        (*sorted(PRUNABLE_SYSTEM_EVENTS), res.cutoff),
-                    ).fetchone()[0]
-                else:
-                    sys_deleted = prune_system_events(conn, days=days)
-                    conn.commit()
-        finally:
-            conn.close()
-        verb = "would delete" if res.dry_run else "deleted"
-        print(f"metric_samples: {verb} {res.candidates if res.dry_run else res.deleted}"
-              f" rows older than {days}d (cutoff {res.cutoff})")
-        if sys_deleted is None:
-            # Said out loud rather than skipped silently: a disarmed lane and a
-            # lane that found nothing print differently, which is the rule the
-            # rest of this estate is held to.
-            print("system events: lane OFF — arm with"
-                  " PLANE_PRUNE_SYSTEM_EVENTS_ENABLED=1 in this host's .env"
-                  " (it deletes data; see claudlobby doctor --switches)")
-        else:
-            print(f"system events: {verb} {sys_deleted} row(s) older than"
-                  f" {days}d, of {sorted(PRUNABLE_SYSTEM_EVENTS)}"
-                  " — every other event type is kept")
-        return 0
-
-    return _guarded("plane prune", run)
-
-
-def _switch_on(env_name: str) -> bool:
-    """An opt-in switch is ON only for an exact `1` (the registry's polarity
-    rule): unset, empty, or anything else is OFF. Matching `switch_is_on`'s
-    shell twin, where an empty assignment wins at its tier and is NOT a `1`."""
-    import os
-    return os.environ.get(env_name, "").strip() == "1"
-
-
-def cmd_plane_expire(args) -> int:
-    """Attention expiry sweep: emit a terminal `expired` task event for
-    every assignment whose deadline passed more than the horizon ago and
-    that nothing has closed — so the attention queue shows what needs the
-    operator NOW, not last Tuesday. A Lane-B fact through normal ingest,
-    idempotent by construction (already-terminal rows are excluded). Runs
-    from a dormant timer, never the ingest daemon. `--dry-run` reports."""
-    root = _resolve_paths(args).root
-
-    def run() -> int:
-        from ..plane.expiry import (
-            DEFAULT_AFTER_DAYS, expirable, expired_events)
-        from ..plane.emit_api import emit_batch
-
-        path = db_file(root)
-        if not path.exists():
-            print(f"expire: no plane db at {path} — nothing to sweep",
-                  file=sys.stderr)
-            return 0
-        days = args.after_days if args.after_days is not None \
-            else DEFAULT_AFTER_DAYS
-        if days < 0:
-            raise ContractViolation(
-                [{"loc": ("after_days",), "msg": "expiry horizon cannot be"
-                  " negative"}])
-        conn = connect(path)
-        try:
-            migrate(conn)
-            plan = expirable(conn, after_days=days)
-        finally:
-            conn.close()
-        for aid in plan.unattributed:
-            print(f"expire: skipped {aid} — no fleet attribution (never"
-                  " emitted under a fabricated fleet)", file=sys.stderr)
-        if args.dry_run or not plan.rows:
-            print(f"attention: {'would expire' if args.dry_run else 'expired'}"
-                  f" {len(plan.rows)} assignment(s) overdue >{days}d"
-                  f" (cutoff {plan.cutoff})")
-            return 0
-        emit_batch(root, expired_events(plan, after_days=days))
-        print(f"attention: expired {len(plan.rows)} assignment(s) overdue"
-              f" >{days}d (cutoff {plan.cutoff})")
-        return 0
-
-    return _guarded("plane expire", run)
-
-
-def _sample_value(raw: str) -> str:
-    """A stored sample value for a line of text: an object reads as
-    `key=value` pairs (host.load's one/five/fifteen), anything else as is."""
-    try:
-        value = json.loads(raw)
-    except ValueError:
-        return raw
+def _sample_text(value) -> str:
+    """A sample value for a line of text: an object reads as `key=value`
+    pairs (host.load's one/five/fifteen), anything else as is."""
     if isinstance(value, dict):
         return " ".join(f"{k}={v}" for k, v in value.items())
     return json.dumps(value) if isinstance(value, (list, str)) else str(value)
 
 
-def cmd_plane_samples(args) -> int:
-    """#1644: one metric_samples family for one subject over a window.
-
-    Read-only by construction: the package's `open_ro` connection (mode=ro
-    plus query_only), and no migrate(), so it can run against a live plane.
-    Every row is fetched and the connection closed before anything is
-    printed, because a reader that keeps its snapshot keeps the daemon's
-    checkpoint from resetting the WAL (#1905, #1912). An unreachable plane
-    refuses at rc 3, and so does one that records no subject of the kind,
-    because a wrong root is not an empty window. An empty window is an
-    answer (rc 0), and says so."""
-    from ..plane.identity import aliases_of_kind, lookup
-    from ..plane.queries import METRIC_SERIES_SQL
-    from ..plane.registries import METRIC_NAMES
+def samples_dispatch(args):
+    """#1644 `plane samples`: one metric family for one subject over a window.
+    The read owner (`plane/samples.py`) closes the plane before this returns,
+    so nothing renders while it is open. An empty window is an answer; an
+    unreachable plane, or one that records no subject of the kind, refuses."""
+    from ..command_result import CommandFailure, CommandOutput
+    from ..context import resolve_paths
+    from ..plane import samples
     from .checkins import _since   # the read doors' one --since grammar
 
-    root = _resolve_paths(args).root
-    metric = args.metric
-    if metric not in METRIC_NAMES:
-        print(f"samples: unknown metric {metric!r}; known: {', '.join(sorted(METRIC_NAMES))}",
-              file=sys.stderr)
-        return 2
-    kind = args.kind or ("host" if metric.startswith("host.") else None)
-    if kind not in _SAMPLE_SUBJECT_KINDS:
-        print(f"samples: name the subject's --kind for {metric!r}"
-              f" (one of: {', '.join(_SAMPLE_SUBJECT_KINDS)})", file=sys.stderr)
-        return 2
-    window = {}
-    for flag, raw in (("--since", args.since), ("--until", args.until)):
-        try:
-            # None is "not given" (--until's default, now); "" is a malformed
-            # bound, which _since refuses like any other.
-            window[flag] = _since(raw) if raw is not None else datetime.now(timezone.utc)
-        except ValueError:
-            print(f"samples: cannot parse {flag} {raw!r} (use e.g. 24h, 30m, or an ISO"
-                  " instant; a naive one is UTC)", file=sys.stderr)
-            return 2
-    since, until = window["--since"], window["--until"]
-    if since > until:
-        print(f"samples: --since ({since.isoformat()}) is after --until ({until.isoformat()})",
-              file=sys.stderr)
-        return 2
-
-    conn, why = open_ro(root)
-    if conn is None:
-        print(f"samples: the plane cannot answer: {why}", file=sys.stderr)
-        return 3
     try:
-        known = aliases_of_kind(conn, kind)
-        subject = args.subject
-        if subject is None and len(known) == 1:
-            subject = known[0]
-        uid = lookup(conn, kind, subject) if subject is not None else None
-        rows = (conn.execute(METRIC_SERIES_SQL, (uid, metric, since.isoformat(),
-                                                 until.isoformat())).fetchall()
-                if uid else [])
-    except sqlite3.Error as exc:
-        why = str(exc)
-    finally:
-        conn.close()
-    # Everything below runs with the plane released, a refusal included.
-    if why is None and not known:
-        # No subject of the kind at all is a wrong root or an emitter that never
-        # ran, not an empty window, so it refuses like an unreachable plane.
-        why = (f"it records no {kind} subject, so it holds no {metric} samples"
-               " (a wrong --root, or nothing has emitted one here)")
-    if why is not None:
-        print(f"samples: the plane cannot answer: {why}", file=sys.stderr)
-        return 3
-    if subject is None:
-        print(f"samples: {len(known)} {kind} subjects are recorded; name one with --subject:"
-              f" {', '.join(known)}", file=sys.stderr)
-        return 2
-    if uid is None:
-        print(f"samples: no {kind} subject named {subject!r}; recorded: {', '.join(known)}",
-              file=sys.stderr)
-        return 2
-    samples = [{"occurred_at": r["occurred_at"], "value": json.loads(r["value"]),
-                "status": r["status"]} for r in rows]
-    if args.json:
-        print(json.dumps({"metric": metric, "unit": METRIC_NAMES[metric].get("unit"),
-                          "kind": kind, "subject": subject, "since": since.isoformat(),
-                          "until": until.isoformat(), "samples": samples}))
-        return 0
-    unit = METRIC_NAMES[metric].get("unit", "")
-    print(f"{metric} ({unit}) for {kind} {subject}, {since.isoformat()} to {until.isoformat()}:"
-          f" {len(rows)} sample(s)")
-    for r in rows:
-        at = datetime.fromisoformat(r["occurred_at"]).astimezone(timezone.utc)
-        flag = f"  [{r['status']}]" if r["status"] else ""
-        print(f"  {at.strftime('%Y-%m-%dT%H:%M:%SZ')}  {_sample_value(r['value'])}{flag}")
-    return 0
-
-
-_SAMPLE_SUBJECT_KINDS = ("host", "vault", "fleet", "actor", "bot_instance", "session")
+        kind = samples.subject_kind(args.metric, args.kind)
+        window = {}
+        for flag, raw in (("--since", args.since), ("--until", args.until)):
+            try:
+                # None is "not given" (--until's default, now); "" is a
+                # malformed bound, which _since refuses like any other.
+                window[flag] = _since(raw) if raw is not None else datetime.now(timezone.utc)
+            except ValueError:
+                raise CommandFailure("invalid_argument", f"cannot parse {flag} {raw!r} (use e.g."
+                                     " 24h, 30m, or an ISO instant; a naive one is UTC)") from None
+        since, until = window["--since"], window["--until"]
+        if since > until:
+            raise CommandFailure("invalid_argument", f"--since ({since.isoformat()}) is after"
+                                 f" --until ({until.isoformat()})")
+        root = resolve_paths(root=args.root, fleet=args.fleet, seed=args.seed).root
+        data = samples.read(root, args.metric, kind=kind, subject=args.subject,
+                            since=since, until=until)
+    except samples.SamplesError as exc:
+        raise CommandFailure(exc.code, str(exc)) from exc
+    except PendingMigrationError as exc:
+        raise CommandFailure("migration_required", f"plane samples refused: {exc}") from exc
+    except DowngradeError as exc:
+        raise CommandFailure("downgrade", f"plane samples refused: {exc}") from exc
+    lines = [f"{data['metric']} ({data['unit'] or ''}) for {data['kind']} {data['subject']},"
+             f" {data['since']} to {data['until']}: {len(data['samples'])} sample(s)"]
+    for sample in data["samples"]:
+        at = datetime.fromisoformat(sample["occurred_at"]).astimezone(timezone.utc)
+        flag = f"  [{sample['status']}]" if sample["status"] else ""
+        lines.append(f"  {at.strftime('%Y-%m-%dT%H:%M:%SZ')}  {_sample_text(sample['value'])}{flag}")
+    return CommandOutput(data, lines=tuple(lines))
 
 
 def cmd_plane_import_workstreams(args) -> int:
@@ -965,24 +489,24 @@ def cmd_plane_import_workstreams(args) -> int:
     root = paths.root
     fleet = resolve_fleet_name(paths)
     if not fleet:
-        print("import-workstreams: no fleet named -- pass --fleet or run from"
+        print("migration workstreams: no fleet named -- pass --fleet or run from"
               " a fleet-scoped root", file=sys.stderr)
         return 2
     src = Path(args.file) if args.file else (paths.fleet_state / "workstreams.json")
 
     probe = probe_source(src)
     if probe.state == SOURCE_ABSENT:
-        print(f"import-workstreams: no residual file at {src} -- nothing to import", file=sys.stderr)
+        print(f"migration workstreams: no residual file at {src} -- nothing to import", file=sys.stderr)
         return 0
     if probe.state == SOURCE_UNREADABLE:
-        print(f"import-workstreams: {src} exists but could not be opened -- refusing"
+        print(f"migration workstreams: {src} exists but could not be opened -- refusing"
               " rather than reporting nothing to import", file=sys.stderr)
         return 3
 
     try:
         file_doc = json.loads(src.read_text())
     except (OSError, json.JSONDecodeError) as exc:
-        print(f"import-workstreams: {src} is present but unreadable: {exc}", file=sys.stderr)
+        print(f"migration workstreams: {src} is present but unreadable: {exc}", file=sys.stderr)
         return 3
 
     from ..workstreams import lease_days_env
@@ -990,13 +514,13 @@ def cmd_plane_import_workstreams(args) -> int:
 
     pr = load_lib_module(paths.lib, "plane-readers.py")
     if pr is None:
-        print(f"import-workstreams: lib/plane-readers.py is not readable under {paths.lib}",
+        print(f"migration workstreams: claudlobby/_runtime_scripts/plane-readers.py is not readable under {paths.lib}",
               file=sys.stderr)
         return 3
 
     mode = capture_mode(_load_capture_config(root), fleet)
     if mode != "full":
-        print(f"import-workstreams: this fleet's capture mode is {mode!r} -- the"
+        print(f"migration workstreams: this fleet's capture mode is {mode!r} -- the"
               " imported note/next_step text on progressed/renewed/blocked events"
               " will be STRIPPED at the door (workstream_event.note,"
               " workstream_event.next_step are CONTENT fields); the construct's"
@@ -1030,20 +554,20 @@ def cmd_plane_import_workstreams(args) -> int:
             the_plan = plan(file_doc, existing, fleet=fleet, import_batch=batch, lease_days=lease_days)
 
             for w in the_plan.warnings:
-                print(f"import-workstreams: {w.workstream_id}: {w.detail}", file=sys.stderr)
+                print(f"migration workstreams: {w.workstream_id}: {w.detail}", file=sys.stderr)
             for s in the_plan.skipped:
-                print(f"import-workstreams: skipped {s.workstream_id} -- {s.reason}", file=sys.stderr)
+                print(f"migration workstreams: skipped {s.workstream_id} -- {s.reason}", file=sys.stderr)
 
-            if args.dry_run:
+            if not args.apply:
                 for ev in the_plan.events:
                     print(json.dumps(ev, separators=(",", ":")))
-                print(f"import-workstreams: would emit {len(the_plan.events)} event(s)"
+                print(f"migration workstreams: would emit {len(the_plan.events)} event(s)"
                       f" for {len(file_doc.get('workstreams', {})) - len(the_plan.skipped)}"
                       f" row(s), batch {batch}", file=sys.stderr)
                 return 0
 
             if not the_plan.events:
-                print("import-workstreams: nothing new to import (every row already"
+                print("migration workstreams: nothing new to import (every row already"
                       " on the plane, or the file holds none)")
                 return 0
 
@@ -1052,21 +576,21 @@ def cmd_plane_import_workstreams(args) -> int:
             duplicate = sum(1 for o in outcomes if o.status == "duplicate")
             spooled = [o for o in outcomes if o.status == "spooled"]
             if spooled:
-                print(f"import-workstreams: {len(spooled)} event(s) SPOOLED -- durable"
+                print(f"migration workstreams: {len(spooled)} event(s) SPOOLED -- durable"
                       " on disk, not yet in the plane; retry with `claudlobby plane"
                       " spool retry` before archiving the source file", file=sys.stderr)
                 return RC_SPOOLED
 
-            print(f"import-workstreams: {committed} event(s) committed,"
+            print(f"migration workstreams: {committed} event(s) committed,"
                   f" {duplicate} already present, batch {batch}")
 
             if args.archive:
                 dest = src.with_name(f"{src.name}.imported-{batch}")
                 src.rename(dest)
-                print(f"import-workstreams: archived {src.name} -> {dest.name}")
+                print(f"migration workstreams: archived {src.name} -> {dest.name}")
             return 0
 
-    return _guarded("import-workstreams", run)
+    return _guarded("migration workstreams", run)
 
 
 def cmd_plane_view(args) -> int:
@@ -1074,7 +598,8 @@ def cmd_plane_view(args) -> int:
     supervision posture as serve: systemd/launchd own backgrounding). Binds
     LOCALHOST by default — Tailscale Serve fronts it per the design walk;
     --host is the raw-bind dev fallback."""
-    root = _resolve_paths(args).root
+    paths = _resolve_paths(args)
+    root = paths.root
     try:
         from ..plane.view import begin_shutdown, create_app
         import uvicorn
@@ -1084,7 +609,7 @@ def cmd_plane_view(args) -> int:
             "install with: pip install -e '.[plane-ui]'"
             f" ({exc})", file=sys.stderr)
         return 1
-    app = create_app(root)
+    app = create_app(root, package=paths.package)
 
     class _ViewServer(uvicorn.Server):
         """Stops when asked. A held SSE connection kept the daemon alive

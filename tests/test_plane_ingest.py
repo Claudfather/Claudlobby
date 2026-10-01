@@ -7,6 +7,7 @@ import pytest
 from claudlobby.plane.contracts import validate_request
 from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.ids import ensure_host_uid, mint_event_id
+from claudlobby.plane.identity import resolve
 from claudlobby.plane.ingest import ingest, now_iso
 from claudlobby.plane.migrations import migrate
 
@@ -51,6 +52,45 @@ def test_ingest_writes_ledger_and_family(env):
     assert row["fleet_uid"].startswith("fleet_")
     ledger = conn.execute("SELECT family FROM ingest_ledger").fetchone()
     assert ledger["family"] == "communication"
+
+
+def test_ingest_attaches_existing_fleet_and_bot_identities_to_their_parents(env):
+    conn, host = env
+    now = now_iso()
+    fleet = resolve(conn, "fleet", "example-fleet", now=now)
+    other_fleet = resolve(conn, "fleet", "other", now=now)
+    actor = resolve(conn, "actor", "bot:example-fleet/alpha", now=now)
+    recipient = resolve(conn, "actor", "bot:other/beta", now=now)
+    instance = resolve(conn, "bot_instance", "bot:example-fleet/alpha", now=now)
+
+    raw = _intent_req()
+    raw["payload"]["recipient"] = "bot:other/beta"
+    ingest(conn, *validate_request(raw), host_uid=host)
+    snapshot = {
+        "event_type": "registry_snapshot", "emitter": "test-suite",
+        "fleet": "example-fleet",
+        "payload": {
+            "entity_type": "bot", "entity_alias": "bot:example-fleet/alpha",
+            "cause": "probe", "scan_id": "parent-repair",
+            "payload": {
+                "alias": "bot:example-fleet/alpha", "account": "default",
+                "service": "com.x.alpha", "model": "opus",
+                "posture": {"permissions_mode": "acceptEdits"},
+                "composed_hashes": {}, "declared_hash": "dh",
+                "schema_version": "1",
+            },
+        },
+    }
+    ingest(conn, *validate_request(snapshot), host_uid=host)
+
+    rows = {r["uid"]: r for r in conn.execute(
+        "SELECT uid, parent_uid, provisional FROM identity_registry")}
+    assert rows[fleet]["parent_uid"] == host
+    assert rows[other_fleet]["parent_uid"] == host
+    assert rows[actor]["parent_uid"] == fleet
+    assert rows[recipient]["parent_uid"] == other_fleet
+    assert rows[instance]["parent_uid"] == fleet
+    assert rows[actor]["provisional"] == rows[instance]["provisional"] == 0
 
 
 def test_duplicate_event_id_is_success_and_writes_nothing(env):

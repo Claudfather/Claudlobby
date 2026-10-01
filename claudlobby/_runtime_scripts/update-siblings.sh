@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+# update-siblings.sh — fast-forward stale framework checkouts to the newest
+# cut RELEASE, guarded, and say so every time it moves one (#1009).
+#
+# The applier half of source currency; notify-behind.sh is the reporter. Split
+# because they run on different clocks for different reasons: reporting is
+# daily and harmless, applying swaps code under a live fleet and is weekly.
+#
+# ---------------------------------------------------------------------------
+# WHY A RELEASE TAG AND NOT origin/main
+# ---------------------------------------------------------------------------
+# A sibling here is a DEPENDENCY, not a work-in-progress: Claudron backs every
+# bot's vault door. Auto-pulling origin/main would put unreleased dev code
+# (0.5.0.dev0 as of writing) onto four production fleets with no human in the
+# loop — the inverse of #1009's incident and a worse one, because it fails
+# forward into code nobody chose to ship.
+#
+# The cost of that choice is explicit and must not be hidden: when main carries
+# fixes that were never released, this script correctly does nothing, and
+# notify-behind.sh raises `source_release_gap` naming exactly that. That is the
+# situation #1009 was filed from — Claudron at v0.4.0, the newest tag, with two
+# data-integrity fixes sitting unreleased on main. The remedy there is to cut a
+# release, which is a human decision, not an unattended pull.
+#
+# A repo with no release tags ships by merging, so its default branch IS its
+# track — see repo_newest_tag, which owns that rule for both scripts. There is
+# deliberately no "track main instead" env knob: the composer emits only
+# CLAUDLOBBY_ROOT and PATH into a host unit, so such a knob could never reach
+# the scheduled run, and a flag the timer cannot set is scaffolding that only
+# ever desynchronises the reporter from the applier.
+#
+# $CLAUDLOBBY_ROOT IS DELIBERATELY NOT UPDATED HERE. Pulling the compositor is
+# not the same decision as updating a dependency: immutable Claudlobby releases
+# require an operator's sealed build, plan, and activation. It is NOT excluded because a pull would rewrite this script under the
+# running interpreter: git's checkout replaces a changed file (a new inode)
+# instead of writing it in place, and bash keeps reading the inode it opened,
+# so a running script finishes on its old bytes. Measured on the Pi (git
+# 2.39.5, ext4), with an in-place write as the positive control that does
+# corrupt a run (#1251 issuecomment-5845912184; grow and shrink re-derived
+# in issuecomment-5846080563). notify-behind.sh still REPORTS the root.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS CLOCK
+# ---------------------------------------------------------------------------
+# Editable installs make the swap immediate: /home/user/claudron resolves the
+# `claudron` import straight to the checkout, so a pull changes the CLI for the
+# NEXT subprocess call — no reinstall, no restart, no warning. A running session
+# keeps the module it imported at start, but every fresh `claudron` invocation
+# it makes crosses the version boundary mid-task.
+#
+# So this runs weekly, in the maintenance block, 30 minutes ahead of
+# weekly-worker-restart (Sun 05:00) — the same stage-then-apply-at-a-restart
+# shape update-claude-code.sh already uses for the binary, which stages daily
+# and lets the weekly bounce apply it.
+#
+# Stated honestly rather than overclaimed: weekly-worker-restart is dormant by
+# default, so on a fleet that never enrolled it the exposure runs until each
+# bot's next natural restart. That is the same exposure the staged binary
+# already carries, it is bounded by the guards below, and every crossing is on
+# the record via the sibling_updated event. A fleet that wants the window tight
+# enrolls the weekly restart.
+#
+# ---------------------------------------------------------------------------
+# GUARDS — a pull that eats somebody's work is worse than a stale sibling
+# ---------------------------------------------------------------------------
+#   * dirty working tree, local unpushed commits, or detached HEAD → SKIP +
+#     notice, never a stash and never a force (repo_pull_blocker).
+#   * fast-forward ONLY — never merge, never rebase. A checkout that cannot
+#     fast-forward has diverged, which is a human's to resolve.
+#   * every movement emits sibling_updated. #1009 is a defect about an
+#     invisible sibling; an auto-updating sibling that says nothing is the same
+#     defect wearing better clothes.
+#
+# Usage: update-siblings.sh [<fleet-name>] [--dry-run]
+#   --dry-run reports what it would do and touches nothing.
+
+set -euo pipefail
+
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
+install_error_trap ""
+
+if [ -n "${CLAUDLOBBY_RELEASE_ID:-}" ]; then
+    if [ "${1:-}" = "--selected-release" ]; then
+        [ "$#" -ge 2 ] && [ "$#" -le 3 ] \
+            && [ "$2" = "$CLAUDLOBBY_RELEASE_ID" ] \
+            && [ "$LIB_DIR" = "${CLAUDLOBBY_NATIVE_DIR:-}" ] || {
+            echo "update-siblings: selected release context differs" >&2
+            exit 2
+        }
+        shift 2
+        [ "$#" -eq 0 ] || [ "$1" = "--dry-run" ] || {
+            echo "update-siblings: invalid selected option" >&2
+            exit 2
+        }
+    else
+        [ "$#" -eq 0 ] && [ -n "${CLAUDLOBBY_CLI:-}" ] \
+            && [ -n "${CLAUDLOBBY_ROOT:-}" ] \
+            && [ "$LIB_DIR" = "${CLAUDLOBBY_NATIVE_DIR:-}" ] || {
+            echo "update-siblings: selected timer context is incomplete" >&2
+            exit 2
+        }
+        exec env CLAUDLOBBY_UPDATE_SCHEDULED=1 "$CLAUDLOBBY_CLI" \
+            --root "$CLAUDLOBBY_ROOT" host update siblings
+    fi
+fi
+
+DRY_RUN=0
+FLEET=""
+for arg in "$@"; do
+    case "$arg" in
+    -h | --help) show_help "${BASH_SOURCE[0]}"; exit 0 ;;
+    --dry-run) DRY_RUN=1 ;;
+    *) [ -z "$FLEET" ] && FLEET="$arg" ;;
+    esac
+done
+FLEET="${FLEET:-${CLAUDLOBBY_FLEET:-}}"
+
+BOTS_DIR="$(resolve_bots_dir "$FLEET")"
+LOG="${CLAUDLOBBY_ROOT}/state/update-siblings.log"
+STATE_DIR="${CLAUDLOBBY_ROOT}/state/currency"
+mkdir -p "$STATE_DIR" 2>/dev/null || true
+setup_log_dir "$LOG"
+
+log() { printf '%s %s\n' "$(ts_iso)" "$*" >> "$LOG"; }
+
+if ! git -C "$CLAUDLOBBY_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    log "SKIP — $CLAUDLOBBY_ROOT is not a git checkout"
+    exit 0
+fi
+
+WATCHED=()
+while IFS= read -r _r; do
+    [ -n "$_r" ] && WATCHED+=("$_r")
+done < <(discover_framework_checkouts)
+
+log "START dry_run=$DRY_RUN watching ${#WATCHED[@]}: ${WATCHED[*]}"
+
+SELF=$(git -C "$CLAUDLOBBY_ROOT" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$CLAUDLOBBY_ROOT")
+
+for repo in "${WATCHED[@]}"; do
+    name=$(basename "$repo")
+
+    if [ "$repo" = "$SELF" ]; then
+        log "[$name] SKIP — the compositor itself is not auto-updated (see header)"
+        continue
+    fi
+
+    if ! with_timeout 120 git -C "$repo" fetch --quiet --tags origin 2>>"$LOG"; then
+        log "[$name] FETCH FAILED — skipped"
+        emit_script_error "" "update-siblings.sh" 1 \
+            "git fetch origin failed for $name — update skipped"
+        continue
+    fi
+
+    # Resolve the target BEFORE the safety check, so a blocked repo can still
+    # report whether it was actually behind — "skipped because dirty" is only
+    # actionable when the operator knows an update was waiting.
+    target=$(repo_currency_target "$repo")
+
+    if ! behind=$(git -C "$repo" rev-list --count "HEAD..$target" 2>>"$LOG"); then
+        log "[$name] SKIP — cannot compare against $target"
+        emit_script_error "" "update-siblings.sh" 1 \
+            "$name: cannot resolve $target — currency unknown, repo unwatched"
+        continue
+    fi
+
+    if [ "${behind:-0}" -eq 0 ]; then
+        log "[$name] CURRENT at $target"
+        currency_clear "$name" "sibling_update_blocked"
+        currency_clear "$name" "sibling_update_failed"
+        continue
+    fi
+
+    blocker=$(repo_pull_blocker "$repo")
+
+    # --dry-run short-circuits ABOVE every side effect, notices included. A
+    # dry run that pages the operator is not a dry run, and the house
+    # convention (orphan-browser-reaper.sh) is "reports without killing or
+    # notifying".
+    if [ "$DRY_RUN" -eq 1 ]; then
+        if [ -n "$blocker" ]; then
+            log "[$name] DRY-RUN would SKIP ($blocker) — $behind behind $target"
+        else
+            log "[$name] DRY-RUN would fast-forward $behind commit(s) to $target"
+        fi
+        continue
+    fi
+
+    if [ -n "$blocker" ]; then
+        log "[$name] BLOCKED ($blocker) — $behind behind $target, not pulling"
+        notify_currency "$name" "sibling_update_blocked" "$behind" \
+            "$name on $(hostname) is $behind commit(s) behind $target but was NOT updated: $blocker — resolve it by hand, then: git -C $repo pull --ff-only"
+        continue
+    fi
+
+    from=$(git -C "$repo" rev-parse --short HEAD)
+    # --ff-only on merge, not pull: pull would consult the branch's configured
+    # rebase/merge behaviour, and a repo with pull.rebase=true would rebase the
+    # checkout instead of refusing. merge --ff-only cannot do anything but
+    # fast-forward or fail.
+    if ! git -C "$repo" merge --ff-only "$target" >>"$LOG" 2>&1; then
+        # A DISTINCT type from sibling_update_blocked, and the distinction is
+        # load-bearing rather than cosmetic. "We refused, because a person is
+        # working here" and "we tried and git would not" are different events
+        # for the operator, and they are the only thing that can tell the two
+        # apart in a test: `git merge --ff-only` refuses a dirty tree on its
+        # own, so asserting merely that HEAD did not move passes just as well
+        # with the guards deleted. It did — that is how this was found.
+        log "[$name] FF FAILED — diverged from $target, human needed"
+        notify_currency "$name" "sibling_update_failed" "$target" \
+            "$name on $(hostname) could not fast-forward to $target (diverged) — resolve by hand: git -C $repo status"
+        continue
+    fi
+    to=$(git -C "$repo" rev-parse --short HEAD)
+
+    log "[$name] UPDATED $from -> $to ($behind commit(s) to $target)"
+    # Loud by construction. A silent auto-update is #1009 inverted: the fleet
+    # would again be running code nobody knew had changed.
+    notify_currency "$name" "sibling_updated" "$to" \
+        "$name on $(hostname) fast-forwarded $from -> $to ($behind commit(s)) to $target — running sessions pick it up on their next $name call; restart to be certain"
+done
+
+log "DONE"
+exit 0

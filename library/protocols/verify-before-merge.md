@@ -9,12 +9,12 @@ When a reviewer reports "DONE," that means they've FINISHED reviewing — not th
 
 ### 1. Parse the verdict
 
-Read each reviewer's OWN latest verdict, never just the newest comment on the PR — reading only the newest comment is how a manager and `lib/pr-review-state.py` can reach opposite answers on the same PR (`lib/pr-review-state.py` resolves it the same way: a PR stays blocked while ANY reviewer's own latest verdict is a block, whoever posted most recently). Look for the explicit header on each:
+Read each reviewer's OWN latest verdict, never just the newest comment on the PR — reading only the newest comment can hide another reviewer's live block. `claudlobby --json task reviews OWNER/REPO --pr N` resolves each recorded reviewer's latest verdict: a PR stays blocked while ANY reviewer's own latest verdict is a block, whoever posted most recently. Look for the explicit header on each:
 
 - `**[alex] [VERDICT] ship it** — reviewed at a1b2c3d` → safe to merge
 - `**[alex] [VERDICT] request changes** — reviewed at a1b2c3d` → bounce to engineer with fix direction; do NOT merge
 
-`alex`/`a1b2c3d` stand in for the reviewer's name and the commit sha they reviewed — check the sha against the PR's current head before trusting an old approval; a mismatch means the verdict may already be stale (`lib/pr-review-state.py` calls this `COMMIT-STALE`). CI green + review completion is necessary but not sufficient. The verdict text is the authoritative signal. Make it a gated function: read verdict → if ship-it, merge; else, bounce.
+`alex`/`a1b2c3d` stand in for the reviewer's name and the commit sha they reviewed — check the sha against the PR's current head before trusting an old approval; `task reviews` marks a mismatch `COMMIT-STALE`. CI green + review completion is necessary but not sufficient. The verdict text and recorded review-role actor must agree. Make it a gated function: read verdict → if ship-it and all independent merge rungs pass, merge; else, bounce.
 
 If a Request Changes verdict was missed and the PR merged, file a follow-up issue and dispatch the fix immediately.
 

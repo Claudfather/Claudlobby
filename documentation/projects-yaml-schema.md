@@ -6,7 +6,7 @@ the platform runs, `fleet.yaml` = WHO the bots are). It is optional and sits bes
 `fleet.yaml`: overlay mode `local/<fleet>/projects.yaml`, root mode
 `<root>/projects.yaml`. Copy `projects.yaml.example` to get started.
 
-Validated by `claudlobby validate` (bad tiers, empty repos, unknown keys —
+Validated by `claudlobby config validate` (bad tiers, empty repos, unknown keys —
 all with did-you-mean suggestions). Composed by `claudlobby generate`.
 
 ## It is the override, not the prerequisite
@@ -15,8 +15,8 @@ all with did-you-mean suggestions). Composed by `claudlobby generate`.
 `projects.yaml` is absent (or holds no projects), `claudlobby` derives one
 project per repo any bot declares in `scope.repos`, at tier `review`, and
 the composed table says so in a line above it. Everything downstream — the
-`PROJECT_TIER_*` map, `dispatch-task.sh --project`, the manager check-in's
-`dispatch` action — works against a derived registry exactly as it does
+`PROJECT_TIER_*` map, canonical task admission, the manager check-in's
+assignment link — works against a derived registry exactly as it does
 against a declared one.
 
 Three rules govern the derivation, and each exists because the alternative
@@ -33,12 +33,11 @@ breaks a shipped door:
   `gh issue list --repo <owner/name>`. A bot with repos and no `org` keeps the
   bare value rather than having an owner invented for it.
 - **A slug always starts with a letter.** A repo such as `30-day-abs` would
-  slug to a key that the validator, `lib/checkin-contract.py` and
-  `dispatch-task.sh --project` all reject, so such a key is prefixed (`p-`)
+  slug to a key that the validator and `claudlobby/checkin_contract.py` reject, so such a key is prefixed (`p-`)
   rather than emitted broken or silently dropped.
 
 Write this file when a project's real closure bar is **not** `review` — that
-is the whole reason to declare one. `claudlobby doctor`'s `goal-binding` rung
+is the whole reason to declare one. `claudlobby host doctor`'s `goal-binding` rung
 reports which of the two a fleet is running on.
 
 ## What composition emits

@@ -25,7 +25,7 @@ REPO = Path(__file__).resolve().parent.parent
 
 def _readers():
     spec = importlib.util.spec_from_file_location(
-        "plane_readers", REPO / "lib" / "plane-readers.py")
+        "plane_readers", REPO / "claudlobby/_runtime_scripts" / "plane-readers.py")
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     return m
@@ -125,10 +125,10 @@ class TestTheDoorsPrintIt:
         (86400, "full 24h window"),
     ])
     def test_the_shared_helper_is_what_the_doors_call(self, tmp_path, window_s, needle):
-        """`commands/core._coverage_line` is the one wording for report-back and
+        """`commands/status_read._coverage_line` is the one wording for report-back and
         uptime; events has its own entry point but the same two reader calls.
         Pinned so a door cannot quietly grow a second phrasing."""
-        from claudlobby.commands.core import _coverage_line
+        from claudlobby.commands.status_read import _coverage_line
 
         conn = _plane(tmp_path, [("system", _ago(2.2)), ("system", _ago(0))])
 
@@ -144,7 +144,7 @@ class TestTheDoorsPrintIt:
         first time the door ran against a shared install that had not been
         updated. A door must not lose its answer because the sentence about
         that answer could not be built."""
-        from claudlobby.commands.core import _coverage_line
+        from claudlobby.commands.status_read import _coverage_line
 
         class _Old:
             class pr:                      # readers without coverage()

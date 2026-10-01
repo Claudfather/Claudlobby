@@ -170,7 +170,7 @@ KNOWN_CREDENTIAL_SOURCES: frozenset[str] = frozenset(
         "cli:gh-token",
         # RESERVED, and deliberately unresolvable: no resolver arm reads this.
         # Fleet-scope GitHub App minting SHIPPED as the use-time helper
-        # (lib/git-credential-github-app + lib/mint-github-token.sh, App-auth
+        # (claudlobby/_runtime_scripts/git-credential-github-app + claudlobby/_runtime_scripts/mint-github-token.sh, App-auth
         # P1 #1271) rather than as this boot-time resolver — a resolver would
         # put ~1h tokens at rest in the launch env, the exact hazard #1214 F5
         # names. The arm stays reserved for #252's per-bot sidecar, where a

@@ -153,9 +153,10 @@ Never set `GSC_ALLOW_DESTRUCTIVE=true`, and never add a write tool to a bot's
    ```
    To reuse the GA4 service account, this is the *same* path as `GA4_SA_KEY_PATH`.
 6. **Attach the MCP** — add `google-search-console` to a bot's `mcp:` list, then
-   `claudlobby generate` (see *Equipping a bot*). The first `uvx` run downloads the
+   stage with `claudlobby config plan`, review `claudlobby config diff PLAN_ID`,
+   and activate with `claudlobby host activate PLAN_ID --install-directory PATH` (see *Equipping a bot*). The first `uvx` run downloads the
    package into the uv cache — warm it once (`uvx --from mcp-search-console==0.3.2
-   mcp-search-console --help`, or `claudlobby warm-cache`) so first bot use isn't slow.
+   mcp-search-console --help`, or `claudlobby host cache warm`) so first bot use isn't slow.
 7. **Verify the connection.** On first live use, run `list_properties` to confirm the
    SA sees the property, then a small `get_search_analytics` for the last 7 days on
    its `site_url`. A successful authenticated response is the proof — see gotchas on
@@ -304,7 +305,8 @@ GA4 SA by pointing at the same key file):
 GSC_SA_KEY_PATH=/abs/path/to/local/<fleet>/.secrets/<name>.json
 ```
 
-Then `claudlobby generate`. The 15 read-only tools compose in as auto-allowed
+Then stage with `claudlobby config plan`, review `claudlobby config diff PLAN_ID`,
+and activate with `claudlobby host activate PLAN_ID --install-directory PATH`. The 15 read-only tools compose in as auto-allowed
 `mcp__google-search-console__*` reads (the five write tools stay prompt-gated, so
-nothing mutating runs unattended). `claudlobby doctor` flags the `.env` var if
+nothing mutating runs unattended). `claudlobby host doctor` flags the `.env` var if
 missing.

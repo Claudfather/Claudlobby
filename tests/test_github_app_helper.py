@@ -1,4 +1,4 @@
-"""App-auth P1 (#1271): lib/git-credential-github-app + mint + setup.
+"""App-auth P1 (#1271): claudlobby/_runtime_scripts/git-credential-github-app + mint + setup.
 
 Lane-A wrappers (model: tests/test_creds_check_telegram.py): the real scripts
 run under subprocess with the network stubbed on a private PATH. Real openssl
@@ -28,14 +28,14 @@ from tests.conftest import (
     _write_exec,
     booby_trap_git,
     constructed_env,
-    plane_emit_env,
     read_fleet_events,
 )
+from tests.test_plane_events_door import _serving
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-HELPER = REPO_ROOT / "lib" / "git-credential-github-app"
-MINT = REPO_ROOT / "lib" / "mint-github-token.sh"
-SETUP = REPO_ROOT / "lib" / "setup-github-app.sh"
+HELPER = REPO_ROOT / "claudlobby/_runtime_scripts" / "git-credential-github-app"
+MINT = REPO_ROOT / "claudlobby/_runtime_scripts" / "mint-github-token.sh"
+SETUP = REPO_ROOT / "claudlobby/_runtime_scripts" / "setup-github-app.sh"
 
 CTX = "protocol=https\nhost=github.com\n\n"
 STUB_TOKEN = "ghs_STUBTOKEN1234567890"
@@ -102,7 +102,7 @@ esac
 
 
 @pytest.fixture
-def app_env(tmp_path, rsa_key):
+def app_env(tmp_path, rsa_key, *, scratch_plane_env):
     """Scratch root + curl stub + a fully-configured env (config via env vars)."""
     stub = tmp_path / "stub-bin"
     stub.mkdir()
@@ -115,11 +115,11 @@ def app_env(tmp_path, rsa_key):
         PATH=f"{stub}:{os.environ['PATH']}",
         STUB_DIR=str(stub),
         HOME=str(home),
-        CLAUDLOBBY_ROOT=str(root),
+
         GITHUB_APP_ID="999001",
         GITHUB_APP_INSTALLATION_ID="555002",
         GITHUB_APP_PRIVATE_KEY_PATH=str(rsa_key),
-        **plane_emit_env(),          # auth_mint_failed lands on the plane (no fleet: under _host)
+        **scratch_plane_env(root, initialize=True),          # auth_mint_failed lands on the plane (no fleet: under _host)
     )
     return {"env": env, "stub": stub, "root": root, "home": home}
 
@@ -217,9 +217,11 @@ class TestHelperGet:
         assert r.returncode == 0
         assert r.stdout == ""
 
-    def test_http_401_is_loud_quit_plus_event(self, app_env):
-        env = dict(app_env["env"], GITHUB_APP_STUB_MODE="http401")
-        r = _run(HELPER, env)
+    def test_http_401_is_loud_quit_plus_event(self, app_env, scratch_plane_env):
+        with _serving(app_env["root"], scratch_plane_env) as socket:
+            env = dict(app_env["env"], GITHUB_APP_STUB_MODE="http401",
+                       PLANE_SOCKET=str(socket))
+            r = _run(HELPER, env)
         assert r.returncode != 0
         assert "quit=1" in r.stdout, "hard failure must stop the helper chain (D11)"
         assert "password=" not in r.stdout

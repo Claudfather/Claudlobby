@@ -42,6 +42,10 @@ _TERMINAL = ",".join(f"'{e}'" for e in TERMINAL_TASK_EVENTS)
 NON_TERMINAL_CLAUSE = (
     " NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
     f"   AND t.assignment_id = a.assignment_id AND t.event IN ({_TERMINAL}))"
+    " AND NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
+    "   AND t.emitter='claudlobby.tasks.v1' AND t.event='cancelled'"
+    "   AND t.assignment_id IS NULL AND t.work_item_id=a.work_item_id"
+    "   AND t.ingest_seq>a.ingest_seq)"
 )
 
 # The plane's OPEN SET for one assignee AS OF an instant (cutover chunk 3, the
@@ -82,14 +86,14 @@ def not_sentinel_sql(col: str = "alias") -> str:
 # THE definition of "a fleet's reports": report-class communications on the
 # fleet's ROOM AXIS — sent by the fleet (fleet_uid) or addressed to it
 # (recipient_fleet: a worker on another fleet reporting to this fleet's manager
-# is this fleet's report). brief's unacked list, `claudlobby report-back` and
-# the overview card all read this text (lib/plane-readers.py carries the
+# is this fleet's report). Brief's unacked list, `fleet reports list`, and
+# the overview card all read this text (claudlobby/_runtime_scripts/plane-readers.py carries the
 # byte-identical copy, pinned): a second population let the card count a report
 # the manager's brief never showed, which no ack could clear. Binds
 # (fleet_uid, fleet_alias, since, since, since_seq, since_seq).
 FLEET_REPORTS_SQL = (
     "SELECT c.occurred_at, c.msg_id, c.sender_uid, c.sender_alias, c.body, c.source_ref,"
-    " c.ingest_seq"
+    " c.ingest_seq, c.privacy, c.truncated, c.work_item_id, c.assignment_id"
     " FROM communications c"
     " WHERE c.message_class = 'report' AND (c.fleet_uid = ? OR c.recipient_fleet = ?)"
     " AND (? IS NULL OR c.occurred_at >= ?) AND (? IS NULL OR c.ingest_seq > ?)"
@@ -124,7 +128,10 @@ OPEN_ASSIGNMENTS_AT_SQL = (
     "      OR (a.source_ref LIKE 'dispatch-log:%' AND a.source_ref NOT LIKE 'dispatch-log:sha:%'"
     "          AND t.assignment_id IN (SELECT s.assignment_id FROM assignments s"
     "            WHERE s.assignee_uid = a.assignee_uid AND s.source_ref = a.source_ref"
-    "              AND (? IS NULL OR s.occurred_at <= ?)))))"
+    "              AND (? IS NULL OR s.occurred_at <= ?)))"
+    "      OR (t.emitter='claudlobby.tasks.v1' AND t.event='cancelled'"
+    "          AND t.assignment_id IS NULL AND t.work_item_id=a.work_item_id"
+    "          AND t.ingest_seq>a.ingest_seq)))"
     " ORDER BY a.occurred_at, a.ingest_seq"
 )
 
@@ -164,13 +171,33 @@ _TX_ACTIVATION = ",".join(f"'{e}'" for e in ACTIVATION_TX_EVENTS)
 # this dispatch". Without this filter a `received` row alone (the sender's
 # pane_submitted lost — plane down at dispatch, up at receipt) made
 # `never_activated` fire for a message that was demonstrably received.
+#
+# The assignment's delivery message, ONE definition for every arm, the status
+# ladder and the board: the legacy `dispatch_msg_id` where the assignment row
+# carries one, else the newest canonical `assignment deliver` communication
+# (command_type='task') linked to this task AND this assignment, addressed to
+# this assignee in this fleet on this host. Canonical delivery never writes
+# dispatch_msg_id, so a join on that column alone hid every failed canonical
+# send from the board.
+_DELIVERY_MSG = (
+    "COALESCE(a.dispatch_msg_id, (SELECT c.msg_id FROM communications c"
+    " WHERE c.work_item_id = a.work_item_id AND c.assignment_id = a.assignment_id"
+    " AND c.command_type = 'task' AND c.recipient_uid = a.assignee_uid"
+    " AND c.fleet_uid = a.fleet_uid AND c.host_uid = a.host_uid"
+    " ORDER BY c.ingest_seq DESC LIMIT 1))")
 _TX_EXISTS = ("EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
-              " AND e.msg_id = a.dispatch_msg_id AND e.event <> 'received')")
+              f" AND e.msg_id = {_DELIVERY_MSG} AND e.event <> 'received')")
 _TX_ACTIVATED = ("EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
-                 " AND e.msg_id = a.dispatch_msg_id"
+                 f" AND e.msg_id = {_DELIVERY_MSG}"
                  f" AND e.event IN ({_TX_ACTIVATION}))")
 _TX_FAILED = ("EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
-              " AND e.msg_id = a.dispatch_msg_id AND e.event='failed')")
+              f" AND e.msg_id = {_DELIVERY_MSG} AND e.event='failed')")
+
+# The resolved delivery message per assignment, for the board's delivery field.
+# Format with ph = the assignment_id placeholders.
+ASSIGNMENT_DELIVERY_MSG_SQL = (
+    f"SELECT a.assignment_id, {_DELIVERY_MSG} AS msg_id FROM assignments a"
+    " WHERE a.assignment_id IN ({ph})")
 
 # --- the delivery JOIN (chunk P, #1501; fold F1/F3) ---------------------------
 # Delivery, derived ONCE here — the honest replacement for reading
@@ -178,7 +205,7 @@ _TX_FAILED = ("EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
 # receiver ingested (94 of 180 large sends the week before chunk O were wrong);
 # the RECEIVER's own row can. A `received` transmission carries the byte length
 # and sha256 of the prompt the receiving session actually got (received_bytes /
-# received_sha256, in `detail`, landed by lib/plane-dispatch-in.sh), keyed to
+# received_sha256, in `detail`, landed by claudlobby/_runtime_scripts/plane-dispatch-in.sh), keyed to
 # the sender's msg_id.
 #
 # fold F1: it JOINs that against the SENDER's WIRE proof (wire_sha256 /
@@ -217,6 +244,33 @@ _TX_FAILED = ("EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
 # practice there is one — MAX(ingest_seq) is defensive). Format with ph = the
 # msg_id placeholders; bind the msg_ids once. json_extract reads each proof out
 # of `detail`, the NEWEST_ACK_SQL idiom.
+# The receiver's fleet is proved by the event envelope plus the identity
+# registry. Historical bare names are usable only within that fleet; a marker
+# naming another fleet cannot turn a same-named bot into the intended recipient.
+_RECEIPT_MATCH_SQL = (
+    " e.kind='transmission' AND e.event='received'"
+    " AND e.host_uid=c.host_uid AND e.fleet_uid=recipient_fleet.uid"
+    " AND json_extract(e.detail, '$.destination') IN"
+    " (recipient.alias, substr(recipient.alias, 5),"
+    "  substr(recipient.alias, instr(recipient.alias, '/') + 1))"
+)
+
+# Separate destination history from per-message proof, so view batches do not
+# perform a destination-wide scan for every communication they display.
+_RECEIPT_PARTIES_SQL = (
+    " FROM communications c"
+    " LEFT JOIN identity_registry recipient ON recipient.kind='actor'"
+    "  AND recipient.uid=c.recipient_uid AND recipient.alias=c.recipient_alias"
+    " LEFT JOIN identity_registry recipient_fleet ON recipient_fleet.kind='fleet'"
+    "  AND recipient.alias LIKE 'bot:%/%'"
+    "  AND recipient_fleet.alias=substr(recipient.alias, 5, instr(recipient.alias, '/') - 5)"
+)
+
+RECEIPT_HISTORY_SQL = (
+    "SELECT EXISTS (SELECT 1 FROM events e WHERE" + _RECEIPT_MATCH_SQL + ")"
+    + _RECEIPT_PARTIES_SQL + " WHERE c.msg_id=?"
+)
+
 DELIVERY_STATUS_SQL = (
     "SELECT c.msg_id AS msg_id, s.wire_bytes AS wire_bytes,"
     " r.received_bytes AS received_bytes,"
@@ -229,29 +283,24 @@ DELIVERY_STATUS_SQL = (
     "    THEN 'altered'"
     "  WHEN s.msg_id IS NOT NULL THEN 'unconfirmed'"
     "  ELSE NULL"
-    " END AS delivery"
-    " FROM communications c"
+    " END AS delivery, r.ingest_seq AS received_ingest_seq"
+    + _RECEIPT_PARTIES_SQL +
     " LEFT JOIN ("
-    "  SELECT e.msg_id AS msg_id,"
-    "   json_extract(e.detail, '$.destination') AS destination,"
+    "  SELECT e.ingest_seq, e.msg_id,"
     "   json_extract(e.detail, '$.received_sha256') AS received_sha256,"
     "   json_extract(e.detail, '$.received_bytes') AS received_bytes"
-    "  FROM events e"
-    "  WHERE e.kind='transmission' AND e.event='received'"
-    "   AND e.ingest_seq = (SELECT MAX(e2.ingest_seq) FROM events e2"
-    "    WHERE e2.kind='transmission' AND e2.event='received' AND e2.msg_id = e.msg_id)"
-    " ) r ON r.msg_id = c.msg_id AND r.destination = c.recipient_raw"
+    "  FROM events e WHERE e.kind='transmission' AND e.event='received'"
+    " ) r ON r.ingest_seq=(SELECT MAX(e.ingest_seq) FROM events e"
+    "  WHERE e.msg_id=c.msg_id AND" + _RECEIPT_MATCH_SQL + ")"
     " LEFT JOIN ("
-    "  SELECT e.msg_id AS msg_id,"
+    "  SELECT e.ingest_seq, e.msg_id,"
     "   json_extract(e.detail, '$.wire_sha256') AS wire_sha256,"
     "   json_extract(e.detail, '$.wire_bytes') AS wire_bytes"
-    "  FROM events e"
+    "  FROM events e WHERE e.kind='transmission'"
+    "   AND e.event IN ('pane_submitted','carrier_queued')"
+    " ) s ON s.ingest_seq=(SELECT MAX(e.ingest_seq) FROM events e"
     "  WHERE e.kind='transmission' AND e.event IN ('pane_submitted','carrier_queued')"
-    "   AND e.ingest_seq = (SELECT MAX(e2.ingest_seq) FROM events e2"
-    "    WHERE e2.kind='transmission'"
-    "     AND e2.event IN ('pane_submitted','carrier_queued')"
-    "     AND e2.msg_id = e.msg_id)"
-    " ) s ON s.msg_id = c.msg_id"
+    "   AND e.msg_id=c.msg_id AND e.host_uid=c.host_uid AND e.fleet_uid IS c.fleet_uid)"
     " WHERE c.msg_id IN ({ph})"
 )
 
@@ -559,9 +608,7 @@ def attention_arms_params(now: str) -> tuple:
     return attention_params(now) * 2
 
 
-_NON_TERMINAL_A = (
-    "NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
-    f"   AND t.assignment_id = a.assignment_id AND t.event IN ({_TERMINAL}))")
+_NON_TERMINAL_A = NON_TERMINAL_CLAUSE.strip()
 
 ATTENTION_SQL = (
     "SELECT a.assignment_id FROM assignments a"
@@ -607,25 +654,16 @@ NUDGE_STATE_SQL = (
 )
 
 # --- resolving ONE task a human names (chunk M-A fold, F6) --------------------
-# "The open assignments carrying this task id" existed three times — the
-# stdlib reader's `TASK_OPEN_SQL`, `commands/task.py`'s `OPEN_BY_TASK_SQL`,
-# and the shape both refusal ladders reason about. Three spellings of one
-# question is how a door starts refusing an id another door acts on. Here it
-# is once; `lib/plane-readers.py` carries the byte-identical stdlib twin, the
-# `OPEN_ASSIGNMENTS_AT_SQL` pattern, pinned by test.
+# The historical shell reader's `TASK_OPEN_SQL` carries a byte-identical
+# stdlib twin of this lookup, pinned by test. It remains for legacy reference
+# resolution; canonical Task operations use the task-state reducer.
 #
-# There is deliberately NO fleet or assignee scope in the SQL. An operator may
-# nudge or withdraw ANY task they can name — they are not a member of a fleet
-# — and the sender's roster does not hold a cross-fleet worker (44.6% of
-# dispatch traffic). Ambiguity is answered by naming the assignment
-# (`--assignment`, the fold's F5), not by silently narrowing the search to the
-# caller's own fleet and acting on whatever survives.
+# There is deliberately NO fleet or assignee scope in this historical lookup;
+# its caller must disambiguate matching assignments explicitly. Canonical
+# task mutations use fleet-scoped IDs and the task-state reducer instead.
 #
-# Columns are the union the two callers need, so one row serves the CLI's
-# re-check message (title, age, assignee, the task's own manager) and the bash
-# door's refusal listing (dispatch_msg_id, assignee, fleet). Newest first:
-# the ORDER only decides how candidates are LISTED, never which one is acted
-# on — a single match is the only thing either door acts on.
+# Columns retain the legacy lookup shape for the stdlib reader. Newest first:
+# the ORDER decides how candidates are listed, never which one is acted on.
 _OPEN_ROW_SELECT = (
     "SELECT a.work_item_id, a.assignment_id, a.dispatch_msg_id, a.occurred_at,"
     " w.title, i.alias AS assignee, m.alias AS assigned_by, f.alias AS fleet"
@@ -690,18 +728,18 @@ TASK_STATUS_SQL = (
     "  AND t.event <> 'supplied_id_not_open'"
     "  ORDER BY t.ingest_seq DESC LIMIT 1),"
     " CASE"
-    "  WHEN a.dispatch_msg_id IS NULL THEN 'created_not_sent'"
+    f"  WHEN {_DELIVERY_MSG} IS NULL THEN 'created_not_sent'"
     "  WHEN EXISTS (SELECT 1 FROM events x WHERE x.kind='transmission'"
-    "    AND x.msg_id = a.dispatch_msg_id"
+    f"    AND x.msg_id = {_DELIVERY_MSG}"
     f"    AND x.event IN ({_TX_OPEN})) THEN 'open'"
     "  WHEN EXISTS (SELECT 1 FROM events x WHERE x.kind='transmission'"
-    "    AND x.msg_id = a.dispatch_msg_id"
+    f"    AND x.msg_id = {_DELIVERY_MSG}"
     f"    AND x.event IN ({_TX_UNRESOLVED})"
     "    AND NOT EXISTS (SELECT 1 FROM events y WHERE y.kind='transmission'"
     "      AND y.msg_id = x.msg_id AND y.attempt_no = x.attempt_no"
     "      AND y.event='failed')) THEN 'pending_unacknowledged'"
     "  WHEN EXISTS (SELECT 1 FROM events x WHERE x.kind='transmission'"
-    "    AND x.msg_id = a.dispatch_msg_id"
+    f"    AND x.msg_id = {_DELIVERY_MSG}"
     "    AND x.event='failed') THEN 'dispatch_failed'"
     "  ELSE 'created_not_sent'"
     " END) AS status,"
@@ -924,22 +962,37 @@ def is_bare_events_scan(plan_detail: str, aliases: frozenset[str]) -> bool:
 # row is still returned -- the door exists to show every decision, and dropping
 # the over-cap ones would hide exactly the records that most need looking at.
 #
-# SELECT/FROM through the fleet scope -- the two constant WHERE terms and the
-# fleet range, shared by every shape `checkin_rows_sql` produces. Binds so
-# far: fleet, fleet.
+def checkin_event_scope_sql(col: str = "e") -> str:
+    """Scope check-in facts by recorded fleet, with an explicit legacy fallback.
+
+    Current facts have an authoritative fleet_uid. Historical facts with no
+    fleet_uid can only be scoped through their bot dispatcher alias. Binds the
+    fleet alias three times: registry lookup, then the two alias range bounds.
+    """
+    return (f"({col}.fleet_uid = (SELECT uid FROM identity_registry"
+            " WHERE kind = 'fleet' AND alias = ?)"
+            f" OR ({col}.fleet_uid IS NULL AND {fleet_alias_range(col + '.subject_alias')}))")
+
+
+# SELECT/FROM through the same recorded-fleet scope as check-in assignment
+# links. Current local-human decisions have a fleet UID but no bot alias;
+# historical null-fleet rows retain the exact bot-alias fallback.
 _CHECKIN_ROWS_HEAD = (
     "SELECT e.subject_alias AS subject_alias, e.occurred_at AS occurred_at,"
     " e.detail AS detail, e.detail_truncated AS detail_truncated, e.ingest_seq AS ingest_seq,"
     " e.source_ref AS source_ref"
     " FROM events e"
     " WHERE e.kind = 'system' AND e.event = 'checkin_decision'"
-    f" AND {fleet_alias_range('e.subject_alias')}"
+    f" AND {checkin_event_scope_sql('e')}"
+    " AND (" + fleet_alias_range("e.subject_alias")
+    + " OR (e.fleet_uid IS NOT NULL AND e.subject_alias LIKE 'human:%'))"
 )
 
 _CHECKIN_ROWS_ORDER = f" ORDER BY {_epoch('e.occurred_at')} DESC, e.ingest_seq DESC"
 
 
-def checkin_rows_sql(*, since: bool = False, bot: bool = False, limit: bool = False) -> str:
+def checkin_rows_sql(*, since: bool = False, bot: bool = False, limit: bool = False,
+                     checkin_id: bool = False) -> str:
     """The check-in decision rows query (PR 3 chunk 4): the window, the bot
     filter and --limit bound here rather than pulled whole into Python and
     filtered there (PR 1's shape) -- a wide --since still shrinks what
@@ -949,13 +1002,13 @@ def checkin_rows_sql(*, since: bool = False, bot: bool = False, limit: bool = Fa
     OPT-IN and appended in this fixed order onto `_CHECKIN_ROWS_HEAD`: the
     alias equality (`bot`), the since floor (`since`), THEN the order
     clause, THEN `LIMIT` (`limit`) -- `LIMIT` has to trail `ORDER BY`
-    syntactically, the one term here whose position is not free. With every
-    flag False this reproduces PR 1's shipped string byte-for-byte, which is
-    what lets `CHECKIN_ROWS_SQL = checkin_rows_sql()` stay a valid alias for
-    every existing reference (test_the_no_bounds_sql_is_the_pr1_string).
+    syntactically, the one term here whose position is not free. The shared
+    base query admits human actors only under the recorded fleet UID;
+    historical bot rows retain the alias fallback.
 
-    Binds, in the order a caller must supply them: fleet, fleet [, alias]
-    [, since] [, limit] -- `fleet_alias_range` binds the fleet TWICE, so
+    Binds: fleet, fleet, fleet, fleet, fleet [, checkin ref] [, alias]
+    [, since] [, limit] -- current UID scope, legacy alias fallback and
+    a separate exact bot-alias guard, so
     every optional term is appended AFTER it. `collect_checkins`
     (commands/checkins.py) gates its params list on the SAME three booleans
     this function is called with, in the SAME order, so the SQL shape and
@@ -967,6 +1020,8 @@ def checkin_rows_sql(*, since: bool = False, bot: bool = False, limit: bool = Fa
     lexical compare reads a ten-minutes-old `-04:00` row as hours stale
     (`_epoch`'s own docstring, above)."""
     sql = _CHECKIN_ROWS_HEAD
+    if checkin_id:
+        sql += " AND e.source_ref = ?"
     if bot:
         sql += " AND e.subject_alias = ?"
     if since:
@@ -997,9 +1052,10 @@ def checkin_dispatch_rows_sql(n: int) -> str:
     DDL forces a system row's assignment_id / work_item_id COLUMNS to NULL
     (0001_kernel.sql), so the address lives in the detail and the join is a
     json_extract -- never the column, which is null by construction for this kind.
-    Fleet-scoped on the DISPATCHER's own alias (the decision rows' own predicate):
-    a 32-hex id is unique, but one bot name on two fleets (#526) is the failure it
-    costs nothing to exclude. The join walks the `kind='system'` slice through
+    Fleet-scoped by the recorded fleet_uid, with bot-alias scoping only for
+    historical null-fleet rows. This also admits a local human dispatcher on
+    a new fact without treating `--by` provenance as its authority. The join
+    walks the `kind='system'` slice through
     `idx_events_kind_seq` with the cheap `event =` filter ahead of any `json_extract`.
 
     There is deliberately no `plane-lookup.py --checkin-dispatch` sibling: this
@@ -1007,7 +1063,7 @@ def checkin_dispatch_rows_sql(n: int) -> str:
     read connection. A bash-side copy with no bash caller is the `--supersedes`
     dead-flag shape (#1032) -- add the mode when a caller exists.
 
-    Binds: fleet, fleet, then one per checkin id.
+    Binds: fleet, fleet, fleet, then one per checkin id.
     """
     ph = ",".join("?" * n)
     d = _detail_json("e.detail")
@@ -1019,7 +1075,7 @@ def checkin_dispatch_rows_sql(n: int) -> str:
         " e.occurred_at AS occurred_at, e.ingest_seq AS ingest_seq"
         " FROM events e"
         " WHERE e.kind = 'system' AND e.event = 'checkin_dispatch'"
-        f" AND {fleet_alias_range('e.subject_alias')}"
+        f" AND {checkin_event_scope_sql('e')}"
         f" AND json_extract({d}, '$.checkin_id') IN ({ph})"
         f" ORDER BY {_epoch('e.occurred_at')}, e.ingest_seq"
     )

@@ -3,7 +3,7 @@
 `measure_claude_version` (lib-common) is the only thing that reads a version:
 the binary RAN and the first line of its stdout carries X.Y.Z, or it is
 could-not-measure with a reason. Every consumer goes through it: the update
-job, the query door `lib/claude-version.sh` and so the registry scan, the eval's
+job, the query door `claudlobby/_runtime_scripts/claude-version.sh` and so the registry scan, the eval's
 version pin, the onboarding seeds and the permissions ladder's record. Each
 one REFUSES when the binary cannot run, rather than recording a stand-in value.
 Six copies of the reader existed, and three of them turned could-not-measure
@@ -22,7 +22,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
+import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -32,7 +35,8 @@ from tests.conftest import _write_exec, constructed_env
 from tests.test_update_claude_code_verify import broken_stub, healthy
 
 REPO = Path(__file__).resolve().parent.parent
-LIB = REPO / "lib"
+LIB = REPO / "claudlobby/_runtime_scripts"
+HARNESS = REPO / "harness"
 DOOR = LIB / "claude-version.sh"
 
 #: Every binary shape the reader has to classify: name -> (script, verdict).
@@ -70,17 +74,25 @@ def _stub(tmp_path: Path, name: str, script: str) -> Path:
     return p
 
 
-def _run(tmp_path: Path, argv: list[str], **env) -> subprocess.CompletedProcess:
+def _run(tmp_path: Path, argv: list[str], *, _timeout=120, **env) -> subprocess.CompletedProcess:
     """argv in a constructed env, with a throwaway HOME and CLAUDLOBBY_ROOT."""
     root = tmp_path / "root"
     root.mkdir(exist_ok=True)
-    return subprocess.run(
+    process = subprocess.Popen(
         argv,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=120,
+        start_new_session=True,
         env=constructed_env(HOME=tmp_path / "home", CLAUDLOBBY_ROOT=root, **env),
     )
+    try:
+        stdout, stderr = process.communicate(timeout=_timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.communicate()
+        raise
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
 
 
 def _bash(tmp_path: Path, code: str, **env) -> subprocess.CompletedProcess:
@@ -104,10 +116,10 @@ def _bash_verdict(tmp_path: Path, binary: str) -> tuple[str | None, str | None]:
 
 
 def _shell_function(script: str, name: str) -> str:
-    """lib/<script>'s function `name`, from its definition line through its closing
+    """A native or measurement script's function `name`, through its closing
     brace: to run one function of a script that cannot be sourced, or to scope a
     search to one function."""
-    text = (LIB / script).read_text()
+    text = ((LIB if script == "lib-common.sh" else HARNESS) / script).read_text()
     start = text.index(f"\n{name}() {{")
     return text[start : text.index("\n}\n", start) + 3]
 
@@ -130,9 +142,20 @@ def test_the_door_prints_a_version_or_nothing(tmp_path, shape):
 
 def test_a_binary_that_hangs_is_could_not_measure_within_the_bound(tmp_path):
     hangs = _stub(tmp_path, "hangs", "#!/bin/bash\nsleep 30\n")
-    r = _door(tmp_path, str(hangs), CLAUDE_VERSION_TIMEOUT_S="1")
+    start = time.monotonic()
+    r = _door(tmp_path, str(hangs), CLAUDE_VERSION_TIMEOUT_S="1", _timeout=10)
     assert (r.returncode, r.stdout) == (3, ""), r.stderr
     assert "did not finish within 1s" in r.stderr, r.stderr
+    assert time.monotonic() - start < 8  # scheduling tolerance, not two bare 30s runs
+
+
+def test_missing_timeout_refuses_without_running_the_binary(tmp_path):
+    marker = tmp_path / "executed"
+    binary = _stub(tmp_path, "must-not-run", f'#!/bin/bash\ntouch "{marker}"\necho 2.1.281\n')
+    r = _bash(tmp_path, f'_TIMEOUT_BIN=""; measure_claude_version "{binary}"; '
+              'printf "%s|[%s]|%s" "$?" "$CLAUDE_VERSION" "$CLAUDE_VERSION_WHY"', _timeout=10)
+    assert r.returncode == 0 and r.stdout.startswith("1|[]|timeout/gtimeout unavailable"), (r.stdout, r.stderr)
+    assert not marker.exists()
 
 
 #: One input per path on which measure_claude_version returns 1: each failing
@@ -205,13 +228,14 @@ def test_with_no_argument_the_door_follows_the_staged_fleet_link(tmp_path):
 
 
 def _paths(tmp_path: Path, lib: Path = LIB):
+    from tests.package_fixtures import source_package
     from claudlobby.paths import Paths
 
     root = tmp_path / "proot"
     root.mkdir(exist_ok=True)
     if not (root / "lib").exists():
         (root / "lib").symlink_to(lib)
-    return Paths(root=root)
+    return Paths(root=root, package=replace(source_package(), native=root / "lib"))
 
 
 @pytest.mark.parametrize("shape", sorted(SHAPES))
@@ -364,7 +388,8 @@ def test_every_seed_caller_stops_on_the_refusal():
     """A refusal a caller ignores is a stand-in by another route: the ladder runs
     without `set -e`, and would boot on with no onboarding seeded."""
     callers = {}
-    for script in sorted(LIB.glob("*.sh")):
+    for script in sorted(path for directory in (LIB, HARNESS)
+                         for path in directory.glob("*.sh")):
         if stops := _seed_calls_stop(script.read_text()):
             callers[script.name] = stops
     ignoring = sorted(name for name, stops in callers.items() if not all(stops))
@@ -439,7 +464,7 @@ def test_the_send_size_probe_refuses_before_building_anything(tmp_path):
     tmp = tmp_path / "tmp"
     tmp.mkdir()
     r = subprocess.run(
-        ["bash", str(LIB / "send-size-probe.sh"), "--n", "1"],
+        ["bash", str(HARNESS / "send-size-probe.sh"), "--n", "1"],
         capture_output=True,
         text=True,
         timeout=120,
@@ -461,7 +486,7 @@ def _eval(tmp_path, claude: str, *args, **env):
     bindir.mkdir(exist_ok=True)
     _write_exec(bindir / "claude", claude)
     return subprocess.run(
-        ["bash", str(LIB / "ab-comms-eval.sh"), *args],
+        ["bash", str(HARNESS / "ab-comms-eval.sh"), *args],
         capture_output=True,
         text=True,
         timeout=300,
@@ -484,12 +509,12 @@ def test_a_real_eval_refuses_when_its_claude_cannot_run(tmp_path):
     assert "COVERAGE_AB_RESULT" not in r.stdout
 
 
-def test_a_dry_run_pins_dry_run_whatever_binary_is_installed(tmp_path):
+def test_a_dry_run_pins_dry_run_whatever_binary_is_installed(tmp_path, built_test_cli):
     """A dry run makes no model call, so a runnable claude on PATH is not part of
     its evidence and must not become its pin."""
     r = _eval(
         tmp_path, healthy("2.1.281"), "--dry-run", "--experiment", "coverage-honesty",
-        "--reps", "1",
+        "--reps", "1", CLAUDLOBBY_CLI=built_test_cli,
     )
     out = r.stdout + r.stderr
     assert r.returncode == 0, out[-1500:]
@@ -500,7 +525,7 @@ def test_a_dry_run_pins_dry_run_whatever_binary_is_installed(tmp_path):
 # --- the update job measures the binary on its own seam, before and after -----------
 
 
-def test_the_update_job_measures_the_fleet_binary_on_its_launch_path(tmp_path):
+def test_the_update_job_measures_the_fleet_binary_on_its_launch_path(tmp_path, *, scratch_plane_env):
     """Versions no real host has, so the only way the job can report them is by
     measuring the stubs on its launch path (CLAUDE_UPDATE_FLEET_PATH, its seam).
     A job that measured on the real launch PATH instead would report the host's
@@ -508,7 +533,7 @@ def test_the_update_job_measures_the_fleet_binary_on_its_launch_path(tmp_path):
     pass by coincidence."""
     from tests.test_update_claude_code_staged import StagedHost
 
-    h = StagedHost(tmp_path, system=healthy("7.7.7"))
+    h = StagedHost(tmp_path, scratch_plane_env=scratch_plane_env, system=healthy("7.7.7"))
     _write_exec(tmp_path / "inplace", healthy("8.8.8"))
     r = h.run(armed=False, NPM_STAGE=tmp_path / "inplace", NPM_STAGE_TARGET=h.system)
     assert r.returncode == 0, (r.stderr, h.log())
@@ -536,7 +561,8 @@ def test_start_bot_and_the_update_job_take_the_launch_path_from_the_one_helper()
     order = re.compile(r"/usr/local/bin:/usr/bin:/bin:\$HOME/\.local/bin")
     spelled = sorted(
         p.name
-        for p in LIB.iterdir()
+        for directory in (LIB, HARNESS)
+        for p in directory.iterdir()
         if p.is_file() and order.search(p.read_text(errors="replace"))
     )
     assert spelled == ["lib-common.sh"], spelled
@@ -544,11 +570,12 @@ def test_start_bot_and_the_update_job_take_the_launch_path_from_the_one_helper()
     assert "fleet_claude_path" in (LIB / "update-claude-code.sh").read_text()
 
 
-def test_the_composer_puts_timers_on_the_same_launch_path():
-    """Composed timer units carry the composer's Python spelling of the order
-    (reload-fleet's `claude plugin update` runs under it), so it is pinned to the
-    bash one byte for byte: a timer and a pane must resolve the same claude."""
-    from claudlobby.composer import _scheduler_tool_path
+def test_the_composer_prepends_selected_release_to_the_same_tool_path(tmp_path, monkeypatch):
+    """The release CLI wins; the remaining tool order matches bot sessions."""
+    import claudlobby.composer as composer
+
+    selected = tmp_path / "release" / "bin" / "claudlobby"
+    monkeypatch.setattr(composer, "selected_cli", lambda: selected)
 
     r = subprocess.run(
         ["bash", "-c", f'. "{LIB}/lib-common.sh"; fleet_launch_path'],
@@ -558,7 +585,7 @@ def test_the_composer_puts_timers_on_the_same_launch_path():
         env=constructed_env(HOME=str(Path.home())),
     )
     assert r.returncode == 0, r.stderr
-    assert _scheduler_tool_path() == r.stdout
+    assert composer._scheduler_tool_path() == f"{selected.parent}:{r.stdout}"
 
 
 def test_a_bare_name_resolves_on_the_launch_path_not_the_callers(tmp_path):
@@ -613,7 +640,8 @@ def test_no_other_script_reads_a_claude_version():
     read = re.compile(r'(?:"\$\{?\w+\}?"|(?:^|(?<=[\s(|;&`]))claude)\s+--version\b', re.M)
     offenders = {
         p.name
-        for p in LIB.iterdir()
+        for directory in (LIB, HARNESS)
+        for p in directory.iterdir()
         if p.is_file()
         and p.suffix in {".sh", ""}
         and read.search(p.read_text(errors="replace"))
@@ -626,6 +654,9 @@ def test_no_other_script_reads_a_claude_version():
     py = [
         p.relative_to(REPO)
         for p in (REPO / "claudlobby").rglob("*.py")
-        if '"--version"' in p.read_text() and p.name != "__main__.py"
+        # Runtime scripts are covered above and build copies of assets retain
+        # their source owners; this half checks the Python implementation package.
+        if p.relative_to(REPO / "claudlobby").parts[0] not in {"_runtime_scripts", "_resources"}
+        and '"--version"' in p.read_text() and p.name != "__main__.py"
     ]
     assert py == [], py

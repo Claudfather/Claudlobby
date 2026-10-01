@@ -20,7 +20,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB_DIR="$SCRIPT_DIR/../lib"
+LIB_DIR="$SCRIPT_DIR/../claudlobby/_runtime_scripts"
 FIXTURES="$SCRIPT_DIR/fixtures/pane-states"
 PASS=0; FAIL=0; TOTAL=0
 
@@ -44,7 +44,7 @@ export PANE_SEND_VERIFY_TICKS=1
 export PANE_SEND_CHUNK_BYTES=400
 export PANE_SEND_CHUNK_SETTLE_S=0.05
 
-# shellcheck source=../lib/lib-common.sh
+# shellcheck source=../claudlobby/_runtime_scripts/lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 
 TMPD=$(mktemp -d)
@@ -371,7 +371,7 @@ assert_eq "...and records a send_unlocked" "1" "$r"
 echo "=== the receipt's repair Enter goes under the same lock ==="
 
 # pane_await_receipt presses ONE more Enter when no receipt comes. It is the
-# one lib/ keystroke outside pane_send_verified, and an Enter landing inside
+# one runtime-script keystroke outside pane_send_verified, and an Enter landing inside
 # another sender's chunks submits that sender's payload half-typed.
 MSG="msg_0123456789abcdef0123456789abcdef"
 : > "$PANE_LOG"; : > "$CAPTURE"

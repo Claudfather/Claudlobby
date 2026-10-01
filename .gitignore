@@ -42,6 +42,10 @@ node_modules/
 # Cloned project repos (legacy: bots clone repos under their own dir)
 */projects/
 
+# Disposable editable-test resources; never commit wheel-built copies.
+claudlobby/_artifact.json
+claudlobby/_resources/
+
 # Logs
 # Runtime state (fleet-state.json, creds-check-state.json, locks)
 state/

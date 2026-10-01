@@ -77,6 +77,19 @@ class ExpiryPlan:
     unattributed: list   # assignment_ids with no fleet alias — skipped, disclosed
 
 
+class ExpiryChanged(RuntimeError):
+    """An assignment changed after the preview and before the write lock."""
+
+
+def require_expirable(conn, plan: ExpiryPlan, *, now: datetime,
+                      after_days: int) -> None:
+    """Recheck a planned batch inside ingest_many's BEGIN IMMEDIATE lock."""
+    current = {r["assignment_id"]: r for r in
+               expirable(conn, now=now, after_days=after_days).rows}
+    if any(current.get(r["assignment_id"]) != r for r in plan.rows):
+        raise ExpiryChanged("assignment changed before expiry commit")
+
+
 def expirable(conn, *, now: datetime | None = None,
               after_days: int = DEFAULT_AFTER_DAYS) -> ExpiryPlan:
     if now is None:
