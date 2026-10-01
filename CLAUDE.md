@@ -8,7 +8,7 @@ Compositor for Claude Code agent fleets. Transforms `fleet.yaml` + `library/` in
 
 **New here?** See [`documentation/getting-started.md`](documentation/getting-started.md) for the clone-to-fleet walkthrough and [`documentation/fleet-yaml-schema.md`](documentation/fleet-yaml-schema.md) for every config field.
 
-**This file is an index.** Detail lives beside what it describes: [`claudlobby/_runtime_scripts/CLAUDE.md`](claudlobby/_runtime_scripts/CLAUDE.md) (each runtime script in depth, and the shell authoring rules), [`harness/CLAUDE.md`](harness/CLAUDE.md) (validation and measurement instruments), the other nested `CLAUDE.md` files, script headers, and `documentation/`. Read "Instruction files" below before adding to this one.
+**This file is an index.** Detail lives beside what it describes: [`claudlobby/_runtime_scripts/CLAUDE.md`](claudlobby/_runtime_scripts/CLAUDE.md) (each runtime script in depth, the contracts of the public-CLI commands that replaced scripts, and the shell authoring rules), [`harness/CLAUDE.md`](harness/CLAUDE.md) (validation and measurement instruments), the other nested `CLAUDE.md` files, script headers, and `documentation/`. Read "Instruction files" below before adding to this one.
 
 ## Ecosystem boundary
 
@@ -87,11 +87,11 @@ One line per script, for routing; operators use the public CLI. **Before changin
 - `reconcile-fleet.sh` — audit supervision state: healthy, orphan, missing, unsupervised-down, unbound
 - `supervisor.sh` — systemd/launchd adapter; the one door for new `systemctl`/`launchctl` calls (other files are ratcheted at their current count)
 - `supervisor-caller.py` — kernel ancestry check for the adapter, so a bot cannot stop its own coordinator
-- `bot-unit-owner.py` — verifies a unit's working directory for the adapter; refuses foreign units
+- `bot-unit-owner.py` — reads a unit's working directory for the adapter without running it; foreign units are left alone, unreadable ownership refuses
 - `runtime-admission.sh` — startup and watchdog release check, and the activation lock
 - `rolling-restart.sh` — restart bots one at a time, each gated on a fresh Telegram `BRIDGE_READY`
 - `weekly-worker-restart.sh` — weekly lossless restart of workers (not managers) onto the staged binary (opt-in)
-- `reload-fleet.sh` — daily plugin update + generate, then a `/reload` of running bots (no restart)
+- `reload-fleet.sh` — daily plugin refresh for the selected fleet, then marks running bots for an idle `/reload` (no restart; never changes authored config)
 - `install-bot.sh` — bot service enrollment (launchd)
 - `install-bot-systemd.sh` — bot service enrollment (systemd)
 
@@ -247,7 +247,7 @@ Each library category has its own format. Check the category's `README.md` for s
 4. Run `claudlobby --fleet <name> config diff PLAN_ID` to verify no unintended rendered drift
 5. Commit to a branch, PR, review
 
-**Before trusting a test run, read [`documentation/test-suite.md`](documentation/test-suite.md).** Never test from a live fleet root; run unsandboxed; the suite is not green, so compare two separately prepared exports (before, after) on failing test **names**, the **counts** line and the **exit code**; never pipe pytest into grep; quarantine a flaky test (`@pytest.mark.quarantine(issue=<N>)`), never deselect it.
+**Before writing or trusting a test, read [`documentation/test-suite.md`](documentation/test-suite.md).** Never test from a live fleet root; run unsandboxed; the suite is not green, so compare two separately prepared exports (before, after) on failing test **names**, the **counts** line and the **exit code**; never pipe pytest into grep; quarantine a flaky test (`@pytest.mark.quarantine(issue=<N>)`), never deselect it.
 
 ### Adding or modifying claudlobby/_runtime_scripts/ scripts
 
@@ -255,7 +255,7 @@ Read [`claudlobby/_runtime_scripts/CLAUDE.md`](claudlobby/_runtime_scripts/CLAUD
 
 ### Validating changes to how a bot behaves — MANDATORY
 
-Any change that affects **how a bot behaves at runtime** (claudlobby/_runtime_scripts/ supervision & observability scripts, hooks, skills, protocols, guardrails, principles, composed `bot.conf` env) must be **empirically validated** before merge: unit tests prove composition, only running the code proves behavior. **Deliver** → **add config** to the canary's `fleet.yaml` → **stage it in an independent canary root** (`host setup`, `config plan --release RELEASE_ID`, `config diff PLAN_ID`; never a production root) → **observe** the real behavior (`bash harness/validate-bot-change.sh` for observability events; otherwise drive the path with the canary's CLI and watch `event list --bot BOT`). **Cite the observation in the PR body**: claimed evidence is not evidence. Ground a fixture for an externally produced shape in a **live capture**, never in the producer's source, committing its shape but never its identifiers. This gate proves the code, not the rollout: separately, the manager validates an independent canary root before coordinated production activation by default (skip for single-bot, product-repo or non-runtime work; the `canary-rollout` protocol). Full text: [`documentation/validating-bot-changes.md`](documentation/validating-bot-changes.md).
+Any change that affects **how a bot behaves at runtime** (claudlobby/_runtime_scripts/ supervision & observability scripts, hooks, skills, protocols, guardrails, principles, composed `bot.conf` env) must be **empirically validated** before merge: unit tests prove composition, only running the code proves behavior. **Deliver** → **add config** to the canary's `fleet.yaml` → **stage it in an independent canary root** (its own labels, `unit_prefix`, Plane state and channels; `host setup`, `config plan --release RELEASE_ID`, `config diff PLAN_ID`; never a production root) → **observe** the real behavior (`bash harness/validate-bot-change.sh` for observability events; otherwise drive the path with the canary's CLI and watch `event list --bot BOT`). **Cite the observation in the PR body**: claimed evidence is not evidence. Ground a fixture for an externally produced shape in a **live capture**, never in the producer's source, committing its shape but never its identifiers. This gate proves the code, not the rollout: separately, the manager validates an independent canary root before coordinated production activation by default (skip for single-bot, product-repo or non-runtime work; the `canary-rollout` protocol). Full text: [`documentation/validating-bot-changes.md`](documentation/validating-bot-changes.md).
 
 ### Validating changes to the onboarding path — MANDATORY
 
@@ -302,10 +302,10 @@ claudlobby bot move <bot> --to <fleet> # move a bot between fleets
 # A manager's acts on one open task (#1481), and the check-in
 claudlobby --json task withdraw TASK_ID --reason "…" --request-id UUID  # terminal withdrawal
 claudlobby --json task escalate TASK_ID --question "…" --request-id UUID  # non-terminal: ask a human
-claudlobby --json task nudge TASK_ID --reason TEXT --request-id UUID 
+claudlobby --json task nudge TASK_ID --reason TEXT --request-id UUID  # record a nudge and notify the fleet manager
 claudlobby --fleet <F> task recheck --request-id UUID [--dry-run]  # ask the manager about due work
 claudlobby --json --fleet F checkin <list|show> [...]  # check-in decisions and outcomes
-claudlobby --json --fleet F checkin record --file FILE --request-id UUID [--dry-run]  # commit before acting
+claudlobby --json --fleet F checkin record --file FILE [--selection-file FILE] --request-id UUID [--dry-run]  # commit before acting
 claudlobby checkin selection <verify|focus-refs> FILE  # offline selection checks
 
 # Scaffolding and one-time migrations (see each --help)

@@ -248,27 +248,37 @@ def test_every_claude_md_has_an_agents_md():
     )
 
 
-def _tree(root: Path) -> dict[str, bytes]:
-    return {p.relative_to(root).as_posix(): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+def _tracked_skills(prefix: str) -> dict[str, dict[str, Path]]:
+    """{skill: {relative file: path}} for the tracked files under `prefix`."""
+    skills: dict[str, dict[str, Path]] = {}
+    for p in _tracked(prefix):
+        name, _, rel = p[len(prefix):].partition("/")
+        if rel:
+            skills.setdefault(name, {})[rel] = REPO_DIR / p
+    return skills
 
 
 def test_every_claude_skill_is_mirrored_for_codex():
-    claude_skills = REPO_DIR / ".claude" / "skills"
-    agents_skills = REPO_DIR / ".agents" / "skills"
-    skills = sorted(p.parent.name for p in claude_skills.glob("*/SKILL.md"))
-    assert skills, "found no .claude/skills/*/SKILL.md; the check would pass vacuously"
+    """Read from git, like every check here: an untracked .DS_Store or a personal
+    skill on one machine is not the repository's to mirror."""
+    claude = _tracked_skills(".claude/skills/")
+    agents = _tracked_skills(".agents/skills/")
+    skills = sorted(name for name, files in claude.items() if "SKILL.md" in files)
+    assert skills, "found no tracked .claude/skills/*/SKILL.md; the check would pass vacuously"
     problems = []
     for name in skills:
-        copy = agents_skills / name
-        if copy.is_symlink() or not copy.is_dir():
-            problems.append(f"{name}: .agents/skills/{name} is not a real directory")
-        elif any(p.is_symlink() for p in copy.rglob("*")):
+        copy = agents.get(name)
+        if copy is None:
+            problems.append(f"{name}: no tracked .agents/skills/{name}/")
+        elif any(p.is_symlink() for p in copy.values()):
             problems.append(f"{name}: holds a symlink")
-        elif _tree(copy) != _tree(claude_skills / name):
+        elif set(copy) != set(claude[name]):
+            problems.append(f"{name}: missing {sorted(set(claude[name]) - set(copy))}, "
+                            f"extra {sorted(set(copy) - set(claude[name]))}")
+        elif any(copy[rel].read_bytes() != claude[name][rel].read_bytes() for rel in copy):
             problems.append(f"{name}: differs from .claude/skills/{name}")
-    for entry in sorted(agents_skills.iterdir()) if agents_skills.is_dir() else []:
-        if entry.name not in skills:
-            problems.append(f"{entry.name}: .agents/skills entry with no .claude/skills source")
+    for name in sorted(set(agents) - set(skills)):
+        problems.append(f"{name}: .agents/skills entry with no .claude/skills source")
     assert not problems, (
         f"{problems}. Each Codex skill is a byte-for-byte copy of its Claude source: "
         f"`rm -rf .agents/skills/<name> && cp -R .claude/skills/<name> .agents/skills/<name>`."

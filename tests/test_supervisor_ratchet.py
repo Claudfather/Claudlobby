@@ -117,7 +117,7 @@ def _current_counts() -> dict[str, int]:
         if rel == ADAPTER_REL:
             continue
         # Markdown is never executed. The scripts' CLAUDE.md (and the AGENTS.md
-        # symlink to it) quotes `systemctl --user stop` and the like while
+        # copy of it) quotes `systemctl --user stop` and the like while
         # documenting them, and prose naming a call is not a call site. A
         # script's own comments still count: this skips documents, not comments.
         if path.suffix == ".md":

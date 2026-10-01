@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 # A folder's agent instructions: Claude Code reads CLAUDE.md, Codex reads the
-# AGENTS.md symlink beside it. They describe the folder they sit in and are
+# AGENTS.md copy beside it. They describe the folder they sit in and are
 # never library or voice content, so a walk over *.md must skip them.
 INSTRUCTION_FILE_NAMES = frozenset({"CLAUDE.md", "AGENTS.md"})
 
