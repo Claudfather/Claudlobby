@@ -13,6 +13,7 @@ import json
 import os
 from dataclasses import replace
 from pathlib import Path
+import re
 import socket
 import stat
 import sys
@@ -600,6 +601,30 @@ def _quiesce_running(root, store, activation_id, pause, old_units, adapter):
     return sockets
 
 
+def _completed_adoption_abort(root: Path, record: ActivationRecord) -> bool:
+    """A verified early first-adoption abort left no candidate effect behind.
+
+    Only its owner's terminal receipt qualifies; a fresh adoption still
+    re-enrolls, re-plans and re-previews SQL from scratch under a new ID.
+    """
+    body = record.body
+    abort = body.get("adoption_abort")
+    result = abort.get("result") if isinstance(abort, dict) else None
+    return (record.status == "rolled_back"
+            and body["intent"].get("source_kind") == "legacy-unsealed"
+            and body["intent"].get("source_release_id") is None
+            and body["previous_selection"] is None
+            and body["completed"] == [] and body["pending"] is None and body["evidence"] == {}
+            and body.get("forward") == {"status": "activating", "completed": [],
+                                        "pending": "producers_paused", "evidence": {}}
+            and isinstance(result, dict)
+            and isinstance(result.get("evidence"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", result["evidence"]) is not None
+            and not body.get("handoff_effects") and not body.get("start_effects")
+            and not body.get("start_phases") and "identity_bindings" not in body
+            and read_migration(root, record.activation_id) is None)
+
+
 def _running_activation(root: Path, activation_id: str, plan_id: str,
                         install_directory: Path, *, legacy_source: bool,
                         adapter: Adapter | None = None) -> ActivationRecord:
@@ -634,7 +659,8 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
             record = read_activation(root, prior.parent.name)
             if record.status not in {"active", "rolled_back"}:
                 raise ActivationError(f"existing activation {record.activation_id} requires explicit repair")
-            if legacy_source:
+            if legacy_source and (record.activation_id == activation_id
+                                  or not _completed_adoption_abort(root, record)):
                 raise ActivationError(f"existing activation {record.activation_id} requires explicit repair")
         plan.check_fresh()
         source = source_plan = None
