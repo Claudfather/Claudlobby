@@ -10,7 +10,7 @@ child-env builders do the same. New subprocess tests use `constructed_env`;
 intentional recording uses `constructed_env(**scratch_plane_env(root))`, with a
 pytest-owned root and private socket. Direct Python database writers still need
 explicit scratch roots: the silencer is not a database access control. See
-[`documentation/testing-plane-isolation.md`](documentation/testing-plane-isolation.md)
+[`documentation/testing-plane-isolation.md`](testing-plane-isolation.md)
 for recording, standalone-shell, and census conventions.
 
 **Build test resources in the disposable export.** After its editable install, run `.venv/bin/python tests/prepare_resources.py --disposable-checkout "$PWD"`. Index a history-free export with `git init --quiet && git add --all` first. Reprepare after source changes. Compare separate prepared before/after exports; a stash/pop in one prepared tree leaves stale assets and is not a valid comparison.

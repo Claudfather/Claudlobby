@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a broken link and three stale lines in the moved script reference (#2035 follow-up)
+
+- `documentation/test-suite.md` links `testing-plane-isolation.md` from its own folder. The link moved one folder down with its text in #2035 and pointed at `documentation/documentation/`.
+- The `reload-fleet.sh` reference row says what the script has done since #1989: a plugin refresh for the selected fleet, then marking running bots for an idle reload. It no longer says the script runs generate; authored config changes only through host activation.
+- The `pull-root.sh` row is gone: #1989 removed the script, and the CLI refuses the job. The `update-siblings.sh` row now gives the current reason the root is excluded: a Claudlobby release needs an operator's sealed build, plan and activation.
+
 ### Changed — the root CLAUDE.md is an index again, and AGENTS.md mirrors every CLAUDE.md for Codex (#2035)
 
 The root `CLAUDE.md` had grown to 168k characters, past Claude Code's 150k warning, almost all of it the scripts table. Every session in this checkout loads it whole, and so does every bot: bot directories sit under the root, and Claude Code reads the `CLAUDE.md` of each parent directory. Codex reads `AGENTS.md` within one 32 KiB budget for the whole chain from the root to the folder it starts in (measured). The root is now a ~27k index with one line per runtime script (all 74). The full reference moved verbatim: the runtime and CLI rows to `claudlobby/_runtime_scripts/CLAUDE.md`, which loads only when a session opens a file there, and the harness rows to a new `harness/CLAUDE.md`, which also indexes all 26 harness scripts. The Python module map moved to `documentation/architecture/module-map.md`, which keeps the Codex chain into `_runtime_scripts/` within budget; the test-suite guidance to `documentation/test-suite.md`; and the full text of the sections the root now summarises to `documentation/validating-bot-changes.md` and `documentation/fleet-update-lifecycle.md`.
