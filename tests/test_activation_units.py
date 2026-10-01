@@ -24,6 +24,11 @@ class RecordedAdapter:
         self.manager = inventory.manager
         self.original = {unit.target: " ".join(dict(unit.properties)[key] for key in
                          ("UnitFileState", "LoadState", "ActiveState")) for unit in inventory.units}
+        scheduled = {unit.declaration.service for unit in inventory.units
+                     if unit.target.endswith(".timer") and unit.declaration.service}
+        # A timer-owned service is paused from and restored to inactive.
+        self.native = {target: " ".join(saved.split()[:2] + ["inactive"]) if target in scheduled else saved
+                       for target, saved in self.original.items()}
         self.states = dict(self.original)
         self.files = {unit.target: unit.installed[0] for unit in inventory.units}
         self.calls = []
@@ -66,20 +71,20 @@ class RecordedAdapter:
             output = self.states[target] + "\n"
         elif function == "svc_activation_pause":
             assert not file.exists() and not file.is_symlink(), "adapter saw unparked installed source"
-            assert args[2] == self.original[target]
+            assert args[2] == self.native[target]
             if target == self.pause_failure:
                 rc = 3
             else:
                 self.states[target] = "unchanged unloaded inactive" if self.manager == "Darwin" else "masked-runtime masked inactive"
         elif function == "svc_activation_resume":
             assert FileSnapshot.read(file) == self.files[target], "resume happened before exact restoration"
-            assert args[2] == self.original[target]
+            assert args[2] == self.native[target]
             if target == self.resume_failure:
                 rc = 3
             else:
-                self.states[target] = self.original[target]
+                self.states[target] = self.native[target]
         elif function == "svc_activation_clear_runtime_mask":
-            assert args[2] == self.original[target] and file.is_file()
+            assert args[2] == self.native[target] and file.is_file()
             output = "removed\n" if target in self.hidden_masks else "absent\n"
             self.hidden_masks.discard(target)
         else:
@@ -435,7 +440,8 @@ def test_phases_park_exact_nodes_then_restore_original_state_and_links(enrollmen
             store.complete("cutover", step, evidence_digest=result.digest)
         assert state.read_activation(store.root, "cutover").status == "rolled_back"
     inventory.check_files()
-    assert adapter.states == adapter.original  # disabled/inactive bot stays so
+    # Disabled/inactive bot stays so; the timer-owned service waits for its timer.
+    assert adapter.states == {**adapter.original, "scheduled.service": "enabled loaded inactive"}
     assert foreign.read_bytes() == before_foreign
     assert os.readlink(wants / "collector.service") == "../collector.service"
 
@@ -601,9 +607,11 @@ def test_legacy_early_abort_restores_only_producer_pause_after_verified_retry(en
         # The timer-owned service ticked off meanwhile: its frozen timer declares
         # it, so that is restored state. A resident service gets no such tolerance.
         adapter.states["scheduled.service"] = "enabled loaded inactive"
-        assert units._scheduled_services(units.load_unit_pause(store, "cutover")) == {"scheduled.service"}
+        pause = units.load_unit_pause(store, "cutover")
+        assert units._scheduled_services(pause.enrollment, pause.phases) == {"scheduled.service"}
         assert units._producer_restored("enabled loaded active", "enabled loaded inactive", scheduled=True)
         assert not units._producer_restored("enabled loaded active", "enabled loaded inactive", scheduled=False)
+        assert not units._producer_restored("enabled loaded failed", "enabled loaded failed", scheduled=True)
         evidence = abort(store, "retry")
         assert evidence.operation == "aborted" and evidence.targets == ("clock.timer", "scheduled.service")
         # Retry reloads before reading restored bytes, then once after restoration;
@@ -667,6 +675,49 @@ def test_early_abort_refuses_wrong_identity_or_progressed_adoption(enrollment, c
                                        sql_user_version=12, adapter=adapter)
         assert state.read_activation(root, "cutover").body == before
         assert adapter.calls[calls:] == []
+
+
+@pytest.mark.parametrize("frozen_active", ["active", "activating"])
+def test_timer_owned_oneshot_mid_run_parks_and_restores_without_resend(enrollment, frozen_active):
+    inventory, phases, plan, adapter, _, _ = enrollment
+    # The inventory itself may be taken while the timer-owned oneshot executes.
+    inventory = _legacy(replace(inventory, units=tuple(
+        replace(unit, properties=tuple((key, frozen_active if key == "ActiveState" else value)
+                                       for key, value in unit.properties))
+        if unit.target == "scheduled.service" else unit for unit in inventory.units)))
+    root = inventory.data_root
+    release = state.read_release(root, plan.release_id)
+    with state.locked_activation(root) as store:
+        # The timer-owned oneshot is executing at the preparation snapshot.
+        adapter.states["scheduled.service"] = "enabled loaded activating"
+        _prepare(store, inventory, phases, plan, adapter)
+        store.begin("cutover", "producers_paused")
+        # The same transition on a timer or an ingest service is drift, before parking.
+        for target in ("clock.timer", "collector.service"):
+            adapter.states[target] = "enabled loaded activating"
+            with pytest.raises(state.ActivationError, match=f"changed before parking: {target}"):
+                units.pause_phase(store, "cutover", "producers", adapter=adapter)
+            adapter.states[target] = adapter.original[target]
+        adapter.states["scheduled.service"] = "enabled loaded failed"
+        with pytest.raises(state.ActivationError, match="changed before parking: scheduled.service"):
+            units.pause_phase(store, "cutover", "producers", adapter=adapter)
+        inventory.check_files()
+        adapter.states["scheduled.service"] = "enabled loaded activating"
+        units.pause_phase(store, "cutover", "producers", adapter=adapter)
+        assert adapter.states["scheduled.service"] == "masked-runtime masked inactive"
+        adapter.calls.clear()
+        units.abort_early_adoption(store, "cutover", reason="probe ran mid-snapshot", release=release,
+                                   sql_user_version=12, adapter=adapter)
+    # The service is restored before its timer, inactive: its next tick, not a resend, runs it.
+    assert [target for function, target in adapter.calls if function == "svc_activation_resume"] == [
+        "scheduled.service", "clock.timer"]
+    assert adapter.states == {**adapter.original, "scheduled.service": "enabled loaded inactive"}
+    assert state.read_activation(root, "cutover").status == "rolled_back"
+    # The frozen enrollment keeps the raw observed state; only the native argument differs.
+    journal = config_install.read_config_install(root, units.journal_id("cutover", "producers"))
+    frozen = state.read_plan(root, journal.plan_id).effects["enrollment"]["units"]
+    assert dict(next(unit for unit in frozen if unit["target"] == "scheduled.service")["properties"])[
+        "ActiveState"] == frozen_active
 
 
 def test_fresh_caller_and_native_state_are_rechecked_before_effects(enrollment):
