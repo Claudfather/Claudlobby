@@ -77,6 +77,42 @@ def test_host_help_and_parse_are_lazy_and_global_scope_order_is_explicit(tmp_pat
     assert list(tmp_path.iterdir()) == []
 
 
+def test_repair_start_routes_through_environment_guard_and_discloses_unknown_write(
+        candidate, monkeypatch, capsys):
+    from claudlobby.commands import operator_context
+    root, release, plan, directory = candidate
+    argv = ["--root", str(root), "--json", "host", "repair-start", "act-1",
+            "--fleet", "example", "--bot", "worker", "--reason", "exited before bridge"]
+    calls, guarded = [], []
+
+    def repair(*args, **kwargs):
+        calls.append((args, kwargs))
+        if len(calls) == 2:
+            raise OSError("fsync failed after replace")
+        return SimpleNamespace(body={"intent": {"release_id": release.release_id, "plan_id": plan.plan_id,
+                                                "install_directory": str(directory)},
+                                     "start_repairs": [{"attempt": {"target": "com.example.worker.service",
+                                                                    "fence": {"ceiling": 1, "fence": "RR_FENCE_x"}}}]})
+
+    monkeypatch.setattr(activation, "repair_failed_bot_start", repair)
+    monkeypatch.setenv("BOT_ID", "worker")
+    assert main(argv) != 0  # A bot caller is refused before any repair owner runs.
+    body = json.loads(capsys.readouterr().out)
+    assert body["command"] == "host.repair-start" and body["error"]["code"] == "conflict"
+    assert calls == []
+    monkeypatch.delenv("BOT_ID")
+    monkeypatch.setattr(operator_context, "require_operator_context", guarded.append)
+    body = call(capsys, argv)
+    # Only the environment guard runs here; the backend owns native ancestry.
+    assert guarded == [None] and calls[0][0] == (root, "act-1")
+    assert calls[0][1] == {"fleet": "example", "bot": "worker", "reason": "exited before bridge"}
+    assert body["data"]["recording"] == "committed"
+    assert body["data"]["target_release_id"] == release.release_id
+    assert main(argv) != 0
+    body = json.loads(capsys.readouterr().out)
+    assert body["data"]["recording"] == "unknown" and "inspect" in body["error"]["hint"]
+
+
 def test_supervision_reap_requires_an_explicit_mode_with_full_schema_command(tmp_path):
     result = _run(PARSE, "--json", "host", "supervision", "reap-orphans",
                   tmp_path=tmp_path)

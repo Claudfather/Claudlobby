@@ -190,6 +190,18 @@ def register_release_subparsers(sub):
                           help="First, forward-only adoption of a reviewed unsealed estate and its existing Plane")
     activate.add_argument("--resume", metavar="ACTIVATION_ID",
                           help="Fix forward the same recorded activation at a supported step with required evidence")
+    repair = _route(hosts, "repair-start", "host.repair-start",
+                    "Archive one verified-dead bot's unresolved activation start")
+    repair.description = ("Operator only. Starts nothing. Requires the selected pending bots_started "
+                          "activation, the named bot's start without a result, identical frozen unit "
+                          "bytes and an inactive unit with no private tmux server. The attempt and its "
+                          "evidence stay in the activation record; then run the sealed candidate's "
+                          "host activate --resume once to start that bot again.")
+    repair.set_defaults(func=_dispatch_host)
+    repair.add_argument("repair_activation_id", metavar="ACTIVATION_ID")
+    repair.add_argument("--fleet", dest="repair_fleet", required=True, metavar="FLEET")
+    repair.add_argument("--bot", required=True, metavar="BOT")
+    repair.add_argument("--reason", required=True, metavar="TEXT")
 
     config = sub.add_parser("config", help="Stage and inspect configuration proposals")
     configs = config.add_subparsers(dest="config_command", required=True)

@@ -198,15 +198,60 @@ def _activate(args, root):
         (f"Activation {args.activation_id}: recorded active; release {executing}; plan {plan.plan_id}.",))
 
 
+def _repair_start(args, root):
+    """Archive one verified-dead unresolved bot start; the sealed resume restarts it."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}", args.repair_activation_id):
+        raise CommandFailure("invalid_argument", "invalid argument: invalid activation ID")
+    executing = _executing_release(root)
+    data = {"activation_id": args.repair_activation_id, "fleet": args.repair_fleet, "bot": args.bot,
+            "executing_release_id": executing, "recorded_activation": None, "recording": "unchanged"}
+    from ..activation import repair_failed_bot_start
+    from ..activation_state import ActivationError, ActivationRefusal
+    try:
+        record = repair_failed_bot_start(root, args.repair_activation_id, fleet=args.repair_fleet,
+                                         bot=args.bot, reason=args.reason)
+    except ActivationRefusal as exc:
+        # The backend raises every failure before its single journal write as a refusal.
+        held = str(exc) == "another host activation holds the lock"
+        raise CommandFailure("conflict", "conflict: host activation lock is held; no change recorded" if held
+                             else f"conflict: start repair refused: {exc}; no change recorded",
+                             data={**data, "recorded_activation": _recorded(root, args.repair_activation_id)},
+                             release_id=executing,
+                             hint="inspect running host operations and activation.lock holders before retrying"
+                             if held else _hint(root)) from exc
+    except (ActivationError, ValueError, OSError) as exc:
+        # The atomic replace may have landed before its fsync or reread failed.
+        raise CommandFailure("unavailable", "unavailable: start repair outcome is unknown",
+                             data={**data, "recording": "unknown",
+                                   "recorded_activation": _recorded(root, args.repair_activation_id)},
+                             release_id=executing,
+                             hint="inspect the activation record's start_effects and start_repairs "
+                                  "before any further repair or resume") from exc
+    archived = record.body["start_repairs"][-1]
+    intent = record.body["intent"]
+    data.update(recorded_activation=_recorded(root, args.repair_activation_id), recording="committed",
+                target_release_id=intent["release_id"], plan_id=intent["plan_id"],
+                archived_target=archived["attempt"]["target"], archived_fence=archived["attempt"]["fence"])
+    resume = (f"claudlobby --root {shlex.quote(str(root))} host activate {intent['plan_id']} "
+              f"--install-directory {shlex.quote(intent['install_directory'])} "
+              f"--resume {args.repair_activation_id}")
+    return CommandOutput(data, executing, (
+        f"Archived the failed start of {args.repair_fleet}/{args.bot}; nothing was started.",
+        f"Next, with release {intent['release_id']}'s sealed CLI: {resume}"))
+
+
 def dispatch(args):
     activating = args.public_command == "host.activate"
+    repairing = args.public_command == "host.repair-start"
     try:
-        if activating:
-            _operator_shell()  # activation itself already checks native ancestry
+        if activating or repairing:
+            _operator_shell()  # refuses bot callers; activation also checks native ancestry
         if args.root is None:
             raise CommandFailure("invalid_argument", "invalid argument: an explicit --root is required",
                                  hint=f"supply claudlobby --root PATH {args.public_command.replace('.', ' ')}")
         root = _host_root(args)
+        if repairing:
+            return _repair_start(args, root)  # The backend checks recorded native ancestry.
         return _activate(args, root) if activating else _status(args, root)
     except CommandFailure as exc:
         if activating:

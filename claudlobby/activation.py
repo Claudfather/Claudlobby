@@ -15,6 +15,7 @@ from dataclasses import replace
 from pathlib import Path
 import socket
 import stat
+import subprocess
 import sys
 import time
 
@@ -945,6 +946,130 @@ def resumable_running_step(record: ActivationRecord) -> str | None:
         supported = (isinstance(record.body.get("start_effects"), dict)
                      and isinstance(record.body.get("start_phases"), dict))
     return step if supported and record.body["pending"] in (None, step) else None
+
+
+def _published_tmux_dir(installed: Path, content: bytes) -> str:
+    """The private tmux directory named by the frozen published unit bytes."""
+    if installed.suffix == ".plist":
+        environment = _darwin_source(content)["environment"]
+    else:
+        try:
+            lines = content.decode("utf-8").splitlines()
+        except UnicodeDecodeError as exc:
+            raise ActivationRefusal("published bot unit is not UTF-8") from exc
+        environment = _environment(" ".join(line.strip().split("=", 1)[1] for line in lines
+                                            if line.strip().startswith("Environment=")))
+    tmpdir = environment.get("TMUX_TMPDIR")
+    if not isinstance(tmpdir, str) or not Path(tmpdir).is_absolute():
+        raise ActivationRefusal("published bot unit has no absolute private tmux directory")
+    return tmpdir
+
+
+def repair_failed_bot_start(root: Path, activation_id: str, *, fleet: str, bot: str,
+                            reason: str, adapter: Adapter | None = None) -> ActivationRecord:
+    """Archive one verified-dead unresolved candidate bot start; never start anything.
+
+    May run from a newer CLI than the target's sealed release: this executable
+    only reads the target's frozen plan/release and observes the named unit
+    through its own adapter. It does not alter the seal, readiness or any other
+    receipt. The sealed candidate's explicit ``--resume`` performs the fresh start.
+
+    Every failure before the single journal write is an ``ActivationRefusal``
+    (nothing changed); a failure after entering the write keeps its own type,
+    because the atomic replace may already have landed.
+    """
+    writing = []
+    try:
+        return _repair_failed_bot_start(root, activation_id, fleet, bot, reason, adapter, writing)
+    except ActivationRefusal:
+        raise
+    except (ActivationError, ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as exc:
+        if writing:
+            raise
+        if str(exc) == "another host activation holds the lock":
+            raise ActivationRefusal("another host activation holds the lock") from exc
+        raise ActivationRefusal("start repair could not verify the recorded activation "
+                                f"({type(exc).__name__})") from exc
+
+
+def _repair_failed_bot_start(root, activation_id, fleet, bot, reason, adapter, writing):
+    root = Path(root).expanduser()
+    if not root.is_absolute() or not root.is_dir():
+        raise ActivationRefusal("start repair requires an explicit existing absolute data root")
+    root = root.resolve()
+    if (not isinstance(reason, str) or not reason.strip() or len(reason) > 500
+            or not reason.isprintable()):
+        raise ActivationRefusal("start repair requires a short reason on one printable line")
+    package = get_resources()
+    adapter = adapter if adapter is not None else Adapter(package)
+    with locked_activation(root) as store:
+        record = read_activation(root, activation_id)
+        intent = record.body["intent"]
+        if record.body["pending"] != "bots_started" or resumable_running_step(record) != "bots_started":
+            raise ActivationRefusal("start repair requires a pending bots_started activation")
+        plan = read_plan(root, intent["plan_id"])
+        release = read_release(root, intent["release_id"])
+        if plan.release_id != release.release_id or plan.release_seal != release.seal_sha256:
+            raise ActivationRefusal("activation plan differs from its sealed release")
+        if read_selection(root) != {"schema": 1, "activation_id": activation_id,
+                                    "release_id": release.release_id, "plan_id": plan.plan_id}:
+            raise ActivationRefusal("host selection is not this activation's candidate")
+        manager = _catalog(units.load_unit_pause(store, activation_id).enrollment["catalog"])[0]
+        matches = [(declaration, item) for declaration, item in planned_units(plan, manager)
+                   if item["enroll"] and item["phase"] == "bots"
+                   and declaration.fleet == fleet and declaration.bot == bot]
+        if len(matches) != 1:
+            raise ActivationRefusal("named fleet/bot is not exactly one candidate bot unit")
+        declaration, item = matches[0]
+        source = str(declaration.source)
+        entries = [entry for entry in enrollment.candidate_entries(store, activation_id, "bots")
+                   if entry["source"] == source]
+        effect = record.body["start_effects"].get(source)
+        if len(entries) != 1 or effect is None:
+            raise ActivationRefusal("named bot has no recorded candidate start intent")
+        if effect["result"] is not None:
+            raise ActivationRefusal("named bot has a durable start result; nothing to repair")
+        entry = entries[0]
+        if (effect["phase"] != "bots" or effect["target"] != entry["target"]
+                or effect["sha256"] != entry["after"]["sha256"] or effect["sha256"] != item["sha256"]
+                or not isinstance(effect.get("fence"), dict)):
+            raise ActivationRefusal("recorded start intent differs from frozen publication")
+        # Native ancestry over this activation's recorded placements, as activation
+        # itself checks; ordinary inventory cannot classify a partial start.
+        for phase in enrollment.PHASES:
+            for placement in enrollment.candidate_entries(store, activation_id, phase):
+                if adapter.call("svc_activation_assert_external", placement["installed"],
+                                placement["target"], str(os.getpid())).returncode:
+                    raise ActivationRefusal("repair caller is hosted or cannot be proved external; "
+                                            "use an operator shell")
+        installed = Path(entry["installed"])
+        try:
+            content = installed.read_bytes()
+            source_bytes = declaration.source.read_bytes()
+        except OSError as exc:
+            raise ActivationRefusal("source or installed bot unit is unreadable") from exc
+        if (hashlib.sha256(content).hexdigest() != effect["sha256"]
+                or hashlib.sha256(source_bytes).hexdigest() != effect["sha256"]):
+            raise ActivationRefusal("source or installed bot unit differs from the frozen start")
+        socket_path = (Path(_published_tmux_dir(installed, content)) / f"tmux-{os.getuid()}"
+                       / declaration.source.stem)
+        try:
+            dead = assert_quiescent(adapter, installed_file=installed, target=entry["target"],
+                                    socket_path=socket_path)
+        except ActivationError as exc:
+            if "socket" in getattr(exc, "detail", ""):
+                raise ActivationRefusal("named bot's private tmux server still accepts or cannot be "
+                                        "observed; inspect that server before repair") from exc
+            raise ActivationRefusal("named bot's unit is not verified inactive; if it is active "
+                                    "(exited) or restarting, explicitly stop that exact verified "
+                                    "bot unit, then retry") from exc
+        if dead.details["socket_state"] not in {"absent", "refused"}:
+            raise ActivationRefusal("named bot's private tmux server is not verified absent")
+        writing.append(True)
+        return store.archive_failed_bot_start(
+            activation_id, source=source, target=entry["target"], sha256=effect["sha256"],
+            fence=effect["fence"], evidence={"details": dead.details, "digest": dead.digest},
+            reason=reason.strip(), repair_artifact=package.artifact_id)
 
 
 def _frozen_unit(row: dict) -> EnrolledUnit:

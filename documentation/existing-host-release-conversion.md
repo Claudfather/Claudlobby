@@ -222,6 +222,40 @@ There is no blanket rollback command for arbitrary unknown native effects.
 Do not invent a new activation ID, remove coordination files, restore old unit
 files over running candidate processes, or report an incomplete adoption as done.
 
+If one candidate bot's start at pending `bots_started` has no result because
+that bot died, and it is verified dead, an operator may archive that one attempt.
+The command starts nothing. It can run from a newer CLI:
+
+```bash
+claudlobby --root "$DATA" host repair-start "$ACTIVATION_ID" \
+  --fleet "$FLEET" --bot "$BOT" --reason "session exited before bridge"
+```
+
+It refuses unless all of these hold: this activation is selected and pending
+`bots_started`; the named bot has a start intent with no result; its source and
+installed unit bytes match the frozen start; and its unit is inactive with no
+accepting private tmux server. It checks that the caller runs outside every
+unit this activation recorded, not the ordinary unit inventory. The reason must
+be one printable line. A refusal says which check failed and records nothing.
+"Outcome unknown" means a failure once the record write had begun: the write
+itself, its sync, the reread that confirms it, or releasing the lock. The
+archive may or may not have landed, so inspect `start_effects` and
+`start_repairs` before anything else.
+
+On Linux a bot unit stays `active (exited)` after its session dies, and it
+keeps restarting if its start failed. The repair refuses "unit is not verified
+inactive". First confirm that this exact bot is the dead one. Then stop that one
+unit yourself with `systemctl --user stop <unit>`, which only kills that bot's
+own tmux server, and retry. Nothing stops it automatically. A refusal about the
+private tmux server means the server still accepts connections, so inspect that
+bot's server instead. On Linux, a runtime-masked producer unit can make the
+caller check report "cannot be proved external" until the masked-unit reader
+from #2053 is in the CLI that runs the repair. The old attempt, its fence and the dead evidence
+stay in the activation record under `start_repairs`; other receipts are not
+changed. Then run the sealed candidate's `--resume` command above once. That
+command gives the bot a fresh fence and starts it. Nothing retries
+automatically, so each further repair needs the command again.
+
 For the specific refusal "existing canonical handoff section is malformed" at
 pending step `queues_classified`, the journal supports repair-forward before
 migration. Preserve a copy of the named bot's `.claude/session.md`, retain its
