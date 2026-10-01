@@ -176,6 +176,49 @@ the release selection and starts the candidate through the native owner.
 Record the activation ID and all outcomes. A refusal or incomplete result is a
 stop condition, not an invitation to delete locks, selection or history.
 
+### Early abort while pausing producers (Linux)
+
+Unsealed first adoption has no recorded rollback release. If its sealed CLI
+cannot finish pausing producers (for example, an older native reader rejects
+systemd runtime masks), resuming that same CLI repeats the refusal. A corrected
+sealed CLI can abort an adoption stopped inside `producers_paused`, with nothing completed, no
+session handoff or candidate start, no release selection and no migration
+journal. From an operator shell, with a sealed release CLI that has the fix:
+
+```bash
+"$FIXED_RELEASE_CLI" --root "$DATA" host abort-adoption "$ACTIVATION_ID" \
+  --reason "TEXT" --expected-sql-version "$PREFLIGHT_USER_VERSION"
+```
+
+`--expected-sql-version` is the Plane `user_version` from your retained
+pre-activation preflight. The adoption journal never froze it. The command
+compares it with a read-only `PRAGMA user_version` and records it with the
+abort; a rerun must name the same value. It never writes the database.
+
+Under the activation lock, the command records the abort before any effect.
+From then on, forward activation and `--resume` are refused for that ID. It
+then:
+
+1. Checks native caller ancestry against the frozen enrollment placements.
+2. Restores only the parked producer files through their ConfigInstall
+   journal and runs one user-manager `daemon-reload`.
+3. Resumes only producer units whose state differs from the frozen snapshot.
+   Units that are untouched or already exact, such as a still-running
+   producer service, are not restarted. Old bots and ingest are never started
+   or restarted.
+
+Timer-owned services may naturally run or exit between observations; their
+enrollment must still match. Timers and resident services must match the saved
+state exactly.
+
+Only verified producer files and native states end the attempt as
+`rolled_back`. The forward record, reason, release and SQL precondition are
+preserved, and each attempt is recorded. Any refusal or unknown native result
+leaves the abort marker in place with no automatic retry. Repair the named
+condition, then rerun the same command; the rerun reconciles evidence before
+any native action. This is not a general rollback and makes no SQL restore
+claim.
+
 ## 5. Verify before releasing the source hold
 
 ```bash

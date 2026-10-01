@@ -702,6 +702,22 @@ _svc_activation_unknown() {
     return 3
 }
 
+# `mask --runtime` reports its own link as FragmentPath, not /dev/null. Accept
+# only this user's exact runtime link for TARGET, and only to /dev/null.
+_svc_activation_runtime_mask() {
+    local link="$1" target="$2" runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    case "$runtime" in /*) ;; *) return 1 ;; esac
+    [ "$link" = "$runtime/systemd/user/$target" ] && [ -L "$link" ] && [ -O "${link%/*}" ] \
+        && [ "$(readlink "$link")" = /dev/null ]
+}
+
+# Early adoption abort only: after the owner restores parked files, reload this
+# user's manager once so observations see them. Never starts, stops or retries.
+svc_activation_reload() {
+    [ "$_OS" = Linux ] || { _svc_activation_unknown "reload is Linux-only"; return 3; }
+    systemctl --user daemon-reload
+}
+
 _svc_activation_read() {
     local file="$1" target="$2" output key value seen=" " uid manager pid status label extra count=0
     case "$file" in /*) ;; *) _svc_activation_unknown "installed path is not absolute"; return 3 ;; esac
@@ -746,7 +762,7 @@ EOF
             fi
             case "$SVC_ACT_LOAD" in
                 loaded) [ "$fragment" = "$file" ] || return 3 ;;
-                masked) [ "$fragment" = /dev/null ] || return 3 ;;
+                masked) [ "$fragment" = /dev/null ] || _svc_activation_runtime_mask "$fragment" "$target" || return 3 ;;
                 not-found) [ ! -e "$file" ] || return 3; SVC_ACT_FILE_STATE=not-found ;;
                 *) return 3 ;;
             esac

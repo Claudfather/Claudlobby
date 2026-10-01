@@ -14,7 +14,10 @@ def _dispatch(args):
 
 
 def _dispatch_host(args):
-    args.activation_id = (getattr(args, "resume", None) or str(uuid4())) if args.public_command == "host.activate" else None
+    if args.public_command == "host.activate":
+        args.activation_id = getattr(args, "resume", None) or str(uuid4())
+    elif args.public_command != "host.abort-adoption":
+        args.activation_id = None
     return execute(args.public_command,
                    lambda: import_module(".host", __package__).dispatch(args),
                    json_output=args.json, request_id=args.activation_id)
@@ -190,6 +193,17 @@ def register_release_subparsers(sub):
                           help="First, forward-only adoption of a reviewed unsealed estate and its existing Plane")
     activate.add_argument("--resume", metavar="ACTIVATION_ID",
                           help="Fix forward the same recorded activation at a supported step with required evidence")
+    abort = _route(hosts, "abort-adoption", "host.abort-adoption",
+                   "Abort an unsealed first adoption stopped while pausing producers")
+    abort.description = ("Operator-only, from a sealed release CLI. Restores only the original producer "
+                         "files and native states of a Linux first adoption with no completed step, "
+                         "handoff, start, selection or migration. Not general rollback: bots, ingest, "
+                         "selection and SQL are untouched.")
+    abort.set_defaults(func=_dispatch_host)
+    abort.add_argument("activation_id", metavar="ACTIVATION_ID")
+    abort.add_argument("--reason", required=True, metavar="TEXT", help="Recorded operator reason")
+    abort.add_argument("--expected-sql-version", required=True, type=int, metavar="INT",
+                       help="Plane user_version from the operator's retained pre-activation preflight")
 
     config = sub.add_parser("config", help="Stage and inspect configuration proposals")
     configs = config.add_subparsers(dest="config_command", required=True)

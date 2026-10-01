@@ -198,17 +198,103 @@ def _activate(args, root):
         (f"Activation {args.activation_id}: recorded active; release {executing}; plan {plan.plan_id}.",))
 
 
+def _abort(args, root):
+    """Operator-only early abort of an unsealed first adoption stopped pausing producers.
+
+    Restores only the original producer pause. It is not general rollback: it
+    never starts bots or ingest, changes selection, or restores SQL.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}", args.activation_id):
+        raise CommandFailure("invalid_argument", "invalid argument: invalid activation ID")
+    reason = args.reason.strip()
+    if not reason or len(reason) > 500 or not reason.isprintable():
+        raise CommandFailure("invalid_argument", "invalid argument: --reason must be one printable line")
+    if args.expected_sql_version < 0:
+        raise CommandFailure("invalid_argument", "invalid argument: --expected-sql-version must be non-negative")
+    executing = _executing_release(root)
+    data = {"activation_id": args.activation_id, "release_id": executing,
+            "recorded_activation": _recorded(root, args.activation_id), "recording": "unchanged"}
+    if data["recorded_activation"] is None:
+        raise CommandFailure("not_found", "activation record not found; no mutation performed", data=data)
+    if executing is None:
+        raise CommandFailure("release_mismatch",
+            "release mismatch: early abort requires a sealed release CLI; no mutation performed",
+            data=data, hint=f"inspect claudlobby --root {shlex.quote(str(root))} host releases")
+    try:
+        from ..activation_state import locked_activation
+        from ..activation_units import abort_early_adoption
+        from ..plane.db import connect_ro, db_file
+        from ..releases import read_release
+        release = read_release(root, executing)
+        with locked_activation(root) as store:
+            conn = connect_ro(db_file(root))
+            try:
+                version = conn.execute("PRAGMA user_version").fetchone()[0]
+            finally:
+                conn.close()
+            if version != args.expected_sql_version:
+                raise CommandFailure("conflict", "conflict: database user_version differs from the "
+                                     "operator's preflight expectation; no mutation performed",
+                                     data=data, release_id=executing)
+            evidence = abort_early_adoption(store, args.activation_id, reason=reason, release=release,
+                                            sql_user_version=version)
+    except CommandFailure:
+        raise
+    except Exception as exc:
+        from subprocess import TimeoutExpired
+        from ..activation_state import ActivationError, ActivationRefusal
+        data.update(recorded_activation=_recorded(root, args.activation_id), recording="unknown")
+        code = "conflict"
+        if isinstance(exc, TimeoutExpired):
+            code, message = "unavailable", "unavailable: native user manager did not answer in time"
+        elif isinstance(exc, (ImportError, OSError)):
+            code, message = "unavailable", "unavailable: abort dependency, database or native access"
+        elif isinstance(exc, ActivationRefusal):
+            message = f"conflict: early abort refused: {exc}"
+        elif isinstance(exc, ActivationError):
+            # Native stderr can contain arbitrary text; disclose operation and rc only.
+            refusal = re.match(r"\A(svc_activation_[a-z_]+) refused \(([0-9]{1,3})\):", str(exc))
+            message = (f"conflict: {refusal[1]} refused ({refusal[2]})" if refusal
+                       else "conflict: early abort did not complete")
+        else:
+            diagnostic = str(uuid4())
+            print(f"diagnostic {diagnostic}: {type(exc).__name__}", file=sys.stderr)
+            code, message = "internal_error", f"internal error; see {diagnostic}"
+        from ..activation_state import read_activation
+        try:
+            marked = "adoption_abort" in read_activation(root, args.activation_id).body
+        except ActivationError:
+            marked = False
+        hint = ("the recorded abort marker keeps forward activation refused; repair the named "
+                "condition, then rerun this same abort command explicitly" if marked else
+                f"no abort marker is recorded; inspect claudlobby --root {shlex.quote(str(root))} "
+                "host status and the recorded activation before rerunning")
+        raise CommandFailure(code, message, data=data, release_id=executing, hint=hint) from exc
+    saved = _recorded(root, args.activation_id)
+    if saved is None or saved["verification"] != "verified" or saved["status"] != "rolled_back":
+        raise CommandFailure("conflict", "conflict: abort owner did not confirm rolled_back state",
+                             data={**data, "recorded_activation": saved, "recording": "unknown"},
+                             release_id=executing)
+    data.update(recorded_activation=saved, recording="committed", restored_targets=list(evidence.targets))
+    return CommandOutput(data, executing, (
+        f"Activation {args.activation_id}: early adoption aborted; original producer files and states "
+        "verified. Bots, ingest, selection and SQL were not touched.",))
+
+
 def dispatch(args):
     activating = args.public_command == "host.activate"
+    aborting = args.public_command == "host.abort-adoption"
     try:
-        if activating:
+        if activating or aborting:
             _operator_shell()  # activation itself already checks native ancestry
         if args.root is None:
             raise CommandFailure("invalid_argument", "invalid argument: an explicit --root is required",
                                  hint=f"supply claudlobby --root PATH {args.public_command.replace('.', ' ')}")
         root = _host_root(args)
+        if aborting:
+            return _abort(args, root)
         return _activate(args, root) if activating else _status(args, root)
     except CommandFailure as exc:
-        if activating:
+        if activating or aborting:
             exc.data.setdefault("activation_id", args.activation_id)
         raise

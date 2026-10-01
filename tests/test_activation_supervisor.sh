@@ -17,7 +17,7 @@ systemctl() {
     if [ "$1" = show ]; then
         [ "$QUERY_FAIL" = 0 ] || return 7
         local fragment="$file"
-        [ "$load" != masked ] || fragment=/dev/null
+        [ "$load" != masked ] || fragment="${MASK_FRAGMENT:-/dev/null}"
         if [ "$active" = deactivating ] && [ -f "$SETTLE_FILE" ]; then
             pending=$(cat "$SETTLE_FILE")
             pending=$((pending - 1)); printf '%s' "$pending" > "$SETTLE_FILE"
@@ -147,6 +147,26 @@ loop_result=$(svc_bot_disenroll_exact "$loop_source" "$loop_installed" "$target"
 expect 0 svc_bot_enroll_exact "$loop_source" "$loop_installed" "$target"
 [ -f "$loop_installed" ]
 [ "$(cat "$TRACE")" = "$(printf 'daemon-reload\nreset-failed worker.service\nenable --now worker.service')" ]
+
+# systemd reports a runtime mask by its own link. Only this user's exact
+# runtime link to /dev/null for the named target counts as masked.
+export XDG_RUNTIME_DIR="$T/run"; mkdir -p "$XDG_RUNTIME_DIR/systemd/user" "$T/foreign-run"
+file="$T/worker.service"; target=worker.service; load=masked; enabled=masked-runtime
+active=inactive; sub=dead; group=""; old_enabled=enabled
+MASK_FRAGMENT="$XDG_RUNTIME_DIR/systemd/user/worker.service"
+ln -s "$file" "$MASK_FRAGMENT"
+expect 3 svc_activation_snapshot "$file" "$target"
+MASK_FRAGMENT="$T/foreign-run/worker.service"; ln -s /dev/null "$MASK_FRAGMENT"
+expect 3 svc_activation_snapshot "$file" "$target"
+MASK_FRAGMENT="$XDG_RUNTIME_DIR/systemd/user/worker.service"
+rm "$MASK_FRAGMENT"; ln -s /dev/null "$MASK_FRAGMENT"
+[ "$(svc_activation_snapshot "$file" "$target")" = 'masked-runtime masked inactive' ]
+: > "$TRACE"; expect 0 svc_activation_resume "$file" "$target" 'enabled loaded active'
+[ "$(cat "$TRACE")" = "$(printf 'unmask --runtime worker.service\nstart worker.service')" ]
+unset MASK_FRAGMENT XDG_RUNTIME_DIR
+# The abort reload helper only reloads the user manager; it is Linux-only.
+: > "$TRACE"; expect 0 svc_activation_reload; [ "$(cat "$TRACE")" = daemon-reload ]
+: > "$TRACE"; _OS=Darwin; expect 3 svc_activation_reload 2>/dev/null; unchanged; _OS=Linux
 
 _OS=Darwin; file="$T/fleet.keepalive.plist"; target=gui/501/fleet.keepalive
 : > "$file"; : > "$TRACE"
