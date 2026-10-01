@@ -227,11 +227,12 @@ def test_abort_adoption_binds_id_and_sql_precondition_before_owner(candidate, mo
             "--reason", "masked reader refused", "--expected-sql-version"]
     before = snapshot(root)
     wrong = call(capsys, argv + ["13"], 4)
-    assert wrong["request_id"] == "adopt" and wrong["data"]["activation_id"] == "adopt"
+    assert wrong["request_id"] is None and wrong["data"]["activation_id"] == "adopt"
     assert "preflight expectation" in wrong["error"]["message"]
     assert calls == [] and snapshot(root) == before
     result = call(capsys, argv + ["12"])
-    assert result["request_id"] == "adopt" and result["release_id"] == release.release_id
+    assert result["request_id"] is None and result["release_id"] == release.release_id
+    assert result["data"]["activation_id"] == "adopt"
     assert calls == [("adopt", "masked reader refused", release.release_id, 12)]
     assert result["data"]["recording"] == "committed"
     assert result["data"]["recorded_activation"]["status"] == "rolled_back"

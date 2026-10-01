@@ -711,16 +711,19 @@ _svc_activation_runtime_mask() {
         && [ "$(readlink "$link")" = /dev/null ]
 }
 
-# Early adoption abort only: after the owner restores parked files, reload this
-# user's manager once so observations see them. Never starts, stops or retries.
+# Reload this user's manager once so observations see files the caller just
+# restored (early adoption abort) or published (Linux phase publication).
+# Never starts, stops or retries.
 svc_activation_reload() {
     [ "$_OS" = Linux ] || { _svc_activation_unknown "reload is Linux-only"; return 3; }
     systemctl --user daemon-reload
 }
 
-# Early adoption abort only: a restored higher-priority installed file hides a
-# surviving runtime mask from load state. Remove only this user's exact mask
-# link for an originally unmasked TARGET; never start, stop or retry.
+# A higher-priority installed file hides a surviving runtime mask from load
+# state. Remove only this user's exact mask link for TARGET; never start, stop
+# or retry. Callers: early adoption abort, whose SAVED is the frozen originally
+# unmasked state; and Linux phase publication, whose SAVED is the candidate's
+# fresh snapshot, so its ownership proof is Python's frozen-original check.
 svc_activation_clear_runtime_mask() {
     local file="$1" target="$2" saved="$3" link
     [ "$_OS" = Linux ] || { _svc_activation_unknown "runtime masks are Linux-only"; return 3; }

@@ -345,6 +345,14 @@ def test_fresh_adoption_admits_only_a_verified_early_abort_prior_record(cold, mo
         with pytest.raises(state.ActivationRefusal, match="deliberately stopped bots"):
             adopt()
         _no_activation_effect(root, host)
+        # Past the gate, the next adoption's own record and journal coexist
+        # with the old attempt's retained journals.
+        with state.locked_activation(root) as store:
+            fresh = store.prepare("fresh", plan, recovery_release_id=plan.release_id,
+                                  enrollment_digest="1" * 64, legacy_source=True)
+            config_install.prepare_config(plan, "fresh")
+        assert fresh.status == "prepared" and fresh.body["intent"]["source_kind"] == "legacy-unsealed"
+        assert config_install.read_config_install(root, "fresh").status == "prepared"
     else:
         with pytest.raises(state.ActivationError, match=f"existing activation {old} requires explicit repair"):
             adopt()

@@ -985,7 +985,10 @@ _RUNNING_QUIESCE_STEPS = _BOOTSTRAP_EMPTY_STEPS
 def resumable_running_step(record: ActivationRecord) -> str | None:
     """Return a supported same-ID stage; a missing start journal never implies no effect."""
     completed = record.body["completed"]
-    if (record.status != "activating" or completed != list(STEPS[:len(completed)])
+    # An early adoption abort in progress refuses forward steps; only its
+    # explicit abort-adoption rerun can continue that record.
+    if (record.status != "activating" or "adoption_abort" in record.body
+            or completed != list(STEPS[:len(completed)])
             or not isinstance(record.body["intent"].get("install_directory"), str)
             or len(completed) >= len(STEPS)):
         return None

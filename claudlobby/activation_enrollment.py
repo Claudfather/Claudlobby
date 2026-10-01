@@ -26,7 +26,7 @@ from .config_install import apply_config, prepare_config, read_config_install, r
 from .config_plan import ConfigPlan, ConfigPlanBuilder, path_state, read_plan
 from .config_units import current_declarations, planned_units
 from .releases import read_release
-from .supervision_inventory import Adapter, _catalog, _environment, _properties
+from .supervision_inventory import Adapter, _catalog, _environment, _properties, runtime_mask
 
 
 _OWNER = "activation-enrollment-v1"
@@ -248,16 +248,9 @@ def _owned_pause_mask(path: Path, entry: dict, prior: dict | None) -> bool:
     directory, linked to /dev/null. Phase publication removes it after the
     candidate bytes are published; preparation leaves it untouched.
     """
-    runtime = _runtime_units()
-    try:
-        owners = {path.parent.lstat().st_uid, path.lstat().st_uid}
-    except OSError:
-        return False
     return (entry["original"] and prior is not None and bool(prior["installed"])
             and dict(prior["properties"]).get("LoadState") == "loaded"
-            and runtime.is_absolute() and path == runtime / Path(entry["installed"]).name
-            and owners == {os.getuid()}
-            and path_state(path)["node"] == {"kind": "symlink", "target": "/dev/null"})
+            and runtime_mask(path, Path(entry["installed"]).name))
 
 
 def _runtime_units() -> Path:

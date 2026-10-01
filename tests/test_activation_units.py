@@ -26,7 +26,9 @@ class RecordedAdapter:
                          ("UnitFileState", "LoadState", "ActiveState")) for unit in inventory.units}
         scheduled = {unit.declaration.service for unit in inventory.units
                      if unit.target.endswith(".timer") and unit.declaration.service}
-        # A timer-owned service is paused from and restored to inactive.
+        if self.manager == "Darwin":  # fixtures enroll launchd jobs as their own-schedule producers
+            scheduled = set(self.original)
+        # A timer-owned service or launchd producer is paused from and restored to inactive.
         self.native = {target: " ".join(saved.split()[:2] + ["inactive"]) if target in scheduled else saved
                        for target, saved in self.original.items()}
         self.states = dict(self.original)
@@ -83,8 +85,8 @@ class RecordedAdapter:
             assert args[2] == self.native[target]
             if target == self.resume_failure:
                 rc = 3
-            else:
-                self.states[target] = self.native[target]
+            else:  # a bootstrapped launchd job resumes its own schedule
+                self.states[target] = self.original[target] if self.manager == "Darwin" else self.native[target]
         elif function == "svc_activation_clear_runtime_mask":
             # Abort restores from the native saved state; publication from its fresh snapshot.
             assert args[2] in (self.native[target], self.states[target]) and file.is_file()
@@ -593,11 +595,22 @@ def test_legacy_early_abort_restores_only_producer_pause_after_verified_retry(en
         assert adapter.states["clock.timer"] == "masked-runtime masked inactive"
         assert not Path(inventory.units[0].installed[0].path).exists()
         adapter.pause_failure = None
+        # A hosted caller is refused by read-only proofs before any abort marker.
+        adapter.refusal["collector.service"] = 1
+        with pytest.raises(state.ActivationError, match="svc_activation_assert_external refused"):
+            abort(store, "hosted")
+        assert "adoption_abort" not in state.read_activation(root, "cutover").body
+        adapter.refusal.clear()
         adapter.resume_failure = "clock.timer"
         with pytest.raises(state.ActivationError, match="svc_activation_resume refused"):
             abort(store, "masked reader refused")
         record = state.read_activation(root, "cutover")
         assert record.status == "activating" and record.body["adoption_abort"]["result"] is None
+        # Status never advertises a forward resume while the abort is in progress.
+        body = {**record.body, "intent": {**record.body["intent"], "install_directory": "/units"}}
+        assert activation.resumable_running_step(state.ActivationRecord("cutover", root, body)) is None
+        unmarked = {key: value for key, value in body.items() if key != "adoption_abort"}
+        assert activation.resumable_running_step(state.ActivationRecord("cutover", root, unmarked)) == "producers_paused"
         # A half-restored host can neither continue forward nor change its SQL precondition.
         with pytest.raises(state.ActivationError, match="out of order"):
             store.begin("cutover", "producers_paused")
@@ -721,6 +734,60 @@ def test_timer_owned_oneshot_mid_run_parks_and_restores_without_resend(enrollmen
     frozen = state.read_plan(root, journal.plan_id).effects["enrollment"]["units"]
     assert dict(next(unit for unit in frozen if unit["target"] == "scheduled.service")["properties"])[
         "ActiveState"] == frozen_active
+
+
+class TickingAdapter(RecordedAdapter):
+    """launchctl print agrees with the current running/idle state."""
+
+    def call(self, function, *args, **kwargs):
+        if function == "svc_inventory_properties":
+            target = args[0]
+            source = plistlib.loads(self.files[target].content)
+            running = self.states[target].split()[2] == "active"
+            output = observed_print(target, source, Path(self.files[target].path), active=running)
+            return subprocess.CompletedProcess([function, *args], 0, output, "")
+        return super().call(function, *args, **kwargs)
+
+
+def _ticking_darwin(installed, tmp_path, frozen_active):
+    root, inputs, paths, _, _ = installed
+    release = r.seal_release(root, inputs, paths)
+    env = {"CLAUDLOBBY_ROOT": str(root), "FLEET_ROOT": str(root),
+           "CLAUDLOBBY_NATIVE_DIR": str(release.native_path), "CLAUDLOBBY_CLI": str(release.cli_path),
+           "CLAUDLOBBY_ARTIFACT_ID": release.inputs.artifact_id}
+    source = root / "fixture.plist"
+    source.write_bytes(plistlib.dumps({"Label": "fixture", "ProgramArguments": ["/bin/sleep", "60"],
+                                      "StartInterval": 60,
+                                      "WorkingDirectory": str(root), "EnvironmentVariables": env}))
+    directory = tmp_path / "LaunchAgents"
+    directory.mkdir()
+    target = directory / "fixture.plist"
+    target.write_bytes(source.read_bytes())
+    declaration = UnitDeclaration(source, "host", root, release.release_id, tuple(env.items()))
+    props = {"UnitFileState": "unchanged", "LoadState": "loaded", "ActiveState": frozen_active,
+             "DisabledOverride": "unset", "EnabledState": "enabled"}
+    entry = EnrolledUnit(declaration, "gui/501/fixture", FileSnapshot.read(source),
+                         (FileSnapshot.read(target),), tuple(props.items()))
+    catalog = f"manager\tDarwin\ndomain\tgui/501\ndirectory\t{directory}\nPID\tStatus\tLabel\n710\t0\tfixture\n"
+    inventory = EnrollmentInventory(root, "Darwin", catalog, (entry,), entry.installed, (), ())
+    plan = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, (), effects={}).seal()
+    return root, inventory, plan, TickingAdapter(inventory), {"producers": [entry.target], "bots": [], "ingest": []}
+
+
+def test_darwin_producer_finished_between_inventory_and_prepare(installed, tmp_path):
+    root, inventory, plan, adapter, phases = _ticking_darwin(installed, tmp_path, "active")
+    adapter.states["gui/501/fixture"] = "unchanged loaded inactive"  # its tick exited
+    with state.locked_activation(root) as store:
+        _prepare(store, inventory, phases, plan, adapter)
+
+
+def test_darwin_producer_started_between_prepare_and_pause(installed, tmp_path):
+    root, inventory, plan, adapter, phases = _ticking_darwin(installed, tmp_path, "inactive")
+    with state.locked_activation(root) as store:
+        _prepare(store, inventory, phases, plan, adapter)
+        store.begin("cutover", "producers_paused")
+        adapter.states["gui/501/fixture"] = "unchanged loaded active"  # its next tick began
+        units.pause_phase(store, "cutover", "producers", adapter=adapter)
 
 
 def test_fresh_caller_and_native_state_are_rechecked_before_effects(enrollment):

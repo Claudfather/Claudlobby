@@ -14,10 +14,7 @@ def _dispatch(args):
 
 
 def _dispatch_host(args):
-    if args.public_command == "host.activate":
-        args.activation_id = getattr(args, "resume", None) or str(uuid4())
-    elif args.public_command != "host.abort-adoption":
-        args.activation_id = None
+    args.activation_id = (getattr(args, "resume", None) or str(uuid4())) if args.public_command == "host.activate" else None
     return execute(args.public_command,
                    lambda: import_module(".host", __package__).dispatch(args),
                    json_output=args.json, request_id=args.activation_id)
@@ -200,7 +197,7 @@ def register_release_subparsers(sub):
                          "handoff, start, selection or migration. Not general rollback: bots, ingest, "
                          "selection and SQL are untouched.")
     abort.set_defaults(func=_dispatch_host)
-    abort.add_argument("activation_id", metavar="ACTIVATION_ID")
+    abort.add_argument("abort_activation_id", metavar="ACTIVATION_ID")
     abort.add_argument("--reason", required=True, metavar="TEXT", help="Recorded operator reason")
     abort.add_argument("--expected-sql-version", required=True, type=int, metavar="INT",
                        help="Plane user_version from the operator's retained pre-activation preflight")

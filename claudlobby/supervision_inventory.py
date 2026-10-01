@@ -358,6 +358,23 @@ def _environment(text):
     return result
 
 
+def runtime_mask(path: str | Path, name: str) -> bool:
+    """This user's exact `mask --runtime` link for NAME, to /dev/null.
+
+    systemd reports such a mask's own link as FragmentPath. The same rule as
+    the native reader: exact runtime path, link and directory owned by the
+    caller, link target /dev/null. Never an arbitrary foreign link.
+    """
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}") / "systemd/user"
+    node = Path(path)
+    try:
+        owners = {node.lstat().st_uid, node.parent.lstat().st_uid}
+        target = os.readlink(node)
+    except OSError:
+        return False
+    return runtime.is_absolute() and node == runtime / name and owners == {os.getuid()} and target == "/dev/null"
+
+
 def legacy_linux_declarations(plan) -> tuple[UnitDeclaration, ...]:
     """Bind existing source-only user-systemd units to the candidate roster.
 
@@ -907,7 +924,10 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                     issues.append(f"{name}: {exc}")
             else:
                 if saved.link == "/dev/null":
-                    if props.get("LoadState") != "masked" or props.get("FragmentPath") != "/dev/null":
+                    fragment = props.get("FragmentPath")
+                    if props.get("LoadState") != "masked" or not (
+                            fragment == "/dev/null"
+                            or fragment == saved.path and runtime_mask(saved.path, name)):
                         issues.append(f"{name}: masked installed ownership is unknown")
                     continue
                 results = [adapter.call("svc_bot_unit_owned_by", saved.path, owner).returncode for owner in owners]

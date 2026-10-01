@@ -483,6 +483,23 @@ class ActivationStore:
         self.assert_locked()
         record = read_activation(self.root, activation_id)
         body = record.body
+        prior = self._admit_adoption_abort(record, sql_user_version)
+        attempt = {"reason": reason, "release_id": release_id, "artifact_id": artifact_id}
+        if prior is None:
+            body["forward"] = {key: body[key] for key in ("status", "completed", "pending", "evidence")}
+            body["adoption_abort"] = {**attempt, "sql_user_version": sql_user_version,
+                                      "attempts": [attempt], "result": None}
+        else:
+            prior["attempts"].append(attempt)
+        return self._save(record)
+
+    def check_adoption_abort(self, activation_id: str, *, sql_user_version: int) -> None:
+        """Side-effect-free eligibility, before native reads; begin repeats it."""
+        self.assert_locked()
+        self._admit_adoption_abort(read_activation(self.root, activation_id), sql_user_version)
+
+    def _admit_adoption_abort(self, record: ActivationRecord, sql_user_version: int) -> dict | None:
+        body = record.body
         if (body["intent"].get("source_kind") != "legacy-unsealed"
                 or body["intent"].get("source_release_id") is not None):
             raise ActivationRefusal("early abort is only for an unsealed first adoption")
@@ -492,19 +509,13 @@ class ActivationStore:
                 or body.get("start_phases", {}) or "identity_bindings" in body
                 or body["previous_selection"] is not None or read_selection(self.root) is not None):
             raise ActivationRefusal("activation is past its producer pause; early abort is not admitted")
-        attempt = {"reason": reason, "release_id": release_id, "artifact_id": artifact_id}
         prior = body.get("adoption_abort")
         if prior is None:
             if "forward" in body:
                 raise ActivationRefusal("activation already has recovery history")
-            body["forward"] = {key: body[key] for key in ("status", "completed", "pending", "evidence")}
-            body["adoption_abort"] = {**attempt, "sql_user_version": sql_user_version,
-                                      "attempts": [attempt], "result": None}
         elif prior["sql_user_version"] != sql_user_version or prior["result"] is not None:
             raise ActivationRefusal("early abort SQL precondition differs from its recorded intent")
-        else:
-            prior["attempts"].append(attempt)
-        return self._save(record)
+        return prior
 
     def record_adoption_abort_recheck(self, activation_id: str, *, reason: str, release_id: str,
                                       artifact_id: str, evidence_digest: str,

@@ -20,7 +20,8 @@ from .releases import _executing_release, _host_releases, _host_root
 
 def _hint(root):
     return (f"inspect claudlobby --root {shlex.quote(str(root))} host status; "
-            "use host activate PLAN_ID --resume ID --install-directory PATH for a supported recorded step; "
+            "use host activate PLAN_ID --resume ID --install-directory PATH for a supported recorded step, "
+            "or rerun host abort-adoption ID for a recorded abort in progress; "
             "running-session handoff and starts without durable receipts need their missing witness repaired first")
 
 
@@ -44,9 +45,12 @@ def _status(args, root):
             try:
                 record = read_activation(root, item["activation_id"])
                 step = resumable_running_step(record)
+                aborting = "adoption_abort" in record.body
             except Exception:
-                step = None
-            recovery.append({"activation_id": item["activation_id"], "supported_step": step})
+                step, aborting = None, False
+            # An abort in progress continues only through host abort-adoption.
+            recovery.append({"activation_id": item["activation_id"], "supported_step": step,
+                             "abort_in_progress": aborting})
     data = {"root": str(root), "recorded_status": state, "selection": evidence["selection"],
             "selected_activation": selected, "unfinished_activations": evidence["unfinished_activations"],
             "activation_errors": evidence["activation_errors"], "selection_error": evidence["selection_error"],
@@ -208,7 +212,8 @@ def _abort(args, root):
     Restores only the original producer pause. It is not general rollback: it
     never starts bots or ingest, changes selection, or restores SQL.
     """
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}", args.activation_id):
+    activation_id = args.abort_activation_id  # its own dest: request_id stays null
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}", activation_id):
         raise CommandFailure("invalid_argument", "invalid argument: invalid activation ID")
     reason = args.reason.strip()
     if not reason or len(reason) > 500 or not reason.isprintable():
@@ -216,8 +221,8 @@ def _abort(args, root):
     if args.expected_sql_version < 0:
         raise CommandFailure("invalid_argument", "invalid argument: --expected-sql-version must be non-negative")
     executing = _executing_release(root)
-    data = {"activation_id": args.activation_id, "release_id": executing,
-            "recorded_activation": _recorded(root, args.activation_id), "recording": "unchanged"}
+    data = {"activation_id": activation_id, "release_id": executing,
+            "recorded_activation": _recorded(root, activation_id), "recording": "unchanged"}
     if data["recorded_activation"] is None:
         raise CommandFailure("not_found", "activation record not found; no mutation performed", data=data)
     if executing is None:
@@ -240,14 +245,14 @@ def _abort(args, root):
                 raise CommandFailure("conflict", "conflict: database user_version differs from the "
                                      "operator's preflight expectation; no mutation performed",
                                      data=data, release_id=executing)
-            evidence = abort_early_adoption(store, args.activation_id, reason=reason, release=release,
+            evidence = abort_early_adoption(store, activation_id, reason=reason, release=release,
                                             sql_user_version=version)
     except CommandFailure:
         raise
     except Exception as exc:
         from subprocess import TimeoutExpired
         from ..activation_state import ActivationError, ActivationRefusal
-        data.update(recorded_activation=_recorded(root, args.activation_id), recording="unknown")
+        data.update(recorded_activation=_recorded(root, activation_id), recording="unknown")
         code = "conflict"
         if isinstance(exc, TimeoutExpired):
             code, message = "unavailable", "unavailable: native user manager did not answer in time"
@@ -266,7 +271,7 @@ def _abort(args, root):
             code, message = "internal_error", f"internal error; see {diagnostic}"
         from ..activation_state import read_activation
         try:
-            marked = "adoption_abort" in read_activation(root, args.activation_id).body
+            marked = "adoption_abort" in read_activation(root, activation_id).body
         except ActivationError:
             marked = False
         hint = ("the recorded abort marker keeps forward activation refused; repair the named "
@@ -274,7 +279,7 @@ def _abort(args, root):
                 f"no abort marker is recorded; inspect claudlobby --root {shlex.quote(str(root))} "
                 "host status and the recorded activation before rerunning")
         raise CommandFailure(code, message, data=data, release_id=executing, hint=hint) from exc
-    saved = _recorded(root, args.activation_id)
+    saved = _recorded(root, activation_id)
     if saved is None or saved["verification"] != "verified" or saved["status"] != "rolled_back":
         raise CommandFailure("conflict", "conflict: abort owner did not confirm rolled_back state",
                              data={**data, "recorded_activation": saved, "recording": "unknown"},
@@ -284,7 +289,7 @@ def _abort(args, root):
     done = ("terminal early abort rechecked; hidden runtime masks cleared" if evidence.operation == "rechecked"
             else "early adoption aborted")
     return CommandOutput(data, executing, (
-        f"Activation {args.activation_id}: {done}; original producer files and states "
+        f"Activation {activation_id}: {done}; original producer files and states "
         "verified. Bots, ingest, selection and SQL were not touched.",))
 
 
@@ -302,6 +307,8 @@ def dispatch(args):
             return _abort(args, root)
         return _activate(args, root) if activating else _status(args, root)
     except CommandFailure as exc:
-        if activating or aborting:
+        if activating:
             exc.data.setdefault("activation_id", args.activation_id)
+        elif aborting:
+            exc.data.setdefault("activation_id", None)  # never echo an unvalidated ID
         raise

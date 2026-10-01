@@ -414,6 +414,30 @@ def test_linux_bootstrap_classifies_stock_alias_mask_and_shadowed_vendor_units(t
                            bootstrap_empty=True).require_complete()
 
 
+def test_linux_runtime_mask_reporting_its_own_link_is_exact_owned_only(tmp_path, monkeypatch):
+    # `mask --runtime` reports its link as FragmentPath (measured on the Pi).
+    obs = Observations(tmp_path)
+    runtime = tmp_path / "xdg-runtime"
+    (runtime / "systemd/user").mkdir(parents=True)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    obs.search_dirs.append(runtime / "systemd/user")
+    unit = obs.add("paused.service", declared=False)
+    unit.unlink()
+    link = runtime / "systemd/user/paused.service"
+    link.symlink_to("/dev/null")
+    obs.properties[unit.name].update(LoadState="masked", UnitFileState="masked-runtime",
+                                     FragmentPath=str(link), WorkingDirectory="",
+                                     Environment="", ExecStart="")
+    inventory = collect_enrollment(obs.root, (), package=obs.package, runner=obs.runner,
+                                   bootstrap_empty=True).require_complete()
+    assert str(link) in inventory.foreign
+    # The same link outside this user's runtime directory is not an owned mask.
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "other-runtime"))
+    with pytest.raises(InventoryError, match="masked installed ownership is unknown"):
+        collect_enrollment(obs.root, (), package=obs.package, runner=obs.runner,
+                           bootstrap_empty=True).require_complete()
+
+
 def test_linux_bootstrap_classifies_pi_ghost_special_template_and_continued_units(tmp_path):
     """Classes observed read-only on a Raspberry Pi user manager (2026-09-30)."""
     obs = Observations(tmp_path)

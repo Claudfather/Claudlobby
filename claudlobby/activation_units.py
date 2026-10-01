@@ -95,8 +95,14 @@ def _same_enrollment(saved: str, observed: str, *, scheduled: bool) -> bool:
 
 
 def _scheduled_services(enrollment: dict, phases: dict) -> set[str]:
-    """Producer services named by a frozen producer timer declaration."""
+    """Producer services named by a frozen producer timer declaration.
+
+    A launchd producer is its own schedule: its PID comes and goes with each
+    tick, and its native pause/resume read only load state.
+    """
     producers = set(phases["producers"])
+    if enrollment["manager"] == "Darwin":
+        return producers
     return {unit["declaration"]["service"] for unit in enrollment["units"]
             if unit["target"] in producers and unit["target"].endswith(".timer")
             and unit["declaration"]["service"] in producers}
@@ -434,11 +440,23 @@ def abort_early_adoption(store: ActivationStore, activation_id: str, *, reason: 
     identifier = journal_id(activation_id, "producers")
     if terminal and read_config_install(store.root, identifier).status != "rolled_back":
         raise ActivationRefusal("terminal recheck requires the restored producer journal")
+    adapter = adapter or Adapter()
+    if not terminal:
+        # Ineligible records refuse before any native read.
+        store.check_adoption_abort(activation_id, sql_user_version=sql_user_version)
+    if not terminal and "adoption_abort" not in record.body:
+        # First attempt: read-only proofs before the durable marker, so a
+        # changed source or hosted caller leaves the record unchanged.
+        for unit in pause.enrollment["units"]:
+            _check_source(unit["generated"])
+        for unit in pause.units():
+            if Path(_file(unit)).exists() or Path(_file(unit)).is_symlink():
+                _check_source(unit["installed"][0])
+        _external(adapter, pause)
     if not terminal:
         store.begin_adoption_abort(activation_id, reason=reason, release_id=release.release_id,
                                    artifact_id=release.inputs.artifact_id,
                                    sql_user_version=sql_user_version)
-    adapter = adapter or Adapter()
     for unit in pause.enrollment["units"]:
         _check_source(unit["generated"])
     if read_config_install(store.root, identifier).status in ("rolling_back", "rolled_back"):
