@@ -1,16 +1,15 @@
-"""`claudlobby new-bot` — interactive bot creation.
+"""Bot source authoring for `claudlobby bot create`.
 
 Two modes:
 
-  Interactive:    `claudlobby new-bot`               (prompts for each field)
-  Non-interactive: `claudlobby new-bot --name X ...` (all flags up front)
+  Interactive:    `claudlobby bot create --interactive` (prompts for each field)
+  Non-interactive: `claudlobby bot create --name X ...` (all flags up front)
 
 Both modes share the same backend. Always:
   1. Builds a BotConfig stanza
   2. Walks through @BotFather + chat-id setup if needed
-  3. Edits fleet.yaml (in-place, preserving comments)
-  4. Optionally runs `claudlobby generate --bot <name>`
-  5. Prints next-step instructions
+  3. Edits fleet.yaml (in-place, preserving comments) after confirmation
+  4. Prints selected configuration staging and activation next steps
 
 YAML editing: text-based, not round-tripped through PyYAML. Inserts
 the new stanza as a properly-indented block at the end of `bots:`.
@@ -20,7 +19,7 @@ Preserves all comments and formatting.
 from __future__ import annotations
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -44,6 +43,7 @@ class NewBotInputs:
     name: str
     expertise: list[str]
     voice: str | None = None
+    voice_text: str | None = None  # pending source content; never a fleet.yaml field
     mission: str | None = None
     model: str | None = None
     effort: str | None = None
@@ -67,33 +67,38 @@ class NewBotInputs:
     require_mention: bool | None = None
     chat_id: str | None = None
     startup_prompt: str | None = None
+    telegram_token: str | None = field(default=None, repr=False)  # deferred until confirmation
 
 
 def _yaml_list(items: list[str]) -> str:
     """`['a','b']` → `[a, b]` for compact YAML."""
-    return "[" + ", ".join(items) + "]"
+    return "[" + ", ".join(_yaml_str(item) for item in items) + "]"
 
 
 def _yaml_str(s: str) -> str:
     """Quote a string for YAML if it contains chars that would confuse the parser."""
-    if any(c in s for c in ":#&*!|>'%@`,{}[]"):
-        return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    import json
+
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_./-]*", s) or s.lower() in (
+        "true", "false", "null", "yes", "no", "on", "off",
+    ):
+        return json.dumps(s, ensure_ascii=False)
     return s
 
 
 def render_stanza(inp: NewBotInputs) -> str:
     """Render a bot stanza as 4-space-indented YAML text."""
     lines: list[str] = []
-    lines.append(f"    {inp.name}:")
+    lines.append(f"    {_yaml_str(inp.name)}:")
     lines.append(f"      expertise: {_yaml_list(inp.expertise)}")
     if inp.voice:
-        lines.append(f"      voice: {inp.voice}")
+        lines.append(f"      voice: {_yaml_str(inp.voice)}")
     if inp.mission:
         lines.append(f"      mission: {_yaml_str(inp.mission)}")
     if inp.scope_org or inp.scope_repos or inp.scope_snowflake_targets:
         lines.append("      scope:")
         if inp.scope_org:
-            lines.append(f"        org: {inp.scope_org}")
+            lines.append(f"        org: {_yaml_str(inp.scope_org)}")
         if inp.scope_repos:
             lines.append(f"        repos: {_yaml_list(inp.scope_repos)}")
         if inp.scope_snowflake_targets:
@@ -101,11 +106,11 @@ def render_stanza(inp: NewBotInputs) -> str:
                 f"        snowflake_targets: {_yaml_list(inp.scope_snowflake_targets)}"
             )
     if inp.account and inp.account != "default":
-        lines.append(f"      account: {inp.account}")
+        lines.append(f"      account: {_yaml_str(inp.account)}")
     if inp.model:
-        lines.append(f"      model: {inp.model}")
+        lines.append(f"      model: {_yaml_str(inp.model)}")
     if inp.effort:
-        lines.append(f"      effort: {inp.effort}")
+        lines.append(f"      effort: {_yaml_str(inp.effort)}")
     if inp.remote_control is False:
         lines.append("      remote_control: false")
     # dangerously_skip_permissions is opt-IN: an omitted field composes to the
@@ -135,13 +140,13 @@ def render_stanza(inp: NewBotInputs) -> str:
     ):
         lines.append("      telegram:")
         if inp.telegram_handle:
-            lines.append(f"        handle: {inp.telegram_handle}")
+            lines.append(f"        handle: {_yaml_str(inp.telegram_handle)}")
         if inp.token_env:
-            lines.append(f"        token_env: {inp.token_env}")
+            lines.append(f"        token_env: {_yaml_str(inp.token_env)}")
         if inp.require_mention is not None:
             lines.append(f"        require_mention: {str(inp.require_mention).lower()}")
         if inp.chat_id:
-            lines.append(f'        chat_id: "{inp.chat_id}"')
+            lines.append(f"        chat_id: {_yaml_str(inp.chat_id)}")
     if inp.startup_prompt:
         lines.append(f"      startup_prompt: {_yaml_str(inp.startup_prompt)}")
     return "\n".join(lines) + "\n"
@@ -277,7 +282,7 @@ def maybe_create_voice(
     if voice_arg:
         return voice_arg
     if voice_text:
-        voice_path = paths.base_voices / f"{name}.md"
+        voice_path = paths.assert_writable(paths.overlay_voices / f"{name}.md")
         voice_path.parent.mkdir(parents=True, exist_ok=True)
         voice_path.write_text(
             f"---\nname: {name.title()}\n---\n\n{voice_text.strip()}\n"
@@ -329,7 +334,7 @@ def _list_skills(p: Path) -> list[str]:
 
 def interactive_collect(paths: Paths) -> NewBotInputs:
     """Walk the user through every field. Returns a populated NewBotInputs."""
-    print("\n=== claudlobby new-bot — interactive ===\n")
+    print("\n=== claudlobby bot create — interactive ===\n")
 
     name = _ask("Bot name (lowercase, no spaces, e.g. 'eng-1')", allow_empty=False)
     while not re.match(r"^[a-z][a-z0-9_-]*$", name):
@@ -347,6 +352,7 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
         )
 
     voice_arg = None
+    voice_text = None
     print("\nVoice (personality overlay, optional):")
     print("  1. Pick existing voice file from voices/")
     print("  2. Write a new voice (paste a paragraph)")
@@ -354,11 +360,9 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
     choice = _ask("Choice (1/2/3)", default="3")
     if choice == "1":
         existing = (
-            sorted(
-                p.relative_to(paths.root)
-                for p in paths.base_voices.rglob("*.md")
-                if p.name not in INSTRUCTION_FILE_NAMES
-            )
+            sorted(Path("voices") / p.relative_to(paths.base_voices)
+                   for p in paths.base_voices.rglob("*.md")
+                   if p.name not in INSTRUCTION_FILE_NAMES)
             if paths.base_voices.is_dir()
             else []
         )
@@ -383,10 +387,8 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
             lines.append(line)
         voice_text = "\n\n".join(lines)
         if voice_text.strip():
-            # Materialize the pasted voice now, through the same helper the
-            # --voice-text CLI flag uses, so the interactive path stops
-            # silently dropping it.
-            voice_arg = maybe_create_voice(paths, name, None, voice_text)
+            # Retain the content until the command's dry-run/confirmation gate.
+            voice_arg = f"voices/{name}.md"
 
     mission = _ask("Mission (one-paragraph charter)")
     model = _ask("Model (opus/sonnet/haiku)", default="opus") or None
@@ -439,13 +441,11 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
     print(f"  - Bot username: {handle}  (must end in '_bot' and be globally unique)")
     print("  - Copy the token BotFather replies with")
     do_token = _ask_yn("Have a token to paste now?", default=True)
+    token = None
     if do_token:
         token = _ask(
             "  Paste token (format: <numbers>:<letters_and_numbers>)", allow_empty=False
         )
-        # Save to .env
-        write_token_to_env(paths.env_file, token_env, token)
-        log.info("  ✓ Saved %s to %s", token_env, paths.env_file)
 
     startup_prompt = (
         _ask("Startup prompt (sent once when the bot boots; leave blank for default)")
@@ -456,6 +456,7 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
         name=name,
         expertise=expertise,
         voice=voice_arg,
+        voice_text=voice_text,
         mission=mission or None,
         model=model,
         effort=effort,
@@ -476,6 +477,7 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
         require_mention=require_mention,
         chat_id=chat_id,
         startup_prompt=startup_prompt,
+        telegram_token=token,
     )
 
 

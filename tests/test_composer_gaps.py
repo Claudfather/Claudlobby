@@ -29,11 +29,12 @@ from claudlobby.composer import (
     link_skills,
 )
 from claudlobby.loader import LibraryItem
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 
 def _make_paths(root: Path) -> Paths:
-    return Paths(root=root, fleet_dir=root)
+    return Paths(root=root, fleet_dir=root, package=source_package())
 
 
 # ── _expand ──────────────────────────────────────────────────────────

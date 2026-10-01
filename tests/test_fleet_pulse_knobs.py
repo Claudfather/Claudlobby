@@ -15,6 +15,7 @@ old placement audible.
 from __future__ import annotations
 
 from pathlib import Path
+import shlex
 from textwrap import dedent
 
 from claudlobby.composer import compose_fleet_timers
@@ -24,10 +25,12 @@ from claudlobby.config import (
     _coerce_fleet_pulse,
     load_fleet,
 )
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 _FLEET = """\
     fleet:
+      manager: astrid
       name: test-fleet
       service_prefix: com.test
       bots:
@@ -42,6 +45,7 @@ _FLEET = """\
 
 _NO_BLOCK = """\
     fleet:
+      manager: astrid
       name: test-fleet
       service_prefix: com.test
       bots:
@@ -51,7 +55,7 @@ _NO_BLOCK = """\
 
 
 def _make_paths(root: Path) -> Paths:
-    return Paths(root=root, fleet_dir=root)
+    return Paths(root=root, fleet_dir=root, package=source_package())
 
 
 def _write(root: Path, body: str) -> Path:
@@ -100,6 +104,18 @@ class TestFleetPulseConfigCoercion:
 
 
 class TestEmissionIntoTheUnit:
+    def test_pulse_job_enters_public_selected_command_on_both_hosts(self, tmp_path):
+        timers = _compose(tmp_path, _FLEET)
+        service = (timers / "com.test.fleet-pulse.service").read_text()
+        plist = (timers / "com.test.fleet-pulse.plist").read_text()
+        start = next(line for line in service.splitlines() if line.startswith("ExecStart="))
+        argv = shlex.split(start.removeprefix("ExecStart="))
+        assert argv[-4:] == ["--fleet", "test-fleet", "fleet", "pulse"]
+        assert "fleet-pulse.sh" not in argv
+        assert "<string>fleet</string>" in plist
+        assert "<string>pulse</string>" in plist
+        assert "fleet-pulse.sh" not in plist
+
     def test_systemd_unit_carries_the_knobs(self, tmp_path):
         svc = (_compose(tmp_path, _FLEET) / "com.test.fleet-pulse.service").read_text()
         assert "Environment=FLEET_PULSE_ESCALATION_THRESHOLD=3" in svc
@@ -147,6 +163,7 @@ class TestEmissionIntoTheUnit:
         body = dedent(
             """\
             fleet:
+              manager: astrid
               name: test-fleet
               service_prefix: com.test
               bots:

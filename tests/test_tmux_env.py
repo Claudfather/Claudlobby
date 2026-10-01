@@ -21,11 +21,12 @@ from claudlobby.config import (
     TelegramConfig,
 )
 from claudlobby.composer import compose_bot_conf
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 
 def _make_paths(root: Path) -> Paths:
-    return Paths(root=root, fleet_dir=root)
+    return Paths(root=root, fleet_dir=root, package=source_package())
 
 
 def _compose_bot(
@@ -59,6 +60,11 @@ def _compose_bot(
     fleet = FleetConfig(
         name="test-fleet",
         service_prefix="com.test",
+        manager="ari",
+        bots={
+            "ari": BotConfig(bot_id="ari", name="ari", expertise=["orchestration"]),
+            bot_id: bot,
+        },
         telegram_group_chat_id=chat_id,
         teams=teams or {},
     )
@@ -203,6 +209,11 @@ class TestTmuxEnvCompleteness:
         fleet = FleetConfig(
             name="test-fleet",
             service_prefix="com.test",
+            manager="ari",
+            bots={
+                "ari": BotConfig(bot_id="ari", name="ari", expertise=["orchestration"]),
+                "worker": bot,
+            },
             telegram_group_chat_id="-100999",
         )
         paths = _make_paths(root)
@@ -423,6 +434,11 @@ class TestManagerTmux:
         fleet = FleetConfig(
             name="test-fleet",
             service_prefix="com.test",
+            manager="ari",
+            bots={
+                "ari": bot,
+                "worker": BotConfig(bot_id="worker", name="worker", expertise=["eng"]),
+            },
             telegram_group_chat_id="-100999",
             teams=teams,
         )
@@ -434,11 +450,13 @@ class TestManagerTmux:
         env = _source_env_and_dump(tmux_env)
         assert env.get("MANAGER_TMUX") == "ari"
 
-    def test_bot_without_team_has_no_manager_tmux(self, tmp_path):
-        """A bot not in any team should not have MANAGER_TMUX set."""
+    def test_worker_without_team_has_the_declared_manager_tmux(self, tmp_path):
+        """Team membership does not remove the fleet's one routing owner."""
         bot_dir, conf = _compose_bot(tmp_path, teams={})
-
-        assert "MANAGER_TMUX" not in conf
+        assert "MANAGER_TMUX" in conf
+        env = _source_env_and_dump(_build_tmux_env(bot_dir))
+        assert env["MANAGER_TMUX"] == "ari"
+        assert env["MANAGER_TMUX_SOCKET"] == "com.test.ari"
 
 
 # ---------------------------------------------------------------------------

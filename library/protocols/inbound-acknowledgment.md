@@ -9,7 +9,7 @@ A bot that goes silent after receiving a request — even if it's working hard i
 
 ## The rule
 
-When you receive a **human-originated** message addressed to you (a DM, an @-mention in a group, a channel ask). **Manager dispatch traffic (`[BOTCOMMAND]` / `dispatch.sh` sends) is outside this protocol** — its acknowledgement is the worker's first `[BOTREPORT]` row, per Worker Lifecycle Step 2, with no deadline. This rule exists for the human channel, where silence reads as breakage:
+When you receive a **human-originated** message addressed to you (a DM, an @-mention in a group, a channel ask). **Canonical assignment delivery is outside this protocol** — the assigned worker acknowledges it with `assignment accept` before doing the work, per Worker Lifecycle Step 2. This rule exists for the human channel, where silence reads as breakage:
 
 1. **Within ~10 seconds**, post one line acknowledging the ask.
 2. **State what you understood** — paraphrase the request in one short clause.
@@ -53,6 +53,6 @@ The human is using the bot through a thin channel (Telegram, Slack). They don't 
 
 Acknowledging closes that loop in 10 seconds. The bot stays trustworthy. The human stays calibrated.
 
-A `UserPromptSubmit` hook can fire a deterministic sub-second receipt before the model has even started thinking — but no shipped hook does: `lib/plane-telegram-in.sh`, the live hook on this path, only records the inbound message to the plane. The model's own acknowledgment is therefore the first thing the human sees, and this protocol's paraphrase + next-step is that receipt.
+A `UserPromptSubmit` hook can fire a deterministic sub-second receipt before the model has even started thinking — but no shipped hook does: `claudlobby/_runtime_scripts/plane-telegram-in.sh`, the live hook on this path, only records the inbound message to the plane. The model's own acknowledgment is therefore the first thing the human sees, and this protocol's paraphrase + next-step is that receipt.
 
 This protocol pairs with `direct-mention-response` (worker acks for @-mentions even mid-task) and `proactivity-discipline` (manager wait-points; idle silence is recorded, not posted). Same family, different surface area.

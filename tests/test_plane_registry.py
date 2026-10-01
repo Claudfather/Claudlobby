@@ -16,11 +16,15 @@ import json
 import logging
 import sqlite3
 import subprocess
+from contextlib import closing
 from pathlib import Path
+
+from tests.plane_setup import initialize_plane
 
 import pytest
 
 from claudlobby.config import load_fleet
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 from claudlobby.plane.contracts import (
     ContractViolation,
@@ -34,7 +38,7 @@ REPO = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture(autouse=True)
-def _isolated_env(tmp_path, monkeypatch):
+def _isolated_env(tmp_path, monkeypatch, _isolate_claudlobby_root):
     """The cascade reads HOME's ~/.env (host tier) — redirect it so the
     operator's real host env can never arm or disarm a test; and clear the
     process-level knobs so ambient shells cannot either."""
@@ -42,7 +46,6 @@ def _isolated_env(tmp_path, monkeypatch):
     home.mkdir(exist_ok=True)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("PLANE_EMIT_ENABLED", raising=False)
-    monkeypatch.delenv("PLANE_EMIT_DISABLED", raising=False)
 
 
 def _fleet_root(tmp_path: Path, *, armed: bool = True,
@@ -52,10 +55,10 @@ def _fleet_root(tmp_path: Path, *, armed: bool = True,
     root.mkdir(exist_ok=True)
     # PRODUCTION-SHAPED arming (gauntlet r1: the shipped check read a tier
     # the estate does not use and every test passed anyway): the REAL
-    # lib/env-tiers.sh resolver + a root-tier .env — exactly the estate's
+    # claudlobby/_runtime_scripts/env-tiers.sh resolver + a root-tier .env — exactly the estate's
     # arming surface.
     if not (root / "lib").exists():
-        (root / "lib").symlink_to(REPO / "lib")
+        (root / "lib").symlink_to(REPO / "claudlobby/_runtime_scripts")
     # Opt-OUT since the defaults flip (chunk N): the scan runs unless a tier
     # says exactly 0. `armed=False` therefore writes the OFF value rather than
     # nothing — absence is now the ON case and has its own pin below.
@@ -67,6 +70,7 @@ def _fleet_root(tmp_path: Path, *, armed: bool = True,
     env = "env: {}"   # arming rides the .env TIER, never this
     (root / "fleet.yaml").write_text(
         "fleet:\n"
+        "  manager: lead\n"
         "  name: test-fleet\n"
         "  service_prefix: com.test\n"
         "  defaults:\n"
@@ -101,9 +105,14 @@ def _db(root: Path) -> sqlite3.Connection:
     return conn
 
 
-def _scan(root: Path):
+def _scan(root: Path, *, scratch_plane_env, package=None, initialize=True, require_commit=False):
     fleet, _ = load_fleet(root / "fleet.yaml")
-    return run_generate_scan(Paths(root=root), fleet)
+    env = scratch_plane_env(root, initialize=initialize)
+    with pytest.MonkeyPatch.context() as patch:
+        for key, value in env.items():
+            patch.setenv(key, value)
+        return run_generate_scan(Paths(root=root, package=package or source_package()), fleet,
+                                 require_commit=require_commit)
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +158,7 @@ def test_scan_completed_requires_scan_id():
 
 def test_hash_gate_suppresses_unchanged_and_chains_changed(tmp_path):
     root = _fleet_root(tmp_path)
+    initialize_plane(root)
     snap = {"event_type": "registry_snapshot", "emitter": "t",
             "fleet": "test-fleet",
             "payload": {"entity_type": "project",
@@ -171,10 +181,11 @@ def test_hash_gate_suppresses_unchanged_and_chains_changed(tmp_path):
     conn.close()
 
 
-def test_observation_confirms_instance_and_actor(tmp_path):
+def test_observation_confirms_instance_and_actor(tmp_path, *, scratch_plane_env):
     """Phase 1's identity loop closes: a bot snapshot flips BOTH the
     instance and the logical actor to provisional=0 (§18)."""
     root = _fleet_root(tmp_path)
+    initialize_plane(root)
     # a door mints the actor lazily first (provisional=1)
     emit_batch(root, [{
         "event_type": "communication", "emitter": "t", "fleet": "test-fleet",
@@ -187,7 +198,7 @@ def test_observation_confirms_instance_and_actor(tmp_path):
         "SELECT provisional FROM identity_registry WHERE kind='actor'"
         " AND alias='bot:test-fleet/lead'").fetchone()[0] == 1
     conn.close()
-    assert _scan(root)["complete"] is True
+    assert _scan(root, scratch_plane_env=scratch_plane_env)["complete"] is True
     conn = _db(root)
     rows = dict(conn.execute(
         "SELECT kind, provisional FROM identity_registry"
@@ -200,13 +211,18 @@ def test_observation_confirms_instance_and_actor(tmp_path):
 # The generate scan + F11 matrix
 # ---------------------------------------------------------------------------
 
-def test_unchanged_rescan_suppresses_every_keyframe(tmp_path):
+def test_unchanged_rescan_suppresses_every_keyframe(tmp_path, *, scratch_plane_env):
     """Determinism is what the hash gate rides on: an unchanged estate
     re-scanned writes NO keyframes (only the scan_completed declaration)."""
     root = _fleet_root(tmp_path)
-    s1 = _scan(root)
+    initialize_plane(root)
+    assert not (root / "state" / "host-uid").exists()
+    with closing(_db(root)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM ingest_ledger").fetchone()[0] == 0
+    s1 = _scan(root, scratch_plane_env=scratch_plane_env)
     assert s1["complete"] is True and s1["outcomes"].get("duplicate") is None
-    s2 = _scan(root)
+    assert (root / "state" / "host-uid").is_file()
+    s2 = _scan(root, scratch_plane_env=scratch_plane_env)
     assert s2["outcomes"]["duplicate"] == s2["entities"]
     assert s2["outcomes"]["committed"] == 1          # scan_completed only
 
@@ -256,7 +272,7 @@ def test_vault_rev_refuses_the_enclosing_framework_repo(tmp_path):
 
 
 def test_vault_armed_scan_completes_and_names_the_vault(tmp_path,
-                                                        monkeypatch):
+                                                        monkeypatch, *, scratch_plane_env):
     """Post-merge live catch: the chunk-B extraction left a dangling `vp`
     in run_generate_scan's revision_seen block — NameError on every
     VAULT-ARMED fleet's scan, invisible here because every fixture was
@@ -275,7 +291,7 @@ def test_vault_armed_scan_completes_and_names_the_vault(tmp_path,
                               "schema_version": "1"})
     monkeypatch.setattr(re_mod, "_vault_rev", lambda paths: "rev-abc123")
     root = _fleet_root(tmp_path)
-    s = _scan(root)
+    s = _scan(root, scratch_plane_env=scratch_plane_env)
     assert s is not None and s["complete"] is True
     conn = _db(root)
     decl = conn.execute(
@@ -287,7 +303,7 @@ def test_vault_armed_scan_completes_and_names_the_vault(tmp_path,
     assert "rev-abc123" in decl[0]["detail"]
 
 
-def test_cli_verify_door_matches_a_fresh_scan(tmp_path):
+def test_cli_verify_door_matches_a_fresh_scan(tmp_path, *, scratch_plane_env):
     """r3 BLOCKER: the shipping --verify door derived the host uid at the
     WRONG PATH (minting a fresh identity that matched no row), so a
     healthy just-scanned estate reported 100% phantom drift at rc 1 — and
@@ -297,23 +313,58 @@ def test_cli_verify_door_matches_a_fresh_scan(tmp_path):
     import subprocess
     import sys
     root = _fleet_root(tmp_path)
-    _scan(root)
+    from claudlobby.resources import get_resources
+    _scan(root, scratch_plane_env=scratch_plane_env, package=get_resources())
     r = subprocess.run(
         [sys.executable, "-m", "claudlobby", "--root", str(root),
          "plane", "registry", "--verify"],
         capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "projection matches the estate" in r.stdout
+    assert "authored configuration matches the recorded Plane projection" in r.stdout
     assert not (root / "host-uid").exists()   # read doors leave no writes
+    structured = subprocess.run(
+        [sys.executable, "-m", "claudlobby", "--root", str(root),
+         "plane", "registry", "--verify", "--json"],
+        capture_output=True, text=True, timeout=120)
+    body = json.loads(structured.stdout)
+    assert structured.returncode == 0 and structured.stderr == ""
+    assert body["data"]["comparison"] == "authored_config_vs_recorded_plane_projection"
+    assert body["data"]["proves_activation_or_runtime"] is False
 
 
-def test_emitter_re_tombstones_after_a_crashed_scan(tmp_path):
+def test_cli_verify_incomplete_authored_enumeration_never_claims_match(
+        tmp_path, scratch_plane_env, monkeypatch):
+    from types import SimpleNamespace
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.commands.plane_registry import dispatch
+    from claudlobby.plane import registry_emit
+    from claudlobby.resources import get_resources
+
+    root = _fleet_root(tmp_path)
+    _scan(root, scratch_plane_env=scratch_plane_env, package=get_resources())
+    original = registry_emit.assemble_entities
+    def incomplete(*args):
+        rows, _ = original(*args)
+        return rows, False
+    monkeypatch.setattr(registry_emit, "assemble_entities", incomplete)
+    args = SimpleNamespace(root=root, fleet=None, seed=False, verify=True,
+                           history=None, changes=None, show=None, type=None,
+                           scope_fleet=None, json=True)
+    with pytest.raises(CommandFailure) as refused:
+        dispatch(args)
+    assert refused.value.error.code == "conflict"
+    assert refused.value.data["enumeration_complete"] is False
+    assert refused.value.data["comparison"] == "authored_config_vs_recorded_plane_projection"
+
+
+def test_emitter_re_tombstones_after_a_crashed_scan(tmp_path, *, scratch_plane_env):
     """Chunk-B gauntlet SEV-1, the EMITTER half (probed): the diff's old
     latest-row-is-a-tombstone skip keyed on existence, so a crashed scan's
     invalid tombstone suppressed every later valid deletion. The diff now
     asks the reader's question (still current?) and re-tombstones."""
     root = _fleet_root(tmp_path)
-    _scan(root)
+    initialize_plane(root)
+    _scan(root, scratch_plane_env=scratch_plane_env)
     # a crashed scan's leftovers: a tombstone with NO completion
     emit_batch(root, [{
         "event_type": "registry_snapshot", "emitter": "t",
@@ -324,7 +375,7 @@ def test_emitter_re_tombstones_after_a_crashed_scan(tmp_path):
                     "tombstone": True}}])
     # roster removal + a REAL complete scan: deletion must finally land
     root2 = _fleet_root(tmp_path, workers="[]", worker_stanza=False)
-    s = _scan(root2)
+    s = _scan(root2, scratch_plane_env=scratch_plane_env)
     assert s["complete"] is True
     assert s["tombstoned"] == 1        # re-tombstoned despite the leftover
     from claudlobby.plane import registry_read as rr
@@ -334,9 +385,10 @@ def test_emitter_re_tombstones_after_a_crashed_scan(tmp_path):
     assert "bot:test-fleet/worker-1" not in aliases
 
 
-def test_roster_removal_tombstones_in_scope_only(tmp_path):
+def test_roster_removal_tombstones_in_scope_only(tmp_path, *, scratch_plane_env):
     root = _fleet_root(tmp_path)
-    _scan(root)
+    initialize_plane(root)
+    _scan(root, scratch_plane_env=scratch_plane_env)
     # ANOTHER fleet's bot exists in the db (out of scope for this scan)
     emit_batch(root, [{
         "event_type": "registry_snapshot", "emitter": "t", "fleet": "other",
@@ -345,7 +397,7 @@ def test_roster_removal_tombstones_in_scope_only(tmp_path):
                     "cause": "generate", "scan_id": "sx"}}])
     # remove worker-1 from the roster
     root2 = _fleet_root(tmp_path, workers="[]", worker_stanza=False)
-    s = _scan(root2)
+    s = _scan(root2, scratch_plane_env=scratch_plane_env)
     assert s["tombstoned"] == 1
     conn = _db(root)
     stones = [r["entity_alias"] for r in conn.execute(
@@ -354,18 +406,18 @@ def test_roster_removal_tombstones_in_scope_only(tmp_path):
     assert stones == ["bot:test-fleet/worker-1"]     # NEVER bot:other/zed
 
 
-def test_incomplete_enumeration_never_tombstones(tmp_path, monkeypatch):
+def test_incomplete_enumeration_never_tombstones(tmp_path, monkeypatch, *, scratch_plane_env):
     """F11: a partial scan must not read absence into deletion — an
     unreadable library item marks the scan incomplete, and an incomplete
     scan emits ZERO tombstones (its scan_completed says complete=false)."""
     from claudlobby.plane import registry_emit
 
     root = _fleet_root(tmp_path)
-    _scan(root)
+    _scan(root, scratch_plane_env=scratch_plane_env)
     root2 = _fleet_root(tmp_path, workers="[]", worker_stanza=False)
     monkeypatch.setattr(registry_emit, "library_items",
                         lambda *a, **k: ([], 3))     # 3 items unreadable
-    s = _scan(root2)
+    s = _scan(root2, scratch_plane_env=scratch_plane_env)
     assert s["complete"] is False
     assert s["tombstoned"] == 0
     conn = _db(root)
@@ -381,36 +433,43 @@ def test_incomplete_enumeration_never_tombstones(tmp_path, monkeypatch):
     assert complete_flags[-1] == 0                   # the incomplete scan says so
 
 
-def test_empty_but_complete_scan_tombstones_everything_in_scope(tmp_path):
-    """F11's fourth arm: an empty fleet that ENUMERATED COMPLETELY is a
-    true deletion of everything it owned."""
+def test_empty_but_complete_scan_tombstones_everything_in_scope(
+    tmp_path, monkeypatch, *, scratch_plane_env
+):
+    """F11's fourth arm: an empty COMPLETE enumeration deletes its scope.
+
+    Fleet admission requires a registered manager. Keep that config valid and
+    control the enumeration result, the boundary the tombstone diff consumes.
+    """
+    from claudlobby.plane import registry_emit
+
     root = _fleet_root(tmp_path)
-    _scan(root)
-    root2 = _fleet_root(tmp_path, workers="[]", worker_stanza=False)
-    # also drop lead: an empty roster
-    text = (root2 / "fleet.yaml").read_text().replace(
-        "\n    lead:\n      expertise: [orchestration]\n", "\n"
-    ).replace("manager: lead", "manager: ''")
-    (root2 / "fleet.yaml").write_text(text)
-    s = _scan(root2)
+    _scan(root, scratch_plane_env=scratch_plane_env)
+    conn = _db(root)
+    prior = {(r["entity_type"], r["entity_alias"]) for r in conn.execute(
+        "SELECT DISTINCT entity_type, entity_alias FROM registry_snapshots")}
+    conn.close()
+    assert {("bot", "bot:test-fleet/lead"),
+            ("bot", "bot:test-fleet/worker-1")} <= prior
+    monkeypatch.setattr(registry_emit, "assemble_entities", lambda *a: ([], True))
+    s = _scan(root, scratch_plane_env=scratch_plane_env)
     assert s["complete"] is True
     conn = _db(root)
-    stones = {r["entity_alias"] for r in conn.execute(
-        "SELECT entity_alias FROM registry_snapshots WHERE tombstone=1")}
+    stones = {(r["entity_type"], r["entity_alias"]) for r in conn.execute(
+        "SELECT entity_type, entity_alias FROM registry_snapshots WHERE tombstone=1")}
     conn.close()
-    assert "bot:test-fleet/lead" in stones
-    assert "bot:test-fleet/worker-1" in stones
+    assert stones == prior
 
 
-def test_a_tier_that_says_zero_emits_nothing(tmp_path):
+def test_a_tier_that_says_zero_emits_nothing(tmp_path, *, scratch_plane_env):
     """The opt-OUT half: PLANE_EMIT_ENABLED=0 -> None, zero db."""
     root = _fleet_root(tmp_path, armed=False)
-    assert _scan(root) is None
+    assert _scan(root, scratch_plane_env=scratch_plane_env, initialize=False) is None
     assert not (root / "state" / "plane" / "plane.db").exists()
 
 
 def test_an_explicit_zero_beats_an_unreachable_resolver(tmp_path,
-                                                        monkeypatch, caplog):
+                                                        monkeypatch, caplog, *, scratch_plane_env):
     """The fold's F3. Failing OPEN is right for a resolver that cannot say
     which tier set a flag — under an on-by-default rule the alternative is
     silently dropping the keyframes every later reader joins against. It is
@@ -432,23 +491,23 @@ def test_an_explicit_zero_beats_an_unreachable_resolver(tmp_path,
 
     monkeypatch.setattr(et, "resolve", boom)
     with caplog.at_level(logging.INFO):
-        assert _scan(root) is None
+        assert _scan(root, scratch_plane_env=scratch_plane_env, initialize=False) is None
     assert not (root / "state" / "plane" / "plane.db").exists()
     assert "PLANE_EMIT_ENABLED=0" in caplog.text
     caplog.clear()
     # ...and with nothing set at all, the same failure still SCANS.
     monkeypatch.delenv("PLANE_EMIT_ENABLED")
-    assert _scan(root) is not None
+    assert _scan(root, scratch_plane_env=scratch_plane_env) is not None
 
 
-def test_a_fleet_with_no_flag_at_all_SCANS(tmp_path):
+def test_a_fleet_with_no_flag_at_all_SCANS(tmp_path, *, scratch_plane_env):
     """The defaults flip itself (chunk N). A keyframe of what the fleet IS is
     what every later metric sample joins to, so a plane whose registry lane
     never ran renders an estate of unnamed uids — which is what the whole
     estate looked like while this shipped dormant. Absence is ON."""
     root = _fleet_root(tmp_path)
     (root / ".env").unlink()
-    s = _scan(root)
+    s = _scan(root, scratch_plane_env=scratch_plane_env)
     assert s is not None and s["entities"] > 0
 
 
@@ -457,15 +516,15 @@ def test_assembly_is_deterministic(tmp_path):
 
     root = _fleet_root(tmp_path)
     fleet, _ = load_fleet(root / "fleet.yaml")
-    paths = Paths(root=root)
+    paths = Paths(root=root, package=source_package())
     a = bot_payload(paths, fleet, fleet.bots["lead"], "v1")
     b = bot_payload(paths, fleet, fleet.bots["lead"], "v1")
     assert canonical_hash(a) == canonical_hash(b)
 
 
-def test_scan_completed_names_scope_and_counts(tmp_path):
+def test_scan_completed_names_scope_and_counts(tmp_path, *, scratch_plane_env):
     root = _fleet_root(tmp_path)
-    _scan(root)
+    _scan(root, scratch_plane_env=scratch_plane_env)
     conn = _db(root)
     row = conn.execute(
         "SELECT json_extract(detail,'$.scope'),"
@@ -483,7 +542,7 @@ def test_scan_completed_names_scope_and_counts(tmp_path):
 # Gauntlet round-1 pins (three-reviewer synthesis)
 # ---------------------------------------------------------------------------
 
-def test_defaults_env_tier_does_not_arm(tmp_path):
+def test_defaults_env_tier_does_not_arm(tmp_path, *, scratch_plane_env):
     """THE round-1 blocker: the shipped check read fleet.defaults['env'] —
     a tier the estate does not use — so the feature was dead in production
     while every test passed. Arming resolves ONLY through the runtime's
@@ -494,14 +553,15 @@ def test_defaults_env_tier_does_not_arm(tmp_path):
     (root / "fleet.yaml").write_text(text)
     # Still None: the defaults tier cannot arm, and post-flip it cannot
     # DISARM either — only the .env tier is consulted, which here says 0.
-    assert _scan(root) is None                       # defaults.env ≠ the tier
+    assert _scan(root, scratch_plane_env=scratch_plane_env, initialize=False) is None                       # defaults.env ≠ the tier
 
 
-def test_vaultless_fleet_never_tombstones_a_vault(tmp_path):
+def test_vaultless_fleet_never_tombstones_a_vault(tmp_path, *, scratch_plane_env):
     """Both probing reviewers, live on the 3-fleet estate: vault
     enumeration is fleet-binding-dependent, so a vaultless fleet's COMPLETE
     scan must never tombstone another fleet's vault (the ping-pong)."""
     root = _fleet_root(tmp_path)
+    initialize_plane(root)
     emit_batch(root, [{
         "event_type": "registry_snapshot", "emitter": "t", "fleet": "other",
         "payload": {"entity_type": "vault", "entity_alias": "shared-vault",
@@ -512,7 +572,7 @@ def test_vaultless_fleet_never_tombstones_a_vault(tmp_path):
                                 "gitignore_safe": True,
                                 "schema_version": "1"},
                     "cause": "generate", "scan_id": "sv"}}])
-    s = _scan(root)                                  # this fleet has no vault
+    s = _scan(root, scratch_plane_env=scratch_plane_env)                                  # this fleet has no vault
     assert s["complete"] is True
     conn = _db(root)
     stones = conn.execute(
@@ -528,6 +588,7 @@ def test_vault_rev_only_change_is_suppressed(tmp_path):
     set. The gate hashes the payload MINUS vault_rev; provenance rides
     revision_seen."""
     root = _fleet_root(tmp_path)
+    initialize_plane(root)
     base = {"event_type": "registry_snapshot", "emitter": "t",
             "fleet": "test-fleet",
             "payload": {"entity_type": "fleet", "entity_alias": "revfleet",
@@ -555,6 +616,7 @@ def test_tombstones_never_confirm_and_double_tombstone_suppresses(tmp_path):
     """Risk r1: a tombstone for a never-seen alias minted-and-confirmed a
     ghost; repeated tombstones each committed a row."""
     root = _fleet_root(tmp_path)
+    initialize_plane(root)
     stone = {"event_type": "registry_snapshot", "emitter": "t",
              "fleet": "test-fleet",
              "payload": {"entity_type": "bot",
@@ -588,7 +650,7 @@ def test_compat_is_never_a_fabricated_verdict(tmp_path):
         "  defaults:\n    claudron_vault_path: " + str(vault))
     (root / "fleet.yaml").write_text(text)
     fleet, _ = load_fleet(root / "fleet.yaml")
-    vp = vault_payload(Paths(root=root), fleet)
+    vp = vault_payload(Paths(root=root, package=source_package()), fleet)
     assert vp is not None
     assert vp["compat"]["ok"] is None                # no probe ran = no verdict
     assert vp["compat"]["floor"] != "unset"
@@ -605,7 +667,7 @@ def test_declared_fleets_sees_the_nested_vault_layout(tmp_path):
     nested = root / "local" / "sys" / "deep-fleet"
     nested.mkdir(parents=True)
     (nested / "fleet.yaml").write_text("fleet:\n  name: deep-fleet\n")
-    hp = host_payload(Paths(root=root))
+    hp = host_payload(Paths(root=root, package=source_package()))
     assert "deep-fleet" in hp["declared_fleets"]
 
 
@@ -625,12 +687,13 @@ def test_float_in_project_raw_does_not_vaporize_the_scan(tmp_path):
         mission_file = None
         validation = None
         raw = {"validation": {"threshold": 0.8}}
-    p = project_payload(Paths(root=root), fleet, _Proj(), None)
+    p = project_payload(Paths(root=root, package=source_package()), fleet, _Proj(), None)
     assert p["validation_hash"].startswith("sha256:")
 
 
 def test_unknown_metric_warns_but_commits(tmp_path, capsys):
     root = _fleet_root(tmp_path)
+    initialize_plane(root)
     out = emit_batch(root, [{
         "event_type": "metric_sample", "emitter": "t", "fleet": "test-fleet",
         "payload": {"subject_kind": "host", "subject": "h",
@@ -639,7 +702,7 @@ def test_unknown_metric_warns_but_commits(tmp_path, capsys):
     assert "unknown metric" in capsys.readouterr().err
 
 
-def test_library_walk_discovers_integrations(tmp_path):
+def test_library_walk_discovers_integrations(tmp_path, *, scratch_plane_env):
     """Cleanup r1: the hand-list missed integrations (never keyframed,
     never tombstonable) and scanned a nonexistent voices dir — categories
     are DISCOVERED from the dirs that exist."""
@@ -647,7 +710,7 @@ def test_library_walk_discovers_integrations(tmp_path):
     integ = root / "library" / "integrations"
     integ.mkdir(parents=True)
     (integ / "github-app.md").write_text("# integration\n")
-    _scan(root)
+    _scan(root, scratch_plane_env=scratch_plane_env)
     conn = _db(root)
     aliases = [r["entity_alias"] for r in conn.execute(
         "SELECT entity_alias FROM registry_snapshots"
@@ -677,6 +740,7 @@ def test_floor_is_semver_max_never_lexical():
     # assemble against a real vault dir to read the floor the payload ships
     import tempfile
     from claudlobby.config import load_fleet
+    from tests.package_fixtures import source_package
     from claudlobby.paths import Paths as _P
     with tempfile.TemporaryDirectory() as d:
         root = Path(d) / "claudlobby"
@@ -684,13 +748,13 @@ def test_floor_is_semver_max_never_lexical():
         vault = Path(d) / "v"
         vault.mkdir()
         (root / "fleet.yaml").write_text(
-            "fleet:\n  name: f\n  service_prefix: com.f\n  defaults:\n"
+            "fleet:\n  name: f\n  manager: b\n  service_prefix: com.f\n  defaults:\n"
             f"    claudron_vault_path: {vault}\n"
             "  bots:\n    b:\n      expertise: [x]\n")
         fleet, _ = load_fleet(root / "fleet.yaml")
         vp = __import__("claudlobby.plane.registry_emit",
                         fromlist=["vault_payload"]).vault_payload(
-            _P(root=root), fleet)
+            _P(root=root, package=source_package()), fleet)
     assert vp["compat"]["floor"] == expected
     assert "demand" not in vp["compat"]["floor"]
 
@@ -710,11 +774,12 @@ def test_safe_hash_survives_mixed_keys_and_is_deterministic():
     assert s1 == s2
 
 
-def test_fleet_with_its_own_vault_never_tombstones_a_siblings(tmp_path):
+def test_fleet_with_its_own_vault_never_tombstones_a_siblings(tmp_path, *, scratch_plane_env):
     """r2, probed: scanned-ANY-vault scope let a vault-carrying fleet
     tombstone a sibling fleet's vault — the ping-pong one fleet over. Scope
     is the EXACT enumerated alias."""
     root = _fleet_root(tmp_path)
+    initialize_plane(root)
     myvault = tmp_path / "myvault"
     myvault.mkdir()
     text = (root / "fleet.yaml").read_text().replace(
@@ -730,7 +795,7 @@ def test_fleet_with_its_own_vault_never_tombstones_a_siblings(tmp_path):
                                 "gitignore_safe": True,
                                 "schema_version": "1"},
                     "cause": "generate", "scan_id": "so"}}])
-    s = _scan(root)                       # scans ITS OWN vault (myvault)
+    s = _scan(root, scratch_plane_env=scratch_plane_env)                       # scans ITS OWN vault (myvault)
     assert s["complete"] is True
     conn = _db(root)
     stones = [r["entity_alias"] for r in conn.execute(
@@ -741,29 +806,40 @@ def test_fleet_with_its_own_vault_never_tombstones_a_siblings(tmp_path):
 
 
 def test_lost_host_uid_skips_the_diff_loudly_never_a_false_clean(
-    tmp_path, caplog
-):
+    tmp_path, caplog, *, scratch_plane_env):
     """r2, probed: the 'read path' MINTED a fresh uid on absence, the
     filter dropped every row, and the scan reported a CLEAN zero. Now: the
-    uid file is READ in the diff path (the later emit legitimately re-mints
-    for new envelopes — that is the write path's job); absent-at-diff-time
-    -> the diff is skipped with a WARNING and the scan discloses
-    complete=False, never a silent tombstoned=0 that reads as clean."""
+    uid file is READ in the diff path. A new emitter host UID cannot silently
+    re-parent the existing fleet: the scan warns about the skipped diff, then
+    refuses at the identity binding, leaving the old row intact."""
     import logging
 
     root = _fleet_root(tmp_path)
-    _scan(root)
+    _scan(root, scratch_plane_env=scratch_plane_env)
+    conn = _db(root)
+    before = conn.execute(
+        "SELECT uid, parent_uid FROM identity_registry WHERE kind='fleet' AND alias='test-fleet'"
+    ).fetchone()
+    conn.close()
     (root / "state" / "host-uid").unlink()
     root2 = _fleet_root(tmp_path, workers="[]", worker_stanza=False)
     with caplog.at_level(logging.WARNING, logger="claudlobby.plane.registry"):
-        s = _scan(root2)
-    assert s["tombstoned"] == 0
-    assert s["complete"] is False          # cannot-diff is disclosed, not clean
+        with pytest.raises(ValueError, match="conflicting parent for fleet identity"):
+            _scan(root2, scratch_plane_env=scratch_plane_env)
+    conn = _db(root)
+    after = conn.execute(
+        "SELECT uid, parent_uid FROM identity_registry WHERE kind='fleet' AND alias='test-fleet'"
+    ).fetchone()
+    tombstones = conn.execute("SELECT COUNT(*) FROM registry_snapshots WHERE tombstone=1").fetchone()[0]
+    conn.close()
+    assert tuple(after) == tuple(before)  # the old host still owns this fleet
+    assert tombstones == 0
     assert any("host-uid" in r.message for r in caplog.records)
 
 
 def test_unknown_metric_warns_once_per_process(tmp_path, capsys):
     root = _fleet_root(tmp_path)
+    initialize_plane(root)
     for _ in range(3):
         emit_batch(root, [{
             "event_type": "metric_sample", "emitter": "t",
@@ -774,7 +850,7 @@ def test_unknown_metric_warns_once_per_process(tmp_path, capsys):
     assert err.count("dup.warn.metric") <= 1
 
 
-def test_revision_seen_never_mints_a_phantom_vault(tmp_path, monkeypatch):
+def test_revision_seen_never_mints_a_phantom_vault(tmp_path, monkeypatch, *, scratch_plane_env):
     """Retro round (probed): a truthy vault_rev with NO vault entity in the
     assembly is reachable (fleet_dir inside the vault repo, no declared
     binding) and the old "vault" fallback minted a provisional identity no
@@ -785,7 +861,7 @@ def test_revision_seen_never_mints_a_phantom_vault(tmp_path, monkeypatch):
     monkeypatch.setattr(re_mod, "vault_payload", lambda paths, fleet: None)
     monkeypatch.setattr(re_mod, "_vault_rev", lambda paths: "rev-phantom1")
     root = _fleet_root(tmp_path)
-    s = _scan(root)
+    s = _scan(root, scratch_plane_env=scratch_plane_env)
     assert s is not None and s["complete"] is True
     conn = _db(root)
     decl = conn.execute(
@@ -824,7 +900,7 @@ def test_keyframe_carries_effective_integrations_and_protocols(tmp_path):
         "      reports_to: lead\n", "      reports_to: lead\n      mcp: [github]\n")
     (root / "fleet.yaml").write_text(fy)
     fleet, _ = load_fleet(root / "fleet.yaml")
-    paths = Paths(root=root)
+    paths = Paths(root=root, package=source_package())
     bot = fleet.bots["worker-1"]
     assert not bot.integrations                    # nothing DECLARED
 
@@ -837,3 +913,103 @@ def test_keyframe_carries_effective_integrations_and_protocols(tmp_path):
     assert "github" in eq["integrations"]          # auto-paired, undeclared
     assert set(eq["integrations"]) > set(bot.integrations)   # strict superset
     assert set(eq["protocols"]) >= set(bot.protocols)
+
+
+@pytest.fixture
+def activation_scan(tmp_path, monkeypatch):
+    from claudlobby import env_tiers
+    from claudlobby.plane import registry_emit as registry
+    from claudlobby.plane import emit_api
+    root = _fleet_root(tmp_path)
+    fleet, _ = load_fleet(root / "fleet.yaml")
+    paths = Paths(root=root, package=source_package())
+    entities = [("host", registry.platform.node(), {}), ("fleet", fleet.name, {})]
+    entities += [("bot", f"bot:{fleet.name}/{bot}", {}) for bot in fleet.bots]
+    monkeypatch.setenv("PLANE_EMIT_DISABLED", "0")
+    monkeypatch.setattr(env_tiers, "resolve", lambda *a, **k: {})
+    monkeypatch.setattr(registry, "_vault_rev", lambda *a: None)
+    monkeypatch.setattr(registry, "assemble_entities", lambda *a: (entities, True))
+    calls = []
+    monkeypatch.setattr(emit_api, "emit_batch", lambda *a, **k: calls.append((a, k)))
+    return registry, emit_api, env_tiers, paths, fleet, entities, calls
+
+
+@pytest.mark.parametrize("stop", ["disabled", "process-opt-out", "tier-opt-out", "unreachable", "incomplete", "empty", "prior-state"])
+def test_activation_scan_refuses_before_any_emit(activation_scan, monkeypatch, stop):
+    registry, _, tiers, paths, fleet, entities, calls = activation_scan
+    if stop == "disabled":
+        monkeypatch.setenv("PLANE_EMIT_DISABLED", "1")
+    elif stop == "process-opt-out":
+        monkeypatch.setenv("PLANE_EMIT_ENABLED", "0")
+    elif stop == "tier-opt-out":
+        monkeypatch.setattr(tiers, "resolve", lambda *a, **k: {
+            "PLANE_EMIT_ENABLED": tiers.Resolution("PLANE_EMIT_ENABLED", "0", "fleet", paths.env_file)})
+    elif stop == "unreachable":
+        def unavailable(*a, **k):
+            raise tiers.ResolverUnavailable("owned unavailable resolver")
+        monkeypatch.setattr(tiers, "resolve", unavailable)
+    elif stop == "prior-state":
+        (paths.root / "state/plane/plane.db").write_bytes(b"unreadable prior registry")
+    else:
+        monkeypatch.setattr(registry, "assemble_entities", lambda *a: (
+            (entities, False) if stop == "incomplete" else ([], True)))
+    with pytest.raises(registry.RegistryScanError) as caught:
+        registry.run_generate_scan(paths, fleet, require_commit=True)
+    assert not calls
+    if stop == "prior-state":
+        assert (paths.root / "state/plane/plane.db").read_bytes() == b"unreadable prior registry"
+    else:
+        assert not (paths.root / "state/plane/plane.db").exists()
+    assert caught.value.summary["recording"] == "not_attempted"
+    assert caught.value.summary["attempted_chunks"] == 0
+
+
+@pytest.mark.parametrize("failure", ["spooled", "staged", "exception", "short-list"])
+def test_activation_scan_discloses_partial_commits_and_never_accepts_a_pending_chunk(
+        activation_scan, monkeypatch, failure):
+    registry, api, _, paths, fleet, entities, calls = activation_scan
+    entities.extend(("library_item", f"shared/skills/item-{i}", {}) for i in range(100))
+    def emit(root, batch, *, require_commit):
+        assert root == paths.root and require_commit is True and len(batch) <= 50
+        calls.append(batch)
+        if len(calls) == 1:
+            return [api.EmitOutcome(str(i), "committed") for i in range(len(batch))]
+        if failure == "exception":
+            raise OSError("owned interrupted store")
+        if failure == "short-list":
+            return []
+        return [api.EmitOutcome(str(i), failure) for i in range(len(batch))]
+    monkeypatch.setattr(api, "emit_batch", emit)
+    with pytest.raises(registry.RegistryScanError) as caught:
+        registry.run_generate_scan(paths, fleet, require_commit=True)
+    summary = caught.value.summary
+    assert len(calls) == summary["attempted_chunks"] == 2  # Never reaches scan_completed.
+    assert summary["committed_chunks"] == 1 and summary["outcomes"]["committed"] == 50
+    assert summary["recording"] != "committed" and summary["event_count"] == len(entities) + 1
+    if failure == "exception":
+        assert summary["recording"] == "unknown" and isinstance(caught.value.__cause__, OSError)
+
+
+def test_activation_committed_scan_seeds_existing_identity_binding(
+        tmp_path, monkeypatch, *, scratch_plane_env):
+    """Real assembler + ingest + SQL; host probes are not identity evidence."""
+    from dataclasses import replace
+    from claudlobby import env_tiers
+    from claudlobby.claude_version import Measurement
+    from claudlobby.context import load_context
+    from claudlobby.operation_context import bind_task_context
+    from claudlobby.plane import registry_emit as registry
+    root = _fleet_root(tmp_path)
+    package = replace(source_package(), library=root / "library")
+    monkeypatch.setattr(env_tiers, "resolve", lambda *a, **k: {})
+    monkeypatch.setattr(registry, "measure_claude_version", lambda *a: Measurement("2.1.0", None))
+    first = _scan(root, scratch_plane_env=scratch_plane_env, package=package, require_commit=True)
+    assert first["complete"] and first["recording"] == "committed"
+    assert first["attempted_chunks"] == first["committed_chunks"]
+    assert sum(first["outcomes"].values()) == first["event_count"]
+    context = load_context(Paths(root=root, package=package), bot="lead")
+    frozen = bind_task_context(context, origin=context)
+    assert frozen.caller == frozen.bots["lead"] and len(frozen.bots) == 2
+    again = _scan(root, scratch_plane_env=scratch_plane_env, package=package, require_commit=True)
+    assert again["outcomes"]["duplicate"] == again["entities"]
+    assert again["outcomes"]["committed"] == 1 and again["recording"] == "committed"

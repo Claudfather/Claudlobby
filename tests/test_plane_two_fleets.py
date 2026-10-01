@@ -4,6 +4,8 @@ the unknown-fleet refusal, the sender's own fleet, the matcher's open rule,
 the host card's recorded facts, one bot-dir walk."""
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 import sqlite3
 from pathlib import Path
 
@@ -17,6 +19,7 @@ from claudlobby.plane.emit_api import emit_batch  # noqa: E402
 from claudlobby.plane.inventory import qualified_labels  # noqa: E402
 from claudlobby.plane.queries import (  # noqa: E402
     fleet_alias_range, fleet_range_params, not_sentinel_sql)
+from tests.package_fixtures import source_package
 from claudlobby.plane.view import create_app  # noqa: E402
 
 PAST, FUTURE = "2020-01-01T00:00:00+00:00", "2099-01-01T00:00:00+00:00"
@@ -32,6 +35,7 @@ def _seed(root: Path, fleets=(("engineering", "a"), ("data", "b")),
                "dispatch_msg_id": "msg_" + h * 32}
         if expected_by:
             asg["expected_by"] = expected_by
+        initialize_plane(root)
         emit_batch(root, [
             {"event_type": "work_item", "emitter": "t", "fleet": fleet,
              "payload": {"work_item_id": "wi_" + h * 32,
@@ -78,10 +82,10 @@ def test_fleet_axis_is_one_case_sensitive_range_on_every_arm(tmp_path):
     room (adversarial lens). Every arm now binds queries.fleet_alias_range:
     a case-variant fleet name is a different fleet everywhere."""
     _seed(tmp_path, fleets=(("eng", "a"), ("Eng", "b")))
-    c = TestClient(create_app(tmp_path))
+    c = TestClient(create_app(tmp_path, package=source_package()))
     fleets = {f["alias"]: f["bots"] for f in c.get("/api/fleets").json()["data"]["fleets"]}
     assert fleets == {"Eng": 2, "eng": 2}
-    tasks = c.get("/api/tasks?fleet=Eng").json()["data"]["assignments"]
+    tasks = c.get("/api/tasks?fleet=Eng").json()["data"]["tasks"]
     assert [a["title"] for a in tasks] == ["work for Eng"]
     rail = c.get("/api/identities?fleet=Eng").json()["data"]["identities"]
     assert {r["alias"] for r in rail if r["alias"].startswith("bot:")} == {
@@ -102,7 +106,7 @@ def test_unknown_fleet_is_a_typed_state_on_every_route(tmp_path):
     _seed(tmp_path)
     live = [{"fleet": "engineering", "bot": "one", "status": "up"},
             {"fleet": "disk-only", "bot": "z", "status": "up"}]
-    c = TestClient(create_app(tmp_path, sampler=_Sampler(live)))
+    c = TestClient(create_app(tmp_path, sampler=_Sampler(live), package=source_package()))
     for route in ("tasks", "identities", "channel", "search?q=go&x=1",
                   "inventory", "org", "utilization", "presence", "grid"):
         sep = "&" if "?" in route else "?"
@@ -110,20 +114,21 @@ def test_unknown_fleet_is_a_typed_state_on_every_route(tmp_path):
         assert body["state"] == "unknown", route
         assert "data, engineering" in body["remediation"] and "data" not in body, route
     for axis in ("", "all"):
-        assert len(c.get(f"/api/tasks?fleet={axis}").json()["data"]["assignments"]) == 2
+        assert len(c.get(f"/api/tasks?fleet={axis}").json()["data"]["tasks"]) == 2
         assert c.get(f"/api/presence?fleet={axis}").json()["state"] == "ok"
     # a fleet the SAMPLER knows (a bot dir before its first plane row) is not unknown
     assert c.get("/api/grid?fleet=disk-only").json()["data"]["panes"] == [live[1]]
     assert c.get("/api/presence?fleet=disk-only").json()["state"] == "ok"
     # a plane holding no fleet at all: the name passes through
     bare = tmp_path / "bare"; bare.mkdir()
+    initialize_plane(bare)
     emit_batch(bare, [{"event_type": "metric_sample", "emitter": "probe",
                        "fleet": "_host", "payload": {"subject_kind": "host",
                                                      "subject": "h1",
                                                      "metric": "host.job_ran",
                                                      "value": 1}}])
-    fresh = TestClient(create_app(bare)).get("/api/tasks?fleet=anything").json()
-    assert fresh["state"] == "ok" and fresh["data"]["assignments"] == []
+    fresh = TestClient(create_app(bare, package=source_package())).get("/api/tasks?fleet=anything").json()
+    assert fresh["state"] == "ok" and fresh["data"]["tasks"] == []
 
 
 # --- identity: the sender's own fleet, and qualification where fleets meet ----
@@ -137,7 +142,7 @@ def test_sender_fleet_is_read_off_the_alias_not_the_emitting_fleet(tmp_path):
     emit_batch(tmp_path, [
         _comm("data", "c", "human:chris", "bot:engineering/one"),
         _comm("data", "d", "bot:engineering/one", "bot:data/one")])
-    c = TestClient(create_app(tmp_path))
+    c = TestClient(create_app(tmp_path, package=source_package()))
     msgs = {m["msg_id"]: m for t in c.get("/api/channel").json()["data"]["threads"]
             for m in t["messages"]}
     human = msgs["msg_" + "c" * 32]
@@ -187,7 +192,7 @@ def test_overview_open_is_the_matchers_rule(tmp_path):
         {"event_type": "task", "emitter": "t", "fleet": "engineering",
          "payload": {"event": "completed", "work_item_id": "wi_" + "a" * 32,
                      "assignment_id": "asg_" + "2" * 32, "actor": worker}}])
-    c = TestClient(create_app(tmp_path))
+    c = TestClient(create_app(tmp_path, package=source_package()))
     ov = {r["alias"]: r for r in c.get("/api/overview").json()["data"]["fleets"]}
     # the seed's own assignment (no source_ref) stays open; the re-dispatched pair closed
     assert ov["engineering"]["open"] == 1 and ov["data"]["open"] == 1
@@ -200,7 +205,7 @@ def test_overview_discloses_provisional_actors_and_the_host_facts(tmp_path):
     sentinel's samples) — None until the probe ever recorded — and the
     ingest-lag STATE, stamped by the API rather than the page."""
     _seed(tmp_path)
-    c = TestClient(create_app(tmp_path))
+    c = TestClient(create_app(tmp_path, package=source_package()))
     before = c.get("/api/overview").json()["data"]
     eng = {r["alias"]: r for r in before["fleets"]}["engineering"]
     assert (eng["bots"], eng["provisional"]) == (2, 2)   # no scan yet: all unconfirmed
@@ -243,7 +248,7 @@ def test_discover_bot_dirs_is_the_walk_the_grid_gates(tmp_path):
 # --- the strip's unacked figure: the fleet's newest ack (chunk K) --------------
 
 def test_overview_unacked_is_past_the_fleets_newest_ack(tmp_path):
-    """`brief --ack` records a `reports_acked` event on the acking bot; the card
+    """`fleet reports ack` records a `reports_acked` event on the acking bot; the card
     counts report-class communications on the room axis past the fleet's newest
     ack by ANY of its actors; a fleet that never acked reads null + reason —
     never a count of everything ever — and another fleet's ack is not its own."""
@@ -251,7 +256,7 @@ def test_overview_unacked_is_past_the_fleets_newest_ack(tmp_path):
     emit_batch(tmp_path, [
         _comm("engineering", "1", "bot:engineering/one", "bot:engineering/mgr", cls="report"),
         _comm("engineering", "2", "bot:engineering/one", "bot:engineering/mgr", cls="report")])
-    c = TestClient(create_app(tmp_path))
+    c = TestClient(create_app(tmp_path, package=source_package()))
     rows = lambda: {r["alias"]: r for r in c.get("/api/overview").json()["data"]["fleets"]}
     eng = rows()["engineering"]
     assert eng["unacked"] is None and "never run" in eng["unacked_reason"]

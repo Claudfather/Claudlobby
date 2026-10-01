@@ -82,7 +82,7 @@ def ignition_doors(fleet: "FleetConfig", paths: "Paths") -> list["Door"]:
         Door(
             "briefing.slots",
             briefing_armed,
-            "bots.<bot>.briefing.slots in fleet.yaml, then generate + lib/setup-fleet",
+            "bots.<bot>.briefing.slots in fleet.yaml, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir>",
         )
     )
 
@@ -94,7 +94,7 @@ def ignition_doors(fleet: "FleetConfig", paths: "Paths") -> list["Door"]:
             boot_brief_armed,
             boot_brief_switch.arm
             if boot_brief_switch is not None
-            else "bots.<bot>.brief.on_start: true in fleet.yaml, then generate",
+            else "bots.<bot>.brief.on_start: true in fleet.yaml, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir>",
         )
     )
 
@@ -148,7 +148,7 @@ def ignition_gap(
     one of them did.
 
     The cheap conjunct is tested FIRST and short-circuits: resolving the doors
-    shells out to ``lib/env-tiers.sh`` through the switch cascade, and a
+    shells out to ``claudlobby/_runtime_scripts/env-tiers.sh`` through the switch cascade, and a
     manager-less fleet can never have a gap however its doors read. ``doors``
     is the seam for a caller that has already paid for that resolve — both
     ``validate`` and ``check_goal_binding`` pass it, so one run resolves once.

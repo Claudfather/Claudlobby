@@ -1,6 +1,6 @@
 # Environment Variables Reference
 
-The compositor writes environment variables to each bot's `bot.conf`. These are sourced at startup by `lib/start-bot.sh` and available to all lib/ scripts, hooks, and skills.
+The compositor writes environment variables to each bot's `bot.conf`. These are sourced at startup by `claudlobby/_runtime_scripts/start-bot.sh` and available to all claudlobby/_runtime_scripts/ scripts, hooks, and skills.
 
 ## The env contract: names in git, values in `.env`
 
@@ -13,7 +13,7 @@ and `fleet.defaults.git_credentials`. All of those files are **tracked**, and th
 without ever holding a value.
 
 The reason is that a name is what the compositor and validator must both agree on: `validate`
-warns when a declared var is unset, `freshbox` audits declarations against `.env` tiers, and a
+warns when a declared var is unset, `config validate --runtime` audits declarations against `.env` tiers, and a
 reader needs to know what to provision. None of that works if names live only in an untracked file.
 A value in a tracked file, by contrast, is a leaked credential.
 
@@ -36,7 +36,7 @@ one fleet sets it — it is the interface. Reasoning from "anything credential-a
 | `BOT_ID` | `bots.<name>` key | Bot identifier (same as fleet.yaml key) |
 | `BOT_NAME` | `bots.<name>.name` (defaults to key) | Bot display name (defaults to BOT_ID) |
 | `BOT_SERVICE` | Derived | systemd/launchd service name (e.g., `com.example.fleet.botname`) |
-| `TMUX_SOCKET` | Derived | Per-bot tmux server socket name (`-L` argument) — equals `BOT_SERVICE`. One tmux server per bot, so one server's death drops only that bot. Peer scripts resolve it via `tmux_socket_for_bot()` (`lib/lib-common.sh`) |
+| `TMUX_SOCKET` | Derived | Per-bot tmux server socket name (`-L` argument) — equals `BOT_SERVICE`. One tmux server per bot, so one server's death drops only that bot. Peer scripts resolve it via `tmux_socket_for_bot()` (`claudlobby/_runtime_scripts/lib-common.sh`) |
 | `BOT_LABEL` | Derived | Human-readable label for the service |
 | `BOT_DIR` | Derived | Absolute path to the bot's runtime directory |
 | `CLAUDLOBBY_ROOT` | Detected | Absolute path to the claudlobby repository root |
@@ -158,7 +158,7 @@ falls back rather than dropping the alert, and says so loudly.
 
 ## Code-Audit Sweep
 
-Emitted only into the `fleet.sweep.owner_bot`'s `bot.conf` (see `fleet.sweep` in the fleet.yaml schema reference) — the fleet-level nightly selector (`lib/code-audit-sweep.sh`) needs to resolve exactly one owner.
+Emitted only into the `fleet.sweep.owner_bot`'s `bot.conf` (see `fleet.sweep` in the fleet.yaml schema reference) — the fleet-level nightly selector (`claudlobby/_runtime_scripts/code-audit-sweep.sh`) needs to resolve exactly one owner.
 
 | Variable | Source | Description |
 |----------|--------|-------------|
@@ -183,13 +183,11 @@ Emitted into **every** bot's `bot.conf` from `projects.yaml` — one pair per pr
 | `CLAUDNA_VERSION` | `bots.<name>.claudna_version` | clauDNA plugin version pin |
 | `CLAUDRON_VAULT_PATH` | `bots.<name>.claudron_vault_path` | Claudron vault root; the bot's `claudron` CLI resolves the vault from it (Claudron `docs/CLI_CONTRACT.md` §Environment) |
 | `CLAUDOSSEUM_TENANT_ID` | `bots.<name>.claudosseum_tenant_id` | Claudosseum telemetry tenant ID |
-| `CLAUDRON_QUERY_BEFORE` | `bots.<name>.env` (manual opt-in) | `1` enables the dispatch query-before preflight: `dispatch-task.sh` prepends fleet-memory pointers (titles + paths from `claudron lookup`) to dispatched tasks. Off by default; needs the claudron CLI on PATH and `CLAUDRON_VAULT_PATH` set |
-| `CLAUDRON_QUERY_LIMIT` | `bots.<name>.env` (manual opt-in) | Max fleet-memory pointers injected per dispatch (default 3) |
 
 ## Opt-in Feature Flags
 
-A handful of shared `lib/` hooks and scripts compose into **every** bot on **every** fleet
-(via `system.yaml` `defaults.hooks` or a shared `lib/` script), but ship **dormant by default** (the plane hooks are the exception since F18 R1: always on, `PLANE_EMIT_DISABLED=1` the one silencer) —
+A handful of shared `claudlobby/_runtime_scripts/` hooks and scripts compose into **every** bot on **every** fleet
+(via `system.yaml` `defaults.hooks` or a shared `claudlobby/_runtime_scripts/` script), but ship **dormant by default** (the plane hooks are the exception since F18 R1: always on, `PLANE_EMIT_DISABLED=1` the one silencer) —
 each is a no-op until the specific var below is set to `"1"` under the relevant bot's
 `bots.<name>.env` (which lands in that bot's `bot.conf` and is inherited by hooks/scripts running
 in its session). This is the equippable-dormant pattern: a shared install cannot be staged
@@ -198,12 +196,12 @@ per-bot, so rollout is gated per-fleet (or per-bot) instead of going live estate
 
 | Variable | Consumer | Description |
 |----------|----------|--------------|
-| `SESSION_DIGEST_ENABLED` | `lib/transcript-digest.sh` (SessionEnd hook) | `"1"` arms per-session Haiku transcript digesting for this bot. Default `0` (dormant) |
+| `SESSION_DIGEST_ENABLED` | `claudlobby/_runtime_scripts/transcript-digest.sh` (SessionEnd hook) | `"1"` arms per-session Haiku transcript digesting for this bot. Default `0` (dormant) |
 | `PLANE_EMIT_ENABLED` | `claudlobby generate` (`registry_emit.py`) | An opt-**OUT** since chunk N: the generate-time registry keyframe scan runs unless the fleet-tier `.env` resolves this to exactly `"0"`. Not a runtime door gate — every door is always on since F18 R1 |
-| `PLANE_EMIT_DISABLED` | `lib/plane-emit.sh`, every hook, every fleet timer | `"1"` silences every plane door — the harness/test exemption, the one silencer. Opposite polarity from the other flags on this list. Set it in the fleet-tier `.env`: the composer carries the resolved value onto every fleet job unit (a timer sources no `.env`) and into `bot.conf` (a session sees no unexported tier assignment), so one line reaches all three |
-| `SPINDOWN_RECEIPT_ENABLED` | `lib/spin-down-bot.sh` | An opt-**OUT** since chunk N: the `bot_teardown_started` receipt is written unless this is exactly `"0"` (it is the one record that survives a `--purge`) |
-| `CLAUDLOBBY_MCP_PROBE_ENABLED` | `claudlobby validate` / `generate` (`mcp_packages.py`) | `"1"` in the fleet-tier `.env` arms the NETWORK half of the MCP package check: each declared fragment's package is resolved by running the exact argv the fragment would run. Off by default — a compose must not depend on an external registry being up. The offline half (is the package version-pinned?) is unconditional and needs no flag. Findings are always WARNINGS; a probe that cannot answer says `could NOT check` and is never read as a pass (#1058) |
-| `CLAUDLOBBY_MCP_PROBE_TIMEOUT_S` | `claudlobby validate` (`mcp_packages.py`) | Per-package bound on that probe, default `60`. A probe that exceeds it yields `could NOT check`, never `missing` — measured: a real package took >120s to fetch on a loaded host |
+| `PLANE_EMIT_DISABLED` | `claudlobby/_runtime_scripts/plane-emit.sh`, every hook, every fleet timer | `"1"` silences every plane door — the harness/test exemption, the one silencer. Opposite polarity from the other flags on this list. Set it in the fleet-tier `.env`: the composer carries the resolved value onto every fleet job unit (a timer sources no `.env`) and into `bot.conf` (a session sees no unexported tier assignment), so one line reaches all three |
+| `SPINDOWN_RECEIPT_ENABLED` | `claudlobby/_runtime_scripts/spin-down-bot.sh` | An opt-**OUT** since chunk N: the `bot_teardown_started` receipt is written unless this is exactly `"0"` (it is the one record that survives a `--purge`) |
+| `CLAUDLOBBY_MCP_PROBE_ENABLED` | `claudlobby config validate` / `generate` (`mcp_packages.py`) | `"1"` in the fleet-tier `.env` arms the NETWORK half of the MCP package check: each declared fragment's package is resolved by running the exact argv the fragment would run. Off by default — a compose must not depend on an external registry being up. The offline half (is the package version-pinned?) is unconditional and needs no flag. Findings are always WARNINGS; a probe that cannot answer says `could NOT check` and is never read as a pass (#1058) |
+| `CLAUDLOBBY_MCP_PROBE_TIMEOUT_S` | `claudlobby config validate` (`mcp_packages.py`) | Per-package bound on that probe, default `60`. A probe that exceeds it yields `could NOT check`, never `missing` — measured: a real package took >120s to fetch on a loaded host |
 
 ## Plugins
 
@@ -218,13 +216,13 @@ per-bot, so rollout is gated per-fleet (or per-bot) instead of going live estate
 | Variable | Source | Description |
 |----------|--------|-------------|
 | `GIT_CONFIG_GLOBAL` | `git_credentials` or `github_app` (fleet or bot) | Path to the composed `<bot_dir>/.gitconfig` that routes git credentials per GitHub org and/or through the GitHub App helper. Emitted when the bot declares either surface. The composed file `include`s the operator's `~/.gitconfig` first; App mode with `slug`+`bot_user_id` overrides the commit identity AFTER the include. See [`fleet-yaml-schema.md`](fleet-yaml-schema.md#fleetdefaultsgit_credentials--botsnamegit_credentials) |
-| `GITHUB_APP_ID` / `GITHUB_APP_INSTALLATION_ID` / `GITHUB_APP_PRIVATE_KEY_PATH` | `github_app` or `mcp: [github-app]` | The three App-auth inputs (fleet tier; values from `lib/setup-github-app.sh`). Consumed at USE time by `lib/git-credential-github-app` — never resolved into the boot env (F9). Note the composed `cache --timeout=3000` layer: git `approve` re-stores a token with a fresh TTL on every successful auth, so a cached token can outlive the ~1h `ghs_` lifetime under continuous pushing — self-healing (the next 401 erases and re-mints) at the cost of one failed round trip (D5) |
+| `GITHUB_APP_ID` / `GITHUB_APP_INSTALLATION_ID` / `GITHUB_APP_PRIVATE_KEY_PATH` | `github_app` or `mcp: [github-app]` | The three App-auth inputs (fleet tier; values from `claudlobby host github-app setup`). Consumed at USE time by `claudlobby/_runtime_scripts/git-credential-github-app` — never resolved into the boot env (F9). Note the composed `cache --timeout=3000` layer: git `approve` re-stores a token with a fresh TTL on every successful auth, so a cached token can outlive the ~1h `ghs_` lifetime under continuous pushing — self-healing (the next 401 erases and re-mints) at the cost of one failed round trip (D5) |
 
 Two operational notes:
 
 **Adding `git_credentials` needs a restart, not a reload.** `bot.conf` is sourced once when the
 pane is created, so a live session keeps whatever `GIT_CONFIG_GLOBAL` it started with (usually
-none). `lib/reload-fleet.sh` deliberately does not restart, so waiting for the daily reload leaves
+none). `claudlobby/_runtime_scripts/reload-fleet.sh` deliberately does not restart, so waiting for the daily reload leaves
 a composed `.gitconfig` that nothing points at.
 
 **A `403` here has two causes that look identical.** Either the routing is not active (no

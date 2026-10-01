@@ -2,14 +2,15 @@
 the vitals hook go through the one fleet-event door (provenance,
 alias-anchored), no per-bot event file is written any more (the reader-less
 keepalive-<day>.jsonl and the fleet-<day>.jsonl both went with R1), and
-`claudlobby uptime` reads the plane's heartbeat samples + restart transitions
+`claudlobby fleet uptime` reads the plane's heartbeat samples + restart transitions
 and nothing else (F18 closure R2b — no retirement fact, no log; refuses when
-the plane cannot answer). Deleted with the log parser:
-test_uptime_from_the_plane_equals_uptime_from_the_log (its plane half lives on
-as test_uptime_metrics_from_the_plane); test_cmd_uptime_reads_the_plane_once_the
-_events_write_is_retired became test_cmd_uptime_reads_the_plane_and_refuses_without_it.
+the plane cannot answer). The old log parser's plane half remains in
+test_uptime_metrics_from_the_plane; the public operation is checked by
+test_fleet_uptime_reads_the_plane_and_refuses_without_it.
 """
 from __future__ import annotations
+
+from tests.plane_setup import initialize_plane
 
 import json
 import subprocess
@@ -22,7 +23,7 @@ from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import emit_batch
 from claudlobby.uptime import compute_metrics, entries_from_plane
 from tests.plane_fixtures import _stdlib_readers
-from tests.test_plane_keepalive_door import CLI, LIB, _rig, _tick
+from tests.test_plane_keepalive_door import CLI, LIB, _replay_pending, _rig, _tick
 
 FLEET = "kfleet"
 TODAY = datetime.now().strftime("%Y-%m-%d")
@@ -31,7 +32,7 @@ TODAY = datetime.now().strftime("%Y-%m-%d")
 def _manifest(root: Path):
     (root / "local" / FLEET).mkdir(parents=True, exist_ok=True)
     (root / "local" / FLEET / "fleet.yaml").write_text(
-        f"fleet:\n  name: {FLEET}\n  service_prefix: com.k\n  bots:\n    b1:\n      expertise: [software-engineering]\n")
+        f"fleet:\n  name: {FLEET}\n  manager: b1\n  service_prefix: com.k\n  bots:\n    b1:\n      expertise: [software-engineering]\n")
     if not (root / "lib").exists():
         (root / "lib").symlink_to(LIB)
 
@@ -43,14 +44,12 @@ def _cli(root: Path, *args, env=None):
 
 
 def _await(root: Path, sql: str, want, *, timeout=30):
-    """The tick's plane emission is DETACHED (the cold CLI lands the row in the
-    background), so the db may not even exist when the tick returns: poll
-    without creating it (a `connect` would mint an empty, schema-less file
-    ahead of the CLI) and read a missing table as nothing yet."""
+    """The tick's emission is detached; replay its raw stage before reading."""
     import sqlite3
     deadline = time.monotonic() + timeout
     while True:
         got = None
+        _replay_pending(root)
         if db_path(root).exists():
             try:
                 with connect(db_path(root)) as conn:
@@ -64,11 +63,11 @@ def _await(root: Path, sql: str, want, *, timeout=30):
 
 # --- the keepalive tick ------------------------------------------------------------
 
-def test_a_dead_session_restart_lands_as_a_fleet_event_and_no_file_is_written(tmp_path):
+def test_a_dead_session_restart_lands_as_a_fleet_event_and_no_file_is_written(tmp_path, *, scratch_plane_env):
     """The tick under a dead session restarts the bot (the start-bot stub) and
     the RESTART transition is a `keepalive_restart` fleet event on the plane
     with provenance; no keepalive-<day>.jsonl, no fleet-<day>.jsonl (R1)."""
-    libdir, bot, env = _rig(tmp_path, has_session=False)
+    libdir, bot, env = _rig(tmp_path, has_session=False, scratch_plane_env=scratch_plane_env)
     r = _tick(libdir, bot, env)
     assert r.returncode == 0, r.stderr
     assert (bot / "start-stub.log").exists()                                       # restarted through the stub
@@ -80,8 +79,8 @@ def test_a_dead_session_restart_lands_as_a_fleet_event_and_no_file_is_written(tm
     assert ref.startswith("fleet-events:sha:") and alias == f"bot:{FLEET}/b1" and sev == "notice"
 
 
-def test_an_idle_tick_lands_no_fleet_event_the_heartbeat_carries_the_verdict(tmp_path):
-    libdir, bot, env = _rig(tmp_path)
+def test_an_idle_tick_lands_no_fleet_event_the_heartbeat_carries_the_verdict(tmp_path, *, scratch_plane_env):
+    libdir, bot, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
     r = _tick(libdir, bot, env)
     assert r.returncode == 0, r.stderr
     assert _await(tmp_path, "SELECT COUNT(*) FROM metric_samples WHERE metric = 'bot.heartbeat'", 1) == 1
@@ -92,8 +91,8 @@ def test_an_idle_tick_lands_no_fleet_event_the_heartbeat_carries_the_verdict(tmp
 
 # --- the vitals hook ---------------------------------------------------------------
 
-def test_the_vitals_hook_lands_its_events_through_the_door(tmp_path):
-    libdir, bot, env = _rig(tmp_path)
+def test_the_vitals_hook_lands_its_events_through_the_door(tmp_path, *, scratch_plane_env):
+    libdir, bot, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
     (libdir / "bot-vitals.sh").symlink_to(LIB / "bot-vitals.sh")
     env = {**env, "BOT_DIR": str(bot), "BOT_ID": "b1", "FLEET_NAME": FLEET}
     payload = json.dumps({"hook_event_name": "PostToolUse", "tool_name": "Read", "session_id": "s-1"})
@@ -139,6 +138,7 @@ def test_uptime_metrics_from_the_plane(tmp_path):
                     "occurred_at": (now - timedelta(minutes=46, seconds=30)).isoformat(),
                     "payload": {"subject_kind": "bot_instance", "subject": f"bot:{FLEET}/b1",
                                 "metric": "bot.session_up", "value": False}})
+    initialize_plane(root)
     out = emit_batch(root, samples)
     assert all(o.status == "committed" for o in out), out
     pr = _stdlib_readers()
@@ -154,22 +154,28 @@ def test_uptime_metrics_from_the_plane(tmp_path):
     assert with_down["uptime_pct"] <= expected["uptime_pct"] and with_down["restart_count"] == 1   # DOWN adds no uptime
 
 
-def test_cmd_uptime_reads_the_plane_and_refuses_without_it(tmp_path):
+def test_fleet_uptime_reads_the_plane_and_refuses_without_it(tmp_path):
     root = tmp_path
     _manifest(root)
     (root / "state" / "plane").mkdir(parents=True, exist_ok=True)
     bot = root / "local" / FLEET / "runtime" / "bots" / "b1"
     bot.mkdir(parents=True); (bot / "bot.conf").write_text('BOT_NAME="b1"\n')
     now = datetime.now(timezone.utc)
+    initialize_plane(root)
     emit_batch(root, [{"event_type": "metric_sample", "emitter": "keepalive", "fleet": FLEET,
                        "occurred_at": (now - timedelta(minutes=m)).isoformat(),
                        "payload": {"subject_kind": "bot_instance", "subject": f"bot:{FLEET}/b1", "metric": "bot.heartbeat",
                                    "value": {"state": "IDLE"}}} for m in (3, 2, 1)])
-    served = _cli(root, "uptime", "--json", "--window", "24h")
+    served = _cli(root, "fleet", "uptime", "--json", "--window", "24h")
     assert served.returncode == 0, served.stderr
-    assert json.loads(served.stdout)["b1"]["24h"]["entries_in_window"] == 3           # the plane, no flag, no fact
+    served_result = json.loads(served.stdout)
+    assert served_result["schema_version"] == 1 and served_result["command"] == "fleet.uptime"
+    assert served_result["ok"] is True
+    assert served_result["data"]["bots"]["b1"]["24h"]["entries_in_window"] == 3  # the plane, no flag, no fact
     for p in (root / "state" / "plane").glob("plane.db*"):
         p.unlink()
-    refused = _cli(root, "uptime", "--json", "--window", "24h")
-    assert refused.returncode == 3 and refused.stdout == "", (refused.returncode, refused.stdout)
-    assert "UNREACHABLE" in refused.stderr and "plane.db" in refused.stderr             # the remedy, never an empty table
+    refused = _cli(root, "fleet", "uptime", "--json", "--window", "24h")
+    refused_result = json.loads(refused.stdout)
+    assert refused.returncode == 6 and refused_result["ok"] is False, (refused.returncode, refused.stdout)
+    assert refused_result["command"] == "fleet.uptime" and refused_result["error"]["code"] == "unavailable"
+    assert refused_result["data"] == {} and "plane.db" in refused_result["error"]["message"]  # never an empty table

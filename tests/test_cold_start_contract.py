@@ -7,23 +7,16 @@ hands you a non-externally-managed environment — so PEP 668 never fires and th
 two blockers a real user hits first are invisible by construction.
 
 These tests encode the contract instead: what the docs are allowed to tell a
-user to run, and what the CLI resolver is allowed to assume. They are fast and
-host-independent, so they run everywhere the rest of the suite does.
+user to run. Selected CLI entrypoint behavior is covered by
+`test_maintenance_jobs.py`; these checks cover onboarding and setup.
 """
 
 from __future__ import annotations
 
-import os
 import re
-import shlex
-import shutil
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
-
-from tests.conftest import _write_exec, constructed_env
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 README = REPO_ROOT / "README.md"
@@ -33,7 +26,6 @@ GETTING_STARTED = REPO_ROOT / "documentation" / "getting-started.md"
 # user-facing docs were fixed. Anything that tells a human what to type counts.
 CONTRIBUTOR_GUIDE = REPO_ROOT / "CLAUDE.md"
 SETUP_SKILL = REPO_ROOT / ".claude" / "skills" / "setup" / "SKILL.md"
-LIB_COMMON = REPO_ROOT / "lib" / "lib-common.sh"
 
 _FENCE_RE = re.compile(r"```(?:bash|sh|console)\n(.*?)```", re.DOTALL)
 
@@ -49,35 +41,18 @@ def _shell_lines(doc: Path) -> list[str]:
     return out
 
 
-def _synthetic_root(tmp_path: Path) -> Path:
-    """A CLAUDLOBBY_ROOT where **both** resolver rungs would succeed.
-
-    That is the point: the fixture package imports under any interpreter, so the
-    system-python rung is viable, and a stub `.venv/bin/python` makes the venv
-    rung viable too. With only one rung viable a test cannot tell which one ran,
-    which is how a rung-order mutation survived the previous test.
-
-    The stub venv is a shell wrapper that announces itself and then execs the
-    real interpreter, so its use is observable in stdout. No actual virtualenv
-    is created — that kept the old test skipped on CI and on fresh clones.
-    """
-    root = tmp_path / "clroot"
-    pkg = root / "claudlobby"
-    pkg.mkdir(parents=True)
-    (pkg / "__init__.py").write_text("")
-    (pkg / "composer.py").write_text("")  # satisfies the usability probe
-    (pkg / "__main__.py").write_text("import sys; print('MODULE', *sys.argv[1:])")
-
-    venv_bin = root / ".venv" / "bin"
-    venv_bin.mkdir(parents=True)
-    stub = venv_bin / "python"
-    stub.write_text(f'#!/bin/bash\nprintf "VENVPY\\n"\nexec "{sys.executable}" "$@"\n')
-    stub.chmod(0o755)
-    return root
-
-
 class TestDocumentedInstallPath:
     """The install commands the docs hand a user must work on a stock host."""
+
+    def test_cold_host_docs_use_setup_then_activation(self):
+        # `lib/setup-fleet` is retired with `lib/setup-system`: `fleet setup`
+        # validates before it activates, so no doc may chain the old wrapper
+        # after a validate (#1681's quickstart shape).
+        for doc in (README, GETTING_STARTED, SETUP_SKILL):
+            text = doc.read_text()
+            assert "host setup" in text and "fleet setup" in text, doc
+            assert "lib/setup-system" not in text and "host-timers" not in text, doc
+            assert "lib/setup-fleet" not in text, doc
 
     @pytest.mark.parametrize(
         "doc", [README, GETTING_STARTED, CONTRIBUTOR_GUIDE], ids=lambda p: p.name
@@ -112,19 +87,29 @@ class TestDocumentedInstallPath:
         install instruction without a venv is a blocker, not a style nit.
         """
         lines = _shell_lines(doc)
-        # Match the extras form too — `-e '.[dev]'` is how the contributor guide
-        # installs, and an earlier bare `-e \.` pattern silently *skipped* that
-        # file rather than checking it.
-        installs_package = any(
-            re.search(r"pip\s+install\s+-e\s+['\"]?\.", ln) for ln in lines
-        )
+        installs_package = any(re.search(r"(?:-m\s+)?pip\s+install\b", ln) for ln in lines)
         if not installs_package:
-            pytest.skip(f"{doc.name} does not install the package")
+            # The README delegates assembly to the canonical walkthrough.
+            assert doc == README and "documentation/getting-started.md" in doc.read_text()
+            lines = _shell_lines(GETTING_STARTED)
+            assert any(re.search(r"-m\s+pip\s+install\b", ln) for ln in lines)
 
         assert any("venv" in ln for ln in lines), (
             f"{doc.name} installs the package but never creates a venv. "
             "PEP 668 makes that install fail on both supported host families."
         )
+
+    def test_walkthrough_probes_a_real_venv_and_never_exits_the_pasting_shell(self):
+        """`import venv` passes on Debian without python3-venv; only creating
+        one proves ensurepip. Snippets are pasted into an interactive shell, so
+        `exit` would close the operator's terminal instead of stopping a block.
+        """
+        lines = _shell_lines(GETTING_STARTED)
+        assert not [ln for ln in lines if re.search(r"\bexit\b", ln)]
+        assert not [ln for ln in lines if re.search(r"\bimport [\w, ]*\bvenv\b", ln)]
+        assert any(re.search(r'-m venv "\$PROBE/', ln) for ln in lines)
+        text = GETTING_STARTED.read_text()
+        assert "python3-venv" in text and "`jq`" in text
 
     def test_every_entry_point_agrees_on_the_first_run_template(self):
         """The three onboarding entry points must name the same template.
@@ -138,245 +123,14 @@ class TestDocumentedInstallPath:
         The skill is included deliberately — the docs agreed with *each other*
         the whole time, so a docs-only comparison would have stayed green.
         """
-        pattern = re.compile(r"[Cc]opy\s+`?(fleet\.yaml\.\w+)|cp\s+(fleet\.yaml\.\w+)")
+        for source in (README, GETTING_STARTED, SETUP_SKILL):
+            assert "fleet.yaml.seed" in source.read_text(), source
+        # The executable copy uses the installed package path, including when
+        # the operator is still in the source checkout after building it.
+        walkthrough = GETTING_STARTED.read_text()
+        assert 'cp "$SEEDS/fleet.yaml.seed" "$WORK/fleet.yaml"' in walkthrough
+        assert 'SEEDS=$("$WORK/bootstrap/bin/python" -I -c' in walkthrough
 
-        def templates(source: Path) -> set[str]:
-            found = pattern.findall(source.read_text())
-            return {m for pair in found for m in pair if m}
-
-        sources = {
-            "README.md": README,
-            "getting-started.md": GETTING_STARTED,
-            "setup SKILL.md": SETUP_SKILL,
-        }
-        named = {label: templates(p) for label, p in sources.items() if p.is_file()}
-        named = {label: t for label, t in named.items() if t}
-        if len(named) < 2:
-            pytest.skip("fewer than two entry points name a first-run template")
-
-        union: set[str] = set()
-        for t in named.values():
-            union |= t
-        assert len(union) == 1, (
-            "onboarding entry points disagree on the first-run template: "
-            + "; ".join(f"{label} → {sorted(t)}" for label, t in named.items())
-            + " — pick one and make the others reference it."
-        )
-
-
-class TestQuickstartStopsAtAFailedValidate:
-    """#1681: the README printed `claudlobby validate && claudlobby generate` and then
-    `lib/setup-fleet` on a line of its own. On a first run, with placeholders still in
-    place, validate correctly fails, and setup-fleet then ran anyway and failed twice
-    more. The conditional has to be written, not implied."""
-
-    @staticmethod
-    def _run_readme_chain(tmp_path: Path, validate_rc: int) -> tuple[list[str], str]:
-        """Run the README's quickstart block from the seed copies on, with stubs for
-        `claudlobby` and `lib/setup-fleet`, and return the calls in order."""
-        text = next(b for b in _FENCE_RE.findall(README.read_text()) if "claudlobby validate" in b)
-        text = text[text.index("cp fleet.yaml.seed") :]  # the part after the clone and install
-        (tmp_path / "bin").mkdir()
-        (tmp_path / "lib").mkdir()
-        log = tmp_path / "calls"
-
-        def stub(path: Path, body: str) -> None:
-            path.write_text("#!/bin/bash\n" + body + "\n")
-            path.chmod(0o755)
-
-        stub(tmp_path / "bin" / "claudlobby", f'echo "$1" >> {log}; [ "$1" = validate ] && exit {validate_rc}; exit 0')
-        stub(tmp_path / "lib" / "setup-fleet", f"echo setup-fleet >> {log}")
-        (tmp_path / "fleet.yaml.seed").write_text("")
-        (tmp_path / ".env.seed.example").write_text("")
-        env = {"PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin", "EDITOR": "true", "HOME": str(tmp_path)}
-        r = subprocess.run(["bash", "-c", text], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60)
-        return log.read_text().split(), r.stderr
-
-    def test_a_failed_validate_is_the_only_call_the_readme_chain_makes(self, tmp_path: Path):
-        calls, err = self._run_readme_chain(tmp_path, 1)
-        assert calls == ["validate"], (calls, err)
-
-    def test_a_passing_validate_runs_the_whole_readme_chain(self, tmp_path: Path):
-        calls, err = self._run_readme_chain(tmp_path, 0)
-        assert calls == ["validate", "generate", "setup-fleet"], (calls, err)
-
-    @pytest.mark.parametrize("doc", [GETTING_STARTED, SETUP_SKILL], ids=lambda p: p.name)
-    def test_setup_fleet_never_runs_on_its_own_line_after_a_validate_chain(self, doc: Path):
-        for block in _FENCE_RE.findall(doc.read_text()):
-            lines = [raw.split("#", 1)[0].rstrip() for raw in block.splitlines()]
-            lines = [line for line in lines if line.strip()]
-            for prev, line in zip(lines, lines[1:]):
-                if "claudlobby validate" in prev and not prev.endswith("\\"):
-                    assert not line.lstrip().startswith("lib/setup-fleet"), (doc.name, prev, line)
-
-
-class TestTheInstallStepSaysHowLongItTakes:
-    """#1681: on a cold host the install ran past eight minutes with no stated
-    duration, and `lib/setup-system` installs with `--quiet`. A stranger cannot tell
-    slow from stopped, which decides whether they wait or press Ctrl-C.
-
-    Each duration a page states is a measurement. The install time is the range of
-    the runs listed beside it, the stopped run is stated as the floor it is, and
-    setup-system's wait is tied to its running the same install."""
-
-    _COUNTS = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8}
-
-    @staticmethod
-    def _joined(doc: Path, section_only: bool = True) -> str:
-        """The install section (or the whole page), with blockquote markers and line wraps removed."""
-        text = doc.read_text()
-        if section_only:
-            start = text.find("python3 -m pip install -e '.[plane-ui]'")
-            assert start != -1, doc.name
-            end = text.find("\n## ", start)
-            text = text[start : end if end != -1 else len(text)]
-        return " ".join(line.lstrip("> ").strip() for line in text.splitlines())
-
-    @pytest.mark.parametrize("doc", [README, GETTING_STARTED], ids=lambda p: p.name)
-    def test_the_stated_range_is_the_range_of_the_listed_runs(self, doc: Path):
-        section = self._joined(doc)
-        m = re.search(r"took (\d+) s to (\d+) s in (\w+) timed runs: (.*?)\. ", section)
-        assert m, section[:800]
-        runs = [int(n) for n in re.findall(r"\b(\d+) s\b", m.group(4))]
-        assert len(runs) == self._COUNTS[m.group(3)], (m.group(3), runs)
-        assert (min(runs), max(runs)) == (int(m.group(1)), int(m.group(2))), (m.group(0), runs)
-
-    @pytest.mark.parametrize("doc", [README, GETTING_STARTED], ids=lambda p: p.name)
-    def test_the_range_names_the_one_host_it_was_measured_on(self, doc: Path):
-        # Without these two phrases the range reads as the install time on every host,
-        # which is the slow-or-stopped misreading #1681 is about.
-        section = self._joined(doc)
-        assert "On one Raspberry Pi 5, whose pip config adds piwheels," in section
-        assert "Other hosts are unmeasured." in section
-
-    @pytest.mark.parametrize("doc", [README, GETTING_STARTED], ids=lambda p: p.name)
-    def test_the_stopped_run_is_stated_as_a_floor(self, doc: Path):
-        assert "was stopped after 8 minutes, and the cause was not recorded" in self._joined(doc)
-
-    @pytest.mark.parametrize("doc", [README, GETTING_STARTED], ids=lambda p: p.name)
-    def test_setup_systems_wait_is_tied_to_the_same_install(self, doc: Path):
-        page = self._joined(doc, section_only=False)
-        assert "runs the same pip install with `--quiet`, so expect the same wait with no output" in page
-
-
-class TestCliResolutionProbe:
-    """`claudlobby_cli` must not mistake an importable package for a usable one."""
-
-    def test_bare_package_import_is_a_false_positive(self, tmp_path: Path):
-        """Demonstrates the trap this guard exists for.
-
-        `claudlobby/` is a plain package directory at the repo root, so
-        `cd <root> && python3 -c 'import claudlobby'` succeeds from cwd alone —
-        with zero dependencies installed. Any resolver probing that way commits
-        to a broken interpreter and dies later on a raw ModuleNotFoundError.
-        """
-        pkg = tmp_path / "claudlobby"
-        pkg.mkdir()
-        (pkg / "__init__.py").write_text("")
-
-        probe = subprocess.run(
-            [sys.executable, "-c", "import claudlobby"],
-            cwd=tmp_path,
-            capture_output=True,
-        )
-        assert probe.returncode == 0, (
-            "expected the bare import to succeed from cwd — if this ever fails, "
-            "the false-positive premise changed and the guard below can relax"
-        )
-
-    def test_lib_common_probes_a_submodule_not_the_bare_package(self):
-        """The resolver must import something that actually pulls the deps."""
-        src = LIB_COMMON.read_text()
-
-        bare = re.findall(r"python3?\s+-c\s+'import claudlobby'", src)
-        assert not bare, (
-            "lib-common.sh probes `import claudlobby`, which succeeds from cwd "
-            "with no dependencies installed. Probe a submodule that imports the "
-            "third-party deps (e.g. claudlobby.composer)."
-        )
-        # Renaming composer.py must fail here rather than silently breaking CLI
-        # resolution on every supervised bot — that CI cost is what makes the
-        # probe's coupling to a module name acceptable.
-        assert "claudlobby.composer" in src, (
-            "expected a submodule probe (claudlobby.composer) in claudlobby_cli — "
-            "if composer.py was renamed, update the probe with it"
-        )
-
-    def test_resolver_prefers_the_repo_local_venv(self):
-        """A venv console script is not on PATH under launchd/systemd.
-
-        That is the common supervised case, not an exotic one — so the resolver
-        has to reach $CLAUDLOBBY_ROOT/.venv itself rather than assuming an
-        activated shell.
-        """
-        src = LIB_COMMON.read_text()
-        assert ".venv/bin/python" in src, (
-            "claudlobby_cli does not prefer $CLAUDLOBBY_ROOT/.venv — supervised "
-            "runs will fall through to a system python without the deps"
-        )
-
-    def test_prefers_the_repo_local_venv_over_system_python(self, tmp_path: Path):
-        """Behavioural rung-order check — asserts WHICH interpreter served the call.
-
-        Replaces a version that was `skipif` on a repo-local `.venv` existing.
-        That guard never fired on CI or on a fresh clone (neither creates one),
-        so the only behavioural test of CLI resolution was dormant exactly where
-        it mattered. Worse, when it *did* run it still passed a mutation that
-        swapped the rung order — it asserted only that the CLI resolved, never
-        that the venv served it, which is the entire property F3 rests on
-        (PR #947 review).
-
-        Here both rungs are deliberately viable: the fixture package imports
-        under any interpreter, and a stub `.venv/bin/python` announces itself.
-        So the assertion can distinguish them.
-        """
-        root = _synthetic_root(tmp_path)
-        result = subprocess.run(
-            ["bash", "-c", f'. "{LIB_COMMON}"\nclaudlobby_cli generate'],
-            env={
-                "CLAUDLOBBY_ROOT": str(root),
-                "PATH": "/usr/bin:/bin",  # no console script, no pipx shims
-                "HOME": str(tmp_path),
-                # The reviewer hit a false PASS from an editable claudlobby in
-                # user site-packages, which resolves regardless of cwd. Scrub it.
-                "PYTHONNOUSERSITE": "1",
-            },
-            cwd="/",  # deliberately not the repo root
-            capture_output=True,
-            text=True,
-        )
-        assert "MODULE generate" in result.stdout, result.stdout + result.stderr
-        assert "VENVPY" in result.stdout, (
-            "claudlobby_cli resolved via system python3 rather than "
-            "$CLAUDLOBBY_ROOT/.venv. The venv rung must win: a venv console "
-            "script is not on PATH under launchd/systemd, so preferring the "
-            "system interpreter silently drops the dependencies.\n"
-            + result.stdout
-            + result.stderr
-        )
-
-    def test_falls_through_to_system_python_when_no_venv(self, tmp_path: Path):
-        """The venv preference must not become a venv *requirement*.
-
-        Rung 3 exists for a checkout whose deps are installed system-wide (the
-        Pi/apt case). Removing the stub venv must fall through, not fail.
-        """
-        root = _synthetic_root(tmp_path)
-        shutil.rmtree(root / ".venv")
-        result = subprocess.run(
-            ["bash", "-c", f'. "{LIB_COMMON}"\nclaudlobby_cli generate'],
-            env={
-                "CLAUDLOBBY_ROOT": str(root),
-                "PATH": "/usr/bin:/bin",
-                "HOME": str(tmp_path),
-                "PYTHONNOUSERSITE": "1",
-            },
-            cwd="/",
-            capture_output=True,
-            text=True,
-        )
-        assert "MODULE generate" in result.stdout, result.stdout + result.stderr
-        assert "VENVPY" not in result.stdout
 
 
 class TestSeedPlaceholderContract:
@@ -410,10 +164,11 @@ class TestSeedPlaceholderContract:
         pointed at chat id REPLACE_ME.
         """
         from claudlobby.config import load_fleet
+        from tests.package_fixtures import source_package
         from claudlobby.paths import Paths
         from claudlobby.validator import validate
 
-        paths = Paths(root=REPO_ROOT, seed=True)
+        paths = Paths(root=REPO_ROOT, seed=True, package=source_package())
         fleet, _meta = load_fleet(paths.fleet_yaml)
         report = validate(fleet, paths)
 
@@ -425,314 +180,6 @@ class TestSeedPlaceholderContract:
         joined = "\n".join(report.errors)
         for field in ("telegram_group_chat_id", "human_telegram_id", "telegram.handle"):
             assert field in joined, f"no placeholder error for {field}:\n{joined}"
-
-
-@pytest.mark.skipif(shutil.which("bash") is None, reason="bash required")
-class TestSetupAsksAboutItsOwnBridge:
-    """#1536: `bridge_state <bot_dir>` answers "does a poller hold this bot's
-    Telegram slot", not "does THIS session hold it". During a restart the outgoing
-    session's poller still holds the slot, so the two-argument form reads `up` for
-    a bridge that is going dark (#1530). First-run guidance told operators to trust
-    exactly that form over the log; it must pass the session's pid."""
-
-    def test_every_bridge_state_call_in_the_setup_skill_names_the_session(self):
-        calls = [
-            line
-            for block in _FENCE_RE.findall(SETUP_SKILL.read_text())
-            for line in block.splitlines()
-            if re.search(r"\bbridge_state\s", line.split("#", 1)[0])
-        ]
-        assert calls, "precondition: the skill checks the bridge"
-        for line in calls:
-            # The call runs to the first `;`, a `$( )` quoted inside it included.
-            call = re.search(r"\bbridge_state\s+((?:\"[^\"]*\$\([^)]*\)\"|[^;])*)", line).group(1)
-            # comments=True: a trailing `# -> up | ...` comment is not an
-            # argument, or the old one-argument call counts its words as three.
-            args = shlex.split(call, comments=True)
-            # bridge_state takes ANY second argument as the resolved token, so an
-            # empty one answers `no_token` for a healthy bot; the third is the session.
-            assert len(args) >= 3, line
-            assert args[1] != "" and args[2] != "", line
-
-    def _run_block(self, tmp_path: Path, *, pane_pid: str | None):
-        """Run the skill's bridge block VERBATIM from a scratch cwd whose
-        `lib/` is this checkout's, against a stub `tmux` that answers
-        `list-panes` with ``pane_pid`` or, with None, fails the way tmux does
-        for a session that does not exist. The env is constructed, so an
-        ambient FLEET_NAME cannot change which socket the block asks."""
-        block = next(
-            b for b in _FENCE_RE.findall(SETUP_SKILL.read_text()) if "bridge_state" in b
-        )
-        (tmp_path / "lib").symlink_to(REPO_ROOT / "lib")
-        stub_dir = tmp_path / "bin"
-        stub_dir.mkdir()
-        log = tmp_path / "tmux.log"
-        answer = f"echo {pane_pid}\n" if pane_pid else "exit 1\n"
-        _write_exec(stub_dir / "tmux", f'#!/bin/bash\necho "$*" >> "{log}"\n{answer}')
-        env = constructed_env(PATH=f"{stub_dir}:{os.environ['PATH']}", HOME=tmp_path)
-        run = subprocess.run(
-            ["bash", "-c", block],
-            cwd=tmp_path,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        return run, (log.read_text() if log.exists() else "")
-
-    def test_with_no_session_the_block_says_so(self, tmp_path):
-        # `. lib/lib-common.sh` arms `set -euo pipefail` in the caller, so a
-        # failing pane lookup must be guarded on its assignment or errexit
-        # ends the shell before the `if` can say "no session yet".
-        run, calls = self._run_block(tmp_path, pane_pid=None)
-        assert "list-panes -t claudfather -F #{pane_pid}" in calls, calls
-        assert (run.returncode, run.stdout.strip()) == (0, "no session yet"), run.stderr
-
-    def test_with_a_session_the_block_asks_bridge_state(self, tmp_path):
-        run, calls = self._run_block(tmp_path, pane_pid="4242")
-        assert "list-panes -t claudfather -F #{pane_pid}" in calls, calls
-        # No bot is composed here, so bridge_state answers with a failure
-        # word; what is pinned is that the found-session branch ran.
-        assert run.stdout.strip() in {
-            "up", "not_mine", "no_bridge", "no_token", "no_handle", "unknown"
-        }, (run.stdout, run.stderr)
-
-
-@pytest.mark.skipif(shutil.which("bash") is None, reason="bash required")
-class TestSetupSystemHonesty:
-    """`setup-system --dry-run` must not report post-conditions it never took."""
-
-    def test_dry_run_does_not_assert_an_install_it_skipped(self):
-        """The success line must live inside the real-mode branch.
-
-        It used to sit after the if/else, so --dry-run printed
-        '✓ claudlobby package installed' and 'prereqs missing: (none)' on a host
-        with no claudlobby at all. The /setup skill is told to parse that output
-        and skip ahead, so the false green propagated into the guided flow.
-        """
-        src = (REPO_ROOT / "lib" / "setup-system").read_text()
-        assert "_claudlobby_importable" in src, (
-            "setup-system no longer verifies the install actually worked"
-        )
-        # The dry-run path must record the state that currently holds.
-        assert re.search(r"DRY_RUN.*=.*1", src)
-        assert "not installed yet" in src, (
-            "dry-run must report claudlobby as missing when it is missing, "
-            "rather than asserting the install it only described"
-        )
-
-    def test_dry_run_never_ticks_something_it_only_described(
-        self, setup_system_dry_run
-    ):
-        """Behavioural, against real `--dry-run` output on this host.
-
-        The invariant: a line announcing an action was *skipped* must never be
-        immediately followed by a tick claiming that action succeeded. That is
-        the whole bug class — the success line living outside the if/else — and
-        it shipped twice: phase 4 (claudlobby, fixed first) and phase 6 (the
-        claudna plugin, found only by re-running setup end to end afterwards).
-
-        A source-grep version of this would have passed on phase 6 while it was
-        still broken, since each phase spells the mistake differently. Parsing
-        real output catches any phase, including ones not written yet.
-
-        Uses the session-scoped fixture rather than spawning its own run: the
-        script probes real tools and costs ~0.6s, and tests/test_setup_system.py
-        already invoked it. Sharing also keeps one contract for what a non-zero
-        exit means, instead of this module skipping where that one asserts.
-        """
-        proc = setup_system_dry_run
-        assert proc.returncode == 0, f"setup-system --dry-run failed: {proc.stderr}"
-
-        lines = [ln.strip() for ln in proc.stdout.splitlines()]
-        # Pairwise over consecutive lines; ✓ is the ok() marker, ○ (miss) and a
-        # further would-run line are both fine.
-        offenders = [
-            f"{line}\n    -> {nxt}"
-            for line, nxt in zip(lines, lines[1:])
-            if "[dry-run] would run" in line and "✓" in nxt
-        ]
-
-        assert not offenders, (
-            "dry-run reported success for an action it skipped:\n"
-            + "\n".join(offenders)
-            + "\n\nThe /setup skill is told to parse this output and skip ahead, "
-            "so a tick here sends the guided flow past a missing dependency."
-        )
-
-    def test_dry_run_summary_does_not_claim_a_genuinely_absent_tool(
-        self, sysbin_excluding
-    ):
-        """The same lie, in the variant the test above structurally cannot see.
-
-        `phase_node` recorded PREREQ_OK unconditionally but printed no ✓, so its
-        false claim reached only the summary array — invisible to a scan for a
-        tick following a would-run line. Two phases carried the bug past the
-        first fix for exactly that reason.
-
-        So this asserts the summary itself. PATH is narrowed to a mirror of the
-        system bin dirs, which excludes the Homebrew prefix where node lives, so
-        node is genuinely unresolvable and the install branch really executes.
-        """
-        # Exclude explicitly rather than relying on the Homebrew prefix being
-        # absent: on Linux these live in /usr/bin and the mirror would include
-        # them, so the install branch would never run and the test would pass
-        # without testing anything.
-        mirror = sysbin_excluding("node", "tmux", "gh")
-        proc = subprocess.run(
-            [str(REPO_ROOT / "lib" / "setup-system"), "--dry-run"],
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env={
-                "PATH": str(mirror),
-                "HOME": os.environ.get("HOME", "/tmp"),
-                # phase_systemd dereferences $USER under `set -u`; without it the
-                # script exits non-zero on Linux and the skip below swallows the
-                # whole check — the Linux-only bugs would go unguarded.
-                "USER": os.environ.get("USER", "runner"),
-            },
-        )
-        if proc.returncode != 0:
-            pytest.skip(f"setup-system could not run on the narrowed PATH: {proc.stderr[-300:]}")
-
-        ok_line = next(
-            (ln for ln in proc.stdout.splitlines() if "prereqs ok:" in ln), ""
-        )
-        missing_line = next(
-            (ln for ln in proc.stdout.splitlines() if "prereqs missing:" in ln), ""
-        )
-        assert ok_line, f"no summary in output:\n{proc.stdout[-800:]}"
-
-        claimed_ok = set(ok_line.split(":", 1)[1].split())
-        # Non-vacuous: if the mirror failed to hide these, the assertions below
-        # would pass by describing nothing.
-        assert "[dry-run] would run" in proc.stdout, (
-            "no install was even attempted — the narrowed PATH did not hide the "
-            f"tools, so this check proves nothing.\n{proc.stdout[-600:]}"
-        )
-        # node and gh only. Hiding a binary from PATH does not make every check
-        # fail: on Linux tmux/jq/curl resolve through `dpkg -l`, which still
-        # reports the package installed, so asserting on them tests the mirror
-        # rather than the script. node and gh are PATH-determined on both
-        # platforms, so their verdicts genuinely depend on the fix.
-        for tool in ("node", "gh"):
-            assert tool not in claimed_ok, (
-                f"dry-run listed {tool} under 'prereqs ok' on a host where it is "
-                f"not resolvable and it only ever said it *would* install it.\n"
-                f"{ok_line}\n{missing_line}"
-            )
-            assert tool in missing_line, (
-                f"{tool} was absent and never installed, so it belongs in "
-                f"'prereqs missing'.\n{ok_line}\n{missing_line}"
-            )
-
-
-# --- /setup Step 0 must prove THIS tree is installed (#2002, finding F2) -------
-
-_STEP0_RE = re.compile(r"^## Step 0\b.*?```bash\n(.*?)```", re.DOTALL | re.MULTILINE)
-
-
-def _step0_check() -> str:
-    """The first shell block under the setup skill's `## Step 0` heading."""
-    m = _STEP0_RE.search(SETUP_SKILL.read_text())
-    assert m, "setup SKILL.md has no bash block under '## Step 0'"
-    return m.group(1).strip()
-
-
-def _fake_tree(root: Path) -> Path:
-    """A tree whose `claudlobby.composer` imports with NO dependencies at all,
-    standing in for a host where PyYAML and Jinja2 are importable anyway."""
-    pkg = root / "claudlobby"
-    pkg.mkdir(parents=True)
-    (pkg / "__init__.py").write_text("")
-    (pkg / "composer.py").write_text("")
-    return root
-
-
-def _stub_venv(tree: Path, resolves_to: Path, *, site: bool = True) -> None:
-    """A `.venv/bin/python` whose installed `claudlobby` is *resolves_to*.
-
-    ``site=False`` leaves out the test runner's own site-packages (``-S``),
-    where an editable `claudlobby` install would otherwise answer the import."""
-    bindir = tree / ".venv" / "bin"
-    bindir.mkdir(parents=True)
-    stub = bindir / "python"
-    flag = "" if site else " -S"
-    stub.write_text(f'#!/bin/sh\nPYTHONPATH="{resolves_to}" exec "{sys.executable}"{flag} "$@"\n')
-    stub.chmod(0o755)
-
-
-def _run_step0(tree: Path) -> str:
-    proc = subprocess.run(
-        ["bash", "-c", _step0_check()], cwd=tree, capture_output=True, text=True, timeout=60
-    )
-    return proc.stdout.strip()
-
-
-class TestSetupStep0ProvesThisTree:
-    """Run from the repo root, any Python imports the repo's own `claudlobby/`
-    from the current directory. So "does `claudlobby.composer` import?" proves
-    only that its dependencies do, and a host that has them anywhere (distro
-    packages, a user-site install) reads as installed with nothing installed.
-    Measured on the #2002 cold run: a fresh export with no venv printed
-    INSTALLED. These run the skill's own Step 0 command against fixture trees."""
-
-    def test_no_venv_is_missing_even_when_the_import_succeeds_from_cwd(self, tmp_path: Path):
-        tree = _fake_tree(tmp_path / "tree")
-        assert _run_step0(tree) == "MISSING"
-
-    def test_a_venv_that_resolves_to_this_tree_is_installed(self, tmp_path: Path):
-        tree = _fake_tree(tmp_path / "tree")
-        _stub_venv(tree, resolves_to=tree)
-        assert _run_step0(tree) == "INSTALLED"
-
-    def test_a_venv_that_resolves_to_another_tree_is_missing(self, tmp_path: Path):
-        tree = _fake_tree(tmp_path / "tree")
-        other = _fake_tree(tmp_path / "other")
-        _stub_venv(tree, resolves_to=other)
-        assert _run_step0(tree) == "MISSING"
-
-
-_REAL_ERROR_RE = re.compile(r"show the user the real error.*?```bash\n(.*?)```", re.DOTALL)
-
-
-def _real_error_command() -> str:
-    """The command Step 0 names for "show the user the real error"."""
-    step0 = SETUP_SKILL.read_text().split("## Step 0", 1)[1].split("\n## ", 1)[0]
-    m = _REAL_ERROR_RE.search(step0)
-    assert m, "Step 0 gives no bash block after 'show the user the real error'"
-    return m.group(1).strip()
-
-
-def _run_real_error(tree: Path) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["bash", "-c", _real_error_command()], cwd=tree, capture_output=True, text=True, timeout=60
-    )
-
-
-class TestSetupStep0NamesTheRealError:
-    """When Step 0 still prints MISSING, the skill tells the operator to show the
-    user the real error, and names the command that prints it. In each MISSING
-    state that command must print something the user can act on."""
-
-    def test_a_venv_that_resolves_to_another_tree_names_that_tree(self, tmp_path: Path):
-        tree = _fake_tree(tmp_path / "tree")
-        other = _fake_tree(tmp_path / "other")
-        _stub_venv(tree, resolves_to=other)
-        run = _run_real_error(tree)
-        assert run.stdout.strip() == str(other / "claudlobby" / "composer.py"), run.stdout + run.stderr
-
-    def test_a_venv_without_claudlobby_says_it_is_not_installed(self, tmp_path: Path):
-        tree = _fake_tree(tmp_path / "tree")
-        _stub_venv(tree, resolves_to=tmp_path / "empty", site=False)
-        run = _run_real_error(tree)
-        assert run.returncode != 0 and "No module named 'claudlobby'" in run.stderr, run.stdout + run.stderr
-
-    def test_no_venv_fails_loudly(self, tmp_path: Path):
-        tree = _fake_tree(tmp_path / "tree")
-        run = _run_real_error(tree)
-        assert run.returncode != 0 and run.stderr.strip(), run.stdout + run.stderr
 
 
 # --- Example IDs in the onboarding docs are obviously fake (#2002, finding F3) --

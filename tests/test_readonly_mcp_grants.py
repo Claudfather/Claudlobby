@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,7 @@ from claudlobby.composer import (
 )
 from claudlobby.config import BotConfig, FleetConfig, McpEntry
 from claudlobby.loader import integration_tool_grants
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 REPO_DIR = Path(__file__).resolve().parent.parent
@@ -73,7 +75,8 @@ def _build_library(
         (skill_dir / "SKILL.md").write_text(
             f"---\nname: catalog\ntool_grants:\n{grants_yaml}---\n\n# catalog\n\nbody\n"
         )
-    return Paths(root=root, fleet_dir=root)
+    return Paths(root=root, fleet_dir=root,
+                 package=replace(source_package(), library=root / "library"))
 
 
 def _bot(
@@ -89,7 +92,7 @@ def _bot(
 
 
 def _single_bot_fleet(bot: BotConfig) -> FleetConfig:
-    return FleetConfig(name="t", service_prefix="p", bots={bot.bot_id: bot})
+    return FleetConfig(manager=bot.bot_id, name="t", service_prefix="p", bots={bot.bot_id: bot})
 
 
 class TestReadOnlySubsetEmission:
@@ -443,7 +446,7 @@ class TestShippedLibraryContent:
     def _tool_grants(self, name: str) -> list[str]:
         # The production reader — the mirror is pinned through the same code
         # path _resolve_integration_grants composes from.
-        return integration_tool_grants(Paths(root=REPO_DIR, fleet_dir=REPO_DIR), name)
+        return integration_tool_grants(Paths(root=REPO_DIR, fleet_dir=REPO_DIR, package=source_package()), name)
 
     def test_shipped_split_fragments_discovered(self):
         assert {"shopify", "printify"} <= set(SPLIT_FRAGMENTS)

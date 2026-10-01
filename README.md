@@ -15,45 +15,34 @@ Runs anywhere Claude Code does: Mac mini, Linux box, Raspberry Pi 5.
 
 The early "one directory per bot" pattern duplicated the same persona scaffolding, MCP boilerplate, lifecycle protocol, and guardrail rules across every bot. Adding a 9th bot meant copy-pasting a CLAUDE.md and editing it. Updating a guardrail meant editing 8 files.
 
-claudlobby flips that: every cross-cutting concern (a guardrail, a protocol, an MCP server config, a skill, a persona) lives **once** in `library/`. `fleet.yaml` declares which bot uses which pieces. `claudlobby generate` produces self-contained bot directories under `runtime/bots/<name>/` that Claude Code can run directly.
+claudlobby flips that: every cross-cutting concern (a guardrail, a protocol, an MCP server config, a skill, a persona) lives **once** in `library/`. `fleet.yaml` declares which bot uses which pieces. A configuration plan composes self-contained bot directories under `runtime/bots/<name>/`; host activation applies the reviewed plan and enrolls their native units.
 
-Add a 9th bot? Add 10 lines to `fleet.yaml`. Update a guardrail? Edit one file in `library/guardrails/`. Re-run `claudlobby generate`. Done.
+Add a 9th bot? Add its stanza to `fleet.yaml`. Update a guardrail? Edit its source in `library/guardrails/`. Stage and review a configuration plan, then activate it.
 
 ## What it changes on your machine
 
-The `/setup` skill runs three steps from your checkout: `lib/setup-system` once per host, `claudlobby generate`, and `lib/setup-fleet` once per fleet (`.claude/skills/setup/SKILL.md`). `lib/setup-system --dry-run` changes nothing: `apt-get update` and every install are guarded by `[ "$DRY_RUN" != 1 ]` (`phase_packages`, `phase_node`), so `--dry-run` runs none of them — a missing package is listed as a `would run` line, not installed. A real run (no `--dry-run`) makes these changes with `sudo`, which may prompt for your password, and installs with `apt-get install -y`, which does not ask. Each row below names the file that makes the change.
+The [setup walkthrough](documentation/getting-started.md) builds an installed wheel, assembles a sealed release with `host setup`, and activates an authored fleet with `fleet setup`. Assembly checks prerequisites and writes release files; **activation starts supervised processes and installs user units**. Neither step installs system packages, invokes `sudo`, enables Linux lingering, or installs Claude Code. Provision those prerequisites separately.
 
 | Change | Where | Made by |
 |---|---|---|
-| **With `sudo`, Linux:** `apt-get update` on every run; `apt-get install` of tmux, jq and curl when missing; the GitHub CLI from GitHub's apt repository (a keyring and a source list); Node 20 from NodeSource (`curl … \| sudo -E bash -`) when node is missing or older than 18 | `/etc/apt/`, system packages | `lib/setup-system` (`phase_packages`, `phase_node`) |
-| **macOS:** Homebrew's installer when `brew` is missing, then `brew install` of tmux, jq, gh and node when missing | Homebrew | `lib/setup-system` (`phase_packages`, `phase_node`) |
-| Claude Code, when `claude` is missing: `npm install -g @anthropic-ai/claude-code` | npm's global prefix | `lib/setup-system` (`phase_claude`) |
-| Claude Code plugins, at user level: `telegram@claude-plugins-official`, and `claudna@Claudfather` from the `Claudfather/clauDNA` marketplace. Each bot start also installs or updates plugins | `~/.claude/plugins/` | `lib/setup-system` (`phase_plugins`); `plugin_ensure` in `lib/lib-common.sh`, run by `lib/start-bot.sh` |
-| **With `sudo`, on every run: managed settings.** Sets `allowedChannelPlugins` to the official Telegram plugin and Claudfather's fork, keeping any other keys. Managed settings bind every Claude Code session on the host, yours included, and this key replaces Claude Code's built-in list of approved channel plugins | `/etc/claude-code/managed-settings.json`; macOS: `/Library/Application Support/ClaudeCode/managed-settings.json` | `lib/setup-system` (`phase_managed_settings`) |
-| **Your own Claude Code settings.** Each bot start sets `skipAutoPermissionPrompt` and `skipDangerousModePermissionPrompt` to `true`, pre-accepting Claude Code's consent prompts for auto and bypass-permissions mode in your sessions as well as the bots'. If the file is not valid JSON, it is replaced by one holding only those two keys | `~/.claude/settings.json` (under `$CLAUDE_CONFIG_DIR` if set) | `lib/start-bot.sh` (the headless consent block) |
-| Each bot's Telegram access list (see [Safety model](#safety-model)) | `~/.claude/channels/telegram-<handle>/access.json` | `claudlobby generate` (`claudlobby/composer.py`) |
-| **With `sudo`, Linux, when linger is off:** `loginctl enable-linger $USER`, so your user units run at boot and after you log out | systemd-logind | `lib/setup-system` (`phase_systemd`) |
-| Units that run as you: a service per bot, each fleet's timers, and the host's `claudlobby-*` timers and services | `~/.config/systemd/user/`; macOS: `~/Library/LaunchAgents/` | `lib/install-bot-systemd.sh`, `lib/install-bot.sh`, `lib/install_fleet_timer.sh`, `lib/install_fleet_timer_launchd.sh` and `lib/install-host-service-systemd.sh`, run by `lib/setup-system` and `lib/setup-fleet` |
-| MCP server packages, fetched before the first boot | package caches in your home directory | `claudlobby warm-cache`, run by `lib/setup-fleet` |
+| A copied interpreter, dependency wheels and immutable framework resources | `<data-root>/releases/` | `host setup` / release assembly |
+| Authored manifests, staged configuration, activation records and Plane state | The explicit data root, including `local/` and `state/` | `fleet setup`, `config plan`, `host activate`, and runtime owners |
+| Units running under your account: bots, fleet timers and host jobs | The reviewed user-unit directory: normally `~/.config/systemd/user/` or `~/Library/LaunchAgents/` | `host activate` through the native supervisor adapter |
+| Claude Code plugins at user level | `~/.claude/plugins/` | `plugin_ensure` in `claudlobby/_runtime_scripts/lib-common.sh`, used by bot startup; this can affect your own Claude sessions too |
+| Your Claude Code consent settings | `~/.claude/settings.json`, or the selected Claude config directory | The headless consent block in `claudlobby/_runtime_scripts/start-bot.sh` sets `skipAutoPermissionPrompt` and `skipDangerousModePermissionPrompt`; malformed JSON is replaced with those keys |
+| Each bot's Telegram access list | `~/.claude/channels/telegram-<handle>/access.json` | The activation composition owner in `claudlobby/composer.py`; writes are atomic and mode 0600, and failures are disclosed per bot |
+| Optional managed channel approvals | `/etc/claude-code/managed-settings.json`, or `/Library/Application Support/ClaudeCode/managed-settings.json` | Explicit operator `host channels approve`; preserves existing keys, requires pre-existing administrative write access and never invokes `sudo` |
+| Optional MCP package downloads | Host cache directories | Explicit `host cache warm`; the first MCP launch may otherwise download packages |
 
-Setup writes nothing to `~/.config/claudlobby/`. A `system.yaml` there is your own override of the host jobs (`claudlobby/config.py`), and `github-app.conf` (mode 600) appears only if you run `lib/setup-github-app.sh` for a GitHub App identity.
+**After activation, enrolled jobs keep running.** `claudlobby/system.yaml` declares the defaults and `claudlobby host doctor --switches` exposes their state. Claude updates can update the user's shared CLI; plugin refreshes can affect shared plugin installs. The browser reaper targets verified automation leftovers. Sibling repository updates remain opt-in. The retired `pull-root` job is not installed by this release; an already-installed old puller must be held and retired through the [existing-host conversion runbook](documentation/existing-host-release-conversion.md).
 
-**After setup, jobs keep running.** `claudlobby/system.yaml` lists them (`host.jobs`, `defaults.jobs`) and whether each is on, and `claudlobby doctor --switches` prints the same for your host. Three act beyond the fleet:
-
-- `claude-update`, daily: `npm install -g @anthropic-ai/claude-code@latest`, with `sudo` when the `claude` it updates is a root-owned install under `/usr` (`lib/update-claude-code.sh`).
-- `reload-fleet`, daily: `claude plugin update`, `claudlobby generate`, then `lib/setup-fleet --jobs-only`, which enrolls any timer that newly composes (`lib/reload-fleet.sh`).
-- `orphan-browser-reaper`, daily: kills browser processes whose parent has exited (`lib/orphan-browser-reaper.sh`).
-
-The two jobs that pull new source into your checkouts, `pull-root` and `update-siblings`, stay off unless you turn them on. The plane serves a read-only web view on `127.0.0.1:8899` (`claudlobby/commands/_parsers.py`) and takes events on a Unix socket, `state/plane/ingest.sock` (`claudlobby/plane/daemon.py`).
-
-**Inside the checkout**, all gitignored (`.gitignore`): `.venv/`, `.env`, `state/` (the plane database `state/plane/plane.db`, fleet state, logs), and the generated bot directories under `runtime/` or `local/<fleet>/`.
+The Plane serves a read-only view on `127.0.0.1:8899` and receives events through `<data-root>/state/plane/ingest.sock`. Release assembly and configuration planning are distinct from native activation; a successful plan does not prove a bot is running or receiving messages.
 
 **Where secrets live**
 
-- `.env` files, read in this order with the most specific winning: `~/.env`, `<checkout>/.env`, `local/<fleet>/.env`, `<bot dir>/.env` (`lib/env-tiers.sh`). `/setup` writes the Telegram token, and a GitHub token if you give one, to `<checkout>/.env` (`.claude/skills/setup/SKILL.md`, Step 3). `claudlobby env-register` shows which file each value comes from.
-- Claude Code's login, in its config directory. Every bot on the `default` account uses yours (`accounts` in `fleet.yaml.seed`).
-- Your `gh` login. Every bot can use it, since every bot runs as you.
-- With a GitHub App identity: `~/.config/claudlobby/github-app.conf` and the App's private key (`documentation/runbooks/github-app-setup.md`).
+- `.env` files resolve in host, root, fleet, then bot order, with the most specific assignment winning (`claudlobby/_runtime_scripts/env-tiers.sh`). Keep fleet tokens in the data overlay. `claudlobby config explain KEY` reports provenance without printing secret values.
+- Claude Code's login lives in its config directory. Bots using the default account share the operator's login; the same OS user may also access the operator's `gh` login.
+- A GitHub App identity uses its explicitly configured credentials and private key; see [GitHub App setup](documentation/runbooks/github-app-setup.md).
 
 ## Safety model
 
@@ -64,14 +53,14 @@ The two jobs that pull new source into your checkouts, `pull-root` and `update-s
 - **Run shell commands without asking.** The default permission mode is `acceptEdits` (`claudlobby/composer.py`), but an allowed tool runs without a prompt. `allow_all: true` in `library/expertise/software-engineering.md` allows every tool, bare `Bash` included (`ALL_TOOLS` in `claudlobby/composer.py`), and the seed bot's `library/expertise/setup-assistant.md` allows `Bash` as well. `fleet.yaml` can also set `permission_mode: auto` or `dangerously_skip_permissions: true` (`fleet.yaml.example`).
 - **Act as your user.** Every bot's unit runs under your account (see the units above), so the operating system lets a bot read and change anything you can, other bots' files included.
 - **Use `sudo` wherever your account needs no password for it.** No composed rule denies `sudo`, so on a host where `sudo -n true` succeeds, every bot has root.
-- **Use every credential on the host.** Each bot's session exports the `.env` files above (`lib/start-bot.sh`), and it has your Claude Code and `gh` logins.
-- **Take instructions over Telegram.** Direct messages are accepted only from `human_telegram_id`. In a fleet's group, `generate` leaves `allowFrom` empty (`claudlobby/composer.py`), which the Telegram plugin reads as every member of the group (the plugin's `server.ts`). A `fleet.yaml` field for that list is #1669.
+- **Use every credential on the host.** Each bot's session exports the `.env` files above (`claudlobby/_runtime_scripts/start-bot.sh`), and it has your Claude Code and `gh` logins.
+- **Take instructions over Telegram.** Direct messages are accepted only from `human_telegram_id`. In a fleet's group, composition leaves `allowFrom` empty (`claudlobby/composer.py`), which the Telegram plugin reads as every member of the group (the plugin's `server.ts`). A `fleet.yaml` field for that list is #1669.
 - **Follow your own Claude Code settings.** Bots on the `default` account read your `~/.claude/settings.json`, so an allow rule you add there, such as a bare `Bash`, applies to every bot.
 
 **What bounds them**
 
 - **Deny rules**, in each bot's `.claude/settings.local.json`. Every bot is denied Read and Edit of its fleet siblings' directories (`claudlobby/composer.py`), plus any `tools.deny` in `fleet.yaml`, and `isolation.shared_config: true` adds transcripts, credentials and the `.env` files (`claudlobby/isolation.py`). **These are not an operating-system boundary.** A deny rule gates Claude Code's own tool calls: the Read tool, and a shell command given a literal path. It does not stop an interpreter that opens a file itself, a path written through a variable, or any script, hook, timer or MCP server (`claudlobby/isolation.py`). Splitting bots off your account is tracked in #1606.
-- **Hooks on every bot** (`defaults.hooks` in `claudlobby/system.yaml`). `lib/gh-mention-guard.sh` rewrites `@` mentions out of GitHub-bound text, and `lib/vault-git-guard.sh` refuses git state rewrites (checkout, rebase, reset and the like) inside a Claudron vault. The rest record activity.
+- **Hooks on every bot** (`defaults.hooks` in `claudlobby/system.yaml`). `claudlobby/_runtime_scripts/gh-mention-guard.sh` rewrites `@` mentions out of GitHub-bound text, and `claudlobby/_runtime_scripts/vault-git-guard.sh` refuses git state rewrites (checkout, rebase, reset and the like) inside a Claudron vault. The rest record activity.
 - **Guardrails are instructions, not enforcement.** The seed's `no-push-main`, `no-destructive-git`, `pii-protection` and `no-fabrication` (`fleet.yaml.seed`) are text in each bot's `CLAUDE.md`, and none carries a deny rule (`library/guardrails/`). Only branch protection on your repository actually blocks a push to `main`.
 - **The sandbox is off in the seed** (`sandbox: enabled: false` in `fleet.yaml.seed`). The `sandbox:` block turns Claude Code's sandbox on (`documentation/fleet-yaml-schema.md`).
 - **Your tokens' scope.** A bot can do on GitHub, Telegram or any other service what the token it holds allows.
@@ -80,67 +69,27 @@ To tighten it: run the fleet under a dedicated account that has no `sudo`, keep 
 
 ## Quick start
 
-**You need:** An Anthropic account (Claude Max, Team, or Enterprise — or an `ANTHROPIC_API_KEY`), [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed, and a Telegram account.
+Existing checkout-based hosts must follow the [conversion prerequisite](documentation/existing-host-release-conversion.md) before pulling this release. The cold-host sequence below does not retire an old source-pulling timer.
 
-**Guided setup (recommended):** Clone the repo, install, and let claudfather walk you through it:
+**You need:** a working Python interpreter, `tmux`, a running user manager (launchd or systemd user), [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated, and the Telegram channel plugin if your fleet declares Telegram. `host setup` checks the native manager and required executables; it does not install them.
 
-```bash
-git clone https://github.com/Claudfather/Claudlobby.git
-cd Claudlobby
-python3 -m venv .venv               # required — see note below
-source .venv/bin/activate
-python3 -m pip install -e '.[plane-ui]'
-claude                              # opens Claude Code in the repo
-```
-
-Then type `/setup` — it checks your host, collects credentials, and spins up claudfather (the built-in setup assistant) on Telegram. Continue setup from your phone.
-
-> **How long the install takes.** On one Raspberry Pi 5, whose pip config adds piwheels, the
-> `pip install` line took 45 s to 61 s in four timed runs: 45 s from an empty pip cache, 52 s and
-> 61 s with a warm cache, and 55 s with the cache state not recorded. Other hosts are unmeasured. One
-> cold host was stopped after 8 minutes, and the cause was not recorded. Where a dependency has no
-> prebuilt wheel for the platform, pip builds it from source, which takes longer.
-
-> **Why `[plane-ui]`.** The operator plane (`claudlobby plane view`) is enrolled by default
-> and needs FastAPI + uvicorn — two pure-Python wheels. Install without the extra and the
-> compositor deliberately composes no unit for it, so nothing crash-loops; `claudlobby doctor
-> --switches` then shows `plane-view` off with this pip line as its arm. Everything else works
-> either way.
->
-> **Why the venv is not optional.** Homebrew python (macOS) and Debian/Raspberry Pi system
-> python are both marked externally-managed under [PEP 668](https://peps.python.org/pep-0668/),
-> so a bare `pip install -e .` is *refused* on the two hosts this project targets first. Note
-> `python3 -m pip`, not `pip` — Homebrew ships `pip3` only, so plain `pip` is not a command.
->
-> Prefer not to manage it yourself? `lib/setup-system` creates the venv, installs claudlobby,
-> and checks every other host prerequisite in one idempotent pass (`--dry-run` to preview). It
-> runs the same pip install with `--quiet`, so expect the same wait with no output.
-> **It will prompt for `sudo`** — its managed-settings phase writes the root-owned
-> `/Library/Application Support/ClaudeCode/managed-settings.json` (and on Linux it installs
-> packages). Use `--dry-run` first if you want to see everything it would touch.
-
-**Manual setup:**
+Build the candidate wheel and its offline, SHA-256-locked dependency wheelhouse as shown in [Getting started](documentation/getting-started.md). Install that wheel into a temporary bootstrap venv, then use its CLI to assemble a sealed release under an **absolute data root outside the checkout**:
 
 ```bash
-git clone https://github.com/Claudfather/Claudlobby.git
-cd Claudlobby
-python3 -m venv .venv && source .venv/bin/activate && python3 -m pip install -e '.[plane-ui]'
-
-cp fleet.yaml.seed fleet.yaml       # one bot (claudfather) — the blessed first run
-cp .env.seed.example .env           # fill in your Telegram token + GitHub PAT
-$EDITOR fleet.yaml                  # replace every REPLACE_ME (validate enforces this)
-
-# validate stops the chain until every REPLACE_ME is filled in
-claudlobby validate && claudlobby generate \
-  && lib/setup-fleet                # enrolls timers + starts every declared bot
+"$WORK/bootstrap/bin/claudlobby" --root "$DATA" host setup --wheel "$WHEEL" \
+  --dependency-lock "$WORK/dependency.lock" --wheelhouse "$WORK/wheelhouse" \
+  --interpreter "$WORK/bootstrap/bin/python"
 ```
 
-Start from `fleet.yaml.seed` (one bot, ~60 lines). `fleet.yaml.example` is the **reference** —
-a full multi-bot manifest documenting every available field — not a starting point.
+The result names the sealed release CLI. Edit a copy of its packaged `fleet.yaml.seed` outside the data root, put the matching token in `$DATA/local/seed/.env`, then activate it through that **sealed CLI**:
 
-The generated `runtime/bots/<bot>/` is everything Claude Code needs — `CLAUDE.md`, `.mcp.json`, `bot.conf`, `.claude/skills/` symlinks, plus a systemd `<bot>.service` and a launchd `<bot>.plist`. Pick the right one for your host.
+```bash
+"$RELEASE_CLI" --root "$DATA" --fleet seed fleet setup \
+  --config "$WORK/fleet.yaml" --install-directory "$USER_UNIT_DIR"
+"$RELEASE_CLI" --root "$DATA" host doctor
+```
 
-See [`documentation/getting-started.md`](documentation/getting-started.md) for the full zero-to-running walkthrough.
+`fleet setup` places the authored file at `$DATA/local/seed/fleet.yaml`, stages the whole host, and uses the existing activation owner to start it. A different existing fleet file requires `--replace-config`. The sealed release keeps its own interpreter and packaged library/native scripts; generated bot files and persistent state live under the data root. See [Getting started](documentation/getting-started.md) for the complete commands, prerequisites, and paths for macOS and Linux.
 
 ## Architecture
 
@@ -157,14 +106,14 @@ See [`documentation/getting-started.md`](documentation/getting-started.md) for t
                          ▼
                     fleet.yaml ← which bots, which pieces
                          │
-                         ▼ claudlobby generate
+                         ▼ config plan → host activate
                          │
 ┌────────────────────────────────────────────────────────────┐
 │  runtime/bots/<name>/     ← gitignored, regeneratable       │
 │  ├── CLAUDE.md            ← persona + voice + roster +      │
 │  │                          protocols + guardrails          │
 │  ├── .mcp.json            ← merged from library/mcp/        │
-│  ├── bot.conf             ← env exports for lib/start-bot.sh│
+│  ├── bot.conf             ← env exports for claudlobby/_runtime_scripts/start-bot.sh│
 │  ├── .claude/skills/      ← symlinks → library/skills/      │
 │  ├── <bot>.service        ← systemd (Linux)                 │
 │  └── <bot>.plist          ← launchd (macOS)                 │
@@ -172,7 +121,7 @@ See [`documentation/getting-started.md`](documentation/getting-started.md) for t
                          │
                          ▼
                 ┌────────────────┐
-                │ Claude Code    │ ← started by lib/start-bot.sh
+                │ Claude Code    │ ← started by claudlobby/_runtime_scripts/start-bot.sh
                 │ + tmux session │   inside the runtime dir
                 │ + Telegram     │
                 │ + MCP servers  │
@@ -186,32 +135,34 @@ See [`documentation/architecture/overview.md`](documentation/architecture/overvi
 ## CLI
 
 ```
-claudlobby validate              # check fleet.yaml against library/
-claudlobby generate              # compose runtime/bots/ from fleet.yaml
-claudlobby generate --bot <name> # compose only one bot
-claudlobby host-timers           # compose host-global timer units from system.yaml
-claudlobby list-library          # show available personas / skills / mcp / etc.
-claudlobby diff [--bot <name>]   # show drift between runtime/ and library/
-claudlobby promote <bot>         # move runtime drift back to library/ (v1: manual)
-claudlobby status [--bot <name>] # fleet health dashboard
-claudlobby doctor                # pre-flight fleet health diagnostic
-claudlobby report-back           # worker reports from the plane (--since, --bot)
-claudlobby uptime [--bot <name>] # per-bot uptime, MTBR, restart-rate metrics
-claudlobby events                # fleet events from the plane (--bot, --type, --critical)
-claudlobby new-bot               # interactive bot scaffolding
-claudlobby new-skill             # scaffold a new skill directory
-claudlobby new-guardrail         # scaffold a new guardrail file
-claudlobby move-bot <bot> --to <fleet>  # move a bot between fleets
-claudlobby warm-cache            # pre-download npx + uvx packages for MCP servers
+claudlobby --fleet <name> config validate  # check authored fleet.yaml
+claudlobby host setup                      # assemble a sealed cold-host release
+claudlobby --fleet <name> fleet setup       # copy initial source, stage and activate
+claudlobby config plan --release <ID>      # stage all declared host fleets
+claudlobby config diff <PLAN_ID>           # inspect staged paths and state digests
+claudlobby host activate <PLAN_ID> --install-directory <PATH>  # apply the plan
+claudlobby library list          # show available personas / skills / mcp / etc.
+claudlobby config diff [--bot <name>]  # show current rendered drift without values
+claudlobby fleet status             # fleet health dashboard
+claudlobby bot status <name>        # one bot, including native and Plane observations
+claudlobby host doctor                # pre-flight fleet health diagnostic
+claudlobby --json fleet reports list  # paginated worker reports (--bot, --status, --since RFC3339)
+claudlobby fleet uptime [--bot <name>] # per-bot uptime, MTBR, restart-rate metrics
+claudlobby event list                # fleet events from the plane (--bot, --type, --critical)
+claudlobby bot create --interactive               # author a bot; stage and activate separately
+claudlobby library create --kind skill             # scaffold a new skill directory
+claudlobby library create --kind guardrail         # scaffold a new guardrail file
+claudlobby bot move <bot> --to <fleet>  # move a bot between fleets
+claudlobby host cache warm            # pre-download npx + uvx packages for MCP servers
 ```
 
 ## What this repo gives you — and doesn't
 
 **Gives you:**
 
-- `library/` — 19 expertise profiles (manager, engineer, reviewer, designer, business, data-engineering, …), 54 skills (dispatch, lifecycle, prs, sweep, fleet-status, briefing, status, triage, …), 17 MCP fragments (github, github-app, gws, google-analytics, google-search-console, meta-ads, meta-business, posthog, notion, linear, slack, shopify, printify, homeassistant, docker, spotify, granola), 25 guardrails, 40 protocols
-- `lib/` — 91 bash lifecycle scripts: `start-bot.sh`, `keepalive.sh`, `report-back.sh`, `tg-post.sh`, `creds-check.sh` (daily credential keepalive), `fleet-state-update.sh`, and more
-- `bin/claudlobby` — the Python compositor
+- `library/` — 19 expertise profiles (manager, engineer, reviewer, designer, business, data-engineering, …), 55 skills (dispatch, lifecycle, prs, sweep, fleet-status, briefing, status, triage, …), 17 MCP fragments (github, github-app, gws, google-analytics, google-search-console, meta-ads, meta-business, posthog, notion, linear, slack, shopify, printify, homeassistant, docker, spotify, granola), 25 guardrails, 40 protocols
+- `claudlobby/_runtime_scripts/` — native runtime scripts and companions; `harness/` holds the development and measurement instruments. Operators and agents use the public CLI
+- `claudlobby` — the installed Python CLI and compositor
 - `fleet.yaml.example` — a full fleet manifest template you can copy and adapt
 
 **You install separately** (the things people miss on a fresh clone):
@@ -219,26 +170,24 @@ claudlobby warm-cache            # pre-download npx + uvx packages for MCP serve
 - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — the CLI + OAuth login (or `ANTHROPIC_API_KEY`)
 - **[Telegram channel plugin](https://github.com/anthropics/claude-plugins-official)** — `claude plugin install telegram@claude-plugins-official`
 - **A clauDNA-style global skills install** — the `~/.claude/skills/` library (`/simplify`, `/review-pr`, `/tech-debt`, `/session-handoff`, …) is what makes the bots feel competent. Without it, the project skills in `library/skills/` work, but the global toolbox is sparse.
-- **Your secrets** — `GITHUB_PAT`, `NOTION_TOKEN`, BotFather tokens (one per bot), MCP server credentials. Stored in `.env` at the repo root (gitignored).
+- **Your secrets** — `GITHUB_PAT`, `NOTION_TOKEN`, BotFather tokens (one per bot), MCP server credentials. Keep them in the private host/data-root/fleet environment tiers described in the bootstrap guide.
 
 See [`documentation/getting-started.md`](documentation/getting-started.md) for the full bootstrap sequence.
 
 ## Sync-back: bots that learn
 
-Bots can edit themselves at runtime — `runtime/bots/` is gitignored, so an in-session edit to a skill, a CLAUDE.md, or a protocol won't pollute git. Two patterns:
-
-- **Skills** auto-sync because they're symlinks: a bot editing `runtime/bots/X/.claude/skills/foo/SKILL.md` is editing `library/skills/foo/SKILL.md`. The change propagates to every bot using `foo`.
-- **Composed CLAUDE.md** doesn't auto-sync (the next `generate` would overwrite it). Use:
-  - `claudlobby diff <bot>` — show drift vs what `generate` would produce
-  - `claudlobby promote <bot>` — pick which drifted lines belong in `library/expertise/`, `voices/`, or a new guardrail/protocol
-
-Foundation for the future ML layer: when claudlobby has embeddings + a knowledge graph behind `library/`, runtime drift becomes training data for "what if more bots needed this rule?"
+Put intended skill and policy changes in authored fleet-overlay source. Packaged
+release assets are sealed: editing a generated skill's symlink target can damage
+the installed release. `claudlobby config diff --bot <bot>` identifies rendered
+drift without printing values; review the change, edit its authored source, then
+stage and inspect a configuration plan before activation. Bot-owned `memory/`
+and `data/` remain mutable and are preserved during composition.
 
 ## Hosts
 
 | Host | Notes |
 |------|-------|
-| macOS (Mac mini) | launchd via `<bot>.plist`. `lib/creds-check.sh` ships with a launchd install pattern. |
+| macOS (Mac mini) | launchd via `<bot>.plist`. `claudlobby/_runtime_scripts/creds-check.sh` ships with a launchd install pattern. |
 | Linux (Raspberry Pi 5, Debian, Ubuntu) | systemd user services via `<bot>.service`. Set `CLAUDLOBBY_ROOT=$HOME/claudlobby` in the unit's Environment. |
 | Linux (root systemd) | Same as user systemd; install to `/etc/systemd/system/` instead of `~/.config/systemd/user/`. |
 
@@ -250,7 +199,7 @@ Opt-in and dormant — a fleet that declares no `github_app:` is unaffected.
 
 ## Status
 
-This repo is in active migration from the older "one-dir-per-bot" template model to the compositor. The current layout is: `library/` (sources), `lib/` (lifecycle scripts), `runtime/` (output), `voices/` (overlays).
+This repo is in active migration from the older "one-dir-per-bot" template model to the compositor. The current layout is: `library/` (sources), `claudlobby/_runtime_scripts/` (lifecycle scripts), `runtime/` (output), `voices/` (overlays).
 
 PRs welcome.
 

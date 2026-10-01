@@ -38,6 +38,8 @@ jobs:
         # bump policy: documentation/integrations/claudron-integration.md). Parity holds against the pin; the gate fails if
         # the composer's rendered copy ever drifts from it.
         run: pip install -e '.[dev,vault]'
+      - name: Prepare installed resources in disposable checkout
+        run: python tests/prepare_resources.py --disposable-checkout "$PWD"
       - name: Run the vault-mode gate (snippet parity + contention)
         # A quarantined vault test runs in quarantine.yml instead (where the
         # [vault] extra is absent, so it skips there too until it is fixed).

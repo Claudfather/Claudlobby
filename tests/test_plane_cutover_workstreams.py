@@ -1,13 +1,4 @@
-"""The workstream registry lives on the plane (cutover chunk A2 moved it
-there behind a fourth door; the F18 closure's R1 made it the ONLY home).
-`workstream-update.sh` works on a registry MATERIALIZED from the plane (the
-same jq programs, one lock), the verb's plane event IS the write, no file is
-ever written, and every reader (`claudlobby workstreams`, brief's section)
-renders the registry from the plane — `plane-readers.workstream_registry`. No
-flag gates this door any more, and since R2b no reader consults the
-retirement fact or a file: a plane that cannot serve the registry, or an
-emission the shim could not record, is a REFUSAL (rc 3 / rc 4), never a file.
-"""
+"""Plane-only workstream import and registry reconstruction checks."""
 from __future__ import annotations
 
 import json
@@ -21,136 +12,15 @@ import pytest
 
 from claudlobby.brief import _workstream_section
 from claudlobby.config import load_fleet
-from tests.plane_fixtures import F, REPO, _cli, _env, _scene, _stdlib_readers, ro as _ro
+from tests.plane_fixtures import F, REPO, _env, _scene, _stdlib_readers, ro as _ro
 
-LIB = REPO / "lib"
-CLI = Path(sys.executable).parent / "claudlobby"
-
-
-def _door_env(root, **extra):
-    env = {"CLAUDLOBBY_ROOT": str(root), "HOME": str(root / "home"), "FLEET_NAME": F, "BOT_NAME": "mgr",
-           "PLANE_EMIT_ENABLED": "1", "PLANE_EMIT_CLI": str(CLI),
-           "PLANE_SOCKET": str(root / "no-daemon.sock"), "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-           "WORKSTREAM_LEASE_DAYS": "14"}
-    env.update(extra)
-    return env
+LIB = REPO / "claudlobby/_runtime_scripts"
 
 
-def _ws(root, *args, **extra):
-    r = subprocess.run(["bash", str(LIB / "workstream-update.sh"), *args], capture_output=True, text=True,
-                       timeout=180, env=_door_env(root, **extra))
-    return r
-
-
-def _reg(paths):
-    """Where the registry FILE used to live — asserted absent: nothing writes one."""
-    return paths.fleet_state / "workstreams.json"
-
-
-def _await(root, sql, want, *, timeout=30):
-    deadline = time.monotonic() + timeout
-    while True:
-        with _ro(root) as conn:
-            got = conn.execute(sql).fetchone()[0]
-        if got == want or time.monotonic() > deadline:
-            return got
-        time.sleep(0.25)
-
-
-def _ws_cli(root, *args, **extra):
-    return subprocess.run([sys.executable, "-m", "claudlobby", "--root", str(root), "--fleet", F,
-                           "workstreams", *args], capture_output=True, text=True, timeout=180,
-                          env=_env(root, **extra))
-
-
-SHARED = ("id", "fleet", "title", "project", "status", "owner_bot", "next", "task_ids", "refs",
-          "opened_ts", "last_progress_ts", "lease_expires_ts")
-
-
-def test_the_plane_renders_every_verb_the_door_wrote(tmp_path):
-    """The whole verb table through the real door, read back through the
-    renderer the door itself materializes from — and no file anywhere."""
-    root, paths, _, _ = _scene(tmp_path)
-    reg = _reg(paths)
-    a = _ws(root, "open", "Ship the widget", "--owner", "w1", "--project", "alpha", "--next", "first cut")
-    assert a.returncode == 0, a.stderr
-    ws_a = a.stdout.strip()
-    b = _ws(root, "open", "A second one"); ws_b = b.stdout.strip()
-    assert _ws(root, "progress", ws_a, "--next", "second cut").returncode == 0
-    # a DIFFERENT lease on the renew: the renewal's own instant (renewed_until) must
-    # be what the plane renders, not the last progress plus the fleet's lease —
-    # the two coincide to the second when both verbs run in one second (a
-    # mutant dropping the renewal survived the first pin)
-    assert _ws(root, "renew", ws_a, "--note", "still on it", WORKSTREAM_LEASE_DAYS="30").returncode == 0
-    assert _ws(root, "block", ws_a, "--note", "waiting on review").returncode == 0
-    assert _ws(root, "close", ws_b, "--status", "done").returncode == 0
-    pruned = _ws(root, "prune")
-    assert pruned.returncode == 0 and "archived on the plane" in pruned.stdout
-    assert not reg.exists()                                                     # the plane event IS the write
-    assert not (root / "local" / F / "runtime" / "workstreams-archive.jsonl").exists()   # the archived event is the archive
-    assert _await(root, "SELECT COUNT(*) FROM events WHERE kind = 'workstream' AND event = 'archived'", 1) == 1
-    pr = _stdlib_readers()
-    with _ro(root) as conn:
-        plane_reg = pr.workstream_registry(conn, F, lease_days=14)
-    assert set(plane_reg["workstreams"]) == {ws_a}                              # the pruned one is gone
-    e = plane_reg["workstreams"][ws_a]
-    assert set(SHARED) <= set(e) and set(e) >= {"renewals"}
-    assert (e["id"], e["fleet"], e["title"], e["project"], e["owner_bot"]) == (ws_a, F, "Ship the widget", "alpha", "w1")
-    assert e["status"] == "blocked" and e["next"] == "waiting on review"        # the block's note replaced the progress's next
-    assert e["task_ids"] == [] and e["refs"] == {"issues": [], "prs": []}
-    assert e["opened_ts"] <= e["last_progress_ts"]                              # the progress advanced (or held) the instant
-    assert [r["note"] for r in e["renewals"]] == ["still on it"]
-    assert e["lease_expires_ts"] > pr._plus_days(e["last_progress_ts"], 14)     # the renewal's own instant, not progress + the default lease
-    assert plane_reg["updated"] >= e["last_progress_ts"]
-
-
-def test_the_door_works_with_no_file_and_the_readers_serve_the_plane(tmp_path):
-    root, paths, _, _ = _scene(tmp_path)
-    reg = _reg(paths)
-    a = _ws(root, "open", "Retired-era work", "--owner", "w2", "--next", "plan it")
-    assert a.returncode == 0, a.stderr
-    ws_a = a.stdout.strip()
-    assert not reg.exists()                                                     # the plane event IS the write
-    assert _await(root, "SELECT COUNT(*) FROM workstreams", 1) == 1
-    listing = _ws_cli(root)                                                     # no flag, no fact: the plane
-    assert listing.returncode == 0 and ws_a in listing.stdout and "w2" in listing.stdout, listing.stdout + listing.stderr
-    shown = _ws_cli(root, "show", ws_a)
-    assert shown.returncode == 0 and "Retired-era work" in shown.stdout and "plan it" in shown.stdout
-    assert _ws(root, "progress", ws_a, "--next", "build it").returncode == 0
-    assert _ws(root, "block", ws_a, "--note", "blocked on x").returncode == 0
-    assert _await(root, "SELECT COUNT(*) FROM events WHERE kind = 'workstream'", 2) == 2
-    assert not reg.exists()
-    deg = []
-    fleet, _ = load_fleet(root / "local" / F / "fleet.yaml")
-    section = _workstream_section(fleet, paths, int(time.time()), deg)
-    assert section == {"active": [], "stalled": []}                             # blocked: not active — served, not omitted
-    assert not any(d.field == "workstreams" for d in deg)
-    assert _ws(root, "close", ws_a, "--status", "done").returncode == 0
-    pruned = _ws(root, "prune")
-    assert pruned.returncode == 0 and "Pruned 1" in pruned.stdout
-    assert not (root / "local" / F / "runtime" / "workstreams-archive.jsonl").exists()   # the archived event is the archive
-    assert _await(root, "SELECT COUNT(*) FROM events WHERE kind = 'workstream' AND event = 'archived'", 1) == 1
-    after = _ws_cli(root)
-    assert after.returncode == 0 and "No workstreams." in after.stdout
-    # the plane gone: the reader REFUSES (rc 3) — unreachable is not "No workstreams." (F18 R2b)
-    for p in (root / "state" / "plane").glob("plane.db*"):
-        p.unlink()
-    unknown = _ws_cli(root)
-    assert unknown.returncode == 3 and unknown.stdout == "" and "UNREACHABLE" in unknown.stderr
-
-
-def test_an_unrecorded_verb_refuses_and_changes_nothing(tmp_path):
-    """An emission the shim could not record is a REFUSAL (rc 4): the verb did
-    not happen, the plane is unchanged, and no file appears — there is
-    nothing to land it in any more."""
-    root, paths, _, _ = _scene(tmp_path)
-    reg = _reg(paths)
-    a = _ws(root, "open", "Lost in the post", PLANE_EMIT_CLI="/usr/bin/false")
-    assert a.returncode == 4, a.stdout + a.stderr
-    assert "did not record this verb" in a.stderr and "nothing changed" in a.stderr
-    assert "landed at" not in a.stderr
-    assert not reg.exists()
-    assert _await(root, "SELECT COUNT(*) FROM workstreams", 0, timeout=2) == 0
+def _cli(root, *args):
+    return subprocess.run([sys.executable, "-m", "claudlobby", "--root", str(root),
+                           "--fleet", F, "migration", "workstreams", *args],
+                          capture_output=True, text=True, timeout=180, env=_env(root))
 
 
 def test_the_lookup_and_the_reader_refuse_an_unknown_fleet(tmp_path):
@@ -188,7 +58,8 @@ def _stale_file(*, lease_days_ago: int = 16):
         days=lease_days_ago + 14
     )  # so lease = progressed+14 is `lease_days_ago` in the past
     lease = progressed + timedelta(days=14)
-    fmt = lambda dt: dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    def fmt(dt):
+        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     return {
         "updated": fmt(progressed),
         "workstreams": {
@@ -220,7 +91,7 @@ def test_import_preserves_the_original_lease_and_progress_instants(tmp_path):
     doc, expected_lease = _stale_file()
     _write_residual(paths, doc)
 
-    r = _cli(root, "import-workstreams")
+    r = _cli(root, "--apply")
     assert r.returncode == 0, r.stdout + r.stderr
 
     pr = _stdlib_readers()
@@ -296,7 +167,7 @@ def test_import_is_idempotent_on_a_second_run(tmp_path):
     doc, _ = _stale_file()
     _write_residual(paths, doc)
 
-    first = _cli(root, "import-workstreams")
+    first = _cli(root, "--apply")
     assert first.returncode == 0, first.stdout + first.stderr
 
     def _counts():
@@ -311,9 +182,9 @@ def test_import_is_idempotent_on_a_second_run(tmp_path):
     before = _counts()
     assert before[0] == 1
 
-    second = _cli(root, "import-workstreams")
+    second = _cli(root, "--apply")
     assert second.returncode == 0, second.stdout + second.stderr
-    assert "skipped ws-stale-one" in second.stderr
+    assert "skipped ws-stale-one" in second.stdout
     after = _counts()
     assert after == before, (before, after)
 
@@ -322,40 +193,21 @@ def test_dedup_skips_an_id_already_live_or_archived(tmp_path):
     """R1 gauntlet hazard 1, reproduced: a construct id is unique per fleet
     FOREVER, live or archived — the importer must not re-mint either."""
     root, paths, _, _ = _scene(tmp_path)
-    # a REAL open through the writer, using the SAME id the file will carry
-    opened = subprocess.run(
-        [
-            "bash",
-            str(LIB / "workstream-update.sh"),
-            "open",
-            "Pre-existing",
-            "--id",
-            "ws-collides",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=180,
-        env={
-            **_env(root),
-            "FLEET_NAME": F,
-            "BOT_NAME": "mgr",
-            "PLANE_EMIT_ENABLED": "1",
-            "PLANE_EMIT_CLI": str(CLI),
-            "PLANE_SOCKET": str(root / "no-daemon.sock"),
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "WORKSTREAM_LEASE_DAYS": "14",
-        },
-    )
-    assert opened.returncode == 0, opened.stdout + opened.stderr
+    # A pre-existing construct uses the same ID the residual file carries.
+    from claudlobby.plane.emit_api import emit_batch
+    opened = emit_batch(root, [{"event_type": "workstream", "emitter": "test",
+        "fleet": F, "payload": {"workstream_id": "ws-collides", "title": "Pre-existing",
+                              "opened_by": f"bot:{F}/mgr"}}], require_commit=True)
+    assert opened[0].status == "committed"
 
     doc, _ = _stale_file()
     doc["workstreams"]["ws-collides"] = doc["workstreams"].pop("ws-stale-one")
     doc["workstreams"]["ws-collides"]["id"] = "ws-collides"
     _write_residual(paths, doc)
 
-    r = _cli(root, "import-workstreams")
+    r = _cli(root, "--apply")
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "skipped ws-collides" in r.stderr
+    assert "skipped ws-collides" in r.stdout
 
     with _ro(root) as conn:
         n = conn.execute(
@@ -374,7 +226,8 @@ def test_renewals_reconstruct_their_own_lease_target(tmp_path):
     now = datetime.now(timezone.utc)
     opened = now - timedelta(days=20)
     renewed_at = now - timedelta(days=10)
-    fmt = lambda dt: dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    def fmt(dt):
+        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     doc = {
         "updated": fmt(renewed_at),
         "workstreams": {
@@ -402,7 +255,7 @@ def test_renewals_reconstruct_their_own_lease_target(tmp_path):
     }
     _write_residual(paths, doc)
 
-    r = _cli(root, "import-workstreams")
+    r = _cli(root, "--apply")
     assert r.returncode == 0, r.stdout + r.stderr
 
     pr = _stdlib_readers()
@@ -422,7 +275,7 @@ def test_dry_run_touches_neither_file_nor_plane(tmp_path):
     _write_residual(paths, doc)
     before = (paths.fleet_state / "workstreams.json").read_text()
 
-    r = _cli(root, "import-workstreams", "--dry-run")
+    r = _cli(root, "--dry-run")
     assert r.returncode == 0, r.stdout + r.stderr
     assert '"event_id"' in r.stdout  # the full envelope plan, not a summary
 
@@ -432,18 +285,18 @@ def test_dry_run_touches_neither_file_nor_plane(tmp_path):
     assert n == 0
 
 
-def test_absent_file_exits_0_and_unreadable_file_exits_3(tmp_path):
+def test_absent_file_exits_0_and_unreadable_file_is_unavailable(tmp_path):
     root, paths, _, _ = _scene(tmp_path)
-    absent = _cli(root, "import-workstreams")
-    assert absent.returncode == 0 and "nothing to import" in absent.stderr
+    absent = _cli(root, "--apply")
+    assert absent.returncode == 0 and "nothing to import" in absent.stdout
 
     resid = paths.fleet_state / "workstreams.json"
     resid.parent.mkdir(parents=True, exist_ok=True)
     resid.write_text("{}")
     resid.chmod(0o000)
     try:
-        unreadable = _cli(root, "import-workstreams")
-        assert unreadable.returncode == 3, unreadable.stdout + unreadable.stderr
+        unreadable = _cli(root, "--apply")
+        assert unreadable.returncode == 6, unreadable.stdout + unreadable.stderr
     finally:
         resid.chmod(0o644)  # restore so tmp_path teardown can remove it
 
@@ -453,15 +306,15 @@ def test_archive_renames_and_a_second_run_finds_nothing(tmp_path):
     doc, _ = _stale_file()
     _write_residual(paths, doc)
 
-    r = _cli(root, "import-workstreams", "--archive")
+    r = _cli(root, "--apply", "--archive")
     assert r.returncode == 0, r.stdout + r.stderr
     assert "archived" in r.stdout
     assert not (paths.fleet_state / "workstreams.json").exists()
     archived = list(paths.fleet_state.glob("workstreams.json.imported-*"))
     assert len(archived) == 1
 
-    again = _cli(root, "import-workstreams")
-    assert again.returncode == 0 and "nothing to import" in again.stderr
+    again = _cli(root, "--apply")
+    assert again.returncode == 0 and "nothing to import" in again.stdout
 
 
 def test_capture_mode_metadata_warns_and_goal_survives_the_strip(tmp_path):
@@ -475,10 +328,10 @@ def test_capture_mode_metadata_warns_and_goal_survives_the_strip(tmp_path):
     doc, _ = _stale_file()
     _write_residual(paths, doc)
 
-    r = _cli(root, "import-workstreams")
+    r = _cli(root, "--apply")
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "capture mode is 'metadata'" in r.stderr
-    assert "STRIPPED" in r.stderr
+    assert "capture mode is 'metadata'" in r.stdout
+    assert "STRIPPED" in r.stdout
 
     pr = _stdlib_readers()
     with _ro(root) as conn:
@@ -500,7 +353,7 @@ def test_dry_run_against_a_fresh_root_creates_no_plane_db(tmp_path):
     _write_residual(paths, doc)
     assert not (root / "state" / "plane" / "plane.db").exists()
 
-    r = _cli(root, "import-workstreams", "--dry-run")
+    r = _cli(root, "--dry-run")
     assert r.returncode == 0, r.stdout + r.stderr
     assert '"event_id"' in r.stdout
 
@@ -509,68 +362,49 @@ def test_dry_run_against_a_fresh_root_creates_no_plane_db(tmp_path):
     )
 
 
-def test_the_lock_excludes_a_shell_writer_when_flock_is_unavailable(
-    tmp_path, monkeypatch
+def test_the_kernel_lock_excludes_a_shell_writer_when_flock_binary_is_unavailable(
+    tmp_path
 ):
-    """#1748 review, the one that mattered: with_lock's own fallback (no
-    flock binary -- stock macOS) uses an mkdir spinlock on <lockfile>.d, a
-    DIFFERENT mechanism and path than fcntl.flock on the lockfile itself.
-    The importer must resolve the SAME way the shell does and take
-    whichever mechanism a shell writer on this host would take, or the two
-    do not exclude each other at all.
+    """Shell's no-flock-binary fallback and the importer must lock the same
+    file. A stale directory from the retired spinlock must be inert.
 
-    BOTH sides must see the restricted PATH, not just the shell subprocess
-    -- the first version of this test only restricted the holder's env and
-    left the pytest process's own PATH (with a real flock on it) in force,
-    so registry_lock took the flock branch while the shell took mkdir: two
-    mechanisms that never contend for anything, a false pass waiting to
-    happen."""
-    import shutil
+    Force the shell's no-binary path on every host, including Linux CI."""
+    import select
     import subprocess as sp
     import time
 
     from claudlobby.plane.workstream_import import registry_lock
 
-    real_flock = shutil.which("flock")
-    if real_flock is None:
-        pytest.skip("no flock binary on this runner -- cannot construct the contrast")
-
-    isolated = tmp_path / "no-flock-bin"
-    isolated.mkdir()
-    # Everything the real /usr/bin offers, EXCEPT flock -- robust by
-    # construction (mirrors every OTHER binary the shell writer needs),
-    # not a guess at which specific ones lib-common.sh happens to call.
-    for f in Path("/usr/bin").glob("*"):
-        if f.name == "flock":
-            continue
-        try:
-            (isolated / f.name).symlink_to(f)
-        except OSError:
-            pass
-    assert shutil.which("flock", path=str(isolated)) is None
-    monkeypatch.setenv("PATH", str(isolated))  # THIS process too
-
     lockfile = tmp_path / "workstreams.lock"
     lockdir = tmp_path / "workstreams.lock.d"
+    lockdir.mkdir()
     holder = sp.Popen(
         [
             "bash",
             "-c",
-            f'. "{LIB}/lib-common.sh"; with_lock "{lockfile}" '
+            f'. "{LIB}/lib-common.sh"; _FLOCK_BIN=; WITH_LOCK_WAIT_S=2; with_lock "{lockfile}" '
             f'bash -c "echo acquired; sleep 1.2; echo released"',
         ],
         stdout=sp.PIPE,
         stderr=sp.STDOUT,
         text=True,
-        env=dict(os.environ, PATH=str(isolated)),
+        env=os.environ.copy(),
     )
-    time.sleep(0.4)
-    assert lockdir.is_dir(), "the shell holder must be using the mkdir fallback by now"
+    try:
+        readable, _, _ = select.select([holder.stdout], [], [], 5)
+        assert readable, "the shell holder did not report acquiring the lock"
+        assert holder.stdout.readline().strip() == "acquired"
+        assert lockfile.is_file(), "the shell holder must lock the shared file"
 
-    t0 = time.monotonic()
-    with registry_lock(lockfile, wait_s=5):
-        elapsed = time.monotonic() - t0
-    holder.wait(timeout=5)
+        t0 = time.monotonic()
+        with registry_lock(lockfile, wait_s=5):
+            elapsed = time.monotonic() - t0
+        assert holder.wait(timeout=5) == 0
+    finally:
+        if holder.poll() is None:
+            holder.kill()
+            holder.wait(timeout=5)
+    assert lockdir.is_dir(), "a stale spinlock directory is inert and left untouched"
     assert elapsed > 0.5, (
         f"acquired after only {elapsed:.2f}s -- the shell holder's lock did not exclude this"
     )

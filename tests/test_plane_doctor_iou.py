@@ -12,10 +12,13 @@ deferred, plus the live-flagged provisional fixes).
 
 from __future__ import annotations
 
+from tests.package_fixtures import source_package
 import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+
+from tests.plane_setup import initialize_plane
 
 from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import emit_batch
@@ -28,6 +31,7 @@ def _root(tmp_path):
     root = tmp_path / "root"
     (root / "state" / "plane").mkdir(parents=True)
     (root / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
+    initialize_plane(root)
     return root
 
 
@@ -78,7 +82,7 @@ def test_rail_excludes_host_sentinel_and_unbadges_humans(tmp_path):
          "fleet": "_host",
          "payload": {"subject_kind": "host", "subject": "myhost",
                      "metric": "host.job_ran", "value": 1}}])
-    body = TestClient(create_app(root)).get("/api/identities").json()
+    body = TestClient(create_app(root, package=source_package())).get("/api/identities").json()
     ids = {i["alias"]: i for i in body["data"]["identities"]}
     assert "_host" not in ids                 # sentinel fleet excluded
     assert ids["human:chris"]["provisional"] == 0   # human not badged

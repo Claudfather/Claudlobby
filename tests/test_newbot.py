@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from textwrap import dedent
+
+import pytest
 
 from claudlobby.newbot import (
     NewBotInputs,
@@ -16,6 +19,7 @@ from claudlobby.newbot import (
     interactive_collect,
     write_token_to_env,
 )
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 
@@ -68,6 +72,15 @@ class TestRenderStanza:
         stanza = render_stanza(inp)
         assert "voice: voices/jian-yang.md" in stanza
         assert "model: opus" in stanza
+
+    def test_multiline_model_cannot_inject_permission_key(self):
+        import yaml
+
+        model = "sonnet\n      dangerously_skip_permissions: true"
+        stanza = render_stanza(NewBotInputs(name="eng", expertise=["frontend-design"], model=model))
+        bot = yaml.safe_load("fleet:\n  bots:\n" + stanza)["fleet"]["bots"]["eng"]
+        assert bot["model"] == model
+        assert "dangerously_skip_permissions" not in bot
 
     def test_default_account_omitted(self):
         inp = NewBotInputs(name="x", expertise=["a"], account="default")
@@ -163,6 +176,7 @@ FLEET_WITH_BOTS = dedent("""\
     fleet:
       name: test
       service_prefix: com.test
+      manager: existing
 
       bots:
         existing:
@@ -185,6 +199,7 @@ class TestInsertBotStanza:
         text = dedent("""\
             fleet:
               name: test
+              manager: existing
               # important comment
               bots:
                 existing:
@@ -200,6 +215,7 @@ class TestInsertBotStanza:
         text = dedent("""\
             fleet:
               name: test
+              manager: lead
               teams:
                 eng:
                   manager: lead
@@ -227,6 +243,7 @@ class TestAddToTeam:
     def test_appends_worker(self):
         text = dedent("""\
             fleet:
+              manager: lead
               teams:
                 eng:
                   manager: lead
@@ -241,12 +258,13 @@ class TestAddToTeam:
     def test_no_duplicate(self):
         text = dedent("""\
             fleet:
+              manager: lead
               teams:
                 eng:
                   manager: lead
                   workers: [a, b]
               bots:
-                x:
+                lead:
                   expertise: [y]
         """)
         result = _add_to_team(text, "eng", "a")
@@ -266,7 +284,7 @@ class TestAddToTeam:
 
 class TestMaybeCreateVoice:
     def test_explicit_path_passthrough(self, tmp_path):
-        paths = Paths(root=tmp_path)
+        paths = Paths(root=tmp_path, package=source_package())
         result = maybe_create_voice(paths, "bot", "voices/custom.md", None)
         assert result == "voices/custom.md"
 
@@ -274,7 +292,7 @@ class TestMaybeCreateVoice:
         root = tmp_path / "repo"
         root.mkdir()
         (root / "voices").mkdir()
-        paths = Paths(root=root)
+        paths = Paths(root=root, package=source_package())
         result = maybe_create_voice(paths, "jian", None, "Terse and blunt.")
         assert result == "voices/jian.md"
         voice_file = root / "voices" / "jian.md"
@@ -284,7 +302,7 @@ class TestMaybeCreateVoice:
         assert "Terse and blunt." in content
 
     def test_none_when_no_voice(self, tmp_path):
-        paths = Paths(root=tmp_path)
+        paths = Paths(root=tmp_path, package=source_package())
         assert maybe_create_voice(paths, "bot", None, None) is None
 
 
@@ -298,7 +316,8 @@ def test_interactive_collect_lists_public_base_expertise_only(
     (
         root / "local" / "fleet-a" / "library" / "expertise" / "overlay-only.md"
     ).write_text("overlay")
-    paths = Paths(root=root, fleet_dir=root / "local" / "fleet-a")
+    package = replace(source_package(), library=root / "library")
+    paths = Paths(root=root, fleet_dir=root / "local" / "fleet-a", package=package)
     # Same wizard answer sequence as the opt-in test — one source of truth for the
     # positional prompt order (blank at idx 14 = default the dangerous prompt).
     answers = iter(_wizard_answers(""))
@@ -352,7 +371,7 @@ def test_interactive_collect_dangerous_is_explicit_opt_in(tmp_path, monkeypatch)
     root = tmp_path / "repo"
     (root / "library" / "expertise").mkdir(parents=True)
     (root / "library" / "expertise" / "base-engineering.md").write_text("base")
-    paths = Paths(root=root)
+    paths = Paths(root=root, package=replace(source_package(), library=root / "library"))
 
     answers = iter(_wizard_answers("y"))
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
@@ -361,14 +380,12 @@ def test_interactive_collect_dangerous_is_explicit_opt_in(tmp_path, monkeypatch)
     assert "dangerously_skip_permissions: true" in render_stanza(result)
 
 
-def test_interactive_collect_paste_voice_is_materialized(tmp_path, monkeypatch):
-    """The 'paste a new voice' branch must materialize the pasted text into a
-    voices/<name>.md file and carry the path on the result. It previously
-    assigned voice_text and dropped it, silently discarding the input (#760)."""
+def test_interactive_collect_retains_pasted_voice_without_writing(tmp_path, monkeypatch):
+    """Keep pasted content for the command's dry-run and confirmation gates."""
     root = tmp_path / "repo"
     (root / "library" / "expertise").mkdir(parents=True)
     (root / "library" / "expertise" / "base-engineering.md").write_text("base")
-    paths = Paths(root=root)
+    paths = Paths(root=root, package=replace(source_package(), library=root / "library"))
 
     # Splice the paste answers into the shared wizard sequence: voice choice
     # "2", then one pasted line + a blank line to terminate. Everything after
@@ -381,23 +398,69 @@ def test_interactive_collect_paste_voice_is_materialized(tmp_path, monkeypatch):
     result = interactive_collect(paths)
 
     assert result.voice == "voices/bot-a.md"
-    voice_file = root / "voices" / "bot-a.md"
-    assert voice_file.is_file()
-    assert "Terse and blunt." in voice_file.read_text()
+    assert result.voice_text == "Terse and blunt."
+    assert not (root / "voices").exists()
 
 
-def test_cli_dangerous_is_opt_in_and_old_flag_removed(tmp_path, capsys):
-    """End-to-end non-interactive CLI: --dangerously-skip-permissions is a positive
+@pytest.mark.parametrize("mode", ["dry-run", "decline", "confirm"])
+def test_new_bot_materializes_pending_voice_only_after_confirmation(
+    tmp_path, monkeypatch, capsys, mode
+):
+    from claudlobby import newbot
+    from claudlobby.__main__ import main
+    from claudlobby import context
+
+    root = tmp_path / "data"
+    root.mkdir()
+    (root / "fleet.yaml").write_text(FLEET_WITH_BOTS)
+    package_voices = tmp_path / "package" / "voices"
+    package_voices.mkdir(parents=True)
+    packaged_voice = package_voices / "bot-a.md"
+    packaged_voice.write_text("Packaged voice.\n")
+    paths = Paths(root=root, package=replace(source_package(), voices=package_voices))
+    pending = NewBotInputs(name="bot-a", expertise=["software-engineering"],
+                           voice="voices/bot-a.md", voice_text="Terse and blunt.",
+                           token_env="TELEGRAM_TOKEN_BOT_A", telegram_token="fixture-token")
+    monkeypatch.setattr(context, "resolve_paths", lambda **kwargs: paths)
+    monkeypatch.setattr(newbot, "interactive_collect", lambda paths: pending)
+    monkeypatch.setattr("builtins.input", lambda _: "n" if mode == "decline" else "y")
+    argv = ["--root", str(root), "bot", "create", "--interactive"]
+    if mode == "dry-run":
+        argv.append("--dry-run")
+
+    assert main(argv) == (4 if mode == "decline" else 0)
+    output = capsys.readouterr()
+
+    voice = root / "voices" / "bot-a.md"
+    backup = root / "fleet.yaml.bak"
+    token_file = root / ".env"
+    if mode == "confirm":
+        assert "config plan" in output.out
+        assert "Terse and blunt." in voice.read_text()
+        assert "voice: voices/bot-a.md" in (root / "fleet.yaml").read_text()
+        assert backup.read_text() == FLEET_WITH_BOTS
+        assert "TELEGRAM_TOKEN_BOT_A=fixture-token" in token_file.read_text()
+    else:
+        assert not voice.exists() and not backup.exists() and not token_file.exists()
+        assert (root / "fleet.yaml").read_text() == FLEET_WITH_BOTS
+    assert packaged_voice.read_text() == "Packaged voice.\n"
+
+
+def test_cli_dangerous_is_opt_in_and_old_flag_removed(tmp_path, capsys, monkeypatch):
+    """Non-interactive CLI flags: --dangerously-skip-permissions is a positive
     opt-in that renders the flag; omitted, the stanza omits it (safe acceptEdits).
     The old --no- opt-out of the removed dangerous default no longer parses."""
-    import pytest
-
     from claudlobby.__main__ import main
+    from claudlobby import context
+
+    paths = Paths(root=tmp_path, package=source_package())
+    (tmp_path / "fleet.yaml").write_text(FLEET_WITH_BOTS)
+    monkeypatch.setattr(context, "resolve_paths", lambda **kwargs: paths)
 
     base = [
         "--root",
         str(tmp_path),
-        "new-bot",
+        "bot", "create",
         "--name",
         "x",
         "--expertise",
@@ -414,6 +477,84 @@ def test_cli_dangerous_is_opt_in_and_old_flag_removed(tmp_path, capsys):
 
     with pytest.raises(SystemExit):  # cut clean: the old opt-out is gone
         main(base + ["--no-dangerously-skip-permissions"])
+
+
+def test_bot_create_generated_fleet_preview_matches_explicit_selector(tmp_path, capsys, monkeypatch):
+    from claudlobby.__main__ import main
+    from claudlobby import context
+    import json
+
+    root = tmp_path / "data"
+    selected = root / "local" / "team"
+    selected.mkdir(parents=True)
+    (root / "fleet.yaml").write_text(FLEET_WITH_BOTS)
+    (selected / "fleet.yaml").write_text(
+        "fleet:\n  name: team\n  manager: lead\n  bots:\n    lead:\n      expertise: [software-engineering]\n")
+    monkeypatch.setattr(context, "get_resources", source_package)
+    monkeypatch.setenv("FLEET_NAME", "team")
+    argv = ["--root", str(root), "--json", "bot", "create", "--name", "new-worker",
+            "--expertise", "software-engineering", "--dry-run"]
+    assert main(argv) == 0
+    session = json.loads(capsys.readouterr().out)["data"]
+    assert main(["--root", str(root), "--fleet", "team", "--json", *argv[3:]]) == 0
+    explicit = json.loads(capsys.readouterr().out)["data"]
+    assert session == explicit
+    assert session["fleet_yaml"] == str(selected / "fleet.yaml")
+    assert (root / "fleet.yaml").read_text() == FLEET_WITH_BOTS
+
+
+def test_bot_create_json_requires_complete_flags_and_only_authors_source(
+    tmp_path, monkeypatch, capsys
+):
+    import json
+    from claudlobby import context
+    from claudlobby.__main__ import main
+
+    (tmp_path / "fleet.yaml").write_text(FLEET_WITH_BOTS)
+    paths = Paths(root=tmp_path, package=source_package())
+    monkeypatch.setattr(context, "resolve_paths", lambda **kwargs: paths)
+    monkeypatch.setattr("builtins.input", lambda *_: pytest.fail("JSON must not prompt"))
+    base = ["--root", str(tmp_path), "--json", "bot", "create"]
+    assert main(base + ["--name", "newbie"]) == 2
+    refused = json.loads(capsys.readouterr().out)
+    assert refused["command"] == "bot.create"
+    assert refused["error"]["code"] == "invalid_argument"
+    assert main(base + ["--name", "newbie", "--expertise", "orchestration",
+                        "--dry-run"]) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["schema_version"] == 1 and preview["data"]["written"] is False
+    assert (tmp_path / "fleet.yaml").read_text() == FLEET_WITH_BOTS
+    assert main(base + ["--name", "newbie", "--expertise", "orchestration",
+                        "--yes"]) == 0
+    created = json.loads(capsys.readouterr().out)
+    assert created["data"]["written"] is True
+    assert "newbie:" in (tmp_path / "fleet.yaml").read_text()
+    assert not (tmp_path / "runtime" / "bots" / "newbie").exists()
+    assert "telegram:" not in created["data"]["stanza"]
+    assert "config plan" in created["data"]["next_step"]
+    with pytest.raises(SystemExit) as retired:
+        main(["new-bot"])
+    assert retired.value.code == 2
+
+
+def test_bot_create_refuses_redirected_fleet_source(tmp_path, monkeypatch, capsys):
+    import json
+    from claudlobby import context
+    from claudlobby.__main__ import main
+
+    other = tmp_path / "other"
+    other.mkdir()
+    foreign_manifest = other / "fleet.yaml"
+    foreign_manifest.write_text(FLEET_WITH_BOTS)
+    (tmp_path / "fleet.yaml").symlink_to(foreign_manifest)
+    paths = Paths(root=tmp_path, package=source_package())
+    monkeypatch.setattr(context, "resolve_paths", lambda **kwargs: paths)
+    assert main(["--root", str(tmp_path), "--json", "bot", "create", "--name",
+                 "newbie", "--expertise", "orchestration", "--yes"]) == 4
+    result = json.loads(capsys.readouterr().out)
+    assert result["command"] == "bot.create" and result["error"]["code"] == "conflict"
+    assert foreign_manifest.read_text() == FLEET_WITH_BOTS
+    assert not (tmp_path / "fleet.yaml.bak").exists()
 
 
 # ---------------------------------------------------------------------------

@@ -28,7 +28,7 @@ def _fleet(tmp_path, *, app_env=None, mint="ok", probe_code="200", pat=None):
     # supervisor.sh is a required sibling: lib-common.sh unconditionally
     # sources it from its own directory (#1573 task 6).
     for helper in ("creds-check.sh", "lib-common.sh", "supervisor.sh"):
-        shutil.copy(REPO_ROOT / "lib" / helper, lib / helper)
+        shutil.copy(REPO_ROOT / "claudlobby/_runtime_scripts" / helper, lib / helper)
 
     # Stub mint CLI: prints a token, or fails per `mint`.
     if mint == "ok":
@@ -64,7 +64,7 @@ esac
 
     fleet_dir = root / "local" / "f"
     (fleet_dir / "runtime" / "bots").mkdir(parents=True)
-    (fleet_dir / "fleet.yaml").write_text("fleet:\n  name: f\n  bots:\n    b1:\n      expertise: [x]\n")
+    (fleet_dir / "fleet.yaml").write_text("fleet:\n  manager: b1\n  name: f\n  bots:\n    b1:\n      expertise: [x]\n")
     env_lines = []
     if pat:
         env_lines.append(f'GITHUB_PAT="{pat}"')
@@ -100,6 +100,35 @@ APP = {
     "GITHUB_APP_INSTALLATION_ID": "555002",
     "GITHUB_APP_PRIVATE_KEY_PATH": "/tmp/nonexistent-key.pem",
 }
+
+
+def test_selected_check_reads_host_tier_app_config_without_ambient_token(tmp_path):
+    f = _fleet(tmp_path)
+    root = tmp_path / "root"
+    fleet_root = root / "local" / "f"
+    home = tmp_path / "home"
+    (home / ".env").write_text(
+        "\n".join(f'{key}="{value}"' for key, value in APP.items()) + "\n"
+    )
+    release_id = "r-" + "a" * 64
+    env = {**f["env"], "CLAUDLOBBY_RELEASE_ID": release_id,
+           "CLAUDLOBBY_NATIVE_DIR": str(f["lib"]),
+           "CLAUDLOBBY_CLI": str(tmp_path / "selected-cli"),
+           "FLEET_ROOT": str(fleet_root), "CLAUDLOBBY_FLEET": "f",
+           "GITHUB_PAT": "ambient-token-must-not-win"}
+    result = subprocess.run(
+        ["bash", str(f["lib"] / "creds-check.sh"),
+         "--selected-release", release_id, "--fleet", "f",
+         "--fleet-root", str(fleet_root),
+         "--bots-dir", str(fleet_root / "runtime" / "bots"), "--bot", "b1"],
+        env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "tick-complete\n"
+    row = json.loads(f["state"].read_text())["github_pat"]
+    assert row["status"] == "ok"
+    assert "installation token" in row["detail"].lower()
+    assert "ambient-token-must-not-win" not in f["state"].read_text()
 
 
 def test_app_configured_healthy_records_ok(tmp_path):

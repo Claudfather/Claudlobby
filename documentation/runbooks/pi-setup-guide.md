@@ -113,7 +113,7 @@ sudo apt install -y tmux
 
 ### jq
 
-Required by several `lib/` scripts (dispatch, reconcile-fleet, report-back, creds-check, keepalive helpers, etc.) for JSON parsing.
+Required by several `claudlobby/_runtime_scripts/` scripts (dispatch, reconcile-fleet, report-back, creds-check, keepalive helpers, etc.) for JSON parsing.
 
 ```bash
 sudo apt install -y jq
@@ -251,8 +251,8 @@ rm -rf ~/.npm/_npx/        # instant fleet-wide cold start regression
 **Health check:**
 
 ```bash
-lib/check-npx-cache.sh --fleet <name>   # verify all MCP packages are cached
-claudlobby warm-cache                    # pre-download any missing packages
+claudlobby --fleet <name> host cache warm --dry-run  # inspect missing packages
+claudlobby --fleet <name> host cache warm            # download missing packages
 ```
 
 **Recovery if cache is cleared:**
@@ -266,7 +266,7 @@ systemctl --user stop <service_prefix>.keepalive.timer
 systemctl --user stop bot1 bot2 bot3 ...   # all bots in the fleet
 
 # Re-warm the cache serially (not in parallel)
-claudlobby --fleet <name> warm-cache
+claudlobby --fleet <name> host cache warm
 
 # Restart fleet, then re-arm keepalive
 systemctl --user start bot1 bot2 bot3 ...  # same list
@@ -406,39 +406,14 @@ journalctl -b 0 | grep -i 'hardware watchdog'  # "Watchdog running with a hardwa
 `RebootWatchdogSec` is separate: it guards the *shutdown* path so a reboot that
 wedges still completes. 10min is the sensible default.
 
-## Host jobs — enrolling is a separate step from declaring
+## Host jobs
 
-`system.yaml` `host.jobs` *declares* the host-level timers (`claude-update`,
-`notify-behind`, `disk-monitor`, `fleet-memory-check`, `orphan-browser-reaper`,
-`host-health-check`). `claudlobby host-timers` *composes* the units into
-`runtime/_host/timers/`. Neither step enrolls them — `lib/setup-system` does.
-
-A host that was set up before a job was added keeps running happily with that job
-composed-but-never-enrolled, and nothing surfaces it. Audit periodically:
-
-```bash
-ls runtime/_host/timers/*.timer | xargs -n1 basename | sed 's/.timer//' | sort > /tmp/composed
-systemctl --user list-timers --all | grep -oE 'claudlobby-[a-z-]+' | sort -u > /tmp/enrolled
-comm -23 /tmp/composed /tmp/enrolled     # composed but NOT enrolled
-```
-
-Then enroll a specific one:
-
-```bash
-TIMER_DIR=$CLAUDLOBBY_ROOT/runtime/_host/timers \
-UNIT_NAME=claudlobby-<job> \
-  lib/install_fleet_timer.sh <job>
-```
-
-**Always start the service once by hand after enrolling.** A timer can enroll
-cleanly and still fail every fire — a non-executable `ExecStart` gives
-`status=203/EXEC` and only shows up in the journal:
-
-```bash
-systemctl --user start claudlobby-<job>.service
-systemctl --user show claudlobby-<job>.service -p Result -p ExecMainStatus
-journalctl --user -u claudlobby-<job>.service -n 20
-```
+`system.yaml` declares the host-level jobs. The sealed release's `config plan`
+stages their units with the fleet; `config diff` exposes the proposed changes,
+and `host activate` installs them through the native user manager. First-time
+`fleet setup` performs those steps together. Follow the
+[cold-host walkthrough](../getting-started.md) before enabling jobs; inspect
+their resulting state with `host doctor` and the systemd user journal.
 
 ## Installing the fleet
 
@@ -446,20 +421,16 @@ One supported pattern on Linux — systemd user services; the cron + tmux patter
 
 ### systemd user services (self-restarting)
 
-```bash
-loginctl enable-linger $USER     # one-time, so user services persist past logout
-claudlobby --fleet <name> generate
-
-# Enroll every armed job and spin up every declared bot — one call.
-# Dormant jobs (enroll: false) stay off until the fleet opts in.
-lib/setup-fleet <name>
-```
+Enable user lingering through your host administrator for persistence past
+logout. Then follow the [cold-host walkthrough](../getting-started.md) to
+assemble a release and run `fleet setup` with
+`--install-directory "$HOME/.config/systemd/user"`.
 
 Each bot becomes a `systemd --user` unit with `Restart=on-failure`. View with `systemctl --user list-timers` and `journalctl --user -u <name> -f`.
 
-### Generic helpers
+### Selected operations
 
-- `lib/keepalive.sh <bot-dir>` — restart a dead session, nudge idle panes
-- `lib/log-rotate.sh [--keep N] <log>...` — tail each log to last N lines
-- `lib/disk-monitor.sh [--threshold N]` — warn if disk usage > threshold
-- `lib/bot-sweep-cron.sh <bot> <trigger>` — periodic dispatch (e.g. `bot-sweep-cron.sh assistant "briefing morning"`)
+- `claudlobby --fleet FLEET bot restart BOT` — supervised bot restart
+- `claudlobby --fleet FLEET fleet logs` — bounded bot log tails
+- `claudlobby host job run disk-monitor` — request the selected, enabled disk check
+- Declare periodic bot prompts in fleet configuration and activate the reviewed plan; the private scheduled dispatcher is not a public command.

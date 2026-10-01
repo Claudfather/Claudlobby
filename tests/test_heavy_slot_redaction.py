@@ -28,8 +28,8 @@ import pytest
 from tests.conftest import constructed_env
 
 REPO = Path(__file__).resolve().parent.parent
-WRAPPER = REPO / "lib" / "heavy-slot.py"
-GUARD = REPO / "lib" / "heavy-slot-guard.sh"
+WRAPPER = REPO / "claudlobby/_runtime_scripts" / "heavy-slot.py"
+GUARD = REPO / "claudlobby/_runtime_scripts" / "heavy-slot-guard.sh"
 BASH = shutil.which("bash")
 SECRET = "Fk3" + "q9Zx" * 6  # FAKE
 

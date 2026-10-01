@@ -2,25 +2,143 @@
 
 from __future__ import annotations
 import argparse
+import hashlib
 import json
 import os
 import shutil
 import stat
 import subprocess
+import sys
+import tempfile
 from pathlib import Path
 from textwrap import dedent
 
 import pytest
 
+import claudlobby
+
+_TEST_TREE = Path(__file__).resolve().parent.parent
+REALBOOT_HOST_CREDS = Path.home() / ".claude" / ".credentials.json"
+if Path(claudlobby.__file__).resolve().parent != _TEST_TREE / "claudlobby":
+    raise pytest.UsageError("test package origin does not match the tree under test")
+
 from claudlobby.config import DEFAULT_GUARDRAILS
 
 
+def _require_prepared_resources():
+    package = _TEST_TREE / "claudlobby"
+    metadata = package / "_artifact.json"
+    guidance = "prepare resources in this disposable checkout with tests/prepare_resources.py"
+    try:
+        manifest = json.loads(metadata.read_text())
+        sources = manifest["resource_sources"]
+        if not isinstance(sources, list) or not sources:
+            raise ValueError("missing source inventory")
+        indexed = subprocess.check_output(
+            ["git", "ls-files", "-z", "--", "claudlobby/_runtime_scripts", "library",
+             "templates", "voices", "fleet.yaml.seed", "fleet.yaml.example",
+             "projects.yaml.seed", ".env.seed.example", "missions/fleet.md.seed"],
+            cwd=_TEST_TREE, timeout=10).decode().split("\0")
+        indexed = {name for name in indexed if name and name not in {
+            "claudlobby/_runtime_scripts/CLAUDE.md",
+            "claudlobby/_runtime_scripts/personal/finance-presync.sh"}}
+        if indexed != set(sources):
+            raise ValueError("prepared resource inventory differs from the source index")
+        for name in sources:
+            source = _TEST_TREE / name
+            # Runtime scripts are authored at their installed package path.
+            target = (source if name.startswith("claudlobby/_runtime_scripts/")
+                      else package / "_resources" / "seeds" / name if name in {
+                          "fleet.yaml.seed", "fleet.yaml.example", "projects.yaml.seed",
+                          ".env.seed.example", "missions/fleet.md.seed"}
+                      else package / "_resources" / name)
+            if (not source.is_file() or not target.is_file()
+                    or hashlib.sha256(source.read_bytes()).digest() != hashlib.sha256(target.read_bytes()).digest()
+                    or source.stat().st_mode & 0o111 != target.stat().st_mode & 0o111):
+                raise ValueError(f"stale prepared resource: {name}")
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as exc:
+        raise pytest.UsageError(f"{guidance}: {exc}") from exc
+
+
+_require_prepared_resources()
+
+
+_HOME_KEYS = ("HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "TMPDIR")
+
+
+def _short_test_directory(prefix):
+    candidates = (os.environ.get("CLAUDLOBBY_TEST_TMPDIR"), "/tmp", os.environ.get("TMPDIR"))
+    for candidate in dict.fromkeys(candidates):
+        if not candidate:
+            continue
+        try:
+            return Path(tempfile.mkdtemp(prefix=prefix, dir=candidate)).resolve()
+        except OSError:
+            continue
+    raise pytest.UsageError("no writable short test temp root; set CLAUDLOBBY_TEST_TMPDIR")
+
+
+def _isolate_home(patch, base):
+    for key, name in zip(_HOME_KEYS, ("home", "config", "cache", "state", "data", "tmp")):
+        directory = base / name
+        directory.mkdir(parents=True, exist_ok=True)
+        patch.setenv(key, str(directory))
+    patch.setattr(tempfile, "tempdir", str(base / "tmp"))
+
+
+def _silence_plane(patch):
+    patch.setenv("PLANE_EMIT_DISABLED", "1")
+    for key in ("CLAUDLOBBY_ROOT", "CLAUDLOBBY_CLI", "PLANE_SOCKET", "PLANE_EMIT_CLI"):
+        patch.delenv(key, raising=False)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_plane_session(tmp_path_factory, request):
+    """Guard session fixtures too; undo only our changes when pytest exits.
+
+    Collection-time subprocesses must use constructed_env themselves: no
+    fixture can protect code that ran before fixture setup.
+    """
+    # Keep Unix socket paths short and environment state outside tests' data
+    # directories. A nested pytest tmp_path can exceed sun_path before tmux
+    # even opens its socket, and adding children changes directory-scan tests.
+    base = _short_test_directory("ct-")
+    with pytest.MonkeyPatch.context() as patch:
+        _isolate_home(patch, base)
+        _silence_plane(patch)
+        # Installed-wheel subprocesses must import their own package, not a
+        # source tree inherited from the parent validation environment (#1316).
+        patch.delenv("PYTHONPATH", raising=False)
+        # Pytest chooses this lazily. Initialize it while TMPDIR belongs to
+        # the session, before a function fixture selects a shorter-lived dir.
+        tmp_path_factory.getbasetemp()
+        yield base
+    if request.session.testsfailed:
+        print(f"retained failed-test files: {base}", file=sys.stderr)
+    else:
+        shutil.rmtree(base)
+
+
 @pytest.fixture(autouse=True)
-def _isolate_claudlobby_root(monkeypatch):
-    """Bot sessions and timer jobs export CLAUDLOBBY_ROOT, and Paths.detect()
-    honors it over the cwd walk-up — strip it so hint-less detection in tests
-    is hermetic. Tests that need it set it explicitly via monkeypatch.setenv."""
-    monkeypatch.delenv("CLAUDLOBBY_ROOT", raising=False)
+def _isolate_claudlobby_root(monkeypatch, _isolate_plane_session):
+    """Reset the default for each test; explicit local overrides still win."""
+    # The session owns cleanup after every test monkeypatch has been undone.
+    # Deleting here runs before this dependent monkeypatch fixture tears down;
+    # source-state tests deliberately replace os.scandir and break rmtree then.
+    base = Path(tempfile.mkdtemp(prefix="t-", dir=_isolate_plane_session)).resolve()
+    _isolate_home(monkeypatch, base)
+    _silence_plane(monkeypatch)
+    from claudlobby import paths
+    original = paths._is_host_data_root
+
+    def refuse_source_checkout(path):
+        resolved = Path(path).resolve()
+        if resolved == _TEST_TREE or resolved.is_relative_to(_TEST_TREE):
+            raise AssertionError("cwd discovery reached the source checkout; pass a private --root")
+        return original(path)
+
+    monkeypatch.setattr(paths, "_is_host_data_root", refuse_source_checkout)
+    yield base
 
 
 @pytest.fixture(autouse=True)
@@ -31,33 +149,7 @@ def _isolate_host_override(monkeypatch):
     monkeypatch.setenv("CLAUDLOBBY_HOST_SYSTEM_YAML", "/nonexistent/claudlobby-host-override.yaml")
 
 
-def quarantine_problem(mark) -> str | None:
-    """Why a ``quarantine`` marker is refused, or None when it is fine.
-
-    A quarantined test leaves CI's required lanes; it still runs, visibly, in
-    the quarantine workflow that nothing requires. So the marker must name the
-    issue that tracks bringing it back, ``quarantine(issue=<number>)``: one
-    that names none has been removed from the gate with no way back."""
-    issue = mark.kwargs.get("issue")
-    if isinstance(issue, bool) or not isinstance(issue, int) or issue <= 0:
-        return "must name its tracking issue: @pytest.mark.quarantine(issue=<number>)"
-    return None
-
-
-@pytest.hookimpl(tryfirst=True)
-def pytest_collection_modifyitems(config, items):
-    """Refuse a quarantine that names no tracking issue, in every lane. It runs
-    before -m deselects anything, so the required lane refuses it too."""
-    refused = [
-        f"{item.nodeid}: {problem}"
-        for item in items
-        for mark in item.iter_markers("quarantine")
-        if (problem := quarantine_problem(mark))
-    ]
-    if refused:
-        raise pytest.UsageError(
-            "quarantined test(s) naming no tracking issue:\n  " + "\n  ".join(refused)
-        )
+from tests.quarantine_policy import pytest_collection_modifyitems  # noqa: F401
 
 
 # Captures chat id, the (expanded) state dir the caller resolved, and the
@@ -68,17 +160,25 @@ TG_STUB = (
 )
 
 
-def read_fleet_events(root):
+def read_fleet_events(root, *, allow_absent=False):
     """Every fleet event on the plane under <root>, rendered as the legacy
-    JSONL rows (compact, one per line, oldest first) — or '' when the plane
-    was never created. F18 closure R1: the state/events/ file this once
+    JSONL rows (compact, one per line, oldest first). An absent or staged-only
+    plane is a test setup error unless the caller explicitly allows it.
+    F18 closure R1: the state/events/ file this once
     concatenated is gone; the rows a door lands (bot-, fleet- or
     host-anchored) come back in the exact row shape the file had, so an
     assertion like `'"type":"disk_high"' in read_fleet_events(root)` keeps
-    its meaning."""
-    db = Path(root) / "state" / "plane" / "plane.db"
+    its meaning. Negative reads require a served recording channel: staged
+    batches have not become queryable facts and must not count as silence."""
+    plane = Path(root) / "state" / "plane"
+    staged = tuple((plane / "staged").glob("*.batch"))
+    if staged:
+        raise AssertionError(f"{len(staged)} plane batch(es) staged but not committed")
+    db = plane / "plane.db"
     if not db.exists():
-        return ""
+        if allow_absent:
+            return ""
+        raise AssertionError("plane database is absent; enable fixture recording before reading events")
     from claudlobby.plane.db import connect_ro
     pr = load_lib_module("plane-readers")
     conn = connect_ro(db)
@@ -95,15 +195,125 @@ def read_fleet_events(root):
         for row in rows)
 
 
-def plane_emit_env():
-    """The two keys that make a driven script RECORD into its CLAUDLOBBY_ROOT's
-    plane through the shim's cold-CLI rung (no daemon listens on the socket):
-    merge into a scrubbed/constructed env. A fleet-less script (a host job)
-    lands under the `_host` anchor; a fleet-scoped one needs FLEET_NAME /
-    CLAUDLOBBY_FLEET or a bot dir beside it."""
-    import sys
-    return {"PLANE_EMIT_CLI": str(Path(sys.executable).parent / "claudlobby"),
-            "PLANE_SOCKET": "/tmp/claudlobby-test-no-daemon.sock"}
+class ScratchPlaneEnv:
+    """Couple a recording opt-in to storage and transports owned by pytest."""
+
+    def __init__(self, base: Path, cli: Path):
+        self.base = base.resolve()
+        self.cli = cli.resolve()
+        self._socket_dirs = []
+
+    def _owned(self, path: Path, label: str, *, sockets=False) -> Path:
+        resolved = Path(path).resolve()
+        owners = [self.base]
+        if sockets:
+            owners.extend(d.resolve() for d in self._socket_dirs)
+        if not any(resolved != owner and resolved.is_relative_to(owner) for owner in owners):
+            raise ValueError(f"{label} must be inside a fixture-owned directory: {path}")
+        return resolved
+
+    def socket_dir(self) -> Path:
+        """Allocate and register one short directory for a real Unix daemon.
+
+        macOS sun_path cannot hold pytest's long basetemp paths. This owns
+        exactly the mkdtemp directory, never all of /tmp.
+        """
+        directory = _short_test_directory("pe-")
+        self._socket_dirs.append(directory)
+        return directory
+
+    def close(self):
+        for directory in self._socket_dirs:
+            shutil.rmtree(directory)
+
+    def __call__(self, root: Path, *, socket: Path | None = None,
+                 cli: Path | None = None, initialize: bool = False) -> dict[str, str]:
+        root = self._owned(root, "Plane root")
+        source = Path(__file__).resolve().parent.parent
+        if root == source or root.is_relative_to(source):
+            raise ValueError("Plane root must not be the source checkout")
+        default_socket = socket is None
+        socket = self._owned(socket if socket is not None else root / "no-daemon.sock",
+                             "Plane socket", sockets=True)
+        if default_socket and socket.exists():
+            raise ValueError(f"default Plane socket must be absent: {socket}")
+        if cli is None:
+            cli = self.cli
+        elif Path(cli).resolve() != self.cli:
+            cli = self._owned(cli, "Plane CLI")
+        if initialize:
+            from tests.plane_setup import initialize_plane
+            initialize_plane(root)
+        return {"CLAUDLOBBY_ROOT": str(root), "PLANE_EMIT_DISABLED": "0",
+                "PLANE_SOCKET": str(socket), "PLANE_EMIT_CLI": str(cli)}
+
+
+@pytest.fixture(scope="session")
+def test_cli(_isolate_plane_session, tmp_path_factory):
+    """Refuse a globally installed CLI or an editable install of another tree."""
+    cli = Path(sys.executable).parent / "claudlobby"
+    assert sys.prefix != sys.base_prefix, "CLI tests require a dedicated venv"
+    assert cli.is_file(), f"install this checkout in the test venv: {cli}"
+    repo = Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [sys.executable, "-c", "import claudlobby; print(claudlobby.__file__)"],
+        cwd=tmp_path_factory.mktemp("plane-cli-preflight"),
+        env=constructed_env(), text=True, capture_output=True, check=True,
+    )
+    assert Path(result.stdout.strip()).resolve().parent == repo / "claudlobby"
+    # The console script must use THIS interpreter, not an ambient installation.
+    assert str(Path(sys.executable)) in cli.read_text().splitlines()[0]
+    return cli
+
+
+@pytest.fixture
+def selected_test_cli(test_cli, monkeypatch, _isolate_claudlobby_root):
+    """Explicit CLI selection for non-recording source harnesses (#1316)."""
+    monkeypatch.setenv("CLAUDLOBBY_CLI", str(test_cli))
+    return test_cli
+
+
+@pytest.fixture(scope="session")
+def built_test_cli(tmp_path_factory):
+    """A private wheel CLI for source instruments that need built resources."""
+    from tests.prepare_resources import _copy_indexed_source
+    from tests.test_package_resources import _copy_installed_dependencies
+
+    owned = tmp_path_factory.mktemp("built-cli")
+    source = owned / "source"
+    source.mkdir()
+    env = constructed_env(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
+                          GIT_TERMINAL_PROMPT="0")
+    # Use the same history-free source snapshot as prepare_resources. Building
+    # the checkout directly adds its HEAD to the artifact ID in CI, so its wheel
+    # correctly fails the harness's prepared-artifact identity check.
+    _copy_indexed_source(_TEST_TREE, source, env)
+    dist = owned / "dist"
+    subprocess.run([sys.executable, "-m", "build", "--no-isolation", "--wheel",
+                    "--outdir", str(dist), str(source)], check=True,
+                   capture_output=True, text=True, env=env)
+    wheel, = dist.glob("*.whl")
+    venv = owned / "venv"
+    subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
+    python = venv / "bin/python"
+    # The source test process may export PYTHONPATH; pip must not mistake that
+    # checkout for a wheel already installed in this otherwise empty venv.
+    subprocess.run([python, "-I", "-m", "pip", "install", "--no-index", "--no-deps",
+                    "--no-compile", str(wheel)], check=True,
+                   capture_output=True, text=True)
+    installed = Path(subprocess.check_output(
+        [python, "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+        text=True).strip())
+    _copy_installed_dependencies(wheel, installed)
+    return venv / "bin/claudlobby"
+
+
+@pytest.fixture
+def scratch_plane_env(tmp_path_factory, test_cli):
+    """Explicit opt-in for intentional recording; use with constructed_env."""
+    builder = ScratchPlaneEnv(tmp_path_factory.getbasetemp(), test_cli)
+    yield builder
+    builder.close()
 
 
 def _scrubbed_env(**overrides):
@@ -118,9 +328,10 @@ def _scrubbed_env(**overrides):
     env = {
         k: v
         for k, v in os.environ.items()
-        if not k.startswith(("TELEGRAM", "CLAUDLOBBY", "FLEET", "BOT_"))
+        if not k.startswith(("TELEGRAM", "CLAUDLOBBY", "FLEET", "BOT_", "PLANE_"))
     }
-    env.update(overrides)
+    env["PLANE_EMIT_DISABLED"] = "1"
+    env.update({k: str(v) for k, v in overrides.items()})
     return env
 
 
@@ -129,10 +340,10 @@ def equip_grammar(root: Path) -> Path:
 
     Opt-in, per test module, rather than a side effect of `fleet_dir`: the
     grammar is needed by the four modules that drive composition or
-    warm-cache, and planting a one-file `lib/` in all 71 fixtures to serve 4
-    is what made `lib/` EXIST without being WIRED. Thirteen helpers across
+    warm-cache, and planting a one-file `claudlobby/_runtime_scripts/` in all 71 fixtures to serve 4
+    is what made `claudlobby/_runtime_scripts/` EXIST without being WIRED. Thirteen helpers across
     the suite key on `(root / "lib").exists()` to decide whether to link the
-    real tree; a partial `lib/` makes that check answer yes and skip, and the
+    real tree; a partial `claudlobby/_runtime_scripts/` makes that check answer yes and skip, and the
     test then runs against doors it cannot read (#1633's ignition tests, where
     `task-recheck` fell back to ARMED and every scenario passed vacuously).
 
@@ -145,7 +356,7 @@ def equip_grammar(root: Path) -> Path:
     lib.mkdir(exist_ok=True)
     repo = Path(__file__).resolve().parent.parent
     dest = lib / "mcp-package-grammar.py"
-    shutil.copy(repo / "lib" / "mcp-package-grammar.py", dest)
+    shutil.copy(repo / "claudlobby/_runtime_scripts" / "mcp-package-grammar.py", dest)
     return dest
 
 
@@ -155,13 +366,17 @@ def constructed_env(**overrides):
     production-pointing variable (FLEET_STATE_PATH, escalation chat ids,
     BOT_DIR) must be remembered and subtracted, and the one nobody thought of
     is the one that leaks. Built minimal, a new isolation-sensitive variable
-    is absent by construction. PATH is the one deliberate inheritance (host
-    tools); pass PATH=... to prepend stub dirs. LANG pins UTF-8 semantics: with
+    is absent by construction. PATH deliberately inherits host tools; pass
+    PATH=... to prepend stub dirs. HOME/XDG/TMPDIR carry the
+    shared fixtures' private directories; explicit overrides still win.
+    LANG pins UTF-8 semantics: with
     no locale at all, grep/awk match the UTF-8 pane-fixture glyphs bytewise and
     lib-common's pane classifiers flip one verdict (test_keepalive_classify /
     test_pane_is_idle, measured). Values are str()-coerced so Paths pass
     through."""
-    env = {"PATH": os.environ["PATH"], "LANG": "C.UTF-8"}
+    env = {"PATH": os.environ["PATH"], "LANG": "C.UTF-8",
+           "PLANE_EMIT_DISABLED": "1"}
+    env.update({key: os.environ[key] for key in _HOME_KEYS if key in os.environ})
     env.update({k: str(v) for k, v in overrides.items()})
     return env
 
@@ -205,23 +420,6 @@ def booby_trap_git(bindir):
         '#!/bin/bash\ntouch "$STUB_DIR/git-was-called"\nexit 1\n',
     )
     return Path(bindir) / "git-was-called"
-
-
-SETUP_SYSTEM = Path(__file__).resolve().parent.parent / "lib" / "setup-system"
-
-
-@pytest.fixture(scope="session")
-def setup_system_dry_run():
-    """One real `setup-system --dry-run` for the whole suite.
-
-    The 10-phase script probes real tools (dpkg/brew/node/python3/claude/jq), so
-    it costs ~0.6s per invocation and is worth running exactly once. Session
-    scope rather than module scope because more than one module now asserts
-    against this output; a per-module fixture ran it again for each.
-    """
-    return subprocess.run(
-        [str(SETUP_SYSTEM), "--dry-run"], capture_output=True, text=True, timeout=120
-    )
 
 
 _SYSTEM_BIN_DIRS = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
@@ -276,7 +474,7 @@ def call_lib_fn(fn: str, value: str) -> str:
     """Source lib-common.sh and call one function on a single value, returning
     stdout. The value travels as a positional arg so the shell never
     interprets it."""
-    lib = Path(__file__).resolve().parent.parent / "lib" / "lib-common.sh"
+    lib = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts" / "lib-common.sh"
     r = subprocess.run(
         ["bash", "-c", f'. "{lib}"; {fn} "$1"', "_", value],
         capture_output=True,
@@ -288,12 +486,14 @@ def call_lib_fn(fn: str, value: str) -> str:
     return r.stdout
 
 
-def load_lib_module(name: str):
-    """Import a lib/*.py script as a module (they have no package)."""
+def load_lib_module(name: str, *, directory: str = "claudlobby/_runtime_scripts"):
+    """Import an un-packaged runtime or harness script as a module."""
     import importlib.util
 
+    if directory not in {"claudlobby/_runtime_scripts", "harness"}:
+        raise ValueError("unknown source script directory")
     spec = importlib.util.spec_from_file_location(
-        name.replace("-", "_"), Path(__file__).parent.parent / "lib" / f"{name}.py"
+        name.replace("-", "_"), Path(__file__).parent.parent / directory / f"{name}.py"
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -322,8 +522,8 @@ def realboot_skip_reason(opt_in_env: str, extra_bins: tuple[str, ...] = ()) -> s
     """Shared gate for the opt-in real-boot harness tests (freshbox idiom):
     returns the pytest skip reason, or '' to run. Base deps are the real-boot
     contract — claude binary, jq, claudron, host auth; extra_bins adds
-    harness-specific binaries. One home, so the dep contract cannot drift
-    between harness wrappers."""
+    harness-specific binaries. The credential path is captured at import,
+    before HOME is isolated, and is the path handed to both harnesses."""
     import shutil
 
     if os.environ.get(opt_in_env) != "1":
@@ -331,9 +531,8 @@ def realboot_skip_reason(opt_in_env: str, extra_bins: tuple[str, ...] = ()) -> s
     missing = [
         b for b in ("claude", "jq", "claudron", *extra_bins) if shutil.which(b) is None
     ]
-    creds = Path.home() / ".claude" / ".credentials.json"
-    if not creds.is_file():
-        missing.append(f"auth {creds}")
+    if not REALBOOT_HOST_CREDS.is_file():
+        missing.append(f"auth {REALBOOT_HOST_CREDS}")
     return f"real-boot harness needs: {', '.join(missing)}" if missing else ""
 
 
@@ -388,7 +587,9 @@ def make_paths(fleet_dir: Path):
     """Paths rooted at a fleet_dir fixture (root == fleet_dir)."""
     from claudlobby.paths import Paths
 
-    return Paths(root=fleet_dir, fleet_dir=fleet_dir)
+    from tests.package_fixtures import source_package
+
+    return Paths(root=fleet_dir, fleet_dir=fleet_dir, package=source_package())
 
 
 def install_real_template(root: Path) -> None:
@@ -406,6 +607,7 @@ def install_real_template(root: Path) -> None:
 MINIMAL_FLEET_YAML = dedent("""\
     fleet:
       name: test-fleet
+      manager: lead
       service_prefix: com.test
       telegram_group_chat_id: "-100999"
 

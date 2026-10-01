@@ -9,13 +9,15 @@ ancestry, and (b) an unresolvable answer is loud rather than plausible.
 """
 
 import os
+import shutil
+import signal
 import subprocess
 import textwrap
 from pathlib import Path
 
 import pytest
 
-DOOR = Path(__file__).resolve().parent.parent / "lib" / "claude-session-pid.sh"
+DOOR = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts" / "claude-session-pid.sh"
 
 
 def run(args, **kw):
@@ -40,35 +42,58 @@ def test_parses_under_bash():
 def _fake_tree(tmp_path, script):
     """Run `script` under a process genuinely named `claude`.
 
-    Uses a COPIED shell binary so `comm` really reads `claude` -- a stub that
-    merely claims the name would not exercise the comm-basename branch the door
-    takes on Linux.
-
-    The trailing `; true` is load-bearing. bash applies an exec optimisation to
-    the LAST command of a `-c` string, replacing itself in place; the fake
-    `claude` process then becomes the door process and there is no claude
-    ancestor left to find. That is not a door defect -- the walk correctly
-    continued past it -- but it silently destroys the fixture, so the fixture
-    keeps the parent alive on purpose.
+    A native Node copy keeps its own executable name on macOS, where framework
+    Python re-execs as Python.app even through a `claude` symlink. The process
+    group and bounded wait keep a broken fixture from hanging the suite.
     """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("native ancestry fixture needs node (a claudlobby prerequisite)")
     fake = tmp_path / "claude"
-    fake.write_bytes(Path("/bin/bash").read_bytes())
-    fake.chmod(0o755)
-    return subprocess.run([str(fake), "-c", script + "; true"],
-                          capture_output=True, text=True)
+    shutil.copy2(node, fake)
+    # Homebrew Node may load libnode relative to the copied executable.
+    source_lib = Path(node).resolve().parent.parent / "lib"
+    for library in source_lib.glob("libnode*.dylib"):
+        (tmp_path / library.name).symlink_to(library)
+    runner = textwrap.dedent("""
+        const {spawnSync, execFileSync} = require('child_process');
+        console.log(`ANCESTOR=${process.pid}`);
+        const comm = execFileSync('ps', ['-o', 'comm=', '-p', String(process.pid)],
+                                  {encoding: 'utf8'}).trim();
+        console.log(`COMM=${comm}`);
+        const result = spawnSync('bash', ['-c', process.argv[2]], {encoding: 'utf8'});
+        process.stdout.write(result.stdout || '');
+        process.stderr.write(result.stderr || '');
+        process.exit(result.status === null ? 1 : result.status);
+    """)
+    runner_path = tmp_path / "ancestor.js"
+    runner_path.write_text(runner)
+    process = subprocess.Popen([str(fake), str(runner_path), script],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               text=True, start_new_session=True)
+    try:
+        stdout, stderr = process.communicate(timeout=20)
+    except subprocess.TimeoutExpired as exc:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.communicate()
+        raise AssertionError("private claude ancestry fixture timed out") from exc
+    return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
 
 
 def test_resolves_to_an_ancestor_named_claude(tmp_path):
+    resolved = tmp_path / "resolved-pid"
     r = _fake_tree(
         tmp_path,
-        f'echo "ANCESTOR=$$"; echo "COMM=$(ps -o comm= -p $$)"; '
-        f'echo "GOT=$(bash {DOOR} --pid)"',
+        f'bash "{DOOR}" --pid > "{resolved}"; '
+        f'read -r got < "{resolved}"; echo "GOT=$got"',
     )
     assert r.returncode == 0, r.stderr
     out = dict(
         l.split("=", 1) for l in r.stdout.splitlines() if "=" in l
     )
-    assert out["COMM"].strip() == "claude", (
+    # ps reports the basename on Linux and the executable path on macOS;
+    # the actual ancestor walk deliberately recognizes both native forms.
+    assert Path(out["COMM"].strip()).name == "claude", (
         "fixture control failed: the ancestor is not actually named claude, "
         "so a pass here would prove nothing"
     )
@@ -117,7 +142,7 @@ def test_from_walks_the_given_ancestry(tmp_path):
     """--from is the seam that makes the walk testable without a real session."""
     r = _fake_tree(
         tmp_path,
-        f'echo "ANCESTOR=$$"; echo "GOT=$(bash {DOOR} --from $$)"',
+        f'owner="$PPID"; echo "GOT=$(bash {DOOR} --from "$owner")"',
     )
     assert r.returncode == 0, r.stderr
     out = dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l)
@@ -146,12 +171,12 @@ SKILLS = ["selfcheck", "review-status", "status-personal", "eng-status"]
 
 @pytest.mark.parametrize("skill", SKILLS)
 def test_skill_uses_the_door(skill):
-    p = DOOR.parent.parent / "library" / "skills" / skill / "SKILL.md"
+    p = DOOR.parents[2] / "library" / "skills" / skill / "SKILL.md"
     text = p.read_text()
     # Anchored, NOT a bare substring: `claude-claude-session-pid.sh` contains
     # `claude-session-pid.sh`, so the loose form passed for a full review round
     # while every shipped caller was rc 127 (#1531 round 2).
-    assert "/lib/claude-session-pid.sh" in text, f"{skill} does not consume the door"
+    assert "$CLAUDLOBBY_NATIVE_DIR/claude-session-pid.sh" in text, f"{skill} does not consume the door"
     assert "claude-claude-session-pid.sh" not in text, f"{skill} carries the doubled-prefix path"
 
 
@@ -163,7 +188,7 @@ def test_skill_has_no_process_scan_in_executable_lines(skill):
     defect in surrounding prose -- a naive whole-file grep would fail on the
     explanation and pass on a regression that omitted it.
     """
-    p = DOOR.parent.parent / "library" / "skills" / skill / "SKILL.md"
+    p = DOOR.parents[2] / "library" / "skills" / skill / "SKILL.md"
     in_fence = False
     offenders = []
     for i, line in enumerate(p.read_text().splitlines(), 1):
@@ -178,7 +203,7 @@ def test_skill_has_no_process_scan_in_executable_lines(skill):
 def test_the_prose_control_is_live():
     """Positive control for the test above: the explanation IS present, so the
     fence-scoping is doing real work rather than passing vacuously."""
-    p = DOOR.parent.parent / "library" / "skills" / "selfcheck" / "SKILL.md"
+    p = DOOR.parents[2] / "library" / "skills" / "selfcheck" / "SKILL.md"
     assert "pgrep -f 'claude' | head -1" in p.read_text(), (
         "explanatory prose missing -- the fence-scoped assertion would then "
         "pass for the wrong reason"
@@ -216,33 +241,33 @@ def test_ambient_claude_processes_do_not_leak_in():
 import re as _re
 
 _LIB_REF = _re.compile(
-    r'(?:\$CLAUDLOBBY_ROOT|\{\{CLAUDLOBBY_ROOT\}\})/(lib/[A-Za-z0-9._-]+)'
+    r'(?:\$CLAUDLOBBY_NATIVE_DIR|\{\{CLAUDLOBBY_NATIVE_DIR\}\})/([A-Za-z0-9._-]+)'
 )
 
 
 def _skill_lib_refs():
-    """Every lib/ path referenced by any shipped skill, with its source line."""
-    skills = DOOR.parent.parent / "library" / "skills"
+    """Every claudlobby/_runtime_scripts/ path referenced by any shipped skill, with its source line."""
+    skills = DOOR.parents[2] / "library" / "skills"
     for path in sorted(skills.glob("*/SKILL.md")):
         for lineno, line in enumerate(path.read_text().splitlines(), 1):
             for m in _LIB_REF.finditer(line):
-                yield path, lineno, m.group(1), line
+                yield path, lineno, "claudlobby/_runtime_scripts/" + m.group(1), line
 
 
 def test_every_lib_path_a_skill_references_exists_on_disk():
-    """Repo-wide, not just this door: a skill that names a lib/ script the
+    """Repo-wide, not just this door: a skill that names a claudlobby/_runtime_scripts/ script the
     repo does not ship is a rc-127 at the caller.
 
     Deliberately broader than the PR that added it -- the failure class is
     'the reference was never resolved', which is not specific to one door.
     """
-    repo = DOOR.parent.parent
+    repo = DOOR.parents[2]
     missing = [
         f"{p.relative_to(repo)}:{n}: {rel}"
         for p, n, rel, _ in _skill_lib_refs()
         if not (repo / rel).exists()
     ]
-    assert not missing, "skills reference lib/ paths that do not exist:\n  " + "\n  ".join(missing)
+    assert not missing, "skills reference claudlobby/_runtime_scripts/ paths that do not exist:\n  " + "\n  ".join(missing)
 
 
 def test_the_existence_check_rejects_the_shape_that_shipped():
@@ -251,9 +276,9 @@ def test_the_existence_check_rejects_the_shape_that_shipped():
     A test that has never been shown to reject the real defect is
     indistinguishable from one that cannot. Feeds it the exact mangled name.
     """
-    repo = DOOR.parent.parent
-    assert not (repo / "lib/claude-claude-session-pid.sh").exists()
-    assert (repo / "lib/claude-session-pid.sh").exists()
+    repo = DOOR.parents[2]
+    assert not (repo / "claudlobby/_runtime_scripts/claude-claude-session-pid.sh").exists()
+    assert (repo / "claudlobby/_runtime_scripts/claude-session-pid.sh").exists()
     # and the substring form that passed for a whole review round:
     assert "claude-session-pid.sh" in "claude-claude-session-pid.sh", (
         "if this ever stops holding, the containment trap is gone and the "
@@ -270,11 +295,11 @@ def test_the_skill_line_actually_runs(skill):
     there is no Claude session in the ancestry, so the door correctly refuses
     with rc 3 and prints `unknown`. Both are healthy; a missing file is not.
     """
-    repo = DOOR.parent.parent
+    repo = DOOR.parents[2]
     path = repo / "library" / "skills" / skill / "SKILL.md"
     lines = [
         l.strip() for l in path.read_text().splitlines()
-        if "CLAUDLOBBY_ROOT" in l and "claude-session-pid" in l and l.strip().startswith('"')
+        if "CLAUDLOBBY_NATIVE_DIR" in l and "claude-session-pid" in l and l.strip().startswith('"')
     ]
     assert lines, f"{skill}: no executable door line found to run"
 
@@ -282,7 +307,7 @@ def test_the_skill_line_actually_runs(skill):
         r = subprocess.run(
             ["bash", "-c", line],
             capture_output=True, text=True,
-            env={**os.environ, "CLAUDLOBBY_ROOT": str(repo)},
+            env={**os.environ, "CLAUDLOBBY_NATIVE_DIR": str(repo / "claudlobby/_runtime_scripts")},
         )
         assert r.returncode != 127, (
             f"{skill}: the shipped line is not executable (rc 127): {line}\n{r.stderr}"

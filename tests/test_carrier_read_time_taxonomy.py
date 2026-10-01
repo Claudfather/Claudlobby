@@ -179,7 +179,7 @@ def test_reload_mechanism_does_not_promise_idle_gating_for_composed_skills():
     idx = flat.find("Mechanism 1")
     assert idx > 0, "Mechanism 1 section missing — test needs updating"
     section = flat[idx : idx + 4000]
-    assert "does NOT cover composed skill symlinks" in section, (
+    assert "does not cover composed skill symlinks" in section.lower(), (
         "Mechanism 1 no longer scopes its idle-gating claim away from composed "
         "skills, so it reads as promising a canary window that does not exist"
     )

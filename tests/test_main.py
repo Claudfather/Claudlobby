@@ -8,13 +8,14 @@ from types import SimpleNamespace
 import pytest
 
 from claudlobby.__main__ import main
-from claudlobby.commands.core import cmd_generate, cmd_validate
+from claudlobby.commands.core import cmd_generate
 from claudlobby.commands._helpers import _load_env, _load_fleet_or_exit, _resolve_paths
 from claudlobby.commands.data_migrate import (
     _contains_git_checkouts,
     _dir_size_mb,
     _human_size,
 )
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 
@@ -86,19 +87,19 @@ class TestLoadEnv:
 
 class TestLoadFleetOrExit:
     def test_missing_file_exits(self, tmp_path):
-        paths = SimpleNamespace(fleet_yaml=tmp_path / "nonexistent.yaml")
+        paths = Paths(root=tmp_path, package=source_package())
         with pytest.raises(SystemExit):
             _load_fleet_or_exit(paths)
 
     def test_malformed_yaml_exits(self, tmp_path):
-        bad = tmp_path / "bad.yaml"
+        bad = tmp_path / "fleet.yaml"
         bad.write_text(": [invalid\n")
-        paths = SimpleNamespace(fleet_yaml=bad)
+        paths = Paths(root=tmp_path, package=source_package())
         with pytest.raises(SystemExit):
             _load_fleet_or_exit(paths)
 
     def test_valid_fleet_returns_config(self, fleet_dir):
-        paths = Paths(root=fleet_dir, fleet_dir=fleet_dir)
+        paths = Paths(root=fleet_dir, package=source_package())
         config, merged_defaults = _load_fleet_or_exit(paths)
         assert config.name == "test-fleet"
         assert "lead" in config.bots
@@ -183,34 +184,20 @@ class TestHumanSize:
         assert _human_size(2048) == "2.0G"
 
 
-# ── cmd_validate ─────────────────────────────────────────────────────
+# ── config validate ─────────────────────────────────────────────────
 
 
-class TestCmdValidate:
+class TestConfigValidate:
     def test_valid_fleet_returns_zero(self, fleet_dir):
-        args = SimpleNamespace(
-            root=str(fleet_dir),
-            fleet=None,
-            seed=False,
-            strict=False,
-            verbose=False,
-        )
-        result = cmd_validate(args)
+        result = main(["--root", str(fleet_dir), "config", "validate"])
         assert result == 0
 
     def test_strict_with_warnings_returns_one(self, fleet_dir):
         """If validate produces warnings and --strict is set, return 1."""
-        args = SimpleNamespace(
-            root=str(fleet_dir),
-            fleet=None,
-            seed=False,
-            strict=True,
-            verbose=False,
-        )
         # This may or may not return 1 depending on whether the minimal
         # fleet produces warnings — the important thing is it doesn't crash
-        result = cmd_validate(args)
-        assert result in (0, 1)
+        result = main(["--root", str(fleet_dir), "config", "validate", "--strict"])
+        assert result in (0, 4)
 
 
 # ── cmd_generate ─────────────────────────────────────────────────────
@@ -275,9 +262,14 @@ class TestMainArgparse:
         assert exc.value.code != 0
 
     def test_validate_subcommand(self, fleet_dir):
-        result = main(["--root", str(fleet_dir), "validate"])
+        result = main(["--root", str(fleet_dir), "config", "validate"])
         assert result == 0
+        with pytest.raises(SystemExit) as retired:
+            main(["--root", str(fleet_dir), "validate"])
+        assert retired.value.code == 2
 
-    def test_generate_subcommand(self, fleet_dir):
-        result = main(["--root", str(fleet_dir), "generate"])
-        assert result == 0
+    def test_generate_is_retired_before_it_can_write_runtime(self, tmp_path):
+        with pytest.raises(SystemExit) as retired:
+            main(["--root", str(tmp_path), "generate"])
+        assert retired.value.code == 2
+        assert list(tmp_path.iterdir()) == []

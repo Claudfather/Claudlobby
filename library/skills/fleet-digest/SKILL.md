@@ -1,10 +1,11 @@
 ---
 name: fleet-digest
-description: "Assemble the monitor's pass input. Joins the plane's session_digest events with vitals, utilization, and report-back rollups into one bounded, coverage-honest summary. Reads only pre-aggregated sources — never raw transcripts."
+description: "Assemble the monitor's pass input. Joins the plane's session_digest events with vitals, utilization, and fleet report rollups into one bounded, coverage-honest summary. Reads only pre-aggregated sources — never raw transcripts."
 argument-hint: "[days] [fleet]"
 tool_grants:
   - "Bash(jq *)"
   - "Bash(python3 *)"
+  - "Bash(claudlobby --json event list *)"
 ---
 
 # Fleet Digest
@@ -16,55 +17,64 @@ apart is what stops thousands of raw rows reaching an Opus reasoning pass.
 Contract: the `fleet-monitoring` protocol. Read its evidence-contract and
 token-discipline sections before changing anything here.
 
-**Arguments:** `$1` = window in days (default `7`). `$2` = fleet filter
-(default: all fleets).
+**Arguments:** `$1` = window in days (default `7`). `$2` = fleet label for the
+coverage rows (default: your own fleet's name from `claudlobby --json context
+show`).
 
-## Step 1 — Enumerate the fleets in scope
+## Step 1 — Scope: your own fleet
 
 The digest is a `session_digest` **system event on the plane** (#1503 — there is
-no `transcript-digest` file any more). `claudlobby events` reads the plane one
-fleet at a time, so first fix the set of fleets to sweep: `$2` if given,
-otherwise every fleet declared on the host (the same discovery `setup-fleets`
-uses).
+no `transcript-digest` file any more). `claudlobby event list` reads the plane one
+fleet at a time, and the generated bot context selects **your own fleet**; the
+commands below never name a fleet. A sweep of other fleets is an operator action
+from an operator shell (`claudlobby --fleet NAME --json event list …`), not a
+grant of this skill — report other fleets as out of scope rather than reading
+them.
 
 ```bash
-if [ -n "${2:-}" ]; then
-  FLEETS="$2"
-else
-  FLEETS="$(for fy in "$CLAUDLOBBY_ROOT"/local/*/fleet.yaml \
-                      "$CLAUDLOBBY_ROOT"/local/*/*/fleet.yaml; do
-    [ -f "$fy" ] && basename "$(dirname "$fy")"
-  done | sort -u)"
-fi
+FLEETS="${2:?pass your own fleet name from claudlobby --json context show}"
 ```
 
 ## Step 2 — Assemble the window from the plane
 
-`claudlobby events` has no day filter, so bound the window on the row `ts`. For
+`claudlobby event list --since` bounds the window at the Plane reader. For
 each fleet, pull its `session_digest` events and reshape each plane row back to
 the flat shape the rest of this skill reads: the pre-aggregated digest rides
-`.data`, while `bot` and `ts` sit on the row — lift `.data` up and carry `bot`,
-`ts` and the fleet.
+`.data`, while `bot` and `occurred_at` sit on each `data.items[]` entry — lift
+`.data` up and carry `bot`, `ts` and the fleet. Follow `data.next_cursor` until
+empty before claiming complete coverage.
 
 ```bash
 DAYS="${1:-7}"
-SINCE="$(date -d "-$((DAYS - 1)) day" +%Y-%m-%d 2>/dev/null \
-         || date -v-"$((DAYS - 1))"d +%Y-%m-%d)"
+SINCE="$(date -u -d "-$((DAYS - 1)) day" +%Y-%m-%d 2>/dev/null \
+         || date -u -v-"$((DAYS - 1))"d +%Y-%m-%d)"
 
 : > /tmp/window.jsonl
 : > /tmp/coverage.txt
 for F in $FLEETS; do
-  out="$(claudlobby --fleet "$F" events --type session_digest --json)"; rc=$?
-  if [ "$rc" -eq 3 ]; then
-    # rc 3 is the plane REFUSING (unreachable), which is NOT "no rows". Coverage
-    # for this fleet is UNKNOWN — record it and never infer health from it.
-    printf '%s\tUNREACHABLE\n' "$F" >> /tmp/coverage.txt; continue
+  cursor=""; n=0; failed=0
+  while :; do
+    if [ -n "$cursor" ]; then
+      out="$(claudlobby --json event list --type session_digest --since "${DAYS}d" --limit 1000 --cursor "$cursor")"; rc=$?
+    else
+      out="$(claudlobby --json event list --type session_digest --since "${DAYS}d" --limit 1000)"; rc=$?
+    fi
+    if [ "$rc" -ne 0 ]; then failed=1; break; fi
+    page="$(printf '%s\n' "$out" | jq -c --arg fleet "$F" --arg since "$SINCE" \
+      '.data.items[] | select((.occurred_at // "")[0:10] >= $since) | .data + {fleet: $fleet, bot: .bot, ts: .occurred_at}')"
+    if [ -n "$page" ]; then
+      printf '%s\n' "$page" >> /tmp/window.jsonl
+      n=$((n + $(printf '%s\n' "$page" | wc -l)))
+    fi
+    cursor="$(printf '%s\n' "$out" | jq -r '.data.next_cursor // empty')"
+    [ -n "$cursor" ] || break
+  done
+  if [ "$failed" -eq 1 ]; then
+    # A failed Plane read is NOT "no rows"; even a partial page is unknown.
+    printf '%s\tUNREACHABLE\n' "$F" >> /tmp/coverage.txt
+  else
+    printf '%s\t%s\n' "$F" "$n" >> /tmp/coverage.txt
   fi
-  n="$(printf '%s\n' "$out" \
-    | jq -c --arg fleet "$F" --arg since "$SINCE" \
-        'select((.ts // "")[0:10] >= $since) | .data + {fleet: $fleet, bot: .bot, ts: .ts}' \
-    | tee -a /tmp/window.jsonl | wc -l | tr -d " ")"
-  printf '%s\t%s\n' "$F" "$n" >> /tmp/coverage.txt
 done
 ```
 
@@ -130,10 +140,19 @@ an uncitable theme is unusable downstream.
 ## Step 5 — Join the rollups
 
 ```bash
-claudlobby --fleet "$F" uptime
-claudlobby --fleet "$F" utilization
-claudlobby --fleet "$F" report-back --since "${DAYS}d"
+claudlobby --json fleet uptime
+claudlobby --json fleet utilization
+claudlobby --json fleet reports list --since CUTOFF
 ```
+
+Run each as one literal command; `CUTOFF` is the literal `<SINCE>T00:00:00Z`
+with Step 2's date. These read your own fleet.
+
+This cutoff is the first UTC midnight of the calendar-day window assembled in
+Step 2, not a rolling `DAYS` × 24-hour cutoff. For reports, inspect `ok` and
+follow `data.next_cursor` with `--cursor` until null before computing counts
+or highlights. If a page fails or content is withheld, disclose that limit;
+never count an unreadable page as zero.
 
 These answer "was the fleet even working?" — the denominator for anything the
 digest rows suggest. A spike in `failed` rows across a week when utilization
@@ -145,7 +164,8 @@ rest. Never synthesise a rollup you did not get.
 ## Step 6 — Bound the output
 
 Budget at **≈4 characters per token** (planning estimate only — use
-`lib/transcript-usage.py` for actual spend). Target a summary that comfortably
+`claudlobby --json fleet usage --since 24h` for covered Claude token counts,
+not quota). Target a summary that comfortably
 fits a reasoning pass alongside its instructions.
 
 If you must cut, cut in this order — **and say what you cut**:
@@ -175,7 +195,7 @@ FRICTION THEMES (each with citable session_ids)
   <theme> — <N> sessions — [<session_id>, ...]
 
 ROLLUPS
-  uptime / utilization / report-back highlights, or the verbatim failure
+  uptime / utilization / fleet report highlights, or the verbatim failure
 
 UNRESOLVED
   anything the digests could not answer — a gap here is a finding for /fleet-observe

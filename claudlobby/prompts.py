@@ -1,4 +1,4 @@
-"""Shared interactive prompt helpers for CLI wizard commands (new-bot, new-skill, new-guardrail)."""
+"""Shared interactive prompt helpers for CLI source-authoring wizards."""
 
 from __future__ import annotations
 

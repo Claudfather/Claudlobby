@@ -61,8 +61,12 @@ class Register(NamedTuple):
     undeclared: tuple[str, ...]  #: keys present in a tier that nothing declares
 
 
-def build(fleet: FleetConfig, paths: Paths, bot: str | None = None) -> Register:
+def build(fleet: FleetConfig, paths: Paths, bot: str | None = None,
+          *, key: str | None = None) -> Register:
     """Derive the register for *bot* (or the fleet's shared tiers without one).
+
+    A named key may also be an operator variable assigned in a tier; an unknown
+    key raises KeyError. Omitting it retains the declared-variable register.
 
     Declarations come from ``collect_env_contracts`` — the same walk that drives
     scaffolding and doctor — never a private scan, so the register cannot report
@@ -72,13 +76,16 @@ def build(fleet: FleetConfig, paths: Paths, bot: str | None = None) -> Register:
 
     declared = {ev.name: ev for ev in collect_env_contracts(fleet, paths)}
     resolved = resolve(paths, bot_name=bot)
+    if key is not None and key not in declared and key not in resolved:
+        raise KeyError(key)
     tiers = tuple(
         (t.tier, str(t.path) if t.path else "-", t.state)
         for t in paths.env_tiers(bot)
     )
 
     rows: list[RegisterRow] = []
-    for name, ev in sorted(declared.items()):
+    for name in sorted(declared if key is None else (key,)):
+        ev = declared.get(name)
         res = resolved.get(name)
         if res is None:
             state, tier, shadowed, blanked = UNSET, "-", (), ()
@@ -96,9 +103,9 @@ def build(fleet: FleetConfig, paths: Paths, bot: str | None = None) -> Register:
                 name=name,
                 state=state,
                 tier=tier,
-                declared_by=ev.source,
-                scaffold_tier=ev.scaffold_tier(),
-                means=_means(fleet, ev.name, bot),
+                declared_by=ev.source if ev else "operator (undeclared)",
+                scaffold_tier=ev.scaffold_tier() if ev else "-",
+                means=_means(fleet, name, bot),
                 shadowed=shadowed,
                 blanked=blanked,
             )
@@ -175,7 +182,7 @@ def format_report(reg: Register) -> str:
     counts = {s: sum(1 for r in reg.rows if r.state == s) for s in _SEVERITY}
     out.append("")
     out.append(
-        f"{len(reg.rows)} declared — {counts[SET]} set, {counts[UNSET]} unset, "
+        f"{len(reg.rows)} variables — {counts[SET]} set, {counts[UNSET]} unset, "
         f"{counts[EMPTY]} empty, {counts[BLANKED]} BLANKED"
     )
     if counts[BLANKED]:
@@ -197,7 +204,7 @@ def format_report(reg: Register) -> str:
 def exits_nonzero(reg: Register) -> bool:
     """Only BLANKED. UNSET is an ordinary un-filled credential and failing on it
     would train an operator to ignore the command, taking the real signal with
-    it — the same reasoning that keeps creds-reconcile's UNKNOWN at rc 0."""
+    it — the same reasoning that keeps host credentials reconcile's UNKNOWN at rc 0."""
     return any(r.state == BLANKED for r in reg.rows)
 
 

@@ -1,11 +1,23 @@
 # Running the test suite
 
 How to get a result you can trust out of `./.venv/bin/pytest`. Moved from the root `CLAUDE.md`
-on 2026-09-29, which keeps a short summary; the rules are unchanged.
+in #2035, which keeps a short summary; the rules are unchanged.
+
+**Plane test isolation.** Run tests from a disposable checkout with its own
+editable-install venv and scratch HOME; never from a live fleet root. Pytest's
+session and function defaults silence incidental emission, and both shared
+child-env builders do the same. New subprocess tests use `constructed_env`;
+intentional recording uses `constructed_env(**scratch_plane_env(root))`, with a
+pytest-owned root and private socket. Direct Python database writers still need
+explicit scratch roots: the silencer is not a database access control. See
+[`documentation/testing-plane-isolation.md`](documentation/testing-plane-isolation.md)
+for recording, standalone-shell, and census conventions.
+
+**Build test resources in the disposable export.** After its editable install, run `.venv/bin/python tests/prepare_resources.py --disposable-checkout "$PWD"`. Index a history-free export with `git init --quiet && git add --all` first. Reprepare after source changes. Compare separate prepared before/after exports; a stash/pop in one prepared tree leaves stale assets and is not a valid comparison.
 
 **Three things about the test suite that will otherwise cost you an hour.**
 
-*Run it unsandboxed — and do not diff sandboxed runs either.* `lib/` scripts call `mktemp -d`
+*Run it unsandboxed — and do not diff sandboxed runs either.* `claudlobby/_runtime_scripts/` scripts call `mktemp -d`
 into the real `$TMPDIR`. Under a restrictive agent sandbox those calls return `Operation not
 permitted` and roughly **250 phantom failures** appear across every bash-script suite. They are
 not real.
@@ -22,17 +34,11 @@ not at all.
 assume your change caused a failure, and do not assume it didn't because the *count* matched —
 compare the failing test **names**:
 
-```bash
-git stash push -u
-./.venv/bin/pytest --tb=no -ra > /tmp/run_before.txt 2>&1; rc_before=$?
-awk "/short test summary info/,0" /tmp/run_before.txt | grep -E "^(FAILED|ERROR)" | sort > /tmp/before.txt
-git stash pop
-./.venv/bin/pytest --tb=no -ra > /tmp/run_after.txt 2>&1; rc_after=$?
-awk "/short test summary info/,0" /tmp/run_after.txt | grep -E "^(FAILED|ERROR)" | sort > /tmp/after.txt
-comm -13 /tmp/before.txt /tmp/after.txt      # failures YOU introduced
-tail -1 /tmp/run_before.txt                 # and compare the counts —
-tail -1 /tmp/run_after.txt                  # "N failed, M passed"
-```
+Prepare two separate disposable exports, one at the base commit and one with
+the candidate bytes. Give each its own editable-install venv, run
+`tests/prepare_resources.py --disposable-checkout "$PWD"` in each, then compare
+the failing test names and counts. Reusing one tree with `git stash -u` removes
+the prepared assets from the before run and hides regressions.
 
 *An empty diff is not the same as a clean one.* The naive `pytest | grep ^FAILED` this
 recipe used to print was wrong in **two independent directions**, and it could also fail

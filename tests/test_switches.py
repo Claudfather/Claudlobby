@@ -3,7 +3,7 @@
 The defaults flip is only half a change. The other half — and the half these
 tests are mostly about — is that whatever stays off has to be VISIBLE, with the
 one line that flips it, at the three places an operator actually looks:
-`claudlobby doctor`, `claudlobby plane doctor`, and the end of a setup run.
+`claudlobby host doctor`, `claudlobby plane doctor`, and the end of a setup run.
 
 So the assertions here are deliberately about the SURFACE, not just the data:
 a registry nobody renders is the same opacity in a tidier shape.
@@ -20,12 +20,14 @@ import pytest
 
 from claudlobby import switches as sw
 from claudlobby.config import load_fleet
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 REPO = Path(__file__).resolve().parent.parent
 
 _FLEET = """\
     fleet:
+      manager: kev
       name: sw-fleet
       service_prefix: com.sw
       bots:
@@ -41,7 +43,7 @@ def _root(tmp_path: Path, env: str | None = None) -> Path:
     # that a Python copy of the cascade drifts from the runtime (#1226), and a
     # test that stubs it certifies the copy instead of the contract.
     if not (root / "lib").exists():
-        (root / "lib").symlink_to(REPO / "lib")
+        (root / "lib").symlink_to(REPO / "claudlobby/_runtime_scripts")
     (root / "fleet.yaml").write_text(dedent(_FLEET))
     if env is not None:
         (root / ".env").write_text(env)
@@ -51,7 +53,7 @@ def _root(tmp_path: Path, env: str | None = None) -> Path:
 def _resolve(tmp_path: Path, env: str | None = None):
     root = _root(tmp_path, env)
     fleet, _md = load_fleet(root / "fleet.yaml")
-    return sw.resolve(Paths(root=root, fleet_dir=root), fleet)
+    return sw.resolve(Paths(root=root, fleet_dir=root, package=source_package()), fleet)
 
 
 def _state(rows, key):
@@ -72,7 +74,7 @@ def test_exactly_the_categories_that_ship_off():
     ARRIVES (#1265, added deliberately and NOT by widening the set quietly), and
     the list is not numbered on purpose — `weekly-worker-restart` already states
     a reason outside the original four. The category: a door with **no
-    deployment gate**. `lib/`
+    deployment gate**. `claudlobby/_runtime_scripts/`
     is read on demand, per use, so a root pull is in force on every bot on its
     next call — no restart, no canary window, no step at which one bot could be
     staged ahead of the others. For those the flag is not a hedge about the
@@ -84,9 +86,9 @@ def test_exactly_the_categories_that_ship_off():
     is no other gate between merge and every host.
 
     A GATE IS SOMETHING A HUMAN CHOOSES, not a mechanism that exists. Automatic
-    enrollment is not a gate: `lib/setup-fleet:22-24` skips only what the
-    composed DORMANT manifest lists, so a job that is not opt-in is enrolled on
-    the next setup run with nobody deciding to. Reading "it has an enrollment
+    enrollment is not a gate: host activation enrolls the declared jobs unless
+    they are marked dormant, so a default-on job is enrolled on the next
+    operator activation. Reading "it has an enrollment
     step" as disqualifying would rule out `boot-capture`, whose enrollment is
     automatic *precisely absent this flag* — the flag is what creates its gate.
     A restart, a per-fleet compose, or an already-opt-in enrollment do qualify.
@@ -100,10 +102,6 @@ def test_exactly_the_categories_that_ship_off():
                       # category, not a new one: armed, vault-sync commits and
                       # pushes the vault on every host it runs on.
                       "vault-sync",
-                      # mutates operator source, the same category again:
-                      # armed, pull-root fast-forwards the install every bot
-                      # on the host runs (#1251).
-                      "pull-root",
                       # model spend — same class as code-audit-sweep /
                       # session-digest, not a new category
                       "manager-checkin",
@@ -149,20 +147,17 @@ def test_exactly_the_categories_that_ship_off():
                       # running bot only at its next restart, which is a gate a
                       # human chooses; a composed DENY binds on the bot's next
                       # tool call with no restart at all (measured, CLAUDE.md's
-                      # runtime-model note), and the nightly reload-fleet
-                      # generate composes onto every bot of every fleet with
-                      # nobody choosing to. So between merge and enforcement
-                      # there is no step at which one bot could go first but
-                      # the manifest, per bot. Nothing from the four list: it
+                      # runtime-model note). Selected activation now provides
+                      # the stage where one bot can go first; the manifest's
+                      # per-bot key is the operator's canary choice. It
                       # only ever narrows what a bot's own tools may touch.
                       "shared-config-isolation",
                       # #1604, the same arrival category as the isolation rules
                       # above and argued the same way: a composed .mcp.json is
                       # read at SESSION START, so it waits for a restart, but
                       # restarts happen with nobody choosing them (keepalive,
-                      # context restarts), and the nightly generate composes
-                      # every bot of every fleet. The manifest is the one place
-                      # one bot can go first. Nothing from the four list: it
+                      # context restarts). Selected activation and the manifest
+                      # let one bot go first. Nothing from the four list: it
                       # deletes nothing, spends nothing, sends nothing, and the
                       # install it arms writes only under state/mcp.
                       "mcp-direct-launch",
@@ -323,7 +318,7 @@ def _resolve_with_jobs(tmp_path, jobs_yaml: str):
     (root / "fleet.yaml").write_text(
         dedent(_FLEET) + "  defaults:\n    jobs:\n" + jobs_yaml)
     fleet, _md = load_fleet(root / "fleet.yaml")
-    return sw.resolve(Paths(root=root, fleet_dir=root), fleet)
+    return sw.resolve(Paths(root=root, fleet_dir=root, package=source_package()), fleet)
 
 
 @pytest.mark.parametrize("key", ["manager-checkin", "weekly-worker-restart"])
@@ -403,7 +398,7 @@ def _cli(root: Path, *argv):
 
 
 def test_doctor_switches_prints_the_table_alone(tmp_path):
-    r = _cli(_root(tmp_path, "TASK_RECHECK_ENABLED=0\n"), "doctor", "--switches")
+    r = _cli(_root(tmp_path, "TASK_RECHECK_ENABLED=0\n"), "host", "doctor", "--switches")
     assert r.returncode == 0, r.stderr
     assert "=== switches ===" in r.stdout
     assert "task-recheck" in r.stdout and "off" in r.stdout
@@ -420,7 +415,7 @@ def test_doctor_switches_prints_the_table_alone(tmp_path):
     # setup summary.
     # The npx-cache RUNG is the probe this guards against. Its name, not the
     # word: the table itself now names npx (mcp-direct-launch, #1604).
-    assert "npx-cache" not in r.stdout and "=== claudlobby doctor ===" not in r.stdout
+    assert "npx-cache" not in r.stdout and "=== claudlobby host doctor ===" not in r.stdout
 
 
 def test_the_doctor_rung_exists_and_never_fails(tmp_path):
@@ -432,7 +427,7 @@ def test_the_doctor_rung_exists_and_never_fails(tmp_path):
     root = _root(tmp_path, "TASK_RECHECK_ENABLED=0\n")
     fleet, _md = load_fleet(root / "fleet.yaml")
     report = DoctorReport()
-    check_switches(fleet, Paths(root=root, fleet_dir=root), report)
+    check_switches(fleet, Paths(root=root, fleet_dir=root, package=source_package()), report)
     rung = next(c for c in report.checks if c.name == "switches")
     assert rung.status == "pass"
     assert "task-recheck" in rung.detail
@@ -447,14 +442,6 @@ def test_status_header_names_a_disabled_reaction(tmp_path):
     assert "task-recheck off on artemis-data" in note
     assert "doctor --switches" in note
     assert switches_off_note("artemis-data", _resolve(tmp_path / "b")) == ""
-
-
-@pytest.mark.parametrize("door", ["lib/setup-fleet", "lib/setup-system"])
-def test_both_setup_doors_end_by_printing_the_table(door):
-    """One renderer, called by both — never a bash copy. A second table in
-    shell is how the printed truth and the actual truth drift."""
-    body = (REPO / door).read_text()
-    assert "doctor --switches" in body
 
 
 # ---------------------------------------------------------------------------
@@ -479,7 +466,7 @@ def test_host_timer_dormancy_is_COMPOSE_TIME_now(tmp_path):
 
     root = tmp_path / "h"
     root.mkdir(parents=True)
-    out = compose_host_timers(Paths(root=root))
+    out = compose_host_timers(Paths(root=root, package=source_package()))
     names = {p.name for p in out.iterdir()}
     assert not [n for n in names if n.startswith("claudlobby-update-siblings")]
     assert "DORMANT" not in names, "a manifest for units nobody composed"
@@ -495,11 +482,11 @@ def test_an_armed_to_unarmed_host_timer_is_PRUNED(tmp_path):
 
     root = tmp_path / "h"
     root.mkdir(parents=True)
-    out = compose_host_timers(Paths(root=root))
+    out = compose_host_timers(Paths(root=root, package=source_package()))
     stale = out / "claudlobby-update-siblings.timer"
     stale.write_text("[Unit]\n")
     (out / "DORMANT").write_text("claudlobby-update-siblings\n")
-    compose_host_timers(Paths(root=root))
+    compose_host_timers(Paths(root=root, package=source_package()))
     assert not stale.exists()
     assert not (out / "DORMANT").exists()
 
@@ -568,7 +555,7 @@ def _walk_back(tmp_path: Path, home: Path, composed: Path):
         f.chmod(0o755)
     script = tmp_path / "drive.sh"
     script.write_text(
-        f'. "{REPO}/lib/lib-common.sh"\n'
+        f'. "{REPO}/claudlobby/_runtime_scripts/lib-common.sh"\n'
         'set +e\n'
         f'walk_back_uncomposed_host_units "{composed}"\n'
     )
@@ -584,7 +571,7 @@ def test_the_plane_services_compose_by_default(tmp_path):
 
     root = tmp_path / "h"
     root.mkdir(parents=True)
-    out = compose_host_timers(Paths(root=root))
+    out = compose_host_timers(Paths(root=root, package=source_package()))
     names = {p.name for p in out.iterdir()}
     for job in ("plane-daemon", "plane-view"):
         assert f"claudlobby-{job}.service" in names
@@ -610,7 +597,7 @@ def test_the_view_is_NOT_composed_without_its_extra(tmp_path, monkeypatch):
     monkeypatch.setattr(_sw, "extra_available", lambda extra: False)
     root = tmp_path / "h"
     root.mkdir(parents=True)
-    out = compose_host_timers(Paths(root=root))
+    out = compose_host_timers(Paths(root=root, package=source_package()))
     names = {p.name for p in out.iterdir()}
     assert "claudlobby-plane-view.service" not in names
     assert "claudlobby-plane-view.plist" not in names
@@ -619,7 +606,7 @@ def test_the_view_is_NOT_composed_without_its_extra(tmp_path, monkeypatch):
     # ...and a unit composed before the extra was removed is pruned, or the
     # next setup run enrols the crash loop from stale files.
     (out / "claudlobby-plane-view.service").write_text("[Unit]\n")
-    compose_host_timers(Paths(root=root))
+    compose_host_timers(Paths(root=root, package=source_package()))
     assert not (out / "claudlobby-plane-view.service").exists()
 
 
@@ -644,11 +631,11 @@ def test_extra_available_reads_the_REAL_interpreter_both_ways():
         mp.undo()
 
 
-def test_the_table_arms_the_view_with_PIP_when_the_extra_is_missing(
+def test_the_table_names_the_release_extra_when_it_is_missing(
         tmp_path, monkeypatch):
     """The other half of F1: the switch table stops saying "on". A row that
     claims a service is running when no unit exists sends a reader to debug
-    supervision instead of installing two wheels."""
+    supervision instead of assembling a release with the required extra."""
     from claudlobby import switches as _sw
 
     monkeypatch.setattr(_sw, "extra_available", lambda extra: False)
@@ -656,8 +643,8 @@ def test_the_table_arms_the_view_with_PIP_when_the_extra_is_missing(
     st = _state(rows, "plane-view")
     assert st.on is False and st.unknown is False
     assert "plane-ui" in st.source
-    assert "pip install -e '.[plane-ui]'" in st.arm
-    assert "pip install -e '.[plane-ui]'" in _sw.format_table(rows)
+    assert "[plane-ui] extra in its offline wheelhouse" in st.arm
+    assert "[plane-ui] extra in its offline wheelhouse" in _sw.format_table(rows)
 
 
 def test_the_composer_arming_tables_are_derived_not_listed():
@@ -686,7 +673,7 @@ def test_the_validator_namespaces_come_from_the_registry():
     assert sw.namespaces() == {
         "TASK", "PLANE", "SESSION", "SPINDOWN", "PANE", "BOOT",
         # worker-unassigned (#1633): OBSERVABILITY_UNASSIGNED_CHECK existed
-        # in lib/fleet-pulse.sh unregistered — the dead-flag sweep could not
+        # in claudlobby/_runtime_scripts/fleet-pulse.sh unregistered — the dead-flag sweep could not
         # tell it apart from a fleet's own tooling variable. Registering the
         # switch is what makes this namespace ours to claim.
         "OBSERVABILITY",
@@ -711,10 +698,12 @@ def test_doctor_switches_works_with_NO_fleet_at_all(tmp_path):
     to their shipped defaults."""
     root = tmp_path / "hostonly"
     root.mkdir()
-    (root / "lib").symlink_to(REPO / "lib")
-    r = _cli(root, "doctor", "--switches")
+    (root / "lib").symlink_to(REPO / "claudlobby/_runtime_scripts")
+    r = _cli(root, "host", "doctor", "--switches")
     assert r.returncode == 0, r.stderr
     assert "plane-daemon" in r.stdout and "update-siblings" in r.stdout
+    if sys.platform == "darwin":
+        assert "orphan-browser-reaper: OFF on macOS" in r.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -771,7 +760,7 @@ def test_the_silencer_reaches_the_bot_conf_AND_the_timer_units(tmp_path):
 
     root = _root(tmp_path, "PLANE_EMIT_DISABLED=1\n")
     fleet, merged = load_fleet(root / "fleet.yaml")
-    paths = Paths(root=root, fleet_dir=root)
+    paths = Paths(root=root, fleet_dir=root, package=source_package())
     conf = compose_bot_conf(fleet.bots["kev"], fleet, paths)
     assert [ln for ln in conf.splitlines()
             if ln.startswith("export PLANE_EMIT_DISABLED=")
@@ -783,7 +772,7 @@ def test_the_silencer_reaches_the_bot_conf_AND_the_timer_units(tmp_path):
     # stays the ONE place the answer lives.
     quiet = _root(tmp_path / "q")
     qfleet, qmerged = load_fleet(quiet / "fleet.yaml")
-    qpaths = Paths(root=quiet, fleet_dir=quiet)
+    qpaths = Paths(root=quiet, fleet_dir=quiet, package=source_package())
     assert "PLANE_EMIT_DISABLED" not in compose_bot_conf(
         qfleet.bots["kev"], qfleet, qpaths)
 
@@ -844,7 +833,7 @@ def test_the_lib_door_and_the_registry_spell_the_knob_the_same_way():
     """The shell reads the variable and the table describes it; a rename on one
     side and not the other is how the estate ended up with flags nothing read.
     Pinned against the door's own source, not a second list."""
-    body = (REPO / "lib" / "lib-common.sh").read_text()
+    body = (REPO / "claudlobby/_runtime_scripts" / "lib-common.sh").read_text()
     assert "PANE_SEND_CHUNK_BYTES" in body
     # the loud line the fold added, so an off switch is visible in the logs of
     # the host it is off on
@@ -863,7 +852,7 @@ def test_a_host_run_says_UNKNOWN_for_a_fleet_it_never_read(tmp_path):
     scope nobody opened, which is the unreachable-is-not-empty defect wearing
     a table. The host rows are still true; the fleet rows say so."""
     root = _root(tmp_path)
-    rows = sw.resolve(Paths(root=root, fleet_dir=root), None)
+    rows = sw.resolve(Paths(root=root, fleet_dir=root, package=source_package()), None)
     st = _state(rows, "task-recheck")
     assert st.unknown and st.unknown_reason == "no-fleet"
     assert st.source == "?" and "no fleet named" in st.detail
@@ -883,7 +872,7 @@ def test_an_unknown_row_prints_BOTH_directions(tmp_path):
     """We do not know which way it is set, so printing one line would be
     picking a side."""
     root = _root(tmp_path)
-    text = sw.format_table(sw.resolve(Paths(root=root, fleet_dir=root), None))
+    text = sw.format_table(sw.resolve(Paths(root=root, fleet_dir=root, package=source_package()), None))
     block = text[text.index("task-recheck"):]
     assert "arm: unset TASK_RECHECK_ENABLED" in block
     assert "turn off: TASK_RECHECK_ENABLED=0" in block
@@ -894,7 +883,7 @@ def test_plane_doctor_and_doctor_switches_agree_on_one_fleet(tmp_path):
     answered differently about the same fleet — one read the fleet tier, the
     other reported the shipped defaults."""
     root = _root(tmp_path, "PLANE_EMIT_ENABLED=0\n")
-    doc = _cli(root, "doctor", "--switches")
+    doc = _cli(root, "host", "doctor", "--switches")
     pln = _cli(root, "plane", "doctor")
     import re
 
@@ -916,7 +905,7 @@ def _gate(tmp_path: Path, value: str | None):
 
     script = tmp_path / "g.sh"
     script.write_text(
-        f'. "{REPO}/lib/lib-common.sh"\n'
+        f'. "{REPO}/claudlobby/_runtime_scripts/lib-common.sh"\n'
         'set +e\n'
         'switch_is_on DEMO_ENABLED demo-door "nothing will happen" || echo OFF\n'
     )
@@ -944,12 +933,11 @@ def test_switch_is_on_owns_polarity(tmp_path, value, off):
 
 
 @pytest.mark.parametrize("script,var", [
-    ("lib/task-recheck.sh", "TASK_RECHECK_ENABLED"),
-    ("lib/plane-expire.sh", "PLANE_EXPIRE_ENABLED"),
-    ("lib/plane-prune.sh", "PLANE_PRUNE_ENABLED"),
-    ("lib/spin-down-bot.sh", "SPINDOWN_RECEIPT_ENABLED"),
+    ("claudlobby/_runtime_scripts/plane-expire.sh", "PLANE_EXPIRE_ENABLED"),
+    ("claudlobby/_runtime_scripts/plane-prune.sh", "PLANE_PRUNE_ENABLED"),
+    ("claudlobby/_runtime_scripts/spin-down-bot.sh", "SPINDOWN_RECEIPT_ENABLED"),
 ])
-def test_the_four_launchers_call_the_shared_gate(script, var):
+def test_the_remaining_shell_launchers_call_the_shared_gate(script, var):
     body = (REPO / script).read_text()
     assert f"switch_is_on {var}" in body
     assert f'"${{{var}:-1}}" = "0"' not in body
@@ -965,14 +953,14 @@ def test_the_doc_switch_tables_ARE_the_registrys_render(doc):
     """Three hand-written tables were a fourth copy of the registry, and the
     estate's recurring defect is a copy drifting (#892/#1143) — two of them
     were already wrong about `session-digest`'s carrier. The block is
-    generated; regenerate with `claudlobby doctor --switches --markdown`."""
+    generated; regenerate with `claudlobby host doctor --switches --markdown`."""
     text = (REPO / doc).read_text()
     assert sw.DOC_BEGIN in text, f"{doc}: no generated block"
     body = text[text.index(sw.DOC_BEGIN):
                 text.index(sw.DOC_END) + len(sw.DOC_END)]
     assert body == sw.format_markdown(**sw.DOC_BLOCKS[doc]), (
         f"{doc} is stale — regenerate:"
-        " claudlobby doctor --switches --markdown")
+        " claudlobby host doctor --switches --markdown")
 
 
 def test_the_markdown_render_is_state_free(tmp_path):
@@ -985,7 +973,7 @@ def test_the_markdown_render_is_state_free(tmp_path):
 
 
 def test_doctor_switches_markdown_prints_every_block(tmp_path):
-    r = _cli(_root(tmp_path), "doctor", "--switches", "--markdown")
+    r = _cli(_root(tmp_path), "host", "doctor", "--switches", "--markdown")
     assert r.returncode == 0, r.stderr
     for doc in sw.DOC_BLOCKS:
         assert doc in r.stdout

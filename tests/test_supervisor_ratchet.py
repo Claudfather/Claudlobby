@@ -1,9 +1,9 @@
 """Ratchet: every direct systemctl/launchctl call site outside
-lib/supervisor.sh is grandfathered at its count on this branch's tip and may
+claudlobby/_runtime_scripts/supervisor.sh is grandfathered at its count on this branch's tip and may
 only shrink from here (#1573 boot admission, task 6).
 
-lib/supervisor.sh is the one adapter meant to own systemctl/launchctl calls
-from here on. Everywhere else in lib/, a direct call is a call site a later
+claudlobby/_runtime_scripts/supervisor.sh is the one adapter meant to own systemctl/launchctl calls
+from here on. Everywhere else in claudlobby/_runtime_scripts/, a direct call is a call site a later
 PR is supposed to migrate onto the adapter, never a new one to add. Absent a
 fence, "migrate one of the existing 109" and "add a 110th while nobody is
 looking, in an unrelated diff" are indistinguishable. This test makes the
@@ -20,20 +20,20 @@ onto the adapter, or simply removed -- passes and is printed: recording a
 NUMBER (not just a name) is what lets a shrink be noticed at all, where a
 plain boolean grandfather list could only ever say "still present somewhere".
 
-Scope is every REGULAR FILE under lib/, recursively, keyed repo-relative
+Scope is every REGULAR FILE under claudlobby/_runtime_scripts/, recursively, keyed repo-relative
 (`lib/<subdir>/<name>`) -- deliberately not tests/test_bash_parse.py's
 LIB_SCRIPTS (which answers a narrower, different question: "what must parse
 as a bash script", `*.sh` plus extensionless-with-a-bash-shebang, and only at
-the top level of lib/). A stray `systemctl`/`launchctl` call does not care
+the top level of claudlobby/_runtime_scripts/). A stray `systemctl`/`launchctl` call does not care
 whether the file it sits in is a bash script, or whether that file lives in a
-subdirectory (lib/personal/*.sh existed unwatched the whole time) -- the
+subdirectory (claudlobby/_runtime_scripts/personal/*.sh existed unwatched the whole time) -- the
 ratchet's question is wider than the parse gate's, so it needs its own scope
 rather than inheriting one built to answer something else. Measured
 identical to the old, narrower scope at this tip regardless (109 calls in 20
 files either way, because nothing outside those 20 files -- including every
-lib/__pycache__/*.pyc, lib/logs/*.log and lib/personal/*.sh -- happens to
+lib/__pycache__/*.pyc, lib/logs/*.log and claudlobby/_runtime_scripts/personal/*.sh -- happens to
 contain the literal token), so the allowlist itself needs no change; only the
-scope that finds it does. lib/supervisor.sh itself is excluded from the scan,
+scope that finds it does. claudlobby/_runtime_scripts/supervisor.sh itself is excluded from the scan,
 by full repo-relative path: it is the adapter whose whole job is to hold
 these calls, so its own count is expected to grow and is meaningless to
 fence.
@@ -61,12 +61,12 @@ once per matching line, which is how the allowlist was first measured
 line-edit wide: append a second call to a line that already has one
 (`systemctl --user disable --now X && systemctl --user daemon-reload`) and
 the count does not move. Re-measured per occurrence, the totals move by
-exactly one: 108 -> 109, all of it `lib/reconcile-fleet.sh` 7 -> 8, one real
+exactly one: 108 -> 109, all of it `claudlobby/_runtime_scripts/reconcile-fleet.sh` 7 -> 8, one real
 line carrying two bare `launchctl` tokens (a `launchctl print` and the
 `(launchctl info unavailable)` fallback string in the same assignment).
 Every other file is unchanged, and so is the set of files with a NONZERO
 count: 20. The SCANNED total is not a figure to quote -- it tracks whatever
-untracked files happen to sit under lib/ when the scan runs (a
+untracked files happen to sit under claudlobby/_runtime_scripts/ when the scan runs (a
 `__pycache__`, a `logs/`, a `personal/`), so it is 118 in a clean checkout
 and higher in a working tree that has been run from.
 """
@@ -78,10 +78,10 @@ import re
 from pathlib import Path
 
 REPO_DIR = Path(__file__).resolve().parent.parent
-LIB_DIR = REPO_DIR / "lib"
+LIB_DIR = REPO_DIR / "claudlobby/_runtime_scripts"
 ALLOWLIST_PATH = Path(__file__).resolve().parent / "supervisor_ratchet_allowlist.json"
 ADAPTER_NAME = "supervisor.sh"
-ADAPTER_REL = f"lib/{ADAPTER_NAME}"
+ADAPTER_REL = f"claudlobby/_runtime_scripts/{ADAPTER_NAME}"
 
 # A bare `systemctl` or `launchctl` token: not glued to a longer identifier
 # immediately before (a letter, underscore or hyphen would make it part of
@@ -97,7 +97,7 @@ CALL_PATTERN = re.compile(r"(^|[^A-Za-z_-])(systemctl|launchctl)( |$)")
 
 
 def _current_counts() -> dict[str, int]:
-    """Measured NOW, over every regular file under lib/ recursively, minus
+    """Measured NOW, over every regular file under claudlobby/_runtime_scripts/ recursively, minus
     the adapter itself and markdown -- EVERY scanned file, zero-count ones included. Never
     read from the allowlist -- the allowlist is the claim being checked, not
     the source of truth for what exists on disk.
@@ -109,17 +109,17 @@ def _current_counts() -> dict[str, int]:
     the old bug to a different line.
     """
     counts: dict[str, int] = {}
-    for path in sorted(LIB_DIR.rglob("*")):
+    for path in sorted(path for directory in (LIB_DIR, REPO_DIR / "harness")
+                       for path in directory.rglob("*")):
         if not path.is_file():
             continue
-        rel = f"lib/{path.relative_to(LIB_DIR)}"
+        rel = path.relative_to(REPO_DIR).as_posix()
         if rel == ADAPTER_REL:
             continue
-        # Markdown is never executed. lib/CLAUDE.md (and the AGENTS.md
+        # Markdown is never executed. The scripts' CLAUDE.md (and the AGENTS.md
         # symlink to it) quotes `systemctl --user stop` and the like while
-        # documenting the scripts, and prose naming a call is not a call
-        # site. A script's own comments still count: this skips documents,
-        # not comments.
+        # documenting them, and prose naming a call is not a call site. A
+        # script's own comments still count: this skips documents, not comments.
         if path.suffix == ".md":
             continue
         n = 0
@@ -154,7 +154,7 @@ def test_no_new_or_grown_direct_supervisor_calls():
             if n > 0:
                 new[name] = n
             # else: never allowlisted and still carries no call -- routine,
-            # not news (this is most of the ~135 files under lib/).
+            # not news (this is most of the ~135 files under claudlobby/_runtime_scripts/).
         elif n > a:
             grown[name] = (a, n)
         elif n < a:
@@ -180,7 +180,7 @@ def test_no_new_or_grown_direct_supervisor_calls():
     assert not new, (
         f"new file(s) carrying direct systemctl/launchctl calls, absent from "
         f"{ALLOWLIST_PATH.name}: {new}. Route a new supervision call through "
-        f"lib/supervisor.sh's verbs instead of calling systemctl/launchctl "
+        f"claudlobby/_runtime_scripts/supervisor.sh's verbs instead of calling systemctl/launchctl "
         f"directly; if this file's presence here is deliberate and "
         f"unrelated to supervision, add it to the allowlist with its "
         f"measured count and a reason."
@@ -188,7 +188,7 @@ def test_no_new_or_grown_direct_supervisor_calls():
     assert not grown, (
         "direct systemctl/launchctl call count grew for: "
         + ", ".join(f"{k}: {a} -> {b}" for k, (a, b) in sorted(grown.items()))
-        + f". lib/supervisor.sh (#1573 task 6) is where a new supervision "
+        + f". claudlobby/_runtime_scripts/supervisor.sh (#1573 task 6) is where a new supervision "
         f"call belongs; if this growth is deliberate and unrelated to the "
         f"adapter, update {ALLOWLIST_PATH.name} to the new measured count."
     )

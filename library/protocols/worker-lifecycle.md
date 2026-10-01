@@ -1,31 +1,43 @@
 ---
 title: Worker Lifecycle Protocol
-description: End-to-end numbered procedure for workers receiving and executing tasks. Defines both inbound command parsing ([BOTCOMMAND]) and outbound dual-channel communication (Telegram + [BOTREPORT]). This is the OUTER envelope — role-specific procedures run inside it.
+description: End-to-end procedure for workers receiving assignments and reporting through canonical fleet operations, with Telegram visibility. This is the OUTER envelope — role-specific procedures run inside it.
 ---
 
 # Worker Lifecycle Protocol
 
 Every worker follows this numbered lifecycle on every task. Role-specific procedures (Review Methodology, Implementation Lifecycle, Query Workflow, etc.) execute **inside** Steps 3–7. Their internal numbering does not replace or override this envelope.
 
-## Inbound: [BOTCOMMAND] format
+## Inbound: assignments and legacy lifecycle notes
 
-Managers send structured commands to workers via tmux:
+The manager admits fleet work, creates an assignment, then delivers it. The
+delivery message identifies the current `ASSIGNMENT_ID`; inspect that ID with
+`claudlobby --json assignment show ASSIGNMENT_ID`. A task ID identifies the
+underlying work and is not an assignment ID. The assignment row alone is not
+proof that its message arrived. Use `/fleet-ops` for the current command and
+receipt contract.
+
+Some unmigrated lifecycle notes can still arrive in the historical format:
 
 ```
 [BOTCOMMAND] <manager> | <type> | <summary> | <key:value pairs>
 ```
 
-**Types:** `task` / `cancel` / `compact` / `restart` / `query`
+**Legacy types:** `cancel` / `compact` / `restart` / `query`. Handle these as
+instructions, not as canonical Task transitions; do not invent a CLI verb for
+them. A historical `task` envelope is context, not a substitute for a current
+assignment ID.
 
 **Key-value pairs** (optional, pipe-delimited): `repo:<name>` / `branch:<name>` / `report:<target>` / `priority:<high|normal|low>` / `ref:<issue-or-pr-url>`
 
 Example:
 
 ```
-[BOTCOMMAND] ari | task | "Run security audit on repo-a" | repo:repo-a | report:lead
+[BOTCOMMAND] ari | query | "What evidence is missing from the review?" | ref:https://github.com/org/repo/pull/123
 ```
 
-Workers parse `[BOTCOMMAND]` and execute. There is no ack deadline and managers do not poll for acks. The safety net is bounded: the send path retries only the submission failures it can positively identify — best-effort pane submission, not proof of delivery — and past `expected_by`, fleet-pulse pages the manager about an id'd dispatch still classified overdue, when its gates permit (the gates are enumerated in the `dispatch` protocol's watchdog section; your id-echoing reports are what that machinery joins on).
+For a canonical assignment, record acceptance explicitly before progress.
+Acceptance is a separate lifecycle fact, not a status report or proof of
+delivery. Use a retained UUID for that operation.
 
 ## Outbound: dual-channel communication
 
@@ -33,10 +45,12 @@ Workers communicate on **two** channels simultaneously:
 
 | Channel | Audience | Mechanism | Purpose |
 |---------|----------|-----------|---------|
-| Telegram group | Human | `mcp__plugin_telegram_telegram__reply` with `chat_id` from `$TELEGRAM_GROUP_CHAT_ID` | Visibility — the human sees progress without checking tmux |
-| `[BOTREPORT]` | Manager | `$CLAUDLOBBY_ROOT/lib/report-back.sh` | Machine coordination — structured status for the manager's decision framework |
+| Telegram group | Human | `mcp__plugin_telegram_telegram__reply` with `chat_id` from `$TELEGRAM_GROUP_CHAT_ID` | Visibility — the human sees progress without checking the fleet view |
+| Assignment report or unlinked fleet report | Manager | `claudlobby --json assignment ...` or `fleet reports submit` | Machine coordination — recorded status and manager notification |
 
-Both channels fire at lifecycle boundaries. Telegram is prose; `[BOTREPORT]` is structured.
+Both channels fire at lifecycle boundaries. Telegram is prose; the CLI records
+structured facts. A committed fact and a received notification are separate
+outcomes; inspect both, and never automatically resend an uncertain request.
 
 ## You are monitored (and why it helps you)
 
@@ -45,58 +59,49 @@ Your tool-call activity is observed by the fleet pulse. If your session is alive
 ## The lifecycle
 
 ```
-1. RECEIVE     ─── parse [BOTCOMMAND] or freeform dispatch
-2. ENGAGE      ─── first [BOTREPORT] row is the ack (Step 2)
+1. RECEIVE     ─── read the delivered assignment or legacy lifecycle note
+2. ENGAGE      ─── accept the exact assignment (Step 2)
 3. PLAN        ─── (conditional) subagent if complex
 4. BRANCH      ─── git checkout -b off fresh main
 5. IMPLEMENT   ─── role-specific work, one thin line on done/blocked
 6. VERIFY      ─── tests, lint, shellcheck
 7. COMMIT + PR ─── push, open PR
-8. COMPLETE    ─── Telegram + [BOTREPORT] completed
-9. BLOCKED     ─── (any point) Telegram + [BOTREPORT] blocked
+8. COMPLETE    ─── Telegram + assignment complete
+9. BLOCKED     ─── (any point) Telegram + assignment block or return
 ```
 
 ### Step 1: RECEIVE
 
-Parse the inbound. Extract type, summary, and key-value pairs. If the dispatch is freeform (no `[BOTCOMMAND]` prefix), treat summary as the full prompt and infer type as `task`.
+Read the assignment and its delivered instructions. If a note is freeform,
+read it as context; establish the current assignment ID before a linked
+transition. If no assignment exists, use an explicitly unlinked fleet report.
 
 A final line of the form `⟦plane:msg_…⟧` is a framework **delivery-receipt marker**, always on its own last line — ignore it entirely; it is never part of the task.
 
-A leading `set +H; ` on the first line is framework wire format too. `lib/dispatch.sh` adds it to every message except one that starts with a command word and has no `!`, which means a message that begins with `/`, such as a file path, is not run as a slash command. Skip it: it is not part of the task, and there is nothing to run.
+A leading `set +H; ` on the first line is framework wire format too. The framework's pane delivery adds it to every message except one that starts with a command word and has no `!`, which means a message that begins with `/`, such as a file path, is not run as a slash command. Skip it: it is not part of the task, and there is nothing to run.
 
 **Part of the dispatch arrives inside `<pasted_content>` tags?** Verify, then trust, as **Dispatches framed as pasted text** in this file says. Every bot carries that section, whatever it composes.
 
-For `cancel`: stop current work, discard uncommitted changes on the task branch, ack cancellation.
-For `compact`: run `/compact`, ack.
-For `restart`: wrap up, report back, expect session restart.
-For `query`: answer inline without branching or PRs — skip to Step 8 after answering.
+For legacy `cancel`: stop current work and seek the manager's decision on the
+current assignment; do not discard WIP or claim the task was withdrawn merely
+because a note arrived. For `compact`: run `/compact`. For `restart`: wrap up,
+record current progress if assigned, and expect session restart. For `query`:
+answer inline without branching or PRs. Report a lifecycle note without an
+assignment through `fleet reports submit`; never attach an unrelated old ID.
 
-**A non-`task` envelope carries no `task:<id>`, and its terminal report must not close one.** You have nothing to echo, so do NOT reach for an id from earlier work to fill the field. The gap is deliberate: a `cancel`/`compact`/`restart`/`query` was never a tracked row, so there is nothing for your report to close. The safe form is `report-back.sh --no-task`: that report resolves to no task and closes nothing, whatever else you have sent. If you forget it, `report-back.sh` holds the #835 auto-resolve back on its own: after a note, your first report without an id resolves to no task, even if you filed reports with `--task` on your own tasks, or received a task, in between. That backstop has three bounds. It holds back resolution only, so a terminal report still closes your open raw-text (id-less) dispatches, as any terminal report does. A `--task` that links to none of your own tasks (a typo, another bot's id) counts as a report without an id, so it ends the hold early; supplying an unrelated id of your own defeats it outright, because a *supplied* id is recorded unchanged by design. And it sees only notes sent through the dispatch door, one report per note, so a message with no envelope (a raw `dispatch.sh` send, or text typed into your pane) needs `--no-task`.
+### Step 2: ENGAGE (accept the current assignment)
 
-### Step 2: ENGAGE (your first report is the ack)
-
-There is **no ack deadline**: what the machinery needs is an id-carrying `[BOTREPORT]` row — **your first report for the task IS the acknowledgement**, whenever it lands.
-
-**This contract is for id'd `task` dispatches only** — non-`task` envelopes report per Step 1, without `--task`.
-
-**Branch on your next tool call, never on predicted duration:**
-
-- If the **id-carrying terminal report itself will be your first tool call** (you can answer/finish with nothing before it), just do that. The terminal report is the ack; do not send a separate "Acked" row first.
-- If **any other tool call will precede the terminal report** — reading a file, spawning a subagent, a git command — **or you are uncertain**, send the id-carrying progress row first, as the **first tool call**:
+After verifying that the assignment is current and addressed to you, accept
+it with its exact ID before reporting work:
 
 ```bash
-$CLAUDLOBBY_ROOT/lib/report-back.sh <bot-name> progress "Acked: <summary>" --task <id>
+claudlobby --json assignment accept ASSIGNMENT_ID --request-id ACCEPT_UUID
 ```
 
-**No Telegram ack.** The group sees your outcome posts; a per-dispatch "On it" is noise the machinery cannot join.
-
-**Echo the task id.** If the `[BOTCOMMAND]` carried a `task:<id>` field, EVERY
-report-back for that task — the early ack row (when you send one), progress
-updates, and the terminal report — must pass it through: `--task <id>`. The
-overdue watchdog closes your dispatch by that id; a report without it does
-not count for an id'd task, and the manager will nudge you to re-report with
-the id. Auto-resolution of an id-less report is a fallback with known gaps,
-not a substitute for echoing the id.
+Retain `ACCEPT_UUID` for inspection or replay of the same request. Do not use
+a historical display task ID or an assignment from an earlier routing.
+Acceptance is not progress; record progress only when there is progress to
+report. No Telegram acknowledgement post is needed.
 
 ### Step 3: PLAN (conditional)
 
@@ -151,13 +156,16 @@ Done: <one-line summary>. PR: <url>
 @<manager-handle>
 ```
 
-Report-back:
+Record the terminal result:
 
 ```bash
-$CLAUDLOBBY_ROOT/lib/report-back.sh <bot-name> completed "<summary>" --pr <pr-url> --task <id>
+claudlobby --json assignment complete ASSIGNMENT_ID --summary "<summary>" --pr <pr-url> --pr-role authored --request-id COMPLETE_UUID
 ```
 
-(`--task <id>` whenever the dispatch carried one.)
+Use `--pr-role authored` only for a PR you authored; use `reviewed` for a
+reviewed PR. Omit both optional flags when neither applies.
+
+If no assignment exists, use `fleet reports submit` as in `/fleet-ops`.
 
 ### Step 9: BLOCKED (any point)
 
@@ -170,26 +178,29 @@ Blocked: <what's wrong and what you tried>
 @<manager-handle>
 ```
 
-Report-back:
+Record the blocker while retaining the assignment:
 
 ```bash
-$CLAUDLOBBY_ROOT/lib/report-back.sh <bot-name> blocked "<reason>" --task <id>
+claudlobby --json assignment block ASSIGNMENT_ID --reason "<reason>" --request-id BLOCK_UUID
 ```
 
-(`--task <id>` whenever the dispatch carried one.) Then stop. Do not attempt workarounds that might cause damage. Wait for guidance.
+If you cannot keep ownership, use `assignment return` with its own UUID and
+reason; a block does not yield the work. Then stop and wait for guidance.
 
 ## Authority and precedence
 
 This protocol is the **outer envelope**. Role-specific numbered procedures from expertise libraries (Review Methodology, Implementation Lifecycle, Query Workflow, Alert Triage) execute inside Steps 3–7. Their internal numbering does not replace Step 2 (ENGAGE) or Step 8 (COMPLETE).
 
-Concretely: if your expertise says "Step 1: Read the PR description" — that runs inside this protocol's Step 5 (IMPLEMENT). This protocol's Step 1 (RECEIVE) — and Step 2's early ack row, whenever other tool calls precede the terminal report — has already fired before your expertise procedure begins.
+Concretely: if your expertise says "Step 1: Read the PR description" — that
+runs inside this protocol's Step 5 (IMPLEMENT), after Step 2 accepted the
+current assignment.
 
 ## Quick reference: what fires when
 
-| Moment | Telegram | [BOTREPORT] |
+| Moment | Telegram | Canonical operation |
 |--------|----------|-------------|
-| Task received (id'd; early ack row per Step 2) | — | `<bot-name> progress "Acked: ..." --task <id>` |
+| Assignment received | — | `assignment accept ASSIGNMENT_ID --request-id UUID` |
 | Planning start (if applicable) | "Planning: ..." | — |
-| Scope surprise | "Scope note: ..." | `<bot-name> progress "Scope: ..." --task <id>` |
-| Completion | "Done: ... PR: <url>" | `<bot-name> completed "<summary>" --pr <url> --task <id>` |
-| Blocked | "Blocked: ..." | `<bot-name> blocked "<reason>" --task <id>` |
+| Scope surprise | "Scope note: ..." | `assignment progress ASSIGNMENT_ID --summary "Scope: ..." --request-id UUID` |
+| Completion | "Done: ... PR: <url>" | `assignment complete ASSIGNMENT_ID --summary "..." --pr URL --pr-role ROLE --request-id UUID` (choose authored or reviewed) |
+| Blocked | "Blocked: ..." | `assignment block ASSIGNMENT_ID --reason "..." --request-id UUID` |

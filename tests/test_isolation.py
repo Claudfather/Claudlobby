@@ -20,6 +20,7 @@ from claudlobby import isolation as iso
 from claudlobby import switches as sw
 from claudlobby.composer import compose_settings_local
 from claudlobby.config import BotConfig, FleetConfig, IsolationConfig, load_fleet
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 # ---------------------------------------------------------------------------
@@ -30,6 +31,7 @@ ALPHA = """\
 fleet:
   name: alpha
   service_prefix: com.alpha
+  manager: otis
   bots:
     ravi:
       expertise: [eng]
@@ -42,6 +44,7 @@ BETA = """\
 fleet:
   name: beta
   service_prefix: com.beta
+  manager: craig
   bots:
     clog:
       expertise: [eng]
@@ -66,7 +69,7 @@ def host(tmp_path, monkeypatch):
         (d / "fleet.yaml").write_text(text)
     alpha_dir = root / "local" / "alpha"
     fleet, _ = load_fleet(alpha_dir / "fleet.yaml")
-    return root, home, fleet, Paths(root=root, fleet_dir=alpha_dir)
+    return root, home, fleet, Paths(root=root, fleet_dir=alpha_dir, package=source_package())
 
 
 def _deny(bot, fleet, paths) -> list[str]:
@@ -134,9 +137,10 @@ def test_each_class_emits_nothing_when_the_switch_is_off(host, cls):
     rules = [r for r in iso.layer0b(otis, fleet, paths).rules if r.cls == cls]
     assert rules  # the positive control: there WAS something to leave out
     assert not [r.text for r in rules if r.text in deny]
-    # and Layer 0 is untouched: exactly the sibling pair, as before #1665
+    # Layer 0 read/edit isolation is unchanged; operator-command denies are independent.
     ravi_dir = paths.bot_runtime("ravi")
-    assert deny == [f"Read(/{ravi_dir}/**)", f"Edit(/{ravi_dir}/**)"]
+    assert [r for r in deny if r.startswith(("Read(", "Edit("))] == [
+        f"Read(/{ravi_dir}/**)", f"Edit(/{ravi_dir}/**)"]
 
 
 def test_every_rule_is_double_slash_anchored(host):
@@ -150,10 +154,48 @@ def test_the_install_root_is_edit_only(host):
     rules = iso.layer0b(fleet.bots["ravi"], fleet, paths).rules
     install = [r for r in rules if r.cls == iso.INSTALL_ROOT]
     assert {r.tool for r in install} == {"Edit"}
-    assert not [
-        r for r in rules if r.tool == "Read" and r.path.startswith(f"{root}/lib")
-    ]
-    assert not _denied([r.text for r in rules], "Read", root / "lib" / "lib-common.sh")
+    deny = [r.text for r in rules]
+    for path in (
+        Path(iso.__file__).resolve(),
+        paths.package.native / "lib-common.sh",
+        paths.package.library / "skills" / "example" / "SKILL.md",
+        paths.package.templates / "claude.md.j2",
+        paths.package.voices / "example.md",
+        paths.package.seeds / "fleet.yaml.seed",
+    ):
+        assert _denied(deny, "Edit", path), path
+        assert not _denied(deny, "Read", path), path
+
+
+def test_candidate_and_recovery_targets_are_protected_but_overlays_are_writable(host):
+    root, home, fleet, paths = host
+    store = paths.release_store
+    store.mkdir(parents=True)
+    targets = []
+    for name in ("candidate", "recovery"):
+        target = root.parent / f"retained-{name}"
+        target.mkdir()
+        alias = store / name
+        alias.symlink_to(target, target_is_directory=True)
+        targets.extend((alias, target.resolve()))
+    deny = _deny(fleet.bots["ravi"], fleet, paths)
+    for release in targets:
+        for relative in (".venv/bin/claudlobby", "claudlobby/_runtime_scripts/keepalive.sh"):
+            path = release / relative
+            assert _denied(deny, "Edit", path), path
+            assert not _denied(deny, "Read", path), path
+    assert _denied(deny, "Edit", store / "future-release" / "manifest.json")
+    for path in (
+        paths.overlay_library / "skills" / "example" / "SKILL.md",
+        paths.overlay_templates / "claude.md.j2",
+        paths.overlay_voices / "example.md",
+        root / "library" / "resources" / "operator.md",
+        root / "templates" / "operator.j2",
+        root / "voices" / "operator.md",
+        root / "state" / "operator.json",
+        paths.bot_runtime("ravi") / "memory" / "MEMORY.md",
+    ):
+        assert not _denied(deny, "Edit", path), path
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +227,9 @@ def test_the_offline_positive_cells_are_named(host):
             "Read",
             home / ".claude" / "channels" / "telegram-clog_bot" / ".env",
         ),
-        "P8 Edit on the install's lib/": ("Edit", root / "lib" / "lib-common.sh"),
+        "P8 Edit on packaged native code": (
+            "Edit", paths.package.native / "lib-common.sh"
+        ),
         "P8 Edit on the shared settings.json": (
             "Edit",
             home / ".claude" / "settings.json",
@@ -210,7 +254,9 @@ def test_the_offline_negative_cells_stay_open(host):
             "Read",
             _slug_dir(home, ravi_dir, "projects/Claudlobby"),
         ),
-        "N9 Read on the install's lib/": ("Read", root / "lib" / "lib-common.sh"),
+        "N9 Read on packaged native code": (
+            "Read", paths.package.native / "lib-common.sh"
+        ),
         "own Telegram state dir": (
             "Read",
             home / ".claude" / "channels" / "telegram-ravi" / "access.json",
@@ -280,8 +326,8 @@ def _self(root: Path, me: iso.HostBot):
         expertise=["eng"],
         isolation=IsolationConfig(shared_config=True),
     )
-    fleet = FleetConfig(name=me.fleet, service_prefix="p", bots={me.name: bot})
-    return bot, fleet, Paths(root=root, fleet_dir=root / "local" / me.fleet)
+    fleet = FleetConfig(name=me.fleet, service_prefix="p", manager=me.name, bots={me.name: bot})
+    return bot, fleet, Paths(root=root, fleet_dir=root / "local" / me.fleet, package=source_package())
 
 
 @pytest.mark.parametrize("name", ROSTER_NAMES)
@@ -382,7 +428,7 @@ def _load(tmp_path, bot_stanza: str, defaults: str = "") -> FleetConfig:
     d = tmp_path / "f"
     d.mkdir(exist_ok=True)
     (d / "fleet.yaml").write_text(
-        "fleet:\n  name: f\n  service_prefix: p\n"
+        "fleet:\n  name: f\n  service_prefix: p\n  manager: b\n"
         + (f"  defaults:\n{defaults}" if defaults else "")
         + f"  bots:\n    b:\n      expertise: [eng]\n{bot_stanza}"
     )

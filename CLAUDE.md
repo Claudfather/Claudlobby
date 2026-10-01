@@ -8,7 +8,7 @@ Compositor for Claude Code agent fleets. Transforms `fleet.yaml` + `library/` in
 
 **New here?** See [`documentation/getting-started.md`](documentation/getting-started.md) for the clone-to-fleet walkthrough and [`documentation/fleet-yaml-schema.md`](documentation/fleet-yaml-schema.md) for every config field.
 
-**This file is an index.** Detail lives beside what it describes: [`lib/CLAUDE.md`](lib/CLAUDE.md) (each `lib/` script in depth, and the shell authoring rules), [`claudlobby/CLAUDE.md`](claudlobby/CLAUDE.md) (the Python module map), the other nested `CLAUDE.md` files, script headers, and `documentation/`. Read "Instruction files" below before adding to this one.
+**This file is an index.** Detail lives beside what it describes: [`claudlobby/_runtime_scripts/CLAUDE.md`](claudlobby/_runtime_scripts/CLAUDE.md) (each runtime script in depth, and the shell authoring rules), [`harness/CLAUDE.md`](harness/CLAUDE.md) (validation and measurement instruments), the other nested `CLAUDE.md` files, script headers, and `documentation/`. Read "Instruction files" below before adding to this one.
 
 ## Ecosystem boundary
 
@@ -34,7 +34,7 @@ knowledge corpus is Claudron's. The local rules:
 ## Architecture
 
 ```
-fleet.yaml          →  claudlobby generate  →  runtime/bots/<name>/
+fleet.yaml          →  config plan + host activate  →  runtime/bots/<name>/
 library/                                         ├── CLAUDE.md      (composed instructions)
   expertise/                                     ├── bot.conf       (env vars, sourced at startup)
   skills/                                        ├── .mcp.json      (MCP server config)
@@ -67,32 +67,37 @@ The compositor reads `fleet.yaml` (which declares bots, their expertise, skills,
 
 ### Runtime model
 
-Bots run as supervised processes: systemd user units on Linux, launchd LaunchAgents on macOS. Each bot lives in its own tmux session on its **own** tmux server (a private `-L <socket>` == `BOT_SERVICE`), so one server's death drops only that bot, never the whole fleet. The manager dispatches work via the socket-aware `lib/dispatch.sh` helper (which resolves the worker's socket); workers report back via `lib/report-back.sh`.
+Bots run as supervised processes: systemd user units on Linux, launchd LaunchAgents on macOS. Each bot lives in its own tmux session on its **own** tmux server (a private `-L <socket>` == `BOT_SERVICE`), so one server's death drops only that bot, never the whole fleet. The canonical `claudlobby task admit` / `task assign` commands record work; `assignment deliver` sends the committed assignment, and `assignment progress|block|return|complete|fail` records a linked worker report. `message send` and `fleet reports submit` handle ordinary and unlinked communication.
 
-**Changing a running fleet:** when a change reaches a bot depends on **when the artifact is read, not what type of file it is** (#1310). Read **once at session start** (composed `CLAUDE.md` text, `bot.conf` env, `.mcp.json`): a running bot sees it from its next restart, so a canary window exists. Read **on demand, per use** (skill symlinks, hook scripts, `lib/`): live on every bot the moment `generate` writes it or the root is pulled, with **no canary window**. Composed `settings.local.json` permissions apply from the next tool call. See [`documentation/fleet-update-lifecycle.md`](documentation/fleet-update-lifecycle.md) before assuming a merged change is in force.
+**Changing a running fleet:** when a change reaches a bot depends on **when the artifact is read, not its file type** (#1310). Read **once at session start** (composed `CLAUDE.md` text, `bot.conf` env, `.mcp.json`): a running bot sees it from its next restart, so a canary window exists. Read **on demand, per use** (skill symlinks, hook scripts, `claudlobby/_runtime_scripts/`): live on every bot once activation publishes it, with **no canary window**. Composed `settings.local.json` permissions apply from the next tool call, so they too have no canary window. See [`documentation/fleet-update-lifecycle.md`](documentation/fleet-update-lifecycle.md) before assuming a merged change is in force.
 
-**Defaults (ruled 2026-09-07):** a job or door is **ON by default** unless it *deletes data, spends money, mutates operator source, sends outbound to people at scale, or has no deployment gate*. The registry, not this sentence, is the list: `claudlobby/switches.py` gives each opt-in's reason, and `claudlobby doctor --switches` prints the live table with the line that arms each. A door turned off no-ops **loudly**.
+**Defaults (ruled 2026-09-07):** a job or door is **ON by default** unless it *deletes data, spends money, mutates operator source, sends outbound to people at scale, or has no deployment gate*. The registry is the list: `claudlobby/switches.py` gives each opt-in's reason, and `claudlobby host doctor --switches` prints the live table and the line that arms each. A door turned off no-ops **loudly**.
 
-### `lib/` scripts
+### Runtime scripts (`claudlobby/_runtime_scripts/`)
 
-One line per script, for routing. **Before changing a script, read [`lib/CLAUDE.md`](lib/CLAUDE.md)**: the shell authoring rules and each script's full reference (contracts, exit codes, the incidents behind them).
+One line per script, for routing; operators use the public CLI. **Before changing one, read [`claudlobby/_runtime_scripts/CLAUDE.md`](claudlobby/_runtime_scripts/CLAUDE.md)**: the shell authoring rules and each script's full reference. Validation and measurement instruments live in `harness/`, indexed in [`harness/CLAUDE.md`](harness/CLAUDE.md).
 
 **Bot lifecycle and supervision**
-- `start-bot.sh` — launch a bot's tmux session (own socket, env from `bot.conf`) and wait until ready
+- `start-bot.sh` — launch a bot's tmux session on its own socket and wait until ready
 - `spin-up-bot.sh` — enroll a bot as a supervised service, then start it (idempotent)
 - `spin-down-bot.sh` — full teardown for canary/throwaway bots; `--purge` also deletes the bot dir
 - `pre-stop-handoff.sh` — graceful context handoff before a service stop
 - `keepalive.sh` — per-bot watchdog: restarts a dead session and records heartbeat samples
 - `keepalive-all.sh` — run keepalive for every bot
 - `reconcile-fleet.sh` — audit supervision state: healthy, orphan, missing, unsupervised-down, unbound
-- `supervisor.sh` — systemd/launchd adapter; the only `lib/` file allowed to call `systemctl`/`launchctl`
+- `supervisor.sh` — systemd/launchd adapter; the one door for new `systemctl`/`launchctl` calls (other files are ratcheted at their current count)
+- `supervisor-caller.py` — kernel ancestry check for the adapter, so a bot cannot stop its own coordinator
+- `bot-unit-owner.py` — verifies a unit's working directory for the adapter; refuses foreign units
+- `runtime-admission.sh` — startup and watchdog release check, and the activation lock
 - `rolling-restart.sh` — restart bots one at a time, each gated on a fresh Telegram `BRIDGE_READY`
-- `weekly-worker-restart.sh` — weekly lossless restart of workers (not managers) to apply a staged binary
-- `reload-fleet.sh` — daily plugin update + `generate`, then a `/reload` of running bots (no restart)
-- `migrate-fleet-to-system.sh` — move `local/<fleet>/` into `local/<system>/<fleet>/`, re-pointing units (reversible)
+- `weekly-worker-restart.sh` — weekly lossless restart of workers (not managers) onto the staged binary (opt-in)
+- `reload-fleet.sh` — daily plugin update + generate, then a `/reload` of running bots (no restart)
+- `install-bot.sh` — bot service enrollment (launchd)
+- `install-bot-systemd.sh` — bot service enrollment (systemd)
 
 **Shared helpers and query doors**
-- `lib-common.sh` — shared helpers; the one door for pane sends (`pane_send_verified`), fleet events (`emit_fleet_event`), switches (`switch_is_on`) and the roster (`declared_bots_strict`)
+- `lib-common.sh` — one door each for pane sends (`pane_send_verified`), fleet events (`emit_fleet_event`), switches (`switch_is_on`); `declared_bots_strict` where empty would license a write
+- `cli-context.sh` — checks an adapter's explicit data root and CLI path; never falls back to PATH
 - `env-tiers.sh` — print the `.env` tier cascade (host, root, fleet, bot) in runtime order
 - `claude-version.sh` — print the Claude Code version, or refuse at rc 3
 - `claude-session-pid.sh` — which Claude Code session the caller runs inside (walks its own ancestry)
@@ -100,34 +105,22 @@ One line per script, for routing. **Before changing a script, read [`lib/CLAUDE.
 - `tg-post.sh` — post a message to Telegram
 - `mcp-package-grammar.py` — how an MCP server's `command` + `args` name a package, in one place
 
-**Dispatch, reporting and the task loop**
+**Dispatch and the task loop**
 - `dispatch.sh` — manager → worker dispatch helper; resolves the worker's tmux socket
-- `dispatch-task.sh` — task dispatch: records it on the plane, then sends it
-- `report-back.sh` — worker → manager structured report; closes the matching dispatch
-- `task-act.sh` — a manager's acts on one open task: `withdraw` (close it) or `escalate` (ask a human)
-- `task-recheck.sh` — timer: sends each manager one list of their stale open tasks
 - `dispatch-overdue.py` — the plane matcher behind fleet-pulse: overdue, orphaned, open, unassigned rows
-- `dispatch-supersede-hint.py` — at dispatch time, flags an open task the new one may supersede
-- `workstream-update.sh` — single writer for the fleet's workstream registry
 - `briefing-trigger.sh` — fire a bot's scheduled briefing as a slash command
-- `manager-checkin.sh` — the check-in beat: prompts an idle manager to pick its next move (dormant)
-- `checkin-record.sh` — write door for a manager's check-in decision
-- `checkin-contract.py` — validates a check-in decision record
-- `sprint-selection-record.py` — records the sprint's full candidate set and scores, not just winners
-- `who-reviewed.py` — which bot wrote a PR review (the shared GitHub account hides it)
-- `pr-review-state.py` — whether a PR's blocking review verdict is still live
+- `manager-checkin.sh` — the check-in beat: prompts an idle manager to pick its next move (opt-in)
 
 **Observable plane (the fleet's record)**
-- `plane-emit.sh` — the recording shim every door uses: daemon socket → cold CLI → spool
+- `plane-emit.sh` — private recording adapter: sends to the plane daemon, else stages durably and reports uncommitted (never a cold CLI)
 - `plane-socket-client.py` — stdlib socket leg of `plane-emit.sh`
 - `plane-daemon.sh` — launcher for the ingest-only plane daemon
 - `plane-view.sh` — launcher for the read-only operator plane UI (localhost)
-- `plane-prune.sh` — timer: deletes metric samples past 30 days, never the ledger
+- `plane-prune.sh` — timer: deletes metric samples past 30 days (opt-in: also an allowlist of system events), never the ledger
 - `plane-expire.sh` — timer: expires assignments 7+ days past deadline
 - `plane-host-probe.sh` — per-minute host samples: load, RAM, disk, swap, iowait, thermal
 - `plane-lookup.py` — read-only plane lookups by task id, assignment, escalation, event
-- `plane-readers.py` — stdlib list readers the bash doors share (open, overdue, escalations, workstreams)
-- `plane-parity.py` — reconcile an archived JSONL ledger against the plane
+- `plane-readers.py` — stdlib list readers shared by the bash doors
 - `plane-session-start.sh` — SessionStart hook: session and process ids for the plane
 - `plane-dispatch-in.sh` — UserPromptSubmit hook: records what the receiving bot actually got
 - `plane-telegram-in.sh` — UserPromptSubmit hook: records the operator's Telegram messages
@@ -135,31 +128,18 @@ One line per script, for routing. **Before changing a script, read [`lib/CLAUDE.
 - `plane-rc-relay-out.sh` — Stop hook: records a Telegram answer sent without the reply tool
 
 **Monitoring and alerts**
-- `fleet-pulse.sh` — fleet watchdog: overdue dispatches, idle workers, critical events, escalations
+- `fleet-pulse.sh` — fleet watchdog: overdue dispatches, idle workers (opt-in), critical events, escalations
 - `bot-vitals.sh` — Pre/PostToolUse hook: records tool calls and session events
-- `fleet-utilization.sh` — per-bot busy/idle % from heartbeat samples
 - `tail-fleet.sh` — tail and grep every bot's logs
 - `disk-monitor.sh` — daily disk check; FLEET ALERT past threshold
 - `fleet-memory-check.sh` — daily fleet RSS vs available RAM; FLEET ALERT past the reserve floor
 - `host-health-check.sh` — alert on Pi under-voltage/throttling and SD/MMC storage stalls
 - `creds-check.sh` — validate fleet credentials, including GitHub App mode
-- `orphan-browser-reaper.sh` — daily reap of browser processes orphaned by dead automation
+- `orphan-browser-reaper.sh` — Linux-only reap of browser processes orphaned by dead automation
 - `notify-behind.sh` — daily report of framework checkouts behind their newest release
 - `transcript-digest.sh` — SessionEnd hook: a model-written digest per session (opt-in: spends)
 - `selfstart-snapshot.sh` — after an unplanned reboot, counts which bots self-started; run it before any rescue
-- `boot-capture.sh` — records every declared bot at each host boot (dormant)
-
-**Setup and enrollment**
-- `setup-system` — host prerequisites + `system.yaml` host-job enrollment
-- `setup-fleet` — per-fleet apply and enroll: default jobs, bots, reconcile
-- `setup-fleets` — run `setup-fleet` for every fleet on the host
-- `install-bot.sh` — bot service enrollment (launchd)
-- `install-bot-systemd.sh` — bot service enrollment (systemd)
-- `install_fleet_timer.sh` — fleet/host timer enrollment (systemd)
-- `install_fleet_timer_launchd.sh` — fleet/host timer enrollment (launchd)
-- `install-host-service-systemd.sh` — host service enrollment, e.g. the plane daemon (systemd)
-- `install-code-audit-sweep.sh` — code-audit-sweep timer enrollment (launchd)
-- `install-code-audit-sweep-systemd.sh` — code-audit-sweep timer enrollment (systemd)
+- `boot-capture.sh` — records every declared bot at each host boot (opt-in)
 
 **Maintenance and updates**
 - `log-rotate.sh` — rotate one bot's logs
@@ -167,51 +147,23 @@ One line per script, for routing. **Before changing a script, read [`lib/CLAUDE.
 - `git-pull-all.sh` — pull every repo in a bot's `projects/`
 - `data-sweep.sh` — weekly purge of vetted ephemeral files in bots' `data/`
 - `check-npx-cache.sh` — check that MCP server packages are cached
-- `update-claude-code.sh` — daily staged Claude Code binary download (no fleet bounce)
+- `update-claude-code.sh` — daily Claude Code update, no fleet bounce; in place by default (a failed install leaves no runnable `claude`), staged only when armed (opt-in)
 - `update-siblings.sh` — weekly fast-forward of sibling checkouts to their newest release (opt-in)
-- `pull-root.sh` — daily fast-forward of `$CLAUDLOBBY_ROOT` itself (opt-in)
 - `bot-sweep-cron.sh` — periodic bot sweep via cron
 - `code-audit-sweep.sh` — picks the stalest repo for a code audit, hands it to its owner (opt-in)
-- `vault-sync.sh` — scheduled vault sync that reports what happened (dormant)
+- `vault-sync.sh` — scheduled vault sync that reports what happened (opt-in)
 
 **GitHub identity and tool-call guards**
 - `git-credential-github-app` — git credential helper that mints GitHub App installation tokens
-- `mint-github-token.sh` — print a fresh App token for one command; never export it at boot
+- `mint-github-token.sh` — private helper printing a fresh App token for hot-path scripts; never export it at boot
 - `github-app-mcp-wrapper.py` — runs the GitHub MCP server with auto-refreshed App tokens
 - `setup-github-app.sh` — one-time App validation and config write
 - `gh-mention-guard.sh` — PreToolUse hook: rewrites `@<botname>` out of GitHub-bound text
 - `mention-rewrite.py` — the rewriter behind `gh-mention-guard.sh`
 - `vault-git-guard.sh` — PreToolUse hook: stops bots rewriting git state inside the vault
 - `vault-git-decide.py` — the decision half of `vault-git-guard.sh`
-- `vault-git-base-rate.py` — how often state-changing git reaches that guard directly
-- `heavy-slot-guard.sh` — PreToolUse hook: puts heavy Bash commands (test suites, installs, builds) behind the host's heavy-job slot (opt-in per bot)
-- `heavy-slot.py` — the heavy-job slot itself: `hook` finds heavy commands, `run` holds a slot while one runs, `status` names holders
-
-**Validation, canaries and measurement**
-- `validate-bot-change.sh` — end-to-end harness for bot behavior changes
-- `coldstart-harness.sh` — prepare/reap for the cold-start onboarding simulation
-- `freshbox-boot-gate.sh` — boots a bot on a fresh config dir; checks composed permissions hold
-- `naked-bot-observe.py` — records what a bot gets from a fleet that declares nothing
-- `boot-strand-sampler.sh` — real-boot sampler for startup prompts left unsubmitted
-- `boot-strand-summary.py` — statistics for `boot-strand-sampler.sh`
-- `send-size-probe.sh` — how much of a large pane send reaches the reader
-- `rehearse-env-cascade.sh` — canary for the `.env` tier cascade on a throwaway bot
-- `rehearse-staged-claude-update.sh` — canary for the staged Claude Code update
-- `rehearse-plane-durability.sh` — canary gating changes to plane daemon checkpointing
-- `plane-durability-driver.py` — that canary's client and loss witness
-- `plane-canary-sampler.py` — that canary's passive daemon sampler
-- `plane-canary-compare.py` — that canary's comparator (self-tested)
-- `rehearse-debounce-recipient.sh` — proves a debounced page survives a manager restart
-- `rehearse-briefing-timer.sh` — rehearses the briefing-timer chain on a throwaway fleet
-- `rehearse-permissions-ladder.sh` — single-factor permissions ladder on a disposable bot
-- `rehearse-vault-sync.sh` — proves `vault-sync.sh`'s outcomes against a real plane
-- `transcript-usage.py` — per-session token accounting from transcripts
-- `ab-comms-eval.sh` — A/B harness for the token-efficiency comms eval
-- `ab-comms-verdict.py` — pass bar and verdict for `ab-comms-eval.sh`
-- `ab-coverage-verdict.py` — coverage-honesty A/B analysis
-- `ab-channel-brevity-verdict.py` — channel-brevity A/B analysis
-- `ab-recoverability-scorer.py` — scores whether compressed-out detail is recoverable in full
-- `ab-recoverability-judge.py` — semantic judge for that scorer
+- `heavy-slot-guard.sh` — PreToolUse hook: queues heavy Bash commands (suites, installs, builds) on the host's heavy-job slot (opt-in)
+- `heavy-slot.py` — the heavy-job slot: `hook` finds heavy commands, `run` holds a slot, `status` names holders
 
 ## Repository Hygiene — MANDATORY
 
@@ -222,7 +174,7 @@ Everything in these top-level directories is committed and shared:
 - `library/` — All composable building blocks (see Architecture above)
 - `voices/` — Personality overlays
 - `templates/` — Jinja2 templates for CLAUDE.md generation
-- `lib/` — Lifecycle and utility scripts
+- `claudlobby/_runtime_scripts/` — Lifecycle and utility scripts
 - `claudlobby/` — Python compositor source
 - `documentation/` — Architecture docs, schema reference, setup guides
 - `fleet.yaml.example` — Template manifest (committed; `fleet.yaml` is NOT)
@@ -270,12 +222,9 @@ git diff --cached    # no secrets, no fleet-specific UUIDs, no hardcoded paths
 
 ### Instruction files: CLAUDE.md and AGENTS.md
 
-Claude Code reads `CLAUDE.md`; Codex reads `AGENTS.md`. Every `AGENTS.md` here is a **committed symlink to the `CLAUDE.md` beside it**, and every `.agents/skills/<name>` a directory symlink to `.claude/skills/<name>` (Codex skips a symlinked `SKILL.md` file). Edit the Claude-side file only; never copy or reword it into the other name.
+Claude Code reads `CLAUDE.md`; Codex reads `AGENTS.md`. Each `AGENTS.md` is a **committed byte-for-byte copy of the `CLAUDE.md` beside it**, and each `.agents/skills/<name>/` a copy of `.claude/skills/<name>/` (copies, because `tests/prepare_resources.py` refuses symlinks). Edit the Claude-side file, then copy it over (`cp CLAUDE.md AGENTS.md`); never reword the copy.
 
-This file loads whole at the start of every session in this checkout, and in every bot under it (`local/<fleet>/runtime/bots/<bot>/`), since Claude Code also reads each parent directory's `CLAUDE.md`. Nested files load only on use: Claude Code reads one when a session first opens a file in its folder, Codex when it starts in that folder. `tests/test_instruction_budget.py` enforces the index above and two budgets:
-
-- **This file: 32 KiB**, Codex's default `project_doc_max_bytes` (it reads no further). One line per thing.
-- **Each nested file: under 150k characters**, where Claude Code starts warning. Past that, move detail into the script's or module's own header.
+Every session started in this checkout loads this file whole, and so does every bot under it, since Claude Code reads each parent directory's `CLAUDE.md`. Nested files load on use only. Claude Code reads one when a session opens a file in its folder, if that folder is under where the session started (so bots never do). Codex reads the `AGENTS.md` chain from the root to its start folder within one 32 KiB budget (measured), so a nested file gets only what the files above it leave; tell Codex to read it. `tests/test_instruction_budget.py` enforces the copies, the indexes and both budgets: the chain through each nested file's rules (up to its `## Script reference`) fits in 32 KiB, and each nested file stays under Claude Code's 150k-character warning. Keep one line per thing here; a script's history goes in its own header.
 
 ### Adding library content
 
@@ -285,112 +234,95 @@ Each library category has its own format. Check the category's `README.md` for s
 2. Use YAML frontmatter with `title:` and `description:` fields
 3. Add an H1 heading (`# Title`) matching the frontmatter title — the loader strips it to avoid duplication in composed output
 4. Use `{{BOT_NAME}}`, `{{FLEET_NAME}}`, `{{CLAUDLOBBY_ROOT}}` Jinja2 placeholders where appropriate
-5. Test: `claudlobby --fleet <your-fleet> generate` and verify the content appears in the right bot's CLAUDE.md
+5. Stage a configuration plan in the independent canary root and verify the intended bot's rendered CLAUDE.md before operator activation.
 6. Commit to a branch, PR, review
 
 **Heading levels matter.** The template renders library content inside `##`/`###` sections. The loader runs `_demote_headings` to shift all headings down. An H1 (`#`) in your file becomes H2 in the output. If you start with H3, it becomes H4 — which may be too deep.
 
 ### Adding compositor features
 
-1. Edit Python source in `claudlobby/` (module map: [`claudlobby/CLAUDE.md`](claudlobby/CLAUDE.md))
-2. Run tests: `python3 -m venv .venv && ./.venv/bin/python -m pip install -e '.[dev]'`, then `./.venv/bin/pytest`
-3. Test against your local fleet: `claudlobby --fleet <name> validate` then `generate`
-4. Run `claudlobby --fleet <name> diff` to verify no unintended drift
+1. Edit Python source in `claudlobby/`
+2. In a disposable checkout with private HOME/TMPDIR, install the dev dependencies, prepare resources with `.venv/bin/python tests/prepare_resources.py --disposable-checkout "$PWD"`, then run the affected existing tests (details below).
+3. Test against your local fleet: `claudlobby --fleet <name> config validate` then stage `config plan --release RELEASE_ID` and inspect `config diff PLAN_ID`
+4. Run `claudlobby --fleet <name> config diff PLAN_ID` to verify no unintended rendered drift
 5. Commit to a branch, PR, review
 
-**Read [`documentation/test-suite.md`](documentation/test-suite.md) before trusting a test run.** Run it **unsandboxed**; the suite is **not green** on macOS, so compare a before and an after run on failing test **names**, the **counts** line and the **exit code**; never pipe pytest into grep; quarantine a flaky test (`@pytest.mark.quarantine(issue=<N>)`), never deselect it.
+**Before trusting a test run, read [`documentation/test-suite.md`](documentation/test-suite.md).** Never test from a live fleet root; run unsandboxed; the suite is not green, so compare two separately prepared exports (before, after) on failing test **names**, the **counts** line and the **exit code**; never pipe pytest into grep; quarantine a flaky test (`@pytest.mark.quarantine(issue=<N>)`), never deselect it.
 
-### Adding or modifying lib/ scripts
+### Adding or modifying claudlobby/_runtime_scripts/ scripts
 
-Read [`lib/CLAUDE.md`](lib/CLAUDE.md) first: the authoring rules (the bash 3.2 one also covers `library/**/*.sh`, gated by `tests/test_bash_parse.py`) and each script's full reference. A new script gets one line in the index above; its detail goes in its own header.
+Read [`claudlobby/_runtime_scripts/CLAUDE.md`](claudlobby/_runtime_scripts/CLAUDE.md) first: the authoring rules and each script's full reference. Two rules reach beyond it: no apostrophes in comments inside `$( )` (bash 3.2; `tests/test_bash_parse.py` also checks `library/**/*.sh`), and an empty roster must never license a write or delete: there use `declared_bots_strict`, never `parse_fleet_bots` or `bot_in_fleet` (#1146). A new script gets one line in the index above; its detail goes in its own header.
 
 ### Validating changes to how a bot behaves — MANDATORY
 
-Any change that affects **how a bot behaves at runtime** (lib/ supervision & observability scripts, hooks, skills, protocols, guardrails, principles, composed `bot.conf` env) must be **empirically validated** before merge: unit tests prove composition, only running the code proves behavior. **Deliver** → **add config** in `fleet.yaml` → **recompose** (`claudlobby --fleet <fleet> generate`, and confirm it landed) → **observe** the real behavior (`bash lib/validate-bot-change.sh` for observability events; otherwise `lib/spin-up-bot.sh`, drive the path, watch `claudlobby events --bot <bot>`). **Cite the observation in the PR body**: claimed evidence is not evidence. Ground a fixture for an externally produced shape in a **live capture**, committing its shape but never its identifiers. This gate proves the code, not the rollout: canary a fleet-wide framework change on one production bot first (the `canary-rollout` protocol). Full text: [`documentation/validating-bot-changes.md`](documentation/validating-bot-changes.md).
+Any change that affects **how a bot behaves at runtime** (claudlobby/_runtime_scripts/ supervision & observability scripts, hooks, skills, protocols, guardrails, principles, composed `bot.conf` env) must be **empirically validated** before merge: unit tests prove composition, only running the code proves behavior. **Deliver** → **add config** to the canary's `fleet.yaml` → **stage it in an independent canary root** (`host setup`, `config plan --release RELEASE_ID`, `config diff PLAN_ID`; never a production root) → **observe** the real behavior (`bash harness/validate-bot-change.sh` for observability events; otherwise drive the path with the canary's CLI and watch `event list --bot BOT`). **Cite the observation in the PR body**: claimed evidence is not evidence. Ground a fixture for an externally produced shape in a **live capture**, never in the producer's source, committing its shape but never its identifiers. This gate proves the code, not the rollout: separately, the manager validates an independent canary root before coordinated production activation by default (skip for single-bot, product-repo or non-runtime work; the `canary-rollout` protocol). Full text: [`documentation/validating-bot-changes.md`](documentation/validating-bot-changes.md).
 
 ### Validating changes to the onboarding path — MANDATORY
 
-Any change to **what a brand-new user is told to run** — `README.md`, `documentation/getting-started.md`, `.claude/skills/setup/SKILL.md`, `lib/setup-system`, `lib/setup-fleet`, `fleet.yaml.seed`, `.env.seed.example` — must be validated **on a cold host**, not from your checkout (#947): **export, do not clone**; **scrub the environment first**; **run the documented commands verbatim**; **log every exploration event** and report the count; **stop at the credential gate**. `tests/test_cold_start_contract.py` is a floor, not a substitute. **Cite the cold run in the PR body.** Procedure: [`documentation/validating-cold-start.md`](documentation/validating-cold-start.md).
+Any change to **what a brand-new user is told to run** — `README.md`, `documentation/getting-started.md`, `.claude/skills/setup/SKILL.md`, `claudlobby host setup`, `fleet.yaml.seed`, `.env.seed.example` — must be validated **on a cold host**, not from your checkout (#947): **export, do not clone**; **scrub the environment first**; **run the documented commands verbatim**; **log every exploration event** and report the count; **stop at the credential gate**. `tests/test_cold_start_contract.py` is a floor, not a substitute. **Cite the cold run in the PR body.** Procedure: [`documentation/validating-cold-start.md`](documentation/validating-cold-start.md).
 
 ### Never hand-edit generated output
 
-Files in `runtime/bots/<name>/` are generated by `claudlobby generate`. Hand-edits will be overwritten on the next generate. To change a bot's config:
+Files in `runtime/bots/<name>/` are composed from a configuration plan. Hand-edits are overwritten by activation. To change a bot's config:
 
 1. Edit `fleet.yaml` (fleet-level config) or `library/<category>/` (content)
-2. Re-run `claudlobby generate`
-3. If the bot drifted during a session (`claudlobby diff` shows changes), use `claudlobby promote` to extract the drift back into library
+2. Stage `claudlobby config plan --release RELEASE_ID`, inspect `config diff PLAN_ID`, then have the operator run `host activate PLAN_ID --install-directory PATH`
+3. If the bot drifted during a session (`claudlobby config diff --bot <name>` shows changed files), review the changes and edit their authored source in `library/`
 
 ## Key Commands
 
 ```bash
 # Composition
-claudlobby validate                    # check fleet.yaml against library
-claudlobby generate [--bot <name>]     # compose runtime/bots/ from fleet.yaml (or one bot)
-claudlobby host-timers                 # compose host-global timer units from system.yaml
-claudlobby diff                        # show drift between runtime and generate
-claudlobby promote <name>              # extract bot drift back into library
-claudlobby list-library                # show available building blocks
+claudlobby config validate  # check fleet.yaml against library
+claudlobby config plan --release <RELEASE_ID>  # stage all declared host fleets
+claudlobby config diff [<PLAN_ID>]  # rendered drift, or a staged plan's paths and digests
+claudlobby host activate <PLAN_ID> --install-directory <PATH>  # operator applies the staged host
+claudlobby library list  # available building blocks
+claudlobby bot create --interactive  # author a bot; stage and activate separately
 
 # Operations
-claudlobby status [--bot <name>]       # fleet health dashboard, or one bot in detail
-claudlobby doctor [--switches]         # pre-flight diagnostic; --switches: every switch and the line that flips it
-claudlobby creds-reconcile             # declared vs stored vs equipped credentials
-claudlobby freshbox                    # fresh-box self-containment audit (--strict, --bot, --reap)
-claudlobby report-back [--since 24h]   # the fleet's reports, from the plane
-claudlobby uptime                      # per-bot uptime, MTBR, restart-rate
-claudlobby events                      # the fleet's events from the plane (rc 3 when it cannot answer)
-claudlobby plane samples host.load --since 2h  # one metric family for one subject over a window (read-only)
-claudlobby workstreams [list|show <id>] # the fleet's workstream registry, from the plane
-claudlobby task nudge <task-id> ["why"] # record a nudge on one open task and ask its manager to act
-claudlobby task recheck --fleet <F>    # ask each manager to act on their stale rows (--dry-run)
-claudlobby checkins [--summary] [--since 7d] [--json]  # check-in decisions and their dispatch outcomes
-claudlobby brief --bot <name> [--json|--ack]  # one read door over fleet state for a bot; --ack advances its report cursor
-claudlobby warm-cache                  # pre-download npx + uvx packages for MCP servers
-claudlobby move-bot <bot> --to <fleet> # move a bot between fleets
+claudlobby bot start <bot>  # start a declared bot through the lifecycle owner
+claudlobby fleet start  # enroll and start the selected fleet's bots
+claudlobby fleet reconcile  # audit the fleet's supervision state
+claudlobby fleet status  # fleet health dashboard
+claudlobby bot status <name>  # one bot in detail
+claudlobby host doctor [--switches]  # pre-flight diagnostic; --switches: every switch and its arming line
+claudlobby host credentials reconcile  # declared vs stored vs equipped credentials
+claudlobby config validate --runtime  # self-containment audit (--strict, --bot)
+claudlobby host supervision reap-orphans --dry-run  # stale supervision units; --apply removes
+claudlobby fleet reports list [--since <RFC3339>]  # the fleet's reports, from the plane
+claudlobby fleet reports ack --through <ACK_CURSOR> --request-id <UUID>  # explicit report acknowledgement
+claudlobby fleet uptime  # per-bot uptime, MTBR, restart rate
+claudlobby event list  # the fleet's events (rc 3 when the plane cannot answer)
+claudlobby workstream list  # the fleet's workstream registry
+claudlobby brief --bot <name> [--json] # one read door over fleet state for a bot
+claudlobby host cache warm  # pre-download npx + uvx MCP packages
+claudlobby bot move <bot> --to <fleet> # move a bot between fleets
 
-# Scaffolding
-claudlobby new-bot                     # interactive bot scaffolding
-claudlobby new-skill                   # scaffold a new skill directory
-claudlobby new-guardrail               # scaffold a new guardrail file
+# A manager's acts on one open task (#1481), and the check-in
+claudlobby --json task withdraw TASK_ID --reason "…" --request-id UUID  # terminal withdrawal
+claudlobby --json task escalate TASK_ID --question "…" --request-id UUID  # non-terminal: ask a human
+claudlobby --json task nudge TASK_ID --reason TEXT --request-id UUID 
+claudlobby --fleet <F> task recheck --request-id UUID [--dry-run]  # ask the manager about due work
+claudlobby --json --fleet F checkin <list|show> [...]  # check-in decisions and outcomes
+claudlobby --json --fleet F checkin record --file FILE --request-id UUID [--dry-run]  # commit before acting
+claudlobby checkin selection <verify|focus-refs> FILE  # offline selection checks
 
-# One-time migrations from legacy layouts
-claudlobby env-migrate                 # .env files into fleet structure
-claudlobby data-migrate                # bot data directories
-claudlobby cron-migrate                # crontab entries to new paths
-claudlobby memory-migrate              # ~/.claude/projects/ memory into per-bot dirs
-claudlobby lessons-migrate             # library/lessons/ into the Claudron vault (dry-run by default)
+# Scaffolding and one-time migrations (see each --help)
+claudlobby library create --kind <skill|guardrail>
+claudlobby migration <env|data|cron|memory|lessons|workstreams>
+
+# After an unplanned reboot — RUN THIS BEFORE RESCUING ANYTHING
+claudlobby/_runtime_scripts/selfstart-snapshot.sh  # how many bots self-started (#1002)
 
 # Testing (the venv is required — PEP 668 refuses a bare install on Homebrew/Debian)
 python3 -m venv .venv
 ./.venv/bin/python -m pip install -e '.[dev]'
-./.venv/bin/pytest                     # run test suite (unsandboxed; baseline is not green)
+./.venv/bin/pytest  # run test suite (unsandboxed; baseline is not green)
 ```
 
-Use `--fleet <name>` for overlay mode: `claudlobby --fleet <your-fleet> generate`
-
-### Fleet operations (lib/ scripts)
-
-```bash
-# Bot lifecycle
-lib/spin-up-bot.sh <bot-dir>           # enroll + start (idempotent)
-lib/reconcile-fleet.sh <fleet>         # audit fleet supervision state
-lib/reconcile-fleet.sh <fleet> --enroll # fix orphan bots
-
-# A manager's acts on ONE open task (#1481)
-lib/task-act.sh withdraw <task-id> --reason "…"   # retire a dispatch nobody will answer (terminal)
-lib/task-act.sh escalate <task-id> "<question>"   # raise it for a human (NON-terminal: the task stays open)
-
-# Maintenance
-lib/log-rotate-fleet.sh --fleet <name> # rotate all bot logs
-lib/git-pull-all.sh <projects-dir>     # pull all repos in a directory
-lib/disk-monitor.sh                    # check disk usage, alert if high
-lib/fleet-memory-check.sh              # fleet memory planning and monitoring
-lib/check-npx-cache.sh                # verify npx cache state
-
-# After an unplanned reboot — RUN THIS BEFORE RESCUING ANYTHING
-lib/selfstart-snapshot.sh             # how many bots self-started (#1002 measurement)
-```
+Use `--fleet <name>` for fleet reads and authoring. Configuration plans and activation cover the whole host; see `canary-rollout` for isolated validation.
 
 ## Python Package Structure
 
-The module map is in [`claudlobby/CLAUDE.md`](claudlobby/CLAUDE.md). Start at `__main__.py` → `commands/` (the CLI), `config.py` (`fleet.yaml`), `composer.py` (generation), `loader.py`, `validator.py`, `paths.py`, `switches.py` and `plane/` (reference: `documentation/architecture/observable-plane.md`).
+The module map (every module, what it owns and the rules behind it) is in [`documentation/architecture/module-map.md`](documentation/architecture/module-map.md). Where to start: `__main__.py` → `commands/` (the CLI), `config.py` (`fleet.yaml` parsing), `composer.py` (generation), `loader.py` (library loading), `validator.py`, `paths.py`, `switches.py` (the switch registry), and `plane/` (the observable plane; reference: `documentation/architecture/observable-plane.md`).

@@ -5,7 +5,7 @@ description: How to run an evaluation that can change a decision — target, bat
 
 # Eval Workflow
 
-An eval exists to *change a decision*. If no result would change what you ship, do not run it — you are buying a number, not an answer. This protocol is the shape of an eval that earns its cost, generalized from the #716/#729 token-efficiency work and implemented by `lib/ab-comms-eval.sh` + `lib/ab-comms-verdict.py`.
+An eval exists to *change a decision*. If no result would change what you ship, do not run it — you are buying a number, not an answer. This protocol is the shape of an eval that earns its cost, generalized from the #716/#729 token-efficiency work and implemented by `harness/ab-comms-eval.sh` + `harness/ab-comms-verdict.py`.
 
 The discipline in one line: **decide what would convince you before you look.**
 
@@ -38,7 +38,7 @@ Battery content is **ratified before the run**, not tuned after. A battery edite
 
 ### Baseline
 
-The control arm, run under conditions identical to the treatment in everything except the target. In the #729 harness this is two bots composed by the *real* `claudlobby generate`, differing only by one line in `fleet.yaml`.
+The control arm, run under conditions identical to the treatment in everything except the target. In the #729 harness this is two bots composed by the real private `harness/compose.py` entry through the same compositor owner, differing only by one line in `fleet.yaml`.
 
 **Pair the runs.** Compare treatment against control *within* a task and rep, then aggregate the paired deltas. Unpaired comparison lets task-to-task variance swamp the effect.
 

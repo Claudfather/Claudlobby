@@ -11,8 +11,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-# shellcheck source=../lib/lib-common.sh
-. "$REPO_DIR/lib/lib-common.sh"
+# shellcheck source=../claudlobby/_runtime_scripts/lib-common.sh
+. "$REPO_DIR/claudlobby/_runtime_scripts/lib-common.sh"
 
 passed=0
 failed=0

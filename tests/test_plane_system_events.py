@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.plane_setup import initialize_plane
+
 from claudlobby.plane.contracts import ContractViolation, FIELD_POLICY
 from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import emit
@@ -45,12 +47,14 @@ def test_caller_supplied_severity_is_a_contract_violation(tmp_path: Path):
 
 
 def test_known_token_gets_registry_stamped_severity(tmp_path: Path):
+    initialize_plane(tmp_path)
     assert SYSTEM_EVENT_SEVERITY["daemon_started"] == "notice"
     emit(tmp_path, _sys("daemon_started"))
     assert _row(tmp_path, "daemon_started")["severity"] == "notice"
 
 
 def test_unknown_token_ingests_with_null_severity(tmp_path: Path):
+    initialize_plane(tmp_path)
     emit(tmp_path, _sys("brand_new_machinery_event"))
     row = _row(tmp_path, "brand_new_machinery_event")
     assert row is not None, "F19: an unknown token must INGEST, never vanish"
@@ -58,6 +62,7 @@ def test_unknown_token_ingests_with_null_severity(tmp_path: Path):
 
 
 def test_overcap_data_truncates_with_flag_never_rejects(tmp_path: Path):
+    initialize_plane(tmp_path)
     cap = FIELD_POLICY[("system", "data")]["cap"]
     emit(tmp_path, _sys("big_diag", data={"blob": "x" * (cap + 100)}))
     row = _row(tmp_path, "big_diag")
@@ -68,6 +73,7 @@ def test_overcap_data_truncates_with_flag_never_rejects(tmp_path: Path):
 
 
 def test_undercap_data_stored_whole_and_unflagged(tmp_path: Path):
+    initialize_plane(tmp_path)
     emit(tmp_path, _sys("small_diag", data={"n": 3}))
     row = _row(tmp_path, "small_diag")
     assert row["detail_truncated"] == 0

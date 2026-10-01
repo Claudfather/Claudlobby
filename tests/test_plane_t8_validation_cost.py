@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.plane_setup import initialize_plane
+
 from claudlobby.plane import emit_api
 from claudlobby.plane.contracts import ContractViolation, FIELD_POLICY
 from claudlobby.plane.db import connect, db_path
@@ -61,12 +63,14 @@ def test_communication_validates_twice_by_ruling(tmp_path, monkeypatch):
     communications is load-bearing — capture LAUNDERED a malformed payload
     (list-of-pairs, privacy='bogus') into a committed row when skipped. The
     double pass is the price of the capture rewrite."""
+    initialize_plane(tmp_path)
     calls = _counting_validate(monkeypatch)
     emit(tmp_path, _comm())
     assert calls["n"] == 2
 
 
 def test_untransformed_task_validates_once(tmp_path, monkeypatch):
+    initialize_plane(tmp_path)
     _arm_full(tmp_path)                      # full mode: capture is identity
     calls = _counting_validate(monkeypatch)
     emit(tmp_path, _task(summary="kept whole in full mode"))
@@ -74,12 +78,14 @@ def test_untransformed_task_validates_once(tmp_path, monkeypatch):
 
 
 def test_metadata_task_without_content_validates_once(tmp_path, monkeypatch):
+    initialize_plane(tmp_path)
     calls = _counting_validate(monkeypatch)
     emit(tmp_path, _task(summary=None))      # nothing for capture to drop
     assert calls["n"] == 1
 
 
 def test_transformed_task_still_validates_twice(tmp_path, monkeypatch):
+    initialize_plane(tmp_path)
     _opt_out_metadata(tmp_path)
     calls = _counting_validate(monkeypatch)
     emit(tmp_path, _task(summary="dropped by metadata mode"))
@@ -98,6 +104,7 @@ def test_default_full_task_validates_once_because_capture_changes_nothing(
     authored summary is kept, so capture returns the INPUT OBJECT ITSELF and
     the second validation pass is skipped — the T8 identity contract paying off
     on what is now the common path, not the exceptional one."""
+    initialize_plane(tmp_path)
     calls = _counting_validate(monkeypatch)
     emit(tmp_path, _task(summary="kept by the default"))
     assert calls["n"] == 1
@@ -130,6 +137,7 @@ def test_broken_capture_config_still_raises_before_any_db(tmp_path):
 
 
 def test_metadata_comm_still_drops_body_with_proof(tmp_path):
+    initialize_plane(tmp_path)
     _opt_out_metadata(tmp_path)
     emit(tmp_path, {**_comm(body="secret"), "fleet": "opted-out"})
     conn = connect(db_path(tmp_path))

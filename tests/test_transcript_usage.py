@@ -1,4 +1,4 @@
-"""Unit tests for lib/transcript-usage.py — per-session token accounting from
+"""Unit tests for the shared transcript-accounting owner, including the
 Claude Code transcripts (the prize-sizing instrument for the token-efficiency
 comms protocol, #716 / #729 stage A).
 
@@ -14,9 +14,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from tests.conftest import load_lib_module, write_jsonl
+from tests.conftest import write_jsonl
+from claudlobby import transcript_usage as tu
 
-tu = load_lib_module("transcript-usage")
 
 MODEL = "claude-opus-4-8"
 
@@ -155,6 +155,15 @@ class TestIterationsNotDoubleCounted:
         assert r.output_tokens == 8  # NOT 16
         assert r.input_tokens == 10  # NOT 20
 
+    def test_repeated_message_id_counts_flat_usage_once_within_session(self, tmp_path):
+        first = _turn({"input_tokens": 7, "output_tokens": 3}, [{"type": "text", "text": "a"}])
+        first["message"]["id"] = "msg-one"
+        second = json.loads(json.dumps(first))
+        second["message"]["content"] = [{"type": "text", "text": "b"}]
+        parsed = tu.parse_file(str(_write(tmp_path, [first, second])))
+        assert parsed.main.turns == 1 and parsed.main.input_tokens == 7
+        assert parsed.duplicate_messages == 1 and parsed.conflicting_duplicates == 0
+
 
 class TestRobustness:
     def test_non_assistant_lines_ignored(self, tmp_path):
@@ -221,6 +230,30 @@ class TestCommsShare:
         assert r.comms_blocks == 0
         assert r.comms_chars == 0
 
+    def test_canonical_writes_count_but_reads_and_setup_do_not(self, tmp_path):
+        outbound = [
+            'claudlobby --json message send --to worker --text "Please check" --request-id UUID',
+            'claudlobby --root /tmp/root --fleet demo --json message reply msg_1 --text "Done" --request-id UUID',
+            'claudlobby --json fleet reports submit --status completed --summary "Done" --request-id UUID',
+            *(f'claudlobby --json assignment {verb} asg_1 --request-id UUID'
+              for verb in ("deliver", "progress", "block", "return", "complete", "fail")),
+        ]
+        controls = [
+            'claudlobby --json message show msg_1',
+            'claudlobby --json assignment accept asg_1 --request-id UUID',
+            'claudlobby --json task admit --title "New work" --request-id UUID',
+            'claudlobby --json task assign task_1 --bot worker --request-id UUID',
+            'claudlobby message send --help',
+            'echo "claudlobby --json message send --to worker --text quoted"',
+        ]
+        row = _turn({"input_tokens": 1}, [
+            {"type": "tool_use", "name": "Bash", "input": {"command": command}}
+            for command in outbound + controls
+        ])
+        r = tu.parse_file(str(_write(tmp_path, [row]))).main
+        assert r.comms_blocks == len(outbound)
+        assert r.comms_chars == sum(len(command) for command in outbound)
+
 
 class TestAggregation:
     def test_add_combines_across_files(self, tmp_path):
@@ -229,6 +262,65 @@ class TestAggregation:
         agg = a + b
         assert agg.input_tokens == 150  # 100 + 50
         assert agg.turns == 2
+
+
+class TestSelectedCoverage:
+    """An idle bot's complete scan is observed zero; an unreadable source is not."""
+
+    def _fleet(self, tmp_path, *bots):
+        from types import SimpleNamespace
+
+        fleet = SimpleNamespace(name="f", bots={b: SimpleNamespace(account=b) for b in bots},
+                                accounts={b: str(tmp_path / "acct" / b) for b in bots})
+        paths = SimpleNamespace(root=tmp_path, bot_runtime=lambda b: tmp_path / "runtime" / b)
+        return fleet, paths
+
+    def _window(self):
+        from datetime import datetime, timedelta, timezone
+
+        end = datetime.now(timezone.utc)
+        return end - timedelta(hours=24), end
+
+    def test_idle_directory_is_observed_zero_and_missing_is_unavailable(self, tmp_path):
+        import os
+        from claudlobby.isolation import transcript_slug
+
+        fleet, paths = self._fleet(tmp_path, "idle", "gone")
+        directory = (tmp_path / "acct" / "idle" / "projects"
+                     / transcript_slug(paths.bot_runtime("idle")))
+        directory.mkdir(parents=True)
+        old = _write(directory, [_ROW1], "old.jsonl")
+        os.utime(old, (0, 0))
+        since, until = self._window()
+        idle = tu.collect_bot_usage(paths, fleet, "idle", since, until)
+        assert idle["coverage"]["status"] == "observed"
+        assert idle["coverage"]["issues"] == []
+        assert idle["coverage"]["older_files_excluded_by_mtime"] == 1
+        assert idle["usage"]["input_tokens"] == 0 and idle["usage"]["turns"] == 0
+        gone = tu.collect_bot_usage(paths, fleet, "gone", since, until)
+        assert gone["coverage"]["status"] == "unavailable"
+        fleet_row = tu.collect_fleet_usage(paths, fleet, since, until)
+        assert fleet_row["coverage"]["status"] == "partial"
+        assert fleet_row["coverage"]["bots_observed"] == 1
+
+    def test_unavailable_usage_refuses_instead_of_zero(self, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+        import pytest
+        from claudlobby.command_result import CommandFailure
+        from claudlobby.commands import checkin, usage_read
+        from claudlobby import activation_state
+
+        fleet, paths = self._fleet(tmp_path, "gone")
+        selected = {"release_id": "r1"}
+        monkeypatch.setattr(checkin, "_scope", lambda _args: (
+            SimpleNamespace(paths=paths, fleet=fleet), None, selected, None))
+        monkeypatch.setattr(activation_state, "read_selection", lambda _root: selected)
+        for command, extra in (("fleet.usage", {}), ("bot.usage", {"bot_id": "gone"})):
+            with pytest.raises(CommandFailure) as caught:
+                usage_read.dispatch(SimpleNamespace(since="24h", public_command=command, **extra))
+            assert caught.value.error.code == "unavailable"
+            assert caught.value.data["usage"] is None
+            assert caught.value.data["coverage"]["status"] == "unavailable"
 
 
 class TestCli:

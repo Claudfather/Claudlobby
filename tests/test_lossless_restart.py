@@ -23,8 +23,11 @@ import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
-LIB_COMMON = REPO_ROOT / "lib" / "lib-common.sh"
+LIB_COMMON = REPO_ROOT / "claudlobby/_runtime_scripts" / "lib-common.sh"
+START_BOT = REPO_ROOT / "claudlobby/_runtime_scripts" / "start-bot.sh"
 
 
 def _run(snippet: str, *args: str) -> tuple[str, int]:
@@ -179,6 +182,43 @@ class TestSessionResumeCapability:
         out, rc = self._status("/someplugin:session resume --auto", config_dir=cfg)
         assert rc == 1, "an unresolvable command must not be injected"
         assert out == "provider-absent:someplugin", "the skip must name the reason"
+
+    @pytest.mark.parametrize("provider, injected", [(None, False), ("someplugin", True)])
+    def test_startup_resume_capability_has_no_errtrap_and_sends_only_when_available(
+            self, tmp_path, provider, injected):
+        # Exercise the real startup branch under macOS Bash 3.2 errtrace.
+        # Guarding the assignment with an outer if still fired ERR inside it.
+        source = START_BOT.read_text()
+        start = 'if should_resume_session "$_SESSION_MD" "$_RESUME_MAX_AGE_S"; then'
+        branch = start + source.split(start, 1)[1].split('if [ -n ', 1)[0]
+        session = _session_md(tmp_path, "session.md", _iso(datetime.now(timezone.utc)))
+        bot = tmp_path / "bot"
+        bot.mkdir()
+        cfg = self._plugin_home(tmp_path, provider)
+        sends, errors, log = (tmp_path / name for name in ("sends", "errors", "boot.log"))
+        script = '''
+. "$1"
+set -Eeuo pipefail
+trap 'printf "ERR\\n" >> "$5"' ERR
+SEND_MARKER="$4"
+pane_send_verified() { printf "send\\n" >> "$SEND_MARKER"; }
+inject_stamp() { printf stamp; }
+emit_fleet_event() { :; }
+_SESSION_MD="$2"; _RESUME_MAX_AGE_S=86400
+_RESUME_CMD="/someplugin:session resume --auto"
+BOT_DIR="$3"; LOG="$6"; TMUX_SOCKET=x; TMUX_SESSION=x
+_PANE_READY_TICKS_BOOT=1
+''' + branch
+        result = subprocess.run(
+            ["/bin/bash", "-c", script, "_", str(LIB_COMMON), str(session),
+             str(bot), str(sends), str(errors), str(log)],
+            capture_output=True, text=True, timeout=15,
+            env={"PATH": "/usr/bin:/bin", "CLAUDE_CONFIG_DIR": cfg},
+        )
+        assert result.returncode == 0, result.stderr
+        assert not errors.exists(), errors.read_text() if errors.exists() else ""
+        assert sends.exists() is injected
+        assert ("RESUME — injecting" if injected else "RESUME SKIP") in log.read_text()
 
     def test_empty_command_disables_injection(self, tmp_path):
         cfg = self._plugin_home(tmp_path, "someplugin")

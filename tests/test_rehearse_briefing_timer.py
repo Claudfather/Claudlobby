@@ -5,11 +5,13 @@ never in a per-bot event file. The predicate is unit-tested here; the
 rehearsal itself needs a user systemd."""
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 import subprocess
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-REHEARSAL = REPO / "lib" / "rehearse-briefing-timer.sh"
+REHEARSAL = REPO / "harness" / "rehearse-briefing-timer.sh"
 
 
 def _predicate() -> str:
@@ -20,7 +22,7 @@ def _predicate() -> str:
 
 def _landed(root: Path, fleet: str, bot: str) -> bool:
     if not (root / "lib").exists():
-        (root / "lib").symlink_to(REPO / "lib")
+        (root / "lib").symlink_to(REPO / "claudlobby/_runtime_scripts")
     r = subprocess.run(["bash", "-c", _predicate() + f'\nbriefing_event_landed "$1" "$2" "$3"', "_",
                         str(root), fleet, bot], capture_output=True, text=True, timeout=60)
     return r.returncode == 0
@@ -30,6 +32,7 @@ def _land(root: Path, fleet: str, bot: str, etype: str, source: str) -> None:
     from claudlobby.plane.emit_api import emit_batch
 
     (root / "state" / "plane").mkdir(parents=True, exist_ok=True)
+    initialize_plane(root)
     out = emit_batch(root, [{"event_type": "system", "emitter": source, "fleet": fleet,
                              "occurred_at": "2026-08-06T12:40:00Z", "source_ref": f"fleet-events:sha:{etype:>032}",
                              "payload": {"event": etype, "subject_kind": "actor", "subject": f"bot:{fleet}/{bot}",

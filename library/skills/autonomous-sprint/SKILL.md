@@ -116,7 +116,7 @@ For each issue, sequentially:
 
 1. **Dispatch engineer** via `/dispatch`:
    - Include issue URL, repo, and relevant context from the mission doc
-   - Engineer: engage (first `[BOTREPORT]` row is the ack) → branch → implement → test → /simplify → PR → report back
+   - Engineer: engage (`assignment accept` is the ack) → branch → implement → test → /simplify → PR → report back
 
 2. **On engineer completion**: immediately dispatch a reviewer
    - If approved: verify CI green → merge → record to the plane
@@ -128,11 +128,13 @@ For each issue, sequentially:
 
 4. **Between issues**: check the engineer's reported state — NOT a context
    percentage, which no bot can measure (`context-management`)
-   - If it reported `context-degraded`, or shows ~3+ completed rows in
-     `claudlobby --fleet "$FLEET_NAME" report-back --bot <b> --status completed
-     --since 24h`: restart the bot before the next issue. **Keep `--fleet`** —
-     the plane's rows are per fleet, and `--fleet` is what scopes the query
-     (#1216)
+   - If it reported `context-degraded`, or shows ~3+ completed reports in a
+     verified 24-hour window, restart the bot before the next issue. Read
+     `claudlobby --fleet "$FLEET_NAME" --json fleet reports list --bot BOT
+     --since "$CUTOFF"`, deriving `CUTOFF` as an offset-bearing RFC3339
+     instant 24 hours before now. Inspect `ok`, follow every `next_cursor`,
+     and count `completed` statuses. Keep `--fleet` for the intended fleet;
+     unreadable or incomplete pages are unknown, not zero.
    - Otherwise: dispatch next issue
 
 **Step 8: Sprint summary**

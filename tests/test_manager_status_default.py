@@ -1,23 +1,22 @@
-"""#2010 — the `status` skill ships with every composed manager by default.
+"""#2010 — the `status` skill ships with the fleet's manager by default.
 
 The manager's readout for the human (`library/skills/status`) reached a bot
 only when its fleet.yaml listed it. It is now a ROLE default on `skills`
 (`defaults.REGISTRY["skills"].roles`), keyed to the `manager` role that
-`FleetConfig.manager_bots()` resolves: every manager, a coordinator whose
-reports are all managers included. The `leaf-manager` role (the `checkin`
-overlay's) would leave a coordinator out, and the skill's audience is whoever
-answers the human.
+`FleetConfig.manager_bots()` resolves: the fleet's one declared manager, which
+owns intake, routing and follow-up. Teams group workers under it; they never
+declare a second manager.
 
-One fixture carries all three shapes, as the `checkin` default's tests do
-(tests/test_defaults_registry.py): `lead` manages a worker (a leaf manager),
-`coord` manages only `lead` (a coordinator), and `worker-1` manages nobody.
-Names are obviously fake; the repo is public.
+The fixture fleet has that shape: `lead` is the manager (and, with a local
+worker to route, the leaf manager), and `worker-1` manages nobody. Names are
+obviously fake; the repo is public.
 """
 
 from __future__ import annotations
 
 import json
 import shutil
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -26,18 +25,26 @@ from claudlobby import defaults
 from claudlobby.composer import compose_bot, resolve_effective_skills
 from claudlobby.config import load_fleet
 from claudlobby.paths import Paths
-from tests.conftest import install_real_template
+from tests.conftest import install_real_template, make_paths
+from tests.package_fixtures import source_package
 
 LIBRARY = Path(__file__).resolve().parent.parent / "library"
 
-#: The skill's own `tool_grants`, read from its frontmatter at compose time.
+#: The skill's own `tool_grants`, read from its frontmatter at compose time:
+#: the bot's own-context reads, the PR read, and the reply tool.
 STATUS_GRANTS = (
-    "Bash(claudlobby *)",
-    "Bash(gh *)",
+    "Bash(claudlobby --json brief)",
+    "Bash(claudlobby --json fleet inbox)",
+    "Bash(gh pr list *)",
     "mcp__plugin_telegram_telegram__reply",
 )
 
+#: What the skill used to grant. A default that reaches every manager must not
+#: bring a CLI wildcard or a general `gh` beside fleet-ops' exact commands.
+BROAD_GRANTS = ("Bash(claudlobby *)", "Bash(gh *)")
+
 LEAD = "    lead:\n      expertise: [orchestration]\n"
+WORKER = "    worker-1:\n      expertise: [software-engineering]\n"
 
 
 def _edit(fleet_dir: Path, old: str, new: str) -> None:
@@ -54,21 +61,6 @@ def _edit(fleet_dir: Path, old: str, new: str) -> None:
     path.write_text(text.replace(old, new))
 
 
-def _add_coordinator(fleet_dir: Path) -> None:
-    """`coord` manages a team of one, `lead`, who is itself a manager."""
-    _edit(
-        fleet_dir,
-        "  teams:\n    eng:\n      manager: lead\n      workers: [worker-1]\n",
-        "  teams:\n    eng:\n      manager: lead\n      workers: [worker-1]\n"
-        "    top:\n      manager: coord\n      workers: [lead]\n",
-    )
-    _edit(
-        fleet_dir,
-        "  bots:\n    lead:\n",
-        "  bots:\n    coord:\n      expertise: [orchestration]\n    lead:\n",
-    )
-
-
 def _compose(fleet_dir: Path, monkeypatch):
     """Compose every bot of the fixture fleet with the REAL `status` skill,
     so the grants asserted are the ones its frontmatter declares."""
@@ -79,7 +71,7 @@ def _compose(fleet_dir: Path, monkeypatch):
     if not dst.exists():
         shutil.copytree(LIBRARY / "skills" / "status", dst)
     fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-    paths = Paths(root=fleet_dir, fleet_dir=fleet_dir)
+    paths = make_paths(fleet_dir)
     for bot in fleet.bots.values():
         compose_bot(bot, fleet, paths, log=lambda m: None)
     return fleet, paths
@@ -94,20 +86,16 @@ def _equipped(paths: Paths, bot_id: str) -> tuple[bool, list[str]]:
 
 
 class TestTheManagerRoleDefault:
-    def test_every_manager_gets_the_skill_and_its_grants(self, fleet_dir, monkeypatch):
-        _add_coordinator(fleet_dir)
+    def test_the_manager_gets_the_skill_and_its_narrow_grants(self, fleet_dir, monkeypatch):
         fleet, paths = _compose(fleet_dir, monkeypatch)
-        assert fleet.manager_bots() == {"lead", "coord"}
-        # coord is not a leaf manager, so the checkin role would have missed it.
-        assert fleet.leaf_manager_bots() == {"lead"}
-        for bot_id in ("lead", "coord"):
-            assert (
-                "status" not in fleet.bots[bot_id].skills
-            )  # defaulted, never declared
-            linked, allow = _equipped(paths, bot_id)
-            assert linked, f"{bot_id}: .claude/skills/status is not linked"
-            for grant in ("Skill(status)", *STATUS_GRANTS):
-                assert grant in allow, f"{bot_id}: {grant} not granted"
+        assert fleet.manager_bots() == {"lead"}
+        assert "status" not in fleet.bots["lead"].skills  # defaulted, never declared
+        linked, allow = _equipped(paths, "lead")
+        assert linked, "lead: .claude/skills/status is not linked"
+        for grant in ("Skill(status)", *STATUS_GRANTS):
+            assert grant in allow, f"lead: {grant} not granted"
+        for grant in BROAD_GRANTS:
+            assert grant not in allow, f"lead: the status default composed {grant}"
 
     def test_a_worker_is_untouched(self, fleet_dir, monkeypatch):
         # Measured as a DIFFERENCE, not an absence: the worker's settings and
@@ -154,32 +142,35 @@ class TestTheManagerRoleDefault:
 
 
 class TestTheOptOuts:
-    def test_the_fleet_wide_switch_removes_it_from_every_manager(
+    def test_the_fleet_wide_switch_removes_it_from_the_manager(
         self, fleet_dir, monkeypatch
     ):
-        _add_coordinator(fleet_dir)
         _, paths = _compose(fleet_dir, monkeypatch)
-        assert _equipped(paths, "lead")[0] and _equipped(paths, "coord")[0]
+        assert _equipped(paths, "lead")[0]
         _edit(
             fleet_dir,
             "  accounts:\n",
             "  system_defaults:\n    skills: false\n\n  accounts:\n",
         )
         _, paths = _compose(fleet_dir, monkeypatch)
-        for bot_id in ("lead", "coord"):
-            linked, allow = _equipped(paths, bot_id)
-            assert not linked, f"{bot_id}: still linked after the fleet opted out"
-            assert "Skill(status)" not in allow
+        linked, allow = _equipped(paths, "lead")
+        assert not linked, "lead: still linked after the fleet opted out"
+        assert "Skill(status)" not in allow
 
-    def test_a_per_bot_switch_removes_it_from_that_bot_only(
-        self, fleet_dir, monkeypatch
-    ):
-        _add_coordinator(fleet_dir)
+    def test_the_managers_own_switch_removes_it(self, fleet_dir, monkeypatch):
         _edit(fleet_dir, LEAD, LEAD + "      system_defaults:\n        skills: false\n")
         _, paths = _compose(fleet_dir, monkeypatch)
         linked, allow = _equipped(paths, "lead")
         assert not linked and "Skill(status)" not in allow
-        assert _equipped(paths, "coord")[0], (
+
+    def test_another_bots_switch_does_not_reach_the_manager(
+        self, fleet_dir, monkeypatch
+    ):
+        # The per-bot switch is that bot's own: set on the worker, the
+        # manager's default still composes.
+        _edit(fleet_dir, WORKER, WORKER + "      system_defaults:\n        skills: false\n")
+        _, paths = _compose(fleet_dir, monkeypatch)
+        assert _equipped(paths, "lead")[0], (
             "the opt-out reached a bot that did not ask for it"
         )
 
@@ -219,10 +210,19 @@ class TestTheRegistry:
     def test_status_is_a_manager_role_overlay_and_nothing_else(self):
         assert defaults.resolve("skills") == []
         assert defaults.resolve("skills", (defaults.ROLE_MANAGER,)) == ["status"]
-        # The leaf-manager role alone carries it no further: every leaf manager
-        # is also a manager, and a coordinator is only a manager.
+        # The leaf-manager role alone carries it no further: the leaf manager
+        # is the manager, and a fleet without a local worker has none.
         assert defaults.resolve("skills", (defaults.ROLE_LEAF_MANAGER,)) == []
         assert (LIBRARY / "skills" / "status" / "SKILL.md").is_file()
+
+    def test_the_skill_grants_only_what_it_declares(self):
+        block = (LIBRARY / "skills" / "status" / "SKILL.md").read_text().split("---", 2)[1]
+        grants = tuple(
+            ln.strip().lstrip("-").strip().strip('"')
+            for ln in block.splitlines()
+            if ln.startswith("  - ")
+        )
+        assert grants == STATUS_GRANTS
 
 
 class TestTheDefaultNeedsTheLibraryToProvideIt:
@@ -237,9 +237,15 @@ class TestTheDefaultNeedsTheLibraryToProvideIt:
         monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
         monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
         install_real_template(fleet_dir)
-        # deliberately do NOT copy library/skills/status in
+        # deliberately do NOT copy library/skills/status in, and bind the
+        # package base to the same status-less library: the source package's
+        # own library provides status.
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        paths = Paths(root=fleet_dir, fleet_dir=fleet_dir)
+        paths = Paths(
+            root=fleet_dir,
+            fleet_dir=fleet_dir,
+            package=replace(source_package(), library=fleet_dir / "library"),
+        )
         return fleet, paths
 
     def test_a_library_without_status_gives_the_manager_no_default(self, fleet_dir, monkeypatch):
@@ -252,13 +258,14 @@ class TestTheDefaultNeedsTheLibraryToProvideIt:
 
     def test_a_library_without_status_raises_no_skill_missing_warning(self, fleet_dir, monkeypatch):
         # skill-missing is emitted per effective skill with no library dir
-        # (validator.py). No status in the effective set => nothing to flag.
+        # (validator.py). No status in the effective set => nothing to flag
+        # for it. fleet-ops is universal equipment, not this default.
         fleet, paths = self._compose_without_status(fleet_dir, monkeypatch)
         for bot in fleet.bots.values():
             is_mgr = bot.bot_id in fleet.manager_bots()
             effective = resolve_effective_skills(bot, fleet, paths, is_manager=is_mgr)
             missing = [s for s in effective if paths.find_library_dir("skills", s) is None]
-            assert missing == [], (bot.bot_id, missing)
+            assert "status" not in missing, (bot.bot_id, missing)
 
     def test_with_status_present_the_manager_still_gets_it(self, fleet_dir, monkeypatch):
         # control: the gate does not suppress a default the library provides.

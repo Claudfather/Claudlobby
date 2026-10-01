@@ -54,7 +54,7 @@ class TestResolveCronPath:
 
     def test_found_in_lib(self, tmp_path):
         ctx = _make_ctx(tmp_path)
-        # Create the script in lib/
+        # Create the script in claudlobby/_runtime_scripts/
         script = tmp_path / "lib" / "my-script.sh"
         script.write_text("#!/bin/bash\n")
         result = _resolve_cron_path("/home/user/bots/eng-1/my-script.sh", ctx)
@@ -69,7 +69,7 @@ class TestResolveCronPath:
 
     def test_basename_fallback(self, tmp_path):
         ctx = _make_ctx(tmp_path)
-        # File exists only at basename in lib/
+        # File exists only at basename in claudlobby/_runtime_scripts/
         script = tmp_path / "lib" / "rotate.sh"
         script.write_text("#!/bin/bash\n")
         result = _resolve_cron_path("/home/user/bots/eng-1/scripts/rotate.sh", ctx)

@@ -140,12 +140,11 @@ def scan_tree(tree: Path, skills: Iterable[str]) -> list[Finding]:
     if not tree.is_dir():
         return []
     findings: list[Finding] = []
-    root = tree.resolve()
     for path in sorted(tree.rglob("*.md")):
-        # An AGENTS.md is a symlink to the CLAUDE.md beside it: the same text,
-        # which this walk also reaches under its real name. Reading it twice
-        # would report each of its refs twice.
-        if path.is_symlink() and path.resolve().is_relative_to(root):
+        # An AGENTS.md is a byte-for-byte copy of the CLAUDE.md beside it
+        # (tests/test_instruction_budget.py): the same text, which this walk
+        # also reads under its real name. Reading both reports each ref twice.
+        if path.name == "AGENTS.md" and (path.parent / "CLAUDE.md").is_file():
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
         for lineno, token in iter_refs(text):

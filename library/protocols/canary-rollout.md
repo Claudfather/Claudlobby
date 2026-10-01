@@ -1,6 +1,6 @@
 ---
 title: Canary Rollout
-description: Manager protocol — by default, canary a fleet-wide framework change on one production bot before rolling it to the whole fleet.
+description: Manager protocol — by default, validate a framework release in an independent canary root before coordinated host activation.
 ---
 
 # Canary Rollout
@@ -18,7 +18,7 @@ The throwaway bot runs in a clean, synthetic environment. Production carries sta
 
 Reach for a canary by default when a change to the **Claudfather framework itself** (claudlobby, clauDNA, claudron) goes **live fleet-wide** — where applying it touches or restarts every running bot at once and a bad rollout would hurt the fleet:
 
-- `lib/` supervision & lifecycle scripts (`start-bot.sh`, `keepalive.sh`, restart/reload paths)
+- `claudlobby/_runtime_scripts/` supervision & lifecycle scripts (`start-bot.sh`, `keepalive.sh`, restart/reload paths)
 - The fleet plugin set (adds, removes, marketplace changes)
 - The bridge / dispatch transport
 - Composed `bot.conf` env that every bot sources at startup
@@ -28,10 +28,11 @@ Reach for a canary by default when a change to the **Claudfather framework itsel
 
 A fleet-wide production canary adds no value here — don't spend one:
 
-- **Single-bot changes** — the blast radius is already one bot; that bot *is* the canary.
+- **An individual bot operation under an unchanged release** — the blast radius is already one bot. A composed config change is different: activation currently coordinates the whole host, even when only one bot's source changed.
 - **App-repo (product) work** — shipping a feature or fix to a product repo is not a fleet-wide framework rollout. The product's own tests and deploy gates cover it.
 - **Non-runtime changes** — docs, README, planning files: nothing to drill.
-- **Library content that only re-composes** — a protocol/skill edit that lands on a bot's next `/reload` without a fleet-wide restart. (If you *do* roll it fleet-wide via a restart, the restart is the risk — canary that.)
+
+Library, skill and permission changes use the same staged activation as code. They are not a restart-free exception.
 
 Judgment call in one line: would a bad version of this change hurt more than one running bot at once? Yes → canary. No → ship it.
 
@@ -39,12 +40,12 @@ Judgment call in one line: would a bad version of this change hurt more than one
 
 Once you have decided to canary:
 
-1. **Pick a low-risk canary bot.** A worker, never the manager running the rollout — if the canary wedges, you still want a live hand on the controls. Prefer an idle bot with no WIP (see `safe-worker-restart` — clean pane, clean `git status`, no pending report). A bad canary should cost nothing.
-2. **Deploy to the canary only.** Apply the change and restart/reload that one bot. The rest of the fleet stays on the old path — it is your control group and your fallback.
-3. **Observe / drill it in production.** Watch it do the *real* thing, not a stub: does it boot clean, does the path the change touches actually fire against real config? Don't just confirm the process is up.
-4. **Evidence gate.** Green-light only on **observed behavior + audit evidence** — cite the pane output, the `claudlobby events` row, the `claudlobby uptime` heartbeat row. No evidence, no rollout. If the canary surfaces a bug, **halt**: fix it, re-canary from step 2.
-5. **Flag the human before the fleet-wide switch.** The fleet-wide roll is the committal, hard-to-walk-back step. Surface it — "canary clean on `<bot>`, rolling to the remaining N?" — and get a go before flipping the fleet.
-6. **Roll the rest, then burn in.** Ship to the remaining bots. "Rolled" is not "done" — a slow failure (a leak, a wedged restart on the fourth bot) only shows on the fleet under load. Declare done after the burn-in is quiet.
+1. **Use an independent canary data root.** Declare a small fleet with its own manager, unique bot service labels and host `unit_prefix`. Use separate Plane state and credentials; omit outbound channels unless a throwaway channel is part of the check. Never share a production bot directory or token.
+2. **Assemble the candidate with `host setup`, then stage `config plan --release RELEASE_ID`.** Use the exact sealed CLI returned by setup and an explicit `--root` on every command. Review `config diff PLAN_ID`: every unit, path and restart must belong to the canary. The [getting-started guide](../../documentation/getting-started.md) describes the release inputs and setup commands.
+3. **The operator activates the canary plan** with `host activate PLAN_ID --install-directory PATH` from an external shell. Stage the affected skill, grants and config together, then exercise real delegation and the affected operation. Observe the receiver, command result and durable record; process liveness alone is insufficient.
+4. **Record the exact candidate and results.** Fix observed failures and repeat only the affected checks. Independent-root evidence proves the candidate works there; it does not prove production data migration, Pi timing or another OS's native manager.
+5. **Review production activation separately.** `config plan` and `host activate` currently coordinate the whole host; there is no single-bot composition or activation shortcut. Existing no-restart holds block that production activation, not independent canary work. Honor the operator's rollout authorization and work-in-progress holds.
+6. **Observe the activated host.** Verify the affected paths and selected release after rollout. Retain previous immutable releases for explicit rollback; never repair generated files by hand.
 
 ## Why this exists
 

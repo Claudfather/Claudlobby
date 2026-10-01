@@ -15,14 +15,17 @@ idempotent, so reprocessing a recovered entry classifies as duplicate.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .contracts import ContractViolation, validate_request
+from .queue_paths import SpoolScan, scan_spool, spool_path
 from .ingest import ingest_many  # patched in tests; keep module-level name
 
 MAX_ATTEMPTS = 5
@@ -60,7 +63,7 @@ def _mkdir_fsynced(p: Path, mode: int | None) -> None:
 def spool_dir(root: Path) -> Path:
     state = Path(root) / "state"
     plane = state / "plane"
-    spool = plane / "spool"
+    spool = spool_path(root)
     _mkdir_fsynced(state, None)
     _mkdir_fsynced(plane, 0o700)
     _mkdir_fsynced(spool, 0o700)
@@ -191,50 +194,6 @@ def spool_write(root: Path, finalized_requests: list[dict], error: str) -> Path:
         raise SpoolWriteError(f"db failed ({error}) AND spool failed ({exc})") from exc
 
 
-@dataclass
-class SpoolScan:
-    """One state-bearing enumeration of the spool tree — THE definition the
-    trust panel, `plane status`, and `plane doctor` all consume, so the
-    three surfaces cannot disagree about the same directory (external round
-    4, probed: doctor printed '[ok] spool depth — 0' at rc 0 for the exact
-    tree /api/trust called unreadable). Side-effect-free by construction —
-    pure path joins, never spool_dir()/quarantine_dir(), which mkdir for
-    writer callers. States: "ok" (absent counts as ok — the spool is
-    lazily created, so absence IS zero pending) or "unreadable" (the count
-    lists are withheld: a number from a tree that could not be fully
-    enumerated is the green-zero lie). Name filters mirror the glob
-    patterns they replaced — parity verified externally on APFS and ext4."""
-
-    spool_state: str
-    pending: list[Path]
-    inflight: list[Path]
-    quarantine_state: str
-    quarantined: list[Path]
-
-
-def scan_spool(root: Path) -> SpoolScan:
-    from ..source_state import SOURCE_OK, SOURCE_UNREADABLE, scan_dir
-
-    sp = Path(root) / "state" / "plane" / "spool"
-    probe, entries = scan_dir(sp)
-    if probe.state == SOURCE_UNREADABLE:
-        spool_state, pending, inflight = "unreadable", [], []
-    else:
-        spool_state = "ok"
-        names = entries if probe.state == SOURCE_OK else []
-        pending = sorted(e for e in names if e.name.endswith(".json"))
-        inflight = sorted(e for e in names if ".json.inflight." in e.name)
-    qprobe, qentries = scan_dir(sp / "quarantine")
-    if qprobe.state == SOURCE_UNREADABLE:
-        quarantine_state, quarantined = "unreadable", []
-    else:
-        quarantine_state = "ok"
-        qnames = qentries if qprobe.state == SOURCE_OK else []
-        quarantined = sorted(e for e in qnames if e.name.endswith(".json"))
-    return SpoolScan(spool_state, pending, inflight,
-                     quarantine_state, quarantined)
-
-
 def oldest_spooled_at(paths: list[Path]) -> str | None:
     """Oldest `spooled_at` across pending entries — the one reader of that
     field, shared by the trust panel and the CLI surfaces."""
@@ -251,7 +210,10 @@ def oldest_spooled_at(paths: list[Path]) -> str | None:
 
 def spool_entries(root: Path) -> list[dict]:
     out = []
-    for f in sorted(spool_dir(root).glob("*.json")):
+    scan = scan_spool(root)
+    if scan.spool_state == "unreadable":
+        raise OSError("spool directory is unreadable")
+    for f in scan.pending:
         try:
             data = json.loads(f.read_text())
         except (json.JSONDecodeError, OSError):
@@ -284,6 +246,9 @@ class DrainReport:
     duplicates: int = 0
     quarantined: int = 0
     remaining: int = 0
+    attempted: int = 0  # batches read/validated, not individual facts
+    refused: tuple[str, ...] = ()
+    limited: bool = False
 
 
 def _spool_envelope_problem(data) -> str | None:
@@ -348,19 +313,55 @@ def _recover_stale_inflight(sd: Path) -> None:
     _fsync_dir(sd)
 
 
-def drain(root: Path, conn: sqlite3.Connection, host_uid: str) -> DrainReport:
+def _unclaim(claimed: Path, original: Path) -> None:
+    """Preserve both nodes on a collision; an inflight claim remains visible."""
+    try:
+        os.link(claimed, original)
+    except FileExistsError:
+        return
+    claimed.unlink()
+    _fsync_dir(original.parent)
+
+
+def drain(root: Path, conn: sqlite3.Connection, host_uid: str, *,
+          approved: dict[str, str] | None = None, max_batches: int | None = None,
+          deadline: float | None = None) -> DrainReport:
+    """Replay through the existing ingest owner. Optional activation bounds admit
+    only reviewed filename/content hashes and stop STARTING work at the deadline;
+    an atomic ingest/fsync already in progress is never reported cancelled.
+    """
     sd = spool_dir(root)
     _recover_stale_inflight(sd)
     ingested = duplicates = quarantined = 0
+    attempted, refused, limited = 0, [], False
     claims: list[tuple[str, Path]] = []
-    for f in sorted(sd.glob("*.json")):
+    candidates = sorted(sd.glob("*.json"))
+    if approved is not None:
+        refused.extend(sorted(set(approved) - {f.name for f in candidates}))
+    for f in candidates:
+        if approved is not None and f.name not in approved:
+            continue
+        if (max_batches is not None and len(claims) >= max_batches
+                or deadline is not None and time.monotonic() >= deadline):
+            limited = True
+            break
         claimed = _claim(f)
         if claimed is not None:
             claims.append((f.name, claimed))
     entries = []
     for orig_name, claimed in claims:
+        if deadline is not None and time.monotonic() >= deadline:
+            _unclaim(claimed, sd / orig_name)
+            limited = True
+            continue
+        attempted += 1
         try:
-            data = json.loads(claimed.read_text())
+            content = claimed.read_bytes()
+            if approved is not None and hashlib.sha256(content).hexdigest() != approved[orig_name]:
+                _unclaim(claimed, sd / orig_name)
+                refused.append(orig_name)
+                continue
+            data = json.loads(content)
         except (json.JSONDecodeError, OSError) as exc:
             quarantine_entry(root, claimed, f"malformed spool file: {exc}", as_name=orig_name)
             quarantined += 1
@@ -372,6 +373,10 @@ def drain(root: Path, conn: sqlite3.Connection, host_uid: str) -> DrainReport:
             continue
         entries.append((data.get("spooled_at") or "", orig_name, claimed, data))
     for _, orig_name, claimed, entry in sorted(entries, key=lambda e: (e[0], e[1])):
+        if deadline is not None and time.monotonic() >= deadline:
+            _unclaim(claimed, sd / orig_name)
+            limited = True
+            continue
         try:
             items = [validate_request(r) for r in entry["requests"]]
         except ContractViolation as exc:
@@ -412,4 +417,5 @@ def drain(root: Path, conn: sqlite3.Connection, host_uid: str) -> DrainReport:
             ingested += 1
         claimed.unlink()  # only after committed ingestion
     remaining = len(list(sd.glob("*.json")))
-    return DrainReport(ingested, duplicates, quarantined, remaining)
+    return DrainReport(ingested, duplicates, quarantined, remaining,
+                       attempted, tuple(refused), limited)
