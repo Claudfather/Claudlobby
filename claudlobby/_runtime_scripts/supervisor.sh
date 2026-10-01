@@ -950,7 +950,7 @@ EOF
 }
 
 svc_activation_pause() {
-    local file="$1" target="$2" saved="$3" remaining=20
+    local file="$1" target="$2" saved="$3" remaining=20 reset=0
     _svc_activation_saved "$saved" || return 3
     svc_activation_assert_external "$file" "$target" "${4:-$$}" || return $?
     case "$_OS" in
@@ -969,6 +969,15 @@ svc_activation_pause() {
                 _svc_activation_read "$file" "$target" || return 3
                 if [ "$SVC_ACT_LOAD" = masked ] && [ "$SVC_ACT_ACTIVE" = inactive ]; then
                     break
+                fi
+                # Parking a timer's service first fails the timer ("Unit to
+                # trigger vanished"); stop does not clear that. Reset only this
+                # exact masked, stopped timer, once; a failed service refuses.
+                if [ "$reset" = 0 ] && [ "${target##*.}" = timer ] \
+                        && [ "$SVC_ACT_LOAD:$SVC_ACT_ACTIVE" = masked:failed ]; then
+                    systemctl --user reset-failed "$target" || return $?
+                    reset=1
+                    continue
                 fi
                 [ "$remaining" -gt 0 ] || {
                     _svc_activation_unknown "$target did not settle after stop"; return 3;

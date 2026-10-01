@@ -31,12 +31,13 @@ systemctl() {
     [ "$1" != "$FAIL_ACTION" ] || return 9
     case "$1" in
         mask) if [ "$SHADOW" = 0 ]; then load=masked; enabled=masked-runtime; fi ;;
-        stop) if [ "$STOP_SETTLE" -gt 0 ]; then active=deactivating; else active=inactive; fi ;;
+        stop) if [ "$STOP_SETTLE" -gt 0 ]; then active=deactivating; else active="${STOP_RESULT:-inactive}"; fi ;;
         unmask) load=loaded; enabled="$old_enabled"; rm -f "${XDG_RUNTIME_DIR:-$T/no-runtime}/systemd/user/$target" ;;
         start) active=active ;;
         disable) active=inactive ;;
         enable) active=active ;;
-        daemon-reload|reset-failed) ;;
+        reset-failed) [ "$active" != failed ] || active=inactive ;;
+        daemon-reload) ;;
         *) return 98 ;;
     esac
 }
@@ -108,6 +109,25 @@ expect 0 svc_activation_pause "$file" "$target" "$saved"
 [ "$(cat "$SETTLE_FILE")" -le 0 ]
 rm "$SETTLE_FILE"
 STOP_SETTLE=0
+# Parking its service first leaves the stopped, masked timer failed ("Unit to
+# trigger vanished"). Only that exact timer's failure is reset, then verified.
+file="$T/vanished.timer"; target=vanished.timer; : > "$file"; : > "$TRACE"
+enabled=enabled; old_enabled=enabled; load=loaded; active=active; group=""
+saved=$(svc_activation_snapshot "$file" "$target")
+STOP_RESULT=failed
+expect 0 svc_activation_pause "$file" "$target" "$saved"
+[ "$(cat "$TRACE")" = "$(printf 'mask --runtime vanished.timer\nstop vanished.timer\nreset-failed vanished.timer')" ]
+[ "$load:$active" = masked:inactive ]
+load=loaded; enabled=enabled; active=active; : > "$TRACE"; FAIL_ACTION=reset-failed
+expect 9 svc_activation_pause "$file" "$target" "$saved"  # a failed reset still refuses
+FAIL_ACTION=""
+# A service left failed after stop is never reset; pause refuses.
+file="$T/vanished.service"; target=vanished.service; : > "$file"; : > "$TRACE"
+load=loaded; enabled=enabled; active=active; group=/user.slice/vanished.service
+saved=$(svc_activation_snapshot "$file" "$target")
+expect 3 svc_activation_pause "$file" "$target" "$saved" 2>/dev/null
+if grep -q reset-failed "$TRACE"; then echo 'FAIL: service failure was reset' >&2; exit 1; fi
+STOP_RESULT=""
 # An inactive, disabled timer stays inactive and disabled after restoration.
 file="$T/worker.timer"; target=worker.timer; : > "$file"; : > "$TRACE"
 enabled=disabled; old_enabled=disabled; load=loaded; active=inactive; group=""
