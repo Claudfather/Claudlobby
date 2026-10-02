@@ -76,6 +76,10 @@ class RecordedAdapter:
         elif function == "svc_activation_pause":
             assert not file.exists() and not file.is_symlink(), "adapter saw unparked installed source"
             assert args[2] == self.native[target]
+            if self.manager == "Linux" and target == "scheduled.service":
+                assert args[4] == "timer-owned"
+            else:
+                assert len(args) == 4
             if target == self.pause_failure:
                 rc = 3
             else:
@@ -172,12 +176,33 @@ def test_prepared_snapshot_refusal_can_cancel_only_unstarted_journals(enrollment
     assert all(call[0] != "svc_activation_pause" for call in adapter.calls)
 
 
-def test_producer_tick_churn_does_not_invalidate_frozen_enrollment(enrollment):
+@pytest.mark.parametrize("saved, observed, later", [
+    ("active", "inactive", "inactive"), ("active", "failed", "failed"),
+    ("failed", "failed", "failed"), ("active", "inactive", "failed"),
+])
+def test_producer_tick_churn_does_not_invalidate_frozen_enrollment(enrollment, saved, observed, later):
     inventory, phases, plan, adapter, _, _ = enrollment
-    adapter.states["scheduled.service"] = "enabled loaded inactive"
+    inventory = replace(inventory, units=tuple(
+        replace(unit, properties=tuple((key, saved if key == "ActiveState" else value)
+                                      for key, value in unit.properties))
+        if unit.target == "scheduled.service" else unit for unit in inventory.units))
+    adapter.states["scheduled.service"] = "enabled loaded " + observed
     with state.locked_activation(inventory.data_root) as store:
         _prepare(store, inventory, phases, plan, adapter)
-        assert state.read_activation(inventory.data_root, "cutover").status == "prepared"
+        pause = units.load_unit_pause(store, "cutover")
+        assert pause.plan("producers").effects["native_observations"]["scheduled.service"] == "enabled loaded " + observed
+        raw = next(unit for unit in pause.enrollment["units"] if unit["target"] == "scheduled.service")
+        assert units._saved(raw) == "enabled loaded " + saved
+        assert units._native_saved(raw, {"scheduled.service"}, allow_failed=True) == "enabled loaded inactive"
+        assert not units._same_enrollment("enabled loaded active", "enabled loaded failed", scheduled=False, allow_failed=True)
+        assert not units._same_enrollment("enabled loaded active", "enabled loaded unknown", scheduled=True, allow_failed=True)
+        assert not units._same_enrollment("enabled loaded active", "disabled loaded failed", scheduled=True, allow_failed=True)
+        assert not units._producer_restored("enabled loaded failed", "enabled loaded failed", scheduled=True, allow_failed=True)
+        adapter.states["scheduled.service"] = "enabled loaded " + later
+        store.begin("cutover", "producers_paused")
+        units.pause_phase(store, "cutover", "producers", adapter=adapter)
+        assert adapter.states["scheduled.service"] == "masked-runtime masked inactive"
+        assert not any(call[0] == "svc_activation_start" for call in adapter.calls)
 
 
 @pytest.fixture
@@ -407,8 +432,14 @@ def test_running_resume_before_selection_reparks_without_repeating_handoff(enrol
     assert state.read_selection(root)["activation_id"] == "previous"
 
 
-def test_phases_park_exact_nodes_then_restore_original_state_and_links(enrollment):
+@pytest.mark.parametrize("frozen_active", ["active", "failed"])
+def test_phases_park_exact_nodes_then_restore_original_state_and_links(enrollment, frozen_active):
     inventory, phases, plan, adapter, foreign, wants = enrollment
+    inventory = replace(inventory, units=tuple(
+        replace(unit, properties=tuple((key, frozen_active if key == "ActiveState" else value)
+                                       for key, value in unit.properties))
+        if unit.target == "scheduled.service" else unit for unit in inventory.units))
+    adapter.states["scheduled.service"] = "enabled loaded " + frozen_active
     before_foreign = foreign.read_bytes()
     with state.locked_activation(inventory.data_root) as store:
         prepared = _prepare(store, inventory, phases, plan, adapter)
@@ -693,7 +724,7 @@ def test_early_abort_refuses_wrong_identity_or_progressed_adoption(enrollment, c
         assert adapter.calls[calls:] == []
 
 
-@pytest.mark.parametrize("frozen_active", ["active", "activating"])
+@pytest.mark.parametrize("frozen_active", ["active", "activating", "failed"])
 def test_timer_owned_oneshot_mid_run_parks_and_restores_without_resend(enrollment, frozen_active):
     inventory, phases, plan, adapter, _, _ = enrollment
     # The inventory itself may be taken while the timer-owned oneshot executes.
@@ -714,11 +745,12 @@ def test_timer_owned_oneshot_mid_run_parks_and_restores_without_resend(enrollmen
             with pytest.raises(state.ActivationError, match=f"changed before parking: {target}"):
                 units.pause_phase(store, "cutover", "producers", adapter=adapter)
             adapter.states[target] = adapter.original[target]
-        adapter.states["scheduled.service"] = "enabled loaded failed"
+        adapter.states["scheduled.service"] = "enabled loaded unknown"
         with pytest.raises(state.ActivationError, match="changed before parking: scheduled.service"):
             units.pause_phase(store, "cutover", "producers", adapter=adapter)
         inventory.check_files()
-        adapter.states["scheduled.service"] = "enabled loaded activating"
+        # A terminal admission failure after sealing is parked without replay.
+        adapter.states["scheduled.service"] = "enabled loaded failed"
         units.pause_phase(store, "cutover", "producers", adapter=adapter)
         assert adapter.states["scheduled.service"] == "masked-runtime masked inactive"
         adapter.calls.clear()

@@ -953,7 +953,9 @@ EOF
 }
 
 svc_activation_pause() {
-    local file="$1" target="$2" saved="$3" remaining=20 reset=0
+    local file="$1" target="$2" saved="$3" remaining=20 reset=0 timer_owned="${5:-}"
+    case "$timer_owned" in ""|timer-owned) ;; *) return 3 ;; esac
+    [ -z "$timer_owned" ] || { [ "$_OS" = Linux ] && [ "${target##*.}" = service ]; } || return 3
     _svc_activation_saved "$saved" || return 3
     svc_activation_assert_external "$file" "$target" "${4:-$$}" || return $?
     case "$_OS" in
@@ -978,6 +980,15 @@ svc_activation_pause() {
                 # exact masked, stopped timer, once; a failed service refuses.
                 if [ "$reset" = 0 ] && [ "${target##*.}" = timer ] \
                         && [ "$SVC_ACT_LOAD:$SVC_ACT_ACTIVE" = masked:failed ]; then
+                    systemctl --user reset-failed "$target" || return $?
+                    reset=1
+                    continue
+                fi
+                # The owner supplies this capability only from frozen timer
+                # membership. Preserve native failure history; never run the job.
+                if [ "$reset" = 0 ] && [ "$timer_owned" = timer-owned ] \
+                        && [ "$SVC_ACT_LOAD:$SVC_ACT_ACTIVE:$SVC_ACT_MAIN_PID:$SVC_ACT_CONTROL_PID" = masked:failed:0:0 ]; then
+                    printf 'activation parking: %s raw state masked failed MainPID=0 ControlPID=0\n' "$target" >&2
                     systemctl --user reset-failed "$target" || return $?
                     reset=1
                     continue
