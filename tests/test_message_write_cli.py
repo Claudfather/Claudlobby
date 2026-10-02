@@ -260,6 +260,41 @@ def test_local_human_sends_and_replies_only_to_a_bot_sender(active, monkeypatch,
     assert unsupported["error"]["code"] == "conflict" and len(calls) == 3
 
 
+def test_a_bot_answers_a_human_sender_on_the_plane(active, monkeypatch, capsys):  # noqa: F811
+    """An operator's session asked a bot over the plane and the bot had no door to answer:
+    `message reply` refused a `human:` sender (#2068). The answer is recorded on the plane,
+    linked to the question, readable by the session that asked, and submitted to no pane,
+    because the asker has none."""
+    root, host = active
+    _human(monkeypatch, host.release)
+    calls = []
+    _native(monkeypatch, calls)
+    asked = _call(capsys, root, "--to", "worker", "--text", "Reply with your path and readiness",
+                  "--request-id", str(uuid4()), expected=5)
+    question = asked["data"]["message_id"]
+    assert len(calls) == 1
+
+    _generated(monkeypatch, root, host.release, bot="worker")
+    request_id = str(uuid4())
+    before = _facts(root)
+    answered = _reply_call(capsys, root, question, "--text", "Ready; nothing in flight",
+                           "--request-id", request_id, expected=0)
+    assert answered["data"]["reply_to_message_id"] == question
+    assert answered["data"]["destination"]["alias"] == "human:operator"
+    assert answered["data"]["recording"] == "committed"
+    assert len(calls) == 1, "no pane received the answer: the human has none"
+    assert _facts(root)[0] == before[0] + 1
+    replay = _reply_call(capsys, root, question, "--text", "Ready; nothing in flight",
+                         "--request-id", request_id, expected=0)
+    assert replay["data"]["replayed"] is True and _facts(root)[0] == before[0] + 1
+
+    _human(monkeypatch, host.release)
+    assert main(["--root", str(root), "--json", "message", "wait", question,
+                 "--for", "reply", "--timeout", "1"]) == 0
+    waited = json.loads(capsys.readouterr().out)
+    assert waited["data"]["reply"]["message_id"] == answered["data"]["message_id"]
+
+
 def test_reply_requires_recorded_recipient_and_replays_to_parent_sender(active, monkeypatch, capsys):
     root, host = active
     _generated(monkeypatch, root, host.release)
