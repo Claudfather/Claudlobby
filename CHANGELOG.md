@@ -18,6 +18,13 @@ The uptime percentage divided up-time by the whole window, so it measured how mu
 - `library/skills/fleet-ops/SKILL.md` describes the figures `fleet uptime` now reports.
 - Not done here: a row naming host outages (#1616), and a utilization figure in `brief`, whose standing `utilization: omitted` entry other surfaces depend on.
 
+### Fixed — a quoted substitution the credential-echo guard cannot delimit no longer hides the rest of its line (#2097)
+
+The guard from #2090 judged a double-quoted `$(...)` by first finding its closing parenthesis. A heredoc post whose prose held an apostrophe or an unmatched parenthesis defeated that search, the whole line read as unparsed, and an unparsed line is allowed. So `gh auth token` or `neonctl --help` beside such a post ran unjudged.
+
+- **A substitution is now delimited as bash reads it.** A parenthesis inside quotes, a comment, a heredoc body or a case pattern does not count.
+- **One that still cannot be delimited is read as text,** in a double-quoted string and in an unquoted heredoc body (a lone backtick too), and the rest of the line is judged.
+
 ### Fixed — a bot can answer a message from a human sender (#2068)
 
 `message reply` refused any parent whose sender was not a bot, and `message send` takes bots only. A bot that a person asked a question over the plane had no door to answer it.
