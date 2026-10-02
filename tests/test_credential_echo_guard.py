@@ -252,6 +252,44 @@ def test_probe_ordinary_work_the_review_saw_refused_is_allowed(command):
     assert _decision(_run(command)) is None, command
 
 
+# #2097: a double-quoted substitution the decider could not delimit made the
+# whole line unreadable, and an unreadable line is allowed, so an echoing form
+# beside it went unjudged. The usual shape is a heredoc post whose prose holds an
+# apostrophe or an unmatched parenthesis. Each prose below names config, auth or
+# neon, so the prefilter hands it to the decider.
+POST_APOSTROPHE = "gh pr comment 1 --body \"$(cat <<'EOF'\nIt's a note about the config\nEOF\n)\""
+POST_PAREN = "gh pr comment 1 --body \"$(cat <<'EOF'\nsee (the auth notes\nEOF\n)\""
+
+QUOTED_SUBST_REFUSED = [
+    POST_APOSTROPHE + " && gh auth token",
+    "gh auth token; " + POST_APOSTROPHE,
+    POST_PAREN + " && neonctl --help",
+    "gh pr comment 1 --body \"$(neonctl --help; cat <<'EOF'\nIt's a note\nEOF\n)\"",  # the help lands in the post
+    "echo \"$(neonctl --help # it's a comment\n)\"",
+    'echo "$(case x in x) neonctl --help;; esac)"',  # a case pattern's parenthesis
+    'echo "$(case x in (x) pip config list;; esac)"',  # an opening parenthesis already balanced it
+    "cat <<EOF\n$(echo it's)\nEOF\ngh auth token",  # bash still runs the line after the heredoc
+    "echo \"$(echo it's)\" && gh auth token",  # cannot be delimited: the rest is still judged
+]
+QUOTED_SUBST_ALLOWED = [
+    POST_APOSTROPHE,
+    POST_PAREN,
+    "gh pr comment 1 --body \"$(cat <<'EOF'\nDon't run neonctl --help here\nEOF\n)\"",
+    'echo "$(case x in x) echo config;; esac)"',
+]
+
+
+@pytest.mark.parametrize("command", QUOTED_SUBST_REFUSED)
+def test_a_quoted_substitution_never_hides_the_rest_of_its_line(command):
+    verdict = _decision(_run(command))
+    assert verdict is not None and verdict[0] == "deny", (command, verdict)
+
+
+@pytest.mark.parametrize("command", QUOTED_SUBST_ALLOWED)
+def test_a_heredoc_post_whose_prose_has_quotes_or_parentheses_is_allowed(command):
+    assert _decision(_run(command)) is None, command
+
+
 def test_the_gh_token_refusal_leads_with_letting_gh_read_it():
     # A token sent to a file stays readable on disk by every bot on the uid.
     verdict = _decision(_run("gh auth token"))
