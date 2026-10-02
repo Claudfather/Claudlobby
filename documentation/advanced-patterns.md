@@ -168,6 +168,31 @@ separate ACK cursor. See `/fleet-ops` for that exact acknowledgement protocol.
 A request replay is for the same intended operation and never automatically
 resends an uncertain message.
 
+### Trusted local task filers
+
+A local integration such as an operator script uses the selected release's CLI
+with an explicit data root and fleet. Use the absolute `cli` path reported for
+that release by `host releases`; the examples below assume that executable is
+on PATH. Activation manages bot CLI bindings, but does not replace an unrelated
+global pip installation. Admit work into the fleet's queue and read back
+the canonical task ID returned by the command:
+
+```bash
+claudlobby --root DATA_ROOT --fleet FLEET --json task admit --title "Concrete outcome" --request-id ADMIT_UUID
+claudlobby --root DATA_ROOT --fleet FLEET --json task show TASK_ID
+```
+
+Supply and retain a distinct lowercase UUID for each intended mutation. Inspect
+the JSON result's recording and request-persistence outcomes before continuing;
+a timeout leaves the result unknown. Read the same request with `request show`
+before deciding what to do next; never automatically repeat admission or delivery.
+The CLI identifies a trusted local caller by its OS account. Optional `--by`
+records provenance for an existing allowed actor; it does not grant that actor's
+authority. Local callers may assign work, but delivery requires the generated
+fleet manager, and linked worker reports require the assigned bot's context.
+The shipped Plane web UI is read-only. This CLI contract does not establish that
+an independently deployed integration has adopted it.
+
 ---
 
 ## 6. Git Pull Scheduler
