@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a bot can answer a message from a human sender (#2068)
+
+`message reply` refused any parent whose sender was not a bot, and `message send` takes bots only. A bot that a person asked a question over the plane had no door to answer it.
+
+- **A reply to a `human:` sender is recorded on the plane and carried by nothing.** A human has no pane, so nothing is submitted and no transmission is written. The reply reports delivery and transport `not_requested`, and the session that asked reads it with `message wait PARENT --for reply` or `message show`.
+- **The shape is keyed on positive facts only:** a `message.reply`, from a generated bot, to a parent addressed to it whose recorded sender is `human:NAME`. Its request receipt freezes a `RecordedReplyBinding`, with no native destination, and plans one recording stage. The receipt validator refuses that shape for a bot recipient, and still refuses a reply on a native route that has no delivery stage.
+- **With no carrier to fall back on, the request is durable before any write,** and a recording that cannot be proven fails as `unavailable`, retryable with the same request UUID.
+- **`message receipt` says `not_applicable`** for a message addressed to a human, never `missing`.
+- **`message send` to a human stays refused,** so a bot answers only someone who asked it.
+- `library/skills/fleet-ops/SKILL.md` says how a reply to a human behaves.
+
 ### Fixed — `bot restart` and `bot start` no longer report a successful start of a staggered unit as unverified (#2087)
 
 On Linux, `systemctl --user restart` and `enable --now` block through a bot unit's `ExecStartPre=/bin/sleep` boot stagger, and the enroll call had a fixed 30 s budget. A unit staggered 30 s or more was cut off before its start returned. A restart that worked was reported as "bot lifecycle effect is unverified", and the readiness wait never ran.

@@ -95,6 +95,42 @@ def _alert_tiers(route):
     return {key: selected[key].value for key in _TIER_KEYS if key in selected}, True
 
 
+def _answer_human(selected, origin, parent, body, *, request_id, release_id) -> CommandOutput:
+    """A generated bot's answer to its human sender (#2068): recorded on the
+    Plane, carried by nothing, read with `message wait --for reply`."""
+    from ..message_context import resolve_human_reply_route
+    from ..message_operations import record_reply_to_human
+    from ..task_operations import TaskActor
+
+    route = resolve_human_reply_route(TaskActor(parent.sender.uid, parent.sender.alias),
+                                      root=selected.paths.root, fleet=selected.fleet.name,
+                                      package=selected.paths.package)
+    if route.release_id != release_id:
+        raise CommandFailure("release_mismatch", "message route differs from selected release",
+                             release_id=release_id)
+    if (route.caller.alias != f"bot:{origin.fleet.name}/{origin.bot_id}"
+            or route.caller.uid != parent.destination.uid):
+        raise CommandFailure("conflict", "reply route differs from recorded parent participants",
+                             release_id=release_id)
+    outcome = record_reply_to_human(route, selected.paths.package, body, request_id=request_id,
+                                    parent_message_id=parent.message_id)
+    data = {"fleet": route.selected.fleet.name, "message_id": outcome.message_id,
+            "sender": {"uid": route.caller.uid, "alias": route.caller.alias},
+            "destination": {"uid": route.peer.uid, "alias": route.peer.alias},
+            "recording": outcome.recording, "request_persisted": outcome.request_persisted,
+            "transport": "not_requested", "delivery": "not_requested",
+            "receipt_observation": None, "integrity_verdict": None,
+            "replayed": outcome.replayed, "alert": None, "reply_to_message_id": parent.message_id}
+    if outcome.recording != "committed":
+        raise CommandFailure(
+            "unavailable", f"message {outcome.message_id}: recording {outcome.recording}. A reply to a "
+            "human has no carrier, so it exists only once it is recorded",
+            data=data, release_id=release_id, retryable=True,
+            hint=f"Retry the same request UUID {request_id}; a retry cannot duplicate the answer.")
+    return CommandOutput(data, release_id=release_id,
+                         lines=(f"{outcome.message_id}\trecording=committed\tdelivery=not_requested",))
+
+
 def dispatch(args) -> CommandOutput:
     from ..activation_state import ActivationError
     from ..config_plan import PlanError
@@ -153,12 +189,15 @@ def dispatch(args) -> CommandOutput:
                 parent_ctx = (human_ctx if human_ctx is not None else
                               bind_task_context(selected, origin=origin))
                 parent = show_message(parent_ctx, parent_message_id)
-                if (parent.destination is None
-                        or parent.destination.uid != parent_ctx.caller.uid
-                        or parent.destination.alias != parent_ctx.caller.alias
-                        or not parent.sender.alias.startswith("bot:")
-                        or parent.sender.fleet_uid is None):
-                    raise CommandFailure("conflict", "reply requires a recorded bot sender and this caller as recipient",
+                addressed = (parent.destination is not None
+                             and parent.destination.uid == parent_ctx.caller.uid
+                             and parent.destination.alias == parent_ctx.caller.alias)
+                if (addressed and origin is not None and parent.sender.fleet_uid is None
+                        and parent.sender.alias.startswith("human:")):
+                    return _answer_human(selected, origin, parent, body,
+                                         request_id=request_id, release_id=release_id)
+                if not addressed or not parent.sender.alias.startswith("bot:") or parent.sender.fleet_uid is None:
+                    raise CommandFailure("conflict", "reply requires a recorded bot or human sender and this caller as recipient",
                                          release_id=release_id)
                 target = parent.sender.alias.removeprefix("bot:")
             route = resolve_message_route(target, root=selected.paths.root,

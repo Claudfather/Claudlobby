@@ -16,7 +16,7 @@ import sys
 from typing import Callable, Mapping
 from uuid import UUID
 
-from .message_context import MessageRoute
+from .message_context import HumanReplyRoute, MessageRoute
 from .message_payload import (MessageBody, encode_communication, encode_transmission,
                               native_message_envelope, native_unlinked_report_envelope)
 from .message_queries import pending_transmission_proof
@@ -83,13 +83,18 @@ class NativeAttemptResult:
     event_id: str
 
 
-def _identity_proof(conn, route: MessageRoute) -> None:
-    expected = (("fleet", route.selected.fleet.name, route.selected_fleet_uid, None),
-                ("fleet", route.peer_context.fleet.name, route.peer_fleet_uid, None),
-                ("actor", route.caller.alias, route.caller.uid, route.caller_fleet_uid),
-                ("actor", route.peer.alias, route.peer.uid, route.peer_fleet_uid),
-                ("actor", route.manager.alias, route.manager.uid, route.selected_fleet_uid))
-    if route.origin is not None:
+def _identity_proof(conn, route: MessageRoute | HumanReplyRoute) -> None:
+    if isinstance(route, HumanReplyRoute):
+        expected = (("fleet", route.selected.fleet.name, route.selected_fleet_uid, None),
+                    ("actor", route.caller.alias, route.caller.uid, route.caller_fleet_uid),
+                    ("actor", route.peer.alias, route.peer.uid, None))
+    else:
+        expected = (("fleet", route.selected.fleet.name, route.selected_fleet_uid, None),
+                    ("fleet", route.peer_context.fleet.name, route.peer_fleet_uid, None),
+                    ("actor", route.caller.alias, route.caller.uid, route.caller_fleet_uid),
+                    ("actor", route.peer.alias, route.peer.uid, route.peer_fleet_uid),
+                    ("actor", route.manager.alias, route.manager.uid, route.selected_fleet_uid))
+    if isinstance(route, MessageRoute) and route.origin is not None:
         expected += (("fleet", route.origin.fleet.name, route.caller_fleet_uid, None),)
     for kind, alias, uid, parent in expected:
         row = conn.execute("SELECT uid, parent_uid FROM identity_registry WHERE kind=? AND alias=?",
@@ -595,3 +600,77 @@ def send_unlinked_report(route: MessageRoute, package: PackageResources, report:
     return send_message(route, package, MessageBody(report.to_body()), request_id=request_id,
                         retry_uncertain=retry_uncertain, trusted_tiers=trusted_tiers,
                         transport=transport, notify=notify, clear=clear, _report=report)
+
+
+def record_reply_to_human(route: HumanReplyRoute, package: PackageResources, body: MessageBody, *,
+                          request_id: str, parent_message_id: str) -> MessageSendResult:
+    """Record a bot's answer to its human sender; carry it nowhere (#2068).
+
+    A human has no pane, so nothing is submitted and no transmission is
+    written: delivery stays not_requested. The answer is the recorded
+    communication, linked to its question, which the asking session reads
+    with `message wait --for reply`. With no carrier to fall back on, the
+    request is durable before any write, and an unproven recording fails.
+    """
+    if not isinstance(route, HumanReplyRoute) or not isinstance(body, MessageBody):
+        raise MessageConflict("frozen human reply route and validated body required")
+    root = route.selected.paths.root
+    if package != route.selected.paths.package or route.origin.paths.root != root:
+        raise MessageConflict("human reply route and package differ")
+    try:
+        if str(UUID(request_id)) != request_id:
+            raise ValueError("noncanonical")
+    except (ValueError, AttributeError) as exc:
+        raise MessageConflict("canonical request UUID required") from exc
+    if not isinstance(parent_message_id, str) or not re.fullmatch(ID_PATTERNS["msg"], parent_message_id):
+        raise MessageConflict("reply requires an exact parent message ID")
+    try:
+        if (root / "state/host-uid").read_text().strip() != route.host_uid:
+            raise MessageConflict("active host identity differs from frozen route")
+    except OSError as exc:
+        raise MessageConflict("active host identity is unavailable") from exc
+    modes = _load_capture_config(root)  # Invalid capture policy is a refusal.
+    semantic = semantic_digest({"body": body.text.encode("utf-8"), "kind": "answer",
+                                "parent_message_id": parent_message_id})
+    parties = {route.caller.alias: route.caller.uid, route.peer.alias: route.peer.uid}
+    binding = route.receipt_binding(parent_message_id)
+    at = datetime.now(timezone.utc)
+    persistence = [True]
+    with locked_request(root, route.selected_fleet_uid, request_id) as store:
+        existing = store.load()
+        if existing is not None:
+            old = existing.intent
+            if (old.operation != "message.reply" or old.operation_version != 1
+                    or old.host_uid != route.host_uid or old.fleet_uid != route.selected_fleet_uid
+                    or old.caller_uid != route.caller.uid or old.recipient_uid != route.peer.uid
+                    or old.semantic_sha256 != semantic or not same_native_route(old.route, binding)
+                    or len(old.stages[0].facts) != 1):
+                raise ReceiptConflict("request UUID already has different message semantics or route")
+            message_id, event_id = old.message_id, old.stages[0].facts[0].event_id
+        else:
+            message_id, event_id = mint_msg_id(), mint_event_id()
+        frozen = existing.intent.route if existing is not None else binding
+        draft = RequestIntent("message.reply", 1, route.host_uid, route.selected_fleet_uid,
+                              route.caller.uid, route.peer.uid, semantic, (StagePlan("recording"),),
+                              message_id=message_id, route=frozen)
+        raw = encode_communication(draft, body, request_id=request_id, event_id=event_id,
+                                   occurred_at=at.isoformat(), parent_message_id=parent_message_id)
+        facts = (expected_fact(validate_item(raw, modes)[0], host_uid=route.host_uid,
+                               fleet_uid=route.selected_fleet_uid, parties=parties),)
+        if existing is not None:
+            if existing.intent.stages[0].facts != facts:
+                raise ReceiptConflict("capture policy or communication projection changed")
+            receipt = existing
+        else:
+            receipt = store.prepare(RequestIntent(
+                "message.reply", 1, route.host_uid, route.selected_fleet_uid, route.caller.uid,
+                route.peer.uid, semantic, (StagePlan("recording", facts),),
+                message_id=message_id, route=frozen))
+        if receipt.stages[0].status != "committed":
+            store.begin_attempt()  # each invocation that may write is its own attempt
+        status = _record(root, route, raw, facts, store=store, stage=0, attempt_no=None,
+                         persistence=persistence)
+    committed = status == "committed"
+    return MessageSendResult(request_id, message_id, "not_requested", status, persistence[0],
+                             existing is not None, committed, "ok" if committed else "unavailable",
+                             0 if committed else 6, retryable=not committed)

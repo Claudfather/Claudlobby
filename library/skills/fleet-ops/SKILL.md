@@ -363,7 +363,10 @@ claudlobby --json message receipt MESSAGE_ID
 ```
 
 Reply only to a message addressed to you. The reply goes to the parent's
-recorded sender; do not choose another recipient. Retain a new UUID for this
+recorded sender; do not choose another recipient. A reply to a human sender
+(`human:NAME`) is recorded on the plane and carried by nothing: it reports
+delivery `not_requested`, there is no receipt to wait for, and the human reads
+it with `message wait MESSAGE_ID --for reply`. Retain a new UUID for this
 reply and use that same UUID to inspect an uncertain outcome:
 
 ```bash
