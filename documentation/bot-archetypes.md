@@ -70,7 +70,7 @@ The brain of the fleet. Converses freely, delegates to workers, monitors health.
 
 | Skill | Purpose |
 |-------|---------|
-| `/dispatch` | Send tasks to fleet bots via tmux with structured tracking |
+| `/dispatch` | Admit, assign, and deliver tracked work through the public CLI; see `/fleet-ops` |
 | `/lifecycle` | Full pipeline: implement → review → iterate → merge → retro → issues |
 | `/fleet-status` | Health check across all bots (alive/dead, reported context-degraded state, idle/working) |
 | `/fleet-pulse` | Actionable fleet health — restart dead workers, flag stuck panes, protect WIP |
@@ -142,9 +142,11 @@ Focused executor. Takes tasks from the manager, works in worktrees, creates PRs.
 - You don't initiate work — you execute what's assigned
 - Work in git worktrees for isolation
 - Always branch, always PR, never push to main
-- When done, report back via report-back.sh
-- If blocked, report back immediately. Don't spin.
+- Accept your current assignment through `claudlobby assignment accept` before working.
+- Report through `claudlobby assignment complete` or `assignment block`, using that assignment's ID and a retained request UUID; follow `/fleet-ops` for the required arguments.
 ```
+
+See [the CLI assignment and reporting examples](advanced-patterns.md#5-inter-bot-communication-and-reports).
 
 ### No Crons
 
