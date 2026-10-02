@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — a composed guard refuses a CLI form that prints an env-held credential (#2090)
+
+A bare `neonctl --help` in a live bot session printed the real `NEON_API_KEY` into a session transcript, because the CLI shows the variable as the default of `--api-key`. Every bot inherits that variable, and the only mitigation was prose in one agent file. The host's settings carry a bare `Bash` allow, so no permission rule could refuse the command.
+
+- **`credential-echo-guard.sh`** is a PreToolUse hook on Bash, composed into every bot through `claudlobby/system.yaml` next to `vault-git-guard.sh`. It refuses the forms in #2090's table A, which were measured with canaries:
+  - neonctl and neon help and usage screens: `--help`, a bare call, an unknown command, a command group without a verb, an unknown or incomplete top-level option.
+  - A `DEBUG` trace in front of neonctl.
+  - `pip config list` and `pip config debug` while `PIP_INDEX_URL` or `PIP_EXTRA_INDEX_URL` can be set.
+  - `gh auth token`.
+- **The safe form is allowed.** A form passes only when its variables are removed in the same command (`env -u VAR`, `env -i`, an empty `VAR=`, or an `unset VAR` earlier in the line). The `DEBUG` trace and `gh auth token` are refused even then, because each falls back to a stored login; `gh auth token` passes with its stdout sent to a file.
+- **It refuses, and never rewrites.** The reason names the safe form and repeats nothing from the command. A refusal is recorded as `credential_echo_refused` with the row and the CLI name only.
+- **It fails open, with a `script_error` breadcrumb.** That happens when jq or python3 is missing, the payload is unparseable, or the decider fails. A command the decider cannot read is allowed and counted as `credential_echo_unparsed`.
+- **`credential-echo-decide.py`** holds the table as data, plus neonctl's command tree. It follows a `bash -c` string, and skips quoted arguments, comments and heredoc bodies. `eval`, scripts, aliases, `xargs` and commands built from variables are out of its reach.
+- **Tests:** `tests/test_credential_echo_guard.py` replays the canary probe kit's table A (`tests/fixtures/credential_echo/registry-rows.json`). Every echoing row is refused as written. Every `unset` row passes under each way of removing its variables. The controls pass untouched. Around the rows it covers separators, subshells, wrappers, scoping traps, the stdout-to-file rule, fail-open, and the plane record.
+
 ### Fixed — a held input box is named HELD and paged with its remedy, never as a hang (#2070)
 
 When a bot's input box held text that was never submitted and no turn was running, keepalive logged `UNKNOWN` on every tick and fleet-pulse paged the manager with `activity_stuck` "likely hung mid-task": a page that points at a restart, which discards the text, when the remedy is an operator Enter. Seen on 2026-10-01 after a restart and under load: 26 consecutive `UNKNOWN` ticks on one bot, three "likely hung" pages on another, and two ordinary sends held at a 1-minute load of 34 and 44, each cleared with exactly two Enters.

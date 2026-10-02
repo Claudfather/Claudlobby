@@ -106,6 +106,7 @@ REFUSED = [
     "gh auth token > /dev/stdout",
     "gh auth token >&2",
     "echo $(gh auth token)",
+    "cat <<EOF\nhi\nEOF\nneonctl --help",  # a command after a heredoc is judged
 ]
 
 ALLOWED = [
@@ -123,6 +124,7 @@ ALLOWED = [
     "gh auth token >> token.txt",
     "gh auth token &> token.txt",
     "git status",
+    "git commit -F - <<'EOF'\nmentions neonctl --help here\nEOF",  # a heredoc body is data
 ]
 
 
