@@ -170,8 +170,11 @@ resends an uncertain message.
 
 ### Trusted local task filers
 
-A local integration such as an operator script uses the installed CLI with an
-explicit data root and fleet. Admit work into the fleet's queue and read back
+A local integration such as an operator script uses the selected release's CLI
+with an explicit data root and fleet. Use the absolute `cli` path reported for
+that release by `host releases`; the examples below assume that executable is
+on PATH. Activation manages bot CLI bindings, but does not replace an unrelated
+global pip installation. Admit work into the fleet's queue and read back
 the canonical task ID returned by the command:
 
 ```bash
