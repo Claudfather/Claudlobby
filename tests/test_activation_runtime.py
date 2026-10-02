@@ -32,6 +32,13 @@ def test_high_linux_boot_rung_extends_only_its_exact_start_budget():
         runtime._start_budget(bot, Path("worker.service"), b"ExecStartPre=/bin/sh -c 'sleep 33'\n")
 
 
+def test_a_unit_start_budget_counts_only_a_linux_units_boot_delay():
+    """bot start and restart size their enroll call with it too (#2087)."""
+    assert runtime.unit_start_budget(Path("worker.service"),
+            b"[Service]\nExecStartPre=/bin/sleep 30\n") == 60
+    assert runtime.unit_start_budget(Path("worker.plist"), b"ExecStartPre=/bin/sleep 30\n") == 30
+
+
 @pytest.fixture
 def tmp_path(tmp_path_factory):
     return tmp_path_factory.mktemp("ar")  # AF_UNIX path bound

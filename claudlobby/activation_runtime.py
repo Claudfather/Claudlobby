@@ -57,9 +57,13 @@ def _call(adapter, function, target, *args, timeout=30):
     return result.stdout.strip()
 
 
-def _start_budget(unit: UnitStart, file: Path, content: bytes) -> int:
-    """Cover the sealed Linux bot boot rung before its admission continuation."""
-    if unit.phase != "bots" or file.suffix != ".service":
+def unit_start_budget(file: Path, content: bytes) -> int:
+    """Seconds a native call that starts this unit may block: 30 plus its boot delay.
+
+    systemctl start and restart block through ExecStartPre, so a sealed Linux
+    unit's /bin/sleep stagger is spent inside the call (#2087).
+    """
+    if file.suffix != ".service":
         return 30
     try:
         lines = [line.strip() for line in content.decode("utf-8").splitlines()
@@ -74,6 +78,11 @@ def _start_budget(unit: UnitStart, file: Path, content: bytes) -> int:
     if delay > 3600:
         raise RuntimeEvidenceError("start", file.name, "published boot delay exceeds bound")
     return 30 + delay
+
+
+def _start_budget(unit: UnitStart, file: Path, content: bytes) -> int:
+    """Cover the sealed Linux bot boot rung before its admission continuation."""
+    return unit_start_budget(file, content) if unit.phase == "bots" else 30
 
 
 def assert_quiescent(adapter: Adapter, *, installed_file: Path, target: str,
