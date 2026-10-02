@@ -441,8 +441,8 @@ def test_run_intent_accepts_recorded_pause_new_bots_and_omitted_bots(tmp_path):
 @pytest.mark.parametrize("installed_bots, appended, message", [
     (("manager",), False, "no reviewed old bot actor"),
     (("worker",), False, "old fleet manager has no installed handoff owner"),
-    (("manager", "worker"), True, "existing canonical handoff section is malformed"),
-], ids=["stopped-worker", "uninstalled-manager", "appended-section"])
+    (("manager", "worker"), True, "existing canonical handoff section is unreadable"),
+], ids=["stopped-worker", "uninstalled-manager", "damaged-section"])
 def test_first_adoption_refuses_standing_handoff_blockers_before_record_or_pause(
         cold, monkeypatch, installed_bots, appended, message):
     root, _, plan, host = cold
@@ -450,8 +450,9 @@ def test_first_adoption_refuses_standing_handoff_blockers_before_record_or_pause
     handoff = root.resolve() / "legacy-runtime" / installed_bots[0] / ".claude/session.md"
     if appended:
         handoff.parent.mkdir()
+        # A section at the end, where the refresh writes it, that lost its status.
         handoff.write_bytes(b"old notes\n\n" + _HANDOFF_BEGIN + b"\n```json\n{}\n```\n"
-                            + _HANDOFF_END + b"\n\n## Later notes\n")
+                            + _HANDOFF_END + b"\n")
     before = handoff.read_bytes() if appended else None
     inventory = SimpleNamespace(manager="Linux", catalog=f"manager\tLinux\ndirectory\t{host.directory}\n",
                                 units=tuple(units))
@@ -1084,13 +1085,13 @@ def test_quiesced_handoff_refusal_repairs_forward_with_same_activation_id(enroll
     identity.write_text(host + "\n")
     identity.chmod(0o600)
 
-    # The old bot's session appended notes after a previous canonical section.
+    # The old bot's handoff ends in a previous canonical section that is damaged.
     member_dir = next(unit.declaration.working_directory for unit in inventory.units
                       if unit.declaration.scope == "bot")
     handoff = member_dir / ".claude/session.md"
     handoff.parent.mkdir(parents=True, exist_ok=True)
     notes = b"---\nlast_updated: 2020-01-01T00:00:00Z\n---\n\n## Next Steps\n- held note\n"
-    malformed = notes + b"\n\n" + _HANDOFF_BEGIN + b"\n```json\n{}\n```\n" + _HANDOFF_END + b"\n\n## Later\n"
+    malformed = notes + b"\n\n" + _HANDOFF_BEGIN + b"\n```json\n{}\n```\n" + _HANDOFF_END + b"\n"
     handoff.write_bytes(malformed)
 
     with state.locked_activation(root) as store:
@@ -1132,10 +1133,11 @@ def test_quiesced_handoff_refusal_repairs_forward_with_same_activation_id(enroll
     monkeypatch.setattr(activation, "apply_migration", migration)
     calls = list(adapter.calls)
 
-    with pytest.raises(state.ActivationError, match="existing canonical handoff section is malformed"):
+    with pytest.raises(state.ActivationError, match="existing canonical handoff section is unreadable"):
         activation.resume_activation(root, "cutover", plan.plan_id, directory, adapter=adapter)
     refused = state.read_activation(root, "cutover")
     assert refused.status == "activating" and refused.body["pending"] == "queues_classified"
+    recorded = refused.body["handoff_refreshed"]  # recorded before any handoff was written
     assert activation.resumable_running_step(refused) == "queues_classified"
     assert handoff.read_bytes() == malformed
 
@@ -1149,5 +1151,8 @@ def test_quiesced_handoff_refusal_repairs_forward_with_same_activation_id(enroll
     assert state.read_selection(root)["activation_id"] == "previous"
     repaired = handoff.read_bytes()
     assert notes in repaired and repaired.rstrip().endswith(_HANDOFF_END)
+    # The repaired step reuses the time its refused attempt recorded (#2094).
+    assert resumed.body["handoff_refreshed"] == recorded
+    assert f"\nreferences_refreshed: {recorded}\n".encode() in repaired.split(b"\n---\n", 1)[0] + b"\n"
     assert task.encode() in repaired and assignment.encode() in repaired
     assert adapter.calls == calls  # no native pause, handoff or start replay

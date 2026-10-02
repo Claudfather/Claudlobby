@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the resume gate reads a handoff's capture time, not the activation's reference refresh (#2094)
+
+Every activation rewrites each bot's handoff with a refresh envelope at the top. The envelope carried `last_updated:`, the field that start-bot's resume gate and clauDNA's readers take as the capture's freshness. So after an activation the gate measured the refresh: an old handoff looked fresh, and a fresh capture written under a day-old envelope looked stale.
+
+- **The envelope carries `references_refreshed:` instead,** so `last_updated:` belongs to the capture again. The reader still accepts the old envelope and files with none; the next activation rewrites them.
+- **A refresh no longer makes an old handoff resume.** It used to, by design, so that a booting bot would read its references. A booting bot gets its IDs from the boot brief (#2049).
+- **The refresh time comes from the activation's own record,** never from a file a session can edit. It is `handoff_refreshed`, written before the handoffs, reused by a retried step, and read by the next activation's 12-hour rule.
+- **The markers count only where the refresh writes them:** the envelope at the top, the section at the end. A note that quotes one no longer refuses the host's activation; a damaged envelope or section in those places still does.
+- **A refresh keeps the handoff's mtime,** which the gate falls back to when a capture has no `last_updated:` of its own.
+
 ### Fixed — a bot can answer a message from a human sender (#2068)
 
 `message reply` refused any parent whose sender was not a bot, and `message send` takes bots only. A bot that a person asked a question over the plane had no door to answer it.

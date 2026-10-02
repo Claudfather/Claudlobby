@@ -14,7 +14,7 @@ import time
 
 import pytest
 
-from claudlobby import activation_handoffs
+from claudlobby import activation, activation_handoffs
 from claudlobby.activation_handoffs import (_BEGIN, _END, _REFRESH_BEGIN, persist_canonical_handoffs,
                                             preflight_canonical_handoffs)
 from claudlobby.activation_state import ActivationError
@@ -34,6 +34,7 @@ QUEUED = "wi_" + "8" * 32
 ASSIGNMENT = "asg_" + "9" * 32
 STALE_HANDOFF = (b"---\nlast_updated: 2020-01-01T00:00:00Z\nschema_version: 2\n---\n"
                  b"\n## Next Steps\n- Historical session note\n")
+REFRESHED = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
 
 
 def _row(conn: sqlite3.Connection, table: str, **fields) -> None:
@@ -103,14 +104,19 @@ def test_first_adoption_persists_current_fleet_owned_ids_and_missing_status(tmp_
     try:
         assert _resume_gate(worker_handoff) == 1
         result = persist_canonical_handoffs(tmp_path, roster=roster, bot_dirs=dirs,
-                                             expected_audit=expected)
+                                             expected_audit=expected, refreshed_at=REFRESHED)
         assert (result["open_tasks"], result["active_assignments"]) == (2, 1)
         refreshed = worker_handoff.read_bytes()
-        assert refreshed.startswith(b"---\ncwd: " + str(dirs["data", "worker"]).encode())
+        assert refreshed.startswith(b"---\ncwd: " + str(dirs["data", "worker"]).encode()
+                                    + b"\nreferences_refreshed: 2026-10-02T12:00:00Z\n")
         assert b"reference refresh, not a new session capture" in refreshed
         assert b"capture freshness is unverified" in refreshed
         assert b"\n\n" + STALE_HANDOFF + b"\n\n" in refreshed
-        assert _resume_gate(worker_handoff) == 0
+        # Inverted by #2094: the refresh used to make this 2020 capture resume,
+        # so a booting bot read its references. The gate now reads the capture,
+        # and the IDs reach a booting bot through the boot brief instead
+        # (test_activation_handoffs_boot.py).
+        assert _resume_gate(worker_handoff) == 1
         worker = _section(worker_handoff)
         assert worker["previous_handoff"] == "existing file present (fresh capture unverified)"
         assert worker["assigned_to_this_bot"] == [{
@@ -125,7 +131,7 @@ def test_first_adoption_persists_current_fleet_owned_ids_and_missing_status(tmp_
         first = worker_handoff.read_bytes()
         manager_first = manager_path.read_bytes()
         persist_canonical_handoffs(tmp_path, roster=roster, bot_dirs=dirs,
-                                    expected_audit=expected)
+                                    expected_audit=expected, refreshed_at=REFRESHED)
         assert worker_handoff.read_bytes() == first
         assert manager_path.read_bytes() == manager_first
         # A new queued task changes the A0 audit; a changed assignee alone does not.
@@ -184,16 +190,17 @@ def test_live_preflight_writes_nothing_and_freezes_no_audit(tmp_path):
 
 
 def _malformed(worker_handoff: Path) -> None:
-    # A later session appended notes after a previous activation's section.
+    # A previous activation's section ends the file, where the refresh writes
+    # it, but its JSON lost the status: ours and damaged, so it still refuses.
     worker_handoff.write_bytes(STALE_HANDOFF + b"\n\n" + _BEGIN + b"\n```json\n{}\n```\n"
-                               + _END + b"\n\n## Later notes\n")
+                               + _END + b"\n")
 
 
 @pytest.mark.parametrize("case, message", [
     ("stopped-worker", "no reviewed old bot actor"),
     ("uninstalled-manager", "old fleet manager has no installed handoff owner"),
     ("retired-worker", "retired bot still owns open work"),
-    ("appended-section", "existing canonical handoff section is malformed"),
+    ("damaged-section", "existing canonical handoff section is unreadable"),
 ])
 def test_live_preflight_refuses_standing_blockers_without_writes(tmp_path, case, message):
     conn, roster, dirs, _expected, worker_handoff = _fixture(tmp_path)
@@ -351,3 +358,84 @@ def test_an_edited_envelope_timestamp_does_not_become_the_refresh_time(tmp_path,
         assert _refresh_stamp(worker_handoff) == _stamp(now)
     finally:
         conn.close()
+
+
+def test_a_section_with_later_notes_after_it_is_the_sessions_text(tmp_path):
+    """A section is ours only at the end. One a session wrote more notes after is
+    the session's text: the refresh keeps it and appends a fresh section, and
+    no single bot's notes refuse the host's activation."""
+    conn, roster, dirs, expected, worker_handoff = _fixture(tmp_path)
+    try:
+        noted = (STALE_HANDOFF + b"\n\n" + _BEGIN + b"\n```json\n{}\n```\n" + _END
+                 + b"\n\n## Later notes\n")
+        worker_handoff.write_bytes(noted)
+        preflight_canonical_handoffs(tmp_path, roster=roster, bot_dirs=dirs, candidate_bots=set(dirs))
+        persist_canonical_handoffs(tmp_path, roster=roster, bot_dirs=dirs, expected_audit=expected)
+        content = worker_handoff.read_bytes()
+        assert b"\n\n" + noted + b"\n\n" in content and content.rstrip().endswith(_END)
+    finally:
+        conn.close()
+
+
+def test_both_transitional_envelopes_are_read_and_rewritten(tmp_path):
+    """The envelope written before #2094 (with last_updated) and none at all are
+    both read; the next write carries references_refreshed only, so the first
+    last_updated in the file is the capture's."""
+    conn, roster, dirs, expected, worker_handoff = _fixture(tmp_path)
+    try:
+        worker_handoff.write_bytes(_legacy_envelope(dirs["data", "worker"], "2026-10-01T08:00:00Z")
+                                   + STALE_HANDOFF)
+        preflight_canonical_handoffs(tmp_path, roster=roster, bot_dirs=dirs, candidate_bots=set(dirs))
+        persist_canonical_handoffs(tmp_path, roster=roster, bot_dirs=dirs, expected_audit=expected,
+                                   refreshed_at=REFRESHED)
+        content = worker_handoff.read_bytes()
+        assert content.count(_REFRESH_BEGIN) == 1
+        assert re.search(rb"^last_updated: (\S+)$", content, re.M).group(1) == b"2020-01-01T00:00:00Z"
+        assert _refresh_stamp(worker_handoff) == "2026-10-02T12:00:00Z"
+        assert b"\n\n" + STALE_HANDOFF + b"\n\n" in content
+    finally:
+        conn.close()
+
+
+def test_a_damaged_envelope_at_the_top_still_refuses(tmp_path):
+    """At the top, where the refresh writes it, an envelope whose prose changed is
+    ours and damaged: refused, as before."""
+    conn, roster, dirs, expected, worker_handoff = _fixture(tmp_path)
+    try:
+        damaged = _legacy_envelope(dirs["data", "worker"], "2026-10-01T08:00:00Z").replace(
+            b"historical", b"old")
+        worker_handoff.write_bytes(damaged + STALE_HANDOFF)
+        with pytest.raises(ActivationError, match="reference refresh is malformed"):
+            preflight_canonical_handoffs(tmp_path, roster=roster, bot_dirs=dirs, candidate_bots=set(dirs))
+        assert worker_handoff.read_bytes() == damaged + STALE_HANDOFF
+    finally:
+        conn.close()
+
+
+def _records(monkeypatch, **bodies):
+    """Activation records by id, as read_activation would return them."""
+    def read(_root, activation_id):
+        if activation_id not in bodies:
+            raise ActivationError(f"cannot read activation {activation_id}")
+        return activation.ActivationRecord(activation_id, Path("/"), bodies[activation_id])
+    monkeypatch.setattr(activation, "read_activation", read)
+
+
+@pytest.mark.parametrize("own, previous, expected", [
+    ("2026-10-02T09:00:00Z", None, "2026-10-02T09:00:00Z"),  # a retried step keeps its own
+    (None, "2026-10-02T03:00:00Z", "2026-10-02T03:00:00Z"),  # under 12 h: the previous one's
+    (None, "2026-10-01T23:00:00Z", "2026-10-02T12:00:00Z"),  # 13 h old: now
+    (None, "missing", "2026-10-02T12:00:00Z"),  # recorded before #2094: none to keep
+    (None, "unreadable", "2026-10-02T12:00:00Z"),
+    (None, "first", "2026-10-02T12:00:00Z"),  # a first adoption has no previous selection
+])
+def test_the_refresh_time_comes_from_the_activation_records(monkeypatch, own, previous, expected):
+    body = {"previous_selection": None if previous == "first" else {"activation_id": "earlier"}}
+    if own:
+        body["handoff_refreshed"] = own
+    bodies = {"current": body}
+    if previous not in ("first", "unreadable"):
+        bodies["earlier"] = {} if previous == "missing" else {"handoff_refreshed": previous}
+    _records(monkeypatch, **bodies)
+    now = REFRESHED.replace(microsecond=123456)
+    assert _stamp(activation._handoff_refresh_time(Path("/"), "current", now)) == expected

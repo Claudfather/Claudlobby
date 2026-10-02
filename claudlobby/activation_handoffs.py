@@ -5,6 +5,14 @@ create task state, infer ownership from a legacy display ID, or certify that a
 session actually produced a handoff. The original session bytes are retained.
 A read-only preflight shares the same mapping and rendering owners so standing
 refusals surface before any activation record or native pause.
+
+The refresh envelope carries its time as ``references_refreshed:`` and never
+``last_updated:``, which stays the session capture's freshness signal: the
+field start-bot's resume gate and clauDNA's readers take (#2094). The caller
+supplies that time from the activation's own record; no time is read back from
+a handoff, which any session can edit. The reader matches its markers only
+where the refresh writes them, at the top and at the end, so a note that quotes
+one is the session's own text.
 """
 
 from __future__ import annotations
@@ -12,10 +20,11 @@ from __future__ import annotations
 from collections import defaultdict
 from contextlib import closing
 from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import stat
 import tempfile
@@ -33,9 +42,19 @@ _REFRESH_BEGIN = b"<!-- claudlobby first-adoption reference refresh begin -->"
 _REFRESH_END = b"<!-- claudlobby first-adoption reference refresh end -->"
 
 
-def _refresh_envelope(bot_dir: Path, timestamp: str) -> bytes:
-    """Fresh reference timestamp, explicitly separate from the old session capture."""
-    return (f"---\ncwd: {bot_dir}\nlast_updated: {timestamp}\nschema_version: 2\n---\n".encode()
+_TIMESTAMP = re.compile(rb"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
+_STATUSES = ("existing file present (fresh capture unverified)",
+             "unavailable (no previous session handoff)",
+             "unavailable (empty previous session handoff)")
+
+
+def _refresh_envelope(bot_dir: Path, timestamp: str, *, field: str = "references_refreshed") -> bytes:
+    """Fresh reference timestamp, explicitly separate from the old session capture.
+
+    Before #2094 the field was ``last_updated``; the reader still accepts that
+    shape, and the next write is always this one.
+    """
+    return (f"---\ncwd: {bot_dir}\n{field}: {timestamp}\nschema_version: 2\n---\n".encode()
             + _REFRESH_BEGIN + b"\n"
             + b"This timestamp marks a canonical task-reference refresh, not a new session capture.\n"
             + b"The original handoff bytes below are historical and their capture freshness is unverified.\n"
@@ -54,7 +73,54 @@ def _owned_directory(path: Path, root: Path) -> None:
         raise ActivationRefusal(f"handoff directory is unavailable or foreign: {path}") from exc
 
 
-def _handoff_file(bot_dir: Path, root: Path) -> tuple[Path, bytes, str, str | None]:
+def _strip_section(previous: bytes, path: Path) -> tuple[bytes, str | None]:
+    """Split off the canonical section where the refresh writes it: from a line
+    that is exactly _BEGIN to a last line that is exactly _END (#2094). A marker
+    quoted anywhere else, or a section a session wrote more notes after, is the
+    session's own text."""
+    body = previous.rstrip()
+    if not (body == _END or body.endswith(b"\n" + _END)):
+        return previous, None
+    start = body.rfind(b"\n" + _BEGIN + b"\n") + 1  # 0 when the file opens with it
+    if start == 0 and not body.startswith(_BEGIN + b"\n"):
+        raise ActivationRefusal(f"existing canonical handoff section is malformed: {path}")
+    try:
+        prior_status = json.loads(body[start:].split(b"```json\n", 1)[1].split(b"\n```", 1)[0])[
+            "previous_handoff"]
+    except (IndexError, KeyError, TypeError, ValueError, UnicodeError) as exc:
+        raise ActivationRefusal(f"existing canonical handoff section is unreadable: {path}") from exc
+    if prior_status not in _STATUSES:
+        raise ActivationRefusal(f"existing canonical handoff status is invalid: {path}")
+    prefix = previous[:start]
+    if prefix.endswith(b"\n\n"):
+        return prefix[:-2], prior_status
+    if prefix:
+        raise ActivationRefusal(f"existing canonical handoff separator is malformed: {path}")
+    return b"", prior_status
+
+
+def _strip_envelope(previous: bytes, bot_dir: Path, path: Path) -> bytes:
+    """Split off the refresh envelope where the refresh writes it: a frontmatter
+    followed at once by a line that is exactly _REFRESH_BEGIN (#2094). Both
+    shapes are read, ``references_refreshed`` and the ``last_updated`` written
+    before #2094. Its time is checked for shape only and never reused."""
+    if not previous.startswith(b"---\n"):
+        return previous
+    end = previous.find(b"\n---\n", 3)
+    if end < 0 or not previous.startswith(_REFRESH_BEGIN + b"\n", end + 5):
+        return previous  # the session's own frontmatter
+    head = previous[:end + 5]
+    for field in ("references_refreshed", "last_updated"):
+        found = re.search(rb"^" + field.encode() + rb": (\S+)$", head, re.M)
+        if found and _TIMESTAMP.fullmatch(found.group(1)):
+            envelope = _refresh_envelope(bot_dir, found.group(1).decode(), field=field)
+            if previous.startswith(envelope):
+                return previous[len(envelope):]
+    raise ActivationRefusal(f"existing canonical reference refresh is malformed: {path}")
+
+
+def _handoff_file(bot_dir: Path, root: Path) -> tuple[Path, bytes, str, tuple[int, int] | None]:
+    """(path, the session's own bytes, status, the file's atime and mtime)."""
     _owned_directory(bot_dir, root)
     directory = bot_dir / ".claude"
     if directory.exists() or directory.is_symlink():
@@ -79,45 +145,14 @@ def _handoff_file(bot_dir: Path, root: Path) -> tuple[Path, bytes, str, str | No
             previous = stream.read()
     except OSError as exc:
         raise ActivationRefusal(f"existing handoff cannot be read: {path}") from exc
-    prior_status = None
-    if _BEGIN in previous or _END in previous:
-        if previous.count(_BEGIN) != 1 or previous.count(_END) != 1 or not previous.rstrip().endswith(_END):
-            raise ActivationRefusal(f"existing canonical handoff section is malformed: {path}")
-        try:
-            section = previous[previous.index(_BEGIN):]
-            prior_status = json.loads(section.split(b"```json\n", 1)[1].split(b"\n```", 1)[0])[
-                "previous_handoff"]
-        except (IndexError, KeyError, ValueError, UnicodeError) as exc:
-            raise ActivationRefusal(f"existing canonical handoff section is unreadable: {path}") from exc
-        if prior_status not in ("existing file present (fresh capture unverified)",
-                                "unavailable (no previous session handoff)",
-                                "unavailable (empty previous session handoff)"):
-            raise ActivationRefusal(f"existing canonical handoff status is invalid: {path}")
-        prefix = previous[:previous.index(_BEGIN)]
-        if prefix.endswith(b"\n\n"):
-            previous = prefix[:-2]
-        elif prefix:
-            raise ActivationRefusal(f"existing canonical handoff separator is malformed: {path}")
-        else:
-            previous = b""
-    refresh_time = None
-    if _REFRESH_BEGIN in previous or _REFRESH_END in previous:
-        if (previous.count(_REFRESH_BEGIN) != 1 or previous.count(_REFRESH_END) != 1
-                or not previous.startswith(b"---\n")):
-            raise ActivationRefusal(f"existing canonical reference refresh is malformed: {path}")
-        try:
-            refresh_time = previous.split(b"\nlast_updated: ", 1)[1].split(b"\n", 1)[0].decode("ascii")
-            envelope = _refresh_envelope(bot_dir, refresh_time)
-            if not previous.startswith(envelope):
-                raise ValueError("unexpected reference refresh envelope")
-        except (IndexError, UnicodeError, ValueError) as exc:
-            raise ActivationRefusal(f"existing canonical reference refresh is malformed: {path}") from exc
-        previous = previous[len(envelope):]
+    previous, prior_status = _strip_section(previous, path)
+    previous = _strip_envelope(previous, bot_dir, path)
     return path, previous, (prior_status or ("existing file present (fresh capture unverified)" if previous else
-                                            "unavailable (empty previous session handoff)")), refresh_time
+                                            "unavailable (empty previous session handoff)")), (
+        info.st_atime_ns, info.st_mtime_ns)
 
 
-def _replace(path: Path, content: bytes) -> None:
+def _replace(path: Path, content: bytes, times: tuple[int, int] | None = None) -> None:
     if not path.parent.exists():
         path.parent.mkdir(mode=0o700)
     fd, temporary = tempfile.mkstemp(prefix=".session-a4f-", dir=path.parent)
@@ -127,6 +162,11 @@ def _replace(path: Path, content: bytes) -> None:
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
+        if times is not None:
+            # A refresh is no session capture (#2094). Keep the file's times:
+            # the resume gate falls back to the mtime for a handoff that has no
+            # last_updated of its own.
+            os.utime(temporary, ns=times)
         os.replace(temporary, path)
         directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
@@ -196,27 +236,22 @@ def _refuse_retired_work(owning, assigned, bot_dirs, candidate_bots) -> None:
         raise ActivationRefusal("retired bot still owns open work or a current assignment")
 
 
-def _render_handoffs(root: Path, bot_dirs, owning, assigned, now: datetime) -> list[tuple[Path, bytes]]:
-    """Validate every existing handoff and render its replacement; writes nothing."""
+def _render_handoffs(root: Path, bot_dirs, owning, assigned, refreshed_at: datetime):
+    """Validate every existing handoff and render its replacement; writes nothing.
+
+    Each envelope carries ``refreshed_at``; no time is read back from a file.
+    """
+    timestamp = refreshed_at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     writes = []
     for key, directory in sorted(bot_dirs.items()):
-        path, previous, status, prior_refresh = _handoff_file(Path(directory), root)
-        refresh = now
-        if prior_refresh is not None:
-            try:
-                previous_time = datetime.strptime(prior_refresh, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-            except ValueError as exc:
-                raise ActivationRefusal(f"existing canonical reference refresh has invalid time: {path}") from exc
-            if timedelta(0) <= now - previous_time < timedelta(hours=12):
-                refresh = previous_time
-        timestamp = refresh.strftime("%Y-%m-%dT%H:%M:%SZ")
+        path, previous, status, times = _handoff_file(Path(directory), root)
         payload = {"schema": 1, "previous_handoff": status,
                    "manager_owned_work": sorted(owning[key], key=lambda row: row["task_id"]),
                    "assigned_to_this_bot": sorted(assigned[key], key=lambda row: (row["owning_fleet"], row["task_id"]))}
         section = (_BEGIN + b"\n```json\n" + json.dumps(payload, sort_keys=True, indent=2).encode()
                    + b"\n```\n" + _END + b"\n")
         writes.append((path, _refresh_envelope(Path(directory), timestamp)
-                       + previous + b"\n\n" + section))
+                       + previous + b"\n\n" + section, times))
     return writes
 
 
@@ -246,8 +281,13 @@ def preflight_canonical_handoffs(root: Path, *, roster: dict[str, tuple[str, tup
 def persist_canonical_handoffs(root: Path, *, roster: dict[str, tuple[str, tuple[str, ...]]],
                                bot_dirs: dict[tuple[str, str], Path],
                                expected_audit: dict,
-                               candidate_bots: set[tuple[str, str]] | None = None) -> dict:
+                               candidate_bots: set[tuple[str, str]] | None = None,
+                               refreshed_at: datetime | None = None) -> dict:
     """Write exact current IDs after old writers stop and before any new bot starts.
+
+    ``refreshed_at`` is the time each envelope carries. Activation passes the
+    one it recorded (#2094), so a retried step writes the same bytes; without
+    it the time is now.
 
     ``roster`` comes from the frozen selected source fleet contexts; ``bot_dirs``
     comes from reviewed, installed old bot declarations. Active assignments
@@ -273,12 +313,13 @@ def persist_canonical_handoffs(root: Path, *, roster: dict[str, tuple[str, tuple
 
     # Validate and render every target before replacing the first file. A
     # failure during replacement still leaves activation pending, not started.
-    writes = _render_handoffs(root, bot_dirs, owning, assigned, datetime.now(timezone.utc))
+    writes = _render_handoffs(root, bot_dirs, owning, assigned,
+                              refreshed_at or datetime.now(timezone.utc))
     try:
-        for path, content in writes:
-            _replace(path, content)
+        for path, content, times in writes:
+            _replace(path, content, times)
     except OSError as exc:
         raise ActivationRefusal("canonical handoff persistence failed; activation remains pending") from exc
     return {"bots": len(writes), "open_tasks": len(actual),
             "active_assignments": sum(aid is not None for _, _, aid in actual),
-            "handoffs": [str(path) for path, _ in writes]}
+            "handoffs": [str(path) for path, _, _ in writes]}
