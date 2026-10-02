@@ -271,6 +271,11 @@ QUOTED_SUBST_REFUSED = [
     "cat <<EOF\n$(echo it's)\nEOF\ngh auth token",  # bash still runs the line after the heredoc
     "echo \"$(echo it's)\" && gh auth token",  # cannot be delimited: the rest is still judged
     "cat <<EOF\nuse `x for the config\nEOF\ngh auth token",  # a lone backtick in a heredoc body
+    # #2103 item 1: the tokenizer joins a backslash-newline before it reads comments, so the
+    # comment swallows the `)`; the `$(` is then read as text and the lone backtick after it
+    # must be too, or the line is unreadable and allowed
+    "echo \"$(echo a # `x \\\n)\" && gh auth token",
+    "echo \"$(echo a # x \\\n)\" && gh auth token",  # the same comment with no backtick: refused on main
 ]
 QUOTED_SUBST_ALLOWED = [
     POST_APOSTROPHE,
