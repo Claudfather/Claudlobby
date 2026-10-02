@@ -71,9 +71,7 @@ def current_entities(conn, *, entity_type: str | None = None,
 def entity_history(conn, ident: str) -> list[dict]:
     """SCD2 windows for one entity, by alias or uid — tombstone rows open
     the deleted period and are rendered, never filtered."""
-    rows = [_parse(r) for r in _q(conn, REG_HISTORY_SQL)]
-    return [r for r in rows
-            if r["entity_alias"] == ident or r["entity_uid"] == ident]
+    return [_parse(r) for r in _q(conn, REG_HISTORY_SQL, {"ident": ident})]
 
 
 def diff_fields(prev, curr, prefix: str = "") -> dict[str, tuple]:
@@ -103,7 +101,13 @@ def recent_changes(conn, *, limit: int = 50) -> list[dict]:
     ``deleted`` / ``recreated``, a first-in-partition row as
     ``first_observed`` (spec's derivation name — honestly first-OBSERVED,
     not created) — never a field storm."""
-    rows = [_parse(r) for r in _q(conn, REG_CHANGES_SQL)[:limit]]
+    if type(limit) is not int or limit < 0:
+        raise ValueError("registry changes limit must be a nonnegative integer")
+    if limit == 0:
+        return []
+    # Python slicing accepted arbitrarily large positive integers; SQLite
+    # binds signed 64-bit integers, whose maximum already exceeds any row count.
+    rows = [_parse(r) for r in _q(conn, REG_CHANGES_SQL, (min(limit, 2**63 - 1),))]
     out = []
     for r in rows:
         first = (r.get("prev_payload") is None
