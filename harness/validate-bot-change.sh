@@ -986,6 +986,73 @@ harness_check "keepalive marker path: idle-looking pane + fresh .last-tool-call 
 harness_check "keepalive marker path: .idle marker not set (fleet-pulse stays consistent)" "$r"
 
 # ===========================================================================
+# #2070 — a held input box is named, and its page says Enter, not restart.
+#   keepalive reads a box holding text that was never submitted, with no turn
+#   running, as HELD: it writes data/.held, writes no .idle, and types nothing
+#   into the box (a pending reload stays pending). fleet-pulse then pages
+#   input_held instead of activity_stuck's "likely hung mid-task", and the
+#   manager's push names the remedy. Its own fleet, so these sweeps touch no
+#   earlier scenario's bots.
+# ===========================================================================
+val_scenario "validate #2070: a held input box reads HELD and pages input_held"
+
+F2070="valf2070"
+F2070_BOTS="$ROOT/local/$F2070/runtime/bots"
+HELDB="valheld"
+mkdir -p "$F2070_BOTS/$HELDB/data"
+cat > "$ROOT/local/$F2070/fleet.yaml" <<YAML
+fleet:
+  name: $F2070
+  manager: $MGR
+  bots:
+    $MGR:
+      expertise: [orchestration]
+    $HELDB:
+      expertise: [software-engineering]
+YAML
+cat > "$F2070_BOTS/$HELDB/bot.conf" <<CONF
+BOT_NAME="$HELDB"
+BOT_ID="$HELDB"
+BOT_SERVICE=""
+MANAGER_TMUX="$MGR"
+OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD=1
+OBSERVABILITY_INPUT_HELD_THRESHOLD=0
+CONF
+# The held box in a live capture's shape (claude 2.1.285; the fixture
+# tests/fixtures/pane-states/input-held-cr.txt): the glyph and a no-break space,
+# the text, the swallowed Enter's empty line, border and footer. No "esc to
+# interrupt": no turn is running.
+_held_frame='\n\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\n\342\235\257\302\240set +H; PROBE2070 read your brief, then continue your open\n  rows and report when done.\n\n\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\n  \342\217\265\342\217\265 auto mode on (shift+tab to cycle)\n'
+tmux new-session -d -s "$HELDB" "printf -- '$_held_frame'; sleep 600"
+sleep 1
+# The last tool call long ago, and a reload waiting for an idle pane.
+touch -t 202001010000 "$F2070_BOTS/$HELDB/data/.last-tool-call"
+touch "$F2070_BOTS/$HELDB/data/.reload-pending"
+CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/keepalive.sh" "$F2070_BOTS/$HELDB" >/dev/null 2>&1 || true
+[ -f "$F2070_BOTS/$HELDB/data/.held" ] && r=yes || r=no
+harness_check "#2070 keepalive reads the held box as HELD (data/.held written)" "$r"
+grep -q ' HELD ' "$F2070_BOTS/$HELDB/keepalive.log" 2>/dev/null && r=yes || r=no
+harness_check "#2070 keepalive logs HELD, not UNKNOWN" "$r"
+[ ! -f "$F2070_BOTS/$HELDB/data/.idle" ] && [ -f "$F2070_BOTS/$HELDB/data/.reload-pending" ] && r=yes || r=no
+harness_check "#2070 keepalive writes no .idle and leaves the reload pending" "$r"
+heldb_pane=$(tmux capture-pane -t "$HELDB" -p 2>/dev/null || true)
+printf '%s' "$heldb_pane" | grep -q '/reload' && r=no || r=yes
+harness_check "#2070 no /reload keystroke went into the held box" "$r"
+
+val_plane_ready "$ROOT" "$F2070"
+CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$F2070" "$LIB_DIR/fleet-pulse.sh" "$F2070" >/dev/null 2>&1 || true
+heldb_ev=$(val_events "$ROOT" "$F2070" "$HELDB")
+printf '%s' "$heldb_ev" | grep -q '"type":"input_held"' && r=yes || r=no
+harness_check "#2070 fleet-pulse emits input_held for the held bot" "$r"
+printf '%s' "$heldb_ev" | grep -q '"type":"activity_stuck"' && r=no || r=yes
+harness_check "#2070 ...and no activity_stuck (no 'likely hung mid-task')" "$r"
+mgr_pane=$(tmux capture-pane -J -t "$MGR" -p -S - 2>/dev/null || true)
+printf '%s\n' "$mgr_pane" | grep -F "$HELDB input_held" | grep -q 'Enter' && r=yes || r=no
+harness_check "#2070 the manager's push names the held box and the Enter remedy" "$r"
+printf '%s\n' "$mgr_pane" | grep -F "$HELDB input_held" | grep -q 'do not restart' && r=yes || r=no
+harness_check "#2070 ...and says not to restart" "$r"
+
+# ===========================================================================
 # #453 Phase 5 — Telegram bridge auto-heal (Tier-2, flag-gated F6b). Proves the
 # heal ladder in keepalive.sh end-to-end: a DARK poller (no bot.pid → no_bridge)
 # on an IDLE bot, with the heal flag on, triggers the restart ladder — the ONLY

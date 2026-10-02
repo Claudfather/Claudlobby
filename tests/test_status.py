@@ -23,6 +23,7 @@ from claudlobby.status import (
     _heartbeat_display,
     _latest_heartbeats,
     _state_display,
+    _tmux_display,
     collect_fleet_status,
     format_bot_detail,
     format_json,
@@ -435,6 +436,17 @@ class TestStateDisplay:
     def test_working(self):
         bs = BotStatus(name="x", state="working")
         assert _state_display(bs) == "working"
+
+
+class TestTmuxDisplay:
+    def test_held(self):
+        # #2070: a box holding unsubmitted text is named, not shown as plain "up".
+        bs = BotStatus(name="x", tmux_alive=True, pane_state="HELD")
+        assert "held" in _tmux_display(bs)
+
+    def test_busy_and_idle_unchanged(self):
+        assert "busy" in _tmux_display(BotStatus(name="x", tmux_alive=True, pane_state="BUSY"))
+        assert _tmux_display(BotStatus(name="x", tmux_alive=True, pane_state="IDLE")) == "idle"
 
 
 class TestHeartbeatDisplay:
