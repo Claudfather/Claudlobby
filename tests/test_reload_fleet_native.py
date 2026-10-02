@@ -21,7 +21,7 @@ def _kill_session(process):
     reaped, so a group that is already gone is not an error (#2077)."""
     try:
         os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):  # ESRCH; EPERM on a macOS runner (#2077)
         pass
 
 
@@ -182,11 +182,11 @@ def test_orphaned_reload_lock_child_cannot_start_plugin_step(tmp_path):
 
 def test_session_cleanup_kills_a_live_group_and_tolerates_a_gone_one(monkeypatch):
     """#2077: a test's ``finally`` kills the group it started, often after the
-    group was already killed and its leader reaped. That second kill answers
-    ESRCH on Linux. On a macOS runner it answered EPERM, which the cleanup
-    raised, failing a test whose assertions had passed. Why macOS answers EPERM
-    there is not established, and the race cannot be produced on demand, so
-    EPERM is injected."""
+    group was already killed and its leader reaped. That second kill has never
+    failed a Linux CI run; on macOS runners it has answered EPERM, which the
+    cleanup raised, failing a test whose assertions had passed. Why macOS
+    answers EPERM there is not established, and the race cannot be produced on
+    demand, so EPERM is injected."""
     live = subprocess.Popen(["sleep", "30"], start_new_session=True)
     _kill_session(live)
     assert live.wait(timeout=10) == -signal.SIGKILL  # it still kills a live group
