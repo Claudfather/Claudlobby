@@ -19,17 +19,17 @@ repos: [Claudfather/Claudlobby]
 | Plan item | Status on main | Evidence | What remains |
 |---|---|---|---|
 | The queue (v2 item 1 / E3) | built | chunks T #1523 (the stale in-flight task, tiered) · U #1524 (`blocked_waiting`) · W #1527 (recorder gaps in the header) · #1435 attention expiry as a recorded fact; the reason vocabulary escalated / send_failed / never_activated / nudged / overdue / blocked_waiting / stale_task, each with a CLI fix line | deep links; the waiting-on-a-human state with no open task (#1685) |
-| Merge-poll observer (v2 item 2) | superseded in part | `pr_role` #1706, `link_source` #1713; `task reviews` and `pr-review-state` read verdicts; merge stays a human act | merged vs closed-without-merge still unrecorded → #2073 part 2 |
-| Recurring with consent (v2 item 3 / play D) | superseded | the manager check-in (#1550; chunks 1–4): the beat, dispatch / ask / nothing; `propose` gated by `planning.initiative` #1559; `sprint` #1560; `focus` #1561 | the decisions card #1562 |
+| Merge-poll observer (v2 item 2) | superseded in part | `pr_role` #1706, `link_source` #1713; `task reviews` reads verdicts (#1989); the plane records no merge | merged vs closed-without-merge still unrecorded → #2073 part 2 |
+| Recurring with consent (v2 item 3 / play D) | superseded | the manager check-in (#1550; chunks 1–4): the beat, dispatch / ask / nothing | open: `propose` gated by `planning.initiative` #1559; `sprint` #1560; `focus` #1561; the decisions card #1562 |
 | Conversations (v2 item 4 / E1 / play E-read) | open | #1533 design B; #1394; chunk Y proved terminal scrollback impossible (alternate screen), so history comes from transcripts | the whole epic → #1533 |
 | Who is this bot (v2 item 5 / play 5) | built | #1434 inventory + equipment; #1437 org chart + utilization | #1483 polish |
 | Work view, lanes (v2 item 6) | partial | canonical Task rows; broadcast grouping #1482; workstreams on the plane #1466 | #1483 item 1 (lanes); no workstream surface |
 | Task story (E2) | fleet half built, UI half open | M-A #1484, M-B #1487, N #1489, P #1502, Q #1505, R #1515, every boot #1496 | no per-task route → #2073 |
 | Create / act (E4) | open, better defined | the verbs are unified-CLI doors; the gate is filed: #1622, #1623, #1670 | → #2075 |
 | Env panel (E5) | open, premise sharpened | `bot.conf` is the session carrier and `FLEET_JOB_ARMING` the timer carrier; `host doctor --switches` | → #2074 |
-| Remote seed (E6) | substrate replaced | the unified CLI #1989: a sealed release, `host setup`, `config plan` / `config diff`, `host activate`, the host lease (PR #1983) | re-spec on activation; the north-star call |
-| Fan-out parity (v2 item 7) | superseded | receipt-gated sends #1821, chunking #1882 / #1495, the send lock PR #2040 | the checklist on #2075 |
-| v1 items 2, 7, 10 and the deprecations | built | the operator-language header #1476; mobile triage (chunk X #1528); schema admission (`schema_state.py`); rows / spool / ingest demoted to the machinery rail; freshness tiers (T); retention #1429; the architecture doc #1453 | the `app.js` split — undone, low |
+| Remote seed (E6) | substrate replaced | the unified CLI #1989: a sealed release, `host setup`, `config plan` / `config diff`, `host activate` | re-spec on activation; the host lease, designed in open PR #1983; the north-star call |
+| Fan-out parity (v2 item 7) | superseded | receipt-gated sends #1821, chunking #1882 / #1495 | the send lock, open PR #2040 (#2036); the checklist on #2075 |
+| v1 items 2, 7, 10 and the deprecations | built | the operator-language header #1480; mobile triage (chunk X #1528); schema admission (`schema_state.py`); rows / spool / ingest demoted to the machinery rail; freshness tiers (T); retention #1429; the architecture doc #1453 | the `app.js` split — undone, low |
 
 ### The v2 restart (2026-09-02), not otherwise recorded
 
