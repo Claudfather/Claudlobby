@@ -21,6 +21,14 @@ A bare `neonctl --help` in a live bot session printed the real `NEON_API_KEY` in
 - **`credential-echo-decide.py`** holds the table as data, plus neonctl's command tree. It follows a `bash -c` string, and skips quoted arguments, comments and heredoc bodies. `eval`, scripts, aliases, `xargs` and commands built from variables are out of its reach.
 - **Tests:** `tests/test_credential_echo_guard.py` replays the canary probe kit's table A (`tests/fixtures/credential_echo/registry-rows.json`). Every echoing row is refused as written. Every `unset` row passes under each way of removing its variables. The controls pass untouched. Around the rows it covers separators, subshells, wrappers, scoping traps, the stdout-to-file rule, fail-open, and the plane record.
 
+### Fixed — `bot restart` and `bot start` no longer report a successful start of a staggered unit as unverified (#2087)
+
+On Linux, `systemctl --user restart` and `enable --now` block through a bot unit's `ExecStartPre=/bin/sleep` boot stagger, and the enroll call had a fixed 30 s budget. A unit staggered 30 s or more was cut off before its start returned. A restart that worked was reported as "bot lifecycle effect is unverified", and the readiness wait never ran.
+
+- **`unit_start_budget`** (activation_runtime) returns 30 s plus the unit's sealed `/bin/sleep` delay. This is the rule activation already used for its own starts, and `_start_budget` now delegates to it.
+- **`set_bot_running`** reads that budget from the sealed unit before the readiness fence and gives it to the enroll call. A call that outlasts the unit's own stagger is still reported unverified. An unstaggered unit and a Darwin plist keep 30 s.
+- **Tests:** `tests/test_bot_operations.py` seals a worker staggered 30 s, whose fake enroll is cut off at its budget while the start still completes. It adds controls for a hang past the stagger, an unstaggered unit, and a unit changed after activation. `tests/test_activation_runtime.py` pins the helper.
+
 ### Fixed — a held input box is named HELD and paged with its remedy, never as a hang (#2070)
 
 When a bot's input box held text that was never submitted and no turn was running, keepalive logged `UNKNOWN` on every tick and fleet-pulse paged the manager with `activity_stuck` "likely hung mid-task": a page that points at a restart, which discards the text, when the remedy is an operator Enter. Seen on 2026-10-01 after a restart and under load: 26 consecutive `UNKNOWN` ticks on one bot, three "likely hung" pages on another, and two ordinary sends held at a 1-minute load of 34 and 44, each cleared with exactly two Enters.
