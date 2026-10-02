@@ -389,8 +389,8 @@ fi
 #
 #   HELD  — No active turn, AND the input box holds text that was never
 #           submitted (pane_is_held, #2070): a send whose Enter was swallowed.
-#           An operator Enter submits it (a second one only if the hint row
-#           reads "review and press Enter to send"); a restart would discard
+#           An operator Enter submits it (one more if the text is still there
+#           after about 10 s, never a third); a restart would discard
 #           it. Asked BEFORE IDLE: the idle patterns can match a held frame
 #           (a word in the held text, or the box border's bytes when no UTF-8
 #           locale is set), and IDLE is the arm that types into the pane.
