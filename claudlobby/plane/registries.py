@@ -192,6 +192,12 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "heavy_slot_refused": "notice",
     "heavy_slot_unreleased": "notice",
     "heavy_slot_unparsed": "notice",
+    # #2090: the credential-echo guard. A Bash call refused because it would
+    # print an env-held credential (the row and the CLI, never the command),
+    # and a command its decider could not read (allowed, and counted). The
+    # record, never a page.
+    "credential_echo_refused": "notice",
+    "credential_echo_unparsed": "notice",
 }
 
 # ---------------------------------------------------------------------------

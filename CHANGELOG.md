@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — a composed guard refuses a CLI form that prints an env-held credential (#2090)
+
+A bare `neonctl --help` in a live bot session printed the real `NEON_API_KEY` into a session transcript, because the CLI shows the variable as the default of `--api-key`. Every bot inherits that variable, and the only mitigation was prose in one agent file. The host's settings carry a bare `Bash` allow, so no permission rule could refuse the command.
+
+- **`credential-echo-guard.sh`** is a PreToolUse hook on Bash, composed into every bot through `claudlobby/system.yaml` next to `vault-git-guard.sh`. It refuses the forms in #2090's table A, which were measured with canaries:
+  - neonctl and neon help and usage screens: `--help`, a bare call, a command group without a verb, an unknown or incomplete top-level option. An unknown command prints only an error, so it passes.
+  - A `DEBUG` trace in front of neonctl.
+  - `pip config list` and `pip config debug` while `PIP_INDEX_URL` or `PIP_EXTRA_INDEX_URL` can be set.
+  - `gh auth token`.
+- **The safe form is allowed.** A form passes only when its variables are removed in the same command (`env -u VAR`, `env -i`, an empty `VAR=`, or an `unset VAR` earlier in the line that always runs: not after `&&`, `||` or `|`, not inside an `if`, a loop or a function body). The `DEBUG` trace and `gh auth token` are refused even then, because each falls back to a stored login; `gh auth token` passes with its stdout sent to a file, and its reason leads with letting gh read the token itself.
+- **It refuses, and never rewrites.** The reason names the safe form and repeats nothing from the command. A refusal is recorded as `credential_echo_refused` with the row and the CLI name only. Both of its events are registered as `notice` in the plane's severity registry.
+- **It fails open, with a `script_error` breadcrumb.** That happens when jq or python3 is missing, the payload is unparseable, or the decider fails. A command the decider cannot read is allowed and counted as `credential_echo_unparsed`.
+- **`credential-echo-decide.py`** holds the table as data, plus neonctl's command tree and pip's options. It reads quotes, ANSI-C strings and abbreviated long options as the shell and the CLI do. It follows a shell's `-c` string, a heredoc or here-string fed to a shell, substitutions inside double quotes and unquoted heredocs, `env` (with `-S`), wrappers such as `command`, `time`, `setsid` and `sudo`, and `npx`, `bunx` and `pnpm|npm|yarn dlx|exec`. It skips quoted arguments, comments and heredoc bodies that are data. `eval`, scripts, aliases, `xargs`, `find -exec` and names built by expansion are out of its reach.
+- **Tests:** `tests/test_credential_echo_guard.py` replays the canary probe kit's table A (`tests/fixtures/credential_echo/registry-rows.json`). Every echoing row is refused as written. Every `unset` row passes under each way of removing its variables. The controls pass untouched. Around the rows it covers separators, subshells, wrappers, scoping traps, the stdout-to-file rule, fail-open, and the plane record.
+
 ### Fixed — `bot restart` and `bot start` no longer report a successful start of a staggered unit as unverified (#2087)
 
 On Linux, `systemctl --user restart` and `enable --now` block through a bot unit's `ExecStartPre=/bin/sleep` boot stagger, and the enroll call had a fixed 30 s budget. A unit staggered 30 s or more was cut off before its start returned. A restart that worked was reported as "bot lifecycle effect is unverified", and the readiness wait never ran.

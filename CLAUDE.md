@@ -162,6 +162,8 @@ One line per script, for routing; operators use the public CLI. **Before changin
 - `mention-rewrite.py` — the rewriter behind `gh-mention-guard.sh`
 - `vault-git-guard.sh` — PreToolUse hook: stops bots rewriting git state inside the vault
 - `vault-git-decide.py` — the decision half of `vault-git-guard.sh`
+- `credential-echo-guard.sh` — PreToolUse hook: refuses a CLI form that prints an env-held credential unless the variable is removed in the same command (#2090)
+- `credential-echo-decide.py` — the decision half of `credential-echo-guard.sh`
 - `heavy-slot-guard.sh` — PreToolUse hook: queues heavy Bash commands (suites, installs, builds) on the host's heavy-job slot (opt-in)
 - `heavy-slot.py` — the heavy-job slot: `hook` finds heavy commands, `run` holds a slot, `status` names holders
 

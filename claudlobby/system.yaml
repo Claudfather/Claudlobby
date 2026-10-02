@@ -387,6 +387,8 @@ defaults:
       # gets no decision. Matcher-scoped to Bash; fails open, loudly.
       - command: "$CLAUDLOBBY_NATIVE_DIR/vault-git-guard.sh"
         matcher: "Bash"
+      - command: "$CLAUDLOBBY_NATIVE_DIR/credential-echo-guard.sh"
+        matcher: "Bash"
     PostToolUse:
       - command: "$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh"
       # The OUTBOUND Telegram carrier (#1402): the plugin's MCP reply path
