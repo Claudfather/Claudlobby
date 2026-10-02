@@ -153,8 +153,9 @@ the selected private session and native enrollment; it does not inspect another
 process by name. Use `claudlobby --json bot logs BOT` or the manager's
 `claudlobby --json fleet logs` for bounded file tails. A missing bot log is
 different from an unreadable source. Native state and recorded activity are
-separate observations. `claudlobby --json fleet uptime --window 24h` reports
-recorded keepalive coverage; missing evidence does not prove downtime or health.
+separate observations. `claudlobby --json fleet uptime --window 24h` reports each
+bot's up share of observed time beside the share observed; unobserved time is
+neither downtime nor health.
 `claudlobby --json fleet utilization` reports busy share and observed seconds from
 Plane heartbeat samples alongside canonical task assignments. A bot with no
 observed BUSY/IDLE duration is unknown, not idle.
