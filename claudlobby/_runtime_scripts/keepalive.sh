@@ -41,7 +41,7 @@ LOG="$BOT_DIR/keepalive.log"
 # Emit a keepalive event: a TRANSITION (RESTART, BRIDGE_HEAL, SKIP, RELOAD) is
 # a FLEET EVENT on the plane through the one door (emit_fleet_event:
 # provenance, alias-anchored), so `claudlobby event list` and `uptime` see it; the
-# per-tick verdicts BUSY / IDLE / UNKNOWN ride the heartbeat sample the same
+# per-tick verdicts BUSY / IDLE / HELD / UNKNOWN ride the heartbeat sample the same
 # tick emits (plane_presence_samples) and are not fleet events. (The
 # keepalive-<day>.jsonl file this once wrote had no reader in the estate —
 # measured, 867 rows/bot/day — and went with the F18 closure.)
@@ -76,7 +76,7 @@ emit_keepalive_event() {
 # restart race) deliberately emit nothing — transitional, the next tick
 # records (unpinned, disclosed).
 plane_presence_samples() {
-    local verdict="$1"   # BUSY|IDLE|UNKNOWN, or DOWN (the dead-session fact)
+    local verdict="$1"   # BUSY|IDLE|HELD|UNKNOWN, or DOWN (the dead-session fact)
     # THE arming predicate (lib-common) — a hand-rolled copy here re-forked
     # what #1384 consolidated, with silent identity skips the ruling calls
     # drift (r2 gauntlet). plane_armed is if-safe under set -e.
@@ -387,6 +387,14 @@ fi
 #           emits no marker for minutes (stable across releases, unlike the
 #           spinner/verb list).
 #
+#   HELD  — No active turn, AND the input box holds text that was never
+#           submitted (pane_is_held, #2070): a send whose Enter was swallowed.
+#           An operator Enter submits it (a second one only if the hint row
+#           reads "review and press Enter to send"); a restart would discard
+#           it. Asked BEFORE IDLE: the idle patterns can match a held frame
+#           (a word in the held text, or the box border's bytes when no UTF-8
+#           locale is set), and IDLE is the arm that types into the pane.
+#
 #   IDLE  — No recent tool-call marker, AND classify_pane matches a prompt glyph
 #           (>, ❯) or a known waiting-for-input marker (no active affordance).
 #
@@ -400,7 +408,7 @@ fi
 # ---------------------------------------------------------------------------
 
 # classify_pane <pane_text>
-# Prints BUSY, IDLE, or UNKNOWN to stdout. Pattern definitions and operator
+# Prints BUSY, HELD, IDLE, or UNKNOWN to stdout. Pattern definitions and operator
 # extension (KEEPALIVE_*_PATTERNS) live in lib-common.sh — pane_is_busy /
 # pane_is_idle are the single source of truth; this adds only the three-way
 # verdict keepalive needs (IDLE drives reload activation, UNKNOWN drives the
@@ -409,6 +417,8 @@ classify_pane() {
     local text="$1"
     if pane_is_busy "$text"; then
         echo "BUSY"
+    elif pane_is_held "$text"; then
+        echo "HELD"
     elif pane_is_idle "$text"; then
         echo "IDLE"
     else
@@ -436,13 +446,28 @@ case "$state" in
         echo "$(ts_iso) BUSY — active processing" >> "$LOG"
         rm -f "$UNKNOWN_COUNTER"
         # Clear idle marker — bot is actively working
-        rm -f "$BOT_DIR/data/.idle"
+        rm -f "$BOT_DIR/data/.idle" "$BOT_DIR/data/.held"
+        ;;
+    HELD)
+        # #2070: text sits in the input box and no turn runs. Name it, so the
+        # page says what an operator does; send NOTHING into the box (no reload,
+        # no bridge heal). data/.held holds the epoch it was first seen, and is
+        # re-stamped every HELD tick so fleet-pulse can tell a live hold from a
+        # stale marker.
+        echo "$(ts_iso) HELD — input box holds text that was never submitted, no turn running (an operator Enter submits it; do not restart)" >> "$LOG"
+        rm -f "$UNKNOWN_COUNTER" "$BOT_DIR/data/.idle"
+        if [ -f "$BOT_DIR/data/.held" ]; then
+            touch "$BOT_DIR/data/.held"
+        else
+            date +%s > "$BOT_DIR/data/.held"
+        fi
         ;;
     IDLE)
         echo "$(ts_iso) IDLE — at prompt" >> "$LOG"
         rm -f "$UNKNOWN_COUNTER"
         # Touch idle marker — fleet-pulse reads this instead of parsing panes
         touch "$BOT_DIR/data/.idle"
+        rm -f "$BOT_DIR/data/.held"
         # F2(b) consolidated reload activation: if reload-fleet.sh marked a live
         # plugin/skill update pending, perform it now that the pane is IDLE, then
         # clear the marker. This is the one place keepalive presses Enter on an
@@ -460,6 +485,7 @@ case "$state" in
         ;;
     *)
         # Track consecutive UNKNOWN runs
+        rm -f "$BOT_DIR/data/.held"
         prev=0
         [ -f "$UNKNOWN_COUNTER" ] && prev=$(cat "$UNKNOWN_COUNTER" 2>/dev/null) || true
         count=$((prev + 1))

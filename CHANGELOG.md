@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a held input box is named HELD and paged with its remedy, never as a hang (#2070)
+
+When a bot's input box held text that was never submitted and no turn was running, keepalive logged `UNKNOWN` on every tick and fleet-pulse paged the manager with `activity_stuck` "likely hung mid-task": a page that points at a restart, which discards the text, when the remedy is an operator Enter. Seen on 2026-10-01 after a restart and under load: 26 consecutive `UNKNOWN` ticks on one bot, three "likely hung" pages on another, and two ordinary sends held at a 1-minute load of 34 and 44, each cleared with exactly two Enters.
+
+- **`pane_is_held`** (lib-common): positive evidence of text on the input box's line, read through `pane_input_region` and `_pane_strip_chrome`, with no length floor. Claude Code's own text there is never held: an empty box's suggestion (`Try "…"`), the queued-message hint behind a running turn, and a menu (a numbered option, or an offered "Esc to cancel"), where an Enter would choose. Byte-safe under any locale.
+- **keepalive** asks it after `BUSY` and before `IDLE`. The `HELD` verdict is logged and rides the heartbeat; `data/.held` holds the time it was first seen; no `.idle` is written and no key is sent, so no reload or bridge heal goes into a held box. Before, with no UTF-8 locale, the idle pattern matched a held box's border bytes and called it `IDLE`.
+- **fleet-pulse** pages `input_held` (critical) in place of `activity_stuck` once a fresh `data/.held` has held for `OBSERVABILITY_INPUT_HELD_THRESHOLD` (default 300 s). The manager's push names the remedy: an operator Enter, a second only if the hint row then reads "review and press Enter to send", never typed text, never a restart.
+- **Readers:** `uptime` counts `HELD` ticks as up time, as it did while they read `UNKNOWN`, and `status` shows `held`. The operator plane's presence still renders `HELD` as `unknown`.
+- **Tests:** `tests/test_pane_is_held.sh` (new), held cases and negative controls in `tests/test_keepalive_classify.sh` under both locales, four fixtures in a live capture's shape, the real keepalive tick, uptime, status, and a `validate-bot-change.sh` scenario that drives keepalive and fleet-pulse end to end.
+
 ### Fixed — a reload-fleet test failed on macOS in its own cleanup (#2077)
 
 Two tests in `tests/test_reload_fleet_native.py` end by killing the process group they

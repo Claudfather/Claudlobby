@@ -55,7 +55,8 @@ Read bot event logs at these natural decision points — not continuously, not o
 
 | Event type | Source | Manager action |
 |------------|--------|---------------|
-| `activity_stuck` | pulse | Bot has made **no tool call** for longer than its threshold AND keepalive has not classified it as idle (no recent `data/.idle` marker). Uses marker-file mtime comparison, not pane regex. Investigate; restart only if `safe-worker-restart` guards pass. |
+| `activity_stuck` | pulse | Bot has made **no tool call** for longer than its threshold AND keepalive has not classified it as idle (no recent `data/.idle` marker). Uses marker-file mtime comparison, not pane regex. Investigate; restart only if `safe-worker-restart` guards pass. A bot whose input box holds text it never submitted gets `input_held` instead (below). |
+| `input_held` | pulse | The bot's **input box holds text that was never submitted** and no turn is running (keepalive's `HELD` verdict, held past `OBSERVABILITY_INPUT_HELD_THRESHOLD`, default 300 s). It is not hung, and **do not restart it**: a restart discards the text. Ask an operator to press **one Enter** in its pane; if the hint row then reads "review and press Enter to send", **one more** sends it. Never more than two, never typed text, and do not message the bot first: a message typed into a held box joins the held text. |
 | `overdue_dispatch` | pulse | A task you dispatched to this bot passed its deadline with no terminal linked report. Check the bot (cross-reference `activity_stuck`): if hung, recover it; if mis-scoped or wedged, re-dispatch or reassign; if it needs a human, escalate. Don't silently wait. |
 | `pane_stuck` (>5 min) | pulse | Investigate pane content, restart if confirmed stuck. Note: a live spinner animates the pane, so an animated-but-hung bot shows up as `activity_stuck`, not `pane_stuck`. |
 | `crash_loop` | pulse | The unit is **failing its start over and over** and systemd is already restarting it (`restarts` in the payload is how many times running). **Do NOT restart it** — another restart only zeroes the counter; the unit is enrolled, so `bot start` is not the fix either. The cause is in the bot's `logs/startup.log` (on 2026-09-23 it was a broken `claude` install, printed on every attempt). Fix the cause, or escalate to the human. Before #1769 this read as "boot in flight" indefinitely and paged no one. |
@@ -80,7 +81,7 @@ session. Do not fall back to a raw launcher.
 
 ## Active Notifications (push)
 
-Reading events at decision points is the default, but silent stalls — the reason `activity_stuck` exists — are exactly the case where a manager *can't* rely on remembering to poll. So `fleet-pulse.sh` also **pushes** a one-line note into your tmux session for high-severity events (`activity_stuck`, `session_missing`, `service_down`, `crash_loop`), debounced to once per episode:
+Reading events at decision points is the default, but silent stalls — the reason `activity_stuck` exists — are exactly the case where a manager *can't* rely on remembering to poll. So `fleet-pulse.sh` also **pushes** a one-line note into your tmux session for high-severity events (`activity_stuck`, `input_held`, `session_missing`, `service_down`, `crash_loop`), debounced to once per episode:
 
 ```
 [FLEET-PULSE] <bot> activity_stuck — no tool calls for 11400s while not idle (likely hung mid-task)
@@ -185,7 +186,8 @@ a large window.
 
 **`--critical` also does not cover every actionable type in the decision table above.** It follows
 the Plane severity registry (`session_missing`, `service_down`, `activity_stuck`, `script_error`,
-`overdue_dispatch`, `bridge_down`, `reload_failed`, `restart_failed`, `rc_timeout`, `crash_loop`) that omits
+`overdue_dispatch`, `bridge_down`, `reload_failed`, `restart_failed`, `rc_timeout`, `crash_loop`,
+`input_held`) that omits
 `pane_stuck`, `wip_uncommitted`, `sweep_repo_unreachable`, and `audit_failed` — all actionable per
 the table above. Same hand-maintained-list gap `brief.py`'s alerts section already discloses
 (#903); this protocol inherits it rather than reintroducing it. Until #903 closes, pair

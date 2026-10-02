@@ -125,6 +125,11 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # gate had been reading as "boot in flight" forever. Critical so the
     # escalation read (severity = 'critical') can page it.
     "crash_loop": "critical",
+    # #2070: a bot whose input box holds text that was never submitted, with no
+    # turn running (keepalive's HELD verdict), paged in place of activity_stuck.
+    # Critical like the page it replaces; the remedy is an operator Enter, not
+    # a restart, so it is not one of fleet-pulse's Telegram escalation types.
+    "input_held": "critical",
     # #1924: historical launchd reenrollment deferral, retained for old facts.
     "job_reenroll_deferred": "notice",
     "alert_delivery_failed": "notice",

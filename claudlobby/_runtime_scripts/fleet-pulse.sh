@@ -64,6 +64,9 @@ mkdir -p "$state_dir"
 # enough that one delivery has stopped being a live signal. The 2026-07-27
 # outage ran ~360 ticks on a single delivery. Set 0 to disable.
 _RENOTIFY_AFTER_S="${FLEET_PULSE_RENOTIFY_AFTER_S:-21600}"  # 6h
+# keepalive re-stamps data/.held on every HELD tick (one a minute), so a marker
+# older than five ticks means keepalive stopped seeing a held box (#2070).
+_HELD_FRESH_S=300
 
 # Dispatch watchdog inputs: the plane, through the matcher (F18 R2a) — no
 # ledger files; a matcher that cannot reach the plane refuses, and the
@@ -563,7 +566,37 @@ for bot_dir in "$BOTS_DIR"/*/; do
     # deterministic and harness-agnostic (works for Claude Code, Codex, Cortex).
     marker="$bot_dir/data/.last-tool-call"
     idle_marker="$bot_dir/data/.idle"
-    if [ -f "$marker" ]; then
+    # #2070: keepalive writes data/.held while the bot's input box holds text
+    # that was never submitted and no turn runs (its HELD verdict). That bot is
+    # not hung: an operator Enter submits the text, and a restart would discard
+    # it. So it gets input_held, naming that remedy, instead of activity_stuck's
+    # "likely hung mid-task". Only while keepalive keeps re-stamping the marker
+    # (a stale one says nothing about the box now), and only once it has held
+    # for the threshold, since a send in flight holds its text for a moment.
+    held_marker="$bot_dir/data/.held"
+    _held=0
+    if [ -f "$held_marker" ] \
+        && marker_age_within "$held_marker" "$_HELD_FRESH_S" \
+        && { [ ! -f "$marker" ] || marker_is_newer "$held_marker" "$marker"; }; then
+        _held=1
+    fi
+    if [ "$_held" = 1 ]; then
+        debounce_clear "$state_dir" "$bot_id" "activity_alerted"
+        held_threshold=$(bot_conf_get "$bot_dir" OBSERVABILITY_INPUT_HELD_THRESHOLD 300)
+        now_epoch=$(date +%s)
+        held_since=$(head -c 20 "$held_marker" 2>/dev/null | tr -cd '0-9' || true)
+        [ -n "$held_since" ] || held_since=$now_epoch
+        held_for=$(( now_epoch - held_since ))
+        if [ "$held_for" -ge "$held_threshold" ]; then
+            emit_fleet_event "input_held" "pulse" \
+                '{"held_since_epoch":'"$held_since"',"held_seconds":'"$held_for"'}' "$bot_dir" "$bot_id"
+            debounce_notify "$state_dir" "$bot_id" "held_alerted" _notify_current_bot \
+                "$bot_id input_held — its input box holds text that was never submitted, and no turn is running (${held_for}s). Remedy: an operator presses Enter in its pane, and a second Enter only if the hint row then reads 'review and press Enter to send'; never typed text, and do not restart (a restart discards the text)." "$_mgr_token" "$_RENOTIFY_AFTER_S"
+        fi
+    else
+        debounce_clear "$state_dir" "$bot_id" "held_alerted"
+    fi
+    if [ "$_held" = 0 ] && [ -f "$marker" ]; then
         # If idle marker is newer than tool-call marker, bot is idle — skip
         if ! marker_is_newer "$idle_marker" "$marker"; then
             threshold=$(bot_conf_get "$bot_dir" OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD 1800)
@@ -717,7 +750,7 @@ _plane_critical() {   # $1 = window start (a naive local instant, or ISO), $2 = 
 _esc_cache=$(safe_mktemp)    # the escalation window
 _rb_cache=$(safe_mktemp)     # the summary's read-back span
 _CRITICAL_ESCALATION_TYPES="service_down session_missing bridge_down rc_timeout crash_loop"
-_CRITICAL_SUMMARY_TYPES="session_missing service_down bridge_down activity_stuck rc_timeout crash_loop"
+_CRITICAL_SUMMARY_TYPES="session_missing service_down bridge_down activity_stuck input_held rc_timeout crash_loop"
 _rb_yesterday=$(date -u -v-1d +%Y-%m-%dT00:00:00Z 2>/dev/null || date -u -d "yesterday" +%Y-%m-%dT00:00:00Z 2>/dev/null || echo "")
 
 # --- Fleet-wide escalation: persistent critical events → Telegram -----------
