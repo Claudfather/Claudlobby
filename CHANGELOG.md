@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a lone backtick in a double-quoted string no longer hides its line from the credential-echo guard (#2103)
+
+#2099 reads a double-quoted `$(` it cannot delimit as text, so the rest of the line is still judged. A lone backtick in the same string still made the line unreadable, and an unreadable line is allowed. A comment ending in a backslash inside the substitution reaches that state, because the tokenizer joins the backslash-newline before it reads comments, so the comment swallows the `)`. This line was refused before #2099, allowed after it, and printed the canary under bash:
+
+````
+echo "$(echo a # `x \
+)" && gh auth token
+````
+
+- **A lone backtick in a double-quoted string is read as text,** as `_substitutions` already reads it, so the line is judged and that form is refused again.
+
 ### Fixed — a quoted substitution the credential-echo guard cannot delimit no longer hides the rest of its line (#2097)
 
 The guard from #2090 judged a double-quoted `$(...)` by first finding its closing parenthesis. A heredoc post whose prose held an apostrophe or an unmatched parenthesis defeated that search, the whole line read as unparsed, and an unparsed line is allowed. So `gh auth token` or `neonctl --help` beside such a post ran unjudged.
