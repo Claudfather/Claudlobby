@@ -14,6 +14,17 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 
 
+def _kill_session(process):
+    """SIGKILL the process group a test started with ``start_new_session=True``.
+
+    Run in a test's ``finally``, where the group is often already killed and
+    reaped, so a group that is already gone is not an error (#2077)."""
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
 def _script_host(tmp_path: Path):
     root = tmp_path / "data"
     native = tmp_path / "native"
@@ -106,10 +117,7 @@ def test_killed_plugin_refresh_is_raised_once_by_next_selected_run(tmp_path):
         os.killpg(process.pid, signal.SIGKILL)
         process.communicate(timeout=10)
     finally:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        _kill_session(process)
         process.communicate(timeout=10)
     inflight = root / "state/reload-fleet.inflight" / f"demo.{process.pid}"
     log = root / "state/reload-fleet.log"
@@ -168,8 +176,24 @@ def test_orphaned_reload_lock_child_cannot_start_plugin_step(tmp_path):
         assert len([line for line in (root / "state/reload-fleet.log").read_text().splitlines()
                     if "reload_failed:" in line]) == 1
     finally:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        _kill_session(process)
         process.communicate(timeout=10)
+
+
+def test_session_cleanup_kills_a_live_group_and_tolerates_a_gone_one(monkeypatch):
+    """#2077: a test's ``finally`` kills the group it started, often after the
+    group was already killed and its leader reaped. That second kill answers
+    ESRCH on Linux. On a macOS runner it answered EPERM, which the cleanup
+    raised, failing a test whose assertions had passed. Why macOS answers EPERM
+    there is not established, and the race cannot be produced on demand, so
+    EPERM is injected."""
+    live = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    _kill_session(live)
+    assert live.wait(timeout=10) == -signal.SIGKILL  # it still kills a live group
+    _kill_session(live)  # its only member is reaped: this kernel's own answer
+
+    def eperm(_pgid, _sig):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(os, "killpg", eperm)
+    _kill_session(live)  # what the macOS runner answered for an already-killed group
