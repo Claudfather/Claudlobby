@@ -1,0 +1,19 @@
+{
+  "_permissions_contract": {
+    "tools": [
+      "API-post-search",
+      "API-retrieve-a-database",
+      "API-query-data-source",
+      "API-post-page",
+      "API-get-block-children",
+      "API-retrieve-a-block",
+      "API-patch-block-children",
+      "API-delete-a-block",
+      "API-update-a-block"
+    ]
+  },
+  "notion": {
+    "command": "ON_DEMAND_EVAL_NOT_RUN",
+    "args": []
+  }
+}
