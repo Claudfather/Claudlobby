@@ -454,7 +454,7 @@ case "$state" in
         # no bridge heal). data/.held holds the epoch it was first seen, and is
         # re-stamped every HELD tick so fleet-pulse can tell a live hold from a
         # stale marker.
-        echo "$(ts_iso) HELD — input box holds text that was never submitted, no turn running (an operator Enter submits it; do not restart)" >> "$LOG"
+        echo "$(ts_iso) HELD — input box holds text that was never submitted, no turn running (an operator Enter, one more if the text is still there after about 10 s, never a third; do not restart)" >> "$LOG"
         rm -f "$UNKNOWN_COUNTER" "$BOT_DIR/data/.idle"
         if [ -f "$BOT_DIR/data/.held" ]; then
             touch "$BOT_DIR/data/.held"
