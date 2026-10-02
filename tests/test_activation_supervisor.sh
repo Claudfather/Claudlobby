@@ -127,6 +127,22 @@ load=loaded; enabled=enabled; active=active; group=/user.slice/vanished.service
 saved=$(svc_activation_snapshot "$file" "$target")
 expect 3 svc_activation_pause "$file" "$target" "$saved" 2>/dev/null
 if grep -q reset-failed "$TRACE"; then echo 'FAIL: service failure was reset' >&2; exit 1; fi
+# Only owner-declared timer services may clear a terminal failed marker.
+load=loaded; enabled=enabled; old_enabled=enabled; active=failed; main_pid=0; control_pid=0; : > "$TRACE"
+expect 0 svc_activation_pause "$file" "$target" 'enabled loaded inactive' "$$" timer-owned
+[ "$(cat "$TRACE")" = "$(printf 'mask --runtime vanished.service\nstop vanished.service\nreset-failed vanished.service')" ]
+[ "$load:$active" = masked:inactive ]
+expect 0 svc_activation_resume "$file" "$target" 'enabled loaded inactive'
+if grep -q '^start ' "$TRACE"; then echo 'FAIL: failed timer job replayed' >&2; exit 1; fi
+load=loaded; enabled=enabled; active=failed; main_pid=42; : > "$TRACE"
+expect 3 svc_activation_pause "$file" "$target" 'enabled loaded inactive' "$$" timer-owned 2>/dev/null
+if grep -q reset-failed "$TRACE"; then echo 'FAIL: live producer failure reset' >&2; exit 1; fi
+main_pid=0; control_pid=42; load=loaded; enabled=enabled; : > "$TRACE"
+expect 3 svc_activation_pause "$file" "$target" 'enabled loaded inactive' "$$" timer-owned 2>/dev/null
+if grep -q reset-failed "$TRACE"; then echo 'FAIL: live control failure reset' >&2; exit 1; fi
+control_pid=0; load=loaded; enabled=enabled; active=failed; FAIL_ACTION=reset-failed; : > "$TRACE"
+expect 9 svc_activation_pause "$file" "$target" 'enabled loaded inactive' "$$" timer-owned
+FAIL_ACTION=""
 STOP_RESULT=""
 # An inactive, disabled timer stays inactive and disabled after restoration.
 file="$T/worker.timer"; target=worker.timer; : > "$file"; : > "$TRACE"

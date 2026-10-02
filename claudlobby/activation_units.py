@@ -80,18 +80,19 @@ def _saved(unit: dict) -> str:
 _TICKING = frozenset({"active", "activating", "inactive"})
 
 
-def _same_enrollment(saved: str, observed: str, *, scheduled: bool) -> bool:
+def _same_enrollment(saved: str, observed: str, *, scheduled: bool, allow_failed: bool = False) -> bool:
     """A timer-owned service may start, still run, or exit between snapshots.
 
     Its timer, not its own activity, is the enrollment state. Timers, resident
-    services, bots and ingest stay exact; failed or other states refuse.
+    services, bots and ingest stay exact. Only Linux timer services may retain
+    a terminal failed outcome while their exact enrollment is parked.
     """
     if not scheduled:
         return saved == observed
-    # Checked even when equal: a failed or unknown activity is never restorable.
+    states = _TICKING | {"failed"} if allow_failed else _TICKING
     before, after = saved.split(), observed.split()
     return (len(before) == len(after) == 3 and before[:2] == after[:2]
-            and before[2] in _TICKING and after[2] in _TICKING)
+            and before[2] in states and after[2] in states)
 
 
 def _scheduled_services(enrollment: dict, phases: dict) -> set[str]:
@@ -108,7 +109,7 @@ def _scheduled_services(enrollment: dict, phases: dict) -> set[str]:
             and unit["declaration"]["service"] in producers}
 
 
-def _native_saved(unit: dict, scheduled: set[str]) -> str:
+def _native_saved(unit: dict, scheduled: set[str], *, allow_failed: bool = False) -> str:
     """The state the native owner pauses from and restores to.
 
     The frozen snapshot stays the raw record. A timer-owned service is restored
@@ -119,7 +120,7 @@ def _native_saved(unit: dict, scheduled: set[str]) -> str:
     if unit["target"] not in scheduled:
         return saved
     file_state, load, active = saved.split()
-    if active not in _TICKING:
+    if active not in (_TICKING | {"failed"} if allow_failed else _TICKING):
         raise ActivationError(f"timer-owned service has no restorable state: {unit['target']}")
     return f"{file_state} {load} inactive"
 
@@ -294,17 +295,21 @@ def prepare_unit_pause(store: ActivationStore, activation_id: str,
     for unit in enrolled:
         _call(adapter, "svc_activation_assert_external", _file(unit), unit["target"], str(os.getpid()))
     scheduled = _scheduled_services(enrollment, membership)
+    observations = {}
     for unit in enrolled:
-        if not _same_enrollment(_saved(unit),
-                                _call(adapter, "svc_activation_snapshot", _file(unit), unit["target"]),
-                                scheduled=unit["target"] in scheduled):
+        observed = _call(adapter, "svc_activation_snapshot", _file(unit), unit["target"])
+        observations[unit["target"]] = observed
+        if not _same_enrollment(_saved(unit), observed,
+                                scheduled=unit["target"] in scheduled,
+                                allow_failed=enrollment["manager"] == "Linux"):
             raise ActivationError(f"native enrollment changed: {unit['target']}")
     _darwin_check(adapter, enrollment, original_load=True)
     plans = []
     for phase in PHASES:
         effects = {"owner": _OWNER, "activation_id": activation_id,
                    "enrollment_digest": inventory.digest, "enrollment": enrollment,
-                   "phases": membership, "phase": phase, "original_release_id": original_release_id}
+                   "phases": membership, "phase": phase, "original_release_id": original_release_id,
+                   "native_observations": observations}
         builder = ConfigPlanBuilder(store.root, release.release_id, release.seal_sha256,
                                     tuple(sorted({unit.declaration.fleet for unit in inventory.units
                                                   if unit.declaration.fleet})), effects=effects)
@@ -389,19 +394,24 @@ def pause_phase(store: ActivationStore, activation_id: str, phase: str, *, adapt
             _check_source(unit["installed"][0])
             if not _same_enrollment(_saved(unit),
                                     _call(adapter, "svc_activation_snapshot", path, unit["target"]),
-                                    scheduled=unit["target"] in scheduled):
+                                    scheduled=unit["target"] in scheduled,
+                                    allow_failed=pause.enrollment["manager"] == "Linux"):
                 raise ActivationError(f"native enrollment changed before parking: {unit['target']}")
     identifier = journal_id(activation_id, phase)
     apply_config(store.root, identifier)  # sole filesystem writer; resumes partial swaps
     for unit in pause.units(phase):
+        timer_service = pause.enrollment["manager"] == "Linux" and unit["target"] in scheduled
         _call(adapter, "svc_activation_pause", _file(unit), unit["target"],
-              _native_saved(unit, scheduled), str(os.getpid()), timeout=_PAUSE_TIMEOUT)
+              _native_saved(unit, scheduled, allow_failed=timer_service), str(os.getpid()),
+              *(("timer-owned",) if timer_service else ()), timeout=_PAUSE_TIMEOUT)
     _darwin_check(adapter, pause.enrollment)
     return UnitPhaseEvidence(phase, identifier, pause.plan(phase).plan_id,
                              tuple(unit["target"] for unit in pause.units(phase)), "paused")
 
 
-def _producer_restored(saved: str, observed: str, *, scheduled: bool) -> bool:
+def _producer_restored(saved: str, observed: str, *, scheduled: bool, allow_failed: bool = False) -> bool:
+    if scheduled and allow_failed and saved.split()[-1] == "failed":
+        saved = " ".join(saved.split()[:2] + ["inactive"])
     return _same_enrollment(saved, observed, scheduled=scheduled)
 
 
@@ -472,16 +482,16 @@ def abort_early_adoption(store: ActivationStore, activation_id: str, *, reason: 
     resumed, cleared = [], []
     scheduled = _scheduled_services(pause.enrollment, pause.phases)
     for unit in _timers_last(pause.units("producers")):
-        target, saved, native = unit["target"], _saved(unit), _native_saved(unit, scheduled)
+        target, saved, native = unit["target"], _saved(unit), _native_saved(unit, scheduled, allow_failed=pause.enrollment["manager"] == "Linux")
         ticks = target in scheduled
         if not _producer_restored(saved, _call(adapter, "svc_activation_snapshot", _file(unit), target),
-                                  scheduled=ticks):
+                                  scheduled=ticks, allow_failed=pause.enrollment["manager"] == "Linux"):
             if terminal:  # a recheck never resumes or starts
                 raise ActivationError(f"restored native state differs: {target}")
             _call(adapter, "svc_activation_resume", _file(unit), target, native)
             resumed.append(target)
             if not _producer_restored(saved, _call(adapter, "svc_activation_snapshot", _file(unit), target),
-                                      scheduled=ticks):
+                                      scheduled=ticks, allow_failed=pause.enrollment["manager"] == "Linux"):
                 raise ActivationError(f"restored native state differs: {target}")
         # A restored higher-priority file can hide a surviving runtime mask.
         if (dict(unit["properties"])["LoadState"] == "loaded"
@@ -525,10 +535,11 @@ def restore_phase(store: ActivationStore, activation_id: str, phase: str, *, ada
     for unit in _timers_last(pause.units(phase)):
         _check_source(unit["installed"][0])
         _darwin_check(adapter, pause.enrollment, {unit["target"]})
-        _call(adapter, "svc_activation_resume", _file(unit), unit["target"], _native_saved(unit, scheduled))
+        _call(adapter, "svc_activation_resume", _file(unit), unit["target"], _native_saved(unit, scheduled, allow_failed=pause.enrollment["manager"] == "Linux"))
         _darwin_check(adapter, pause.enrollment, {unit["target"]}, original_load=True)
-        if not _same_enrollment(_saved(unit), _call(adapter, "svc_activation_snapshot", _file(unit), unit["target"]),
-                                scheduled=unit["target"] in scheduled):
+        if not _producer_restored(_saved(unit), _call(adapter, "svc_activation_snapshot", _file(unit), unit["target"]),
+                                  scheduled=unit["target"] in scheduled,
+                                  allow_failed=pause.enrollment["manager"] == "Linux"):
             raise ActivationError(f"restored native state differs: {unit['target']}")
     return UnitPhaseEvidence(phase, identifier, pause.plan(phase).plan_id,
                              tuple(unit["target"] for unit in pause.units(phase)), "restored")
