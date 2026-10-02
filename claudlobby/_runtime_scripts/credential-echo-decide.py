@@ -15,14 +15,23 @@ which may itself carry a value.
 A variable is removed for a command by `env -u VAR` or `env -i` in front of
 it, an empty `VAR=` assignment in front of it, or an `unset VAR` (or a bare
 `VAR=` or `export VAR=`) earlier in the same command line, at the same or an
-outer level and not as a pipeline or background element. Nothing else
-counts: whether the hook's own environment holds the variable says nothing
-about the shell the Bash tool starts.
+outer level and not as a pipeline or background element. That earlier
+removal counts only where it always runs: not after `&&`, `||` or `|`, not
+inside an `if`, a loop or a `case`, and not in a function body. `unset -f`
+and `unset -n` remove no variable. Nothing else counts: whether the hook's
+own environment holds the variable says nothing about the shell the Bash
+tool starts.
 
 Bounds, so nobody reads this as a fix for the class: it is a command filter.
-A `bash -c` or `sh -c` string is followed; `eval`, a script, an alias,
-`xargs` and a command built from a variable are not. Output that a CLI
-already printed is out of reach.
+It follows a shell's `-c` string (in any option cluster), a heredoc or
+here-string fed to a shell, the substitutions inside double quotes and
+unquoted heredocs, `env` (`-S` included), the wrappers in _WRAPPERS, and the
+package runners `npx`, `bunx` and `pnpm|npm|yarn dlx|exec`. It does not
+follow `eval`, a script, an alias, `xargs`, `find -exec`, a package manager
+given options before `dlx`/`exec` or running a bin by name (`pnpm neonctl`),
+or a name built by expansion (a variable, a glob, braces). pip's options are
+pip 23's, so an option a later pip adds can hide `config list`. Output that
+a CLI already printed is out of reach.
 """
 
 from __future__ import annotations
@@ -43,10 +52,10 @@ ROWS = {
     },
     "neon-usage": {
         "action": "unset", "vars": ("NEON_API_KEY",),
-        "reason": "`{cli}` prints its help here (a bare call, an unknown command, a command "
-                  "group without a verb, or an unknown or incomplete option), and that help "
-                  "shows NEON_API_KEY from the environment as the default of --api-key. Run "
-                  "the same command with the key removed: prefix it with `env -u NEON_API_KEY`.",
+        "reason": "`{cli}` prints its help here (a bare call, a command group without a "
+                  "verb, or an unknown or incomplete option), and that help shows "
+                  "NEON_API_KEY from the environment as the default of --api-key. Run the "
+                  "same command with the key removed: prefix it with `env -u NEON_API_KEY`.",
     },
     "neon-debug": {
         "action": "refuse", "vars": ("NEON_API_KEY",),
@@ -64,20 +73,21 @@ ROWS = {
     },
     "gh-auth-token": {
         "action": "stdout-to-file", "vars": ("GH_TOKEN", "GITHUB_TOKEN"),
-        "reason": "`gh auth token` prints the token (GH_TOKEN or GITHUB_TOKEN when set, "
-                  "otherwise the stored login's) into the transcript, and removing the "
-                  "variables does not help. Send its stdout to a file (`gh auth token > FILE`), "
-                  "or let gh read the token itself.",
+        "reason": "Let gh read the token itself: run the gh command that needs it instead "
+                  "of printing the token. `gh auth token` prints it (GH_TOKEN or GITHUB_TOKEN "
+                  "when set, otherwise the stored login's) into the transcript, and removing "
+                  "the variables does not help. Only if another program must have it, send "
+                  "stdout to a file (`gh auth token > FILE`), where it stays readable on disk.",
     },
 }
 
-# neonctl's command tree (2.22.0, from its own help): what prints help.
+# neonctl's command tree (2.22.0, from its own help): what prints help. A group
+# prints it when called without a verb. An unknown command, at the top or in a
+# group, prints only an error (measured with a canary key), so it passes.
 NEON = {
     "clis": ("neonctl", "neon"),
     "groups": ("orgs", "org", "projects", "project", "ip-allow", "vpc", "branches", "branch",
                "databases", "database", "db", "roles", "role", "operations", "operation"),
-    "leaves": ("auth", "login", "me", "connection-string", "cs", "set-context", "init",
-               "completion"),
     "valued": ("-o", "--output", "--config-dir", "--api-key", "--context-file"),
     "flags": ("--color", "--no-color", "--analytics", "--no-analytics", "-h", "--help",
               "-v", "--version"),
@@ -91,9 +101,146 @@ _SPECIAL = {"/dev/stdout", "/dev/stderr", "/dev/tty", "/dev/fd/1", "/dev/fd/2",
 _SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
 _PERSIST = {";", "&&", "||", "\n", None}
 
+# pip's own long options (pip 23's `pip --help` and `pip config --help`, the
+# hidden ones and two later ones included), and whether each takes a value.
+# optparse takes any unambiguous prefix (`--tim 5`), and pip has no short
+# option that takes one.
+PIP_LONG = {
+    "--cache-dir": True, "--cert": True, "--client-cert": True, "--default-timeout": True,
+    "--editor": True, "--exists-action": True, "--keyring-provider": True,
+    "--local-log": True, "--log": True, "--log-file": True, "--proxy": True,
+    "--python": True, "--resume-retries": True, "--retries": True, "--timeout": True,
+    "--trusted-host": True, "--use-deprecated": True, "--use-feature": True,
+    "--debug": False, "--disable-pip-version-check": False, "--global": False,
+    "--help": False, "--isolated": False, "--no-cache-dir": False, "--no-color": False,
+    "--no-input": False, "--no-python-version-warning": False, "--quiet": False,
+    "--require-venv": False, "--require-virtualenv": False, "--site": False,
+    "--user": False, "--verbose": False, "--version": False,
+}
+
+# GNU env's long options, as the short option each one is; "" is a flag.
+_ENV_LONG = {"--ignore-environment": "i", "--null": "0", "--unset": "u", "--chdir": "C",
+             "--split-string": "S", "--argv0": "a", "--debug": "v", "--block-signal": "",
+             "--default-signal": "", "--ignore-signal": "", "--list-signal-handling": "",
+             "--help": "", "--version": ""}
+_ENV_VALUED = {"u", "C", "S", "a"}
+
+# Wrappers that run the command after their own options: the short options
+# that take a value, and the long options with whether each does. getopt_long
+# takes any unambiguous prefix, so `--adj 5` still takes its word.
+_WRAPPERS = {
+    "command": ("", {}),
+    "builtin": ("", {}),
+    "nohup": ("", {"--help": False, "--version": False}),
+    "setsid": ("", {"--ctty": False, "--fork": False, "--wait": False, "--help": False,
+                    "--version": False}),
+    "exec": ("a", {}),
+    "time": ("fo", {"--format": True, "--output": True, "--append": False,
+                    "--portability": False, "--verbose": False, "--quiet": False,
+                    "--help": False, "--version": False}),
+    "nice": ("n", {"--adjustment": True, "--help": False, "--version": False}),
+    "timeout": ("sk", {"--signal": True, "--kill-after": True, "--preserve-status": False,
+                       "--foreground": False, "--verbose": False, "--help": False,
+                       "--version": False}),
+    "stdbuf": ("ioe", {"--input": True, "--output": True, "--error": True, "--help": False,
+                       "--version": False}),
+    "sudo": ("CDghpRrTtUu", {"--chdir": True, "--chroot": True, "--close-from": True,
+                             "--command-timeout": True, "--group": True, "--host": True,
+                             "--other-user": True, "--prompt": True, "--role": True,
+                             "--type": True, "--user": True, "--askpass": False,
+                             "--background": False, "--bell": False, "--edit": False,
+                             "--help": False, "--list": False, "--login": False,
+                             "--non-interactive": False, "--preserve-env": False,
+                             "--preserve-groups": False, "--remove-timestamp": False,
+                             "--reset-timestamp": False, "--set-home": False,
+                             "--shell": False, "--stdin": False, "--validate": False,
+                             "--version": False}),
+    "doas": ("Cu", {}),
+}
+
+# npx, bunx and `pnpm|npm|yarn dlx|exec`: the long options that take a value.
+_RUNNER_LONG = {"--package": True, "--call": True, "--prefix": True, "--workspace": True,
+                "--dir": True, "--shell-mode": False, "--yes": False, "--no": False,
+                "--bun": False, "--silent": False, "--quiet": False, "--help": False}
+
+_ANSI_C = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n",
+           "r": "\r", "t": "\t", "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?"}
+_OCTAL = re.compile(r"[0-7]{1,3}")
+_HEX = {"x": re.compile(r"[0-9A-Fa-f]{0,2}"), "u": re.compile(r"[0-9A-Fa-f]{0,4}"),
+        "U": re.compile(r"[0-9A-Fa-f]{0,8}")}
+
 
 class Unparsed(Exception):
     pass
+
+
+def _long(word: str, names) -> tuple:
+    """(the long option `word` names, its `=value` or None). getopt_long and
+    optparse take any unambiguous prefix; an unknown or ambiguous one is None."""
+    name, eq, value = word.partition("=")
+    if name not in names:
+        hits = [n for n in names if n.startswith(name)]
+        name = hits[0] if len(hits) == 1 else None
+    return name, (value if eq else None)
+
+
+def _options_end(words: list, i: int, short: str, longs: dict) -> int:
+    """Index of the first word after the options that start at words[i]:
+    `short` holds the short options that take a value, `longs` maps each long
+    option to whether it does."""
+    while i < len(words):
+        w = words[i]
+        if w == "--":
+            return i + 1
+        if not w.startswith("-") or w == "-":
+            return i
+        i += 1
+        if w.startswith("--"):
+            name, value = _long(w, longs)
+            i += bool(value is None and longs.get(name))
+            continue
+        for k, c in enumerate(w[1:], 1):
+            if c in short:
+                i += k == len(w) - 1  # its value is the next word unless attached
+                break
+    return i
+
+
+def _ansi_c(s: str, j: int):
+    """Decode a $'...' body that starts at s[j], as bash does: (text, index
+    after the closing quote). A name can be spelled in its escapes."""
+    out, n = [], len(s)
+    while j < n and s[j] != "'":
+        if s[j] != "\\" or j + 1 >= n:
+            out.append(s[j])
+            j += 1
+            continue
+        e = s[j + 1]
+        if e in _ANSI_C:
+            out.append(_ANSI_C[e])
+            j += 2
+        elif e in "01234567":
+            digits = _OCTAL.match(s, j + 1).group(0)
+            out.append(chr(int(digits, 8) & 0xFF))
+            j += 1 + len(digits)
+        elif e in _HEX:
+            digits = _HEX[e].match(s, j + 2).group(0)
+            if not digits:
+                out.append("\\" + e)
+            elif int(digits, 16) > 0x10FFFF:
+                raise Unparsed("ANSI-C escape out of range")
+            else:
+                out.append(chr(int(digits, 16)))
+            j += 2 + len(digits)
+        elif e == "c" and j + 2 < n:
+            out.append(chr(ord(s[j + 2]) & 0x1F))
+            j += 3
+        else:
+            out.append("\\" + e)
+            j += 2
+    if j >= n:
+        raise Unparsed("unbalanced ANSI-C quote")
+    return "".join(out), j + 1
 
 
 def _balanced(s: str, i: int) -> int:
@@ -188,13 +335,10 @@ def _tokens(command: str) -> list:
                 raise Unparsed("unbalanced single quote")
             word, quoted, i = (word or "") + s[i + 1:j], True, j + 1
         elif c == "$" and s.startswith("$'", i):
-            j, buf = i + 2, []
-            while j < n and s[j] != "'":
-                buf.append(s[j + 1] if s[j] == "\\" and j + 1 < n else s[j])
-                j += 2 if s[j] == "\\" else 1
-            if j >= n:
-                raise Unparsed("unbalanced ANSI-C quote")
-            word, quoted, i = (word or "") + "".join(buf), True, j + 1
+            text, i = _ansi_c(s, i + 2)
+            word, quoted = (word or "") + text, True
+        elif c == "$" and s.startswith('$"', i):
+            i += 1  # a translated string reads as a double-quoted one
         elif c == '"':
             j, buf = i + 1, []
             while j < n and s[j] != '"':
@@ -256,8 +400,9 @@ def _tokens(command: str) -> list:
 
 
 def _commands(tokens: list) -> list:
-    """Simple commands in order: dict(words, redirs, subs, heredocs, depth, sep)."""
-    cmds, cur, depth, backtick, want_target, pending = [], None, 0, False, None, []
+    """Simple commands in order: dict(words, redirs, subs, heredocs, depth, sep,
+    prev), sep the operator after the command and prev the one before it."""
+    cmds, cur, depth, backtick, want_target, pending, last_op = [], None, 0, False, None, [], None
 
     def close(sep):
         nonlocal cur
@@ -273,7 +418,8 @@ def _commands(tokens: list) -> list:
                 owner["heredocs"].append((tok[1], tok[2]))
             continue
         if cur is None:
-            cur = {"words": [], "redirs": [], "subs": [], "heredocs": [], "depth": depth, "sep": None}
+            cur = {"words": [], "redirs": [], "subs": [], "heredocs": [], "depth": depth, "sep": None,
+                   "prev": last_op}
         if tok[0] == "word":
             if want_target is not None:
                 want_target.append(tok[1])
@@ -302,8 +448,45 @@ def _commands(tokens: list) -> list:
                     backtick = False
             else:
                 close(op)
+            last_op = op
     close(None)
     return cmds
+
+
+def _env(words: list, i: int, state: dict):
+    """env's options from words[i]: update `state` and return (words, the
+    command's index). `-S STRING` splits STRING into words in place, as env does."""
+    while i < len(words):
+        w = words[i]
+        if w == "--":
+            return words, i + 1
+        if w == "-":
+            opts = [("i", None)]
+        elif w.startswith("--"):
+            name, value = _long(w, _ENV_LONG)
+            opts = [(_ENV_LONG.get(name, ""), value)]
+        elif w.startswith("-") and len(w) > 1:
+            opts = []
+            for k, c in enumerate(w[1:], 1):
+                opts.append((c, (w[k + 1:] or None) if c in _ENV_VALUED else None))
+                if c in _ENV_VALUED:
+                    break
+        else:
+            return words, i
+        for letter, value in opts:
+            if letter in _ENV_VALUED and value is None:
+                i += 1
+                value = words[i] if i < len(words) else ""
+            if letter == "i":
+                state.clear()
+                state["*"] = "removed"
+            elif letter == "u":
+                state[value] = "removed"
+            elif letter == "S":
+                split = [t[1] for t in _tokens(value) if t[0] == "word"]
+                words = words[:i + 1] + split + words[i + 1:]
+        i += 1
+    return words, i
 
 
 def _strip(words: list, state: dict):
@@ -318,56 +501,30 @@ def _strip(words: list, state: dict):
             continue
         base = os.path.basename(words[i])
         if base == "env":
-            i += 1
-            while i < len(words):
-                w = words[i]
-                if w in ("-i", "--ignore-environment", "-"):
-                    state.clear()
-                    state["*"] = "removed"
-                elif w == "-u" or w == "--unset":
-                    if i + 1 < len(words):
-                        state[words[i + 1]] = "removed"
-                        i += 1
-                elif w.startswith("--unset="):
-                    state[w.split("=", 1)[1]] = "removed"
-                elif w.startswith("-u") and len(w) > 2:
-                    state[w[2:]] = "removed"
-                elif w in ("-C", "--chdir"):
-                    i += 1
-                elif w.startswith("-") and w != "--":
-                    pass
-                else:
-                    break
-                i += 1
+            words, i = _env(words, i + 1, state)
             continue
-        if base in ("command", "builtin", "nohup", "exec", "time", "sudo", "doas"):
-            if base == "command" and any(w.startswith("-") and ("v" in w or "V" in w)
-                                         for w in words[i + 1:i + 3]):
+        if base in _WRAPPERS:
+            short, longs = _WRAPPERS[base]
+            j = _options_end(words, i + 1, short, longs)
+            if base == "command" and any(w.startswith("-") and w != "--" and ("v" in w or "V" in w)
+                                         for w in words[i + 1:j]):
                 return []  # `command -v` / `-V` looks a name up; it runs nothing
-            i += 1
-            while i < len(words) and words[i].startswith("-"):
-                i += 1 + (words[i] in ("-a", "-u", "-g", "-p", "-C", "-D", "-h", "-U"))
+            i = j + (base == "timeout")  # timeout's duration comes before the command
             continue
-        if base == "nice":
+        if base in ("pnpm", "npm", "yarn") and words[i + 1:i + 2] in (["dlx"], ["exec"], ["x"]):
+            i, base = i + 1, "npx"  # the runner's options follow, as npx takes them
+        if base in ("npx", "bunx"):
             i += 1
-            while i < len(words) and words[i].startswith("-"):
-                i += 1 + (words[i] in ("-n", "--adjustment"))
-            continue
-        if base == "timeout":
-            i += 1
-            while i < len(words) and words[i].startswith("-"):
-                i += 1 + (words[i] in ("-s", "--signal", "-k", "--kill-after"))
-            i += 1  # the duration
-            continue
-        if base == "stdbuf":
-            i += 1
-            while i < len(words) and words[i].startswith("-"):
-                i += 1 + (words[i] in ("-i", "-o", "-e"))
-            continue
-        if base == "npx":
-            i += 1
-            while i < len(words) and words[i].startswith("-"):
-                i += 1 + (words[i] in ("-p", "--package"))
+            while i < len(words) and words[i].startswith("-") and words[i] != "-":
+                w = words[i]
+                i += 1
+                if w == "--":
+                    break
+                name, value = _long(w, _RUNNER_LONG) if w.startswith("--") else (w, None)
+                if name in ("-c", "--call", "--shell-mode"):  # the rest is a shell string
+                    return ["sh", "-c", " ".join(([value] if value else []) + words[i:])]
+                if value is None and (_RUNNER_LONG.get(name) or name in ("-p", "-w", "-C")):
+                    i += 1
             if i < len(words):
                 words = words[:i] + [words[i].split("@", 1)[0] or words[i]] + words[i + 1:]
             continue
@@ -390,6 +547,22 @@ def _positionals(args: list, valued: tuple = ()) -> list:
             continue
         out.append(a)
         i += 1
+    return out
+
+
+def _pip_positionals(args: list) -> list:
+    """pip's sub-command words, past its options (PIP_LONG, prefixes included)."""
+    out, i = [], 0
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if a == "--":
+            return out + args[i:]
+        if a.startswith("--"):
+            name, value = _long(a, PIP_LONG)
+            i += bool(value is None and PIP_LONG.get(name))
+        elif not a.startswith("-") or a == "-":
+            out.append(a)
     return out
 
 
@@ -421,8 +594,6 @@ def _neon(args: list):
         i += 1
     if not positionals:
         return None if version else "neon-usage"
-    if positionals[0] not in NEON["groups"] + NEON["leaves"]:
-        return "neon-usage"
     if positionals[0] in NEON["groups"] and len(positionals) < 2:
         return "neon-usage"
     return None
@@ -439,6 +610,10 @@ def _stdout_to_file(redirs: list) -> bool:
 
 # Words that open or continue a compound command; the simple command follows them.
 _RESERVED = {"if", "then", "elif", "else", "while", "until", "do", "!", "{"}
+# Words that open and close a compound whose body may not run: a removal
+# inside one is no removal for what follows.
+_OPENS = {"if", "while", "until", "for", "select", "case"}
+_CLOSES = {"fi", "done", "esac"}
 
 
 def _unreserve(words: list) -> list:
@@ -504,7 +679,7 @@ def _judge(cmd: dict, words: list, state: dict, depth_budget: int, stdin_texts: 
             return "neon-debug", cli
         row = _neon(args)
     elif cli == "pip":
-        row = "pip-config" if _positionals(args)[:2] in (["config", "list"], ["config", "debug"]) else None
+        row = "pip-config" if _pip_positionals(args)[:2] in (["config", "list"], ["config", "debug"]) else None
     elif cli == "gh":
         row = "gh-auth-token" if _positionals(args)[:2] == ["auth", "token"] else None
     else:
@@ -524,12 +699,20 @@ def decide(command: str, outer: dict | None = None, depth_budget: int = 3):
     tokens = _tokens(command)
     scopes = {0: dict(outer or {})}
     pipe = []  # what the earlier elements of this pipeline write to stdin
+    nest = 0  # open if, loop and case compounds
     for cmd in _commands(tokens):
         d = cmd["depth"]
         for k in [k for k in scopes if k > d]:
             del scopes[k]
         base = scopes.get(d) or dict(scopes[max(k for k in scopes if k <= d)])
         scopes[d] = base
+        for w in cmd["words"]:
+            if w in _OPENS:
+                nest += 1
+            elif w in _CLOSES:
+                nest = max(0, nest - 1)
+            elif w not in _RESERVED:
+                break
         words = _unreserve(cmd["words"])
         # Substitutions run first: inside double quotes, and in an unquoted heredoc body.
         inner = list(cmd["subs"]) + [t for body, q in cmd["heredocs"] if not q
@@ -545,7 +728,14 @@ def decide(command: str, outer: dict | None = None, depth_budget: int = 3):
             own.append(" ".join(words[1:]))
         stdin_texts, pipe = pipe + own, (own if cmd["sep"] in ("|", "|&") else [])
         if words and (words[0] in ("unset", "export") or all(_ASSIGN.match(w) for w in words)):
-            if cmd["sep"] in _PERSIST:
+            # It counts for what follows only where it always runs; a ")" right
+            # before it closes a function's name, so it is a function body.
+            always = (nest == 0 and cmd["sep"] in _PERSIST
+                      and cmd["prev"] not in ("&&", "||", "|", "|&", ")"))
+            if words[0] == "unset" and any(w.startswith("-") and set(w[1:]) & {"f", "n"}
+                                           for w in words[1:]):
+                always = False  # -f removes a function, -n a reference
+            if always:
                 for w in words[1:] if words[0] in ("unset", "export") else words:
                     m = _ASSIGN.match(w)
                     if m:

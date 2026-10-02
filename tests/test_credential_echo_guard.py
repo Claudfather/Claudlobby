@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from claudlobby.plane.registries import SYSTEM_EVENT_SEVERITY
 from tests.conftest import constructed_env, read_fleet_events
 from tests.test_plane_events_door import _serving
 
@@ -122,6 +123,31 @@ REFUSED = [
     "bash -ec 'neonctl --help'",
     "ne'on'ctl --help",  # a name split by quoting runs the same CLI
     '"n"eonctl --help',
+    "pip --tim 5 config list",  # optparse takes any unambiguous prefix
+    "pip config --editor vi list",  # an option's value is not the action
+    "pip --log-file x config debug",  # a hidden option takes a value too
+    "env --ch /tmp neonctl --help",  # getopt_long takes a prefix of --chdir
+    "env -S 'neonctl --help'",  # env splits the string into the command
+    "env -u NEON_API_KEY -S 'DEBUG=1 neonctl me'",
+    "setsid -f neonctl --help",
+    "nice --adj 5 neonctl --help",
+    "timeout -k 5 10 neonctl --help",
+    "bunx neonctl --help",
+    "pnpm dlx neonctl --help",
+    "npm exec -- neonctl --help",
+    "npx -c 'neonctl --help'",
+    "$'\\x6eeonctl' --help",  # an ANSI-C string decodes as bash decodes it
+    "$'neon\\143tl' --help",
+    "gh $'\\x61uth' token",
+    '$"neonctl" --help',  # a translated string reads as a double-quoted one
+    "false && unset NEON_API_KEY; neonctl --help",  # a removal that never ran
+    "cd /nowhere && unset NEON_API_KEY; neonctl --help",
+    "(false) && unset NEON_API_KEY; neonctl --help",
+    "if false; then unset NEON_API_KEY; fi; neonctl --help",
+    "for i in; do unset NEON_API_KEY; done; neonctl --help",
+    "f() { unset NEON_API_KEY; }; neonctl --help",  # a function body runs when called
+    "unset -f NEON_API_KEY; neonctl --help",  # removes a function, not the variable
+    "echo | unset NEON_API_KEY; neonctl --help",  # a pipeline's last element is a subshell
 ]
 
 ALLOWED = [
@@ -144,6 +170,63 @@ ALLOWED = [
     "command -V neon",
     "for i in neonctl neon; do echo $i; done",
     "cat <<'EOF'\n$(neonctl --help)\nEOF",  # a quoted heredoc is literal
+    "neonctl projects nosuchverb",  # an unknown command prints only an error
+    "pip --timeout 5 install requests",
+    "pip --tim 5 config get global.index-url",
+    "env -S 'neonctl projects list'",
+    "env -u NEON_API_KEY -S 'neonctl --help'",
+    "env --uns=NEON_API_KEY neonctl --help",  # a prefix of --unset still removes it
+    "setsid -f neonctl projects list",
+    "pnpm dlx neonctl projects list",
+    "bunx neonctl@2 projects list",
+    "echo $'neonctl --help'",
+    "unset -v NEON_API_KEY; neonctl --help",
+    "{ unset NEON_API_KEY; neonctl --help; }",
+    "cd /tmp; unset NEON_API_KEY && neonctl --help",
+]
+
+# ---- probes added in review of #2091 (vera's, pasted as given) -----------------------------------------
+PROBE_REFUSED = [
+    "if true; then neonctl --help; fi",
+    "for i in 1; do neonctl --help; done",
+    "while true; do neonctl --help; break; done",
+    "if neonctl --help; then :; fi",
+    "! neonctl --help",
+    'echo "$(neonctl --help)"',
+    'x="$(neonctl --help)"; echo "$x"',
+    'echo "`neonctl --help`"',
+    'printf "%s" "$(pip config list)"',
+    'echo "$(gh auth token)"',
+    "cat <<EOF\n$(neonctl --help)\nEOF",
+    "bash <<'EOF'\nneonctl --help\nEOF",
+    "sh <<EOF\npip config list\nEOF",
+    "bash -s <<'EOF'\ngh auth token\nEOF",
+    "bash -ec 'neonctl --help'",
+    "bash -lc 'pip config list'",
+    "sh -xc 'neonctl --help'",
+    'echo "$(neonctl --help 2>&1 | sed "s/a/b/")"',
+    "ne''onctl --help",
+    'n"e"onctl --help',
+    "pip con''fig list",
+    "gh au''th token",
+    "pip --timeout 5 config list",
+    "pip --cache-dir /tmp/c config list",
+    "env -- neonctl --help",
+    "env -u OTHER -- neonctl --help",
+    "command -p neonctl --help",
+    "time -p neonctl --help",
+]
+PROBE_ALLOWED = [
+    "command -v neonctl",
+    "command -v neon",
+    "command -V neonctl",
+    "neonctl nosuchcmd",
+    "neonctl help",
+    "cat <<EOF\nneonctl --help\nEOF",
+    "cat <<'EOF'\n$(neonctl --help)\nEOF",
+    "bash <<'EOF'\necho neonctl --help\nEOF",
+    "env -u NEON_API_KEY -- neonctl --help",
+    "env -i -- neonctl --help",
 ]
 
 
@@ -156,6 +239,31 @@ def test_the_command_forms_around_a_row_are_refused(command):
 @pytest.mark.parametrize("command", ALLOWED)
 def test_the_command_forms_around_a_row_are_allowed(command):
     assert _decision(_run(command)) is None, command
+
+
+@pytest.mark.parametrize("command", PROBE_REFUSED)
+def test_probe_a_form_the_review_got_past_the_guard_is_refused(command):
+    verdict = _decision(_run(command))
+    assert verdict is not None and verdict[0] == "deny", (command, verdict)
+
+
+@pytest.mark.parametrize("command", PROBE_ALLOWED)
+def test_probe_ordinary_work_the_review_saw_refused_is_allowed(command):
+    assert _decision(_run(command)) is None, command
+
+
+def test_the_gh_token_refusal_leads_with_letting_gh_read_it():
+    # A token sent to a file stays readable on disk by every bot on the uid.
+    verdict = _decision(_run("gh auth token"))
+    assert verdict is not None and verdict[0] == "deny"
+    assert verdict[1].startswith("Let gh read the token itself"), verdict[1]
+    assert verdict[1].index("Let gh") < verdict[1].index("> FILE")
+
+
+def test_the_guard_events_are_registered_as_notices():
+    # Unregistered, they would land on the plane with no severity.
+    assert SYSTEM_EVENT_SEVERITY.get("credential_echo_refused") == "notice"
+    assert SYSTEM_EVENT_SEVERITY.get("credential_echo_unparsed") == "notice"
 
 
 def test_the_refusal_names_the_safe_form_and_never_a_value():

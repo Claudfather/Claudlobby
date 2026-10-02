@@ -31,12 +31,18 @@ _allow() { exit 0; }   # no decision — normal permission flow applies
 # row: neonctl/neon, pip ... config, gh auth token. Deliberately over-matches.
 # Quotes and backslashes are stripped first, still without a fork: a name
 # split by quoting (ne'on'ctl, "n"eonctl) runs the same CLI but never contains
-# the name as written.
+# the name as written. An ANSI-C string can spell a name in escapes, so a
+# payload holding one goes to the decider whatever it names.
 payload="$(cat)"
 _bare="${payload//[\"\'\\]/}"
 case "$_bare" in
 *neon*|*config*|*auth*) ;;
-*) _allow ;;
+*)
+    case "$payload" in
+    *"\$'"*) ;;
+    *) _allow ;;
+    esac
+    ;;
 esac
 case "$payload" in
 *Bash*) ;;
