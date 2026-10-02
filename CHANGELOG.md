@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a quoted substitution the credential-echo guard cannot delimit no longer hides the rest of its line (#2097)
+
+The guard from #2090 judged a double-quoted `$(...)` by first finding its closing parenthesis. A heredoc post whose prose held an apostrophe or an unmatched parenthesis defeated that search, the whole line read as unparsed, and an unparsed line is allowed. So `gh auth token` or `neonctl --help` beside such a post ran unjudged.
+
+- **A substitution is now delimited as bash reads it.** A parenthesis inside quotes, a comment, a heredoc body or a case pattern does not count.
+- **One that still cannot be delimited is read as text,** in a double-quoted string and in an unquoted heredoc body (a lone backtick too), and the rest of the line is judged.
+
 ### Added — a composed guard refuses a CLI form that prints an env-held credential (#2090)
 
 A bare `neonctl --help` in a live bot session printed the real `NEON_API_KEY` into a session transcript, because the CLI shows the variable as the default of `--api-key`. Every bot inherits that variable, and the only mitigation was prose in one agent file. The host's settings carry a bare `Bash` allow, so no permission rule could refuse the command.

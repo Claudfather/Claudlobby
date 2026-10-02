@@ -270,6 +270,7 @@ QUOTED_SUBST_REFUSED = [
     'echo "$(case x in (x) pip config list;; esac)"',  # an opening parenthesis already balanced it
     "cat <<EOF\n$(echo it's)\nEOF\ngh auth token",  # bash still runs the line after the heredoc
     "echo \"$(echo it's)\" && gh auth token",  # cannot be delimited: the rest is still judged
+    "cat <<EOF\nuse `x for the config\nEOF\ngh auth token",  # a lone backtick in a heredoc body
 ]
 QUOTED_SUBST_ALLOWED = [
     POST_APOSTROPHE,
