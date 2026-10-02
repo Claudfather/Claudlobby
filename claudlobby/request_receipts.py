@@ -99,12 +99,28 @@ class MessageRouteBinding:
     manager_destination: NativeDestination
 
 
-def same_native_route(frozen: MessageRouteBinding | None,
-                      current: MessageRouteBinding | None) -> bool:
+@dataclass(frozen=True)
+class RecordedReplyBinding:
+    """A bot's answer to a human sender (#2068): recorded on the Plane and carried
+    by nothing, because a human has no pane. The recipient is named positively,
+    so a reply whose native route is merely missing never takes this shape."""
+
+    activation_id: str
+    plan_id: str
+    release_id: str
+    caller_fleet_uid: str
+    caller_alias: str
+    recipient_alias: str
+    parent_message_id: str
+
+
+def same_native_route(frozen: MessageRouteBinding | RecordedReplyBinding | None,
+                      current: MessageRouteBinding | RecordedReplyBinding | None) -> bool:
     """Selection stamps are provenance; every party and native target stays fixed."""
     if frozen is None or current is None:
         return frozen is current
-    return (isinstance(frozen, MessageRouteBinding) and isinstance(current, MessageRouteBinding)
+    return (type(frozen) is type(current)
+            and isinstance(current, (MessageRouteBinding, RecordedReplyBinding))
             and replace(frozen, activation_id=current.activation_id,
                         plan_id=current.plan_id, release_id=current.release_id) == current)
 
@@ -122,7 +138,7 @@ class RequestIntent:
     task_id: str | None = None
     assignment_id: str | None = None
     message_id: str | None = None
-    route: MessageRouteBinding | None = None
+    route: MessageRouteBinding | RecordedReplyBinding | None = None
     expected_by: str | None = None  # task routing's frozen fleet-default deadline only
 
 
@@ -255,6 +271,31 @@ def _message_route(intent):
         raise ReceiptError("message route aliases differ from native destinations")
 
 
+def _recorded_reply(intent):
+    """The one message shape with no delivery stage (#2068), keyed on positive
+    facts only: a reply, from a bot, to a recorded human, planning one recording."""
+    route = intent.route
+    if intent.operation != "message.reply":
+        raise ReceiptError("only a reply can be recorded without a carrier")
+    if intent.recipient_uid is None or intent.message_id is None:
+        raise ReceiptError("a recorded reply requires a recipient and message ID")
+    for value in (route.activation_id, route.plan_id, route.release_id):
+        if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value):
+            raise ReceiptError("invalid message selection stamp")
+    _id(route.caller_fleet_uid, "fleet")
+    _id(route.parent_message_id, "msg")
+    if (not isinstance(route.caller_alias, str)
+            or not re.fullmatch(r"bot:[A-Za-z0-9_-]+/[A-Za-z0-9_-]+", route.caller_alias)):
+        raise ReceiptError("a recorded reply comes from a bot caller")
+    if (not isinstance(route.recipient_alias, str)
+            or not re.fullmatch(r"human:[^\s:/]+", route.recipient_alias)):
+        raise ReceiptError("a reply without a carrier must name a human recipient")
+    if route.parent_message_id == intent.message_id:
+        raise ReceiptError("a reply cannot name itself as parent")
+    if tuple(plan.kind for plan in intent.stages) != ("recording",):
+        raise ReceiptError("a recorded reply plans one recording stage and no delivery")
+
+
 def _validate(receipt):
     if type(receipt.format_version) is not int or receipt.format_version != FORMAT_VERSION:
         raise ReceiptError("unsupported request receipt format")
@@ -281,7 +322,10 @@ def _validate(receipt):
             raise ReceiptError("only task routing may freeze a timezone-aware default deadline")
     is_message = intent.operation in _O1_NATIVE
     native_stage = _NATIVE_STAGES.get(intent.operation)
-    if is_message or intent.route is not None:
+    if isinstance(intent.route, RecordedReplyBinding):
+        _recorded_reply(intent)
+        is_message, native_stage = False, None  # recorded, and carried by nothing
+    elif is_message or intent.route is not None:
         if native_stage is None:
             raise ReceiptError("operation cannot retain a native message route")
         _message_route(intent)
@@ -374,7 +418,9 @@ def _decode(raw):
             raw = {**raw, "intent": {**raw["intent"], "expected_by": None}}
         intent = raw["intent"]
         route = intent["route"]
-        if route is not None:
+        if route is not None and "peer_destination" not in route:
+            route = RecordedReplyBinding(**route)
+        elif route is not None:
             route = MessageRouteBinding(**{
                 **route,
                 "peer_destination": NativeDestination(**route["peer_destination"]),
@@ -466,7 +512,7 @@ class RequestStore:
 
     def _check_route_root(self, receipt):
         route = receipt.intent.route
-        if route is not None and route.peer_destination.root != str(self.path.parents[3]):
+        if isinstance(route, MessageRouteBinding) and route.peer_destination.root != str(self.path.parents[3]):
             raise ReceiptConflict("message route belongs to another request root")
 
     def _save(self, receipt):
@@ -501,7 +547,8 @@ class RequestStore:
     def begin_attempt(self) -> RequestReceipt:
         """An explicit execution attempt only; inspection/replay lookup never increments."""
         receipt = self._required()
-        if receipt.intent.operation in _O1_NATIVE:
+        if (receipt.intent.operation in _O1_NATIVE
+                and not isinstance(receipt.intent.route, RecordedReplyBinding)):
             raise ReceiptError("reserve a message attempt and delivery outcome atomically")
         if receipt.message_attempts:
             raise ReceiptConflict("a native notification cannot return to the recording stage")
@@ -587,7 +634,8 @@ class RequestStore:
 
     def _native_required(self):
         receipt = self._required()
-        if receipt.intent.operation not in _NATIVE_STAGES or receipt.intent.route is None:
+        if (receipt.intent.operation not in _NATIVE_STAGES or receipt.intent.route is None
+                or isinstance(receipt.intent.route, RecordedReplyBinding)):
             raise ReceiptError("native attempt requires a frozen message route")
         return receipt
 

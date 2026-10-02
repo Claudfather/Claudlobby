@@ -87,8 +87,9 @@ class ReceiptObservation:
     root: str
     sender: MessageIdentity | None
     destination: MessageIdentity | None
-    receipt_observation: Literal["received", "missing", "no_history", "unavailable"]
-    integrity_verdict: Literal["delivered", "truncated", "altered", "unconfirmed", "unknown"]
+    receipt_observation: Literal["received", "missing", "no_history", "unavailable", "not_applicable"]
+    integrity_verdict: Literal["delivered", "truncated", "altered", "unconfirmed", "unknown",
+                               "not_applicable"]
     exit_code: int
     code: str | None
     reason: str | None
@@ -305,6 +306,16 @@ def receipt(ctx: TaskOperationContext, message_id: str, *, destination: str | No
         try:
             with _snapshot(ctx, deadline=deadline) as conn:
                 observed = _show(conn, ctx, message_id)
+                target = observed.destination
+                if target is not None and target.fleet_uid is None and target.alias.startswith("human:"):
+                    # #2068: a human has no pane, so the message is recorded and
+                    # carried by nothing. There is no receipt to wait for.
+                    if destination is not None and destination != target.alias:
+                        raise MessageQueryError("destination does not match the recorded recipient")
+                    return ReceiptObservation(
+                        message_id, str(ctx.root), observed.sender, target, "not_applicable",
+                        "not_applicable", 0, None,
+                        f"{target.alias} has no pane: the message is recorded, not carried")
                 _destination(conn, ctx, observed, destination)
                 if message is not None and observed != message:
                     raise MessageUnavailableError("recorded message changed during receipt observation")
