@@ -591,7 +591,7 @@ for bot_dir in "$BOTS_DIR"/*/; do
             emit_fleet_event "input_held" "pulse" \
                 '{"held_since_epoch":'"$held_since"',"held_seconds":'"$held_for"'}' "$bot_dir" "$bot_id"
             debounce_notify "$state_dir" "$bot_id" "held_alerted" _notify_current_bot \
-                "$bot_id input_held — its input box holds text that was never submitted, and no turn is running (${held_for}s). Remedy: an operator presses Enter in its pane, and one more only if the text is still there after about 10 s; never a third, never typed text, and do not restart (a restart discards the text)." "$_mgr_token" "$_RENOTIFY_AFTER_S"
+                "$bot_id input_held — its input box holds text that was never submitted, and no turn is running (${held_for}s). Remedy: an operator presses Enter in its pane, and one more only if the text is still there after about 10 s. If it is still there after that, stop and look: a menu or a modal may be taking the Enter. Never typed text, and do not restart (a restart discards the text)." "$_mgr_token" "$_RENOTIFY_AFTER_S"
         fi
     else
         debounce_clear "$state_dir" "$bot_id" "held_alerted"

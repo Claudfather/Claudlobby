@@ -390,7 +390,8 @@ fi
 #   HELD  — No active turn, AND the input box holds text that was never
 #           submitted (pane_is_held, #2070): a send whose Enter was swallowed.
 #           An operator Enter submits it (one more if the text is still there
-#           after about 10 s, never a third); a restart would discard
+#           after about 10 s; if it stays, stop and look: a menu or a modal may
+#           be taking the Enter); a restart would discard
 #           it. Asked BEFORE IDLE: the idle patterns can match a held frame
 #           (a word in the held text, or the box border's bytes when no UTF-8
 #           locale is set), and IDLE is the arm that types into the pane.
@@ -454,7 +455,7 @@ case "$state" in
         # no bridge heal). data/.held holds the epoch it was first seen, and is
         # re-stamped every HELD tick so fleet-pulse can tell a live hold from a
         # stale marker.
-        echo "$(ts_iso) HELD — input box holds text that was never submitted, no turn running (an operator Enter, one more if the text is still there after about 10 s, never a third; do not restart)" >> "$LOG"
+        echo "$(ts_iso) HELD — input box holds text that was never submitted, no turn running (an operator Enter, one more if the text is still there after about 10 s, then stop and look: a menu or modal may be taking the Enter; do not restart)" >> "$LOG"
         rm -f "$UNKNOWN_COUNTER" "$BOT_DIR/data/.idle"
         if [ -f "$BOT_DIR/data/.held" ]; then
             touch "$BOT_DIR/data/.held"
