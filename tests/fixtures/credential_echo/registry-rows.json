@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "about": "Table A of Claudlobby #2090 as data. Each row is run under `env -i PATH HOME=<fresh dir> VAR=<canary>` by check_rows.py; `expect` is the status per variable (FULL = the whole canary printed, PARTIAL(tail) = a masked echo, no = nothing). `action` is the guard action the issue proposes. Rows flagged network call a provider API with a canary (rejected) and are skipped unless --network is given.",
+  "measured_with": {"neonctl": "2.22.0", "gh": "2.92.0", "railway": "4.35.1", "vercel": "50.37.3", "doctl": "1.153.0", "pip": "23.0.1", "psql": "15.19"},
+  "rows": [
+    {"id": "A1-neonctl-help", "argv": ["neonctl", "--help"], "vars": ["NEON_API_KEY"], "expect": {"NEON_API_KEY": "FULL"}, "form": "help screen", "action": "unset"},
+    {"id": "A1-neon-help", "argv": ["neon", "--help"], "vars": ["NEON_API_KEY"], "expect": {"NEON_API_KEY": "FULL"}, "form": "help screen (alias binary)", "action": "unset"},
+    {"id": "A1-neonctl-leaf-help", "argv": ["neonctl", "projects", "list", "--help"], "vars": ["NEON_API_KEY"], "expect": {"NEON_API_KEY": "FULL"}, "form": "help screen (subcommand)", "action": "unset"},
+    {"id": "A1-neonctl-group-help", "argv": ["neonctl", "branches", "--help"], "vars": ["NEON_API_KEY"], "expect": {"NEON_API_KEY": "FULL"}, "form": "help screen (command group)", "action": "unset"},
+    {"id": "A2-neonctl-unknown-option", "argv": ["neonctl", "--bogus"], "vars": ["NEON_API_KEY"], "expect": {"NEON_API_KEY": "FULL"}, "form": "unknown top-level option prints the help", "action": "unset"},
+    {"id": "A2-neonctl-missing-value", "argv": ["neonctl", "--api-key"], "vars": ["NEON_API_KEY"], "expect": {"NEON_API_KEY": "FULL"}, "form": "incomplete top-level option prints the help", "action": "unset"},
+    {"id": "A3-neonctl-debug-trace", "argv": ["neonctl", "me"], "env": {"DEBUG": "*"}, "vars": ["NEON_API_KEY"], "expect": {"NEON_API_KEY": "FULL"}, "form": "DEBUG=* HTTP trace prints the Authorization header", "action": "refuse-assignment", "network": true, "timeout": 60},
+    {"id": "A4-pip-config-list", "argv": ["pip", "config", "list"], "vars": ["PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL"], "templates": {"PIP_INDEX_URL": "https://user:{c}@example.invalid/simple", "PIP_EXTRA_INDEX_URL": "https://user:{c}@example.invalid/simple"}, "expect": {"PIP_INDEX_URL": "FULL", "PIP_EXTRA_INDEX_URL": "FULL"}, "form": "config listing", "action": "unset"},
+    {"id": "A4-pip-config-debug", "argv": ["pip", "config", "debug"], "vars": ["PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL"], "templates": {"PIP_INDEX_URL": "https://user:{c}@example.invalid/simple", "PIP_EXTRA_INDEX_URL": "https://user:{c}@example.invalid/simple"}, "expect": {"PIP_INDEX_URL": "FULL", "PIP_EXTRA_INDEX_URL": "FULL"}, "form": "config listing", "action": "unset"},
+    {"id": "A5-gh-auth-token", "argv": ["gh", "auth", "token"], "vars": ["GH_TOKEN"], "expect": {"GH_TOKEN": "FULL"}, "form": "prints the token by design; unsetting falls back to the stored login", "action": "refuse-unless-stdout-redirected"},
+    {"id": "A6-psql-help", "argv": ["psql", "--help"], "vars": ["PGHOST", "PGUSER", "PGPORT", "PGDATABASE", "PGPASSWORD"], "expect": {"PGHOST": "FULL", "PGUSER": "FULL", "PGPORT": "FULL", "PGDATABASE": "FULL", "PGPASSWORD": "no"}, "form": "help screen; connection metadata only, never the password", "action": "optional"}
+  ],
+  "controls": [
+    {"id": "C-neonctl-completion-help", "argv": ["neonctl", "completion", "--help"], "vars": ["NEON_API_KEY"], "expect": {"NEON_API_KEY": "no"}},
+    {"id": "C-neonctl-version", "argv": ["neonctl", "--version"], "vars": ["NEON_API_KEY"], "expect": {"NEON_API_KEY": "no"}},
+    {"id": "C-gh-help", "argv": ["gh", "--help"], "vars": ["GH_TOKEN", "GITHUB_TOKEN"], "expect": {"GH_TOKEN": "no", "GITHUB_TOKEN": "no"}},
+    {"id": "C-gh-auth-status", "argv": ["gh", "auth", "status"], "vars": ["GH_TOKEN"], "expect": {"GH_TOKEN": "no"}, "network": true, "timeout": 40},
+    {"id": "C-railway-help", "argv": ["railway", "--help"], "vars": ["RAILWAY_TOKEN", "RAILWAY_API_TOKEN"], "expect": {"RAILWAY_TOKEN": "no", "RAILWAY_API_TOKEN": "no"}},
+    {"id": "C-vercel-help", "argv": ["vercel", "--help"], "vars": ["VERCEL_TOKEN"], "expect": {"VERCEL_TOKEN": "no"}},
+    {"id": "C-doctl-help", "argv": ["doctl", "--help"], "vars": ["DIGITALOCEAN_ACCESS_TOKEN"], "expect": {"DIGITALOCEAN_ACCESS_TOKEN": "no"}},
+    {"id": "C-pip-install-help", "argv": ["pip", "install", "--help"], "vars": ["PIP_INDEX_URL"], "templates": {"PIP_INDEX_URL": "https://user:{c}@example.invalid/simple"}, "expect": {"PIP_INDEX_URL": "no"}}
+  ]
+}
