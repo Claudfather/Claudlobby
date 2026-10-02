@@ -3332,6 +3332,42 @@ pane_is_busy() {
     printf '%s' "$text" | grep -qE "$_busy_pattern"
 }
 
+# pane_is_held <pane_text>
+# Returns 0 when the input box holds text that was never submitted (#2070):
+# the box's input line (pane_input_region's first line, with the glyph and its
+# padding stripped by _pane_strip_chrome) carries text, and that text is none
+# of the lines Claude Code draws there itself.
+#
+# Positive evidence only, and no length floor. Claude Code puts its own text
+# after the glyph too, and a check keyed on "the glyph line is not empty" (or
+# on a length) reads every one of these as held; the queued-message hint did,
+# on a bot that was mid-turn:
+#   Try "fix typecheck errors"         an empty box's suggestion
+#   Press up to edit queued messages   a message queued behind a running turn
+#   1. Yes, try it                     a menu's selected option: Enter CHOOSES
+# A menu also offers its own exit below the options ("Esc to cancel").
+#
+# It says nothing about whether a turn is running, so a caller asks
+# pane_is_busy first; keepalive's classify_pane does. Byte-safe and fork-free
+# past pane_input_region: literal case patterns, so the answer does not move
+# with the locale. The idle bracket's does: under LC_ALL=C it matches a box
+# border's bytes, which is why classify_pane asks this before pane_is_idle.
+pane_is_held() {
+    local region first
+    region=$(pane_input_region "$1")
+    [ -n "$region" ] || return 1
+    first=$(_pane_strip_chrome "${region%%$'\n'*}")
+    [ -n "$first" ] || return 1
+    case "$first" in
+        'Try "'*'"'|'Press up to edit queued messages') return 1 ;;
+        [0-9].\ *|[0-9][0-9].\ *) return 1 ;;
+    esac
+    case "$region" in
+        *'Esc to cancel'*|*'Esc to go back'*) return 1 ;;
+    esac
+    return 0
+}
+
 # bot_dir_for_session <session> [bots_dir]
 # Session name -> bot runtime dir, on stdout — _session_candidate_dir (the
 # resolution shared with tmux_socket_for_session) plus an existence gate,

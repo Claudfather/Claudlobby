@@ -50,6 +50,18 @@ class TestComputeMetrics:
         assert m["idle_seconds"] > 0
         assert m["busy_seconds"] == 0
 
+    def test_held_counts_as_up_time(self):
+        # #2070: HELD is a live session whose input box holds text that was
+        # never submitted. Those ticks read UNKNOWN until keepalive could name
+        # them, and counted as up time; a held bot must not start reading down.
+        now = datetime(2026, 5, 17, 12, 0, tzinfo=TZ)
+        stamps = [datetime(2026, 5, 17, 11, m, tzinfo=TZ) for m in (0, 5, 10)]
+        held = compute_metrics([(t, "HELD") for t in stamps], timedelta(hours=24), now=now)
+        unknown = compute_metrics([(t, "UNKNOWN") for t in stamps], timedelta(hours=24), now=now)
+        assert held["uptime_pct"] > 0
+        assert held["uptime_pct"] == unknown["uptime_pct"]
+        assert held["busy_seconds"] == 0
+
     def test_restart_counted(self):
         now = datetime(2026, 5, 17, 12, 0, tzinfo=TZ)
         entries = [

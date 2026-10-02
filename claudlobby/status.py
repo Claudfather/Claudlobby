@@ -519,6 +519,10 @@ def _tmux_display(bs: BotStatus) -> str:
             return _green("busy")
         if bs.pane_state == "IDLE":
             return "idle"
+        if bs.pane_state == "HELD":
+            # #2070: text sits unsubmitted in the input box; an operator Enter
+            # clears it, a restart would discard it.
+            return _yellow("held")
         return "up"
     return _red("down")
 

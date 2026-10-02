@@ -183,6 +183,37 @@ def test_unknown_pane_records_unknown(tmp_path, *, scratch_plane_env):
     assert hb["state"] == "UNKNOWN"
 
 
+
+def test_held_pane_records_held_and_types_nothing(tmp_path, *, scratch_plane_env):
+    """#2070: a box holding text that was never submitted, with no turn running,
+    is HELD. The heartbeat says so, data/.held carries the time it was first
+    seen, .idle is not written, and no key goes into the box: a pending reload
+    stays pending. The rig runs with no locale set, where the idle pattern
+    matched this frame's border bytes and called it IDLE."""
+    libdir, bot, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
+    frame = tmp_path / "held-frame.txt"
+    frame.write_bytes(
+        (REPO / "tests/fixtures/pane-states/input-held-cr.txt").read_bytes())
+    sends = tmp_path / "sends.log"
+    (tmp_path / "tmux").write_text(
+        "#!/bin/bash\ncase \"$*\" in\n"
+        "  *has-session*) exit 0 ;;\n"
+        f"  *capture-pane*) cat {json.dumps(str(frame))} ;;\n"
+        f"  *send-keys*) printf '%s\\n' \"$*\" >> {json.dumps(str(sends))} ;;\n"
+        "  *) exit 0 ;;\nesac\n")
+    (bot / "data" / ".reload-pending").touch()
+    r = _tick(libdir, bot, env)
+    assert r.returncode == 0, r.stderr
+    hb = next(json.loads(s["value"]) for s in _wait_samples(tmp_path)
+              if s["metric"] == "bot.heartbeat")
+    assert hb["state"] == "HELD"
+    held = bot / "data" / ".held"
+    assert held.is_file() and held.read_text().strip().isdigit()
+    assert not (bot / "data" / ".idle").exists()
+    assert (bot / "data" / ".reload-pending").exists()
+    assert not sends.exists() or not sends.read_text().strip(), sends.read_text()
+    assert " HELD " in (bot / "keepalive.log").read_text()
+
 def test_dead_session_records_session_down_and_no_heartbeat(tmp_path, *, scratch_plane_env):
     """The dead path records the one fact it observed (session_up=false)
     and NO heartbeat — no pane was classified, and a fabricated verdict is

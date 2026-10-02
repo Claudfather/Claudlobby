@@ -86,7 +86,10 @@ def compute_metrics(
             busy_secs += duration
         elif state == "IDLE":
             idle_secs += duration
-        elif state in ("UNKNOWN", "SKIP"):
+        elif state in ("UNKNOWN", "SKIP", "HELD"):
+            # HELD (#2070) is a live session whose input box holds text that
+            # was never submitted: up, and counted where those ticks counted
+            # while keepalive could only call them UNKNOWN.
             unknown_secs += duration
 
     up_secs = busy_secs + idle_secs + unknown_secs

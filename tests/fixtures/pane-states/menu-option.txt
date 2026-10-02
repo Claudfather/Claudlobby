@@ -1,0 +1,10 @@
+  Try the new fullscreen renderer?
+
+  · Flicker-free output — fixes the flashing you see during long responses
+  · Mouse support — click to move your cursor or expand results
+  · Selected text auto-copies to your clipboard
+
+  ❯ 1. Yes, try it
+    2. Not now
+
+  Enter to confirm · Esc to cancel
