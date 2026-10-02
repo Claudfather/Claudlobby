@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a reload-fleet test failed on macOS in its own cleanup (#2077)
+
+Two tests in `tests/test_reload_fleet_native.py` end by killing the process group they
+started, ignoring only ESRCH. In one of them the test body has already killed that group
+and reaped its leader, and on macOS runners that second kill has answered EPERM, failing
+a test whose assertions had passed. The cleanup is one helper now, and it ignores EPERM
+too, as `tests/test_bridge_state.py` already does; a new test pins that it still kills a
+live group. Tests only.
+
 ### Fixed — the brief says what each open row asks (#2044)
 
 After a respawn, a worker's brief named its open rows by id alone, so nothing it could read said what they asked: two bots hand-rolled a plane read for the text in one hour. The work item's title is the dispatch text, and the brief's `work` section already reads it from the canonical reducer in the same session, so no second read is added.
