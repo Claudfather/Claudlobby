@@ -533,9 +533,11 @@ if should_resume_session "$_SESSION_MD" "$_RESUME_MAX_AGE_S"; then
         # #1265: stamp the send instant. Written before the call and again
         # after, so a send that never returns leaves state=sending on disk.
         _inject_t0="$(inject_stamp "$BOT_DIR" resume sending)"
+        _send_rc=0
         PANE_READY_TICKS="$_PANE_READY_TICKS_BOOT" \
-            pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "$_RESUME_CMD"
-        inject_stamp "$BOT_DIR" resume "done" 0 "$_inject_t0" >/dev/null
+            pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "$_RESUME_CMD" || _send_rc=$?
+        inject_stamp "$BOT_DIR" resume "done" "$_send_rc" "$_inject_t0" >/dev/null
+        boot_send_settled RESUME "$_send_rc" "$LOG"
         ;;
     *)
         echo "$(ts_iso) RESUME SKIP — fresh checkpoint present but no resume capability [$_resume_status]; starting clean, handoff left at $_SESSION_MD" >> "$LOG"
@@ -556,9 +558,11 @@ if [ -n "${STARTUP_PROMPT:-}" ]; then
     # fired to the second while the session appeared 36-168s later, so all of
     # the variance lives here and nothing recorded it.
     _inject_t0="$(inject_stamp "$BOT_DIR" startup sending)"
+    _send_rc=0
     PANE_READY_TICKS="$_PANE_READY_TICKS_BOOT" \
-        pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "set +H; $STARTUP_PROMPT"
-    inject_stamp "$BOT_DIR" startup "done" 0 "$_inject_t0" >/dev/null
+        pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "set +H; $STARTUP_PROMPT" || _send_rc=$?
+    inject_stamp "$BOT_DIR" startup "done" "$_send_rc" "$_inject_t0" >/dev/null
+    boot_send_settled STARTUP "$_send_rc" "$LOG"
 fi
 
 # Mark bot as idle in fleet-state — non-fatal if helper is missing or fails

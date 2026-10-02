@@ -346,7 +346,10 @@ count_send_retries() {
 # in start-bot.sh starts honoring it with no sampler change — but INERT today:
 # start-bot.sh arms its own value at both pane_send_verified call sites
 # (start-bot.sh:371,381 as of #1109), so a forwarded override cannot reach the
-# injection path. knob_disclosure says so in the output.
+# injection path. knob_disclosure says so in the output. PANE_SEND_SHOWN_TICKS
+# (#1236) bounds the wait for the box to show the payload before the Enter, the
+# step a boot strand is now decided in, and PANE_SEND_ENTER_TRIES how many
+# Enters a payload still in the box after it gets.
 #
 # Unforwarded — no pre-registered ladder sweeps them. Set in the caller env
 # they are dropped by env -i, and knob_disclosure prints them as SCRUBBED
@@ -358,7 +361,7 @@ count_send_retries() {
 # design whose arm identity is already pre-registered. PANE_RECEIPT_WAIT_S
 # (#1099) is here because no boot send calls the receipt gate: it is
 # dispatch-task.sh's.
-_FORWARDED_PANE_KNOBS="PANE_SEND_VERIFY_TICKS PANE_SEND_SETTLE_S PANE_READY_TICKS PANE_VERIFY_TRACE"
+_FORWARDED_PANE_KNOBS="PANE_SEND_VERIFY_TICKS PANE_SEND_SETTLE_S PANE_SEND_SHOWN_TICKS PANE_SEND_ENTER_TRIES PANE_READY_TICKS PANE_VERIFY_TRACE"
 _UNFORWARDED_PANE_KNOBS="PANE_READY_POLL_S PANE_RECOVER_TICKS PANE_SEND_CHUNK_BYTES PANE_SEND_CHUNK_SETTLE_S PANE_RECEIPT_WAIT_S"
 
 # Field separator for the fate records below: ASCII unit separator, NOT a tab.
@@ -399,6 +402,8 @@ pane_knob_fate() {
         PANE_READY_TICKS)       inforce="$_PANE_READY_TICKS_BOOT"; src="boot-armed" ;;
         PANE_SEND_SETTLE_S)     default_val="$_PANE_SEND_SETTLE_DEFAULT" ;;
         PANE_SEND_VERIFY_TICKS) default_val="$_PANE_SEND_VERIFY_TICKS_DEFAULT" ;;
+        PANE_SEND_SHOWN_TICKS)  default_val="$_PANE_SEND_SHOWN_TICKS_DEFAULT" ;;
+        PANE_SEND_ENTER_TRIES)  default_val="$_PANE_SEND_ENTER_TRIES_DEFAULT" ;;
         # #1236. This knob has no default VALUE: unset IS off, and off is the
         # production condition. Recording it as `default` would assert a
         # fallback constant lib-common does not have, and

@@ -42,6 +42,9 @@ else
 fi
 
 if ! bot_tmux_send "$WORKER_SOCKET" "$WORKER_SESSION" "$PAYLOAD"; then
-    echo "dispatch: session '$WORKER_SESSION' could not be reached on socket '$WORKER_SOCKET'" >&2
+    # A send can fail with the session there: its box never showed the payload,
+    # so the Enter was withheld, or still held it after the last Enter (#1236).
+    # The send's own line above says which.
+    echo "dispatch: the send to session '$WORKER_SESSION' on socket '$WORKER_SOCKET' did not submit" >&2
     exit 1
 fi

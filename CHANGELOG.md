@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a send presses Enter only once the box shows the typed text, and a held box is never counted as sent (#1236)
+
+`pane_send_verified`, the one door every keystroke injector uses, sent the Enter 0.3 s after the text whether or not the TUI had read it. A TUI that had not read the text yet read the text and the Enter together, and kept the Enter as an invisible character in the box: the prompt stayed there unsubmitted, and the next Enter only removed that character. The verify then read the first frame after the Enter, which under load was often drawn before the text, as a submit.
+
+- The send now waits until the input box shows the END of the payload (`pane_shows_payload_end`) and only then presses Enter. A submit counts only when the payload was seen in the box and is then gone. A TUI that draws the text at once is seen at the first check, so the common send costs one more pane capture than before (the one before the Enter).
+- When the box never shows the payload within `PANE_SEND_SHOWN_TICKS` (default 50 x 0.2 s = 10 s), the Enter is withheld, never sent blind: `pane_send_verified` returns 3, records a `send_unsubmitted` event (`payload-not-shown`) and says so on stderr. The text may still land in the box unsubmitted, where one Enter sends it.
+- A box that still shows the payload a verify window after the Enter gets another Enter, up to `PANE_SEND_ENTER_TRIES` (default 4) in all, each recorded as `send_retry`. One retry used to be the limit, after which the send returned 0 unchecked. A payload still in the box after the last Enter now returns 3 and records `send_unsubmitted` (`payload-still-in-box`). A paste-framed payload counts as shown by its `[Pasted text` placeholder, and a message queued behind a running turn counts as gone: the box then shows only "Press up to edit queued messages".
+- `start-bot.sh` logs a boot prompt that was not submitted (`NOT SUBMITTED`, through `boot_send_settled`) and goes on booting; any other send failure still ends the boot. keepalive leaves a reload pending for the next idle tick when its reload commands did not submit. `dispatch.sh` no longer reports every failed send as an unreachable session. The message transport already reports any result but 0 or a missing session as `unknown`.
+- The #860 pre-draw repair, which types the payload again when the box appears without it, now runs inside that wait, so its Enter waits too.
+
 ### Fixed — `fleet uptime` reports uptime as the share of observed time, and MTBR as the gap between restarts (#891, #1616)
 
 The uptime percentage divided up-time by the whole window, so it measured how much history the plane held. Measured on a live four-bot fleet, it equalled the observed coverage to the decimal in every window (36.9% over 30 days for bots up 99.99–100% of the time on record). MTBR divided up-time by the restart rows in the window, and every kickstart on boot after a host outage was a restart.
