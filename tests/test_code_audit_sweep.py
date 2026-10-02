@@ -295,21 +295,11 @@ class TestSweepSelector:
             """)
         )
         tmux = bindir / "tmux"
-        tmux.write_text(
-            dedent("""\
-            #!/usr/bin/env bash
-            # Skip a leading "-L <socket>" (per-bot server selection) to reach
-            # the real subcommand.
-            [ "$1" = "-L" ] && shift 2
-            case "$1" in
-                has-session) exit 0;;
-                capture-pane) echo "idle - at prompt";;
-                send-keys) exit 0;;
-            esac
-            """)
-        )
+        # An idle input box that shows what is typed and clears on Enter: the
+        # send presses Enter only once the box shows the payload (#1236).
+        from tests.conftest import fake_tmux_input_box
+        fake_tmux_input_box(tmux, tmp_path / "typed")
         gh.chmod(0o755)
-        tmux.chmod(0o755)
 
         from tests.conftest import read_fleet_events
         env = dict(os.environ)
