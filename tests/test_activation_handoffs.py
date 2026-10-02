@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
 import json
+import os
 from pathlib import Path
+import re
 import sqlite3
 import subprocess
+import time
 
 import pytest
 
-from claudlobby.activation_handoffs import (_BEGIN, _END, persist_canonical_handoffs,
+from claudlobby import activation_handoffs
+from claudlobby.activation_handoffs import (_BEGIN, _END, _REFRESH_BEGIN, persist_canonical_handoffs,
                                             preflight_canonical_handoffs)
 from claudlobby.activation_state import ActivationError
 from claudlobby.plane.db import db_file
@@ -226,5 +231,123 @@ def test_cross_fleet_legacy_assignment_refuses_before_handoff_write(tmp_path):
                                        expected_audit=asdict(audit))
         assert worker_handoff.read_bytes() == STALE_HANDOFF
         assert not (dirs["eng", "manager"] / ".claude/session.md").exists()
+    finally:
+        conn.close()
+
+
+# #2094: the refresh envelope reused `last_updated:`, the capture's freshness
+# signal and the field start-bot's resume gate reads, so the gate measured the
+# refresh, never the capture; and the 12-hour rule took the previous refresh
+# time from a field any session can edit.
+_MARKER_BLOCK = (_REFRESH_BEGIN + b"\n"
+                 b"This timestamp marks a canonical task-reference refresh, not a new session capture.\n"
+                 b"The original handoff bytes below are historical and their capture freshness is unverified.\n"
+                 b"Read the canonical task and assignment IDs in the section at the end of this file.\n"
+                 b"<!-- claudlobby first-adoption reference refresh end -->\n\n")
+
+
+def _legacy_envelope(directory: Path, stamp: str) -> bytes:
+    """The envelope as activations wrote it before #2094, carrying last_updated."""
+    return f"---\ncwd: {directory}\nlast_updated: {stamp}\nschema_version: 2\n---\n".encode() + _MARKER_BLOCK
+
+
+def _stamp(moment: datetime) -> str:
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _frozen(monkeypatch, moment: datetime) -> None:
+    """Pin the clock the refresh reads."""
+    class Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return moment if tz is None else moment.astimezone(tz)
+    monkeypatch.setattr(activation_handoffs, "datetime", Frozen)
+
+
+def _refresh_stamp(path: Path) -> str:
+    """The time the envelope at the top of a handoff carries, whichever field holds it."""
+    head = path.read_bytes().split(b"\n---\n", 1)[0]
+    return re.search(rb"^(?:references_refreshed|last_updated): (\S+)$", head, re.M).group(1).decode()
+
+
+def test_a_handoff_written_after_a_refresh_resumes(tmp_path, monkeypatch):
+    """A session keeps the envelope and writes its capture under it, a day after
+    the refresh: the gate must read the capture, not the refresh."""
+    conn, roster, dirs, expected, worker_handoff = _fixture(tmp_path)
+    try:
+        with monkeypatch.context() as clock:
+            _frozen(clock, datetime.now(timezone.utc) - timedelta(hours=25))
+            persist_canonical_handoffs(tmp_path, roster=roster, bot_dirs=dirs, expected_audit=expected)
+        captured = _stamp(datetime.now(timezone.utc)).encode()
+        worker_handoff.write_bytes(worker_handoff.read_bytes().replace(
+            b"last_updated: 2020-01-01T00:00:00Z", b"last_updated: " + captured))
+        assert _resume_gate(worker_handoff) == 0
+    finally:
+        conn.close()
+
+
+def test_a_handoff_written_a_day_before_a_refresh_does_not_resume(tmp_path):
+    conn, roster, dirs, expected, worker_handoff = _fixture(tmp_path)
+    try:
+        day_old = _stamp(datetime.now(timezone.utc) - timedelta(hours=25)).encode()
+        worker_handoff.write_bytes(STALE_HANDOFF.replace(b"2020-01-01T00:00:00Z", day_old))
+        assert _resume_gate(worker_handoff) == 1
+        persist_canonical_handoffs(tmp_path, roster=roster, bot_dirs=dirs, expected_audit=expected)
+        assert _resume_gate(worker_handoff) == 1  # a refresh is not a capture
+    finally:
+        conn.close()
+
+
+def test_a_refresh_keeps_the_mtime_a_capture_without_a_timestamp_is_judged_by(tmp_path):
+    """The gate falls back to the file's mtime for a handoff with no last_updated
+    of its own, so a refresh that rewrites the file must not make it new."""
+    conn, roster, dirs, expected, worker_handoff = _fixture(tmp_path)
+    try:
+        worker_handoff.write_bytes(b"## Next Steps\n- A capture with no timestamp of its own\n")
+        day_old = time.time() - 25 * 3600
+        os.utime(worker_handoff, (day_old, day_old))
+        assert _resume_gate(worker_handoff) == 1
+        persist_canonical_handoffs(tmp_path, roster=roster, bot_dirs=dirs, expected_audit=expected)
+        assert _resume_gate(worker_handoff) == 1
+    finally:
+        conn.close()
+
+
+QUOTING_HANDOFF = (b"---\nlast_updated: 2026-10-01T00:00:00Z\nschema_version: 2\n---\n\n## Notes\n"
+                   b"- The activation adds a header that opens with " + _REFRESH_BEGIN + b".\n"
+                   b"- Its IDs sit between " + _BEGIN + b" and " + _END + b".\n"
+                   b"\n```\n" + _REFRESH_BEGIN + b"\n" + _BEGIN + b"\n" + _END + b"\n```\n")
+
+
+def test_a_note_quoting_a_marker_line_does_not_refuse(tmp_path):
+    """The markers are ours only where the refresh writes them: at the top and at
+    the end. Quoted in a note, inline or on a line of their own, they are text,
+    and one bot's quote must not refuse the whole host's activation."""
+    conn, roster, dirs, expected, worker_handoff = _fixture(tmp_path)
+    try:
+        worker_handoff.write_bytes(QUOTING_HANDOFF)
+        preflight_canonical_handoffs(tmp_path, roster=roster, bot_dirs=dirs, candidate_bots=set(dirs))
+        persist_canonical_handoffs(tmp_path, roster=roster, bot_dirs=dirs, expected_audit=expected)
+        assert b"\n\n" + QUOTING_HANDOFF + b"\n\n" in worker_handoff.read_bytes()
+        assert _section(worker_handoff)["assigned_to_this_bot"][0]["assignment_id"] == ASSIGNMENT
+        persist_canonical_handoffs(tmp_path, roster=roster, bot_dirs=dirs, expected_audit=expected)
+        assert worker_handoff.read_bytes().count(QUOTING_HANDOFF) == 1
+    finally:
+        conn.close()
+
+
+def test_an_edited_envelope_timestamp_does_not_become_the_refresh_time(tmp_path, monkeypatch):
+    """A session rewrote the envelope's timestamp to its capture time, so the gate
+    would read the capture. The next refresh must not take that edit as its own
+    time: a time read from the file is one any session can change."""
+    conn, roster, dirs, expected, worker_handoff = _fixture(tmp_path)
+    try:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        edited = _stamp(now - timedelta(hours=1))
+        worker_handoff.write_bytes(_legacy_envelope(dirs["data", "worker"], edited) + STALE_HANDOFF)
+        with monkeypatch.context() as clock:
+            _frozen(clock, now)
+            persist_canonical_handoffs(tmp_path, roster=roster, bot_dirs=dirs, expected_audit=expected)
+        assert _refresh_stamp(worker_handoff) == _stamp(now)
     finally:
         conn.close()
