@@ -29,8 +29,12 @@ _allow() { exit 0; }   # no decision — normal permission flow applies
 # --- zero-fork prefilters ----------------------------------------------------
 # A payload naming none of the registry's CLIs or sub-commands cannot trip a
 # row: neonctl/neon, pip ... config, gh auth token. Deliberately over-matches.
+# Quotes and backslashes are stripped first, still without a fork: a name
+# split by quoting (ne'on'ctl, "n"eonctl) runs the same CLI but never contains
+# the name as written.
 payload="$(cat)"
-case "$payload" in
+_bare="${payload//[\"\'\\]/}"
+case "$_bare" in
 *neon*|*config*|*auth*) ;;
 *) _allow ;;
 esac

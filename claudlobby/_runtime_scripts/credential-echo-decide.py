@@ -96,9 +96,57 @@ class Unparsed(Exception):
     pass
 
 
+def _balanced(s: str, i: int) -> int:
+    """Index of the `)` that closes a `$(` whose body starts at s[i]."""
+    depth = 1
+    while i < len(s):
+        c = s[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c in "'\"":
+            j = s.find(c, i + 1)
+            if j < 0:
+                raise Unparsed("unbalanced quote in a command substitution")
+            i = j + 1
+            continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    raise Unparsed("unbalanced command substitution")
+
+
+def _substitutions(text: str) -> list:
+    """The command strings of the `$(...)` and backtick substitutions in text,
+    which the shell runs even inside double quotes and unquoted heredocs."""
+    out, i = [], 0
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+        elif text.startswith("$(", i) and not text.startswith("$((", i):
+            j = _balanced(text, i + 2)
+            out.append(text[i + 2:j])
+            i = j + 1
+        elif text[i] == "`":
+            j = text.find("`", i + 1)
+            if j < 0:
+                raise Unparsed("unbalanced backtick")
+            out.append(text[i + 1:j])
+            i = j + 1
+        else:
+            i += 1
+    return out
+
+
 def _tokens(command: str) -> list:
-    """("word", text, quoted) / ("op", op) / ("redir", fd, op): quotes removed,
-    line continuations joined, comments and heredoc bodies skipped."""
+    """("word", text, quoted) / ("op", op) / ("redir", fd, op) / ("sub", command)
+    / ("heredoc", body, delimiter_quoted): quotes removed, line continuations
+    joined, comments dropped. A substitution inside double quotes comes back as
+    its own "sub" token, and a heredoc body follows the line that opened it."""
     s = command.replace("\\\n", "")
     i, n = 0, len(s)
     out, word, quoted, heredocs = [], None, False, []
@@ -107,8 +155,8 @@ def _tokens(command: str) -> list:
         nonlocal word, quoted
         if word is not None:
             out.append(("word", word, quoted))
-            if heredocs and heredocs[-1] is None:
-                heredocs[-1] = word  # the first word after << is its delimiter
+            if heredocs and heredocs[-1][0] is None:
+                heredocs[-1] = [word, quoted]  # the first word after << is its delimiter
         word, quoted = None, False
 
     while i < n:
@@ -120,13 +168,16 @@ def _tokens(command: str) -> list:
             flush()
             out.append(("op", "\n"))
             i += 1
-            for delim in heredocs:  # a heredoc body is data, never commands
+            for delim, delim_quoted in heredocs:
+                body = []
                 while i < n:
                     j = s.find("\n", i)
                     line = s[i:] if j < 0 else s[i:j]
                     i = n if j < 0 else j + 1
                     if line.strip() == delim:
                         break
+                    body.append(line)
+                out.append(("heredoc", "\n".join(body), delim_quoted))
             heredocs = []
         elif c == "#" and word is None:
             j = s.find("\n", i)
@@ -150,6 +201,18 @@ def _tokens(command: str) -> list:
                 if s[j] == "\\" and j + 1 < n and s[j + 1] in '"\\$`':
                     buf.append(s[j + 1])
                     j += 2
+                elif s.startswith("$(", j) and not s.startswith("$((", j):
+                    k = _balanced(s, j + 2)
+                    out.append(("sub", s[j + 2:k]))
+                    buf.append(s[j:k + 1])
+                    j = k + 1
+                elif s[j] == "`":
+                    k = s.find("`", j + 1)
+                    if k < 0:
+                        raise Unparsed("unbalanced backtick")
+                    out.append(("sub", s[j + 1:k]))
+                    buf.append(s[j:k + 1])
+                    j = k + 1
                 else:
                     buf.append(s[j])
                     j += 1
@@ -180,7 +243,7 @@ def _tokens(command: str) -> list:
                 flush()
                 out.append(("redir", fd, op))
                 if op in ("<<", "<<-"):
-                    heredocs.append(None)  # filled by the delimiter word
+                    heredocs.append([None, False])  # filled by the delimiter word
             else:
                 flush()
                 out.append(("op", op))
@@ -193,19 +256,24 @@ def _tokens(command: str) -> list:
 
 
 def _commands(tokens: list) -> list:
-    """Simple commands: dict(words, redirs, depth, sep) in order."""
-    cmds, cur, depth, backtick, want_target = [], None, 0, False, None
+    """Simple commands in order: dict(words, redirs, subs, heredocs, depth, sep)."""
+    cmds, cur, depth, backtick, want_target, pending = [], None, 0, False, None, []
 
     def close(sep):
         nonlocal cur
-        if cur is not None and (cur["words"] or cur["redirs"]):
+        if cur is not None and (cur["words"] or cur["redirs"] or cur["subs"]):
             cur["sep"] = sep
             cmds.append(cur)
         cur = None
 
     for tok in tokens:
+        if tok[0] == "heredoc":
+            owner = pending.pop(0) if pending else (cmds[-1] if cmds else None)
+            if owner is not None:
+                owner["heredocs"].append((tok[1], tok[2]))
+            continue
         if cur is None:
-            cur = {"words": [], "redirs": [], "depth": depth, "sep": None}
+            cur = {"words": [], "redirs": [], "subs": [], "heredocs": [], "depth": depth, "sep": None}
         if tok[0] == "word":
             if want_target is not None:
                 want_target.append(tok[1])
@@ -214,9 +282,13 @@ def _commands(tokens: list) -> list:
                 continue
             else:
                 cur["words"].append(tok[1])
+        elif tok[0] == "sub":
+            cur["subs"].append(tok[1])
         elif tok[0] == "redir":
             want_target = [tok[1], tok[2]]
             cur["redirs"].append(want_target)
+            if tok[2] in ("<<", "<<-"):
+                pending.append(cur)
         else:
             op = tok[1]
             if op == "(" or (op == "`" and not backtick):
@@ -269,6 +341,9 @@ def _strip(words: list, state: dict):
                 i += 1
             continue
         if base in ("command", "builtin", "nohup", "exec", "time", "sudo", "doas"):
+            if base == "command" and any(w.startswith("-") and ("v" in w or "V" in w)
+                                         for w in words[i + 1:i + 3]):
+                return []  # `command -v` / `-V` looks a name up; it runs nothing
             i += 1
             while i < len(words) and words[i].startswith("-"):
                 i += 1 + (words[i] in ("-a", "-u", "-g", "-p", "-C", "-D", "-h", "-U"))
@@ -362,17 +437,63 @@ def _stdout_to_file(redirs: list) -> bool:
     return False
 
 
-def _judge(cmd: dict, state: dict, depth_budget: int):
+# Words that open or continue a compound command; the simple command follows them.
+_RESERVED = {"if", "then", "elif", "else", "while", "until", "do", "!", "{"}
+
+
+def _unreserve(words: list) -> list:
+    i = 0
+    while i < len(words) and words[i] in _RESERVED:
+        i += 1
+    return words[i:]
+
+
+def _shell_call(args: list):
+    """("c", STRING) for `sh -c STRING` (any option cluster holding c),
+    ("stdin", None) for a shell that reads its commands from stdin, or
+    ("script", None) for a shell running a script file."""
+    i, has_c, has_s = 0, False, False
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            i += 1
+            break
+        if a in ("-o", "+o", "-O", "+O", "--rcfile", "--init-file"):
+            i += 2
+            continue
+        if a.startswith("--"):
+            i += 1
+            continue
+        if a[:1] in ("-", "+") and len(a) > 1:
+            has_c = has_c or "c" in a[1:]
+            has_s = has_s or "s" in a[1:]
+            i += 1
+            continue
+        break
+    rest = args[i:]
+    if has_c:
+        return "c", (rest[0] if rest else None)
+    if has_s or not rest:
+        return "stdin", None
+    return "script", None
+
+
+def _judge(cmd: dict, words: list, state: dict, depth_budget: int, stdin_texts: list):
     """None, or (row, cli) for one simple command."""
-    words = _strip(list(cmd["words"]), state)
+    words = _strip(list(words), state)
     if not words:
         return None
     base = os.path.basename(words[0])
     args = words[1:]
-    if base in _SHELLS and depth_budget > 0:
-        for j, w in enumerate(args):
-            if w == "-c" and j + 1 < len(args):
-                return decide(args[j + 1], dict(state), depth_budget - 1, inner=True)
+    if base in _SHELLS:
+        kind, script = _shell_call(args)
+        texts = [script] if kind == "c" and script else (stdin_texts if kind == "stdin" else [])
+        for text in texts:
+            if depth_budget > 0:
+                hit = decide(text, dict(state), depth_budget - 1)
+                if hit:
+                    return hit
+        return None
     cli = base
     if re.fullmatch(r"python[0-9.]*", base) and args[:2] == ["-m", "pip"]:
         cli, args = "pip", args[2:]
@@ -398,19 +519,32 @@ def _judge(cmd: dict, state: dict, depth_budget: int):
     return row, cli
 
 
-def decide(command: str, outer: dict | None = None, depth_budget: int = 2, inner: bool = False):
-    """None, or (row, cli): the first command line element that would echo."""
+def decide(command: str, outer: dict | None = None, depth_budget: int = 3):
+    """None, or (row, cli): the first element of the command line that would echo."""
     tokens = _tokens(command)
     scopes = {0: dict(outer or {})}
+    pipe = []  # what the earlier elements of this pipeline write to stdin
     for cmd in _commands(tokens):
         d = cmd["depth"]
         for k in [k for k in scopes if k > d]:
             del scopes[k]
         base = scopes.get(d) or dict(scopes[max(k for k in scopes if k <= d)])
         scopes[d] = base
-        words = cmd["words"]
-        if words and words[0] in ("unset", "export") or (
-                words and all(_ASSIGN.match(w) for w in words)):
+        words = _unreserve(cmd["words"])
+        # Substitutions run first: inside double quotes, and in an unquoted heredoc body.
+        inner = list(cmd["subs"]) + [t for body, q in cmd["heredocs"] if not q
+                                     for t in _substitutions(body)]
+        for text in inner:
+            if depth_budget > 0:
+                hit = decide(text, dict(base), depth_budget - 1)
+                if hit:
+                    return hit
+        own = [body for body, _ in cmd["heredocs"]]
+        own += [r[2] for r in cmd["redirs"] if r[1] == "<<<" and len(r) > 2]
+        if words and words[0] in ("echo", "printf"):
+            own.append(" ".join(words[1:]))
+        stdin_texts, pipe = pipe + own, (own if cmd["sep"] in ("|", "|&") else [])
+        if words and (words[0] in ("unset", "export") or all(_ASSIGN.match(w) for w in words)):
             if cmd["sep"] in _PERSIST:
                 for w in words[1:] if words[0] in ("unset", "export") else words:
                     m = _ASSIGN.match(w)
@@ -420,7 +554,7 @@ def decide(command: str, outer: dict | None = None, depth_budget: int = 2, inner
                     elif words[0] == "unset" and not w.startswith("-"):
                         base[w] = "removed"
             continue
-        hit = _judge(cmd, dict(base), depth_budget)
+        hit = _judge(cmd, words, dict(base), depth_budget, stdin_texts)
         if hit:
             return hit
     return None

@@ -107,6 +107,21 @@ REFUSED = [
     "gh auth token >&2",
     "echo $(gh auth token)",
     "cat <<EOF\nhi\nEOF\nneonctl --help",  # a command after a heredoc is judged
+    "for i in 1; do neonctl --help; done",
+    "if true; then neonctl --help; fi",
+    "while true; do neonctl --help; break; done",
+    "if true; then :; else neonctl --help; fi",
+    "! neonctl --help",
+    'echo "$(neonctl --help)"',  # a substitution runs inside double quotes
+    'echo "`neonctl --help`"',
+    "bash <<'EOF'\nneonctl --help\nEOF",  # a heredoc fed to a shell is commands
+    "cat <<'EOF' | bash\nneonctl --help\nEOF",
+    "cat <<EOF\n$(neonctl --help)\nEOF",  # an unquoted heredoc runs its substitutions
+    "echo 'neonctl --help' | sh",
+    "bash <<< 'neonctl --help'",
+    "bash -ec 'neonctl --help'",
+    "ne'on'ctl --help",  # a name split by quoting runs the same CLI
+    '"n"eonctl --help',
 ]
 
 ALLOWED = [
@@ -125,6 +140,10 @@ ALLOWED = [
     "gh auth token &> token.txt",
     "git status",
     "git commit -F - <<'EOF'\nmentions neonctl --help here\nEOF",  # a heredoc body is data
+    "command -v neonctl",  # a lookup runs nothing
+    "command -V neon",
+    "for i in neonctl neon; do echo $i; done",
+    "cat <<'EOF'\n$(neonctl --help)\nEOF",  # a quoted heredoc is literal
 ]
 
 
