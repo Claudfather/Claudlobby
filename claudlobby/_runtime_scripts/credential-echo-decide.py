@@ -26,7 +26,9 @@ Bounds, so nobody reads this as a fix for the class: it is a command filter.
 It follows a shell's `-c` string (in any option cluster), a heredoc or
 here-string fed to a shell, the substitutions inside double quotes and
 unquoted heredocs, `env` (`-S` included), the wrappers in _WRAPPERS, and the
-package runners `npx`, `bunx` and `pnpm|npm|yarn dlx|exec`. It does not
+package runners `npx`, `bunx` and `pnpm|npm|yarn dlx|exec`. A substitution is
+delimited as bash reads it; one that still cannot be is read as text, and the
+rest of its line is judged (#2097). It does not
 follow `eval`, a script, an alias, `xargs`, `find -exec`, a package manager
 given options before `dlx`/`exec` or running a bin by name (`pnpm neonctl`),
 or a name built by expansion (a variable, a glob, braces). pip's options are
@@ -243,27 +245,104 @@ def _ansi_c(s: str, j: int):
     return "".join(out), j + 1
 
 
-def _balanced(s: str, i: int) -> int:
-    """Index of the `)` that closes a `$(` whose body starts at s[i]."""
-    depth = 1
-    while i < len(s):
-        c = s[i]
-        if c == "\\":
+# Words after which a command can start, so that a `case` there is the keyword.
+_LEADERS = {"then", "do", "else", "elif", "if", "while", "until", "!", "{", "time"}
+_WORD_END = " \t\n;&|()<>"
+
+
+def _word_end(s: str, i: int) -> int:
+    """Index just past the shell word that starts at s[i]; its quotes and
+    escapes belong to it."""
+    n = len(s)
+    while i < n and s[i] not in _WORD_END:
+        if s[i] == "\\":
             i += 2
-            continue
-        if c in "'\"":
-            j = s.find(c, i + 1)
-            if j < 0:
+        elif s[i] == "'" or s.startswith("$'", i):
+            ansi = s[i] == "$"
+            j = i + 1 + ansi
+            while j < n and s[j] != "'":
+                j += 2 if ansi and s[j] == "\\" else 1
+            if j >= n:
                 raise Unparsed("unbalanced quote in a command substitution")
             i = j + 1
-            continue
-        if c == "(":
-            depth += 1
+        elif s[i] == '"':
+            j = i + 1
+            while j < n and s[j] != '"':
+                j += 2 if s[j] == "\\" else 1
+            if j >= n:
+                raise Unparsed("unbalanced quote in a command substitution")
+            i = j + 1
+        else:
+            i += 1
+    return min(i, n)
+
+
+def _balanced(s: str, i: int) -> int:
+    """Index of the `)` that closes a `$(` whose body starts at s[i], reading
+    the body as bash reads it: a parenthesis inside quotes, a comment, a
+    heredoc body or a case pattern does not count (#2097). Unparsed when it
+    still cannot be delimited."""
+    depth, n = 1, len(s)
+    heredocs = []  # (delimiter, strip_tabs): bodies that start at the next newline
+    cases = []  # [depth, state] per open `case`: subject, in, pattern or body
+    command = True  # the next word stands where a command can start
+    while i < n:
+        c = s[i]
+        top = cases[-1] if cases and cases[-1][0] == depth else None
+        if c in " \t":
+            i += 1
+        elif c == "\n":
+            i += 1
+            for delim, strip in heredocs:
+                while i < n:
+                    j = s.find("\n", i)
+                    line = s[i:] if j < 0 else s[i:j]
+                    i = n if j < 0 else j + 1
+                    if (line.lstrip("\t") if strip else line) == delim:
+                        break
+            heredocs, command = [], True
+        elif c == "#":  # reached only where a word starts: a comment
+            j = s.find("\n", i)
+            i = n if j < 0 else j
+        elif s.startswith("<<", i) and not s.startswith("<<<", i):
+            j = i + 2 + s.startswith("<<-", i)
+            while j < n and s[j] in " \t":
+                j += 1
+            k = _word_end(s, j)
+            delim = re.sub(r"[\"'\\]", "", s[j:k])
+            if delim:
+                heredocs.append((delim, s.startswith("<<-", i)))
+            i, command = k, False
+        elif c in ";&|<>":
+            op = _OPS.match(s, i).group(0)
+            if top and op in (";;", ";&", ";;&"):
+                top[1] = "pattern"
+            i, command = i + len(op), c in ";&|"
+        elif c == "(":
+            if top and top[1] == "pattern":
+                i += 1  # a pattern's optional opening parenthesis
+            else:
+                depth, i, command = depth + 1, i + 1, True
         elif c == ")":
+            if top and top[1] == "pattern":
+                top[1], i, command = "body", i + 1, True  # the pattern ends
+                continue
             depth -= 1
             if depth == 0:
                 return i
-        i += 1
+            i, command = i + 1, False
+        else:
+            k = _word_end(s, i)
+            word = s[i:k]
+            if command and word == "case":
+                cases.append([depth, "subject"])
+            elif top and top[1] == "subject":
+                top[1] = "in"
+            elif top and top[1] == "in" and word == "in":
+                top[1] = "pattern"
+            elif top and word == "esac" and (command or top[1] == "pattern"):
+                cases.pop()
+            i, command = k, word in _LEADERS
     raise Unparsed("unbalanced command substitution")
 
 
@@ -275,13 +354,20 @@ def _substitutions(text: str) -> list:
         if text[i] == "\\":
             i += 2
         elif text.startswith("$(", i) and not text.startswith("$((", i):
-            j = _balanced(text, i + 2)
+            try:
+                j = _balanced(text, i + 2)
+            except Unparsed:
+                # It cannot be delimited (#2097). Read it as text: bash still
+                # runs the commands after the heredoc, so they are judged.
+                i += 2
+                continue
             out.append(text[i + 2:j])
             i = j + 1
         elif text[i] == "`":
             j = text.find("`", i + 1)
             if j < 0:
-                raise Unparsed("unbalanced backtick")
+                i += 1  # a lone backtick is text here, for the same reason
+                continue
             out.append(text[i + 1:j])
             i = j + 1
         else:
@@ -346,7 +432,14 @@ def _tokens(command: str) -> list:
                     buf.append(s[j + 1])
                     j += 2
                 elif s.startswith("$(", j) and not s.startswith("$((", j):
-                    k = _balanced(s, j + 2)
+                    try:
+                        k = _balanced(s, j + 2)
+                    except Unparsed:
+                        # It cannot be delimited (#2097). Read the `$(` as text,
+                        # so the rest of the line is still judged.
+                        buf.append(s[j:j + 2])
+                        j += 2
+                        continue
                     out.append(("sub", s[j + 2:k]))
                     buf.append(s[j:k + 1])
                     j = k + 1

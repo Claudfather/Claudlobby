@@ -16,6 +16,13 @@ Every activation rewrites each bot's handoff with a refresh envelope at the top.
 - **The markers count only where the refresh writes them:** the envelope at the top, the section at the end. A note that quotes one no longer refuses the host's activation; a damaged envelope or section in those places still does.
 - **A refresh keeps the handoff's mtime,** which the gate falls back to when a capture has no `last_updated:` of its own.
 
+### Fixed — a quoted substitution the credential-echo guard cannot delimit no longer hides the rest of its line (#2097)
+
+The guard from #2090 judged a double-quoted `$(...)` by first finding its closing parenthesis. A heredoc post whose prose held an apostrophe or an unmatched parenthesis defeated that search, the whole line read as unparsed, and an unparsed line is allowed. So `gh auth token` or `neonctl --help` beside such a post ran unjudged.
+
+- **A substitution is now delimited as bash reads it.** A parenthesis inside quotes, a comment, a heredoc body or a case pattern does not count.
+- **One that still cannot be delimited is read as text,** in a double-quoted string and in an unquoted heredoc body (a lone backtick too), and the rest of the line is judged.
+
 ### Fixed — a bot can answer a message from a human sender (#2068)
 
 `message reply` refused any parent whose sender was not a bot, and `message send` takes bots only. A bot that a person asked a question over the plane had no door to answer it.
