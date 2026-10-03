@@ -129,6 +129,15 @@ _resolve_manager_token() {
 # it are not held back by its predecessor's floor.
 _HELD_PUSH_FLOOR_S_DEFAULT=1800
 
+# A push waits for the manager's box to be drawn (#2138), as a boot send does:
+# the first tick after a manager restart can reach it before its box is drawn
+# (9 to 19 s for a production-shaped bot, #860), and keys typed then are lost.
+# The box wait captures before it sleeps, so a drawn box costs one capture and
+# no wait; it waits only on a blank pane, for FLEET_PULSE_PUSH_BOX_TICKS polls
+# of 0.5 s (default 60: 30 s). A pane that never draws ends the wait, and its
+# push falls to #860's never-drawn recovery and, still unshown, to the floor.
+_PUSH_BOX_TICKS_DEFAULT=60
+
 # _held_push_floor_holds <marker> <floor_s>: whether the floor holds a push to the
 # manager instance in _mgr_token. The marker must name that instance and be at
 # most <floor_s> old. A marker dated ahead of the clock is expired, never fresh:
@@ -150,7 +159,7 @@ _held_push_floor_holds() {
 # manager session, still returns 0: the recipient token re-fires the alert once a
 # manager appears (#831).
 notify_manager() {
-    local bot_dir="$1" msg="$2" target="" mgr="" mgr_socket="" rc=0 floor marker pane
+    local bot_dir="$1" msg="$2" target="" mgr="" mgr_socket="" rc=0 floor marker pane box_ticks
     target=$(_manager_target "$bot_dir") || return 0
     [ -n "$target" ] || return 0
     mgr_socket="${target%%|*}"; mgr="${target##*|}"
@@ -170,7 +179,9 @@ notify_manager() {
     fi
     # Attribute any send_miss to THIS bot's ledger — it is the one whose manager
     # could not be reached. bot_tmux_send sanitizes + two-step sends.
-    BOT_DIR="$bot_dir" BOT_ID="$(basename "$bot_dir")" \
+    box_ticks="${FLEET_PULSE_PUSH_BOX_TICKS:-$_PUSH_BOX_TICKS_DEFAULT}"
+    case "$box_ticks" in ''|*[!0-9]*) box_ticks="$_PUSH_BOX_TICKS_DEFAULT" ;; esac
+    BOT_DIR="$bot_dir" BOT_ID="$(basename "$bot_dir")" PANE_READY_TICKS="$box_ticks" \
         bot_tmux_send "$mgr_socket" "$mgr" "[FLEET-PULSE] $msg" || rc=$?
     case "$rc" in
         0) rm -f "$marker" ;;
