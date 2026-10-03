@@ -117,7 +117,7 @@ _resolve_manager_token() {
 
 # A manager's box that holds text gets no push (#2120 review, dara): typing into
 # it would glue the alert to that text, the opposite of the fleet's own held-box
-# remedy (never typed text), and Chris's rule makes a glued box his call. And
+# remedy (never typed text), and a glued box is the operator's call. And
 # after a push the box did not take (rc 3), that manager gets no push for
 # FLEET_PULSE_HELD_PUSH_FLOOR_S (default 1800 s, the shape of #1088's re-arm
 # bound): no wait and no typing in between, so a box that takes no input costs
