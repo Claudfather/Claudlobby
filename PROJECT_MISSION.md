@@ -2,7 +2,7 @@
 
 ## What this project is
 
-Claudlobby is a framework for running a fleet of always-on Claude Code bots on a single Linux or macOS host. Each bot has its own persona, its own Telegram bot for communication, its own MCP servers, isolated state, and a distinct identity. A manager bot orchestrates workers via tmux dispatch; workers report back via shared scripts and a fleet-state ledger.
+Claudlobby is a framework for running a fleet of always-on Claude Code bots on a single Linux or macOS host. Each bot has its own persona, its own Telegram bot for communication, its own MCP servers, isolated state, and a distinct identity. A manager bot admits work, assigns workers, and delivers recorded assignments through the public `claudlobby` CLI; workers accept and report against those assignments. The observable Plane records work, messages, receipts, and reports.
 
 The name is the metaphor: a COD lobby. Bots gather in a shared room (Telegram group chat), the manager assigns missions, workers execute and report back. It's a coordination layer for a squad.
 
@@ -15,6 +15,20 @@ The reference runtime for operating Claude Code bots in production. Bots install
 Trivial to run a fleet of distinct, cooperating bots on cheap hardware — and to point that fleet at a goal. A fleet doesn't just *run*; it runs *toward something*: it knows the mission it serves, picks work that advances it, and closes that work at the rigor each project declares.
 
 *(The "run → run toward something" extension was ratified by the fleet owner on 2026-07-06 with the goal-aware-fleet plan — `documentation/plans/2026-07-06-goal-aware-fleet-portfolio.md`, decision forks F1–F6 locked. Those locks also satisfy this document's approval gate for the associated dispatch and lifecycle changes.)*
+
+## Mission and delivery tracking
+
+The durable mission is to run specialist agent teams that do useful business work a team of people would otherwise do. They communicate plainly to the human while preserving the rigor of the work ([simple outside, rigorous inside](library/principles/simple-outside-rigorous-inside.md)), parallelize useful authorized work, and sustain progress over days. Surviving restarts with context intact is a precondition for holding that goal. [#974](https://github.com/Claudfather/Claudlobby/issues/974) records the historical rationale; this mission is not a claim that every part has shipped.
+
+Delivery follows observed need: build the smallest useful end-to-end slice, exercise runtime changes with a real isolated canary, then extend from measured failures or demand. Choose orchestration patterns to serve that work.
+
+Residual delivery work remains tracked separately from **Current sprint focus**:
+
+- Restart context survival [#986](https://github.com/Claudfather/Claudlobby/issues/986) and the fleet read loop [#1102](https://github.com/Claudfather/Claudlobby/issues/1102).
+- Operator visibility: the conversations, task history, credentials and gated actions in [#2079](https://github.com/Claudfather/Claudlobby/issues/2079).
+- Deferred manager check-in features: initiative intake [#1559](https://github.com/Claudfather/Claudlobby/issues/1559), sprint execution [#1560](https://github.com/Claudfather/Claudlobby/issues/1560), focus [#1561](https://github.com/Claudfather/Claudlobby/issues/1561), the operator decisions card [#1562](https://github.com/Claudfather/Claudlobby/issues/1562), and smaller follow-ups [#1563](https://github.com/Claudfather/Claudlobby/issues/1563).
+
+These links preserve delivery tracking; they do not select a sprint, enable deferred features, or waive the approval rules below.
 
 ## Guiding principles
 
@@ -108,7 +122,7 @@ Add one when its owner next touches it.*
 ## What we choose not to build
 
 - **A hosted version.** Claudlobby is software users run themselves. We are not becoming "Claude Code Bots as a Service."
-- **Web UI for fleet management.** Telegram + tmux + systemctl + fleet-state.json is the management surface. Adding a web UI would double the surface area for marginal benefit.
+- **An unrestricted web management surface.** The local read-only operator Plane complements the public CLI and Telegram. Operator writes are separately gated under [#2075](https://github.com/Claudfather/Claudlobby/issues/2075); the read surface does not authorize them.
 - **Cross-host fleet coordination.** A Claudlobby fleet runs on one host. Multi-host coordination is interesting and explicitly out of scope for v1 — the architecture would change too much.
 - **Skill or knowledge management.** That's clauDNA and Claudron. Claudlobby orchestrates bots that consume those; it does not become them.
 - **Per-bot LLM provider abstraction.** Claudlobby is for Claude Code specifically. Bots running on other LLMs would require enough divergence that they belong in a different framework.
