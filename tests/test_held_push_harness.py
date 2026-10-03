@@ -88,9 +88,19 @@ def test_a_restarted_manager_is_not_held_back_by_its_predecessors_floor(run):
             "the alerts re-fire to it, and one push waits on its box",
             "its other alert is held back by its floor",
             "a manager that takes input replaces it and shows its box",
+            "it reuses its predecessor's session id, so a floor keyed by the id would hold it back",
             "the new manager is not held back by its predecessor's floor",
             "session_missing reaches the new manager",
             "service_down reaches the new manager")
+
+
+def test_a_floor_marker_dated_ahead_of_the_clock_holds_nothing_back(run):
+    """A host that boots behind real time reads an older marker as dated ahead;
+    plane-emit.sh treats a negative age as expired, and so must the floor."""
+    _passed(run, "the planted marker is dated a day ahead",
+            "a marker dated ahead holds nothing back",
+            "session_missing is pushed again",
+            "service_down is pushed again")
 
 
 def test_every_check_passes(run):

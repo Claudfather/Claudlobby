@@ -90,6 +90,10 @@ held_skips ()    { grep -c "box holds text" "$ROOT/pulse.log" || true; }
 floor_skips ()   { grep -c "did not take a push less than" "$ROOT/pulse.log" || true; }
 # The box's own line: the last line the stub draws with its prompt.
 box_line ()      { mgr_pane | grep '^>' | tail -1; }
+# The manager session's tmux id. A restarted manager on its private socket gets
+# the same one again (a new server numbers from zero), so it cannot name an
+# instance.
+session_id ()    { tmux -L "$MGR_SOCK" display-message -p -t "$MGR" '#{session_id}' 2>/dev/null; }
 
 # One sweep. The short shown budget keeps a held push to about a second here: the
 # property is how many pushes wait, not how long one wait is. The emits are on and
@@ -156,20 +160,40 @@ check "no second service_down push"    1 "$(push_count service_down)"
 echo "--- 6. the floor belongs to the manager instance: a restarted manager is not held back ---"
 # A restart is a new box: #831's recipient token (session_created, pane_pid)
 # changes, so both alerts re-fire to it. A deaf one sets a floor; the next one,
-# which takes input, must not inherit that floor.
+# which takes input, must not inherit that floor, though it reuses the deaf
+# one's session id: a floor keyed by the id would hold it back.
 tmux -L "$MGR_SOCK" kill-session -t "$MGR" 2>/dev/null || true
 start_manager --deaf
 check "a second deaf manager is up and shows its box" shown "$(manager_box)"
+sid_before=$(session_id)
 run_pulse
 check "the alerts re-fire to it, and one push waits on its box" 1 "$(waits)"
 check "its other alert is held back by its floor" 1 "$(floor_skips)"
 tmux -L "$MGR_SOCK" kill-session -t "$MGR" 2>/dev/null || true
 start_manager
 check "a manager that takes input replaces it and shows its box" shown "$(manager_box)"
+check "it reuses its predecessor's session id, so a floor keyed by the id would hold it back" "$sid_before" "$(session_id)"
 run_pulse
 check "the new manager is not held back by its predecessor's floor" 0 "$(floor_skips)"
 check "session_missing reaches the new manager" 1 "$(push_count session_missing)"
 check "service_down reaches the new manager"    1 "$(push_count service_down)"
+
+echo "--- 7. a floor marker dated ahead of the clock is expired, not fresh ---"
+# A host with no real-time clock can boot behind real time, so a marker written
+# before the reboot reads as dated in the future. Plant one for the current
+# manager, naming it and a day ahead, and let both alerts re-fire to it through
+# the re-notify leg.
+token=$(tmux -L "$MGR_SOCK" display-message -p -t "$MGR" '#{session_created}-#{pane_pid}')
+marker="$ROOT/state/pulse/held-push.$(printf '%s|%s' "$MGR_SOCK" "$MGR" | tr -c 'A-Za-z0-9._-' '_')"
+printf '%s' "$token" > "$marker"
+python3 -c 'import os, sys, time; t = time.time() + 86400; os.utime(sys.argv[1], (t, t))' "$marker"
+check "the planted marker is dated a day ahead" ahead \
+    "$(python3 -c 'import os, sys, time; print("ahead" if os.stat(sys.argv[1]).st_mtime > time.time() + 3600 else "not ahead")' "$marker")"
+sleep 2
+run_pulse FLEET_PULSE_RENOTIFY_AFTER_S=1
+check "a marker dated ahead holds nothing back" 0 "$(floor_skips)"
+check "session_missing is pushed again" 2 "$(push_count session_missing)"
+check "service_down is pushed again"    2 "$(push_count service_down)"
 
 echo
 echo "=== $pass passed, $fail failed ==="
