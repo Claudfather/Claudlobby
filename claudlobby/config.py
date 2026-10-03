@@ -793,6 +793,11 @@ class BotConfig:
     # heavy-job slot, a PreToolUse hook composed for this bot only
     # (composer._with_heavy_slot_hook).
     heavy_slot: bool = False
+    # Opt-in per bot: refuse a GitHub-bound write that would put a term from the
+    # host's list (~/.config/claudlobby/public-write-terms) into a PUBLIC
+    # repository, a PreToolUse hook composed for this bot only
+    # (composer._with_public_write_guard_hook).
+    public_write_guard: bool = False
     # #1665 Layer 0b, opt-in per bot: deny rules on the shared config dir, the
     # .env tiers and the install's code (composer.compose_settings_local).
     isolation: IsolationConfig = field(default_factory=IsolationConfig)
@@ -1919,6 +1924,10 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         heavy_slot=_strict_bool(
             "'heavy_slot'",
             raw.get("heavy_slot", defaults.get("heavy_slot", False)),
+        ),
+        public_write_guard=_strict_bool(
+            "'public_write_guard'",
+            raw.get("public_write_guard", defaults.get("public_write_guard", False)),
         ),
         isolation=_parse_isolation(
             defaults.get("isolation"), raw.get("isolation"), name
