@@ -29,7 +29,7 @@ import re
 from pathlib import Path
 
 from claudlobby.plane.registries import SYSTEM_EVENT_SEVERITY
-from conftest import load_lib_module
+from tests.conftest import load_lib_module
 
 REPO = Path(__file__).resolve().parent.parent
 LIB = REPO / "claudlobby" / "_runtime_scripts"
