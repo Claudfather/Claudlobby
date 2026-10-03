@@ -31,6 +31,49 @@ A PreToolUse hook, `claudlobby/_runtime_scripts/public-write-guard.sh` (with its
 - **Opt-in:** registered in the switch registry as opt-in for the `heavy_slot` reason. A composed hook has no deployment gate (#1310), so the manifest key is where one bot goes first.
 - **Tests:** `tests/test_public_write_guard.py` drives the real hook with a fake `gh` and real git repositories, in both directions for each shape; `tests/test_public_write_guard_compose.py` covers the composition.
 
+### Fixed — a CLI delivery held in an idle bot's box is submitted (#2105)
+
+Since #1989, every CLI delivery (`message send` and `reply`, `assignment deliver`, `task nudge` and `recheck`) has pressed Enter once with verification off. No layer repaired an Enter the box ate: the transport left it to the operation owner, and the owner said it did not verify. A message that landed in an idle box could sit there until a person pressed Enter. On 2026-10-02 the pulse paged 24 such holds on 14 bots.
+
+- **The operation owner now repairs the Enter, after the receipt wait finds no receipt.** It looks at the recipient's box, and presses one Enter only when `held_delivery_match` finds this message in it.
+  - A text match: the box starts with a Claudlobby envelope, has no second one, and ends with this message's trailer, the only trailer in it.
+  - A chip match: a long payload is drawn only as `[Pasted text #N +M lines]`. The box must hold that one chip and nothing else, and M must be the wire's single newline or one more. A chip names no message, so the box must also have been empty when the owner read it just before its send: then the chip is this send's, or a sender's racing between that read and the keystrokes.
+  - Either way, `pane_is_busy` must see no running turn, and no menu may be open.
+- **`pane_is_busy` sees a running turn that draws no interrupt hint.** Claude Code 2.1.285 draws "esc to interrupt" in few running turns. The shared check now also reads the turn's activity line: one glyph at the start of the line, a word and an ellipsis (`✻ Transmogrifying…`, `● Misting… (58m 4s · …)`). Every consumer gets it: keepalive's pane classifier, the keystroke injectors' `bot_is_busy`, and this repair.
+- **At most two Enters, the operators' recipe.** A swallowed Enter leaves a CR in the box, and the next Enter only strips it (#1236). So a second Enter is pressed only after another receipt wait finds no receipt, and only on the same match. Never a third, and never the payload again. A held delivery's command can now take about 34 s.
+- **#1236's rc 3 is covered too.** When the box never showed the payload, the transport withheld its Enter; the receipt wait and the repair now run on that send as well, so text that lands later is still submitted.
+- **Every repair is a fleet event on the recipient,** `delivery_enter_repaired` (notice). It records whether the match was by text or by chip, and every look, so a misfire on someone else's paste can be found. The command's JSON carries `enter_repair`.
+- This supersedes S2-03's "no automatic Enter repair" for this one case only (`documentation/plans/2026-09-30-unified-cli-finalization.md`).
+
+### Added — every PR names the production check that proves it, and the merger runs it once the change is live (#2111)
+
+CI, a green deploy and a healthy service prove that a system still runs, not that a merged change does what it was merged to do. Until now that check lived in individual managers' memory, when it happened at all, and nothing posted a result after a merge.
+
+- **`library/guardrails/verify-rollout.md`** (opt-in). The author writes a `## Rollout check` with four lines: Observe, Control, When and Who. A reviewer treats a missing or vacuous one as request-changes. Once the change is live by the target's own record, the merger runs the check and posts PASS, FAIL or PENDING on the PR. For the framework, "live" means the active release's `source_revision` contains the merge commit.
+  - **PENDING** is a task on the plane, one per check.
+  - **A check only the operator can run** goes to them through `task escalate`, one per message.
+  - **A FAIL stops that repo's merge train.** The merger opens a `rollout-hold` issue, which only the fix or revert PR may close.
+- **`.github/workflows/verify-rollout.yml`**, a reusable workflow, and this repo's caller, `rollout-check.yml`. A repo adopts the check with one caller file, and it reads as `rollout-check / Rollout check` in the status rollup. What the checker does:
+  - It reads the body and the changed files live through the API, and the docs and tests paths from the caller file on the default branch, so the PR under check cannot widen its own exemption.
+  - It fails a missing section, an empty or `N/A` field, a heading inside a fenced block or a comment, an `N/A` that is not `docs-only` or `tests-only`, an exemption the changed paths do not bear out, and any failed lookup.
+  - It reads a field as GitHub renders it: a field ends with its list item, so text after a blank line (the footer most bodies end with) is not its answer, and a comment hides text up to its `-->` across the lines of one paragraph.
+  - It flags a PR that changes a workflow file, because such a PR can replace the job that checks it.
+- **The merge guardrails** (`merge-policy-auto-admin`, `merge-policy-auto-after-review`) read that check by name, and every read they add fails closed:
+  - only a 404 on the default branch's caller file says a repo has not adopted the check;
+  - only the check's newest run at the head counts;
+  - the merger reads a PR's changed files from the API, and a PR that changes a workflow file merges only on the rung 1 verdict that names each one.
+  - The new rung 5 refuses a merge while a `rollout-hold` issue is open, in a repo that has adopted the check. The only exception is a PR that closes it and whose rung 1 verdict names it: a closing keyword alone is the author's to write. In a repo that has not adopted the check, rung 5 lists nothing and cannot refuse, so a fleet that composes the guardrail without opting in gains no new way to fail.
+- `.github/pull_request_template.md` carries the section. `canary-rollout` gains a row and a pointer for the rollout check.
+
+### Fixed — a self restart after a checkpoint reads the session's capture, not the activation's envelope (#2119)
+
+Since #2110, each activation tops every bot's handoff with an envelope that carries `references_refreshed:`, not `last_updated:`. The self-restart check (`claudlobby bot restart` on yourself) read only the file's first frontmatter, so a session that checkpointed below the envelope and then restarted itself was refused, however fresh its capture.
+
+- **The check reads the session's capture below a recognised envelope.** It finds the envelope with the activation's own reader, so the two agree on what an envelope is.
+- **An envelope that reader refuses is refused here too, by name:** "the reference refresh envelope at its top is malformed". The obvious repair, adding `last_updated:` to the envelope, used to pass this check and then block the next activation. Delete the envelope block instead; a handoff without one is read by both.
+- **No envelope time vouches for a capture.** Editing the old envelope's `last_updated:`, the repair before #2094, no longer passes a stale capture. A handoff whose only `last_updated:` is in an old envelope now refuses until the session writes its own frontmatter.
+- **A fresh handoff whose first 8 KiB end inside a multi-byte character no longer refuses:** only the frontmatter is decoded.
+
 ### Fixed — a heavy-slot test no longer fails when its poll reads the slot's lock file mid-write (#2125)
 
 The held-slot test's poll parsed `slot-0.lock` as it found it. `heavy-slot.py` creates that file empty and truncates it before each write, so a poll in that window failed the test with `JSONDecodeError` (CI run 37104705081). The tests now read the record as the module's own reader does: an empty or half-written file is no record yet, and the poll tries again. Test-only; the module already read it this way.

@@ -11,6 +11,7 @@ A change can pass every throwaway-bot test and still break the moment it goes li
 |------|--------|-------|
 | Pre-merge throwaway-bot validation (`validate-bot-change.sh`) | The **code works** — the event fires, the alert sends | **Hard gate.** Mandatory for every runtime change, before merge. |
 | **Canary rollout** (this protocol) | The **rollout is safe** in real production state | **Strong default.** Do it when a bad fleet-wide rollout would hurt the fleet — judgment, not a universal mandate. |
+| **Rollout check** ([verify-rollout](../guardrails/verify-rollout.md)) | The merged change **does what it was merged to do**, where it runs | Where a fleet opts in, **every PR** names its check before merge; the merger posts PASS, FAIL or PENDING once the change is live. |
 
 The throwaway bot runs in a clean, synthetic environment. Production carries state it never had: the real plugin/marketplace registry, real MCP config, live supervision units, a real running binary, concurrent bots. That gap is exactly where a merged-and-tested change bites. So the pre-merge gate is mandatory for every runtime change; the canary is the **expected default** when that change ships *live across the fleet* — a judgment call, not a rule that fires on every PR.
 
@@ -45,7 +46,7 @@ Once you have decided to canary:
 3. **The operator activates the canary plan** with `host activate PLAN_ID --install-directory PATH` from an external shell. Stage the affected skill, grants and config together, then exercise real delegation and the affected operation. Observe the receiver, command result and durable record; process liveness alone is insufficient.
 4. **Record the exact candidate and results.** Fix observed failures and repeat only the affected checks. Independent-root evidence proves the candidate works there; it does not prove production data migration, Pi timing or another OS's native manager.
 5. **Review production activation separately.** `config plan` and `host activate` currently coordinate the whole host; there is no single-bot composition or activation shortcut. Existing no-restart holds block that production activation, not independent canary work. Honor the operator's rollout authorization and work-in-progress holds.
-6. **Observe the activated host.** Verify the affected paths and selected release after rollout. Retain previous immutable releases for explicit rollback; never repair generated files by hand.
+6. **Observe the activated host.** Verify the affected paths and selected release after rollout. Retain previous immutable releases for explicit rollback; never repair generated files by hand. Then run each merged PR's rollout check against it ([verify-rollout](../guardrails/verify-rollout.md)).
 
 ## Why this exists
 

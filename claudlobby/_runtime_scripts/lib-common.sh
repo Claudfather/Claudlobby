@@ -3394,13 +3394,25 @@ pane_is_idle() {
 
 # Base busy-detection regex — single source of truth for keepalive.sh
 # classify_pane and every "should I inject keystrokes?" consumer
-# (bot-sweep-cron). "esc to interrupt" is drawn during ANY
-# active turn and is stable across Claude Code releases and
-# prefersReducedMotion; the churning verb lists (Thinking/Running/…) that
-# consumers previously grepped silently degrade on UI changes and must not
-# reappear (gate: tests/test_busy_ssot.py). Operators extend at runtime via
-# KEEPALIVE_BUSY_PATTERNS.
+# (bot-sweep-cron). "esc to interrupt" is drawn in some active turns, not all:
+# Claude Code 2.1.285 draws it in few (1 of 7 running turns on the live panes,
+# 2026-10-03), so pane_is_busy also reads the activity line below. The churning
+# verb lists (Thinking/Running/…) that consumers previously grepped silently
+# degrade on UI changes and must not reappear (gate: tests/test_busy_ssot.py).
+# Operators extend at runtime via KEEPALIVE_BUSY_PATTERNS.
 _BUSY_PATTERN_BASE='[Ee]sc to interrupt'
+
+# A running turn's activity line, the sign of one that 2.1.285 does draw (#2105
+# review): at the start of the line one glyph and a space, then one word and an
+# ellipsis, then the line's end or the parenthesised elapsed time:
+#   ✻ Transmogrifying…          ● Misting… (58m 4s · ↓ 299.7k tokens · …)
+# Its shape, never its verb. Not this shape: a finished turn's summary (no
+# ellipsis: ✻ Sautéed for 12s · done 9:59 PM), a transcript line with no glyph
+# (verb-no-esc's "  Thinking…"), and the box's own line, whose glyph is followed
+# by a no-break space. Bytes under LC_ALL=C, so the answer does not move with the
+# locale. It can read a finished turn as busy when the last line drawn is an
+# answer of one word and an ellipsis ("● Checking…"); that errs toward not typing.
+_BUSY_ACTIVITY_LINE_RE=$'^([\xc2-\xdf][\x80-\xbf]|[\xe0-\xef][\x80-\xbf]{2}|[\xf0-\xf4][\x80-\xbf]{3}) +[A-Z][^ (]*\xe2\x80\xa6( \\([0-9]|$)'
 
 # Default recency window (seconds) for the data/.last-tool-call liveness
 # marker — one home, consumed by bot_is_busy and keepalive.sh so the two
@@ -3417,7 +3429,8 @@ pane_is_busy() {
     if [ -n "${KEEPALIVE_BUSY_PATTERNS:-}" ]; then
         _busy_pattern="$_busy_pattern|$KEEPALIVE_BUSY_PATTERNS"
     fi
-    printf '%s' "$text" | grep -qE "$_busy_pattern"
+    printf '%s' "$text" | grep -qE "$_busy_pattern" && return 0
+    printf '%s\n' "$text" | LC_ALL=C grep -qE "$_BUSY_ACTIVITY_LINE_RE"
 }
 
 # pane_is_held <pane_text>
@@ -3453,6 +3466,81 @@ pane_is_held() {
     case "$region" in
         *'Esc to cancel'*|*'Esc to go back'*) return 1 ;;
     esac
+    return 0
+}
+
+# _held_box_squeezed <region>
+# The input box's own text, from pane_input_region's first line (the glyph line)
+# to the rule drawn under the box, with the glyph and every blank (space, tab,
+# CR, NBSP) removed, so the TUI's wrapping cannot change it. Under LC_ALL=C: the
+# glyph (U+276F) and the rule (U+2500) are matched as bytes on every platform.
+_held_box_squeezed() {
+    printf '%s\n' "$1" | LC_ALL=C awk '
+        function squeeze(t) { gsub(/[ \t\r]/, "", t); gsub("\302\240", "", t); return t }
+        NR == 1 { sub(/^[ \t]*(\342\235\257|>)/, "") }
+        NR > 1 { t = $0; gsub("\342\224\200", "", t)
+                 if (t ~ /^[ \t]*$/ && $0 ~ /\342\224\200/) exit }
+        { out = out squeeze($0) }
+        END { printf "%s", out }'
+}
+
+# held_delivery_match <pane_text> <msg_id> [<before>]
+# Whether the input box holds this one tracked delivery, unsubmitted, in a pane
+# where pane_is_busy sees no running turn and no menu is open, so that an Enter
+# may submit it (#2105). The messaging operation owner asks it before each of its
+# at most two repair Enters, after a receipt wait found no receipt. <before> is
+# what the owner read in the box just before its send (read_box: empty, held or
+# unknown). It reads a capture only; it never sends a key. Prints one verdict; rc
+# 0 only for `text` or `chip`.
+#
+#   busy        pane_is_busy sees a running turn: Claude Code queues what is typed
+#   not-held    pane_is_held refuses: an empty box, the queued-message hint, a
+#               menu option (an Enter would CHOOSE it), Esc to cancel or go back
+#   not-shown   pane_shows_payload_end refuses: the box does not show this
+#               message's trailer, the end every tracked wire carries (#1236)
+#   glued       text before this message's envelope, a second envelope heading,
+#               or a second message's trailer: an Enter would submit more than
+#               this message
+#   chips       a paste chip beside other text, or more than one chip
+#   chip-lines  the chip's "+N lines" is not this wire's newline count (one,
+#               before the trailer) nor one more (the CR a swallowed Enter left)
+#   text        the box starts with a Claudlobby envelope and ends with this
+#               message's trailer, the only trailer in it
+#   chip        the box holds one paste chip and nothing else, and <before> is
+#               empty: a long payload is drawn as "[Pasted text #N +M lines]" and
+#               its text cannot be read, so the chip is this send's or a racing
+#               sender's (Chris's rule: one held message in an idle bot's box),
+#               recorded as a chip match so a misfire is findable
+#   chip-unproven  one chip, but the box was not seen empty before the send
+#               (<before> held, unknown or absent): it may be an earlier paste
+held_delivery_match() {
+    local pane="$1" msg_id="$2" before="${3:-}" region box trailer rest lines
+    if pane_is_busy "$pane"; then printf busy; return 1; fi
+    if ! pane_is_held "$pane"; then printf not-held; return 1; fi
+    region=$(pane_input_region "$pane")
+    trailer="⟦plane:${msg_id}⟧"
+    if ! pane_shows_payload_end "$region" "$trailer"; then printf not-shown; return 1; fi
+    box=$(_held_box_squeezed "$region")
+    case "$box" in
+        *'[Pastedtext#'*)
+            rest=$(printf '%s' "$box" | LC_ALL=C sed -nE 's/^\[Pastedtext#[0-9]+(\+([0-9]+)lines)?\]$/=\2/p')
+            case "$rest" in
+                '') printf chips; return 1 ;;
+                =1|=2) ;;
+                *) printf chip-lines; return 1 ;;
+            esac
+            if [ "$before" = empty ]; then printf chip; return 0; fi
+            printf chip-unproven; return 1 ;;
+    esac
+    case "$box" in
+        '[Claudlobby'*"$trailer") ;;
+        *) printf glued; return 1 ;;
+    esac
+    rest="${box%"$trailer"}"
+    case "${rest#'[Claudlobby'}" in
+        *'⟦plane:'*|*'[Claudlobby'*) printf glued; return 1 ;;
+    esac
+    printf text
     return 0
 }
 
