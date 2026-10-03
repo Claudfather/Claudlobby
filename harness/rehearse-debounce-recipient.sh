@@ -66,10 +66,19 @@ EOF
 # Each manager instance logs what it was submitted (the stand-in's --log), and a
 # restart starts a new instance with a new, empty log, as a restarted manager is a
 # new, empty session.
+# Start returns once the box is drawn. The stand-in draws it after entering raw
+# mode, and entering raw mode discards keys typed before it, which the tty has
+# already echoed. A pulse sent before the box is never submitted, and the debounce
+# then marks it sent (#2136). A box that never comes fails the run, loudly.
 MGR_N=0
 start_manager () {
     MGR_N=$((MGR_N+1)); MGR_LOG="$ROOT/mgr$MGR_N.log"; : > "$MGR_LOG"
     tmux -L "$MGR_SOCK" new-session -d -s "$MGR" "$MGR_BOX --log $(printf '%q' "$MGR_LOG")"
+    for _ in $(seq 1 100); do
+        mgr_pane | grep -q '^>' && return 0
+        sleep 0.2
+    done
+    check "manager $MGR_N drew its box within 20 s" drawn "not drawn"
 }
 mgr_pane ()      { tmux -L "$MGR_SOCK" capture-pane -t "$MGR" -p 2>/dev/null || true; }
 # Count what the current instance was SUBMITTED, never text the pane shows: that
