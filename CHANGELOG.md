@@ -10,6 +10,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 The heavy-job slot bounded concurrency but did not share it. After a release, the next process to call `flock` won the slot, so a driver that took it again at once beat every waiter that polls on a timer, of another fleet or its own. `claudlobby/_runtime_scripts/heavy-slot.py` now keeps a queue. A call that cannot take a slot takes a ticket under its fleet and bot and still exits 75, and a free slot goes only to the oldest ticket from a fleet other than the one that took a slot last, else the oldest. A waiter keeps its place by calling again: nothing expires while every slot is held, and once a slot is free, a ticket whose holder has been silent for 180 s (`TICKET_IDLE_S`; `HEAVY_SLOT_TICKET_IDLE_S` in the environment overrides it) is dropped. `status` lists the queue with that limit beside each wait, a refusal and the take its ticket waited for carry the ticket's number, and `state/heavy-slot/no-queue` switches the queue off.
 
+### Added — an opt-in guard that refuses a GitHub write putting a listed term into a public repository
+
+A PreToolUse hook, `claudlobby/_runtime_scripts/public-write-guard.sh` (with its decider `claudlobby/_runtime_scripts/public-write-guard.py`), composed for a bot that sets `public_write_guard: true` (a strict bool, per bot or through `fleet.defaults`, like `heavy_slot`). It refuses, and never rewrites, a GitHub-bound write that would put a term from the host's list into a **public** repository. A private or internal repository is untouched.
+
+- **The list is host configuration:** `~/.config/claudlobby/public-write-terms`, one case-insensitive regular expression per line. It is never repository content, and the tests use invented terms.
+- **What it reads is what the write puts in the repository:**
+  - every `mcp__github__*` tool except `get_`/`list_`/`search_`;
+  - the `gh` issue, pr, release, gist, repo and label commands except their reads, and `gh api` with fields (not a GET, not a GraphQL query), including body files and standard input;
+  - `git commit`: messages, added lines, and the new files an earlier `git add` in the same command names;
+  - `git push`: the messages, added lines and new paths of every outgoing commit, and of any commit made earlier in the same command, which does not exist yet when the guard runs.
+
+  It reads the command as the shell does: a backslash-newline continues the line, an issue or PR URL names the target only when it is a positional word after the verb (a URL inside a body, title or comment is text), `env NAME=value` and `NAME=value` set what the command sees, and the commands inside a command substitution are read. It does not read removed lines, a `cd` directory, a body file's path or the target's name, so a clean-up commit passes and so does a clean write made from a path that contains a term.
+- **Public is read live, only on a hit:** `gh api repos/OWNER/REPO`, cached for 10 minutes. A REST call that fails fast is asked again over GraphQL (`gh repo view`), since a REST throttle leaves GraphQL working. When both fail, an answer cached up to a day ago stands in. An unknown answer is never cached, and a cache stamp from the future is not trusted.
+- **Failure directions:**
+  - no list: allow, plus a critical `public_write_guard_unarmed` event;
+  - a broken list (a line that does not compile, or one that can match an empty string, so every write would be a hit): refuse every guarded write, naming the line and column, never its text;
+  - a payload that is not JSON: allow, with a `script_error` breadcrumb;
+  - a hit whose repository or visibility is unknown: refuse;
+  - content it cannot read counts as a hit: a missing body file, a program's output piped into the write or substituted into its content (`$(...)` or backticks, except `cat` of a file or of a heredoc, in a commit message, a body, title, notes, subject, comment or description flag, or a `gh api` field such as `body` or `query`), a git command run from a directory it cannot name. A substitution in any other flag, such as the sha in `--match-head-commit "$(gh api …)"`, is left as written: it is not content.
+- **Its events name the bot**, the refusal, the no-list alarm and the fail-open breadcrumb alike, so `claudlobby event list --bot <bot>` and the bot's brief see them.
+- **Its ceiling:** it does not follow `eval`, functions, aliases or scripts, and it does not read an annotated tag's own message. Three writes publish content that is not a word of the command, and are not read: `gh pr create --fill` (its title and body come from commits already pushed), `gh repo create --source --push` (the local history), and the asset files of `gh release create` and `upload`. It keeps accidents out; it is not a boundary against a caller trying to get past it.
+- **Off switch:** `state/public-write-guard/disabled`, host-wide. `python3 claudlobby/_runtime_scripts/public-write-guard.py --check` says whether a host's guard is armed, the list and the off switch, without printing a term.
+- **Opt-in:** registered in the switch registry as opt-in for the `heavy_slot` reason. A composed hook has no deployment gate (#1310), so the manifest key is where one bot goes first.
+- **Tests:** `tests/test_public_write_guard.py` drives the real hook with a fake `gh` and real git repositories, in both directions for each shape; `tests/test_public_write_guard_compose.py` covers the composition.
+
 ### Fixed — the debounce rehearsal waits for its manager's box (#2136)
 
 `tests/test_debounce_recipient_harness.py` has failed in single CI lanes since #2108: the runner sometimes started the manager's stand-in after the first pulse. The stand-in enters raw mode before it draws its box, and entering raw mode discards keys typed before it. So neither alert of that tick was submitted, and the debounce marked both sent.
