@@ -36,7 +36,6 @@ from pathlib import Path
 import pytest
 
 from claudlobby.brief import _alerts_section
-from claudlobby.commands.events import CRITICAL_TYPES
 from claudlobby.plane.emit_api import emit_batch
 from claudlobby.plane.daemon import PlaneDaemon
 from claudlobby.plane.registries import SYSTEM_EVENT_SEVERITY
@@ -141,11 +140,13 @@ def _bot_dir(paths, bot):
 
 # --- the registry ------------------------------------------------------------
 
-def test_every_critical_type_is_registered_critical():
-    """`--critical` on the plane path is the registry-stamped severity, so
-    the files' hand list and the registry must agree on every fleet event."""
-    for t in CRITICAL_TYPES:
-        assert SYSTEM_EVENT_SEVERITY.get(t) == "critical", t
+def test_the_watchdog_findings_stay_registered_critical():
+    """`--critical` on the plane path is the registry-stamped severity, the
+    one definition. The findings an operator must act on stay critical in it."""
+    critical = {t for t, s in SYSTEM_EVENT_SEVERITY.items() if s == "critical"}
+    assert {"session_missing", "service_down", "activity_stuck", "script_error",
+            "overdue_dispatch", "bridge_down", "reload_failed", "restart_failed",
+            "rc_timeout", "crash_loop"} <= critical
     assert SYSTEM_EVENT_SEVERITY["report_status"] == "notice"
 
 
