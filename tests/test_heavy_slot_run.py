@@ -116,7 +116,14 @@ def _ran(where: Path) -> list[Path]:
 
 
 def _record(se, slot: int = 0) -> dict:
-    return json.loads((se.state / f"slot-{slot}.lock").read_text())
+    """The slot's record, read as the module's own _read reads it (#2125): an
+    empty or half-written file is no record yet. _acquire creates the file
+    empty and _write truncates it before writing, so a poll can land between."""
+    try:
+        rec = json.loads((se.state / f"slot-{slot}.lock").read_text() or "{}")
+    except ValueError:
+        return {}
+    return rec if isinstance(rec, dict) else {}
 
 
 def _events(se) -> list[dict]:
@@ -258,6 +265,29 @@ class TestTheSlot:
 
 
 class TestTheRecord:
+    def test_a_poll_between_the_lock_and_its_record_reads_no_record_yet(self, se):
+        """_acquire creates the lock file empty and _write truncates it before
+        writing, so a poll can read it in between (#2125). CI hit that once, in
+        the held-slot poll (run 37104705081: JSONDecodeError). The tests read it
+        as the module's own _read does, as no record yet, and poll on."""
+        lock = se.state / "slot-0.lock"
+        lock.parent.mkdir(parents=True)
+        lock.write_text("")  # created by _acquire, not yet written
+        assert _record(se) == {}
+        lock.write_text('{"state": "he')  # caught mid-write
+        assert _record(se) == {}
+        lock.write_text("")
+        reads = []
+
+        def poll():
+            reads.append(_record(se))
+            if len(reads) == 2:  # the wrapper's write lands
+                lock.write_text(json.dumps({"state": "held"}) + "\n")
+            return reads[-1].get("state") == "held"
+
+        _wait_for(poll)
+        assert reads == [{}, {}, {"state": "held"}]
+
     def test_acquire_and_release_are_events(self, se):
         _run(se, "pytest", "-q")
         acquired, released = _events(se)
