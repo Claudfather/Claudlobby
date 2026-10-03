@@ -14,6 +14,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,11 +26,13 @@ from tests.conftest import constructed_env
 REPO = Path(__file__).resolve().parent.parent
 WRAPPER = REPO / "claudlobby/_runtime_scripts" / "heavy-slot.py"
 
-# The stub job: records that it ran, traps TERM, waits for a file when asked,
-# exits with a chosen code.
+# The stub job: records that it ran (and who, in STUB_LOG), traps TERM, sleeps
+# or waits for a file when asked, exits with a chosen code.
 STUB = """#!/bin/bash
 trap 'touch "$STUB_DIR/term"; exit 143' TERM
 touch "$STUB_DIR/ran.$$"
+if [ -n "${STUB_LOG:-}" ]; then echo "${STUB_WHO:-?} start" >> "$STUB_LOG"; fi
+if [ -n "${STUB_SLEEP:-}" ]; then sleep "$STUB_SLEEP"; fi
 if [ -n "${STUB_WAIT:-}" ]; then
   while [ ! -e "$STUB_WAIT" ]; do sleep 0.05; done
 fi
@@ -354,3 +357,68 @@ class TestStatus:
         se.state.mkdir(parents=True)
         (se.state / "disabled").touch()
         assert "DISABLED" in _status(se).stdout
+
+
+# A driver that takes the slot again the moment it releases it: the wrapper's
+# own cmd_run in a loop, in one process, so nothing but its own code runs
+# between a release and the next take (#2124). A refused take is retried 20 ms
+# later, faster than any waiter polls.
+DRIVER = """
+import importlib.util, sys, time
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("heavy_slot", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+stop, rounds = Path(sys.argv[2]), 0
+while not stop.exists() and rounds < 40:
+    if m.cmd_run(["pytest"]) == 75:
+        time.sleep(0.02)
+    else:
+        rounds += 1
+"""
+
+
+def _drive(se, log: Path, stop: Path) -> subprocess.Popen:
+    """The back-to-back driver, testfleet/driver, its jobs 0.6 s each."""
+    with open(se.tmp / "driver.err", "w") as err:
+        return subprocess.Popen(
+            [sys.executable, "-c", DRIVER, str(WRAPPER), str(stop)],
+            env=_env(se, BOT_ID="driver", STUB_LOG=log, STUB_WHO="driver", STUB_SLEEP=0.6),
+            stdout=subprocess.DEVNULL,
+            stderr=err,
+        )
+
+
+class TestTheQueue:
+    @pytest.mark.parametrize("fleet", ["otherfleet", "testfleet"],
+                             ids=["another-fleet", "same-fleet"])
+    def test_a_back_to_back_driver_no_longer_starves_a_polling_waiter(self, se, fleet):
+        # The slot had no queue: whoever called flock first after a release won
+        # it, so a driver that takes it again at once beat every waiter that
+        # polls on a timer, of its own fleet or another (#2124). Now a refused
+        # call takes a ticket, and the driver's next take waits behind it.
+        log, stop = se.tmp / "starts.log", se.tmp / "stop"
+        driver = _drive(se, log, stop)
+        try:
+            _wait_for(lambda: log.exists() and "driver start" in log.read_text())
+            served, deadline = False, time.monotonic() + 10
+            while time.monotonic() < deadline:
+                r = _run(se, "pytest", FLEET_NAME=fleet, BOT_ID="waiter",
+                         STUB_LOG=log, STUB_WHO="waiter")
+                if r.returncode == 0:
+                    served = True
+                    break
+                assert r.returncode == 75, r.stderr
+                with log.open("a") as fh:
+                    fh.write("waiter refused\n")
+                time.sleep(0.25)
+        finally:
+            stop.touch()
+            driver.wait(30)
+        lines = log.read_text().splitlines()
+        assert served, f"the waiter was never served while the driver ran: {lines}"
+        if "waiter refused" in lines:
+            # served at the first release after its first refusal: the driver
+            # finishes at most the job it was running then
+            waited = lines[lines.index("waiter refused"):lines.index("waiter start")]
+            assert waited.count("driver start") <= 1, lines
