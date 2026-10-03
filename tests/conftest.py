@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import shutil
+import shlex
 import stat
 import subprocess
 import sys
@@ -421,6 +422,30 @@ def booby_trap_git(bindir):
     )
     return Path(bindir) / "git-was-called"
 
+
+def fake_tmux_input_box(path, state, *, echoes=True):
+    """Plant a fake `tmux` whose pane is an idle Claude Code input box.
+
+    The send presses Enter only once the box SHOWS the payload (#1236), so a
+    test that drives a real send through a fake TMUX_BIN needs a box that does:
+    each typed `send-keys` chunk is appended and drawn after a "> " prompt, and
+    Enter submits it, leaving the box empty. echoes=False is a TUI that never
+    draws what is typed, so the send must withhold its Enter. A leading
+    "-L <socket>" is skipped, has-session succeeds, anything else exits 0.
+    Shared so every such test models one box, not its own variant of it.
+    """
+    typed = 'printf %s "${@: -1}" >> "$S"' if echoes else ":"
+    _write_exec(Path(path), (
+        "#!/bin/bash\n"
+        f"S={shlex.quote(str(state))}\n"
+        '[ "$1" = "-L" ] && shift 2\n'
+        'case "$1" in\n'
+        "    has-session) exit 0 ;;\n"
+        "    capture-pane) printf '> %s\\n' \"$(cat \"$S\" 2>/dev/null)\" ;;\n"
+        '    send-keys) if [ "${@: -1}" = Enter ]; then : > "$S"; else ' + typed + "; fi ;;\n"
+        "esac\n"
+        "exit 0\n"))
+    return Path(path)
 
 _SYSTEM_BIN_DIRS = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
 

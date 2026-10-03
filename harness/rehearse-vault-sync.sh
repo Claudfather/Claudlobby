@@ -202,15 +202,18 @@ PY2
 }
 
 # --- the DELIVERY door, for scenario 5 --------------------------------------
-# Fresh sessions per arm rather than clearing between them: `clear-history` only
-# drops scrollback and a `sleep` pane ignores C-l, so a "cleared" pane still
+# The managers are the input-box stand-in, not bare `sleep` panes: a push presses
+# Enter only once the box shows it (#1236), and a pane that draws no box is,
+# correctly, never submitted to. Fresh sessions per arm rather than clearing
+# between them: `clear-history` only drops scrollback, so a "cleared" pane still
 # shows the previous arm's push and the next count reads as a false positive
 # (rehearse-debounce-recipient.sh hit exactly this).
+MGR_BOX="$(printf '%q %q' "$(type -P python3)" "$REPO/tests/fixtures/input-box-stub.py")"
 mgr_panes_up() {
     tmux -L "$DECOY_SOCK"  kill-server 2>/dev/null || true
     tmux -L "$TARGET_SOCK" kill-server 2>/dev/null || true
-    tmux -L "$DECOY_SOCK"  new-session -d -s decoy-mgr  "sleep 300" 2>/dev/null || return 1
-    tmux -L "$TARGET_SOCK" new-session -d -s target-mgr "sleep 300" 2>/dev/null || return 1
+    tmux -L "$DECOY_SOCK"  new-session -d -s decoy-mgr  "$MGR_BOX" 2>/dev/null || return 1
+    tmux -L "$TARGET_SOCK" new-session -d -s target-mgr "$MGR_BOX" 2>/dev/null || return 1
 }
 # How many FLEET-ALERT pushes landed in one manager's pane. Anchored on the short
 # prefix, never the whole line: the pane wraps at its width, so the reason text is
