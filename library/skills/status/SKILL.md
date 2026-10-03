@@ -96,7 +96,7 @@ things. Do this even when nothing in either list touches that field — a standi
 **Worked example — `labeled`:**
 
 ```
-No critical alerts, though the alert filter omits host-job types (#903), so that is not an all-clear.
+No critical alerts of my own, and fleet- and host-level alerts are not read here (#2109), so that is not an all-clear.
 ```
 
 **Worked example — `omitted`:** this is the half that had no example, and the negative constraint

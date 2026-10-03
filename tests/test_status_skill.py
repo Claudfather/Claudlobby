@@ -69,7 +69,7 @@ def test_degraded_procedure_covers_BOTH_modes_with_worked_examples() -> None:
     text = STATUS.read_text()
     assert "labeled" in text and "omitted" in text
     # each mode needs a real example line, not just a mention of the mode name
-    assert "#903" in text, "no worked example for the labeled mode"
+    assert "#2109" in text, "no worked example for the labeled mode"
     assert "#891" in text, "no worked example for the omitted mode"
 
 
