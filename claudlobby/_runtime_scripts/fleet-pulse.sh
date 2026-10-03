@@ -520,8 +520,10 @@ for bot_dir in "$BOTS_DIR"/*/; do
                     #     touches .idle when idle; bot-vitals touches .last-tool-call
                     #     on each tool call);
                     #   - recently active: a tool call within the active window; or
-                    #   - active turn: an "esc to interrupt" affordance in the pane
-                    #     (e.g. a long tool call or waiting on a subagent).
+                    #   - active turn: pane_is_busy sees one in the whole pane, by
+                    #     its interrupt hint or its activity line (a long tool call,
+                    #     a subagent, or a long-thinking turn whose timer ticks
+                    #     above the five lines hashed here).
                     # Any of these means busy/idle, NOT stuck.
                     if [ "$elapsed" -ge "$pane_stuck_threshold" ] \
                         && ! marker_is_newer "$bot_dir/data/.idle" "$bot_dir/data/.last-tool-call" \
@@ -749,6 +751,21 @@ _plane_critical() {   # $1 = window start (a naive local instant, or ISO), $2 = 
 # and the pass aborted on a script_error) -- #1901.
 _esc_cache=$(safe_mktemp)    # the escalation window
 _rb_cache=$(safe_mktemp)     # the summary's read-back span
+# The critical types fleet-pulse reads the plane for, each list a deliberate
+# subset of the registry's critical types (SYSTEM_EVENT_SEVERITY in
+# claudlobby/plane/registries.py; tests/test_service_is_crash_looping.py fails
+# on a type here that is not critical there). Both reads take a bot's own rows
+# only, so a FLEET ALERT, recorded against the fleet or the host and paged by
+# its own writer, never appears in either.
+# Escalation pages Telegram when FLEET_PULSE_ESCALATION_THRESHOLD bots or more
+# carry one inside the window: a fault across the fleet, which no one bot's
+# remedy clears. activity_stuck, overdue_dispatch and input_held page the
+# manager one bot at a time instead (input_held's remedy is an operator's
+# Enter, never a restart), and script_error is read by `event list --critical`
+# and the bot's brief.
+# The summary's ALERTS column is one line per bot: the state of its session,
+# unit, bridge and pane. overdue_dispatch is a task's state rather than the
+# bot's (the manager push carries it), and script_error is left out too.
 _CRITICAL_ESCALATION_TYPES="service_down session_missing bridge_down rc_timeout crash_loop"
 _CRITICAL_SUMMARY_TYPES="session_missing service_down bridge_down activity_stuck input_held rc_timeout crash_loop"
 _rb_yesterday=$(date -u -v-1d +%Y-%m-%dT00:00:00Z 2>/dev/null || date -u -d "yesterday" +%Y-%m-%dT00:00:00Z 2>/dev/null || echo "")

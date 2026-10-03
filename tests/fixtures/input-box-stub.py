@@ -13,15 +13,20 @@ prompt line and a footer under it, and keeps the cursor on the prompt line: for
 a pane whose geometry is part of what it tests (a verify that read a fixed tail
 of the pane once never reached the input line for exactly this reason). A submit
 leaves the typed line above the next box, as the transcript does.
+
+--log PATH appends each submitted line to PATH, one line per submit (a LF inside
+it becomes a space): the record of what was submitted, which the pane is not.
 """
 import os
 import sys
 import tty
 
 CHROME = "--chrome" in sys.argv[1:]
+LOG = sys.argv[sys.argv.index("--log") + 1] if "--log" in sys.argv[1:-1] else None
 fd = sys.stdin.fileno()
 tty.setraw(fd)
 out = sys.stdout.buffer
+line = bytearray()
 
 
 def box():
@@ -41,12 +46,18 @@ while True:
         break
     for byte in data:
         if byte == 13:
+            if LOG is not None:
+                with open(LOG, "ab") as log:
+                    log.write(line + b"\n")
+            line.clear()
             if CHROME:
                 out.write(b"\x1b[J")  # the chrome under the typed text goes
             out.write(b"\r\n")
             box()
         elif byte == 10:
+            line += b" "
             out.write(b"\r\n  ")
         else:
+            line.append(byte)
             out.write(bytes([byte]))
     out.flush()

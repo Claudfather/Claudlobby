@@ -38,6 +38,9 @@ IDLE_PANE = (FIXTURES / "idle-prompt.txt").read_text()
 # "esc to interrupt", only its activity line above the box.
 THINKING_PANE = (FIXTURES / "thinking-turn.txt").read_text()
 TYPED_BUSY_PANE = (FIXTURES / "input-typed-busy.txt").read_text()
+# A live frame from this host (#2130): a turn running its hooks, whose activity
+# line opens its parenthesis with a word and draws no interrupt hint.
+HOOKS_PANE = (FIXTURES / "hooks-running-turn.txt").read_text()
 
 
 def _bash(script: str, env: dict | None = None) -> subprocess.CompletedProcess:
@@ -69,7 +72,7 @@ def test_fixture_contents_still_match_their_names():
     assert "esc to interrupt" in ESC_PANE
     assert "esc to interrupt" not in VERB_PANE and "Thinking" in VERB_PANE
     assert IDLE_PANE.rstrip("\n").endswith(">")
-    for pane in (ESC_PANE, VERB_PANE, IDLE_PANE, THINKING_PANE, TYPED_BUSY_PANE):
+    for pane in (ESC_PANE, VERB_PANE, IDLE_PANE, THINKING_PANE, TYPED_BUSY_PANE, HOOKS_PANE):
         # These interpolate into bash double-quoted strings in _sourced calls.
         assert not set(pane) & set('"$`\\'), (
             "pane fixtures must stay bash-double-quote-safe"
@@ -105,12 +108,58 @@ def test_pane_is_busy_sees_a_turn_with_text_typed_in_the_box():
     assert _sourced(f'pane_is_busy "{TYPED_BUSY_PANE}"').returncode == 0
 
 
+def test_pane_is_busy_sees_a_turn_running_its_hooks():
+    """The live positive control for #2130: the commonest word-parenthesis frame here."""
+    assert "sc to interrupt" not in HOOKS_PANE
+    assert "(running PreToolUse hooks" in HOOKS_PANE
+    assert _sourced(f'pane_is_busy "{HOOKS_PANE}"').returncode == 0
+
+
 def test_pane_is_busy_operator_extension():
     rc = _sourced(
         'pane_is_busy "CUSTOM_BUSY_MARKER"',
         env={"KEEPALIVE_BUSY_PATTERNS": "CUSTOM_BUSY_MARKER"},
     ).returncode
     assert rc == 0
+
+
+def _frame(above, box="❯\u00a0"):
+    rule = "─" * 60
+    return "\n".join(
+        [
+            above,
+            "",
+            rule,
+            box,
+            rule,
+            "",
+            "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
+        ]
+    )
+
+
+def test_pane_is_busy_reads_a_running_turn_by_its_shape():
+    """The positive side, from the live panes: a timer parenthesis, and a progress parenthesis that opens with a word instead of a digit."""
+    for above in (
+        "● Misting… (58m 4s · ↓ 299.7k tokens)",
+        "● Misting… (running Workflow tasks… 3/5 · 12m 4s · ↓ 1.2k tokens)",
+    ):
+        assert _sourced(f'pane_is_busy "{_frame(above)}"').returncode == 0, above
+
+
+def test_pane_is_busy_does_not_read_lookalikes_as_a_running_turn():
+    """The negative side, the lines that only look like the activity line: each one is an edge of the shape."""
+    for label, text in (
+        (
+            "typed text in the box that ends in an ellipsis",
+            _frame("● Done.", box="❯\u00a0Foo…"),
+        ),
+        ("a lowercase word", _frame("✻ thinking…")),
+        ("more words after the ellipsis", _frame("✻ Cogitating… and then some words")),
+        ("the shape indented, as in a tool result", _frame("  ✻ Cogitating…")),
+        ("a finished turn's summary line", _frame("✻ Sautéed for 12s · done 9:59 PM")),
+    ):
+        assert _sourced(f'pane_is_busy "{text}"').returncode == 1, label
 
 
 # --- bot_dir_for_session: session name -> bot dir ------------------------------

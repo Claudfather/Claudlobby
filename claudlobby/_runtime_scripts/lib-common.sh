@@ -3404,15 +3404,17 @@ _BUSY_PATTERN_BASE='[Ee]sc to interrupt'
 
 # A running turn's activity line, the sign of one that 2.1.285 does draw (#2105
 # review): at the start of the line one glyph and a space, then one word and an
-# ellipsis, then the line's end or the parenthesised elapsed time:
+# ellipsis, then the line's end or a parenthesis. The parenthesis opens with the
+# elapsed time, or with a word, as while the turn runs its hooks (#2130):
 #   ✻ Transmogrifying…          ● Misting… (58m 4s · ↓ 299.7k tokens · …)
+#   ● Combobulating… (running PreToolUse hooks… 0/6 · 17m 50s · ↓ 67.1k tokens · …)
 # Its shape, never its verb. Not this shape: a finished turn's summary (no
 # ellipsis: ✻ Sautéed for 12s · done 9:59 PM), a transcript line with no glyph
 # (verb-no-esc's "  Thinking…"), and the box's own line, whose glyph is followed
 # by a no-break space. Bytes under LC_ALL=C, so the answer does not move with the
 # locale. It can read a finished turn as busy when the last line drawn is an
 # answer of one word and an ellipsis ("● Checking…"); that errs toward not typing.
-_BUSY_ACTIVITY_LINE_RE=$'^([\xc2-\xdf][\x80-\xbf]|[\xe0-\xef][\x80-\xbf]{2}|[\xf0-\xf4][\x80-\xbf]{3}) +[A-Z][^ (]*\xe2\x80\xa6( \\([0-9]|$)'
+_BUSY_ACTIVITY_LINE_RE=$'^([\xc2-\xdf][\x80-\xbf]|[\xe0-\xef][\x80-\xbf]{2}|[\xf0-\xf4][\x80-\xbf]{3}) +[A-Z][^ (]*\xe2\x80\xa6( \\(|$)'
 
 # Default recency window (seconds) for the data/.last-tool-call liveness
 # marker — one home, consumed by bot_is_busy and keepalive.sh so the two

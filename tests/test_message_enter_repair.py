@@ -401,3 +401,117 @@ def test_read_box_says_whether_the_box_holds_text_before_a_send(frame, state):
         assert message_transport.read_box(package, destination(), timeout=10) == state
         assert message_transport.read_box(package, destination("absent"), timeout=10) == "unknown"
         assert log.read_bytes() == b""
+
+
+def test_the_box_is_read_before_the_send_and_handed_to_every_look_on_message_send(
+    active, monkeypatch, capsys
+):
+    """Option (c)'s ORDER and hand-over on the message path: the stub box answers the read, the wrapped send marks the send."""
+    root, host = active
+    _generated(monkeypatch, root, host.release)
+    events = []
+    box = _Box(needs=2, verdict="chip", match="chip#1", before="empty")
+    real_read = box.read_box
+
+    def read_box(*args, **kwargs):
+        events.append("read")
+        return real_read(*args, **kwargs)
+
+    box.read_box = read_box
+    _held(monkeypatch, box)
+    inner = message_operations.send_message
+
+    def ordered(*args, **kwargs):
+        events.append("send")
+        return inner(*args, **kwargs)
+
+    monkeypatch.setattr(message_operations, "send_message", ordered)
+    out = _send(capsys, root, expected=0)
+    assert events == ["read", "send"], "the box is read once, before the send"
+    assert box.befores == ["empty", "empty"] and out["data"]["delivery"] == "received"
+
+
+def test_the_box_is_read_before_the_send_and_handed_to_every_look_on_assignment_delivery(
+    active, monkeypatch, capsys, tmp_path
+):  # noqa: F811
+    """The same pin on the assignment path, the one that carries long bodies (the chips): the suite's other test there never reads what the look was given."""
+    root, host = active
+    _generated(monkeypatch, root, host.release)
+    ctx, task, assigned = _assigned(root)
+    body = tmp_path / "assignment.txt"
+    body.write_text("Private assignment delivery", encoding="utf-8")
+    events = []
+    box = _Box(needs=2, verdict="chip", match="chip#1", before="empty")
+    real_read = box.read_box
+
+    def read_box(*args, **kwargs):
+        events.append("read")
+        return real_read(*args, **kwargs)
+
+    box.read_box = read_box
+    real = assignment_delivery.deliver
+
+    def injected(*args, **kwargs):
+        events.append("send")
+
+        def transport(*_, **native):
+            return TransportOutcome("submitted", "sha256:" + "a" * 64, 99, 0)
+
+        return real(*args, transport=transport, **kwargs)
+
+    monkeypatch.setattr(assignment_delivery, "deliver", injected)
+    monkeypatch.setattr(message_transport, "press_held_enter", box.press, raising=False)
+    monkeypatch.setattr(message_transport, "read_box", box.read_box, raising=False)
+    monkeypatch.setattr(message_queries, "receipt", box.receipt)
+    out = _delivery_call(
+        capsys,
+        root,
+        assigned.assignment_id,
+        "--file",
+        str(body),
+        "--request-id",
+        str(uuid4()),
+        expected=0,
+    )
+    assert events == ["read", "send"], "the box is read once, before the send"
+    assert box.befores == ["empty", "empty"] and out["data"]["delivery"] == "received"
+
+
+def test_read_box_answers_unknown_on_every_failure(tmp_path):  # noqa: F811
+    """read_box is the proof a chip press rests on: a timeout, a launch error, a failed observation and a garbled answer must all read unknown, never empty."""
+    package = replace(
+        source_package(),
+        native=Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts",
+    )
+    destination = message_transport.TransportDestination(
+        tmp_path, "fleet", "private-none", "worker", tmp_path
+    )
+
+    def raising(exc):
+        def runner(*args, **kwargs):
+            raise exc
+
+        return runner
+
+    for failure in (
+        subprocess.TimeoutExpired("native", 5),
+        OSError("boom"),
+        message_transport._StartedFailure("lost"),
+    ):
+        assert (
+            message_transport.read_box(package, destination, runner=raising(failure))
+            == "unknown"
+        ), failure
+    for stdout in (b"box-v1\tmaybe\n", b"", b"empty\n", b"box-v1\tempty"):
+        runner = lambda *args, _out=stdout, **kwargs: SimpleNamespace(stdout=_out)
+        assert (
+            message_transport.read_box(package, destination, runner=runner) == "unknown"
+        ), stdout
+    assert (
+        message_transport.read_box(
+            package,
+            destination,
+            runner=lambda *a, **k: SimpleNamespace(stdout=b"box-v1\tempty\n"),
+        )
+        == "empty"
+    )

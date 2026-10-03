@@ -8,8 +8,7 @@ render each one back as the row the retired ledgers used to hold. Private
 legacy rows keep that shape through one renderer shared with
 ``plane-lookup.py --events`` and fleet-pulse. ``--critical`` is
 the severity the registry stamped at ingest (``SYSTEM_EVENT_SEVERITY``), one
-definition; ``CRITICAL_TYPES`` below is the file-era vocabulary, kept so the
-registry is pinned to agree with it.
+definition.
 
 There is no file to read (F18 closure, R2b): R1 removed every writer, and a
 reader that could still open one would read nothing at best and the archive
@@ -28,22 +27,6 @@ import json
 import sqlite3
 
 from ..command_result import CommandFailure, CommandOutput
-
-# Critical event types — fleet health problems that need attention. The
-# file-era hand list; the plane path filters on the registry's severity, and
-# tests pin that every name here is registered critical.
-CRITICAL_TYPES = {
-    "session_missing",
-    "service_down",
-    "activity_stuck",
-    "script_error",
-    "overdue_dispatch",
-    "bridge_down",
-    "reload_failed",
-    "restart_failed",
-    "rc_timeout",
-    "crash_loop",
-}
 
 
 def plane_events_conn(paths):
