@@ -300,6 +300,22 @@ class ActivationStore:
         body["pending"] = step
         return self._save(record)
 
+    def record_handoff_refresh(self, activation_id: str, refreshed: str) -> ActivationRecord:
+        """Record when the handoffs' references count as refreshed, before they
+        are written (#2094). A retried step reuses it, and the next activation
+        reads it here rather than from a handoff a session can edit."""
+        record = read_activation(self.root, activation_id)
+        body = record.body
+        if body["pending"] != "queues_classified":
+            raise ActivationError("the handoff refresh time belongs to the queues_classified step")
+        if not isinstance(refreshed, str) or not re.fullmatch(
+                r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", refreshed):
+            raise ActivationError("the handoff refresh time is not a UTC timestamp")
+        if body.get("handoff_refreshed", refreshed) != refreshed:
+            raise ActivationError("a different handoff refresh time is already recorded")
+        body["handoff_refreshed"] = refreshed
+        return self._save(record)
+
     def record_start_intent(self, activation_id: str, *, phase: str, source: str,
                             target: str, sha256: str, fence: dict | None) -> ActivationRecord:
         """Durably fence one exact native start before invoking the native owner."""
