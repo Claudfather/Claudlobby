@@ -5,9 +5,10 @@
 # A marker changing shape is not the property. The property is a human-facing
 # push arriving in the session that exists NOW, so this drives the real
 # fleet-pulse.sh against a real (throwaway) bot whose real condition is still
-# unresolved, restarts the real manager session, and reads the real pane.
+# unresolved, restarts the real manager session, and counts what that session
+# was submitted.
 #
-# Red on the pre-fix code: step 3 finds an empty pane, because the marker says
+# Red on the pre-fix code: step 3 finds nothing submitted, because the marker says
 # "already told someone" and cannot say the someone is gone.
 #
 # Isolation (#846): private tmux sockets under a throwaway TMUX_TMPDIR, a
@@ -26,13 +27,14 @@ command -v tmux >/dev/null 2>&1 || { echo "SKIP: tmux not available"; exit 0; }
 command -v python3 >/dev/null 2>&1 || { echo "SKIP: python3 not available"; exit 0; }
 # The manager is the input-box stand-in, not a bare `sleep` pane: a push presses
 # Enter only once the box shows it (#1236), and a pane that draws no box is,
-# correctly, never submitted to. Each submitted push then stays on its own line
-# above a fresh box, as Claude Code's transcript keeps it.
+# correctly, never submitted to.
 MGR_BOX="$(printf '%q %q' "$(type -P python3)" "$REPO/tests/fixtures/input-box-stub.py")"
-# Test seam: delay the stand-in's start by N seconds, so the first push reaches the
-# pane before its box is drawn (#2136). Unset, the command is unchanged.
-if [ -n "${REHEARSAL_MANAGER_START_DELAY:-}" ]; then
-    MGR_BOX="sleep $(printf '%q' "$REHEARSAL_MANAGER_START_DELAY"); exec $MGR_BOX"
+# Test seam: start each manager's stand-in N seconds late, so a pulse sent at once
+# would reach its pane before the box is drawn (#2136). Unset or empty, the
+# command is unchanged.
+if [ -n "${REHEARSE_MANAGER_START_DELAY:-}" ]; then
+    MGR_BOX="sleep $(printf '%q' "$REHEARSE_MANAGER_START_DELAY"); exec $MGR_BOX"
+    echo "seam: each manager's stand-in starts $REHEARSE_MANAGER_START_DELAY s late (#2136)"
 fi
 
 ROOT="$(mktemp -d)"
@@ -63,28 +65,23 @@ export TMUX_SOCKET=rdrw$$
 export BOT_SERVICE=rdrw$$
 EOF
 
-# Each manager instance logs what it was submitted (the stand-in's --log), and a
-# restart starts a new instance with a new, empty log, as a restarted manager is a
-# new, empty session.
-# Start returns once the box is drawn. The stand-in draws it after entering raw
-# mode, and entering raw mode discards keys typed before it, which the tty has
-# already echoed. A pulse sent before the box is never submitted, and the debounce
-# then marks it sent (#2136). A box that never comes fails the run, loudly.
-MGR_N=0
+# The manager's stand-in logs each line it is submitted (--log), and each start
+# empties the log, as a restarted manager is a new, empty session. The pane is
+# no record of a submit: text there can sit unsubmitted in the box, or be the
+# tty's echo of keys typed before the stand-in read them.
+# A start waits for the box, through lib-common's own wait, because the stand-in
+# draws it only once in raw mode, and entering raw mode discards keys typed
+# before it. A pulse sent earlier is never submitted, and the debounce then
+# marks it sent (#2136). lib-common is sourced in the substitution's subshell
+# only, since sourcing it arms set -e and its own EXIT trap.
+MGR_LOG="$ROOT/mgr.log"
 start_manager () {
-    MGR_N=$((MGR_N+1)); MGR_LOG="$ROOT/mgr$MGR_N.log"; : > "$MGR_LOG"
+    : > "$MGR_LOG"
     tmux -L "$MGR_SOCK" new-session -d -s "$MGR" "$MGR_BOX --log $(printf '%q' "$MGR_LOG")"
-    for _ in $(seq 1 100); do
-        mgr_pane | grep -q '^>' && return 0
-        sleep 0.2
-    done
-    check "manager $MGR_N drew its box within 20 s" drawn "not drawn"
+    # shellcheck source=/dev/null
+    check "the manager drew its box" drawn "$(. "$LIB_DIR/lib-common.sh" &&
+        PANE_READY_TICKS=100 PANE_READY_POLL_S=0.2 pane_await_input_box "$MGR_SOCK" "$MGR")"
 }
-mgr_pane ()      { tmux -L "$MGR_SOCK" capture-pane -t "$MGR" -p 2>/dev/null || true; }
-# Count what the current instance was SUBMITTED, never text the pane shows: that
-# can sit unsubmitted in the box, or be the tty's echo of keys typed before the
-# stand-in read them, which it then discarded. Read from the pane, a push whose
-# Enter was withheld passed as pushed (#2136).
 # Counted PER ALERT TYPE: one tick legitimately pushes two here (the worker has
 # no tmux session AND no real service unit), so a bare total would conflate them.
 push_count ()    { grep -c "\\[FLEET-PULSE\\].*$1" "$MGR_LOG" || true; }
@@ -112,8 +109,7 @@ check "3 ticks, still one service_down to the SAME instance"    1 "$(push_count 
 
 echo "--- 3. the bug: manager restarts, condition STILL unresolved ---"
 tmux -L "$MGR_SOCK" kill-session -t "$MGR" 2>/dev/null || true
-start_manager                               # a new session IS a new, empty pane
-check "restarted manager starts with no push" 0 "$(push_count session_missing)"
+start_manager
 run_pulse
 check "restarted manager receives session_missing (THE PROPERTY)" 1 "$(push_count session_missing)"
 check "restarted manager receives service_down too"              1 "$(push_count service_down)"

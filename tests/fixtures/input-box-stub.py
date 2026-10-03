@@ -15,8 +15,7 @@ of the pane once never reached the input line for exactly this reason). A submit
 leaves the typed line above the next box, as the transcript does.
 
 --log PATH appends each submitted line to PATH, one line per submit (a LF inside
-it becomes a space): what was submitted, as opposed to text the pane shows, which
-may be held in the box or be the tty's echo of keys this stand-in never read.
+it becomes a space): the record of what was submitted, which the pane is not.
 """
 import os
 import sys
@@ -49,14 +48,14 @@ while True:
         if byte == 13:
             if LOG is not None:
                 with open(LOG, "ab") as log:
-                    log.write(bytes(line).replace(b"\n", b" ") + b"\n")
+                    log.write(line + b"\n")
             line.clear()
             if CHROME:
                 out.write(b"\x1b[J")  # the chrome under the typed text goes
             out.write(b"\r\n")
             box()
         elif byte == 10:
-            line.append(byte)
+            line += b" "
             out.write(b"\r\n  ")
         else:
             line.append(byte)

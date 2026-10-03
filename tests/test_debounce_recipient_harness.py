@@ -2,8 +2,8 @@
 
 Unit tests prove the marker re-fires; only this proves the *notification*
 arrives. It drives the real `fleet-pulse.sh` against a throwaway bot with a real
-unresolved condition, restarts a real manager tmux session, and reads the real
-pane — the property the 2026-07-27 outage turned on.
+unresolved condition, restarts a real manager tmux session, and counts what that
+session was submitted — the property the 2026-07-27 outage turned on.
 
 Not opt-in: the only dependency is tmux, which per-PR CI already installs for
 the move-bot integration tests. Follows tests/test_validate_harness.py — assert
@@ -28,18 +28,24 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.fixture(scope="module")
-def run():
+@pytest.fixture(scope="module", params=["", "3"], ids=["prompt-start", "slow-start"])
+def run(request):
+    """Every test runs on both arms. The slow arm starts each manager's stand-in
+    3 s late, so a pulse sent at once would reach its pane before the box (#2136)."""
     r = subprocess.run(
-        ["bash", str(HARNESS)], capture_output=True, text=True, timeout=600
+        ["bash", str(HARNESS)], capture_output=True, text=True, timeout=300,
+        env={**os.environ, "REHEARSE_MANAGER_START_DELAY": request.param},
     )
+    r.delay = request.param
     return r
 
 
 def test_harness_ran_rather_than_skipping(run):
-    """rc 0 is not enough: the tmux-absent path also exits 0."""
+    """rc 0 is not enough: the tmux-absent path also exits 0. And only an arm
+    that ran slow covers the late start."""
     assert "SKIP:" not in run.stdout, run.stdout
     assert "restarted manager receives session_missing" in run.stdout, run.stdout
+    assert ("starts 3 s late" in run.stdout) == bool(run.delay), run.stdout
 
 
 def test_alert_survives_a_manager_restart(run):
@@ -51,15 +57,3 @@ def test_alert_survives_a_manager_restart(run):
 def test_debounce_still_debounces(run):
     """The fix must not turn a debounced alert into a per-tick alarm."""
     assert "FAIL: 3 ticks" not in run.stdout, run.stdout
-
-
-def test_the_rehearsal_holds_when_its_manager_is_slow_to_draw_its_box():
-    """#2136: CI runners sometimes start the manager's stand-in after the first push.
-    The keys it missed are echoed by the tty and discarded when it enters raw mode,
-    so neither alert of that tick is submitted, and the debounce then keeps them
-    from being pushed again. The seam delays the stand-in's start, to force the
-    race: the rehearsal must wait for the box before the first pulse."""
-    r = subprocess.run(["bash", str(HARNESS)], capture_output=True, text=True, timeout=600,
-                       env={**os.environ, "REHEARSAL_MANAGER_START_DELAY": "3"})
-    assert "SKIP:" not in r.stdout, r.stdout
-    assert r.returncode == 0 and "0 failed" in r.stdout, f"{r.stdout}\n{r.stderr}"
