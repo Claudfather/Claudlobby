@@ -214,3 +214,41 @@ def test_without_a_data_root_the_hook_fails_open_and_writes_no_slot(se):
                        capture_output=True, text=True, timeout=60)
     assert p.returncode == 2 and "CLAUDLOBBY_ROOT" in p.stderr
     assert not (WRAPPER.parent.parent / "state" / "heavy-slot").exists()
+
+
+def test_a_free_slot_that_is_another_callers_turn_refuses_the_call(se):
+    # #2124: beta was refused while the slot was held, so the free slot is its
+    # turn. The hook refuses alpha, naming that turn, and queues alpha behind
+    # it; once beta has had its turn the hook lets alpha through.
+    holder = subprocess.Popen(
+        [str(WRAPPER), "run", "--", "pytest", "-q"],
+        env={**se.env, "STUB_WAIT": str(se.tmp / "release")},
+    )
+    deadline = time.monotonic() + 15
+    while not list(se.tmp.glob("ran.*")):
+        assert time.monotonic() < deadline, "the holder never started"
+        time.sleep(0.02)
+    beta = {**se.env, "BOT_ID": "beta"}
+
+    def run_beta():
+        return subprocess.run([str(WRAPPER), "run", "--", "pytest"], env=beta,
+                              capture_output=True, text=True, timeout=60).returncode
+
+    assert run_beta() == 75
+    (se.tmp / "release").touch()
+    holder.wait(15)
+    rc, out, _ = _hook(se, "pytest -q")
+    decision = json.loads(out)["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"
+    reason = decision["permissionDecisionReason"]
+    assert "another caller's turn: ticket 1, testfleet/beta" in reason
+    assert "you hold ticket 2, place 2 of 2" in reason
+    (ev,) = [e for e in _events(se) if e["type"] == "heavy_slot_refused"
+             and e["data"]["where"] == "hook"]
+    assert (ev["data"]["ticket"]["n"], ev["data"]["ticket"]["bot"]) == (2, "alpha")
+    assert run_beta() == 0
+    rc, out, _ = _hook(se, "pytest -q")
+    command = json.loads(out)["hookSpecificOutput"]["updatedInput"]["command"]
+    p = subprocess.run([BASH, "-c", command], env=se.env, capture_output=True, text=True,
+                       timeout=60)
+    assert p.returncode == 0, p.stderr

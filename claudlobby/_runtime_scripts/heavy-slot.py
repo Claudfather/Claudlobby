@@ -11,8 +11,9 @@ hold across a score of bots in four fleets. So a bot that opted in
     tool call and puts the wrapper in front of each heavy command in it (a
     whole pytest or vitest suite, an npm/pnpm/yarn install, a test or build
     script, next build, Playwright, Chromium), leaving every other byte of the
-    command alone. When every slot is taken it refuses the call before
-    anything runs, naming the holder, so the bot retries instead of hanging
+    command alone. When every slot is taken, or a free slot is another
+    caller's turn in the queue, it refuses the call before anything runs,
+    naming the holder or the turn, so the bot retries instead of hanging
     behind a 15-minute suite.
 
 ``run -- ARGV``
@@ -22,11 +23,13 @@ hold across a score of bots in four fleets. So a bot that opted in
     holder dies (kill, tool timeout, OOM, host reset), so a dead holder can
     never wedge the slot. Its record stays, marked unreleased, and the next
     holder reports it: a different boot id means the job was running when the
-    host reset, the evidence #1644 lacks.
+    host reset, the evidence #1644 lacks. A call that cannot take a slot,
+    because every slot is held or a free one is another caller's turn, takes
+    a ticket in the queue (#2124) and exits 75.
 
 ``status [--json]``
     The one-line door: who holds each slot, or who held it last and whether
-    they released it.
+    they released it, and who waits in the queue, in the order they are served.
 
 Bounds, stated rather than implied: the gate sees Bash tool calls only. A heavy
 job started from inside a script (`make test`, `python render.py`) is not seen,
@@ -37,8 +40,10 @@ would corrupt it, which is worse than missing the gate.
 
 Knobs, all host-wide: ``state/heavy-slot/slots`` holds the slot count (default
 1, the measured start); ``state/heavy-slot/disabled`` makes the hook pass every
-call through at once, without a restart. Test seams: HEAVY_SLOT_DIR,
-HEAVY_SLOT_EVENTS_FILE, HEAVY_SLOT_BOOT_ID.
+call through at once, without a restart; ``state/heavy-slot/no-queue`` makes
+every caller decide on the slots alone, as before the queue. The environment's
+HEAVY_SLOT_TICKET_IDLE_S overrides TICKET_IDLE_S for the process that reads it.
+Test seams: HEAVY_SLOT_DIR, HEAVY_SLOT_EVENTS_FILE, HEAVY_SLOT_BOOT_ID.
 
 Stdlib only, Python 3.9 (the system python3 on the estate's macOS hosts).
 """
@@ -1264,20 +1269,223 @@ def _holding(rec: dict, now: float) -> str:
     return f"{_who(rec)} running {_tool_of(rec)} since {_clock(start)}{mins}"
 
 
-def refusal(holders: List[dict], n: int, now: Optional[float] = None) -> str:
+def refusal(holders: List[dict], n: int, now: Optional[float] = None,
+            mine: Optional[dict] = None, order: Optional[List[dict]] = None) -> str:
+    """Why a call did not run. Given the queue's verdict (the caller's ticket and
+    the order), it also says whose turn it is and where the caller stands."""
     now = time.time() if now is None else now
+    order = order or []
     pace = "one at a time" if n == 1 else f"at most {n} at a time"
-    who = "; ".join(_holding(h, now) for h in holders) or "holders not recorded"
-    return (f"NOT RUN: this host's heavy-job slot is taken ({len(holders)} of {n}): {who}. "
-            f"Heavy jobs run {pace} on this host so it does not thrash (#1686). Retry this "
-            "later and do other work meanwhile; do not wait in a sleep loop. A run that names "
-            "its test files is not gated.")
+    if mine is not None and not holders and order and order[0]["n"] != mine["n"]:
+        turn = order[0]
+        why = (f"NOT RUN: this host's heavy-job slot is free, but it is another caller's "
+               f"turn: ticket {turn['n']}, {_who(turn)}, waiting since {_clock(turn['since'])}.")
+    else:
+        who = "; ".join(_holding(h, now) for h in holders) or "holders not recorded"
+        why = f"NOT RUN: this host's heavy-job slot is taken ({len(holders)} of {n}): {who}."
+    text = f"{why} Heavy jobs run {pace} on this host so it does not thrash (#1686)."
+    if mine is not None:
+        place = [t["n"] for t in order].index(mine["n"]) + 1
+        text += (f" They take turns in a queue (#2124): you hold ticket {mine['n']}, place "
+                 f"{place} of {len(order)}, kept while you retry within "
+                 f"{_span(ticket_idle_s())} of a slot coming free.")
+    return text + (" Retry this later and do other work meanwhile; do not wait in a sleep "
+                   "loop. A run that names its test files is not gated.")
 
 
 def _holder_summary(rec: dict) -> dict:
     out = {k: rec.get(k) for k in ("slot", "fleet", "bot", "started_at", "pid")}
     out.update(tool=_tool_of(rec), shape=_public(rec)["shape"])
     return out
+
+
+# --- the queue -----------------------------------------------------------------
+# The slots alone bound concurrency but do not share it: after a release the
+# next process to call flock wins, so a caller that takes the slot again at once
+# beats every waiter that polls (#2124). So a call that cannot take a slot takes
+# a ticket, kept under its fleet and bot so that the same bot's next call finds
+# it, and a free slot goes only to the head of the queue: the oldest ticket from
+# a fleet other than the last holder's, else the oldest ticket. Nobody waits
+# inside this script: a bot's turn waits on the hook, and its Bash call on the
+# wrapper, so a refused call still exits 75 and its caller retries.
+#
+# A waiter shows that it still waits only by calling again: its process ends
+# with the refusal, so no lock can stand for it. Nothing expires while every
+# slot is held, since nobody can be served and a waiter need not poll through a
+# long suite. Once a slot is free, a ticket whose holder has been silent for
+# TICKET_IDLE_S is dropped, so an abandoned ticket idles a free slot that long
+# at most, once.
+
+TICKET_IDLE_S = 180  # about three missed polls at a 60 s retry
+QUEUE_LOCK_WAIT_S = 2.0  # a decision holds the queue's lock for milliseconds
+
+
+def ticket_idle_s() -> int:
+    """TICKET_IDLE_S, or HEAVY_SLOT_TICKET_IDLE_S (whole seconds, 1 or more)
+    from this process's environment."""
+    try:
+        idle = int(os.environ.get("HEAVY_SLOT_TICKET_IDLE_S") or TICKET_IDLE_S)
+    except ValueError:
+        return TICKET_IDLE_S
+    return idle if idle >= 1 else TICKET_IDLE_S
+
+
+def _span(seconds: int) -> str:
+    return f"{seconds // 60} min" if seconds % 60 == 0 else f"{seconds} s"
+
+
+def _identity() -> Tuple[str, str]:
+    """(fleet, bot): the caller, as its record and its ticket name it."""
+    return (os.environ.get("FLEET_NAME") or os.environ.get("CLAUDLOBBY_FLEET") or "",
+            os.environ.get("BOT_ID") or os.environ.get("BOT_NAME") or "")
+
+
+def _lock_queue(d: Path) -> Optional[int]:
+    """An fd holding the queue's lock, or None. When the queue is switched off
+    (`no-queue`), its lock cannot be had within QUEUE_LOCK_WAIT_S (a stopped
+    process holds it) or its files cannot be made, the caller decides on the
+    slots alone, as before the queue, rather than hang or fail."""
+    if (d / "no-queue").exists():
+        return None
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        fd = os.open(d / "queue.lock", os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError:
+        return None
+    deadline = time.monotonic() + QUEUE_LOCK_WAIT_S
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                os.close(fd)
+                return None
+            time.sleep(0.01)
+
+
+def _ticket_ok(t) -> bool:
+    return (isinstance(t, dict) and isinstance(t.get("n"), int)
+            and all(isinstance(t.get(k), str) for k in ("fleet", "bot"))
+            and all(isinstance(t.get(k), (int, float)) for k in ("since", "seen")))
+
+
+def load_queue(d: Path) -> dict:
+    """The queue as last written. A missing or damaged file is an empty queue."""
+    try:
+        q = json.loads((d / "queue.json").read_text())
+    except (OSError, ValueError):
+        q = None
+    if not (isinstance(q, dict) and isinstance(q.get("next"), int)
+            and isinstance(q.get("tickets"), list)):
+        return {"v": 1, "next": 1, "tickets": []}
+    q["tickets"] = [t for t in q["tickets"] if _ticket_ok(t)]
+    return q
+
+
+def _save_queue(d: Path, q: dict) -> None:
+    """Replaced whole, so a reader without the lock never sees half a queue."""
+    tmp = d / f"queue.json.{os.getpid()}"
+    tmp.write_text(json.dumps(q, sort_keys=True) + "\n")
+    os.replace(tmp, d / "queue.json")
+
+
+def _free_since(slots) -> Optional[float]:
+    """When the longest-free slot came free (0 for one never used, or whose
+    holder died unreleased), or None while every slot is held."""
+    free = [rec for _, held, rec in slots if not held]
+    return min(_epoch(rec, "released") or 0.0 for rec in free) if free else None
+
+
+def _last_fleet(slots) -> Optional[str]:
+    """The fleet that took a slot last, holding it still or not: while another
+    fleet waits, the next turn is not this fleet's."""
+    takes = []
+    for _, _, rec in slots:
+        start = _epoch(rec, "started")
+        if start is not None:
+            takes.append((start, rec.get("fleet") or ""))
+    return max(takes)[1] if takes else None
+
+
+def _live(tickets: List[dict], slots, now: float, idle: int):
+    """(the tickets still waiting, the dropped ones with how long each was
+    silent once a slot was free)."""
+    since = _free_since(slots)
+    if since is None:
+        return list(tickets), []
+    live, dropped = [], []
+    for t in tickets:
+        silent = now - max(t["seen"], since)
+        if silent <= idle:
+            live.append(t)
+        else:
+            dropped.append((t, int(silent)))
+    return live, dropped
+
+
+def _served(live: List[dict], slots) -> List[dict]:
+    """The tickets in the order they are served: oldest first, except that the
+    oldest ticket from a fleet other than the last holder's goes ahead."""
+    order = sorted(live, key=lambda t: t["n"])
+    last = _last_fleet(slots)
+    for i, t in enumerate(order):
+        if last is not None and t["fleet"] != last:
+            order.insert(0, order.pop(i))
+            break
+    return order
+
+
+def take_turn(q: dict, slots, tool: str, now: float, idle: int):
+    """One caller's decision on the queue: (order, dropped, mine, queued). The
+    caller's ticket is refreshed, or a new one goes in at the back (a dropped
+    one is not revived); `queued` says whether it held one before this call.
+    `order` includes it, and its first tickets, one per free slot, may take one."""
+    me = _identity()
+    live, dropped = _live(q["tickets"], slots, now, idle)
+    mine = next((t for t in live if (t["fleet"], t["bot"]) == me), None)
+    queued = mine is not None
+    if mine is None:
+        mine = {"n": q["next"], "fleet": me[0], "bot": me[1], "tool": tool, "since": int(now)}
+        q["next"] += 1
+        live.append(mine)
+    mine["seen"] = int(now)
+    return _served(live, slots), dropped, mine, queued
+
+
+def _may_take(mine: dict, order: List[dict], slots) -> bool:
+    free = sum(1 for _, held, _ in slots if not held)
+    return any(t["n"] == mine["n"] for t in order[:free])
+
+
+def _ticket_summary(t: dict, order: List[dict]) -> dict:
+    out = {k: t.get(k) for k in ("n", "fleet", "bot", "tool")}
+    out["since"] = _now_iso(t["since"])
+    places = [x["n"] for x in order]
+    if t["n"] in places:
+        out.update(place=places.index(t["n"]) + 1, queued=len(places))
+    return out
+
+
+def _emit_dropped(dropped, idle: int) -> None:
+    for t, silent in dropped:
+        _emit("heavy_slot_ticket_dropped", {"ticket": _ticket_summary(t, []),
+                                            "last_try": _now_iso(t["seen"]),
+                                            "silent_s": silent, "idle_s": idle})
+
+
+def _queue_line(place: int, t: dict, now: float, idle: int) -> str:
+    return (f"queue {place}: ticket {t['n']}, {_who(t)} ({t.get('tool') or '?'}), waiting "
+            f"since {_clock(t['since'])} ({int((now - t['since']) // 60)} min), last try "
+            f"{_clock(t['seen'])}; dropped after {_span(idle)} silent once a slot is free"
+            + (" — next" if place == 1 else ""))
+
+
+def _queue_row(place: int, t: dict, now: float, idle: int) -> dict:
+    return {"place": place, "ticket": t["n"], "fleet": t["fleet"], "bot": t["bot"],
+            "tool": t.get("tool") or "?", "since": _now_iso(t["since"]),
+            "last_try": _now_iso(t["seen"]), "waiting_s": int(now - t["since"]),
+            "idle_s": idle}
 
 
 # --- the record on the plane ---------------------------------------------------
@@ -1340,15 +1548,39 @@ def cmd_hook() -> int:
     if rewritten is None:
         return 0
     n, _ = slot_count(d)
-    slots = probe(d, n)
-    if slots and all(held for _, held, _ in slots):
-        holders = [rec for _, _, rec in slots]
-        _emit("heavy_slot_refused", {"where": "hook", "shape": _shape_text(command),
-                                     "holders": [_holder_summary(h) for h in holders]})
+    shape = _shape_text(command)
+    idle, now = ticket_idle_s(), time.time()
+    mine, order, dropped = None, [], []
+    qfd = _lock_queue(d)
+    try:
+        slots = probe(d, n)
+        holders = [rec for _, held, rec in slots if held]
+        if qfd is None:
+            refused = len(holders) == len(slots)
+        else:
+            q = load_queue(d)
+            tool = next((w for w in shape.split() if not w.startswith("-")), "?")
+            order, dropped, mine, queued = take_turn(q, slots, tool, now, idle)
+            refused = not _may_take(mine, order, slots)
+            if not refused and not queued:
+                order.remove(mine)  # a call let through needs no ticket: the wrapper decides
+            if refused or queued or dropped:
+                q["tickets"] = order
+                _save_queue(d, q)
+    finally:
+        if qfd is not None:
+            os.close(qfd)
+    _emit_dropped(dropped, idle)
+    if refused:
+        data = {"where": "hook", "shape": shape,
+                "holders": [_holder_summary(h) for h in holders]}
+        if mine is not None:
+            data["ticket"] = _ticket_summary(mine, order)
+        _emit("heavy_slot_refused", data)
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
-            "permissionDecisionReason": "heavy-slot: " + refusal(holders, n)}}))
+            "permissionDecisionReason": "heavy-slot: " + refusal(holders, n, now, mine, order)}}))
         return 0
     if not _syntax_ok(rewritten) and _syntax_ok(command):
         _emit("heavy_slot_unparsed", {"reason": "the rewrite does not parse",
@@ -1372,13 +1604,37 @@ def cmd_run(argv: List[str]) -> int:
         return 2
     d = slot_dir()
     n, _ = slot_count(d)
-    got = _acquire(d, n)
+    idle, now = ticket_idle_s(), time.time()
+    mine, order, dropped, queued = None, [], [], False
+    qfd = _lock_queue(d)
+    try:
+        if qfd is None:
+            got = _acquire(d, n)
+        else:
+            q = load_queue(d)
+            slots = probe(d, n)
+            order, dropped, mine, queued = take_turn(q, slots, _tool(argv), now, idle)
+            got = _acquire(d, n) if _may_take(mine, order, slots) else None
+            if got is not None:
+                order.remove(mine)
+            if got is None or queued or dropped:
+                q["tickets"] = order
+                _save_queue(d, q)
+    finally:
+        if qfd is not None:
+            os.close(qfd)
+    _emit_dropped(dropped, idle)
     if got is None:
         slots = probe(d, n)
-        holders = [rec for _, held, rec in slots if held] or [rec for _, _, rec in slots]
-        print("heavy-slot: " + refusal(holders, n), file=sys.stderr)
-        _emit("heavy_slot_refused", {"where": "wrapper", "shape": shape,
-                                     "holders": [_holder_summary(h) for h in holders]})
+        holders = [rec for _, held, rec in slots if held]
+        if mine is None:
+            holders = holders or [rec for _, _, rec in slots]
+        print("heavy-slot: " + refusal(holders, n, now, mine, order), file=sys.stderr)
+        data = {"where": "wrapper", "shape": shape,
+                "holders": [_holder_summary(h) for h in holders]}
+        if mine is not None:
+            data["ticket"] = _ticket_summary(mine, order)
+        _emit("heavy_slot_refused", data)
         return EX_TEMPFAIL
     slot, fd = got
     # From here the wrapper holds the slot, so a signal must reach the job and
@@ -1410,18 +1666,20 @@ def cmd_run(argv: List[str]) -> int:
         _emit("heavy_slot_unreleased", {"slot": slot, "previous": _public(previous),
                                         "across_reset": previous.get("boot_id") != boot})
     started = time.time()
+    fleet, bot = _identity()
     record = {
-        "v": 1, "slot": slot, "slots": n, "state": "held",
-        "fleet": os.environ.get("FLEET_NAME") or os.environ.get("CLAUDLOBBY_FLEET") or "",
-        "bot": os.environ.get("BOT_ID") or os.environ.get("BOT_NAME") or "",
+        "v": 1, "slot": slot, "slots": n, "state": "held", "fleet": fleet, "bot": bot,
         "shape": shape, "tool": _tool(argv), "cwd": os.getcwd(), "pid": os.getpid(),
         "host": socket.gethostname(),
         "boot_id": boot, "started_at": _now_iso(started), "started_epoch": int(started),
         "released_at": None, "exit": None,
     }
     _write(fd, record)
-    _emit("heavy_slot_acquired", {"slot": slot, "slots": n, "shape": shape,
-                                  "started_at": record["started_at"]})
+    acquired = {"slot": slot, "slots": n, "shape": shape, "started_at": record["started_at"]}
+    if queued:  # the ticket it waited on, for joining its refusals to this
+        acquired["ticket"] = {"n": mine["n"], "since": _now_iso(mine["since"]),
+                              "waited_s": int(started - mine["since"])}
+    _emit("heavy_slot_acquired", acquired)
     delay = os.environ.get("HEAVY_SLOT_START_DELAY_S")  # test seam: hold the pre-start window open
     if delay:
         try:
@@ -1445,8 +1703,8 @@ def cmd_run(argv: List[str]) -> int:
         rc = child.wait()
     status = rc if rc >= 0 else 128 - rc
     ended = time.time()
-    record.update(state="released", released_at=_now_iso(ended), exit=status,
-                  duration_s=round(ended - started, 1))
+    record.update(state="released", released_at=_now_iso(ended), released_epoch=round(ended, 3),
+                  exit=status, duration_s=round(ended - started, 1))
     _write(fd, record)
     os.close(fd)
     _emit("heavy_slot_released", {"slot": slot, "shape": shape, "exit": status,
@@ -1484,20 +1742,34 @@ def cmd_status(args: List[str]) -> int:
     d = slot_dir()
     n, source = slot_count(d)
     disabled = (d / "disabled").exists()
+    queue_off = (d / "no-queue").exists()
     slots = probe(d, n, extra=True)
+    idle, now = ticket_idle_s(), time.time()
+    counted = [s for s in slots if s[0] < n]
+    order = [] if queue_off else _served(_live(load_queue(d)["tickets"], counted, now, idle)[0],
+                                         counted)
     if "--json" in args:
         print(json.dumps({"dir": str(d), "slots_configured": n, "source": source,
-                          "disabled": disabled,
-                          "slots": [{"slot": s, "held": h, "record": _public(r)} for s, h, r in slots]},
+                          "disabled": disabled, "queue_off": queue_off, "ticket_idle_s": idle,
+                          "slots": [{"slot": s, "held": h, "record": _public(r)} for s, h, r in slots],
+                          "queue": [_queue_row(i, t, now, idle) for i, t in enumerate(order, 1)]},
                          sort_keys=True))
         return 0
-    boot, now = boot_id(), time.time()
+    boot = boot_id()
     print(f"heavy-slot: {n} slot(s) ({source}), state {d}")
     if disabled:
         print(f"DISABLED: {d / 'disabled'} exists, so the hook passes every call through; "
               "remove it to gate again")
+    if queue_off:
+        print(f"QUEUE OFF: {d / 'no-queue'} exists, so every caller decides on the slots "
+              "alone; remove it to queue again")
     for slot, held, rec in slots:
         print(_status_line(slot, held, rec, boot, now))
+    if not queue_off:
+        print(f"queue: {len(order)} waiting, in the order they are served" if order
+              else "queue: empty")
+    for i, t in enumerate(order, 1):
+        print(_queue_line(i, t, now, idle))
     return 0
 
 

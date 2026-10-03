@@ -10,6 +10,9 @@ slot directory (HEAVY_SLOT_DIR) and writes its events to a file
 
 from __future__ import annotations
 
+import fcntl
+import functools
+import importlib.util
 import json
 import os
 import signal
@@ -422,3 +425,183 @@ class TestTheQueue:
             # finishes at most the job it was running then
             waited = lines[lines.index("waiter refused"):lines.index("waiter start")]
             assert waited.count("driver start") <= 1, lines
+
+    def test_the_next_turn_goes_to_another_fleet_before_an_older_ticket(self, se):
+        p = _hold(se)  # testfleet/alpha
+        assert _run(se, "pytest", BOT_ID="beta").returncode == 75  # ticket 1
+        assert _run(se, "pytest", FLEET_NAME="otherfleet", BOT_ID="gamma").returncode == 75
+        (se.tmp / "release").touch()
+        assert p.wait(15) == 0
+        r = _run(se, "pytest", BOT_ID="beta")
+        assert r.returncode == 75
+        assert "another caller's turn: ticket 2, otherfleet/gamma" in r.stderr
+        assert _run(se, "pytest", FLEET_NAME="otherfleet", BOT_ID="gamma").returncode == 0
+        assert _run(se, "pytest", BOT_ID="beta").returncode == 0
+
+    def test_within_one_fleet_a_free_slot_goes_to_the_oldest_ticket(self, se):
+        p = _hold(se)
+        assert _run(se, "pytest", BOT_ID="beta").returncode == 75  # ticket 1
+        assert _run(se, "pytest", BOT_ID="gamma").returncode == 75  # ticket 2
+        (se.tmp / "release").touch()
+        assert p.wait(15) == 0
+        r = _run(se, "pytest", BOT_ID="gamma")
+        assert r.returncode == 75 and "ticket 1, testfleet/beta" in r.stderr
+        assert "you hold ticket 2, place 2 of 2" in r.stderr
+        assert _run(se, "pytest", BOT_ID="beta").returncode == 0
+        assert _run(se, "pytest", BOT_ID="gamma").returncode == 0
+
+    def test_nothing_expires_while_every_slot_is_held(self, se):
+        p = _hold(se)
+        assert _run(se, "pytest", BOT_ID="beta").returncode == 75
+        time.sleep(4)  # silent past the limit below, but the slot was held all along
+        (se.tmp / "release").touch()
+        assert p.wait(15) == 0
+        r = _run(se, "pytest", HEAVY_SLOT_TICKET_IDLE_S=3)  # alpha's next take, at once
+        assert r.returncode == 75 and "ticket 1, testfleet/beta" in r.stderr
+        assert _run(se, "pytest", BOT_ID="beta", HEAVY_SLOT_TICKET_IDLE_S=3).returncode == 0
+
+    def test_a_silent_waiter_is_dropped_once_a_slot_has_been_free_that_long(self, se):
+        p = _hold(se)
+        assert _run(se, "pytest", BOT_ID="beta").returncode == 75
+        (se.tmp / "release").touch()
+        assert p.wait(15) == 0
+        time.sleep(1.5)
+        r = _run(se, "pytest", HEAVY_SLOT_TICKET_IDLE_S=1)  # alpha's next take
+        assert r.returncode == 0, r.stderr
+        (ev,) = [e for e in _events(se) if e["type"] == "heavy_slot_ticket_dropped"]
+        assert (ev["data"]["ticket"]["bot"], ev["data"]["idle_s"]) == ("beta", 1)
+        assert ev["data"]["silent_s"] >= 1
+
+    def test_status_lists_the_queue_with_the_limit_beside_each_wait(self, se):
+        p = _hold(se)
+        _run(se, "pytest", BOT_ID="beta")
+        _run(se, "pytest", FLEET_NAME="otherfleet", BOT_ID="gamma")
+        out = _status(se).stdout
+        # served next: the other fleet's ticket, since the holder's fleet took the slot last
+        assert "queue: 2 waiting, in the order they are served" in out
+        assert "queue 1: ticket 2, otherfleet/gamma (pytest), waiting since" in out
+        assert "queue 2: ticket 1, testfleet/beta (pytest), waiting since" in out
+        assert out.count("dropped after 3 min silent once a slot is free") == 2
+        assert out.count("— next") == 1
+        st = json.loads(_status(se, "--json").stdout)
+        assert st["ticket_idle_s"] == 180 and st["queue_off"] is False
+        assert [(q["place"], q["ticket"], q["fleet"], q["bot"], q["idle_s"])
+                for q in st["queue"]] == [(1, 2, "otherfleet", "gamma", 180),
+                                          (2, 1, "testfleet", "beta", 180)]
+        # the limit shown is the one the reader's environment sets
+        other = subprocess.run([str(WRAPPER), "status"], env=_env(se, HEAVY_SLOT_TICKET_IDLE_S=90),
+                               capture_output=True, text=True, timeout=60).stdout
+        assert "dropped after 90 s silent once a slot is free" in other
+        (se.tmp / "release").touch()
+        p.wait(15)
+
+    def test_a_refusal_and_the_take_it_waited_for_carry_one_ticket(self, se):
+        p = _hold(se)
+        _run(se, "pytest", BOT_ID="beta")
+        (se.tmp / "release").touch()
+        p.wait(15)
+        assert _run(se, "pytest", BOT_ID="beta").returncode == 0
+        refused = [e["data"] for e in _events(se) if e["type"] == "heavy_slot_refused"]
+        acquired = [e["data"] for e in _events(se) if e["type"] == "heavy_slot_acquired"]
+        assert [(r["ticket"]["n"], r["ticket"]["bot"], r["ticket"]["place"]) for r in refused] == [
+            (1, "beta", 1)]
+        assert "ticket" not in acquired[0]  # alpha took a free slot nobody waited for
+        assert acquired[1]["ticket"]["n"] == 1 and acquired[1]["ticket"]["waited_s"] >= 0
+
+    def test_the_off_switch_decides_on_the_slot_alone(self, se):
+        se.state.mkdir(parents=True)
+        (se.state / "no-queue").touch()
+        p = _hold(se)
+        r = _run(se, "pytest", BOT_ID="beta")
+        assert r.returncode == 75 and "ticket" not in r.stderr
+        (se.tmp / "release").touch()
+        p.wait(15)
+        assert _run(se, "pytest").returncode == 0  # alpha again: no turn is held for beta
+        assert not (se.state / "queue.json").exists()
+        assert "QUEUE OFF" in _status(se).stdout
+
+    def test_a_queue_lock_nobody_releases_falls_back_to_the_slot_alone(self, se):
+        # A stopped process holding the queue's lock must not stop every heavy job.
+        se.state.mkdir(parents=True)
+        fd = os.open(se.state / "queue.lock", os.O_RDWR | os.O_CREAT, 0o644)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            t = time.monotonic()
+            r = _run(se, "pytest")
+            assert r.returncode == 0, r.stderr
+            assert time.monotonic() - t >= 2  # QUEUE_LOCK_WAIT_S, then on without it
+        finally:
+            os.close(fd)
+        assert not (se.state / "queue.json").exists()
+
+    def test_a_damaged_queue_file_is_an_empty_queue(self, se):
+        se.state.mkdir(parents=True)
+        (se.state / "queue.json").write_text('{"next": "x", "tickets": [')
+        assert _run(se, "pytest").returncode == 0
+
+
+@pytest.fixture(scope="module")
+def hs():
+    """The script as a module (its name has a dash)."""
+    spec = importlib.util.spec_from_file_location("heavy_slot", WRAPPER)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+T0 = 1_790_000_000.0  # any epoch: the decision reads differences only
+
+
+def _held(at: float) -> list:
+    return [(0, True, {"state": "held", "fleet": "testfleet", "bot": "driver",
+                       "started_epoch": at})]
+
+
+def _free(at: float) -> list:
+    return [(0, False, {"state": "released", "fleet": "testfleet", "bot": "driver",
+                        "started_epoch": at - 30, "released_epoch": at})]
+
+
+class TestTheQueuesDecision:
+    """take_turn and _may_take, the decision both the hook and the wrapper make,
+    at the real constants: the clock is an argument here, so a 60 s retry costs
+    no 60 s of test time."""
+
+    @staticmethod
+    def _call(hs, monkeypatch, q, fleet, bot, slots, now):
+        """One call by fleet/bot at `now`, written back as the wrapper writes it:
+        (whether it may take a slot, the bots whose tickets it dropped)."""
+        monkeypatch.setenv("FLEET_NAME", fleet)
+        monkeypatch.setenv("BOT_ID", bot)
+        order, dropped, mine, _ = hs.take_turn(q, slots, "pytest", now, hs.ticket_idle_s())
+        may = hs._may_take(mine, order, slots)
+        q["tickets"] = [t for t in order if not (may and t["n"] == mine["n"])]
+        return may, [t["bot"] for t, _ in dropped]
+
+    @pytest.mark.parametrize("fleet", ["otherfleet", "testfleet"],
+                             ids=["another-fleet", "same-fleet"])
+    def test_a_waiter_retrying_every_60_s_keeps_its_place_while_a_driver_waits(
+            self, hs, monkeypatch, fleet):
+        monkeypatch.delenv("HEAVY_SLOT_TICKET_IDLE_S", raising=False)
+        q = {"v": 1, "next": 1, "tickets": []}
+        call = functools.partial(self._call, hs, monkeypatch, q)
+        # the driver holds the slot: the waiter's poll is refused and takes ticket 1
+        assert call(fleet, "waiter", _held(T0 - 5), T0) == (False, [])
+        # the driver's job ends at T0+1; it tries again at once, then every 20 ms
+        for dt in (1.0, 1.02, 30, 59.98):
+            assert call("testfleet", "driver", _free(T0 + 1), T0 + dt) == (False, [])
+        # the waiter's next poll, 60 s after its last, takes the slot; the driver is next
+        assert call(fleet, "waiter", _free(T0 + 1), T0 + 60) == (True, [])
+        assert [(t["bot"], t["n"]) for t in q["tickets"]] == [("driver", 2)]
+
+    def test_a_ticket_is_kept_180_s_after_a_slot_comes_free_and_no_longer(self, hs, monkeypatch):
+        monkeypatch.delenv("HEAVY_SLOT_TICKET_IDLE_S", raising=False)
+        assert hs.TICKET_IDLE_S == 180
+        q = {"v": 1, "next": 1, "tickets": []}
+        call = functools.partial(self._call, hs, monkeypatch, q)
+        assert call("otherfleet", "waiter", _held(T0 - 5), T0) == (False, [])
+        # however long the slot stays held, the ticket stands
+        assert call("testfleet", "driver", _held(T0 - 5), T0 + 3600) == (False, [])
+        # the slot comes free at T0+3600, and the waiter stays silent from then on
+        assert call("testfleet", "driver", _free(T0 + 3600), T0 + 3600 + 180) == (False, [])
+        assert call("testfleet", "driver", _free(T0 + 3600), T0 + 3600 + 181) == (True, ["waiter"])
