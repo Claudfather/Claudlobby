@@ -2749,9 +2749,13 @@ pane_input_region() {
 # across 19 stranded bots, and the sampler reproduced it at ~1-in-3 under load
 # -- and nobody knew WHY the predicate returned false. Three candidates: render
 # lag at tick 1, the _PANE_MIN_VISIBLE_MATCH floor, chrome the stripper misses.
-# Its answer was render lag (24 of 24 traced strands read an empty box at tick
-# 1). The send now waits for the payload to show before its Enter, so the first
-# not-held tick follows a held one; the trace still records the verify ticks.
+# Its run could not tell them apart: clean boots read the same empty box at
+# tick 1 as held ones. The mechanism came from a reproduction instead: a busy
+# TUI that reads the text and its Enter in one read keeps the Enter as an
+# invisible character, and the prompt stays held (20 of 20 holds, 0 of 4
+# controls). The send now waits for the payload to show before its Enter, so
+# the first not-held tick follows a held one; the trace still records the
+# verify ticks.
 #
 # OFF BY DEFAULT AND OFF MEANS OFF. PANE_VERIFY_TRACE unset costs one parameter
 # test per tick: no capture, no fork, no write. This matters more than tidiness
@@ -3289,8 +3293,10 @@ pane_send_verified() {
             # whatever the readiness verdict was. That verdict used to stand in for
             # the sighting (drawn, unwaited and unverified all counted an empty box
             # as a submit), and under load the first frame after the Enter could
-            # predate the text: 24 of 24 traced strands read an empty box there, and
-            # each was reported clean while its prompt sat held. A message queued
+            # predate the text, so a prompt the TUI then held was reported clean
+            # (a busy TUI that reads the text and its Enter in one read keeps the
+            # Enter as an invisible character: 20 of 20 holds in a reproduction,
+            # 0 of 4 controls). A message queued
             # behind a running turn counts as gone too: the box then shows only the
             # TUI's "Press up to edit queued messages" hint.
             pane_holds_unsubmitted "$pane" "$probe" || return 0
