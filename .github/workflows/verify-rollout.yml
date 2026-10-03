@@ -74,8 +74,9 @@ jobs:
           VACUOUS = {"", "n/a", "na", "none", "nothing", "-", "--", "tbd", "todo", "?", "..."}
           KINDS = {"docs-only": "docs-paths", "tests-only": "tests-paths"}
           CODE = "[code block]"
-          HEADING = re.compile(r"^##[ \t]+rollout check:?[ \t]*$", re.I)
-          NEXT_SECTION = re.compile(r"^#{1,2}[ \t]")
+          HEADING = re.compile(r"^ {0,3}##[ \t]+rollout check:?(?:[ \t]+#+)?[ \t]*$", re.I)
+          NEXT_SECTION = re.compile(r"^ {0,3}#{1,2}(?:[ \t]|$)")
+          COMMENT_BLOCK = re.compile(r"^ {0,3}<!--")
           FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
           FENCE_CLOSE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
           PREFIX = r"^\s*(?:(?:[-*+]|\d+[.)])\s+)?(?:\*\*|__)?\s*"
@@ -114,12 +115,39 @@ jobs:
                       fh.write(line + "\n")
 
 
+          def inline_text(line):
+              """One line with its complete <!-- --> comments dropped, as GitHub renders
+              it. A code span (a backtick run, closed by a run of the same length) is
+              text, and so is a <!-- that does not close on the line."""
+              out, i = [], 0
+              while i < len(line):
+                  if line[i] == "`":
+                      run = re.match(r"`+", line[i:]).group(0)
+                      closer = re.compile(r"(?<!`)" + run + r"(?!`)").search(line, i + len(run))
+                      stop = closer.end() if closer else i + len(run)
+                      out.append(line[i:stop])
+                      i = stop
+                      continue
+                  if line.startswith("<!--", i):
+                      close = line.find("-->", i + 4)
+                      if close != -1:
+                          i = close + 3
+                          continue
+                  out.append(line[i])
+                  i += 1
+              return "".join(out)
+
+
           def visible_lines(body):
-              """The body's lines as GitHub shows them. HTML comments outside code are
-              dropped, and an unclosed one runs to the end. A fenced block (``` or ~~~,
-              closed only by the same character at least as long, unclosed to the end)
-              becomes one CODE line when it holds anything, so a heading inside it is no
-              heading, and a field given as a fenced command is not empty."""
+              """The body's lines as GitHub shows them.
+              - A fenced block (``` or ~~~, closed only by the same character at least
+                as long; unclosed, it runs to the end) becomes one CODE line when it
+                holds anything: a heading inside it is no heading, and a field given as
+                a fenced command is not empty.
+              - A line that starts with <!-- opens a comment that hides everything up
+                to its -->; unclosed, it runs to the end.
+              - Elsewhere a comment hides text only when it closes on its line, and a
+                <!-- inside a code span is text (#2116's own body had one)."""
               out, fence, filled, in_comment = [], None, False, False
               for line in (body or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
                   if fence:
@@ -131,28 +159,25 @@ jobs:
                           filled = True
                       continue
                   if in_comment:
-                      end = line.find("-->")
-                      if end == -1:
+                      close = line.find("-->")
+                      if close == -1:
                           continue
-                      line, in_comment = line[end + 3:], False
-                  kept = ""
-                  while True:
-                      start = line.find("<!--")
-                      if start == -1:
-                          kept += line
-                          break
-                      kept += line[:start]
-                      end = line.find("-->", start + 4)
-                      if end == -1:
+                      line, in_comment = line[close + 3:], False
+                  elif COMMENT_BLOCK.match(line):
+                      begin = line.find("<!--")
+                      close = line.find("-->", begin + 4)
+                      if close == -1:
                           in_comment = True
-                          break
-                      line = line[end + 3:]
+                          continue
+                      line = line[:begin] + line[close + 3:]
+                  kept = inline_text(line)
                   opening = FENCE_OPEN.match(kept)
                   if opening and not (opening.group(1)[0] == "`" and "`" in opening.group(2)):
                       fence, filled = opening.group(1), False
                       continue
                   out.append(kept)
               return out
+
 
 
           def section(body):

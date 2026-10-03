@@ -275,6 +275,33 @@ def test_a_heading_in_or_after_an_open_comment_does_not_count(tmp_path, body):
     assert run_check(tmp_path, body).rc == 1
 
 
+@pytest.mark.parametrize("before", [
+    "Inline code like `<!--` is text.\n",
+    "A lone <!-- in a sentence, never closed, is text.\n",
+    "A double-backtick span ``<!-- `x` `` is text too.\n",
+], ids=["code-span", "unclosed-inline", "double-backtick-span"])
+def test_a_comment_marker_github_shows_as_text_hides_nothing(tmp_path, before):
+    """Found on #2116's own body (dara): `<!--` in inline code turned a comment
+    on, and every later line, the section included, was dropped."""
+    run = run_check(tmp_path, before + "\n" + section(**FULL))
+    assert run.rc == 0, run.out
+
+
+def test_a_complete_inline_comment_is_dropped(tmp_path):
+    run = run_check(tmp_path, section(**{**FULL, "Who": "<!-- any bot -->"}))
+    assert run.rc == 1
+    assert any("**Who:**" in e for e in run.errors), run.out
+
+
+@pytest.mark.parametrize("heading,passes", [
+    ("## Rollout check", True), ("## rollout check:", True), ("   ## Rollout check", True),
+    ("## Rollout check ##", True), ("    ## Rollout check", False), ("### Rollout check", False),
+], ids=["plain", "lower-colon", "indented-3", "closing-hashes", "indented-4-is-code", "level-3"])
+def test_the_heading_forms_github_renders(tmp_path, heading, passes):
+    body = section(**FULL).replace("## Rollout check", heading, 1)
+    assert (run_check(tmp_path, body).rc == 0) is passes
+
+
 def test_a_comment_marker_inside_a_fence_is_text(tmp_path):
     body = "```html\n<!-- not a comment here\n```\n" + section(**FULL)
     assert run_check(tmp_path, body).rc == 0
