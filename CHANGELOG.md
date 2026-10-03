@@ -15,6 +15,10 @@ Since #2110, each activation tops every bot's handoff with an envelope that carr
 - **No envelope time vouches for a capture.** Editing the old envelope's `last_updated:`, the repair before #2094, no longer passes a stale capture. A handoff whose only `last_updated:` is in an old envelope now refuses until the session writes its own frontmatter.
 - **A fresh handoff whose first 8 KiB end inside a multi-byte character no longer refuses:** only the frontmatter is decoded.
 
+### Fixed — a heavy-slot test no longer fails when its poll reads the slot's lock file mid-write (#2125)
+
+The held-slot test's poll parsed `slot-0.lock` as it found it. `heavy-slot.py` creates that file empty and truncates it before each write, so a poll in that window failed the test with `JSONDecodeError` (CI run 37104705081). The tests now read the record as the module's own reader does: an empty or half-written file is no record yet, and the poll tries again. Test-only; the module already read it this way.
+
 ### Fixed — a lone backtick in a double-quoted string no longer hides its line from the credential-echo guard (#2103)
 
 #2099 reads a double-quoted `$(` it cannot delimit as text, so the rest of the line is still judged. A lone backtick in the same string still made the line unreadable, and an unreadable line is allowed. A comment ending in a backslash inside the substitution reaches that state, because the tokenizer joins the backslash-newline before it reads comments, so the comment swallows the `)`. This line was refused before #2099, allowed after it, and printed the canary under bash:
