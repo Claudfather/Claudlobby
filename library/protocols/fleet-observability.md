@@ -195,6 +195,7 @@ a large window.
 | `bridge_down`, `reload_failed`, `restart_failed`, `keepalive_failed`, `alert_target_refused`, `alert_pair_unreachable`, `fleet_alert` | a FLEET ALERT raised with a fleet in scope: a fleet job, a bot's bring-up, `fleet notify --level alert` (`fleet_alert`) | the fleet, read as bot `fleet` |
 | `rolling_restart_stalled` | a FLEET ALERT from `rolling-restart.sh` when a roll halts | the fleet of the shell that ran it, else the host: not the fleet it was rolling (#2112) |
 | `disk_high`, `memory_high`, `undervoltage`, `storage_stall`, `host_health`, `binary_update_failed`, `binary_unrunnable`, `vault_sync_failed` | a FLEET ALERT from a host job, which runs with no fleet | the host, as is any FLEET ALERT raised with no fleet in scope; no fleet's `event list` reads it |
+| `public_write_guard_unarmed` | the public-write guard (opt-in), on each GitHub write it checks while the host has no term list | the bot |
 | `shadow_parity_diverged` | nothing now (the plane cutover's shadow) | kept so its old rows classify |
 
 **Where an alert is recorded decides who can read it (#2109).** Fleet-pulse's escalation and a bot's
