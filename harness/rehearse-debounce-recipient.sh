@@ -63,14 +63,22 @@ export TMUX_SOCKET=rdrw$$
 export BOT_SERVICE=rdrw$$
 EOF
 
-start_manager () { tmux -L "$MGR_SOCK" new-session -d -s "$MGR" "$MGR_BOX"; }
+# Each manager instance logs what it was submitted (the stand-in's --log), and a
+# restart starts a new instance with a new, empty log, as a restarted manager is a
+# new, empty session.
+MGR_N=0
+start_manager () {
+    MGR_N=$((MGR_N+1)); MGR_LOG="$ROOT/mgr$MGR_N.log"; : > "$MGR_LOG"
+    tmux -L "$MGR_SOCK" new-session -d -s "$MGR" "$MGR_BOX --log $(printf '%q' "$MGR_LOG")"
+}
 mgr_pane ()      { tmux -L "$MGR_SOCK" capture-pane -t "$MGR" -p 2>/dev/null || true; }
-# Count pushes rather than clearing between steps: `clear-history` only drops
-# scrollback, so a "cleared" pane still shows the previous push and every later
-# check would read as a false positive.
+# Count what the current instance was SUBMITTED, never text the pane shows: that
+# can sit unsubmitted in the box, or be the tty's echo of keys typed before the
+# stand-in read them, which it then discarded. Read from the pane, a push whose
+# Enter was withheld passed as pushed (#2136).
 # Counted PER ALERT TYPE: one tick legitimately pushes two here (the worker has
 # no tmux session AND no real service unit), so a bare total would conflate them.
-push_count ()    { printf '%s' "$(mgr_pane)" | grep -c "\\[FLEET-PULSE\\].*$1" || true; }
+push_count ()    { grep -c "\\[FLEET-PULSE\\].*$1" "$MGR_LOG" || true; }
 
 run_pulse () {
     env CLAUDLOBBY_ROOT="$ROOT" TMUX_TMPDIR="$TMUX_TMPDIR" \
