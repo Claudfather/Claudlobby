@@ -12,7 +12,6 @@ which receipt gates them); the native look itself runs against real tmux.
 """
 
 import json
-import os
 import shutil
 import sqlite3
 import subprocess
@@ -26,16 +25,18 @@ from uuid import uuid4
 import pytest
 
 from claudlobby import assignment_delivery, message_operations, message_queries, message_transport
-from claudlobby.__main__ import main
 from claudlobby.message_queries import MessageIdentity, ReceiptObservation
 from claudlobby.message_transport import TransportOutcome
 from claudlobby.plane.db import db_file
 from claudlobby.recording_alerts import ChannelOutcome, RecordingAlertOutcome
 from tests.package_fixtures import source_package
+from tests.plane_fixtures import F as SCENE_FLEET, _scene
+from tests.plane_setup import initialize_plane
 from tests.test_activation import cold, tmp_path  # noqa: F401 — short private activation root
 from tests.test_releases import installed  # noqa: F401 — cold dependency
 from tests.test_task_read_cli import active  # noqa: F401 — active private Plane fixture
 from tests.test_message_write_cli import _assigned, _call, _delivery_call, _generated
+from tests.test_plane_events_door import _events_cmd, _rows
 
 
 class _Box:
@@ -211,10 +212,29 @@ def test_the_repair_is_a_fleet_event_with_its_match_and_every_look(active, monke
         (out["data"]["message_id"], "chip", "chip#3", 2)
     assert [look["pressed"] for look in data["attempts"]] == [True, True]
     assert data["receipt"] == "received"
-    # visible where an operator looks for it
-    assert main(["--root", str(root), "--json", "event", "list", "--type", "delivery_enter_repaired"]) == 0
-    listed = json.loads(capsys.readouterr().out)["data"]["items"]
-    assert [item["bot"] for item in listed] == ["worker"]
+
+
+def test_the_repair_fact_is_listed_where_an_operator_looks(tmp_path):
+    """`event list --type delivery_enter_repaired` shows the fact on the recipient,
+    with its match and both looks. The door reads the plane through the active
+    release's matcher, which the private plane scene installs and the activation
+    fixture above does not, so the door is asked here."""
+    root, _paths, _, _ = _scene(tmp_path)
+    initialize_plane(root)
+    route = SimpleNamespace(peer_destination=SimpleNamespace(fleet=SCENE_FLEET),
+                            peer=SimpleNamespace(alias=f"bot:{SCENE_FLEET}/w1"),
+                            caller=SimpleNamespace(alias=f"bot:{SCENE_FLEET}/w2"),
+                            selected=SimpleNamespace(paths=SimpleNamespace(root=root)))
+    looks = tuple(message_operations.EnterRepairAttempt(at, "chip", True, "chip#3", None)
+                  for at in ("2026-10-03T00:00:00+00:00", "2026-10-03T00:00:12+00:00"))
+    received = SimpleNamespace(receipt_observation="received")
+    message_id = "msg_" + "d" * 32
+    assert message_operations._record_enter_repair(route, message_id, looks, received) == "committed"
+    items = _rows(_events_cmd(root, "--type", "delivery_enter_repaired"))
+    assert [(item["bot"], item["type"]) for item in items] == [("w1", "delivery_enter_repaired")]
+    fact = items[0]["data"]
+    assert (fact["msg_id"], fact["match"], fact["chip"], fact["enters"], fact["receipt"]) == \
+        (message_id, "chip", "chip#3", 2, "received")
 
 
 # --- the native look, on real tmux ---------------------------------------------------
