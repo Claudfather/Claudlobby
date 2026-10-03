@@ -230,7 +230,7 @@ def test_the_repair_fact_is_listed_where_an_operator_looks(tmp_path):
     received = SimpleNamespace(receipt_observation="received")
     message_id = "msg_" + "d" * 32
     assert message_operations._record_enter_repair(route, message_id, looks, received) == "committed"
-    items = _rows(_events_cmd(root, "--type", "delivery_enter_repaired"))
+    items = _rows(_events_cmd(root, "--json", "--type", "delivery_enter_repaired"))
     assert [(item["bot"], item["type"]) for item in items] == [("w1", "delivery_enter_repaired")]
     fact = items[0]["data"]
     assert (fact["msg_id"], fact["match"], fact["chip"], fact["enters"], fact["receipt"]) == \
