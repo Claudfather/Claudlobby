@@ -65,7 +65,7 @@ check() {
 }
 
 ENVELOPE="[Claudlobby ordinary message] Message: $MSG From: bot:f/dara To: bot:f/otis Kind: chat"
-TRAILER="⟦plane:$MSG⟧"
+TRAILER="⟦plane:${MSG}⟧"
 
 echo "=== held_delivery_match (#2105) ==="
 
@@ -89,12 +89,12 @@ check "not-held: Esc to cancel under the box" 1 not-held \
 
 # --- the box holds something else, or more than this message ---------------------
 check "not-shown: another message's delivery" 1 not-shown \
-    "$(box "[Claudlobby ordinary message] Message: $OTHER body" "⟦plane:$OTHER⟧")"
+    "$(box "[Claudlobby ordinary message] Message: $OTHER body" "⟦plane:${OTHER}⟧")"
 check "not-shown: someone's typed text" 1 not-shown "$(box "let me check the logs first")"
 check "glued: text before this message's envelope" 1 glued \
     "$(box "notes I was typing $ENVELOPE body" "$TRAILER")"
 check "glued: another delivery glued ahead of this one" 1 glued \
-    "$(box "[Claudlobby ordinary message] Message: $OTHER first" "⟦plane:$OTHER⟧" "$ENVELOPE second" "$TRAILER")"
+    "$(box "[Claudlobby ordinary message] Message: $OTHER first" "⟦plane:${OTHER}⟧" "$ENVELOPE second" "$TRAILER")"
 check "chips: two paste chips" 1 chips "$(box "[Pasted text #1 +2 lines][Pasted text #2 +1 lines]")"
 check "chips: a chip beside typed text" 1 chips "$(box "and also [Pasted text #2 +1 lines]")"
 check "chip-lines: a chip with no newline (not a tracked wire)" 1 chip-lines "$(box "[Pasted text #4]")"
