@@ -43,15 +43,19 @@ box() {
     printf '%s\n' "$RULE" "$STATUS"
 }
 
+# What the owner read in the box just before its send (read_box), the
+# predicate's third argument: empty unless a check says otherwise.
+BEFORE=empty
+
 # check <label> <expected rc> <expected verdict> <pane text>
 check() {
     local label="$1" want_rc="$2" want="$3" pane="$4" loc got rc
     for loc in "" C; do
         total=$((total + 1))
         if [ -n "$loc" ]; then
-            got=$(LC_ALL="$loc" held_delivery_match "$pane" "$MSG"); rc=$?
+            got=$(LC_ALL="$loc" held_delivery_match "$pane" "$MSG" "$BEFORE"); rc=$?
         else
-            got=$(held_delivery_match "$pane" "$MSG"); rc=$?
+            got=$(held_delivery_match "$pane" "$MSG" "$BEFORE"); rc=$?
         fi
         if [ "$rc" = "$want_rc" ] && [ "$got" = "$want" ]; then
             passed=$((passed + 1))
@@ -99,6 +103,33 @@ check "chips: two paste chips" 1 chips "$(box "[Pasted text #1 +2 lines][Pasted 
 check "chips: a chip beside typed text" 1 chips "$(box "and also [Pasted text #2 +1 lines]")"
 check "chip-lines: a chip with no newline (not a tracked wire)" 1 chip-lines "$(box "[Pasted text #4]")"
 check "chip-lines: a chip with +3 lines" 1 chip-lines "$(box "[Pasted text #5 +3 lines]")"
+
+# check_before <before> <label> <expected rc> <expected verdict> <pane text>
+check_before() {
+    local saved="$BEFORE"
+    BEFORE="$1"; shift
+    check "$@"
+    BEFORE="$saved"
+}
+
+# --- #2105 review (vera, pullrequestreview-5399643896) ---------------------------
+
+# The blocker's positive control: live frames of claude 2.1.285. A running turn
+# draws its activity line and, mostly, no interrupt hint.
+live_busy="$(sed "s#set +H; \[BOTCOMMAND\] mgr | task | CAPQ1:#$ENVELOPE#" "$FIXTURE_DIR/input-typed-busy.txt")"
+check "busy: a turn runs with the delivery in the box and no interrupt hint (live frame)" 1 busy "$live_busy"
+finished="$(printf '%s\n' '' '✻ Sautéed for 12s · done 9:59 PM' '' "$RULE" "❯${NBSP}" "$RULE" '' "$STATUS")"
+check "not-held: a finished turn's summary line, empty box (live shape)" 1 not-held "$finished"
+
+# Item 1: an earlier delivery cut off before its trailer, glued ahead of this one.
+check "glued: a second envelope heading in the box" 1 glued "$(box "$ENVELOPE first, cut short" "$ENVELOPE second" "$TRAILER")"
+
+# Option (c): a chip carries no message id, so it is this send's only when the
+# box was empty just before the send. The text branch's trailer needs no read.
+check_before held "chip-unproven: the box held text before the send" 1 chip-unproven "$(box "[Pasted text #3 +2 lines]")"
+check_before unknown "chip-unproven: the box could not be read before the send" 1 chip-unproven "$(box "[Pasted text #3 +2 lines]")"
+check_before "" "chip-unproven: no read of the box before the send" 1 chip-unproven "$(box "[Pasted text #3 +2 lines]")"
+check_before held "text: the trailer names the message, whatever the box held" 0 text "$(box "$ENVELOPE body" "$TRAILER")"
 
 echo ""
 echo "=== $passed/$total passed ==="

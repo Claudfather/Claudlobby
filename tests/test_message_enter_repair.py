@@ -3,9 +3,11 @@
 A CLI delivery presses Enter once with verification off. When the receiver had
 not submitted the message after the receipt wait, its box may still hold it: the
 messaging operation owner then looks, and presses one Enter only when the box
-holds exactly this message in a pane with no turn running and no menu open; a
-second, only after another receipt wait, and only on the same match. Never a
-third, never the payload again, and the repair is a Plane fact.
+holds this message's text (its trailer names it), or one paste chip in a box that
+was empty just before the send, in a pane where pane_is_busy sees no running turn
+and no menu is open; a second, only after another receipt wait, and only on the
+same match. Never a third, never the payload again, and the repair is a Plane
+fact.
 
 The box is faked where the decision under test is the owner's (how many looks,
 which receipt gates them); the native look itself runs against real tmux.
@@ -13,6 +15,7 @@ which receipt gates them); the native look itself runs against real tmux.
 
 import json
 import shutil
+from contextlib import contextmanager
 import sqlite3
 import subprocess
 import time
@@ -45,16 +48,21 @@ class _Box:
     press stands in for message_transport.press_held_enter (the native look),
     receipt for message_queries.receipt, which reads what the receiver submitted."""
 
-    def __init__(self, *, needs=1, verdict="text", match="text"):
-        self.needs, self.verdict, self.match = needs, verdict, match
-        self.enters, self.expects, self.waits = 0, [], []
+    def __init__(self, *, needs=1, verdict="text", match="text", before="empty"):
+        self.needs, self.verdict, self.match, self.before = needs, verdict, match, before
+        self.enters, self.expects, self.befores, self.waits = 0, [], [], []
 
     @property
     def submitted(self):
         return self.verdict in ("text", "chip") and self.enters >= self.needs
 
-    def press(self, package, destination, *, message_id, expect=None, timeout=15, runner=None):
+    def read_box(self, package, destination, *, timeout=5, runner=None):
+        return self.before
+
+    def press(self, package, destination, *, message_id, expect=None, before=None, timeout=15,
+              runner=None):
         self.expects.append(expect)
+        self.befores.append(before)
         if self.verdict not in ("text", "chip"):
             return SimpleNamespace(verdict=self.verdict, pressed=False, match=None, reason=None)
         if self.submitted:
@@ -90,8 +98,8 @@ def _held(monkeypatch, box, *, rc=0):
                     clear=lambda *a, **k: None, **kwargs)
     monkeypatch.setattr(message_operations, "send_message", wrapped)
     monkeypatch.setattr(message_transport, "press_held_enter", box.press, raising=False)
+    monkeypatch.setattr(message_transport, "read_box", box.read_box, raising=False)
     monkeypatch.setattr(message_queries, "receipt", box.receipt)
-    monkeypatch.setattr(message_operations, "_REPAIR_RECHECK_S", 0, raising=False)
 
 
 def _send(capsys, root, *, expected):
@@ -121,6 +129,9 @@ def test_the_recipe_a_second_enter_only_for_the_same_match(active, monkeypatch, 
     _held(monkeypatch, box)
     out = _send(capsys, root, expected=0)
     assert box.enters == 2 and box.expects == [None, "chip#1"]
+    # The receipt wait between the looks is the owner's 12 s, asked for after each press.
+    assert box.waits[1:] == [message_operations._REPAIR_RECHECK_S] * 2 == [12, 12]
+    assert box.befores == ["empty", "empty"]
     assert out["data"]["delivery"] == "received"
     assert (out["data"]["enter_repair"]["pressed"], out["data"]["enter_repair"]["match"]) == (2, "chip")
 
@@ -187,11 +198,45 @@ def test_an_assignment_delivery_held_in_the_box_is_repaired(active, monkeypatch,
         return real(*args, transport=transport, **kwargs)
     monkeypatch.setattr(assignment_delivery, "deliver", injected)
     monkeypatch.setattr(message_transport, "press_held_enter", box.press, raising=False)
+    monkeypatch.setattr(message_transport, "read_box", box.read_box, raising=False)
     monkeypatch.setattr(message_queries, "receipt", box.receipt)
-    monkeypatch.setattr(message_operations, "_REPAIR_RECHECK_S", 0, raising=False)
     out = _delivery_call(capsys, root, assigned.assignment_id, "--file", str(body),
                          "--request-id", str(uuid4()), expected=0)
     assert box.enters == 2 and out["data"]["delivery"] == "received"
+
+
+def test_the_box_read_before_the_send_reaches_every_look(active, monkeypatch, capsys):
+    """Option (c): the owner reads the recipient's box once, just before its send,
+    and gives that read to each look, which presses a chip only on an empty one."""
+    root, host = active
+    _generated(monkeypatch, root, host.release)
+    box = _Box(needs=99, before="held")
+    _held(monkeypatch, box)
+    _send(capsys, root, expected=5)
+    assert box.befores == ["held", "held"]
+
+
+def test_a_press_is_recorded_even_when_the_receipt_read_after_it_raises():
+    """vera's item 2: a receipt read that raises after the press (her probe: a
+    locked database) used to leave the press unrecorded. It is recorded, then the
+    error goes on up."""
+    recorded = []
+    first = SimpleNamespace(receipt_observation="missing")
+
+    def press(package, destination, *, message_id, expect=None, before=None):
+        return SimpleNamespace(verdict="text", pressed=True, match="text", reason=None)
+
+    def observe(wait):
+        raise sqlite3.OperationalError("database is locked")
+
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        message_operations.repair_held_delivery(
+            SimpleNamespace(peer_destination=None), None, "msg_" + "e" * 32, observe=observe,
+            first=first, press=press, record=lambda *args: recorded.append(args) or "committed")
+    assert len(recorded) == 1
+    _route, message_id, attempts, observed = recorded[0]
+    assert message_id == "msg_" + "e" * 32 and [a.pressed for a in attempts] == [True]
+    assert observed is first
 
 
 def test_the_repair_is_a_fleet_event_with_its_match_and_every_look(active, monkeypatch, capsys):
@@ -255,16 +300,18 @@ BUSY = _frame(f"[Claudlobby ordinary message] Message: {MSG} body", f"⟦plane:{
               above=("✻ Cogitating… (12s · esc to interrupt)",))
 MENU = _frame("1. Yes, try it", "2. Not now", "Enter to confirm · Esc to cancel")
 OTHER = _frame("[Claudlobby ordinary message] Message: msg_" + "d" * 32 + " body", "⟦plane:msg_" + "d" * 32 + "⟧")
+# claude 2.1.285 draws a running turn's activity line and, mostly, no interrupt hint.
+LIVE_BUSY = _frame(f"[Claudlobby ordinary message] Message: {MSG} body", f"⟦plane:{MSG}⟧",
+                   above=("✻ Transmogrifying…",))
+CHIP3 = _frame("[Pasted text #3 +2 lines]")
+EMPTY = _frame("")
 
 
-@pytest.mark.parametrize(("frame", "expect", "verdict", "keys"), [
-    (HELD, None, "text", b"\r"),
-    (HELD, "chip#2", "changed", b""),
-    (BUSY, None, "busy", b""),
-    (MENU, None, "not-held", b""),
-    (OTHER, None, "not-shown", b""),
-], ids=["held", "held-but-not-the-earlier-match", "busy", "menu", "another-message"])
-def test_the_native_look_presses_one_enter_only_on_a_box_holding_this_message(frame, expect, verdict, keys):
+@contextmanager
+def _stub_pane(frame, *, session="worker"):
+    """A real tmux pane drawing <frame> through the held-box stub, which logs every
+    key it receives. Yields a destination maker (a session name), the key log and
+    the package whose native helper is this checkout's."""
     tmux = shutil.which("tmux")
     assert tmux, "the native look requires tmux"
     stub = Path(__file__).resolve().parent / "fixtures" / "held-box-stub.py"
@@ -280,22 +327,77 @@ def test_the_native_look_presses_one_enter_only_on_a_box_holding_this_message(fr
                "TMUX_TMPDIR": str(sockets), "TMPDIR": str(sockets), "LANG": "C.UTF-8"}
         socket = "private-held"
         subprocess.run([tmux, "-L", socket, "-f", "/dev/null", "new-session", "-d", "-x", "200", "-y", "40",
-                        "-s", "worker", f"python3 {stub} {root / 'frame.txt'} {log}"], env=env, check=True)
+                        "-s", session, f"python3 {stub} {root / 'frame.txt'} {log}"], env=env, check=True)
         try:
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
-                shown = subprocess.run([tmux, "-L", socket, "capture-pane", "-p", "-t", "worker"], env=env,
+                shown = subprocess.run([tmux, "-L", socket, "capture-pane", "-p", "-t", session], env=env,
                                        capture_output=True, text=True).stdout
                 if "auto mode on" in shown:
                     break
                 time.sleep(0.1)
-            destination = message_transport.TransportDestination(root, "fleet", socket, "worker", sockets)
             package = replace(source_package(),
                               native=Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts")
-            outcome = message_transport.press_held_enter(package, destination, message_id=MSG,
-                                                         expect=expect, timeout=10)
-            time.sleep(0.5)
-            assert (outcome.verdict, outcome.pressed) == (verdict, keys == b"\r"), outcome
-            assert log.read_bytes() == keys
+            yield ((lambda name=session: message_transport.TransportDestination(
+                root, "fleet", socket, name, sockets)), log, package)
         finally:
             subprocess.run([tmux, "-L", socket, "kill-server"], env=env, capture_output=True, timeout=5)
+
+
+@pytest.mark.parametrize(("frame", "expect", "verdict", "keys"), [
+    (HELD, None, "text", b"\r"),
+    (HELD, "chip#2", "changed", b""),
+    (BUSY, None, "busy", b""),
+    (MENU, None, "not-held", b""),
+    (OTHER, None, "not-shown", b""),
+    (LIVE_BUSY, None, "busy", b""),
+], ids=["held", "held-but-not-the-earlier-match", "busy", "menu", "another-message",
+        "busy-live-frame-no-hint"])
+def test_the_native_look_presses_one_enter_only_on_a_box_holding_this_message(frame, expect, verdict, keys):
+    with _stub_pane(frame) as (destination, log, package):
+        outcome = message_transport.press_held_enter(package, destination(), message_id=MSG,
+                                                     expect=expect, timeout=10)
+        time.sleep(0.5)
+        assert (outcome.verdict, outcome.pressed) == (verdict, keys == b"\r"), outcome
+        assert log.read_bytes() == keys
+
+
+def test_the_native_look_names_the_chip_it_presses():
+    """vera's (a): the match names the chip's own number, the one a second look must see."""
+    with _stub_pane(CHIP3) as (destination, log, package):
+        outcome = message_transport.press_held_enter(package, destination(), message_id=MSG,
+                                                     before="empty", timeout=10)
+        time.sleep(0.5)
+        assert (outcome.verdict, outcome.pressed, outcome.match) == ("chip", True, "chip#3"), outcome
+        assert log.read_bytes() == b"\r"
+
+
+@pytest.mark.parametrize("before", ["held", "unknown", None])
+def test_a_lone_chip_is_pressed_only_when_the_box_was_empty_before_the_send(before):
+    """Option (c): a chip carries no message id, so the look presses one only when
+    the owner's read just before its send found the box empty."""
+    with _stub_pane(CHIP3) as (destination, log, package):
+        outcome = message_transport.press_held_enter(package, destination(), message_id=MSG,
+                                                     before=before, timeout=10)
+        time.sleep(0.5)
+        assert (outcome.verdict, outcome.pressed) == ("chip-unproven", False), outcome
+        assert log.read_bytes() == b""
+
+
+def test_the_native_look_reads_only_the_exact_session():
+    """vera's (b): asked for `work` while only `worker` exists, the look reads and
+    presses nothing; a target matched by prefix would read the other pane."""
+    with _stub_pane(HELD, session="worker") as (destination, log, package):
+        outcome = message_transport.press_held_enter(package, destination("work"), message_id=MSG,
+                                                     timeout=10)
+        time.sleep(0.5)
+        assert (outcome.verdict, outcome.pressed) == ("unknown", False), outcome
+        assert log.read_bytes() == b""
+
+
+@pytest.mark.parametrize(("frame", "state"), [(HELD, "held"), (EMPTY, "empty")], ids=["held", "empty"])
+def test_read_box_says_whether_the_box_holds_text_before_a_send(frame, state):
+    with _stub_pane(frame) as (destination, log, package):
+        assert message_transport.read_box(package, destination(), timeout=10) == state
+        assert message_transport.read_box(package, destination("absent"), timeout=10) == "unknown"
+        assert log.read_bytes() == b""
