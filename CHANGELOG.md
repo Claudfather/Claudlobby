@@ -23,7 +23,7 @@ CI, a green deploy and a healthy service prove that a system still runs, not tha
   - only a 404 on the default branch's caller file says a repo has not adopted the check;
   - only the check's newest run at the head counts;
   - the merger reads a PR's changed files from the API, and a PR that changes a workflow file merges only on the rung 1 verdict that names each one.
-  - The new rung 5 refuses a merge while a `rollout-hold` issue is open. The only exception is a PR that closes it and whose rung 1 verdict names it: a closing keyword alone is the author's to write.
+  - The new rung 5 refuses a merge while a `rollout-hold` issue is open, in a repo that has adopted the check. The only exception is a PR that closes it and whose rung 1 verdict names it: a closing keyword alone is the author's to write. In a repo that has not adopted the check, rung 5 lists nothing and cannot refuse, so a fleet that composes the guardrail without opting in gains no new way to fail.
 - `.github/pull_request_template.md` carries the section. `canary-rollout` gains a row and a pointer for the rollout check.
 
 ### Fixed — a send presses Enter only once the box shows the typed text, and a held box is never counted as sent (#1236)

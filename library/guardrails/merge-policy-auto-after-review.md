@@ -82,19 +82,24 @@ The manager auto-merges PRs when ALL of:
 
    Run rung 0, this rung and the merge command in one call: the Bash tool keeps no variables between calls, and a `$DELETE` that was never set just keeps the branch.
 
-5. **NO OPEN ROLLOUT HOLD on this repo** (`verify-rollout`). A failed rollout check opens an issue labelled `rollout-hold`. While one is open, only a PR that fixes or reverts the change that failed may merge into the repo, and it needs both:
+5. **NO OPEN ROLLOUT HOLD on a repo that has adopted the rollout check** (`verify-rollout`). This rung applies only where the repo's default branch carries `.github/workflows/rollout-check.yml`, read as rung 2 reads it. Elsewhere it is inert: a fleet that composes this guardrail without opting into `verify-rollout` gains no hold listing that could refuse its merge. Only a 404 says the repo has not adopted the check; any other failed read refuses, because it cannot tell the two apart. Where the rung applies, a failed rollout check opens an issue labelled `rollout-hold`. While one is open, only a PR that fixes or reverts the change that failed may merge into the repo, and it needs both:
    - **It closes that hold** (`closingIssuesReferences`, filled from a `Closes #N` keyword in its body). It may close any one open hold: requiring every hold would deadlock two independent ones.
    - **The rung 1 verdict names the hold:** a different bot's verdict, at this head, that names the hold issue and says this PR fixes or reverts the change that failed. The keyword is the author's to write, and a body edit after the review adds it without moving the head, so the keyword never grants the exception by itself.
 
    A failed listing or read refuses, like rung 4's. Run it in the same call as rung 0, which sets `$REPO` and `$N`. When the PR closes a hold, the snippet names it, and the verdict is held to that name:
 
    ```bash
-   HOLDS=$(gh issue list --repo "$REPO" --label rollout-hold --state open --json number --jq '.[].number') || { echo "REFUSE: the rollout-hold listing failed"; exit 1; }
-   if [ -n "$HOLDS" ]; then
-     CLOSES=$(gh pr view "$N" --repo "$REPO" --json closingIssuesReferences --jq '.closingIssuesReferences[].number') || { echo "REFUSE: cannot read what this PR closes"; exit 1; }
-     HOLD=$(printf '%s\n' $HOLDS | grep -xF -f <(printf '%s\n' $CLOSES) | head -1) || true
-     [ -n "$HOLD" ] || { echo "REFUSE: rollout hold open: $HOLDS"; exit 1; }
-     echo "This PR closes rollout hold #$HOLD: merge only if the rung 1 verdict names #$HOLD and says this PR fixes or reverts the change that failed."
+   DEFAULT=$(gh api "repos/$REPO" --jq .default_branch) || { echo "REFUSE: cannot read the default branch"; exit 1; }
+   if ERR=$(gh api "repos/$REPO/contents/.github/workflows/rollout-check.yml?ref=$DEFAULT" --silent 2>&1); then
+     HOLDS=$(gh issue list --repo "$REPO" --label rollout-hold --state open --json number --jq '.[].number') || { echo "REFUSE: the rollout-hold listing failed"; exit 1; }
+     if [ -n "$HOLDS" ]; then
+       CLOSES=$(gh pr view "$N" --repo "$REPO" --json closingIssuesReferences --jq '.closingIssuesReferences[].number') || { echo "REFUSE: cannot read what this PR closes"; exit 1; }
+       HOLD=$(printf '%s\n' $HOLDS | grep -xF -f <(printf '%s\n' $CLOSES) | head -1) || true
+       [ -n "$HOLD" ] || { echo "REFUSE: rollout hold open: $HOLDS"; exit 1; }
+       echo "This PR closes rollout hold #$HOLD: merge only if the rung 1 verdict names #$HOLD and says this PR fixes or reverts the change that failed."
+     fi
+   else
+     case "$ERR" in *"HTTP 404"*) echo "This repo has not adopted the rollout check: no hold applies" ;; *) echo "REFUSE: cannot tell whether this repo runs the rollout check: $ERR"; exit 1 ;; esac
    fi
    ```
 
@@ -116,6 +121,6 @@ gh pr merge "$N" --repo "$REPO" --squash $DELETE --match-head-commit "$PH"
 - PRs with unresolved review threads.
 - PRs where CI is failing or pending — **or where a required workflow is missing from the rollup.** "Not failing" is not "passed": an absent workflow cannot fail.
 - PRs the manager authored (self-merge requires a second reviewer).
-- PRs into a repo with an open `rollout-hold` issue, except one that closes it and whose rung 1 verdict names it (rung 5).
+- PRs into a repo that has adopted the rollout check while a `rollout-hold` issue is open, except one that closes it and whose rung 1 verdict names it (rung 5).
 
 The manager posts "Merging #NN" to Telegram before executing, so the human has visibility — **naming any branch rung 4 kept**, because the stacked PR's author is told nowhere else.
