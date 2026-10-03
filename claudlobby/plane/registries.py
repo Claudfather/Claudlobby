@@ -151,6 +151,9 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # from the messaging operation owner. data.match says whether the box showed
     # the message's text or only a paste chip.
     "delivery_enter_repaired": "notice",
+    # #2036: a pane send that went out WITHOUT the recipient's send lock,
+    # because no lock could be taken at all (a refused one is send_miss).
+    "send_unlocked": "notice",
     "resume_skipped": "notice",
     "plugin_marketplace_failed": "notice",
     "briefing_deferred": "notice",

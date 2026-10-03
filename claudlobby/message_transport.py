@@ -225,22 +225,34 @@ class EnterRepairOutcome:
 _REPAIR_SCRIPT = r'''
 set -uo pipefail
 . "$1" >/dev/null 2>&1 || { printf 'repair-v1\tunknown\t0\t-\n'; exit 3; }
-pane=$(bot_tmux "$2" capture-pane -p -t "=$3:" 2>/dev/null) || { printf 'repair-v1\tunknown\t0\t-\n'; _lc_cleanup >/dev/null 2>&1; exit 3; }
-verdict=$(held_delivery_match "$pane" "$4" "${6:-}") && ok=1 || ok=0
-match=-
-if [ "$ok" = 1 ]; then
-    match="$verdict"
-    if [ "$verdict" = chip ]; then
-        match="chip$(printf '%s\n' "$(pane_input_region "$pane")" | LC_ALL=C grep -oE '\[Pasted text #[0-9]+' | head -1 | LC_ALL=C sed 's/.*#/#/')"
+_repair_look_and_press() {
+    local pane verdict ok match pressed
+    pane=$(bot_tmux "$2" capture-pane -p -t "=$3:" 2>/dev/null) || { printf 'repair-v1\tunknown\t0\t-\n'; return 3; }
+    verdict=$(held_delivery_match "$pane" "$4" "${6:-}") && ok=1 || ok=0
+    match=-
+    if [ "$ok" = 1 ]; then
+        match="$verdict"
+        if [ "$verdict" = chip ]; then
+            match="chip$(printf '%s\n' "$(pane_input_region "$pane")" | LC_ALL=C grep -oE '\[Pasted text #[0-9]+' | head -1 | LC_ALL=C sed 's/.*#/#/')"
+        fi
+        if [ -n "${5:-}" ] && [ "$match" != "$5" ]; then verdict=changed; ok=0; fi
     fi
-    if [ -n "${5:-}" ] && [ "$match" != "$5" ]; then verdict=changed; ok=0; fi
-fi
-pressed=0
-if [ "$ok" = 1 ]; then
-    bot_tmux "$2" send-keys -t "=$3:" Enter >/dev/null 2>&1 && pressed=1
-fi
-printf 'repair-v1\t%s\t%s\t%s\n' "${verdict:-unknown}" "$pressed" "$match"
+    pressed=0
+    if [ "$ok" = 1 ]; then
+        bot_tmux "$2" send-keys -t "=$3:" Enter >/dev/null 2>&1 && pressed=1
+    fi
+    printf 'repair-v1\t%s\t%s\t%s\n' "${verdict:-unknown}" "$pressed" "$match"
+}
+# The look and its Enter hold the pane's send lock (#2036), so no other sender
+# types between them and the Enter never lands inside another sender's chunks.
+# The wait, 5 s, covers a send in flight (a 4 KB one holds the lock about 2 s)
+# inside this call's own 15 s bound. Refused, it looks at nothing and presses
+# nothing.
+rc=0
+_pane_with_send_lock enter 5 "$2" "$3" _repair_look_and_press "$@" || rc=$?
+[ "$rc" -ne 75 ] || printf 'repair-v1\tunknown\t0\t-\n'
 _lc_cleanup >/dev/null 2>&1
+[ "$rc" -ne 3 ] || exit 3
 exit 0
 '''
 

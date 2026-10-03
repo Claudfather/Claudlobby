@@ -679,7 +679,9 @@ svc_bot_control_exact() (
     if [ "$control" = interrupt ]; then
         # Esc requests one turn/tool cancellation without Ctrl-C's idle-prompt
         # exit behavior. Tmux submission does not verify Claude cancelled it.
-        bot_tmux "$expected" send-keys -t "$session" Escape || return 3
+        # It takes the pane's send lock (#2036): an Escape landing inside
+        # another sender's chunks would act on that half-typed payload.
+        pane_send_key "$expected" "$session" Escape interrupt || return 3
     else
         # Keep the existing chunked pane primitive, but disable its optional
         # Enter repair: this explicit control is never automatically resent.
