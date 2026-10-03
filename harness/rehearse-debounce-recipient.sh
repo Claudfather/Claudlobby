@@ -60,6 +60,19 @@ EOF
 
 start_manager () { tmux -L "$MGR_SOCK" new-session -d -s "$MGR" "$MGR_BOX"; }
 mgr_pane ()      { tmux -L "$MGR_SOCK" capture-pane -t "$MGR" -p 2>/dev/null || true; }
+# The precondition every push below rests on: a manager that is up and shows its
+# box. A push typed before the box is drawn is never shown there, so it returns
+# 3 (#1236) and its window stays open (#2120). That is a slow start, not the
+# restart this rehearsal tests, and on a slow runner it failed every later check.
+manager_box ()   {
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        # capture-pane trims trailing spaces, so the "> " prompt reads as ">".
+        case "$(mgr_pane)" in *">"*) echo shown; return ;; esac
+        sleep 0.5
+    done
+    echo missing
+}
 # Count pushes rather than clearing between steps: `clear-history` only drops
 # scrollback, so a "cleared" pane still shows the previous push and every later
 # check would read as a false positive.
@@ -78,6 +91,7 @@ echo "=== #831 rehearsal: does a FLEET-PULSE alert survive a manager restart? ==
 
 echo "--- 1. episode opens: manager is up, condition fires ---"
 start_manager
+check "  the manager is up and shows its box" shown "$(manager_box)"
 run_pulse
 check "  session_missing pushed once" 1 "$(push_count session_missing)"
 check "  service_down pushed once"    1 "$(push_count service_down)"
@@ -92,6 +106,7 @@ echo "--- 3. the bug: manager restarts, condition STILL unresolved ---"
 tmux -L "$MGR_SOCK" kill-session -t "$MGR" 2>/dev/null || true
 start_manager                               # a new session IS a new, empty pane
 check "restarted manager starts with no push" 0 "$(push_count session_missing)"
+check "the restarted manager is up and shows its box" shown "$(manager_box)"
 run_pulse
 check "restarted manager receives session_missing (THE PROPERTY)" 1 "$(push_count session_missing)"
 check "restarted manager receives service_down too"              1 "$(push_count service_down)"

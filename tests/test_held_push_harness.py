@@ -4,7 +4,8 @@ A FLEET-PULSE push never types into a manager's box that holds text, and the
 alert is still recorded for the escalation; a push the box did not take keeps
 its alert's window open; a box that takes no input costs one wait, then a floor
 with no wait and no typing; once the floor lapses and the box takes input, the
-push goes out, closes the window and clears the floor. It drives the real
+push goes out, closes the window and clears the floor. The floor is the manager
+instance's, so a restarted manager is not held back by it. It drives the real
 `fleet-pulse.sh` against a throwaway worker with two real unresolved conditions
 and a real manager pane: one holding text, one that takes no input, one that
 does.
@@ -78,6 +79,18 @@ def test_the_floor_lapses_and_the_push_goes_out_once_the_box_takes_input(run):
             "a submitted push clears the floor",
             "no second session_missing push",
             "no second service_down push")
+
+
+def test_a_restarted_manager_is_not_held_back_by_its_predecessors_floor(run):
+    """The floor is the manager instance's (#831's recipient token): a restart is a new
+    box, and the alerts that re-fire to it go out."""
+    _passed(run, "a second deaf manager is up and shows its box",
+            "the alerts re-fire to it, and one push waits on its box",
+            "its other alert is held back by its floor",
+            "a manager that takes input replaces it and shows its box",
+            "the new manager is not held back by its predecessor's floor",
+            "session_missing reaches the new manager",
+            "service_down reaches the new manager")
 
 
 def test_every_check_passes(run):

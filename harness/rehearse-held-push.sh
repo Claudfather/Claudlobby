@@ -12,7 +12,8 @@
 # the same box every sweep. So (dara's decision on vera's review): a box that
 # holds text gets no push, the alert's record is left to the escalation, and
 # after a push the box did not take, that manager gets no push until a floor
-# (FLEET_PULSE_HELD_PUSH_FLOOR_S, 30 min) lapses.
+# (FLEET_PULSE_HELD_PUSH_FLOOR_S, 30 min) lapses. The floor is that manager
+# instance's: a restarted manager is a new box and is not held back by it.
 #
 # Isolation as in rehearse-debounce-recipient.sh (#846): private tmux sockets
 # under a throwaway TMUX_TMPDIR, a throwaway CLAUDLOBBY_ROOT, and a fake
@@ -151,6 +152,24 @@ echo "--- 5. control: a closed window debounces ---"
 run_pulse
 check "no second session_missing push" 1 "$(push_count session_missing)"
 check "no second service_down push"    1 "$(push_count service_down)"
+
+echo "--- 6. the floor belongs to the manager instance: a restarted manager is not held back ---"
+# A restart is a new box: #831's recipient token (session_created, pane_pid)
+# changes, so both alerts re-fire to it. A deaf one sets a floor; the next one,
+# which takes input, must not inherit that floor.
+tmux -L "$MGR_SOCK" kill-session -t "$MGR" 2>/dev/null || true
+start_manager --deaf
+check "a second deaf manager is up and shows its box" shown "$(manager_box)"
+run_pulse
+check "the alerts re-fire to it, and one push waits on its box" 1 "$(waits)"
+check "its other alert is held back by its floor" 1 "$(floor_skips)"
+tmux -L "$MGR_SOCK" kill-session -t "$MGR" 2>/dev/null || true
+start_manager
+check "a manager that takes input replaces it and shows its box" shown "$(manager_box)"
+run_pulse
+check "the new manager is not held back by its predecessor's floor" 0 "$(floor_skips)"
+check "session_missing reaches the new manager" 1 "$(push_count session_missing)"
+check "service_down reaches the new manager"    1 "$(push_count service_down)"
 
 echo
 echo "=== $pass passed, $fail failed ==="
