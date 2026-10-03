@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 # rehearse-held-push.sh — prove #2120 on real tmux sessions: a FLEET-PULSE push
-# that the manager's box did not take keeps its alert's window open, and such a
-# box costs one push wait per sweep, not one per alert.
+# never types into a manager's box that holds text, a push the box did not take
+# keeps its alert's window open, and a box that takes no input costs one wait per
+# floor, not one per sweep or per alert.
 #
 # notify_manager discarded the send's status (`bot_tmux_send ... || true`), so a
 # push typed and never submitted (rc 3, #1236) returned 0, and debounce_notify
 # set the marker: the alert went quiet though nobody had read it (#900: a send
-# that reached nobody must not buy the window). And every push to a box that
-# never shows it waited the whole shown budget, ahead of the sweep's Telegram
-# escalation.
-#
-# Red on the pre-fix code: step 1 finds both windows closed and two waits, and
-# step 2 finds no push at all.
+# that reached nobody must not buy the window). With the window kept open, an
+# unbounded re-page would type a copy of the alert, and press its Enters, into
+# the same box every sweep. So (dara's decision on vera's review): a box that
+# holds text gets no push, the alert's record is left to the escalation, and
+# after a push the box did not take, that manager gets no push until a floor
+# (FLEET_PULSE_HELD_PUSH_FLOOR_S, 30 min) lapses.
 #
 # Isolation as in rehearse-debounce-recipient.sh (#846): private tmux sockets
 # under a throwaway TMUX_TMPDIR, a throwaway CLAUDLOBBY_ROOT, and a fake
@@ -80,42 +81,73 @@ window ()        { if [ -f "$ROOT/state/pulse/w1.$1" ]; then echo closed; else e
 # Each push that waited out the shown budget says so on the sweep's stderr.
 waits ()         { grep -c "never showed the typed payload" "$ROOT/pulse.log" || true; }
 
-# One sweep. The short shown budget keeps a held push to about a second here:
-# the property is how many pushes wait, not how long one wait is.
+# Each sweep records its alerts on the plane whatever the push did; with no daemon
+# in this throwaway root, plane-emit.sh stages them under it. That record is what
+# the escalation reads, so an alert whose push is skipped is still carried there.
+recorded ()      { cat "$ROOT"/state/plane/staged/* 2>/dev/null | grep -c "$1" || true; }
+held_skips ()    { grep -c "box holds text" "$ROOT/pulse.log" || true; }
+floor_skips ()   { grep -c "did not take a push less than" "$ROOT/pulse.log" || true; }
+# The box's own line: the last line the stub draws with its prompt.
+box_line ()      { mgr_pane | grep '^>' | tail -1; }
+
+# One sweep. The short shown budget keeps a held push to about a second here: the
+# property is how many pushes wait, not how long one wait is. The emits are on and
+# can only stage in this root: PLANE_SOCKET is unset, so the socket is the root's
+# own, which nothing serves. Extra VAR=value arguments go into the sweep's env.
 run_pulse () {
-    env CLAUDLOBBY_ROOT="$ROOT" TMUX_TMPDIR="$TMUX_TMPDIR" PANE_SEND_SHOWN_TICKS=5 \
-        FLEET_PULSE_ESCALATION_CHAT_ID="-100999" \
-        TELEGRAM_GROUP_CHAT_ID="" FLEET_PULSE_ESCALATION_STATE_DIR="$ROOT/tg" \
+    env -u PLANE_EMIT_DISABLED -u PLANE_SOCKET CLAUDLOBBY_ROOT="$ROOT" TMUX_TMPDIR="$TMUX_TMPDIR" \
+        PANE_SEND_SHOWN_TICKS=5 FLEET_PULSE_ESCALATION_CHAT_ID="-100999" \
+        TELEGRAM_GROUP_CHAT_ID="" FLEET_PULSE_ESCALATION_STATE_DIR="$ROOT/tg" "$@" \
         bash "$LIB_DIR/fleet-pulse.sh" "$FLEET" >"$ROOT/pulse.log" 2>&1 || true
 }
 
-echo "=== #2120 rehearsal: is a FLEET-PULSE push the manager never took counted as delivered? ==="
+echo "=== #2120 rehearsal: no push types into a held box, and a box that takes no input is bounded ==="
 
-echo "--- 1. the manager's box takes no input; two alerts this sweep ---"
-start_manager --deaf
+echo "--- 1. the manager's box already holds text; two alerts this sweep ---"
+start_manager
 check "the manager is up and shows its box" shown "$(manager_box)"
+tmux -L "$MGR_SOCK" send-keys -t "$MGR" -l "a reply being typed"
+sleep 0.5
+check "the box holds the manager's own text" "> a reply being typed" "$(box_line)"
+seen=$(recorded session_missing)
 run_pulse
+check "a held box gets no copy of an alert" 0 "$(push_count session_missing)"
+check "a held box gets no Enter: its text is still in it" "> a reply being typed" "$(box_line)"
+check "both alerts are skipped, not typed" 2 "$(held_skips)"
+check "a skipped push leaves session_missing's window open" open "$(window session_alerted)"
+check "the alert is still recorded for the escalation" 1 "$(( $(recorded session_missing) - seen ))"
+
+echo "--- 2. the box takes no input: one wait, then the floor ---"
+tmux -L "$MGR_SOCK" kill-session -t "$MGR" 2>/dev/null || true
+start_manager --deaf
+check "the deaf manager is up and shows its box" shown "$(manager_box)"
+run_pulse
+check "one push waits on the box that takes no input" 1 "$(waits)"
+check "the other alert is held back by the floor, not typed" 1 "$(floor_skips)"
 check "a held push leaves session_missing's window open" open "$(window session_alerted)"
 check "a held push leaves service_down's window open"    open "$(window service_alerted)"
-check "one push waits on the held box, not one per alert" 1 "$(waits)"
 
-echo "--- 2. still held: the next sweep pages again ---"
+echo "--- 3. within the floor: no wait and no typing ---"
+seen=$(recorded session_missing)
 run_pulse
-check "the next sweep pushes again"         1 "$(waits)"
-check "the held manager is still up"         shown "$(manager_box)"
-check "session_missing's window stays open" open "$(window session_alerted)"
+check "no push waits within the floor" 0 "$(waits)"
+check "both alerts are held back by the floor" 2 "$(floor_skips)"
+check "the alert is still recorded within the floor" 1 "$(( $(recorded session_missing) - seen ))"
+check "session_missing's window stays open within the floor" open "$(window session_alerted)"
 
-echo "--- 3. the box takes input again: a submitted push closes the window ---"
+echo "--- 4. the floor lapses and the box takes input: the push goes out ---"
 tmux -L "$MGR_SOCK" kill-session -t "$MGR" 2>/dev/null || true
 start_manager
 check "the restarted manager is up and shows its box" shown "$(manager_box)"
-run_pulse
+sleep 2
+run_pulse FLEET_PULSE_HELD_PUSH_FLOOR_S=1
 check "session_missing is pushed and submitted"          1 "$(push_count session_missing)"
 check "service_down is pushed and submitted"             1 "$(push_count service_down)"
 check "a submitted push closes session_missing's window" closed "$(window session_alerted)"
 check "a submitted push closes service_down's window"    closed "$(window service_alerted)"
+check "a submitted push clears the floor" absent "$(ls "$ROOT"/state/pulse/held-push.* >/dev/null 2>&1 && echo present || echo absent)"
 
-echo "--- 4. control: a closed window debounces ---"
+echo "--- 5. control: a closed window debounces ---"
 run_pulse
 check "no second session_missing push" 1 "$(push_count session_missing)"
 check "no second service_down push"    1 "$(push_count service_down)"
