@@ -496,7 +496,7 @@ class TestTheQueue:
         lines = _status(se).stdout.splitlines()
         # served next: the other fleet's ticket, since the holder's fleet took the slot last
         assert "queue: 2 waiting, in the order they are served" in lines
-        first, second = [x for x in lines if x.startswith("queue ")][1:]
+        first, second = [x for x in lines if x.startswith("queue ")]
         assert first.startswith("queue 1: ticket ") and "otherfleet/gamma (pytest)" in first
         assert first.endswith("dropped after 3 min silent once a slot is free — next")
         assert second.startswith("queue 2: ticket ") and "testfleet/beta (pytest)" in second
