@@ -520,8 +520,10 @@ for bot_dir in "$BOTS_DIR"/*/; do
                     #     touches .idle when idle; bot-vitals touches .last-tool-call
                     #     on each tool call);
                     #   - recently active: a tool call within the active window; or
-                    #   - active turn: an "esc to interrupt" affordance in the pane
-                    #     (e.g. a long tool call or waiting on a subagent).
+                    #   - active turn: pane_is_busy sees one in the whole pane, by
+                    #     its interrupt hint or its activity line (a long tool call,
+                    #     a subagent, or a long-thinking turn whose timer ticks
+                    #     above the five lines hashed here).
                     # Any of these means busy/idle, NOT stuck.
                     if [ "$elapsed" -ge "$pane_stuck_threshold" ] \
                         && ! marker_is_newer "$bot_dir/data/.idle" "$bot_dir/data/.last-tool-call" \
