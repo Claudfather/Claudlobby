@@ -23,7 +23,7 @@ GUARDRAILS = REPO / "library" / "guardrails"
 FAKE_GH = REPO / "tests" / "fixtures" / "fake-gh-rungs.py"
 FILES = ("merge-policy-auto-admin.md", "merge-policy-auto-after-review.md")
 
-ADOPTION = "rollout-check.yml?ref="   # rung 2: is the check adopted, and its newest run
+ADOPTION = "statusCheckRollup"        # rung 2: is the check adopted, and its newest run
 WORKFLOWS = 'pulls/$N/files'          # rung 2: the PR's own workflow changes
 HOLD = "rollout-hold"                 # rung 5: an open rollout hold
 
@@ -94,22 +94,42 @@ def test_rung_2_reads_the_prs_own_files_for_a_workflow_change(tmp_path, name):
 
 @pytest.mark.parametrize("name", FILES)
 @pytest.mark.parametrize(("state", "passes", "hold"), [
-    ({"holds": []}, True, None),
-    ({"holds": [100], "closes": [100]}, True, 100),
-    ({"holds": [100, 200], "closes": [200]}, True, 200),
-    ({"holds": [100], "closes": [10]}, False, None),
-    ({"holds": [10], "closes": [100]}, False, None),
-    ({"holds": [100], "closes": []}, False, None),
-    ({"fail": ["holds"]}, False, None),
-    ({"holds": [100], "fail": ["closes"]}, False, None),
+    ({"contents": "present", "holds": []}, True, None),
+    ({"contents": "present", "holds": [100], "closes": [100]}, True, 100),
+    ({"contents": "present", "holds": [100, 200], "closes": [200]}, True, 200),
+    ({"contents": "present", "holds": [100], "closes": [10]}, False, None),
+    ({"contents": "present", "holds": [10], "closes": [100]}, False, None),
+    ({"contents": "present", "holds": [100], "closes": []}, False, None),
+    ({"contents": "present", "fail": ["holds"]}, False, None),
+    ({"contents": "present", "holds": [100], "fail": ["closes"]}, False, None),
+    ({"contents": "present", "fail": ["contents"]}, False, None),
+    ({"contents": "present", "fail": ["repo"]}, False, None),
 ], ids=["no-hold", "closes-the-hold", "closes-one-of-two", "10-against-100", "100-against-10",
-        "closes-nothing", "hold-listing-fails", "closes-read-fails"])
+        "closes-nothing", "hold-listing-fails", "closes-read-fails", "adoption-read-fails",
+        "default-branch-read-fails"])
 def test_rung_5_refuses_a_failed_read_and_never_lets_the_keyword_alone_grant_it(tmp_path, name, state,
                                                                                passes, hold):
-    """A `Closes #N` keyword is the author's to write, so a PR that closes a hold
-    still merges only on the rung 1 verdict that names that hold; the snippet says
-    which, so the merger can hold the verdict to it."""
+    """In a repo that has adopted the check. A `Closes #N` keyword is the author's to
+    write, so a PR that closes a hold still merges only on the rung 1 verdict that
+    names that hold; the snippet says which, so the merger can hold the verdict to it.
+    An adoption read that fails cannot tell an adopted repo from one that is not, so
+    it refuses."""
     run = run_rung(tmp_path, snippet(name, HOLD), state)
     assert passed(run) is passes, run.stdout
     if hold is not None:
         assert f"rung 1 verdict names #{hold}" in run.stdout, run.stdout
+
+
+@pytest.mark.parametrize("name", FILES)
+@pytest.mark.parametrize("state", [
+    {"contents": "absent", "holds": [100]},
+    {"contents": "absent", "fail": ["holds", "closes"]},
+], ids=["a-hold-labelled-issue", "the-listing-would-fail"])
+def test_rung_5_is_inert_where_the_repo_has_not_adopted_the_check(tmp_path, name, state):
+    """Opt-in (dara, for a fleet that composes this guardrail without verify-rollout):
+    where the default branch has no rollout-check caller (a 404), rung 5 lists no holds
+    and so cannot refuse a merge."""
+    run = run_rung(tmp_path, snippet(name, HOLD), state)
+    assert passed(run), run.stdout
+    calls = [json.loads(line) for line in (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()]
+    assert not any(call[:2] in (["issue", "list"], ["pr", "view"]) for call in calls), calls
