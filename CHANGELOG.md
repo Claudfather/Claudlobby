@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the debounce rehearsal waits for its manager's box (#2136)
+
+`tests/test_debounce_recipient_harness.py` has failed in single CI lanes since #2108: the runner sometimes started the manager's stand-in after the first pulse. The stand-in enters raw mode before it draws its box, and entering raw mode discards keys typed before it. So neither alert of that tick was submitted, and the debounce marked both sent.
+
+- **The rehearsal starts a manager only once its box is drawn,** and fails by name when the box does not come within 20 s.
+- **It counts what each manager instance was submitted,** from the stand-in's new `--log`, never the text its pane shows. Read from the pane, a push whose Enter was withheld passed as pushed.
+- **`REHEARSAL_MANAGER_START_DELAY` forces the race,** and a new test runs the rehearsal with a 3 s delay.
+
 ### Fixed — the shared busy check sees a running turn whose activity line opens its parenthesis with a word (#2130)
 
 #2105 taught `pane_is_busy` a running turn's activity line, but read its parenthesis only when it opened with a digit, the elapsed time (`● Misting… (58m 4s · …)`). A running turn opens it with a word while it runs its hooks (`● Combobulating… (running PreToolUse hooks… 0/6 · 17m 50s · …)`), and can for other progress too. In vera's live pass after #2121, every running turn the check missed had that shape, about one in fifteen. In four minutes of one working session here, 197 of 960 frames drew it, every one a turn running its hooks. A miss reads a running turn as not busy to every consumer. #2105's repair then presses its Enter into a busy box, where it lands on the delivery's own text and is queued behind the turn. The keystroke injectors' `bot_is_busy` reaches this check once the bot's last tool call is older than its active window (180 s by default).
