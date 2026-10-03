@@ -10,7 +10,8 @@ that its session precheck dropped the send before any pane write.
 
 ``press_held_enter`` is the second native call, made only by the operation owner
 after a receipt wait found no receipt (#2105): it reads the pane, and presses one
-Enter only when ``held_delivery_match`` says the box holds exactly this message.
+Enter only when ``held_delivery_match`` finds this message there: its text, or one
+paste chip in a box that read_box found empty just before the send.
 """
 
 from __future__ import annotations
@@ -206,7 +207,7 @@ class EnterRepairOutcome:
     """One look at the recipient's box, and whether one Enter followed it.
 
     verdict is held_delivery_match's (text, chip, busy, not-held, not-shown, glued,
-    chips, chip-lines), ``changed`` when the box no longer holds what an earlier
+    chips, chip-lines, chip-unproven), ``changed`` when the box no longer holds what an earlier
     look matched, or ``unknown`` when the pane could not be read or the native call
     failed. match names what was matched (``text``, or ``chip#N`` with the chip's
     number) so a later look can require the same; pressed is true only when the
@@ -225,7 +226,7 @@ _REPAIR_SCRIPT = r'''
 set -uo pipefail
 . "$1" >/dev/null 2>&1 || { printf 'repair-v1\tunknown\t0\t-\n'; exit 3; }
 pane=$(bot_tmux "$2" capture-pane -p -t "=$3:" 2>/dev/null) || { printf 'repair-v1\tunknown\t0\t-\n'; _lc_cleanup >/dev/null 2>&1; exit 3; }
-verdict=$(held_delivery_match "$pane" "$4") && ok=1 || ok=0
+verdict=$(held_delivery_match "$pane" "$4" "${6:-}") && ok=1 || ok=0
 match=-
 if [ "$ok" = 1 ]; then
     match="$verdict"
@@ -244,16 +245,18 @@ exit 0
 '''
 
 _VERDICTS = frozenset({"text", "chip", "busy", "not-held", "not-shown", "glued", "chips", "chip-lines",
-                       "changed", "unknown"})
+                       "chip-unproven", "changed", "unknown"})
 
 
 def press_held_enter(package: PackageResources, destination: TransportDestination, *,
-                     message_id: str, expect: str | None = None, timeout: float = 15,
-                     runner=None) -> EnterRepairOutcome:
-    """Press ONE Enter in the recipient's box when it holds exactly this message.
+                     message_id: str, expect: str | None = None, before: str | None = None,
+                     timeout: float = 15, runner=None) -> EnterRepairOutcome:
+    """Press ONE Enter in the recipient's box when it holds this message.
 
     Never sends the payload, never a second key. ``expect`` is an earlier look's
-    match: this look presses only if it matches the same. The operation owner
+    match: this look presses only if it matches the same. ``before`` is read_box's
+    answer from just before the send: a lone paste chip carries no message id, so
+    it is pressed only when the box was ``empty`` then. The operation owner
     decides whether a second look is due. The same fixed native environment as
     send(): no inherited shell state, the Plane unreachable from the native side
     (the owner records the repair), the exact =session: target."""
@@ -263,6 +266,8 @@ def press_held_enter(package: PackageResources, destination: TransportDestinatio
         raise ValueError("canonical message ID required")
     if expect is not None and not re.fullmatch(r"text|chip#[0-9]+", expect):
         raise ValueError("expect names an earlier match: text or chip#N")
+    if before is not None and before not in _BOX_STATES:
+        raise ValueError("before is read_box's answer: empty, held or unknown")
     if isinstance(timeout, bool) or not 0 < timeout <= 60:
         raise ValueError("repair timeout must be finite and in (0, 60]")
     native = package.native / "lib-common.sh"
@@ -273,7 +278,8 @@ def press_held_enter(package: PackageResources, destination: TransportDestinatio
            "FLEET_NAME": destination.fleet, "TMUX_TMPDIR": str(destination.tmux_tmpdir),
            "TMPDIR": str(destination.tmux_tmpdir), "PLANE_EMIT_DISABLED": "1"}
     command = ["/bin/bash", "--noprofile", "--norc", "-c", _REPAIR_SCRIPT, "message-enter-repair",
-               str(native), destination.socket, destination.session, message_id, expect or ""]
+               str(native), destination.socket, destination.session, message_id, expect or "",
+               before or ""]
     try:
         result = (runner or _run)(command, input=b"", env=env, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
@@ -290,6 +296,48 @@ def press_held_enter(package: PackageResources, destination: TransportDestinatio
     verdict, pressed, match = line
     return EnterRepairOutcome(verdict, pressed, match,
                               "pane could not be read" if verdict == "unknown" else None)
+
+
+# One read of the recipient's box just before a send (#2105, chip identity): does
+# it already hold text, a person's or an earlier delivery's? The same exact pane
+# and the shared pane_is_held as the repair's look. Nothing is sent.
+_BOX_SCRIPT = r'''
+set -uo pipefail
+. "$1" >/dev/null 2>&1 || { printf 'box-v1\tunknown\n'; exit 3; }
+pane=$(bot_tmux "$2" capture-pane -p -t "=$3:" 2>/dev/null) || { printf 'box-v1\tunknown\n'; _lc_cleanup >/dev/null 2>&1; exit 3; }
+if pane_is_held "$pane"; then printf 'box-v1\theld\n'; else printf 'box-v1\tempty\n'; fi
+_lc_cleanup >/dev/null 2>&1
+exit 0
+'''
+
+_BOX_STATES = frozenset({"empty", "held", "unknown"})
+
+
+def read_box(package: PackageResources, destination: TransportDestination, *,
+             timeout: float = 5, runner=None) -> str:
+    """``empty`` when the recipient's box holds no text before a send, ``held`` when
+    it does, ``unknown`` when it could not be read. The owner reads it just before
+    its send and hands it to press_held_enter: a lone paste chip afterwards can then
+    only be this send's, or a sender's racing between the read and the keystrokes."""
+    if not isinstance(destination, TransportDestination):
+        raise ValueError("a frozen TransportDestination is required")
+    if isinstance(timeout, bool) or not 0 < timeout <= 30:
+        raise ValueError("box read timeout must be finite and in (0, 30]")
+    native = package.native / "lib-common.sh"
+    if not native.is_absolute() or not native.is_file():
+        return "unknown"
+    env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
+           "LC_ALL": "C", "CLAUDLOBBY_ROOT": str(destination.root),
+           "FLEET_NAME": destination.fleet, "TMUX_TMPDIR": str(destination.tmux_tmpdir),
+           "TMPDIR": str(destination.tmux_tmpdir), "PLANE_EMIT_DISABLED": "1"}
+    command = ["/bin/bash", "--noprofile", "--norc", "-c", _BOX_SCRIPT, "message-box-read",
+               str(native), destination.socket, destination.session]
+    try:
+        result = (runner or _run)(command, input=b"", env=env, timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError, _StartedFailure):
+        return "unknown"
+    found = re.fullmatch(rb"box-v1\t(empty|held|unknown)\n", result.stdout or b"")
+    return found.group(1).decode() if found else "unknown"
 
 
 def _repair_line(output: bytes | None) -> tuple[str, bool, str | None] | None:

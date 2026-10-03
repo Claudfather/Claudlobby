@@ -137,7 +137,8 @@ def dispatch(args) -> CommandOutput:
     from ..context import BotNotFoundError
     from ..message_context import MessageContextError, resolve_message_route
     from ..message_operations import (MessageConflict, MessageIdentityUnavailable,
-                                      repair_held_delivery, send_message, send_unlinked_report)
+                                      read_recipient_box, repair_held_delivery, send_message,
+                                      send_unlinked_report)
     from ..message_queries import MessageQueryError, receipt, show_message
     from ..operation_context import (OperationContextError, OperationContextUnavailableError,
                                      bind_task_context, resolve_operation_scope,
@@ -218,6 +219,8 @@ def dispatch(args) -> CommandOutput:
                 raise CommandFailure("conflict", "reply route differs from recorded parent participants",
                                      release_id=release_id)
             trusted_tiers, tiers_available = _alert_tiers(route)
+            # The box just before the send, for the chip repair (#2105).
+            box_before = read_recipient_box(route, selected.paths.package)
             if is_report:
                 outcome = send_unlinked_report(route, selected.paths.package, report,
                                                request_id=request_id,
@@ -265,6 +268,7 @@ def dispatch(args) -> CommandOutput:
                                    wait=_RECEIPT_WAIT_S)
                 repair, observed = repair_held_delivery(
                     route, selected.paths.package, outcome.message_id, first=observed,
+                    box_before=box_before,
                     observe=lambda wait: receipt(ctx, outcome.message_id,
                                                  destination=route.peer.alias, wait=wait))
                 if repair is not None:

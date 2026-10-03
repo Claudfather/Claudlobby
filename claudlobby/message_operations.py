@@ -687,9 +687,10 @@ def record_reply_to_human(route: HumanReplyRoute, package: PackageResources, bod
 # The transport presses Enter once and never verifies it (PANE_SEND_VERIFY_TICKS=0),
 # and defers this repair to its owner. It supersedes S2-03's "no automatic Enter
 # repair" (documentation/plans/2026-09-30-unified-cli-finalization.md) for one case
-# only: a box that still holds exactly this message, in a pane with no turn running
-# and no menu open, gets at most the two Enters the operator recipe and Chris's rule
-# for clog allow. The payload itself is never sent twice.
+# only: a box that still holds this message's text, or one paste chip in a box that
+# was empty just before the send, in a pane where pane_is_busy sees no running turn
+# and no menu is open, gets at most the two Enters the operator recipe and Chris's
+# rule for clog allow. The payload itself is never sent twice.
 
 _REPAIR_RECHECK_S = 12
 
@@ -724,21 +725,31 @@ class HeldDeliveryRepair:
                 "attempts": [asdict(attempt) for attempt in self.attempts]}
 
 
+def read_recipient_box(route: MessageRoute, package: PackageResources) -> str:
+    """read_box for this route's recipient, taken just before a send (#2105): a
+    paste chip carries no message id, so the repair presses one only when the
+    box was ``empty`` before the send."""
+    return _native_transport.read_box(package, route.peer_destination)
+
+
 def repair_held_delivery(route: MessageRoute, package: PackageResources, message_id: str, *,
-                         observe: Callable[[float], object], first, recheck_s: float = _REPAIR_RECHECK_S,
-                         press=None, record=None, now=None):
+                         observe: Callable[[float], object], first, recheck_s: float | None = None,
+                         box_before: str | None = None, press=None, record=None, now=None):
     """Press the Enter a held delivery is waiting for, at most twice (#2105).
 
     ``first`` is the caller's receipt observation after its own wait. Only when it
     found no receipt (``missing`` or ``no_history``; never ``unavailable``, where the
     proof is still queued) does this look at the recipient's box. Each look presses
-    ONE Enter, and only on held_delivery_match's text or chip verdict. A second look
+    ONE Enter, and only on held_delivery_match's text or chip verdict; a chip only
+    when ``box_before`` (the owner's read_box just before its send) is ``empty``,
+    since a chip carries no message id. A second look
     comes only after a further ``recheck_s`` receipt wait (``observe``) found no
     receipt, and presses only on the same match: a first Enter can only strip the CR
     a swallowed Enter left in the box (#1236), and the second then submits. Never a
     third Enter, never the payload. Any press is recorded on the Plane as
     ``delivery_enter_repaired`` with every look, so a held, then repaired delivery
-    is visible and a misfire on someone else's paste can be found.
+    is visible and a misfire on someone else's paste can be found. It is recorded
+    even when a receipt read after the press raises; the error then goes on up.
 
     Returns ``(None, first)`` when no look was due, else ``(repair, observation)``
     with the last receipt observation."""
@@ -746,22 +757,27 @@ def repair_held_delivery(route: MessageRoute, package: PackageResources, message
         return None, first
     press = press or _native_transport.press_held_enter
     clock = now or (lambda: datetime.now(timezone.utc))
+    wait = _REPAIR_RECHECK_S if recheck_s is None else recheck_s
     attempts: list[EnterRepairAttempt] = []
     observed, expect = first, None
-    for _look in (1, 2):
-        at = clock()
-        outcome = press(package, route.peer_destination, message_id=message_id, expect=expect)
-        attempts.append(EnterRepairAttempt(at.isoformat(), outcome.verdict, outcome.pressed,
-                                           outcome.match, outcome.reason))
-        if not outcome.pressed:
-            break
-        expect = outcome.match
-        observed = observe(recheck_s)
-        if getattr(observed, "receipt_observation", None) == "received":
-            break
     recording = "not_requested"
-    if any(attempt.pressed for attempt in attempts):
-        recording = (record or _record_enter_repair)(route, message_id, tuple(attempts), observed)
+    try:
+        for _look in (1, 2):
+            at = clock()
+            outcome = press(package, route.peer_destination, message_id=message_id, expect=expect,
+                            before=box_before)
+            attempts.append(EnterRepairAttempt(at.isoformat(), outcome.verdict, outcome.pressed,
+                                               outcome.match, outcome.reason))
+            if not outcome.pressed:
+                break
+            expect = outcome.match
+            observed = observe(wait)
+            if getattr(observed, "receipt_observation", None) == "received":
+                break
+    finally:
+        # A press is recorded even when the receipt read after it raised.
+        if any(attempt.pressed for attempt in attempts):
+            recording = (record or _record_enter_repair)(route, message_id, tuple(attempts), observed)
     return HeldDeliveryRepair(tuple(attempts), recording), observed
 
 

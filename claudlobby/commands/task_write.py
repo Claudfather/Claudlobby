@@ -151,8 +151,8 @@ def _nudge_envelope(result, route, by, reason):
 
 
 def _committed_notification(ctx, route, package, result, envelope, *, send_on_replay=True):
-    from ..message_operations import (RenderedNativeEnvelope, repair_held_delivery,
-                                      send_committed_native_attempt)
+    from ..message_operations import (RenderedNativeEnvelope, read_recipient_box,
+                                      repair_held_delivery, send_committed_native_attempt)
     from ..message_queries import receipt as observe_receipt
     from ..request_receipts import locked_request
 
@@ -161,6 +161,7 @@ def _committed_notification(ctx, route, package, result, envelope, *, send_on_re
             "transmission_recording": "unknown", "request_persisted": None,
             "receipt_observation": None, "integrity_verdict": None}
     native_returncode = None
+    box_before = None
     try:
         # The task owner has returned: its request and task locks are both
         # released. This is the same request lock, never a nested one.
@@ -186,6 +187,8 @@ def _committed_notification(ctx, route, package, result, envelope, *, send_on_re
                             transmission_recording=prior.recording_status,
                             request_persisted=True)
             else:
+                # The box just before the send, for the chip repair (#2105).
+                box_before = read_recipient_box(route, package)
                 attempt = send_committed_native_attempt(
                     route, package, store, frozen,
                     RenderedNativeEnvelope(result.message_id, envelope),
@@ -206,7 +209,7 @@ def _committed_notification(ctx, route, package, result, envelope, *, send_on_re
                                    wait=10 if waits else 0)
         if waits:
             repair, observed = repair_held_delivery(
-                route, package, result.message_id, first=observed,
+                route, package, result.message_id, first=observed, box_before=box_before,
                 observe=lambda wait: observe_receipt(ctx, result.message_id,
                                                      destination=route.peer.alias, wait=wait))
             if repair is not None:
