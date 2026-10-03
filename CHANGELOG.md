@@ -19,6 +19,17 @@ Since #1989, every CLI delivery (`message send` and `reply`, `assignment deliver
 - **Every repair is a fleet event on the recipient,** `delivery_enter_repaired` (notice). It records whether the match was by text or by chip, and every look, so a misfire on someone else's paste can be found. The command's JSON carries `enter_repair`.
 - This supersedes S2-03's "no automatic Enter repair" for this one case only (`documentation/plans/2026-09-30-unified-cli-finalization.md`).
 
+### Fixed — a lone backtick in a double-quoted string no longer hides its line from the credential-echo guard (#2103)
+
+#2099 reads a double-quoted `$(` it cannot delimit as text, so the rest of the line is still judged. A lone backtick in the same string still made the line unreadable, and an unreadable line is allowed. A comment ending in a backslash inside the substitution reaches that state, because the tokenizer joins the backslash-newline before it reads comments, so the comment swallows the `)`. This line was refused before #2099, allowed after it, and printed the canary under bash:
+
+````
+echo "$(echo a # `x \
+)" && gh auth token
+````
+
+- **A lone backtick in a double-quoted string is read as text,** as `_substitutions` already reads it, so the line is judged and that form is refused again.
+
 ### Fixed — a send presses Enter only once the box shows the typed text, and a held box is never counted as sent (#1236)
 
 `pane_send_verified`, the one door every keystroke injector uses, sent the Enter 0.3 s after the text whether or not the TUI had read it. A TUI that had not read the text yet read the text and the Enter together, and kept the Enter as an invisible character in the box: the prompt stayed there unsubmitted, and the next Enter only removed that character. The verify then read the first frame after the Enter, which under load was often drawn before the text, as a submit.
