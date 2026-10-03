@@ -115,35 +115,49 @@ _resolve_manager_token() {
     _mgr_token="$_mgr_token_val"
 }
 
-# Managers whose box did not take a push this sweep (#2120), as <target> entries.
-# Each later push to one would wait out the whole shown budget (about 10 s) for a
-# box that is not taking input, ahead of the sweep's Telegram escalation, and type
-# into the same unsubmitted text, so it is not sent this sweep. One sweep is one
-# process, so the list starts empty each sweep.
-_held_mgr_targets=""
+# A manager's box that holds text gets no push (#2120 review, dara): typing into
+# it would glue the alert to that text, the opposite of the fleet's own held-box
+# remedy (never typed text), and Chris's rule makes a glued box his call. And
+# after a push the box did not take (rc 3), that manager gets no push for
+# FLEET_PULSE_HELD_PUSH_FLOOR_S (default 1800 s, the shape of #1088's re-arm
+# bound): no wait and no typing in between, so a box that takes no input costs
+# one wait per floor, not one per sweep or per alert. Either way the alert's
+# window stays open and its event is on the plane for the escalation. A push
+# that is submitted clears the floor.
+_HELD_PUSH_FLOOR_S_DEFAULT=1800
 
 # Returns the push's delivery verdict, which debounce_notify reads (#900: a send
 # that reached nobody must not buy the window): 0 submitted; 3 typed and not
-# submitted (#1236), or not sent because the box held an earlier push this
-# sweep; 1 not sent. A non-zero leaves the alert's window open, so the next
-# sweep pushes it again. No manager, or no manager session, still returns 0:
-# the recipient token re-fires the alert once a manager appears (#831).
+# submitted (#1236), or not typed because the box held text or the floor is
+# fresh; 1 not sent. A non-zero leaves the alert's window open. No manager, or no
+# manager session, still returns 0: the recipient token re-fires the alert once a
+# manager appears (#831).
 notify_manager() {
-    local bot_dir="$1" msg="$2" target="" mgr="" mgr_socket="" rc=0
+    local bot_dir="$1" msg="$2" target="" mgr="" mgr_socket="" rc=0 floor marker pane
     target=$(_manager_target "$bot_dir") || return 0
     [ -n "$target" ] || return 0
     mgr_socket="${target%%|*}"; mgr="${target##*|}"
     check_tmux_session "$mgr" "$mgr_socket" || return 0
-    case "$_held_mgr_targets" in
-        *"<$target>"*)
-            echo "fleet-pulse: $mgr did not take an earlier push this sweep; $(basename "$bot_dir")'s alert waits for the next sweep" >&2
-            return 3 ;;
-    esac
+    floor="${FLEET_PULSE_HELD_PUSH_FLOOR_S:-$_HELD_PUSH_FLOOR_S_DEFAULT}"
+    case "$floor" in ''|*[!0-9]*) floor="$_HELD_PUSH_FLOOR_S_DEFAULT" ;; esac
+    marker="$state_dir/held-push.$(printf '%s' "$target" | tr -c 'A-Za-z0-9._-' '_')"
+    if marker_age_within "$marker" "$floor"; then
+        echo "fleet-pulse: $mgr did not take a push less than ${floor}s ago; $(basename "$bot_dir")'s alert waits for the floor to lapse" >&2
+        return 3
+    fi
+    pane=$(bot_tmux "$mgr_socket" capture-pane -p -t "$mgr" 2>/dev/null) || pane=""
+    if pane_is_held "$pane"; then
+        echo "fleet-pulse: $mgr's box holds text; $(basename "$bot_dir")'s alert is not typed into it" >&2
+        return 3
+    fi
     # Attribute any send_miss to THIS bot's ledger — it is the one whose manager
     # could not be reached. bot_tmux_send sanitizes + two-step sends.
     BOT_DIR="$bot_dir" BOT_ID="$(basename "$bot_dir")" \
         bot_tmux_send "$mgr_socket" "$mgr" "[FLEET-PULSE] $msg" || rc=$?
-    [ "$rc" -ne 3 ] || _held_mgr_targets="$_held_mgr_targets<$target>"
+    case "$rc" in
+        0) rm -f "$marker" ;;
+        3) touch "$marker" 2>/dev/null || true ;;
+    esac
     return "$rc"
 }
 
