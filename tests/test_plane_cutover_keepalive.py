@@ -179,3 +179,26 @@ def test_fleet_uptime_reads_the_plane_and_refuses_without_it(tmp_path):
     assert refused.returncode == 6 and refused_result["ok"] is False, (refused.returncode, refused.stdout)
     assert refused_result["command"] == "fleet.uptime" and refused_result["error"]["code"] == "unavailable"
     assert refused_result["data"] == {} and "plane.db" in refused_result["error"]["message"]  # never an empty table
+
+
+def test_fleet_uptime_says_what_it_measured_even_with_no_rows(tmp_path):
+    """#891: with no bot rows the text path still prints its coverage line (the
+    `No bots found` path #1742's review noted is gone; this pins it), and the JSON
+    says what `uptime_pct` divides by. The plane holds the fleet (a plane that
+    never saw it is refused as the wrong root); the runtime has no bot dirs."""
+    root = tmp_path
+    _manifest(root)
+    (root / "state" / "plane").mkdir(parents=True, exist_ok=True)
+    (root / "local" / FLEET / "runtime" / "bots").mkdir(parents=True)
+    initialize_plane(root)
+    emit_batch(root, [{"event_type": "metric_sample", "emitter": "keepalive", "fleet": FLEET,
+                       "occurred_at": datetime.now(timezone.utc).isoformat(),
+                       "payload": {"subject_kind": "bot_instance", "subject": f"bot:{FLEET}/b1",
+                                   "metric": "bot.heartbeat", "value": {"state": "IDLE"}}}])
+    text = _cli(root, "fleet", "uptime", "--window", "24h")
+    assert text.returncode == 0, text.stderr
+    assert "coverage:" in text.stdout
+    served = _cli(root, "fleet", "uptime", "--json", "--window", "24h")
+    result = json.loads(served.stdout)
+    assert result["ok"] is True and result["data"]["bots"] == {}, served.stdout
+    assert "observed" in result["data"]["meaning"]
