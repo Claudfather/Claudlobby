@@ -449,7 +449,7 @@ cleanup() {
             "$rc" "$((${pass:-0} + ${fail:-0}))"
     fi
     # Per-bot servers must be torn down with kill-server, or empty servers leak.
-    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${MP_SESSION:-}" "${IDLEK:-}" "${SOCKB:-}" "${BUSYM:-}" "${BUSYP:-}" "${BRIEF:-}" "${BRIEFBUSY:-}" "${BRIEFNOSKILL:-}" "${BRIEFWAIT:-}" "${SINK:-}" "${TR_MGR:-}" "${CK2_BOT:-}"; do
+    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${MP_SESSION:-}" "${IDLEK:-}" "${SOCKB:-}" "${BUSYM:-}" "${BUSYP:-}" "${BRIEF:-}" "${BRIEFBUSY:-}" "${BRIEFNOSKILL:-}" "${BRIEFWAIT:-}" "${SINK:-}" "${TR_MGR:-}" "${CK2_BOT:-}" "${LK:-}"; do
         [ -n "$_s" ] && command tmux -L "$(vsock "$_s")" kill-server 2>/dev/null || true
     done
     # And every server whose socket is in this run's private dir (#586), named
@@ -4507,6 +4507,69 @@ if [ "${_vg_deny:-}" = "" ]; then
     echo "      vault: $_VG_VAULT"
 fi
 rm -rf "$_VG_ROOT"
+
+val_scenario "validate #2036: two senders to one real pane arrive whole, never interleaved"
+# A REAL pane. Its program is a raw-mode reader that appends every byte the pane
+# receives to a file, so what arrived, and in what order, is read from the pty
+# itself rather than from a stub. Raw because a pane in canonical mode caps a
+# line (1024 bytes on macOS) and would cut the 1800-byte payloads below; raw
+# also makes each Enter a lone CR byte, the separator the check splits on.
+LK="vallock"
+LK_OUT="$ROOT/pane-lock.bytes"
+: > "$LK_OUT"
+tmux new-session -d -s "$LK" "stty raw -echo; exec cat >> '$LK_OUT'"
+_lk_t=0
+while [ "$_lk_t" -lt 50 ]; do
+    [ "$(tmux display-message -p -t "$LK" '#{pane_current_command}' 2>/dev/null || true)" = cat ] && break
+    sleep 0.1
+    _lk_t=$((_lk_t + 1))
+done
+# Numbered tokens: no two chunks alike, and every byte names its sender.
+_lk_payload() {
+    local l="$1" i=1 t o=""
+    while [ "$i" -le 300 ]; do
+        printf -v t '%s%04d ' "$l" "$i"
+        o="$o$t"
+        i=$((i + 1))
+    done
+    printf '%s' "$o"
+}
+LK_A="$(_lk_payload A)"
+LK_B="$(_lk_payload B)"
+# _lk_pair <lock dir for A> <lock dir for B>: A sends slowly (0.3s between its
+# 5 chunks) and B starts once A's first chunk has reached the pane. Prints
+# "whole" when the pane received exactly the two payloads, each ended by its
+# own Enter. An empty dir is the shipped default, $CLAUDLOBBY_ROOT/state/pane-send.
+_lk_pair() {
+    : > "$LK_OUT"
+    ( PANE_SEND_LOCK_DIR="$1" PANE_SEND_CHUNK_SETTLE_S=0.3 \
+        pane_send_verified "$(vsock "$LK")" "$LK" "$LK_A" ) >/dev/null 2>&1 &
+    local pa=$! pb t=0
+    while [ "$t" -lt 100 ] && ! grep -q A0001 "$LK_OUT" 2>/dev/null; do
+        sleep 0.05
+        t=$((t + 1))
+    done
+    ( PANE_SEND_LOCK_DIR="$2" pane_send_verified "$(vsock "$LK")" "$LK" "$LK_B" ) >/dev/null 2>&1 &
+    pb=$!
+    wait "$pa" || true
+    wait "$pb" || true
+    sleep 0.3
+    python3 -S -E -c 'import sys
+data = open(sys.argv[1], "rb").read().decode("utf-8", "replace")
+segs = [s for s in data.split("\r") if s]
+print("whole" if sorted(segs) == sorted(sys.argv[2:4]) else "interleaved: %d segment(s)" % len(segs))' \
+        "$LK_OUT" "$LK_A" "$LK_B"
+}
+# The control first: each sender given its OWN lock dir, which is no shared lock
+# at all, the pre-#2036 shape. It has to interleave here, or this pane could not
+# show the defect and the check after it would prove nothing.
+_lk_r=$(_lk_pair "$ROOT/pane-lock-a" "$ROOT/pane-lock-b")
+case "$_lk_r" in interleaved*) r=yes ;; *) r=no ;; esac
+harness_check "#2036 control: two senders that share NO lock interleave in a real pane ($_lk_r)" "$r"
+_lk_r=$(_lk_pair "" "")
+[ "$_lk_r" = whole ] && r=yes || r=no
+harness_check "#2036: two senders to one real pane arrive as two whole payloads, each ended by its own Enter ($_lk_r)" "$r"
+command tmux -L "$(vsock "$LK")" kill-server 2>/dev/null || true
 
 # A refusal no check reported still fails the run: a read that could not run
 # is never dropped on the floor.

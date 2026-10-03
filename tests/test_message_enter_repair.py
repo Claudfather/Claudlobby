@@ -18,6 +18,7 @@ import shutil
 from contextlib import contextmanager
 import sqlite3
 import subprocess
+import sys
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -360,6 +361,53 @@ def test_the_native_look_presses_one_enter_only_on_a_box_holding_this_message(fr
         time.sleep(0.5)
         assert (outcome.verdict, outcome.pressed) == (verdict, keys == b"\r"), outcome
         assert log.read_bytes() == keys
+
+
+_HOLD_LOCK = """import fcntl, os, sys, time
+f = open(sys.argv[1], "a+")
+fcntl.flock(f, fcntl.LOCK_EX)
+f.seek(0)
+f.truncate()
+f.write("pid=%d since=test bot=external-holder door=test what=payload\\n" % os.getpid())
+f.flush()
+open(sys.argv[2], "w").close()
+time.sleep(float(sys.argv[3]))
+"""
+
+
+def test_the_native_look_waits_for_the_recipients_send_lock():
+    """#2036: the owner's repair Enter is a keystroke like any other. While another
+    sender holds the pane's send lock, the look presses nothing; once the lock is
+    free it looks and presses under it, so its Enter cannot land inside another
+    sender's chunks. The lock file is the shipped helper's, for the bare session."""
+    with _stub_pane(HELD) as (destination, log, package):
+        dest = destination()
+        lock = subprocess.run(
+            ["bash", "-c", '. "$1/lib-common.sh" >/dev/null 2>&1; _pane_send_lock_file "$2" "$3"; '
+             'printf %s "${_PANE_SEND_LOCK_FILE:-}"', "lock-file", str(package.native), dest.socket,
+             dest.session],
+            env={"PATH": "/usr/bin:/bin", "CLAUDLOBBY_ROOT": str(dest.root), "LC_ALL": "C"},
+            capture_output=True, text=True, timeout=10).stdout
+        assert lock.startswith(str(dest.root)), f"no lock file named under the destination root: {lock!r}"
+        Path(lock).parent.mkdir(parents=True, exist_ok=True)
+        held = Path(lock).parent / "held"
+        holder = subprocess.Popen([sys.executable, "-c", _HOLD_LOCK, lock, str(held), "30"])
+        try:
+            deadline = time.monotonic() + 10
+            while not held.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert held.exists(), "the holder never took the lock"
+            outcome = message_transport.press_held_enter(package, dest, message_id=MSG, timeout=15)
+            time.sleep(0.5)
+            assert (outcome.verdict, outcome.pressed) == ("unknown", False), outcome
+            assert log.read_bytes() == b""
+        finally:
+            holder.kill()
+            holder.wait(timeout=5)
+        outcome = message_transport.press_held_enter(package, dest, message_id=MSG, timeout=15)
+        time.sleep(0.5)
+        assert (outcome.verdict, outcome.pressed) == ("text", True), outcome
+        assert log.read_bytes() == b"\r"
 
 
 def test_the_native_look_names_the_chip_it_presses():
