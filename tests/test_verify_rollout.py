@@ -24,7 +24,6 @@ from __future__ import annotations
 import fnmatch
 import json
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -102,7 +101,10 @@ def run_check(tmp_path: Path, body, files=("claudlobby/brief.py",), *, base_call
     script.write_text(_checker_source(), encoding="utf-8")
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir(exist_ok=True)
-    shutil.copy(FAKE_GH, fake_bin / "gh")
+    # A /bin/sh shim, so the stand-in runs under this interpreter on every runner
+    # rather than whichever python3 the PATH below happens to reach.
+    (fake_bin / "gh").write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE_GH}" "$@"\n',
+                                 encoding="utf-8")
     (fake_bin / "gh").chmod(0o755)
     entries = [f if isinstance(f, dict) else {"filename": f} for f in files]
     state = tmp_path / "state.json"
@@ -111,7 +113,7 @@ def run_check(tmp_path: Path, body, files=("claudlobby/brief.py",), *, base_call
     log = tmp_path / "gh-calls.log"
     log.write_text("", encoding="utf-8")
     summary = tmp_path / "summary.md"
-    env = {"PATH": f"{fake_bin}:/usr/bin:/bin", "HOME": str(tmp_path), "LC_ALL": "C.UTF-8",
+    env = {"PATH": f"{fake_bin}:/usr/bin:/bin", "HOME": str(tmp_path), "PYTHONUTF8": "1",
            "REPO": "example-org/example-repo", "PR_NUMBER": pr, "DEFAULT_BRANCH": "main",
            "DOCS_PATHS_RUN": docs_run, "TESTS_PATHS_RUN": tests_run,
            "FAKE_GH_STATE": str(state), "FAKE_GH_LOG": str(log),
