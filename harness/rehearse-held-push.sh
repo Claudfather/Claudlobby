@@ -88,6 +88,16 @@ waits ()         { grep -c "never showed the typed payload" "$ROOT/pulse.log" ||
 recorded ()      { cat "$ROOT"/state/plane/staged/* 2>/dev/null | grep -c "$1" || true; }
 held_skips ()    { grep -c "box holds text" "$ROOT/pulse.log" || true; }
 floor_skips ()   { grep -c "did not take a push less than" "$ROOT/pulse.log" || true; }
+# A push the stub TOOK: a "> " line holding it that is not the box's current
+# line. Text merely visible in the pane is not enough: keys typed before the
+# stub starts are echoed by the tty with no prompt, and are lost (#2138).
+took_count ()    {
+    local pane n
+    pane=$(mgr_pane)
+    n=$(printf '%s\n' "$pane" | grep -c "^> \\[FLEET-PULSE\\].*$1" || true)
+    case "$(printf '%s\n' "$pane" | grep '^>' | tail -1)" in *"[FLEET-PULSE]"*"$1"*) n=$((n - 1)) ;; esac
+    echo "$n"
+}
 # The box's own line: the last line the stub draws with its prompt.
 box_line ()      { mgr_pane | grep '^>' | tail -1; }
 # The manager session's tmux id. A restarted manager on its private socket gets
@@ -194,6 +204,20 @@ run_pulse FLEET_PULSE_RENOTIFY_AFTER_S=1
 check "a marker dated ahead holds nothing back" 0 "$(floor_skips)"
 check "session_missing is pushed again" 2 "$(push_count session_missing)"
 check "service_down is pushed again"    2 "$(push_count service_down)"
+
+echo "--- 8. a restarted manager whose box draws late gets the alert in the same sweep ---"
+# The first tick after a manager restart can reach it before its box is drawn
+# (9 to 19 s for a production-shaped bot, #860), and keys typed then are lost
+# (#2138). The push waits for the box, as a boot send does, so the alert lands
+# in that tick rather than costing the new instance a floor.
+tmux -L "$MGR_SOCK" kill-session -t "$MGR" 2>/dev/null || true
+tmux -L "$MGR_SOCK" new-session -d -s "$MGR" "sleep 5; $STUB"
+check "the new manager's pane is still blank when the sweep starts" blank \
+    "$(case "$(mgr_pane)" in *[![:space:]]*) echo drawn ;; *) echo blank ;; esac)"
+run_pulse FLEET_PULSE_REARM_WINDOW_S=0
+check "session_missing reaches the late manager in the same sweep" 1 "$(took_count session_missing)"
+check "service_down reaches it in the same sweep" 1 "$(took_count service_down)"
+check "no push to it waited out the shown budget" 0 "$(waits)"
 
 echo
 echo "=== $pass passed, $fail failed ==="

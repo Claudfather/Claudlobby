@@ -103,6 +103,15 @@ def test_a_floor_marker_dated_ahead_of_the_clock_holds_nothing_back(run):
             "service_down is pushed again")
 
 
+def test_a_restarted_manager_whose_box_draws_late_gets_the_alert_in_the_same_sweep(run):
+    """#2138 (ravi): the first tick after a restart can come before the box is drawn,
+    and keys typed then are lost. The push waits for the box, so the alert lands."""
+    _passed(run, "the new manager's pane is still blank when the sweep starts",
+            "session_missing reaches the late manager in the same sweep",
+            "service_down reaches it in the same sweep",
+            "no push to it waited out the shown budget")
+
+
 def test_every_check_passes(run):
     assert run.returncode == 0, f"{run.stdout}\n{run.stderr}"
     assert "0 failed" in run.stdout, run.stdout
