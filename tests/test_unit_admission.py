@@ -10,6 +10,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -68,6 +69,87 @@ def test_interrupted_activation_and_reboot_refuse_before_producer_effect(proposa
     assert effects == ["ran"]
     with a.locked_activation(builder.root):
         pass  # normal one-shot cleanup and refusal leave no lock behind
+
+
+def test_due_timer_service_waits_for_its_verified_candidate_then_runs_once(proposal, monkeypatch):
+    import threading
+    from claudlobby.config_units import unit_family
+    from tests.test_activation_state import _advance, _prepare
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    builder, _, _ = proposal
+    release, identity = read_release(builder.root, builder.release_id), _identity(builder)
+    env = _environment(release)
+    argv = r.wrap_unit_argv(env, unit="claudlobby-maintenance", phase="producers",
+                            mode="oneshot", argv=["/bin/sh", "-c", "exit 0"])
+    files = {"claudlobby-maintenance.plist": (plistlib.dumps({
+                 "Label": "claudlobby-maintenance", "WorkingDirectory": str(builder.root),
+                 "EnvironmentVariables": env, "ProgramArguments": list(argv)}), 0o644),
+             "claudlobby-maintenance.service": (b"[Service]\nType=oneshot\n", 0o644),
+             "claudlobby-maintenance.timer": (b"[Timer]\nUnit=claudlobby-maintenance.service\n", 0o644)}
+    destination = builder.root / "runtime/_host/timers"
+    builder.effects["units"] = unit_family(files, destination=destination, scope="host",
+                                           phase="producers", release_id=release.release_id)
+    builder.directory(destination)
+    for name, (content, mode) in files.items():
+        builder.file(destination / name, content, mode=mode)
+    plan = builder.seal()
+    effects, outcomes = [], []
+
+    def producer(*args, **kwargs):
+        effects.append("ran")
+        return SimpleNamespace(returncode=0)
+
+    def tick():
+        try:
+            outcomes.append(r.run_unit(argv, identity=identity, environment=env, runner=producer))
+        except a.ActivationError as exc:
+            outcomes.append(str(exc))
+
+    def resuming(store, activation_id):
+        _advance(store, activation_id, a.STEPS[:a.STEPS.index("selection_switched")])
+        store.begin(activation_id, "selection_switched")
+        store.select(activation_id)
+        _advance(store, activation_id, a.STEPS[a.STEPS.index("selection_switched") + 1:-1])
+        store.begin(activation_id, "producers_resumed")
+
+    with a.locked_activation(builder.root) as store:
+        _prepare(store, plan)
+        resuming(store, "candidate")
+        waiter = threading.Thread(target=tick)
+        waiter.start()
+        time.sleep(1.5)
+        assert effects == [] and waiter.is_alive()  # pending service: no body, no grant
+        # A producer outside the frozen timer family keeps the immediate handshake.
+        other = r.wrap_unit_argv(env, unit="claudlobby-maintenance", phase="producers",
+                                 mode="oneshot", argv=["/bin/sh", "-c", "exit 1"])
+        with pytest.raises(a.ActivationError, match="authorization unavailable"):
+            r.run_unit(other, identity=identity, environment=env, runner=producer)
+        store.complete("candidate", "producers_resumed", evidence_digest="a" * 64)
+        time.sleep(1)
+        assert effects == []  # committed, but the coordinator still holds EX
+    waiter.join(timeout=10)
+    assert outcomes == [0] and effects == ["ran"]
+
+    # A timeout, or an interrupted next activation, refuses with no body run.
+    with a.locked_activation(builder.root) as store:
+        _prepare(store, plan, "next")
+        resuming(store, "next")
+        monkeypatch.setattr(r, "_SCHEDULED_WAIT", 1.0)
+        tick()
+        monkeypatch.setattr(r, "_SCHEDULED_WAIT", 180.0)
+        waiter = threading.Thread(target=tick)
+        waiter.start()
+        time.sleep(1)
+    waiter.join(timeout=10)  # coordinator lost before completing producers_resumed
+    assert outcomes[1:] == ["scheduled producer was not admitted before its wait ended; no job ran",
+                            "selected release activation is incomplete; recover it before mutations"]
+    assert effects == ["ran"]
+    with a.locked_activation(builder.root) as store:
+        monkeypatch.setattr(sys, "platform", "darwin")  # launchd keeps the existing handshake
+        with pytest.raises(a.ActivationError, match="authorization unavailable"):
+            r.run_unit(argv, identity=identity, environment=env, runner=producer)
+    assert effects == ["ran"]
 
 
 def test_resident_exec_retains_supervised_pid_without_lifetime_shared_lock(proposal, tmp_path):

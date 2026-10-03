@@ -296,3 +296,35 @@ def test_explicit_second_attempt_retains_first_event_and_fact(receipt_case):
         assert saved.message_attempts[0].recording_status == "unrecorded"
         assert saved.message_attempts[1].observation == rr.TransportObservation("failed")
         assert saved.stages[1] == rr.StageOutcome("failed", 2)
+
+
+def _recorded_reply(intent, recipient="human:operator"):
+    return replace(intent, operation="message.reply", stages=intent.stages[:1],
+                   route=rr.RecordedReplyBinding("activation-1", "plan-1", "release-1",
+                                                 "fleet_" + "2" * 32, "bot:fleet-a/worker",
+                                                 recipient, "msg_" + "9" * 32))
+
+
+def test_a_reply_recorded_for_a_human_is_keyed_on_positive_facts(receipt_case):
+    """#2068: the one message shape with no delivery stage is a reply from a bot
+    to a recorded human. A bot recipient, an added delivery stage, another
+    operation, or a native route without its delivery stage never takes it."""
+    root, ident, intent = receipt_case
+    recorded = _recorded_reply(intent)
+    with rr.locked_request(root, intent.fleet_uid, ident) as store:
+        store.prepare(recorded)
+        store.begin_attempt()
+        store.stage(0)
+        store.outcome(0, "committed")
+    with rr.locked_request(root, intent.fleet_uid, ident) as store:
+        assert store.load().intent == recorded  # the binding survives the codec
+        with pytest.raises(rr.ReceiptError):
+            store.begin_native_attempt("ev_" + "a" * 32)  # nothing is ever carried
+    mutants = (_recorded_reply(intent, recipient="bot:fleet-a/caller"),
+               replace(_recorded_reply(intent), stages=intent.stages),
+               replace(_recorded_reply(intent), operation="message.send"),
+               replace(_message_intent(root, intent), operation="message.reply", stages=intent.stages[:1]))
+    for mutant in mutants:
+        with rr.locked_request(root, intent.fleet_uid, str(uuid4())) as store:
+            with pytest.raises(rr.ReceiptError):
+                store.prepare(mutant)

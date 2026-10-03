@@ -125,6 +125,11 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # gate had been reading as "boot in flight" forever. Critical so the
     # escalation read (severity = 'critical') can page it.
     "crash_loop": "critical",
+    # #2070: a bot whose input box holds text that was never submitted, with no
+    # turn running (keepalive's HELD verdict), paged in place of activity_stuck.
+    # Critical like the page it replaces; the remedy is an operator Enter, not
+    # a restart, so it is not one of fleet-pulse's Telegram escalation types.
+    "input_held": "critical",
     # #1924: historical launchd reenrollment deferral, retained for old facts.
     "job_reenroll_deferred": "notice",
     "alert_delivery_failed": "notice",
@@ -136,6 +141,11 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "send_retry": "notice",
     "send_blind": "notice",
     "send_blind_recovered": "notice",
+    # #1236: a send that was not submitted. The box never showed the typed
+    # payload, so the Enter was withheld (payload-not-shown), or it still showed
+    # it after the last Enter (payload-still-in-box). The text is in the box, or
+    # may still land there, unsubmitted.
+    "send_unsubmitted": "notice",
     "resume_skipped": "notice",
     "plugin_marketplace_failed": "notice",
     "briefing_deferred": "notice",
@@ -190,10 +200,16 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # The public-write guard: a refused GitHub-bound write (the record), and an
     # armed guard that found no host list. That one is critical because the
     # protection someone armed is off until the list is written: it shows in
-    # `claudlobby events --critical` and under ALERTS in the bot's brief. It
+    # `claudlobby event list --critical` and under ALERTS in the bot's brief. It
     # does not page (fleet-pulse pages a fixed list of types).
     "public_write_refused": "notice",
     "public_write_guard_unarmed": "critical",
+    # #2090: the credential-echo guard. A Bash call refused because it would
+    # print an env-held credential (the row and the CLI, never the command),
+    # and a command its decider could not read (allowed, and counted). The
+    # record, never a page.
+    "credential_echo_refused": "notice",
+    "credential_echo_unparsed": "notice",
 }
 
 # ---------------------------------------------------------------------------

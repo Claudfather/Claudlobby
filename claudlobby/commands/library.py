@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 
+from ..paths import INSTRUCTION_FILE_NAMES
 from ..command_result import CommandFailure, CommandOutput
 
 
@@ -62,6 +63,8 @@ def _walk_voices(paths) -> list[dict]:
     for directory, source in ((paths.overlay_voices, "overlay"), (paths.base_voices, "base")):
         if directory and directory.is_dir():
             for path in sorted(directory.rglob("*.md")):
+                if path.name in INSTRUCTION_FILE_NAMES:
+                    continue
                 found.setdefault(path.relative_to(directory).as_posix(), source)
     return [{"name": name, "source": source} for name, source in sorted(found.items())]
 

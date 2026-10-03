@@ -1,12 +1,15 @@
 ---
 title: System map — Claudlobby compositor + behavior-capture layer
 type: knowledge
-status: current
+status: historical
 owner: chris
 created: 2026-07-30
 ---
 
 # System map — Claudlobby compositor + behavior-capture layer
+
+This July snapshot preserves the pre-CLI architecture. For current task admission,
+assignment, delivery and reporting, see [the public CLI examples](../advanced-patterns.md#5-inter-bot-communication-and-reports).
 
 ## Origin
 

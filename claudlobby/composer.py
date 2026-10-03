@@ -2851,6 +2851,9 @@ def compose_settings_local(
 
     settings: dict = {
         "autoMemoryDirectory": memory_dir,
+        # The data root's developer guide is outside the bot's sealed release.
+        # Exclude only that file, preserving bot and project instructions (#2057).
+        "claudeMdExcludes": [str(paths.root / "CLAUDE.md")],
     }
 
     # Build permissions block — layered composition

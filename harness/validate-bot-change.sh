@@ -43,19 +43,21 @@ unset FLEET_NAME
 # into the start-bot.sh boots and MASK a regression that CI (clean env) exposes.
 unset CLAUDE_FLAGS
 
-# Compress BOTH #860 budgets. This harness stubs `claude` with `exec cat`, so its
-# panes never draw a box BY CONSTRUCTION — which means every send here classifies
-# as never-drawn and pays both waits: the 45s readiness budget, and then the 12s
-# recovery poll that a never-drawn send earns, across 18 start-bot invocations.
-# Uncompressed that is minutes of waiting for a TUI the stub cannot render, and
-# the settle sleep on top of it. PANE_READY_TICKS is deliberately NOT set: start-bot
-# arms its own per-call value, and every other caller runs at the production default.
-# it timed out this harness at 120s when only the first was compressed.
-# Nothing about the behaviour under test changes; only the wait for a box that
-# will never appear. The real budgets are exercised against real boots in
-# harness/boot-strand-sampler.sh, which is where they belong, and the unit contract
-# is pinned in tests/test_pane_send_verified.sh.
-export PANE_READY_POLL_S=0.05 PANE_RECOVER_TICKS=2 PANE_SEND_SETTLE_S=0
+# Compress the pane-send budgets. Every pane a send must LAND in is a stand-in
+# that draws an input box and consumes what is typed (VAL_BOX below): since
+# #1236 a send presses Enter only once the box SHOWS the payload, so a `cat` or
+# `sleep` pane, which draws none, is correctly never submitted to. The budgets
+# bound the waits for a box or a payload a stand-in will never draw: the 12s
+# recovery poll a never-drawn send earns, and the 10s wait for the payload to
+# show, which a pane left without a box would pay on every send before failing;
+# compressed, such a send fails in a second instead of slowing the run (the
+# 45s readiness budget timed out this harness at 120s when only it was
+# compressed). PANE_READY_TICKS is deliberately NOT set: start-bot arms its own
+# per-call value, and every other caller runs at the production default.
+# Nothing about the behaviour under test changes; only the waits. The real
+# budgets are exercised against real boots in harness/boot-strand-sampler.sh,
+# and the unit contract is pinned in tests/test_pane_send_verified.sh.
+export PANE_READY_POLL_S=0.05 PANE_RECOVER_TICKS=2 PANE_SEND_SHOWN_TICKS=5 PANE_SEND_SETTLE_S=0
 # Pin the escalation chat id for the WHOLE run (#846). fleet-pulse's critical
 # alerts do NOT travel through MANAGER_TMUX — the isolation this harness provides
 # by shadowing tmux — they go straight out via tg-post.sh, keyed on this var. So
@@ -126,6 +128,11 @@ EVENTS="$BOT_DIR/data/events"   # the marker/idle files still live under data/; 
 # on macOS). The CLI remains selected for fixture seeding and Plane reads.
 # ---------------------------------------------------------------------------
 VAL_REPO="$(cd "$LIB_DIR/../.." && pwd)"
+# The stand-in for every pane a send must land in (the budgets above): an input
+# box that echoes what is typed and submits it on the Enter. `--chrome` draws
+# Claude Code's border and footer below the prompt line. An absolute python3, so
+# a stub claude run by start-bot, which rebuilds PATH, still finds it.
+VAL_BOX="$(printf '%q %q' "$(type -P python3)" "$VAL_REPO/tests/fixtures/input-box-stub.py")"
 # The pytest wrapper supplies its preflighted CLI. Hand callers must also select
 # one explicitly; neither PATH nor a nearby checkout chooses this harness's code.
 VAL_CLI="${PLANE_EMIT_CLI:-${CLAUDLOBBY_CLI:-}}"
@@ -427,6 +434,13 @@ val_seed_report() {
 
 cleanup() {
     local rc=$?
+    # Every line below must run, whatever fails. A killed parent leaves stdout
+    # a broken pipe, so the first write below fails: SIGPIPE would end this
+    # trap there, and, with that ignored, so would the run's set -e. Either way
+    # not one server was torn down: how a killed run left its tmux servers and
+    # plane daemons behind.
+    set +e
+    trap '' PIPE
     # set -e ends the run at a failed command, before the summary line, and the
     # ERR trap records that on the plane alone, which may be what could not be
     # read. So the output says it, and how far the run got.
@@ -437,6 +451,12 @@ cleanup() {
     # Per-bot servers must be torn down with kill-server, or empty servers leak.
     for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${MP_SESSION:-}" "${IDLEK:-}" "${SOCKB:-}" "${BUSYM:-}" "${BUSYP:-}" "${BRIEF:-}" "${BRIEFBUSY:-}" "${BRIEFNOSKILL:-}" "${BRIEFWAIT:-}" "${SINK:-}" "${TR_MGR:-}" "${CK2_BOT:-}"; do
         [ -n "$_s" ] && command tmux -L "$(vsock "$_s")" kill-server 2>/dev/null || true
+    done
+    # And every server whose socket is in this run's private dir (#586), named
+    # in the list above or not: a session a later scenario starts under a name
+    # the list does not carry would otherwise outlive the run.
+    for _sock in "$TMUX_TMPDIR"/tmux-*/*; do
+        [ -S "$_sock" ] && command tmux -S "$_sock" kill-server 2>/dev/null || true
     done
     # Bridge-hijack pollers are plain bun processes, not tmux panes — TERM any
     # still-alive ones so a mid-scenario abort never leaks a poller.
@@ -484,6 +504,15 @@ cleanup() {
     rm -rf "$ROOT" "${RB_ROOT:-}" "${WR_ROOT:-}" "${BP_ROOT:-}" "${SC_ROOT:-}" "${CK2_ROOT2:-}" "$TMUX_TMPDIR"
 }
 trap cleanup EXIT
+# A signal ends the run through the EXIT trap, so a TERM (an operator stopping
+# the run on a loaded host) tears it down too. A parent killed outright is seen
+# at the run's next write, as the SIGPIPE of a pipe nobody reads, and ends it
+# the same way. A SIGKILL to the run itself, which is what the pytest wrapper's
+# timeout sends, reaches no trap: that path still leaks.
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 141' PIPE
+trap 'exit 143' TERM
 
 # One real daemon per fixture root. Keep the process IDs in this shell for the
 # existing EXIT trap; no root may accidentally send to another root's Plane.
@@ -520,11 +549,12 @@ OBSERVABILITY_BRIDGE_DOWN_GRACE=0
 CONF
 
 # --- Run: stand up a non-idle worker pane + a manager session to receive alerts ---
-# The manager receives many injected notices across this harness. A sleeping
-# process never drains its tty input; after the canonical input queue fills,
-# tmux reports successful sends that never appear in capture-pane. `cat` reads
-# each line while the tty still echoes it for the pane assertions below.
-tmux new-session -d -s "$MGR" 'cat >/dev/null'
+# The manager receives many injected notices across this harness. It is the box
+# stand-in: a sleeping process never drains its tty input, and after the
+# canonical input queue fills, tmux reports successful sends that never appear
+# in capture-pane, while the stand-in reads everything (raw mode) and leaves each
+# submitted notice on its own line for the pane assertions below.
+tmux new-session -d -s "$MGR" "$VAL_BOX"
 tmux new-session -d -s "$BOT" 'printf "\n⠹ Cogitating (esc to interrupt)\n"; sleep 600'
 sleep 1  # let panes render
 
@@ -922,13 +952,15 @@ BOT_ID="$IBOT"
 BOT_SERVICE=""
 MANAGER_TMUX="$MGR"
 CONF
-# Idle pane: last line ends in a prompt glyph '>' (matches the idle base pattern).
-# Draw the prompt with chrome BELOW it, as Claude Code does — this is the pane
-# that exercises keepalive's send_reload_command, so a prompt-as-last-line shape
-# here would validate the reload path against a geometry production never has.
-# classify_pane captures the whole pane (not a tail), so idle detection is
-# unaffected by the extra lines.
-tmux new-session -d -s "$IBOT" 'printf -- "\n--------\n> \n--------\n\n  auto mode on\n"; sleep 600'
+# Idle pane: the prompt line ends in a glyph '>' (matches the idle base pattern).
+# Draw the prompt with chrome BELOW it, as Claude Code does (the box stand-in's
+# --chrome) — this is the pane that exercises keepalive's send_reload_command, so
+# a prompt-as-last-line shape here would validate the reload path against a
+# geometry production never has. It consumes each command, as the TUI does: a
+# pane that only echoes keeps the first command in its box, and the send then
+# rightly reports it unsubmitted. classify_pane captures the whole pane (not a
+# tail), so idle detection is unaffected by the extra lines.
+tmux new-session -d -s "$IBOT" "$VAL_BOX --chrome"
 sleep 1
 touch "$IBOT_DIR/data/.reload-pending"
 CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/keepalive.sh" "$IBOT_DIR" >/dev/null 2>&1 || true
@@ -984,6 +1016,73 @@ CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/keepalive.sh" "$MBOT_DIR" >/dev/null 2>&1 || t
 harness_check "keepalive marker path: idle-looking pane + fresh .last-tool-call → BUSY, NOT reloaded (#7)" "$r"
 [ ! -f "$MBOT_DIR/data/.idle" ] && r=yes || r=no
 harness_check "keepalive marker path: .idle marker not set (fleet-pulse stays consistent)" "$r"
+
+# ===========================================================================
+# #2070 — a held input box is named, and its page says Enter, not restart.
+#   keepalive reads a box holding text that was never submitted, with no turn
+#   running, as HELD: it writes data/.held, writes no .idle, and types nothing
+#   into the box (a pending reload stays pending). fleet-pulse then pages
+#   input_held instead of activity_stuck's "likely hung mid-task", and the
+#   manager's push names the remedy. Its own fleet, so these sweeps touch no
+#   earlier scenario's bots.
+# ===========================================================================
+val_scenario "validate #2070: a held input box reads HELD and pages input_held"
+
+F2070="valf2070"
+F2070_BOTS="$ROOT/local/$F2070/runtime/bots"
+HELDB="valheld"
+mkdir -p "$F2070_BOTS/$HELDB/data"
+cat > "$ROOT/local/$F2070/fleet.yaml" <<YAML
+fleet:
+  name: $F2070
+  manager: $MGR
+  bots:
+    $MGR:
+      expertise: [orchestration]
+    $HELDB:
+      expertise: [software-engineering]
+YAML
+cat > "$F2070_BOTS/$HELDB/bot.conf" <<CONF
+BOT_NAME="$HELDB"
+BOT_ID="$HELDB"
+BOT_SERVICE=""
+MANAGER_TMUX="$MGR"
+OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD=1
+OBSERVABILITY_INPUT_HELD_THRESHOLD=0
+CONF
+# The held box in a live capture's shape (claude 2.1.285; the fixture
+# tests/fixtures/pane-states/input-held-cr.txt): the glyph and a no-break space,
+# the text, the swallowed Enter's empty line, border and footer. No "esc to
+# interrupt": no turn is running.
+_held_frame='\n\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\n\342\235\257\302\240set +H; PROBE2070 read your brief, then continue your open\n  rows and report when done.\n\n\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\n  \342\217\265\342\217\265 auto mode on (shift+tab to cycle)\n'
+tmux new-session -d -s "$HELDB" "printf -- '$_held_frame'; sleep 600"
+sleep 1
+# The last tool call long ago, and a reload waiting for an idle pane.
+touch -t 202001010000 "$F2070_BOTS/$HELDB/data/.last-tool-call"
+touch "$F2070_BOTS/$HELDB/data/.reload-pending"
+CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/keepalive.sh" "$F2070_BOTS/$HELDB" >/dev/null 2>&1 || true
+[ -f "$F2070_BOTS/$HELDB/data/.held" ] && r=yes || r=no
+harness_check "#2070 keepalive reads the held box as HELD (data/.held written)" "$r"
+grep -q ' HELD ' "$F2070_BOTS/$HELDB/keepalive.log" 2>/dev/null && r=yes || r=no
+harness_check "#2070 keepalive logs HELD, not UNKNOWN" "$r"
+[ ! -f "$F2070_BOTS/$HELDB/data/.idle" ] && [ -f "$F2070_BOTS/$HELDB/data/.reload-pending" ] && r=yes || r=no
+harness_check "#2070 keepalive writes no .idle and leaves the reload pending" "$r"
+heldb_pane=$(tmux capture-pane -t "$HELDB" -p 2>/dev/null || true)
+printf '%s' "$heldb_pane" | grep -q '/reload' && r=no || r=yes
+harness_check "#2070 no /reload keystroke went into the held box" "$r"
+
+val_plane_ready "$ROOT" "$F2070"
+CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$F2070" "$LIB_DIR/fleet-pulse.sh" "$F2070" >/dev/null 2>&1 || true
+heldb_ev=$(val_events "$ROOT" "$F2070" "$HELDB")
+printf '%s' "$heldb_ev" | grep -q '"type":"input_held"' && r=yes || r=no
+harness_check "#2070 fleet-pulse emits input_held for the held bot" "$r"
+printf '%s' "$heldb_ev" | grep -q '"type":"activity_stuck"' && r=no || r=yes
+harness_check "#2070 ...and no activity_stuck (no 'likely hung mid-task')" "$r"
+mgr_pane=$(tmux capture-pane -J -t "$MGR" -p -S - 2>/dev/null || true)
+printf '%s\n' "$mgr_pane" | grep -F "$HELDB input_held" | grep -q 'Enter' && r=yes || r=no
+harness_check "#2070 the manager's push names the held box and the Enter remedy" "$r"
+printf '%s\n' "$mgr_pane" | grep -F "$HELDB input_held" | grep -q 'do not restart' && r=yes || r=no
+harness_check "#2070 ...and says not to restart" "$r"
 
 # ===========================================================================
 # #453 Phase 5 — Telegram bridge auto-heal (Tier-2, flag-gated F6b). Proves the
@@ -1309,9 +1408,9 @@ mkdir -p "$RB_HOME/.claude"
 RB_PLUGIN_DIR="$RB_HOME/.claude/plugins/cache/ValMarketplace/claudna"
 mkdir -p "$RB_PLUGIN_DIR"
 printf '{"skipAutoPermissionPrompt":true,"skipDangerousModePermissionPrompt":true}\n' > "$RB_HOME/.claude/settings.json"
-cat > "$RB_ROOT/bin/claude" <<'STUB'
+cat > "$RB_ROOT/bin/claude" <<STUB
 #!/bin/bash
-exec cat
+exec $VAL_BOX
 STUB
 chmod +x "$RB_ROOT/bin/claude"
 cat > "$RB_DIR/bot.conf" <<CONF
@@ -1410,7 +1509,7 @@ cat > "$RB_STAGED" <<STUB
 #!/bin/bash
 if [ "\${1:-}" = plugin ]; then echo "\$*" >> "$RB_ROOT/staged-plugin-argv.log"; exit 0; fi
 echo ZZZ_STAGED_LINK_LAUNCHED
-exec cat
+exec $VAL_BOX
 STUB
 chmod +x "$RB_STAGED"
 ln -sfn "$RB_STAGED" "$RB_ROOT/state/bin/claude"
@@ -1455,9 +1554,9 @@ harness_check "ready verdict -> no rc_timeout event (no false alarm, #751)" "$r"
 # Negative: reconfigure valrb as a CHANNEL bot (handle + a resolvable token) whose
 # poller never came up — no bot.pid under TELEGRAM_STATE_DIR -> bridge_state stays
 # no_bridge -> the probe times out and emits the now-true-positive rc_timeout.
-cat > "$RB_ROOT/bin/claude" <<'STUB'
+cat > "$RB_ROOT/bin/claude" <<STUB
 #!/bin/bash
-exec cat
+exec $VAL_BOX
 STUB
 chmod +x "$RB_ROOT/bin/claude"
 cat >> "$RB_DIR/bot.conf" <<CONF
@@ -1827,7 +1926,7 @@ if [ "\$1" = plugin ]; then
     fi
     exit 0
 fi
-exec cat
+exec $VAL_BOX
 STUB
 chmod +x "$RB_ROOT/bin/claude"
 TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=10 CLAUDE_BIN="$RB_ROOT/bin/claude" \
@@ -2356,24 +2455,26 @@ for _d in "$BRIEF_DIR" "$BRIEFBUSY_DIR" "$BRIEFWAIT_DIR"; do
     ln -s "$CLAUDLOBBY_LIBRARY_DIR/skills/briefing" "$_d/.claude/skills/briefing"
 done
 
-# Idle briefing bot: plain pane, no esc-to-interrupt, no fresh .last-tool-call
+# Every pane here is the box stand-in (VAL_BOX): the trigger's send lands only
+# in a box that shows it.
+# Idle briefing bot: a box, no esc-to-interrupt, no fresh .last-tool-call
 # -> bot_is_busy reads not-busy -> the trigger dispatches.
-tmux new-session -d -s "$BRIEF" "sleep 600"
+tmux new-session -d -s "$BRIEF" "$VAL_BOX"
 # Busy briefing bot: a fresh data/.last-tool-call -> bot_is_busy reads BUSY via
 # the rendering-immune marker branch (no pane-render race) -> the trigger defers.
-tmux new-session -d -s "$BRIEFBUSY" "sleep 600"
+tmux new-session -d -s "$BRIEFBUSY" "$VAL_BOX"
 touch "$BRIEFBUSY_DIR/data/.last-tool-call"
 # Retry bot: busy the same way, until its marker is removed mid-window below.
-tmux new-session -d -s "$BRIEFWAIT" "sleep 600"
+tmux new-session -d -s "$BRIEFWAIT" "$VAL_BOX"
 touch "$BRIEFWAIT_DIR/data/.last-tool-call"
 # Every bot here names $MGR, so the FLEET NOTICE must land in its pane. Reopen
 # the draining fixture if an earlier scenario stopped its private server.
-tmux has-session -t "$MGR" 2>/dev/null || tmux new-session -d -s "$MGR" 'cat >/dev/null'
+tmux has-session -t "$MGR" 2>/dev/null || tmux new-session -d -s "$MGR" "$VAL_BOX"
 # Idle briefing bot with no composed skill: the trigger must refuse it.
-tmux new-session -d -s "$BRIEFNOSKILL" "sleep 600"
+tmux new-session -d -s "$BRIEFNOSKILL" "$VAL_BOX"
 # Classifier sink: an idle pane that receives direct dispatch.sh sends, so the
 # computed PAYLOAD (bare vs set +H;) is observable verbatim in the captured pane.
-tmux new-session -d -s "$SINK" "sleep 600"
+tmux new-session -d -s "$SINK" "$VAL_BOX"
 sleep 1  # let panes render
 
 # --- Observe: the real trigger against the idle, busy + skill-less bots --------

@@ -27,15 +27,10 @@ def dispatch(args) -> CommandOutput:
 
     if args.public_command == "bot.status" and args.bot_id not in context.fleet.bots:
         raise CommandFailure("not_found", "bot is not declared in the selected fleet")
-    statuses = collect_fleet_status(context.fleet, context.paths)
-    switch_states = None
-    try:
-        from ..switches import resolve
-        switch_states = resolve(context.paths, context.fleet)
-    except Exception:
-        # Status remains readable when the optional switch header cannot be resolved.
-        pass
     if args.public_command == "bot.status":
+        # One bot: probe only its own tmux/service and select its heartbeat;
+        # the switch header is a fleet-table concern this view never renders.
+        statuses = collect_fleet_status(context.fleet, context.paths, only=args.bot_id)
         status = next((row for row in statuses if row.name == args.bot_id), None)
         if status is None:
             raise CommandFailure("unavailable", "declared bot status could not be collected")
@@ -43,6 +38,14 @@ def dispatch(args) -> CommandOutput:
                 "bot": json.loads(format_json([status], context.fleet.name))["bots"][0]}
         lines = (format_bot_detail(status).rstrip(),)
     else:
+        statuses = collect_fleet_status(context.fleet, context.paths)
+        switch_states = None
+        try:
+            from ..switches import resolve
+            switch_states = resolve(context.paths, context.fleet)
+        except Exception:
+            # Status remains readable when the optional switch header cannot be resolved.
+            pass
         data = json.loads(format_json(statuses, context.fleet.name, switch_states))
         lines = (format_table(statuses, context.fleet.name, switch_states).rstrip(),)
     return CommandOutput(data, release_id=release_id, lines=lines)
@@ -96,8 +99,12 @@ def _uptime(args, context, release_id: str | None) -> CommandOutput:
     finally:
         plane.close()
     display_window = args.window or "24h"
+    meaning = ("uptime_pct is the share of observed time the session was up, observed_pct the share"
+               " of the window observed; unobserved time is neither up nor down. restart_count counts"
+               " restart episodes the bot was seen up just before; restarts_after_silence followed a"
+               " longer stretch with no up sample. mtbr_seconds is the mean gap between counted restarts.")
     data = {"fleet": context.fleet.name, "bots": results, "coverage": coverage,
-            "source": "Plane keepalive samples and restart transitions"}
+            "source": "Plane keepalive samples and restart transitions", "meaning": meaning}
     lines = (format_table(results, window=display_window), coverage[display_window])
     return CommandOutput(data, release_id=release_id, lines=lines)
 

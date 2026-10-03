@@ -142,7 +142,8 @@ def _iso(epoch: int) -> str:
 _SEQ = [0]
 
 
-def _land(paths: Paths, row: dict, *, fleet: str = FLEET) -> tuple[str, str]:
+def _land(paths: Paths, row: dict, *, fleet: str = FLEET,
+          title: str = "t") -> tuple[str, str]:
     """Land one legacy-shaped dispatch row on the plane under ``paths.root``
     as the live door lands it (work item + assignment + communication) —
     the importer suite's helper, with the fleet the brief's carrier names."""
@@ -153,7 +154,8 @@ def _land(paths: Paths, row: dict, *, fleet: str = FLEET) -> tuple[str, str]:
     wi, asg, _msg = _live_dispatch(
         paths.root, n, tid, ts=_iso(row["dispatched_at"]), bot=row["bot"],
         expected_by=_iso(row["expected_by"]) if isinstance(row.get("expected_by"), int) else None,
-        fleet=fleet, ref=None if row.get("task_id") else f"dispatch-log:sha:{n:0>32}")
+        fleet=fleet, ref=None if row.get("task_id") else f"dispatch-log:sha:{n:0>32}",
+        title=title)
     return wi, asg
 
 
@@ -381,6 +383,94 @@ def test_respawn_marks_the_canonical_assignment_orphaned(paths: Paths):
     assert item["attention"]["status"] == "orphaned"
     assert task_id in format_boot_brief(brief, boot_provenance(paths, NOW))
 
+
+# --- #2044: each open row's TEXT --------------------------------------------
+# After a respawn a worker's brief named its rows by id alone, so nothing said
+# what they asked. The work item's title is the dispatch text: whole in --json,
+# clipped in text exactly as the re-check digest clips it, and never a blank.
+
+LONG_TITLE = (
+    "Fix the pane send lock: hold one sender per recipient pane across the whole send,\n"
+    "including the verify and the repair, then report with the task id and the head."
+) * 2
+
+
+def _row_line(text: str, task_id: str) -> str:
+    return next(line for line in text.splitlines()
+                if task_id in line and "assignment" not in line)
+
+
+def test_json_work_rows_carry_the_whole_title(paths: Paths):
+    task_id, _ = _land(paths, _dispatch("alex", NOW - 500, NOW + 5000, task_id="t-long"),
+                       title=LONG_TITLE)
+    item = build_brief(_fleet(), paths, "alex", NOW)["work"]["items"][0]
+    assert item["task_id"] == task_id
+    assert item["title"] == LONG_TITLE
+
+
+def test_text_work_rows_clip_the_title_as_the_recheck_digest_does(paths: Paths):
+    from claudlobby.task_recheck import _clip
+    task_id, _ = _land(paths, _dispatch("alex", NOW - 500, NOW + 5000, task_id="t-long"),
+                       title=LONG_TITLE)
+    text = format_brief(build_brief(_fleet(), paths, "alex", NOW))
+    assert _clip(LONG_TITLE) in _row_line(text, task_id)
+    assert LONG_TITLE.splitlines()[1] not in text  # one line per row, never the whole text
+
+
+def test_boot_brief_names_each_open_row_by_its_text(paths: Paths):
+    from claudlobby.task_recheck import _clip
+    task_id, _ = _land(paths, _dispatch("alex", NOW - 9000, NOW - 3000, task_id="t-orph"),
+                       title=LONG_TITLE)
+    os.utime(paths.runtime_bots / "alex" / "data" / ".spawn", (NOW - 100, NOW - 100))
+    brief = build_brief(_fleet(), paths, "alex", NOW)
+    boot = format_boot_brief(brief, boot_provenance(paths, NOW))
+    assert _clip(LONG_TITLE) in next(line for line in boot.splitlines() if task_id in line)
+
+
+def test_three_titled_rows_still_fit_the_boot_budget(paths: Paths):
+    from claudlobby.brief import BOOT_CHAR_BUDGET
+    ids = [_land(paths, _dispatch("alex", NOW - 9000 + i, NOW - 3000, task_id=f"t-b{i}"),
+                 title=LONG_TITLE)[0] for i in range(3)]
+    os.utime(paths.runtime_bots / "alex" / "data" / ".spawn", (NOW - 100, NOW - 100))
+    boot = format_boot_brief(build_brief(_fleet(), paths, "alex", NOW), boot_provenance(paths, NOW))
+    assert all(task_id in boot for task_id in ids) and "more capped" not in boot
+    assert len(boot) <= BOOT_CHAR_BUDGET
+
+
+def test_a_row_with_no_recorded_title_says_so_and_is_degraded(paths: Paths, monkeypatch):
+    # The contract refuses an empty title at ingest, so the title is blanked
+    # after the read: this pins the render and the disclosure for a row whose
+    # text is missing, whatever left it so, rather than a reachable ingest path.
+    import claudlobby.task_state as task_state
+    real = task_state.read_tasks
+
+    def blanked(conn, **kw):
+        snap = real(conn, **kw)
+        return replace(snap, tasks=tuple(replace(t, title="") for t in snap.tasks))
+
+    monkeypatch.setattr(task_state, "read_tasks", blanked)
+    task_id, _ = _land(paths, _dispatch("alex", NOW - 500, NOW + 5000, task_id="t-blank"))
+    brief = build_brief(_fleet(), paths, "alex", NOW)
+    assert _find(brief, "work.title", "#2044")
+    text = format_brief(brief)
+    assert "(title not recorded)" in _row_line(text, task_id)
+    boot = format_boot_brief(brief, boot_provenance(paths, NOW))
+    assert "(title not recorded)" in next(line for line in boot.splitlines() if task_id in line)
+
+
+def test_the_managers_fleet_view_carries_each_rows_text_too(paths: Paths):
+    # #2044 asks for the text on the rows a manager dispatched as well as on a
+    # worker's own. A manager's brief lists the fleet's whole intake, so the
+    # same row reads the same way from the manager's side, in all three forms.
+    from claudlobby.task_recheck import _clip
+    task_id, _ = _land(paths, _dispatch("alex", NOW - 500, NOW + 5000, task_id="t-mgr"),
+                       title=LONG_TITLE)
+    brief = build_brief(_fleet(), paths, "ari", NOW)
+    assert brief["work"]["scope"] == "fleet"
+    assert [item["title"] for item in brief["work"]["items"]] == [LONG_TITLE]
+    assert _clip(LONG_TITLE) in _row_line(format_brief(brief), task_id)
+    boot = format_boot_brief(brief, boot_provenance(paths, NOW))
+    assert _clip(LONG_TITLE) in next(line for line in boot.splitlines() if task_id in line)
 
 def test_terminal_report_closes_canonical_work(paths: Paths):
     _land(paths, _dispatch("alex", NOW - 9000, NOW - 3000, task_id="old-done"))

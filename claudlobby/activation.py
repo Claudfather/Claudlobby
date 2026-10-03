@@ -12,9 +12,12 @@ import base64
 import json
 import os
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import re
 import socket
 import stat
+import subprocess
 import sys
 import time
 
@@ -432,6 +435,31 @@ def _source_handoff_roster(source_plan, bot_dirs, package):
     return roster
 
 
+def _handoff_refresh_time(root: Path, activation_id: str, now: datetime) -> datetime:
+    """When the handoffs' references count as refreshed, from the activation
+    records and never from a handoff file, which any session can edit (#2094).
+
+    A retried step keeps the time its first attempt recorded. An activation
+    within 12 h of the previous one's recorded refresh keeps that time. Otherwise,
+    including after an activation that recorded none, it is now.
+    """
+    def parse(value):
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+    body = read_activation(root, activation_id).body
+    if body.get("handoff_refreshed"):
+        return parse(body["handoff_refreshed"])
+    previous = body.get("previous_selection")
+    if previous:
+        try:
+            prior = read_activation(root, previous["activation_id"]).body.get("handoff_refreshed")
+        except ActivationError:
+            prior = None
+        if prior and timedelta(0) <= now - parse(prior) < timedelta(hours=12):
+            return parse(prior)
+    return now.astimezone(timezone.utc).replace(microsecond=0)
+
+
 def _handoff_inputs(old_units, source_plan, contexts, package):
     """Old handoff roster, exact bot directories and retained candidate bots.
 
@@ -600,6 +628,61 @@ def _quiesce_running(root, store, activation_id, pause, old_units, adapter):
     return sockets
 
 
+def _completed_adoption_abort(root: Path, record: ActivationRecord) -> bool:
+    """A verified early first-adoption abort left no candidate effect behind.
+
+    Only its owner's terminal receipt qualifies; a fresh adoption still
+    re-enrolls, re-plans and re-previews SQL from scratch under a new ID.
+    """
+    body = record.body
+    abort = body.get("adoption_abort")
+    result = abort.get("result") if isinstance(abort, dict) else None
+    return (record.status == "rolled_back"
+            and body["intent"].get("source_kind") == "legacy-unsealed"
+            and body["intent"].get("source_release_id") is None
+            and body["previous_selection"] is None
+            and body["completed"] == [] and body["pending"] is None and body["evidence"] == {}
+            and body.get("forward") == {"status": "activating", "completed": [],
+                                        "pending": "producers_paused", "evidence": {}}
+            and isinstance(result, dict)
+            and isinstance(result.get("evidence"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", result["evidence"]) is not None
+            and not body.get("handoff_effects") and not body.get("start_effects")
+            and not body.get("start_phases") and "identity_bindings" not in body
+            and read_migration(root, record.activation_id) is None)
+
+
+def _cancelled_before_effects(root: Path, record: ActivationRecord) -> bool:
+    """cancel_prepared's receipt for a first adoption, its journals still unstarted.
+
+    The owner proved zero effects when it wrote the receipt; this read-only
+    recheck only confirms the named journals were not started since.
+    """
+    body = record.body
+    cancellation = body.get("cancellation")
+    if not (record.status == "rolled_back"
+            and body["intent"].get("source_kind") == "legacy-unsealed"
+            and body["intent"].get("source_release_id") is None
+            and body["previous_selection"] is None
+            and isinstance(cancellation, dict)
+            and cancellation.get("kind") == "prepared-before-effects"
+            and cancellation.get("selection_sha256") == _digest(None)
+            and isinstance(cancellation.get("journals"), list)
+            and body["completed"] == [] and body["pending"] is None and body["evidence"] == {}
+            and not body.get("handoff_effects") and not body.get("start_effects")
+            and not body.get("start_phases") and "identity_bindings" not in body
+            and "forward" not in body and "adoption_abort" not in body
+            and read_migration(root, record.activation_id) is None):
+        return False
+    try:
+        journals = [config_install.read_config_install(root, identifier)
+                    for identifier in cancellation["journals"]]
+    except (config_install.ConfigInstallError, TypeError, ValueError):
+        return False
+    return all(journal.status == "prepared" and all(row == "pending" for row in journal.progress)
+               for journal in journals)
+
+
 def _running_activation(root: Path, activation_id: str, plan_id: str,
                         install_directory: Path, *, legacy_source: bool,
                         adapter: Adapter | None = None) -> ActivationRecord:
@@ -634,7 +717,9 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
             record = read_activation(root, prior.parent.name)
             if record.status not in {"active", "rolled_back"}:
                 raise ActivationError(f"existing activation {record.activation_id} requires explicit repair")
-            if legacy_source:
+            if legacy_source and (record.activation_id == activation_id
+                                  or not (_completed_adoption_abort(root, record)
+                                          or _cancelled_before_effects(root, record))):
                 raise ActivationError(f"existing activation {record.activation_id} requires explicit repair")
         plan.check_fresh()
         source = source_plan = None
@@ -745,9 +830,11 @@ def _finish_running_activation(root, store, activation_id, plan, release, source
             raise ActivationRefusal("data or pending queues block activation: " + "; ".join(migration.blockers))
         from .activation_handoffs import persist_canonical_handoffs
         roster, bot_dirs, candidate_bots = _handoff_inputs(old_units, source_plan, contexts, package)
+        refreshed = _handoff_refresh_time(root, activation_id, datetime.now(timezone.utc))
+        store.record_handoff_refresh(activation_id, refreshed.strftime("%Y-%m-%dT%H:%M:%SZ"))
         persist_canonical_handoffs(root, roster=roster, bot_dirs=bot_dirs,
                                    expected_audit=migration.task_audit,
-                                   candidate_bots=candidate_bots)
+                                   candidate_bots=candidate_bots, refreshed_at=refreshed)
         store.complete(activation_id, "queues_classified", evidence_digest=migration.manifest_id[2:])
     else:
         journal = read_migration(root, activation_id)
@@ -927,7 +1014,10 @@ _RUNNING_QUIESCE_STEPS = _BOOTSTRAP_EMPTY_STEPS
 def resumable_running_step(record: ActivationRecord) -> str | None:
     """Return a supported same-ID stage; a missing start journal never implies no effect."""
     completed = record.body["completed"]
-    if (record.status != "activating" or completed != list(STEPS[:len(completed)])
+    # An early adoption abort in progress refuses forward steps; only its
+    # explicit abort-adoption rerun can continue that record.
+    if (record.status != "activating" or "adoption_abort" in record.body
+            or completed != list(STEPS[:len(completed)])
             or not isinstance(record.body["intent"].get("install_directory"), str)
             or len(completed) >= len(STEPS)):
         return None
@@ -945,6 +1035,130 @@ def resumable_running_step(record: ActivationRecord) -> str | None:
         supported = (isinstance(record.body.get("start_effects"), dict)
                      and isinstance(record.body.get("start_phases"), dict))
     return step if supported and record.body["pending"] in (None, step) else None
+
+
+def _published_tmux_dir(installed: Path, content: bytes) -> str:
+    """The private tmux directory named by the frozen published unit bytes."""
+    if installed.suffix == ".plist":
+        environment = _darwin_source(content)["environment"]
+    else:
+        try:
+            lines = content.decode("utf-8").splitlines()
+        except UnicodeDecodeError as exc:
+            raise ActivationRefusal("published bot unit is not UTF-8") from exc
+        environment = _environment(" ".join(line.strip().split("=", 1)[1] for line in lines
+                                            if line.strip().startswith("Environment=")))
+    tmpdir = environment.get("TMUX_TMPDIR")
+    if not isinstance(tmpdir, str) or not Path(tmpdir).is_absolute():
+        raise ActivationRefusal("published bot unit has no absolute private tmux directory")
+    return tmpdir
+
+
+def repair_failed_bot_start(root: Path, activation_id: str, *, fleet: str, bot: str,
+                            reason: str, adapter: Adapter | None = None) -> ActivationRecord:
+    """Archive one verified-dead unresolved candidate bot start; never start anything.
+
+    May run from a newer CLI than the target's sealed release: this executable
+    only reads the target's frozen plan/release and observes the named unit
+    through its own adapter. It does not alter the seal, readiness or any other
+    receipt. The sealed candidate's explicit ``--resume`` performs the fresh start.
+
+    Every failure before the single journal write is an ``ActivationRefusal``
+    (nothing changed); a failure after entering the write keeps its own type,
+    because the atomic replace may already have landed.
+    """
+    writing = []
+    try:
+        return _repair_failed_bot_start(root, activation_id, fleet, bot, reason, adapter, writing)
+    except ActivationRefusal:
+        raise
+    except (ActivationError, ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as exc:
+        if writing:
+            raise
+        if str(exc) == "another host activation holds the lock":
+            raise ActivationRefusal("another host activation holds the lock") from exc
+        raise ActivationRefusal("start repair could not verify the recorded activation "
+                                f"({type(exc).__name__})") from exc
+
+
+def _repair_failed_bot_start(root, activation_id, fleet, bot, reason, adapter, writing):
+    root = Path(root).expanduser()
+    if not root.is_absolute() or not root.is_dir():
+        raise ActivationRefusal("start repair requires an explicit existing absolute data root")
+    root = root.resolve()
+    if (not isinstance(reason, str) or not reason.strip() or len(reason) > 500
+            or not reason.isprintable()):
+        raise ActivationRefusal("start repair requires a short reason on one printable line")
+    package = get_resources()
+    adapter = adapter if adapter is not None else Adapter(package)
+    with locked_activation(root) as store:
+        record = read_activation(root, activation_id)
+        intent = record.body["intent"]
+        if record.body["pending"] != "bots_started" or resumable_running_step(record) != "bots_started":
+            raise ActivationRefusal("start repair requires a pending bots_started activation")
+        plan = read_plan(root, intent["plan_id"])
+        release = read_release(root, intent["release_id"])
+        if plan.release_id != release.release_id or plan.release_seal != release.seal_sha256:
+            raise ActivationRefusal("activation plan differs from its sealed release")
+        if read_selection(root) != {"schema": 1, "activation_id": activation_id,
+                                    "release_id": release.release_id, "plan_id": plan.plan_id}:
+            raise ActivationRefusal("host selection is not this activation's candidate")
+        manager = _catalog(units.load_unit_pause(store, activation_id).enrollment["catalog"])[0]
+        matches = [(declaration, item) for declaration, item in planned_units(plan, manager)
+                   if item["enroll"] and item["phase"] == "bots"
+                   and declaration.fleet == fleet and declaration.bot == bot]
+        if len(matches) != 1:
+            raise ActivationRefusal("named fleet/bot is not exactly one candidate bot unit")
+        declaration, item = matches[0]
+        source = str(declaration.source)
+        entries = [entry for entry in enrollment.candidate_entries(store, activation_id, "bots")
+                   if entry["source"] == source]
+        effect = record.body["start_effects"].get(source)
+        if len(entries) != 1 or effect is None:
+            raise ActivationRefusal("named bot has no recorded candidate start intent")
+        if effect["result"] is not None:
+            raise ActivationRefusal("named bot has a durable start result; nothing to repair")
+        entry = entries[0]
+        if (effect["phase"] != "bots" or effect["target"] != entry["target"]
+                or effect["sha256"] != entry["after"]["sha256"] or effect["sha256"] != item["sha256"]
+                or not isinstance(effect.get("fence"), dict)):
+            raise ActivationRefusal("recorded start intent differs from frozen publication")
+        # Native ancestry over this activation's recorded placements, as activation
+        # itself checks; ordinary inventory cannot classify a partial start.
+        for phase in enrollment.PHASES:
+            for placement in enrollment.candidate_entries(store, activation_id, phase):
+                if adapter.call("svc_activation_assert_external", placement["installed"],
+                                placement["target"], str(os.getpid())).returncode:
+                    raise ActivationRefusal("repair caller is hosted or cannot be proved external; "
+                                            "use an operator shell")
+        installed = Path(entry["installed"])
+        try:
+            content = installed.read_bytes()
+            source_bytes = declaration.source.read_bytes()
+        except OSError as exc:
+            raise ActivationRefusal("source or installed bot unit is unreadable") from exc
+        if (hashlib.sha256(content).hexdigest() != effect["sha256"]
+                or hashlib.sha256(source_bytes).hexdigest() != effect["sha256"]):
+            raise ActivationRefusal("source or installed bot unit differs from the frozen start")
+        socket_path = (Path(_published_tmux_dir(installed, content)) / f"tmux-{os.getuid()}"
+                       / declaration.source.stem)
+        try:
+            dead = assert_quiescent(adapter, installed_file=installed, target=entry["target"],
+                                    socket_path=socket_path)
+        except ActivationError as exc:
+            if "socket" in getattr(exc, "detail", ""):
+                raise ActivationRefusal("named bot's private tmux server still accepts or cannot be "
+                                        "observed; inspect that server before repair") from exc
+            raise ActivationRefusal("named bot's unit is not verified inactive; if it is active "
+                                    "(exited) or restarting, explicitly stop that exact verified "
+                                    "bot unit, then retry") from exc
+        if dead.details["socket_state"] not in {"absent", "refused"}:
+            raise ActivationRefusal("named bot's private tmux server is not verified absent")
+        writing.append(True)
+        return store.archive_failed_bot_start(
+            activation_id, source=source, target=entry["target"], sha256=effect["sha256"],
+            fence=effect["fence"], evidence={"details": dead.details, "digest": dead.digest},
+            reason=reason.strip(), repair_artifact=package.artifact_id)
 
 
 def _frozen_unit(row: dict) -> EnrolledUnit:

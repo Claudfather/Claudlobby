@@ -20,8 +20,15 @@
 set -uo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../claudlobby/_runtime_scripts" && pwd)"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 command -v tmux >/dev/null 2>&1 || { echo "SKIP: tmux not available"; exit 0; }
+command -v python3 >/dev/null 2>&1 || { echo "SKIP: python3 not available"; exit 0; }
+# The manager is the input-box stand-in, not a bare `sleep` pane: a push presses
+# Enter only once the box shows it (#1236), and a pane that draws no box is,
+# correctly, never submitted to. Each submitted push then stays on its own line
+# above a fresh box, as Claude Code's transcript keeps it.
+MGR_BOX="$(printf '%q %q' "$(type -P python3)" "$REPO/tests/fixtures/input-box-stub.py")"
 
 ROOT="$(mktemp -d)"
 FLEET="rdr$$"
@@ -51,11 +58,11 @@ export TMUX_SOCKET=rdrw$$
 export BOT_SERVICE=rdrw$$
 EOF
 
-start_manager () { tmux -L "$MGR_SOCK" new-session -d -s "$MGR" "sleep 600"; }
+start_manager () { tmux -L "$MGR_SOCK" new-session -d -s "$MGR" "$MGR_BOX"; }
 mgr_pane ()      { tmux -L "$MGR_SOCK" capture-pane -t "$MGR" -p 2>/dev/null || true; }
 # Count pushes rather than clearing between steps: `clear-history` only drops
-# scrollback and a `sleep` pane ignores C-l, so a "cleared" pane still shows the
-# previous push and every later check would read as a false positive.
+# scrollback, so a "cleared" pane still shows the previous push and every later
+# check would read as a false positive.
 # Counted PER ALERT TYPE: one tick legitimately pushes two here (the worker has
 # no tmux session AND no real service unit), so a bare total would conflate them.
 push_count ()    { printf '%s' "$(mgr_pane)" | grep -c "\\[FLEET-PULSE\\].*$1" || true; }

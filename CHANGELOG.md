@@ -17,7 +17,7 @@ A PreToolUse hook, `claudlobby/_runtime_scripts/public-write-guard.sh` (with its
   - `git commit`: messages, added lines, and the new files an earlier `git add` in the same command names;
   - `git push`: the messages, added lines and new paths of every outgoing commit, and of any commit made earlier in the same command, which does not exist yet when the guard runs.
 
-  It reads the command as the shell does: a backslash-newline continues the line, a GitHub issue or PR URL names the target, `env NAME=value` and `NAME=value` set what the command sees, and the commands inside a command substitution are read. It does not read removed lines, a `cd` directory, a body file's path or the target's name, so a clean-up commit passes and so does a clean write made from a path that contains a term.
+  It reads the command as the shell does: a backslash-newline continues the line, an issue or PR URL names the target only when it is a positional word after the verb (a URL inside a body, title or comment is text), `env NAME=value` and `NAME=value` set what the command sees, and the commands inside a command substitution are read. It does not read removed lines, a `cd` directory, a body file's path or the target's name, so a clean-up commit passes and so does a clean write made from a path that contains a term.
 - **Public is read live, only on a hit:** `gh api repos/OWNER/REPO`, cached for 10 minutes. A REST call that fails fast is asked again over GraphQL (`gh repo view`), since a REST throttle leaves GraphQL working. When both fail, an answer cached up to a day ago stands in. An unknown answer is never cached, and a cache stamp from the future is not trusted.
 - **Failure directions:**
   - no list: allow, plus a critical `public_write_guard_unarmed` event;
@@ -25,11 +25,151 @@ A PreToolUse hook, `claudlobby/_runtime_scripts/public-write-guard.sh` (with its
   - a payload that is not JSON: allow, with a `script_error` breadcrumb;
   - a hit whose repository or visibility is unknown: refuse;
   - content it cannot read counts as a hit: a missing body file, a program's output piped into the write or substituted into its content (`$(...)` or backticks, except `cat` of a file or of a heredoc, in a commit message, a body, title, notes, subject, comment or description flag, or a `gh api` field such as `body` or `query`), a git command run from a directory it cannot name. A substitution in any other flag, such as the sha in `--match-head-commit "$(gh api …)"`, is left as written: it is not content.
-- **Its events name the bot**, the refusal, the no-list alarm and the fail-open breadcrumb alike, so `claudlobby events --bot <bot>` and the bot's brief see them.
+- **Its events name the bot**, the refusal, the no-list alarm and the fail-open breadcrumb alike, so `claudlobby event list --bot <bot>` and the bot's brief see them.
 - **Its ceiling:** it does not follow `eval`, functions, aliases or scripts, and it does not read an annotated tag's own message. Three writes publish content that is not a word of the command, and are not read: `gh pr create --fill` (its title and body come from commits already pushed), `gh repo create --source --push` (the local history), and the asset files of `gh release create` and `upload`. It keeps accidents out; it is not a boundary against a caller trying to get past it.
 - **Off switch:** `state/public-write-guard/disabled`, host-wide. `python3 claudlobby/_runtime_scripts/public-write-guard.py --check` says whether a host's guard is armed, the list and the off switch, without printing a term.
 - **Opt-in:** registered in the switch registry as opt-in for the `heavy_slot` reason. A composed hook has no deployment gate (#1310), so the manifest key is where one bot goes first.
 - **Tests:** `tests/test_public_write_guard.py` drives the real hook with a fake `gh` and real git repositories, in both directions for each shape; `tests/test_public_write_guard_compose.py` covers the composition.
+
+### Fixed — a heavy-slot test no longer fails when its poll reads the slot's lock file mid-write (#2125)
+
+The held-slot test's poll parsed `slot-0.lock` as it found it. `heavy-slot.py` creates that file empty and truncates it before each write, so a poll in that window failed the test with `JSONDecodeError` (CI run 37104705081). The tests now read the record as the module's own reader does: an empty or half-written file is no record yet, and the poll tries again. Test-only; the module already read it this way.
+
+### Fixed — a lone backtick in a double-quoted string no longer hides its line from the credential-echo guard (#2103)
+
+#2099 reads a double-quoted `$(` it cannot delimit as text, so the rest of the line is still judged. A lone backtick in the same string still made the line unreadable, and an unreadable line is allowed. A comment ending in a backslash inside the substitution reaches that state, because the tokenizer joins the backslash-newline before it reads comments, so the comment swallows the `)`. This line was refused before #2099, allowed after it, and printed the canary under bash:
+
+````
+echo "$(echo a # `x \
+)" && gh auth token
+````
+
+- **A lone backtick in a double-quoted string is read as text,** as `_substitutions` already reads it, so the line is judged and that form is refused again.
+
+### Fixed — a send presses Enter only once the box shows the typed text, and a held box is never counted as sent (#1236)
+
+`pane_send_verified`, the one door every keystroke injector uses, sent the Enter 0.3 s after the text whether or not the TUI had read it. A TUI that had not read the text yet read the text and the Enter together, and kept the Enter as an invisible character in the box: the prompt stayed there unsubmitted, and the next Enter only removed that character. The verify then read the first frame after the Enter, which under load was often drawn before the text, as a submit.
+
+- The send now waits until the input box shows the END of the payload (`pane_shows_payload_end`) and only then presses Enter. A submit counts only when the payload was seen in the box and is then gone. A TUI that draws the text at once is seen at the first check, so the common send costs one more pane capture than before (the one before the Enter).
+- When the box never shows the payload within `PANE_SEND_SHOWN_TICKS` (default 50 x 0.2 s = 10 s), the Enter is withheld, never sent blind: `pane_send_verified` returns 3, records a `send_unsubmitted` event (`payload-not-shown`) and says so on stderr. The text may still land in the box unsubmitted, where one Enter sends it.
+- A box that still shows the payload a verify window after the Enter gets another Enter, up to `PANE_SEND_ENTER_TRIES` (default 4) in all, each recorded as `send_retry`. One retry used to be the limit, after which the send returned 0 unchecked. A payload still in the box after the last Enter now returns 3 and records `send_unsubmitted` (`payload-still-in-box`). A paste-framed payload counts as shown by its `[Pasted text` placeholder, and a message queued behind a running turn counts as gone: the box then shows only "Press up to edit queued messages".
+- `start-bot.sh` logs a boot prompt that was not submitted (`NOT SUBMITTED`, through `boot_send_settled`) and goes on booting; any other send failure still ends the boot. keepalive leaves a reload pending for the next idle tick when its reload commands did not submit. `dispatch.sh` no longer reports every failed send as an unreachable session. The message transport already reports any result but 0 or a missing session as `unknown`.
+- The #860 pre-draw repair, which types the payload again when the box appears without it, now runs inside that wait, so its Enter waits too.
+- Test stand-ins draw a box: every pane a send must land in, in the unit tests, in `harness/validate-bot-change.sh` and in the debounce and vault-sync rehearsals, is now `tests/fixtures/input-box-stub.py`, which draws an input box and consumes what is typed. A `cat` or `sleep` pane draws none and is, correctly, never submitted to. `harness/validate-bot-change.sh` now tears itself down when it is stopped (TERM, INT, HUP) or its parent dies (seen at its next write), and reaps every tmux server in its own socket dir; a SIGKILL to the run itself still reaches no trap. `harness/boot-strand-sampler.sh` gains `--no-channels`, which keeps an unauthenticated channel off a shared host, `--model`, and `--resume`, which seeds a fresh handoff before each boot so the startup prompt is typed into the turn the resume command starts. It now counts a prompt delivered mid-turn (a `queued_command` attachment) as submitted, and never a tool result that carries its marker. `--minimal-plugins` copies only what the probe loads from the host plugin cache, and the run's first boot prints what it loaded.
+
+### Fixed — the resume gate reads a handoff's capture time, not the activation's reference refresh (#2094)
+
+Every activation rewrites each bot's handoff with a refresh envelope at the top. The envelope carried `last_updated:`, the field that start-bot's resume gate and clauDNA's readers take as the capture's freshness. So after an activation the gate measured the refresh: an old handoff looked fresh, and a fresh capture written under a day-old envelope looked stale.
+
+- **The envelope carries `references_refreshed:` instead,** so `last_updated:` belongs to the capture again. The reader still accepts the old envelope and files with none; the next activation rewrites them.
+- **A refresh no longer makes an old handoff resume.** It used to, by design, so that a booting bot would read its references. A booting bot gets its IDs from the boot brief (#2049).
+- **The refresh time comes from the activation's own record,** never from a file a session can edit. It is `handoff_refreshed`, written before the handoffs, reused by a retried step, and read by the next activation's 12-hour rule.
+- **The markers count only where the refresh writes them:** the envelope at the top, the section at the end. A note that quotes one no longer refuses the host's activation; a damaged envelope or section in those places still does.
+- **A refresh keeps the handoff's mtime,** which the gate falls back to when a capture has no `last_updated:` of its own.
+
+### Fixed — `fleet uptime` reports uptime as the share of observed time, and MTBR as the gap between restarts (#891, #1616)
+
+The uptime percentage divided up-time by the whole window, so it measured how much history the plane held. Measured on a live four-bot fleet, it equalled the observed coverage to the decimal in every window (36.9% over 30 days for bots up 99.99–100% of the time on record). MTBR divided up-time by the restart rows in the window, and every kickstart on boot after a host outage was a restart.
+
+- **`uptime_pct` is up ÷ observed time,** and null when nothing was observed. `observed_pct` and `observed_seconds` say how much of the window that was, and `down_seconds` how much was a dead session. Time between samples is credited as before, capped at 10 minutes; a restart event marks an episode and adds no time, so an event whose samples have aged out cannot add downtime.
+- **Restarts are episodes.** RESTART and DOWN rows with no up sample between them and no gap over 10 minutes are one restart. It counts as the bot's only if the bot was seen up in the 10 minutes before it. One that follows a longer stretch with no up sample (a host outage, a recording gap) is reported as `restarts_after_silence` and left out of the count and of MTBR. `restart_events` keeps every row.
+- **`mtbr_seconds` is the mean gap between consecutive counted restarts,** for each one that starts in the window, measured back past the window's edge. One restart has no gap and reads null. Restart events are never pruned, so a sample prune does not move it.
+- **First Boot is the first up sample after the last restart,** not the DOWN sample keepalive lands with it.
+- **The table says what it divides by:** `Up (obs)` and `Observed` columns, a line under the table, and a line per bot for restarts it did not count. The JSON carries a `meaning`.
+- `library/skills/fleet-ops/SKILL.md` describes the figures `fleet uptime` now reports.
+- Not done here: a row naming host outages (#1616), and a utilization figure in `brief`, whose standing `utilization: omitted` entry other surfaces depend on.
+
+### Fixed — a quoted substitution the credential-echo guard cannot delimit no longer hides the rest of its line (#2097)
+
+The guard from #2090 judged a double-quoted `$(...)` by first finding its closing parenthesis. A heredoc post whose prose held an apostrophe or an unmatched parenthesis defeated that search, the whole line read as unparsed, and an unparsed line is allowed. So `gh auth token` or `neonctl --help` beside such a post ran unjudged.
+
+- **A substitution is now delimited as bash reads it.** A parenthesis inside quotes, a comment, a heredoc body or a case pattern does not count.
+- **One that still cannot be delimited is read as text,** in a double-quoted string and in an unquoted heredoc body (a lone backtick too), and the rest of the line is judged.
+
+### Fixed — a bot can answer a message from a human sender (#2068)
+
+`message reply` refused any parent whose sender was not a bot, and `message send` takes bots only. A bot that a person asked a question over the plane had no door to answer it.
+
+- **A reply to a `human:` sender is recorded on the plane and carried by nothing.** A human has no pane, so nothing is submitted and no transmission is written. The reply reports delivery and transport `not_requested`, and the session that asked reads it with `message wait PARENT --for reply` or `message show`.
+- **The shape is keyed on positive facts only:** a `message.reply`, from a generated bot, to a parent addressed to it whose recorded sender is `human:NAME`. Its request receipt freezes a `RecordedReplyBinding`, with no native destination, and plans one recording stage. The receipt validator refuses that shape for a bot recipient, and still refuses a reply on a native route that has no delivery stage.
+- **With no carrier to fall back on, the request is durable before any write,** and a recording that cannot be proven fails as `unavailable`, retryable with the same request UUID.
+- **`message receipt` says `not_applicable`** for a message addressed to a human, never `missing`.
+- **`message send` to a human stays refused,** so a bot answers only someone who asked it.
+- `library/skills/fleet-ops/SKILL.md` says how a reply to a human behaves.
+
+### Added — a composed guard refuses a CLI form that prints an env-held credential (#2090)
+
+A bare `neonctl --help` in a live bot session printed the real `NEON_API_KEY` into a session transcript, because the CLI shows the variable as the default of `--api-key`. Every bot inherits that variable, and the only mitigation was prose in one agent file. The host's settings carry a bare `Bash` allow, so no permission rule could refuse the command.
+
+- **`credential-echo-guard.sh`** is a PreToolUse hook on Bash, composed into every bot through `claudlobby/system.yaml` next to `vault-git-guard.sh`. It refuses the forms in #2090's table A, which were measured with canaries:
+  - neonctl and neon help and usage screens: `--help`, a bare call, a command group without a verb, an unknown or incomplete top-level option. An unknown command prints only an error, so it passes.
+  - A `DEBUG` trace in front of neonctl.
+  - `pip config list` and `pip config debug` while `PIP_INDEX_URL` or `PIP_EXTRA_INDEX_URL` can be set.
+  - `gh auth token`.
+- **The safe form is allowed.** A form passes only when its variables are removed in the same command (`env -u VAR`, `env -i`, an empty `VAR=`, or an `unset VAR` earlier in the line that always runs: not after `&&`, `||` or `|`, not inside an `if`, a loop or a function body). The `DEBUG` trace and `gh auth token` are refused even then, because each falls back to a stored login; `gh auth token` passes with its stdout sent to a file, and its reason leads with letting gh read the token itself.
+- **It refuses, and never rewrites.** The reason names the safe form and repeats nothing from the command. A refusal is recorded as `credential_echo_refused` with the row and the CLI name only. Both of its events are registered as `notice` in the plane's severity registry.
+- **It fails open, with a `script_error` breadcrumb.** That happens when jq or python3 is missing, the payload is unparseable, or the decider fails. A command the decider cannot read is allowed and counted as `credential_echo_unparsed`.
+- **`credential-echo-decide.py`** holds the table as data, plus neonctl's command tree and pip's options. It reads quotes, ANSI-C strings and abbreviated long options as the shell and the CLI do. It follows a shell's `-c` string, a heredoc or here-string fed to a shell, substitutions inside double quotes and unquoted heredocs, `env` (with `-S`), wrappers such as `command`, `time`, `setsid` and `sudo`, and `npx`, `bunx` and `pnpm|npm|yarn dlx|exec`. It skips quoted arguments, comments and heredoc bodies that are data. `eval`, scripts, aliases, `xargs`, `find -exec` and names built by expansion are out of its reach.
+- **Tests:** `tests/test_credential_echo_guard.py` replays the canary probe kit's table A (`tests/fixtures/credential_echo/registry-rows.json`). Every echoing row is refused as written. Every `unset` row passes under each way of removing its variables. The controls pass untouched. Around the rows it covers separators, subshells, wrappers, scoping traps, the stdout-to-file rule, fail-open, and the plane record.
+
+### Fixed — `bot restart` and `bot start` no longer report a successful start of a staggered unit as unverified (#2087)
+
+On Linux, `systemctl --user restart` and `enable --now` block through a bot unit's `ExecStartPre=/bin/sleep` boot stagger, and the enroll call had a fixed 30 s budget. A unit staggered 30 s or more was cut off before its start returned. A restart that worked was reported as "bot lifecycle effect is unverified", and the readiness wait never ran.
+
+- **`unit_start_budget`** (activation_runtime) returns 30 s plus the unit's sealed `/bin/sleep` delay. This is the rule activation already used for its own starts, and `_start_budget` now delegates to it.
+- **`set_bot_running`** reads that budget from the sealed unit before the readiness fence and gives it to the enroll call. A call that outlasts the unit's own stagger is still reported unverified. An unstaggered unit and a Darwin plist keep 30 s.
+- **Tests:** `tests/test_bot_operations.py` seals a worker staggered 30 s, whose fake enroll is cut off at its budget while the start still completes. It adds controls for a hang past the stagger, an unstaggered unit, and a unit changed after activation. `tests/test_activation_runtime.py` pins the helper.
+
+### Fixed — a held input box is named HELD and paged with its remedy, never as a hang (#2070)
+
+When a bot's input box held text that was never submitted and no turn was running, keepalive logged `UNKNOWN` on every tick and fleet-pulse paged the manager with `activity_stuck` "likely hung mid-task": a page that points at a restart, which discards the text, when the remedy is an operator Enter. Seen on 2026-10-01 after a restart and under load: 26 consecutive `UNKNOWN` ticks on one bot, three "likely hung" pages on another, and two ordinary sends held at a 1-minute load of 34 and 44, each cleared with exactly two Enters.
+
+- **`pane_is_held`** (lib-common): positive evidence of text on the input box's line, read through `pane_input_region` and `_pane_strip_chrome`, with no length floor. Claude Code's own text there is never held: an empty box's suggestion (`Try "…"`), the queued-message hint behind a running turn, and a menu (a numbered option, or an offered "Esc to cancel"), where an Enter would choose. Byte-safe under any locale.
+- **keepalive** asks it after `BUSY` and before `IDLE`. The `HELD` verdict is logged and rides the heartbeat; `data/.held` holds the time it was first seen; no `.idle` is written and no key is sent, so no reload or bridge heal goes into a held box. Before, with no UTF-8 locale, the idle pattern matched a held box's border bytes and called it `IDLE`.
+- **fleet-pulse** pages `input_held` (critical) in place of `activity_stuck` once a fresh `data/.held` has held for `OBSERVABILITY_INPUT_HELD_THRESHOLD` (default 300 s). The manager's push names the remedy: an operator Enter, one more only if the text is still there after about 10 s, and if it is still there after that, stop and look, since a menu or a modal may be taking the Enter; never typed text, never a restart.
+- **Readers:** `uptime` counts `HELD` ticks as up time, as it did while they read `UNKNOWN`, and `status` shows `held`. The operator plane's presence still renders `HELD` as `unknown`.
+- **Tests:** `tests/test_pane_is_held.sh` (new), held cases and negative controls in `tests/test_keepalive_classify.sh` under both locales, four fixtures in a live capture's shape, the real keepalive tick, uptime, status, and a `validate-bot-change.sh` scenario that drives keepalive and fleet-pulse end to end.
+
+### Fixed — a reload-fleet test failed on macOS in its own cleanup (#2077)
+
+Two tests in `tests/test_reload_fleet_native.py` end by killing the process group they
+started, ignoring only ESRCH. In one of them the test body has already killed that group
+and reaped its leader, and on macOS runners that second kill has answered EPERM, failing
+a test whose assertions had passed. The cleanup is one helper now, and it ignores EPERM
+too, as `tests/test_bridge_state.py` already does; a new test pins that it still kills a
+live group. Tests only.
+
+### Fixed — the brief says what each open row asks (#2044)
+
+After a respawn, a worker's brief named its open rows by id alone, so nothing it could read said what they asked: two bots hand-rolled a plane read for the text in one hour. The work item's title is the dispatch text, and the brief's `work` section already reads it from the canonical reducer in the same session, so no second read is added.
+
+- **Text mode:** each WORK row ends with its title on one line, clipped to 80 characters by `task_recheck._clip`, the helper the re-check digest uses, so the two cannot drift. A long or multi-line title no longer spills across the section.
+- **The boot brief:** each SessionStart detail line now ends with the same clipped title, the case the issue is about. Three titled rows still fit the 1,000-character budget.
+- **Both views:** a worker's own rows and a manager's fleet view, which holds the rows it dispatched, carry the same text the same way.
+- **`--json`:** unchanged; every `work.items[]` row already carried `title`, whole. Schema-1's top-level keys are unchanged.
+- **A row with no recorded title** renders as `(title not recorded)` and is disclosed in `degraded[]` as `work.title`, never as a blank. The contract refuses an empty title at ingest, so this covers a row whatever left it so.
+
+### Fixed — composed bots exclude the data root's developer instructions (#2057)
+
+Every bot's local settings exclude the exact absolute data-root `CLAUDE.md` path,
+so new sessions use their composed instructions without inheriting the checkout's
+developer guide outside release activation. Bot and project instruction files
+remain eligible to load. The exclusion takes effect at the next session start.
+
+### Fixed — a broken link and three stale lines in the moved script reference (#2035 follow-up)
+
+- `documentation/test-suite.md` links `testing-plane-isolation.md` from its own folder. The link moved one folder down with its text in #2035 and pointed at `documentation/documentation/`.
+- The `reload-fleet.sh` reference row says what the script has done since #1989: a plugin refresh for the selected fleet, then marking running bots for an idle reload. It no longer says the script runs generate; authored config changes only through host activation.
+- The `pull-root.sh` row is gone: #1989 removed the script, and the CLI refuses the job. The `update-siblings.sh` row now gives the current reason the root is excluded: a Claudlobby release needs an operator's sealed build, plan and activation.
+
+### Changed — the root CLAUDE.md is an index again, and AGENTS.md mirrors every CLAUDE.md for Codex (#2035)
+
+The root `CLAUDE.md` had grown to 168k characters, past Claude Code's 150k warning, almost all of it the scripts table. Every session in this checkout loads it whole, and so does every bot: bot directories sit under the root, and Claude Code reads the `CLAUDE.md` of each parent directory. Codex reads `AGENTS.md` within one 32 KiB budget for the whole chain from the root to the folder it starts in (measured). The root is now a ~27k index with one line per runtime script (all 74). The full reference moved verbatim: the runtime and CLI rows to `claudlobby/_runtime_scripts/CLAUDE.md`, which loads only when a session opens a file there, and the harness rows to a new `harness/CLAUDE.md`, which also indexes all 26 harness scripts. The Python module map moved to `documentation/architecture/module-map.md`, which keeps the Codex chain into `_runtime_scripts/` within budget; the test-suite guidance to `documentation/test-suite.md`; and the full text of the sections the root now summarises to `documentation/validating-bot-changes.md` and `documentation/fleet-update-lifecycle.md`.
+
+- Every `CLAUDE.md` has a committed `AGENTS.md` beside it that is a byte-for-byte copy, and each `.agents/skills/<name>/` is a copy of `.claude/skills/<name>/`, so Claude Code and Codex read the same text. Copies, not symlinks: `tests/prepare_resources.py` refuses a symlink in the index, and Codex's skill loader skips a symlinked `SKILL.md` file (measured). Codex reads `AGENTS.md` at the root and nested, within one shared 32 KiB budget (measured).
+- `tests/test_instruction_budget.py` fails a PR when a Codex chain to any folder's rules passes 32 KiB, a nested instruction file passes 150k characters (naming the rows to move), an index misses, duplicates or invents a script or holds anything but one-line entries, or an `AGENTS.md` or Codex skill differs from its Claude source.
+- `tests/test_supervisor_ratchet.py` skips `.md` files: prose that names `systemctl` is not a call site, and the moved reference quotes three.
+- `claudlobby library list` and the `bot create --interactive` voice picker no longer offer `voices/CLAUDE.md`, or its new `AGENTS.md`, as a voice, and the generate-time skill-reference scan skips an `AGENTS.md` that mirrors the `CLAUDE.md` beside it, so each reference is reported once.
 
 ### Changed — main integration for the unified CLI (#1747, #1989)
 

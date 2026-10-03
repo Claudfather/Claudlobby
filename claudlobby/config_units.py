@@ -46,10 +46,13 @@ def unit_family(files: dict[str, tuple[bytes, int]], *, destination: Path,
         raise PlanError("staged unit is not bound to its candidate release") from exc
     # Native identity is public location metadata. Other environment values may
     # be credentials; they stay in the private staged bytes, never in summaries.
+    # The one composed opt-in switch the scheduled host updater must compare
+    # with its unit (host_update_operations) is carried too, including an empty
+    # disarming assignment; an absent switch stays absent.
     identity = {key: environment[key] for key in (
         "CLAUDLOBBY_ROOT", "FLEET_ROOT", "CLAUDLOBBY_NATIVE_DIR",
         "CLAUDLOBBY_LIBRARY_DIR", "CLAUDLOBBY_CLI", "CLAUDLOBBY_ARTIFACT_ID",
-        "CLAUDLOBBY_RELEASE_ID") if key in environment}
+        "CLAUDLOBBY_RELEASE_ID", "CLAUDLOBBY_STAGED_CLAUDE_UPDATE_ENABLED") if key in environment}
     return [{"source": str(destination / name), "scope": scope, "phase": phase,
              "release_id": release_id, "working_directory": working_directory,
              "environment": identity, "fleet": fleet, "bot": bot, "enroll": enroll,

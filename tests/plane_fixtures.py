@@ -173,11 +173,13 @@ def _stdlib_readers():
 # no ledger left to compare or import. These four helpers were its exports;
 # the suites that land a dispatch the way the live door does still ride them.
 
-def _live_dispatch(root, n, task_id, *, ts, bot="w1", expected_by=None, fleet=None, ref=None):
+def _live_dispatch(root, n, task_id, *, ts, bot="w1", expected_by=None, fleet=None, ref=None,
+                   title="t"):
     """A dispatch the LIVE door landed: three events, emitter dispatch-task.
     *expected_by* (ISO) mirrors the ledger row's deadline when a test needs
     the watchdog's question answered on both sides; *ref* overrides the
-    source_ref (an id-less construct's ``dispatch-log:sha:<key>``)."""
+    source_ref (an id-less construct's ``dispatch-log:sha:<key>``); *title* is the
+    work item's title, which the live door fills with the whole dispatch text."""
     initialize_plane(root)
     fl = fleet or F
     wi, asg, msg = f"wi_{n:0>32}", f"asg_{n:0>32}", f"msg_{n:0>32}"
@@ -185,7 +187,7 @@ def _live_dispatch(root, n, task_id, *, ts, bot="w1", expected_by=None, fleet=No
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "dispatch-task", "fleet": fl,
          "source_ref": ref, "occurred_at": ts,
-         "payload": {"work_item_id": wi, "title": "t", "created_by": f"bot:{fl}/mgr"}},
+         "payload": {"work_item_id": wi, "title": title, "created_by": f"bot:{fl}/mgr"}},
         {"event_type": "assignment", "emitter": "dispatch-task", "fleet": fl,
          "source_ref": ref, "occurred_at": ts,
          "payload": {"assignment_id": asg, "work_item_id": wi,

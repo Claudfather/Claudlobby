@@ -20,13 +20,20 @@ def test_fleet_and_bot_status_keep_native_and_plane_facts_separate(monkeypatch, 
 
     monkeypatch.setattr(orientation, "_context", lambda args: _context(tmp_path))
     monkeypatch.setattr(activation_state, "read_selection", lambda root: None)
-    monkeypatch.setattr(switches, "resolve", lambda paths, fleet: [])
-    monkeypatch.setattr(status, "collect_fleet_status", lambda fleet, paths: [
-        BotStatus(name="worker", service_active=True, service_sub="running",
-                  tmux_alive=True, plane_unreachable="Plane unavailable")])
+    resolved, scopes = [], []
+    monkeypatch.setattr(switches, "resolve", lambda paths, fleet: resolved.append(1) or [])
+
+    def _collect(fleet, paths, only=None):
+        scopes.append(only)
+        return [BotStatus(name="worker", service_active=True, service_sub="running",
+                          tmux_alive=True, plane_unreachable="Plane unavailable")]
+    monkeypatch.setattr(status, "collect_fleet_status", _collect)
 
     fleet = status_read.dispatch(SimpleNamespace(public_command="fleet.status"))
+    assert scopes == [None] and len(resolved) == 1
     bot = status_read.dispatch(SimpleNamespace(public_command="bot.status", bot_id="worker"))
+    # one bot: only its own probes, and no fleet switch header it never renders
+    assert scopes == [None, "worker"] and len(resolved) == 1
     for row in (fleet.data["bots"][0], bot.data["bot"]):
         assert row["service_active"] is True and row["tmux_alive"] is True
         assert row["plane_unreachable"] == "Plane unavailable"

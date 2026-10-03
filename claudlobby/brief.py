@@ -430,6 +430,16 @@ def _work_section(
             "historical_references": list(task.display_ids),
             "issues": [asdict(issue) for issue in task.issues],
         })
+    # #2044: the title IS the dispatch text, the only thing that tells a
+    # respawned worker what a row asks. The contract refuses an empty title at
+    # ingest, so a missing one is said here, whatever left it so, and is never
+    # rendered as a blank that reads like a row with nothing to say.
+    untitled = sum(1 for item in items if not (item["title"] or "").strip())
+    if untitled:
+        degraded.append(Degradation(
+            field="work.title", mode="labeled", issue="#2044",
+            reason=f"{untitled} open task(s) have no recorded title, so they are "
+                   "listed by id only"))
     if missing_attention and not any(d.field == "work.attention" for d in degraded):
         degraded.append(Degradation(
             field="work.attention", mode="labeled", issue="#1747",
@@ -701,6 +711,14 @@ def build_brief(fleet, paths: Paths, bot_id: str, now: int, *,
 # --- rendering ----------------------------------------------------------------
 
 
+def _row_text(title: str | None) -> str:
+    """A row's text on one line: the title clipped exactly as the re-check
+    digest clips it (`task_recheck._clip`), so the two surfaces cannot drift,
+    or a stated absence, never a blank. ``--json`` keeps the title whole."""
+    from .task_recheck import _clip
+    return _clip(title) if (title or "").strip() else "(title not recorded)"
+
+
 def _short(ts: str | None) -> str:
     return (ts or "—")[:19].replace("T", " ")
 
@@ -769,7 +787,7 @@ def format_brief(brief: dict) -> str:
         shown, more = rows(items)
         for item in shown:
             out.append(
-                f"    {item['task_id']}  {item['state']}  {item['title']}"
+                f"    {item['task_id']}  {item['state']}  {_row_text(item['title'])}"
             )
             assignment = item["assignment"]
             if assignment:
@@ -1000,7 +1018,8 @@ def _boot_detail_lines(work: dict, now: int) -> tuple[list[str], int]:
         elif status == "overdue":
             overdue_s = observation.get("elapsed_past_deadline_s") or 0
             note = f" (+{overdue_s // 60}m past deadline)"
-        lines.append(f"  {status.upper()} {item['task_id']}{assignment_id} — {age} old{note}")
+        lines.append(f"  {status.upper()} {item['task_id']}{assignment_id} — {age} old{note}:"
+                     f" {_row_text(item['title'])}")
     return lines, max(0, len(ordered) - BOOT_DETAIL_LIMIT)
 
 

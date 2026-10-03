@@ -49,10 +49,23 @@ Use the Agent tool to keep your main context lean:
 
 ## Self-Restart
 
-```bash
-# Linux
-sudo systemctl restart {{BOT_NAME}}
+Handoff first, then the canonical CLI — never `systemctl` or `launchctl`
+directly. Use `/restart` if it is equipped; otherwise:
 
-# macOS
-launchctl kickstart -k gui/$(id -u)/{{SERVICE_PREFIX}}.{{BOT_NAME}}
-```
+1. Save a fresh session handoff to `<cwd>/.claude/session.md` (your
+   session-handoff skill if you have one, else write it yourself) with a
+   `last_updated` ISO-8601 UTC timestamp in its frontmatter — `start-bot.sh`
+   age-gates the resume on that field.
+2. Notify on the channel that the handoff is saved and the restart is
+   intentional (best-effort).
+3. Request the restart with your literal bot ID:
+
+   ```bash
+   claudlobby --json bot restart {{BOT_ID}}
+   ```
+
+   See `claudlobby bot restart --help` for the exact syntax. An uncertain
+   result needs inspection, not an automatic retry.
+4. The new session resumes from that handoff when a resume capability is
+   installed. Only that fresh session can confirm resumption; this one cannot
+   claim it.

@@ -254,10 +254,79 @@ def test_local_human_sends_and_replies_only_to_a_bot_sender(active, monkeypatch,
     assert degraded["data"]["sender"]["alias"] == "human:operator"
     assert degraded["data"]["recording"] == "unrecorded" and len(calls) == 3
 
+    # A reply to the human is recorded on the Plane and carried by nothing (#2068).
     _generated(monkeypatch, root, host.release, bot="worker")
-    unsupported = _reply_call(capsys, root, sent["data"]["message_id"],
-                              "--text", "No human transport", "--request-id", str(uuid4()), expected=4)
-    assert unsupported["error"]["code"] == "conflict" and len(calls) == 3
+    recorded = _reply_call(capsys, root, sent["data"]["message_id"],
+                           "--text", "Recorded for the human", "--request-id", str(uuid4()), expected=0)
+    assert recorded["data"]["destination"]["alias"] == "human:operator"
+    assert recorded["data"]["delivery"] == recorded["data"]["transport"] == "not_requested"
+    assert len(calls) == 3, "no pane received the answer"
+
+
+def test_a_bot_answers_a_human_sender_on_the_plane(active, monkeypatch, capsys):  # noqa: F811
+    """An operator's session asked a bot over the plane and the bot had no door to answer:
+    `message reply` refused a `human:` sender (#2068). The answer is recorded on the plane,
+    linked to the question, readable by the session that asked, and submitted to no pane,
+    because the asker has none."""
+    root, host = active
+    _human(monkeypatch, host.release)
+    calls = []
+    _native(monkeypatch, calls)
+    asked = _call(capsys, root, "--to", "worker", "--text", "Reply with your path and readiness",
+                  "--request-id", str(uuid4()), expected=5)
+    question = asked["data"]["message_id"]
+    assert len(calls) == 1
+
+    _generated(monkeypatch, root, host.release, bot="worker")
+    request_id = str(uuid4())
+    before = _facts(root)
+    answered = _reply_call(capsys, root, question, "--text", "Ready; nothing in flight",
+                           "--request-id", request_id, expected=0)
+    assert answered["data"]["reply_to_message_id"] == question
+    assert answered["data"]["destination"]["alias"] == "human:operator"
+    assert answered["data"]["recording"] == "committed"
+    assert len(calls) == 1, "no pane received the answer: the human has none"
+    assert _facts(root)[0] == before[0] + 1
+    replay = _reply_call(capsys, root, question, "--text", "Ready; nothing in flight",
+                         "--request-id", request_id, expected=0)
+    assert replay["data"]["replayed"] is True and _facts(root)[0] == before[0] + 1
+
+    _human(monkeypatch, host.release)
+    assert main(["--root", str(root), "--json", "message", "wait", question,
+                 "--for", "reply", "--timeout", "1"]) == 0
+    waited = json.loads(capsys.readouterr().out)
+    assert waited["data"]["reply"]["message_id"] == answered["data"]["message_id"]
+
+
+def test_a_reply_to_a_human_has_no_receipt_or_carrier_and_send_stays_refused(active, monkeypatch, capsys):  # noqa: F811
+    """The guards on #2068's reply to a human: it reports no delivery stage,
+    `message receipt` says not applicable (never missing), `message show`
+    renders a human destination with no fleet, and a bot still cannot `message
+    send` to a human, so it answers only someone who asked it."""
+    root, host = active
+    _human(monkeypatch, host.release)
+    calls = []
+    _native(monkeypatch, calls)
+    question = _call(capsys, root, "--to", "worker", "--text", "Are you ready?",
+                     "--request-id", str(uuid4()), expected=5)["data"]["message_id"]
+    _generated(monkeypatch, root, host.release, bot="worker")
+    data = _reply_call(capsys, root, question, "--text", "Ready", "--request-id", str(uuid4()),
+                       expected=0)["data"]
+    assert (data["delivery"], data["transport"]) == ("not_requested", "not_requested")
+    assert data["receipt_observation"] is None and data["integrity_verdict"] is None
+
+    assert main(["--root", str(root), "--json", "message", "receipt", data["message_id"]]) == 0
+    observed = json.loads(capsys.readouterr().out)["data"]
+    assert observed["receipt_observation"] == observed["integrity_verdict"] == "not_applicable"
+    assert main(["--root", str(root), "--json", "message", "show", data["message_id"]]) == 0
+    shown = json.loads(capsys.readouterr().out)["data"]["message"]
+    assert shown["destination"] == {"uid": data["destination"]["uid"], "alias": "human:operator",
+                                    "fleet_uid": None}
+    assert shown["reply_to_message_id"] == question
+
+    refused = _call(capsys, root, "--to", "human:operator", "--text", "Unprompted",
+                    "--request-id", str(uuid4()), expected=4)
+    assert refused["error"]["code"] == "conflict" and len(calls) == 1
 
 
 def test_reply_requires_recorded_recipient_and_replays_to_parent_sender(active, monkeypatch, capsys):

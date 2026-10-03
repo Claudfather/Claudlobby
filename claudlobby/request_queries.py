@@ -128,7 +128,7 @@ def _read_receipt(root: Path, fleet_uid: str, request_id: str):
                 raise RequestQueryError("retained request record exceeds the read limit")
         receipt = decode_receipt(json.loads(data), request_id=request_id, fleet_uid=fleet_uid)
         route = receipt.intent.route
-        if route is not None and route.peer_destination.root != str(root):
+        if isinstance(route, MessageRouteBinding) and route.peer_destination.root != str(root):
             raise RequestQueryError("retained message route belongs to another host root")
         return receipt
     except FileNotFoundError as exc:

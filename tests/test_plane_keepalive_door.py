@@ -183,6 +183,37 @@ def test_unknown_pane_records_unknown(tmp_path, *, scratch_plane_env):
     assert hb["state"] == "UNKNOWN"
 
 
+
+def test_held_pane_records_held_and_types_nothing(tmp_path, *, scratch_plane_env):
+    """#2070: a box holding text that was never submitted, with no turn running,
+    is HELD. The heartbeat says so, data/.held carries the time it was first
+    seen, .idle is not written, and no key goes into the box: a pending reload
+    stays pending. The rig runs with no locale set, where the idle pattern
+    matched this frame's border bytes and called it IDLE."""
+    libdir, bot, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
+    frame = tmp_path / "held-frame.txt"
+    frame.write_bytes(
+        (REPO / "tests/fixtures/pane-states/input-held-cr.txt").read_bytes())
+    sends = tmp_path / "sends.log"
+    (tmp_path / "tmux").write_text(
+        "#!/bin/bash\ncase \"$*\" in\n"
+        "  *has-session*) exit 0 ;;\n"
+        f"  *capture-pane*) cat {json.dumps(str(frame))} ;;\n"
+        f"  *send-keys*) printf '%s\\n' \"$*\" >> {json.dumps(str(sends))} ;;\n"
+        "  *) exit 0 ;;\nesac\n")
+    (bot / "data" / ".reload-pending").touch()
+    r = _tick(libdir, bot, env)
+    assert r.returncode == 0, r.stderr
+    hb = next(json.loads(s["value"]) for s in _wait_samples(tmp_path)
+              if s["metric"] == "bot.heartbeat")
+    assert hb["state"] == "HELD"
+    held = bot / "data" / ".held"
+    assert held.is_file() and held.read_text().strip().isdigit()
+    assert not (bot / "data" / ".idle").exists()
+    assert (bot / "data" / ".reload-pending").exists()
+    assert not sends.exists() or not sends.read_text().strip(), sends.read_text()
+    assert " HELD " in (bot / "keepalive.log").read_text()
+
 def test_dead_session_records_session_down_and_no_heartbeat(tmp_path, *, scratch_plane_env):
     """The dead path records the one fact it observed (session_up=false)
     and NO heartbeat — no pane was classified, and a fabricated verdict is
@@ -336,3 +367,43 @@ def test_wedged_emit_is_reaped_at_the_timeout(tmp_path, *, scratch_plane_env):
     while _wedge_alive() and time.monotonic() < deadline:
         time.sleep(1)
     assert not _wedge_alive(), "the wedged emit survived its reaper"
+
+
+def _reload_rig(tmp_path: Path, *, scratch_plane_env, shows_typed: bool):
+    """An IDLE bot with a reload pending, and a tmux that remembers what was
+    typed into the box. shows_typed=False is a TUI that never draws it."""
+    libdir, bot, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
+    from tests.conftest import fake_tmux_input_box
+    fake_tmux_input_box(tmp_path / "tmux", tmp_path / "pane-state", echoes=shows_typed)
+    (bot / "data" / ".reload-pending").touch()
+    env.update({"PANE_SEND_SETTLE_S": "0", "PANE_SEND_SHOWN_TICKS": "2",
+                "PANE_SEND_VERIFY_TICKS": "1"})
+    return libdir, bot, env
+
+
+def test_reload_is_left_pending_when_its_command_never_shows(tmp_path, *, scratch_plane_env):
+    """#1236: the send withholds its Enter when the box never shows the typed
+    command, and keepalive must neither abort on that nor clear the marker:
+    the next idle tick tries again. The tick still ends 0, with no Enter sent
+    blind into the box."""
+    libdir, bot, env = _reload_rig(tmp_path, scratch_plane_env=scratch_plane_env,
+                                   shows_typed=False)
+    r = _tick(libdir, bot, env)
+    assert r.returncode == 0, r.stderr
+    assert (bot / "data" / ".reload-pending").exists()
+    log = (bot / "keepalive.log").read_text()
+    assert "RELOAD — not submitted; left pending for the next idle tick" in log
+    assert "RELOAD — sent" not in log
+    assert "Enter was withheld" in r.stderr
+
+
+def test_reload_clears_the_marker_once_both_commands_submit(tmp_path, *, scratch_plane_env):
+    """The positive control for the case above: a box that shows each typed
+    command gets its Enter, and the marker is cleared."""
+    libdir, bot, env = _reload_rig(tmp_path, scratch_plane_env=scratch_plane_env,
+                                   shows_typed=True)
+    r = _tick(libdir, bot, env)
+    assert r.returncode == 0, r.stderr
+    assert not (bot / "data" / ".reload-pending").exists()
+    log = (bot / "keepalive.log").read_text()
+    assert "RELOAD — sent /reload-plugins + /reload-skills (live update)" in log
