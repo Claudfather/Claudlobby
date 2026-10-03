@@ -446,7 +446,11 @@ def _tokens(command: str) -> list:
                 elif s[j] == "`":
                     k = s.find("`", j + 1)
                     if k < 0:
-                        raise Unparsed("unbalanced backtick")
+                        # A lone backtick is read as text, as _substitutions reads
+                        # it, so the rest of the line is still judged (#2103).
+                        buf.append(s[j])
+                        j += 1
+                        continue
                     out.append(("sub", s[j + 1:k]))
                     buf.append(s[j:k + 1])
                     j = k + 1
