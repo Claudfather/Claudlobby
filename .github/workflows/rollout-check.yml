@@ -1,0 +1,29 @@
+name: Rollout check
+
+# Every PR names, under "## Rollout check", the production check that proves it
+# works once it is live (library/guardrails/verify-rollout.md, #2111). This file is
+# the caller every adopting repo carries; another repo pins `uses:` to a full
+# commit sha of Claudfather/Claudlobby instead of this local path.
+#
+# The job id "rollout-check" and verify-rollout.yml's job name make the check
+# "rollout-check / Rollout check" in the PR's status rollup, the name the merge
+# guardrails read. Keep both.
+#
+# The paths below are what an "N/A: docs-only" or "N/A: tests-only" PR may change.
+# The check reads them from this file on the default branch, not from the PR's
+# copy. library/ is composed into every bot, so it is production code here.
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  rollout-check:
+    uses: ./.github/workflows/verify-rollout.yml
+    with:
+      docs-paths: "documentation/** README.md CHANGELOG.md"
+      tests-paths: "tests/**"
