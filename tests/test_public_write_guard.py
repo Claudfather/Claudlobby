@@ -952,12 +952,12 @@ def test_the_guards_event_types_are_registered():
     assert SYSTEM_EVENT_SEVERITY["public_write_refused"] == "notice"
 
 
-def test_the_guards_events_land_on_the_plane_anchored_on_the_bot(env, tmp_path):
+def test_the_guards_events_land_on_the_plane_anchored_on_the_bot(env, tmp_path, scratch_plane_env):
     """Through the REAL emission path, not the test seam: a refusal, the no-list
     alarm and the fail-open breadcrumb each land anchored on the bot, so the
     rollout's `claudlobby event list --bot <bot>` finds them."""
     from tests.plane_fixtures import _scene
-    from tests.test_plane_events_door import _door_env, _events_cmd, _rows
+    from tests.test_plane_events_door import _door_env, _events_cmd, _rows, _serving
 
     root, paths, _, _ = _scene(tmp_path)
     bot_dir = paths.runtime_bots / "w1"
@@ -972,7 +972,7 @@ def test_the_guards_events_land_on_the_plane_anchored_on_the_bot(env, tmp_path):
     (shim / "python3").chmod(0o755)
     e = {k: v for k, v in env.items()
          if k not in ("PLANE_EMIT_DISABLED", "PUBLIC_WRITE_GUARD_EVENTS_FILE")}
-    e.update(_door_env(root))
+    e.update(_door_env(root, scratch_plane_env=scratch_plane_env))
     e.update(PATH=f"{shim}:{tmp_path / 'bin'}:/usr/bin:/bin", BOT_DIR=str(bot_dir), BOT_ID="w1",
              FLEET_EVENT_EMIT_TIMEOUT_S="120")
 
@@ -984,21 +984,23 @@ def test_the_guards_events_land_on_the_plane_anchored_on_the_bot(env, tmp_path):
                 return rows
             time.sleep(1)
 
-    assert run(e, "mcp__github__create_issue", issue("pub-org", "pub-repo"), tmp_path)[0] == "deny"
-    assert [r["type"] for r in landed("--type", "public_write_refused")] == ["public_write_refused"]
-    no_dir = {k: v for k, v in e.items() if k != "BOT_DIR"}  # BOT_ID alone still names the bot
-    assert run(no_dir, "mcp__github__create_issue", issue("pub-org", "pub-repo"), tmp_path)[0] == "deny"
-    deadline = time.monotonic() + 180
-    while len(landed("--type", "public_write_refused")) < 2 and time.monotonic() < deadline:
-        time.sleep(1)
-    assert len(landed("--type", "public_write_refused")) == 2
-    Path(e["PUBLIC_WRITE_GUARD_TERMS"]).unlink()
-    assert run(e, "mcp__github__create_issue", issue("pub-org", "pub-repo"), tmp_path)[0] == "allow"
-    assert [r["type"] for r in landed("--critical")] == ["public_write_guard_unarmed"]
-    failing = dict(e, PWG_FAIL="1")
-    assert run(failing, "mcp__github__create_issue", issue("pub-org", "pub-repo"), tmp_path)[0] == "allow"
-    crumbs = landed("--type", "script_error")
-    assert len(crumbs) == 1 and "INACTIVE" in crumbs[0]["data"]["message"]
+    with _serving(root, scratch_plane_env) as sock:  # emits commit only through a daemon
+        e["PLANE_SOCKET"] = str(sock)
+        assert run(e, "mcp__github__create_issue", issue("pub-org", "pub-repo"), tmp_path)[0] == "deny"
+        assert [r["type"] for r in landed("--type", "public_write_refused")] == ["public_write_refused"]
+        no_dir = {k: v for k, v in e.items() if k != "BOT_DIR"}  # BOT_ID alone still names the bot
+        assert run(no_dir, "mcp__github__create_issue", issue("pub-org", "pub-repo"), tmp_path)[0] == "deny"
+        deadline = time.monotonic() + 180
+        while len(landed("--type", "public_write_refused")) < 2 and time.monotonic() < deadline:
+            time.sleep(1)
+        assert len(landed("--type", "public_write_refused")) == 2
+        Path(e["PUBLIC_WRITE_GUARD_TERMS"]).unlink()
+        assert run(e, "mcp__github__create_issue", issue("pub-org", "pub-repo"), tmp_path)[0] == "allow"
+        assert [r["type"] for r in landed("--critical")] == ["public_write_guard_unarmed"]
+        failing = dict(e, PWG_FAIL="1")
+        assert run(failing, "mcp__github__create_issue", issue("pub-org", "pub-repo"), tmp_path)[0] == "allow"
+        crumbs = landed("--type", "script_error")
+        assert len(crumbs) == 1 and "INACTIVE" in crumbs[0]["data"]["message"]
 
 
 # --- a URL a write's text mentions is text; only a URL given as the target is one ---------
