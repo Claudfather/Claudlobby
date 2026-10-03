@@ -63,6 +63,10 @@ EOF
 
 start_manager () { tmux -L "$MGR_SOCK" new-session -d -s "$MGR" "$STUB $*"; }
 mgr_pane ()      { tmux -L "$MGR_SOCK" capture-pane -t "$MGR" -p 2>/dev/null || true; }
+# Whether the manager's pane is still blank. A function, never a case inside
+# $( ): bash 3.2 (the macOS /bin/bash) ends the substitution at the first
+# pattern's ")" and reads the rest of the line as text.
+mgr_blank ()     { case "$(mgr_pane)" in *[![:space:]]*) echo drawn ;; *) echo blank ;; esac; }
 # The precondition every step rests on: a manager session that is up and shows
 # its box. Without it, a push finds no session, returns 0 and closes the window,
 # which reads as the very result a held push is tested for.
@@ -212,8 +216,7 @@ echo "--- 8. a restarted manager whose box draws late gets the alert in the same
 # in that tick rather than costing the new instance a floor.
 tmux -L "$MGR_SOCK" kill-session -t "$MGR" 2>/dev/null || true
 tmux -L "$MGR_SOCK" new-session -d -s "$MGR" "sleep 5; $STUB"
-check "the new manager's pane is still blank when the sweep starts" blank \
-    "$(case "$(mgr_pane)" in *[![:space:]]*) echo drawn ;; *) echo blank ;; esac)"
+check "the new manager's pane is still blank when the sweep starts" blank "$(mgr_blank)"
 run_pulse FLEET_PULSE_REARM_WINDOW_S=0
 check "session_missing reaches the late manager in the same sweep" 1 "$(took_count session_missing)"
 check "service_down reaches it in the same sweep" 1 "$(took_count service_down)"
