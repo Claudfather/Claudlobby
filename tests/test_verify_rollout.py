@@ -447,3 +447,58 @@ def test_the_docs_paths_here_do_not_cover_composed_library_text():
     for path in ("library/guardrails/no-push-main.md", "claudlobby/brief.py",
                  "claudlobby/_runtime_scripts/keepalive.sh", ".github/workflows/test.yml"):
         assert not any(fnmatch.fnmatchcase(path, g) for g in globs), path
+
+
+# --- a field ends where GitHub ends it (#2116 review) ---------------------------------
+
+FOOTER = "\U0001F916 Generated with [Claude Code](https://claude.com/claude-code)"
+
+
+@pytest.mark.parametrize("after", [FOOTER, "[who]: https://example.com/any-bot", "Thanks for reviewing."],
+                         ids=["footer", "link-reference", "closing-sentence"])
+def test_text_under_a_last_section_is_not_the_last_fields_answer(tmp_path, after):
+    """GitHub renders **Who:** empty here: after the blank line, the text is outside its list
+    item. Most bodies end with the footer, and the template puts this section last."""
+    body = section(**{**FULL, "Who": None}) + "- **Who:**\n\n" + after + "\n"
+    run = run_check(tmp_path, body)
+    assert run.rc == 1
+    assert any("**Who:**" in e for e in run.errors), run.out
+
+
+@pytest.mark.parametrize("answer", ["  ```bash\n  claudlobby --json brief\n  ```", "  any bot with the fleet's credentials"],
+                         ids=["indented-fence", "indented-paragraph"])
+def test_an_indented_answer_after_a_blank_line_still_counts(tmp_path, answer):
+    body = section(**{**FULL, "Who": None}) + "- **Who:**\n\n" + answer + "\n"
+    assert run_check(tmp_path, body).rc == 0
+
+
+@pytest.mark.parametrize("value", ["<!-- any bot with the fleet's credentials,\n  or operator only, and why -->",
+                                   "<!-- any bot\n  -->"],
+                         ids=["wrapped-prompt", "closed-on-the-next-line"])
+def test_a_comment_closed_later_in_its_paragraph_hides_the_text(tmp_path, value):
+    """GitHub hides an inline comment up to its -->, across the lines of one paragraph."""
+    run = run_check(tmp_path, section(**{**FULL, "Who": value}))
+    assert run.rc == 1
+    assert any("**Who:**" in e for e in run.errors), run.out
+
+
+@pytest.mark.parametrize("body", [
+    section(**{**FULL, "Who": "any bot, see `<!--`\n  in the log -->"}),
+    section(**{**FULL, "Who": "<!-- any bot, never closed"}),
+    section(**{**FULL, "Who": "any bot <!-- not closed here"}) + "\nA later paragraph -->\n",
+    section(**{**FULL, "Who": "`<!-- shown as code -->`"}),
+], ids=["code-span-then-arrow", "only-an-unclosed-comment", "closed-only-after-a-blank-line",
+        "code-span-holding-a-comment"])
+def test_an_open_comment_github_shows_as_text_still_counts(tmp_path, body):
+    assert run_check(tmp_path, body).rc == 0, "GitHub shows this <!-- as text"
+
+
+def test_the_guardrails_skeleton_left_unfilled_fails(tmp_path):
+    """Bots write the section from the guardrail's skeleton: gh pr create --body skips the
+    template. Left unfilled, it must fail like the template does."""
+    text = (GUARDRAILS / "verify-rollout.md").read_text(encoding="utf-8")
+    skeleton = re.search(r"```markdown\n(## Rollout check\n.*?)```", text, re.S).group(1)
+    run = run_check(tmp_path, skeleton)
+    assert run.rc == 1
+    for name in ("Observe", "Control", "When", "Who"):
+        assert any(f"**{name}:**" in e for e in run.errors), (name, run.out)

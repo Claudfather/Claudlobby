@@ -4,8 +4,10 @@
 It answers the three reads the checker makes from a JSON state file
 ($FAKE_GH_STATE): the PR body, the PR's changed files, and the caller file on the
 default branch. Each call's arguments are appended to $FAKE_GH_LOG, one call per
-line, so a test can say which reads were made and with what. It ignores --jq and
-prints what that expression would.
+line, so a test can say which reads were made and with what. It prints what each
+read's --jq would, and refuses (exit 2) a read whose --jq or pagination is not
+the checker's (#2116 review): it cannot evaluate them, so without the pin a
+checker that read the title, or only the first page of files, would pass here.
 """
 
 import json
@@ -34,6 +36,10 @@ if "/contents/" in endpoint:
         sys.exit(1)
     sys.stdout.write(state["base_caller"])
 elif re.search(r"/pulls/\d+/files(\?|$)", endpoint):
+    if "--paginate" not in args or ".[] | .filename, (.previous_filename // empty)" not in args:
+        print(f"fake gh: the file read is not every page of filenames and previous names: {args}",
+              file=sys.stderr)
+        sys.exit(2)
     if fail.get("files"):
         print("gh: Server Error (HTTP 502)", file=sys.stderr)
         sys.exit(1)
@@ -42,6 +48,9 @@ elif re.search(r"/pulls/\d+/files(\?|$)", endpoint):
         if item.get("previous_filename"):
             print(item["previous_filename"])
 elif re.search(r"/pulls/\d+$", endpoint):
+    if '.body // ""' not in args:
+        print(f"fake gh: the body read is not the PR body: {args}", file=sys.stderr)
+        sys.exit(2)
     if fail.get("body"):
         print("gh: Server Error (HTTP 502)", file=sys.stderr)
         sys.exit(1)
