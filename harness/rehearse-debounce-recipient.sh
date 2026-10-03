@@ -29,6 +29,11 @@ command -v python3 >/dev/null 2>&1 || { echo "SKIP: python3 not available"; exit
 # correctly, never submitted to. Each submitted push then stays on its own line
 # above a fresh box, as Claude Code's transcript keeps it.
 MGR_BOX="$(printf '%q %q' "$(type -P python3)" "$REPO/tests/fixtures/input-box-stub.py")"
+# Test seam: delay the stand-in's start by N seconds, so the first push reaches the
+# pane before its box is drawn (#2136). Unset, the command is unchanged.
+if [ -n "${REHEARSAL_MANAGER_START_DELAY:-}" ]; then
+    MGR_BOX="sleep $(printf '%q' "$REHEARSAL_MANAGER_START_DELAY"); exec $MGR_BOX"
+fi
 
 ROOT="$(mktemp -d)"
 FLEET="rdr$$"
