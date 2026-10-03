@@ -28,6 +28,7 @@ from tests.plane_setup import initialize_plane
 import json
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -1462,3 +1463,213 @@ class TestSummaryDisclosesUnknownRetries:
         assert "send_retry UNKNOWN on 1 boot(s)" in text
         assert "clean via #837 send_retry: 1 boot(s)" in text
         assert "retry_fired == 0: 0/1" in text or "retry_fired == 0: " in text
+
+
+def _sampler_rc(fn: str, *args: str) -> int:
+    """The exit status of one sampler function. call_script_fn asserts rc 0,
+    and these are predicates, so their status is the answer."""
+    r = subprocess.run(
+        ["bash", "-c", f'. "{SAMPLER}"; {fn} "$@"', "_", *args],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return r.returncode
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="the evidence checks require jq")
+class TestResumeBootEvidence:
+    """--resume: what counts as the startup prompt reaching the model, what is
+    only queued, and a boot that never took the resume path."""
+
+    MARKER = "BSPROBE_843"
+
+    def _transcript(self, tmp_path, *records):
+        cfg = tmp_path / "cfg"
+        project = cfg / "projects" / "p"
+        project.mkdir(parents=True)
+        newer = tmp_path / ".boot-marker"
+        newer.write_text("")
+        os.utime(newer, (1_000_000_000, 1_000_000_000))
+        (project / "s.jsonl").write_text(
+            "".join(json.dumps(r) + "\n" for r in records), encoding="utf-8"
+        )
+        return str(cfg), str(newer)
+
+    def _enqueue(self):
+        return {"type": "queue-operation", "operation": "enqueue",
+                "content": f"Boot probe {self.MARKER}: reply"}
+
+    def test_typed_user_record_is_submitted(self, tmp_path):
+        cfg, newer = self._transcript(tmp_path, {
+            "type": "user",
+            "message": {"role": "user", "content": f"Boot probe {self.MARKER}: reply"},
+        })
+        assert _sampler_rc("submitted_evidence", cfg, newer, self.MARKER) == 0
+
+    def test_queued_command_attachment_is_submitted(self, tmp_path):
+        # The record shape of claude 2.1.285: a prompt typed mid-turn reaches
+        # the running turn as this attachment, with no user record.
+        cfg, newer = self._transcript(tmp_path, self._enqueue(), {
+            "type": "attachment",
+            "attachment": {"type": "queued_command", "commandMode": "prompt",
+                           "prompt": f"Boot probe {self.MARKER}: reply"},
+        })
+        assert _sampler_rc("submitted_evidence", cfg, newer, self.MARKER) == 0
+
+    def test_enqueue_alone_is_queued_not_submitted(self, tmp_path):
+        cfg, newer = self._transcript(tmp_path, self._enqueue())
+        assert _sampler_rc("submitted_evidence", cfg, newer, self.MARKER) == 1
+        assert _sampler_rc("queued_evidence", cfg, newer, self.MARKER) == 0
+
+    def test_typed_prompt_is_not_read_as_queued(self, tmp_path):
+        cfg, newer = self._transcript(tmp_path, {
+            "type": "user",
+            "message": {"role": "user", "content": f"Boot probe {self.MARKER}: reply"},
+        })
+        assert _sampler_rc("queued_evidence", cfg, newer, self.MARKER) == 1
+
+    def test_tool_result_carrying_the_marker_is_not_submitted(self, tmp_path):
+        # A resume turn runs tools, and their output is recorded as a user
+        # record: it must never read as the prompt arriving.
+        cfg, newer = self._transcript(tmp_path, {
+            "type": "user",
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1",
+                 "content": f"output that mentions {self.MARKER}"},
+            ]},
+        })
+        assert _sampler_rc("submitted_evidence", cfg, newer, self.MARKER) == 1
+
+    def test_assistant_echo_is_not_submitted(self, tmp_path):
+        cfg, newer = self._transcript(tmp_path, {
+            "type": "assistant",
+            "message": {"role": "assistant",
+                        "content": [{"type": "text", "text": self.MARKER}]},
+        })
+        assert _sampler_rc("submitted_evidence", cfg, newer, self.MARKER) == 1
+
+    def test_a_record_of_unexpected_shape_does_not_end_the_scan(self, tmp_path):
+        # Indexing a string attachment raises in jq, which reports that record
+        # and goes on: the submission after it must still be found.
+        cfg, newer = self._transcript(
+            tmp_path,
+            {"type": "attachment", "attachment": f"not an object {self.MARKER}"},
+            {"type": "user", "message": {"role": "user", "content": [
+                {"type": "text", "text": f"Boot probe {self.MARKER}: reply"}]}},
+        )
+        assert _sampler_rc("submitted_evidence", cfg, newer, self.MARKER) == 0
+
+    def test_seeded_handoff_passes_the_resume_age_gate(self, tmp_path):
+        bot = tmp_path / "bot"
+        bot.mkdir()
+        assert _sampler_rc("seed_resume_handoff", str(bot)) == 0
+        handoff = bot / ".claude" / "session.md"
+        # The gate start-bot itself consults (lib-common), at its default age.
+        assert _sampler_rc("should_resume_session", str(handoff), "86400") == 0
+        # Never the marker: the resume turn reads this file.
+        assert self.MARKER not in handoff.read_text(encoding="utf-8")
+
+    def test_resume_injected_reads_only_this_boots_part_of_the_log(self, tmp_path):
+        line = ("RESUME — injecting resume command [available]: "
+                "/claudna:session resume --auto\n")
+        log = tmp_path / "startup.log"
+        log.write_text("2026-10-02T00:00:00Z " + line, encoding="utf-8")
+        offset = str(log.stat().st_size)
+        assert _sampler_rc("resume_injected", str(log), offset) == 1
+        with log.open("a", encoding="utf-8") as f:
+            f.write("2026-10-02T00:05:00Z " + line)
+        assert _sampler_rc("resume_injected", str(log), offset) == 0
+        assert _sampler_rc("resume_injected", str(tmp_path / "absent.log"), "0") == 1
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="the plugin copy and fingerprint require jq")
+class TestMinimalPluginCopy:
+    """--minimal-plugins: the probe gets only what it loads from the host cache,
+    and its first boot's fingerprint shows what that was."""
+
+    def _host(self, tmp_path):
+        host = tmp_path / "host-plugins"
+        for rel, text in {
+            "cache/m/a/1.0/skills/x/SKILL.md": "enabled, installed version",
+            "cache/m/a/0.9/old.txt": "enabled plugin, older version",
+            "cache/m/b/2.0/b.txt": "installed, not enabled",
+            "marketplaces/m/.claude-plugin/marketplace.json": "{}",
+            "known_marketplaces.json": "{}",
+            "blocklist.json": "{}",
+        }.items():
+            (host / rel).parent.mkdir(parents=True, exist_ok=True)
+            (host / rel).write_text(text, encoding="utf-8")
+        (host / "installed_plugins.json").write_text(json.dumps({"version": 2, "plugins": {
+            "a@m": [{"scope": "user", "installPath": str(host / "cache/m/a/1.0")}],
+            "b@m": [{"scope": "user", "installPath": str(host / "cache/m/b/2.0")}],
+        }}), encoding="utf-8")
+        return host
+
+    def _settings(self, tmp_path, enabled):
+        settings = tmp_path / "settings.local.json"
+        settings.write_text(json.dumps({"enabledPlugins": enabled}), encoding="utf-8")
+        return settings
+
+    def test_copies_the_enabled_plugins_and_skips_the_rest(self, tmp_path):
+        host = self._host(tmp_path)
+        dst = tmp_path / "probe-plugins"
+        settings = self._settings(tmp_path, {"a@m": True, "b@m": False})
+        call_script_fn(SAMPLER, "copy_minimal_plugins", str(host), str(dst), str(settings))
+        assert (dst / "cache/m/a/1.0/skills/x/SKILL.md").is_file()
+        assert not (dst / "cache/m/a/0.9").exists()
+        assert not (dst / "cache/m/b").exists()
+        for kept in ("installed_plugins.json", "known_marketplaces.json", "blocklist.json",
+                     "marketplaces/m/.claude-plugin/marketplace.json"):
+            assert (dst / kept).is_file(), kept
+
+    def test_an_enabled_plugin_with_no_install_is_named_not_copied(self, tmp_path):
+        host = self._host(tmp_path)
+        dst = tmp_path / "probe-plugins"
+        settings = self._settings(tmp_path, {"a@m": True, "c@m": True})
+        out = call_script_fn(SAMPLER, "copy_minimal_plugins", str(host), str(dst), str(settings))
+        assert "c@m not copied" in out
+        assert (dst / "cache/m/a/1.0/skills/x/SKILL.md").is_file()
+
+    def test_fingerprint_keeps_initial_skills_session_hooks_and_mcp(self, tmp_path):
+        cfg = tmp_path / "cfg"
+        project = cfg / "projects" / "p"
+        project.mkdir(parents=True)
+        newer = tmp_path / ".boot-marker"
+        newer.write_text("")
+        os.utime(newer, (1_000_000_000, 1_000_000_000))
+        records = [
+            {"type": "attachment", "attachment": {"type": "skill_listing", "isInitial": True,
+                                                  "names": ["b-skill", "a-skill"]}},
+            {"type": "attachment", "attachment": {"type": "skill_listing", "isInitial": False,
+                                                  "names": ["later-skill"]}},
+            {"type": "attachment", "attachment": {"type": "hook_success", "hookEvent": "SessionStart",
+                                                  "hookName": "SessionStart:startup",
+                                                  "command": "${CLAUDE_PLUGIN_ROOT}/hooks/start.sh"}},
+            {"type": "attachment", "attachment": {"type": "hook_success", "hookEvent": "PreToolUse",
+                                                  "hookName": "PreToolUse:Bash", "command": "guard.sh"}},
+            {"type": "attachment", "attachment": {"type": "mcp_instructions_delta",
+                                                  "addedNames": ["srv"], "removedNames": []}},
+        ]
+        (project / "s.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records),
+                                         encoding="utf-8")
+        out = call_script_fn(SAMPLER, "boot_fingerprint", str(cfg), str(newer))
+        assert out.splitlines() == [
+            "hook hook_success SessionStart:startup ${CLAUDE_PLUGIN_ROOT}/hooks/start.sh",
+            "mcp srv",
+            "skill a-skill",
+            "skill b-skill",
+        ]
+
+    def test_tree_digest_is_equal_for_equal_trees_and_moves_with_one_byte(self, tmp_path):
+        def tree(d, text):
+            (d / "x" / "y").mkdir(parents=True)
+            (d / "x" / "y" / "f.txt").write_text(text, encoding="utf-8")
+            (d / "g.txt").write_text("g", encoding="utf-8")
+            return str(d)
+
+        a = call_script_fn(SAMPLER, "tree_digest", tree(tmp_path / "a", "same")).strip()
+        b = call_script_fn(SAMPLER, "tree_digest", tree(tmp_path / "b", "same")).strip()
+        c = call_script_fn(SAMPLER, "tree_digest", tree(tmp_path / "c", "Same")).strip()
+        assert a and a == b
+        assert a != c

@@ -473,12 +473,19 @@ case "$state" in
         # plugin/skill update pending, perform it now that the pane is IDLE, then
         # clear the marker. This is the one place keepalive presses Enter on an
         # idle pane — safe because it sends fixed slash commands, not ghost text.
+        # A send that did not submit (its box never showed the command, so the
+        # Enter was withheld, or still held it after the last Enter, #1236; or a
+        # keystroke failed) leaves the marker for the next IDLE tick. A command
+        # that later lands in the box makes the pane read HELD (#2070) or
+        # UNKNOWN, never IDLE, so it is never typed twice.
         if [ -f "$BOT_DIR/data/.reload-pending" ]; then
-            send_reload_command "/reload-plugins"
-            send_reload_command "/reload-skills"
-            rm -f "$BOT_DIR/data/.reload-pending"
-            echo "$(ts_iso) RELOAD — sent /reload-plugins + /reload-skills (live update)" >> "$LOG"
-            emit_keepalive_event "RELOAD" "sent /reload-plugins + /reload-skills"
+            if send_reload_command "/reload-plugins" && send_reload_command "/reload-skills"; then
+                rm -f "$BOT_DIR/data/.reload-pending"
+                echo "$(ts_iso) RELOAD — sent /reload-plugins + /reload-skills (live update)" >> "$LOG"
+                emit_keepalive_event "RELOAD" "sent /reload-plugins + /reload-skills"
+            else
+                echo "$(ts_iso) RELOAD — not submitted; left pending for the next idle tick" >> "$LOG"
+            fi
         fi
         # Tier-2 Telegram-bridge self-heal — gated OFF by default (F6b). Runs here, on
         # a confirmed-IDLE pane, so a heal bounce never interrupts in-flight work.

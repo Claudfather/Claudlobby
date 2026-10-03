@@ -1,0 +1,24 @@
+
+
+● ok
+
+✻ Sautéed for 0s · done 9:59 PM
+
+❯ set +H; start a long turn CAPB0
+
+❯ set +H; [BOTCOMMAND] mgr | task | CAPQ1: the shape of an assignment delivery,
+  a few hundred bytes of prose with an id and a pointer, sent while the
+  receiver is in a long turn, so that the queue path is what gets measured here
+  and not the idle one. Read the issue and the plan first, then report back.
+  CAPQ1
+  ⟦plane:msg_0123456789abcdef0123456789abcdef⟧
+  ctrl+x ctrl+s to send now
+
+✽ Transmogrifying…
+  ⎿  Tip: Start with small features or bug fixes, tell Claude to propose a plan,
+     and verify its suggested edits
+                                                            ◐ medium · /effort
+────────────────────────────────────────────────────────────────────────────────
+❯ Press up to edit queued messages
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← for agents

@@ -156,6 +156,11 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "send_retry": "notice",
     "send_blind": "notice",
     "send_blind_recovered": "notice",
+    # #1236: a send that was not submitted. The box never showed the typed
+    # payload, so the Enter was withheld (payload-not-shown), or it still showed
+    # it after the last Enter (payload-still-in-box). The text is in the box, or
+    # may still land there, unsubmitted.
+    "send_unsubmitted": "notice",
     "resume_skipped": "notice",
     "plugin_marketplace_failed": "notice",
     "briefing_deferred": "notice",

@@ -63,6 +63,6 @@ fi
 if bot_tmux_send "$BOT_SOCKET" "$BOT_NAME" "$DISPATCH"; then
     echo "$TS OK — dispatched '$DISPATCH' to $BOT_NAME" >>"$LOG"
 else
-    echo "$TS ERROR — dispatch to $BOT_NAME failed (logged as send_miss)" >>"$LOG"
+    echo "$TS ERROR — dispatch to $BOT_NAME failed (its send event and stderr say why)" >>"$LOG"
     exit 1
 fi

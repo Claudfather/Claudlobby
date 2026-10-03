@@ -367,3 +367,43 @@ def test_wedged_emit_is_reaped_at_the_timeout(tmp_path, *, scratch_plane_env):
     while _wedge_alive() and time.monotonic() < deadline:
         time.sleep(1)
     assert not _wedge_alive(), "the wedged emit survived its reaper"
+
+
+def _reload_rig(tmp_path: Path, *, scratch_plane_env, shows_typed: bool):
+    """An IDLE bot with a reload pending, and a tmux that remembers what was
+    typed into the box. shows_typed=False is a TUI that never draws it."""
+    libdir, bot, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
+    from tests.conftest import fake_tmux_input_box
+    fake_tmux_input_box(tmp_path / "tmux", tmp_path / "pane-state", echoes=shows_typed)
+    (bot / "data" / ".reload-pending").touch()
+    env.update({"PANE_SEND_SETTLE_S": "0", "PANE_SEND_SHOWN_TICKS": "2",
+                "PANE_SEND_VERIFY_TICKS": "1"})
+    return libdir, bot, env
+
+
+def test_reload_is_left_pending_when_its_command_never_shows(tmp_path, *, scratch_plane_env):
+    """#1236: the send withholds its Enter when the box never shows the typed
+    command, and keepalive must neither abort on that nor clear the marker:
+    the next idle tick tries again. The tick still ends 0, with no Enter sent
+    blind into the box."""
+    libdir, bot, env = _reload_rig(tmp_path, scratch_plane_env=scratch_plane_env,
+                                   shows_typed=False)
+    r = _tick(libdir, bot, env)
+    assert r.returncode == 0, r.stderr
+    assert (bot / "data" / ".reload-pending").exists()
+    log = (bot / "keepalive.log").read_text()
+    assert "RELOAD — not submitted; left pending for the next idle tick" in log
+    assert "RELOAD — sent" not in log
+    assert "Enter was withheld" in r.stderr
+
+
+def test_reload_clears_the_marker_once_both_commands_submit(tmp_path, *, scratch_plane_env):
+    """The positive control for the case above: a box that shows each typed
+    command gets its Enter, and the marker is cleared."""
+    libdir, bot, env = _reload_rig(tmp_path, scratch_plane_env=scratch_plane_env,
+                                   shows_typed=True)
+    r = _tick(libdir, bot, env)
+    assert r.returncode == 0, r.stderr
+    assert not (bot / "data" / ".reload-pending").exists()
+    log = (bot / "keepalive.log").read_text()
+    assert "RELOAD — sent /reload-plugins + /reload-skills (live update)" in log
