@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a rollout check run that has not completed blocks the merge, whatever its `startedAt` (#2116 follow-up)
+
+The merge guardrails' rung 2 read the newest `rollout-check / Rollout check` run by sorting on `startedAt`. A queued run whose `startedAt` is null or a zero time sorts first under `gh`'s jq, so the read took the older run, and a stale green passed while the newer run waited in the queue (ravi's note on #2116). The read now names any run that has not completed `PENDING`, so the rung refuses until every run of the check has completed, and then reads the newest.
+
 ### Fixed — the shared busy check sees a running turn whose activity line opens its parenthesis with a word (#2130)
 
 #2105 taught `pane_is_busy` a running turn's activity line, but read its parenthesis only when it opened with a digit, the elapsed time (`● Misting… (58m 4s · …)`). A running turn opens it with a word while it runs its hooks (`● Combobulating… (running PreToolUse hooks… 0/6 · 17m 50s · …)`), and can for other progress too. In vera's live pass after #2121, every running turn the check missed had that shape, about one in fifteen. In four minutes of one working session here, 197 of 960 frames drew it, every one a turn running its hooks. A miss reads a running turn as not busy to every consumer. #2105's repair then presses its Enter into a busy box, where it lands on the delivery's own text and is queued behind the turn. The keystroke injectors' `bot_is_busy` reaches this check once the bot's last tool call is older than its active window (180 s by default).

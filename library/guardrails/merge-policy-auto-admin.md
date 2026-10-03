@@ -73,13 +73,13 @@ The manager auto-merges PRs using `--admin` when ALL of:
 
    **Incidentally correct is a proxy** — the same distinction as counting versus naming, one layer down. A thing that happens to be right is not a thing that must be right, and only the second belongs in a guardrail. Use `gh pr view <n> --json statusCheckRollup` or `gh pr checks <n>`.
 
-   **One name is fixed in every repo that has adopted it: the rollout check** (`verify-rollout`). Read whether the repo's default branch carries `.github/workflows/rollout-check.yml`: only a 404 means the repo has not adopted the check, and any other failed read refuses. Where it has, the newest `rollout-check / Rollout check` run at the head must be `SUCCESS`. The rollup lists every run of a name, so a read that takes any `SUCCESS` would pass a stale green after a red body edit. Anything but `SUCCESS` in the newest run, or no run, refuses. Run it in the same call as rung 0, which sets `$REPO` and `$N`:
+   **One name is fixed in every repo that has adopted it: the rollout check** (`verify-rollout`). Read whether the repo's default branch carries `.github/workflows/rollout-check.yml`: only a 404 means the repo has not adopted the check, and any other failed read refuses. Where it has, the newest `rollout-check / Rollout check` run at the head must be `SUCCESS`. The rollup lists every run of a name, so a read that takes any `SUCCESS` would pass a stale green after a red body edit. Anything but `SUCCESS` in the newest run, or no run, refuses. So does any run that has not completed, newest or not: a queued run's `startedAt` can be null or a zero time, which sorts it before the runs that started, so the read names it `PENDING` instead of trusting the order. Run it in the same call as rung 0, which sets `$REPO` and `$N`:
 
    ```bash
    DEFAULT=$(gh api "repos/$REPO" --jq .default_branch) || { echo "REFUSE: cannot read the default branch"; exit 1; }
    if ERR=$(gh api "repos/$REPO/contents/.github/workflows/rollout-check.yml?ref=$DEFAULT" --silent 2>&1); then
-     ROLLOUT=$(gh pr view "$N" --repo "$REPO" --json statusCheckRollup --jq '[.statusCheckRollup[] | select(.name == "rollout-check / Rollout check")] | sort_by(.startedAt) | last | .conclusion // "ABSENT"') || { echo "REFUSE: cannot read the rollout check"; exit 1; }
-     [ "$ROLLOUT" = SUCCESS ] || { echo "REFUSE: the rollout check's newest run is $ROLLOUT"; exit 1; }
+     ROLLOUT=$(gh pr view "$N" --repo "$REPO" --json statusCheckRollup --jq '[.statusCheckRollup[] | select(.name == "rollout-check / Rollout check")] | if any(.status != "COMPLETED") then "PENDING" else (sort_by(.startedAt) | last | .conclusion // "ABSENT") end') || { echo "REFUSE: cannot read the rollout check"; exit 1; }
+     [ "$ROLLOUT" = SUCCESS ] || { echo "REFUSE: the rollout check reads $ROLLOUT"; exit 1; }
    else
      case "$ERR" in *"HTTP 404"*) echo "This repo has not adopted the rollout check" ;; *) echo "REFUSE: cannot tell whether this repo runs the rollout check: $ERR"; exit 1 ;; esac
    fi
