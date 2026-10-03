@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — fleet-pulse no longer counts a push the manager's box never took as delivered, and such a box costs one wait per sweep (#2120)
+
+`notify_manager` ended `bot_tmux_send ... || true`. So a push typed and never submitted (rc 3 since #2108) returned 0, and `debounce_notify` closed the alert's window: the alert went quiet until its 6-hour re-notify, though nobody had read it. And since #2108, a push to a box that never shows it waits up to 10 s before giving up, once per alert, all ahead of the sweep's Telegram escalation.
+
+- **The push's status is the delivery verdict.** A push typed and not submitted (rc 3) or not sent (rc 1) leaves the window open, so the next sweep pushes it again (#900's rule). A submitted push closes it, as before. No manager, or no manager session, still counts as sent: the recipient token re-fires the alert once a manager appears (#831).
+- **A manager whose box held one push gets no other push that sweep.** Each would wait out the same 10 s for a box that is not taking input, and type into the same unsubmitted text. Its alerts stay open for the next sweep, and the Telegram escalation waits for at most one push per manager, not one per alert.
+
 ### Fixed — a lone backtick in a double-quoted string no longer hides its line from the credential-echo guard (#2103)
 
 #2099 reads a double-quoted `$(` it cannot delimit as text, so the rest of the line is still judged. A lone backtick in the same string still made the line unreadable, and an unreadable line is allowed. A comment ending in a backslash inside the substitution reaches that state, because the tokenizer joins the backslash-newline before it reads comments, so the comment swallows the `)`. This line was refused before #2099, allowed after it, and printed the canary under bash:
