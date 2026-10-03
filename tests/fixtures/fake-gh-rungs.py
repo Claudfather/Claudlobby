@@ -21,8 +21,12 @@ with open(os.environ["FAKE_GH_STATE"], encoding="utf-8") as fh:
     state = json.load(fh)
 fail = set(state.get("fail") or [])
 
-ROLLUP_JQ = ('[.statusCheckRollup[] | select(.name == "rollout-check / Rollout check")] '
-             '| sort_by(.startedAt) | last | .conclusion // "ABSENT"')
+ROLLUP_RUNS = '[.statusCheckRollup[] | select(.name == "rollout-check / Rollout check")] '
+NEWEST = 'sort_by(.startedAt) | last | .conclusion // "ABSENT"'
+# The read before #2116's hardening, and the read after it: a run that has not
+# completed (queued or in progress) reads PENDING, whatever its startedAt.
+ROLLUP_JQ_NEWEST = ROLLUP_RUNS + "| " + NEWEST
+ROLLUP_JQ = ROLLUP_RUNS + '| if any(.status != "COMPLETED") then "PENDING" else (' + NEWEST + ') end'
 FILES_JQ = ".[] | .filename, (.previous_filename // empty)"
 
 
@@ -72,13 +76,18 @@ if args[:1] == ["api"]:
 elif args[:2] == ["pr", "view"]:
     fields = args[args.index("--json") + 1] if "--json" in args else ""
     if fields == "statusCheckRollup":
-        if jq_arg() != ROLLUP_JQ:
+        if jq_arg() not in (ROLLUP_JQ, ROLLUP_JQ_NEWEST):
             refuse("the rollup read is not the newest run's conclusion")
         if "rollup" in fail:
             broken()
-        runs = sorted((r for r in state.get("rollup", []) if r["name"] == "rollout-check / Rollout check"),
-                      key=lambda r: r["startedAt"])
-        print((runs[-1].get("conclusion") if runs else None) or "ABSENT")
+        runs = [r for r in state.get("rollup", []) if r["name"] == "rollout-check / Rollout check"]
+        if jq_arg() == ROLLUP_JQ and any(r.get("status") != "COMPLETED" for r in runs):
+            print("PENDING")
+        else:
+            # As jq sorts: a null startedAt (or none) before any string, stably.
+            runs.sort(key=lambda r: (r.get("startedAt") is not None, r.get("startedAt") or ""))
+            conclusion = runs[-1].get("conclusion") if runs else None
+            print("ABSENT" if conclusion is None or conclusion is False else conclusion)
     elif fields == "closingIssuesReferences":
         if jq_arg() != ".closingIssuesReferences[].number":
             refuse("the closes read is not the closing issue numbers")
