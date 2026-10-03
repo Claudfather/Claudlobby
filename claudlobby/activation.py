@@ -12,6 +12,7 @@ import base64
 import json
 import os
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import re
 import socket
@@ -434,6 +435,31 @@ def _source_handoff_roster(source_plan, bot_dirs, package):
     return roster
 
 
+def _handoff_refresh_time(root: Path, activation_id: str, now: datetime) -> datetime:
+    """When the handoffs' references count as refreshed, from the activation
+    records and never from a handoff file, which any session can edit (#2094).
+
+    A retried step keeps the time its first attempt recorded. An activation
+    within 12 h of the previous one's recorded refresh keeps that time. Otherwise,
+    including after an activation that recorded none, it is now.
+    """
+    def parse(value):
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+    body = read_activation(root, activation_id).body
+    if body.get("handoff_refreshed"):
+        return parse(body["handoff_refreshed"])
+    previous = body.get("previous_selection")
+    if previous:
+        try:
+            prior = read_activation(root, previous["activation_id"]).body.get("handoff_refreshed")
+        except ActivationError:
+            prior = None
+        if prior and timedelta(0) <= now - parse(prior) < timedelta(hours=12):
+            return parse(prior)
+    return now.astimezone(timezone.utc).replace(microsecond=0)
+
+
 def _handoff_inputs(old_units, source_plan, contexts, package):
     """Old handoff roster, exact bot directories and retained candidate bots.
 
@@ -804,9 +830,11 @@ def _finish_running_activation(root, store, activation_id, plan, release, source
             raise ActivationRefusal("data or pending queues block activation: " + "; ".join(migration.blockers))
         from .activation_handoffs import persist_canonical_handoffs
         roster, bot_dirs, candidate_bots = _handoff_inputs(old_units, source_plan, contexts, package)
+        refreshed = _handoff_refresh_time(root, activation_id, datetime.now(timezone.utc))
+        store.record_handoff_refresh(activation_id, refreshed.strftime("%Y-%m-%dT%H:%M:%SZ"))
         persist_canonical_handoffs(root, roster=roster, bot_dirs=bot_dirs,
                                    expected_audit=migration.task_audit,
-                                   candidate_bots=candidate_bots)
+                                   candidate_bots=candidate_bots, refreshed_at=refreshed)
         store.complete(activation_id, "queues_classified", evidence_digest=migration.manifest_id[2:])
     else:
         journal = read_migration(root, activation_id)
