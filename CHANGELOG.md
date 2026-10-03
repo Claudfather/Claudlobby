@@ -21,6 +21,16 @@ CI, a green deploy and a healthy service prove that a system still runs, not tha
 - **The merge guardrails** (`merge-policy-auto-admin`, `merge-policy-auto-after-review`) read that check by name. A PR that changes a workflow file needs a reviewer verdict that names the change. The new rung 5 refuses a merge while a `rollout-hold` issue is open, except for the PR that closes it.
 - `.github/pull_request_template.md` carries the section. `canary-rollout` gains a row and a pointer for the rollout check.
 
+### Fixed — the resume gate reads a handoff's capture time, not the activation's reference refresh (#2094)
+
+Every activation rewrites each bot's handoff with a refresh envelope at the top. The envelope carried `last_updated:`, the field that start-bot's resume gate and clauDNA's readers take as the capture's freshness. So after an activation the gate measured the refresh: an old handoff looked fresh, and a fresh capture written under a day-old envelope looked stale.
+
+- **The envelope carries `references_refreshed:` instead,** so `last_updated:` belongs to the capture again. The reader still accepts the old envelope and files with none; the next activation rewrites them.
+- **A refresh no longer makes an old handoff resume.** It used to, by design, so that a booting bot would read its references. A booting bot gets its IDs from the boot brief (#2049).
+- **The refresh time comes from the activation's own record,** never from a file a session can edit. It is `handoff_refreshed`, written before the handoffs, reused by a retried step, and read by the next activation's 12-hour rule.
+- **The markers count only where the refresh writes them:** the envelope at the top, the section at the end. A note that quotes one no longer refuses the host's activation; a damaged envelope or section in those places still does.
+- **A refresh keeps the handoff's mtime,** which the gate falls back to when a capture has no `last_updated:` of its own.
+
 ### Fixed — `fleet uptime` reports uptime as the share of observed time, and MTBR as the gap between restarts (#891, #1616)
 
 The uptime percentage divided up-time by the whole window, so it measured how much history the plane held. Measured on a live four-bot fleet, it equalled the observed coverage to the decimal in every window (36.9% over 30 days for bots up 99.99–100% of the time on record). MTBR divided up-time by the restart rows in the window, and every kickstart on boot after a host outage was a restart.
