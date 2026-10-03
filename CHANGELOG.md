@@ -12,7 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **The push's status is the delivery verdict.** A push typed and not submitted (rc 3) or not sent (rc 1) leaves the window open, so the next sweep pushes it again (#900's rule). A submitted push closes it, as before. No manager, or no manager session, still counts as sent: the recipient token re-fires the alert once a manager appears (#831).
 - **No push types into a box that already holds text.** Before each push, the shipped `pane_is_held` reads the manager's box. If it holds anything, the push is skipped, the window stays open, and the alert's plane record is left to the escalation. Typing would glue the alert to that text, which is the opposite of the fleet's own held-box remedy, and a glued box is the operator's call.
-- **After a push the box did not take, a floor.** That manager gets no push for `FLEET_PULSE_HELD_PUSH_FLOOR_S` (default 30 minutes, the shape of #1088's re-arm bound), with no wait and no typing in between. So a box that takes no input costs one wait per floor, not one per sweep or per alert, and a submitted push clears the floor.
+- **After a push the box did not take, a floor.** That manager gets no push for `FLEET_PULSE_HELD_PUSH_FLOOR_S` (default 30 minutes, the shape of #1088's re-arm bound), with no wait and no typing in between. So a box that takes no input costs one wait per floor, not one per sweep or per alert, and a submitted push clears the floor. The floor is that manager instance's (#831's recipient token), so a restarted manager, a new box, gets the alerts that re-fire to it.
 
 ### Added — every PR names the production check that proves it, and the merger runs it once the change is live (#2111)
 

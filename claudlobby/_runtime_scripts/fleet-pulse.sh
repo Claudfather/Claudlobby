@@ -123,7 +123,10 @@ _resolve_manager_token() {
 # bound): no wait and no typing in between, so a box that takes no input costs
 # one wait per floor, not one per sweep or per alert. Either way the alert's
 # window stays open and its event is on the plane for the escalation. A push
-# that is submitted clears the floor.
+# that is submitted clears the floor. The floor belongs to the manager INSTANCE
+# that did not take the push, named by #831's recipient token (session_created
+# and pane_pid): a restarted manager is a new box, so the alerts that re-fire to
+# it are not held back by its predecessor's floor.
 _HELD_PUSH_FLOOR_S_DEFAULT=1800
 
 # Returns the push's delivery verdict, which debounce_notify reads (#900: a send
@@ -141,7 +144,8 @@ notify_manager() {
     floor="${FLEET_PULSE_HELD_PUSH_FLOOR_S:-$_HELD_PUSH_FLOOR_S_DEFAULT}"
     case "$floor" in ''|*[!0-9]*) floor="$_HELD_PUSH_FLOOR_S_DEFAULT" ;; esac
     marker="$state_dir/held-push.$(printf '%s' "$target" | tr -c 'A-Za-z0-9._-' '_')"
-    if marker_age_within "$marker" "$floor"; then
+    _resolve_manager_token "$bot_dir"
+    if marker_age_within "$marker" "$floor" && [ "$(cat "$marker" 2>/dev/null)" = "$_mgr_token" ]; then
         echo "fleet-pulse: $mgr did not take a push less than ${floor}s ago; $(basename "$bot_dir")'s alert waits for the floor to lapse" >&2
         return 3
     fi
@@ -156,7 +160,7 @@ notify_manager() {
         bot_tmux_send "$mgr_socket" "$mgr" "[FLEET-PULSE] $msg" || rc=$?
     case "$rc" in
         0) rm -f "$marker" ;;
-        3) touch "$marker" 2>/dev/null || true ;;
+        3) printf '%s' "$_mgr_token" > "$marker" 2>/dev/null || true ;;
     esac
     return "$rc"
 }
