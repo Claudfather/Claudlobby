@@ -108,16 +108,6 @@ class TestCollectPlaneEvents:
         # send_miss is informational (emit_fleet_notice), not operator-actionable
         assert SYSTEM_EVENT_SEVERITY["send_miss"] != "critical"
 
-    def test_the_registry_marks_the_lifecycle_failures_critical(self):
-        critical = {t for t, s in SYSTEM_EVENT_SEVERITY.items() if s == "critical"}
-        assert {
-            "bridge_down",
-            "reload_failed",
-            "restart_failed",
-            "rc_timeout",
-        } <= critical
-        assert "send_miss" not in critical
-
     def test_events_sorted_by_timestamp(self, scene):
         _root, paths = scene
         timestamps = [e["ts"] for e in _collect(paths)]

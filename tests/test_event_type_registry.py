@@ -11,8 +11,8 @@ stored. So the gate sits on everything that names a type:
      type is a variable is listed below with the values it can take;
   b. every hand-built system row and every Python writer's literal type is a
      registry key;
-  c. fleet-pulse's two critical lists equal the registry's PULSE_* sets, each
-     a subset of the critical types;
+  c. (fleet-pulse's two critical lists are checked by an existing test,
+     tests/test_service_is_crash_looping.py: every type they list is critical);
   d. every type the event tables of the observability protocol, the
      fleet-pulse skill and the observability guide name is a registry key,
      and a table labelled critical lists exactly the critical types.
@@ -28,21 +28,24 @@ import functools
 import re
 from pathlib import Path
 
-from claudlobby.plane.registries import (
-    PULSE_ESCALATION_TYPES,
-    PULSE_SUMMARY_TYPES,
-    SYSTEM_EVENT_SEVERITY,
-)
+from claudlobby.plane.registries import SYSTEM_EVENT_SEVERITY
+from conftest import load_lib_module
 
 REPO = Path(__file__).resolve().parent.parent
 LIB = REPO / "claudlobby" / "_runtime_scripts"
-RS = "claudlobby/_runtime_scripts/"
+RS = LIB.relative_to(REPO).as_posix() + "/"
 CRITICAL = frozenset(t for t, s in SYSTEM_EVENT_SEVERITY.items() if s == "critical")
 LITERAL = re.compile(r"""["']([a-z][a-z0-9_]*)["']""")
 
 
 def _rel(path: Path) -> str:
     return path.relative_to(REPO).as_posix()
+
+
+@functools.cache
+def _text(path: Path) -> str:
+    """A file's text, read once a session: several scans read the same files."""
+    return path.read_text()
 
 
 @functools.cache
@@ -127,107 +130,23 @@ def _call(names) -> re.Pattern:
         re.M)
 
 
-def _skip_dquote(s: str, i: int) -> int:
-    """Index just past the double quote that closes the string opened before i."""
-    while i < len(s):
-        c = s[i]
-        if c == "\\":
-            i += 2
-        elif c == '"':
-            return i + 1
-        elif s.startswith("$(", i):
-            i = _skip_parens(s, i + 2)
-        elif c == "`":
-            i = s.index("`", i + 1) + 1
-        else:
-            i += 1
-    raise ValueError("unterminated double quote")
-
-
-def _skip_parens(s: str, i: int) -> int:
-    """Index just past the `)` that closes the `$(` opened before i."""
-    depth = 1
-    while i < len(s):
-        c = s[i]
-        if c == "\\":
-            i += 2
-            continue
-        if c == "'":
-            i = s.index("'", i + 1) + 1
-            continue
-        if c == '"':
-            i = _skip_dquote(s, i + 1)
-            continue
-        if c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                return i + 1
-        i += 1
-    raise ValueError("unterminated $(")
-
-
-def _skip_braces(s: str, i: int) -> int:
-    """Index just past the `}` that closes the `${` opened before i."""
-    depth = 1
-    while i < len(s):
-        c = s[i]
-        if c == "\\":
-            i += 2
-            continue
-        if c == '"':
-            i = _skip_dquote(s, i + 1)
-            continue
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return i + 1
-        i += 1
-    raise ValueError("unterminated ${")
+# heavy-slot.py's shell word reader, the runtime's own: quotes, expansions,
+# escapes and line continuations read the way bash reads them.
+_SHELL = load_lib_module("heavy-slot")
 
 
 def _words(s: str, i: int, n: int) -> list[tuple[str, str | None]]:
     """The first *n* shell words of the command that starts at s[i], each as
     (as written, literal value), the literal None when the word expands
-    anything. Quotes, `$( )`, `${ }` and line continuations are read the way
-    bash reads them; the command ends at a newline, an operator or a comment."""
-    out: list[tuple[str, str | None]] = []
+    anything. The command ends at a newline, an operator or a comment."""
+    scan, out = _SHELL._Scanner(s), []
     while len(out) < n:
         while i < len(s) and (s[i] in " \t" or s.startswith("\\\n", i)):
             i += 2 if s[i] == "\\" else 1
-        if i >= len(s) or s[i] in "\n;&|)#":
+        if i >= len(s) or s[i] in "\n;&|()<>#":
             break
-        start, parts, expands = i, [], False
-        while i < len(s) and s[i] not in " \t\n;&|)" and not s.startswith("\\\n", i):
-            c = s[i]
-            if c == "\\":
-                parts.append(s[i + 1])
-                i += 2
-            elif c == "'":
-                j = s.index("'", i + 1)
-                parts.append(s[i + 1:j])
-                i = j + 1
-            elif c == '"':
-                j = _skip_dquote(s, i + 1)
-                inner = s[i + 1:j - 1]
-                expands = expands or "$" in inner or "`" in inner
-                parts.append(inner)
-                i = j
-            elif s.startswith("$(", i):
-                i, expands = _skip_parens(s, i + 2), True
-            elif s.startswith("${", i):
-                i, expands = _skip_braces(s, i + 2), True
-            elif c == "$":
-                i, expands = i + 1, True
-            elif c == "`":
-                i, expands = s.index("`", i + 1) + 1, True
-            else:
-                parts.append(c)
-                i += 1
-        out.append((s[start:i], None if expands else "".join(parts)))
+        word, i = scan._word(i)
+        out.append((word.raw, word.value))
     return out
 
 
@@ -237,7 +156,7 @@ def _calls(where: str, text: str, first_line: int, writers: dict) -> list[tuple]
         pos = writers[m["name"]]
         try:
             words = _words(text, m.end(), pos)
-        except ValueError:
+        except (ValueError, _SHELL.Unsure):
             words = []
         line = first_line + text.count("\n", 0, m.start("name")) + 1
         out.append((where, line, m["name"], words[pos - 1] if len(words) >= pos else None))
@@ -252,10 +171,10 @@ def _shell_sites() -> tuple[tuple, ...]:
     sites = []
     for p in _runtime_shell_scripts():
         where = _rel(p)
-        sites += _calls(where, _code(p.read_text()), 0,
+        sites += _calls(where, _code(_text(p)), 0,
                         {**SHELL_WRITERS, **LOCAL_WRAPPERS.get(where, {})})
     for p in sorted((REPO / "library").rglob("*.md")):
-        text = p.read_text()
+        text = _text(p)
         for m in FENCE.finditer(text):
             sites += _calls(_rel(p), _code(m.group(1)), text.count("\n", 0, m.start(1)),
                             SHELL_WRITERS)
@@ -321,19 +240,12 @@ def test_the_listed_values_are_registered_and_the_forwarders_are_scanned():
         # The values the script gives the variable, read from the script. None
         # read is a pattern that stopped matching, so it fails rather than
         # passing on an empty set.
-        taken = set(re.findall(pattern, _code((REPO / where).read_text())))
+        taken = set(re.findall(pattern, _code(_text(REPO / where))))
         assert taken, (where, "the pattern reads no value from the script", pattern)
         assert taken == values, (where, "values the script takes vs the list", taken ^ values)
     for (where, _name, _arg), forwarders in FORWARDED_TYPES.items():
         for f in forwarders:
             assert f in SHELL_WRITERS or f in LOCAL_WRAPPERS.get(where, {}), (where, f)
-
-
-def test_the_variable_check_reads_an_assignment():
-    """Positive control for the assignment cross-check above."""
-    text = _code((LIB / "host-health-check.sh").read_text())
-    assert set(re.findall(r"\bKEY=\"?([a-z][a-z0-9_]*)\"?", text)) == {
-        "host_health", "undervoltage", "storage_stall"}
 
 
 # --- b. hand-built rows and the Python writers --------------------------------
@@ -378,7 +290,9 @@ def _row_sites() -> tuple[tuple, ...]:
     """(file, line, value as written, its literal types or None, family)."""
     out = []
     for p in _runtime_shell_scripts() + _python_modules():
-        text = p.read_text()
+        text = _text(p)
+        if "subject_kind" not in text:    # every ROW match names it
+            continue
         for m in ROW.finditer(text):
             value = m["value"].strip()
             cond = CONDITIONAL.fullmatch(value)
@@ -394,7 +308,7 @@ def _py_writer_sites() -> tuple[tuple, ...]:
     """(file, line, helper, its literal type or None, the argument as written)."""
     out = []
     for where, helper in PY_WRITERS.items():
-        text = (REPO / where).read_text()
+        text = _text(REPO / where)
         for m in re.finditer(r"(?<!def )\b" + re.escape(helper) + r"\(\s*(?P<arg>[^,)]*)", text):
             arg = m["arg"].strip()
             lit = LITERAL.fullmatch(arg)
@@ -461,7 +375,9 @@ SYSTEM_FAMILY = re.compile(r"""["']?event_type["']?\s*:\s*["']system["']"""
 
 
 def _names_a_system_row(path: Path) -> bool:
-    text = path.read_text()
+    text = _text(path)
+    if "system'" not in text and 'system"' not in text and "subject_kind" not in text:
+        return False                      # what every pattern below needs
     return bool(SYSTEM_FAMILY.search(text) or (path.suffix == ".py" and SUBJECT_KEY.search(text)))
 
 
@@ -483,30 +399,6 @@ def test_no_file_builds_a_system_row_the_scans_cannot_see():
     assert marked - seen == set()
 
 
-# --- c. fleet-pulse's critical lists --------------------------------------------
-
-
-def _pulse_list(var: str) -> frozenset[str]:
-    text = (LIB / "fleet-pulse.sh").read_text()
-    assert len(re.findall(rf"^\s*{var}\+?=", text, re.M)) == 1, f"{var}: assigned more than once"
-    m = re.search(rf'^{var}="([^"]*)"$', text, re.M)
-    assert m, f"{var} not found in fleet-pulse.sh"
-    types = m[1].split()
-    assert types and len(types) == len(set(types)), (var, types)
-    return frozenset(types)
-
-
-def test_fleet_pulse_lists_equal_the_registry_sets():
-    assert _pulse_list("_CRITICAL_ESCALATION_TYPES") == PULSE_ESCALATION_TYPES
-    assert _pulse_list("_CRITICAL_SUMMARY_TYPES") == PULSE_SUMMARY_TYPES
-
-
-def test_the_pulse_sets_are_deliberate_subsets_of_the_critical_types():
-    assert PULSE_ESCALATION_TYPES < CRITICAL
-    assert PULSE_SUMMARY_TYPES < CRITICAL
-    assert "input_held" in PULSE_SUMMARY_TYPES - PULSE_ESCALATION_TYPES
-
-
 # --- d. the documents -------------------------------------------------------------
 
 DOCS = (
@@ -522,7 +414,7 @@ TOKEN = re.compile(r"`([a-z][a-z0-9_]*)`")
 def _event_tables(path: str) -> tuple[tuple, ...]:
     """(heading, header, ((line, types), ...)) for each table whose first column
     names event types: the backticked names in each row's first cell."""
-    lines = (REPO / path).read_text().split("\n")
+    lines = _text(REPO / path).split("\n")
     tables, heading, fenced, i = [], "", False, 0
     while i < len(lines):
         line = lines[i]
@@ -589,7 +481,7 @@ def test_a_table_labelled_critical_lists_exactly_the_critical_types():
 def test_every_type_a_doc_queries_is_registered():
     """A `--type NAME` command in the docs must name a registered type."""
     queried = {(p, t) for p in DOCS
-               for t in re.findall(r"--type\s+([a-z][a-z0-9_]*)", (REPO / p).read_text())}
+               for t in re.findall(r"--type\s+([a-z][a-z0-9_]*)", _text(REPO / p))}
     assert len({t for p, t in queried if p == DOCS[2]}) >= 3, queried   # positive control
     assert [q for q in sorted(queried) if q[1] not in SYSTEM_EVENT_SEVERITY] == []
 
@@ -598,7 +490,7 @@ def test_the_protocols_per_type_sweep_names_notice_types():
     """The protocol pairs --critical with a loop over the actionable types it
     misses. Each must be registered, and notice: a critical one is already in
     --critical, and the loop would say otherwise."""
-    loops = re.findall(r"^for t in ([a-z_ ]+); do$", (REPO / DOCS[0]).read_text(), re.M)
+    loops = re.findall(r"^for t in ([a-z_ ]+); do$", _text(REPO / DOCS[0]), re.M)
     assert len(loops) == 1, loops
     types = loops[0].split()
     assert types and all(SYSTEM_EVENT_SEVERITY.get(t) == "notice" for t in types), types

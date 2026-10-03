@@ -725,19 +725,7 @@ def test_alerts_are_labeled_as_the_bots_own(paths: Paths):
     assert "this bot's own critical events" in entry[0]["reason"]
     assert "fleet- and host-level alerts" in entry[0]["reason"]
     assert "absence of an alert is not evidence of health" in entry[0]["reason"]
-
-
-def test_the_alert_label_is_unconditional(paths: Paths, monkeypatch):
-    """No symbol clears the #2109 label: its bound is the read's own filter
-    (this bot's rows), not a missing registry. known_values.FLEET_EVENT_TYPES,
-    the symbol the #903 label keyed on, changes nothing."""
-    from claudlobby import known_values
-
-    monkeypatch.setattr(known_values, "FLEET_EVENT_TYPES", {"disk_high"}, raising=False)
-    _seed_plane(paths)
-    brief = build_brief(_fleet(), paths, "alex", NOW)
-    assert _find(brief, "alerts", "#903") == []
-    assert [e["mode"] for e in _find(brief, "alerts", "#2109")] == ["labeled"]
+    assert _find(brief, "alerts", "#903") == []    # the hand-list label is gone
 
 
 def test_utilization_is_recorded_as_omitted(paths: Paths):

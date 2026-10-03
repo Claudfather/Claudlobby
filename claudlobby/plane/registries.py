@@ -92,8 +92,9 @@ def cap_for(family: str, field: str) -> int:
 # own throwaway plane). An unknown token still INGESTS (F19), but with NULL
 # severity, so no critical read can show it, and registering it later does not
 # re-stamp the rows already stored. tests/test_event_type_registry.py fails on
-# a writer whose type is missing here, and on fleet-pulse's lists or a document
-# whose own list disagrees with this one.
+# a writer whose type is missing here, and on a document whose own list
+# disagrees with this one; tests/test_service_is_crash_looping.py fails on a
+# fleet-pulse list that names a type not critical here.
 #
 # critical is what `event list --critical` and a bot's brief select, and what
 # fleet-pulse's two reads choose their types from; notice is the record. The
@@ -213,10 +214,10 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "credential_echo_refused": "notice",
     "credential_echo_unparsed": "notice",
     # FLEET ALERTs (emit_failure_alert): each records its caller's own type and
-    # pages the manager and Telegram. Host jobs run with no fleet, so theirs are
-    # recorded against the host: disk-monitor, fleet-memory-check,
-    # host-health-check (one of three types, by finding), update-claude-code
-    # and vault-sync.
+    # pages the manager and Telegram. Where each row lands is in the
+    # fleet-observability protocol's table. From the host jobs: disk-monitor,
+    # fleet-memory-check, host-health-check (one of three types, by finding),
+    # update-claude-code and vault-sync.
     "disk_high": "critical",
     "memory_high": "critical",
     "undervoltage": "critical",
@@ -225,11 +226,9 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "binary_update_failed": "critical",
     "binary_unrunnable": "critical",
     "vault_sync_failed": "critical",
-    # ...and those raised with a fleet in scope, recorded against that fleet (a
-    # run with none lands on the host): a bot's keepalive that failed to run
-    # (keepalive-all), a halted rolling restart (recorded against the fleet of
-    # whoever ran it, not the fleet it rolled: #2112), and the alert target
-    # checks of fleet-pulse and creds-check.
+    # ...and from the fleet jobs: a bot's keepalive that failed to run
+    # (keepalive-all), a halted rolling restart, and the alert target checks of
+    # fleet-pulse and creds-check.
     "keepalive_failed": "critical",
     "rolling_restart_stalled": "critical",
     "alert_target_refused": "critical",
@@ -270,37 +269,6 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "task_recheck_noop": "notice",
     "workstream_prune_noop": "notice",
 }
-
-#: fleet-pulse's two reads of the plane's critical rows. fleet-pulse.sh keeps
-#: each as a bash list (_CRITICAL_ESCALATION_TYPES, _CRITICAL_SUMMARY_TYPES);
-#: tests/test_event_type_registry.py pins each list equal to its set here, and
-#: each set inside the critical types.
-#:
-#: Both are DELIBERATE subsets. Both reads take a bot's own rows only, so a
-#: FLEET ALERT, recorded against the fleet or the host and paged by its own
-#: writer, can never appear in either (bridge_down does, through fleet-pulse's
-#: own row for the bot); nor can shadow_parity_diverged, which nothing records
-#: now.
-#:
-#: PULSE_ESCALATION_TYPES page Telegram when FLEET_PULSE_ESCALATION_THRESHOLD
-#: bots or more carry one inside the escalation window: a fault across the
-#: fleet, which no one bot's remedy clears. Of the other bot-level critical
-#: types, activity_stuck, overdue_dispatch and input_held page the manager's
-#: pane one bot at a time (input_held's remedy is an operator's Enter, never a
-#: restart), and script_error, one per failed script run, is read by `event
-#: list --critical` and the bot's brief.
-PULSE_ESCALATION_TYPES: frozenset[str] = frozenset({
-    "service_down", "session_missing", "bridge_down", "rc_timeout", "crash_loop",
-})
-
-#: PULSE_SUMMARY_TYPES fill the pulse summary's ALERTS column, one line per
-#: bot: the state of its session, unit, bridge and pane. Left out:
-#: overdue_dispatch, which is a task's state rather than the bot's (the manager
-#: push carries it), and script_error.
-PULSE_SUMMARY_TYPES: frozenset[str] = frozenset({
-    "session_missing", "service_down", "bridge_down", "activity_stuck",
-    "input_held", "rc_timeout", "crash_loop",
-})
 
 # ---------------------------------------------------------------------------
 # Phase 2b: the metric-name registry (§9b MetricSample — open registry,
