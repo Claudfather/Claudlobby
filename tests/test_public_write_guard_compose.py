@@ -84,3 +84,11 @@ def test_the_matcher_covers_bash_and_the_github_mcp_tools(fleet_dir: Path, tool,
     _arm(fleet_dir, where="lead")
     (matcher,) = _guard_matchers(_settings(fleet_dir, "lead"))
     assert bool(re.fullmatch(matcher, tool)) is runs, (matcher, tool)
+
+
+def test_the_declared_default_is_off():
+    """The loader passes its own False, so only a config built directly reads the class's
+    declared default: it is off too, or the guard would be armed where nobody armed it."""
+    from claudlobby.config import BotConfig
+
+    assert BotConfig(bot_id="b", name="b", expertise=[]).public_write_guard is False

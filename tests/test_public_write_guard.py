@@ -955,7 +955,7 @@ def test_the_guards_event_types_are_registered():
 def test_the_guards_events_land_on_the_plane_anchored_on_the_bot(env, tmp_path):
     """Through the REAL emission path, not the test seam: a refusal, the no-list
     alarm and the fail-open breadcrumb each land anchored on the bot, so the
-    rollout's `claudlobby events --bot <bot>` finds them."""
+    rollout's `claudlobby event list --bot <bot>` finds them."""
     from tests.plane_fixtures import _scene
     from tests.test_plane_events_door import _door_env, _events_cmd, _rows
 
@@ -1143,3 +1143,82 @@ def test_an_off_switch_beside_the_release_is_never_read(env, tmp_path, root):
                        capture_output=True, text=True, env=e, timeout=60)
     assert p.returncode == 0, p.stdout + p.stderr
     assert "no CLAUDLOBBY_ROOT data directory" in p.stdout and "set, so every call" not in p.stdout
+
+
+# --- vera's round-3 mutation re-run (#2032): each test below fails on its mutant -----------
+
+
+def test_a_push_carries_the_unreadable_mark_of_a_commit_earlier_in_the_command(
+    env, tmp_path
+):
+    """A commit message that is a program's output cannot be read. From a private checkout
+    the commit itself goes to a private repository and passes, but the push in the same
+    command sends that commit to a public one, so the push is refused as unreadable."""
+    d = repo(tmp_path, env, "priv-org/priv-repo")
+    g = ["git", "-C", str(d)]
+    subprocess.run(
+        [*g, "remote", "add", "pub", "https://github.com/pub-org/pub-repo.git"],
+        check=True,
+        env=env,
+    )
+    subprocess.run(
+        [*g, "update-ref", "refs/remotes/pub/main", "HEAD"], check=True, env=env
+    )
+    verdict, why = bash(
+        env, 'git commit --allow-empty -m "$(date +%s)" && git push pub main', d
+    )
+    assert verdict == "deny" and "could not read" in why, why
+    assert bash(env, 'git commit --allow-empty -m "$(date +%s)"', d)[0] == "allow"
+    assert (
+        bash(env, 'git commit --allow-empty -m "plain" && git push pub main', d)[0]
+        == "allow"
+    )
+
+
+def test_a_pure_rename_to_a_path_named_like_a_term_is_content(env, tmp_path):
+    """A rename with no change of content prints no `+++` line: the new path is only in
+    its `rename to` line, and a path whose name holds a listed term is content."""
+    pub = repo(tmp_path, env, "pub-org/pub-repo")
+    g = ["git", "-C", str(pub)]
+    subprocess.run([*g, "mv", "a.txt", "zephyr-widgets.txt"], check=True, env=env)
+    verdict, why = bash(env, 'git commit -m "plain"', pub)
+    assert verdict == "deny" and "staged changes" in why, why
+    subprocess.run([*g, "commit", "-qm", "plain"], check=True, env=env)
+    verdict, why = bash(env, "git push origin main", pub)
+    assert verdict == "deny" and "changes to push" in why, why
+    priv = repo(tmp_path, env, "priv-org/priv-repo")
+    subprocess.run(
+        ["git", "-C", str(priv), "mv", "a.txt", "zephyr-widgets.txt"],
+        check=True,
+        env=env,
+    )
+    assert bash(env, 'git commit -m "plain"', priv)[0] == "allow"
+
+
+def test_gh_api_placeholders_go_where_gh_repo_points(env, tmp_path):
+    """`{owner}/{repo}` in a `gh api` path comes from GH_REPO when it is set, in the
+    command or exported, and from the checkout's remote only when it is not."""
+    priv = repo(tmp_path, env, "priv-org/priv-repo")
+    pub = repo(tmp_path, env, "pub-org/pub-repo")
+    post = 'gh api repos/{owner}/{repo}/issues -f title=t -f body="' + HIT + '"'
+    assert bash(env, "GH_REPO=pub-org/pub-repo " + post, priv)[0] == "deny"
+    assert bash(env, "GH_REPO=priv-org/priv-repo " + post, pub)[0] == "allow"
+    assert bash(dict(env, GH_REPO="pub-org/pub-repo"), post, priv)[0] == "deny"
+    assert bash(dict(env, GH_REPO="priv-org/priv-repo"), post, pub)[0] == "allow"
+    assert bash(env, post, priv)[0] == "allow"
+    assert bash(env, post, pub)[0] == "deny"
+
+
+def test_a_broken_line_names_its_own_column(env, tmp_path):
+    """The column is the broken character's position in the list line, not in the
+    `(?:...)` the guard wraps the line in to compile it."""
+    Path(env["PUBLIC_WRITE_GUARD_TERMS"]).write_text("# invented\nzephyr[widgets\n")
+    verdict, why = run(
+        env,
+        "mcp__github__create_issue",
+        issue("priv-org", "priv-repo", "plain"),
+        tmp_path,
+    )
+    assert verdict == "deny" and "line 2 does not compile, column 7" in why, why
+    rc, out = check_list(env)
+    assert rc == 1 and "column 7" in out, out
