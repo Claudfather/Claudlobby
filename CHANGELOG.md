@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the heavy slot serves its waiters in turn (#2124)
+
+The heavy-job slot bounded concurrency but did not share it. After a release, the next process to call `flock` won the slot, so a driver that took it again at once beat every waiter that polls on a timer, of another fleet or its own. `claudlobby/_runtime_scripts/heavy-slot.py` now keeps a queue. A call that cannot take a slot takes a ticket under its fleet and bot and still exits 75, and a free slot goes only to the oldest ticket from a fleet other than the one that took a slot last, else the oldest. A waiter keeps its place by calling again: nothing expires while every slot is held, and once a slot is free, a ticket whose holder has been silent for 180 s (`TICKET_IDLE_S`; `HEAVY_SLOT_TICKET_IDLE_S` in the environment overrides it) is dropped. `status` lists the queue with that limit beside each wait, a refusal and the take its ticket waited for carry the ticket's number, and `state/heavy-slot/no-queue` switches the queue off.
+
 ### Added — an opt-in guard that refuses a GitHub write putting a listed term into a public repository
 
 A PreToolUse hook, `claudlobby/_runtime_scripts/public-write-guard.sh` (with its decider `claudlobby/_runtime_scripts/public-write-guard.py`), composed for a bot that sets `public_write_guard: true` (a strict bool, per bot or through `fleet.defaults`, like `heavy_slot`). It refuses, and never rewrites, a GitHub-bound write that would put a term from the host's list into a **public** repository. A private or internal repository is untouched.
