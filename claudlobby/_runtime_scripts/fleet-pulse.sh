@@ -129,6 +129,20 @@ _resolve_manager_token() {
 # it are not held back by its predecessor's floor.
 _HELD_PUSH_FLOOR_S_DEFAULT=1800
 
+# _held_push_floor_holds <marker> <floor_s>: whether the floor holds a push to the
+# manager instance in _mgr_token. The marker must name that instance and be at
+# most <floor_s> old. A marker dated ahead of the clock is expired, never fresh:
+# an RTC-less host boots up to an hour behind real time, so a marker written
+# before the reboot reads as future-dated, which marker_age_within would read as
+# fresh for the whole skew (plane-emit.sh reads its wedge marker the same way).
+_held_push_floor_holds() {
+    local marker="$1" floor="$2" age
+    [ -f "$marker" ] || return 1
+    [ "$(cat "$marker" 2>/dev/null)" = "$_mgr_token" ] || return 1
+    age=$(( $(date +%s) - $(stat_mtime "$marker" 2>/dev/null || echo 0) ))
+    [ "$age" -ge 0 ] && [ "$age" -le "$floor" ]
+}
+
 # Returns the push's delivery verdict, which debounce_notify reads (#900: a send
 # that reached nobody must not buy the window): 0 submitted; 3 typed and not
 # submitted (#1236), or not typed because the box held text or the floor is
@@ -145,7 +159,7 @@ notify_manager() {
     case "$floor" in ''|*[!0-9]*) floor="$_HELD_PUSH_FLOOR_S_DEFAULT" ;; esac
     marker="$state_dir/held-push.$(printf '%s' "$target" | tr -c 'A-Za-z0-9._-' '_')"
     _resolve_manager_token "$bot_dir"
-    if marker_age_within "$marker" "$floor" && [ "$(cat "$marker" 2>/dev/null)" = "$_mgr_token" ]; then
+    if _held_push_floor_holds "$marker" "$floor"; then
         echo "fleet-pulse: $mgr did not take a push less than ${floor}s ago; $(basename "$bot_dir")'s alert waits for the floor to lapse" >&2
         return 3
     fi
