@@ -18,6 +18,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Cost:** one python start per send, about 54 ms on the Pi at load 15.
 - **Tests:** `tests/test_pane_send_lock.sh` (new: concurrent senders against a fake pane, the bounded refusal, release on every exit path, both unlocked paths, the receipt Enter, a swallowed Enter's retry under a second sender, both spellings of a pane, and a single key), a real-tmux case in `tests/test_message_enter_repair.py` (the owner's repair waits for a held lock), a ratchet, `tests/test_send_keys_ratchet.py`, that fails on any `send-keys` outside a function running under the lock, and a `validate-bot-change.sh` scenario that runs two senders into a real raw-mode tmux pane, with a no-shared-lock control that has to interleave.
 
+### Added — an opt-in guard that refuses a GitHub write putting a listed term into a public repository
+
+A PreToolUse hook, `claudlobby/_runtime_scripts/public-write-guard.sh` (with its decider `claudlobby/_runtime_scripts/public-write-guard.py`), composed for a bot that sets `public_write_guard: true` (a strict bool, per bot or through `fleet.defaults`, like `heavy_slot`). It refuses, and never rewrites, a GitHub-bound write that would put a term from the host's list into a **public** repository. A private or internal repository is untouched.
+
+- **The list is host configuration:** `~/.config/claudlobby/public-write-terms`, one case-insensitive regular expression per line. It is never repository content, and the tests use invented terms.
+- **What it reads is what the write puts in the repository:**
+  - every `mcp__github__*` tool except `get_`/`list_`/`search_`;
+  - the `gh` issue, pr, release, gist, repo and label commands except their reads, and `gh api` with fields (not a GET, not a GraphQL query), including body files and standard input;
+  - `git commit`: messages, added lines, and the new files an earlier `git add` in the same command names;
+  - `git push`: the messages, added lines and new paths of every outgoing commit, and of any commit made earlier in the same command, which does not exist yet when the guard runs.
+
+  It reads the command as the shell does: a backslash-newline continues the line, an issue or PR URL names the target only when it is a positional word after the verb (a URL inside a body, title or comment is text), `env NAME=value` and `NAME=value` set what the command sees, and the commands inside a command substitution are read. It does not read removed lines, a `cd` directory, a body file's path or the target's name, so a clean-up commit passes and so does a clean write made from a path that contains a term.
+- **Public is read live, only on a hit:** `gh api repos/OWNER/REPO`, cached for 10 minutes. A REST call that fails fast is asked again over GraphQL (`gh repo view`), since a REST throttle leaves GraphQL working. When both fail, an answer cached up to a day ago stands in. An unknown answer is never cached, and a cache stamp from the future is not trusted.
+- **Failure directions:**
+  - no list: allow, plus a critical `public_write_guard_unarmed` event;
+  - a broken list (a line that does not compile, or one that can match an empty string, so every write would be a hit): refuse every guarded write, naming the line and column, never its text;
+  - a payload that is not JSON: allow, with a `script_error` breadcrumb;
+  - a hit whose repository or visibility is unknown: refuse;
+  - content it cannot read counts as a hit: a missing body file, a program's output piped into the write or substituted into its content (`$(...)` or backticks, except `cat` of a file or of a heredoc, in a commit message, a body, title, notes, subject, comment or description flag, or a `gh api` field such as `body` or `query`), a git command run from a directory it cannot name. A substitution in any other flag, such as the sha in `--match-head-commit "$(gh api …)"`, is left as written: it is not content.
+- **Its events name the bot**, the refusal, the no-list alarm and the fail-open breadcrumb alike, so `claudlobby event list --bot <bot>` and the bot's brief see them.
+- **Its ceiling:** it does not follow `eval`, functions, aliases or scripts, and it does not read an annotated tag's own message. Three writes publish content that is not a word of the command, and are not read: `gh pr create --fill` (its title and body come from commits already pushed), `gh repo create --source --push` (the local history), and the asset files of `gh release create` and `upload`. It keeps accidents out; it is not a boundary against a caller trying to get past it.
+- **Off switch:** `state/public-write-guard/disabled`, host-wide. `python3 claudlobby/_runtime_scripts/public-write-guard.py --check` says whether a host's guard is armed, the list and the off switch, without printing a term.
+- **Opt-in:** registered in the switch registry as opt-in for the `heavy_slot` reason. A composed hook has no deployment gate (#1310), so the manifest key is where one bot goes first.
+- **Tests:** `tests/test_public_write_guard.py` drives the real hook with a fake `gh` and real git repositories, in both directions for each shape; `tests/test_public_write_guard_compose.py` covers the composition.
+
+### Fixed — the debounce rehearsal waits for its manager's box (#2136)
+
+`tests/test_debounce_recipient_harness.py` has failed in single CI lanes since #2108: the runner sometimes started the manager's stand-in after the first pulse. The stand-in enters raw mode before it draws its box, and entering raw mode discards keys typed before it. So neither alert of that tick was submitted, and the debounce marked both sent.
+
+- **The rehearsal starts a manager only once its box is drawn,** through lib-common's `pane_await_input_box`, and fails by name when the box does not come within 20 s.
+- **It counts what each manager instance was submitted,** from the stand-in's new `--log`, never the text its pane shows. Read from the pane, a push whose Enter was withheld passed as pushed.
+- **`REHEARSE_MANAGER_START_DELAY` forces the race.** Every test of the rehearsal now runs twice, the second time with each manager starting 3 s late.
+
+### Fixed — a rollout check run that has not completed blocks the merge, whatever its `startedAt` (#2116 follow-up)
+
+The merge guardrails' rung 2 read the newest `rollout-check / Rollout check` run by sorting on `startedAt`. Under `gh`'s jq a null or zero `startedAt` sorts before a started run, so a queued run reported that way would hand the read the older run, and a stale green would pass (ravi's note on #2116). On this change's own push GitHub reported queued runs with their queue time, so that case was not seen. The read now names any run that has not completed `PENDING`, so the rung refuses until every run of the check has completed, and then reads the newest.
+
 ### Fixed — one registry for event types: every type the runtime writes is registered, and its writers, fleet-pulse's lists and the docs are gated against it (#903)
 
 The plane stamps a system event's severity at ingest from `SYSTEM_EVENT_SEVERITY` in `claudlobby/plane/registries.py`, and stores a type the registry lacks with no severity. Nothing checked the types the runtime writes against it, and four readers kept lists of their own. Most FLEET ALERT types were stored with no severity. Those recorded against a fleet (`keepalive_failed`, `alert_target_refused`, ...) now show in `event list --critical`. Those recorded against the host (`disk_high`, `memory_high`, ...) are stamped critical now too, but no read shows host rows yet (#2109).
