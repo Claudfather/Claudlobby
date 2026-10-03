@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a self restart after a checkpoint reads the session's capture, not the activation's envelope (#2119)
+
+Since #2110, each activation tops every bot's handoff with an envelope that carries `references_refreshed:`, not `last_updated:`. The self-restart check (`claudlobby bot restart` on yourself) read only the file's first frontmatter, so a session that checkpointed below the envelope and then restarted itself was refused, however fresh its capture.
+
+- **The check reads the session's capture below a recognised envelope.** It finds the envelope with the activation's own reader, so the two agree on what an envelope is.
+- **An envelope that reader refuses is refused here too, by name:** "the reference refresh envelope at its top is malformed". The obvious repair, adding `last_updated:` to the envelope, used to pass this check and then block the next activation. Delete the envelope block instead; a handoff without one is read by both.
+- **No envelope time vouches for a capture.** Editing the old envelope's `last_updated:`, the repair before #2094, no longer passes a stale capture. A handoff whose only `last_updated:` is in an old envelope now refuses until the session writes its own frontmatter.
+- **A fresh handoff whose first 8 KiB end inside a multi-byte character no longer refuses:** only the frontmatter is decoded.
+
 ### Fixed — a lone backtick in a double-quoted string no longer hides its line from the credential-echo guard (#2103)
 
 #2099 reads a double-quoted `$(` it cannot delimit as text, so the rest of the line is still judged. A lone backtick in the same string still made the line unreadable, and an unreadable line is allowed. A comment ending in a backslash inside the substitution reaches that state, because the tokenizer joins the backslash-newline before it reads comments, so the comment swallows the `)`. This line was refused before #2099, allowed after it, and printed the canary under bash:
