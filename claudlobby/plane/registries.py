@@ -87,18 +87,20 @@ def cap_for(family: str, field: str) -> int:
 # A caller-supplied severity is a caller bug (ContractViolation via the strict
 # wire model).
 #
-# This dict is the fleet's one event-type vocabulary: every type a writer
-# records is a key. An unknown token still INGESTS (F19), but with NULL
+# This dict is the fleet's one event-type vocabulary: every type the runtime,
+# the library and the package record is a key (a harness records only into its
+# own throwaway plane). An unknown token still INGESTS (F19), but with NULL
 # severity, so no critical read can show it, and registering it later does not
 # re-stamp the rows already stored. tests/test_event_type_registry.py fails on
-# a writer whose type is missing here, and on a reader or a document whose own
-# list disagrees with this one.
+# a writer whose type is missing here, and on fleet-pulse's lists or a document
+# whose own list disagrees with this one.
 #
-# critical is what `event list --critical`, a bot's brief and fleet-pulse's
-# reads select; notice is the record. The rule for a new type: raised through
-# emit_failure_alert (a FLEET ALERT), critical; through emit_fleet_notice or
-# notify_currency (a FLEET NOTICE), notice; recorded directly by a writer,
-# notice unless that writer pages someone for it.
+# critical is what `event list --critical` and a bot's brief select, and what
+# fleet-pulse's two reads choose their types from; notice is the record. The
+# rule for a new type: raised through emit_failure_alert (a FLEET ALERT),
+# critical; through emit_fleet_notice or notify_currency (a FLEET NOTICE),
+# notice; recorded directly by a writer, notice unless it is a fault that writer
+# pages someone to fix.
 SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "fleet_alert": "critical",
     "fleet_notice": "notice",
@@ -119,9 +121,10 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # cutover chunk 7a — a report whose status reached no task event (a terminal
     # note that resolved nothing): the status the idle-worker check reads.
     "report_status": "notice",
-    # cutover Phase B — the fleet events (once the per-bot data/events files,
-    # gone since F18 R1) on the plane: the `emit_fleet_event` types the estate
-    # emitted when the files went.
+    # The faults the runtime records about a bot or its fleet: a session or
+    # unit gone, a pane that stopped working, a failed script, an overdue
+    # dispatch, a bridge down, a reload or restart that failed, a start that
+    # never settled.
     "session_missing": "critical",
     "service_down": "critical",
     "activity_stuck": "critical",
@@ -144,6 +147,7 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "job_reenroll_deferred": "notice",
     "alert_delivery_failed": "notice",
     "dispatch_orphaned": "notice",
+    # fleet-pulse pushes it to the manager, but as routing, not a fault.
     "worker_unassigned": "notice",
     "pane_stuck": "notice",
     "wip_uncommitted": "notice",
@@ -223,8 +227,9 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "vault_sync_failed": "critical",
     # ...and those raised with a fleet in scope, recorded against that fleet (a
     # run with none lands on the host): a bot's keepalive that failed to run
-    # (keepalive-all), a halted rolling restart, and the alert target checks of
-    # fleet-pulse and creds-check.
+    # (keepalive-all), a halted rolling restart (recorded against the fleet of
+    # whoever ran it, not the fleet it rolled: #2112), and the alert target
+    # checks of fleet-pulse and creds-check.
     "keepalive_failed": "critical",
     "rolling_restart_stalled": "critical",
     "alert_target_refused": "critical",

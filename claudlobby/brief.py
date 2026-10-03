@@ -38,9 +38,10 @@ class of untruth it was added to prevent:
   ``#2109`` fleet- and host-level alerts
       LABELED, unconditionally, because the bound is this module's own read:
       the alerts section asks the plane for THIS bot's critical events. A
-      FLEET ALERT is recorded against the fleet, or, from a host job that runs
-      with no fleet, against the host (``disk_high``, ``memory_high``,
-      ``reload_failed``, ...), so no bot's read returns it. Which types are
+      FLEET ALERT is recorded against the fleet (``reload_failed``,
+      ``keepalive_failed``, ...), or, from a host job that runs with no fleet,
+      against the host (``disk_high``, ``memory_high``, ...), so no bot's read
+      returns it. Which types are
       critical is the one registry, ``plane.registries.SYSTEM_EVENT_SEVERITY``
       (#903); the label goes when this read takes those rows too, not before.
 

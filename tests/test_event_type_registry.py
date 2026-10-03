@@ -89,11 +89,15 @@ LOCAL_WRAPPERS = {
     RS + "vault-git-guard.sh": {"_event": 1},
 }
 # A writer call whose type is a variable, keyed (file, writer, the argument as
-# written): every value it can take...
+# written): the pattern that reads, from the script itself, every value the
+# variable takes, and those values. The list is checked against the script,
+# never trusted: bot-vitals reads its type from the Python it embeds, which
+# hands each type to evt()...
 VARIABLE_TYPES = {
-    (RS + "bot-vitals.sh", "emit_fleet_event", '"$_etype"'): {"tool_call", "session_event"},
+    (RS + "bot-vitals.sh", "emit_fleet_event", '"$_etype"'):
+        (r"\bevt\('([a-z][a-z0-9_]*)'", {"tool_call", "session_event"}),
     (RS + "host-health-check.sh", "emit_failure_alert", '"$KEY"'):
-        {"host_health", "undervoltage", "storage_stall"},
+        (r'\bKEY="([a-z][a-z0-9_]*)"', {"host_health", "undervoltage", "storage_stall"}),
 }
 # ...or the writers that hand their own caller's type through. Their calls are
 # scanned too, so the type is checked where it is written as a literal.
@@ -111,11 +115,15 @@ FENCE = re.compile(r"^[ \t]*```[^\n]*\n(.*?)^[ \t]*```", re.M | re.S)
 
 def _call(names) -> re.Pattern:
     """A call of one of *names* at command position: a line start, or after an
-    operator, a brace, a case arm's `)` or a keyword. A definition (`name()`)
-    and a mention (`command -v name`, a label argument) are not calls."""
+    operator, a brace, a case arm's `)` or a keyword, behind any `NAME=value`
+    environment prefixes (`FLEET=x emit_fleet_event t` records t). A definition
+    (`name()`) and a mention (`command -v name`, a label argument) are not calls."""
     alt = "|".join(sorted(map(re.escape, names), key=len, reverse=True))
+    prefix = (r"""(?:[A-Za-z_][A-Za-z0-9_]*=(?:"(?:[^"\\\n]|\\.)*"|'[^'\n]*'|[^\s;&|()"']*)"""
+              r"[ \t]+)*")
     return re.compile(
-        r"(?:^|[;&|({}!)]|\bthen\b|\bdo\b|\belse\b)[ \t]*(?P<name>" + alt + r")(?=[ \t]|\\\n)",
+        r"(?:^|[;&|({}!)]|\bthen\b|\bdo\b|\belse\b)[ \t]*" + prefix
+        + r"(?P<name>" + alt + r")(?=[ \t]|\\\n)",
         re.M)
 
 
@@ -266,6 +274,23 @@ def test_the_shell_scan_finds_the_writers():
     assert {name for _w, _l, name, _word in sites} == set(SHELL_WRITERS) | {"_event"}
 
 
+def test_the_call_pattern_reads_each_call_shape():
+    """Positive control for _call itself, one line per shape it claims: a
+    shape it stopped reading would pass every check here on nothing."""
+    text = "\n".join((
+        "emit_fleet_event plain_call src '{}'",
+        "true && emit_fleet_event after_operator src '{}'",
+        'FOO=1 BAR="a b" emit_fleet_event env_prefixed src \'{}\' "" >/dev/null 2>&1 || true',
+        "if x; then emit_failure_alert \"$d\" after_keyword \"why\"; fi",
+        "command -v emit_fleet_event >/dev/null  # a mention, not a call",
+        "emit_fleet_event() { :; }  # a definition, not a call",
+    ))
+    found = [(name, word[1]) for _w, _l, name, word in _calls("x.sh", text, 0, SHELL_WRITERS)]
+    assert found == [("emit_fleet_event", "plain_call"), ("emit_fleet_event", "after_operator"),
+                     ("emit_fleet_event", "env_prefixed"),
+                     ("emit_failure_alert", "after_keyword")], found
+
+
 def test_every_literal_type_a_shell_writer_records_is_registered():
     missing = [f"{where}:{line} {name} {word[1]}" for where, line, name, word in _shell_sites()
                if word and word[1] is not None and word[1] not in SYSTEM_EVENT_SEVERITY]
@@ -290,16 +315,15 @@ def test_every_variable_type_is_listed():
 
 
 def test_the_listed_values_are_registered_and_the_forwarders_are_scanned():
-    for (where, _name, arg), values in VARIABLE_TYPES.items():
+    for (where, _name, _arg), (pattern, values) in VARIABLE_TYPES.items():
         unknown = values - SYSTEM_EVENT_SEVERITY.keys()
         assert not unknown, (where, unknown)
-        # A variable the script assigns from literals must not take a value
-        # the table lacks.
-        var = re.fullmatch(r'"\$(\w+)"', arg)
-        if var:
-            assigned = set(re.findall(rf"\b{var[1]}=\"?([a-z][a-z0-9_]*)\"?",
-                                      _code((REPO / where).read_text())))
-            assert assigned <= values, (where, assigned - values)
+        # The values the script gives the variable, read from the script. None
+        # read is a pattern that stopped matching, so it fails rather than
+        # passing on an empty set.
+        taken = set(re.findall(pattern, _code((REPO / where).read_text())))
+        assert taken, (where, "the pattern reads no value from the script", pattern)
+        assert taken == values, (where, "values the script takes vs the list", taken ^ values)
     for (where, _name, _arg), forwarders in FORWARDED_TYPES.items():
         for f in forwarders:
             assert f in SHELL_WRITERS or f in LOCAL_WRAPPERS.get(where, {}), (where, f)
@@ -445,7 +469,10 @@ def test_no_file_builds_a_system_row_the_scans_cannot_see():
     """The tripwire for a new writer shape: every runtime script or Python
     module that names the system family (or, in Python, a subject) is one
     where a scan found its writer. A file that trips it needs its writer's
-    shape added to a scan, not an exemption."""
+    shape added to a scan, not an exemption.
+
+    Its bound: it works per file. A second row in a file where a scan already
+    found one, in a shape no scan reads, is not caught here."""
     marked = {_rel(p) for p in _runtime_shell_scripts() + _python_modules()
               if _names_a_system_row(p)}
     for m in ("claudlobby/brief.py", "claudlobby/task_recheck.py",

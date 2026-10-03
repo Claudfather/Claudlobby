@@ -192,7 +192,8 @@ a large window.
 | `session_missing`, `service_down`, `bridge_down`, `crash_loop`, `activity_stuck`, `input_held`, `overdue_dispatch` | fleet-pulse, per bot | the bot |
 | `rc_timeout` | `start-bot.sh`, once per (re)start | the bot |
 | `script_error` | a runtime script's ERR trap | its bot; the fleet or the host for a script with none |
-| `bridge_down`, `reload_failed`, `restart_failed`, `keepalive_failed`, `alert_target_refused`, `alert_pair_unreachable`, `rolling_restart_stalled`, `fleet_alert` | a FLEET ALERT raised with a fleet in scope: a fleet job, a bot's bring-up, `fleet notify --level alert` (`fleet_alert`) | the fleet, read as bot `fleet` |
+| `bridge_down`, `reload_failed`, `restart_failed`, `keepalive_failed`, `alert_target_refused`, `alert_pair_unreachable`, `fleet_alert` | a FLEET ALERT raised with a fleet in scope: a fleet job, a bot's bring-up, `fleet notify --level alert` (`fleet_alert`) | the fleet, read as bot `fleet` |
+| `rolling_restart_stalled` | a FLEET ALERT from `rolling-restart.sh` when a roll halts | the fleet of the shell that ran it, else the host: not the fleet it was rolling (#2112) |
 | `disk_high`, `memory_high`, `undervoltage`, `storage_stall`, `host_health`, `binary_update_failed`, `binary_unrunnable`, `vault_sync_failed` | a FLEET ALERT from a host job, which runs with no fleet | the host, as is any FLEET ALERT raised with no fleet in scope; no fleet's `event list` reads it |
 | `shadow_parity_diverged` | nothing now (the plane cutover's shadow) | kept so its old rows classify |
 
