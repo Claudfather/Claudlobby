@@ -291,7 +291,12 @@ b.set_bot_running = restart
 b._schedule_self_restart(root=root, fleet='fleet', bot='bot', ceiling=None,
                          bot_dir=bot_dir)
 if stalled:
-    time.sleep(0.15)
+    # Stalled means still alive when the witness's wait ends, so stay until it
+    # logs that verdict: a fixed sleep raced the witness's own scheduling (#2137).
+    log, deadline = bot_dir / 'logs/startup.log', time.monotonic() + 8
+    while time.monotonic() < deadline and not (
+            log.exists() and '"status":"incomplete"' in log.read_text()):
+        time.sleep(0.01)
 os._exit(0)  # even an abrupt caller death releases the child to finish
 """
     process = subprocess.run([os.sys.executable, "-c", code, str(tmp_path), str(bot_dir),
