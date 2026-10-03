@@ -3,7 +3,8 @@
 Phase 1 ships FIELD_POLICY (the classification registry — the ENFORCEMENT
 source of truth: contracts read caps from here, the capture door reads
 CONTENT membership from here; editing a cap HERE changes behavior).
-SYSTEM_EVENT_TYPES and METRIC_NAMES join in Phase 2b.
+SYSTEM_EVENT_SEVERITY (the system-event vocabulary, each type with its
+severity) and METRIC_NAMES joined in Phase 2b.
 """
 
 from __future__ import annotations
@@ -84,9 +85,20 @@ def cap_for(family: str, field: str) -> int:
 # kind=system severity is REGISTRY-OWNED (§9b: "ingest stamps it from the
 # package-owned seed module; callers cannot set it; unknown type => null").
 # A caller-supplied severity is a caller bug (ContractViolation via the strict
-# wire model). Phase 2b grows this seed into the full SYSTEM_EVENT_TYPES
-# registry (F19: unknown tokens still INGEST — they just carry NULL severity
-# until the registry learns them).
+# wire model).
+#
+# This dict is the fleet's one event-type vocabulary: every type a writer
+# records is a key. An unknown token still INGESTS (F19), but with NULL
+# severity, so no critical read can show it, and registering it later does not
+# re-stamp the rows already stored. tests/test_event_type_registry.py fails on
+# a writer whose type is missing here, and on a reader or a document whose own
+# list disagrees with this one.
+#
+# critical is what `event list --critical`, a bot's brief and fleet-pulse's
+# reads select; notice is the record. The rule for a new type: raised through
+# emit_failure_alert (a FLEET ALERT), critical; through emit_fleet_notice or
+# notify_currency (a FLEET NOTICE), notice; recorded directly by a writer,
+# notice unless that writer pages someone for it.
 SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "fleet_alert": "critical",
     "fleet_notice": "notice",
@@ -108,10 +120,8 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # note that resolved nothing): the status the idle-worker check reads.
     "report_status": "notice",
     # cutover Phase B — the fleet events (once the per-bot data/events files,
-    # gone since F18 R1) on the plane: every `emit_fleet_event` type the estate emits, registered with the
-    # severity `claudlobby events`' CRITICAL_TYPES implies (critical pages the
-    # operator through fleet-pulse's escalation; notice is the record). An
-    # unregistered type still ingests with NULL severity (F19).
+    # gone since F18 R1) on the plane: the `emit_fleet_event` types the estate
+    # emitted when the files went.
     "session_missing": "critical",
     "service_down": "critical",
     "activity_stuck": "critical",
@@ -198,7 +208,94 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # record, never a page.
     "credential_echo_refused": "notice",
     "credential_echo_unparsed": "notice",
+    # FLEET ALERTs (emit_failure_alert): each records its caller's own type and
+    # pages the manager and Telegram. Host jobs run with no fleet, so theirs are
+    # recorded against the host: disk-monitor, fleet-memory-check,
+    # host-health-check (one of three types, by finding), update-claude-code
+    # and vault-sync.
+    "disk_high": "critical",
+    "memory_high": "critical",
+    "undervoltage": "critical",
+    "storage_stall": "critical",
+    "host_health": "critical",
+    "binary_update_failed": "critical",
+    "binary_unrunnable": "critical",
+    "vault_sync_failed": "critical",
+    # ...and those raised with a fleet in scope, recorded against that fleet (a
+    # run with none lands on the host): a bot's keepalive that failed to run
+    # (keepalive-all), a halted rolling restart, and the alert target checks of
+    # fleet-pulse and creds-check.
+    "keepalive_failed": "critical",
+    "rolling_restart_stalled": "critical",
+    "alert_target_refused": "critical",
+    "alert_pair_unreachable": "critical",
+    # FLEET NOTICEs (emit_fleet_notice): the same channels, framed as routine.
+    "orphan_browser_reaped": "notice",
+    "binary_update_skipped": "notice",
+    "binary_prune_skipped": "notice",
+    "binary_repaired": "notice",
+    "vault_sync_recovered": "notice",
+    # notify_currency: the debounced source-currency notices of notify-behind
+    # and update-siblings.
+    "source_behind": "notice",
+    "source_release_gap": "notice",
+    "sibling_update_blocked": "notice",
+    "sibling_update_failed": "notice",
+    "sibling_updated": "notice",
+    # Records nobody is paged for: which manager a host-scoped signal reached
+    # (lib-common), a failed App token mint (git-credential-github-app), each
+    # declared bot at a host boot and the boot's summary (boot-capture), the
+    # vault git-state guard's denials and the targets it could not read,
+    # vault-sync's failed-sync row on the vault itself (its page is
+    # vault_sync_failed), and the code-audit-sweep skill's completion, which
+    # the agent records.
+    "alert_recipient_resolved": "notice",
+    "auth_mint_failed": "notice",
+    "boot_capture": "notice",
+    "boot_capture_summary": "notice",
+    "vault_guard_denied": "notice",
+    "vault_guard_unresolved": "notice",
+    "vault_sync": "notice",
+    "audit_completed": "notice",
+    # The Python writers' records: a local operator's first contact
+    # (operation_context), a task re-check and an empty one (task_recheck), and
+    # an empty workstream prune (workstream_operations).
+    "operator_first_seen": "notice",
+    "task_recheck": "notice",
+    "task_recheck_noop": "notice",
+    "workstream_prune_noop": "notice",
 }
+
+#: fleet-pulse's two reads of the plane's critical rows. fleet-pulse.sh keeps
+#: each as a bash list (_CRITICAL_ESCALATION_TYPES, _CRITICAL_SUMMARY_TYPES);
+#: tests/test_event_type_registry.py pins each list equal to its set here, and
+#: each set inside the critical types.
+#:
+#: Both are DELIBERATE subsets. Both reads take a bot's own rows only, so a
+#: FLEET ALERT, recorded against the fleet or the host and paged by its own
+#: writer, can never appear in either (bridge_down does, through fleet-pulse's
+#: own row for the bot); nor can shadow_parity_diverged, which nothing records
+#: now.
+#:
+#: PULSE_ESCALATION_TYPES page Telegram when FLEET_PULSE_ESCALATION_THRESHOLD
+#: bots or more carry one inside the escalation window: a fault across the
+#: fleet, which no one bot's remedy clears. Of the other bot-level critical
+#: types, activity_stuck, overdue_dispatch and input_held page the manager's
+#: pane one bot at a time (input_held's remedy is an operator's Enter, never a
+#: restart), and script_error, one per failed script run, is read by `event
+#: list --critical` and the bot's brief.
+PULSE_ESCALATION_TYPES: frozenset[str] = frozenset({
+    "service_down", "session_missing", "bridge_down", "rc_timeout", "crash_loop",
+})
+
+#: PULSE_SUMMARY_TYPES fill the pulse summary's ALERTS column, one line per
+#: bot: the state of its session, unit, bridge and pane. Left out:
+#: overdue_dispatch, which is a task's state rather than the bot's (the manager
+#: push carries it), and script_error.
+PULSE_SUMMARY_TYPES: frozenset[str] = frozenset({
+    "session_missing", "service_down", "bridge_down", "activity_stuck",
+    "input_held", "rc_timeout", "crash_loop",
+})
 
 # ---------------------------------------------------------------------------
 # Phase 2b: the metric-name registry (§9b MetricSample — open registry,

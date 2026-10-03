@@ -714,23 +714,30 @@ def test_the_911_label_retired_with_the_ledgers(paths: Paths):
     assert len(brief["reports"]["unacked"]) == 1
 
 
-def test_alerts_are_labeled_until_the_event_type_ssot_lands(paths: Paths):
-    """#903: absence of an alert is not evidence of health, and says so."""
+def test_alerts_are_labeled_as_the_bots_own(paths: Paths):
+    """#2109: fleet- and host-level alerts are not read here, so absence of an
+    alert is not evidence of health, and says so."""
     _seed_plane(paths)
     brief = build_brief(_fleet(), paths, "alex", NOW)
 
-    entry = _find(brief, "alerts", "#903")
+    entry = _find(brief, "alerts", "#2109")
     assert entry and entry[0]["mode"] == "labeled"
+    assert "this bot's own critical events" in entry[0]["reason"]
+    assert "fleet- and host-level alerts" in entry[0]["reason"]
     assert "absence of an alert is not evidence of health" in entry[0]["reason"]
 
 
-def test_alert_label_clears_when_the_ssot_symbol_appears(paths: Paths, monkeypatch):
-    """Keyed on #903's actual deliverable, so it retires itself."""
+def test_the_alert_label_is_unconditional(paths: Paths, monkeypatch):
+    """No symbol clears the #2109 label: its bound is the read's own filter
+    (this bot's rows), not a missing registry. known_values.FLEET_EVENT_TYPES,
+    the symbol the #903 label keyed on, changes nothing."""
     from claudlobby import known_values
 
     monkeypatch.setattr(known_values, "FLEET_EVENT_TYPES", {"disk_high"}, raising=False)
     _seed_plane(paths)
-    assert _find(build_brief(_fleet(), paths, "alex", NOW), "alerts", "#903") == []
+    brief = build_brief(_fleet(), paths, "alex", NOW)
+    assert _find(brief, "alerts", "#903") == []
+    assert [e["mode"] for e in _find(brief, "alerts", "#2109")] == ["labeled"]
 
 
 def test_utilization_is_recorded_as_omitted(paths: Paths):
@@ -767,7 +774,7 @@ def test_format_marks_degraded_sections_inline_and_lists_them(paths: Paths):
     _seed_plane(paths)
     text = format_brief(build_brief(_fleet(), paths, "alex", NOW))
 
-    assert "ALERTS" in text and "[degraded: #903]" in text
+    assert "ALERTS" in text and "[degraded: #2109]" in text
     assert "DEGRADED — fields this door will not serve as plain truth" in text
     assert "degraded field(s)" in text  # the top-of-output banner
     for section in ("MISSION", "WORK", "WORKSTREAMS", "REPORTS"):

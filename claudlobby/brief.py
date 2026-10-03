@@ -35,14 +35,14 @@ class of untruth it was added to prevent:
       recorded as such, never dropped silently by a reader. The re-scan this
       module carried, and its label, went with the files.
 
-  ``#903`` event-type SSOT
-      DETECTED, structurally. ``CRITICAL_TYPES`` is a hand-maintained
-      nine-literal list that omits every host-job alert type (``disk_high``,
-      ``memory_high``, ``briefing_failed``, ...), so the alert section is
-      incomplete by construction and no measurement taken here could show it —
-      the missing rows are exactly the ones the filter never returns. #903
-      ships an event-type registry in ``known_values``; the label is keyed on
-      that symbol existing, so it clears when the SSOT lands and not before.
+  ``#2109`` fleet- and host-level alerts
+      LABELED, unconditionally, because the bound is this module's own read:
+      the alerts section asks the plane for THIS bot's critical events. A
+      FLEET ALERT is recorded against the fleet, or, from a host job that runs
+      with no fleet, against the host (``disk_high``, ``memory_high``,
+      ``reload_failed``, ...), so no bot's read returns it. Which types are
+      critical is the one registry, ``plane.registries.SYSTEM_EVENT_SEVERITY``
+      (#903); the label goes when this read takes those rows too, not before.
 
   ``#891`` uptime windows
       OMITTED. ``claudlobby fleet uptime`` counts missing keepalive history as
@@ -565,34 +565,24 @@ def _reports_section(
 def _alerts_section(
     paths: Paths, bot_id: str, now: int, degraded: list[Degradation], plane=None
 ) -> list[dict]:
-    """Critical events for the bot within the lookback window.
+    """This bot's own critical events within the lookback window.
 
-    Incomplete by construction until #903 lands — see the module docstring.
-    The degradation is keyed on the SSOT symbol rather than a hardcoded flag,
-    so it retires itself when the registry ships.
+    Labeled on every call: fleet- and host-level alerts are not read here
+    (#2109) — see the module docstring.
     """
-    try:
-        from . import known_values
-
-        has_ssot = hasattr(known_values, "FLEET_EVENT_TYPES")
-    except ImportError:  # pragma: no cover - known_values is a sibling module
-        has_ssot = False
-
-    if not has_ssot:
-        degraded.append(
-            Degradation(
-                field="alerts",
-                mode="labeled",
-                reason=(
-                    "critical events are filtered by CRITICAL_TYPES, a "
-                    "hand-maintained list that omits every host-job alert type "
-                    "(disk_high, memory_high, briefing_failed, ...); alerts "
-                    "shown are real, but absence of an alert is not evidence of "
-                    "health"
-                ),
-                issue="#903",
-            )
+    degraded.append(
+        Degradation(
+            field="alerts",
+            mode="labeled",
+            reason=(
+                "alerts shown are this bot's own critical events; fleet- and "
+                "host-level alerts (disk_high, memory_high, reload_failed, ...) "
+                "are not read here, so absence of an alert is not evidence of "
+                "health"
+            ),
+            issue="#2109",
         )
+    )
 
     cutoff = (
         (datetime.fromtimestamp(now, timezone.utc) - timedelta(hours=ALERT_WINDOW_H))
