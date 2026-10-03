@@ -124,6 +124,16 @@ _GH_READS = {
 }
 _GH_TARGET_FLAGS = {"-R", "--repo", "--hostname"}
 _GH_FILE_FLAGS = {"--body-file", "-F", "--notes-file"}
+# The other value-taking flags of the issue and pr write verbs (gh 2.92.0, from each verb's
+# --help). Their value is a name, a branch or a reference, never the selector, whatever it
+# looks like: --duplicate-of takes an issue URL, and a URL there must not read as the target.
+_GH_OTHER_VALUE_FLAGS = {
+    "--add-assignee", "--add-label", "--add-project", "--add-reviewer", "--assignee",
+    "--author-email", "--base", "--branch-repo", "--duplicate-of", "--head", "--label",
+    "--match-head-commit", "--milestone", "--project", "--reason", "--recover",
+    "--remove-assignee", "--remove-label", "--remove-project", "--remove-reviewer",
+    "--reviewer", "--template",
+}
 _API_SKIP = {
     "-X",
     "--method",
@@ -216,7 +226,7 @@ _READABLE_SUBST = re.compile(
 )
 # an issue or pull request URL, as a whole word
 _TARGET_URL = re.compile(
-    r"https?://(?P<host>[^/\s]+)/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)"
+    r"(?i:https?)://(?P<host>[^/\s]+)/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)"
     r"/(?:issues|pull)/\d+(?:[/?#]\S*)?"
 )
 _VISIBILITIES = ("public", "private", "internal")
@@ -657,7 +667,7 @@ def _target_url(
     positional, so a URL a body, a title or a comment mentions is text, not the target."""
     if group not in ("issue", "pr"):
         return None
-    values = _GH_TARGET_FLAGS | _GH_CONTENT_FLAGS | _GH_FILE_FLAGS
+    values = _GH_TARGET_FLAGS | _GH_CONTENT_FLAGS | _GH_FILE_FLAGS | _GH_OTHER_VALUE_FLAGS
     values -= _GH_SWITCHES.get((group, verb), set())
     seen, k = 0, 0
     while k < len(args):
@@ -997,15 +1007,15 @@ def _gh_write(
     def target():
         if group == "gist":
             return ("(gist)", "(gist)")
-        flag = _flag_values(args, {"-R", "--repo"})
-        if flag:
-            return _parse_repo(_expand(flag[-1], assigns))
-        if url_at:  # gh writes where the URL points, whatever directory it runs in
+        if url_at:  # gh writes where the URL points, whatever directory it runs in and whatever -R says
             m = url_at[1]
-            host = m.group("host").lower()
+            host = re.sub(r"^.*\x40|:\d*$", "", m.group("host").lower())  # the host alone: gh drops userinfo and port
             if host != "github.com" and not host.endswith(".github.com"):
                 return ("", "")  # another host
             return (m.group("owner"), m.group("repo"))
+        flag = _flag_values(args, {"-R", "--repo"})
+        if flag:
+            return _parse_repo(_expand(flag[-1], assigns))
         if group == "repo" and len(pos) > 2:
             if verb == "create":
                 return ("(new)", pos[2])
