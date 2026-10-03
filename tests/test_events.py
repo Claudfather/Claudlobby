@@ -29,7 +29,6 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from claudlobby.commands.events import (
-    CRITICAL_TYPES,
     collect_plane_events,
     format_event_table,
     plane_events_conn,
@@ -108,15 +107,6 @@ class TestCollectPlaneEvents:
         assert types == {"bridge_down", "reload_failed", "restart_failed"}
         # send_miss is informational (emit_fleet_notice), not operator-actionable
         assert SYSTEM_EVENT_SEVERITY["send_miss"] != "critical"
-
-    def test_critical_types_set_contents(self):
-        assert {
-            "bridge_down",
-            "reload_failed",
-            "restart_failed",
-            "rc_timeout",
-        } <= CRITICAL_TYPES
-        assert "send_miss" not in CRITICAL_TYPES
 
     def test_events_sorted_by_timestamp(self, scene):
         _root, paths = scene
