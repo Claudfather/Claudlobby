@@ -14,6 +14,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **No push types into a box that already holds text.** Before each push, the shipped `pane_is_held` reads the manager's box. If it holds anything, the push is skipped, the window stays open, and the alert's plane record is left to the escalation. Typing would glue the alert to that text, which is the opposite of the fleet's own held-box remedy, and a glued box is the operator's call.
 - **After a push the box did not take, a floor.** That manager gets no push for `FLEET_PULSE_HELD_PUSH_FLOOR_S` (default 30 minutes, the shape of #1088's re-arm bound), with no wait and no typing in between. So a box that takes no input costs one wait per floor, not one per sweep or per alert, and a submitted push clears the floor.
 
+### Added — every PR names the production check that proves it, and the merger runs it once the change is live (#2111)
+
+CI, a green deploy and a healthy service prove that a system still runs, not that a merged change does what it was merged to do. Until now that check lived in individual managers' memory, when it happened at all, and nothing posted a result after a merge.
+
+- **`library/guardrails/verify-rollout.md`** (opt-in). The author writes a `## Rollout check` with four lines: Observe, Control, When and Who. A reviewer treats a missing or vacuous one as request-changes. Once the change is live by the target's own record, the merger runs the check and posts PASS, FAIL or PENDING on the PR. For the framework, "live" means the active release's `source_revision` contains the merge commit.
+  - **PENDING** is a task on the plane, one per check.
+  - **A check only the operator can run** goes to them through `task escalate`, one per message.
+  - **A FAIL stops that repo's merge train.** The merger opens a `rollout-hold` issue, which only the fix or revert PR may close.
+- **`.github/workflows/verify-rollout.yml`**, a reusable workflow, and this repo's caller, `rollout-check.yml`. A repo adopts the check with one caller file, and it reads as `rollout-check / Rollout check` in the status rollup. What the checker does:
+  - It reads the body and the changed files live through the API, and the docs and tests paths from the caller file on the default branch, so the PR under check cannot widen its own exemption.
+  - It fails a missing section, an empty or `N/A` field, a heading inside a fenced block or a comment, an `N/A` that is not `docs-only` or `tests-only`, an exemption the changed paths do not bear out, and any failed lookup.
+  - It reads a field as GitHub renders it: a field ends with its list item, so text after a blank line (the footer most bodies end with) is not its answer, and a comment hides text up to its `-->` across the lines of one paragraph.
+  - It flags a PR that changes a workflow file, because such a PR can replace the job that checks it.
+- **The merge guardrails** (`merge-policy-auto-admin`, `merge-policy-auto-after-review`) read that check by name, and every read they add fails closed:
+  - only a 404 on the default branch's caller file says a repo has not adopted the check;
+  - only the check's newest run at the head counts;
+  - the merger reads a PR's changed files from the API, and a PR that changes a workflow file merges only on the rung 1 verdict that names each one.
+  - The new rung 5 refuses a merge while a `rollout-hold` issue is open, in a repo that has adopted the check. The only exception is a PR that closes it and whose rung 1 verdict names it: a closing keyword alone is the author's to write. In a repo that has not adopted the check, rung 5 lists nothing and cannot refuse, so a fleet that composes the guardrail without opting in gains no new way to fail.
+- `.github/pull_request_template.md` carries the section. `canary-rollout` gains a row and a pointer for the rollout check.
+
 ### Fixed — a self restart after a checkpoint reads the session's capture, not the activation's envelope (#2119)
 
 Since #2110, each activation tops every bot's handoff with an envelope that carries `references_refreshed:`, not `last_updated:`. The self-restart check (`claudlobby bot restart` on yourself) read only the file's first frontmatter, so a session that checkpointed below the envelope and then restarted itself was refused, however fresh its capture.
