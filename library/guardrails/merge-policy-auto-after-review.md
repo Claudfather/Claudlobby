@@ -49,13 +49,13 @@ The manager auto-merges PRs when ALL of:
 
    Two cautions, because the obvious ways to check this both return confident wrong answers. Read the **rulesets** API, not `/branches/main/protection` — the legacy endpoint answers `404 Branch not protected` for a repo fully protected by a ruleset, asserting a negative it has no standing to assert. Then read the ruleset's **`enforcement`** field, because one can exist and enforce nothing (`enforcement: disabled`). The two failures point in **opposite** directions: the legacy endpoint calls a protected repo unprotected, a bare ruleset listing calls an unprotected one protected.
 
-   **One name is fixed in every repo that has adopted it: the rollout check** (`verify-rollout`). Read whether the repo's default branch carries `.github/workflows/rollout-check.yml`: only a 404 means the repo has not adopted the check, and any other failed read refuses. Where it has, the newest `rollout-check / Rollout check` run at the head must be `SUCCESS`. The rollup lists every run of a name, so a read that takes any `SUCCESS` would pass a stale green after a red body edit. Anything but `SUCCESS` in the newest run, or no run, refuses. Run it in the same call as rung 0, which sets `$REPO` and `$N`:
+   **One name is fixed in every repo that has adopted it: the rollout check** (`verify-rollout`). Read whether the repo's default branch carries `.github/workflows/rollout-check.yml`: only a 404 means the repo has not adopted the check, and any other failed read refuses. Where it has, the newest `rollout-check / Rollout check` run at the head must be `SUCCESS`. The rollup lists every run of a name, so a read that takes any `SUCCESS` would pass a stale green after a red body edit. Anything but `SUCCESS` in the newest run, or no run, refuses. A run that has not completed has not passed, newest or not, so the read names it `PENDING` rather than trusting timestamps to order runs that have not finished. Run it in the same call as rung 0, which sets `$REPO` and `$N`:
 
    ```bash
    DEFAULT=$(gh api "repos/$REPO" --jq .default_branch) || { echo "REFUSE: cannot read the default branch"; exit 1; }
    if ERR=$(gh api "repos/$REPO/contents/.github/workflows/rollout-check.yml?ref=$DEFAULT" --silent 2>&1); then
-     ROLLOUT=$(gh pr view "$N" --repo "$REPO" --json statusCheckRollup --jq '[.statusCheckRollup[] | select(.name == "rollout-check / Rollout check")] | sort_by(.startedAt) | last | .conclusion // "ABSENT"') || { echo "REFUSE: cannot read the rollout check"; exit 1; }
-     [ "$ROLLOUT" = SUCCESS ] || { echo "REFUSE: the rollout check's newest run is $ROLLOUT"; exit 1; }
+     ROLLOUT=$(gh pr view "$N" --repo "$REPO" --json statusCheckRollup --jq '[.statusCheckRollup[] | select(.name == "rollout-check / Rollout check")] | if any(.status != "COMPLETED") then "PENDING" else (sort_by(.startedAt) | last | .conclusion // "ABSENT") end') || { echo "REFUSE: cannot read the rollout check"; exit 1; }
+     [ "$ROLLOUT" = SUCCESS ] || { echo "REFUSE: the rollout check reads $ROLLOUT"; exit 1; }
    else
      case "$ERR" in *"HTTP 404"*) echo "This repo has not adopted the rollout check" ;; *) echo "REFUSE: cannot tell whether this repo runs the rollout check: $ERR"; exit 1 ;; esac
    fi

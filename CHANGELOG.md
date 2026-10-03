@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a rollout check run that has not completed blocks the merge, whatever its `startedAt` (#2116 follow-up)
+
+The merge guardrails' rung 2 read the newest `rollout-check / Rollout check` run by sorting on `startedAt`. Under `gh`'s jq a null or zero `startedAt` sorts before a started run, so a queued run reported that way would hand the read the older run, and a stale green would pass (ravi's note on #2116). On this change's own push GitHub reported queued runs with their queue time, so that case was not seen. The read now names any run that has not completed `PENDING`, so the rung refuses until every run of the check has completed, and then reads the newest.
+
 ### Fixed — one registry for event types: every type the runtime writes is registered, and its writers, fleet-pulse's lists and the docs are gated against it (#903)
 
 The plane stamps a system event's severity at ingest from `SYSTEM_EVENT_SEVERITY` in `claudlobby/plane/registries.py`, and stores a type the registry lacks with no severity. Nothing checked the types the runtime writes against it, and four readers kept lists of their own. Most FLEET ALERT types were stored with no severity. Those recorded against a fleet (`keepalive_failed`, `alert_target_refused`, ...) now show in `event list --critical`. Those recorded against the host (`disk_high`, `memory_high`, ...) are stamped critical now too, but no read shows host rows yet (#2109).
