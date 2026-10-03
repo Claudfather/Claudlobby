@@ -90,9 +90,10 @@ def test_the_skill_is_coupled_to_its_doors():
 
 
 def test_the_degraded_rule_is_keyed_on_mode_omitted_per_field():
-    # brief's degraded[] is NEVER empty on a real fleet (captured live, cycle 4: a
-    # fleet with a plane carries alerts:labeled #903 and work.attention:labeled
-    # #1014 on every call); only mode "omitted" means a field is absent (#1467)
+    # brief's degraded[] is NEVER empty on a real fleet (a fleet with a plane
+    # carries alerts:labeled #2109 on every call, and work.attention:labeled
+    # #1014 was captured live beside it); only mode "omitted" means a field is
+    # absent (#1467)
     rule = _flat(SKILL.read_text().split("## DECIDE")[0])
     assert "`mode` is `omitted`" in rule and "unavailable" in rule
     assert "`mode` is `labeled`" in rule and "present" in rule

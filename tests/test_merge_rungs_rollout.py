@@ -27,10 +27,17 @@ ADOPTION = "statusCheckRollup"        # rung 2: is the check adopted, and its ne
 WORKFLOWS = 'pulls/$N/files'          # rung 2: the PR's own workflow changes
 HOLD = "rollout-hold"                 # rung 5: an open rollout hold
 
-GREEN = {"name": "rollout-check / Rollout check", "startedAt": "2026-10-03T08:00:00Z",
-         "conclusion": "SUCCESS"}
+GREEN = {"name": "rollout-check / Rollout check", "status": "COMPLETED",
+         "startedAt": "2026-10-03T08:00:00Z", "conclusion": "SUCCESS"}
 RED_LATER = {**GREEN, "startedAt": "2026-10-03T08:05:00Z", "conclusion": "FAILURE"}
-PENDING_LATER = {**GREEN, "startedAt": "2026-10-03T08:05:00Z", "conclusion": None}
+# As a live rollup shows a run in progress: started, with an empty conclusion.
+PENDING_LATER = {**GREEN, "status": "IN_PROGRESS", "startedAt": "2026-10-03T08:05:00Z",
+                 "conclusion": ""}
+# A newer run still queued, whose startedAt is null or a zero time: sorted by
+# startedAt it comes first, so a read of the newest run took the older green.
+QUEUED_NULL = {**GREEN, "status": "QUEUED", "startedAt": None, "conclusion": None}
+QUEUED_ZERO = {**QUEUED_NULL, "startedAt": "0001-01-01T00:00:00Z"}
+RUNNING_EARLIER = {**PENDING_LATER, "startedAt": "2026-10-03T07:55:00Z"}
 
 
 def snippet(name: str, marker: str) -> str:
@@ -64,15 +71,20 @@ def passed(run: subprocess.CompletedProcess) -> bool:
     ({"contents": "present", "rollup": [GREEN]}, True),
     ({"contents": "present", "rollup": [GREEN, RED_LATER]}, False),
     ({"contents": "present", "rollup": [GREEN, PENDING_LATER]}, False),
+    ({"contents": "present", "rollup": [GREEN, QUEUED_NULL]}, False),
+    ({"contents": "present", "rollup": [GREEN, QUEUED_ZERO]}, False),
+    ({"contents": "present", "rollup": [RUNNING_EARLIER, GREEN]}, False),
     ({"contents": "present", "rollup": []}, False),
     ({"contents": "present", "fail": ["contents"]}, False),
     ({"contents": "present", "fail": ["repo"]}, False),
     ({"contents": "present", "rollup": [GREEN], "fail": ["rollup"]}, False),
 ], ids=["not-adopted-404", "newest-green", "stale-green-under-a-newer-red", "newer-run-pending",
+        "newer-run-queued-null-start", "newer-run-queued-zero-start", "an-older-run-still-running",
         "no-run", "adoption-read-fails", "default-branch-read-fails", "rollup-read-fails"])
 def test_rung_2_takes_the_newest_rollout_run_and_refuses_a_failed_read(tmp_path, name, state, passes):
     """Only a 404 says the repo has not adopted the check; the rollup lists every run
-    of a name, so only the newest counts."""
+    of a name, so only the newest counts, and a run that has not completed (queued,
+    whatever its startedAt, or still running) means the check has not passed."""
     assert passed(run_rung(tmp_path, snippet(name, ADOPTION), state)) is passes
 
 

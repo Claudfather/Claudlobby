@@ -2,10 +2,12 @@
 # held_delivery_match (#2105): may one repair Enter submit this held delivery?
 #
 # The messaging operation owner asks it before each of its at most two repair
-# Enters, after a receipt wait found no receipt for the message. It must answer
-# text or chip only for a box that holds exactly this one tracked delivery, in a
-# pane with no turn running and no menu open, and refuse every other frame with a
-# reason. The frames are built here in the layout of the captured fixtures
+# Enters, after a receipt wait found no receipt for the message. It answers text
+# or chip only when the box shows this delivery by the checks in lib-common.sh's
+# verdict list (an envelope at the start and this message's trailer, the only one,
+# at the end; or one lone chip after an empty read before the send), in a pane
+# where pane_is_busy sees no running turn and no menu is open. It refuses every
+# other frame with a reason. The frames are built here in the layout of the captured fixtures
 # (tests/fixtures/pane-states/input-held-cr.txt: a rule above and below the box,
 # the glyph and its NBSP, wrapped lines indented), and asked under the suite's
 # locale and under LC_ALL=C.
