@@ -15,13 +15,13 @@ Every PR body has a `## Rollout check` section with four lines. `.github/pull_re
 
 ```markdown
 ## Rollout check
-- **Observe:** what to read in production (a command, endpoint, job, event or record) and the exact value or shape expected
-- **Control:** what the same check shows today, or on a case this change must not touch, so that a pass cannot be vacuous
-- **When:** right after the change is live, or after a named live event (a timer run, real traffic), with the date by which it will have happened
-- **Who:** any bot with the fleet's credentials, or operator only, and why
+- **Observe:** <!-- what to read in production (a command, endpoint, job, event or record) and the exact value or shape expected -->
+- **Control:** <!-- what the same check shows today, or on a case this change must not touch, so that a pass cannot be vacuous -->
+- **When:** <!-- right after the change is live, or after a named live event (a timer run, real traffic), with the date by which it will have happened -->
+- **Who:** <!-- any bot with the fleet's credentials, or operator only, and why -->
 ```
 
-A change with nothing to observe in production carries one line instead: `N/A: docs-only` or `N/A: tests-only`. CI accepts it only when every changed path is under the docs or tests paths that the repo's caller file declares on its default branch.
+The prompts are comments, as in the template: left unfilled, every field reads empty and CI fails it. A change with nothing to observe in production carries one line instead: `N/A: docs-only` or `N/A: tests-only`. CI accepts it only when every changed path is under the docs or tests paths that the repo's caller file declares on its default branch.
 
 ## Reviewer
 

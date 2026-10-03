@@ -17,8 +17,13 @@ CI, a green deploy and a healthy service prove that a system still runs, not tha
 - **`.github/workflows/verify-rollout.yml`**, a reusable workflow, and this repo's caller, `rollout-check.yml`. A repo adopts the check with one caller file, and it reads as `rollout-check / Rollout check` in the status rollup. What the checker does:
   - It reads the body and the changed files live through the API, and the docs and tests paths from the caller file on the default branch, so the PR under check cannot widen its own exemption.
   - It fails a missing section, an empty or `N/A` field, a heading inside a fenced block or a comment, an `N/A` that is not `docs-only` or `tests-only`, an exemption the changed paths do not bear out, and any failed lookup.
+  - It reads a field as GitHub renders it: a field ends with its list item, so text after a blank line (the footer most bodies end with) is not its answer, and a comment hides text up to its `-->` across the lines of one paragraph.
   - It flags a PR that changes a workflow file, because such a PR can replace the job that checks it.
-- **The merge guardrails** (`merge-policy-auto-admin`, `merge-policy-auto-after-review`) read that check by name. A PR that changes a workflow file needs a reviewer verdict that names the change. The new rung 5 refuses a merge while a `rollout-hold` issue is open, except for the PR that closes it.
+- **The merge guardrails** (`merge-policy-auto-admin`, `merge-policy-auto-after-review`) read that check by name, and every read they add fails closed:
+  - only a 404 on the default branch's caller file says a repo has not adopted the check;
+  - only the check's newest run at the head counts;
+  - the merger reads a PR's changed files from the API, and a PR that changes a workflow file merges only on the rung 1 verdict that names each one.
+  - The new rung 5 refuses a merge while a `rollout-hold` issue is open. The only exception is a PR that closes it and whose rung 1 verdict names it: a closing keyword alone is the author's to write.
 - `.github/pull_request_template.md` carries the section. `canary-rollout` gains a row and a pointer for the rollout check.
 
 ### Fixed — a send presses Enter only once the box shows the typed text, and a held box is never counted as sent (#1236)

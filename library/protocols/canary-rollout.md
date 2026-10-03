@@ -11,7 +11,7 @@ A change can pass every throwaway-bot test and still break the moment it goes li
 |------|--------|-------|
 | Pre-merge throwaway-bot validation (`validate-bot-change.sh`) | The **code works** — the event fires, the alert sends | **Hard gate.** Mandatory for every runtime change, before merge. |
 | **Canary rollout** (this protocol) | The **rollout is safe** in real production state | **Strong default.** Do it when a bad fleet-wide rollout would hurt the fleet — judgment, not a universal mandate. |
-| **Rollout check** ([verify-rollout](../guardrails/verify-rollout.md)) | The merged change **does what it was merged to do**, where it runs | **Every PR** names its check before merge; the merger posts PASS, FAIL or PENDING once the change is live. |
+| **Rollout check** ([verify-rollout](../guardrails/verify-rollout.md)) | The merged change **does what it was merged to do**, where it runs | Where a fleet opts in, **every PR** names its check before merge; the merger posts PASS, FAIL or PENDING once the change is live. |
 
 The throwaway bot runs in a clean, synthetic environment. Production carries state it never had: the real plugin/marketplace registry, real MCP config, live supervision units, a real running binary, concurrent bots. That gap is exactly where a merged-and-tested change bites. So the pre-merge gate is mandatory for every runtime change; the canary is the **expected default** when that change ships *live across the fleet* — a judgment call, not a rule that fires on every PR.
 

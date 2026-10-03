@@ -76,6 +76,7 @@ jobs:
           CODE = "[code block]"
           HEADING = re.compile(r"^ {0,3}##[ \t]+rollout check:?(?:[ \t]+#+)?[ \t]*$", re.I)
           NEXT_SECTION = re.compile(r"^ {0,3}#{1,2}(?:[ \t]|$)")
+          BLOCK_START = re.compile(r"^\s*(?:[-*+]|\d+[.)])[ \t]|^ {0,3}#{1,6}(?:[ \t]|$)")
           COMMENT_BLOCK = re.compile(r"^ {0,3}<!--")
           FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
           FENCE_CLOSE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
@@ -115,10 +116,12 @@ jobs:
                       fh.write(line + "\n")
 
 
-          def inline_text(line):
+          def inline_text(line, opened=None):
               """One line with its complete <!-- --> comments dropped, as GitHub renders
               it. A code span (a backtick run, closed by a run of the same length) is
-              text, and so is a <!-- that does not close on the line."""
+              text. A <!-- that does not close on the line is kept as text here, and
+              its position goes into opened: visible_lines decides, from the rest of
+              the paragraph, whether GitHub hides it."""
               out, i = [], 0
               while i < len(line):
                   if line[i] == "`":
@@ -133,6 +136,8 @@ jobs:
                       if close != -1:
                           i = close + 3
                           continue
+                      if opened is not None and not opened:
+                          opened.append(len("".join(out)))
                   out.append(line[i])
                   i += 1
               return "".join(out)
@@ -146,16 +151,34 @@ jobs:
                 a fenced command is not empty.
               - A line that starts with <!-- opens a comment that hides everything up
                 to its -->; unclosed, it runs to the end.
-              - Elsewhere a comment hides text only when it closes on its line, and a
-                <!-- inside a code span is text (#2116's own body had one)."""
-              out, fence, filled, in_comment = [], None, False, False
+              - Elsewhere a comment hides text up to its -->, across the lines of one
+                paragraph: a --> before the next blank line, fence, list item, heading
+                or comment block hides everything between (#2116 review). With none
+                before then, the <!-- is text. A <!-- inside a code span is always
+                text (#2116's own body had one).
+              - A fence keeps its indent on its CODE line, so an indented fenced
+                answer after a blank line still continues its field."""
+              out, fence, filled, in_comment, indent, held = [], None, False, False, "", None
               for line in (body or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+                  if held is not None:
+                      # An inline <!-- opened earlier in this paragraph: GitHub hides it up to
+                      # the first --> before the paragraph ends. With none, it was text.
+                      if not line.strip() or FENCE_OPEN.match(line) or BLOCK_START.match(line) or COMMENT_BLOCK.match(line):
+                          held = None
+                      elif "-->" in line:
+                          where, cut = held
+                          out[where] = out[where][:cut]
+                          del out[where + 1:]
+                          line, held = line[line.find("-->") + 3:], None
+                      else:
+                          out.append(line)
+                          continue
                   if fence:
                       close = FENCE_CLOSE.match(line)
                       if close and close.group(1)[0] == fence[0] and len(close.group(1)) >= len(fence):
                           fence = None
                       elif line.strip() and not filled:
-                          out.append(CODE)
+                          out.append(indent + CODE)
                           filled = True
                       continue
                   if in_comment:
@@ -170,11 +193,14 @@ jobs:
                           in_comment = True
                           continue
                       line = line[:begin] + line[close + 3:]
-                  kept = inline_text(line)
+                  opened = []
+                  kept = inline_text(line, opened)
                   opening = FENCE_OPEN.match(kept)
                   if opening and not (opening.group(1)[0] == "`" and "`" in opening.group(2)):
-                      fence, filled = opening.group(1), False
+                      fence, filled, indent = opening.group(1), False, kept[:len(kept) - len(kept.lstrip())]
                       continue
+                  if opened:
+                      held = (len(out), opened[0])
                   out.append(kept)
               return out
 
@@ -191,14 +217,23 @@ jobs:
 
 
           def fields(lines):
-              found, current = {}, None
+              # A value ends with its list item or paragraph, as GitHub renders it: after a
+              # blank line only an indented line continues it, so text under a last section
+              # (the footer most bodies end with) is not the last field's answer.
+              found, current, blank = {}, None, False
               for line in lines:
                   label = LABEL.match(line)
                   if label:
                       current = label.group(1).capitalize()
                       found.setdefault(current, []).append(label.group(2))
+                  elif not line.strip():
+                      blank = True
+                      continue
+                  elif current and blank and not line[:1].isspace():
+                      current = None
                   elif current:
                       found[current].append(line)
+                  blank = False
               return {name: "\n".join(parts) for name, parts in found.items()}
 
 

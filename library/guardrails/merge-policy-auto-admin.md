@@ -73,7 +73,25 @@ The manager auto-merges PRs using `--admin` when ALL of:
 
    **Incidentally correct is a proxy** — the same distinction as counting versus naming, one layer down. A thing that happens to be right is not a thing that must be right, and only the second belongs in a guardrail. Use `gh pr view <n> --json statusCheckRollup` or `gh pr checks <n>`.
 
-   **One name is fixed in every repo: the rollout check** (`verify-rollout`). If the repo's default branch carries `.github/workflows/rollout-check.yml`, the rollup must show `rollout-check / Rollout check` as `SUCCESS` in its newest run at the head; absent refuses, as above. **If the PR changes anything under `.github/workflows/`, that `SUCCESS` proves nothing**, because a PR can rename or replace any job, this one included. Merge it only on a reviewer verdict at this head that names the workflow change.
+   **One name is fixed in every repo that has adopted it: the rollout check** (`verify-rollout`). Read whether the repo's default branch carries `.github/workflows/rollout-check.yml`: only a 404 means the repo has not adopted the check, and any other failed read refuses. Where it has, the newest `rollout-check / Rollout check` run at the head must be `SUCCESS`. The rollup lists every run of a name, so a read that takes any `SUCCESS` would pass a stale green after a red body edit. Anything but `SUCCESS` in the newest run, or no run, refuses. Run it in the same call as rung 0, which sets `$REPO` and `$N`:
+
+   ```bash
+   DEFAULT=$(gh api "repos/$REPO" --jq .default_branch) || { echo "REFUSE: cannot read the default branch"; exit 1; }
+   if ERR=$(gh api "repos/$REPO/contents/.github/workflows/rollout-check.yml?ref=$DEFAULT" --silent 2>&1); then
+     ROLLOUT=$(gh pr view "$N" --repo "$REPO" --json statusCheckRollup --jq '[.statusCheckRollup[] | select(.name == "rollout-check / Rollout check")] | sort_by(.startedAt) | last | .conclusion // "ABSENT"') || { echo "REFUSE: cannot read the rollout check"; exit 1; }
+     [ "$ROLLOUT" = SUCCESS ] || { echo "REFUSE: the rollout check's newest run is $ROLLOUT"; exit 1; }
+   else
+     case "$ERR" in *"HTTP 404"*) echo "This repo has not adopted the rollout check" ;; *) echo "REFUSE: cannot tell whether this repo runs the rollout check: $ERR"; exit 1 ;; esac
+   fi
+   ```
+
+   **A PR that changes anything under `.github/workflows/` gets no proof from that `SUCCESS`.** It can rename or replace any job, this one included, and the check's own warning about it is printed by code such a PR controls (in another repo it can re-point `uses:`). So the merger reads the PR's own file list from the API, every page and each rename's old name, and a failed read refuses. A PR that lists any workflow file merges only on the rung 1 verdict (a different bot's, at this head) that names each one:
+
+   ```bash
+   WF=$(gh api --paginate "repos/$REPO/pulls/$N/files" --jq '.[] | .filename, (.previous_filename // empty)') || { echo "REFUSE: cannot read the PR's files"; exit 1; }
+   WF=$(printf '%s\n' "$WF" | grep '^\.github/workflows/' || true)
+   [ -z "$WF" ] || { printf 'WORKFLOW CHANGE: %s\n' $WF; echo "Merge only on the rung 1 verdict that names each workflow file above."; }
+   ```
 
 3. **Mergeable reads `MERGEABLE` explicitly** — never "not `CONFLICTING`". GitHub computes this field **lazily**: the first read after a push returns `UNKNOWN`, and only a re-query resolves it. `UNKNOWN` is not `false`, so a not-conflicting test passes on a field that has not been computed yet. Re-query until the value is `MERGEABLE` or `CONFLICTING`, and treat a persistent `UNKNOWN` as not mergeable.
 
@@ -88,13 +106,19 @@ The manager auto-merges PRs using `--admin` when ALL of:
 
    Run rung 0, this rung and the merge command in one call: the Bash tool keeps no variables between calls, and a `$DELETE` that was never set just keeps the branch.
 
-5. **NO OPEN ROLLOUT HOLD on this repo** (`verify-rollout`). A failed rollout check opens an issue labelled `rollout-hold`, and while one is open, only a PR that closes it may merge into the repo. A failed listing refuses, like rung 4's. Run it in the same call as rung 0, which sets `$REPO` and `$N`:
+5. **NO OPEN ROLLOUT HOLD on this repo** (`verify-rollout`). A failed rollout check opens an issue labelled `rollout-hold`. While one is open, only a PR that fixes or reverts the change that failed may merge into the repo, and it needs both:
+   - **It closes that hold** (`closingIssuesReferences`, filled from a `Closes #N` keyword in its body). It may close any one open hold: requiring every hold would deadlock two independent ones.
+   - **The rung 1 verdict names the hold:** a different bot's verdict, at this head, that names the hold issue and says this PR fixes or reverts the change that failed. The keyword is the author's to write, and a body edit after the review adds it without moving the head, so the keyword never grants the exception by itself.
+
+   A failed listing or read refuses, like rung 4's. Run it in the same call as rung 0, which sets `$REPO` and `$N`. When the PR closes a hold, the snippet names it, and the verdict is held to that name:
 
    ```bash
    HOLDS=$(gh issue list --repo "$REPO" --label rollout-hold --state open --json number --jq '.[].number') || { echo "REFUSE: the rollout-hold listing failed"; exit 1; }
    if [ -n "$HOLDS" ]; then
      CLOSES=$(gh pr view "$N" --repo "$REPO" --json closingIssuesReferences --jq '.closingIssuesReferences[].number') || { echo "REFUSE: cannot read what this PR closes"; exit 1; }
-     printf '%s\n' $HOLDS | grep -qxF -f <(printf '%s\n' $CLOSES) || { echo "REFUSE: rollout hold open: $HOLDS"; exit 1; }
+     HOLD=$(printf '%s\n' $HOLDS | grep -xF -f <(printf '%s\n' $CLOSES) | head -1) || true
+     [ -n "$HOLD" ] || { echo "REFUSE: rollout hold open: $HOLDS"; exit 1; }
+     echo "This PR closes rollout hold #$HOLD: merge only if the rung 1 verdict names #$HOLD and says this PR fixes or reverts the change that failed."
    fi
    ```
 
@@ -152,7 +176,7 @@ Of the six that carry a ruleset, **four DECLARE an approval requirement and only
 - Never merge a PR with `Request Changes` verdict outstanding.
 - Never merge a PR where CI is failing — **or where a required workflow is missing from the rollup.** "Not failing" is not "passed": an absent workflow cannot fail.
 - Never merge a PR the manager itself authored without a separate reviewer.
-- Never merge into a repo with an open `rollout-hold` issue, except the PR that closes it (rung 5).
+- Never merge into a repo with an open `rollout-hold` issue, except a PR that closes it and whose rung 1 verdict names it (rung 5).
 - Never treat an **unanswerable** rung 1 as a satisfied one. No authorship row is a refusal, not a clear — the same absence is produced by a self-review nobody reported, by a stripped summary, and by querying the wrong fleet.
 
 The manager posts "Merging #NN (--admin, reviewed by <reviewer>)" to Telegram before executing, **naming any branch rung 4 kept** — the stacked PR's author is told nowhere else.
