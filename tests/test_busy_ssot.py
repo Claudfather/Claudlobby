@@ -34,6 +34,10 @@ FIXTURES = REPO_DIR / "tests" / "fixtures" / "pane-states"
 ESC_PANE = (FIXTURES / "busy-spinner.txt").read_text()
 VERB_PANE = (FIXTURES / "verb-no-esc.txt").read_text()
 IDLE_PANE = (FIXTURES / "idle-prompt.txt").read_text()
+# Live frames of claude 2.1.285 (#2105 review): a running turn that draws no
+# "esc to interrupt", only its activity line above the box.
+THINKING_PANE = (FIXTURES / "thinking-turn.txt").read_text()
+TYPED_BUSY_PANE = (FIXTURES / "input-typed-busy.txt").read_text()
 
 
 def _bash(script: str, env: dict | None = None) -> subprocess.CompletedProcess:
@@ -65,7 +69,7 @@ def test_fixture_contents_still_match_their_names():
     assert "esc to interrupt" in ESC_PANE
     assert "esc to interrupt" not in VERB_PANE and "Thinking" in VERB_PANE
     assert IDLE_PANE.rstrip("\n").endswith(">")
-    for pane in (ESC_PANE, VERB_PANE, IDLE_PANE):
+    for pane in (ESC_PANE, VERB_PANE, IDLE_PANE, THINKING_PANE, TYPED_BUSY_PANE):
         # These interpolate into bash double-quoted strings in _sourced calls.
         assert not set(pane) & set('"$`\\'), (
             "pane fixtures must stay bash-double-quote-safe"
@@ -88,6 +92,17 @@ def test_pane_is_busy_verb_list_is_not_busy():
     documented rationale). Marker recency covers the rest.
     """
     assert _sourced(f'pane_is_busy "{VERB_PANE}"').returncode == 1
+
+
+def test_pane_is_busy_sees_a_thinking_turn():
+    """The positive control: a check that never fires passes every refusal test."""
+    assert "sc to interrupt" not in THINKING_PANE
+    assert _sourced(f'pane_is_busy "{THINKING_PANE}"').returncode == 0
+
+
+def test_pane_is_busy_sees_a_turn_with_text_typed_in_the_box():
+    assert "sc to interrupt" not in TYPED_BUSY_PANE
+    assert _sourced(f'pane_is_busy "{TYPED_BUSY_PANE}"').returncode == 0
 
 
 def test_pane_is_busy_operator_extension():

@@ -31,7 +31,7 @@ def dispatch(args) -> CommandOutput:
     from ..config_plan import PlanError
     from ..context import BotNotFoundError
     from ..message_context import MessageContextError, resolve_message_route
-    from ..message_operations import MessageConflict
+    from ..message_operations import MessageConflict, read_recipient_box, repair_held_delivery
     from ..message_queries import MessageQueryError, receipt
     from ..operation_context import (OperationContextError, OperationContextUnavailableError,
                                      bind_task_context, resolve_operation_scope)
@@ -86,10 +86,15 @@ def dispatch(args) -> CommandOutput:
                     or route.manager != ctx.caller):
                 raise CommandFailure("conflict", "assignment route differs from active task identities",
                                      release_id=release_id)
+            # The box just before the send, for the chip repair (#2105).
+            box_before = read_recipient_box(route, selected.paths.package)
             result = deliver(ctx, route, selected.paths.package, request_id,
                              args.assignment_id, body, retry_uncertain=args.retry_uncertain)
             data = _data(route, result)
-            if result.delivery != "submitted":
+            # rc 3 (#1236): the box never showed the payload and the transport
+            # withheld its Enter; the receipt wait and held-box repair decide (#2105).
+            withheld = result.delivery == "unknown" and result.native_returncode == 3
+            if result.delivery != "submitted" and not withheld:
                 code = "delivery_failed" if result.delivery == "failed" else "delivery_unknown"
                 raise _effect_failure(code,
                                      "assignment intent recorded; native delivery was not confirmed; inspect request",
@@ -97,6 +102,13 @@ def dispatch(args) -> CommandOutput:
             try:
                 observed = receipt(ctx, result.message_id, destination=route.peer.alias,
                                    wait=_RECEIPT_WAIT_S)
+                repair, observed = repair_held_delivery(
+                    route, selected.paths.package, result.message_id, first=observed,
+                    box_before=box_before,
+                    observe=lambda wait: receipt(ctx, result.message_id,
+                                                 destination=route.peer.alias, wait=wait))
+                if repair is not None:
+                    data["enter_repair"] = repair.as_dict()
             except (OperationContextUnavailableError, OperationContextError,
                     MessageQueryError, PendingMigrationError, DowngradeError,
                     OSError, sqlite3.Error) as exc:
