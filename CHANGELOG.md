@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the debounce rehearsal waits for its manager's box (#2136)
+
+`tests/test_debounce_recipient_harness.py` has failed in single CI lanes since #2108: the runner sometimes started the manager's stand-in after the first pulse. The stand-in enters raw mode before it draws its box, and entering raw mode discards keys typed before it. So neither alert of that tick was submitted, and the debounce marked both sent.
+
+- **The rehearsal starts a manager only once its box is drawn,** through lib-common's `pane_await_input_box`, and fails by name when the box does not come within 20 s.
+- **It counts what each manager instance was submitted,** from the stand-in's new `--log`, never the text its pane shows. Read from the pane, a push whose Enter was withheld passed as pushed.
+- **`REHEARSE_MANAGER_START_DELAY` forces the race.** Every test of the rehearsal now runs twice, the second time with each manager starting 3 s late.
+
 ### Fixed — a rollout check run that has not completed blocks the merge, whatever its `startedAt` (#2116 follow-up)
 
 The merge guardrails' rung 2 read the newest `rollout-check / Rollout check` run by sorting on `startedAt`. Under `gh`'s jq a null or zero `startedAt` sorts before a started run, so a queued run reported that way would hand the read the older run, and a stale green would pass (ravi's note on #2116). On this change's own push GitHub reported queued runs with their queue time, so that case was not seen. The read now names any run that has not completed `PENDING`, so the rung refuses until every run of the check has completed, and then reads the newest.
