@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed — a rollout check run that has not completed blocks the merge, whatever its `startedAt` (#2116 follow-up)
 
-The merge guardrails' rung 2 read the newest `rollout-check / Rollout check` run by sorting on `startedAt`. A queued run whose `startedAt` is null or a zero time sorts first under `gh`'s jq, so the read took the older run, and a stale green passed while the newer run waited in the queue (ravi's note on #2116). The read now names any run that has not completed `PENDING`, so the rung refuses until every run of the check has completed, and then reads the newest.
+The merge guardrails' rung 2 read the newest `rollout-check / Rollout check` run by sorting on `startedAt`. Under `gh`'s jq a null or zero `startedAt` sorts before a started run, so a queued run reported that way would hand the read the older run, and a stale green would pass (ravi's note on #2116). On this change's own push GitHub reported queued runs with their queue time, so that case was not seen. The read now names any run that has not completed `PENDING`, so the rung refuses until every run of the check has completed, and then reads the newest.
 
 ### Fixed — the shared busy check sees a running turn whose activity line opens its parenthesis with a word (#2130)
 
