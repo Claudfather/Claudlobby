@@ -99,8 +99,12 @@ def _uptime(args, context, release_id: str | None) -> CommandOutput:
     finally:
         plane.close()
     display_window = args.window or "24h"
+    meaning = ("uptime_pct is the share of observed time the session was up, observed_pct the share"
+               " of the window observed; unobserved time is neither up nor down. restart_count counts"
+               " restart episodes the bot was seen up just before; restarts_after_silence followed a"
+               " longer stretch with no up sample. mtbr_seconds is the mean gap between counted restarts.")
     data = {"fleet": context.fleet.name, "bots": results, "coverage": coverage,
-            "source": "Plane keepalive samples and restart transitions"}
+            "source": "Plane keepalive samples and restart transitions", "meaning": meaning}
     lines = (format_table(results, window=display_window), coverage[display_window])
     return CommandOutput(data, release_id=release_id, lines=lines)
 

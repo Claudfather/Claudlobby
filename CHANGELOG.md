@@ -17,6 +17,18 @@ echo "$(echo a # `x \
 
 - **A lone backtick in a double-quoted string is read as text,** as `_substitutions` already reads it, so the line is judged and that form is refused again.
 
+### Fixed — `fleet uptime` reports uptime as the share of observed time, and MTBR as the gap between restarts (#891, #1616)
+
+The uptime percentage divided up-time by the whole window, so it measured how much history the plane held. Measured on a live four-bot fleet, it equalled the observed coverage to the decimal in every window (36.9% over 30 days for bots up 99.99–100% of the time on record). MTBR divided up-time by the restart rows in the window, and every kickstart on boot after a host outage was a restart.
+
+- **`uptime_pct` is up ÷ observed time,** and null when nothing was observed. `observed_pct` and `observed_seconds` say how much of the window that was, and `down_seconds` how much was a dead session. Time between samples is credited as before, capped at 10 minutes; a restart event marks an episode and adds no time, so an event whose samples have aged out cannot add downtime.
+- **Restarts are episodes.** RESTART and DOWN rows with no up sample between them and no gap over 10 minutes are one restart. It counts as the bot's only if the bot was seen up in the 10 minutes before it. One that follows a longer stretch with no up sample (a host outage, a recording gap) is reported as `restarts_after_silence` and left out of the count and of MTBR. `restart_events` keeps every row.
+- **`mtbr_seconds` is the mean gap between consecutive counted restarts,** for each one that starts in the window, measured back past the window's edge. One restart has no gap and reads null. Restart events are never pruned, so a sample prune does not move it.
+- **First Boot is the first up sample after the last restart,** not the DOWN sample keepalive lands with it.
+- **The table says what it divides by:** `Up (obs)` and `Observed` columns, a line under the table, and a line per bot for restarts it did not count. The JSON carries a `meaning`.
+- `library/skills/fleet-ops/SKILL.md` describes the figures `fleet uptime` now reports.
+- Not done here: a row naming host outages (#1616), and a utilization figure in `brief`, whose standing `utilization: omitted` entry other surfaces depend on.
+
 ### Fixed — a quoted substitution the credential-echo guard cannot delimit no longer hides the rest of its line (#2097)
 
 The guard from #2090 judged a double-quoted `$(...)` by first finding its closing parenthesis. A heredoc post whose prose held an apostrophe or an unmatched parenthesis defeated that search, the whole line read as unparsed, and an unparsed line is allowed. So `gh auth token` or `neonctl --help` beside such a post ran unjudged.
