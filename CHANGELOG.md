@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a CLI delivery held in an idle bot's box is submitted (#2105)
+
+Since #1989, every CLI delivery (`message send` and `reply`, `assignment deliver`, `task nudge` and `recheck`) has pressed Enter once with verification off. No layer repaired an Enter the box ate: the transport left it to the operation owner, and the owner said it did not verify. A message that landed in an idle box could sit there until a person pressed Enter. On 2026-10-02 the pulse paged 24 such holds on 14 bots.
+
+- **The operation owner now repairs the Enter, after the receipt wait finds no receipt.** It looks at the recipient's box, and presses one Enter only when `held_delivery_match` finds this message in it.
+  - A text match: the box starts with a Claudlobby envelope, has no second one, and ends with this message's trailer, the only trailer in it.
+  - A chip match: a long payload is drawn only as `[Pasted text #N +M lines]`. The box must hold that one chip and nothing else, and M must be the wire's single newline or one more. A chip names no message, so the box must also have been empty when the owner read it just before its send: then the chip is this send's, or a sender's racing between that read and the keystrokes.
+  - Either way, `pane_is_busy` must see no running turn, and no menu may be open.
+- **`pane_is_busy` sees a running turn that draws no interrupt hint.** Claude Code 2.1.285 draws "esc to interrupt" in few running turns. The shared check now also reads the turn's activity line: one glyph at the start of the line, a word and an ellipsis (`✻ Transmogrifying…`, `● Misting… (58m 4s · …)`). Every consumer gets it: keepalive's pane classifier, the keystroke injectors' `bot_is_busy`, and this repair.
+- **At most two Enters, the operators' recipe.** A swallowed Enter leaves a CR in the box, and the next Enter only strips it (#1236). So a second Enter is pressed only after another receipt wait finds no receipt, and only on the same match. Never a third, and never the payload again. A held delivery's command can now take about 34 s.
+- **#1236's rc 3 is covered too.** When the box never showed the payload, the transport withheld its Enter; the receipt wait and the repair now run on that send as well, so text that lands later is still submitted.
+- **Every repair is a fleet event on the recipient,** `delivery_enter_repaired` (notice). It records whether the match was by text or by chip, and every look, so a misfire on someone else's paste can be found. The command's JSON carries `enter_repair`.
+- This supersedes S2-03's "no automatic Enter repair" for this one case only (`documentation/plans/2026-09-30-unified-cli-finalization.md`).
+
 ### Added — every PR names the production check that proves it, and the merger runs it once the change is live (#2111)
 
 CI, a green deploy and a healthy service prove that a system still runs, not that a merged change does what it was merged to do. Until now that check lived in individual managers' memory, when it happened at all, and nothing posted a result after a merge.
