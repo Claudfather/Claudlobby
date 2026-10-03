@@ -1459,7 +1459,7 @@ def _emit(event: str, data: dict) -> None:
         return
     lib = str(LIB)  # lib-common.sh ships beside this file, in the same release
     # The bot is named rather than left to an ambient BOT_DIR: an event anchored
-    # on the fleet is one neither `claudlobby events --bot` nor its brief reads.
+    # on the fleet is one neither `claudlobby event list --bot` nor its brief reads.
     script = (
         '( . "$1/lib-common.sh" >/dev/null 2>&1 || exit 0; '
         'emit_fleet_event "$2" public-write-guard "$3" "$4" "$5" ) </dev/null >/dev/null 2>&1 &'

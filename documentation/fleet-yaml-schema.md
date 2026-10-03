@@ -582,12 +582,12 @@ bots:
 
   It reads the command as the shell does: a backslash-newline continues the line, a GitHub issue or PR URL names the target, `env NAME=value` and `NAME=value` set what the command sees, and the commands inside a command substitution are read. It does not read a directory named by `cd`, a body file's path, or the target repository's name, so a clean write made from a path that contains a term passes. It does not read removed lines either, so a commit that takes a term out passes.
 - **Public means public at write time.** Only a hit asks where the write goes, so a write with no hit makes no call. The repository's visibility is read live (`gh api repos/OWNER/REPO`) and cached for 10 minutes in `state/public-write-guard/visibility.json`, so a repository made public is seen as public within 10 minutes. A REST call that fails fast is asked again over GraphQL (`gh repo view`), since a REST throttle leaves GraphQL working; when both fail, an answer cached up to a day ago stands in. An unknown answer is never cached, and a cache stamp from the future is not trusted.
-- **It refuses with a reason and never rewrites.** The reason names the repository, its visibility and which part matched (the command, a body file, the staged changes, the commits to push), never the matched text. Its events name the bot, so `claudlobby events --bot <bot> --type public_write_refused` and the bot's brief see them.
+- **It refuses with a reason and never rewrites.** The reason names the repository, its visibility and which part matched (the command, a body file, the staged changes, the commits to push), never the matched text. Its events name the bot, so `claudlobby event list --bot <bot> --type public_write_refused` and the bot's brief see them.
 - **Failure directions**, each chosen on purpose:
 
   | case | what happens |
   |---|---|
-  | no list file | allow, and a critical `public_write_guard_unarmed` event in `claudlobby events` (it does not page) |
+  | no list file | allow, and a critical `public_write_guard_unarmed` event in `claudlobby event list` (it does not page) |
   | a broken list: a line that does not compile, or one that can match an empty string (every write would be a hit) | refuse every guarded write, naming the line and column, never its text |
   | a payload that is not JSON | allow, with a `script_error` breadcrumb |
   | a hit whose repository cannot be named, or whose visibility cannot be read | refuse, saying which |
