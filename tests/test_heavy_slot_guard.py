@@ -89,6 +89,24 @@ def _events(se) -> list[dict]:
     return [json.loads(x) for x in f.read_text().splitlines()] if f.exists() else []
 
 
+def _hold(se) -> subprocess.Popen:
+    """testfleet/alpha holding the slot: its stub job started, waiting on `release`."""
+    holder = subprocess.Popen(
+        [str(WRAPPER), "run", "--", "pytest", "-q"],
+        env={**se.env, "STUB_WAIT": str(se.tmp / "release")},
+    )
+    deadline = time.monotonic() + 15
+    while not list(se.tmp.glob("ran.*")):
+        assert time.monotonic() < deadline, "the holder never started"
+        time.sleep(0.02)
+    return holder
+
+
+def _rewritten(out: str) -> str:
+    """The command a let-through decision runs."""
+    return json.loads(out)["hookSpecificOutput"]["updatedInput"]["command"]
+
+
 def test_a_heavy_command_gets_the_wrapper_and_keeps_the_rest_of_its_input(se):
     rc, out, _ = _hook(
         se,
@@ -129,14 +147,7 @@ def test_another_tool_passes_untouched(se):
 
 
 def test_a_taken_slot_refuses_the_call_before_anything_runs(se):
-    holder = subprocess.Popen(
-        [str(WRAPPER), "run", "--", "pytest", "-q"],
-        env={**se.env, "STUB_WAIT": str(se.tmp / "release")},
-    )
-    deadline = time.monotonic() + 15
-    while not list(se.tmp.glob("ran.*")):
-        assert time.monotonic() < deadline, "the holder never started"
-        time.sleep(0.02)
+    holder = _hold(se)
     rc, out, _ = _hook(se, "cd app && npm ci")
     assert rc == 0
     decision = json.loads(out)["hookSpecificOutput"]
@@ -175,9 +186,8 @@ def test_without_python_the_hook_fails_open(se, tmp_path):
 
 def test_the_rewritten_command_runs_the_job_under_the_slot(se):
     _, out, _ = _hook(se, "pytest -q")
-    command = json.loads(out)["hookSpecificOutput"]["updatedInput"]["command"]
     p = subprocess.run(
-        [BASH, "-c", command], env=se.env, capture_output=True, text=True, timeout=60
+        [BASH, "-c", _rewritten(out)], env=se.env, capture_output=True, text=True, timeout=60
     )
     assert p.returncode == 0 and list(se.tmp.glob("ran.*"))
     record = json.loads((se.state / "slot-0.lock").read_text())
@@ -191,7 +201,7 @@ def test_the_slot_lives_under_the_data_root_and_the_wrapper_is_the_native_code(s
     env = {k: v for k, v in se.env.items() if k != "HEAVY_SLOT_DIR"}
     env["CLAUDLOBBY_ROOT"] = str(root)
     _, out, _ = _hook(se, "pytest -q", env=env)
-    command = json.loads(out)["hookSpecificOutput"]["updatedInput"]["command"]
+    command = _rewritten(out)
     assert command == f"{W} pytest -q"
     p = subprocess.run(
         [BASH, "-c", command], env=env, capture_output=True, text=True, timeout=60
@@ -220,14 +230,7 @@ def test_a_free_slot_that_is_another_callers_turn_refuses_the_call(se):
     # #2124: beta was refused while the slot was held, so the free slot is its
     # turn. The hook refuses alpha, naming that turn, and queues alpha behind
     # it; once beta has had its turn the hook lets alpha through.
-    holder = subprocess.Popen(
-        [str(WRAPPER), "run", "--", "pytest", "-q"],
-        env={**se.env, "STUB_WAIT": str(se.tmp / "release")},
-    )
-    deadline = time.monotonic() + 15
-    while not list(se.tmp.glob("ran.*")):
-        assert time.monotonic() < deadline, "the holder never started"
-        time.sleep(0.02)
+    holder = _hold(se)
     beta = {**se.env, "BOT_ID": "beta"}
 
     def run_beta():
@@ -241,14 +244,13 @@ def test_a_free_slot_that_is_another_callers_turn_refuses_the_call(se):
     decision = json.loads(out)["hookSpecificOutput"]
     assert decision["permissionDecision"] == "deny"
     reason = decision["permissionDecisionReason"]
-    assert "another caller's turn: ticket 1, testfleet/beta" in reason
-    assert "you hold ticket 2, place 2 of 2" in reason
-    (ev,) = [e for e in _events(se) if e["type"] == "heavy_slot_refused"
+    assert "another caller's turn" in reason and "testfleet/beta, waiting since" in reason
+    assert "place 2 of 2" in reason
+    (ev,) = [e["data"] for e in _events(se) if e["type"] == "heavy_slot_refused"
              and e["data"]["where"] == "hook"]
-    assert (ev["data"]["ticket"]["n"], ev["data"]["ticket"]["bot"]) == (2, "alpha")
+    assert (ev["ticket"]["bot"], ev["ticket"]["place"], ev["ticket"]["tool"]) == ("alpha", 2, "pytest")
     assert run_beta() == 0
-    rc, out, _ = _hook(se, "pytest -q")
-    command = json.loads(out)["hookSpecificOutput"]["updatedInput"]["command"]
-    p = subprocess.run([BASH, "-c", command], env=se.env, capture_output=True, text=True,
-                       timeout=60)
+    _, out, _ = _hook(se, "pytest -q")
+    p = subprocess.run([BASH, "-c", _rewritten(out)], env=se.env, capture_output=True,
+                       text=True, timeout=60)
     assert p.returncode == 0, p.stderr
