@@ -49,6 +49,8 @@ The manager auto-merges PRs when ALL of:
 
    Two cautions, because the obvious ways to check this both return confident wrong answers. Read the **rulesets** API, not `/branches/main/protection` — the legacy endpoint answers `404 Branch not protected` for a repo fully protected by a ruleset, asserting a negative it has no standing to assert. Then read the ruleset's **`enforcement`** field, because one can exist and enforce nothing (`enforcement: disabled`). The two failures point in **opposite** directions: the legacy endpoint calls a protected repo unprotected, a bare ruleset listing calls an unprotected one protected.
 
+   **One name is fixed in every repo: the rollout check** (`verify-rollout`). If the repo's default branch carries `.github/workflows/rollout-check.yml`, the rollup must show `rollout-check / Rollout check` as `SUCCESS` in its newest run at the head; absent refuses, as above. **If the PR changes anything under `.github/workflows/`, that `SUCCESS` proves nothing**, because a PR can rename or replace any job, this one included. Merge it only on a reviewer verdict at this head that names the workflow change.
+
 3. **Mergeable reads `MERGEABLE` explicitly** — never "not `CONFLICTING`". GitHub computes this field **lazily**: the first read after a push returns `UNKNOWN`, and only a re-query resolves it. `UNKNOWN` is not `false`, so a not-conflicting test passes on a field that has not been computed yet. Re-query until the value is `MERGEABLE` or `CONFLICTING`, and treat a persistent `UNKNOWN` as not mergeable.
 
    This rung is deliberately **not** a `mergeStateStatus` test. That field reports `BLOCKED` for the ordinary case of a PR still awaiting its review, so gating on `clean`/`unstable` refuses PRs that are perfectly mergeable.
@@ -61,6 +63,18 @@ The manager auto-merges PRs when ALL of:
    ```
 
    Run rung 0, this rung and the merge command in one call: the Bash tool keeps no variables between calls, and a `$DELETE` that was never set just keeps the branch.
+
+5. **NO OPEN ROLLOUT HOLD on this repo** (`verify-rollout`). A failed rollout check opens an issue labelled `rollout-hold`, and while one is open, only a PR that closes it may merge into the repo. A failed listing refuses, like rung 4's. Run it in the same call as rung 0, which sets `$REPO` and `$N`:
+
+   ```bash
+   HOLDS=$(gh issue list --repo "$REPO" --label rollout-hold --state open --json number --jq '.[].number') || { echo "REFUSE: the rollout-hold listing failed"; exit 1; }
+   if [ -n "$HOLDS" ]; then
+     CLOSES=$(gh pr view "$N" --repo "$REPO" --json closingIssuesReferences --jq '.closingIssuesReferences[].number') || { echo "REFUSE: cannot read what this PR closes"; exit 1; }
+     printf '%s\n' $HOLDS | grep -qxF -f <(printf '%s\n' $CLOSES) || { echo "REFUSE: rollout hold open: $HOLDS"; exit 1; }
+   fi
+   ```
+
+   After the merge, the PR's own rollout check is the merger's to run, once the change is live: see `verify-rollout`.
 
 Merge command — **carrying the same `$PH` rung 0 anchored to**:
 
@@ -78,5 +92,6 @@ gh pr merge "$N" --repo "$REPO" --squash $DELETE --match-head-commit "$PH"
 - PRs with unresolved review threads.
 - PRs where CI is failing or pending — **or where a required workflow is missing from the rollup.** "Not failing" is not "passed": an absent workflow cannot fail.
 - PRs the manager authored (self-merge requires a second reviewer).
+- PRs into a repo with an open `rollout-hold` issue, except the PR that closes it (rung 5).
 
 The manager posts "Merging #NN" to Telegram before executing, so the human has visibility — **naming any branch rung 4 kept**, because the stacked PR's author is told nowhere else.

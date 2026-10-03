@@ -1,0 +1,274 @@
+name: Verify rollout
+
+# The CI half of library/guardrails/verify-rollout.md (#2111): every PR names, in a
+# "## Rollout check" section, the production check that proves it works once it is
+# live. A repo adopts it with one caller file, .github/workflows/rollout-check.yml,
+# shaped like this repo's own (copy it and pin `uses:` to a full commit sha):
+#
+#   jobs:
+#     rollout-check:
+#       uses: Claudfather/Claudlobby/.github/workflows/verify-rollout.yml@<full sha>
+#
+# The caller's job id and this file's job name make the check
+# "rollout-check / Rollout check" in a PR's status rollup. The merge guardrails
+# read that name, so keep both.
+#
+# What the PR under check cannot set:
+# - The body and the changed files are read live through the API. A re-run replays
+#   the original event, so a body taken from the payload could be stale.
+# - The docs and tests paths that an "N/A" exemption is checked against are read
+#   from the caller file on the DEFAULT branch, never from this run's inputs: under
+#   on: pull_request the PR's own copy of the caller file is the one that runs.
+# What it CAN do, and who catches it: a PR that edits workflow files can re-point
+# `uses:` or replace this job outright, so no step here can guard against that.
+# This job flags such a PR, and the merge guardrails refuse it without a reviewer
+# verdict that names the workflow change.
+#
+# A failed lookup fails the check. Nothing reads an error as an empty answer.
+
+on:
+  workflow_call:
+    inputs:
+      docs-paths:
+        description: >-
+          Space-separated globs a docs-only PR may change. The check reads this from
+          the caller file on the default branch, not from the value passed here.
+        type: string
+        default: ""
+      tests-paths:
+        description: >-
+          Space-separated globs a tests-only PR may change, read the same way.
+        type: string
+        default: ""
+
+jobs:
+  check:
+    name: Rollout check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    concurrency:
+      group: verify-rollout-${{ github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: true
+    steps:
+      - name: The PR body names its production check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          DOCS_PATHS_RUN: ${{ inputs.docs-paths }}
+          TESTS_PATHS_RUN: ${{ inputs.tests-paths }}
+        run: |
+          python3 - <<'PY'
+          import fnmatch
+          import os
+          import re
+          import subprocess
+          import sys
+
+          CALLER = ".github/workflows/rollout-check.yml"
+          FIELDS = ("Observe", "Control", "When", "Who")
+          VACUOUS = {"", "n/a", "na", "none", "nothing", "-", "--", "tbd", "todo", "?", "..."}
+          KINDS = {"docs-only": "docs-paths", "tests-only": "tests-paths"}
+          CODE = "[code block]"
+          HEADING = re.compile(r"^##[ \t]+rollout check:?[ \t]*$", re.I)
+          NEXT_SECTION = re.compile(r"^#{1,2}[ \t]")
+          FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+          FENCE_CLOSE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
+          PREFIX = r"^\s*(?:(?:[-*+]|\d+[.)])\s+)?(?:\*\*|__)?\s*"
+          LABEL = re.compile(PREFIX + r"(observe|control|when|who)\s*(?:\*\*|__)?\s*:"
+                             r"\s*(?:\*\*|__)?(.*)$", re.I)
+          NA = re.compile(PREFIX + r"n/?a\b", re.I)
+          NA_KIND = re.compile(PREFIX + r"n/?a\s*(?:\*\*|__)?\s*[:—–-]\s*(?:\*\*|__)?\s*"
+                               r"(docs-only|tests-only)\b", re.I)
+
+          REPO = os.environ.get("REPO", "")
+          PR = os.environ.get("PR_NUMBER", "")
+          DEFAULT_BRANCH = os.environ.get("DEFAULT_BRANCH", "")
+
+
+          class LookupFailed(Exception):
+              """A gh api call failed. The check fails; it never reads this as empty."""
+
+
+          def gh(what, *args):
+              proc = subprocess.run(["gh", "api", *args], capture_output=True, text=True)
+              if proc.returncode != 0:
+                  detail = (proc.stderr.strip() or proc.stdout.strip())[:300]
+                  raise LookupFailed(f"could not read {what}: {detail or 'exit %d' % proc.returncode}")
+              return proc.stdout
+
+
+          def annotate(kind, message):
+              message = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print(f"::{kind} title=Rollout check::{message}")
+
+
+          def summary(line):
+              path = os.environ.get("GITHUB_STEP_SUMMARY")
+              if path:
+                  with open(path, "a", encoding="utf-8") as fh:
+                      fh.write(line + "\n")
+
+
+          def visible_lines(body):
+              """The body's lines as GitHub shows them. HTML comments outside code are
+              dropped, and an unclosed one runs to the end. A fenced block (``` or ~~~,
+              closed only by the same character at least as long, unclosed to the end)
+              becomes one CODE line when it holds anything, so a heading inside it is no
+              heading, and a field given as a fenced command is not empty."""
+              out, fence, filled, in_comment = [], None, False, False
+              for line in (body or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+                  if fence:
+                      close = FENCE_CLOSE.match(line)
+                      if close and close.group(1)[0] == fence[0] and len(close.group(1)) >= len(fence):
+                          fence = None
+                      elif line.strip() and not filled:
+                          out.append(CODE)
+                          filled = True
+                      continue
+                  if in_comment:
+                      end = line.find("-->")
+                      if end == -1:
+                          continue
+                      line, in_comment = line[end + 3:], False
+                  kept = ""
+                  while True:
+                      start = line.find("<!--")
+                      if start == -1:
+                          kept += line
+                          break
+                      kept += line[:start]
+                      end = line.find("-->", start + 4)
+                      if end == -1:
+                          in_comment = True
+                          break
+                      line = line[end + 3:]
+                  opening = FENCE_OPEN.match(kept)
+                  if opening and not (opening.group(1)[0] == "`" and "`" in opening.group(2)):
+                      fence, filled = opening.group(1), False
+                      continue
+                  out.append(kept)
+              return out
+
+
+          def section(body):
+              lines = visible_lines(body)
+              for i, line in enumerate(lines):
+                  if HEADING.match(line):
+                      rest = lines[i + 1:]
+                      end = next((j for j, l in enumerate(rest) if NEXT_SECTION.match(l)), len(rest))
+                      return rest[:end]
+              return None
+
+
+          def fields(lines):
+              found, current = {}, None
+              for line in lines:
+                  label = LABEL.match(line)
+                  if label:
+                      current = label.group(1).capitalize()
+                      found.setdefault(current, []).append(label.group(2))
+                  elif current:
+                      found[current].append(line)
+              return {name: "\n".join(parts) for name, parts in found.items()}
+
+
+          def vacuous(value):
+              value = re.sub(r"[*_`\s]+", " ", value).strip().strip(".:;,!").strip().lower()
+              return value in VACUOUS
+
+
+          def declared_paths(key):
+              try:
+                  text = gh(f"{CALLER} on {DEFAULT_BRANCH}", "-H", "Accept: application/vnd.github.raw",
+                            f"repos/{REPO}/contents/{CALLER}?ref={DEFAULT_BRANCH}")
+              except LookupFailed as exc:
+                  if "HTTP 404" in str(exc):
+                      return None, (f"the default branch ({DEFAULT_BRANCH}) has no {CALLER}, "
+                                    f"so no {key} is declared")
+                  raise
+              values = re.findall(rf"^[ \t]*{re.escape(key)}:[ \t]*(.*?)[ \t]*$", text, re.M)
+              if len(values) != 1:
+                  return None, f"{CALLER} on {DEFAULT_BRANCH} declares {key} {len(values)} times, not once"
+              globs = values[0].strip("\"'").split()
+              if not globs:
+                  return None, f"{CALLER} on {DEFAULT_BRANCH} declares an empty {key}"
+              run = os.environ.get(key.upper().replace("-", "_") + "_RUN", "").split()
+              if run and run != globs:
+                  annotate("warning", f"This run was given {key} '{' '.join(run)}', but the default "
+                           f"branch's {CALLER} declares '{' '.join(globs)}'. The default branch's "
+                           "value applies: a PR cannot widen its own exemption.")
+              return globs, None
+
+
+          def judge(body, changed):
+              lines = section(body)
+              if lines is None:
+                  return ['the PR body has no "## Rollout check" section']
+              claims = [line for line in lines if NA.match(line)]
+              if claims:
+                  kind = NA_KIND.match(claims[0])
+                  if not kind:
+                      return ["N/A needs its reason, as one line: `N/A: docs-only` or `N/A: tests-only`"]
+                  kind = kind.group(1).lower()
+                  globs, why = declared_paths(KINDS[kind])
+                  if why:
+                      return [f"`N/A: {kind}` cannot be checked: {why}"]
+                  outside = [p for p in changed if not any(fnmatch.fnmatchcase(p, g) for g in globs)]
+                  if outside:
+                      shown = ", ".join(outside[:10]) + (f" and {len(outside) - 10} more"
+                                                         if len(outside) > 10 else "")
+                      return [f"`N/A: {kind}`, but these changed paths are outside "
+                              f"{KINDS[kind]} ({' '.join(globs)}): {shown}"]
+                  print(f"`N/A: {kind}`: every changed path is under {KINDS[kind]} ({' '.join(globs)}).")
+                  return []
+              got = fields(lines)
+              problems = []
+              for name in FIELDS:
+                  if name not in got:
+                      problems.append(f"no **{name}:** line in the section")
+                  elif vacuous(got[name]):
+                      problems.append(f"**{name}:** is empty, or says only N/A, none, TBD or the like")
+              return problems
+
+
+          def main():
+              if not PR:
+                  print("Not a pull request: there is no PR body to check.")
+                  return 0
+              try:
+                  body = gh("the PR body", f"repos/{REPO}/pulls/{PR}", "--jq", '.body // ""')
+                  listing = gh("the PR's changed files", "--paginate",
+                               f"repos/{REPO}/pulls/{PR}/files?per_page=100",
+                               "--jq", ".[] | .filename, (.previous_filename // empty)")
+                  changed = [path for path in listing.splitlines() if path]
+                  workflows = sorted({p for p in changed if p.startswith(".github/workflows/")})
+                  if workflows:
+                      annotate("warning", "This PR changes workflow files (" + ", ".join(workflows) +
+                               "). A PR can rename or replace the job that checks it, so this "
+                               "result proves nothing for it: the merger needs a reviewer verdict "
+                               "that names the workflow change.")
+                      summary("Changes workflow files, for the reviewer: " + ", ".join(workflows))
+                  problems = judge(body, changed)
+              except LookupFailed as exc:
+                  problems = [str(exc)]
+              if problems:
+                  for problem in problems:
+                      annotate("error", problem)
+                  summary("Rollout check FAILED: " + "; ".join(problems))
+                  print('Fill in "## Rollout check" with Observe, Control, When and Who, or one '
+                        "line, `N/A: docs-only` or `N/A: tests-only` (library/guardrails/"
+                        "verify-rollout.md in Claudfather/Claudlobby). Saving the edited body "
+                        "re-runs this check.")
+                  return 1
+              summary("Rollout check: the PR body names its rollout check.")
+              print("Rollout check: the PR body names its rollout check.")
+              return 0
+
+
+          sys.exit(main())
+          PY

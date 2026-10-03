@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — every PR names the production check that proves it, and the merger runs it once the change is live (#2111)
+
+CI, a green deploy and a healthy service prove that a system still runs, not that a merged change does what it was merged to do. Until now that check lived in individual managers' memory, when it happened at all, and nothing posted a result after a merge.
+
+- **`library/guardrails/verify-rollout.md`** (opt-in). The author writes a `## Rollout check` with four lines: Observe, Control, When and Who. A reviewer treats a missing or vacuous one as request-changes. Once the change is live by the target's own record, the merger runs the check and posts PASS, FAIL or PENDING on the PR. For the framework, "live" means the active release's `source_revision` contains the merge commit.
+  - **PENDING** is a task on the plane, one per check.
+  - **A check only the operator can run** goes to them through `task escalate`, one per message.
+  - **A FAIL stops that repo's merge train.** The merger opens a `rollout-hold` issue, which only the fix or revert PR may close.
+- **`.github/workflows/verify-rollout.yml`**, a reusable workflow, and this repo's caller, `rollout-check.yml`. A repo adopts the check with one caller file, and it reads as `rollout-check / Rollout check` in the status rollup. What the checker does:
+  - It reads the body and the changed files live through the API, and the docs and tests paths from the caller file on the default branch, so the PR under check cannot widen its own exemption.
+  - It fails a missing section, an empty or `N/A` field, a heading inside a fenced block or a comment, an `N/A` that is not `docs-only` or `tests-only`, an exemption the changed paths do not bear out, and any failed lookup.
+  - It flags a PR that changes a workflow file, because such a PR can replace the job that checks it.
+- **The merge guardrails** (`merge-policy-auto-admin`, `merge-policy-auto-after-review`) read that check by name. A PR that changes a workflow file needs a reviewer verdict that names the change. The new rung 5 refuses a merge while a `rollout-hold` issue is open, except for the PR that closes it.
+- `.github/pull_request_template.md` carries the section. `canary-rollout` gains a row and a pointer for the rollout check.
+
 ### Fixed — `fleet uptime` reports uptime as the share of observed time, and MTBR as the gap between restarts (#891, #1616)
 
 The uptime percentage divided up-time by the whole window, so it measured how much history the plane held. Measured on a live four-bot fleet, it equalled the observed coverage to the decimal in every window (36.9% over 30 days for bots up 99.99–100% of the time on record). MTBR divided up-time by the restart rows in the window, and every kickstart on boot after a host outage was a restart.
