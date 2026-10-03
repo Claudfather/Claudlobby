@@ -146,6 +146,11 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # it after the last Enter (payload-still-in-box). The text is in the box, or
     # may still land there, unsubmitted.
     "send_unsubmitted": "notice",
+    # #2105: a CLI delivery the receiver had not submitted after the receipt wait,
+    # whose box held exactly that message in an idle pane, got one or two Enters
+    # from the messaging operation owner. data.match says whether the box showed
+    # the message's text or only a paste chip.
+    "delivery_enter_repaired": "notice",
     "resume_skipped": "notice",
     "plugin_marketplace_failed": "notice",
     "briefing_deferred": "notice",

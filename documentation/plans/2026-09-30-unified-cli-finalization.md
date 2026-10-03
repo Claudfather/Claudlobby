@@ -281,6 +281,13 @@ claim that all 199 findings are resolved.
   submission is a resend risk. Uncertain sends stay disclosed and held, and
   `message send` performs exactly one native submission. Cleanup of the stale
   docstring and the uncalled `pane_await_receipt` helper is a follow-up.
+  **Superseded for one case by #2105.** After the receipt wait finds no
+  receipt, the operation owner looks at the recipient's box. It presses one
+  Enter only when the box still holds exactly this message, no turn is running
+  and no menu is open, and presses a second only after another receipt wait,
+  on the same match. That is Chris's standing rule for clog, made stricter. An
+  Enter on a box that holds this payload submits it once or does nothing, so
+  the payload is still sent exactly once. `pane_await_receipt` stays uncalled.
 - **S5a-01 / S5a-08, honest recording outages.**
   - **Disarmed daemon:** disarming it is an operator choice. Hook and timer emits
     stage within their bound, stay unrecorded and are shown as attention by

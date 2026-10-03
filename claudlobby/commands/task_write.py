@@ -151,7 +151,8 @@ def _nudge_envelope(result, route, by, reason):
 
 
 def _committed_notification(ctx, route, package, result, envelope, *, send_on_replay=True):
-    from ..message_operations import RenderedNativeEnvelope, send_committed_native_attempt
+    from ..message_operations import (RenderedNativeEnvelope, repair_held_delivery,
+                                      send_committed_native_attempt)
     from ..message_queries import receipt as observe_receipt
     from ..request_receipts import locked_request
 
@@ -159,6 +160,7 @@ def _committed_notification(ctx, route, package, result, envelope, *, send_on_re
             "notification": "unknown", "transport": "unknown",
             "transmission_recording": "unknown", "request_persisted": None,
             "receipt_observation": None, "integrity_verdict": None}
+    native_returncode = None
     try:
         # The task owner has returned: its request and task locks are both
         # released. This is the same request lock, never a nested one.
@@ -192,9 +194,23 @@ def _committed_notification(ctx, route, package, result, envelope, *, send_on_re
                             notification=attempt.delivery,
                             transmission_recording=attempt.transmission_recording,
                             request_persisted=attempt.request_persisted)
+                native_returncode = (attempt.observation.native_returncode
+                                     if attempt.observation else None)
+        # A fresh submission, or rc 3 (#1236: the transport withheld its Enter
+        # because the box never showed the payload), waits for its receipt; a
+        # held box then gets the owner's Enter repair (#2105).
+        waits = ((data["transport"] == "submitted"
+                  or (data["transport"] == "unknown" and native_returncode == 3))
+                 and (not result.replayed or send_on_replay))
         observed = observe_receipt(ctx, result.message_id, destination=route.peer.alias,
-                                   wait=10 if data["transport"] == "submitted"
-                                   and (not result.replayed or send_on_replay) else 0)
+                                   wait=10 if waits else 0)
+        if waits:
+            repair, observed = repair_held_delivery(
+                route, package, result.message_id, first=observed,
+                observe=lambda wait: observe_receipt(ctx, result.message_id,
+                                                     destination=route.peer.alias, wait=wait))
+            if repair is not None:
+                data["enter_repair"] = repair.as_dict()
         data.update(receipt_observation=observed.receipt_observation,
                     integrity_verdict=observed.integrity_verdict)
         if (observed.exit_code == 0 and observed.receipt_observation == "received"

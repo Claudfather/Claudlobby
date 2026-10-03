@@ -1,14 +1,17 @@
 """One ordinary send to a bot, with a receipt but no transport replay.
 
 The public caller must hold runtime mutation_admission for the whole operation.
-This owner neither resolves a route nor verifies receiver delivery or idle Enter.
+This owner neither resolves a route nor verifies receiver delivery. After its
+caller's receipt wait finds no receipt, repair_held_delivery may press the Enter
+an idle, held box is waiting for (#2105); it never sends the payload again.
 """
 
 from __future__ import annotations
 
 from contextlib import closing, contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 import re
 import sqlite3
@@ -20,6 +23,7 @@ from .message_context import HumanReplyRoute, MessageRoute
 from .message_payload import (MessageBody, encode_communication, encode_transmission,
                               native_message_envelope, native_unlinked_report_envelope)
 from .message_queries import pending_transmission_proof
+from . import message_transport as _native_transport
 from .message_transport import TransportOutcome, send as native_send
 from .plane.db import connect_ro, db_file
 from .plane.emit_api import _load_capture_config, emit_batch, validate_item
@@ -55,6 +59,7 @@ class MessageSendResult:
     exit_code: int
     retryable: bool = False
     alert: object | None = None
+    native_returncode: int | None = None  # the transport's, when it observed one
 
 
 @dataclass(frozen=True)
@@ -559,7 +564,9 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
                                  persistence[0], native_result.replayed,
                                  not degraded and delivery == "submitted",
                                  code, 11 if degraded else (0 if delivery == "submitted" else 5),
-                                 alert=alert)
+                                 alert=alert,
+                                 native_returncode=(native_result.observation.native_returncode
+                                                    if native_result.observation else None))
 
     # Distinguish unavailable request persistence from an existing receipt.
     # A failed read after lock acquisition never becomes a fresh send.
@@ -674,3 +681,110 @@ def record_reply_to_human(route: HumanReplyRoute, package: PackageResources, bod
     return MessageSendResult(request_id, message_id, "not_requested", status, persistence[0],
                              existing is not None, committed, "ok" if committed else "unavailable",
                              0 if committed else 6, retryable=not committed)
+
+
+# --- the receipt-gated idle Enter repair (#2105) ------------------------------------
+# The transport presses Enter once and never verifies it (PANE_SEND_VERIFY_TICKS=0),
+# and defers this repair to its owner. It supersedes S2-03's "no automatic Enter
+# repair" (documentation/plans/2026-09-30-unified-cli-finalization.md) for one case
+# only: a box that still holds exactly this message, in a pane with no turn running
+# and no menu open, gets at most the two Enters the operator recipe and Chris's rule
+# for clog allow. The payload itself is never sent twice.
+
+_REPAIR_RECHECK_S = 12
+
+
+@dataclass(frozen=True)
+class EnterRepairAttempt:
+    at: str
+    verdict: str
+    pressed: bool
+    match: str | None = None
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class HeldDeliveryRepair:
+    attempts: tuple[EnterRepairAttempt, ...]
+    recording: str  # committed, unknown, or not_requested when nothing was pressed
+
+    @property
+    def pressed(self) -> int:
+        return sum(1 for attempt in self.attempts if attempt.pressed)
+
+    @property
+    def match(self) -> str | None:
+        first = next((attempt for attempt in self.attempts if attempt.pressed), None)
+        if first is None or first.match is None:
+            return None
+        return "chip" if first.match.startswith("chip") else "text"
+
+    def as_dict(self) -> dict:
+        return {"pressed": self.pressed, "match": self.match, "recording": self.recording,
+                "attempts": [asdict(attempt) for attempt in self.attempts]}
+
+
+def repair_held_delivery(route: MessageRoute, package: PackageResources, message_id: str, *,
+                         observe: Callable[[float], object], first, recheck_s: float = _REPAIR_RECHECK_S,
+                         press=None, record=None, now=None):
+    """Press the Enter a held delivery is waiting for, at most twice (#2105).
+
+    ``first`` is the caller's receipt observation after its own wait. Only when it
+    found no receipt (``missing`` or ``no_history``; never ``unavailable``, where the
+    proof is still queued) does this look at the recipient's box. Each look presses
+    ONE Enter, and only on held_delivery_match's text or chip verdict. A second look
+    comes only after a further ``recheck_s`` receipt wait (``observe``) found no
+    receipt, and presses only on the same match: a first Enter can only strip the CR
+    a swallowed Enter left in the box (#1236), and the second then submits. Never a
+    third Enter, never the payload. Any press is recorded on the Plane as
+    ``delivery_enter_repaired`` with every look, so a held, then repaired delivery
+    is visible and a misfire on someone else's paste can be found.
+
+    Returns ``(None, first)`` when no look was due, else ``(repair, observation)``
+    with the last receipt observation."""
+    if getattr(first, "receipt_observation", None) not in {"missing", "no_history"}:
+        return None, first
+    press = press or _native_transport.press_held_enter
+    clock = now or (lambda: datetime.now(timezone.utc))
+    attempts: list[EnterRepairAttempt] = []
+    observed, expect = first, None
+    for _look in (1, 2):
+        at = clock()
+        outcome = press(package, route.peer_destination, message_id=message_id, expect=expect)
+        attempts.append(EnterRepairAttempt(at.isoformat(), outcome.verdict, outcome.pressed,
+                                           outcome.match, outcome.reason))
+        if not outcome.pressed:
+            break
+        expect = outcome.match
+        observed = observe(recheck_s)
+        if getattr(observed, "receipt_observation", None) == "received":
+            break
+    recording = "not_requested"
+    if any(attempt.pressed for attempt in attempts):
+        recording = (record or _record_enter_repair)(route, message_id, tuple(attempts), observed)
+    return HeldDeliveryRepair(tuple(attempts), recording), observed
+
+
+def _record_enter_repair(route: MessageRoute, message_id: str,
+                         attempts: tuple[EnterRepairAttempt, ...], observed) -> str:
+    """One fleet event on the recipient: what was matched and every look."""
+    at = datetime.now(timezone.utc)
+    pressed = next(attempt for attempt in attempts if attempt.pressed)
+    chip = pressed.match if pressed.match and pressed.match.startswith("chip") else None
+    raw = {"event_id": mint_event_id(), "event_type": "system", "emitter": "message-enter-repair",
+           "fleet": route.peer_destination.fleet,
+           "source_ref": "fleet-events:sha:" + sha256(
+               f"delivery_enter_repaired:{message_id}".encode("ascii")).hexdigest(),
+           "payload": {"event": "delivery_enter_repaired", "subject_kind": "actor",
+                       "subject": route.peer.alias,
+                       "data": {"source": "message", "legacy_ts": at.isoformat(),
+                                "data": {"msg_id": message_id, "sender": route.caller.alias,
+                                         "match": "chip" if chip else "text", "chip": chip,
+                                         "enters": sum(1 for attempt in attempts if attempt.pressed),
+                                         "attempts": [asdict(attempt) for attempt in attempts],
+                                         "receipt": getattr(observed, "receipt_observation", None)}}}}
+    try:
+        recorded = emit_batch(route.selected.paths.root, [raw], require_commit=True)[0]
+    except Exception:
+        return "unknown"
+    return "committed" if recorded.status in {"committed", "duplicate"} else "unknown"

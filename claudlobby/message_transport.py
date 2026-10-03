@@ -2,11 +2,15 @@
 
 The caller freezes destination identity/scope and records intent before calling.
 This adapter validates literal native targets, not roster membership or runtime
-health. It never records Plane facts, proves receipt, repairs Enter, or retries.
+health. It never records Plane facts, proves receipt, or retries a payload.
 ``submitted`` means the native payload/Enter call returned successfully; receiver
 receipt plus wire-integrity evidence belong to the messaging operation owner.
 Any started send failure is unknown unless the native owner explicitly reports
 that its session precheck dropped the send before any pane write.
+
+``press_held_enter`` is the second native call, made only by the operation owner
+after a receipt wait found no receipt (#2105): it reads the pane, and presses one
+Enter only when ``held_delivery_match`` says the box holds exactly this message.
 """
 
 from __future__ import annotations
@@ -150,7 +154,8 @@ def send(package: PackageResources, destination: TransportDestination, *, messag
     Null bytes cannot cross Bash's string boundary and are refused before effects.
     PANE_SEND_VERIFY_TICKS=0 disables both post-send Enter and blind-payload
     repairs. Native chunk/settle defaults remain intact; readiness/health admission
-    and a later receipt-gated idle Enter repair belong to the operation owner.
+    and the receipt-gated idle Enter repair (press_held_enter) belong to the
+    operation owner.
     """
     if not isinstance(destination, TransportDestination):
         raise ValueError("a frozen TransportDestination is required")
@@ -194,3 +199,102 @@ def send(package: PackageResources, destination: TransportDestination, *, messag
                                 reason="native session precheck dropped the send")
     return TransportOutcome("unknown", digest, length, result.returncode,
                             "native submission did not complete with a valid success result")
+
+
+@dataclass(frozen=True)
+class EnterRepairOutcome:
+    """One look at the recipient's box, and whether one Enter followed it.
+
+    verdict is held_delivery_match's (text, chip, busy, not-held, not-shown, glued,
+    chips, chip-lines), ``changed`` when the box no longer holds what an earlier
+    look matched, or ``unknown`` when the pane could not be read or the native call
+    failed. match names what was matched (``text``, or ``chip#N`` with the chip's
+    number) so a later look can require the same; pressed is true only when the
+    Enter keystroke itself was sent."""
+    verdict: str
+    pressed: bool
+    match: str | None = None
+    reason: str | None = None
+
+
+# Read the exact pane, ask the shipped predicate, and press one Enter on its
+# text/chip verdict only, and, when an earlier look is named ($5), only if this
+# look matches the same thing: the same message's text, or the same chip number
+# (a chip's "+N lines" can drop by one once a first Enter strips a kept CR).
+_REPAIR_SCRIPT = r'''
+set -uo pipefail
+. "$1" >/dev/null 2>&1 || { printf 'repair-v1\tunknown\t0\t-\n'; exit 3; }
+pane=$(bot_tmux "$2" capture-pane -p -t "=$3:" 2>/dev/null) || { printf 'repair-v1\tunknown\t0\t-\n'; _lc_cleanup >/dev/null 2>&1; exit 3; }
+verdict=$(held_delivery_match "$pane" "$4") && ok=1 || ok=0
+match=-
+if [ "$ok" = 1 ]; then
+    match="$verdict"
+    if [ "$verdict" = chip ]; then
+        match="chip$(printf '%s\n' "$(pane_input_region "$pane")" | LC_ALL=C grep -oE '\[Pasted text #[0-9]+' | head -1 | LC_ALL=C sed 's/.*#/#/')"
+    fi
+    if [ -n "${5:-}" ] && [ "$match" != "$5" ]; then verdict=changed; ok=0; fi
+fi
+pressed=0
+if [ "$ok" = 1 ]; then
+    bot_tmux "$2" send-keys -t "=$3:" Enter >/dev/null 2>&1 && pressed=1
+fi
+printf 'repair-v1\t%s\t%s\t%s\n' "${verdict:-unknown}" "$pressed" "$match"
+_lc_cleanup >/dev/null 2>&1
+exit 0
+'''
+
+_VERDICTS = frozenset({"text", "chip", "busy", "not-held", "not-shown", "glued", "chips", "chip-lines",
+                       "changed", "unknown"})
+
+
+def press_held_enter(package: PackageResources, destination: TransportDestination, *,
+                     message_id: str, expect: str | None = None, timeout: float = 15,
+                     runner=None) -> EnterRepairOutcome:
+    """Press ONE Enter in the recipient's box when it holds exactly this message.
+
+    Never sends the payload, never a second key. ``expect`` is an earlier look's
+    match: this look presses only if it matches the same. The operation owner
+    decides whether a second look is due. The same fixed native environment as
+    send(): no inherited shell state, the Plane unreachable from the native side
+    (the owner records the repair), the exact =session: target."""
+    if not isinstance(destination, TransportDestination):
+        raise ValueError("a frozen TransportDestination is required")
+    if not isinstance(message_id, str) or not re.fullmatch(ID_PATTERNS["msg"], message_id):
+        raise ValueError("canonical message ID required")
+    if expect is not None and not re.fullmatch(r"text|chip#[0-9]+", expect):
+        raise ValueError("expect names an earlier match: text or chip#N")
+    if isinstance(timeout, bool) or not 0 < timeout <= 60:
+        raise ValueError("repair timeout must be finite and in (0, 60]")
+    native = package.native / "lib-common.sh"
+    if not native.is_absolute() or not native.is_file():
+        return EnterRepairOutcome("unknown", False, reason="selected native helper unavailable")
+    env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
+           "LC_ALL": "C", "CLAUDLOBBY_ROOT": str(destination.root),
+           "FLEET_NAME": destination.fleet, "TMUX_TMPDIR": str(destination.tmux_tmpdir),
+           "TMPDIR": str(destination.tmux_tmpdir), "PLANE_EMIT_DISABLED": "1"}
+    command = ["/bin/bash", "--noprofile", "--norc", "-c", _REPAIR_SCRIPT, "message-enter-repair",
+               str(native), destination.socket, destination.session, message_id, expect or ""]
+    try:
+        result = (runner or _run)(command, input=b"", env=env, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        # The keystroke may or may not have gone: report what was printed, never guess.
+        line = _repair_line(exc.output)
+        if line is None:
+            return EnterRepairOutcome("unknown", False, reason="native repair timed out")
+        return EnterRepairOutcome(*line)
+    except (OSError, _StartedFailure):
+        return EnterRepairOutcome("unknown", False, reason="native repair could not run")
+    line = _repair_line(result.stdout)
+    if line is None:
+        return EnterRepairOutcome("unknown", False, reason="native repair gave no valid result")
+    verdict, pressed, match = line
+    return EnterRepairOutcome(verdict, pressed, match,
+                              "pane could not be read" if verdict == "unknown" else None)
+
+
+def _repair_line(output: bytes | None) -> tuple[str, bool, str | None] | None:
+    found = re.fullmatch(rb"repair-v1\t([a-z-]+)\t([01])\t(-|text|chip#[0-9]+)\n", output or b"")
+    if not found or found.group(1).decode() not in _VERDICTS:
+        return None
+    match = found.group(3).decode()
+    return found.group(1).decode(), found.group(2) == b"1", None if match == "-" else match

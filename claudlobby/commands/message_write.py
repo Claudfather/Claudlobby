@@ -137,7 +137,7 @@ def dispatch(args) -> CommandOutput:
     from ..context import BotNotFoundError
     from ..message_context import MessageContextError, resolve_message_route
     from ..message_operations import (MessageConflict, MessageIdentityUnavailable,
-                                      send_message, send_unlinked_report)
+                                      repair_held_delivery, send_message, send_unlinked_report)
     from ..message_queries import MessageQueryError, receipt, show_message
     from ..operation_context import (OperationContextError, OperationContextUnavailableError,
                                      bind_task_context, resolve_operation_scope,
@@ -247,17 +247,28 @@ def dispatch(args) -> CommandOutput:
                 raise _effect_failure("recording_degraded",
                                      "message recording is degraded; inspect the request before retrying",
                                      data=data, request_id=request_id, release_id=release_id)
-            if outcome.delivery != "submitted":
+            # rc 3 (#1236): the box never showed the payload, so the transport
+            # withheld its Enter. The text can still land; the receipt wait and
+            # the held-box repair below decide (#2105).
+            withheld = outcome.delivery == "unknown" and getattr(outcome, "native_returncode", None) == 3
+            if outcome.delivery != "submitted" and not withheld:
                 code = "delivery_failed" if outcome.delivery == "failed" else "delivery_unknown"
                 raise _effect_failure(code, "message transport was not confirmed; inspect the request",
                                      data=data, request_id=request_id, release_id=release_id)
             # A tmux success is only submission. This read owns the final byte
-            # integrity verdict and never repairs or resends the native payload.
+            # integrity verdict. It never resends the native payload; when no
+            # receipt came, the owner may press the Enter a held box waits for.
             try:
                 ctx = (human_ctx if human_ctx is not None else
                        bind_task_context(route.selected, origin=route.origin))
                 observed = receipt(ctx, outcome.message_id, destination=route.peer.alias,
                                    wait=_RECEIPT_WAIT_S)
+                repair, observed = repair_held_delivery(
+                    route, selected.paths.package, outcome.message_id, first=observed,
+                    observe=lambda wait: receipt(ctx, outcome.message_id,
+                                                 destination=route.peer.alias, wait=wait))
+                if repair is not None:
+                    data["enter_repair"] = repair.as_dict()
             except (OperationContextUnavailableError, OperationContextError,
                     MessageQueryError, PendingMigrationError, DowngradeError,
                     OSError, sqlite3.Error) as exc:

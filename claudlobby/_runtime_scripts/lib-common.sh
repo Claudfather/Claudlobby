@@ -3456,6 +3456,73 @@ pane_is_held() {
     return 0
 }
 
+# _held_box_squeezed <region>
+# The input box's own text, from pane_input_region's first line (the glyph line)
+# to the rule drawn under the box, with the glyph and every blank (space, tab,
+# CR, NBSP) removed, so the TUI's wrapping cannot change it. Under LC_ALL=C: the
+# glyph (U+276F) and the rule (U+2500) are matched as bytes on every platform.
+_held_box_squeezed() {
+    printf '%s\n' "$1" | LC_ALL=C awk '
+        function squeeze(t) { gsub(/[ \t\r]/, "", t); gsub("\302\240", "", t); return t }
+        NR == 1 { sub(/^[ \t]*(\342\235\257|>)/, "") }
+        NR > 1 { t = $0; gsub("\342\224\200", "", t)
+                 if (t ~ /^[ \t]*$/ && $0 ~ /\342\224\200/) exit }
+        { out = out squeeze($0) }
+        END { printf "%s", out }'
+}
+
+# held_delivery_match <pane_text> <msg_id>
+# Whether the input box holds exactly this one tracked delivery, unsubmitted, in a
+# pane with no turn running and no menu open, so that an Enter may submit it
+# (#2105). The messaging operation owner asks it before each of its at most two
+# repair Enters, after a receipt wait found no receipt. It reads a capture only;
+# it never sends a key. Prints one verdict; rc 0 only for `text` or `chip`.
+#
+#   busy        a turn is running (pane_is_busy): Claude Code queues what is typed
+#   not-held    pane_is_held refuses: an empty box, the queued-message hint, a
+#               menu option (an Enter would CHOOSE it), Esc to cancel or go back
+#   not-shown   pane_shows_payload_end refuses: the box does not show this
+#               message's trailer, the end every tracked wire carries (#1236)
+#   glued       text before this message's envelope, or a second message's
+#               trailer: an Enter would submit more than this message
+#   chips       a paste chip beside other text, or more than one chip
+#   chip-lines  the chip's "+N lines" is not this wire's newline count (one,
+#               before the trailer) nor one more (the CR a swallowed Enter left)
+#   text        the box starts with a Claudlobby envelope and ends with this
+#               message's trailer, the only trailer in it
+#   chip        the box holds one paste chip and nothing else: a long payload is
+#               drawn as "[Pasted text #N +M lines]" and its text cannot be read,
+#               so this is dara's (b) on Chris's rule (one held message in an idle
+#               bot's box), recorded as a chip match so a misfire is findable
+held_delivery_match() {
+    local pane="$1" msg_id="$2" region box trailer rest lines
+    if pane_is_busy "$pane"; then printf busy; return 1; fi
+    if ! pane_is_held "$pane"; then printf not-held; return 1; fi
+    region=$(pane_input_region "$pane")
+    trailer="⟦plane:${msg_id}⟧"
+    if ! pane_shows_payload_end "$region" "$trailer"; then printf not-shown; return 1; fi
+    box=$(_held_box_squeezed "$region")
+    case "$box" in
+        *'[Pastedtext#'*)
+            rest=$(printf '%s' "$box" | LC_ALL=C sed -nE 's/^\[Pastedtext#[0-9]+(\+([0-9]+)lines)?\]$/=\2/p')
+            case "$rest" in
+                '') printf chips; return 1 ;;
+                =1|=2) printf chip; return 0 ;;
+                *) printf chip-lines; return 1 ;;
+            esac ;;
+    esac
+    case "$box" in
+        '[Claudlobby'*"$trailer") ;;
+        *) printf glued; return 1 ;;
+    esac
+    rest="${box%"$trailer"}"
+    case "$rest" in
+        *'⟦plane:'*) printf glued; return 1 ;;
+    esac
+    printf text
+    return 0
+}
+
 # bot_dir_for_session <session> [bots_dir]
 # Session name -> bot runtime dir, on stdout — _session_candidate_dir (the
 # resolution shared with tmux_socket_for_session) plus an existence gate,

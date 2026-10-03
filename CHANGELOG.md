@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a CLI delivery held in an idle bot's box is submitted (#2105)
+
+Since #1989, every CLI delivery (`message send` and `reply`, `assignment deliver`, `task nudge` and `recheck`) has pressed Enter once with verification off. No layer repaired an Enter the box ate: the transport left it to the operation owner, and the owner said it did not verify. A message that landed in an idle box could sit there until a person pressed Enter. On 2026-10-02 the pulse paged 24 such holds on 14 bots.
+
+- **The operation owner now repairs the Enter, after the receipt wait finds no receipt.** It looks at the recipient's box, and presses one Enter only when `held_delivery_match` says the box holds exactly this message.
+  - A text match: the box starts with a Claudlobby envelope and ends with this message's trailer, the only trailer in it.
+  - A chip match: a long payload is drawn only as `[Pasted text #N +M lines]`. The box must hold that one chip and nothing else, and M must be the wire's single newline or one more.
+  - Either way, the pane must show no running turn and no open menu.
+- **At most two Enters, the operators' recipe.** A swallowed Enter leaves a CR in the box, and the next Enter only strips it (#1236). So a second Enter is pressed only after another receipt wait finds no receipt, and only on the same match. Never a third, and never the payload again. A held delivery's command can now take about 34 s.
+- **#1236's rc 3 is covered too.** When the box never showed the payload, the transport withheld its Enter; the receipt wait and the repair now run on that send as well, so text that lands later is still submitted.
+- **Every repair is a fleet event on the recipient,** `delivery_enter_repaired` (notice). It records whether the match was by text or by chip, and every look, so a misfire on someone else's paste can be found. The command's JSON carries `enter_repair`.
+- This supersedes S2-03's "no automatic Enter repair" for this one case only (`documentation/plans/2026-09-30-unified-cli-finalization.md`).
+
 ### Fixed — a send presses Enter only once the box shows the typed text, and a held box is never counted as sent (#1236)
 
 `pane_send_verified`, the one door every keystroke injector uses, sent the Enter 0.3 s after the text whether or not the TUI had read it. A TUI that had not read the text yet read the text and the Enter together, and kept the Enter as an invisible character in the box: the prompt stayed there unsubmitted, and the next Enter only removed that character. The verify then read the first frame after the Enter, which under load was often drawn before the text, as a submit.

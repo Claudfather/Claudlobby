@@ -43,6 +43,7 @@ class AssignmentDeliveryResult:
     replayed: bool
     attempt_no: int | None
     reason: str | None = None
+    native_returncode: int | None = None  # the transport's, when it observed one
 
 
 def _scope(ctx: TaskOperationContext, route: MessageRoute, package: PackageResources,
@@ -207,4 +208,6 @@ def deliver(ctx: TaskOperationContext, route: MessageRoute, package: PackageReso
         return AssignmentDeliveryResult(request_id, task_id, assignment_id, message_id,
                                         "committed", native.delivery,
                                         native.transmission_recording, native.request_persisted,
-                                        native.replayed, native.attempt_no)
+                                        native.replayed, native.attempt_no,
+                                        native_returncode=(native.observation.native_returncode
+                                                           if native.observation else None))
