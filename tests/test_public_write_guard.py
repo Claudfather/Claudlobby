@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -1224,3 +1225,49 @@ def test_a_broken_line_names_its_own_column(env, tmp_path):
     assert verdict == "deny" and "line 2 does not compile, column 7" in why, why
     rc, out = check_list(env)
     assert rc == 1 and "column 7" in out, out
+
+
+# Round 3 (vera's rows): where a URL in an issue or pr write sends it. Each expected
+# answer is where the real gh 2.92.0 sends the write.
+_PUB, _PRIV = "pub-org/pub-repo", "priv-org/priv-repo"
+_AT = chr(64)  # an at-sign, kept out of this file's text
+_URL_ROWS = [
+    # --duplicate-of takes an issue URL: the number is the selector, the URL only a reference
+    ("duplicate-of a private issue, from a public checkout",
+     f'gh issue close 5 --duplicate-of https://github.com/{_PRIV}/issues/3 --comment "{HIT}"', "pub", "deny"),
+    ("duplicate-of a public issue, from a private checkout",
+     f'gh issue close 5 --duplicate-of https://github.com/{_PUB}/issues/3 --comment "{HIT}"', "priv", "allow"),
+    ("a URL as the value of another flag, from a public checkout",
+     f'gh issue edit 5 --add-label https://github.com/{_PRIV}/issues/3 --title "{HIT}"', "pub", "deny"),
+    # a URL selector wins over -R: gh writes where the URL points
+    ("URL to a public repository, -R names a private one",
+     f'gh issue comment https://github.com/{_PUB}/issues/9 -R {_PRIV} --body "{HIT}"', "priv", "deny"),
+    ("URL to a private repository, -R names a public one",
+     f'gh issue comment https://github.com/{_PRIV}/issues/9 -R {_PUB} --body "{HIT}"', "pub", "allow"),
+    ("the same with -R first",
+     f'gh issue comment -R {_PRIV} https://github.com/{_PUB}/issues/9 --body "{HIT}"', "priv", "deny"),
+    # gh reads the host alone: no port, no userinfo, any case of the scheme
+    ("an explicit port",
+     f'gh issue comment https://github.com:443/{_PUB}/issues/9 --body "{HIT}"', "priv", "deny"),
+    ("userinfo",
+     f'gh issue comment https://someone{_AT}github.com/{_PUB}/issues/9 --body "{HIT}"', "priv", "deny"),
+    ("an upper-case scheme",
+     f'gh issue comment HTTPS://github.com/{_PUB}/issues/9 --body "{HIT}"', "priv", "deny"),
+]
+
+
+@pytest.mark.parametrize("label,command,where,want", _URL_ROWS, ids=[r[0] for r in _URL_ROWS])
+def test_a_url_goes_where_gh_sends_it(env, tmp_path, label, command, where, want):
+    cwd = repo(tmp_path, env, _PRIV if where == "priv" else _PUB)
+    assert bash(env, command, cwd)[0] == want, label
+
+
+def test_a_malformed_host_in_a_url_never_crashes_the_decider(env, tmp_path):
+    """The hook fails open on a decider that crashes, so its front door cannot show a
+    crash: run the decider itself."""
+    cwd = repo(tmp_path, env, _PUB)
+    command = f'gh issue comment https://[::1/{_PUB}/issues/9 --body "{HIT}"'
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(cwd)})
+    p = subprocess.run([sys.executable, str(SCRIPTS / "public-write-guard.py")], input=payload,
+                       capture_output=True, text=True, env=env, cwd=cwd)
+    assert p.returncode == 0, p.stderr
