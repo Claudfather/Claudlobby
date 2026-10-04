@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — fleet-pulse no longer counts a push the manager's box never took as delivered, never types into a held box, and bounds a box that takes no input (#2120)
+
+`notify_manager` ended `bot_tmux_send ... || true`. So a push typed and never submitted (rc 3 since #2108) returned 0, and `debounce_notify` closed the alert's window: the alert went quiet until its 6-hour re-notify, though nobody had read it. And since #2108, a push to a box that never shows it waits up to 10 s before giving up, once per alert, all ahead of the sweep's Telegram escalation.
+
+- **The push's status is the delivery verdict.** A push typed and not submitted (rc 3) or not sent (rc 1) leaves the window open, so the next sweep pushes it again (#900's rule). A submitted push closes it, as before. No manager, or no manager session, still counts as sent: the recipient token re-fires the alert once a manager appears (#831).
+- **No push types into a box that already holds text.** Before each push, the shipped `pane_is_held` reads the manager's box. If it holds anything, the push is skipped, the window stays open, and the alert's plane record is left to the escalation. Typing would glue the alert to that text, which is the opposite of the fleet's own held-box remedy, and a glued box is the operator's call.
+- **After a push the box did not take, a floor.** That manager gets no push for `FLEET_PULSE_HELD_PUSH_FLOOR_S` (default 30 minutes, the shape of #1088's re-arm bound), with no wait and no typing in between. So a box that takes no input costs one wait per floor, not one per sweep or per alert, and a submitted push clears the floor. The floor is that manager instance's (#831's recipient token, not the tmux session id, which a restarted manager reuses), so a restarted manager, a new box, gets the alerts that re-fire to it. A floor marker dated ahead of the clock, as after a reboot of a host with no real-time clock, is expired, not fresh.
+- **A push waits for the manager's box to be drawn.** The first tick after a manager restart can reach it before its box is drawn (9 to 19 s for a production-shaped bot, #860), and keys typed then are lost (#2138). The push arms the boot's box wait (`FLEET_PULSE_PUSH_BOX_TICKS`, default 60 polls of 0.5 s), so the alert lands in that tick instead of costing the new instance a floor. A drawn box costs one capture and no wait.
+
 ### Added — an opt-in guard that refuses a GitHub write putting a listed term into a public repository
 
 A PreToolUse hook, `claudlobby/_runtime_scripts/public-write-guard.sh` (with its decider `claudlobby/_runtime_scripts/public-write-guard.py`), composed for a bot that sets `public_write_guard: true` (a strict bool, per bot or through `fleet.defaults`, like `heavy_slot`). It refuses, and never rewrites, a GitHub-bound write that would put a term from the host's list into a **public** repository. A private or internal repository is untouched.
