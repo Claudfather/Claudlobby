@@ -115,16 +115,79 @@ _resolve_manager_token() {
     _mgr_token="$_mgr_token_val"
 }
 
+# A manager's box that holds text gets no push (#2120 review, dara): typing into
+# it would glue the alert to that text, the opposite of the fleet's own held-box
+# remedy (never typed text), and a glued box is the operator's call. And
+# after a push the box did not take (rc 3), that manager gets no push for
+# FLEET_PULSE_HELD_PUSH_FLOOR_S (default 1800 s, the shape of #1088's re-arm
+# bound): no wait and no typing in between, so a box that takes no input costs
+# one wait per floor, not one per sweep or per alert. Either way the alert's
+# window stays open and its event is on the plane for the escalation. A push
+# that is submitted clears the floor. The floor belongs to the manager INSTANCE
+# that did not take the push, named by #831's recipient token (session_created
+# and pane_pid): a restarted manager is a new box, so the alerts that re-fire to
+# it are not held back by its predecessor's floor.
+_HELD_PUSH_FLOOR_S_DEFAULT=1800
+
+# A push waits for the manager's box to be drawn (#2138), as a boot send does:
+# the first tick after a manager restart can reach it before its box is drawn
+# (9 to 19 s for a production-shaped bot, #860), and keys typed then are lost.
+# The box wait captures before it sleeps, so a drawn box costs one capture and
+# no wait; it waits only on a blank pane, for FLEET_PULSE_PUSH_BOX_TICKS polls
+# of 0.5 s (default 60: 30 s). A pane that never draws ends the wait, and its
+# push falls to #860's never-drawn recovery and, still unshown, to the floor.
+_PUSH_BOX_TICKS_DEFAULT=60
+
+# _held_push_floor_holds <marker> <floor_s>: whether the floor holds a push to the
+# manager instance in _mgr_token. The marker must name that instance and be at
+# most <floor_s> old. A marker dated ahead of the clock is expired, never fresh:
+# an RTC-less host boots up to an hour behind real time, so a marker written
+# before the reboot reads as future-dated, which marker_age_within would read as
+# fresh for the whole skew (plane-emit.sh reads its wedge marker the same way).
+_held_push_floor_holds() {
+    local marker="$1" floor="$2" age
+    [ -f "$marker" ] || return 1
+    [ "$(cat "$marker" 2>/dev/null)" = "$_mgr_token" ] || return 1
+    age=$(( $(date +%s) - $(stat_mtime "$marker" 2>/dev/null || echo 0) ))
+    [ "$age" -ge 0 ] && [ "$age" -le "$floor" ]
+}
+
+# Returns the push's delivery verdict, which debounce_notify reads (#900: a send
+# that reached nobody must not buy the window): 0 submitted; 3 typed and not
+# submitted (#1236), or not typed because the box held text or the floor is
+# fresh; 1 not sent. A non-zero leaves the alert's window open. No manager, or no
+# manager session, still returns 0: the recipient token re-fires the alert once a
+# manager appears (#831).
 notify_manager() {
-    local bot_dir="$1" msg="$2" target="" mgr="" mgr_socket=""
+    local bot_dir="$1" msg="$2" target="" mgr="" mgr_socket="" rc=0 floor marker pane box_ticks
     target=$(_manager_target "$bot_dir") || return 0
     [ -n "$target" ] || return 0
     mgr_socket="${target%%|*}"; mgr="${target##*|}"
     check_tmux_session "$mgr" "$mgr_socket" || return 0
+    floor="${FLEET_PULSE_HELD_PUSH_FLOOR_S:-$_HELD_PUSH_FLOOR_S_DEFAULT}"
+    case "$floor" in ''|*[!0-9]*) floor="$_HELD_PUSH_FLOOR_S_DEFAULT" ;; esac
+    marker="$state_dir/held-push.$(printf '%s' "$target" | tr -c 'A-Za-z0-9._-' '_')"
+    _resolve_manager_token "$bot_dir"
+    if _held_push_floor_holds "$marker" "$floor"; then
+        echo "fleet-pulse: $mgr did not take a push less than ${floor}s ago; $(basename "$bot_dir")'s alert waits for the floor to lapse" >&2
+        return 3
+    fi
+    pane=$(bot_tmux "$mgr_socket" capture-pane -p -t "$mgr" 2>/dev/null) || pane=""
+    if pane_is_held "$pane"; then
+        echo "fleet-pulse: $mgr's box holds text; $(basename "$bot_dir")'s alert is not typed into it" >&2
+        return 3
+    fi
     # Attribute any send_miss to THIS bot's ledger — it is the one whose manager
     # could not be reached. bot_tmux_send sanitizes + two-step sends.
-    BOT_DIR="$bot_dir" BOT_ID="$(basename "$bot_dir")" \
-        bot_tmux_send "$mgr_socket" "$mgr" "[FLEET-PULSE] $msg" || true
+    box_ticks="${FLEET_PULSE_PUSH_BOX_TICKS:-$_PUSH_BOX_TICKS_DEFAULT}"
+    case "$box_ticks" in ''|*[!0-9]*) box_ticks="$_PUSH_BOX_TICKS_DEFAULT" ;; esac
+    BOT_DIR="$bot_dir" BOT_ID="$(basename "$bot_dir")" PANE_READY_TICKS="$box_ticks" \
+        bot_tmux_send "$mgr_socket" "$mgr" "[FLEET-PULSE] $msg" || rc=$?
+    case "$rc" in
+        0) rm -f "$marker" ;;
+        3) printf '%s' "$_mgr_token" > "$marker" 2>/dev/null || true ;;
+    esac
+    return "$rc"
 }
 
 # Wrapper: notify_manager needs bot_dir, but debounce_notify passes only

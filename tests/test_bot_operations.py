@@ -250,9 +250,18 @@ def test_explicit_handoff_keeps_running_session_env_while_stop_cleans_it(tmp_pat
     assert not secret_env.exists()
 
 
-@pytest.mark.parametrize("stalled", [False, True])
-def test_self_restart_witness_survives_requesting_process_exit(tmp_path, stalled):
-    """The one-shot witness, not the dying pane, owns the final outcome."""
+@pytest.mark.parametrize("stalled, late_witness", [
+    pytest.param(False, False, id="False"),
+    pytest.param(True, False, id="True"),
+    pytest.param(False, True, id="False-late-witness"),
+    pytest.param(True, True, id="True-late-witness"),
+])
+def test_self_restart_witness_survives_requesting_process_exit(tmp_path, stalled, late_witness):
+    """The one-shot witness, not the dying pane, owns the final outcome.
+
+    A late witness is descheduled for a second between its admission and its wait
+    (#2137). Looking late at a caller that has exited, it still logs complete: the
+    caller finished, so the restart is safe."""
     bot_dir = tmp_path / "bot"
     (bot_dir / ".claude").mkdir(parents=True)
     (bot_dir / "logs").mkdir()
@@ -268,6 +277,13 @@ from claudlobby import bot_operations as b
 root, bot_dir = map(Path, sys.argv[1:3])
 stalled = sys.argv[3] == '1'
 b._SELF_RESPONSE_WAIT_S = 0.05 if stalled else 30
+if sys.argv[4] == '1':
+    parent, real_select = os.getpid(), b.select.select
+    def late_select(*args):
+        if os.getpid() != parent:
+            time.sleep(1)
+        return real_select(*args)
+    b.select.select = late_select
 b.read_selection = lambda _: {'release_id': 'selected'}
 def restart(**kwargs):
     kwargs['_on_lock']()
@@ -278,11 +294,16 @@ b.set_bot_running = restart
 b._schedule_self_restart(root=root, fleet='fleet', bot='bot', ceiling=None,
                          bot_dir=bot_dir)
 if stalled:
-    time.sleep(0.15)
+    # Stalled means still alive when the witness's wait ends, so stay until it
+    # logs that verdict: a fixed sleep raced the witness's own scheduling (#2137).
+    log, deadline = bot_dir / 'logs/startup.log', time.monotonic() + 8
+    while time.monotonic() < deadline and not (
+            log.exists() and '"status":"incomplete"' in log.read_text()):
+        time.sleep(0.01)
 os._exit(0)  # even an abrupt caller death releases the child to finish
 """
     process = subprocess.run([os.sys.executable, "-c", code, str(tmp_path), str(bot_dir),
-                              "1" if stalled else "0"],
+                              "1" if stalled else "0", "1" if late_witness else "0"],
                              capture_output=True, text=True, timeout=10)
     assert process.returncode == 0, process.stderr
     log = bot_dir / "logs/startup.log"

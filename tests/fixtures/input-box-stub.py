@@ -14,14 +14,19 @@ a pane whose geometry is part of what it tests (a verify that read a fixed tail
 of the pane once never reached the input line for exactly this reason). A submit
 leaves the typed line above the next box, as the transcript does.
 
+--deaf draws the box and never reads: a pane whose box takes no input, so a send
+never sees its payload there and nothing is submitted (#2120).
+
 --log PATH appends each submitted line to PATH, one line per submit (a LF inside
 it becomes a space): the record of what was submitted, which the pane is not.
 """
 import os
+import signal
 import sys
 import tty
 
 CHROME = "--chrome" in sys.argv[1:]
+DEAF = "--deaf" in sys.argv[1:]
 LOG = sys.argv[sys.argv.index("--log") + 1] if "--log" in sys.argv[1:-1] else None
 fd = sys.stdin.fileno()
 tty.setraw(fd)
@@ -40,6 +45,8 @@ def box():
 
 box()
 out.flush()
+while DEAF:
+    signal.pause()
 while True:
     data = os.read(fd, 4096)
     if not data:
