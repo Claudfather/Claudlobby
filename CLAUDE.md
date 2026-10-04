@@ -165,7 +165,7 @@ One line per script, for routing; operators use the public CLI. **Before changin
 - `credential-echo-guard.sh` — PreToolUse hook: refuses a CLI form that prints an env-held credential unless the variable is removed in the same command (#2090)
 - `credential-echo-decide.py` — the decision half of `credential-echo-guard.sh`
 - `heavy-slot-guard.sh` — PreToolUse hook: queues heavy Bash commands (suites, installs, builds) on the host's heavy-job slot (opt-in)
-- `heavy-slot.py` — the heavy-job slot: `hook` finds heavy commands, `run` holds a slot, `status` names holders
+- `heavy-slot.py` — the heavy-job slot: `hook` finds heavy commands, `run` holds a slot or queues a ticket, `status` names holders and the queue
 - `public-write-guard.sh` — PreToolUse hook: refuses a GitHub-bound write that would put a term from the host's list into a public repository (opt-in)
 - `public-write-guard.py` — the decision half of `public-write-guard.sh`
 
