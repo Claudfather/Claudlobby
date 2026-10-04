@@ -785,10 +785,11 @@ class BotConfig:
     # arming is additionally gated at compose time on the installed CLI exposing
     # `brief --boot` (composed settings outlive installs on this estate).
     brief_on_start: bool = False
-    # #1604, opt-in per bot: launch each exactly pinned npx MCP server as
-    # `node <entry>` from the copy warm-cache installs under state/mcp/npm,
-    # with no resident `npm exec` wrapper (composer.compose_mcp_json).
-    mcp_direct_launch: bool = False
+    # #1604, on unless the bot or the fleet's defaults opt out: launch each
+    # exactly pinned npx MCP server as `node <entry>` from the copy config plan
+    # installs under state/mcp/npm, with no resident `npm exec` wrapper
+    # (composer.compose_mcp_json).
+    mcp_direct_launch: bool = True
     # #1686, opt-in per bot: run the bot's heavy Bash commands under the host's
     # heavy-job slot, a PreToolUse hook composed for this bot only
     # (composer._with_heavy_slot_hook).
@@ -1919,7 +1920,7 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         brief_on_start=_parse_brief(raw.get("brief", defaults.get("brief"))),
         mcp_direct_launch=_strict_bool(
             "'mcp_direct_launch'",
-            raw.get("mcp_direct_launch", defaults.get("mcp_direct_launch", False)),
+            raw.get("mcp_direct_launch", defaults.get("mcp_direct_launch", True)),
         ),
         heavy_slot=_strict_bool(
             "'heavy_slot'",

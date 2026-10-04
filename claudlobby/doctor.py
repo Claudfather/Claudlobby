@@ -278,14 +278,15 @@ def _check_composed_launches(fleet: FleetConfig, paths: Paths, report: DoctorRep
     """What each bot WILL launch: its composed `.mcp.json` (#1991 review).
 
     A `node` entry inside a `state/mcp/npm/` copy whose script is gone is a
-    server that will not start at the bot's next session, and nothing else says
-    so: the plan below reads what config staging would compose NOW, which is the npx
-    fallback. Every bot is read, armed or not, because a bot disarmed without a
-    new activation still launches whatever its file names. A fleet with no composed
-    direct launch adds no line."""
+    server that will not start at the bot's next session. The plan below reads
+    what config staging would compose NOW, which is the npx fallback, so this
+    reads the files, through the one predicate `start-bot.sh` also runs at
+    every session start (`mcp_direct.missing_copies`), with the same remedy.
+    Every bot is read, armed or not, because a bot disarmed without a new
+    activation still launches whatever its file names. A fleet with no
+    composed direct launch adds no line."""
     from . import mcp_direct
 
-    marker = mcp_direct.INSTALL_ROOT
     seen = 0
     dead: list[str] = []
     for bot in fleet.bots.values():
@@ -297,26 +298,14 @@ def _check_composed_launches(fleet: FleetConfig, paths: Paths, report: DoctorRep
             report.add("mcp-launch-composed", "warn",
                        f"{bot.bot_id}: .mcp.json unreadable ({exc.__class__.__name__})")
             continue
-        for name, server in (composed.get("mcpServers") or {}).items():
-            args = server.get("args") or []
-            if server.get("command") != "node" or not args:
-                continue
-            entry = Path(str(args[0]))
-            # By its path SEGMENTS, not a prefix of this run's root: a file
-            # composed under another spelling of the root is still a copy.
-            parts = entry.parts
-            if not any(parts[i:i + len(marker)] == marker for i in range(len(parts))):
-                continue
-            seen += 1
-            if not entry.is_file():
-                dead.append(f"{bot.bot_id}/{name} ({entry})")
+        seen += len(mcp_direct.composed_copies(composed))
+        dead.extend(f"{bot.bot_id}/{name} ({entry})"
+                    for name, entry in mcp_direct.missing_copies(composed))
     if dead:
         shown = ", ".join(dead[:4]) + (f" (+{len(dead) - 4} more)" if len(dead) > 4 else "")
         report.add("mcp-launch-composed", "fail",
                    f"{len(dead)} composed MCP server(s) will not start: the state/mcp copy"
-                   f" they launch is gone: {shown} — inspect the owned copy;"
-                   " `host cache warm` may report it unusable, so stage and activate"
-                   " a config plan to publish the npx fallback if it cannot be restored")
+                   f" they launch is gone: {shown}. Remedy: {mcp_direct.remedy(fleet.name)}")
     elif seen:
         report.add("mcp-launch-composed", "pass",
                    f"{seen} composed direct launch(es): every entry point exists")
@@ -327,16 +316,16 @@ def check_mcp_launch(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> 
     still carrying an npm wrapper and why.
 
     It reads the composer's own plan (`mcp_launch_plan`), so doctor and
-    config staging cannot disagree. No armed bot adds no line: off is the shipped
-    default, and the switches rung already names it with its arm line. The
-    composed files are read first and separately (`mcp-launch-composed`),
+    config staging cannot disagree. On is the shipped default; a fleet whose
+    bots all opt out, or whose armed bots declare no MCP server, adds no line.
+    The composed files are read first and separately (`mcp-launch-composed`),
     because the plan cannot see a copy removed after compose."""
     from . import mcp_direct
     from .composer import mcp_launch_plan
     from .mcp_grammar import GrammarUnavailable
 
     _check_composed_launches(fleet, paths, report)
-    armed = [b for b in fleet.bots.values() if b.mcp_direct_launch]
+    armed = [b for b in fleet.bots.values() if b.mcp_direct_launch and b.mcp]
     if not armed:
         return
     left: list[str] = []
@@ -355,8 +344,9 @@ def check_mcp_launch(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> 
                    f"{len(armed)} armed bot(s): every npx server launches directly")
         return
     shown = ", ".join(left[:6]) + (f" (+{len(left) - 6} more)" if len(left) > 6 else "")
-    fix = (" — run `claudlobby --fleet <fleet> host cache warm`, then stage and activate"
-           " a new config plan" if fixable else "")
+    fix = (" — stage and activate a new config plan, which installs missing copies before it"
+           " composes (`claudlobby --fleet <fleet> host cache warm` installs them alone and"
+           " shows npm's errors)" if fixable else "")
     report.add("mcp-launch", "warn",
                f"{len(left)} server(s) on armed bot(s) still launch through npx: {shown}{fix}")
 

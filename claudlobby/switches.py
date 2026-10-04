@@ -216,6 +216,13 @@ def _carrier_lines(sw: Switch) -> tuple[str, str]:
                     f"{var}=1 in {where} — the ruled harness exemption;"
                     " silences EVERY door at once")
         return f"unset {var} — on by default", f"{var}=0 in {where}"
+    if sw.carrier == COMPOSE_BOT and sw.polarity != OPT_IN:
+        return (
+            f"on by default; {sw.config}: true at bots.<bot> or defaults in fleet.yaml"
+            f" undoes an opt-out, then {sw.compose_steps} ({sw.takes_effect})",
+            f"{sw.config}: false at bots.<bot> or defaults in fleet.yaml, then"
+            f" {sw.compose_steps} ({sw.takes_effect_off})",
+        )
     if sw.carrier == COMPOSE_BOT:
         return (
             f"bots.<bot>.{sw.config}: true in fleet.yaml on an independent canary root with ONE armed bot first, then"
@@ -604,23 +611,16 @@ SWITCHES: tuple[Switch, ...] = (
     Switch(
         key="mcp-direct-launch",
         scope=GENERATE,
-        polarity=OPT_IN,
+        polarity=OPT_OUT,
         carrier=COMPOSE_BOT,
         config="mcp_direct_launch",
-        compose_steps=("claudlobby --root <data-root> --fleet <fleet> host cache warm,"
-                       " then config plan, config diff PLAN_ID, and claudlobby"
-                       " --root <data-root> host activate PLAN_ID"
-                       " --install-directory <native-user-unit-dir>"),
-        takes_effect=("it takes effect when that bot next restarts: .mcp.json is"
-                      " read at session start"),
+        takes_effect=("config plan installs the copies first; it takes effect when"
+                      " that bot next restarts: .mcp.json is read at session start"),
         takes_effect_off="back on npx at the bot's next restart",
-        why_opt_in="changes how every MCP server starts; warm the pinned cache "
-                   "and activate an independent canary root with one armed bot "
-                   "before widening the manifest",
         what="launch each exactly pinned npx MCP server as `node <entry>` from "
-             "the copy warm-cache installs under state/mcp/npm, instead of "
+             "the copy config plan installs under state/mcp/npm, instead of "
              "through npx, which keeps an idle `npm exec` wrapper resident as "
-             "the parent of every server (#1604: 41 of them held 1.4 GB, "
+             "the parent of every server (#1604: 42 of them held 1.4 GB, "
              "mostly swap, on the Pi). A server that cannot launch directly "
              "keeps npx, and composition says which and why",
     ),

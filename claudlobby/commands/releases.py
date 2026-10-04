@@ -234,6 +234,7 @@ def _config_plan(args, root: Path) -> CommandOutput:
         paths = declared_paths(root, package, external=args.fleet_path)
     except FileNotFoundError as exc:
         raise CommandFailure("not_found", str(exc)) from exc
+    _install_direct_copies(paths)
     try:
         plan = stage_configuration(paths, release,
                                    log=lambda _: print("configuration warning reported by the validator",
@@ -245,6 +246,43 @@ def _config_plan(args, root: Path) -> CommandOutput:
                              hint=f"use the sealed candidate CLI {release.cli_path} and inspect fleet declarations") from exc
     return CommandOutput(_plan_data(plan), _executing_release(root),
                          (f"Configuration plan {plan.plan_id}: {len(plan.changes)} proposed paths.",))
+
+
+def _install_direct_copies(fleet_paths) -> None:
+    """Install each copy an armed bot launches directly, BEFORE staging composes
+    (#1604). Composition writes `node <copy>` only for a copy that is there, so
+    without this the first plan on a fresh host composes the npx fallback.
+
+    Best effort, and outside the planner, which writes nothing: a fleet this
+    cannot load is staging's to report, and a failed install leaves that
+    package's servers on npx, which composition's own warning names. npm's text
+    stays out of this output; `host cache warm` shows it."""
+    from .. import mcp_direct
+    from ..config import load_fleet
+    from ..mcp_grammar import GrammarUnavailable, grammar
+
+    specs: dict[str, tuple[str, str]] = {}
+    for paths in fleet_paths:
+        try:
+            fleet, _defaults = load_fleet(paths.fleet_yaml, projects_yaml=paths.projects_yaml)
+            specs.update(mcp_direct.armed_specs(fleet, paths, grammar(paths)))
+        except (GrammarUnavailable, OSError, ValueError):
+            continue
+    if not specs:
+        return
+    root = fleet_paths[0].root
+    for spec, (bare, version) in sorted(specs.items()):
+        outcome, detail = mcp_direct.install(root, bare, version)
+        if outcome == "failed":
+            print(f"direct-launch copy {spec}: install failed, so its servers keep npx;"
+                  " `claudlobby --fleet <fleet> host cache warm` shows npm's error",
+                  file=sys.stderr)
+        elif outcome == "unusable":
+            # The reason is the package's (its bin or shebang), never npm output.
+            print(f"direct-launch copy {spec}: cannot launch directly ({detail}),"
+                  " so its servers keep npx", file=sys.stderr)
+        elif outcome == "installed":
+            print(f"direct-launch copy {spec}: installed", file=sys.stderr)
 
 
 def _config_diff(args, root: Path) -> CommandOutput:

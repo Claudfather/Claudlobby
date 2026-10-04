@@ -373,3 +373,29 @@ def test_stage_requires_local_coverage_and_includes_explicit_external_fleet(stag
     assert set(plan.content(changes[host / "mention-allowlist"]).decode().splitlines()) == {
         f"{name}-human" for name in plan.fleets}
     plan.check_fresh()
+
+
+def test_a_composed_direct_launch_copy_is_a_plan_input(staging_case):
+    """#1604: each state/mcp copy a composed .mcp.json launches is a plan input,
+    so activation refuses a plan whose copy went missing after staging instead
+    of restarting a bot onto a server that cannot start."""
+    fleet_yaml = staging_case.paths.fleet_yaml
+    text = fleet_yaml.read_text()
+    anchor = "    primary-worker:\n"
+    assert text.count(anchor) == 1
+    fleet_yaml.write_text(text.replace(anchor, anchor + "      mcp: [demo]\n"))
+    _write(staging_case.root / "library/mcp/demo.json",
+           json.dumps({"demo": {"command": "npx", "args": ["-y", "@scope/demo-mcp@1.2.3"]}}))
+    package = staging_case.root / "state/mcp/npm/@scope/demo-mcp@1.2.3/node_modules/@scope/demo-mcp"
+    _write(package / "package.json", json.dumps(
+        {"name": "@scope/demo-mcp", "version": "1.2.3", "bin": {"demo-mcp": "dist/index.js"}}))
+    entry = _write(package / "dist/index.js", "#!/usr/bin/env node\nconsole.log('server')\n")
+    plan = config_staging.stage_configuration([staging_case.paths], staging_case.release)
+    generated = staging_case.paths.bot_runtime("primary-worker") / ".mcp.json"
+    composed = json.loads(plan.content(_changes(plan)[generated]))["mcpServers"]["demo"]
+    assert composed["args"][0] == str(entry), "precondition: the plan composes the copy"
+    assert str(entry) in plan.inputs
+    plan.check_fresh()
+    entry.unlink()
+    with pytest.raises(PlanError, match="input changed"):
+        plan.check_fresh()

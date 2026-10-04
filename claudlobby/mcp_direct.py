@@ -3,11 +3,15 @@
 `npx -y <pkg>@<ver>` runs the server as the grandchild of an `npm exec` process
 that stays resident for the server's whole life and does nothing. Measured on
 the Pi, 2026-09-29: 41 wrappers holding 45 MB private and 1,388 MB of swap.
-This module is the ONE answer to two questions, for the composer, `warm-cache`
-and `doctor` alike, so the three cannot disagree:
+This module is the ONE answer to three questions, for the composer, `config
+plan`, `host cache warm`, `doctor` and `start-bot.sh` alike, so they cannot
+disagree:
 
-* where a package's direct copy lives, and how one gets there (`install`)
+* which copies an armed bot needs (`armed_specs`), where each lives, and how
+  one gets there (`install`)
 * whether a server can launch from it, and if not, why (`direct_launch`)
+* whether a composed `.mcp.json` launches a copy that is gone
+  (`missing_copies`), and what brings it back (`remedy`)
 
 The copy lives in a directory claudlobby owns, ``state/mcp/npm/<name>@<version>/``,
 never in npm's npx cache. ``~/.npm/_npx/<hash>/`` is keyed by an npm-internal
@@ -26,6 +30,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -37,8 +42,11 @@ INSTALL_ROOT = ("state", "mcp", "npm")
 NPM_INSTALL_FLAGS = ("--prefer-offline", "--no-audit", "--no-fund")
 INSTALL_TIMEOUT_S = 300
 
-#: The one reason `warm-cache` can fix. Every other reason is about the package.
+#: The one reason an install can fix. Every other reason is about the package.
 NOT_INSTALLED = "not installed"
+#: An installed copy whose entry script is gone: damage after the install,
+#: which is atomic, so `install` sets it aside and installs again.
+ENTRY_MISSING = "entry point missing"
 
 #: A plain node script, so `node <path>` runs exactly what npx's `sh -c <bin>`
 #: does. A shebang with arguments (`env -S node --flag`) would lose them under
@@ -104,7 +112,7 @@ def entry_point(pkg_dir: Path, bare: str) -> tuple[Path | None, str]:
         with path.open("r", encoding="utf-8", errors="replace") as fh:
             first = fh.readline().rstrip("\r\n")
     except OSError:
-        return None, "entry point missing"
+        return None, ENTRY_MISSING
     if not _NODE_SHEBANG.fullmatch(first):
         return (
             None,
@@ -132,6 +140,35 @@ def direct_launch(server: dict, root: Path, g) -> tuple[dict | None, str, str]:
     return {**server, "command": "node", "args": [str(entry), *rest]}, spec, ""
 
 
+def armed_specs(fleet, paths, g) -> dict[str, tuple[str, str]]:
+    """``spec -> (bare, version)`` for each exactly pinned npx package an ARMED
+    bot of *fleet* launches: the copies `host cache warm` and `config plan`
+    install, collected once so the two cannot install different sets.
+
+    The spec is the composer's own (`split_npx_args`, as `direct_launch`
+    reads it), so what is installed is what composition looks for."""
+    found: dict[str, tuple[str, str]] = {}
+    for bot in fleet.bots.values():
+        if not bot.mcp_direct_launch:
+            continue
+        for entry in bot.mcp:
+            frag_path = paths.find_library_file("mcp", entry.name, ".json")
+            if frag_path is None:
+                continue
+            try:
+                frag = json.loads(frag_path.read_text())
+            except (OSError, ValueError):
+                continue
+            for _name, server in g.servers_in(frag):
+                if server.get("command") != "npx" or "args" not in server:
+                    continue
+                spec, _rest = g.split_npx_args(server["args"])
+                pin = pinned(g, spec)
+                if pin is not None:
+                    found[spec] = pin
+    return found
+
+
 def install(root: Path, bare: str, version: str) -> tuple[str, str]:
     """Put ``<bare>@<version>`` under ``state/mcp/npm``, atomically.
 
@@ -141,17 +178,29 @@ def install(root: Path, bare: str, version: str) -> tuple[str, str]:
 
     npm installs into a temporary SIBLING that is renamed into place only once
     it holds a launchable entry point, so a torn install is never what a
-    compose finds, and a failure leaves nothing behind.
+    compose finds, and a failure leaves nothing behind. A copy that lost its
+    manifest or its entry script after it landed is set aside and installed
+    again, so one warm restores a copy a composed file names; any other
+    reason is the package's own and is left alone.
     """
     final = install_dir(root, bare, version)
     entry, why = entry_point(package_dir(root, bare, version), bare)
     if entry is not None:
         return "present", str(entry)
-    if final.exists():
+    if final.exists() and why not in (NOT_INSTALLED, ENTRY_MISSING):
         return "unusable", why
     final.parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.mkdtemp(prefix=f".{final.name}.", dir=final.parent))
+    damaged = None
     try:
+        if final.exists():
+            # Moved aside, not deleted in place: a server still running from
+            # the damaged copy keeps its open files either way.
+            damaged = Path(tempfile.mkdtemp(prefix=f".{final.name}.damaged.", dir=final.parent))
+            try:
+                os.rename(final, damaged / "copy")
+            except OSError as exc:
+                return "failed", f"could not set the damaged copy aside: {exc}"
         argv = [
             "npm",
             "install",
@@ -188,3 +237,81 @@ def install(root: Path, bare: str, version: str) -> tuple[str, str]:
     finally:
         if tmp.exists():
             shutil.rmtree(tmp, ignore_errors=True)
+        if damaged is not None:
+            shutil.rmtree(damaged, ignore_errors=True)
+
+
+def composed_copies(mcp) -> list[tuple[str, Path]]:
+    """``(server, entry)`` for each server a composed ``.mcp.json`` launches as
+    ``node <entry>`` from a copy under ``state/mcp/npm``.
+
+    Judged by the path's SEGMENTS, not by a prefix of one spelling of the data
+    root: a file composed under another spelling of the root still names a
+    copy. A ``node`` entry anywhere else (the global-binary swap) is not a copy
+    this module vouches for."""
+    servers = mcp.get("mcpServers") if isinstance(mcp, dict) else None
+    if not isinstance(servers, dict):
+        return []
+    found = []
+    for name, server in servers.items():
+        if not isinstance(server, dict) or server.get("command") != "node":
+            continue
+        args = server.get("args") or []
+        if not isinstance(args, list) or not args:
+            continue
+        entry = Path(str(args[0]))
+        parts, n = entry.parts, len(INSTALL_ROOT)
+        if any(parts[i:i + n] == INSTALL_ROOT for i in range(len(parts))):
+            found.append((name, entry))
+    return found
+
+
+def missing_copies(mcp) -> list[tuple[str, Path]]:
+    """The composed copies whose entry script is gone. Each is a server that
+    fails to start at the bot's next session until the copy is back, the one
+    predicate `doctor` and `start-bot.sh` both read. Its bound: only the entry
+    script is checked, so a copy whose script survived a partial deletion of
+    its `node_modules` passes."""
+    return [(name, entry) for name, entry in composed_copies(mcp) if not entry.is_file()]
+
+
+def remedy(fleet: str) -> str:
+    """What brings a missing copy back. The copy's path is fixed by its pin, so
+    a warm reinstalls it where the composed file looks and no new plan is
+    needed; a bot whose key is off no longer counts as armed for the warm, so
+    a new plan composes its npx launch instead."""
+    return (f"run `claudlobby --fleet {fleet or '<fleet>'} host cache warm` to reinstall it at"
+            " the same path, then restart the bot (a bot with mcp_direct_launch off needs"
+            " a new config plan instead)")
+
+
+def missing_notice(bot: str, fleet: str, missing: list[tuple[str, Path]]) -> str:
+    """The one line `start-bot.sh` raises for a bot that starts with copies gone."""
+    listed = ", ".join(f"{name} ({entry})" for name, entry in missing)
+    return (f"{bot}: {len(missing)} MCP server(s) will not start this session, because"
+            f" the state/mcp copy each launches is gone: {listed}. Remedy: {remedy(fleet)}.")
+
+
+def _main(argv: list[str]) -> int:
+    """``python -I -B -m claudlobby.mcp_direct notice <.mcp.json> <bot> <fleet>``
+    prints the notice for the composed copies that are gone, or nothing.
+
+    `start-bot.sh` runs it before every session start. A file it cannot read
+    prints nothing (rc 2), and it never raises, so a boot it checks is never a
+    boot it blocks."""
+    if len(argv) != 4 or argv[0] != "notice":
+        print("usage: python -m claudlobby.mcp_direct notice <.mcp.json> <bot> <fleet>",
+              file=sys.stderr)
+        return 2
+    try:
+        mcp = json.loads(Path(argv[1]).read_text())
+    except (OSError, ValueError):
+        return 2
+    missing = missing_copies(mcp)
+    if missing:
+        print(missing_notice(argv[2], argv[3], missing))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main(sys.argv[1:]))

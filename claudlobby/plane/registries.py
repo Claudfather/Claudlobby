@@ -260,6 +260,9 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "binary_prune_skipped": "notice",
     "binary_repaired": "notice",
     "vault_sync_recovered": "notice",
+    # start-bot: a composed direct-launch MCP copy is gone at session start, so
+    # that server will not start until the copy is back (#1604).
+    "mcp_copy_missing": "notice",
     # notify_currency: the debounced source-currency notices of notify-behind
     # and update-siblings.
     "source_behind": "notice",

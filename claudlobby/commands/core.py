@@ -193,9 +193,6 @@ def cmd_warm_cache(args, *, paths=None, fleet=None, summary=None) -> int:
     # is the shape two of the three shipped uvx fragments use.
     targets: dict[tuple[str, tuple[str, ...]], str] = {}
     unreadable: set[str] = set()
-    # #1604: spec -> (bare, version) for the copies an ARMED bot launches from.
-    # Only armed bots contribute, so a fleet that armed nobody installs nothing.
-    direct: dict[str, tuple[str, str]] = {}
     for bot in fleet.bots.values():
         for entry in bot.mcp:
             frag_path = paths.find_library_file("mcp", entry.name, ".json")
@@ -215,10 +212,10 @@ def cmd_warm_cache(args, *, paths=None, fleet=None, summary=None) -> int:
                     continue
                 pkg, prefix = target
                 targets[(runtime, tuple(prefix))] = pkg
-                if bot.mcp_direct_launch and runtime == "npx":
-                    pin = mcp_direct.pinned(g, pkg)
-                    if pin is not None:
-                        direct[pkg] = pin
+    # #1604: spec -> (bare, version) for the copies an ARMED bot launches from,
+    # the one collection `config plan` installs from too. Only armed bots
+    # contribute, so a fleet whose bots all opt out installs nothing.
+    direct = mcp_direct.armed_specs(fleet, paths, g)
 
     if unreadable:
         # Coverage honesty: these servers are NOT warmed and will pay the cold

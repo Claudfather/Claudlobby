@@ -161,6 +161,21 @@ seed_workspace_trust "$BOT_DIR" || true
 seed_all_checkouts "$BOT_DIR" || true
 # --- end MCP checkout pre-trust ----------------------------------------------
 
+# --- Direct-launch MCP copies (#1604) -----------------------------------------
+# A composed `node <state/mcp copy>` whose copy is gone is a server that will
+# not start this session. mcp_direct holds the one predicate, and doctor reads
+# the same one. The notice names each server, its path and the remedy, and the
+# bot launches anyway: one missing server never keeps a bot down.
+if [ -n "${_NATIVE_ADMISSION_PYTHON:-}" ] && [ -x "${_NATIVE_ADMISSION_PYTHON}" ]; then
+    _copy_notice="$("$_NATIVE_ADMISSION_PYTHON" -I -B -m claudlobby.mcp_direct notice \
+        "$BOT_DIR/.mcp.json" "$(basename "$BOT_DIR")" "${FLEET_NAME:-}" 2>/dev/null || true)"
+    if [ -n "$_copy_notice" ]; then
+        echo "$(ts_iso) MCP $_copy_notice" >> "$BOT_DIR/logs/startup.log" 2>/dev/null || true
+        emit_fleet_notice "$(dirname "$BOT_DIR")" mcp_copy_missing "$_copy_notice" || true
+    fi
+fi
+# --- end direct-launch MCP copies --------------------------------------------
+
 # Tmux session name: use the bot directory slug (always lowercase) rather
 # than BOT_NAME (display name, potentially mixed-case from fleet.yaml).
 # Dispatch and monitoring scripts target sessions by this slug.
