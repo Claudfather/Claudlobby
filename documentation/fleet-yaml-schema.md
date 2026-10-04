@@ -602,7 +602,7 @@ To arm one canary bot, write the host's list and check it with `python3 "$CLAUDL
 
 ### `bots.<name>.mcp_direct_launch` / `fleet.defaults.mcp_direct_launch`
 
-On by default (#1604). `npx -y <pkg>@<version>` keeps an `npm exec` process resident as the parent of the server it starts, for the server's whole life. On the Pi, 42 of those wrappers held 61 MiB in RAM and 1,439 MiB in swap. A bot launches each **exactly pinned** npx server as `node <entry point>` from a copy under `$CLAUDLOBBY_ROOT/state/mcp/npm/<name>@<version>/`, so no wrapper process exists at all. `config plan` installs every copy an armed bot needs before it composes, so the first plan on a fresh host already composes the direct launch; `host cache warm` installs the same set on its own.
+On by default (#1604). `npx -y <pkg>@<version>` keeps an `npm exec` process resident as the parent of the server it starts, for the server's whole life; on the Pi, 42 of them held 61 MiB in RAM and 1,439 MiB in swap. A bot instead launches each **exactly pinned** npx server as `node <entry point>` from a copy under `$CLAUDLOBBY_ROOT/state/mcp/npm/<name>@<version>/`, so no wrapper process exists. `config plan` (and so `fleet setup`) installs every copy an armed bot needs before it composes; `host cache warm` installs the same set on its own.
 
 ```yaml
 defaults:
@@ -611,8 +611,6 @@ bots:
   ravi:
     mcp_direct_launch: true   # STRICT bool: a typo string is a parse error, never an arming
 ```
-
-A bot's own key wins over `defaults`. `.mcp.json` is read at session start, so a change reaches a bot at its next session after the activation that publishes it.
 
 Any server that can't launch directly keeps today's npx launch. That launch can't break the server; it only forgoes the saving. Composition names every such server with its reason, in one warning per bot, and the `host doctor` MCP launch rung says the same:
 
@@ -623,15 +621,7 @@ Any server that can't launch directly keeps today's npx launch. That launch can'
 | `entry point is not a plain node script` | none. `node <path>` would drop a shebang's flags, and a non-node bin is not node at all |
 | `cannot tell which bin npx would run` | none. npx itself refuses an ambiguous bin |
 
-A copy removed *after* activation is different: the bot's composed file still points at it, so that server will not start. Three places say so, through one predicate (`mcp_direct.missing_copies`):
-
-- `host activate` refuses a plan whose copy went missing after it was staged, because each composed copy is a plan input. Stage a new plan, which installs it again.
-- `start-bot.sh` raises one `mcp_copy_missing` notice at every session start that finds one, naming the bot, each server, its path and the remedy, then launches anyway.
-- The `host doctor` `mcp-launch-composed` rung reads every bot's composed `.mcp.json`, armed or not, and **fails** naming each bot, server and path.
-
-The remedy is one `claudlobby --fleet <fleet> host cache warm`. The copy's path is fixed by its pin, so the warm reinstalls it where the composed file looks, setting a damaged copy aside first, and the next session starts it. A bot whose key is off no longer counts as armed for the warm, so stage and activate a new plan for it instead, which composes its npx launch.
-
-Nothing in the framework deletes a copy: no sweep, prune or cache verb touches `state/mcp`. A hand deletion does, and so does a `git clean -x` in a data root that is also a git checkout, where `state/` is ignored.
+A copy removed *after* staging is different: the composed file still points at it, so that server will not start. `host activate` refuses a plan whose copy went missing, `start-bot.sh` raises one `mcp_copy_missing` notice naming the bot, each server and its path, and the `host doctor` `mcp-launch-composed` rung fails the same way. The remedy is `claudlobby --fleet <fleet> host cache warm`, which reinstalls the copy at the same path, then a restart of the bot. Nothing in the framework deletes a copy; a hand deletion does, and so does a `git clean -x` in a data root that is also a git checkout.
 
 The copy installs the fragment's exact pin. npm resolves the rest of its dependency tree from its own cache first (`--prefer-offline`). uvx servers are untouched. `claudlobby/_runtime_scripts/fleet-memory-check.sh` does not show the saving (#862): its fleet total never matched an `npm exec` line, and its per-bot figure counts only the pane process and its direct children.
 

@@ -1,11 +1,11 @@
 """#1604: launch a pinned npx MCP server as `node <entry>`, with no npm wrapper.
 
 `npx -y <pkg>@<ver>` leaves `npm exec` resident as the PARENT of the server it
-starts, plus a `sh -c` shim between them. Measured on the Pi, 2026-09-29: 41
-wrappers holding 45 MB private and 1,388 MB of swap, a third of the swap file,
-while doing nothing. The copy `warm-cache` installs under
-`$CLAUDLOBBY_ROOT/state/mcp/npm/<name>@<version>/` lets the composer launch
-the same pinned package directly.
+starts, plus a `sh -c` shim between them. Measured on the Pi, 2026-10-04: 42
+wrappers holding 61 MiB in RAM and 1,439 MiB of swap while doing nothing. The
+copy `config plan` (or `host cache warm`) installs under
+`$CLAUDLOBBY_ROOT/state/mcp/npm/<name>@<version>/` lets the composer launch the
+same pinned package directly.
 
 Three rules carry the weight, and each has a test below:
 
@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -123,13 +124,6 @@ class TestTheKeyIsPerBot:
         fleet = load_test_fleet(fleet_dir)
         assert fleet.bots["lead"].mcp_direct_launch is False
         assert fleet.bots["worker-1"].mcp_direct_launch is True
-
-    def test_defaults_widen_it_and_a_bot_can_stay_out(self, fleet_dir: Path):
-        _arm(fleet_dir, where="defaults")
-        _arm(fleet_dir, where="worker-1", value="false")
-        fleet = load_test_fleet(fleet_dir)
-        assert fleet.bots["lead"].mcp_direct_launch is True
-        assert fleet.bots["worker-1"].mcp_direct_launch is False
 
     def test_a_string_is_refused_rather_than_read_as_true(self, fleet_dir: Path):
         _arm(fleet_dir, where="lead", value='"yes"')
@@ -326,9 +320,10 @@ class _FakeNpm(SubprocessRecorder):
     """`npm install --prefix <dir> ... <spec>` lays the package out as npm would;
     `fail=True` leaves a partial tree and exits 1."""
 
-    def __init__(self, *, fail: bool = False):
+    def __init__(self, *, fail: bool = False, first_line: str = "#!/usr/bin/env node"):
         super().__init__()
         self.fail = fail
+        self.first_line = first_line
 
     def __call__(self, argv, *a, **kw):
         result = super().__call__(argv, *a, **kw)
@@ -341,8 +336,12 @@ class _FakeNpm(SubprocessRecorder):
                 return subprocess.CompletedProcess(
                     argv, 1, "", "npm ERR! network ETIMEDOUT"
                 )
-            _write_package(pkg)
+            _write_package(pkg, first_line=self.first_line)
         return result
+
+
+def _npm_installs(npm: _FakeNpm) -> list[list[str]]:
+    return [c for c in npm.argv_for("npm") if c[1:2] == ["install"]]
 
 
 class TestWarmCacheInstallsForArmedBots:
@@ -353,7 +352,7 @@ class TestWarmCacheInstallsForArmedBots:
         return cmd_warm_cache(warm_cache_args(fleet_dir, dry_run=dry_run), summary=summary)
 
     def _installs(self, npm: _FakeNpm) -> list[list[str]]:
-        return [c for c in npm.argv_for("npm") if c[1:2] == ["install"]]
+        return _npm_installs(npm)
 
     def test_the_pinned_package_lands_in_state_mcp(self, fleet_dir: Path, monkeypatch):
         equip_bot_with_mcp(fleet_dir, {"demo": NPX})
@@ -424,6 +423,16 @@ class TestWarmCacheInstallsForArmedBots:
         assert self._installs(npm) == []
         assert "cannot launch directly" in caplog.text
 
+    def test_an_install_that_cannot_launch_directly_is_kept_so_no_run_repeats_it(
+        self, fleet_dir: Path, monkeypatch
+    ):
+        equip_bot_with_mcp(fleet_dir, {"demo": NPX})
+        npm = _FakeNpm(first_line="#!/bin/sh")
+        assert self._run(fleet_dir, monkeypatch, npm) == 0
+        assert self._run(fleet_dir, monkeypatch, npm) == 0
+        assert len(self._installs(npm)) == 1, "the second warm ran npm again"
+        assert _compose(fleet_dir)["demo"]["command"] == "npx"
+
     def test_a_failed_install_leaves_no_copy_and_fails_the_warm(
         self, fleet_dir: Path, monkeypatch, caplog
     ):
@@ -455,15 +464,6 @@ class TestWarmCacheInstallsForArmedBots:
 
 
 class TestTheSwitchIsNamedWhereTheOperatorLooks:
-    def test_it_is_registered_as_a_per_bot_opt_out(self):
-        from claudlobby import switches as sw
-
-        row = sw.by_key("mcp-direct-launch")
-        assert row.polarity == sw.OPT_OUT
-        assert row.carrier == sw.COMPOSE_BOT
-        assert row.config == "mcp_direct_launch"
-        assert not row.why_opt_in
-
     def test_its_lines_say_restart_and_that_the_plan_installs_not_next_tool_call(self):
         from claudlobby import switches as sw
 
@@ -484,7 +484,7 @@ class TestTheSwitchIsNamedWhereTheOperatorLooks:
         assert "next tool call" in row.arm and "next tool call" in row.disarm
         assert "at the bot's next restart" not in row.arm
 
-    def test_resolve_names_the_bots_that_have_it_on(self, fleet_dir: Path):
+    def test_resolve_names_the_bots_that_opted_out(self, fleet_dir: Path):
         from claudlobby import switches as sw
 
         _arm(fleet_dir, where="worker-1", value="false")
@@ -495,7 +495,7 @@ class TestTheSwitchIsNamedWhereTheOperatorLooks:
         }
         row = rows["mcp-direct-launch"]
         assert row.on is True
-        assert "1 of 2 bot(s): lead" in row.source
+        assert "off for 1 of 2 bot(s): worker-1" in row.source
 
 
 # --- doctor names what config staging would compose -------------------------
@@ -660,6 +660,7 @@ class TestItIsOnUnlessABotOptsOut:
 
         row = sw.by_key("mcp-direct-launch")
         assert row.polarity == sw.OPT_OUT and row.default_on
+        assert (row.carrier, row.config) == (sw.COMPOSE_BOT, "mcp_direct_launch")
         assert not row.why_opt_in
         assert "mcp_direct_launch: false" in row.disarm
 
@@ -699,7 +700,7 @@ class TestPlanningInstallsTheCopiesFirst:
         return seen
 
     def _installs(self, npm: "_FakeNpm") -> list[list[str]]:
-        return [c for c in npm.argv_for("npm") if c[1:2] == ["install"]]
+        return _npm_installs(npm)
 
     def test_the_copy_is_installed_before_composition(self, fleet_dir: Path, monkeypatch):
         equip_bot_with_mcp(fleet_dir, {"demo": NPX})
@@ -758,8 +759,6 @@ class TestTheOnePredicateForAMissingCopy:
         assert mcp_direct.missing_copies(_composed(entry)) == [("demo", entry)]
 
     def _notice(self, tmp_path: Path, mcp_json: Path) -> subprocess.CompletedProcess:
-        import sys
-
         return subprocess.run(
             [sys.executable, "-I", "-B", "-m", "claudlobby.mcp_direct", "notice",
              str(mcp_json), "lead", "demo-fleet"],
@@ -798,9 +797,10 @@ class TestStartBotNamesAMissingCopy:
         assert source.count(start) == 1 and source.count(end) == 1
         block = start + source.split(start, 1)[1].split(end, 1)[0]
         bot = tmp_path / "bots" / "lead"
-        (bot / "logs").mkdir(parents=True)
+        (bot / "logs").mkdir(parents=True, exist_ok=True)
         (bot / ".mcp.json").write_text(json.dumps(mcp))
         notices, errors = tmp_path / "notices", tmp_path / "errors"
+        (tmp_path / "root" / "state").mkdir(parents=True, exist_ok=True)
         script = (
             '. "$1"\n'
             "set -Eeuo pipefail\n"
@@ -808,16 +808,15 @@ class TestStartBotNamesAMissingCopy:
             'NOTICES="$3"\n'
             'emit_fleet_notice() { printf "%s\\n" "$@" >> "$NOTICES"; }\n'
             'BOT_DIR="$2"; FLEET_NAME=demo-fleet; _NATIVE_ADMISSION_PYTHON="$5"\n'
+            'CLAUDLOBBY_ROOT="$6"\n'
             + block)
         r = subprocess.run(["/bin/bash", "-c", script, "_", str(LIB_COMMON), str(bot),
-                            str(notices), str(errors), python],
+                            str(notices), str(errors), python, str(tmp_path / "root")],
                            capture_output=True, text=True, timeout=60,
                            env={"PATH": "/usr/bin:/bin"})
         return r, notices, errors
 
     def test_a_missing_copy_raises_one_notice_and_the_boot_goes_on(self, fleet_dir: Path, tmp_path: Path):
-        import sys
-
         entry = _package_dir(fleet_dir) / "dist" / "index.js"
         r, notices, errors = self._run(tmp_path, _composed(entry), sys.executable)
         assert r.returncode == 0, r.stderr
@@ -827,9 +826,21 @@ class TestStartBotNamesAMissingCopy:
         assert message.startswith("lead: 1 MCP server(s) will not start") and str(entry) in message
         assert "MCP lead: 1 MCP server(s)" in (tmp_path / "bots" / "lead" / "logs" / "startup.log").read_text()
 
-    def test_a_present_copy_raises_nothing(self, fleet_dir: Path, tmp_path: Path):
-        import sys
+    def test_a_restart_with_the_same_copies_gone_pages_once_and_a_fixed_copy_rearms(
+            self, fleet_dir: Path, tmp_path: Path):
+        entry = _package_dir(fleet_dir) / "dist" / "index.js"
+        marker = tmp_path / "root" / "state" / "lead.mcp-copy-missing"
+        for _restart in range(2):
+            r, notices, _errors = self._run(tmp_path, _composed(entry), sys.executable)
+            assert r.returncode == 0, r.stderr
+        assert len(notices.read_text().splitlines()) == 3, "the second start paged again"
+        assert marker.is_file()
+        _write_package(_package_dir(fleet_dir))
+        r, _notices, _errors = self._run(tmp_path, _composed(entry), sys.executable)
+        assert r.returncode == 0, r.stderr
+        assert not marker.exists(), "a start with every copy present must clear the marker"
 
+    def test_a_present_copy_raises_nothing(self, fleet_dir: Path, tmp_path: Path):
         entry = _write_package(_package_dir(fleet_dir))
         r, notices, errors = self._run(tmp_path, _composed(entry), sys.executable)
         assert r.returncode == 0, r.stderr

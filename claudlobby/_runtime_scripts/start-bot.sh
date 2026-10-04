@@ -165,13 +165,19 @@ seed_all_checkouts "$BOT_DIR" || true
 # A composed `node <state/mcp copy>` whose copy is gone is a server that will
 # not start this session. mcp_direct holds the one predicate, and doctor reads
 # the same one. The notice names each server, its path and the remedy, and the
-# bot launches anyway: one missing server never keeps a bot down.
-if [ -n "${_NATIVE_ADMISSION_PYTHON:-}" ] && [ -x "${_NATIVE_ADMISSION_PYTHON}" ]; then
+# bot launches anyway: one missing server never keeps a bot down. Debounced on
+# the notice text, so a restart with the same copies gone pages nobody again,
+# and a different set does.
+_mcp_copy_notify() { emit_fleet_notice "$(dirname "$BOT_DIR")" mcp_copy_missing "$1"; }
+if [ -x "${_NATIVE_ADMISSION_PYTHON:-}" ]; then
     _copy_notice="$("$_NATIVE_ADMISSION_PYTHON" -I -B -m claudlobby.mcp_direct notice \
         "$BOT_DIR/.mcp.json" "$(basename "$BOT_DIR")" "${FLEET_NAME:-}" 2>/dev/null || true)"
     if [ -n "$_copy_notice" ]; then
         echo "$(ts_iso) MCP $_copy_notice" >> "$BOT_DIR/logs/startup.log" 2>/dev/null || true
-        emit_fleet_notice "$(dirname "$BOT_DIR")" mcp_copy_missing "$_copy_notice" || true
+        debounce_notify "$CLAUDLOBBY_ROOT/state" "$(basename "$BOT_DIR")" mcp-copy-missing \
+            _mcp_copy_notify "$_copy_notice" "$_copy_notice" || true
+    else
+        debounce_clear "$CLAUDLOBBY_ROOT/state" "$(basename "$BOT_DIR")" mcp-copy-missing || true
     fi
 fi
 # --- end direct-launch MCP copies --------------------------------------------

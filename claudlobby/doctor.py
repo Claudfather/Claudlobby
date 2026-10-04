@@ -304,8 +304,7 @@ def _check_composed_launches(fleet: FleetConfig, paths: Paths, report: DoctorRep
     if dead:
         shown = ", ".join(dead[:4]) + (f" (+{len(dead) - 4} more)" if len(dead) > 4 else "")
         report.add("mcp-launch-composed", "fail",
-                   f"{len(dead)} composed MCP server(s) will not start: the state/mcp copy"
-                   f" they launch is gone: {shown}. Remedy: {mcp_direct.remedy(fleet.name)}")
+                   mcp_direct.missing_line(len(dead), shown, fleet.name))
     elif seen:
         report.add("mcp-launch-composed", "pass",
                    f"{seen} composed direct launch(es): every entry point exists")
@@ -344,9 +343,7 @@ def check_mcp_launch(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> 
                    f"{len(armed)} armed bot(s): every npx server launches directly")
         return
     shown = ", ".join(left[:6]) + (f" (+{len(left) - 6} more)" if len(left) > 6 else "")
-    fix = (" — stage and activate a new config plan, which installs missing copies before it"
-           " composes (`claudlobby --fleet <fleet> host cache warm` installs them alone and"
-           " shows npm's errors)" if fixable else "")
+    fix = f" — {mcp_direct.install_fix(fleet.name)}" if fixable else ""
     report.add("mcp-launch", "warn",
                f"{len(left)} server(s) on armed bot(s) still launch through npx: {shown}{fix}")
 

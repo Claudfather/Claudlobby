@@ -429,6 +429,7 @@ def apply_move(move, bot, *, force, cleanup):
     from ..activation import upgrade_activation
     from ..activation_state import read_selection
     from ..bot_operations import set_bot_running
+    from .. import mcp_direct
     from ..config_staging import stage_configuration
     from ..releases import read_release
 
@@ -448,8 +449,9 @@ def apply_move(move, bot, *, force, cleanup):
         if access is not None:
             data["access_updated"] = access
         release = read_release(move.root, move.release_id)
-        plan = stage_configuration(declared_paths(move.root, move.source.paths.package,
-                                                  external=move.external), release)
+        fleet_paths = declared_paths(move.root, move.source.paths.package, external=move.external)
+        mcp_direct.install_armed(fleet_paths)  # #1604: copies before composition, as config plan does
+        plan = stage_configuration(fleet_paths, release)
         data["plan_id"] = plan.plan_id
         staged_scope(move, plan)
         activation_id = str(uuid4())

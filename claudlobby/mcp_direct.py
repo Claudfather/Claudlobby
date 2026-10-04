@@ -2,7 +2,7 @@
 
 `npx -y <pkg>@<ver>` runs the server as the grandchild of an `npm exec` process
 that stays resident for the server's whole life and does nothing. Measured on
-the Pi, 2026-09-29: 41 wrappers holding 45 MB private and 1,388 MB of swap.
+the Pi, 2026-10-04: 42 wrappers holding 61 MiB in RAM and 1,439 MiB of swap.
 This module is the ONE answer to three questions, for the composer, `config
 plan`, `host cache warm`, `doctor` and `start-bot.sh` alike, so they cannot
 disagree:
@@ -143,30 +143,39 @@ def direct_launch(server: dict, root: Path, g) -> tuple[dict | None, str, str]:
 def armed_specs(fleet, paths, g) -> dict[str, tuple[str, str]]:
     """``spec -> (bare, version)`` for each exactly pinned npx package an ARMED
     bot of *fleet* launches: the copies `host cache warm` and `config plan`
-    install, collected once so the two cannot install different sets.
-
-    The spec is the composer's own (`split_npx_args`, as `direct_launch`
-    reads it), so what is installed is what composition looks for."""
+    install, collected once so the two cannot install different sets. The walk
+    is the grammar's own (`declared_packages`), whose npx spec is the one
+    `direct_launch` reads, so what is installed is what composition looks for."""
+    fragments = sorted({
+        str(path) for bot in fleet.bots.values() if bot.mcp_direct_launch
+        for entry in bot.mcp
+        if (path := paths.find_library_file("mcp", entry.name, ".json")) is not None})
     found: dict[str, tuple[str, str]] = {}
-    for bot in fleet.bots.values():
-        if not bot.mcp_direct_launch:
-            continue
-        for entry in bot.mcp:
-            frag_path = paths.find_library_file("mcp", entry.name, ".json")
-            if frag_path is None:
-                continue
-            try:
-                frag = json.loads(frag_path.read_text())
-            except (OSError, ValueError):
-                continue
-            for _name, server in g.servers_in(frag):
-                if server.get("command") != "npx" or "args" not in server:
-                    continue
-                spec, _rest = g.split_npx_args(server["args"])
-                pin = pinned(g, spec)
-                if pin is not None:
-                    found[spec] = pin
+    for _fragment, _key, runtime, spec, _bare, _pinned, _argv in g.declared_packages(fragments):
+        if runtime == "npx" and (pin := pinned(g, spec)) is not None:
+            found[spec] = pin
     return found
+
+
+def install_armed(fleet_paths) -> list[tuple[str, str, str]]:
+    """Install every copy an armed bot of these fleets launches directly, and
+    return ``(spec, outcome, detail)`` for each. The step staging's callers run
+    BEFORE they stage (`config plan`, `fleet setup`, `bot move`): composition
+    writes `node <copy>` only for a copy that is there, so without it the first
+    plan on a fresh host composes the npx fallback. A fleet this cannot load is
+    staging's to report; a failed install leaves that package's servers on npx,
+    which composition's own warning names."""
+    from .context import load_context  # lazy: start-bot imports this module bare
+    from .mcp_grammar import grammar
+
+    specs: dict[str, tuple[str, str]] = {}
+    for paths in fleet_paths:
+        try:
+            specs.update(armed_specs(load_context(paths).fleet, paths, grammar(paths)))
+        except Exception:  # noqa: BLE001 — staging reports this fleet; this step only forgoes copies
+            continue
+    return [(spec, *install(fleet_paths[0].root, bare, version))
+            for spec, (bare, version) in sorted(specs.items())]
 
 
 def install(root: Path, bare: str, version: str) -> tuple[str, str]:
@@ -177,11 +186,12 @@ def install(root: Path, bare: str, version: str) -> tuple[str, str]:
     directly, so npx stays; ``detail`` says why) or ``failed``.
 
     npm installs into a temporary SIBLING that is renamed into place only once
-    it holds a launchable entry point, so a torn install is never what a
-    compose finds, and a failure leaves nothing behind. A copy that lost its
-    manifest or its entry script after it landed is set aside and installed
-    again, so one warm restores a copy a composed file names; any other
-    reason is the package's own and is left alone.
+    it is whole, so a torn install is never what a compose finds, and a failure
+    leaves nothing behind. An install that cannot launch directly is kept: the
+    next plan or warm then answers ``unusable`` without running npm, and
+    composition names the package's own reason. A copy that lost its manifest
+    or its entry script after it landed is replaced by a fresh install, so one
+    warm restores a copy a composed file names.
     """
     final = install_dir(root, bare, version)
     entry, why = entry_point(package_dir(root, bare, version), bare)
@@ -191,24 +201,8 @@ def install(root: Path, bare: str, version: str) -> tuple[str, str]:
         return "unusable", why
     final.parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.mkdtemp(prefix=f".{final.name}.", dir=final.parent))
-    damaged = None
     try:
-        if final.exists():
-            # Moved aside, not deleted in place: a server still running from
-            # the damaged copy keeps its open files either way.
-            damaged = Path(tempfile.mkdtemp(prefix=f".{final.name}.damaged.", dir=final.parent))
-            try:
-                os.rename(final, damaged / "copy")
-            except OSError as exc:
-                return "failed", f"could not set the damaged copy aside: {exc}"
-        argv = [
-            "npm",
-            "install",
-            "--prefix",
-            str(tmp),
-            *NPM_INSTALL_FLAGS,
-            f"{bare}@{version}",
-        ]
+        argv = ["npm", "install", "--prefix", str(tmp), *NPM_INSTALL_FLAGS, f"{bare}@{version}"]
         try:
             proc = subprocess.run(
                 argv, capture_output=True, text=True, timeout=INSTALL_TIMEOUT_S
@@ -224,21 +218,25 @@ def install(root: Path, bare: str, version: str) -> tuple[str, str]:
             last = out[-1].strip() if out else "(no output)"
             return "failed", f"npm install exited {proc.returncode}: {last}"
         entry, why = entry_point(tmp / "node_modules" / bare, bare)
-        if entry is None:
-            return "unusable", why
+        if final.exists():
+            # A concurrent install may have landed while npm ran; theirs is as
+            # good as ours. Otherwise the copy there is the damaged one, and a
+            # whole replacement now stands ready.
+            if entry_point(package_dir(root, bare, version), bare)[0] is not None:
+                return "present", "installed concurrently"
+            shutil.rmtree(final, ignore_errors=True)
         try:
             os.rename(tmp, final)
         except OSError as exc:
-            # A concurrent warm got there first: theirs is as good as ours.
             if entry_point(package_dir(root, bare, version), bare)[0] is not None:
                 return "present", "installed concurrently"
             return "failed", f"could not move the install into place: {exc}"
+        if entry is None:
+            return "unusable", why
         return "installed", str(package_dir(root, bare, version))
     finally:
         if tmp.exists():
             shutil.rmtree(tmp, ignore_errors=True)
-        if damaged is not None:
-            shutil.rmtree(damaged, ignore_errors=True)
 
 
 def composed_copies(mcp) -> list[tuple[str, Path]]:
@@ -285,11 +283,18 @@ def remedy(fleet: str) -> str:
             " a new config plan instead)")
 
 
-def missing_notice(bot: str, fleet: str, missing: list[tuple[str, Path]]) -> str:
-    """The one line `start-bot.sh` raises for a bot that starts with copies gone."""
-    listed = ", ".join(f"{name} ({entry})" for name, entry in missing)
-    return (f"{bot}: {len(missing)} MCP server(s) will not start this session, because"
-            f" the state/mcp copy each launches is gone: {listed}. Remedy: {remedy(fleet)}.")
+def missing_line(count: int, listed: str, fleet: str) -> str:
+    """The one sentence for composed servers whose copy is gone, with its
+    remedy: `start-bot.sh`'s notice and doctor's rung both say it."""
+    return (f"{count} MCP server(s) will not start: the state/mcp copy each launches is"
+            f" gone: {listed}. Remedy: {remedy(fleet)}")
+
+
+def install_fix(fleet: str) -> str:
+    """What to do about a server that kept npx because its copy is not installed."""
+    return ("config plan installs a missing copy before it composes; run `claudlobby"
+            f" --fleet {fleet or '<fleet>'} host cache warm` to see why one did not install,"
+            " then stage and activate a new config plan")
 
 
 def _main(argv: list[str]) -> int:
@@ -309,7 +314,8 @@ def _main(argv: list[str]) -> int:
         return 2
     missing = missing_copies(mcp)
     if missing:
-        print(missing_notice(argv[2], argv[3], missing))
+        listed = ", ".join(f"{name} ({entry})" for name, entry in missing)
+        print(f"{argv[2]}: {missing_line(len(missing), listed, argv[3])}")
     return 0
 
 

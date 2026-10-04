@@ -126,7 +126,7 @@ chmod 600 "$DATA/local/seed/.env"
 "${EDITOR:-vi}" "$DATA/local/seed/.env"
 ```
 
-Replace every `REPLACE_ME` in the manifest, including the Telegram handle and user/group IDs. Use the actual Telegram group ID; `-1234567890` is a deliberately fake basic-group example, not a value to deploy. Put the matching `TELEGRAM_TOKEN_CLAUDFATHER` in the fleet `.env`; a GitHub token is optional. The `.env` stays in the data overlay and is never passed as a CLI argument. Setup does not prewarm MCP packages; the first boot may download them. After authoring the manifest in the data root, `"$RELEASE_CLI" --root "$DATA" --fleet seed host cache warm` can prepare the declared caches explicitly.
+Replace every `REPLACE_ME` in the manifest, including the Telegram handle and user/group IDs. Use the actual Telegram group ID; `-1234567890` is a deliberately fake basic-group example, not a value to deploy. Put the matching `TELEGRAM_TOKEN_CLAUDFATHER` in the fleet `.env`; a GitHub token is optional. The `.env` stays in the data overlay and is never passed as a CLI argument. Setup does not prewarm MCP packages. The first configuration plan installs a copy of each exactly pinned npx server under `state/mcp/npm`, so it needs npm and the network; a failed install leaves that server on npx, and the first boot may download the rest. After authoring the manifest in the data root, `"$RELEASE_CLI" --root "$DATA" --fleet seed host cache warm` can prepare the declared caches explicitly.
 
 ## 4. Activate and diagnose
 

@@ -220,9 +220,7 @@ def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
             f"{name} ({spec + ': ' if spec else ''}{why})" for name, spec, why in npx_fallbacks
         )
         fix = (
-            " config plan installs a missing copy before it composes when it can; run"
-            " `claudlobby --fleet <fleet> host cache warm` to see why one did not install,"
-            " then stage and activate a new config plan."
+            f" {mcp_direct.install_fix(paths.fleet_name or '')}."
             if any(why == mcp_direct.NOT_INSTALLED for _n, _s, why in npx_fallbacks)
             else ""
         )
