@@ -23,6 +23,7 @@ the index and the detail.
 - `plane-canary-compare.py` — that canary's comparator (self-tested)
 - `plane-parity.py` — reconcile an archived JSONL ledger against the plane
 - `rehearse-debounce-recipient.sh` — proves a debounced page survives a manager restart
+- `rehearse-held-push.sh` — proves no page is typed into a held box, and a box that takes no input costs one wait per floor
 - `rehearse-briefing-timer.sh` — rehearses the briefing-timer chain on a throwaway fleet
 - `rehearse-permissions-ladder.sh` — single-factor permissions ladder on a disposable bot
 - `rehearse-vault-sync.sh` — proves `vault-sync.sh`'s outcomes against a real plane
