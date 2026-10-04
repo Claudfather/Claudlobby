@@ -591,3 +591,98 @@ class TestDoctorReadsTheComposedFile:
         composed = json.loads((bot_dir / ".mcp.json").read_text())["mcpServers"]["demo"]
         assert composed["command"] == "node", "precondition: the global-binary swap ran"
         assert "mcp-launch-composed" not in self._checks(fleet_dir)
+
+
+# --- option A: the direct launch is the default, and staging installs it ------
+
+class TestItIsOnUnlessABotOptsOut:
+    """#1604, option A. The npm wrapper is the cost every bot pays by default,
+    so the default is the direct launch; a bot or a fleet's defaults can still
+    opt out, and anything that cannot launch directly keeps npx as before."""
+
+    def test_a_bot_that_sets_nothing_launches_the_installed_copy(self, fleet_dir: Path):
+        equip_bot_with_mcp(fleet_dir, {"demo": NPX})
+        entry = _write_package(_package_dir(fleet_dir))
+        server = _compose(fleet_dir)["demo"]
+        assert (server["command"], server["args"]) == ("node", [str(entry), "--flag"])
+
+    def test_a_bot_that_opts_out_keeps_npx(self, fleet_dir: Path):
+        equip_bot_with_mcp(fleet_dir, {"demo": NPX})
+        _write_package(_package_dir(fleet_dir))
+        _arm(fleet_dir, where="lead", value="false")
+        assert _compose(fleet_dir)["demo"]["command"] == "npx"
+
+    def test_defaults_can_opt_a_fleet_out_and_a_bot_back_in(self, fleet_dir: Path):
+        _arm(fleet_dir, where="defaults", value="false")
+        _arm(fleet_dir, where="worker-1", value="true")
+        fleet = load_test_fleet(fleet_dir)
+        assert fleet.bots["lead"].mcp_direct_launch is False
+        assert fleet.bots["worker-1"].mcp_direct_launch is True
+
+    def test_the_switch_is_an_opt_out(self):
+        from claudlobby import switches as sw
+
+        row = sw.by_key("mcp-direct-launch")
+        assert row.polarity == sw.OPT_OUT and row.default_on
+        assert not row.why_opt_in
+        assert "mcp_direct_launch: false" in row.disarm
+
+
+class TestPlanningInstallsTheCopiesFirst:
+    """Installs belong in staging (#1604, A): `config plan` installs each copy
+    an armed bot launches BEFORE it composes, so the first plan on a fresh host
+    composes the direct launch instead of the npx fallback, with no separate
+    warm. A failed install never stops the plan: that server keeps npx."""
+
+    def _plan(self, fleet_dir: Path, monkeypatch, npm: "_FakeNpm") -> dict:
+        import types
+
+        import claudlobby.config_staging as staging
+        import claudlobby.context as context
+        from claudlobby.commands import releases
+
+        class _Staged(Exception):
+            pass
+
+        seen: dict = {}
+
+        def stage(fleet_paths, release, *, log=lambda message: None):
+            # What composition will find when it runs.
+            seen["copy_installed"] = (_package_dir(fleet_dir) / "package.json").is_file()
+            raise _Staged
+
+        monkeypatch.setattr(releases, "_release",
+                            lambda root, release_id: types.SimpleNamespace(cli_path=Path("/x")))
+        monkeypatch.setattr(context, "declared_paths",
+                            lambda root, package, *, external=(): [make_paths(fleet_dir)])
+        monkeypatch.setattr(staging, "stage_configuration", stage)
+        monkeypatch.setattr(subprocess, "run", npm)
+        with pytest.raises(_Staged):
+            releases._config_plan(types.SimpleNamespace(release="r-" + "0" * 64, fleet_path=()),
+                                  fleet_dir)
+        return seen
+
+    def _installs(self, npm: "_FakeNpm") -> list[list[str]]:
+        return [c for c in npm.argv_for("npm") if c[1:2] == ["install"]]
+
+    def test_the_copy_is_installed_before_composition(self, fleet_dir: Path, monkeypatch):
+        equip_bot_with_mcp(fleet_dir, {"demo": NPX})
+        npm = _FakeNpm()
+        assert self._plan(fleet_dir, monkeypatch, npm) == {"copy_installed": True}
+        [call] = self._installs(npm)
+        assert call[-1] == SPEC
+
+    def test_a_failed_install_still_plans_and_says_which(self, fleet_dir: Path, monkeypatch, capsys):
+        equip_bot_with_mcp(fleet_dir, {"demo": NPX})
+        npm = _FakeNpm(fail=True)
+        assert self._plan(fleet_dir, monkeypatch, npm) == {"copy_installed": False}
+        err = capsys.readouterr().err
+        assert SPEC in err and "failed" in err
+        assert "ETIMEDOUT" not in err, "npm's own text stays out of the plan's output"
+
+    def test_a_bot_that_opts_out_installs_nothing(self, fleet_dir: Path, monkeypatch):
+        equip_bot_with_mcp(fleet_dir, {"demo": NPX})
+        _arm(fleet_dir, where="defaults", value="false")
+        npm = _FakeNpm()
+        assert self._plan(fleet_dir, monkeypatch, npm) == {"copy_installed": False}
+        assert self._installs(npm) == []
