@@ -5,15 +5,16 @@ status: draft
 owner: chrisrogers37
 created: 2026-10-04
 updated: 2026-10-04
-issue: "TBD"
+issue: "#2145"
 spec: documentation/plans/2026-08-18-observable-plane-design-v2.md
 repos: [Claudfather/Claudlobby, Claudfather/clauDNA, Claudfather/Claudron]
 ---
 
 # Runtime-neutral observability and memory for mixed Claude/Codex teams
 
-> **Status:** draft for operator review. Nothing here is built. Decision forks (§3) are proposals
-> until ratified. Line references are to Claudlobby `cd292cb`, clauDNA `e5c413e` (v0.26.0) and
+> **Status:** draft. Nothing here is built. **All decision forks (§3) were ratified by the operator
+> on 2026-10-04** (F4 as amended there); the plan is next fleshed out with `/claudna:forge` and
+> `/claudna:ironclad`. Line references are to Claudlobby `cd292cb`, clauDNA `e5c413e` (v0.26.0) and
 > Claudron `29fdcf3` (v0.9.0). Vendor behavior marked *(doc)* comes from vendor documentation read
 > on 2026-10-03 and is verified by the P0 canaries before anything depends on it.
 
@@ -136,33 +137,41 @@ OTLP/HTTP with JSON encoding so it stays stdlib (no protobuf dependency).
   contract or schema change).
 - Lean: **(c)**. Revisit (b) only if a reader needs the uid on the transmission row itself, and then
   after P2 stops `tool_call` and a prune.
-- Ratifier: operator. Status: open.
+- Ratifier: operator. Status: locked (lean), 2026-10-04.
 
 **F2 — Session-uid derivation for new runtimes.**
 - Options: (a) `sha256("<runtime>:" + id)` for non-Claude, Claude unchanged; (b) raw id everywhere.
 - Lean: **(a)**: ids from two vendors must not collide, and Claude rows must keep joining.
-- Ratifier: operator. Status: open.
+- Ratifier: operator. Status: locked (lean), 2026-10-04.
 
 **F3 — Where telemetry lands.**
 - Options: (a) Collector → files only; (b) files for raw plus the `plane-otel` intake for an
   allowlist; (c) spans in the plane (new family and migration).
 - Lean: **(b)**.
-- Ratifier: operator. Status: open.
+- Ratifier: operator. Status: locked (lean), 2026-10-04.
 
-**F4 — Telemetry switch.**
+**F4 — Telemetry configuration and default.**
 - Context: the Defaults rule makes anything that deletes data opt-in; raw telemetry needs rotation
-  and retention, which deletes. Bots configured to export with no Collector running would send to
-  an unbound port.
-- Options: (a) ships on; (b) one opt-in `Switch` (`telemetry`, carrier: system.yaml enroll for the
-  Collector host service) that gates both the Collector and the per-bot `OTEL_*` env.
-- Lean: **(b)**, permanently opt-in like `plane-prune`.
-- Ratifier: operator. Status: open.
+  and retention, which deletes. One Collector serves every fleet on a host; telemetry *on* is a
+  per-bot choice. Bots configured to export with no Collector running would send to an unbound port.
+- Options: (a) ships on; (b) one host-wide switch for both; (c) split by scope: the Collector is a
+  host service enrolled in `system.yaml`, the per-bot setting is composed from `fleet.yaml`.
+- Decision: **(c)**, opt-in on both sides, permanently (like `plane-prune`):
+  - Collector: `Switch` `otel-collector`, scope `HOST_SERVICE`, carrier `ENROLL_HOST`
+    (`system.yaml` enroll); the host owns retention (`retention_days`).
+  - Bots: `fleet.yaml` `defaults.telemetry` with a `bots.<name>.telemetry` override (same precedence
+    as other bot scalars, `_select_bot_scalar`), composed into `bot.conf` (`Switch` `telemetry`,
+    scope `GENERATE`, carrier `COMPOSE_BOT`). Fields: `enabled` (default false) and `content`
+    (`metadata`, the default, or `full`; `full` is the explicit, disclosed act design v2 §11 asks
+    for and maps to the runtime's prompt/tool-detail gates).
+  - `config plan` fails when a bot has telemetry enabled on a host whose Collector is not enrolled.
+- Ratifier: operator. Status: locked (c), 2026-10-04.
 
 **F5 — Normalized attribute names.**
 - Options: (a) OTel GenAI semantic conventions (`gen_ai.conversation.id`, `gen_ai.tool.name`,
   `gen_ai.usage.*`) plus `agent.runtime`; (b) house names.
 - Lean: **(a)**.
-- Ratifier: operator. Status: open.
+- Ratifier: operator. Status: locked (lean), 2026-10-04.
 
 **F6 — What replaces `session_digest`, including skipped sessions.**
 - Context: consumers are `library/skills/fleet-digest/SKILL.md`, `library/skills/fleet-observe/SKILL.md`
@@ -175,42 +184,42 @@ OTLP/HTTP with JSON encoding so it stays stdlib (no protobuf dependency).
   always a segment summary, `export.py:11-12`) is unchanged.
 - Lean: **(b)** plus the export change; keep `session_digest` registered so history classifies
   (`claudlobby/plane/registries.py:111-121`).
-- Ratifier: operator. Status: open.
+- Ratifier: operator. Status: locked (lean), 2026-10-04.
 
 **F7 — Who ships the Codex hook adapters.**
 - Options: (a) each contract owner ships its own (Claudron `hooks.py` per boundary spec Q1; clauDNA
   a Codex host manifest with its store hooks) and Claudlobby composes them with a parity gate, as it
   does for the Claudron loop (`tests/test_claudron_loop.py`); (b) Claudlobby writes every Codex hook.
 - Lean: **(a)**.
-- Ratifier: operator. Status: open.
+- Ratifier: operator. Status: locked (lean), 2026-10-04.
 
 **F8 — clauDNA activity layer.**
 - Options: (a) freeze: no new kinds, hooks stay wired; (b) unwire the three activity hooks, keep the
   registry and readers; (c) remove.
 - Lean: **(a)** now; (b) once interactive users have OTel too.
-- Ratifier: operator. Status: open.
+- Ratifier: operator. Status: locked (lean), 2026-10-04.
 
 **F9 — Harvest provenance for non-Claude sessions.**
 - Options: (a) `session:<runtime>/<sid>:<seg>` for non-Claude, unchanged for Claude; (b) always
   qualified.
 - Lean: **(a)**, mirroring F2.
-- Ratifier: operator. Status: open.
+- Ratifier: operator. Status: locked (lean), 2026-10-04.
 
 **F10 — Summarizer for Codex sessions.**
 - Options: (a) keep `claude -p` (Haiku) for every runtime; (b) a per-runtime runner (`codex exec`).
 - Lean: **(a)**. Consequence: a host running Codex bots with summaries on also needs a Claude binary
   and account. A Codex-only host means (b), or summaries off.
-- Ratifier: operator. Status: open.
+- Ratifier: operator. Status: locked (lean), 2026-10-04.
 
 **F11 — Launching Codex bots.**
 - Options: (a) in this epic; (b) a companion epic (§5).
 - Lean: **(b)**. This epic lands the vocabulary and the owner-side adapters; every step that
   composes or validates a Codex bot lives in the companion, because Claudlobby's mandatory runtime
   validation needs a bot that can run.
-- Ratifier: operator. Status: open.
+- Ratifier: operator. Status: locked (lean), 2026-10-04.
 
 **F12 — clauDNA skills on Codex.** Out of scope (behavior parity is its own epic). The Codex host
-manifest ships store hooks only. Ratifier: operator. Status: open.
+manifest ships store hooks only. Ratifier: operator. Status: locked (lean), 2026-10-04.
 
 **F13 — clauDNA's owner-pid field for Codex.**
 - Context: `session.opened.claude_pid` (`lib/claudna/session_store/events.py:96`).
@@ -218,7 +227,7 @@ manifest ships store hooks only. Ratifier: operator. Status: open.
   `owner_pid`.
 - Lean: **(a)** until the next envelope major (no schema change; older readers unaffected); rename
   then.
-- Ratifier: operator. Status: open.
+- Ratifier: operator. Status: locked (lean), 2026-10-04.
 
 **F14 — Per-bot clauDNA state directory cutover.**
 - Context: bots share `~/.claudna` today; P3 moves each to `$BOT_DIR/data/claudna`, which strands
@@ -226,7 +235,7 @@ manifest ships store hooks only. Ratifier: operator. Status: open.
 - Options: (a) seal every open session in the old root at the switch (`session_store seal`), keep it
   read-only until its retention window passes, then remove; (b) migrate sessions into per-bot roots.
 - Lean: **(a)**.
-- Ratifier: operator. Status: open.
+- Ratifier: operator. Status: locked (lean), 2026-10-04.
 
 **F15 — Waive the pre-registered summarizer comparison.**
 - Context: clauDNA spec §1.1 rule 4 requires a pre-registered siloed comparison of
@@ -235,7 +244,7 @@ manifest ships store hooks only. Ratifier: operator. Status: open.
 - Options: (a) waive the comparison and record the decision in the spec; (b) run the comparison as
   a P3 entry gate.
 - Lean: **(a)**, keeping rule 4's coverage concern (skipped sessions) through F6.
-- Ratifier: operator. Status: open.
+- Ratifier: operator. Status: locked (lean), 2026-10-04.
 
 **F16 — How Claudlobby finds clauDNA's export entrypoint.**
 - Context: the door is `python3 <plugin root>/lib/claudna/session_store export …`; there is no
@@ -250,7 +259,7 @@ manifest ships store hooks only. Ratifier: operator. Status: open.
   The export job checks that the recorded path exists; a missing one (a plugin update applied by
   `/reload` without a restart, `reload-fleet.sh`) is reported as a stale entrypoint and the bot is
   skipped until its next SessionStart rewrites the file.
-- Ratifier: operator. Status: open.
+- Ratifier: operator. Status: locked (lean), 2026-10-04.
 
 **F17 — Session uid on a retried request.**
 - Context: `session_uid` is part of a request's hashed facts (`claudlobby/request_facts.py:42-51`),
@@ -264,7 +273,7 @@ manifest ships store hooks only. Ratifier: operator. Status: open.
   (c) leave `session_uid` out of the hashed projection.
 - Lean: **(a)**: the replay then proves the same facts, and the format bump is the existing,
   gated path for exactly this kind of change.
-- Ratifier: operator. Status: open.
+- Ratifier: operator. Status: locked (lean), 2026-10-04.
 
 ## 4. Evidence
 
@@ -361,7 +370,7 @@ Record results in a run log next to this plan, in the style of
 - [ ] **C9** Host identification: confirm the adapter can be selected by the hook command itself (`… hook <event> --host codex`) rather than sniffed.
 - [ ] **C10** `CLAUDE_CODE_CHILD_SESSION` leak: when a bot's tmux server is started from inside another Claude session, does the variable reach the bot? `start-bot.sh` does not scrub env. If it does, P3's guard change needs a scrub first.
 - [ ] **C11** Claude session id in tools: in a tmux-hosted bot, does the Bash tool's `CLAUDE_CODE_SESSION_ID` equal the SessionStart payload's `session_id`, from the main thread and from an Agent subagent (whose shells carry `CLAUDE_CODE_CHILD_SESSION=1`)? If a subagent's id differs, F1(c) doors running under `CLAUDE_CODE_CHILD_SESSION=1` record no uid.
-- [ ] Ratify F1–F17.
+- [x] Ratify F1–F17 (operator, 2026-10-04).
 
 ### P1 — Vocabulary, join key and the contracts behind them
 
@@ -401,21 +410,22 @@ clauDNA:
 
 ### P2 — Local OpenTelemetry pipeline (Claudlobby; gated by F4)
 
-- [ ] A `telemetry` `Switch` row (opt-in). New host service `otel-collector` (`host.jobs`, `unit: service`) running upstream `otelcol-contrib` on `127.0.0.1`, installed by host setup. That means a cold-host onboarding run per the onboarding rule.
+- [ ] The `otel-collector` host service (F4): a `Switch` row (`HOST_SERVICE`, `ENROLL_HOST`, opt-in) and `host.jobs.otel-collector` (`unit: service`) running upstream `otelcol-contrib` on `127.0.0.1`, installed by host setup. That means a cold-host onboarding run per the onboarding rule.
   - The composer renders its config from `system.yaml`:
     - an OTLP receiver;
     - a `transform` processor (F5);
     - a `resource` processor;
-    - a `file` exporter to `state/otel/` with rotation and a stated retention;
+    - a `file` exporter to `state/otel/` with rotation and the host's `retention_days`;
     - an OTLP/HTTP exporter with `encoding: json` to `plane-otel`.
   - Validate the rendered config with `otelcol validate` in tests.
-- [ ] Composer emits per-bot telemetry env for **Claude** bots, only when the switch is on:
+- [ ] Per-bot telemetry from `fleet.yaml` (F4): `defaults.telemetry` and `bots.<name>.telemetry` (`enabled`, `content`) parsed into `BotConfig`, with a `Switch` row (`GENERATE`, `COMPOSE_BOT`, opt-in), docs in `documentation/fleet-yaml-schema.md` and `fleet.yaml.example`, and regenerated switch tables. For an enabled **Claude** bot the composer writes into `bot.conf`:
   - `CLAUDE_CODE_ENABLE_TELEMETRY=1`;
   - `OTEL_LOGS_EXPORTER=otlp` and `OTEL_METRICS_EXPORTER=otlp`;
   - the protocol and an endpoint on `127.0.0.1`;
-  - `OTEL_RESOURCE_ATTRIBUTES` with fleet uid, `bot:<fleet>/<bot>` and `agent.runtime=claude`.
+  - `OTEL_RESOURCE_ATTRIBUTES` with fleet uid, `bot:<fleet>/<bot>` and `agent.runtime=claude`;
+  - the content gates (`OTEL_LOG_USER_PROMPTS`, `OTEL_LOG_TOOL_DETAILS`) only when `content: full`.
 
-  Content gates stay off (v2 §11). The carrier is `bot.conf`, applied at next restart.
+  Applied at the bot's next restart. `config plan` fails when an enabled bot's host has no enrolled Collector; test it.
 - [ ] `plane-otel` intake: its own localhost host service, not the daemon or the view, which are pinned to their scopes. It maps an allowlist into `emit_batch`:
   - per-session cost, tokens and tool-failure counts as `metric_samples` on `subject_kind='session'` (new `METRIC_NAMES`);
   - `api_error` and repeated tool failure as system events (`SYSTEM_EVENT_SEVERITY`).
@@ -573,6 +583,6 @@ An adversarial review of the first draft corrected its evidence and sequencing.
 ## 13. Disposition
 
 Draft. Next:
-1. The operator ratifies F1–F17.
-2. P0 runs.
-3. An epic issue is opened, with one sub-issue per phase per repo.
+1. ~~The operator ratifies F1–F17.~~ Done, 2026-10-04.
+2. `/claudna:forge` and `/claudna:ironclad` flesh the plan out.
+3. P0 runs; sub-issues per phase per repo are opened from the epic.
