@@ -85,7 +85,6 @@ Readers: claudlobby event list / fleet reports list / fleet uptime / fleet statu
 | `bot_teardown_started` | spin-down | `spin-down-bot.sh` was invoked on a bot: records the door (`action`), `actor`, `fleet`, `bot_dir`, `expected_return`, and `reason`. Emitted BEFORE the teardown legs run, so it records an intent, not a confirmed outcome — a crash mid-teardown still leaves the record. **Dormant unless the fleet sets `SPINDOWN_RECEIPT_ENABLED=1`**, so an unarmed fleet writes no rows and an empty result means *not armed*, not *no teardowns* |
 | `pane_stuck` | pulse | Bot's pane content unchanged for >5 min |
 | `wip_uncommitted` | pulse | Bot has uncommitted changes in a project repo |
-| `session_event` | vitals | Session lifecycle (start, stop) |
 | `send_miss` | dispatch | A cross-socket tmux send (dispatch, cross-bot nudge) found no live session on the resolved socket — logged breadcrumb, not escalated |
 | `job_reenroll_deferred` | notice | Historical notice from the retired fleet setup path: a launchd job could not apply its changed plist while it was running its own enrollment. Kept readable for older Plane records; sealed host activation now owns enrollment. |
 
