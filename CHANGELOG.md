@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the event-type gate reads every place a script names a writer, and bot-vitals drops a type no payload can produce (#2140)
+
+Two items #2122 left open from #903.
+
+- **`session_event` is gone.** `bot-vitals.sh` recorded it when the hook payload carried a `session_event` field, and no PreToolUse or PostToolUse payload carries one, so the type was never written. Its branch, its registry key (notice), its rows in the observability protocol's decision table and the observability guide, and the gate's list of the values bot-vitals records leave together, because the gate checks them against one another. Rows already stored keep the severity they were stamped with.
+- **The writer gate no longer reads past a call it cannot parse.** `tests/test_event_type_registry.py` checked a type only where its call scan read the call. A writer named anywhere else either never runs (`timeout`, `nice`, `env` and `command` start a program, never a shell function, and a `bash -c` string starts a shell that has not loaded one) or records a type nothing checks (`eval`, `trap`, backticks, a name kept in a variable). A new test fails on every place the runtime shell scripts or the library's fenced blocks name a writer, unless it is a call the scan reads, the writer's own definition, a `command -v` probe, a usage message, or a label handed to `plane_armed` or `plane_emit_bounded`. The call scan now knows every reserved word that starts a command (`if`, `while`, `time` and the rest), so a guarded call is read, not flagged. `public-write-guard.py`, which runs a writer through `bash -c`, has its helper scanned like the other Python writers, and a tripwire fails on any Python module that names a shell writer without that. Its bound: a writer whose name is assembled at run time is named nowhere, so no scan of the text sees it.
+
 ### Fixed — fleet-pulse no longer counts a push the manager's box never took as delivered, never types into a held box, and bounds a box that takes no input (#2120)
 
 `notify_manager` ended `bot_tmux_send ... || true`. So a push typed and never submitted (rc 3 since #2108) returned 0, and `debounce_notify` closed the alert's window: the alert went quiet until its 6-hour re-notify, though nobody had read it. And since #2108, a push to a box that never shows it waits up to 10 s before giving up, once per alert, all ahead of the sweep's Telegram escalation.

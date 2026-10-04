@@ -5,7 +5,8 @@
 # through the fleet-event door (emit_fleet_event). Works as both PreToolUse and
 # PostToolUse hook.
 #
-# Captures: tool_call, session events.
+# Captures: tool_call. A Pre/PostToolUse payload carries no session lifecycle
+# field, so no session event can be derived here.
 # NOTE: context_warning and rate_limit are NOT available via the Claude Code
 # hook payload (PreToolUse/PostToolUse). Managers must use live checks for those.
 #
@@ -35,13 +36,13 @@ payload="$(cat)"
 bot="${BOT_ID:-unknown}"
 
 # --- Parse payload and emit event(s) ---
-# Single python3 call: parse payload, classify event type, print one
+# Single python3 call: parse the payload and print one
 # `<type>\t<data-json>` line per event; every line then goes through the ONE
 # fleet-event door (cutover B2: emit_fleet_event lands it on the plane with
 # provenance, alias-anchored, and the JSONL append retires with the family —
 # this script printed straight into fleet-<day>.jsonl before, so its rows were
-# invisible to `claudlobby event list` from the flip on). Values passed via env to
-# avoid shell injection.
+# invisible to `claudlobby event list` from the flip on). The payload reaches
+# python on stdin, never inside its source, so payload text cannot inject code.
 python3 -c "
 import json, sys
 
@@ -72,11 +73,6 @@ if tool:
 # NOTE: context_warning and rate_limit are not available in the hook payload.
 # The PreToolUse/PostToolUse schema does not include context_window_percent
 # or rate_limited fields. Managers must use live checks for these signals.
-
-# Session events (start, stop, etc.)
-session_event = p.get('session_event')
-if session_event:
-    evt('session_event', {'event': session_event, 'session': session})
 
 # Print all events, one per line
 for e in events:

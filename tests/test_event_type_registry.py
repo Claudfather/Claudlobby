@@ -102,7 +102,7 @@ LOCAL_WRAPPERS = {
 # hands each type to evt()...
 VARIABLE_TYPES = {
     (RS + "bot-vitals.sh", "emit_fleet_event", '"$_etype"'):
-        (r"\bevt\('([a-z][a-z0-9_]*)'", {"tool_call", "session_event"}),
+        (r"\bevt\('([a-z][a-z0-9_]*)'", {"tool_call"}),
     (RS + "host-health-check.sh", "emit_failure_alert", '"$KEY"'):
         (r'\bKEY="([a-z][a-z0-9_]*)"', {"host_health", "undervoltage", "storage_stall"}),
 }
