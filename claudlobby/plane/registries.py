@@ -208,15 +208,17 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "checkin_decision": "notice",
     "checkin_dispatch": "notice",
     # #1686: the host's heavy-job slot. A hold and its release, a call refused
-    # because every slot was taken, a hold whose holder died without a release
-    # (across_reset: it was running when the host reset, #1644's evidence), and
-    # a heavy-looking command the matcher would not parse. The record, never a
-    # page.
+    # because every slot was taken or a free one was another caller's turn, a
+    # hold whose holder died without a release (across_reset: it was running
+    # when the host reset, #1644's evidence), a heavy-looking command the
+    # matcher would not parse, and (#2124) a queue ticket dropped because its
+    # holder stayed silent once a slot was free. The record, never a page.
     "heavy_slot_acquired": "notice",
     "heavy_slot_released": "notice",
     "heavy_slot_refused": "notice",
     "heavy_slot_unreleased": "notice",
     "heavy_slot_unparsed": "notice",
+    "heavy_slot_ticket_dropped": "notice",
     # The public-write guard: a refused GitHub-bound write (the record), and an
     # armed guard that found no host list. That one is critical because the
     # protection someone armed is off until the list is written: it shows in

@@ -8,8 +8,9 @@
 # point: for each Bash tool call it puts claudlobby/_runtime_scripts/heavy-slot.py's wrapper in front of
 # every heavy command (a whole pytest or vitest suite, an npm/pnpm/yarn install,
 # a test or build script, next build, Playwright, Chromium) and leaves every
-# other byte alone; when every slot is taken it refuses the call before
-# anything runs, naming the holder. The decision lives in heavy-slot.py (stdlib,
+# other byte alone; when every slot is taken, or a free slot is another
+# caller's turn in the queue, it refuses the call before anything runs, naming
+# the holder or the turn. The decision lives in heavy-slot.py (stdlib,
 # unit-tested); this file is the cheap front door.
 #
 # COMPOSED ONLY FOR A BOT THAT OPTED IN (`heavy_slot: true` in fleet.yaml): a
