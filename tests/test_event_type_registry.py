@@ -208,6 +208,7 @@ def test_the_shell_scan_finds_the_writers():
               "source_behind", "vault_guard_denied", "auth_mint_failed", "audit_completed"):
         assert t in found, t
     assert {name for _w, _l, name, _word in sites} == set(SHELL_WRITERS) | {"_event"}
+    assert any(p.parent != LIB for p in _runtime_shell_scripts())  # the walk is recursive
 
 
 def test_the_call_pattern_reads_each_call_shape():
@@ -226,12 +227,21 @@ def test_the_call_pattern_reads_each_call_shape():
         "function notify_currency {  # a definition, not a call",
         'local t="${1:?emit_fleet_event: <type> required}"  # a usage message, not a call',
         "plane_armed emit_fleet_event || return 0  # a label, not a call",
+        "emit_fleet_event_x not_a_writer src '{}'  # a longer name is not a writer",
+        "my_emit_fleet_event not_a_writer src '{}'  # nor is a name that ends in one",
     ))
     found = [(name, word[1]) for _w, _l, name, word in _calls("x.sh", text, 0, SHELL_WRITERS)]
     assert found == [("emit_fleet_event", "plain_call"), ("emit_fleet_event", "after_operator"),
                      ("emit_fleet_event", "env_prefixed"),
                      ("emit_failure_alert", "after_keyword"), ("emit_fleet_event", "guarded")], found
     assert _unread("x.sh", text, 0, SHELL_WRITERS) == []
+
+
+def test_a_call_after_each_command_start_word_is_read():
+    for word in ("if", "elif", "then", "else", "do", "while", "until", "time"):
+        line = f"{word} emit_fleet_event after_word src '{{}}'"
+        got = [w[1] for *_, w in _calls("x.sh", line, 0, SHELL_WRITERS) if w]
+        assert got == ["after_word"], (word, got)
 
 
 def test_every_literal_type_a_shell_writer_records_is_registered():
