@@ -449,7 +449,7 @@ cleanup() {
             "$rc" "$((${pass:-0} + ${fail:-0}))"
     fi
     # Per-bot servers must be torn down with kill-server, or empty servers leak.
-    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${MP_SESSION:-}" "${IDLEK:-}" "${SOCKB:-}" "${BUSYM:-}" "${BUSYP:-}" "${BRIEF:-}" "${BRIEFBUSY:-}" "${BRIEFNOSKILL:-}" "${BRIEFWAIT:-}" "${SINK:-}" "${TR_MGR:-}" "${CK2_BOT:-}"; do
+    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${MP_SESSION:-}" "${IDLEK:-}" "${SOCKB:-}" "${BUSYM:-}" "${BUSYP:-}" "${BRIEF:-}" "${BRIEFBUSY:-}" "${BRIEFNOSKILL:-}" "${BRIEFWAIT:-}" "${SINK:-}" "${TR_MGR:-}" "${CK2_BOT:-}" "${LK:-}"; do
         [ -n "$_s" ] && command tmux -L "$(vsock "$_s")" kill-server 2>/dev/null || true
     done
     # And every server whose socket is in this run's private dir (#586), named
@@ -4507,6 +4507,74 @@ if [ "${_vg_deny:-}" = "" ]; then
     echo "      vault: $_VG_VAULT"
 fi
 rm -rf "$_VG_ROOT"
+
+val_scenario "validate #2036: two senders to one real pane arrive whole, never interleaved"
+# A REAL pane running the input-box stand-in (VAL_BOX). It echoes what is typed,
+# so a send sees its payload in the box and presses its Enter, as every send
+# must since #1236 (a pane that shows nothing is never submitted to). Its --log
+# records each submitted line, so what was submitted, and in what order, is read
+# from what the pane took rather than from the senders. Wide, so the 1800-byte
+# payloads below keep the prompt line on screen.
+LK="vallock"
+LK_OUT="$ROOT/pane-lock.submits"
+# _lk_fresh: a new pane for each pair, so text one pair left in the box cannot
+# join the next pair's submits.
+_lk_fresh() {
+    local t=0
+    command tmux -L "$(vsock "$LK")" kill-server 2>/dev/null || true
+    : > "$LK_OUT"
+    tmux new-session -d -x 250 -y 60 -s "$LK" "$VAL_BOX --log '$LK_OUT'"
+    while [ "$t" -lt 50 ]; do
+        case "$(tmux capture-pane -p -t "$LK" 2>/dev/null || true)" in *">"*) return 0 ;; esac
+        sleep 0.1
+        t=$((t + 1))
+    done
+}
+# Numbered tokens: no two chunks alike, and every byte names its sender.
+_lk_payload() {
+    local l="$1" i=1 t o=""
+    while [ "$i" -le 300 ]; do
+        printf -v t '%s%04d ' "$l" "$i"
+        o="$o$t"
+        i=$((i + 1))
+    done
+    printf '%s' "$o"
+}
+LK_A="$(_lk_payload A)"
+LK_B="$(_lk_payload B)"
+# _lk_pair <lock dir for A> <lock dir for B>: A sends slowly (0.3s between its
+# 5 chunks) and B starts once A's first chunk shows in the box. Prints "whole"
+# when the pane took exactly the two payloads, one submit each. An empty dir is
+# the shipped default, $CLAUDLOBBY_ROOT/state/pane-send.
+_lk_pair() {
+    _lk_fresh
+    ( PANE_SEND_LOCK_DIR="$1" PANE_SEND_CHUNK_SETTLE_S=0.3 \
+        pane_send_verified "$(vsock "$LK")" "$LK" "$LK_A" ) >/dev/null 2>&1 &
+    local pa=$! pb t=0
+    while [ "$t" -lt 100 ] && ! tmux capture-pane -p -t "$LK" 2>/dev/null | grep -q A0001; do
+        sleep 0.05
+        t=$((t + 1))
+    done
+    ( PANE_SEND_LOCK_DIR="$2" pane_send_verified "$(vsock "$LK")" "$LK" "$LK_B" ) >/dev/null 2>&1 &
+    pb=$!
+    wait "$pa" || true
+    wait "$pb" || true
+    sleep 0.3
+    python3 -S -E -c 'import sys
+subs = [s for s in open(sys.argv[1], "rb").read().decode("utf-8", "replace").split("\n") if s]
+print("whole" if sorted(subs) == sorted(sys.argv[2:4]) else "interleaved: %d submit(s)" % len(subs))' \
+        "$LK_OUT" "$LK_A" "$LK_B"
+}
+# The control first: each sender given its OWN lock dir, which is no shared lock
+# at all, the pre-#2036 shape. It has to interleave here, or this pane could not
+# show the defect and the check after it would prove nothing.
+_lk_r=$(_lk_pair "$ROOT/pane-lock-a" "$ROOT/pane-lock-b")
+case "$_lk_r" in interleaved*) r=yes ;; *) r=no ;; esac
+harness_check "#2036 control: two senders that share NO lock interleave in a real pane ($_lk_r)" "$r"
+_lk_r=$(_lk_pair "" "")
+[ "$_lk_r" = whole ] && r=yes || r=no
+harness_check "#2036: two senders to one real pane arrive as two whole payloads, one submit each ($_lk_r)" "$r"
+command tmux -L "$(vsock "$LK")" kill-server 2>/dev/null || true
 
 # A refusal no check reported still fails the run: a read that could not run
 # is never dropped on the floor.

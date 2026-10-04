@@ -512,9 +512,12 @@ count_send_retries() {
 # whole boot. Forwarding them here would put a second, unpinned arm axis into a
 # design whose arm identity is already pre-registered. PANE_RECEIPT_WAIT_S
 # (#1099) is here because no boot send calls the receipt gate: it is
-# dispatch-task.sh's.
+# dispatch-task.sh's. The #2036 send-lock knobs are here too: the lock wait
+# only ever runs when another sender holds the pane, which a boot sample does
+# not arrange, and PANE_SEND_LOCK_DIR is a test seam that a measurement must
+# never move (senders that disagree on it do not exclude each other).
 _FORWARDED_PANE_KNOBS="PANE_SEND_VERIFY_TICKS PANE_SEND_SETTLE_S PANE_SEND_SHOWN_TICKS PANE_SEND_ENTER_TRIES PANE_READY_TICKS PANE_VERIFY_TRACE"
-_UNFORWARDED_PANE_KNOBS="PANE_READY_POLL_S PANE_RECOVER_TICKS PANE_SEND_CHUNK_BYTES PANE_SEND_CHUNK_SETTLE_S PANE_RECEIPT_WAIT_S"
+_UNFORWARDED_PANE_KNOBS="PANE_READY_POLL_S PANE_RECOVER_TICKS PANE_SEND_CHUNK_BYTES PANE_SEND_CHUNK_SETTLE_S PANE_RECEIPT_WAIT_S PANE_SEND_LOCK_WAIT_S PANE_SEND_LOCK_DIR"
 
 # Field separator for the fate records below: ASCII unit separator, NOT a tab.
 # Tab is an IFS-whitespace character, so `IFS=<tab> read` collapses adjacent

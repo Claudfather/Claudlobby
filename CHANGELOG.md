@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — two senders to one pane no longer interleave their chunks (#2036)
+
+`pane_send_verified` has typed a payload in 400-byte chunks 0.15 s apart since #1493, so a large send takes seconds, and nothing serialised the senders of ONE pane. A second send that started in that window wrote its chunks between the first one's. On 2026-09-30 a manager's query landed inside a worker's report in a third bot's pane, splitting it mid-word, and both receipt trailers broke.
+
+- **One sender at a time per recipient.** The whole send (the wait for an input box, the chunks, the Enter, the verify and any repair) runs holding the recipient's send lock, keyed by tmux socket and session, in `$CLAUDLOBBY_ROOT/state/pane-send/`. The key reduces a target to its session name, since the CLI's transport names a pane `=<session>:` and every other injector names it bare.
+- **Every other keystroke into a pane takes the same lock,** since an Enter or an Escape pressed between another sender's chunks acts on that payload half-typed: `pane_await_receipt`'s repair Enter; the messaging owner's held-delivery repair (#2105), whose look and Enter both run under it with a 5 s wait inside the call's 15 s bound; and `bot interrupt`'s Escape, through the new `pane_send_key`.
+- **Portable, and released on every exit path.** macOS has no `flock(1)`, so a python child takes `flock(2)` through `fcntl` on a descriptor the sending subshell holds. The kernel releases it with the last descriptor, on a return, a failure, `set -e`, SIGTERM or SIGKILL alike, so there is no stale-holder recovery to get wrong. `plane_emit_bounded` closes that descriptor for the emit it backgrounds, so an orphaned emit cannot keep a pane locked.
+- **A bounded wait, and never a send past a holder.** A sender still refused after `PANE_SEND_LOCK_WAIT_S` (default 60 s) sends nothing. It names the holder on stderr, records `send_miss` with reason `recipient-lock-timeout`, and returns 75, so the dispatch and report doors record the send as `failed`.
+- **A lock that cannot be taken at all** (no lock dir, no python) is no evidence of a concurrent sender. That send goes out without the lock, loudly: stderr, plus a new `send_unlocked` event (notice). Failing closed there would stop every dispatch, report and startup prompt on the host at once over a directory permission.
+- **Cost:** one python start per send, about 54 ms on the Pi at load 15.
+- **Tests:** `tests/test_pane_send_lock.sh` (new: concurrent senders against a fake pane, the bounded refusal, release on every exit path, both unlocked paths, the receipt Enter, a swallowed Enter's retry under a second sender, both spellings of a pane, and a single key), a real-tmux case in `tests/test_message_enter_repair.py` (the owner's repair waits for a held lock), a ratchet, `tests/test_send_keys_ratchet.py`, that fails on any `send-keys` outside a function running under the lock, and a `validate-bot-change.sh` scenario that runs two senders into a real raw-mode tmux pane, with a no-shared-lock control that has to interleave.
+
 ### Fixed — the event-type gate reads every place a script names a writer, and bot-vitals drops a type no payload can produce (#2140)
 
 Two items #2122 left open from #903.

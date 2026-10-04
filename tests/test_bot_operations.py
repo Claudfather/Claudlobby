@@ -31,6 +31,7 @@ def test_private_control_uses_one_exact_native_send(tmp_path):
     (private / "lib-common.sh").write_text("""
 tmux_session_name() { printf 'worker'; }
 bot_tmux() { printf 'tmux %s\\n' "$*" >> "$CONTROL_LOG"; }
+pane_send_key() { printf 'key %s\\n' "$*" >> "$CONTROL_LOG"; }
 pane_send_verified() {
     printf 'pane %s %s %s ticks=%s\\n' "$1" "$2" "$3" "$PANE_SEND_VERIFY_TICKS" >> "$CONTROL_LOG"
 }
@@ -47,7 +48,9 @@ pane_send_verified() {
 
     interrupt = run("interrupt")
     assert interrupt.returncode == 0 and interrupt.stdout == "control-submitted\n"
-    assert log.read_text() == "tmux worker.socket send-keys -t worker Escape\n"
+    # #2036: the Escape is a keystroke into the pane, so it takes the pane's send
+    # lock through pane_send_key, never a bare send-keys.
+    assert log.read_text() == "key worker.socket worker Escape interrupt\n"
     log.unlink()
     compact = run("compact")
     assert compact.returncode == 0 and compact.stdout == "control-submitted\n"
