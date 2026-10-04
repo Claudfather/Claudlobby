@@ -197,7 +197,6 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "keepalive_skip": "notice",
     "keepalive_reload": "notice",
     "tool_call": "notice",
-    "session_event": "notice",
     # chunk K (#1467): `claudlobby fleet reports ack` records the viewer's read
     # position as a plane fact — informational, never an alert
     "reports_acked": "notice",

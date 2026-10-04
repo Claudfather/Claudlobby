@@ -7,8 +7,10 @@ never show it, and registering it later does not re-stamp the rows already
 stored. So the gate sits on everything that names a type:
 
   a. every literal type a runtime shell script, or a shell block in the
-     library, hands a shell writer is a registry key, and every call whose
-     type is a variable is listed below with the values it can take;
+     library, hands a shell writer is a registry key, every call whose type
+     is a variable is listed below with the values it can take, and no other
+     place in those texts names a writer (a call the scan cannot read either
+     never runs or records a type nothing checks);
   b. every hand-built system row and every Python writer's literal type is a
      registry key;
   c. (fleet-pulse's two critical lists are checked by an existing test,
@@ -27,6 +29,8 @@ from __future__ import annotations
 import functools
 import re
 from pathlib import Path
+
+import pytest
 
 from claudlobby.plane.registries import SYSTEM_EVENT_SEVERITY
 from tests.conftest import load_lib_module
@@ -98,7 +102,7 @@ LOCAL_WRAPPERS = {
 # hands each type to evt()...
 VARIABLE_TYPES = {
     (RS + "bot-vitals.sh", "emit_fleet_event", '"$_etype"'):
-        (r"\bevt\('([a-z][a-z0-9_]*)'", {"tool_call", "session_event"}),
+        (r"\bevt\('([a-z][a-z0-9_]*)'", {"tool_call"}),
     (RS + "host-health-check.sh", "emit_failure_alert", '"$KEY"'):
         (r'\bKEY="([a-z][a-z0-9_]*)"', {"host_health", "undervoltage", "storage_stall"}),
 }
@@ -116,17 +120,23 @@ FORWARDED_TYPES = {
 FENCE = re.compile(r"^[ \t]*```[^\n]*\n(.*?)^[ \t]*```", re.M | re.S)
 
 
+def _alt(names) -> str:
+    """A regex alternation of *names*, the longest first."""
+    return "|".join(sorted(map(re.escape, names), key=len, reverse=True))
+
+
 def _call(names) -> re.Pattern:
     """A call of one of *names* at command position: a line start, or after an
-    operator, a brace, a case arm's `)` or a keyword, behind any `NAME=value`
-    environment prefixes (`FLEET=x emit_fleet_event t` records t). A definition
-    (`name()`) and a mention (`command -v name`, a label argument) are not calls."""
-    alt = "|".join(sorted(map(re.escape, names), key=len, reverse=True))
+    operator, a brace, a case arm's `)` or a reserved word that starts a command
+    (`if`, `elif`, `then`, `else`, `do`, `while`, `until`, `time`), behind any
+    `NAME=value` environment prefixes (`FLEET=x emit_fleet_event t` records t). A
+    definition (`name()`) and a mention (`command -v name`, a label argument) are
+    not calls."""
     prefix = (r"""(?:[A-Za-z_][A-Za-z0-9_]*=(?:"(?:[^"\\\n]|\\.)*"|'[^'\n]*'|[^\s;&|()"']*)"""
               r"[ \t]+)*")
     return re.compile(
-        r"(?:^|[;&|({}!)]|\bthen\b|\bdo\b|\belse\b)[ \t]*" + prefix
-        + r"(?P<name>" + alt + r")(?=[ \t]|\\\n)",
+        r"(?:^|[;&|({}!)]|\b(?:if|elif|then|else|do|while|until|time)\b)[ \t]*" + prefix
+        + r"(?P<name>" + _alt(names) + r")(?=[ \t]|\\\n)",
         re.M)
 
 
@@ -164,21 +174,28 @@ def _calls(where: str, text: str, first_line: int, writers: dict) -> list[tuple]
 
 
 @functools.cache
-def _shell_sites() -> tuple[tuple, ...]:
-    """(file, line, writer, (argument, literal) or None) for every writer call
-    in a runtime shell script, and in a fenced block of the library's markdown
+def _shell_texts() -> tuple[tuple, ...]:
+    """(file, code, the line before it, writers) for every text gate a reads:
+    each runtime shell script, and each fenced block of the library's markdown
     (a command a composed skill or protocol has an agent run)."""
-    sites = []
+    texts = []
     for p in _runtime_shell_scripts():
         where = _rel(p)
-        sites += _calls(where, _code(_text(p)), 0,
-                        {**SHELL_WRITERS, **LOCAL_WRAPPERS.get(where, {})})
+        texts.append((where, _code(_text(p)), 0,
+                      {**SHELL_WRITERS, **LOCAL_WRAPPERS.get(where, {})}))
     for p in sorted((REPO / "library").rglob("*.md")):
         text = _text(p)
         for m in FENCE.finditer(text):
-            sites += _calls(_rel(p), _code(m.group(1)), text.count("\n", 0, m.start(1)),
-                            SHELL_WRITERS)
-    return tuple(sites)
+            texts.append((_rel(p), _code(m.group(1)), text.count("\n", 0, m.start(1)),
+                          SHELL_WRITERS))
+    return tuple(texts)
+
+
+@functools.cache
+def _shell_sites() -> tuple[tuple, ...]:
+    """(file, line, writer, (argument, literal) or None) for every writer call
+    in the texts gate a reads."""
+    return tuple(site for t in _shell_texts() for site in _calls(*t))
 
 
 def test_the_shell_scan_finds_the_writers():
@@ -191,23 +208,40 @@ def test_the_shell_scan_finds_the_writers():
               "source_behind", "vault_guard_denied", "auth_mint_failed", "audit_completed"):
         assert t in found, t
     assert {name for _w, _l, name, _word in sites} == set(SHELL_WRITERS) | {"_event"}
+    assert any(p.parent != LIB for p in _runtime_shell_scripts())  # the walk is recursive
 
 
 def test_the_call_pattern_reads_each_call_shape():
     """Positive control for _call itself, one line per shape it claims: a
-    shape it stopped reading would pass every check here on nothing."""
+    shape it stopped reading would pass every check here on nothing. Every
+    other place the text names a writer is a mention or a definition, and
+    _unread names none of them."""
     text = "\n".join((
         "emit_fleet_event plain_call src '{}'",
         "true && emit_fleet_event after_operator src '{}'",
         'FOO=1 BAR="a b" emit_fleet_event env_prefixed src \'{}\' "" >/dev/null 2>&1 || true',
         "if x; then emit_failure_alert \"$d\" after_keyword \"why\"; fi",
+        "if emit_fleet_event guarded src '{}'; then :; fi",
         "command -v emit_fleet_event >/dev/null  # a mention, not a call",
         "emit_fleet_event() { :; }  # a definition, not a call",
+        "function notify_currency {  # a definition, not a call",
+        'local t="${1:?emit_fleet_event: <type> required}"  # a usage message, not a call',
+        "plane_armed emit_fleet_event || return 0  # a label, not a call",
+        "emit_fleet_event_x not_a_writer src '{}'  # a longer name is not a writer",
+        "my_emit_fleet_event not_a_writer src '{}'  # nor is a name that ends in one",
     ))
     found = [(name, word[1]) for _w, _l, name, word in _calls("x.sh", text, 0, SHELL_WRITERS)]
     assert found == [("emit_fleet_event", "plain_call"), ("emit_fleet_event", "after_operator"),
                      ("emit_fleet_event", "env_prefixed"),
-                     ("emit_failure_alert", "after_keyword")], found
+                     ("emit_failure_alert", "after_keyword"), ("emit_fleet_event", "guarded")], found
+    assert _unread("x.sh", text, 0, SHELL_WRITERS) == []
+
+
+def test_a_call_after_each_command_start_word_is_read():
+    for word in ("if", "elif", "then", "else", "do", "while", "until", "time"):
+        line = f"{word} emit_fleet_event after_word src '{{}}'"
+        got = [w[1] for *_, w in _calls("x.sh", line, 0, SHELL_WRITERS) if w]
+        assert got == ["after_word"], (word, got)
 
 
 def test_every_literal_type_a_shell_writer_records_is_registered():
@@ -248,6 +282,69 @@ def test_the_listed_values_are_registered_and_the_forwarders_are_scanned():
             assert f in SHELL_WRITERS or f in LOCAL_WRAPPERS.get(where, {}), (where, f)
 
 
+# What comes before a writer's name where it is named but not called: a
+# `command -v` probe, a usage message, the label a caller hands a helper.
+NOT_CALLS = (r"\bcommand[ \t]+-v[ \t]+", r"\$\{\d:\?", r"\bplane_(?:armed|emit_bounded)[ \t]+")
+
+
+def _unread(where: str, code: str, first_line: int, writers: dict) -> list[str]:
+    """Each place *code* names one of *writers* that is not a call _call reads,
+    a mention NOT_CALLS lists, or the writer's own definition (`name()`,
+    `function name`). The checks above see a type only where _call reads the
+    call; a writer named anywhere else either never runs or records a type none
+    of them reads, and UNREAD_SHAPES holds one of each."""
+    name = r"\b(?P<name>" + _alt(writers) + r")\b"
+    named = [m.start("name") for m in re.finditer(name, code)]
+    if not named:
+        return []
+    known = {m.start("name") for m in _call(writers).finditer(code)}
+    for pattern in (*(before + name for before in NOT_CALLS),
+                    r"^[ \t]*" + name + r"[ \t]*\(\)", r"^[ \t]*function[ \t]+" + name):
+        known |= {m.start("name") for m in re.finditer(pattern, code, re.M)}
+    lines, out = code.split("\n"), []
+    for pos in named:
+        if pos not in known:
+            n = code.count("\n", 0, pos)
+            out.append(f"{where}:{first_line + n + 1} {lines[n].strip()[:100]}")
+    return out
+
+
+def test_every_place_that_names_a_writer_is_a_call_the_scan_reads():
+    """Gate a's texts name a writer only where _unread allows it. Its bound: a
+    writer whose name is assembled at run time is named nowhere, so no scan of
+    the text sees it."""
+    unread = [u for t in _shell_texts() for u in _unread(*t)]
+    assert unread == [], ("call a writer only in a shape _call reads", unread)
+
+
+# A writer in a shape _call does not read, one line each. The first five never
+# run: `timeout`, `nice`, `env` and `command` start a program, never a shell
+# function, and a `bash -c` string starts a shell that has not loaded one. The
+# rest run the writer and record a type no check reads.
+UNREAD_SHAPES = {
+    "timeout": "timeout 5 emit_fleet_event planted src '{}'",
+    "nice": "nice -n 10 emit_fleet_event planted src '{}'",
+    "command": "command emit_fleet_event planted src '{}'",
+    "env": "env FOO=1 emit_fleet_event planted src '{}'",
+    "bash-c": "bash -c 'emit_fleet_event planted src {}'",
+    "name-in-a-variable": "w=emit_fleet_event; \"$w\" planted src '{}'",
+    "eval": "eval \"emit_fleet_event planted src '{}'\"",
+    "trap": "trap 'emit_fleet_event planted src {}' EXIT",
+    "backticks": "x=`emit_fleet_event planted src '{}'`",
+    "second-call-on-a-read-line":
+        "emit_fleet_event read src '{}'; eval \"emit_fleet_event planted src '{}'\"",
+    "inside-a-one-line-function": "f() { eval \"emit_fleet_event planted src '{}'\"; }",
+}
+
+
+@pytest.mark.parametrize("line", UNREAD_SHAPES.values(), ids=UNREAD_SHAPES)
+def test_a_writer_the_call_scan_cannot_read_is_named(line):
+    """Positive control for _unread, one line per shape."""
+    assert "planted" not in [w[1] for *_, w in _calls("x.sh", line, 0, SHELL_WRITERS) if w]
+    named = _unread("x.sh", line, 0, SHELL_WRITERS)
+    assert len(named) == 1, named
+
+
 # --- b. hand-built rows and the Python writers --------------------------------
 
 # A system row built by hand rather than through a writer names its type beside
@@ -275,6 +372,7 @@ VARIABLE_ROWS = {
 PY_WRITERS = {
     "claudlobby/plane/daemon.py": "_emit_system",
     RS + "heavy-slot.py": "_emit",
+    RS + "public-write-guard.py": "_emit",
 }
 
 
@@ -326,7 +424,7 @@ def test_the_row_and_python_scans_find_the_writers():
         assert t in rows, t
     helpers = {lit for *_, lit, _arg in _py_writer_sites()}
     for t in ("daemon_started", "daemon_stopping", "spool_drain_completed",
-              "heavy_slot_acquired", "heavy_slot_refused"):
+              "heavy_slot_acquired", "heavy_slot_refused", "public_write_refused"):
         assert t in helpers, t
 
 
@@ -364,6 +462,17 @@ def test_every_python_writer_records_a_registered_literal():
     bad = [f"{where}:{line} {helper}({arg})" for where, line, helper, lit, arg in _py_writer_sites()
            if lit is None or lit not in SYSTEM_EVENT_SEVERITY]
     assert bad == [], ("pass a registered literal type", bad)
+
+
+def test_every_python_module_that_names_a_shell_writer_is_scanned():
+    """A module that runs a shell writer through `bash -c` hands it the type its
+    own helper took, so the helper belongs in PY_WRITERS, where its callers'
+    literal types are checked. The `bash -c` string itself is no text gate a
+    reads."""
+    name = re.compile(r"\b(?:" + _alt(SHELL_WRITERS) + r")\b")
+    naming = {_rel(p) for p in _python_modules() if name.search(_code(_text(p)))}
+    assert RS + "heavy-slot.py" in naming, naming                  # the pattern still matches
+    assert naming <= PY_WRITERS.keys(), sorted(naming - PY_WRITERS.keys())
 
 
 # A file that names the system family, or (Python) a subject, may be building a

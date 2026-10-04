@@ -129,7 +129,7 @@ One line per script, for routing; operators use the public CLI. **Before changin
 
 **Monitoring and alerts**
 - `fleet-pulse.sh` — fleet watchdog: overdue dispatches, idle workers (opt-in), critical events, escalations
-- `bot-vitals.sh` — Pre/PostToolUse hook: records tool calls and session events
+- `bot-vitals.sh` — Pre/PostToolUse hook: records tool calls
 - `tail-fleet.sh` — tail and grep every bot's logs
 - `disk-monitor.sh` — daily disk check; FLEET ALERT past threshold
 - `fleet-memory-check.sh` — daily fleet RSS vs available RAM; FLEET ALERT past the reserve floor
