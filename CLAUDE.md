@@ -108,6 +108,7 @@ One line per script, for routing; operators use the public CLI. **Before changin
 **Dispatch and the task loop**
 - `dispatch.sh` — manager → worker dispatch helper; resolves the worker's tmux socket
 - `dispatch-overdue.py` — the plane matcher behind fleet-pulse: overdue, orphaned, open, unassigned rows
+- `issue-intake.py` — lists the issues a skill may take (author, or whoever applied the trust label, can triage the repo); `quote` wraps issue text as data
 - `briefing-trigger.sh` — fire a bot's scheduled briefing as a slash command
 - `manager-checkin.sh` — the check-in beat: prompts an idle manager to pick its next move (opt-in)
 
