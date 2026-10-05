@@ -213,6 +213,8 @@ RAW_SINK_CEILING_MIB = MAX_MEGABYTES * MAX_FILES * len(SIGNALS)   # 1,920 MiB �
 DEFAULT_RETENTION_DAYS = 14
 #: content-bearing log-record attributes, kept off disk unless the bot was composed `content: full` (design v2 §11)
 CONTENT_KEYS = ("prompt", "prompt_text", "response", "tool_input", "tool_parameters", "arguments", "output", "body")
+#: account identity on every Claude Code event (C6a), dropped on the same condition (epic §14 Q16, answered 2026-10-05)
+IDENTITY_KEYS = ("user.email", "user.account_uuid", "user.account_id", "user.id", "organization.id")
 def sink_dir(root: Path) -> Path: ...                # <root>/state/otel
 def retention_parser() -> argparse.ArgumentParser: ...   # add_help=False parent: --retention-days, a positive int, default DEFAULT_RETENTION_DAYS;
                                                      # `plane otel-intake` attaches it (Task 6) — parsed at run time, plane prune's mechanism
@@ -403,6 +405,7 @@ from .fleet_events import fleet_event_request       # P1 Claudlobby Task 9b (Hal
 #: Codex table joins at the companion (#2149). Spellings are read off the Step 1 capture, never off documentation.
 VENDOR_TO_HOUSE = {"claude": {
     "session_attribute": "session.id",                     # the join key (C6a: == the hook session_id, resume included)
+    "fold_role": ("claudna.role", "summarizer"),           # §14 Q15 (c): spend folds into the bot, no session counted
     "metrics": {"claude_code.cost.usage": "session.cost_usd",
                 "claude_code.token.usage": "session.tokens",          # by `type`: input, output, cacheRead → cache_read, cacheCreation → cache_write
                 "claude_code.active_time.total": "session.active_time_s"},

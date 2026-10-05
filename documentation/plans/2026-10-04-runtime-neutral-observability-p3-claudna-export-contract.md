@@ -239,6 +239,18 @@ class TestFrozenLayer:
 "Hooks stay wired" is already pinned by `tests/test_session_store_hook.py::TestWiring` (`:377-389`, the `wired` tuple); no new wiring test.
 - [ ] **Step 2:** Verify: `python3 -m pytest tests/test_session_store_activity.py -q`. Commit: `test(activity): pin the frozen activity layer (F8)`.
 
+### Task 1b: tag the summarizer's telemetry (epic §14 Q15, answered 2026-10-05)
+
+**Files:** `lib/claudna/session_store/summarize.py`, `tests/test_session_store_summarize.py` (both modified). C6a measured that
+the summarizer's `claude -p` children export full sessions under the bot's telemetry env; the operator chose (c), tag and fold.
+
+- [ ] **Step 1 (tests first):** `test_the_child_tags_its_telemetry` — `run_claude`'s child env (captured with a stub `subprocess.run`)
+  carries `OTEL_RESOURCE_ATTRIBUTES` ending in `claudna.role=summarizer`, appended after a comma to an inherited value and alone
+  when none is inherited; nothing else in the env changes.
+- [ ] **Step 2:** `summarize.py:83`, after `child_env = {**env, CHILD_ENV: "1"}`: append `claudna.role=summarizer` to
+  `OTEL_RESOURCE_ATTRIBUTES` (comma-joined, no duplicate). Harmless with telemetry off: the variable is only read by an exporter.
+- [ ] **Step 3:** CHANGELOG `### Changed` bullet under this PR's entry. Commit: `feat(summarize): tag the summarizer's telemetry (Claudlobby#2145 Q15)`.
+
 ### Task 5: the nested-child guard does not read `CLAUDE_CODE_CHILD_SESSION` — a pin (P0 fold, 2026-10-05)
 
 > **Re-written from C10/C11 (Claudlobby run log, 2026-10-05).** The forge draft below had the guard return "nested"

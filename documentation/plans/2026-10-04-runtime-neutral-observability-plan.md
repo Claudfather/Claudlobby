@@ -2252,12 +2252,14 @@ Added by ironclad cycle 1 (2026-10-05) — carried to the operator; answered whe
     clauDNA's own run log; (c) the child keeps exporting and appends a resource attribute (`claudna.role=summarizer`)
     so the intake can fold it into the parent bot's spend without counting a session. Lean: (c) — the spend is
     real and belongs to the bot, and the attribute is one line at clauDNA `summarize.py:83` (`child_env`); decides a plan 3 or plan 5
-    step and plan 4 Task 9's mapping.
+    step and plan 4 Task 9's mapping. **Answered 2026-10-05 — (c), tag and fold:** plan 5 Task 1b tags the child,
+    plan 4 Task 9 folds tagged records into the bot's spend and counts no session for them.
 16. **Account identity on every event** (C6a, measured 2026-10-05). Every Claude Code event carries `user.email`,
     `user.account_uuid`, `user.account_id`, `user.id` and `organization.id`; plan 4's `CONTENT_KEYS` drop none of
     them, so the raw files would hold the account email on every line (0700, local, 14-day retention). Lean: add an
     `IDENTITY_KEYS` drop beside `CONTENT_KEYS` for non-`full` bots — no reader names them, the bot and fleet come
     from `claudlobby.*`, and the raw files then hold nothing personal; decides one line and one test in plan 4 Task 6.
+    **Answered 2026-10-05 — drop unless `full`:** plan 4 Task 6 adds `IDENTITY_KEYS` beside `CONTENT_KEYS`.
 
 ## 15. Forge change log (2026-10-04)
 
