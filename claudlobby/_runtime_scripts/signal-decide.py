@@ -30,11 +30,15 @@ Bounds, stated once here (the hook, the guardrail and the CHANGELOG point
 here). It reads the command text: a tripwire for honest mistakes, not a
 sandbox. Out of its reach: a script file; eval of a variable; a function or
 alias; a pid passed through a file in the same command; a name built by
-expansion; env -S; a command echoed into a shell; a signal sent from another
-interpreter or by a tool that picks its own targets (npx kill-port, GNU
-parallel); process control that is not a signal verb (tmux kill-server and
-kill-session, screen -X quit, a stop or kill through the user manager); and a
-typed pid of another bot's process. The per-bot subreaper of #2158 is the
+expansion; env -S; a command echoed into a shell; a wrapper outside its table
+(taskset, chrt, unbuffer, busybox) or a `time { ...; }` group; a signal sent
+from another interpreter or by a tool that picks its own targets (npx
+kill-port, GNU parallel); process control that is not a signal verb (tmux
+kill-server and kill-session, screen -X quit, a stop or kill through the user
+manager); a typed pid of another bot's process; and a command run by a tool
+other than Bash, which is all the hook matches. A command nesting $( more than
+about 110 deep overflows this decider's stack, and the hook then fails open
+with its script_error breadcrumb. The per-bot subreaper of #2158 is the
 backstop for those.
 """
 
