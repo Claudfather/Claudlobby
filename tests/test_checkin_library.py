@@ -33,7 +33,8 @@ def _flat(text: str) -> str:
 DOORS = ['claudlobby --json --fleet "$FLEET_NAME" checkin list --bot "$BOT_ID" --last',
          'claudlobby --json --fleet "$FLEET_NAME" checkin list --bot "$BOT_ID" --since 7d --raised',
          'claudlobby --fleet "$FLEET_NAME" brief --bot $BOT_ID --json',
-         'claudlobby --fleet "$FLEET_NAME" fleet status --json', "claudron lookup --limit 5", "gh issue list",
+         'claudlobby --fleet "$FLEET_NAME" fleet status --json', "claudron lookup --limit 5",
+         'python3 "$CLAUDLOBBY_NATIVE_DIR/issue-intake.py" list',
          'claudlobby --json --fleet "$FLEET_NAME" checkin record --file DECISION_FILE --request-id CHECKIN_UUID',
          'task assign TASK_ID --bot WORKER --checkin CHECKIN_ID',
          'assignment deliver ASSIGNMENT_ID --file FILE',
@@ -103,7 +104,8 @@ def test_the_degraded_rule_is_keyed_on_mode_omitted_per_field():
 
 # --- the grants match the command lines the skill itself writes --------------------
 
-FORBIDDEN = ("Bash", "Bash(*)", "Bash(bash *)", "Bash(cat *)", "Bash(claudron *)", "Bash(sh *)", "Bash(gh *)", "Bash(claudlobby *)")
+FORBIDDEN = ("Bash", "Bash(*)", "Bash(bash *)", "Bash(cat *)", "Bash(claudron *)", "Bash(sh *)", "Bash(gh *)",
+             "Bash(claudlobby *)", "Bash(python3 *)", "Bash(gh issue list *)")
 
 
 def _bash_grant_matches(grant: str, command: str) -> bool:
@@ -114,13 +116,13 @@ def _bash_grant_matches(grant: str, command: str) -> bool:
 
 
 def _skill_command_lines() -> list[str]:
-    """Every `bash …`, `claudlobby …`, `claudron …`, `gh …` span — inline code,
+    """Every `bash …`, `claudlobby …`, `claudron …`, `gh …`, `python3 …` span — inline code,
     which MAY wrap across lines — or fenced-bash line of SKILL.md."""
     text = SKILL.read_text()
-    cmds = re.findall(r"`((?:bash|claudlobby|claudron|gh) [^`]+)`", text)
+    cmds = re.findall(r"`((?:bash|claudlobby|claudron|gh|python3) [^`]+)`", text)
     for block in re.findall(r"```bash\n(.*?)```", text, re.S):
         for line in block.splitlines():
-            if line.startswith(("bash ", "claudlobby ", "claudron ", "gh ")):
+            if line.startswith(("bash ", "claudlobby ", "claudron ", "gh ", "python3 ")):
                 cmds.append(line)
     return [_flat(c) for c in cmds]
 
@@ -140,7 +142,9 @@ def test_the_skill_grants_cover_its_own_commands_and_nothing_forbidden():
                                     r"(?:[a-z][a-z-]+ ){1,2}\*\)", g)), g
     cmds = _skill_command_lines()
     assert cmds, "no command lines found in the skill"
-    assert any(c.startswith("gh issue list ") for c in cmds)          # the wrapped span IS collected (cycle-3 R7)
+    assert any(c.startswith('python3 "$CLAUDLOBBY_NATIVE_DIR/issue-intake.py" list ')
+               for c in cmds)                                    # the wrapped span IS collected (cycle-3 R7)
+    assert not [c for c in cmds if c.startswith("gh issue list")]   # the backlog read goes through the intake
     assert "checkin record --dry-run" in SKILL.read_text()
     for block in re.findall(r"```bash\n(.*?)```", SKILL.read_text(), re.S):                                # …and none hides in a fenced block
         for line in block.splitlines():

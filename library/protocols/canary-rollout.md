@@ -46,7 +46,7 @@ Once you have decided to canary:
 3. **The operator activates the canary plan** with `host activate PLAN_ID --install-directory PATH` from an external shell. Stage the affected skill, grants and config together, then exercise real delegation and the affected operation. Observe the receiver, command result and durable record; process liveness alone is insufficient.
 4. **Record the exact candidate and results.** Fix observed failures and repeat only the affected checks. Independent-root evidence proves the candidate works there; it does not prove production data migration, Pi timing or another OS's native manager.
 5. **Review production activation separately.** `config plan` and `host activate` currently coordinate the whole host; there is no single-bot composition or activation shortcut. Existing no-restart holds block that production activation, not independent canary work. Honor the operator's rollout authorization and work-in-progress holds.
-6. **Observe the activated host.** Verify the affected paths and selected release after rollout. Retain previous immutable releases for explicit rollback; never repair generated files by hand. Then run each merged PR's rollout check against it ([verify-rollout](../guardrails/verify-rollout.md)).
+6. **Observe the activated host.** Verify the affected paths and selected release after rollout. Retain previous immutable releases for explicit rollback; never repair generated files by hand. Then run each merged PR's rollout check against it (the `verify-rollout` guardrail). Its commands are text from the PR body: read what each does before running it, and run them only for a PR whose author can triage the repository, as a fleet PR's can, or after someone who can has said to.
 
 ## Why this exists
 
