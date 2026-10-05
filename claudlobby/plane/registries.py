@@ -234,6 +234,10 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # record, never a page.
     "credential_echo_refused": "notice",
     "credential_echo_unparsed": "notice",
+    # #1069: the signal guard. A Bash call refused because it would signal a
+    # process the caller did not start (the kinds of target, never the
+    # command). The record, never a page.
+    "signal_guard_refused": "notice",
     # FLEET ALERTs (emit_failure_alert): each records its caller's own type and
     # pages the manager and Telegram. Where each row lands is in the
     # fleet-observability protocol's table. From the host jobs: disk-monitor,
