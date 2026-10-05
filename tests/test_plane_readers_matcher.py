@@ -281,7 +281,7 @@ def test_an_unreachable_plane_refuses_and_never_answers_empty(tmp_path):
     wrong = _matcher(root, "--open", "w1", "--fleet", F, "--root", str(other))
     assert wrong.returncode == 3 and wrong.stdout == "" and "holds no bot of fleet" in wrong.stderr
     (root / "state" / "plane" / "plane.db").unlink()
-    for args in (("--open", "w1"), ("--open-task", "w1"), ("--all", str(NOW_EPOCH)),
+    for args in (("--open", "w1"), ("--all", str(NOW_EPOCH)),
                  ("--unassigned", str(NOW_EPOCH)), ("--orphans", str(NOW_EPOCH), "--bots-dir", str(root))):
         gone = _matcher(root, *args, "--fleet", F)
         assert gone.returncode == 3 and gone.stdout == "" and "UNREACHABLE" in gone.stderr, (args, gone.stderr)
@@ -362,17 +362,15 @@ def test_the_grammar_refuses_a_dropped_value_and_a_path_in_the_bot_slot(tmp_path
                  ("--all", str(NOW_EPOCH), "--fleet")):
         r = _matcher(root, *args, CLAUDLOBBY_FLEET="other")
         assert r.returncode == 2 and r.stdout == "" and "needs a value" in r.stderr, args
-    for mode in ("--open", "--open-task"):                          # the #1187 shape gate
-        for bad in ("/a/path", "x.jsonl", " "):
-            r = _matcher(root, mode, bad, "--fleet", F)
-            assert r.returncode == 2 and r.stdout == "" and "expects <bot_id> first" in r.stderr, (mode, bad)
-    for args in (("--open-task", "w1"), ("--orphans", "--bots-dir", str(root)), ("--unassigned",)):
+    for bad in ("/a/path", "x.jsonl", " "):                         # the #1187 shape gate
+        r = _matcher(root, "--open", bad, "--fleet", F)
+        assert r.returncode == 2 and r.stdout == "" and "expects <bot_id> first" in r.stderr, bad
+    for args in (("--open", "w1"), ("--orphans", "--bots-dir", str(root)), ("--unassigned",)):
         r = _matcher(root, *args, "--fleet", F)
         assert r.returncode == 0, (args, r.stderr)
     assert _matcher(root).returncode == 2 and _matcher(root, "--source", "plane").returncode == 2   # no such mode
-    for args in (("--all", "later"), ("--open-task", "w1", "soon")):
-        r = _matcher(root, *args, "--fleet", F)
-        assert r.returncode == 2 and "must be an integer" in r.stderr, args
+    r = _matcher(root, "--all", "later", "--fleet", F)
+    assert r.returncode == 2 and "must be an integer" in r.stderr
     # --bots-dir need not be last in what the caller assembles: --fleet/--root are stripped first
     bots = root / "bots"
     (bots / "w1" / "data").mkdir(parents=True)

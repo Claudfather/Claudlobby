@@ -149,8 +149,8 @@ class Harness:
         bdir = fleet_dir / "runtime" / "bots" / name
         bdir.mkdir(parents=True)
         svc = f"{service_prefix}.{name}"
-        # Unquoted values: bot_conf_get strips double quotes only while
-        # extract_bot_conf_var strips singles — bare values satisfy both.
+        # Unquoted values: bot_conf_get strips double quotes only, so bare
+        # values read back exactly as written.
         (bdir / "bot.conf").write_text(
             f"export BOT_NAME={name}\n"
             f"export BOT_SERVICE={svc}\n"

@@ -715,7 +715,7 @@ harness_check "#835 a second sweep does NOT re-record the same orphan (latch hol
 # ===========================================================================
 # #1187 — a read door whose misuse was indistinguishable from "nothing open".
 #
-# --open, --open-task and single-bot mode each name ONE bot and take it first;
+# --open and single-bot mode each name ONE bot and take it first;
 # --all/--orphans/--unassigned name none. Calling a bot-slot mode with the
 # every-bot grammar keeps the ARITY valid, so a path lands in the bot slot,
 # nothing matches, and it exits 0 printing nothing -- byte-identical to a real
