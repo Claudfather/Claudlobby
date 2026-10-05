@@ -35,3 +35,5 @@ Full pipeline orchestrated by the manager bot.
 
 - Every phase transition gets a Telegram message for visibility
 - Mechanical decisions: auto-proceed. Judgment calls: flag human.
+- `--issue <url>` travels as the URL: the engineer reads the issue itself, as data, and the
+  dispatch never carries its text (the `github-text-is-data` guardrail)

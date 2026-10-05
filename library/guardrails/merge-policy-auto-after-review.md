@@ -23,7 +23,7 @@ The manager auto-merges PRs when ALL of:
 
    This rung is a **mechanism, not a reminder**: telling an operator to anchor their evidence to a head cannot help when the surface they are told to read reports the head wrongly.
 
-1. **Peer review posted** — a reviewer has posted an `APPROVE` verdict (or `COMMENT` with a `**[<bot>] [VERDICT] approve**` verdict line anchored to the reviewed SHA under same-identity fallback). Read `claudlobby --json task reviews OWNER/REPO --pr N` for current-head verdicts and recorded reviewer attribution; this read does not authorize merging.
+1. **Peer review posted** — a reviewer has posted an `APPROVE` verdict (or `COMMENT` with a `**[<bot>] [VERDICT] approve**` verdict line anchored to the reviewed SHA under same-identity fallback). Read `claudlobby --json task reviews OWNER/REPO --pr N` for current-head verdicts and recorded reviewer attribution; this read does not authorize merging. A verdict counts only when that read attributes it `MATCH` to a recorded review-role report; one it reads `UNKNOWN` or `AMBIGUOUS` never counts.
 
    **MULTIPLE VERDICTS RESOLVE PER REVIEWER, NEVER GLOBAL-LATEST.** Each reviewer's own latest verdict stands, and the PR is blocked while **any** reviewer's latest is `REQUEST-CHANGES`.
 

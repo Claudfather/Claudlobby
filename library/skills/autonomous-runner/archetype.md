@@ -9,6 +9,7 @@ This archetype is the recipe for composing a bot around the `autonomous-runner` 
 - Your bots have a procedural `--auto` skill available (clauDNA provides these; check what is installed)
 - You have a target repository with a healthy backlog of well-formed issues (each containing an `## Implementation Plan` section, ideally produced by `/claudna:audit tech-debt --auto` or similar)
 - You want overnight or cadence-based PR generation without per-issue human intervention
+- The picker label is applied by people who can triage the repo: the bot takes only issues whose author can triage, or whose label one of them applied, with no change to its title or body since (`issue-intake.py`, SKILL.md Step 3)
 - You're OK with PRs awaiting a human review before merge (the contract is hard: this bot never merges)
 
 ## Composition

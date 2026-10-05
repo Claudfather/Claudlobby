@@ -32,6 +32,26 @@ to that selected root; using a second fleet inside the production root does not
 provide an independent release switch. On-demand skills, hooks and permissions
 are published only after the activation owner has quiesced affected consumers.
 
+### Refreshing a skill's installed copies
+
+A bot's skills are copies, frozen into `runtime/bots/<bot>/.claude/skills/` when a plan
+is activated. They never follow `library/` or a source checkout on their own: a changed
+skill reaches a bot only through the steps above, a release that contains it, then
+`config plan`, `config diff` and `host activate`. `config diff --bot` does not compare
+skills, so to confirm a bot carries the new copy, read its
+`.claude/skills/<name>/SKILL.md` after activation.
+
+Claudlobby never writes a user-level `~/.claude/skills/<name>/`. A copy there was put
+there by hand or by the operator's own sync, so no release or activation refreshes it
+and nothing reports when it drifts. Every bot whose Claude config directory is
+`~/.claude` (the default) loads it too, beside its own copy, and which of two
+same-named skills a session runs is not established here. After a skill changes,
+compare each such copy with a bot's activated one, then replace or delete it:
+
+```bash
+diff -r ~/.claude/skills/<name> <data-root>/<fleet-overlay>/runtime/bots/<bot>/.claude/skills/<name>
+```
+
 ## The rule as the root CLAUDE.md stated it
 
 The root `CLAUDE.md` stated the rule in this paragraph until #2035; it now keeps a summary. The paragraph predates sealed releases: where it says `generate`, read activation.
