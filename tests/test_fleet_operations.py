@@ -172,7 +172,8 @@ def test_pulse_timeout_kills_its_private_process_group(monkeypatch):
     with pytest.raises(fleet_pulse.FleetPulseError) as failure:
         fleet_pulse._sweep(["private-pulse"], {})
     assert failure.value.code == "timeout" and failure.value.effect_attempted
-    assert killed == [(731, fleet_pulse.signal.SIGKILL)]
+    # SIGTERM first, so the sweep's own traps can clean up; SIGKILL what is left.
+    assert killed == [(731, fleet_pulse.signal.SIGTERM), (731, fleet_pulse.signal.SIGKILL)]
 
 
 def test_selected_private_pulse_refuses_direct_entry(tmp_path):
