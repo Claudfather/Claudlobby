@@ -18,7 +18,9 @@ repos: Claudfather/Claudron
 > `8e895cb` adds only `.github/workflows/tests.yml` and three CHANGELOG lines). `spec:` above is a path in
 > the **Claudron** repo. Depends on: nothing — this is the epic's first PR. Waits on canaries: **C1, for
 > Task 3 only**; Tasks 1, 2 and 4 do not wait. Reforged 2026-10-05 from ironclad cycle 1 (directives
-> C1–C7; cross-cutting X1, X7, X14) — no fork or decision changed.
+> C1–C7; cross-cutting X1, X7, X14) and its interim fold (the P4 flag's naming caveat, the `session_alias`
+> default, row 10's flipper named as P1 Claudlobby's unheld Half A, row 11's `session.runtime`) — no fork or
+> decision changed.
 
 ## Summary
 
@@ -36,8 +38,9 @@ precedes any R3 consumer. (b) `merge_settings` stops carrying a private copy of 
 keys on `SNIPPET_EVENTS`, pinned by a test that a map entry added nowhere else still merges. (c) Confirm
 the ops-log id regex admits a Codex `session_id` once C1 records one; widen it — with a doc-parity table so
 `docs/CLI_CONTRACT.md` and `test_ops.py` move together — only if it does not. Deliberately left to later
-PRs: any Codex adapter, snippet, `--host` flag or capability (P4); any attribute name or normalization text
-(P2, Claudlobby); the Claudlobby `claudron` pin bump (P3).
+PRs: any Codex adapter, snippet, `hooks install --host codex` flag (name settled in P4: `--host` clashes with
+Claudron's existing `host` term; `--front-end`/`--agent` are candidates) or capability (P4); any attribute
+name or normalization text (P2, Claudlobby); the Claudlobby `claudron` pin bump (P3).
 
 ## Evidence (Claudron at `6ca2b94`)
 
@@ -107,8 +110,9 @@ None. F1–F17 are ratified (2026-10-04); this is order 1 of the epic's six PRs 
 ### Blocks
 P2 (Claudlobby) — the attribute contract needs its owner named first (R1/R2). P4 Claudron — row 12 fixes
 the owner and the parity-reader constraint the Codex snippet must satisfy; Task 2 is the shape its event
-map extends. The companion (Claudlobby#2149) — reads rows 10–12 under R6. Row flips: P1 Claudlobby Task 10
-(row 10), P3 clauDNA Task 9 (row 11) and P4 Claudron (row 12) each open the one-line Claudron PR that turns
+map extends. The companion (Claudlobby#2149) — reads rows 10–12 under R6. Row flips: P1 Claudlobby Task 10,
+Half A (row 10 — after Claudlobby's release N, which ships everything the cell cites; the held Half B changes
+none of it), P3 clauDNA Task 9 (row 11) and P4 Claudron (row 12) each open the one-line Claudron PR that turns
 a *planned* cell into the shipped text — never before the owning release exists.
 
 ### Steps
@@ -185,14 +189,14 @@ Line numbers are pre-edit; edit bottom-up or re-grep. Every touched sentence car
 
 ```markdown
 | 5 | **Session-loop protocol** (roles, ordering, single-prompt rule, claim mechanism) | Claudron (knowledge roles) | `docs/CLI_CONTRACT.md` §Session-loop protocol *(amended 2026-10-04 — was "none — changelog lore"; C2 #84 landed it, 0.4.0)* | ✓ the claim is structural — a front-end defers on the registered `hook pre-compact` entry; the `hooks.py:62` sniff is gone (R5 met); Claudlobby composes the loop per bot behind an R3 gate (`tests/test_claudron_loop.py`); a second host's snippet is row 12 |
-| 10 | **Session join key** `(runtime, session_id)` — `runtime ∈ {claude, codex}`; `session_id` the id the runtime hands its hooks, in the class `[A-Za-z0-9][A-Za-z0-9._-]{0,127}` — stated **here, once**: clauDNA `paths.py:32` (`_SID_RE`) and Claudron `ops.py:33` (`_ID_RE`) are its two copies and their tests cite this row (C1 may widen it; Task 3 leg B and the clauDNA mirror move together); plane uid `sess_` + sha256(`session_alias(id, runtime)`)[:32], where `session_alias` is the raw id for `claude` and `"<runtime>:" + id` otherwise (Claudlobby#2145 F2) | Claudlobby | **planned** (P1 Claudlobby Task 4; P1 Claudlobby Task 10 opens the Claudron PR that flips this cell): `ids.session_alias(id, runtime)` composed into `derive_session_uid(id, runtime)` in `claudlobby/plane/ids.py` (today `:79-89`, Claude-only) — the F2 material rule exists in that one function and nowhere else; its text in `documentation/architecture/observable-plane.md`; until then Claudlobby#2145 §2.2 | consumers conform: clauDNA keys sessions by `session_id` and records `runtime` at open (P1 clauDNA); P2's intake sets its session `subject = session_alias(id, runtime)` and its test pins the composition, not a coincidence; Claudron treats provenance `session:<runtime>/<sid>:<seg>` (F9) as an opaque string in both channels (`engine.py:160-161`, `amend.py:37,63,84`) — no engine change; the bought layer's `gen_ai.conversation.id` + `agent.runtime` carry the same key (§10.2) |
-| 11 | **clauDNA export contract** — `claudna.export/1` and its planned additions: item `runtime` (P1), `--include-skipped` status items and `segment{sealed_at,sealed_by,counts}` (P3), and the `entrypoint.json` record (`claudna.entrypoint/1`, F16, P3) | clauDNA | `documentation/specs/2026-09-28-session-store-design.md` §8 (the envelope: shipped, v0.26.0); the additions **planned** there (P1/P3 clauDNA; P3 clauDNA Task 9 opens the Claudron PR that flips this cell) | consumer: Claudlobby's `session-export` job (P3) conforms to §8 and reads `entrypoint.json` for the door's path — never Claude Code's `installed_plugins.json` (F16); R6: Claudlobby asserts no field before the clauDNA release that ships it |
+| 10 | **Session join key** `(runtime, session_id)` — `runtime ∈ {claude, codex}`; `session_id` the id the runtime hands its hooks, in the class `[A-Za-z0-9][A-Za-z0-9._-]{0,127}` — stated **here, once**: clauDNA `paths.py:32` (`_SID_RE`) and Claudron `ops.py:33` (`_ID_RE`) are its two copies and their tests cite this row (C1 may widen it; Task 3 leg B and the clauDNA mirror move together); plane uid `sess_` + sha256(`session_alias(id, runtime)`)[:32], where `session_alias(platform_session_id, runtime="claude")` is the raw id for `claude` (the default) and `"<runtime>:" + id` otherwise (Claudlobby#2145 F2) | Claudlobby | **planned** (P1 Claudlobby Task 4; P1 Claudlobby Task 10, Half A, opens the Claudron PR that flips this cell): `ids.session_alias(platform_session_id, runtime="claude")` composed into `derive_session_uid(platform_session_id, runtime="claude")` in `claudlobby/plane/ids.py` (today `:79-89`, Claude-only) — the F2 material rule exists in that one function and nowhere else; its text in `documentation/architecture/observable-plane.md`; until then Claudlobby#2145 §2.2 | consumers conform: clauDNA keys sessions by `session_id` and records `runtime` at open (P1 clauDNA); P2's intake sets its session `subject = session_alias(id, runtime)` and its test pins the composition, not a coincidence; Claudron treats provenance `session:<runtime>/<sid>:<seg>` (F9) as an opaque string in both channels (`engine.py:160-161`, `amend.py:37,63,84`) — no engine change; the bought layer's `gen_ai.conversation.id` + `agent.runtime` carry the same key (§10.2) |
+| 11 | **clauDNA export contract** — `claudna.export/1` and its planned additions: item `session.runtime` (P1), `--include-skipped` status items and `segment{sealed_at,sealed_by,counts}` (P3), and the `entrypoint.json` record (`claudna.entrypoint/1`, F16, P3) | clauDNA | `documentation/specs/2026-09-28-session-store-design.md` §8 (the envelope: shipped, v0.26.0); the additions **planned** there (P1/P3 clauDNA; P3 clauDNA Task 9 opens the Claudron PR that flips this cell) | consumer: Claudlobby's `session-export` job (P3) conforms to §8 and reads `entrypoint.json` for the door's path — never Claude Code's `installed_plugins.json` (F16); R6: Claudlobby asserts no field before the clauDNA release that ships it |
 | 12 | **Codex session-loop snippet** — the normative Codex `hooks.json` shape for the engine's roles; same `<executable> --vault <root> hook <event>` command form and `hook <event>` identity suffix (`CLI_CONTRACT.md:320-323,366-370`) | Claudron | **planned** (P4 Claudron, after C1/C3 — P4 itself flips this cell): its own `##` section in `docs/CLI_CONTRACT.md` with a parity test (`doc_parity.fenced_block` reads one fence per `##` section) and a capability (e.g. `codex-session-loop`) gated per §Capability probe | R6: no composer renders it before the release that ships it; the companion (Claudlobby#2149) bumps the pin afterwards. If C3 shows Codex cannot block at PreCompact, the P4 text records R-capture-prompt as not held on Codex |
 ```
 
-  Each *planned* cell names the PR that flips it to the shipped text (X14): row 10 — P1 Claudlobby Task 10;
-  row 11 — P3 clauDNA Task 9; row 12 — P4 Claudron. Until that PR merges the cell stays *planned* (R6),
-  whatever the sibling has shipped.
+  Each *planned* cell names the PR that flips it to the shipped text (X14): row 10 — P1 Claudlobby Task 10,
+  Half A (that plan's unheld release N carries everything the cell cites); row 11 — P3 clauDNA Task 9; row 12
+  — P4 Claudron. Until that PR merges the cell stays *planned* (R6), whatever the sibling has shipped.
 
 - [ ] **Step 7 — §10.8 item 12, after item 11 (`:716`):**
 
@@ -426,8 +430,9 @@ def test_the_session_id_class_is_the_documented_one():
   4; `grep -n "^## " <spec>` lists `## Amendment — 2026-10-04 …` directly before `## Appendix Z …`, the last
   `##`.
 - [ ] `grep -n "^| 1[0-2] |" <spec>` prints three rows; each "Authoritative text" cell of rows 10–12
-  contains `planned` and names its flipping PR; row 10 contains `[A-Za-z0-9][A-Za-z0-9._-]{0,127}` and
-  `session_alias`; `grep -c "amended 2026-10-04" <spec>` = 3 (the three case-sensitive stamps the steps
+  contains `planned` and names its flipping PR; row 10 contains `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`,
+  `session_alias(platform_session_id, runtime="claude")` and `Task 10, Half A`; row 11 contains `session.runtime`;
+  `grep -c "amended 2026-10-04" <spec>` = 3 (the three case-sensitive stamps the steps
   write: §10.2 Claudron *Never*, §10.3 Q1, row 5) and `grep -ci "amended 2026-10-04" <spec>` = 4 (adds the
   status sentence's "Amended"); the Claudlobby *Owns* "Added" and R8's "added" stamps are counted by neither.
 - [ ] `grep -n "event_cmds" claudron/hooks.py` prints nothing; `grep -n "SNIPPET_EVENTS" claudron/hooks.py`
@@ -445,7 +450,8 @@ def test_the_session_id_class_is_the_documented_one():
 
 ## What NOT To Do
 
-- Do not add a Codex event map, snippet, `hooks install --host`, doctor-per-host text or a
+- Do not add a Codex event map, snippet, `hooks install --host codex` (name settled in P4: `--host` clashes
+  with Claudron's existing `host` term; `--front-end`/`--agent` are candidates), doctor-per-host text or a
   `codex-session-loop` capability here — P4, after C1/C3. Do not parameterize `merge_settings` on a map
   "for P4": a Codex `hooks.json` has its own shape and `_is_claudron_hook` is bound to Claude's; P4 decides.
 - Do not "unify" the tests' `EVENT_CMD` copies (`test_hooks.py:467`, `test_doctor_hooks.py:25`) with

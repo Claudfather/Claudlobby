@@ -77,9 +77,10 @@ rest. The amendment is recorded in v2 when this plan is ratified (P1):
 - v2 §9b (`:409-426`) `session_usage` and `utilization_windows`: decided on P2's evidence.
 - v2's round-2 session-identity ruling (`:606`): the SessionStart hook `plane-session-start.sh` and
   its `process_uid` minting ("recorded for the future OTel/process join", `plane-session-start.sh:20-23`)
-  are **superseded**. The doors derive the uid from the caller's own session id (§2.2), and the OTel
+  are **superseded**. The doors derive the uid from the caller's own session id (§2.2; F1(c) as ratified,
+  A-F1 proposed, §16), and the OTel
   join is by the normalized session attribute, so the hook retires with the digest in P3. The amendment
-  also dates v2 `:63` and the comment at `ids.py:25-29` ("minted fresh per process at SessionStart"):
+  also dates v2 `:63` and the comment at `ids.py:25-28` ("minted fresh per process at SessionStart"):
   `process_uid` is unminted after P3, and `"process": "proc_"` stays registered so historical rows classify
   (ironclad cycle 1).
 - v2 §12 item 2 (`:542`), "export through OTel — authoritative domain record stays local", had the plane
@@ -110,7 +111,7 @@ owner's hook adapter installed for the bot's runtime.
   rows still join) and `"<runtime>:" + id` otherwise (F2). One implementation per language
   (`derive_session_uid` in Python; `plane-session-start.sh`'s Claude-only bash mirror stays
   parity-tested until it retires in P3). The material rule itself is one Python function,
-  `ids.session_alias(platform_session_id, runtime) -> str` (P1 Claudlobby), with
+  `ids.session_alias(platform_session_id, runtime="claude") -> str` (P1 Claudlobby), with
   `derive_session_uid(id, runtime) = derive_uid("sess", session_alias(id, runtime))`; the P2 intake's
   `session` subjects call the same function, so the F2 rule is never spelled twice (ironclad cycle 1).
 - **Where it is written (F1).** The worker's task doors (`assignment accept|progress|block|return|
@@ -248,8 +249,8 @@ the plane's registry names are the stable reader surface. Spec: §6 P2 "the Coll
 
 *Forge note (2026-10-04), F6 — two facts the context lacked:* (1) the digest rows are invisible to all
 four consumers today — `plane-readers.py` `fleet_events` filters `source_ref LIKE 'fleet-events:%'`
-(`:1155-1164,1250`) while `transcript-digest.sh:340-342` stamps `session-digest:<sid>`, and the reader
-projects the nested `detail.data` shape `emit_fleet_event` writes (`:1226-1230`), so even a matching
+(`:1155-1164,1250-1251`) while `transcript-digest.sh:340-342` stamps `session-digest:<sid>`, and the reader
+projects the nested `detail.data` shape `emit_fleet_event` writes (`:1226-1228`), so even a matching
 row would render `data: {}`; (2) a `system` row cannot carry the `session_uid` stream column
 (`contracts.py:124-141`, DDL `0011:150`). The `session_summary` registration precedent is
 `registries.py:201-204` (not `:111-121`). Spec: §6 P3 "the `session_summary` plane event".
@@ -622,7 +623,8 @@ canary table in clauDNA#395's form, naming `scripts/session_canary.py` where it 
 
 ## 6. Implementation plan
 
-Order: P0 → P1 → (P2 ∥ P3 ∥ P4). Releases gate cross-repo steps and are named in each phase.
+Order: P0 → P1 → (P2 ∥ P3 ∥ P4); P2-a and P3 Claudlobby need only P1 Claudlobby's Half A, since Half B is held
+(§10; interim fold). Releases gate cross-repo steps and are named in each phase.
 Every PR that changes runtime behavior cites canary-root observation
 (`harness/validate-bot-change.sh`) per Claudlobby's mandatory runtime validation.
 
@@ -631,7 +633,8 @@ Every PR that changes runtime behavior cites canary-root observation
 Record results in a run log next to this plan, in the style of
 `2026-09-28-unified-cli-run-log.md`. Size M, not S (ironclad cycle 1): eleven canaries, eight of which need a
 Codex install the operator's machine lacks (§14 Q3). P0 runs as **two batches**: the Claude-only batch first
-(C6, C10, C11 — they unblock P1 Half B, P2 and P3), the Codex batch (step 0, C1–C5, C7–C9) once an install
+(C6, C10, C11 — they unblock P1 (C10 decides Half A's conditional Task 7b, C11 Half B's child-shell guard), P2
+and P3), the Codex batch (step 0, C1–C5, C7–C9) once an install
 exists. Each clauDNA-relevant answer is mirrored into clauDNA's phase-3 canary table (§5.1).
 
 - [ ] **Step 0 — Codex telemetry preflight, before any Codex session** (ironclad cycle 1, security): write
@@ -694,8 +697,8 @@ exists. Each clauDNA-relevant answer is mirrored into clauDNA's phase-3 canary t
   `${CLAUDE_PLUGIN_ROOT}`)? Source says Codex sets `PLUGIN_ROOT`, `PLUGIN_DATA`, `CLAUDE_PLUGIN_ROOT` and
   `CLAUDE_PLUGIN_DATA` for plugin hook commands; confirm, and record whether a marketplace-installed clauDNA
   loads at all (clauDNA#120 saw the marketplace fetched but the plugin not installed).
-- [ ] **C9** Host identification: confirm the adapter can be selected by the hook command itself (`… hook <event> --host codex`) rather than sniffed.
-- [ ] **C10** `CLAUDE_CODE_CHILD_SESSION` leak: when a bot's tmux server is started from inside another Claude session, does the variable reach the bot? `start-bot.sh` does not scrub env. If it does, the scrub is P3 Claudlobby's conditional Task 6b (`start-bot.sh` unsets `CLAUDE_CODE_CHILD_SESSION` before `exec $CLAUDE`, `:268`, with a harness check that a bot started from inside a Claude session sees no marker); P3 clauDNA's guard task is held on it, and the 0.28 release does not wait (ironclad cycle 1).
+- [ ] **C9** Host identification: confirm the adapter can be selected by the hook command itself (`… hook --host codex <event>` — the selector precedes the event, as in `session-store.sh --host codex <event>`, §6 P4 spec) rather than sniffed.
+- [ ] **C10** `CLAUDE_CODE_CHILD_SESSION` leak: when a bot's tmux server is started from inside another Claude session, does the variable reach the bot? `start-bot.sh` does not scrub env. If it does, the scrub is P1 Claudlobby Task 7b (Half A; `tests/test_boot_policy_conformance.py`): `start-bot.sh` unsets `CLAUDE_CODE_CHILD_SESSION` before `exec $CLAUDE` (`:268`), with a subprocess check that a bot started from inside a Claude session sees no marker; P3 clauDNA's guard task (plan 5 Task 5) waits on it, and the 0.28 release does not wait (ironclad cycle 1; the "P3 Claudlobby Task 6b" name was a slip — interim fold).
 - [ ] **C11** Claude session id in tools: in a tmux-hosted bot, does the Bash tool's `CLAUDE_CODE_SESSION_ID` equal the SessionStart payload's `session_id`, from the main thread and from an Agent subagent (whose shells carry `CLAUDE_CODE_CHILD_SESSION=1`)? If a subagent's id differs, F1(c) doors running under `CLAUDE_CODE_CHILD_SESSION=1` record no uid. (The
   env-vars reference now says the variable "matches the `session_id` field in the hook JSON input" for Bash
   and hook subprocesses; the canary still measures it, from a subagent in particular.)
@@ -734,27 +737,28 @@ Claudlobby:
   - A `codex` bot fails validation with "execution adapter not shipped" until the companion lands.
   - Docs: `documentation/fleet-yaml-schema.md`, `fleet.yaml.example`, `config_explain`.
 - [ ] Composed `CLAUDLOBBY_RUNTIME` in `bot.conf`, so the doors know the runtime for `derive_session_uid(…, runtime)`. Add a row in `documentation/environment-variables.md` and a composer test.
-- [ ] `BotPayload.runtime` in the registry keyframe (`contracts.py:670-688`, `extra="forbid"`), with a payload schema bump and `registry_emit.bot_payload`.
+- [ ] `BotPayload.runtime` in the registry keyframe (`contracts.py:670-688`, `extra="forbid"`) and `registry_emit.bot_payload`.
   - Decided in the per-PR plan: an **additive optional field with a `wire_additions` declaration, no
     payload-schema bump** (the `WorkstreamEvent.waiting_on` precedent, `migration_plan.py:421-424`), written
     only when it carries information — `registry_emit.py:170-173`'s rule, so a keyframe drained by an older
     daemon keeps the shape every daemon accepts. In P1 every bot is `claude`, so no keyframe carries the key
     until the companion ships on a release whose floor includes this contract.
-- [ ] `ids.session_alias(platform_session_id, runtime) -> str` (the raw id for `claude`, `f"{runtime}:{id}"` otherwise — the one statement of F2's material rule) and `derive_session_uid(platform_session_id, runtime="claude") = derive_uid("sess", session_alias(…))` per F2, in Python (the doors' only derivation; the P2 intake's `session` subjects call `session_alias` too — ironclad cycle 1). The bash mirror in `plane-session-start.sh` stays Claude-only until it retires in P3 (no Codex bot can run before the companion). Extend `tests/test_plane_ids.py` with a Codex case that pins the composition.
-- [ ] Task and report doors attach `session_uid` per F1(c), derived from the caller's session-id env (§2.2):
+- [ ] `ids.session_alias(platform_session_id, runtime="claude") -> str` (the raw id for `claude`, `f"{runtime}:{id}"` otherwise — the one statement of F2's material rule) and `derive_session_uid(platform_session_id, runtime="claude") = derive_uid("sess", session_alias(…))` per F2, in Python (the doors' only derivation; the P2 intake's `session` subjects call `session_alias` too — ironclad cycle 1). The bash mirror in `plane-session-start.sh` stays Claude-only until it retires in P3 (no Codex bot can run before the companion). Extend `tests/test_plane_ids.py` with a Codex case that pins the composition.
+- [ ] Task and report doors attach `session_uid` per F1(c), derived from the caller's session-id env (§2.2) — plan 2
+  Half B (Task 6 Step 2b, Tasks 7–9), held on A-F17/A-F1 (§16):
   - `task_operations.accept` and `_assignment_report` (`claudlobby/task_operations.py:445, 473+`; raws built by `_raw()` at `:312-317`) set `events.session_uid`;
   - `encode_report_facts` (`fleet reports submit`) and the send path in `message_operations` set `sender_session_uid`.
-  - **Receipts:** per F17, a retried `--request-id` after a `/clear` or restart must not raise `ReceiptConflict`. Under F17(a), `RequestIntent` carries `session_uid` and a replay reuses it (receipt format bump). Test exactly that replay. *Ironclad cycle 1:* the spec below is corrected (decoder-first two-release sequencing; `_save` stamps the current `FORMAT_VERSION`); A-F17 (§16) proposes (c) instead, so plan 2's Task 6 is held until the operator rules.
+  - **Receipts:** per F17, a retried `--request-id` after a `/clear` or restart must not raise `ReceiptConflict`. Under F17(a), `RequestIntent` carries `session_uid` and a replay reuses it (receipt format bump). Test exactly that replay. *Ironclad cycle 1:* the spec below is corrected (decoder-first two-release sequencing; `_save` stamps the current `FORMAT_VERSION`); A-F17 (§16) proposes (c) instead, so plan 2's Task 6 Step 2b (the writer flip, Half B) is held until the operator rules; Step 2a, the decoder, is forward-compatible and ships unheld with Half A.
 
   `task show` (the reducer must keep the `session_uid` column it already selects, `task_state.py:77-85,200-204`)
-  and `_runtime_scripts/plane-lookup.py` print the session — `plane-lookup.py --session <sess_|raw>` is the door
-  that joins on it, and `session_id` is printed beside `session_uid` wherever known (the raw telemetry carries
-  the raw id; `.plane-session` holds uids only). Tests cover each door, including the leg that reaches the F17
+  and `_runtime_scripts/plane-lookup.py` print the session — `plane-lookup.py --session <sess_uid>` is the door
+  that joins on it, uid only: P1's rows carry no raw id and `.plane-session` holds uids only, so printing
+  `session_id` beside `session_uid` is what A-F1 (§16) would add (interim fold). Tests cover each door, including the leg that reaches the F17
   code: a first attempt *prepared but not committed*, then the retry from session B (the §6 P1 spec). The canary
   adds a 48 h keepalive/restart-count observation — Half B changes every task, report and message door and the
   receipt format, and no harness scenario drives them (ironclad cycle 1).
-- [ ] One Python fleet-event row helper (ironclad cycle 1, extension-check): `claudlobby/plane/fleet_events.py`
-  (the plan names it) builds exactly the row `emit_fleet_event` writes (`lib-common.sh:2118-2170`: `event_type:
+- [ ] One Python fleet-event row helper (ironclad cycle 1, extension-check; plan 2 Task 9b, **Half A**):
+  `fleet_event_request` in `claudlobby/plane/fleet_events.py` builds exactly the row `emit_fleet_event` writes (`lib-common.sh:2117-2173`: `event_type:
   system`, `source_ref: "fleet-events:…"`, `payload.data = {"source", "legacy_ts", "data"}`), with a bash/Python
   parity test; the two hand-rolled copies (`fleet_notification.py:91-97`, `message_operations.py:790-797`) adopt
   it in that PR; P2's intake events and P3's `session_export._system_event` call it. The digest is being retired
@@ -810,12 +814,16 @@ class RequestIntent:
     session_uid: str | None = None   # F17: the caller's session uid at the first attempt; a replay reuses it
 ```
 
-- **Resolution, once per invocation.** `operation_context` (`claudlobby/operation_context.py:182-210`, where
-  the caller selectors are read) resolves `session_uid = derive_session_uid(os.environ.get("CLAUDE_CODE_SESSION_ID"), runtime=os.environ.get("CLAUDLOBBY_RUNTIME", "claude"))`
-  when the id is present and `None` otherwise (§2.2: "with no session-id env, the door records no uid rather
+- **Resolution, once per invocation.** P1's `caller_session_uid()` in `operation_context` (plan 2 Task 7; bound
+  by `bind_task_context`, `claudlobby/operation_context.py:109-136`, and by the message routes; the caller
+  selectors are read at `:182-210`) maps `CLAUDLOBBY_RUNTIME` (default `claude`) to that runtime's session-id
+  env — only `claude` → `CLAUDE_CODE_SESSION_ID` today, so `codex` (or any other runtime) → `None` until C1 names
+  Codex's variable and the companion adds the row — and returns `derive_session_uid(id, runtime=runtime)` when
+  the id is present and `None` otherwise (§2.2: "with no session-id env, the door records no uid rather
   than a possibly wrong one"), and `TaskOperationContext` (`claudlobby/task_operations.py:46-66`) carries it.
-  Canary C11 decides whether a subagent's shell (`CLAUDE_CODE_CHILD_SESSION=1`) sees the same id; if it does
-  not, the resolver returns `None` under that variable rather than another session's uid.
+  Canary C11 decides whether a subagent's shell (`CLAUDE_CODE_CHILD_SESSION=1`) sees the same id; until it says
+  so (`SUBAGENT_SHELL_SHARES_SESSION_ID`), the resolver returns `None` under that variable rather than another
+  session's uid.
 - **Task doors.** `_prepare(...)` (`:320-331`) gains `session_uid`; its callers pass
   `previous.intent.session_uid if previous is not None else ctx.session_uid` — the pattern `_assignment_report`
   already uses to reuse `message_id` and `event_ids` from `previous` (`:511-513`) and `expected_by`
@@ -863,13 +871,15 @@ session B carries uid B. The same pair for `message send` and `fleet reports sub
 writer ships, the first v2 receipt is a `host migrate` blocker to every release before N for as long as it is
 retained — `state/requests/` has no prune lane — so the canary observes `host migrate`'s plan output in the
 rollback direction. **A-F17 (§16)** proposes leaving `session_uid` out of the hashed projection instead, which
-needs none of this; plan 2's Task 6 is held until the operator rules.
+needs none of this; plan 2's Task 6 Step 2b (the N+1 writer flip) is held until the operator rules, while Step 2a
+(release N's decoder, with Half A) is forward-compatible and not held.
 
 ### P2 — Local OpenTelemetry pipeline (Claudlobby; gated by F4)
 
 P2 splits (ironclad cycle 1; align-to-mission, cost-benefit, first-principles, precedent-check): **P2-b** stops
 `tool_call` and needs nothing from the Collector or the intake — it ships first in §10's order, size S;
-**P2-a** is the pipeline, size L, held on A-F4 (§16). Plan 4 (§10.1) carries both.
+**P2-a** is the pipeline, size L, held on A-F4, A-F4b, A-F3 and A-F5 (§16; per task in §10.1). Plan 4 (§10.1)
+carries both.
 
 **P2-b — marker-only `bot-vitals.sh` (first, independent, S).**
 - [ ] Stop `bot-vitals.sh` emitting `tool_call` (`:62-64`), with the #874 fix (the hook falls back to `$PWD` for
@@ -889,8 +899,8 @@ P2 splits (ironclad cycle 1; align-to-mission, cost-benefit, first-principles, p
   - Update `tests/test_event_type_registry.py:100-101`, `tests/test_plane_cutover_keepalive.py:94-110`, and `tests/test_plane_emit_class.py:170-185`. (`tests/test_system_event_retention.py:100` pins `{"tool_call","wip_uncommitted"}` and stays unchanged.)
   - Update `library/protocols/fleet-observability.md:66`, `documentation/guides/observability.md:83,88`, and the `bot-vitals` index rows (root and `_runtime_scripts` `CLAUDE.md`/`AGENTS.md`).
 
-**P2-a — the pipeline (L; held on A-F4).**
-- [ ] The `otel-collector` host service (F4): a `Switch` row (`HOST_SERVICE`, `ENROLL_HOST`, opt-in) and `host.jobs.otel-collector` (`unit: service`) running upstream `otelcol-contrib` on `127.0.0.1`. The binary is operator-installed (Claudlobby installs
+**P2-a — the pipeline (L; held on A-F4, A-F4b, A-F3, A-F5).**
+- [ ] The `otel-collector` host service (F4): a `Switch` row (`HOST_SERVICE`, `ENROLL_HOST`, opt-in, `plane=True`) and `host.jobs.otel-collector` (`unit: service`) running upstream `otelcol-contrib` on `127.0.0.1`. The binary is operator-installed (Claudlobby installs
   no third-party binaries; `host setup` refuses when the job is enrolled and the binary is missing, as it
   does for `tmux`/`claude`/`jq`, and `host doctor` gains a rung). The install instruction changes what a
   new user is told to run, so a cold-host onboarding run applies per the onboarding rule.
@@ -906,11 +916,11 @@ P2 splits (ironclad cycle 1; align-to-mission, cost-benefit, first-principles, p
   - `CLAUDE_CODE_ENABLE_TELEMETRY=1`;
   - `OTEL_LOGS_EXPORTER=otlp` and `OTEL_METRICS_EXPORTER=otlp`;
   - the protocol and an endpoint on `127.0.0.1`;
-  - `OTEL_RESOURCE_ATTRIBUTES` with fleet uid, `bot:<fleet>/<bot>` and `agent.runtime=claude`;
+  - `OTEL_RESOURCE_ATTRIBUTES` with `claudlobby.fleet=<fleet name>` (the alias, never a uid), `bot:<fleet>/<bot>` and `agent.runtime=claude`;
   - the content gates (`OTEL_LOG_USER_PROMPTS`, `OTEL_LOG_TOOL_DETAILS`) only when `content: full`.
 
   Applied at the bot's next restart. `config plan` fails when an enabled bot's host has no enrolled Collector; test it. *(A-F4b in §16 proposes a named warning instead; the step stands as ratified until the operator rules.)*
-- [ ] `plane-otel` intake: its own localhost host service, not the daemon or the view, which are pinned to their scopes, with its own `Switch` row (`HOST_SERVICE`, `OPT_IN`, `ENROLL_HOST`, `plane=True` — one row per service, `switches.py:290-310`; ironclad cycle 1). It maps an allowlist onto the daemon's socket through `daemon.send_batch` (`daemon.py:917-945`, the Python door; `emit_batch` behind it; the daemon stays the single writer):
+- [ ] `plane-otel` intake: its own localhost host service, not the daemon or the view, which are pinned to their scopes, with its own `Switch` row (`HOST_SERVICE`, `OPT_IN`, `ENROLL_HOST`, `plane=True` — one row per service, `switches.py:290-310`; ironclad cycle 1). It maps an allowlist onto the daemon's socket through `daemon.send_batch` (`daemon.py:917-941`, the Python door; `emit_batch` behind it; the daemon stays the single writer):
   - per-session cost, tokens, tool calls/failures, API requests/errors and active time as `metric_samples`
     on `subject_kind='session'` (five new `METRIC_NAMES`), with the derive-not-mint rule for session
     subjects so the sample's `subject_uid` is the F2 uid;
@@ -943,22 +953,28 @@ bots:
 ```
 
 ```python
+# claudlobby/known_values.py — beside KNOWN_EFFORTS (enums live here, one home)
+KNOWN_TELEMETRY_CONTENT: frozenset[str] = frozenset({"metadata", "full"})
+
 # claudlobby/config.py — beside IsolationConfig / ObservabilityConfig
 @dataclass(frozen=True)
 class TelemetryConfig:
     enabled: bool = False
-    content: str = "metadata"        # "metadata" | "full"
+    content: str = "metadata"        # metadata | full — KNOWN_TELEMETRY_CONTENT
 
-TELEMETRY_CONTENT = ("metadata", "full")
-
-def _parse_telemetry(raw: object, where: str) -> TelemetryConfig: ...   # unknown key → ValueError(f"{where}: telemetry: unknown key(s) …")
-def _merge_telemetry(default: TelemetryConfig | None, bot: TelemetryConfig | None) -> TelemetryConfig: ...   # field-wise, bot over defaults, built-in last
+# P2's generic strict-mapping helpers: ONE parser and ONE field-wise merger for every strict sub-mapping on
+# BotConfig (P3 Claudlobby registers `claudna:` here in one line, never a second copy)
+def _parse_strict_mapping(raw: Any, where: str, fields: dict[str, Callable[[str, Any], Any]]) -> dict: ...   # unknown key → ValueError naming it
+def _merge_fieldwise(cls, defaults_raw: Any, bot_raw: Any, name: str, key: str, fields: dict): ...   # field-wise, bot over defaults, built-in last
+_TELEMETRY_FIELDS = {"enabled": …,   # _strict_bool
+                     "content": …}   # _parse_enum(…, KNOWN_TELEMETRY_CONTENT)
+_STRICT_MAPPING_FIELDS: dict[str, dict] = {"telemetry": _TELEMETRY_FIELDS}
 
 # BotConfig gains:
-    telemetry: TelemetryConfig = TelemetryConfig()
+    telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
 ```
 
-`scalar_config_origin` (`config.py:2262-2297`) learns the mapping so `config explain` reports where each
+`scalar_config_origin` (`config.py:2262-2297`) reads `_STRICT_MAPPING_FIELDS` so `config explain` reports where each
 field came from (`bot` / `fleet.defaults` / `built_in`). `_select_bot_scalar` (`:1735-1741`) is not used:
 it selects whole values by presence, and a bot that sets only `enabled: true` must still inherit
 `content` from `defaults`. *(Correction to F4's "same precedence as other bot scalars,
@@ -993,8 +1009,8 @@ vendor's (v2 §11, `:534`) and stay off until the operator discloses `full` (iro
     )
 ```
 
-`tests/test_switches.py:98-180` (the opt-in allowlist) gains `"telemetry"` and `"otel-collector"` with
-their reasons; `claudlobby host doctor --switches --markdown` regenerates the three pinned tables
+`tests/test_switches.py:99-178` (the opt-in allowlist) gains `"telemetry"`, `"otel-collector"` and `"plane-otel"`
+with their reasons; `claudlobby host doctor --switches --markdown` regenerates the three pinned tables
 (`DOC_BLOCKS`, `switches.py:1143-1147`; pinned by `:957-969`).
 
 **What the composer writes** (`compose_bot_conf`, `claudlobby/composer.py:977`; the block goes beside
@@ -1051,7 +1067,7 @@ criterion (C6; ironclad cycle 1).
   `switches.py:326-335`). The permanently-opt-in precedents are `plane-prune-system-events` (`:350-381`)
   and the `ENROLL_HOST` jobs `update-siblings` / `vault-sync` (`:448-472`).
 - The `otel-collector` switch row: `Switch(key="otel-collector", scope=HOST_SERVICE, polarity=OPT_IN,
-  carrier=ENROLL_HOST, job="otel-collector", why_opt_in="deletes data — its file rotation ages raw telemetry "
+  carrier=ENROLL_HOST, job="otel-collector", plane=True, why_opt_in="deletes data — its file rotation ages raw telemetry "
   "out by count and age (the plane-prune-system-events category, #1744); and a resident process on the "
   "smallest host class", what="run the host's local OpenTelemetry Collector on "
   "127.0.0.1 (receives the bots' OTLP, writes rotated raw files under state/otel/, forwards an allowlist "
@@ -1060,7 +1076,7 @@ criterion (C6; ironclad cycle 1).
   plane=True, …)`, its `what` naming the Collector as its feeder: every `HOST_SERVICE` has one,
   `switches.py:290-310`, and an unrowed job gets no `host doctor --switches` recipe — ironclad cycle 1);
   `_validate_timers` (`validator.py:2094-2103` pattern) still warns `job-inert` when exactly one of the two is
-  enrolled. Both `why_opt_in` reasons sit in categories `tests/test_switches.py:98-182` admits (`telemetry`:
+  enrolled. Both `why_opt_in` reasons sit in categories `tests/test_switches.py:99-178` admits (`telemetry`:
   arrival; `otel-collector`: deletes data).
 - The binary: Claudlobby installs no third-party binaries (`commands/setup.py:85-88` refuses on a
   missing `tmux`/`claude`/`jq`; the one installer is the `claude-update` host job via `npm`,
@@ -1070,8 +1086,10 @@ criterion (C6; ironclad cycle 1).
   is enrolled**, and `host doctor` gains a rung that names the resolved binary and its version. *(The
   epic's "installed by host setup" is corrected to this; it is not a fork.)*
 - The launcher `_runtime_scripts/otel-collector.sh` is thin like `plane-daemon.sh:1-27`: sources
-  `cli-context.sh`, requires the root, resolves `OTELCOL_BIN` (`$CLAUDLOBBY_OTELCOL_BIN`, else
-  `otelcol-contrib` on PATH), and `exec`s it with `--config "$CLAUDLOBBY_ROOT/runtime/_host/otel/collector.yaml"`
+  `cli-context.sh`, requires the root, reads `OTELCOL_BIN` from `runtime/_host/otel/otelcol-bin` — the binary the
+  composer resolved at compose time (`$CLAUDLOBBY_OTELCOL_BIN`, else `otelcol-contrib` on PATH) and wrote beside the
+  config; the launcher never probes PATH itself (a unit's PATH is stripped; P2's form, interim fold) — and `exec`s
+  it with `--config "$CLAUDLOBBY_ROOT/runtime/_host/otel/collector.yaml"`
   — a file the composer renders at compose time from the entry above (the Collector-config spec, next).
   `plane-otel.sh` execs `claudlobby --root "$CLAUDLOBBY_ROOT" plane otel-intake --host 127.0.0.1 --port 4319`.
 - Documentation: `system-yaml-schema.md` roster (`:203-216`) and the `unit: service` section
@@ -1092,8 +1110,8 @@ so all three refuse together — intended:
 ```python
     # #2145 F4: a bot exporting OTLP with no Collector enrolled would send to an unbound port.
     try:
-        _otel = load_host_jobs().get("otel-collector") or {}
-        otel_enrolled = _otel.get("enroll") is True          # the service rule, composer.py:5291-5306
+        _otel_cfg = load_host_jobs().get("otel-collector") or {}   # _otel is the module alias (from . import otel_collector as _otel)
+        otel_enrolled = _otel_cfg.get("enroll") is True      # the service rule, composer.py:5291-5306
         otel_error = None
     except RuntimeError as exc:                               # a malformed host override, config.py:2142-2191
         otel_enrolled, otel_error = False, str(exc)
@@ -1250,9 +1268,9 @@ service:
   whatever `--retention-days` says; both knobs are documented. Whichever component writes `state/otel/`:
   `UMask=0077` on its unit (precedents `start-bot.sh:204`, `plane-session-start.sh:80`, `plane/spool.py:105`,
   `plane/daemon.py:749-752` — with `content: full` these files hold prompt text, and v2 F22/§11 want 0700/0600
-  for content-bearing stores; `_write_service_units`, `composer.py:4040-4175`, emits no `UMask=` today), the
+  for content-bearing stores; `_write_service_units`, `composer.py:4040-4178`, emits no `UMask=` today), the
   launcher pre-creates `state/otel/` 0700, `host doctor` gains a rung for mode, total size and oldest file, both
-  process names join `fleet-memory-check.sh:76-85`'s filter with a row in `fleet-memory-planning.md`, and the
+  process names join `fleet-memory-check.sh:82-89`'s filter with a row in `fleet-memory-planning.md`, and the
   total bound is a canary pass criterion.
 - Budget for the one-host P2 canary (C6 records the actuals; v2's decision-framework ruling: hardware
   informs budgets, never model shape): Collector RSS ≤ 192 MiB and ≤ 3 % of one core, averaged over the
@@ -1268,7 +1286,8 @@ request path would block the next exporter for up to the 5 s socket timeout; the
 the timing, or the server is a `ThreadingHTTPServer` — ironclad cycle 1), and keys everything on
 `(agent.runtime, gen_ai.conversation.id)` from the normalized attributes. It is a **translator, not a writer**:
 it posts `{"events": […]}` batches to the daemon's socket (`<root>/state/plane/ingest.sock`, `daemon.py:207-208`;
-protocol `:16-24`) through `daemon.send_batch(sock_path, events, timeout=5.0)` (`daemon.py:917-945` — "any Python
+protocol `:16-24`) through `daemon.send_batch(sock_path, events, timeout=5.0)` (`daemon.py:917-941`, signature
+`send_batch(sock_path, events, *, timeout=30.0)` — "any Python
 caller's door", which already guards the replied-and-closed race; the intake is its first production caller and
 pins its exception contract in `tests/test_plane_daemon.py`, catching `OSError`/`ValueError` to drop-and-count),
 never a private `post()`; its `serve()` mirrors `PlaneDaemon.serve(install_signals=True)`'s SIGTERM/SIGINT
@@ -1288,7 +1307,7 @@ daemon socket; one-shot timer ticks and CLI doors may call `emit_batch` in-proce
 | `session.api_requests` | metric | `{requests, errors}` (delta) | `api_request` events; `api_error` + `api_retries_exhausted` → errors | `codex.api_request` events; `error.message != nil` or `http.response.status_code ≥ 400` → errors |
 | `session.active_time_s` | metric, **enrichment only** (§2.3: Claude-only; load-bearing for nothing — busy % is `plane/utilization.py:1-17` from `bot.heartbeat`) | seconds (delta) | `claude_code.active_time.total` | — (absent) |
 | `api_error` | system event, `notice` | `data.data = {runtime, session_id, session_uid, model, status_code, attempt, exhausted, count}` | one per `api_error` / `api_retries_exhausted` (`exhausted: true`), ~~debounced to one event per session per 5-minute window~~ one event per session per **60 s intake window** with `count` (the window is the intake's only clock; see *Window*) | `codex.api_request` with an error |
-| `tool_failure_streak` | system event, `notice` | `data.data = {runtime, session_id, session_uid, tool, count}` | ≥ 3 consecutive `tool_result success=="false"` for one `gen_ai.tool.name` in a session; reset on success — the one bounded piece of cross-window state the intake keeps (see *Window*) | same, from `codex.tool_result` |
+| `tool_failure_streak` | system event, `notice` | `data.data = {runtime, session_id, session_uid, tool, count}` | ≥ 3 consecutive `tool_result success=="false"` for one `gen_ai.tool.name` in a session, counted **inside one 60 s window**; reset on success; no cross-window state (see *Window*) | same, from `codex.tool_result` |
 
 - **Window.** Metric samples are emitted once per `(runtime, session)` per 60-second window (Claude's
   metric export interval *(doc)*; Codex's exporter batches asynchronously), carrying the window's **delta**
@@ -1298,22 +1317,23 @@ daemon socket; one-shot timer ticks and CLI doors may call `emit_batch` in-proce
   description says so (`registries.py:296-337` shape `name → {unit, description}`; object values follow the
   `host.swap_pages` precedent). *(Corrected, ironclad cycle 1:)* the two system events follow the same clock —
   `api_error` is one event per session per 60 s window with `count` (the 5-minute debounce would have needed
-  state the intake forswears); `tool_failure_streak` keeps one bounded counter per `(session, tool)` — the last
-  tool name and its consecutive failures, reset on success, bounded by the live sessions, lost on restart (at
-  most one streak's start) — the intake's single exception. **A batch never mixes seen and unseen ids:** each
+  state the intake forswears); `tool_failure_streak` is counted **inside one 60 s window**, with no cross-window
+  state at all — a streak straddling a window edge is two shorter runs and may go unreported, the stated bound
+  (P2's definition, adopted in the interim fold; the cycle-1 bounded cross-window counter is dropped). **A batch
+  never mixes seen and unseen ids:** each
   window's samples go in one batch and each system event in its own single-event batch (`_verify_duplicates`
   refuses a mixed batch with `RuntimeError`, `ingest.py:548-552,598-605`, and `emit_batch` does not spool that,
-  `emit_api.py:273-280`). A straddle test — a 2+1 streak across a window edge, an `api_error` burst across one —
-  pins both.
+  `emit_api.py:273-280`). A straddle test — failures 2+2 across a window edge → no `tool_failure_streak`, 3+1 →
+  one; an `api_error` burst across one — pins both.
 - **Sidechain spend** is attributed on neither path today (ironclad cycle 1): subagent turns live in nested
   transcripts outside any segment range (`transcript_usage.py:20-25`, ~13 % of real fleet spend), and whether
   OTel attributes a subagent's `api_request` to the parent `session.id` is exactly what C11 leaves open. The
-  allowlist declares a `sidechain` bucket on `session.tokens`/`session.cost_usd` for whichever path wins (a C11
-  sub-question for OTel; time-window attribution from `<sid>/subagents/**` for the transcript path), and the
-  registry description labels it an approximation.
+  allowlist declares **no** `sidechain` bucket: `session.tokens` stays `{input, output, cache_read, cache_write}`
+  and `session.cost_usd` a number (P2's shape) — subagent attribution is §2.3 enrichment, not allowlisted (interim
+  fold; the cycle-1 bucket is dropped).
 - **Subject and identity (the derive-not-mint rule).** Samples are `metric_sample` requests with
   `subject_kind = "session"` (legal everywhere: `contracts.py:86,732-733`, `samples.py:24`, the DDL
-  CHECKs) and `subject = ids.session_alias(id, runtime)` (P1 Claudlobby: the raw id for `claude`,
+  CHECKs) and `subject = ids.session_alias(id, runtime)` (P1 Claudlobby Half A: the raw id for `claude`,
   `f"{runtime}:{id}"` otherwise — the one Python statement of F2's material rule; the intake never builds the
   string itself — ironclad cycle 1). Today
   `MetricSample` has only the alias form and `identity.resolve` mints a **random** uid on first sight
@@ -1324,14 +1344,14 @@ daemon socket; one-shot timer ticks and CLI doors may call `emit_batch` in-proce
   actor uid when `claudlobby.bot` is present. `MetricSample` has no slot to name that parent, so the P2
   plan adds an additive `subject_parent` alias, legal only for `session` subjects and declared in
   `migration_plan.py`'s `wire_additions` (the `waiting_on` precedent). `samples.py:35-43` infers the kind from the `session.`
-  prefix as it does for `host.`. The `session_uid` the P1 doors write on task events and the
+  prefix as it does for `host.`. The `session_uid` the P1 doors (Half B) write on task events and the
   `subject_uid` on these samples are then the same string.
-- **Row shape for the two system events:** the fleet-event shape, built by the one Python helper P1 adds
-  (`claudlobby/plane/fleet_events.py`, §6 P1; `source_ref = "fleet-events:…"` as the helper writes it — the
+- **Row shape for the two system events:** the fleet-event shape, built by the one Python helper P1 Half A adds
+  (`fleet_event_request`, `claudlobby/plane/fleet_events.py`, plan 2 Task 9b, §6 P1; `source_ref = "fleet-events:…"` as the helper writes it — the
   `otel:<session_uid>:<window>` sub-grammar is dropped, `event_id` already carries the dedup key;
   `data = {"source": "plane-otel", "legacy_ts": …, "data": {…}}`), subject `actor bot:<fleet>/<bot>` when the
   bot is known and the anchor pair `session`/`sess_…` otherwise, so `claudlobby event list --type api_error`
-  renders them (`plane-readers.py:1155-1164,1226-1230`). `event_id` is derived (`derive_uid("ev", …)`
+  renders them (`plane-readers.py:1155-1164,1226-1228`). `event_id` is derived (`derive_uid("ev", …)`
   over runtime, session, window and type) so a replayed Collector queue is a `duplicate`, not a second row.
 - **Registry and docs.** `METRIC_NAMES` gains the five names; `SYSTEM_EVENT_SEVERITY` gains `api_error`
   and `tool_failure_streak` at `notice` (the rule at `registries.py:100-104`; `critical` would also
@@ -1344,7 +1364,7 @@ daemon socket; one-shot timer ticks and CLI doors may call `emit_batch` in-proce
   externally produced shape comes from a live capture, never the producer's source; identifiers scrubbed):
   one window of a Claude session and one of a Codex session produce exactly the allowlisted samples with
   the expected deltas; a `tool_result` streak produces one `tool_failure_streak`; an `api_error` burst
-  produces one debounced event; a Codex `input/cached_input` pair produces uncached `input`; a payload
+  produces one per-window event; a Codex `input/cached_input` pair produces uncached `input`; a payload
   with prompt text in `metadata` mode reaches the plane with no content field; a socket miss drops and
   counts; `derive_session_uid("abc", "codex") == entity("session", session_alias("abc", "codex"))` — the test
   pins the composition, not the literal `"codex:abc"`; an unknown metric name
@@ -1353,13 +1373,13 @@ daemon socket; one-shot timer ticks and CLI doors may call `emit_batch` in-proce
 ### P3 — Summaries owned by clauDNA; the export consumer
 
 Claudlobby:
-- [ ] Per-bot `CLAUDNA_STATE_DIR=$BOT_DIR/data/claudna`, with the cutover per F14. The composer line itself ships earlier, as its own one-line PR before clauDNA 0.27 merges (§9, §10 order 3; ironclad cycle 1); this step verifies it is in place on the canary fleet and runs the F14 runbook — within F14(a), the `chmod -R a-w ~/.claudna` step is gated on the "no interactive clauDNA sessions for the service user" condition (or the service user's shell gets its own `CLAUDNA_STATE_DIR` first, verified with one session), and the old root is renamed rather than chmod'ed: the hook exits 0 and logs under a read-only root (`session-store.sh:22-31,43-44`, `cli.py:177-213`), and 0.28's `entrypoint.json` write would fail the same way. A-F14 (§16) is conditional on *why* the roots are per bot.
-- [ ] `CLAUDNA_SESSION_SUMMARY` and `CLAUDNA_HARVEST` as fleet-level opt-ins, since they spend model calls. Add `Switch` rows and regenerate the switch tables (`switches.format_markdown` into `fleet-yaml-schema.md`, `system-yaml-schema.md`, `observable-plane.md`; pinned by `tests/test_switches.py`). Add rows to `documentation/environment-variables.md:183`. The composition matches the summarizer gate (`project.py:276-287`; §4.2): compose `CLAUDNA_SESSION_SUMMARY=1` whenever `harvest: true` (the validator refuses `harvest: true` with `session_summary: false`) and `=0` for unset/false, so an unarmed bot's status item reads `skipped_reason: disabled` — the common row — rather than the `headless` the gate yields by default; `fleet-yaml-schema.md` says which reason an unarmed bot produces, and the `claudna-harvest` switch's `what` ("summaries on, typed blocks filed") is what the composition produces (ironclad cycle 1).
+- [ ] Per-bot `CLAUDNA_STATE_DIR=$BOT_DIR/data/claudna`, with the cutover per F14. The composer line itself ships earlier, as its own one-line PR before clauDNA 0.27 merges (§9, §10 order 3; ironclad cycle 1); this step verifies it is in place on the canary fleet (plan 6 Task 1) and runs the F14 runbook (plan 6 Task 7, held on A-F14) — within F14(a), the `chmod -R a-w ~/.claudna` step is gated on the "no interactive clauDNA sessions for the service user" condition (or the service user's shell gets its own `CLAUDNA_STATE_DIR` first, verified with one session), and the old root is renamed rather than chmod'ed: the hook exits 0 and logs under a read-only root (`session-store.sh:22-31,43-44`, `cli.py:177-213`), and 0.28's `entrypoint.json` write would fail the same way. A-F14 (§16) is conditional on *why* the roots are per bot: the per-bot line and the `session-export` per-bot grouping ship now (clauDNA spec §1.1 rule 3 already says per bot) and A-F14, if ratified, would revert them; only the runbook is held (interim fold).
+- [ ] `CLAUDNA_SESSION_SUMMARY` and `CLAUDNA_HARVEST` as fleet-level opt-ins, since they spend model calls. Add `Switch` rows and regenerate the switch tables (`switches.format_markdown` into `fleet-yaml-schema.md`, `system-yaml-schema.md`, `observable-plane.md`; pinned by `tests/test_switches.py`). Add rows to `documentation/environment-variables.md:183`. The composition matches the summarizer gate (`project.py:276-287`; §4.2): compose `CLAUDNA_SESSION_SUMMARY=1` whenever `harvest: true` (the loader refuses `harvest: true` with `session_summary: false` at config load — a `ValueError` from `_coerce_bot` naming both keys) and `=0` for unset/false, so an unarmed bot's status item reads `skipped.reason: disabled` — the common row — rather than the `headless` the gate yields by default; `fleet-yaml-schema.md` says which reason an unarmed bot produces, and the `claudna-harvest` switch's `what` ("summaries on, typed blocks filed") is what the composition produces (ironclad cycle 1).
 - [ ] Bump the Claudron pin `v0.6.1` → `v0.9.0`. Harvest needs ≥0.7.1, and homes ≥0.8. The jump crosses vault migrations (vault format 3 / m003 in 0.7.0, index schema 7 in 0.8.0; Claudron's CHANGELOG says to run `claudron doctor --fix`), so the bump ships with an operator-run step (it writes a git commit to a shared vault — Defaults rule): `claudron doctor --fix --json` once per vault, from one clone, not from every host. Composition then ~~refuses~~ **warns** (`shared.add("claudron-migration", …)` naming the `--fix` line, plus the doctor rung — every host-side probe warns by stated intent, `validator.py:1138-1152,1319-1331`; #2001 made `doctor` surface migrations and never `--fix`) for a vault with **pending migrations or an old vault format**, never for unrelated doctor findings (D009/D010 hook warnings, structure warnings); a hard refusal, if wanted, is scoped to plans that change that bot's session-loop composition or move the pin, with the reason warn-never-fail does not apply recorded in the plan. The probe is gated on `claudron_on_path` and memoized per `validate()` call, well under `doctor`'s 60 s. This is **its own PR (6a), after 6b** (§10.1), with a per-host runbook: upgrade → `claudron doctor --fix` from one clone → `git pull` on each clone → `config plan` (ironclad cycle 1). Canary it on one host first. Touches:
   - `pyproject.toml`;
   - `conformance.yml`;
   - `claudlobby/claudron_compat.py` and `tests/test_claudron_compat.py`;
-  - `tests/test_claudron_loop.py::TestSnippetParity` (`:453`);
+  - `tests/test_claudron_loop.py::TestSnippetParity` (`:452-500`);
   - `documentation/integrations/claudron-integration.md:7,44,48`.
 - [ ] `session-export` fleet job. It invokes the export door at its contracted path (F16):
   - `python3 <entrypoint> export --consumer claudlobby --include-skipped --json`;
@@ -1374,11 +1394,14 @@ Claudlobby:
   (`emit_api.py:273-280`), so a run that emitted [seg1, seg2] and died before `--ack` would wedge the bot
   forever with the tick exiting 0 (ironclad cycle 1, critical). A deterministic refusal
   (`ContractViolation`/`RuntimeError`) becomes a `status: skipped, skipped_reason: unexportable` item so the
-  cursor advances; after N consecutive failures per bot the job emits an `export_stalled` notice at `critical`
+  cursor advances; after N consecutive failures per bot the job emits an `export_stalled` system event at `critical`
   (the `reload_failed` precedent, `registries.py:135-136`) and `doctor` gains a rung for per-bot cursor age. The
-  job requires `plugin_version >= 0.28.0` in `entrypoint.json`, else `skip: old_entrypoint`; a non-zero exit or
-  non-JSON stdout is `export_failed` with its own counter. The export item also needs the segment's
-  `sealed_at`/`sealed_by`/`counts` (additive, the clauDNA P3 PR).
+  job reads `entrypoint.json` and skips a bot, naming the reason, on `no_entrypoint` (no file), `unknown_schema`
+  (`schema` ≠ `claudna.entrypoint/1`), `old_entrypoint` (`plugin_version` missing or `< 0.28.0`) or
+  `stale_entrypoint` (the recorded path gone) — a skip, not a failure; a 60 s timeout is `export_timeout` and a
+  non-zero exit or non-JSON stdout is `export_failed` (its own counter), both counted as failures — six reasons,
+  the same six P3 clauDNA's writer-side text lists (interim fold). The export item also needs the segment's
+  `sealed_at`/`sealed_by`/`counts` (additive, the clauDNA P3 PR; plan 5 Task 1, not held — A-F6 would only add to it).
 - [ ] Retire `transcript-digest.sh`, removing it from:
   - `claudlobby/system.yaml:402-417` and `system.yaml.example:444`;
   - its `Switch` row;
@@ -1397,7 +1420,7 @@ clauDNA:
   plugin version, with the join key spelled `runtime` (not `host`) and the staleness semantics the consumer
   relies on stated on the writer side too. Spec §8; tested.
 - [ ] Freeze the activity layer per F8, with a spec note. `TestFrozenLayer`'s docstring says the freeze covers the store's hooks and kinds and not `plugin-hooks/telemetry-emit.sh` (Claudosseum's `skill_invocation` writer, its own hook entry by owner decision, phase-4 plan `:97-99`; §11).
-- [ ] Child guard reads `CLAUDE_CODE_CHILD_SESSION=1` first, keeping the pid and entrypoint checks as fallbacks. This step is held until P3 Claudlobby's conditional Task 6b lands if C10 shows a leak; the 0.28 release does not wait. If C11's hook-env leg shows a subagent's `PostToolUse` carrying the marker with the parent's `session_id`, the marker check is restricted to the lifecycle events. Update the `SETUP_GUIDE.md` env table (`:309-317`) if any documented semantics change; fix the "Claudlobby sets `CLAUDNA_TELEMETRY=1`" claims (`SETUP_GUIDE.md:704`, `telemetry.py:3`, phase-4 plan `:68` — it never has, `composer.py:1319-1330`); and close Claudlobby#1961's `CLAUDLOBBY_HOOK_CHILD` thread in spec §11.5 (never built; superseded by Claude Code's own marker, spec §4.4 `:145`, §11.5 `:464`).
+- [ ] Child guard reads `CLAUDE_CODE_CHILD_SESSION=1` first, keeping the pid and entrypoint checks as fallbacks. This step waits on P1 Claudlobby Task 7b (Half A; `tests/test_boot_policy_conformance.py`) if C10 shows a leak; the 0.28 release does not wait. If C11's hook-env leg shows a subagent's `PostToolUse` carrying the marker with the parent's `session_id`, the marker check is restricted to the lifecycle events. Update the `SETUP_GUIDE.md` env table (`:309-317`) if any documented semantics change; fix the "Claudlobby sets `CLAUDNA_TELEMETRY=1`" claims (`SETUP_GUIDE.md:704`, `telemetry.py:3`, phase-4 plan `:68` — it never has, `composer.py:1319-1330`); and close Claudlobby#1961's `CLAUDLOBBY_HOOK_CHILD` thread in spec §11.5 (never built; superseded by Claude Code's own marker, spec §4.4 `:145`, §11.5 `:464`).
 - [ ] Release clauDNA 0.28.0.
 
 #### Spec: the clauDNA export contract additions (`--include-skipped`, `runtime`, `entrypoint.json`)
@@ -1463,9 +1486,12 @@ which bots turn off (`CLAUDNA_SESSION_BRIEFING=0`, `session-start.sh:26-29`) and
   skips the bot until the next SessionStart rewrites the file; it never guesses another path. **Staleness is
   more than absence** (ironclad cycle 1): Claude Code's plugin cache is per version and nothing establishes
   that the previous directory is removed on update, so a surviving directory would run an *older* store
-  against newer files — the consumer requires `plugin_version >= 0.28.0`, else `skip: old_entrypoint` (an
-  older entrypoint rejects `--include-skipped` with exit 2, none of the enumerated skips); a non-zero exit or
-  non-JSON stdout is `export_failed` with its own counter; the P3 canary records whether `claude plugin update`
+  against newer files — the consumer requires `plugin_version >= 0.28.0` (an older entrypoint rejects
+  `--include-skipped` with exit 2, which no skip would name). The consumer's reasons are six, and P3 clauDNA's
+  writer-side text lists the same six (interim fold): `no_entrypoint` (no file), `unknown_schema` (`schema` ≠
+  `claudna.entrypoint/1`), `old_entrypoint` (`plugin_version` missing or `< 0.28.0`), `stale_entrypoint` (the
+  recorded path gone), `export_timeout`, and `export_failed` (a non-zero exit or non-JSON stdout, with its own
+  counter); the P3 canary records whether `claude plugin update`
   leaves the prior `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>` directory.
 - Spec §8 gains this record as the second contract surface beside the export envelope; spec §1.1 rule 2 and
   §8 `:440` ("the plane never parses the store's files") are amended to "…never parses the store's *session*
@@ -1483,10 +1509,10 @@ the payload.*
 
 **What the digest's consumers can actually read today.** The four F6 consumers reach digest rows through
 one door, `claudlobby event list --type session_digest` (`fleet-digest/SKILL.md:58-69`;
-`fleet-monitoring.md:98`), which `plane-readers.py`'s `fleet_events` serves (`:1238-1280`). That reader
-(1) filters `e.source_ref LIKE 'fleet-events:%'` (`:1155-1164,1250`), while `transcript-digest.sh` stamps
+`fleet-monitoring.md:98`), which `plane-readers.py`'s `fleet_events` serves (`:1238-1279`). That reader
+(1) filters `e.source_ref LIKE 'fleet-events:%'` (`:1155-1164,1250-1251`), while `transcript-digest.sh` stamps
 `source_ref = "session-digest:<sid>"` (`:340-342`); and (2) projects `data` from the nested
-`detail.data` that `emit_fleet_event` writes (`legacy_event_row`, `:1226-1230`; `lib-common.sh:2163-2165`),
+`detail.data` that `emit_fleet_event` writes (`legacy_event_row`, `:1226-1228`; `lib-common.sh:2166-2167`),
 while the digest writes a flat `data`. So a `session_digest` row never reaches `fleet-digest` today, and
 would render as `data: {}` if it did. Neither side is tested (`tests/test_transcript_digest.sh` asserts on
 the staged payload only). The filter landed in #1456, and #1503 then moved the digest onto the plane without a
@@ -1631,7 +1657,8 @@ clauDNA:
 Claudron:
 - [ ] A Codex adapter in `hooks.py`:
   - event map, snippet renderer for Codex `hooks.json`, and merge;
-  - `hooks install --host codex`;
+  - `hooks install --host codex` (name settled in P4: `--host` clashes with Claudron's existing `host` term;
+    `--front-end`/`--agent` are candidates);
   - doctor D009/D010 per host;
   - a normative Codex snippet in `docs/CLI_CONTRACT.md` with a parity test;
   - a capability (e.g. `codex-session-loop`) with its gate sentence.
@@ -1802,8 +1829,8 @@ adapters (P4) in the same C1 captures, per its "live capture, never the producer
 
 ## 8. Verification checklist
 
-- [ ] `task show` names the session that worked on a task, for a Claude bot, and `plane-lookup.py --session` joins on it (`session_id` printed beside `session_uid`). A Codex bot follows in the companion.
-- [ ] One query over `state/otel/` answers "what did session X cost and which tools failed" — the `jq` is written once in `observable-plane.md` and run as a P2 canary step, starting from what `task show` prints.
+- [ ] `task show` names the session that worked on a task, for a Claude bot, and `plane-lookup.py --session <sess_uid>` joins on it (the raw `session_id` beside it only if A-F1 is ratified, §16). A Codex bot follows in the companion.
+- [ ] One query over `state/otel/` answers "what did session X cost and which tools failed" — the `jq` is written once in `observable-plane.md` and run as a P2 canary step, starting from what `task show` prints when P1 Half B has landed; until then from `derive_session_uid(hook session_id)` directly.
 - [ ] The first reader of the intra-session layer is named before P2-a opens, and the allowlist is sized to it (ironclad cycle 1): a fleet-pulse rung reading `api_error` as the `rate_limit` instrument `fleet-observability.md:94` says does not exist, `brief_read.py:114`/`usage_read.py:39` repointed *inside* P2, or the `fleet-digest` `plane samples` grant with a `plane samples session.tool_calls` step. The plane leg lands with that reader (A-F3).
 - [ ] Fleet-level RSS/CPU on the P2 canary host, before and after, within the Pi 5 baseline; the canary RC/Telegram bot answers an inbound message on day 1 and day 7.
 - [ ] 48 h keepalive/restart-count observation for P1 Half B on the canary root.
@@ -1830,10 +1857,10 @@ adapters (P4) in the same C1 captures, per its "live capture, never the producer
 | Phase | Size | Repos | Release gates |
 |---|---|---|---|
 | P0 | ~~S~~ **M** (eleven canaries, eight needing a Codex install; two batches, §6 P0) | all | — |
-| P1 | M | Claudron (spec, prep), Claudlobby, clauDNA | clauDNA 0.27 release |
+| P1 | M (P1 Claudlobby ships Half A, unheld, then Half B, held on A-F17/A-F1; §10.1) | Claudron (spec, prep), Claudlobby, clauDNA | clauDNA 0.27 release |
 | P2-b | **S** (independent; first) | Claudlobby | — |
-| P2-a | **L** (held on A-F4, §16) | Claudlobby | — |
-| P3 | M (P3 Claudlobby is M → L and splits 6b/6a, §10.1) | Claudlobby, clauDNA | clauDNA 0.28 release; Claudron pin bump (6a) |
+| P2-a | **L** (held on A-F4, A-F4b, A-F3, A-F5; §16) | Claudlobby | — |
+| P3 | M (P3 Claudlobby is M → L and splits 6b/6a; only its F14 runbook is held, on A-F14; §10.1) | Claudlobby, clauDNA | clauDNA 0.28 release; Claudron pin bump (6a) |
 | P4 | L | clauDNA, Claudron, Claudlobby (adapters) | clauDNA and Claudron releases |
 | Companion | L | Claudlobby | needs P1, P4 releases |
 
@@ -1843,18 +1870,22 @@ adapters (P4) in the same C1 captures, per its "live capture, never the producer
 clauDNA runtime-at-open change, then its release. 4. The Claudlobby session uid on its doors. 5. P2 and P3 in
 parallel. 6. P4 per repo.~~
 
-PR order (ironclad cycle 1):
+PR order (ironclad cycle 1; packaging and holds per the interim fold):
 1. P0, the Claude-only batch (C6, C10, C11).
-2. **P2-b** — marker-only `bot-vitals.sh` with the #874 fix (S; §6 P2).
+2. **P2-b** — marker-only `bot-vitals.sh` with the #874 fix (plan 4 Tasks 1–2; S; §6 P2).
 3. **Per-bot `CLAUDNA_STATE_DIR="$BOT_DIR/data/claudna"`** — one composer line and one test, its own Claudlobby PR,
-   before clauDNA 0.27 merges (§9); the earliest Claudlobby item.
+   before clauDNA 0.27 merges (§9); the earliest Claudlobby item. It ships now; A-F14 (§16), if ratified, would
+   revert it.
 4. The Claudron boundary-spec PR (plan 1).
-5. The Claudlobby runtime field and derivation (plan 2, Half A), then the session uid on its doors and the
-   receipts (Half B; Task 6 held on A-F17).
+5. **P1 Claudlobby Half A** (plan 2, release N; unheld): the runtime field and derivation (Tasks 1–5), the receipt
+   decoder (Task 6 Step 2a — forward-compatible), the C10 scrub if C10 leaks (Task 7b), the fleet-event helper
+   (Task 9b) and the row-10 flip. Then **Half B** (release N+1, after every host has activated N): the writer flip
+   (Task 6 Step 2b), the doors and readers (Tasks 7–9), their docs and the door observation — held on A-F17/A-F1.
 6. The clauDNA runtime-at-open change (plan 3), then its 0.27 release — with the mission amendments (D1 before
-   plan 2 merges; D2 before 0.27 ships).
-7. In parallel: **P2-a** (plan 4; held on A-F4) ∥ (**P3 clauDNA** 0.28 (plan 5) → **P3 Claudlobby 6b** (plan 6,
-   Tasks 1–2 and 4–8)).
+   plan 2's Half A merges; D2 before 0.27 ships).
+7. In parallel: **P2-a** (plan 4 Tasks 3–9, on Half A; held on A-F4, A-F4b, A-F3, A-F5) ∥ (**P3 clauDNA** 0.28
+   (plan 5; Task 1 not held — A-F6 is additive) → **P3 Claudlobby 6b** (plan 6, on Half A and 0.28; Tasks 1–2 and
+   4–8, of which only Task 7, the F14 runbook, is held — A-F14)).
 8. **P3 Claudlobby 6a** — the Claudron pin bump, its own PR after 6b, with the per-host runbook.
 9. P0, the Codex batch (install → step 0 → C1–C5, C7–C9).
 10. P4 per repo.
@@ -1872,24 +1903,26 @@ One plan per PR beside this file, each with `epic:` pointing here. P4 and the co
 | Order | Plan | Repo | Size |
 |---|---|---|---|
 | 1 | `2026-10-04-runtime-neutral-observability-p1-claudron-boundary-spec.md` | Claudron | S |
-| 2 | `2026-10-04-runtime-neutral-observability-p1-claudlobby-runtime-and-join-key.md` | Claudlobby | M |
+| 2 | `2026-10-04-runtime-neutral-observability-p1-claudlobby-runtime-and-join-key.md` | Claudlobby | M — Half A (release N: Tasks 1–5, Task 6 Step 2a, 7b, 9b, the row-10 flip; unheld), then Half B (release N+1: Task 6 Step 2b, Tasks 7–9, their docs and observation; held on A-F17/A-F1) |
 | 3 | `2026-10-04-runtime-neutral-observability-p1-claudna-runtime-at-open.md` | clauDNA | M |
-| 4 | `2026-10-04-runtime-neutral-observability-p2-otel-pipeline.md` | Claudlobby | ~~L~~ P2-b S (Task 7/9, first) + P2-a L (held on A-F4) |
-| 5 | `2026-10-04-runtime-neutral-observability-p3-claudna-export-contract.md` | clauDNA | M (nearer S–M) |
-| 6 | `2026-10-04-runtime-neutral-observability-p3-claudlobby-summaries.md` | Claudlobby | ~~M → L (eight tasks; seam after the Claudron pin)~~ two PRs: 6b M (Tasks 1–2, 4–8), then 6a S (Task 3, the pin bump) |
+| 4 | `2026-10-04-runtime-neutral-observability-p2-otel-pipeline.md` | Claudlobby | ~~L~~ P2-b S (Tasks 1–2, first) + P2-a L (Tasks 3–9; held: Tasks 3, 4, 7, 8, 9 on A-F4, Task 4's OTTL block also on A-F5, Task 5 on A-F4b, Task 6 Steps 3–5 on A-F3) |
+| 5 | `2026-10-04-runtime-neutral-observability-p3-claudna-export-contract.md` | clauDNA | M (nearer S–M); not held — A-F6 would add a key to Task 1's `segment` object, an additive follow-up |
+| 6 | `2026-10-04-runtime-neutral-observability-p3-claudlobby-summaries.md` | Claudlobby | ~~M → L (eight tasks; seam after the Claudron pin)~~ two PRs: 6b M (Tasks 1–2, 4–8; only Task 7, the F14 runbook, is held — A-F14), then 6a S (Task 3, the pin bump) |
 
-Order 2 may split at its marked seam (runtime field and derivation first, the doors and receipts second)
-if the first half is wanted on a bot before the receipt bump is reviewed. Plan 5 releases clauDNA before
+Order 2 splits at its marked seam, and the split is required at the release level (F17 decoder-first): Half A
+carries everything unheld — the decoder, Task 7b and Task 9b among it, which P3 clauDNA's Task 5, P2-a and P3
+Claudlobby consume — and Half B only what waits on A-F17/A-F1 (interim fold). Plan 5 releases clauDNA before
 plan 6 can consume it. *(Ironclad cycle 1:)* the per-bot `CLAUDNA_STATE_DIR` one-liner (§10 order 3) needs no
-plan file — one composer line, one test, a CHANGELOG line — and plan 6's Task 2 becomes a verification that it
+plan file — one composer line, one test, a CHANGELOG line — and plan 6's Task 1 becomes a verification that it
 landed. Plans 4 and 6 edit the same files (`test_event_type_registry.py`, `fleet-observability.md`, the switch
 tables, `system.yaml`, `observable-plane.md`, both `CLAUDE.md`/`AGENTS.md` pairs) with no ordering between P2
 and P3: whichever merges second rebases, regenerates the three switch tables and `system.yaml.example`,
 re-copies both `AGENTS.md`, and re-runs `tests/test_instruction_budget.py`, `tests/test_switches.py` and
-`tests/test_event_type_registry.py` before pushing; the fleet-event helper (§6 P1) lands with P1 and both consume
-it. Plans 4–6 cite pre-dependency line numbers and carry plan 1's caveat ("line numbers are pre-edit; edit
+`tests/test_event_type_registry.py` before pushing; the fleet-event helper (§6 P1) lands with P1 Half A (plan 2
+Task 9b) and both consume it. Plans 4–6 cite pre-dependency line numbers and carry plan 1's caveat ("line numbers are pre-edit; edit
 bottom-up or re-grep"). Every plan implementing a contested option carries a `> **Held:**` line at the top of
-the affected task (§16), and each plan names the mission decision it depends on (D1/D2).
+the affected task (§16), no unheld work rides a PR that waits on an amendment (interim fold), and each plan names
+the mission decision it depends on (D1/D2).
 
 ## 11. What NOT to do
 
@@ -1937,7 +1970,8 @@ Draft. Next:
 3. P0 runs as two batches (§6 P0; step 0 first on the Codex side); sub-issues per phase per repo are opened
    from the epic.
 4. Register rows 10–12 flip from *planned* to *shipped* by one Claudron PR each, from the plan that ships the
-   surface: row 10 (the join key) from P1 Claudlobby Task 10, row 11 (the export contract's new fields) from P3
+   surface: row 10 (the join key) from P1 Claudlobby Half A (Task 10's row-10 step: `session_alias`/`derive_session_uid`
+   and `observable-plane.md` ship in release N), row 11 (the export contract's new fields) from P3
    clauDNA Task 9, row 12 (the Codex session-loop snippet) from P4 Claudron. One ADR in
    `documentation/decisions/` (the house `supersedes_scope` form, `2026-07-18-claudron-consumption-door.md:9`)
    records F18 and the v2 §19 ruling this plan supersedes, or the operator states the reason for none; the v2
@@ -1956,7 +1990,7 @@ Questions the code could not answer; each has a lean, and the operator decides.
    *where* Codex launching lives, not *whether*). ~~Amend it in the P1 Claudlobby PR, or record that F11's
    ratification supersedes it?~~ The "F11 supersedes" option is withdrawn (ironclad cycle 1; D1 in §16). Ratify
    **F18** (or an operator decision record) cited from the mission in the `:17` form (#515), and amend every line
-   coherently in the P1 Claudlobby PR before it merges, coordinated with `origin/codex/974-mission-consolidation`.
+   coherently in P1 Claudlobby's Half A PR before it merges, coordinated with `origin/codex/974-mission-consolidation`.
    Lean: F18 as worded in §16.
 3. **Where the canaries run.** Codex is not installed on the operator's machine (the Homebrew cask `codex`
    is available). C1–C5 and C7–C9 need it; C6, C10 and C11 need only Claude Code.
@@ -2060,6 +2094,43 @@ unchanged; each affected fork carries an *Ironclad cycle 1* pointer; the amendme
   pointers (the F10/F15/F16/F17 context corrections live in §4.2 and the §6 specs instead); F14's context is not
   amended because the operator's reason for per-bot roots is not on record (A-F14 asks for it).
 
+### Interim fold (ironclad cycle 1.5, 2026-10-05)
+
+Folded by `/claudna:forge --reforge` from two sweeps run after the cycle-1 fold commit (`5df2429b`): a Held-task ×
+cross-plan dependency sweep (unheld work was riding PRs that wait on amendments, and downstream plans depended on
+it unconditionally) and a cross-document naming check (one name, several spellings). No fork's Options, Decision,
+Lean or Status line changed; no amendment was applied or added.
+
+- **Packaging — unheld work never rides a PR that waits on an amendment.** P1 Claudlobby Half A (release N) = plan 2
+  Tasks 1–5, Task 6 Step 2a (the decoder, forward-compatible, not held), Task 7b (the conditional C10 scrub),
+  Task 9b (`fleet_event_request`) and the row-10 flip; Half B (release N+1) = Task 6 Step 2b and Tasks 7–9 with
+  their docs and the door observation, held on A-F17/A-F1. P2-a and P3 Claudlobby depend on Half A; P3 clauDNA's
+  guard waits on Task 7b. Plan 5 Task 1 is not held (A-F6 is additive). Plan 6 Task 7, the F14 runbook, is the only
+  held P3 Claudlobby task: the per-bot root and the `session-export` per-bot grouping ship now, and A-F14 would
+  revert them. P2-a's holds are A-F4, A-F4b, A-F3 and A-F5. §6 (order, P0, P1, P2, P3), §8, §10, §10.1, §13, §14 Q2,
+  D1 and the §16 "if ratified" lists follow.
+- **Stale task numbers.** §10.1 (P2-b Tasks 1–2, P2-a Tasks 3–9; plan 6 Task 1 is the per-bot root) and §16 (A-F3:
+  P2 Task 9; A-F4: the intake is P2 Task 6, the Collector parts of Tasks 3–5; A-F4b: Task 5; A-F5: Task 4; A-F6:
+  plan 5 Task 1; A-F14: plan 6 Task 1).
+- **One spelling per name.** The C10 scrub is P1 Claudlobby Task 7b (no "P3 Claudlobby Task 6b" exists);
+  `plane-lookup.py --session <sess_uid>` only (the raw id beside it is what A-F1 would add); `tool_failure_streak`
+  counts inside one 60 s window (2+2 → none, 3+1 → one; the cross-window counter is gone); no `sidechain` bucket;
+  the six `entrypoint.json` skip reasons; the loader, not the validator, refuses `harvest` without
+  `session_summary`; `skipped.reason` on export items, `skipped_reason` on the event; `_otel_cfg` beside the
+  `_otel` module alias; `api_error` per window, not debounced; `claudlobby.fleet=<fleet name>`, never a uid;
+  `hooks install --host codex` with P4's naming caveat; the hook selector before the event (C9); `export_stalled`
+  a system event; no payload-schema bump for `BotPayload.runtime`; `session_alias(…, runtime="claude")`;
+  `send_batch`'s signature; the telemetry spec on P2's generic strict-mapping helpers, `KNOWN_TELEMETRY_CONTENT`
+  and `field(default_factory=…)`; the Collector binary resolved at compose time into `otelcol-bin`; `plane=True` on
+  both service rows and `plane-otel` in the opt-in allowlist; the F17 resolver sketch names `caller_session_uid()`
+  and its codex → `None` rule.
+- **Citations re-verified at `cd292cb`:** `ids.py:25-28` (the `process_uid` comment), `lib-common.sh:2117-2173`
+  (`emit_fleet_event`) and `:2166-2167` (its nested row), `daemon.py:917-941` (`send_batch`), `composer.py:4040-4178`
+  (`_write_service_units`), `fleet-memory-check.sh:82-89`, `plane-readers.py:1238-1279` (`fleet_events`),
+  `:1250-1251` and `:1226-1228` (the filter and the nested projection), `TestSnippetParity` `:452-500`,
+  `tests/test_switches.py:99-178` (the opt-in allowlist); `plane/daemon.py:749-752` and `samples.py:24,35-43`
+  confirmed as cited.
+
 ## 16. Proposed fork amendments (ironclad cycle 1, 2026-10-05)
 
 *Recorded by `/claudna:forge --reforge` from the seven-lens review of #2144 (147 → 76 findings after dedup).
@@ -2078,7 +2149,7 @@ first-principles, CB cost-benefit, EC extension-check, PC precedent-check, PH pl
   line. F3(b) — raw files plus an allowlist — and F5 survive in structure; the normalization lives in the intake's
   mapping (A-F5).
 - Evidence: both runtimes export OTLP/HTTP JSON *(doc; C5/C6 confirm)*; the intake must parse OTLP/JSON and map
-  attributes anyway (P2 Task 4), so the Collector spec's OTTL statements duplicate a Python dict; what the
+  attributes anyway (P2 Task 6), so the Collector spec's OTTL statements duplicate a Python dict; what the
   Collector uniquely adds — a queue on a loopback hop, gRPC bridging — nothing needs. Its cost: a ~100 MB
   operator-installed binary (§4.1), ≤ 192 MiB / 3 % of a core resident (the P2 budget; with the intake ~4 % of a
   Pi 5's usable RAM, `fleet-memory-planning.md:43-54`, against `PROJECT_MISSION.md:104`), an alpha `file`
@@ -2086,8 +2157,9 @@ first-principles, CB cost-benefit, EC extension-check, PC precedent-check, PH pl
   process choice decidable on floor-host measurements, not model shape.
 - Lenses: for — FP, CB, AR; AM's resource concern. Against — none argued for keeping it. If (c) stands, the costs
   are recorded as accepted and `otelcol-contrib validate` is a required CI leg with a pinned binary (§6 P2, done).
-- If ratified: plan 4 — Tasks 2, 3, 5 and 6 (the Collector unit and launcher, the rendered `collector.yaml`, the
-  `validate` leg, the `otel-collector` switch row and the `host setup` refusal) are dropped; the intake gains the
+- If ratified: plan 4 — the Collector parts of Tasks 3, 4 and 5 go (the `otel-collector` switch row; the Collector
+  unit and launcher, the rendered `collector.yaml`, its `validate` leg and the `host setup` refusal; the
+  Collector-enrollment check), while Task 6 Steps 3–5 are A-F3's; the intake gains the
   raw-file writer (rotation, the total bound, `UMask=0077`, the 0700 directory, the doctor rung) and the
   `telemetry` composition points `OTEL_EXPORTER_OTLP_ENDPOINT` at `plane-otel`'s port; §2.4's diagram, the two §6
   P2 specs and F4's "Collector" bullet are re-specified by a forge pass (the F4 context's "no Collector running"
@@ -2105,7 +2177,7 @@ first-principles, CB cost-benefit, EC extension-check, PC precedent-check, PH pl
   other hosts; this would be the validator's first host-state `PlanError`.
 - Lenses: for — PC, AR. Against — the ratified text's own ground (F4 context): an enabled bot with no Collector
   exports to an unbound port; the §6 P2 spec records "all three refuse together — intended".
-- If ratified: plan 4 Task 3 — the rung appends a warning, not `report.errors`; the `config plan` test asserts the
+- If ratified: plan 4 Task 5 — the rung appends a warning, not `report.errors`; the `config plan` test asserts the
   warning, not `PlanError`; F4's bullet 3 is amended; the §6 P2 "`config plan` check" block is rewritten.
 
 **A-F17 — Adopt (c): leave `session_uid` out of the hashed projection. Status: proposed amendment.**
@@ -2122,7 +2194,8 @@ first-principles, CB cost-benefit, EC extension-check, PC precedent-check, PH pl
   (`message_id`, `expected_by`); (c) rehashes every projection, so an in-flight request straddling activation
   conflicts once; the strict decoder makes any new intent field an honest bump — and asks that F17's record carry
   the permanent blocker and why (c) was rejected (§4.2 and the §6 P1 spec do).
-- If ratified: plan 2 — Task 6 dropped; `request_facts.expected_fact`/`reconcile_facts` change, with tests and the
+- If ratified: plan 2 — Task 6 Step 2b (the writer flip, Half B) dropped; Step 2a's decoder (Half A) is harmless
+  whether or not it has shipped — no receipt is ever written in format 2; `request_facts.expected_fact`/`reconcile_facts` change, with tests and the
   prepared-not-committed replay leg; the `fleet-update-lifecycle.md` blocker sentence and the `host migrate`
   preview test are not needed; the §6 P1 spec is replaced; F17's lean stands as history with its pointer.
 
@@ -2139,7 +2212,7 @@ first-principles, CB cost-benefit, EC extension-check, PC precedent-check, PH pl
   isolation story, and the seam makes (b) a ~30-line function whenever wanted; no Codex-only host is foreseen
   (§14 Q10). All four agree F10's *text* needed the reader-half correction (§6 P4 spec, done).
 - If ratified: the P4 clauDNA plan gains `Host.summarizer`, the `no_summarizer` reason (`events.py:174`'s
-  vocabulary; spec §8's `skipped_reason`) and C12 in P0's Codex batch; F10's consequence line changes.
+  vocabulary; spec §8's `skipped.reason`) and C12 in P0's Codex batch; F10's consequence line changes.
 
 **A-F1 — Land F1(a) before (c): the receiver hook writes the executing session. Status: proposed amendment.**
 - Proposal: `Transmission.session_uid` legal only with `state == "received"` (the `received_bytes` precedent,
@@ -2152,19 +2225,20 @@ first-principles, CB cost-benefit, EC extension-check, PC precedent-check, PH pl
 - Lenses: for — AR. Against — none argued the opposite; F1's own revisit trigger was "a reader needs the uid on
   the transmission row".
 - If ratified: plan 2 Half B adds the field (contract + `wire_additions` + `plane-dispatch-in.sh` + `_DELIVERY_MSG`
-  + tests); the F17 work waits for (c); §2.2 "Where it is written" gains the transmission row.
+  + tests); the F17 work waits for (c); §2.2 "Where it is written" gains the transmission row; `plane-lookup.py
+  --session` prints the raw `session_id` that row carries beside `session_uid` (plan 2 Task 9).
 
 **A-F3 — Sequencing only: raw files first, the plane leg with its first reader. Status: proposed amendment.**
 - Proposal: the plane leg (five `session.*` metrics, two events) lands in the PR that repoints the first reader
   (`brief_read.py:114`/`usage_read.py:39`, or `fleet-digest`'s `plane samples` grant), at the grain that reader
   needs; the raw files land first. F3(b) is unchanged.
-- Evidence: nothing reads `plane samples`; `brief_read`/`usage_read` keep reading transcripts (P2 Task 8 deferred
+- Evidence: nothing reads `plane samples`; `brief_read`/`usage_read` keep reading transcripts (P2 Task 9 deferred
   the repoint); `api_error`/`tool_failure_streak` page nothing (§14 Q6); by the plan's own discriminator
   (`retention.py:84-91`) unread rows are the class the epic retires; the one problem the layer could solve
   (`rate_limit`, `fleet-observability.md:94`) stays unsolved.
 - Lenses: for — AR. FP and CB agree on the ground ("no named consumer").
-- If ratified: plan 4 splits P2-a into the raw-file PR and the plane-leg PR; §8 names the reader (done); the
-  allowlist is sized to it.
+- If ratified: plan 4 splits P2-a into the raw-file PR and the plane-leg PR (Task 6 Steps 3–5, held on A-F3, move
+  to the latter); §8 names the reader (done); the allowlist is sized to it.
 
 **A-F5 — Scope F5 to the intake's internal vendor→house mapping. Status: proposed amendment.**
 - Proposal: F5 names the intake's mapping (one dict, tested from the C5/C6 fixtures); raw files stay
@@ -2175,7 +2249,7 @@ first-principles, CB cost-benefit, EC extension-check, PC precedent-check, PH pl
   Codex raw metric *names* still differ (§11's last forge line).
 - Lenses: for — AR. FP asks without proposing: who reads `gen_ai.*` names — if only a human with `jq`, F5(b) is
   cheaper (§14 Q13). Against — F5's lean: a convention over house names, for an external reader.
-- If ratified: plan 4 — the `transform/normalize` OTTL block goes; the intake's mapping dict is the F5 artefact;
+- If ratified: plan 4 — Task 4's `transform/normalize` OTTL block goes; the intake's mapping dict is the F5 artefact;
   the §6 P2 spec's "Three things" item 1 and the Collector YAML are rewritten; the "Stated limitations" semconv
   pin is deleted.
 
@@ -2190,8 +2264,9 @@ first-principles, CB cost-benefit, EC extension-check, PC precedent-check, PH pl
 - Lenses: for — AR (PH supplies the fallback). Against — F6's shape: the plane holds what the consumers read, not
   transcript access; `tool_calls` is P2's `session.tool_calls` sample; a job reading transcripts re-creates the
   reader the retired digest had.
-- If ratified: plan 5 Task 2 — `segment.transcript`; plan 6 Task 4 — the volume computation in `summary_record`;
-  the §6 P3 spec's null rule narrows to `journey`/`blocks`/`procedures`/`producer`.
+- If ratified: plan 5 Task 1 gains a key (`segment.transcript`) — an additive follow-up, not a hold: Task 1 ships
+  unheld, since `{sealed_at, sealed_by, counts}` is needed under either outcome; plan 6 Task 4 computes volume in
+  `summary_record`; the §6 P3 spec's null rule narrows to `journey`/`blocks`/`procedures`/`producer`.
 
 **A-F14 — One shared store per host instead of per-bot roots (conditional). Status: proposed amendment.**
 - Proposal: if the only reason for per-bot `CLAUDNA_STATE_DIR` is "the export job runs per bot", one shared store
@@ -2203,8 +2278,10 @@ first-principles, CB cost-benefit, EC extension-check, PC precedent-check, PH pl
 - Evidence: §4.2 (the export's iteration). The runbook's `chmod -R a-w` finding (AR) is adjacent and is already
   folded within F14(a) (§6 P3).
 - Lenses: for — FP (conditional). Against — the hygiene reasons above, if they are the operator's.
-- If ratified: plan 6 — Task 2 (the per-bot root) and Task 7 (the runbook) go; `session-export` groups by
-  `actor.bot_id`; the §10 order-3 one-liner is replaced by the X21 pin remedy alone (§9).
+- If ratified: plan 6 — the per-bot root (Task 1, with the §10 order-3 one-liner) and the `session-export` per-bot
+  grouping, which ship now (clauDNA spec §1.1 rule 3 already says per bot), would be reverted: `session-export`
+  groups by `actor.bot_id` and the one-liner gives way to the X21 pin remedy alone (§9); Task 7 (the runbook, the
+  only task held on A-F14) goes. A-F14 holds nothing else: it is conditional on an operator reason not on record.
 
 **Decisions needing ratification**
 
@@ -2217,7 +2294,7 @@ CLI"** — recorded in the mission in the 2026-07-06 form (`PROJECT_MISSION.md:1
 and both one-liners coherently, coordinated with `origin/codex/974-mission-consolidation` (which rewrites the
 mission and keeps the line). With it: the epic joins Current sprint focus (`PROJECT_MISSION.md:52-87`) carrying
 #2145, and item 2 there (`:84`, the optional Claudosseum telemetry emitter) is advanced or retired explicitly.
-Lens: AM (PC on the form). Lands before the P1 Claudlobby PR merges (plan 2 Task 5 Step 2, unconditional).
+Lens: AM (PC on the form). Lands before P1 Claudlobby's Half A merges (plan 2 Task 5 Step 2, unconditional).
 
 **D2 — clauDNA's mission amendment. Status: proposed decision.** clauDNA's mission (last amended 2026-07-06) says
 "for Claude Code" (`:5`, `:15`) and "does not handle telemetry" (`:33`, `:62`), while this epic assigns clauDNA

@@ -21,7 +21,8 @@ repos: Claudfather/clauDNA
 > records is clauDNA's own vocabulary; the Codex host that will write `runtime: "codex"` is P4. Depends on
 > one operator decision: **D2** (Task 5 Step 2b — the clauDNA mission amendment, proposed here and ratified by
 > approving; it lands before 0.27.0 ships the closed `{claude, codex}` vocabulary). Reforged 2026-10-05 from
-> ironclad cycle 1 (N1–N9; cross-cutting X4, X6, X11, X16, X21) — no fork changed.
+> ironclad cycle 1 (N1–N9; cross-cutting X4, X6, X11, X16, X21) and its interim fold (the item field spelled
+> `session.runtime`; the Claudlobby pieces this plan names are P1 Claudlobby's unheld Half A) — no fork changed.
 
 ## Summary
 
@@ -140,7 +141,7 @@ None in code. Register order: the Claudron boundary-spec PR (§10.1 row 1) ideal
 ### Blocks
 P3 clauDNA (`2026-10-04-runtime-neutral-observability-p3-claudna-export-contract.md`: `--include-skipped`,
 `entrypoint.json`, the item's `segment` object build on `claudna.session/2` and `SESSION_FIELDS` here); P3
-Claudlobby (`session_summary.runtime` reads the item field); P4 clauDNA (`host.name` replaces the literal
+Claudlobby (`session_summary.runtime` reads the item's `session.runtime`); P4 clauDNA (`host.name` replaces the literal
 `RUNTIME`); the companion #2149. Register row 11's flip to shipped is P3 clauDNA Task 9's (the Claudron P1 plan
 names it); this PR flips nothing in the register.
 
@@ -277,7 +278,7 @@ Tasks follow as H3 siblings.
   the two new tests and the spec sentence may match. Commit: `feat(session-store): session.json is
   claudna.session/2 and carries runtime; /1 reads, warns and upgrades once`.
 
-### Task 3: `claudna.export/1` items gain `runtime`; spec §8 names the item fields for the first time
+### Task 3: `claudna.export/1` items gain `session.runtime`; spec §8 names the item fields for the first time
 
 **Files:** `lib/claudna/session_store/export.py`, `tests/test_session_store_export.py`, spec §8.
 
@@ -429,7 +430,7 @@ Tasks follow as H3 siblings.
   marketplace plugin"; `:15` stays (Claude Code remains the north star's host). A dated italic paragraph after
   `:24` in the `:40` form names #2145, F8 (the aligned direction) and D2. The CHANGELOG bullet below names it;
   the PR body quotes the three replacements and asks for ratification in so many words. (The Claudlobby sibling
-  is D1 — the P1 Claudlobby plan's Task 5 Step 2.)
+  is D1 — the P1 Claudlobby plan's Task 5 Step 2, in its unheld Half A.)
 - [ ] **Step 3:** `CHANGELOG.md` `## [Unreleased]` (house format: bold headline, issue in parentheses, prose
   naming files and fields; `### Added` before `### Changed`, above the existing `### Fixed`):
   - Added — **Sessions record which agent runtime opened them** (Claudlobby#2145 P1): `session.opened.runtime`
@@ -526,7 +527,7 @@ Claudron` jobs.
   or any Codex payload handling (P4); do not add a module (the layering gate would need a rank).
 - Do not reorder the sweep's fully-retired skip (`retention.py:184-185`) to upgrade a fully retired `/1` file; readers fold it.
 - Do not touch `~/.claude/settings.json`, the plugin cache, or any Claudlobby file (its `session_alias`/`derive_session_uid`
-  and `CLAUDLOBBY_RUNTIME` are the P1 Claudlobby plan's).
+  and `CLAUDLOBBY_RUNTIME` are the P1 Claudlobby plan's Half A).
 - Do not bump `claudna.export/1`: both item changes are additive, and P3 relies on the tag staying.
 - Do not edit the frozen text of the summarizer pre-registration: the withdrawal is one dated status line citing
   F15 (`ab-gating-rollout.md:39`); the 2026-09-30 document stays legible beneath it.
