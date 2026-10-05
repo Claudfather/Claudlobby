@@ -23,8 +23,8 @@ value is kept as its type and length. Prompts, tool inputs and responses never r
 |---|---|---|---|
 | **C6a** confirmation leg | **Passes off the floor host.** Claude Code 2.1.289 exports OTLP/HTTP-JSON logs and metrics straight to a local endpoint under the plan's env block; the resource attributes land verbatim on every row; temporality is delta by default; `session.id` = hook `session_id` across `--resume`. | F4 stays locked on this evidence; **F4's gate is the floor host**, so P2-a1 still waits on the operator leg. | Floor host (Pi): the same run; bot-hour volume and receiver footprint; the 24 h `tool_call` overlap; RC day 1. |
 | **C6a** side legs | Log events emitted while the endpoint is down are **dropped, not retried** (35 s outage). Summarizer `claude -p` children **export full sessions** under their own random `session.id`, carrying the bot's resource attributes. Every event carries `user.email`, `user.account_uuid`, `user.id`, `organization.id`. Prompt/response attributes are the literal `<REDACTED>` at default settings. The prefixed event name is the log **body** (`claude_code.api_request`); the `event.name` attribute is bare (`api_request`). | Plan 4 (`records()` reads the body; the 6/8 line counts; the restart risk); §14 Q15, Q16 for the operator. | — |
-| **C10** | **Leaks — all of it.** A tmux server started from a Claude Bash tool hands the pane `CLAUDE_CODE_CHILD_SESSION=1`, `CLAUDECODE=1` *and the caller's* `CLAUDE_CODE_SESSION_ID`. But a `claude` started with those leaked markers **replaces the id with its own and sets the marker itself** on every child (headless). | Plan 2 Task 7b as written is a no-op: unsetting the marker changes nothing a hook or tool sees. Task 7b is re-scoped to the open interactive question below. | Interactive: does a bot `claude` started with a leaked `CLAUDECODE=1` boot normally in tmux? |
-| **C11** | **Yes, from both (headless).** Main-thread Bash, an Agent subagent's Bash and every hook (including the subagent's `PostToolUse`) carry the SessionStart `session_id`. **Every one of them also carries `CLAUDE_CODE_CHILD_SESSION=1`**, the main thread included. The hook payload's `agent_id`/`agent_type` is what tells a subagent's hook from the parent's. | `SUBAGENT_SHELL_SHARES_SESSION_ID = True` (plan 2 Task 7), and the marker branch is dropped: it discriminates nothing. **Plan 5 Task 5 is struck**: a guard that records nothing under the marker would record nothing for every session. | Interactive tmux bot: the same three readings (Half B's gate names the tmux-hosted bot). |
+| **C10** | **Leaks — all of it.** A tmux server started from a Claude Bash tool hands the pane `CLAUDE_CODE_CHILD_SESSION=1`, `CLAUDECODE=1` *and the caller's* `CLAUDE_CODE_SESSION_ID`. But a `claude` started with those leaked markers **replaces the id with its own and sets the marker itself** on every child (headless). | Plan 2 Task 7b as written is a no-op: unsetting the marker changes nothing a hook or tool sees. Task 7b is re-scoped to the open interactive question below. | **Answered (operator leg 1):** it boots, but the leaked marker **turns transcript saving off** — Task 7b ships (unset the three markers before exec). |
+| **C11** | **Yes, from both (headless).** Main-thread Bash, an Agent subagent's Bash and every hook (including the subagent's `PostToolUse`) carry the SessionStart `session_id`. **Every one of them also carries `CLAUDE_CODE_CHILD_SESSION=1`**, the main thread included. The hook payload's `agent_id`/`agent_type` is what tells a subagent's hook from the parent's. | `SUBAGENT_SHELL_SHARES_SESSION_ID = True` (plan 2 Task 7), and the marker branch is dropped: it discriminates nothing. **Plan 5 Task 5 is struck**: a guard that records nothing under the marker would record nothing for every session. | **Answered (operator leg 1, interactive tmux):** same readings — closed; Half B's gate is met. |
 
 No fork reopens. F4's confirmation is provisional until the floor-host leg; the other findings are plan facts.
 
@@ -121,6 +121,29 @@ three-turn session sends about 5 log requests and 2 metric requests. The per-bot
 **Read from code:** plan 4's mapping keys on `claude_code.tool_result`, `claude_code.api_request` and
 `claude_code.api_error` (`…-p2-otel-pipeline.md:409-411`), and `records()` names an `event_name` without its
 source field (`:415`). Only the log body carries those spellings.
+
+### 2026-10-05 ~20:06 UTC — operator leg 1: interactive C11 and C10 in tmux (macOS, Claude Code 2.1.289)
+
+**Measured (Run A, clean):** an interactive `claude` in a throwaway tmux server (`tmux -L rnc`), hooks from
+`runtime-neutral-canary.py setup`. Main-thread Bash, an Agent subagent's Bash and every hook (four subagent
+`PostToolUse` among them) carried the SessionStart `session_id`; every one also carried `CLAUDE_CODE_CHILD_SESSION=1`,
+`CLAUDECODE=1` and `CLAUDE_CODE_ENTRYPOINT=cli`. The receiver was not running, so this run has no OTel leg (the
+headless runs above carry it). The subagent's first write to `~/rnc` was refused by the operator's Claude Code
+sandbox (writes outside the working directory); its retry wrote to `/tmp` inside the sandbox — a harness detail, not
+a finding.
+
+**Measured (Run B, leaked markers):** the same session started with `CLAUDE_CODE_CHILD_SESSION=1`, `CLAUDECODE=1` and
+a foreign `CLAUDE_CODE_SESSION_ID` exported before `claude` — the shape C10 found reaching a bot's pane. It **booted
+to the input box** and took a fresh id (`405d…`) that every hook, both Bash files and every exported datapoint and
+event named; the foreign id appeared nowhere. OTel exported normally (`application/json`, delta, resource attributes on
+every row, log lag 5.0 s). But the footer read: **"⚠ Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION
+marker · restart with CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 to keep future transcripts"**. A bot started from inside
+a Claude session would run without a transcript: no `--resume`, nothing for clauDNA's store or any transcript reader.
+
+**Consequence:** C11 is closed (Half B's gate). C10's leak is not harmless after all — not for ids, but for
+persistence — so **Task 7b ships** in Half A: `start-bot.sh` unsets `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION` and
+`CLAUDE_CODE_SESSION_ID` before `exec $CLAUDE`. Removing the cause is preferred to setting
+`CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1`, which would mask it.
 
 ## Plan changes this log caused (2026-10-05)
 

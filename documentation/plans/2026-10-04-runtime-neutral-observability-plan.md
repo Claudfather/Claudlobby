@@ -851,6 +851,8 @@ clauDNA's phase-3 canary table (§5.1).
     on every child anyway (headless), so the leak is harmless for ids. Supervised starts don't inherit a caller's
     env (`supervision.py:95-123`). Task 7b is re-scoped to the one open question — does a leaked `CLAUDECODE=1`
     change an interactive bot's boot (operator leg 1) — and gates nothing; plan 5 Task 5 no longer waits.
+    **Answered (operator leg 1, 2026-10-05):** the bot boots, but an inherited marker **turns transcript saving
+    off**; Task 7b ships in Half A, unsetting `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION` and `CLAUDE_CODE_SESSION_ID`.
 - [ ] **C11** Claude session id in tools: in a tmux-hosted bot, does the Bash tool's `CLAUDE_CODE_SESSION_ID` equal the SessionStart payload's `session_id`, from the main thread and from an Agent subagent (whose shells carry `CLAUDE_CODE_CHILD_SESSION=1`)? If a subagent's id differs, F1(c) doors running under `CLAUDE_CODE_CHILD_SESSION=1` record no uid. (The
   env-vars reference now says the variable "matches the `session_id` field in the hook JSON input" for Bash
   and hook subprocesses; the canary still measures it, from a subagent in particular.)
@@ -861,7 +863,8 @@ clauDNA's phase-3 canary table (§5.1).
   - **Status (run log, 2026-10-05, headless):** yes from both — main thread and an Agent subagent share the
     SessionStart `session_id` in Bash and in every hook, and **every** one of those processes carries
     `CLAUDE_CODE_CHILD_SESSION=1`, the main thread's too. No guard reads the marker any more (plan 2 Task 7, plan 5
-    Task 5). **Owed:** the same readings in a tmux-hosted interactive session (operator leg 1) — Half B's gate.
+    Task 5). **Closed (operator leg 1, 2026-10-05):** the same readings in an interactive tmux session; Half B's gate
+    is met.
 - [x] Ratify F1–F17 (operator, 2026-10-04).
 - [x] Rule F18 (D1), D2 and the §16 amendments (operator, 2026-10-05; the lock comments on #2144 are linked from
   §3 and §16 *Rulings*).
