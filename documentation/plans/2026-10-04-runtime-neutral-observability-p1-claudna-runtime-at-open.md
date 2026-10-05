@@ -4,6 +4,7 @@ type: plan
 status: draft
 owner: chrisrogers37
 created: 2026-10-04
+updated: 2026-10-05
 epic: documentation/plans/2026-10-04-runtime-neutral-observability-plan.md
 spec: Claudfather/clauDNA documentation/specs/2026-09-28-session-store-design.md
 issue: "#2145"
@@ -17,7 +18,10 @@ repos: Claudfather/clauDNA
 > `skills/session/resume.md` and `CHANGELOG.md`). Depends on: nothing in another repo (the Claudron
 > boundary-spec PR, §10.1 row 1, should merge first so register rule R2 is satisfied before the export
 > contract changes, but no code here waits on it). Waits on canaries: **none** — every value this PR
-> records is clauDNA's own vocabulary; the Codex host that will write `runtime: "codex"` is P4.
+> records is clauDNA's own vocabulary; the Codex host that will write `runtime: "codex"` is P4. Depends on
+> one operator decision: **D2** (Task 5 Step 2b — the clauDNA mission amendment, proposed here and ratified by
+> approving; it lands before 0.27.0 ships the closed `{claude, codex}` vocabulary). Reforged 2026-10-05 from
+> ironclad cycle 1 (N1–N9; cross-cutting X4, X6, X11, X16, X21) — no fork changed.
 
 ## Summary
 
@@ -26,10 +30,12 @@ has its clauDNA half: `session.opened.data.runtime` (optional, top-level, `claud
 `claude`), `SessionHandle.open_session(..., runtime=None)`, the Claude hook recording `"claude"`. Carry it
 through the projection (`session.json` becomes `claudna.session/2`, with the older-tag handling the
 `claudna.segment/2` bump already established) and the export item (`claudna.export/1`, additive), and give
-spec §8 the item-field table it never had. Qualify harvest provenance for non-Claude sessions per F9
-(`session:<runtime>/<sid>:<seg>`; Claude refs byte-identical). Amend spec §1.1 rule 1 (the plane stops
-recording tool calls after P2) and rule 4 (F15: comparison waived, one summarizer, coverage kept by F6), and
-the Claude-only wording in §4.1/§4.2/§6.2/§7.2/§10. Release 0.27.0: the P3 plans consume these fields.
+spec §8 the item-field table it never had — this plan is that table's one author; P3 extends it in place.
+Qualify harvest provenance for non-Claude sessions per F9 (`session:<runtime>/<sid>:<seg>`; Claude refs
+byte-identical). Amend spec §1.1 rule 1 (the plane stops recording tool calls after P2) and rule 4 (F15:
+comparison waived — the frozen pre-registration is withdrawn by name, one summarizer, coverage kept by F6),
+the Claude-only wording in §4.1/§4.2/§6.2/§7.2/§10, and propose the clauDNA mission amendment (D2) the closed
+`{claude, codex}` vocabulary needs. Release 0.27.0: the P3 plans consume these fields.
 Deliberately left to later PRs: `--include-skipped`, `entrypoint.json` and the item's `segment` object
 (P3); the `host_claude`/`host_codex` split, `--host` selection and any Codex payload (P4).
 
@@ -108,12 +114,20 @@ flip-flop one full `rebuild` per cross-version write; that is not fixable from 0
 is), it is lossless (logs are truth; `runtime` is in the log and every 0.27 read folds from the log on a tag
 mismatch), and it ends when the last 0.26 process restarts (a plugin update takes effect at the next session
 start; detached 0.26 workers — summarizer, harvest, sweep — are the realistic cross-version writers while bots
-still share one `~/.claudna`, F14). The epic's P1 sentence "mixed 0.26/0.27 **readers** then converge instead
+still share one `~/.claudna`, F14). **Timing on a fleet (X21/N4):** Claudlobby's `start-bot.sh` runs
+`claude plugin update` through `plugin_ensure` on every bot start (`_runtime_scripts/lib-common.sh:4699-4710`;
+once per host boot when `BOOT_PLUGIN_UPDATE_ONCE=1`), so 0.27 reaches every tmux-hosted bot at its next
+restart whatever the epic's sequencing says, and the flip-flop is fleet-wide — bounded by one restart cycle
+per bot — until the per-bot `CLAUDNA_STATE_DIR` root lands (the epic's §10 one-line Claudlobby PR), after which
+bots stop sharing one `~/.claudna` and the only cross-version writers are a host's own interactive sessions.
+The epic's P1 sentence "mixed 0.26/0.27 **readers** then converge instead
 of rewriting each other's file" is therefore true as written for readers and must not be read as a claim
 about writers; this plan's CHANGELOG entry says so. What 0.27 does so that readers converge and the file
 settles on `/2`: (1) readers keep writing nothing (pinned by a test); (2) `claudna.session/1` joins
 `OLDER_PROJECTIONS`, so 0.27's `check` warns rather than fails; (3) `stale_projections` covers `session.json`,
-so the sweep rewrites a closed session's `/1` once; (4) 0.27 **never trusts a `/1` file's content** — a 0.26
+so the sweep rewrites a `/1` once for **any** session that still has a segment — open or closed: the sweep
+walks every such session and checks `stale_projections` before `due` (`retention.py:184-191`), so "closed"
+is not a condition; (4) 0.27 **never trusts a `/1` file's content** — a 0.26
 rebuild drops `runtime` from the projection while the log still names it, so folding is the only correct
 read. That is why `_SCHEMA_FILES` gains **no** `/1` entry and no `/1` schema file is kept: the only reason
 to validate a `/1` document would be to serve it, and serving it could report `claude` for a Codex session.
@@ -121,15 +135,18 @@ to validate a `/1` document would be to serve it, and serving it could report `c
 ## Implementation Plan
 
 ### Dependencies
-None in code. Register order: the Claudron boundary-spec PR (§10.1 row 1) ideally merges first (R2).
+None in code. Register order: the Claudron boundary-spec PR (§10.1 row 1) ideally merges first (R2). **The mission decision this plan depends on (N6/X11): D2** — clauDNA's `PROJECT_MISSION.md` says "for Claude Code" (`:5`, `:15`) and "clauDNA does not handle telemetry" / "No phone-home" (`:33`, `:62`), while this PR ships a closed `{claude, codex}` runtime vocabulary and the store already records `tool.failed`/`skill.invoked` locally; Task 5 Step 2b proposes the amendment (local memory with an export door, no phone-home; whether clauDNA's scope includes non-Claude hosts), the operator ratifies it by approving this PR, and it lands before 0.27.0 is cut (Task 7). The epic's §16 records D2.
 
 ### Blocks
 P3 clauDNA (`2026-10-04-runtime-neutral-observability-p3-claudna-export-contract.md`: `--include-skipped`,
 `entrypoint.json`, the item's `segment` object build on `claudna.session/2` and `SESSION_FIELDS` here); P3
 Claudlobby (`session_summary.runtime` reads the item field); P4 clauDNA (`host.name` replaces the literal
-`RUNTIME`); the companion #2149.
+`RUNTIME`); the companion #2149. Register row 11's flip to shipped is P3 clauDNA Task 9's (the Claudron P1 plan
+names it); this PR flips nothing in the register.
 
 ### Steps
+
+Tasks follow as H3 siblings.
 
 ### Task 0: worktree, before-leg, evidence
 
@@ -157,7 +174,8 @@ Claudlobby (`session_summary.runtime` reads the item field); P4 clauDNA (`host.n
   `open_session(..., runtime="codex")` puts `"runtime": "codex"` in the first lifecycle line;
   `open_session(...)` with no kwarg writes no `runtime` key (byte-compatible with 0.26 logs); `session_facts`
   returns `runtime == "codex"` / `"claude"` respectively, and the first `session.opened` that names one wins
-  across a resume. `tests/test_session_store_hook.py::TestClearLink` (beside `:503-506`):
+  across a resume. `tests/test_session_store_hook.py::TestNestedChildren` (the class that holds `:503-506`,
+  `test_the_owning_claude_pid_is_recorded`; there is no `TestClearLink` — N1): beside it,
   `test_the_runtime_is_recorded_as_claude` — after a `SessionStart startup`, the first lifecycle line has
   `data["runtime"] == "claude"`.
 - [ ] **Step 2:** `events.py:93-97` — before:
@@ -181,7 +199,11 @@ Claudlobby (`session_summary.runtime` reads the item field); P4 clauDNA (`host.n
   session.opened's that names one; a log written before 0.27 reads as claude`. `session_facts` (`:290-299`):
   initialise `runtime = None`, in the `session.opened` branch add `runtime = runtime or e["data"].get("runtime")`
   (the `chain_id` first-wins pattern at `:294` — a resume cannot change the runtime, because the two runtimes'
-  ids never meet in one session directory), and return `runtime=runtime or "claude"`.
+  ids never meet in one session directory), and return `runtime=runtime or "claude"`. **This value is what the
+  detached worker dispatches on (X6/N8):** in P4 the summarizer (`summarize.py:184`, `read_range`'s only caller),
+  harvest's `resummarize` and the sweep's `close_abandoned` select the per-runtime transcript reader *inside the
+  worker* from `SessionFacts.runtime` / `session.json.runtime` — never from a hook flag; `boundaries._seal`
+  records only `file_size(transcript_path)` (`boundaries.py:247-254`) and reads no transcript.
 - [ ] **Step 5:** `boundaries.py` after `:49`:
   ```python
   #: The runtime this adapter serves, recorded at open as ``session.opened.runtime`` (Claudlobby#2145 P1).
@@ -248,7 +270,7 @@ Claudlobby (`session_summary.runtime` reads the item field); P4 clauDNA (`host.n
 - [ ] **Step 4:** Spec §6.4 (`:243-266`): the example's `"schema"` becomes `"claudna.session/2"` and gains
   `"runtime": "claude",` after `"private": false,`; one sentence after the example: "`runtime` is the first
   `session.opened`'s (`claude` for a log written before 0.27). `claudna.session/1` is an older tag: readers fold
-  it from the log, `check` warns, the sweep rewrites a closed session's once (as for `claudna.segment/1`)."
+  it from the log, `check` warns, the sweep rewrites it once (as for `claudna.segment/1`)."
 - [ ] **Step 5:** Verify: `python3 -m pytest tests/test_session_store.py tests/test_session_store_readers.py
   tests/test_session_store_export.py tests/test_session_store_unclosed.py -q` (every reader of `session.json`),
   then `grep -rn 'claudna.session/1' lib tests documentation` — only `OLDER_PROJECTIONS`, the `older/` fixture,
@@ -267,7 +289,10 @@ Claudlobby (`session_summary.runtime` reads the item field); P4 clauDNA (`host.n
 - [ ] **Step 2:** `export.py:46-47` — `SESSION_FIELDS = (..., "origin", "runtime")`; the docstring sentence at
   `:11-12` gains "(``runtime`` since 0.27; absent in an older envelope means ``claude``)".
 - [ ] **Step 3:** Spec §8, after `:440`, a new subsection **"Item fields and rules"** (contract text; Claudron
-  register rule R3 — consumers conform to this):
+  register rule R3 — consumers conform to this). **This subsection is the one home of the item fields (X4/N2):**
+  P3 clauDNA Task 7 *extends this table in place* — rows for `segment`, `skipped` and the status items, plus
+  `entrypoint.json` as the second surface — and never re-defines a field or moves the grammar, flag, ack and
+  additive rules written here; a checklist grep there asserts each item key is defined exactly once in §8.
 
   | Field | Type | Source | Rule |
   |---|---|---|---|
@@ -281,9 +306,12 @@ Claudlobby (`session_summary.runtime` reads the item field); P4 clauDNA (`host.n
   whose cursor moved. **Consumer names** match `^[a-z][a-z0-9_-]{0,31}$`; `harvest` is **reserved** (the
   store's own consumer, acked only by its code). `--since-seg N`, `--limit N` (default 100). **Ack:**
   `--ack --sid <sid> --through <seg>` replies `{consumer, sid, through_seg}`; `through` may not exceed the
-  session's highest final-or-retired index, and a cursor never moves back. **Additive rule:** new item keys
-  may land under `claudna.export/1`; a consumer ignores unknown keys; removing or retyping a key is
-  `claudna.export/2`. The second contract surface, `entrypoint.json`, is P3's.
+  session's highest final-or-retired index, and a cursor never moves back. **Additive rule (new in 0.27):** new
+  item keys may land under `claudna.export/1`; a consumer ignores unknown keys; removing or retyping a key is
+  `claudna.export/2`. Until now §8 had no such rule — the standing position was
+  `documentation/plans/2026-10-01-session-store-hardening.md:44` ("the export fields … are the `claudna.export/1`
+  contract: leave them alone"); this rule says how they may grow without a bump. The second contract surface,
+  `entrypoint.json`, is P3's.
 - [ ] **Step 4:** Verify: `python3 -m pytest tests/test_session_store_export.py -q`. Commit: `feat(export):
   items carry session.runtime; spec §8 names the item fields, the consumer grammar and the ack rule`.
 
@@ -332,9 +360,10 @@ Claudlobby (`session_summary.runtime` reads the item field); P4 clauDNA (`host.n
   and the contract leg. Commit: `feat(harvest): provenance is session:<runtime>/<sid>:<seg> for non-Claude
   sessions (F9); Claude refs unchanged`.
 
-### Task 5: spec §1.1, §4, §6.2, §7.2, §10; CHANGELOG
+### Task 5: spec §1.1, §4, §6.2, §7.2, §10, §11; the pre-registration withdrawal (F15); the mission amendment (D2); CHANGELOG
 
-**Files:** `documentation/specs/2026-09-28-session-store-design.md`, `CHANGELOG.md`.
+**Files:** `documentation/specs/2026-09-28-session-store-design.md`,
+`documentation/plans/2026-09-30-summarizer-comparison-preregistration.md`, `PROJECT_MISSION.md`, `CHANGELOG.md`.
 
 - [ ] **Step 1:** §1.1 rule 1 (`:32`) → "**A fact is recorded once, by whoever observes it first-hand.**
   Per-tool-call telemetry is the runtime's: Claude Code and Codex export it natively and Claudlobby's local
@@ -349,7 +378,26 @@ Claudlobby (`session_summary.runtime` reads the item field); P4 clauDNA (`host.n
   #2145 P3. The store's summarizer is the single owner. Rule 4's coverage concern — the skipped rows the plane's
   monitor needs — is kept by F6: `session export --include-skipped` emits status-only items (P3) and
   Claudlobby turns them into its `session_summary` event. Claudlobby#1961's remaining item (the digest child's
-  isolation) closes with the digest."
+  isolation) closes with the digest. The pre-registered comparison is
+  `documentation/plans/2026-09-30-summarizer-comparison-preregistration.md` (#373; ratified and frozen
+  2026-09-30; its battery period never started) — **withdrawn**, not quietly edited (Claudlobby
+  `library/protocols/ab-gating-rollout.md:39`: re-register, never a quiet edit); the stronger ground for the
+  waiver is that the digest's `session_digest` rows never reached their consumers (Claudlobby#1456/#1503), so
+  there was no baseline to compare against." Rule 1's "Claudlobby's local Collector normalizes it" reads
+  "Claudlobby's normalization layer normalizes it" — mechanism-neutral, as the Claudron register is worded
+  (A-F4 in the epic's §16 may replace the Collector; this spec must not need re-amending).
+- [ ] **Step 1b — the pre-registration, withdrawn by name (N3).** `documentation/plans/2026-09-30-summarizer-comparison-preregistration.md:3`
+  currently opens `**Status:** ratified by the owner as written, 2026-09-30, and frozen: …`. Prepend a new
+  status line and keep the old one as history: `**Status:** withdrawn 2026-10-04 — Claudlobby#2145 F15; the
+  battery period never started; the digest retires in #2145 P3. Below is the document as ratified and frozen
+  on 2026-09-30; nothing else in it changes.` One line, dated, citing the fork: a withdrawal, not an edit of
+  the frozen text.
+- [ ] **Step 1c — spec §11, a dated item in the #203-reversal form (`:466`, item 7).** Append after item 10
+  (`:470`): "12. **Rule 4's summarizer comparison — decided 2026-10-04: waived (Claudlobby#2145 F15).** The
+  pre-registration (`documentation/plans/2026-09-30-summarizer-comparison-preregistration.md`, #373) is
+  withdrawn; its battery never started, and the digest's rows never reached their consumers
+  (Claudlobby#1456/#1503), so there was no baseline. The store's summarizer is the single owner; coverage of
+  skipped segments is F6's (`--include-skipped`, P3)."
 - [ ] **Step 2:** §4.1 `:92` Session identity → "the runtime's `session_id` (Claude Code today; the runtime is
   recorded at open as `session.opened.runtime`, `claude` when absent)"; `:103` Source → "the runtime
   (`session.opened.runtime`)"; after `:95` add: "Vault evidence is `session:<sid>:<seg>` for `claude` and
@@ -359,8 +407,29 @@ Claudlobby (`session_summary.runtime` reads the item field); P4 clauDNA (`host.n
   "`runtime` is the agent runtime that opened the session (absent before 0.27: `claude`); `claude_pid` is the
   owning agent process (Claude Code's `$CLAUDE_PID`; F13 keeps the name until the next envelope major)". §7.2
   `:414`: "evidence `session:<sid>:<seg>` (`session:<runtime>/<sid>:<seg>` for a non-Claude session, F9)". §10
-  `:453` Hosts: append "The adapter records its runtime at open (`runtime: "claude"`); a second host's adapter
-  (#2145 P4) records its own, and everything past the adapter reads `SessionFacts.runtime`."
+  `:453` Hosts: "A Cursor adapter can land later without touching the core." → "A Cursor or Codex adapter can
+  land later without touching the core (#2145 P4)." (N3), then append "The adapter records its runtime at open
+  (`runtime: "claude"`); a second host's adapter (#2145 P4) records its own, and everything past the adapter —
+  the detached summarizer worker included — reads `SessionFacts.runtime`."
+- [ ] **Step 2b — the clauDNA mission amendment (D2; the operator ratifies by approving this PR; lands before
+  0.27.0 is cut).** `PROJECT_MISSION.md` (last amended 2026-07-06, the docs-audit note at `:40` is the dated-note
+  form) excludes what this PR ships: `:33` "clauDNA does not handle telemetry. Claudosseum does." and `:62`
+  "**Telemetry collection.** No phone-home. Telemetry lives in Claudosseum, opt-in." against a store that
+  records `tool.failed`, `skill.invoked`, prompt metadata and segment boundaries locally and exports them
+  through `session export`; `:5` "for Claude Code" and `:15` "Materially smarter Claude Code with one install"
+  against a closed `{claude, codex}` vocabulary, `host_codex.py` and a Codex manifest in P4. Proposed wording,
+  recorded in the epic's §16 as D2: `:33` → "clauDNA does not handle telemetry — it keeps a **local session
+  store** (the memory of what a session did, on the user's disk, spec `documentation/specs/2026-09-28-session-store-design.md`)
+  and hands it to one consumer at a time through `session export` when asked; it never phones home. Hosted
+  telemetry is Claudosseum's, opt-in (`CLAUDNA_TELEMETRY=1`)."; `:62` → "**Telemetry collection.** No
+  phone-home. The session store records locally and exports only on request (spec §1.1 rule 1, §8); hosted
+  telemetry lives in Claudosseum, opt-in."; **the scope question — decided here, before the P4 clauDNA plan is
+  written:** `:5` → "the canonical set of skills, hooks, and agents for Claude Code — and, through one host
+  adapter per agent runtime (#2145 F8, P4: Codex), for the runtimes a fleet composes — distributed as a
+  marketplace plugin"; `:15` stays (Claude Code remains the north star's host). A dated italic paragraph after
+  `:24` in the `:40` form names #2145, F8 (the aligned direction) and D2. The CHANGELOG bullet below names it;
+  the PR body quotes the three replacements and asks for ratification in so many words. (The Claudlobby sibling
+  is D1 — the P1 Claudlobby plan's Task 5 Step 2.)
 - [ ] **Step 3:** `CHANGELOG.md` `## [Unreleased]` (house format: bold headline, issue in parentheses, prose
   naming files and fields; `### Added` before `### Changed`, above the existing `### Fixed`):
   - Added — **Sessions record which agent runtime opened them** (Claudlobby#2145 P1): `session.opened.runtime`
@@ -371,13 +440,19 @@ Claudlobby (`session_summary.runtime` reads the item field); P4 clauDNA (`host.n
   - Added — **Harvest provenance names the runtime for non-Claude sessions** (F9): `session:<runtime>/<sid>:<seg>`;
     Claude refs are byte-identical to before.
   - Changed — **Heads-up: `session.json` is `claudna.session/2`.** 0.27 reads a `/1` file by folding its log,
-    `check` warns on it, the sweep rewrites a closed session's once. A **0.26 writer** sharing a store (a bot not
-    yet restarted onto 0.27, its detached summarizer/harvest/sweep) rebuilds a `/2` file back to `/1` on its own
-    writes and 0.27 rebuilds it forward — one full rebuild each, nothing lost (the log holds `runtime`); it ends
-    when the last 0.26 process restarts. `check` run from 0.26 fails on a `/2` file: run it from 0.27.
+    `check` warns on it, the sweep rewrites it once (any session that still has a segment). A **0.26 writer**
+    sharing a store (a bot not yet restarted onto 0.27, its detached summarizer/harvest/sweep) rebuilds a `/2`
+    file back to `/1` on its own writes and 0.27 rebuilds it forward — one full rebuild each, nothing lost (the
+    log holds `runtime`); it ends when the last 0.26 process restarts — on a Claudlobby fleet that is each bot's
+    next restart, since `start-bot.sh` updates the plugin at launch. `check` run from 0.26 fails on a `/2` file:
+    run it from 0.27.
   - Changed — **Spec §1.1 rules 1 and 4 amended** (tool calls are the runtime's telemetry after #2145 P2; the
-    summarizer comparison is waived, F15) and §4/§6.2/§7.2/§10 say "runtime" where they said Claude Code.
-- [ ] **Step 4:** Commit: `docs(spec): runtime at open, qualified provenance, rules 1 and 4 amended; changelog`.
+    summarizer comparison is waived, F15 — `documentation/plans/2026-09-30-summarizer-comparison-preregistration.md`
+    is withdrawn, §11 item 12) and §4/§6.2/§7.2/§10 say "runtime" where they said Claude Code.
+  - Changed — **Mission amended** (#2145 D2): `PROJECT_MISSION.md` names the local session store and its export
+    door as the memory clauDNA keeps (no phone-home) and admits host adapters for the runtimes a fleet composes;
+    the north star is unchanged.
+- [ ] **Step 4:** Commit: `docs(spec): runtime at open, qualified provenance, rules 1 and 4 amended, the F15 pre-registration withdrawn, the mission amended (D2); changelog`.
 
 ### Task 6: the gate — `make check`, the 3.9 runtime leg, the contract leg
 
@@ -401,7 +476,10 @@ Claudlobby (`session_summary.runtime` reads the item field); P4 clauDNA (`host.n
   a new contract field — minor, not patch; both manifests move together, `make check-manifest` pins it), PR
   titled `release: v0.27.0` (the convention of #401), merge, push the tag. The marketplace tracks the default
   branch (CONTRIBUTING "What a marketplace user receives"), so the merge is what users receive. P3's plans
-  name 0.27.0 as their floor.
+  name 0.27.0 as their floor. The release is not cut before the D2 mission amendment (Task 5 Step 2b) is
+  merged: 0.27.0 is the first release whose vocabulary names a non-Claude runtime, and the mission says so first.
+  Claudlobby bots receive it at their next restart (`start-bot.sh`'s `plugin_ensure`), not on a schedule this
+  repo controls.
 
 ## Test Plan
 
@@ -428,7 +506,13 @@ Claudron` jobs.
 - [ ] A local session (Task 6) shows `.session.runtime == "claude"` in `show --json` and in an export item.
 - [ ] `make test-contract`: the Codex note's frontmatter has `source_url: session:codex/s2:1` and its fact's
   evidence line starts with that ref; the Claude note keeps `session:s1:1`.
-- [ ] `./scripts/release.sh --dry-run minor` prints 0.27.0 and the four CHANGELOG bullets it would move.
+- [ ] `grep -n '^\*\*Status:\*\* withdrawn 2026-10-04' documentation/plans/2026-09-30-summarizer-comparison-preregistration.md`
+  prints line 3 and the 2026-09-30 ratification sentence still follows it; `grep -n 'decided 2026-10-04: waived' <spec>`
+  prints one §11 line; `grep -n 'Cursor or Codex adapter' <spec>` prints `:453`.
+- [ ] `grep -n 'Item fields and rules' <spec>` prints one line; `grep -c 'Additive rule (new in 0.27)' <spec>` = 1.
+- [ ] `PROJECT_MISSION.md:33,62` carry the local-store sentences and `:5` the host-adapter clause; the dated
+  paragraph names #2145 F8 and D2; `:15` is unchanged.
+- [ ] `./scripts/release.sh --dry-run minor` prints 0.27.0 and the five CHANGELOG bullets it would move.
 
 ## What NOT To Do
 
@@ -441,14 +525,29 @@ Claudron` jobs.
 - Do not add `--include-skipped`, `entrypoint.json` or the item's `segment` object (P3), nor `host_*.py`, `--host`
   or any Codex payload handling (P4); do not add a module (the layering gate would need a rank).
 - Do not reorder the sweep's fully-retired skip (`retention.py:184-185`) to upgrade a fully retired `/1` file; readers fold it.
-- Do not touch `~/.claude/settings.json`, the plugin cache, or any Claudlobby file (its `derive_session_uid` and
-  `CLAUDLOBBY_RUNTIME` are the P1 Claudlobby plan's).
+- Do not touch `~/.claude/settings.json`, the plugin cache, or any Claudlobby file (its `session_alias`/`derive_session_uid`
+  and `CLAUDLOBBY_RUNTIME` are the P1 Claudlobby plan's).
 - Do not bump `claudna.export/1`: both item changes are additive, and P3 relies on the tag staying.
+- Do not edit the frozen text of the summarizer pre-registration: the withdrawal is one dated status line citing
+  F15 (`ab-gating-rollout.md:39`); the 2026-09-30 document stays legible beneath it.
+- Do not define any §8 item field anywhere but the "Item fields and rules" table (P3 extends it; P4 cites it).
+- Do not cut 0.27.0 before the D2 mission amendment is merged; do not write "Collector" into the spec (the
+  normalization layer is Claudlobby's to name).
 
 ## Context
 
-area: session store (events, projection, export, harvest provenance) · effort: M · risk: Low–Med (a projection
-tag bump touches every reader; mixed-version writers rebuild — lossless, bounded, documented) · priority: P1
-(§10.1 order 3; releases before P3) · related: Claudlobby#2145 (epic; F2, F6, F9, F13, F15), Claudlobby#1961
-(spec rule 4), clauDNA#300/#306 (Codex adapter prior art). Epic text to touch when this merges: §6 P1 clauDNA
-bullet 2 — "readers converge" is right; add "a 0.26 writer still rebuilds to `/1`; bounded and lossless".
+area: session store (events, projection, export, harvest provenance) · spec and mission text · effort: M · risk:
+Low–Med (a projection tag bump touches every reader; mixed-version writers rebuild — lossless, bounded by one
+bot restart cycle, documented) · priority: P1 (§10.1 order 3; releases before P3) · related: Claudlobby#2145
+(epic; F2, F6, F8, F9, F13, F15; D2), Claudlobby#1961 (spec rule 4), Claudlobby#1456/#1503 (the digest never
+reached its consumers — the ground for F15), clauDNA#373 (the pre-registration), clauDNA#395 (the canary-table
+form), clauDNA#300/#306 (Codex adapter prior art) · reforged 2026-10-05 (ironclad cycle 1).
+
+## Canary answers this PR waits on
+
+None. **Mirror rule (X16/N7):** canaries that decide clauDNA code are run from the Claudlobby side — C1 (does
+the Codex `session_id` fit `paths.py:32`'s class — the register's row 10 states it once; P4 clauDNA), C10 and
+C11 (child-session markers and ids; P3 clauDNA). When the Claudlobby run log records one, the same row is
+added to `documentation/plans/2026-09-30-session-store-phase-3.md`'s canary table (`:12-25`, the #395 form:
+question · observed · consequence), naming `scripts/session_canary.py` where it was the harness, so clauDNA's
+own record of what its code rests on stays complete.

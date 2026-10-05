@@ -18,7 +18,11 @@ repos: Claudfather/clauDNA
 > `71f983d` (v0.26.0; `main` `d1f70d4` differs only in `skills/session/resume.md` and `CHANGELOG.md`).
 > Depends on: the P1 clauDNA release (`session.opened.data.runtime`, `claudna.session/2`, `runtime` in
 > `SESSION_FIELDS`). Waits on canaries: **C10 for Task 5 only**, plus the hook-env reading from C11's
-> subagent leg (see *Canary answers this PR waits on*). Everything else ships regardless.
+> subagent leg (see *Canary answers this PR waits on*). Task 5 is held until C10 is answered and, if it
+> leaks, until the P1 Claudlobby plan's conditional `start-bot.sh` scrub task has landed on every bot; the
+> 0.28 release does not wait. Everything else ships regardless. Mission: this PR adds no runtime
+> vocabulary; it rests on the clauDNA mission amendment the P1 clauDNA plan lands (D2, epic §16) — a local
+> memory with an export door and no phone-home.
 
 ## Summary
 
@@ -50,7 +54,7 @@ The **P1 clauDNA release** on `main`: `SESSION_FIELDS` carries `runtime`, `sessi
 The P3 Claudlobby plan (`2026-10-04-runtime-neutral-observability-p3-claudlobby-summaries.md`): its `session-export` job runs `python3 -S <entrypoint> export --consumer claudlobby --include-skipped --json` and fills `session_summary` from the `segment` object. It cannot open until this PR is **released** (plan index §10.1: plan 5 releases before plan 6 consumes it).
 
 ### Steps
-Tasks 1–2 (`export.py`, `cli.py`, `tests/test_session_store_export.py`) are disjoint from Task 3 (`boundaries.py`, a new schema, `tests/test_session_store_hook.py`) and Task 4 (`tests/test_session_store_activity.py`), so they can be developed in parallel and land in one PR. Task 5 edits the same two files as Task 3 and follows it. Tasks 6–8 are docs; Task 9 gates and releases.
+Tasks follow as H3 siblings. Line numbers are pre-dependency: the P1 clauDNA release (plan 3) edits `boundaries.py`, `events.py`, `project.py`, `export.py` and the spec before this PR opens — edit bottom-up or re-grep each anchor at PR-open. Tasks 1–2 (`export.py`, `cli.py`, `tests/test_session_store_export.py`) are disjoint from Task 3 (`boundaries.py`, a new schema, `tests/test_session_store_hook.py`) and Task 4 (`tests/test_session_store_activity.py`), so they can be developed in parallel and land in one PR. Task 5 edits the same two files as Task 3 and follows it. Tasks 6–8 are docs; Task 9 gates and releases.
 
 ### Task 0: worktree, before-leg, evidence
 
@@ -58,6 +62,8 @@ Tasks 1–2 (`export.py`, `cli.py`, `tests/test_session_store_export.py`) are di
 - [ ] Before leg, in the worktree, both interpreters (`lib/CLAUDE.md`: the floor is 3.9): `python3 -m pytest tests/ -q 2>&1 | tail -3 > ~/Projects/claudna-p3-export-out/before-dev.txt` and, with a venv built from `/usr/bin/python3` and `requirements-runtime-test.txt`, `make test-runtime 2>&1 | tail -3 > …/before-39.txt`. Record failing names, not just counts (the sandbox-only failures listed in the maintainer's memory note are not this PR's).
 
 ### Task 1: every item carries `segment: {sealed_at, sealed_by, counts}`
+
+> **Held:** this task implements F6 as ratified; amendment A-F6 (epic §16) proposes otherwise. Do not start it before the operator rules.
 
 **Files:** `lib/claudna/session_store/export.py` (modified), `tests/test_session_store_export.py` (modified).
 
@@ -133,19 +139,20 @@ def skip_reason(bucket: list[dict]) -> str:
             return settled, None, "gave_up" if settled else None  # not settled: in flight, stale or unreadable — hold
 ```
 
-The loop (`:118-131`): `go_on, doc, reason = take(index)`; the item condition becomes `if doc is not None or (include_skipped and reason not in (None, "private")):`; the item dict is built as in Task 1 and, `if doc is None`, gains `item["skipped"] = {"reason": reason}` — regular items never carry a `skipped` key. `private` passes with no item because a summary withheld by the person's choice is not a coverage fact for a fleet monitor (the spec's reason set excludes it). Docstring (`:19-20`) gains one sentence naming the flag and the three reasons.
+The loop (`:118-131`): `go_on, doc, reason = take(index)`; the item condition becomes `if doc is not None or (include_skipped and reason not in (None, "private")):`; the item dict is built as in Task 1 and, `if doc is None`, gains `item["skipped"] = {"reason": reason}` — regular items never carry a `skipped` key. `private` passes with no item because a summary withheld by the person's choice is not a coverage fact for a fleet monitor (the spec's reason set excludes it). The no-item default is #387's (`documentation/plans/2026-09-30-session-store-phases-5-7.md:25,66`; `export.py:19-20`: "a skipped segment passes") and stays — the flag adds items, never changes what passes. The reason set is `events.py:174`'s today; A-F10 (epic §16), if ratified, adds `no_summarizer` in P4, so a consumer treats an unknown reason as a skip. Docstring (`:19-20`) gains one sentence naming the flag and the three reasons.
 - [ ] **Step 3:** `cli.py`: after `:368` add `exp.add_argument("--include-skipped", action="store_true", help="also emit a status item {summary: null, skipped: {reason}} for each segment the cursor passes unsummarized")`; `:274` passes `include_skipped=args.include_skipped`. The `hook` hot path (`:316`) is untouched.
-- [ ] **Step 4:** Verify: `python3 -m pytest tests/test_session_store_export.py -q`. Commit: `feat(export): --include-skipped emits status items for the segments the cursor passes (F6)`.
+- [ ] **Step 4 (the machine-readable half of §8 — X17):** `schemas/export.schema.json` (new; `$id` `claudna.export/1`; only `_SUPPORTED` keywords, `schema.py:25-29` — `items` is one): the envelope `{schema, consumer, items, next}`; each item requires `sid, seg, session, summary, segment`, `skipped` optional, `additionalProperties: false`; `session` requires every `SESSION_FIELDS` key (`runtime` included — P1 shipped it); `summary` is `["object", "null"]`; `segment` mirrors Task 1's `segment_record` (held with it under A-F6); `skipped.reason` is the closed set of Step 2. Test, in `TestIncludeSkipped`: `test_the_envelope_validates_against_the_published_schema` — `schema.validate(export(store, "c", include_skipped=True), schema.load("export")) == []` on `["done", "skipped", "done"]`, and the same envelope with `"skipped": null` forced onto a regular item fails. `tests/test_session_store.py:648-655` gates the new file's keywords and timestamp patterns automatically. Claudlobby vendors this file the way clauDNA vendors `contracts/claudron.json` (P3 Claudlobby Task 8's drift gate); until that leg runs, this schema is the contract's only machine gate.
+- [ ] **Step 5:** Verify: `python3 -m pytest tests/test_session_store_export.py -q`. Commit: `feat(export): --include-skipped emits status items for the segments the cursor passes; schemas/export.schema.json pins the envelope (F6)`.
 
 ### Task 3: the opening SessionStart writes `<CLAUDNA_STATE_DIR>/entrypoint.json` (F16)
 
 **Files:** `lib/claudna/session_store/boundaries.py` (modified), `lib/claudna/session_store/schemas/entrypoint.schema.json` (new), `tests/test_session_store_hook.py` (modified).
 
 - [ ] **Step 1 (tests first):** a new class `TestEntrypoint` in `tests/test_session_store_hook.py` (imports: `schema` from `claudna.session_store`, `subprocess`, `sys` already there):
-  - `test_an_opening_session_start_writes_the_record`: `fire(store, "SessionStart", transcript, source="startup")`; `doc = json.loads((store.root / "entrypoint.json").read_text())`; `schema.validate(doc, schema.load("entrypoint")) == []`; `doc["entrypoint"] == str(Path(boundaries.__file__).resolve().parent)`; `doc["plugin_root"] == str(REPO_ROOT)`; `doc["plugin_version"] == json.loads((REPO_ROOT / ".claude-plugin" / "plugin.json").read_text())["version"]`; `doc["host"] == "claude"`; `doc["python"] == sys.executable`; `(store.root / "entrypoint.json").stat().st_mode & 0o077 == 0`.
+  - `test_an_opening_session_start_writes_the_record`: `fire(store, "SessionStart", transcript, source="startup")`; `doc = json.loads((store.root / "entrypoint.json").read_text())`; `schema.validate(doc, schema.load("entrypoint")) == []`; `doc["entrypoint"] == str(Path(boundaries.__file__).resolve().parent)`; `doc["plugin_root"] == str(REPO_ROOT)`; `doc["plugin_version"] == json.loads((REPO_ROOT / ".claude-plugin" / "plugin.json").read_text())["version"]`; `doc["runtime"] == "claude"`; `doc["python"] == sys.executable`; `(store.root / "entrypoint.json").stat().st_mode & 0o077 == 0`.
   - `test_the_record_is_rewritten_on_every_opening_start_and_never_on_compact`: after the startup, overwrite the file with `{"stale": true}`; `PreCompact` then `SessionStart(compact)` leave it stale; `SessionEnd` then `SessionStart(resume)` rewrite a valid record.
   - `test_the_recorded_entrypoint_runs_the_export_door`: `subprocess.run([sys.executable, "-S", doc["entrypoint"], "export", "--consumer", "test", "--json", "--root", str(store.root)], capture_output=True, text=True)` → `returncode == 0` and `json.loads(stdout)["schema"] == "claudna.export/1"` — the contract in one assertion: the recorded path is the directory form the hooks use.
-  - `test_a_missing_or_malformed_manifest_leaves_the_version_null`: `monkeypatch.setattr(boundaries, "ENTRYPOINT", tmp_path / "lib" / "claudna" / "session_store")` (mkdir parents); `boundaries.write_entrypoint(root, host="claude")` → `plugin_version is None`, `plugin_root == str(tmp_path)`; write `{"version": 3}` to `tmp_path/.claude-plugin/plugin.json` → still `None`.
+  - `test_a_missing_or_malformed_manifest_leaves_the_version_null`: `monkeypatch.setattr(boundaries, "ENTRYPOINT", tmp_path / "lib" / "claudna" / "session_store")` (mkdir parents); `boundaries.write_entrypoint(root, runtime="claude")` → `plugin_version is None`, `plugin_root == str(tmp_path)`; write `{"version": 3}` to `tmp_path/.claude-plugin/plugin.json` → still `None`.
   - `test_a_failed_write_is_logged_and_the_session_is_still_open`: `monkeypatch.setattr(boundaries, "atomic_write_json", raising OSError)`; through `run_hook(...)` (the `:248-256` recipe) the result starts with `"error:"`, `hooks/errors.log` has the line, and `sessions/<SID>/seg-001` exists.
   - In `TestWrapper.test_it_records_prints_nothing_and_exits_0` (`:304-309`): assert `(state / "entrypoint.json").is_file()` and its `entrypoint == str(REPO_ROOT / "lib" / "claudna" / "session_store")` — the real wrapper, the real package.
 - [ ] **Step 2:** `schemas/entrypoint.schema.json` (new; only `_SUPPORTED` keywords, and the envelope's timestamp pattern, or `tests/test_session_store.py:648-655` fail):
@@ -156,7 +163,7 @@ The loop (`:118-131`): `go_on, doc, reason = take(index)`; the item condition be
   "$id": "claudna.entrypoint/1",
   "title": "<state>/entrypoint.json — where this plugin's store entrypoint is (spec §8, F16)",
   "type": "object",
-  "required": ["schema", "entrypoint", "plugin_root", "plugin_version", "python", "host", "written_at"],
+  "required": ["schema", "entrypoint", "plugin_root", "plugin_version", "python", "runtime", "written_at"],
   "additionalProperties": false,
   "properties": {
     "schema": {"const": "claudna.entrypoint/1"},
@@ -164,7 +171,7 @@ The loop (`:118-131`): `go_on, doc, reason = take(index)`; the item condition be
     "plugin_root": {"type": "string", "minLength": 1},
     "plugin_version": {"type": ["string", "null"], "minLength": 1},
     "python": {"type": "string", "minLength": 1},
-    "host": {"enum": ["claude", "codex"]},
+    "runtime": {"enum": ["claude", "codex"]},
     "written_at": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"}
   }
 }
@@ -182,7 +189,7 @@ ENTRYPOINT_SCHEMA = "claudna.entrypoint/1"
 `spawn_worker` (`:174,177`) drops its local `package` and uses `str(ENTRYPOINT)` — behaviour identical. New function after `harvest_choice` (`:122`):
 
 ```python
-def write_entrypoint(root: Path, *, host: str) -> Path:
+def write_entrypoint(root: Path, *, runtime: str) -> Path:
     """Publish where this plugin's store entrypoint is (spec §8, F16): ``<root>/entrypoint.json``.
 
     Claudlobby's export job runs ``python3 -S <entrypoint> export …`` from this record instead of guessing a
@@ -196,12 +203,12 @@ def write_entrypoint(root: Path, *, host: str) -> Path:
     atomic_write_json(path, {
         "schema": ENTRYPOINT_SCHEMA, "entrypoint": str(ENTRYPOINT), "plugin_root": str(plugin_root),
         "plugin_version": version if isinstance(version, str) else None, "python": sys.executable,
-        "host": host, "written_at": ev.now_ts(),
+        "runtime": runtime, "written_at": ev.now_ts(),
     })
     return path
 ```
 
-In `_session_start`, insert before `return f"session opened ({source})"` (`:162`): `write_entrypoint(root, host=RUNTIME)  # F16: after the store writes, so a failed write can't lose the session`. It sits after the `_SOURCES` check, so `compact` (`:130-135`) never writes. An `OSError` propagates like any store failure: `run_hook` logs it to `hooks/errors.log` (`cli.py:177-193`) and the hook still exits 0.
+In `_session_start`, insert before `return f"session opened ({source})"` (`:162`): `write_entrypoint(root, runtime=RUNTIME)  # F16: after the store writes, so a failed write can't lose the session`. It sits after the `_SOURCES` check, so `compact` (`:130-135`) never writes. An `OSError` propagates like any store failure: `run_hook` logs it to `hooks/errors.log` (`cli.py:177-193`) and the hook still exits 0. Writer-side statement of what the consumer relies on (spec §8, Task 7): a consumer requires `schema == "claudna.entrypoint/1"` and `plugin_version >= 0.28.0` (else it skips the store as `old_entrypoint`), treats an `entrypoint` directory missing on disk as **stale**, and treats a non-zero exit or non-JSON stdout from the door as `export_failed` — never as a reason to guess another path (X18). The key is `runtime`, not `host`: it is the join key's name (`session.opened.data.runtime`, P1); `host` stays the adapter-module vocabulary (`host_claude.py`, P4).
 - [ ] **Step 4:** Verify: `python3 -m pytest tests/test_session_store_hook.py tests/test_session_store.py -q` (the second file's schema walk now covers the new file). Commit: `feat(session): the opening SessionStart writes <state>/entrypoint.json (F16)`.
 
 ### Task 4: freeze the activity layer (F8) — the test
@@ -213,7 +220,9 @@ In `_session_start`, insert before `return f"session opened ({source})"` (`:162`
 ```python
 class TestFrozenLayer:
     """F8 (Claudlobby#2145): the activity layer is frozen — these four kinds, these three hooks, no more.
-    Intra-session detail is the runtime's own OpenTelemetry export; the hooks stay wired (TestWiring)."""
+    Intra-session detail is the runtime's own OpenTelemetry export; the hooks stay wired (TestWiring).
+    Not covered: plugin-hooks/telemetry-emit.sh, Claudosseum's skill_invocation writer, which keeps its own
+    hook entry by owner decision (phase-4 plan :97-99; spec §10) — a Claudosseum contract, not this layer."""
 
     KINDS = ("prompt.submitted", "skill.invoked", "tool.failed", "tool.interrupted")
 
@@ -232,80 +241,84 @@ class TestFrozenLayer:
 
 ### Task 5: the nested-child guard reads `CLAUDE_CODE_CHILD_SESSION=1` first — **conditional on C10**
 
-**Files:** `lib/claudna/session_store/boundaries.py`, `tests/test_session_store_hook.py`, `SETUP_GUIDE.md` (all modified). Hold this task's commit until the canary section below is answered; the rest of the PR does not wait.
+**Files:** `lib/claudna/session_store/boundaries.py`, `tests/test_session_store_hook.py`, `SETUP_GUIDE.md` (all modified). Hold this task's commit until C10 is answered and, if it leaks, until the P1 Claudlobby plan's conditional `start-bot.sh` scrub task (`unset CLAUDE_CODE_CHILD_SESSION` before `exec $CLAUDE`, with its test) has landed on every bot; the rest of the PR — and the 0.28 release — does not wait (X3).
 
 - [ ] **Step 1 (tests first):** in `TestNestedChildren` (`:436`): `test_claude_codes_own_child_marker_is_enough` — parent `self.env("cli", 100)` opens; a child with `{**self.env("cli", 100), "CLAUDE_CODE_CHILD_SESSION": "1"}` (same pid, same entrypoint — today's three checks would let it through) gets `ignored: nested` on `SessionStart(startup)`, `PreCompact` and `SessionEnd`; the session stays open with one segment; the parent still closes. `test_a_marked_child_records_nothing_of_its_own` — a child with the marker and a **fresh** id (`boundaries.handle` with `session_id="child-1"`) gets `ignored: nested` on its `SessionStart(startup)` and nothing exists under `sessions/child-1` (spec §4.4 `:145`: "a real child marker would still be the stronger signal where it exists" — a marked child records nothing, like `CLAUDNA_SESSION_CHILD`). `test_a_marked_resume_is_ignored_too` — the marker wins over the resume exemption.
 - [ ] **Step 2:** `boundaries.py`: constant after `INTERACTIVE_ENTRYPOINTS`: `CHILD_SESSION_ENV = "CLAUDE_CODE_CHILD_SESSION"  #: Claude Code's own marker for a nested session's processes (documented; C10 measured the leak)`. `inherited` (`:307`) gains, as its **first** statement, before the unknown/resume preamble: `if env.get(CHILD_SESSION_ENV) == "1": return True`. Docstring: first line becomes "Is this hook a nested ``claude``'s — Claude Code's own marker says so, or it reuses an existing session's id? (spec §11.5)"; a first bullet names the marker; the three existing bullets become "the fallbacks for a Claude Code that doesn't set it". `handle` (`:337`) returns `"ignored: nested child (a Claude Code child session, or an inherited session id)"` — every existing assertion is `startswith("ignored: nested")`. Not in the wrapper: one guard, in Python, so `scripts/session_canary.py:44` (which imports `inherited`) keeps asking the real one.
 - [ ] **Step 3:** `SETUP_GUIDE.md` §3.7 bullets (after `:320`): "**Nested sessions:** a `claude` started from inside a session carries Claude Code's `CLAUDE_CODE_CHILD_SESSION=1` and records nothing; a child that inherited its parent's session id is ignored on the same grounds." The env table (`:309-317`) gains no row: this is Claude Code's variable, not a clauDNA setting.
 - [ ] **Step 4:** Verify: `python3 -m pytest tests/test_session_store_hook.py tests/test_session_canary.py -q`. Commit: `feat(session): the nested-child guard reads CLAUDE_CODE_CHILD_SESSION first (C10)`.
 
-### Task 6: SETUP_GUIDE — the owning agent process (F13, unconditional)
+### Task 6: SETUP_GUIDE — the owning agent process (F13, unconditional), and one false claim in three places
 
-**Files:** `SETUP_GUIDE.md` (modified).
+**Files:** `SETUP_GUIDE.md`, `lib/claudna/session_store/telemetry.py`, `documentation/plans/2026-09-30-session-store-phase-4.md` (all modified).
 
 - [ ] `:316` "How long a session whose `claude` process is gone may sit open…" → "How long a session whose owning agent process (the `claude` that opened it, recorded as `claude_pid`) is gone may sit open…"; `:320` "…and whose `claude` process is gone, and marks them `abandoned`" → "…and whose owning agent process is gone, and marks them `abandoned`". No other row changes semantics in this PR (`:313`'s entrypoint list is P4's). Add one bullet after `:320`: "**For fleet tooling:** each opening SessionStart rewrites `~/.claudna/entrypoint.json`, naming the store's entrypoint and plugin version, so Claudlobby's export job runs the store by contract instead of guessing a plugin-cache path (spec §8)." Commit with Task 8.
+- [ ] **Three false claims, one fact (D6):** `SETUP_GUIDE.md:704` "Fleet bots | **On** (Claudlobby sets `CLAUDNA_TELEMETRY=1`)" → "Fleet bots | **Off** — Claudlobby composes only `CLAUDNA_VERSION` (`composer.py:1319-1330`); a fleet opts a bot in with `CLAUDNA_TELEMETRY=1` in its `env:`"; `telemetry.py:3` "(Claudlobby sets it for fleet bots)" → "(a fleet sets it per bot through `env:`; Claudlobby composes no default)"; phase-4 plan `:68` "which Claudlobby sets for fleet bots" → the same, dated `(corrected 2026-10-05)`. Claudlobby never has set it; the P3 Claudlobby plan keeps it an operator `env:` knob outside its `claudna:` mapping.
 
 ### Task 7: spec §8 contract text, §5 layout, §4.2 freeze note
 
 **Files:** `documentation/specs/2026-09-28-session-store-design.md` (modified). Register rule R3: this text is what Claudlobby conforms to, so it is exact. `0.28` below means the version Task 9 releases (`0.28.0` if P1 shipped as `0.27.0`); write the real number.
 
-- [ ] **§8 (`:433-440`)** replaces the contract line, the fenced block and the envelope sentence with:
+- [ ] **§8 — extend P1's table, never rewrite §8 (X4).** P1 clauDNA Task 3 Step 3 inserted an **Item fields and rules** subsection after `:440`: the grammar block, `--since-seg`/`--limit`, the ack rule and the additive rule (new in 0.27, citing `2026-10-01-session-store-hardening.md:44`) live there and stay P1's text; `session`'s row (with `runtime`) and `next`'s are P1's too. This task edits that subsection in place — the grammar's first line gains `[--include-skipped]`, `summary`'s row gains "or `null` on a status item", the table gains the `segment` and `skipped` rows, and the **Status items** and **entrypoint record** paragraphs follow the table. The text below is what lands, written as rows and paragraphs of P1's subsection (re-grep the anchors at PR-open):
 
-> **Export contract** (the surface Claudron and Claudlobby pin; drift-gated on their side per Claudron register rule R3):
+> *The contract line (`:433`, or where P1 moved it):* **Export contract** (the surface Claudron and Claudlobby pin — Claudron register rule R3: consumers conform to this text; the machine gate is `schemas/export.schema.json` here and, once P3 Claudlobby Task 8's conformance leg runs the door, Claudlobby's vendored copy of it). No "drift-gated on their side" claim until that leg exists (X17).
 >
 > ```
 > session export --consumer <name> [--since-seg N] [--limit N] [--include-skipped] --json
 > session export --consumer <name> --ack --sid <sid> --through <seg>
 > ```
 >
-> Returns `{ schema: "claudna.export/1", consumer, items: [...], next: <cursor> }`. Each item is `{ sid, seg, session, summary, segment }`, plus `skipped` on a status item:
-> - `session` — the `session.json` subset `SESSION_FIELDS`: `sid`, `status`, `opened_at`, `closed_at`, `close_reason`, `chain_id`, `parent_sid`, `actor`, `origin`, `runtime` (0.27; absent means `claude`).
-> - `summary` — the segment summary (§6.6), or `null` on a status item.
-> - `segment` (0.28, additive) — `{ sealed_at, sealed_by, counts }`: the seal as `segment.json` records it (§6.5) and `counts` = `{ prompts, skills, failures, interrupts }`; `counts` is `null` for a retired segment, whose activity log is gone.
-> - **Status items** (0.28) appear only with `--include-skipped`: `{ …, summary: null, skipped: { reason } }` for each final segment the cursor passes unsummarized. `reason` is the `summary.skipped` reason (`disabled`, `trivial`, `headless`, `no_transcript`), `gave_up` (a summary that will never come: failed for good, attempts spent, or a retry nothing will run), or `retired` (retired before any summary was archived). A segment skipped as `private`, like a private session, never exports. Status items count against `--limit`; `next` is the same with or without the flag; without it the envelope is byte-identical to the flagged one minus the status items.
-> - `next` — per session, the segment the consumer may ack. An ack never moves a cursor back and never passes the session's last final segment.
+> *Rows added to P1's table* (each item is `{ sid, seg, session, summary, segment }`, plus `skipped` on a status item):
+> - `session` — P1's row, untouched (the `SESSION_FIELDS` subset; `runtime` absent means `claude`).
+> - `summary` — P1's row gains: "or `null` on a status item".
+> - `segment` (0.28, additive) — `{ sealed_at, sealed_by, counts }`: the seal as `segment.json` records it (§6.5) and `counts` = `{ prompts, skills, failures, interrupts }`; `counts` is `null` for a retired segment, whose activity log is gone. (A-F6, epic §16, would add `transcript { path, range }` and move the volume computation to the consumer — held with Task 1.)
+> - `skipped` (0.28) — `{ reason }`, present only on a **status item**. Status items appear only with `--include-skipped`: `{ …, summary: null, skipped: { reason } }` for each final segment the cursor passes unsummarized. `reason` is the `summary.skipped` reason (`disabled`, `trivial`, `headless`, `no_transcript`), `gave_up` (a summary that will never come: failed for good, attempts spent, or a retry nothing will run), or `retired` (retired before any summary was archived). A segment skipped as `private`, like a private session, never exports. Status items count against `--limit`; `next` is the same with or without the flag; without it the envelope is byte-identical to the flagged one minus the status items. Which reason a bot yields follows the gate (`project.py:276-287`): a Claudlobby bot with summaries unarmed reads `disabled` (its `bot.conf` composes `CLAUDNA_SESSION_SUMMARY=0`, P3 Claudlobby Task 1); `headless` is a bot or `claude -p` with the variable unset. A consumer treats an unknown reason as a skip — A-F10 (epic §16), if ratified, adds `no_summarizer` in P4.
+> - `next` and the ack rule — P1's rows, untouched.
 >
-> Consumers read through this command and never parse the store's files; item keys are additive, and a consumer ignores what it doesn't know.
+> *`:440`'s envelope sentence and §1.1 rule 2 (`:33`), amended (D5):* the plane never parses the store's *session* files; the one file a consumer reads is the published `entrypoint.json`, the second contract surface (below). Item keys are additive (P1's rule), and a consumer ignores what it doesn't know.
 >
 > **The entrypoint record** (0.28, F16). The store's own opening SessionStart (`startup`, `clear`, `resume`, `fork`; never `compact`) writes `<CLAUDNA_STATE_DIR>/entrypoint.json`, mode 0600, by atomic replace:
 >
 > ```json
 > {"schema": "claudna.entrypoint/1", "entrypoint": "/abs/…/lib/claudna/session_store", "plugin_root": "/abs/…",
->  "plugin_version": "0.28.0", "python": "/usr/bin/python3", "host": "claude", "written_at": "2026-10-04T12:00:00.000Z"}
+>  "plugin_version": "0.28.0", "python": "/usr/bin/python3", "runtime": "claude", "written_at": "2026-10-04T12:00:00.000Z"}
 > ```
 >
-> `entrypoint` is the package directory the hooks themselves run (`python3 -S <entrypoint> <verb>`); `plugin_root` its plugin; `plugin_version` from `<plugin_root>/.claude-plugin/plugin.json`, `null` when unreadable; `host` the adapter that wrote it (`claude`; `codex` once that host ships); `written_at` in the store's timestamp format. A consumer runs `python3 -S <entrypoint> export --consumer <name> [--include-skipped] --json` and `… --ack --sid <sid> --through <seg>`. A record whose `entrypoint` no longer exists is **stale** (a plugin replaced under a running session): the consumer skips that store until the next SessionStart rewrites it and never guesses another path. Schema: `schemas/entrypoint.schema.json`. It is written by the store hook (no matcher, gated by `CLAUDNA_SESSION_STORE`), not the briefing hook, which bots turn off.
+> `entrypoint` is the package directory the hooks themselves run (`python3 -S <entrypoint> <verb>`); `plugin_root` its plugin; `plugin_version` from `<plugin_root>/.claude-plugin/plugin.json`, `null` when unreadable; `runtime` the runtime that wrote it (`claude`; `codex` once that host ships) — the join key's name, not `host` (X18); `written_at` in the store's timestamp format. A consumer runs `python3 -S <entrypoint> export --consumer <name> [--include-skipped] --json` and `… --ack --sid <sid> --through <seg>`. A consumer requires `schema == "claudna.entrypoint/1"` and `plugin_version >= 0.28.0`, else it skips the store as `old_entrypoint`. A record whose `entrypoint` no longer exists is **stale** (a plugin replaced under a running session): the consumer skips that store until the next SessionStart rewrites it and never guesses another path; a non-zero exit or non-JSON stdout from the door is `export_failed`, not a reason to look elsewhere. Schema: `schemas/entrypoint.schema.json`. The record answers outside a session what `<claudna-root>` (`SKILL_CONTRACT.md` §1.1 `:26-43`) answers inside one — which copy of the plugin is loaded — and formalizes, with a schema, the plugin-writes/fleet-reads shape of `<BOT_DIR>/.claude/session.md` (Claudlobby#2094). It is written by the store hook (no matcher, gated by `CLAUDNA_SESSION_STORE`), not the briefing hook, which bots turn off.
 
 - [ ] **§5 (`:149-173`)**: under the root, before `links/`, add `  entrypoint.json            # where this plugin's store entrypoint is (§8, F16); rewritten at each opening SessionStart`.
 - [ ] **§4.2**, after the table (`:116`): "**Frozen (2026-10-04, Claudlobby#2145 F8).** The activity layer — `prompt.submitted`, `skill.invoked`, `tool.failed`, `tool.interrupted` from the three hooks above — takes no new kinds and no new hooks, and the hooks stay wired. Intra-session detail is the runtime's own OpenTelemetry export, normalized by Claudlobby's Collector. Unwiring waits until interactive users have OTel too. Pinned by `tests/test_session_store_activity.py::TestFrozenLayer` and `tests/test_session_store_hook.py::TestWiring`."
-- [ ] Commit: `docs(spec): §8 names the export items — status items, the segment object, entrypoint.json; §5 layout; §4.2 freeze (F6, F8, F16)`.
+- [ ] **§10 Hosts (`:453`)**: one sentence — "A host adapter's name is the `runtime` value it records (`session.opened.data.runtime`, `entrypoint.json.runtime`); `host` is the adapter-module vocabulary (`host_claude.py`, P4), never a second key" (X18).
+- [ ] **§4.4 (`:145`) and §11.5 (`:464`)** — close the Claudlobby#1961 thread (D6): `CLAUDLOBBY_HOOK_CHILD` was never built; Claude Code's own `CLAUDE_CODE_CHILD_SESSION=1` is the child marker. `:145` "(and Claudlobby's child marker once one ships — `CLAUDLOBBY_HOOK_CHILD` is proposed in Claudlobby#1961; none exists today)" → "(and Claude Code's own `CLAUDE_CODE_CHILD_SESSION=1`, which the guard reads first — Task 5, C10)"; `:464` "a hook-suppression marker (Claudlobby#1961)" → "the `CLAUDNA_SESSION_CHILD=1` marker; Claudlobby#1961's `CLAUDLOBBY_HOOK_CHILD` was never built and is superseded by Claude Code's own marker". Closing #1961 is unconditional; only the "reads first" clause rides with Task 5.
+- [ ] Commit: `docs(spec): §8 extends the item table — status items, the segment object, entrypoint.json (runtime); §1.1 rule 2; §5 layout; §4.2 freeze; §10 hosts; #1961 closed (F6, F8, F16)`.
 
 ### Task 8: CHANGELOG
 
 **Files:** `CHANGELOG.md` (modified; `scripts/check-changelog.sh` requires new `[Unreleased]` content).
 
-- [ ] `### Added`: "**The export door carries what Claudlobby's `session_summary` needs** (Claudlobby#2145 P3). Every `claudna.export/1` item gains `segment: {sealed_at, sealed_by, counts}` (`counts` is `null` for a retired segment). `session export --include-skipped` adds a status item `{summary: null, skipped: {reason}}` for each final segment the cursor passes unsummarized — `reason` is the summary-gate reason, `gave_up` or `retired`; `private` never exports — so a fleet monitor sees coverage, not just summaries; without the flag the envelope is unchanged. Each opening SessionStart now writes `~/.claudna/entrypoint.json` (`claudna.entrypoint/1`: the store's entrypoint, plugin root and version), so Claudlobby runs the store by contract instead of guessing the plugin-cache path (spec §8)."
-- [ ] `### Changed`: "**The activity layer is frozen** (F8): its four kinds and three hooks are pinned; new intra-session detail comes from the runtime's own telemetry." · "**SETUP_GUIDE says "owning agent process"** where it said "`claude` process" (F13)." · (Task 5, when it lands) "**Heads-up: a `claude` started from inside a session records nothing.** The nested-child guard reads Claude Code's own `CLAUDE_CODE_CHILD_SESSION=1` first; the pid and entrypoint checks remain the fallbacks. Fleet hosts: `start-bot.sh` must not pass that variable to a bot (Claudlobby#2145 C10)."
+- [ ] `### Added`: "**The export door carries what Claudlobby's `session_summary` needs** (Claudlobby#2145 P3). Every `claudna.export/1` item gains `segment: {sealed_at, sealed_by, counts}` (`counts` is `null` for a retired segment). `session export --include-skipped` adds a status item `{summary: null, skipped: {reason}}` for each final segment the cursor passes unsummarized — `reason` is the summary-gate reason, `gave_up` or `retired`; `private` never exports — so a fleet monitor sees coverage, not just summaries; without the flag the envelope is unchanged. Each opening SessionStart now writes `~/.claudna/entrypoint.json` (`claudna.entrypoint/1`: the store's entrypoint, plugin root, version and `runtime`), so Claudlobby runs the store by contract instead of guessing the plugin-cache path (spec §8); `schemas/export.schema.json` pins the envelope."
+- [ ] `### Changed`: "**The activity layer is frozen** (F8): its four kinds and three hooks are pinned; new intra-session detail comes from the runtime's own telemetry." · "**SETUP_GUIDE says "owning agent process"** where it said "`claude` process" (F13)." · (Task 5, when it lands) "**Heads-up: a `claude` started from inside a session records nothing.** The nested-child guard reads Claude Code's own `CLAUDE_CODE_CHILD_SESSION=1` first; the pid and entrypoint checks remain the fallbacks. Fleet hosts: `start-bot.sh` must not pass that variable to a bot — the P1 Claudlobby plan's conditional scrub task, Task 7b (Claudlobby#2145 C10)."
 - [ ] Commit (with Task 6): `docs: owning-agent wording (F13), the entrypoint record and the export additions in SETUP_GUIDE and CHANGELOG`.
 
 ### Task 9: gate, the live check, release
 
 - [ ] `make check` in the worktree (CI runs the same target, `Makefile:22`); then the 3.9 leg: `PATH="<venv-39>/bin:$PATH" make test-runtime` (the export, hook and activity suites are in `RUNTIME_TESTS`, `:54-61`); `tests/test_runtime_layout.py` (layering, stdlib-only, one shim) runs inside both. Compare failing names against Task 0's before-leg files; only pre-existing names may remain.
-- [ ] Live check on this machine: `claude --plugin-dir ~/Projects/claudna-p3-export`, type one prompt, `/exit`; then `jq . ~/.claudna/entrypoint.json` shows `entrypoint` under the worktree and `plugin_version` the bumped number (the marketplace 0.26.0 copy writes nothing, so nothing overwrites it); `python3 -S "$(jq -r .entrypoint ~/.claudna/entrypoint.json)" export --consumer test --json | python3 -m json.tool | head -40` prints a `claudna.export/1` envelope whose items carry `segment`; add `--include-skipped` and confirm a `skipped` item appears for a session whose segment was skipped (`headless`/`disabled` — this session, if `CLAUDNA_HARVEST` is unset). Paste both outputs, paths redacted to `~`, into the PR body.
-- [ ] PR → review → merge. Release on `main` per `CONTRIBUTING.md:128-138`: `./scripts/release.sh minor` (both manifests, the CHANGELOG section, the commit and tag; it does not push), push the commit and the tag; `release-tag.yml` also tags on the version change. Then the P3 Claudlobby plan may bump its `claudna_version` and open.
+- [ ] Live check on this machine: `claude --plugin-dir ~/Projects/claudna-p3-export`, type one prompt, `/exit`; then `jq . ~/.claudna/entrypoint.json` shows `entrypoint` under the worktree and `plugin_version` the bumped number (the marketplace 0.26.0 copy writes nothing, so nothing overwrites it); `python3 -S "$(jq -r .entrypoint ~/.claudna/entrypoint.json)" export --consumer test --json | python3 -m json.tool | head -40` prints a `claudna.export/1` envelope whose items carry `segment`; add `--include-skipped` and confirm a `skipped` item appears for a session whose segment was skipped (`headless`/`disabled` — this session, if `CLAUDNA_HARVEST` is unset). Paste both outputs, paths redacted to `~`, into the PR body. Also record, for X18: `ls ~/.claude/plugins/cache/Claudfather/claudna/` before and after `claude plugin update claudna` — does the prior `<version>` directory survive? It decides whether a stale `entrypoint` can point at a still-present older copy, and so what the consumer's staleness check really sees; the answer goes into the PR body and the P3 Claudlobby canary.
+- [ ] PR → review → merge. **Before merging,** the fleet's `claudna_version` is pinned (the P3 Claudlobby plan's Dependencies): marketplace auto-update (`start-bot.sh:315-321` → `lib-common.sh:4699-4710`, `claude plugin update` on every bot start unless `BOOT_PLUGIN_UPDATE_ONCE=1`) otherwise delivers 0.28 to every tmux-hosted bot at its next restart, C10 answered or not — which is why Task 5, not the release, is what C10 gates (D9/X21). Release on `main` per `CONTRIBUTING.md:128-138`: `./scripts/release.sh minor` (both manifests, the CHANGELOG section, the commit and tag; it does not push), push the commit and the tag; `release-tag.yml` also tags on the version change. Then the P3 Claudlobby plan may bump its `claudna_version` and open.
+- [ ] Open the Claudron PR that flips boundary-spec §10.4 register row 11 (the clauDNA export contract: `--include-skipped`, `segment`, `entrypoint.json`) from *planned* to shipped, citing the 0.28 tag — the authoritative text stays here (R2); the register points at it (X14).
 
 ## Test Plan
 
-New: `TestExport::test_every_item_carries_the_segment_object`, the archived-item assertions in `TestReviewRound387`, `TestIncludeSkipped` (seven tests) and the extended `test_the_cli` in `tests/test_session_store_export.py`; `TestEntrypoint` (five tests) and the wrapper assertion in `tests/test_session_store_hook.py`; `TestFrozenLayer` (three) in `tests/test_session_store_activity.py`; `TestNestedChildren` gains three (Task 5). Existing: `tests/test_session_store.py::TestSchemas` now also walks `entrypoint.schema.json`. All of these run in both legs (`RUNTIME_TESTS`). Manual: Task 9's live check. Coverage: every branch of the new `take()` (done / skipped / retired-with-archive / retired-without / settled / unsettled) has a test naming it.
+New: `TestExport::test_every_item_carries_the_segment_object`, the archived-item assertions in `TestReviewRound387`, `TestIncludeSkipped` (eight tests, one against `schemas/export.schema.json`) and the extended `test_the_cli` in `tests/test_session_store_export.py`; `TestEntrypoint` (five tests) and the wrapper assertion in `tests/test_session_store_hook.py`; `TestFrozenLayer` (three) in `tests/test_session_store_activity.py`; `TestNestedChildren` gains three (Task 5). Existing: `tests/test_session_store.py::TestSchemas` now also walks `entrypoint.schema.json` and `export.schema.json`. All of these run in both legs (`RUNTIME_TESTS`). Manual: Task 9's live check. Coverage: every branch of the new `take()` (done / skipped / retired-with-archive / retired-without / settled / unsettled) has a test naming it.
 
 ## Verification Checklist
 
 - [ ] `python3 -m pytest tests/ -q` and `make test-runtime` under `/usr/bin/python3` (3.9): no failing name that is not in Task 0's before-leg files.
 - [ ] `make check` green (lint at `line-length = 120`, manifests, changelog gate).
 - [ ] `python3 -m pytest tests/test_session_store_export.py -q -k "unchanged"`: the unflagged envelope equals the flagged one minus status items; no default item has a `skipped` key.
-- [ ] `~/.claudna/entrypoint.json` exists after a real SessionStart, is `0600`, validates against `schemas/entrypoint.schema.json`, and `python3 -S <its entrypoint> export --consumer test --json` exits 0 with a `claudna.export/1` envelope.
+- [ ] `~/.claudna/entrypoint.json` exists after a real SessionStart, is `0600`, validates against `schemas/entrypoint.schema.json`, carries `runtime: "claude"`, and `python3 -S <its entrypoint> export --consumer test --json` exits 0 with a `claudna.export/1` envelope.
 - [ ] Mutation probes, shown then restored: drop `"counts"` from `segment_record` → Task 1's test fails; return `"trivial"` for every reason → the `retired`/`gave_up` tests fail; add an `ACTIVITY` kind to `REGISTRY` → `TestFrozenLayer` fails; change the schema's `written_at` pattern → `test_every_timestamp_pattern_is_the_envelopes` fails.
-- [ ] Spec §8 names every item key the code emits (`sid, seg, session, summary, segment, skipped`), and `SESSION_FIELDS` in the text equals `export.SESSION_FIELDS`.
+- [ ] Spec §8 defines every item key the code emits (`sid, seg, session, summary, segment, skipped`) **exactly once** (`grep -c` per key over the Item fields table — P1's rows plus this PR's; X4), `SESSION_FIELDS` in the text equals `export.SESSION_FIELDS`, and the flagged envelope validates against `schemas/export.schema.json`.
 - [ ] (Task 5) `scripts/session_canary.py report` on a run with a marked child shows every child event ignored by the guard.
 
 ## What NOT To Do
@@ -316,17 +329,21 @@ New: `TestExport::test_every_item_carries_the_segment_object`, the archived-item
 - Don't emit a status item for a `private` skip or a private session.
 - Don't add `runtime` anywhere (P1 did), `--host` or `host_*.py` (P4), or a new `session_store` module (none is needed; the layering gate would also demand a rank).
 - Don't put the `CLAUDE_CODE_CHILD_SESSION` check in `session-store.sh`: one guard, in Python, that the canary script can ask.
-- Don't install 0.28 on a tmux-hosted bot before C10 is answered; if the variable leaks, `start-bot.sh` must `unset CLAUDE_CODE_CHILD_SESSION` first (a Claudlobby change) or every bot hook is ignored and no session ever closes.
+- Don't gate the 0.28 release on C10 — marketplace auto-update reaches tmux-hosted bots at their next restart regardless (Task 9). Gate **Task 5**: it is held until C10 is answered and, if the variable leaks, until the P1 Claudlobby plan's conditional `start-bot.sh` scrub has landed on every bot — otherwise every bot hook is ignored and no session ever closes.
+- Don't rewrite §8 from the pre-P1 text: extend P1's **Item fields and rules** table in place (X4).
+- Don't name the record's adapter `host`: the key is `runtime`, the join key's name (X18).
 - Don't use 3.10+ syntax in `lib/` (`match`, `X | Y` at runtime, `zip(strict=)`): the floor is 3.9; annotations are fine under `from __future__ import annotations`.
 - Don't let `write_entrypoint` swallow its `OSError`: `run_hook` logs it; a silent failure would leave a stale record nobody notices.
 
 ## Context
 
-area: session store / export door · effort: M · risk: Medium (two runtime-behaviour changes in the SessionStart hook — a new file write, and the guard under C10; the export changes are additive) · priority: P3 (plan 5 of §10.1) · related: Claudlobby#2145 (epic), Claudlobby#1961 (the digest's coverage concern F6 keeps), clauDNA#373 (nested children, M3), clauDNA#387 (export review S4).
+area: session store / export door · effort: M, nearer S–M (three additive contract changes and one file write; D7) · risk: Medium (two runtime-behaviour changes in the SessionStart hook — a new file write, and the guard under C10; the export changes are additive) · priority: P3 (plan 5 of §10.1) · related: Claudlobby#2145 (epic), Claudlobby#1961 (the digest's coverage concern F6 keeps), clauDNA#373 (nested children, M3), clauDNA#387 (export review S4).
 
 ## Canary answers this PR waits on
 
 | Canary | Task | If it answers the other way |
 |---|---|---|
-| **C10** — does `CLAUDE_CODE_CHILD_SESSION` reach a bot whose tmux server was started from inside another Claude session? | 5 | **Leaks:** Claudlobby's `start-bot.sh` scrubs it before `exec $CLAUDE` (`:224-227,268`; it unsets nothing today) and that change is deployed to every bot **before** 0.28 is installed; Task 5 is held (or the release waits) until then. **Doesn't leak:** Task 5 ships as written. |
+| **C10** — does `CLAUDE_CODE_CHILD_SESSION` reach a bot whose tmux server was started from inside another Claude session? | 5 | **Leaks:** the P1 Claudlobby plan's conditional `start-bot.sh` scrub task (`unset CLAUDE_CODE_CHILD_SESSION` before `exec $CLAUDE`, `:224-227,268`; it unsets nothing today; with a test) lands and is deployed to every bot first; Task 5 is held until then — **the 0.28 release does not wait** (X3, D9). **Doesn't leak:** Task 5 ships as written. |
 | **C11, hook-side reading** — do `PostToolUse`/`PostToolUseFailure` hook processes fired by an Agent subagent's tool calls carry `CLAUDE_CODE_CHILD_SESSION=1` with the parent's `session_id`? (C11 already runs hooks from a subagent; a 3-line scratch hook appending `env | grep ^CLAUDE_CODE_` to a file records it — no repo change.) | 5 | **They do:** the marker check in `inherited` is restricted to `event in ("SessionStart", "PreCompact", "SessionEnd")` so the parent keeps its subagents' `skill.invoked`/`tool.failed`; activity events keep the three fallback checks (which already catch a reused id by pid). **They don't:** as written. |
+
+When the Claudlobby run log records C10 and C11, the same rows are added to `documentation/plans/2026-09-30-session-store-phase-3.md`'s canary table (`:23-25`, the #395 form), naming `scripts/session_canary.py` where it was the harness (X16).
