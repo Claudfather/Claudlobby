@@ -107,8 +107,9 @@ Tasks follow as H3 siblings, in shipping order: leg P2-b (Tasks 1–2) first, th
 > and the dead `session_event` path; Step 2's deletion of the `tool_call` emit, and Step 1's zero-rows assertion for
 > `tool_call`, move to Task 9 (P2-a2), which retires the emit in the PR that lands its replacement. Also observed on the
 > Pi (run log, 2026-10-05): every production bot composes `bot-vitals.sh` twice (the release's and the legacy
-> `$CLAUDLOBBY_ROOT/lib/` copy). P2-b's before-leg records whether that duplicate comes from this repo's composition or
-> from stale host state; if from composition, P2-b removes the legacy entry.
+> `$CLAUDLOBBY_ROOT/lib/` copy). The cause is #2062: the fleet manifests still declare the root `lib/` hook beside the
+> release's default. P2-b does not fix it; its before-leg counts rows per call so the doubling is not read as a P2-b
+> effect, and its tests compose a single registration.
 
 **Files:** `claudlobby/_runtime_scripts/bot-vitals.sh`, `tests/test_plane_cutover_keepalive.py`, `tests/test_plane_emit_class.py`, `tests/test_event_type_registry.py`, `documentation/guides/observability.md`, `documentation/fleet-yaml-schema.md`, `fleet.yaml.example`, `CLAUDE.md`/`AGENTS.md`, `claudlobby/_runtime_scripts/CLAUDE.md`/`AGENTS.md`, `CHANGELOG.md`. **Untouched by design:** `system.yaml:369,393` (the hooks stay — they are the marker), `registries.py:196` and `retention.py:88-91` (`tool_call` stays registered and prunable so existing rows classify and age out), `tests/test_system_event_retention.py:100`, `library/protocols/fleet-observability.md` (no `tool_call` row exists; its `session_event` row `:66` is `ef86465a`'s). Line numbers below are at `cd292cb`; on `ef86465a` the header is one line longer and `:77-79` is already gone — re-grep at PR-open.
 

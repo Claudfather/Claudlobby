@@ -179,7 +179,7 @@ up, restored byte-identical afterwards) and restarting it twice through the rele
 - **Not observed in the compressed window:** watchdog restarts, summarizer child sessions, intake outages, idle
   volume. They move to C6b (P2-a1's canary week).
 
-**Measured, fleet findings outside this epic's code (operator to decide on issues):**
+**Measured, fleet findings outside this epic's code** (filed 2026-10-05: 1 was already #2062 — Pi evidence added; 2 was #2087, fixed by #2089 on 2026-10-02 after the Pi's checkout `8bc588a8`, so the Pi needs a newer release; 3 is new, #2168):
 1. **Every one of the Pi's 21 bots composes `bot-vitals.sh` twice** in the same `PreToolUse`/`PostToolUse` group —
    `$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh` and the legacy `$CLAUDLOBBY_ROOT/lib/bot-vitals.sh` — so the plane
    writes two `tool_call` rows per hook event. The legacy entry will point at a deleted script once the checkout
