@@ -60,9 +60,8 @@ SELECTORS = frozenset("pkill killall killall5 skill".split())
 LOOKUPS = frozenset(
     "ps pgrep pidof pstree lsof fuser ss netstat top tmux screen".split()
 )
-READERS = frozenset(
-    "cat head tail tr cut sort uniq grep sed awk jobs echo printf".split()
-)
+READERS = frozenset("cat head tail tr cut sort uniq grep sed awk jobs".split())  # name files
+PRINTERS = frozenset(["echo", "printf"])  # print their own arguments
 OWN = frozenset(["!", "$", "BASHPID"])  # the shell's own handles
 DECLARES = frozenset("export local declare readonly typeset".split())
 KEYWORDS = frozenset("if then else elif do while until ! { } in fi done".split())
@@ -101,6 +100,7 @@ SYSTEM_PATH_RE = re.compile(r"(?<![\w.])/(proc|sys)(/|$)")
 PLAIN_RE = re.compile(r"[^ \t\r\n;&|()<>\\'\"$`]+")  # a run of characters with no meaning
 DQ_PLAIN_RE = {'"': re.compile(r'[^"\\$`]+'), None: re.compile(r"[^\\$`]+")}
 SIGNALLERS = SELECTORS | {"kill", "fuser", "find"}
+SYSTEM_READ = ("lookup", "a read under /proc or /sys")
 GUARDRAIL = (
     LIB.parent
     / "_resources"
@@ -561,7 +561,7 @@ class Trace:
     def word(self, w):
         """None when every pid this word can carry is the caller's own, else (kind, where from)."""
         if SYSTEM_PATH_RE.search("".join(w.pieces)):
-            return "lookup", "a read under /proc or /sys"
+            return SYSTEM_READ
         for v in sorted(w.vars - OWN):
             if v in self.verdicts:
                 return self.verdicts[v]
@@ -580,15 +580,17 @@ class Trace:
     def command(self, cmd, blk):
         """None when all this command can print is the caller's own pids."""
         for op, w, _ in cmd.redirects:
-            if op in INPUTS and w is not None and (verdict := self.word(w)):
+            if op in INPUTS and w is not None and (verdict := self.input(op, w)):
                 return verdict
         if not cmd.words or cmd.words[0].text in ("for", "select"):
             return (
                 None  # an assignment, a redirect alone or a loop header prints nothing
             )
-        name = resolve(cmd)[0]
+        name, args, _ = resolve(cmd)
+        if name in PRINTERS:
+            return self.first(args)
         if name in READERS:
-            return self.first(resolve(cmd)[1])
+            return next((v for v in map(self.path, args) if v), None)
         if name in LOOKUPS:
             return "lookup", f"`{name}`, a process lookup"
         return (
@@ -602,7 +604,7 @@ class Trace:
         sits after `done`, so a read takes the whole block's: `wide`)."""
         feeds = [self.command(o, blk) for o in stages(cmd, blk)]
         feeds += [
-            self.word(w)
+            self.input(op, w)
             for c in (blk if wide else [cmd])
             for op, w, _ in c.redirects
             if op in INPUTS
@@ -610,6 +612,23 @@ class Trace:
         if not feeds:
             return "unknown", "a read with no input the guard can see"
         return next((v for v in feeds if v), None)
+
+    def path(self, w):
+        """A reader's argument names a file, and the file's content is what is read,
+        so a name is a lookup only when it points under /proc or /sys, wherever it
+        came from (W=$(mktemp -d); cat $W/pid is a pid file). A process
+        substitution is content, not a name."""
+        if w.src.startswith(("<(", ">(")):
+            return self.word(w)
+        names = ["".join(w.pieces), *self.typed(w)]
+        names += ["".join(x.pieces) for sub in w.subs for b in blocks(sub) for c in b for x in all_words(c)]
+        if any(map(SYSTEM_PATH_RE.search, names)) or any(self.verdicts.get(v) == SYSTEM_READ for v in w.vars):
+            return SYSTEM_READ
+        return None
+
+    def input(self, op, w):
+        """An input redirect: `<` names a file; a here-string or heredoc is content."""
+        return self.path(w) if op == "<" else self.word(w)
 
     def typed(self, w):
         """The literal values a word can hold: its own text, or one variable's typed values."""

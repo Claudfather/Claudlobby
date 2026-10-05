@@ -141,6 +141,9 @@ REFUSED = [
     "lsof -ti :8080 | xargs kill",
     "pgrep watcher | xargs -n1 sh -c 'kill $0'",
     "xargs kill < /proc/4242/task/4242/children",
+    "xargs kill < <(pgrep watcher)",
+    "kill $(cat <(pgrep watcher))",  # a process substitution is content, not a file name
+    "d=/proc/4242; kill $(cat $d/stat)",
     # every process, PID 1, through a variable too
     "kill -9 -1",
     "kill -- -1",
@@ -197,6 +200,10 @@ ALLOWED = [
     "while read p; do kill $p; done < pids.txt",
     "cat job.pid | xargs kill",
     "cat job.pid | xargs -I PID kill PID",  # a named placeholder is not a process name
+    # a file's name says nothing of its content: only /proc and /sys count (replay finding)
+    'W=$(mktemp -d); (sleep 30 & echo $! > "$W/pid"); kill "$(cat "$W/pid")"',
+    'W=$(mktemp -d); kill $(cat < "$W/pid")',
+    'while read p; do kill $p; done < "$(dirname "$0")/pids"',
     # sends nothing, or runs nothing
     "kill -0 $pid",
     "kill -0 $(pgrep watcher) && echo alive",
