@@ -146,6 +146,9 @@ claudlobby --json workstream list
 The brief defaults to your bot and combines mission, open work, workstreams,
 reports and recent alerts. Its `data.brief.work` uses canonical task IDs; inspect
 `data.brief.degraded` and `data.brief.work.issues` before treating an empty view as clear.
+Unacknowledged report rows (`reports.unacked`) are in the fleet manager's view only, the
+oldest 50; any other view carries their number (`reports.count`) and the command that
+lists them (`reports.list_command`).
 `--bot BOT` changes only the view. It does not change your caller identity.
 For current session and supervision evidence, use `claudlobby --json fleet status`
 or `claudlobby --json bot status BOT`. `claudlobby --json bot session BOT` reads
