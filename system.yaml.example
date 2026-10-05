@@ -45,7 +45,12 @@
 #
 # Job entries accept optional systemd timer knobs: `persistent: true`
 # (catch up missed runs) and `randomized_delay: <seconds>` (start jitter);
-# launchd has no equivalent, so plists ignore them.
+# launchd has no equivalent, so plists ignore them. An interval job's
+# `startup_delay: <seconds>` is its first run, counted from the timer's own
+# start (OnActiveSec=), so a restarted user manager or an activation starts
+# the producers staggered instead of all at once (#2059); without one a job
+# waits its interval, at most 900 s. launchd's StartInterval already waits
+# one interval after load.
 #
 # DEFAULTS RULE (ruled 2026-09-07). A job or door is ON by default unless it
 # DELETES DATA, SPENDS MONEY, MUTATES OPERATOR SOURCE, or SENDS OUTBOUND TO
@@ -152,6 +157,7 @@ host:
     plane-host-probe:
       script: "$CLAUDLOBBY_NATIVE_DIR/plane-host-probe.sh"
       interval: 60
+      startup_delay: 60
       type: oneshot
     # Source-currency REPORT (read-only, never pulls): how far each framework
     # checkout -- claudlobby AND its discovered siblings -- is behind its newest
@@ -359,6 +365,7 @@ host:
       enroll: false
       script: "$CLAUDLOBBY_NATIVE_DIR/boot-capture.sh"
       interval: 30
+      startup_delay: 30
       type: oneshot
 
   # Boot policy (design doc 2026-09-20-boot-admission-and-supervision-
@@ -492,13 +499,18 @@ defaults:
     dispatch_deadline: 86400
 
   jobs:
+    # Interval jobs start staggered after a manager start or an activation
+    # (startup_delay, #2059): the watchdog first, then the pulse once bots are
+    # up, then the producers that message managers, then housekeeping.
     fleet-pulse:
       script: "$CLAUDLOBBY_NATIVE_DIR/fleet-pulse.sh"
       interval_from: observability.pulse_interval
+      startup_delay: 300
       type: oneshot
     keepalive:
       script: "$CLAUDLOBBY_NATIVE_DIR/keepalive-all.sh"
       interval: 60
+      startup_delay: 60
       type: oneshot
       # The per-bot plane emit is backgrounded and reaped on its own clock;
       # it must outlive the sweep. Without this the supervisor's control-group
@@ -508,6 +520,7 @@ defaults:
     log-rotation:
       script: "$CLAUDLOBBY_NATIVE_DIR/log-rotate-fleet.sh"
       interval: 86400
+      startup_delay: 1200
       type: oneshot
     creds-check:
       script: "$CLAUDLOBBY_NATIVE_DIR/creds-check.sh"
@@ -563,6 +576,7 @@ defaults:
     task-recheck:
       script: "$CLAUDLOBBY_CLI --root $CLAUDLOBBY_ROOT _task-recheck-tick"
       interval: 21600
+      startup_delay: 900
       type: oneshot
     # PR 2 of the manager check-in build (chunk 2): every 15 min, inject
     # `/checkin` into an idle, EQUIPPED manager through the beat
@@ -583,4 +597,5 @@ defaults:
       enroll: false
       script: "$CLAUDLOBBY_NATIVE_DIR/manager-checkin.sh"
       interval: 900
+      startup_delay: 600
       type: oneshot

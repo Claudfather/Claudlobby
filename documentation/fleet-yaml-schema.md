@@ -734,9 +734,12 @@ fleet_pulse:
   escalation_state_dir: "~/.claude/channels/telegram-<bot-handle>"
   renotify_after_s: 21600
   rearm_window_s: 0
+  timeout_s: 300
 ```
 
 Omit a key to keep the script's own default; the composer emits only what is set, so a default lives in exactly one place.
+
+`timeout_s` is the one key that is not an environment variable: it caps the sweep itself, and `claudlobby fleet pulse` reads it from this block, so a hand run gets the same cap as the timer (#2059). Unset, the cap scales with load: 120 s × load1 per CPU, between 120 and 900 s. A sweep that reaches the cap is stopped (SIGTERM, then SIGKILL after 10 s), its summary file is replaced by one that starts `TIMED OUT`, and the command exits 8. `claudlobby config validate` warns outside 30-3600.
 
 > **Do not put these in a `.env` file.** Earlier revisions of this section said to
 > use the fleet `.env` or to edit the unit's environment. **Neither worked** (#1120):

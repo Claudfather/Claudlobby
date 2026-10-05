@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — interval timers start after their own startup delay, and the fleet pulse's cap scales with load (#2059)
+
+On 2026-10-05 a restarted user manager started every interval timer on a host that had been up for days. Each `OnBootSec=` point was already past, so systemd fired every producer in the same second into bots that were still starting; task-recheck failed because its managers were not up. Every `host activate` did the same, because it restarts every enrolled timer.
+
+- **Interval timers count their first run from their own start.** `OnActiveSec=<startup_delay>` replaces `OnBootSec=<interval>`, and `OnUnitActiveSec=<interval>` keeps the cadence. `OnStartupSec=` would not do: systemd.timer(5) fires a timer at once when an `OnBootSec=` or `OnStartupSec=` point is already past, and that is true of every timer an activation re-creates.
+- **The packaged startup delays are staggered:** keepalive 60 s, fleet-pulse 300 s, manager-checkin 600 s, task-recheck 900 s, log-rotation 1200 s, and on the host plane-host-probe 60 s and boot-capture 30 s. A job with no `startup_delay` waits its interval, at most 900 s.
+- **Unchanged:** calendar timers (`Persistent=` applies only to them), and the launchd plist, whose `StartInterval` with no `RunAtLoad` already first runs one interval after load.
+- **The fleet pulse's cap** is `fleet_pulse.timeout_s` from `fleet.yaml`, else 120 s × load1 per CPU, between 120 and 900 s. A fixed 120 s timed out 92 sweeps at load1 14-74 on four cores. A sweep that reaches the cap gets SIGTERM, then SIGKILL after 10 s, and its summary file is replaced by one that starts `TIMED OUT`; the command still exits 8. `config validate` warns outside 30-3600.
+- **It reaches a host at the next `host activate`,** which rewrites every enrolled unit and restarts its timer. That activation is the first that does not fire every producer at once.
+- **Tests:** `tests/test_system_defaults.py` (`TestTimerStartupDelay`: no composed timer counts from boot, the packaged delays and their stagger, the default, a fleet override, calendar and launchd unchanged) and `tests/test_fleet_pulse_cap.py` (the cap's three sources, a real sweep that times out and leaves its summary, the fleet's `timeout_s`, coercion and validation), plus the existing timer and pulse assertions updated.
+
 ### Removed — helpers with no caller since #1989 (#2152)
 
 #1989 deleted every caller of these, so they ran nowhere:

@@ -2156,6 +2156,15 @@ def _validate_alert_pair(fleet: FleetConfig, report: ValidationReport) -> None:
         )
 
 
+def _validate_fleet_pulse_cap(fleet: FleetConfig, report: ValidationReport) -> None:
+    """fleet_pulse.timeout_s caps the pulse sweep (#2059). Under 30 s a sweep
+    cannot finish on a loaded host; over 3600 s a wedged one holds its unit for
+    longer than a pulse is worth."""
+    cap = getattr(fleet.fleet_pulse, "timeout_s", None)
+    if cap is not None and not 30 <= cap <= 3600:
+        report.warn("obs-range", f"fleet_pulse.timeout_s must be 30-3600 seconds (got {cap})")
+
+
 def _validate_ignition(
     fleet: FleetConfig,
     paths: Paths,
@@ -2517,6 +2526,7 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_fleet(fleet, report)
     _validate_timers(fleet, report)
     _validate_alert_pair(fleet, report)
+    _validate_fleet_pulse_cap(fleet, report)
     # Resolved once for both rungs that ask (#1680) — the cascade shells out.
     # Gated on a leaf manager because neither rung can reach a doors-consuming
     # branch without one.

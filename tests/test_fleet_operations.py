@@ -130,7 +130,7 @@ def test_pulse_uses_selected_native_once_and_reports_tick_not_health(tmp_path, m
                         lambda **_kwargs: (destination, None))
     called = []
 
-    def run(command, env):
+    def run(command, env, **_kwargs):  # the cap and summary path (#2059)
         called.append((command, env["CLAUDLOBBY_PRIVATE_PULSE_RELEASE"]))
         return "worker DOWN\n", "watchdog dark\n", 0
 

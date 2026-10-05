@@ -4006,11 +4006,18 @@ def _resolve_timer_schedule(timer_cfg: dict, merged_defaults: dict) -> dict:
     """Resolve timer scheduling from config.
 
     Returns a dict describing the schedule type:
-      {"type": "interval", "seconds": 300}
+      {"type": "interval", "seconds": 300, "startup": 300}
       {"type": "calendar", "expression": "*-*-* 06:00:00"}
+
+    ``startup`` is the first run's delay, counted from the timer's own start
+    (OnActiveSec=, #2059): the job's ``startup_delay``, else its interval up to
+    900 s. Never the boot: a timer started on a host up longer than its
+    OnBootSec= point elapses at once, so a restarted user manager or an
+    activation fired every producer together.
     """
     if "schedule" in timer_cfg:
         return {"type": "calendar", "expression": timer_cfg["schedule"]}
+    seconds = int(timer_cfg.get("interval", 300))
     if "interval_from" in timer_cfg:
         ref = timer_cfg["interval_from"]
         section, _, field = ref.partition(".")
@@ -4018,8 +4025,10 @@ def _resolve_timer_schedule(timer_cfg: dict, merged_defaults: dict) -> dict:
             obs = merged_defaults.get("observability", {})
             val = obs.get(field)
             if val is not None:
-                return {"type": "interval", "seconds": int(val)}
-    return {"type": "interval", "seconds": timer_cfg.get("interval", 300)}
+                seconds = int(val)
+    startup = timer_cfg.get("startup_delay")
+    startup = min(seconds, 900) if startup is None else int(startup)
+    return {"type": "interval", "seconds": seconds, "startup": startup}
 
 
 # The system.yaml fleet job whose script reads the FLEET_PULSE_* knobs (#1120).
@@ -4325,7 +4334,7 @@ def _write_timer_units(
             [
                 "",
                 "[Timer]",
-                f"OnBootSec={secs}",
+                f"OnActiveSec={sched['startup']}",
                 f"OnUnitActiveSec={secs}",
                 "AccuracySec=10",
             ]
