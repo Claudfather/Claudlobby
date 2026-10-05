@@ -1352,9 +1352,10 @@ def test_a_young_tmp_is_left_to_its_stager(running):
 
 
 def test_an_orphan_that_is_not_a_batch_is_quarantined(running):
-    """A stage killed before its flush leaves an empty file. It goes to the
-    quarantine with its reason, under a name a listing shows (not a dotfile),
-    and the daemon keeps serving."""
+    """An orphan that is not a batch goes to the quarantine with its reason,
+    under a name a listing shows (not a dotfile), and the daemon keeps serving.
+    This one is empty, but its name is the older form with no writer pid, so
+    nothing proves its writer gone: it is not counted as a lost stage (#2164)."""
     from claudlobby.plane.daemon import STAGED_ORPHAN_AGE_S
 
     root, sock, _ = running
@@ -1365,3 +1366,144 @@ def test_an_orphan_that_is_not_a_batch_is_quarantined(running):
     assert "ev_" + "0" * 32 + ".json" in names, names
     assert "ev_" + "0" * 32 + ".json.reason" in names, names
     assert send_batch(sock, [_comm("a")])["ok"] is True
+
+
+
+def _dead_pid() -> int:
+    """A pid that ran and is gone: a child, waited for."""
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    assert child.wait() == 0
+    return child.pid
+
+
+def _stage_killed_before_its_write(staged: Path, lead: str) -> Path:
+    """Run the client's own `_stage` in a child that dies right after creating
+    its temp file, before writing a byte: its `fchmod` ends the process with
+    `os._exit`, which, like the bounded emit's SIGKILL, runs no cleanup.
+    Returns what the child leaves behind."""
+    client = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts/plane-socket-client.py"
+    payload = json.dumps({"events": [{**_comm("k"), "event_id": lead}]})
+    script = ("import importlib.util, os, sys\n"
+              "spec = importlib.util.spec_from_file_location('psc', sys.argv[1])\n"
+              "psc = importlib.util.module_from_spec(spec)\n"
+              "spec.loader.exec_module(psc)\n"
+              "os.fchmod = lambda *_: os._exit(137)\n"
+              "psc._stage(sys.argv[2], sys.argv[3], sys.argv[4])\n")
+    r = subprocess.run([sys.executable, "-c", script, str(client), str(staged), payload, lead],
+                       capture_output=True, text=True)
+    assert r.returncode == 137, (r.returncode, r.stderr)
+    left = list(staged.iterdir())
+    assert len(left) == 1, left
+    return left[0]
+
+
+def _replay(root: Path):
+    daemon = PlaneDaemon(root)
+    try:
+        return daemon._replay_staged(max_batches=200)
+    finally:
+        daemon.writer.close()
+
+
+def _quarantined(root: Path) -> set:
+    q = root / "state" / "plane" / "spool" / "quarantine"
+    return {f.name for f in q.iterdir()} if q.is_dir() else set()
+
+
+def test_a_stage_killed_before_its_write_is_counted_lost_not_quarantined(tmp_path):
+    """#2164: a stager reaped between creating its temp file and writing it
+    leaves an empty file, and replay quarantined it as a malformed batch, so
+    the event was lost and counted nowhere (5 on the Pi from 2026-10-02 to
+    10-05). The empty file is the only record of that loss, so replay counts
+    it: the file goes, and a stage_empty row in .emit-losses stays, which
+    plane doctor reads as an emit NOT recorded."""
+    from claudlobby.plane.daemon import STAGED_ORPHAN_AGE_S
+
+    initialize_plane(tmp_path)
+    plane = tmp_path / "state" / "plane"
+    staged = plane / "staged"
+    lead = mint_event_id()
+    left = _stage_killed_before_its_write(staged, lead)
+    # What a reap in that window leaves: an empty temp named for its stager.
+    assert left.name.startswith(".") and left.name.endswith(".tmp") and lead in left.name, left.name
+    assert left.stat().st_size == 0
+    t = time.time() - STAGED_ORPHAN_AGE_S - 60
+    os.utime(left, (t, t))
+
+    report = _replay(tmp_path)
+
+    assert not _quarantined(tmp_path), "an empty stage was quarantined as a malformed batch"
+    assert not list(staged.iterdir()), "the empty stage was left in the staged queue"
+    rows = [row.split("\t") for row in (plane / ".emit-losses").read_text().splitlines()]
+    assert [(row[1], row[3]) for row in rows] == [("stage_empty", left.name)], rows
+    assert report.lost == 1 and report.quarantined == 0, report
+    doctor = _doctor(tmp_path)
+    assert "1 emit(s) NOT recorded (stage_empty)" in doctor.stdout, doctor.stdout
+
+
+def test_an_empty_stage_whose_writer_may_still_run_is_quarantined_as_before(tmp_path):
+    """Size 0 proves that no write completed only once the writer is gone: a
+    stager still alive past the hour could yet write. A pid that is running
+    (this test's own, standing for a reused one) cannot prove that, so replay
+    keeps today's handling and counts nothing."""
+    from claudlobby.plane.daemon import STAGED_ORPHAN_AGE_S
+
+    initialize_plane(tmp_path)
+    staged = tmp_path / "state" / "plane" / "staged"
+    stem = f"{time.time_ns()}-{mint_event_id()}.batch.{os.getpid()}"
+    _orphan(staged, f".{stem}.tmp", "", STAGED_ORPHAN_AGE_S + 60)
+
+    report = _replay(tmp_path)
+
+    assert f"{stem}.json" in _quarantined(tmp_path), _quarantined(tmp_path)
+    assert not (tmp_path / "state" / "plane" / ".emit-losses").exists()
+    assert report.quarantined == 1, report
+
+
+def test_a_torn_stage_is_quarantined_not_counted(tmp_path):
+    """A stage that wrote part of its batch has bytes worth reading: it stays a
+    malformed batch in the quarantine, even with its writer gone."""
+    from claudlobby.plane.daemon import STAGED_ORPHAN_AGE_S
+
+    initialize_plane(tmp_path)
+    staged = tmp_path / "state" / "plane" / "staged"
+    stem = f"{time.time_ns()}-{mint_event_id()}.batch.{_dead_pid()}"
+    _orphan(staged, f".{stem}.tmp", '{"events": [{"event_type"', STAGED_ORPHAN_AGE_S + 60)
+
+    report = _replay(tmp_path)
+
+    assert f"{stem}.json" in _quarantined(tmp_path), _quarantined(tmp_path)
+    assert not (tmp_path / "state" / "plane" / ".emit-losses").exists()
+    assert report.quarantined == 1, report
+
+
+def test_a_loss_that_cannot_be_recorded_leaves_the_stage_quarantined(tmp_path):
+    """The empty file goes only once its loss row is written. With
+    .emit-losses unwritable (a directory in its place), replay quarantines it
+    as before rather than drop the only record of the loss."""
+    from claudlobby.plane.daemon import STAGED_ORPHAN_AGE_S
+
+    initialize_plane(tmp_path)
+    plane = tmp_path / "state" / "plane"
+    (plane / ".emit-losses").mkdir(parents=True)
+    stem = f"{time.time_ns()}-{mint_event_id()}.batch.{_dead_pid()}"
+    _orphan(plane / "staged", f".{stem}.tmp", "", STAGED_ORPHAN_AGE_S + 60)
+
+    report = _replay(tmp_path)
+
+    assert f"{stem}.json" in _quarantined(tmp_path), _quarantined(tmp_path)
+    assert report.quarantined == 1, report
+
+
+def test_a_young_empty_stage_is_left_to_its_stager(tmp_path):
+    """Under the hour gate an empty temp may be a stage still inside its
+    create or write: replay leaves it, counted nowhere, whatever its pid."""
+    initialize_plane(tmp_path)
+    staged = tmp_path / "state" / "plane" / "staged"
+    young = _orphan(staged, f".{time.time_ns()}-{mint_event_id()}.batch.{_dead_pid()}.tmp", "", 0)
+
+    _replay(tmp_path)
+
+    assert young.exists()
+    assert not _quarantined(tmp_path)
+    assert not (tmp_path / "state" / "plane" / ".emit-losses").exists()
