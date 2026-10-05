@@ -69,7 +69,9 @@ A step that fails is **recorded, never guessed around**: add its name to
    queued intake; each row has canonical `task_id`, nullable current
    `assignment.assignment_id`, `state`, `attention` and labeled
    `historical_references`), `work.issues` (unresolved history even when no
-   task is open), `workstreams` (`active`, `stalled`, `blocked` waits), `reports.unacked`,
+   task is open), `workstreams` (`active`, `stalled`, `blocked` waits), `reports.count`
+   (the unacknowledged reports, your `inputs_seen.unacked`) and `reports.unacked` (their
+   rows, the oldest 50; a cut is labeled `reports.unacked` in `degraded[]`),
    `alerts` (last 24h critical), `mission`. Read
    `degraded[]` **by mode, for the fields you use**: an entry whose `mode` is
    `omitted` and whose `field` is `work`, `workstreams`, `reports` or `alerts`

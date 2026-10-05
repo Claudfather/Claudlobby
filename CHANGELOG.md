@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — a worker's brief counts the fleet's unacknowledged reports instead of listing them (#2159)
+
+`claudlobby --json brief` gave every viewer every unacknowledged report. A worker never acknowledges reports, so its list only grew: on 2026-10-05 one worker's brief was 353,814 bytes, 98% of them 840 report rows, all ahead of its own work.
+
+- **A viewer that is not the fleet's manager** gets `reports.count` (the reports past its read position) and `reports.list_command` (`claudlobby --json fleet reports list --unacknowledged`), and no `reports.unacked`; `degraded[]` names `reports.unacked` as omitted, with the count.
+- **The manager** keeps `reports.unacked`: the oldest 50 rows (`REPORT_ROW_LIMIT`), with `count` and `list_command` beside them. A cut is labeled in `degraded[]` with the total.
+- **The role** comes from the activated configuration (`fleet.manager_bots()`), the one predicate the work section now shares. The `checkin` and `status` skills take the number from `reports.count`.
+
 ### Removed — helpers with no caller since #1989 (#2152)
 
 #1989 deleted every caller of these, so they ran nowhere:
