@@ -1526,6 +1526,21 @@ class TestLeafManagerCheckinOptOut:
         }, worker_got
 
 
+@pytest.fixture(scope="module")
+def startup_delay_units(tmp_path_factory):
+    """The default fleet's and the host's timers, composed once for TestTimerStartupDelay."""
+    from claudlobby.composer import compose_fleet_timers, compose_host_timers
+
+    base = tmp_path_factory.mktemp("startup-delay")
+    root = base / "claudlobby"
+    fleet, merged = load_fleet(_write_fleet(root, _NO_OVERRIDE_FLEET))
+    fleet_timers = compose_fleet_timers(fleet, Paths(root=root, fleet_dir=root, package=source_package()), merged)
+    host = base / "host"
+    host.mkdir()
+    (host / "lib").mkdir()
+    return fleet_timers, compose_host_timers(Paths(root=host, fleet_dir=host, package=source_package()))
+
+
 class TestTimerStartupDelay:
     """An interval timer counts its first run from its own start (OnActiveSec=,
     #2059) and keeps its cadence with OnUnitActiveSec=. A past OnBootSec= or
@@ -1553,41 +1568,27 @@ fleet:
       expertise: [eng]
 """
 
-    @pytest.fixture(scope="class")
-    def composed(self, tmp_path_factory):
-        """The default fleet's and the host's timers, composed once for the class."""
-        from claudlobby.composer import compose_fleet_timers, compose_host_timers
-
-        base = tmp_path_factory.mktemp("startup-delay")
-        root = base / "claudlobby"
-        fleet, merged = load_fleet(_write_fleet(root, _NO_OVERRIDE_FLEET))
-        fleet_timers = compose_fleet_timers(fleet, Paths(root=root, fleet_dir=root, package=source_package()), merged)
-        host = base / "host"
-        host.mkdir()
-        (host / "lib").mkdir()
-        return fleet_timers, compose_host_timers(Paths(root=host, fleet_dir=host, package=source_package()))
-
-    def test_no_composed_timer_counts_from_boot(self, composed):
-        timers = [t for d in composed for t in sorted(d.glob("*.timer"))]
+    def test_no_composed_timer_counts_from_boot(self, startup_delay_units):
+        timers = [t for d in startup_delay_units for t in sorted(d.glob("*.timer"))]
         assert timers, "nothing composed: the check would pass vacuously"
         for timer in timers:
             assert "OnBootSec=" not in timer.read_text(), timer.name
 
     @pytest.mark.parametrize("job", sorted(PACKAGED))
-    def test_a_packaged_interval_job_starts_after_its_delay_then_keeps_its_cadence(self, composed, job):
+    def test_a_packaged_interval_job_starts_after_its_delay_then_keeps_its_cadence(self, startup_delay_units, job):
         startup, interval = self.PACKAGED[job]
-        lines = (composed[0] / f"com.test.{job}.timer").read_text().splitlines()
+        lines = (startup_delay_units[0] / f"com.test.{job}.timer").read_text().splitlines()
         assert f"OnActiveSec={startup}" in lines, lines
         assert f"OnUnitActiveSec={interval}" in lines, lines
 
-    def test_the_host_probe_starts_off_the_keepalive_minute(self, composed):
-        lines = (composed[1] / "claudlobby-plane-host-probe.timer").read_text().splitlines()
+    def test_the_host_probe_starts_off_the_keepalive_minute(self, startup_delay_units):
+        lines = (startup_delay_units[1] / "claudlobby-plane-host-probe.timer").read_text().splitlines()
         assert "OnActiveSec=75" in lines and "OnUnitActiveSec=60" in lines
 
-    def test_launchd_starts_an_interval_job_one_interval_after_load(self, composed):
+    def test_launchd_starts_an_interval_job_one_interval_after_load(self, startup_delay_units):
         """A known limitation, pinned: launchd has no first-run delay apart from the
         interval, so after each load a long-interval job waits a full interval."""
-        plist = (composed[0] / "com.test.task-recheck.plist").read_text()
+        plist = (startup_delay_units[0] / "com.test.task-recheck.plist").read_text()
         assert "<key>StartInterval</key>" in plist and "<integer>21600</integer>" in plist
         assert "RunAtLoad" not in plist
 
