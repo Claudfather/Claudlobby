@@ -38,7 +38,8 @@ hand-rolled reader silently disagrees with the framework's own, and yours is the
 It gives you: `mission`, `work.items` (canonical open task and assignment IDs,
 including queued manager intake), `work.issues` (unresolved history),
 assignment-keyed `work.items[].attention` (including overdue/orphaned or an
-explicit unknown), `workstreams`, `reports.unacked`,
+explicit unknown), `workstreams`, `reports.count` and `reports.unacked` (the manager's
+view lists the oldest 50; any other viewer gets the count and the command that lists them),
 `alerts`, and — load-bearing — `degraded[]`.
 For current escalations use `claudlobby --json fleet inbox`; an empty brief work view
 does not certify that no alert or question needs attention.

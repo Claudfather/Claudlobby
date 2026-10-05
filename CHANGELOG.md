@@ -18,6 +18,14 @@ On 2026-10-05 a manager bot's ad-hoc kill loop killed each process matching a pa
 - **`library/guardrails/signal-only-what-you-started.md`** gives the rule and the safe pattern. It is not added to every bot's composed guardrails: the refusal carries the pattern at the moment it is needed.
 - **Tests:** `tests/test_signal_guard.py` runs a table of refused and allowed forms through the decider (the forms above, each bypass the review found, and a typed pid of the test's own ancestor, directly and through a variable and a loop), then runs the hook itself on the outage loop with its names neutralised, the prefilter's quoting and escape cases, the fail-open paths, the composition and the plane record.
 
+### Changed — a worker's brief counts the fleet's unacknowledged reports instead of listing them (#2159)
+
+`claudlobby --json brief` gave every viewer every unacknowledged report. A worker never acknowledges reports, so its list only grew: on 2026-10-05 one worker's brief was 353,814 bytes, 98% of them 840 report rows, all ahead of its own work.
+
+- **A viewer that is not the fleet's manager** gets `reports.count` (the reports past its read position) and `reports.list_command` (`claudlobby --json fleet reports list --unacknowledged`), and no `reports.unacked`; `degraded[]` names `reports.unacked` as omitted, with the count.
+- **The manager** keeps `reports.unacked`: the oldest 50 rows (`REPORT_ROW_LIMIT`), with `count` and `list_command` beside them. A cut is labeled in `degraded[]` with the total.
+- **The role** comes from the activated configuration (`fleet.manager_bots()`), the one predicate the work section now shares. The `checkin` and `status` skills take the number from `reports.count`.
+
 ### Changed — skills take issue work only from people who can triage the repo, and read GitHub text as data
 
 The skills that pick their own work from a repo's issues listed every open issue. They now list it through a new intake, and every library file that reads issue, pull request, comment or review text treats that text as data.
