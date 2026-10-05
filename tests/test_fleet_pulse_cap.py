@@ -1,17 +1,16 @@
-"""The fleet pulse's time cap (#907 stopgap, with #2059).
+"""The fleet pulse's time cap (#2059, a stopgap for #907's sweep cost).
 
-A fixed 120 s cap read host load as a failed unit: 92 sweeps timed out between
-2026-10-04 12Z and the outage report, every one at load1 14-74 on four cores, and
-each left the previous tick's summary standing. The cap now comes from
-fleet.yaml's ``fleet_pulse.timeout_s`` when set, else scales with load per CPU
-(120-900 s); a sweep that times out is stopped with SIGTERM before SIGKILL and
-leaves a summary that says so.
+The cap is fleet.yaml's ``fleet_pulse.timeout_s``, clamped to its validated range,
+else 120 s scaled by load per CPU up to 240 s, under the default 300 s pulse
+cadence so an activation finds the shared lock free between ticks. A sweep that
+reaches it gets SIGTERM, then SIGKILL, and leaves a summary that says so, with the
+last complete one kept beside it.
 """
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 import os
+import stat
 from types import SimpleNamespace
 
 import pytest
@@ -24,76 +23,68 @@ from claudlobby.config import FleetPulseConfig, _coerce_fleet_pulse
     "configured,load1,cpus,cap",
     [
         (None, 0.5, 4, 120),  # an idle host keeps the old cap
-        (None, 14.0, 4, 420),  # the lightest load a timeout was measured at
-        (None, 74.0, 4, 900),  # the heaviest, clamped
-        (300, 74.0, 4, 300),  # fleet.yaml wins over the load
+        (None, 6.0, 4, 180),  # scaled by load per CPU
+        (None, 74.0, 4, 240),  # the heaviest measured load, at the ceiling
+        (450, 74.0, 4, 450),  # fleet.yaml wins over the load
+        (5, 0.5, 4, 30),  # and is clamped to its validated range
+        (7200, 0.5, 4, 3600),
     ],
 )
-def test_the_cap_is_configured_or_scaled_with_load(
-    monkeypatch, configured, load1, cpus, cap
-):
-    monkeypatch.setattr(fleet_pulse.os, "getloadavg", lambda: (load1, load1, load1))
-    monkeypatch.setattr(fleet_pulse.os, "cpu_count", lambda: cpus)
-    got, why = fleet_pulse.sweep_cap(configured)
+def test_the_cap_is_configured_or_scaled_with_load(configured, load1, cpus, cap):
+    got, why = fleet_pulse.sweep_cap(configured, load1, cpus)
     assert got == cap
     assert ("fleet_pulse.timeout_s" in why) == (configured is not None), why
 
 
-def test_a_timed_out_sweep_records_a_summary_that_says_so(tmp_path):
-    summary = tmp_path / "state/pulse/example.pulse-summary.txt"
-    summary.parent.mkdir(parents=True)
-    summary.write_text("all healthy\n")  # the previous tick's summary
+def test_the_scaled_cap_and_its_grace_fit_under_the_default_cadence():
+    assert fleet_pulse.MAX_CAP_S + fleet_pulse.TERM_GRACE_S < 300
+
+
+def _time_out(summary, monkeypatch):
+    monkeypatch.setattr(
+        fleet_pulse, "sweep_cap", lambda configured, load1, cpus: (1, "a test cap")
+    )
     with pytest.raises(fleet_pulse.FleetPulseError) as failure:
         fleet_pulse._sweep(
             ["/bin/sh", "-c", "echo watchdog dark >&2; sleep 30"],
             dict(os.environ),
-            cap=1,
-            why="a test cap",
             summary_path=summary,
         )
     assert failure.value.code == "timeout" and failure.value.effect_attempted
-    assert str(summary) in str(failure.value)
+    return failure.value
+
+
+def test_a_timed_out_sweep_says_so_and_keeps_the_last_complete_summary(
+    tmp_path, monkeypatch
+):
+    summary = tmp_path / "state/pulse/example.pulse-summary.txt"
+    kept = tmp_path / "state/pulse/example.pulse-summary.last-complete.txt"
+    summary.parent.mkdir(parents=True)
+    summary.write_text("all healthy\n")
+    summary.chmod(0o600)
+
+    error = _time_out(summary, monkeypatch)
+    assert str(summary) in str(error)
     text = summary.read_text()
     assert text.startswith("TIMED OUT"), text
-    assert "1 s" in text and "a test cap" in text and "watchdog dark" in text
-    assert "all healthy" not in text
+    for needle in ("1 s", "a test cap", "fleet escalation", str(kept), "watchdog dark"):
+        assert needle in text, (needle, text)
+    assert stat.S_IMODE(summary.stat().st_mode) == 0o600
+    assert kept.read_text() == "all healthy\n"
+
+    _time_out(summary, monkeypatch)  # a second timeout keeps the last COMPLETE summary
+    assert kept.read_text() == "all healthy\n"
 
 
-def test_pulse_fleet_takes_the_cap_from_the_fleet(tmp_path, monkeypatch):
-    native = tmp_path / "native"
-    native.mkdir()
-    (native / "fleet-pulse.sh").touch()
-    release = SimpleNamespace(
-        native_path=native,
-        cli_path=tmp_path / "bin/claudlobby",
-        release_id="selected-release",
-    )
-    fleet = SimpleNamespace(
-        name="example", manager="manager", fleet_pulse=FleetPulseConfig(timeout_s=450)
-    )
-    destination = SimpleNamespace(
-        fleet=fleet, paths=SimpleNamespace(root=tmp_path, lib=native)
-    )
+def test_a_summary_that_cannot_be_written_still_reports_a_timeout(
+    tmp_path, monkeypatch
+):
+    def refuse(*_args):
+        raise OSError(28, "No space left on device")
 
-    @contextmanager
-    def admitted(root, **kwargs):
-        yield release
-
-    monkeypatch.setattr(fleet_pulse, "mutation_admission", admitted)
-    monkeypatch.setattr(fleet_pulse, "native_environment", lambda _paths: {})
-    monkeypatch.setattr(
-        fleet_pulse, "resolve_operation_scope", lambda **_kwargs: (destination, None)
-    )
-    seen = {}
-
-    def run(command, env, **kwargs):
-        seen.update(kwargs)
-        return "ok\n", "", 0
-
-    monkeypatch.setattr(fleet_pulse, "_sweep", run)
-    fleet_pulse.pulse_fleet(root=tmp_path, fleet="example")
-    assert seen["cap"] == 450
-    assert seen["summary_path"] == tmp_path / "state/pulse/example.pulse-summary.txt"
+    monkeypatch.setattr(fleet_pulse, "_record_timeout", refuse)
+    error = _time_out(tmp_path / "pulse-summary.txt", monkeypatch)
+    assert "not written" in str(error) and "No space left" in str(error)
 
 
 def test_fleet_yaml_carries_timeout_s_and_keeps_it_off_the_unit_environment():

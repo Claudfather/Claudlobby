@@ -4010,10 +4010,11 @@ def _resolve_timer_schedule(timer_cfg: dict, merged_defaults: dict) -> dict:
       {"type": "calendar", "expression": "*-*-* 06:00:00"}
 
     ``startup`` is the first run's delay, counted from the timer's own start
-    (OnActiveSec=, #2059): the job's ``startup_delay``, else its interval up to
-    900 s. Never the boot: a timer started on a host up longer than its
-    OnBootSec= point elapses at once, so a restarted user manager or an
-    activation fired every producer together.
+    (OnActiveSec=): the job's ``startup_delay``, else its interval up to 900 s.
+    A past OnBootSec= or OnStartupSec= point fires a timer at once
+    (systemd.timer(5)), and an activation restarts every timer. OnUnitActiveSec=
+    counts from the service's last start, which the manager keeps across a timer
+    restart, so a job overdue on its interval still runs at once.
     """
     if "schedule" in timer_cfg:
         return {"type": "calendar", "expression": timer_cfg["schedule"]}

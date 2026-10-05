@@ -2082,6 +2082,21 @@ def _validate_timers(fleet: FleetConfig, report: ValidationReport) -> None:
             f"{sf.source} = {sf.value!r} — {sf.reason}: {sf.path} "
             "(anchor the script on $CLAUDLOBBY_ROOT)"
         )
+    for name, job in jobs.items():
+        delay = job.get("startup_delay") if isinstance(job, dict) else None
+        if delay is None:
+            continue
+        try:
+            in_range = 1 <= int(delay) <= 3600
+        except (TypeError, ValueError):
+            in_range = False
+        if not in_range:
+            report.warn(
+                "obs-range",
+                f"jobs.{name}.startup_delay must be 1-3600 seconds (got {delay!r}): 0 starts "
+                "the job with every other producer, and a long delay postpones its first "
+                "run after every manager restart",
+            )
 
     # An armed beat on a leafless fleet warns rather than staying silent. The
     # compose-time job gate (composer.LEAF_MANAGER_GATED_JOBS) filters
@@ -2157,12 +2172,13 @@ def _validate_alert_pair(fleet: FleetConfig, report: ValidationReport) -> None:
 
 
 def _validate_fleet_pulse_cap(fleet: FleetConfig, report: ValidationReport) -> None:
-    """fleet_pulse.timeout_s caps the pulse sweep (#2059). Under 30 s a sweep
-    cannot finish on a loaded host; over 3600 s a wedged one holds its unit for
-    longer than a pulse is worth."""
+    """fleet_pulse.timeout_s caps the pulse sweep; the sweep clamps it to the same range."""
+    from .config import FLEET_PULSE_TIMEOUT_RANGE
+
+    low, high = FLEET_PULSE_TIMEOUT_RANGE
     cap = getattr(fleet.fleet_pulse, "timeout_s", None)
-    if cap is not None and not 30 <= cap <= 3600:
-        report.warn("obs-range", f"fleet_pulse.timeout_s must be 30-3600 seconds (got {cap})")
+    if cap is not None and not low <= cap <= high:
+        report.warn("obs-range", f"fleet_pulse.timeout_s must be {low}-{high} seconds (got {cap}); it is clamped")
 
 
 def _validate_ignition(

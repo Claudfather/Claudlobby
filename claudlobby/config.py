@@ -192,6 +192,10 @@ FLEET_PULSE_ENV_KEYS: dict[str, str] = {
 }
 
 
+# fleet_pulse.timeout_s, validated and clamped to this range (seconds).
+FLEET_PULSE_TIMEOUT_RANGE = (30, 3600)
+
+
 @dataclass
 class FleetPulseConfig:
     """Fleet-pulse escalation knobs — the alert-volume controls (#1120).
