@@ -28,7 +28,7 @@ Retired with the legacy readers, and why:
     gate (#1187) stays: a path, a `.jsonl` name or an empty string in the bot
     slot is still rc 2, and single-bot mode (which shared the hazard) is gone.
   * single-bot mode — the plane readers answer per fleet; one bot is
-    `--open` / `--open-task`, every bot is `--all` / `--orphans` /
+    `--open`, every bot is `--all` / `--orphans` /
     `--unassigned`.
 Two semantics moved from the matcher to the DISPATCH and REPORT DOORS, where
 the plane records them at emission time, and are no longer this module's to
@@ -215,10 +215,6 @@ def _overdue(plane: _Plane, bot: str, now: int, max_age=None) -> list:
 
 def _open(plane: _Plane, bot: str) -> list:
     return dispatch_overdue.open_dispatches(bot, fleet=F, root=str(plane.root))
-
-
-def _head(plane: _Plane, bot: str):
-    return dispatch_overdue.open_task_id(bot, fleet=F, root=str(plane.root))
 
 
 def _argv(plane: _Plane, *args) -> list[str]:
@@ -475,79 +471,6 @@ class TestOrphanSplit:
         assert self._sets(p, bots) == ({}, {})
 
 
-class TestOpenTaskResolution:
-    """#835 — the id report-back.sh supplies when the worker omits --task."""
-
-    def test_resolves_the_oldest_open_dispatch(self, tmp_path):
-        """Oldest, not newest: the oldest is the row past its deadline and
-        alarming, and it is what a serial FIFO worker just finished. Rows are
-        landed out of dispatch order to pin that this is time-ordered, not
-        ingest-ordered."""
-        p = _land(tmp_path, [
-            _dispatch("w1", 300, 1000, task_id="t-300-cccc"),
-            _dispatch("w1", 100, 1000, task_id="t-100-aaaa"),
-            _dispatch("w1", 200, 1000, task_id="t-200-bbbb"),
-        ])
-        assert _head(p, "w1") == "t-100-aaaa"
-
-    def test_concurrent_dispatches_retire_in_dispatch_order(self, tmp_path):
-        """The normal case, not an edge one — most active bots carry 2-3 open.
-        Each report closes exactly one row, oldest first, so a sequence of
-        reports drains the queue in the order it was sent."""
-        p = _land(tmp_path, [
-            _dispatch("w1", 100, 1000, task_id="t-100-aaaa"),
-            _dispatch("w1", 200, 1000, task_id="t-200-bbbb"),
-            _dispatch("w1", 300, 1000, task_id="t-300-cccc"),
-        ])
-        drained = []
-        for _ in range(3):
-            tid = _head(p, "w1")
-            drained.append(tid)
-            p.report(_report("w1", "1970-01-01T00:20:00Z", task_id=tid))
-        assert drained == ["t-100-aaaa", "t-200-bbbb", "t-300-cccc"]
-        assert _head(p, "w1") is None
-
-    def test_skips_already_closed_dispatches(self, tmp_path):
-        p = _land(tmp_path, [
-            _dispatch("w1", 100, 1000, task_id="t-100-aaaa"),
-            _dispatch("w1", 300, 1000, task_id="t-300-cccc"),
-        ], [_report("w1", "1970-01-01T00:10:00Z", task_id="t-300-cccc")])
-        assert _head(p, "w1") == "t-100-aaaa"
-
-    def test_none_when_nothing_open(self, tmp_path):
-        p = _land(tmp_path, [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")],
-                  [_report("w1", "1970-01-01T00:10:00Z", task_id="t-100-aaaa")])
-        assert _head(p, "w1") is None
-
-    def test_scoped_to_the_bot(self, tmp_path):
-        """A peer's open dispatch must never be handed to this bot — that is
-        the cross-bot leak the watchdog join is deliberately scoped against."""
-        p = _land(tmp_path, [_dispatch("w2", 300, 1000, task_id="t-300-cccc")])
-        assert _head(p, "w1") is None
-
-    def test_idless_dispatches_are_not_resolvable(self, tmp_path):
-        p = _land(tmp_path, [_dispatch("w1", 100, 1000)])
-        assert _head(p, "w1") is None
-
-    def test_an_unanswered_idless_dispatch_suppresses_the_resolver(self, tmp_path):
-        """#1190: while the bot's NEWEST assignment is id-less and unanswered, a
-        terminal report most plausibly answers THAT, so resolving an older
-        id'd row would be a false completion — the resolver returns nothing
-        until the bot's next terminal report discharges the id-less row."""
-        p = _land(tmp_path, [
-            _dispatch("w1", 100, 1000, task_id="t-100-aaaa"),
-            _dispatch("w1", 200, 1000),                       # a peer note, id-less, newest
-        ])
-        assert _head(p, "w1") is None
-        p.report(_report("w1", "1970-01-01T00:10:00Z"))     # id-less terminal: discharges it
-        assert _head(p, "w1") == "t-100-aaaa"
-
-    def test_a_peers_report_does_not_close_this_bots_dispatch(self, tmp_path):
-        p = _land(tmp_path, [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")],
-                  [_report("w2", "1970-01-01T00:10:00Z", task_id="t-100-aaaa")])
-        assert _head(p, "w1") == "t-100-aaaa"
-
-
 class TestProgressLiveness:
     """The #1390-shaped question: does the alarm distinguish BUSY from STUCK?
 
@@ -641,7 +564,7 @@ class TestProgressLiveness:
 
 
 class TestOpenList:
-    """#904 — the read door's list form. Same join as the resolver, wider set."""
+    """#904 — the read door's list form."""
 
     def test_lists_every_open_row_oldest_first(self, tmp_path):
         """Landed out of dispatch order, to pin that this is time-ordered."""
@@ -651,16 +574,6 @@ class TestOpenList:
             _dispatch("w1", 200, 1000, task_id="t-200-bbbb"),
         ])
         assert [t for _, _, t in _open(p, "w1")] == ["t-100-aaaa", "t-200-bbbb", "t-300-cccc"]
-
-    def test_open_task_id_is_this_lists_head(self, tmp_path):
-        """One loop, not two: a resolver that could hand back an id this list
-        does not contain is the desync class the module exists to prevent."""
-        p = _land(tmp_path, [
-            _dispatch("w1", 300, 1000, task_id="t-c"),
-            _dispatch("w1", 100, 1000, task_id="t-a"),
-        ])
-        rows = _open(p, "w1")
-        assert _head(p, "w1") == rows[0][2]
 
     def test_is_deadline_blind(self, tmp_path):
         """A row inside its deadline is OPEN but not overdue — the distinction
@@ -690,18 +603,17 @@ class TestOpenList:
         assert [t for _, _, t in _open(p, "w1")] == ["t-a"]
 
     def test_idless_rows_are_not_listed(self, tmp_path):
-        """Same gate as the resolver: only id'd rows are addressable."""
+        """Only id'd rows are addressable."""
         p = _land(tmp_path, [_dispatch("w1", 100, 1000)])
         assert _open(p, "w1") == []
 
     def test_missing_expected_by_is_None_not_a_filter(self, tmp_path):
-        """A row the resolver would still hand back must remain listable, or
+        """A row with no deadline is still open and must remain listable, or
         the door hides work that can still be closed."""
         row = _dispatch("w1", 100, 1000, task_id="t-a")
         del row["expected_by"]
         p = _land(tmp_path, [row])
         assert _open(p, "w1") == [(100, None, "t-a")]
-        assert _head(p, "w1") == "t-a"
 
     def test_scoped_to_the_bot(self, tmp_path):
         p = _land(tmp_path, [
@@ -727,10 +639,8 @@ class TestOpenList:
 
     def test_ties_keep_ingest_order_matching_the_old_strict_min(self, tmp_path):
         """The tie-break was asserted from reading the sort's stability; this
-        pins it. `open_task_id` USED to scan with a strict `<`, which keeps the
-        FIRST row seen on a tie; the plane orders by instant then ingest
-        order, so it must agree — if it ever did not, the resolver would close
-        a different dispatch than the one the list shows first, silently."""
+        pins it: the plane orders by instant, then ingest order, so the FIRST
+        row landed on a tie comes first."""
         p = _land(tmp_path, [
             _dispatch("w1", 100, 1000, task_id="t-ccc"),
             _dispatch("w1", 100, 1000, task_id="t-bbb"),
@@ -738,9 +648,8 @@ class TestOpenList:
         ])
         rows = _open(p, "w1")
         assert [t for _, _, t in rows] == ["t-ccc", "t-bbb", "t-aaa"]
-        assert _head(p, "w1") == "t-ccc"
 
-    def test_a_tie_at_the_head_still_resolves_to_the_head(self, tmp_path):
+    def test_a_tie_at_the_oldest_instant_still_sorts_by_time_first(self, tmp_path):
         """Tie at the oldest timestamp, with a younger row landed first — so
         ingest order and time order disagree and only the sort can be right."""
         p = _land(tmp_path, [
@@ -750,17 +659,8 @@ class TestOpenList:
         ])
         rows = _open(p, "w1")
         assert [t for _, _, t in rows] == ["t-old-z", "t-old-a", "t-young"]
-        assert _head(p, "w1") == rows[0][2] == "t-old-z"
 
     # --- #1124: the identical-dispatched_at tie-break -------------------------
-    #
-    # open_task_id resolves the dispatch an id-less report-back closes, which is
-    # MOST reports (report-back.sh omits --task in the common path, #847). The
-    # resolver is `rows[0]` off open_dispatches()'s instant-then-ingest order.
-    # Live harm class, not hypothetical (#878): on 2026-08-08 three ai-platform
-    # reports resolved to task ids dispatched 2026-08-04 — a 4.6-day gap. A
-    # tie-break regression adds one more way for an id-less report to close the
-    # wrong dispatch.
     #
     # THE IDS ARE CHOSEN SO INGEST ORDER AND ALPHABETICAL ORDER DISAGREE. An
     # implementation that broke ties by sorting on task_id would satisfy a
@@ -774,41 +674,19 @@ class TestOpenList:
             _dispatch("w1", 100, 1000, task_id=second),
         ])
 
-    def test_tie_resolves_to_the_row_landed_first(self, tmp_path):
-        p = self._tied(tmp_path, "t-bbb", "t-aaa")
-        # Ingest order, NOT the alphabetically-smaller id.
-        assert _head(p, "w1") == "t-bbb"
-
-    def test_tie_reversed_order_resolves_to_the_other_row(self, tmp_path):
-        """Same two rows, order swapped, other answer. Without this a
-        constant-by-coincidence implementation passes."""
-        p = self._tied(tmp_path, "t-aaa", "t-bbb")
-        assert _head(p, "w1") == "t-aaa"
-
-    def test_tie_answer_is_order_dependent_not_a_fixed_value(self, tmp_path):
-        """States the property directly: the two orders must disagree. A single
-        assertion no implementation can satisfy by returning a constant."""
-        first = _head(self._tied(tmp_path / "a", "t-bbb", "t-aaa"), "w1")
-        second = _head(self._tied(tmp_path / "b", "t-aaa", "t-bbb"), "w1")
-        assert first != second, "tie-break is not order-dependent"
-        assert {first, second} == {"t-aaa", "t-bbb"}
-
-    def test_tie_head_of_open_dispatches_matches_the_resolver(self, tmp_path):
-        """The resolver is the list's head — the invariant #904 created and the
-        reason a tie-break regression would desync them rather than just
-        reorder a display."""
+    def test_a_tie_keeps_ingest_order_whichever_row_lands_first(self, tmp_path):
+        """Both orders, so the answer cannot be a constant, and never the
+        alphabetically smaller id."""
         for i, (first, second) in enumerate((("t-bbb", "t-aaa"), ("t-aaa", "t-bbb"))):
             p = self._tied(tmp_path / str(i), first, second)
-            rows = _open(p, "w1")
-            assert [t for _, _, t in rows] == [first, second]
-            assert _head(p, "w1") == rows[0][2]
+            assert [t for _, _, t in _open(p, "w1")] == [first, second]
 
 
 class TestBotSlotShapeGate:
     """#1187 — right count, wrong order was silent; wrong count never was.
 
-    --open and --open-task each name one bot and take it first; --all,
-    --orphans and --unassigned name none. Calling a bot-slot mode with a path
+    --open names one bot and takes it first; --all, --orphans and
+    --unassigned name none. Calling a bot-slot mode with a path
     in the bot slot used to keep the arity valid, match nothing, and print
     nothing at rc 0 — the same output as a genuinely empty result. That is how
     a manager checking whether its closures had worked read a full backlog as
@@ -819,14 +697,12 @@ class TestBotSlotShapeGate:
     def _rows(self, tmp_path):
         return _land(tmp_path, [_dispatch("w1", 100, 1000, task_id="t-a")])
 
-    @pytest.mark.parametrize("mode", ["--open", "--open-task"])
     def test_a_path_in_the_bot_slot_is_refused_loudly_not_silently(
-        self, tmp_path, monkeypatch, capsys, mode
+        self, tmp_path, monkeypatch, capsys
     ):
-        """THE regression this gate exists for. Both doors share the grammar,
-        so both share the hazard; a fix on one only would leave the other."""
+        """THE regression this gate exists for."""
         p = self._rows(tmp_path)
-        monkeypatch.setattr("sys.argv", _argv(p, mode, str(tmp_path / "state" / "dispatch-log.jsonl"), "1786700000"))
+        monkeypatch.setattr("sys.argv", _argv(p, "--open", str(tmp_path / "state" / "dispatch-log.jsonl"), "1786700000"))
         assert dispatch_overdue.main() == 2
         out = capsys.readouterr()
         assert out.out == ""  # never a partial result alongside a refusal
@@ -862,20 +738,11 @@ class TestBotSlotShapeGate:
         above. `a.b` guards the suffix test against becoming a bare dot test."""
         assert dispatch_overdue._not_a_bot_id(bot) is None
 
-    def test_gate_is_inert_for_the_report_back_call_shape(self, tmp_path, monkeypatch, capsys):
-        """report-back.sh passes its own $BOT first. Same rc, same stdout as
-        before the gate — its fail-open contract is untouched."""
-        p = self._rows(tmp_path)
-        monkeypatch.setattr("sys.argv", _argv(p, "--open-task", "w1"))
-        assert dispatch_overdue.main() == 0
-        assert capsys.readouterr().out == "t-a\n"
-
-    @pytest.mark.parametrize("mode", ["--open", "--open-task"])
-    def test_a_missing_bot_is_a_usage_error(self, tmp_path, monkeypatch, capsys, mode):
+    def test_a_missing_bot_is_a_usage_error(self, tmp_path, monkeypatch, capsys):
         """No bot at all was already rc 2 before the gate and stays so. Pinned so
         the shape gate is never mistaken for the thing that made misuse loud."""
         p = self._rows(tmp_path)
-        monkeypatch.setattr("sys.argv", _argv(p, mode))
+        monkeypatch.setattr("sys.argv", _argv(p, "--open"))
         assert dispatch_overdue.main() == 2
         assert capsys.readouterr().out == ""
 
@@ -900,7 +767,7 @@ class TestBotSlotShapeGate:
         monkeypatch.setattr("sys.argv", _argv(p, "w1", "2000"))
         assert dispatch_overdue.main() == 2
         out = capsys.readouterr()
-        assert out.out == "" and "--open-task" in out.err
+        assert out.out == "" and "--unassigned" in out.err
 
 
 class TestOpenScopeDisclosure:
@@ -953,19 +820,6 @@ class TestOpenScopeDisclosure:
         assert out.out == ""
         assert out.err != ""  # the disclosure went somewhere — just not stdout
 
-    def test_open_task_prints_one_id_or_nothing_and_discloses_on_stderr(
-        self, tmp_path, monkeypatch, capsys
-    ):
-        """The resolver is machine-consumed: one id or nothing on stdout. Its
-        answer is disclosed on stderr — `[source=plane]` — because the report
-        door discards stderr and a reader auditing by hand must be able to
-        see which side answered (the plane, now the only one)."""
-        p = _land(tmp_path, [_dispatch("w9", 100, 1000, task_id="t-z")])
-        monkeypatch.setattr("sys.argv", _argv(p, "--open-task", "w1"))
-        assert dispatch_overdue.main() == 0
-        out = capsys.readouterr()
-        assert out.out == "" and "[source=plane]" in out.err and "'w1'" in out.err
-
 
 class TestSupersession:
     """A re-dispatch replaces an earlier task, so the older row is never answered.
@@ -997,15 +851,10 @@ class TestSupersession:
         p = _land(tmp_path, dispatches)
         return dispatch_overdue.overdue_all(self.NOW, fleet=F, root=str(p.root))
 
-    def _both_open_doors(self, tmp_path, dispatches, bot="w1", reports=None):
-        """(open list ids, resolver id) — the PRODUCT the class never asserted.
-
-        A helper returning one door would let a hole reopen shifted by one;
-        this returns both because the #1357 defect was the DISAGREEMENT
-        between them, not either door's own behaviour.
-        """
+    def _open_ids(self, tmp_path, dispatches, bot="w1", reports=None):
+        """The open list's ids, oldest first."""
         p = _land(tmp_path, dispatches, reports or [])
-        return [r[2] for r in _open(p, bot)], _head(p, bot)
+        return [r[2] for r in _open(p, bot)]
 
     def test_an_explicitly_superseded_row_is_retired(self, tmp_path):
         """The stranded row goes quiet; the replacement stays accountable."""
@@ -1025,8 +874,8 @@ class TestSupersession:
 
         Same shape as above minus the declaration: two dispatches to one bot, nothing
         saying the second replaces the first. Both are owed, both must stay visible.
-        This is what the oldest-first resolver exists to serve, and it is exactly the
-        case timing-based inference got wrong.
+        The open list shows them oldest first, and this is exactly the case
+        timing-based inference got wrong.
         """
         out = self._overdue(tmp_path, [
             _dispatch("w1", 100, 1000, task_id="t-100-a"),
@@ -1075,17 +924,13 @@ class TestSupersession:
     # invisible to alerting and simultaneously the preferred close target.
     # ------------------------------------------------------------------
 
-    def test_a_retired_row_is_gone_from_BOTH_open_doors(self, tmp_path):
-        """The core regression, stated as the product rather than as one door."""
-        ids, head = self._both_open_doors(tmp_path, [
+    def test_a_retired_row_is_gone_from_the_open_list(self, tmp_path):
+        """The core regression: a retired row must not stay listed open."""
+        ids = self._open_ids(tmp_path, [
             _dispatch("w1", 100, 1000, task_id="t-100-old"),
             _dispatch("w1", 200, 1100, task_id="t-200-new", supersedes="t-100-old"),
         ])
         assert ids == ["t-200-new"], f"the retired row is still listed open: {ids}"
-        assert head == "t-200-new", (
-            f"the resolver hands back the RETIRED row ({head}) — an id-less report "
-            "would close the row we declared dead and strand the live one"
-        )
 
     def test_the_two_doors_agree_on_what_retirement_means(self, tmp_path):
         """The desync assertion — neither door alone can express this."""
@@ -1094,39 +939,36 @@ class TestSupersession:
             _dispatch("w1", 200, 1100, task_id="t-200-new", supersedes="t-100-old"),
         ]
         overdue_ids = {r[3] for r in self._overdue(tmp_path / "o", dispatches).get("w1", [])}
-        open_ids, head = self._both_open_doors(tmp_path / "d", dispatches)
+        open_ids = self._open_ids(tmp_path / "d", dispatches)
         assert "t-100-old" not in overdue_ids, (
             "positive control failed: the overdue path stopped retiring the row, "
             "so a green agreement assertion below would prove nothing"
         )
         assert "t-100-old" not in set(open_ids), "OVERDUE retired the row and OPEN did not — the doors disagree"
-        assert head != "t-100-old", "the resolver inherited the wrong answer"
         assert set(overdue_ids) <= set(open_ids), (
             "open must stay a strict superset of overdue while sharing its "
             f"retirement rule: open={open_ids} overdue={sorted(overdue_ids)}"
         )
 
-    def test_an_undeclared_queue_is_NOT_retired_from_the_open_doors(self, tmp_path):
-        """The boundary, restated for the door that carries the resolver: an
-        over-broad gate would silently mark live work `completed`. Two
-        dispatches, no declaration — both stay open, oldest still first."""
-        ids, head = self._both_open_doors(tmp_path, [
+    def test_an_undeclared_queue_is_NOT_retired_from_the_open_list(self, tmp_path):
+        """The boundary, restated for the open list: an over-broad gate would
+        silently drop live work. Two dispatches, no declaration — both stay
+        open, oldest still first."""
+        ids = self._open_ids(tmp_path, [
             _dispatch("w1", 100, 1000, task_id="t-100-a"),
             _dispatch("w1", 200, 1100, task_id="t-200-b"),
         ])
         assert ids == ["t-100-a", "t-200-b"], f"a queued dispatch was retired: {ids}"
-        assert head == "t-100-a", "FIFO resolution broke"
 
-    def test_a_chain_leaves_no_phantom_at_the_head(self, tmp_path):
+    def test_a_chain_leaves_no_phantom_in_the_open_list(self, tmp_path):
         """The sharpest live reproduction: nothing went wrong operationally.
 
         The manager superseded correctly at every hop and the worker reported
         both live rows with explicit ids, so both closed. The first row was
         retired two hops back, will never be reported against, and was still
-        the head of the open list — so the bot's next id-less report closed a
-        row from three hours earlier.
+        listed open.
         """
-        ids, head = self._both_open_doors(
+        ids = self._open_ids(
             tmp_path,
             [
                 _dispatch("w1", 100, 200, task_id="t-1"),
@@ -1139,7 +981,6 @@ class TestSupersession:
             ],
         )
         assert ids == [], f"phantom rows survived a fully-answered chain: {ids}"
-        assert head is None, f"the resolver still offers a retired row: {head}"
 
 
 class TestUnassigned:
@@ -1365,8 +1206,8 @@ class TestUnreachableIsNotEmpty:
     report-back's `awk`), so the refusal rides stderr and the rc.
     """
 
-    @pytest.mark.parametrize("argv", [["--open", "w1"], ["--open-task", "w1"], ["--all", "5000"],
-                                      ["--unassigned", "5000"]], ids=["open", "open-task", "all", "unassigned"])
+    @pytest.mark.parametrize("argv", [["--open", "w1"], ["--all", "5000"],
+                                      ["--unassigned", "5000"]], ids=["open", "all", "unassigned"])
     def test_no_plane_db_refuses_at_rc3_with_nothing_on_stdout(self, tmp_path, monkeypatch, capsys, argv):
         root = plane_root(tmp_path)                                   # the home exists; no db was ever created
         monkeypatch.setattr("sys.argv", ["dispatch-overdue.py", *argv, "--fleet", F, "--root", str(root)])

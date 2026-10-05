@@ -4,7 +4,7 @@
 THE PLANE IS THE ONLY SOURCE (F18 closure, R2a). Every question this module
 answers is asked of the host's plane db through the stdlib readers beside it
 (`plane-readers.py`): the fleet's roster, its open assignments, the overdue
-rules, the resolver's head, the idle-worker mirror. The dispatch log and the
+rules, the idle-worker mirror. The dispatch log and the
 report ledger this module was born reading no longer exist — no door writes
 them (R1) — and this module no longer knows how to read a file at all.
 
@@ -42,18 +42,9 @@ mode and enables the respawn (orphan) split:
   dispatch-overdue.py --open <bot_id> [--fleet F] [--root R]
       Every still-open id'd assignment, OLDEST FIRST, deadline-blind (#904):
       "<dispatched_at> <expected_by> <task_id>" (expected_by "-" when none).
-      A strict superset of --all's rows for the bot; --open-task is its head.
+      A strict superset of --all's rows for the bot.
       States its scope on STDERR on every run (#1187), so an empty result
       names what it filtered on. Stdout stays rows-only for machine callers.
-
-  dispatch-overdue.py --open-task <bot_id> [<now_epoch>] [--fleet F] [--root R]
-      The id report-back.sh should echo when --task is omitted (#835): the
-      OLDEST open id'd assignment, or nothing — nothing also while the bot's
-      NEWEST assignment is id-less and unanswered (#1190: a terminal report
-      then most plausibly answers that, and stamping an older id'd row would
-      be a false completion, the one outcome worse than an open row).
-      Silent (rc 0, no stdout) when nothing resolves; the plane path discloses
-      its answer on stderr.
 
   dispatch-overdue.py --unassigned [<now_epoch>] [--fleet F] [--root R]
       The MIRROR of overdue (#1024): workers whose newest report is terminal
@@ -61,8 +52,8 @@ mode and enables the respawn (orphan) split:
       newest report instant; it never asks whether a dispatch is open.
       "<bot_id> <reported_at> <idle_seconds> <task_id> <status>" per worker.
 
-WHICH MODES HAVE A BOT SLOT — the grammar trap behind #1187: --open and
---open-task take ONE bot FIRST; --all, --orphans and --unassigned name none.
+WHICH MODES HAVE A BOT SLOT — the grammar trap behind #1187: --open takes
+ONE bot FIRST; --all, --orphans and --unassigned name none.
 The bot slot refuses what a bot id can never be (a path, a `.jsonl` name, an
 empty string) at rc 2, lexically and never by roster — a plausible but wrong
 name still answers zero rows, which is why --open states its scope.
@@ -70,8 +61,8 @@ name still answers zero rows, which is why --open states its scope.
 UNREACHABLE IS NOT EMPTY. A plane that cannot be opened, holds no schema, or
 holds no bot of the named fleet (a wrong root, or a fleet it has never seen)
 REFUSES at rc 3 with empty stdout — never "nothing open", never a file. rc 2
-is a malformed call. Callers that parse stdout (fleet-pulse's caches,
-report-back's resolver) read the rc; the refusal rides stderr.
+is a malformed call. Callers that parse stdout (fleet-pulse's caches) read
+the rc; the refusal rides stderr.
 
 Kept as a standalone, stdlib-only script so it is unit-testable in isolation
 and callable from fleet-pulse.sh without importing the package.
@@ -266,9 +257,8 @@ def open_dispatches(
     """The bot's still-open id'd assignments, OLDEST FIRST.
 
     Each entry is (dispatched_at, expected_by, task_id). ``expected_by`` is
-    None when the assignment carries none — deliberately NOT a filter, so this
-    set stays a strict superset of what ``open_task_id`` considers: a row that
-    can supply the resolver's id must also be listable here.
+    None when the assignment carries none — deliberately NOT a filter: a row
+    with no deadline is still open, so it stays listable.
 
     OPEN is deadline-blind, and that is the whole point of this door: an
     assignment is open until it is CLOSED (a terminal task event) or RETIRED
@@ -277,8 +267,7 @@ def open_dispatches(
     three tasks, none late yet" is readable. Deadline-blind is NOT
     supersede-blind (#1357): a retired assignment is gone from both doors.
     The SQL is the plane's own definition of open (`queries.OPEN_ASSIGNMENTS_AT_SQL`,
-    pinned byte-identical in `plane-readers.py`), so this door and the
-    resolver can never disagree about what open means.
+    pinned byte-identical in `plane-readers.py`).
     """
     with _session(plane, fleet, root) as p:
         entry = _plane_bot(p, bot, "open")
@@ -489,41 +478,6 @@ def unassigned_all(
         return p.pr.unassigned_rows(p.conn, p.fleet, now=now, idle_threshold=idle_threshold)
 
 
-def open_task_id(
-    bot: str,
-    *,
-    fleet: str | None = None,
-    root: str | None = None,
-    plane: _Plane | None = None,
-) -> str | None:
-    """The bot's OLDEST still-open id'd dispatch, or None.
-
-    What report-back.sh resolves when the worker omits --task, so the common
-    path closes its dispatch by default instead of by discipline. OLDEST, not
-    newest: a worker is a serial session draining a queued buffer in FIFO
-    order, so the dispatch it just finished is the oldest one still open; and
-    the oldest is the one actually past its deadline and alarming. FIFO also
-    makes a wrong guess self-correcting — N reports for N queued tasks retire
-    them in the order they were sent.
-
-    Deliberately NOT a loosening of the join: the plane reader's ``head`` is
-    the head of the same open list ``open_dispatches`` returns, so the
-    resolver can never hand back an id the list does not contain.
-
-    SUPPRESSED (None) while the bot's NEWEST assignment is id-less and
-    unanswered (#1190): the most recent thing asked of the bot carried no id,
-    so a terminal report now most plausibly answers that, and stamping an
-    older id'd row would be a false completion — the one outcome worse than
-    an open row. The cost is one-directional and deliberate: a report that WAS
-    the missing echo leaves its row open until the next report (UNTRACKED,
-    the degradation direction #1187 chose; the watchdog still surfaces it).
-    The plane reader answers for the present instant.
-    """
-    with _session(plane, fleet, root) as p:
-        entry = _plane_bot(p, bot, "to resolve")
-        return p.pr.head(p.conn, p.fleet, bot, entry=entry) if entry else None
-
-
 # --- the CLI --------------------------------------------------------------------
 
 def _take_bots_dir(argv: list[str]) -> tuple[list[str], str | None]:
@@ -645,7 +599,7 @@ def _refuse_undeterminable_orphans(bots_dir: str | None) -> bool:
 _USAGE = __doc__.strip().splitlines()[0]
 # The positional grammar, once: mode -> (takes a bot, takes <now_epoch>).
 _GRAMMAR = {"--all": (False, True), "--orphans": (False, True), "--open": (True, False),
-            "--open-task": (True, True), "--unassigned": (False, True)}
+            "--unassigned": (False, True)}
 _MODES = tuple(_GRAMMAR)
 
 
@@ -710,12 +664,6 @@ def main() -> int:
             # becomes a phantom open row. An empty result that names what
             # it filtered on can never be read as "nothing exists".
             print(f"--open: bot={bot!r} -> {len(rows)} open id'd dispatch(es) [source=plane]",
-                  file=sys.stderr)
-        elif mode == "--open-task":
-            tid = open_task_id(bot, fleet=fleet_opt, root=root_opt)
-            if tid:
-                print(tid)
-            print(f"dispatch-overdue: --open-task: bot={bot!r} -> {tid or '-'} [source=plane]",
                   file=sys.stderr)
         elif mode == "--unassigned":
             for bot_id, (rts, idle, tid, status) in sorted(

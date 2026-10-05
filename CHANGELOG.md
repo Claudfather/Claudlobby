@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed — helpers with no caller since #1989 (#2152)
+
+#1989 deleted every caller of these, so they ran nowhere:
+
+- **`guard_unit_capture` and `unit_owner_root`** (`lib-common.sh`): the host-unit capture guard of #1153, called only by the three host-unit installers #1989 removed. `host activate` now refuses a unit at a candidate label that the frozen inventory does not own.
+- **`resolve_timer_unit` and `extract_bot_conf_var`** (`lib-common.sh`): the fleet-timer installers' unit-name resolver, called only by `install_fleet_timer.sh` and `install_fleet_timer_launchd.sh`. Timer unit names now come from the fleet's `service_prefix` at compose time.
+- **`dispatch-overdue.py --open-task`**, with `open_task_id` and the plane readers only it reached (`plane-readers.py`'s `head`, `answering_idless` and `answering_control_note`): the id-less report resolver, called only by `report-back.sh`. Report verbs now name their assignment instead of having one chosen for them. `--open`, `--all`, `--orphans` and `--unassigned` are unchanged.
+- **Tests:** `test_host_unit_capture.py`, `test_extract_bot_conf_var.py` and `test_resolver_control_note_guard.py` go with the code they tested, as do the resolver cases in `test_plane_readers_resolver.py`, `test_dispatch_overdue.py` and `test_plane_readers_matcher.py`. Open-list tests that also asserted the resolver keep their open-list assertions.
+
 ### Fixed — two senders to one pane no longer interleave their chunks (#2036)
 
 `pane_send_verified` has typed a payload in 400-byte chunks 0.15 s apart since #1493, so a large send takes seconds, and nothing serialised the senders of ONE pane. A second send that started in that window wrote its chunks between the first one's. On 2026-09-30 a manager's query landed inside a worker's report in a third bot's pane, splitting it mid-word, and both receipt trailers broke.
