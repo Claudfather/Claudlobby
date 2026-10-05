@@ -299,8 +299,10 @@ def cmd_plane_doctor(args) -> int:
                                " re-emitting is safe (ingest dedupes on the"
                                " pre-minted event id)")
                 # A batch the client refused to stage (full queue, untrusted
-                # capture policy, failed write): its fate is known — NOT
-                # recorded — and it must not hide behind a green rung (S5a-01).
+                # capture policy, failed write), or a stage that died before
+                # writing its batch (stage_empty, counted at replay, #2164): its
+                # fate is known — NOT recorded — and it must not hide behind a
+                # green rung (S5a-01).
                 refused = [r for r in rows if "\treap\t" not in r]
                 if refused:
                     kinds = sorted({r.split("\t")[1] for r in refused if len(r.split("\t")) > 1})
