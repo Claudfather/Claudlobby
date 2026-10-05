@@ -136,6 +136,15 @@ No plan carries a `Held:` line any more.
 
 ## 6. Still open on the review side
 
+> **Update, P0 Claude batch (2026-10-05, later the same day).** Order 1 has started. `harness/runtime-neutral-canary.py`
+> (tests: `tests/test_runtime_neutral_canary.py`) and the run log
+> `documentation/plans/2026-10-04-runtime-neutral-observability-run-log.md` exist. C6a's bot-free legs, C10 and C11
+> are measured headless, and the fold is in the epic (§15 *P0 Claude-batch fold*) and plans 2, 4 and 5. **Two
+> corrections the next session must know:** `CLAUDE_CODE_CHILD_SESSION=1` is on every process Claude Code spawns,
+> so nothing reads it (plan 5 Task 5 is now the opposite pin); and plan 4's `records()` takes the event name from
+> the log body. No fork reopened. Owed: the run log's operator legs 1–3 (interactive C10/C11; the floor host; the
+> canary RC bot) and §14 Q15–Q16. The bullets below are the pre-update state.
+
 - **Step 3 of the review brief**: canaries C1–C11 as small safe scripts (style of clauDNA's `scripts/session_canary.py`;
   log field names and sizes, never prompt content), exact instructions for the interactive steps, the run log
   `documentation/plans/2026-10-04-runtime-neutral-observability-run-log.md`. Not started. Codex is not installed on the

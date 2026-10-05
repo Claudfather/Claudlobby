@@ -516,7 +516,10 @@ Runtimes *(doc)*:
   - OTel metrics and logs via `CLAUDE_CODE_ENABLE_TELEMETRY`, with traces in beta.
   - Attributes include `session.id` and `prompt.id`.
   - `TRACEPARENT` is passed to Bash children and read by `-p`; interactive sessions ignore it.
-  - No parent session id in hooks. `CLAUDE_CODE_CHILD_SESSION=1` marks children.
+  - No parent session id in hooks. `CLAUDE_CODE_CHILD_SESSION=1` marks children. *(P0 fold, 2026-10-05: measured on
+    **every** process Claude Code spawns — main-thread Bash and every hook of a top-level session included — so it
+    marks "spawned by Claude Code", not "nested" or "subagent"; a subagent's hook is told apart by the payload's
+    `agent_id`/`agent_type`. Run log, C11.)*
 - **Codex:**
   - Hooks are on by default, in `~/.codex/hooks.json`, `config.toml`, repo `.codex/`, or a plugin manifest.
   - Hook events: `SessionStart` (`startup|resume|clear|compact`), `SessionEnd`, `PreCompact`/`PostCompact`, `UserPromptSubmit`, `Pre/PostToolUse`, `SubagentStart/Stop`, `Stop`. Payloads carry `session_id`, `transcript_path`, `cwd`.
@@ -824,6 +827,12 @@ clauDNA's phase-3 canary table (§5.1).
     gets a delivered reply (`27813876`, #533: `DISABLE_TELEMETRY` once killed `--remote-control` because flag
     evaluation rides the telemetry channel, `known_values.py:94-103`; *enabling* an exporter has never been
     measured against RC).
+  - **Status (run log, 2026-10-05):** every leg that needs no bot is `Measured:` on an x86_64 container — the
+    direct export works (`application/json`, `/v1/logs` and `/v1/metrics`, the resource attributes verbatim on
+    every row, delta, 5 s/60 s), `session.id` = hook `session_id` across `resume`, a 35 s outage drops that
+    window's log events (metrics survive), and the summarizer children export full sessions under their own ids
+    (§14 Q15). Every event also carries the account's identity attributes (§14 Q16). **Owed (operator):** the
+    floor-host run that is F4's gate, bot-hour volume and footprint, the 24-hour overlap, RC day 1.
 - [ ] **C6b** Claude OTel under the intake — inside P2-a1's one-week canary (§6 P2; ironclad cycle 2): intake RSS;
   intake handler latency (the time to `200`, with the raw write behind it); `state/otel/` growth per bot-hour against
   the raw sink's bound; fleet-level RSS/CPU on the canary host before and after (the mission metric is the fleet
@@ -837,6 +846,11 @@ clauDNA's phase-3 canary table (§5.1).
   loads at all (clauDNA#120 saw the marketplace fetched but the plugin not installed).
 - [ ] **C9** Host identification: confirm the adapter can be selected by the hook command itself (`… hook --host codex <event>` — the selector precedes the event, as in `session-store.sh --host codex <event>`, §6 P4 spec) rather than sniffed.
 - [ ] **C10** `CLAUDE_CODE_CHILD_SESSION` leak: when a bot's tmux server is started from inside another Claude session, does the variable reach the bot? `start-bot.sh` does not scrub env. If it does, the scrub is P1 Claudlobby Task 7b (Half A; `tests/test_boot_policy_conformance.py`): `start-bot.sh` unsets `CLAUDE_CODE_CHILD_SESSION` before `exec $CLAUDE` (`:268`), with a subprocess check that a bot started from inside a Claude session sees no marker; P3 clauDNA's guard task (plan 5 Task 5) waits on it, and the 0.28 release does not wait (ironclad cycle 1; the "P3 Claudlobby Task 6b" name was a slip — interim fold).
+  - **Status (run log, 2026-10-05):** it leaks — the marker, `CLAUDECODE=1` and the caller's
+    `CLAUDE_CODE_SESSION_ID` all reach the pane — but a `claude` started with them sets its own id and the marker
+    on every child anyway (headless), so the leak is harmless for ids. Supervised starts don't inherit a caller's
+    env (`supervision.py:95-123`). Task 7b is re-scoped to the one open question — does a leaked `CLAUDECODE=1`
+    change an interactive bot's boot (operator leg 1) — and gates nothing; plan 5 Task 5 no longer waits.
 - [ ] **C11** Claude session id in tools: in a tmux-hosted bot, does the Bash tool's `CLAUDE_CODE_SESSION_ID` equal the SessionStart payload's `session_id`, from the main thread and from an Agent subagent (whose shells carry `CLAUDE_CODE_CHILD_SESSION=1`)? If a subagent's id differs, F1(c) doors running under `CLAUDE_CODE_CHILD_SESSION=1` record no uid. (The
   env-vars reference now says the variable "matches the `session_id` field in the hook JSON input" for Bash
   and hook subprocesses; the canary still measures it, from a subagent in particular.)
@@ -844,6 +858,10 @@ clauDNA's phase-3 canary table (§5.1).
     scratch hook appending `env | grep ^CLAUDE_CODE_` to a file): does it carry `CLAUDE_CODE_CHILD_SESSION=1`
     with the parent's `session_id`? If it does, P3's clauDNA guard restricts the marker check to the lifecycle
     events so the parent keeps its subagents' `skill.invoked`/`tool.failed` (the P3 clauDNA plan's canary table).
+  - **Status (run log, 2026-10-05, headless):** yes from both — main thread and an Agent subagent share the
+    SessionStart `session_id` in Bash and in every hook, and **every** one of those processes carries
+    `CLAUDE_CODE_CHILD_SESSION=1`, the main thread's too. No guard reads the marker any more (plan 2 Task 7, plan 5
+    Task 5). **Owed:** the same readings in a tmux-hosted interactive session (operator leg 1) — Half B's gate.
 - [x] Ratify F1–F17 (operator, 2026-10-04).
 - [x] Rule F18 (D1), D2 and the §16 amendments (operator, 2026-10-05; the lock comments on #2144 are linked from
   §3 and §16 *Rulings*).
@@ -997,9 +1015,10 @@ SESSION_COLUMNS = ("session_uid", "sender_session_uid")   # F17(c): observations
   Codex's variable and the companion adds the row — and returns `derive_session_uid(id, runtime=runtime)` when
   the id is present and `None` otherwise (§2.2: "with no session-id env, the door records no uid rather
   than a possibly wrong one"), and `TaskOperationContext` (`claudlobby/task_operations.py:46-66`) carries it.
-  Canary C11 decides whether a subagent's shell (`CLAUDE_CODE_CHILD_SESSION=1`) sees the same id; until it says
-  so (`SUBAGENT_SHELL_SHARES_SESSION_ID`), the resolver returns `None` under that variable rather than another
-  session's uid.
+  Canary C11 measured (2026-10-05, headless) that a subagent's shell sees the same id as the main thread's, and
+  that both carry `CLAUDE_CODE_CHILD_SESSION=1`; the resolver therefore reads the id and never the marker (plan 2
+  Task 7; the forge draft's `SUBAGENT_SHELL_SHARES_SESSION_ID` is dropped). The interactive tmux leg is owed
+  before Half B opens.
 - **Where the doors put it.** The payload dicts handed to `_raw` (`task_operations.py:312-317`) set `"session_uid"`
   from `ctx.session_uid` (the accept payload at `:460-461`; the report's linked task detail via
   `encode_report_facts`, `claudlobby/report_payload.py:198-199`); the communication dicts (`encode_communication`,
@@ -1545,7 +1564,7 @@ clauDNA:
   plugin version, with the join key spelled `runtime` (not `host`) and the staleness semantics the consumer
   relies on stated on the writer side too. Spec §8; tested.
 - [ ] Freeze the activity layer per F8, with a spec note. `TestFrozenLayer`'s docstring says the freeze covers the store's hooks and kinds and not `plugin-hooks/telemetry-emit.sh` (Claudosseum's `skill_invocation` writer, its own hook entry by owner decision, phase-4 plan `:97-99`; §11).
-- [ ] Child guard reads `CLAUDE_CODE_CHILD_SESSION=1` first, keeping the pid and entrypoint checks as fallbacks. This step waits on P1 Claudlobby Task 7b (Half A; `tests/test_boot_policy_conformance.py`) if C10 shows a leak; the 0.28 release does not wait. If C11's hook-env leg shows a subagent's `PostToolUse` carrying the marker with the parent's `session_id`, the marker check is restricted to the lifecycle events. Update the `SETUP_GUIDE.md` env table (`:309-317`) if any documented semantics change; fix the "Claudlobby sets `CLAUDNA_TELEMETRY=1`" claims (`SETUP_GUIDE.md:704`, `telemetry.py:3`, phase-4 plan `:68` — it never has, `composer.py:1319-1330`); and close Claudlobby#1961's `CLAUDLOBBY_HOOK_CHILD` thread in spec §11.5 (never built; superseded by Claude Code's own marker, spec §4.4 `:145`, §11.5 `:464`).
+- [ ] ~~Child guard reads `CLAUDE_CODE_CHILD_SESSION=1` first, keeping the pid and entrypoint checks as fallbacks.~~ *(P0 fold, 2026-10-05: struck — the marker is on every hook of every session (C11), so this would ignore every event. Plan 5 Task 5 is now a pin that the guard does **not** read it.)* This step waits on P1 Claudlobby Task 7b (Half A; `tests/test_boot_policy_conformance.py`) if C10 shows a leak; the 0.28 release does not wait. If C11's hook-env leg shows a subagent's `PostToolUse` carrying the marker with the parent's `session_id`, the marker check is restricted to the lifecycle events. Update the `SETUP_GUIDE.md` env table (`:309-317`) if any documented semantics change; fix the "Claudlobby sets `CLAUDNA_TELEMETRY=1`" claims (`SETUP_GUIDE.md:704`, `telemetry.py:3`, phase-4 plan `:68` — it never has, `composer.py:1319-1330`); and close Claudlobby#1961's `CLAUDLOBBY_HOOK_CHILD` thread in spec §11.5 (never built; superseded by Claude Code's own marker, spec §4.4 `:145`, §11.5 `:464`).
 - [ ] Release clauDNA 0.28.0.
 
 #### Spec: the clauDNA export contract additions (`--include-skipped`, `runtime`, `entrypoint.json`)
@@ -1984,6 +2003,10 @@ adapters (P4) in the same C1 captures, per its "live capture, never the producer
 - **Volume moves rather than disappears:** `state/otel/` needs its own retention and a total bound (64 MiB × 15 files per signal × 2 signals = 1,920 MiB, the intake spec), 0700/0600 modes, and the `otel sink` rung in `plane doctor`.
 - **Marketplace auto-update defeats the release ordering** (ironclad cycle 1, compatibility). `start-bot.sh:315-321` runs `claude plugin update` through `plugin_ensure` at every bot start (or once per host boot), and `CLAUDNA_VERSION` is composed with no consumer (`composer.py:1319-1324`; `plugin_ensure` greps the registry for the name only, `lib-common.sh:4699-4710`), so clauDNA 0.27 and 0.28 reach tmux-hosted bots at their next restart — weeks before P3 composes the per-bot root — a fleet shares one `~/.claudna` with mixed 0.26/0.27 writers (the one-rebuild-each convergence of §6 P1 holds, fleet-wide), and the plan's C10 ordering is unenforceable the same way. "Pinned" means nothing until something consumes the pin. **Remedy:** pin `claudna_version` on the fleet before merging the clauDNA P3 release — `plugin_ensure` honours `CLAUDNA_VERSION`, or the marketplace entry is pinned by `sha`/tag per clauDNA `CONTRIBUTING.md:140` — or ship the state-dir line first (§10, order 3).
 - **Two foundation costs are paid on purpose** (first-principles): the strict `RequestIntent(**intent)` decoder makes any new intent field a receipt-format bump (`request_receipts.py:436-450`; F17(c) adds none — A-F17), and `session.schema.json`'s `additionalProperties: false` makes one optional field a projection bump (`claudna.session/2`, §6 P1). Both are the price of refusing unknown fields at a boundary; neither is loosened here.
+- **An intake restart drops its window's log events** (C6a, measured 2026-10-05): the exporter does not hold log
+  batches through a 35 s outage, and a session ending inside one delivers nothing. Event-derived counts
+  (`session.tool_calls`, `session.api_requests`) undercount across restarts; `session.tokens` (a metric) survives a
+  restart shorter than the 60 s interval. Plan 4's *Stated limitations* carries it.
 - **Calendar gates the size table does not price** (§10): P2-a1's one-week canary before P2-a2 opens, the three-repo release chain (clauDNA 0.27 → 0.28, Claudron, the pin bump), and the Codex install (§14 Q3). Two gates the cycle-2 text listed are gone with the rulings of 2026-10-05: the mission decisions (D1 as F18(a) and D2 are ratified; their texts ride Half A and plan 3's PR) and F17(a)'s fleet-wide activation of release N before Half B (F17(c) changes no receipt format, so Half B has no release gate). The plane's own history (v2 → design-v2 F18 cutover in 18 days, 13 post-ship fixes) says that is where schedule risk sits.
 
 ## 10. Complexity and sequencing
@@ -2220,6 +2243,22 @@ Added by ironclad cycle 1 (2026-10-05) — carried to the operator; answered whe
     nothing — the model calls are the opt-in `claudna:` knobs), with the monitor's new stop rule (§6 P3) keeping
     week one cheap.
 
+15. **The summarizer's children in the telemetry** (C6a, measured 2026-10-05). clauDNA's `claude -p` summaries
+    inherit the bot's exporter env under `set -a` and export full sessions — `session.count`, tokens, cost, events
+    — under their own random `--session-id`, with the bot's resource attributes and no hook ever naming the id.
+    At the intake each summary is an extra session of the bot. Options: (a) keep them — it is the bot's spend, and
+    the intake labels a session no hook names as `unhooked`; (b) clauDNA's `run_claude` drops
+    `CLAUDE_CODE_ENABLE_TELEMETRY` from the child env, so summaries cost nothing at the intake and show up only in
+    clauDNA's own run log; (c) the child keeps exporting and appends a resource attribute (`claudna.role=summarizer`)
+    so the intake can fold it into the parent bot's spend without counting a session. Lean: (c) — the spend is
+    real and belongs to the bot, and the attribute is one line at clauDNA `summarize.py:83` (`child_env`); decides a plan 3 or plan 5
+    step and plan 4 Task 9's mapping.
+16. **Account identity on every event** (C6a, measured 2026-10-05). Every Claude Code event carries `user.email`,
+    `user.account_uuid`, `user.account_id`, `user.id` and `organization.id`; plan 4's `CONTENT_KEYS` drop none of
+    them, so the raw files would hold the account email on every line (0700, local, 14-day retention). Lean: add an
+    `IDENTITY_KEYS` drop beside `CONTENT_KEYS` for non-`full` bots — no reader names them, the bot and fleet come
+    from `claudlobby.*`, and the raw files then hold nothing personal; decides one line and one test in plan 4 Task 6.
+
 ## 15. Forge change log (2026-10-04)
 
 - Wrote the six per-PR plans §10.1 indexes (P1 ×3, P2, P3 ×2); their authors corrected four spellings here
@@ -2372,6 +2411,18 @@ correction paragraphs folded into one history note; the planner's write-version 
 otelcol row marked no longer load-bearing), §5.1, §6 (order, P0, P1, the F17 spec, P2 and both its specs, P3, P4),
 §7–§11, §13, §14 (Q2, Q4, Q7, Q8, Q13 answered; Q10 the revisit trigger) and §10's order and §10.1's index
 re-derived (P2-a1/P2-a2; Half B after Half A and C11; 6b carries the F14 runbook document).
+
+### P0 Claude-batch fold (2026-10-05)
+
+Folded from the run log's first entries (`2026-10-04-runtime-neutral-observability-run-log.md`; instrument
+`harness/runtime-neutral-canary.py`). No fork reopens: C6a's confirmation leg passed off the floor host, so F4 stays
+locked and its gate (the floor-host run) stays open. Fact changes, each traced in the run log's *Plan changes*:
+§4 (what the child marker marks), §6 P0 (status lines on C6a, C10, C11), §6 P1 (the resolver reads no marker),
+§6 P3 (the child-guard bullet struck), §9 (the restart cost), §14 Q15–Q16 (new, for the operator); plan 2 (Task 7
+drops the constant; Task 7b re-scoped; Half B's gate is C11 alone), plan 4 (`records()` reads the log body; 6/8
+lines; the restart limitation; the canary table), plan 5 (Task 5 becomes the opposite pin; no canary holds it).
+Owed before the gates they name: operator legs 1 (interactive C10/C11 — Half B, Task 7b), 2 (floor host — P2-a1)
+and 3 (the canary RC bot — P2-a1).
 
 ## 16. Fork amendments and decisions — ruled 2026-10-05
 
