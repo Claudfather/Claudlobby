@@ -4,6 +4,7 @@ type: plan
 status: draft
 owner: chrisrogers37
 created: 2026-10-04
+updated: 2026-10-05
 epic: documentation/plans/2026-10-04-runtime-neutral-observability-plan.md
 spec: documentation/plans/2026-08-18-observable-plane-design-v2.md
 issue: "#2145"
@@ -19,15 +20,18 @@ repos: Claudfather/Claudlobby
 > design-v2 §1.1 amendment, Task 9b's `fleet_event_request`, and — if C10 leaked — Task 7b's conditional `start-bot.sh`
 > scrub; nothing from Half B); the P3 clauDNA
 > release (plan 5: `export --include-skipped`, the item's `segment` object, `session.runtime`,
-> `<CLAUDNA_STATE_DIR>/entrypoint.json`, `schemas/export.schema.json`); Claudron `v0.9.0` (`6ca2b94`, tagged) for PR 6a.
-> Waits on canaries: none — this PR reads no `CLAUDE_*` variable and composes no Codex bot. Mission: every change here
-> pays for a Claude-only fleet; the mixed-runtime framing rests on the Claudlobby mission decision the epic carries
-> (D1/F18, epic §16).
+> `<CLAUDNA_STATE_DIR>/entrypoint.json`, `lib/claudna/session_store/schemas/export.schema.json`); Claudron `v0.9.0`
+> (`6ca2b94`, tagged) for PR 6a. Waits on canaries: none — this PR reads no `CLAUDE_*` variable and composes no Codex bot.
+> Mission decision this plan depends on: **D1**, inherited through Half A (which merges after D1 is ruled), and **D2**,
+> inherited through clauDNA 0.27/0.28 (cut after D2 is ruled) — so 6b merges after both (epic §16). Every change here
+> pays for a Claude-only fleet: if either decision is declined or deferred, Half A and 0.27 ship their Claude-only
+> vocabulary and nothing here changes; the mixed-runtime framing rests on D1/F18.
 
 ## Summary
 
 Claudlobby stops writing session summaries and starts consuming clauDNA's: each bot gets its own clauDNA root
-(`$BOT_DIR/data/claudna`, F14), a fleet timer `session-export` reads every bot's export door at the path clauDNA's own
+(`$BOT_DIR/data/claudna`, F14 — first, as §10 order 3's one-line PR, whose activation seals the old root's bot sessions
+per F14(a)), a fleet timer `session-export` reads every bot's export door at the path clauDNA's own
 hook records (F16) and turns each sealed segment — summarized or skipped — into one `session_summary` system event
 shaped for the reader the four monitor consumers already use (F6), then acks. `transcript-digest.sh` and
 `plane-session-start.sh` retire with every touchpoint, making `ids.derive_session_uid` the one derivation (F2). The two
@@ -47,9 +51,19 @@ lands and grants them the door).
   (`paths.bot_runtime`, `:1007`; `claudlobby/paths.py:686`) and `bot.conf` is sourced under `set -a`
   (`start-bot.sh:223-229`), so a `"$BOT_DIR/…"` value expands at source time — the `TELEGRAM_STATE_DIR="$HOME/…"`
   shape at `:1041`, admitted by `path_audit.is_safe_anchored_path` (`claudlobby/path_audit.py:596-608`).
-- **The seal step's entrypoint.** clauDNA's `seal <sid>` and `list --json` take `--root` (`cli.py:327-337,344-350`); the
-  rows carry `sid` and `status` (`readers.py:80`). The store entrypoint is recorded only by the P3 clauDNA release
-  (`entrypoint.json`, the export-contract spec), into the **new** root; the composer never learns it.
+- **The seal step (clauDNA 0.26, `d1f70d4`).** `list [--bot <name|id>] [--json] --root R` (`cli.py:344-350`) prints rows,
+  newest first, carrying `sid`, `status`, `kind` and `bot` — no fleet (`readers.py:78-89`) — **50 by default** (`--limit`)
+  and private sessions only with `--include-private`; `--bot` matches the actor's `bot_name` or `bot_id` (`readers.py:71-72`),
+  which a bot's session records with `kind: "bot"` from the `BOT_ID`/`BOT_NAME` its `bot.conf` exports (`boundaries.py:52-74`;
+  `composer.py:1023-1024`), so it never returns an interactive session. `seal <sid> --root R` closes a session as abandoned
+  with **no owner pid** — a live one too (`cli.py:506-512` → `boundaries.abandon_session` → `close_abandoned(owner_pid=None)`,
+  `store.py:322-338`) — and hands the caller's environment to the summary gate (`boundaries.py:213-229`). `sweep [--dry-run]
+  --root R` (`cli.py:341-343,415-450`) closes only sessions whose `claude` pid is gone and that sat idle past
+  `CLAUDNA_UNCLOSED_AFTER_H` hours (floor 1 h, `unclosed.py:48-61`), at most `SWEEP_LIMIT = 5` per run, longest idle first
+  (`:51`); it strips `CLAUDNA_SESSION_SUMMARY` before summarizing (`cli.py:422-424`), runs retention under the same lock
+  (`:442`) and prints `{"closed": […], …}`. The store entrypoint is recorded only by the P3 clauDNA release
+  (`entrypoint.json`, the export-contract spec), into the **new** root; the composer never learns it, so before 0.28 the
+  installed plugin's cache directory is the only way to run the store (the F14 runbook's fallback, Task 7).
 - **Fleet job, not host job.** `defaults.jobs` (`claudlobby/system.yaml:466-558`) composes per-fleet timers through
   `compose_fleet_timers` (`composer.py:4823-4871`) with the fleet name appended on `ExecStart` (`_write_timer_units`,
   `:4206-4207`); `task-recheck` (`system.yaml:535-538`) is a Python tick with no launcher —
@@ -135,12 +149,14 @@ lands and grants them the door).
 
 P1 Claudlobby **Half A** merged (release N: `derive_session_uid(id, runtime)`, `CLAUDLOBBY_RUNTIME`, Task 9b's
 `fleet_event_request` that `_system_event` calls, and — if C10 leaked — Task 7b's conditional `start-bot.sh` scrub; nothing
-here waits on Half B, whose doors are held on A-F1/A-F17); clauDNA P3 released **with
-`claudna_version` pinned on the fleet before that release merges** (X21): marketplace auto-update (`start-bot.sh:315-321`
-→ `lib-common.sh:4699-4710`, `claude plugin update` on every bot start unless `BOOT_PLUGIN_UPDATE_ONCE=1`) otherwise
-delivers 0.28 to every bot at its next restart, ahead of Task 1's composition; Claudron `v0.9.0` installed on the canary
-host for PR 6a (`pip install -e '.[dev,vault]'` for the parity leg). **P2 is not a dependency** — P2 ∥ P3 (epic §10);
-this plan lands beside plan 4 in parallel. Both edit `switches.py`, `system.yaml`, `plane/registries.py`,
+here waits on Half B, whose doors are held on A-F1/A-F17); clauDNA P3 released (0.28.0, this plan's floor,
+`MIN_PLUGIN_VERSION`) **after §10 order 3's per-bot root is active on every bot** (Task 1 Steps 1–2; X21): `claudna_version`
+exports `CLAUDNA_VERSION` and nothing pins the installed plugin today (`plugin_ensure` runs `claude plugin update` on every
+bot start unless `BOOT_PLUGIN_UPDATE_ONCE=1`, `start-bot.sh:315-321` → `lib-common.sh:4693-4710`), so 0.28 reaches every
+bot at its next restart, ahead of 6b — the guard is the order-3 per-bot root: an early 0.28 writes `entrypoint.json` into
+the bot's own root and, with summaries unarmed, the bot's summary gate returns `headless` (no spend); Claudron `v0.9.0`
+installed on the canary host for PR 6a (`pip install -e '.[dev,vault]'` for the parity leg). **P2 is not a dependency** —
+P2 ∥ P3 (epic §10); this plan lands beside plan 4 in parallel. Both edit `switches.py`, `system.yaml`, `plane/registries.py`,
 `tests/test_event_type_registry.py` and the three switch tables, so: whichever of P2-a/P2-b merged first, this PR rebases
 onto it, regenerates the three switch tables and `system.yaml.example`, re-copies both `AGENTS.md`, and re-runs
 `tests/test_instruction_budget.py`, `tests/test_switches.py`, `tests/test_event_type_registry.py` before pushing (X12).
@@ -157,11 +173,14 @@ lands and grants `fleet-digest` the `plane samples` door), and this plan informs
 Tasks follow as H3 siblings. Line numbers are pre-dependency: P1 Claudlobby Half A (plan 2) edits `config.py`,
 `composer.py`, `plane/contracts.py`, `plane/ids.py` and `tests/test_event_type_registry.py`, and adds
 `plane/fleet_events.py`, before this PR opens — edit bottom-up or re-grep each anchor at PR-open;
-`tests/test_switches.py`'s opt-in allowlist is `:99-178` (X15). Seam: Task 3 (the Claudron pin) is its own PR, **6a**,
-after the rest (**6b** = Tasks 1–2, 4–6, 7c and 8): the bump is an operator-run vault migration with a per-host runbook
-and its own canary, and nothing in 6b calls what v0.9.0 adds — `claudna.harvest` is documented as requiring 6a on the
-host before a bot arms it (B3). Task 7 (the F14 cutover runbook, held on A-F14) is outside 6b's merge gate: it rides 6b
-if the operator has ruled by then, else its own docs PR — no unheld task waits on it.
+`tests/test_switches.py`'s opt-in allowlist is `:99-178` (X15). Seams: Task 1's Steps 1–2 are §10 order 3's own one-line
+PR and its activation, ahead of everything else here (it needs nothing from P1). Task 3 (the Claudron pin) is its own PR,
+**6a**, after the rest (**6b** = Task 1 Steps 3–11, Tasks 2, 4–6, 7c and 8): the bump is an operator-run vault migration
+with a per-host runbook and its own canary and gate (Task 3 Step 6), and nothing in 6b calls what v0.9.0 adds —
+`claudna.harvest` is documented, and warned (`claudna-harvest-pin`, Task 1 Step 9), as requiring 6a on the host before a
+bot arms it (B3). Task 7 (the old root's rename and removal, held on A-F14 — F14(a)'s seal is not held; it runs at order 3,
+Task 1 Step 2) is outside 6b's merge gate: it rides 6b if the operator has ruled by then, else its own docs PR — no unheld
+task waits on it.
 
 ### Task 0: worktree, before-leg, evidence
 
@@ -169,31 +188,130 @@ if the operator has ruled by then, else its own docs PR — no unheld task waits
   `documentation/test-suite.md` (`:32`: the macOS suite is not green — compare **names and counts** across two separately
   prepared legs, unsandboxed; root `CLAUDE.md:254,325`): `./.venv/bin/pytest --tb=no -ra > <evidence>/run_before.txt 2>&1;
   echo $?`, then `bash harness/validate-bot-change.sh` and record its pass/fail pair by name. Evidence dir outside the repo.
+- [ ] **The other two PRs get their own.** §10 order 3 (Task 1 Steps 1–2): its own branch from `origin/main` — it needs
+  nothing from P1 — and the same before-leg. **6a** (Task 3): branch `p3/claudron-pin` from `origin/main` **after** 6b
+  merged, with its own before-leg (the same commands, its own evidence files); Task 3 Step 6's gate compares against it,
+  never against 6b's.
 
 ### Task 1: per-bot `CLAUDNA_STATE_DIR`, and the `claudna:` mapping composed into `bot.conf`
 
 Not held: the per-bot root ships now — clauDNA's spec §1.1 rule 3 (`2026-09-28-session-store-design.md:34`) already says
-per bot. A-F14 (epic §16), conditional on an operator reason not on record, would revert it (and Task 4's per-bot grouping)
-if ratified; only Task 7's cutover runbook is held on it.
+per bot. A-F14 (epic §16) was conditional on no operator reason for per-bot roots being on record; the epic's §16 now
+records those reasons (ironclad cycle 2; first-principles withdrew its support, adversarial-review's ground stands), so
+the operator either rules it or it lapses. If ratified it would revert this task (and Task 4's per-bot grouping) — once
+bots write per-bot roots, a reverse cutover rather than a simple revert, which is why A-F14 is ruled before §10 order 3
+or lapses; only Task 7's rename and removal of the old root are held on it.
 
-**Files:** `claudlobby/config.py`, `claudlobby/composer.py`, `tests/test_composer.py`, `tests/test_config.py` (or the
-file that holds `_coerce_observability`'s tests), `documentation/fleet-yaml-schema.md`, `fleet.yaml.example`,
+**Two PRs, one task.** The `CLAUDNA_STATE_DIR` line is §10 order 3's own one-line PR, before clauDNA 0.27 merges (epic
+§9; §10.1: it needs no plan file, and this task is its spec): Step 1 is that PR and Step 2 its activation — F14(a)'s seal
+of the old root, carried out at the switch, as the fork decides. 6b carries Steps 3–11, and Step 3's first assertion then
+verifies the line; if order 3 did not land first, 6b carries Step 1 and runs Step 2 at its own activation. Steps 4–6 are
+the **canonical carrier** of P2's strict-mapping helpers (plan 4 Task 3 cites them): 6b is unheld and lands first in the
+planned order, so the registry's literal is P3-first and P2-a registers `telemetry` in one line; if P2-a lands first
+instead, it carries Steps 4–6 verbatim, with its own mapping in the cells and the literal (X13).
+
+**Files:** order 3 — `claudlobby/composer.py`, `tests/test_composer.py`, `CHANGELOG.md`. 6b — `claudlobby/config.py`,
+`claudlobby/composer.py`, `claudlobby/commands/config_explain.py`, `claudlobby/validator.py`, `tests/test_composer.py`,
+`tests/test_config.py` (or the file that holds `_coerce_observability`'s tests), `tests/test_env_register.py` (`config
+explain`'s cells live there; there is no `tests/test_config_explain*.py`), `tests/test_validator.py`,
+`tests/test_validate_warning_discipline.py`, `documentation/fleet-yaml-schema.md`, `fleet.yaml.example`,
 `documentation/environment-variables.md`.
 
-- [ ] **Step 1 (tests first).** `tests/test_composer.py`: every composed `bot.conf` carries exactly one
-  `export CLAUDNA_STATE_DIR="$BOT_DIR/data/claudna"` line, **after** the `BOT_DIR=` line, unconditionally (a bot with no
-  `claudna_version` too) — if the epic's §10 one-line `CLAUDNA_STATE_DIR` PR landed first (X21), this assertion verifies
-  it and Step 3 adds only the knob lines; every `bot.conf` carries exactly one `export CLAUDNA_SESSION_SUMMARY=` line:
+- [ ] **Step 1 — the order-3 PR: the line.** `compose_bot_conf` (`composer.py:1319-1330`): the `# Ecosystem` header
+  becomes unconditional, followed by `export CLAUDNA_STATE_DIR="$BOT_DIR/data/claudna"` (why: the per-bot root is a
+  composition invariant, not a knob — a shared `~/.claudna` strands sessions, F14), then the existing three optional lines.
+  Test first, in `tests/test_composer.py`: every composed `bot.conf` carries exactly one such line, **after** the
+  `BOT_DIR=` line (`:1010`), unconditionally (a bot with no `claudna_version` too); existing tests pinning full `bot.conf`
+  text gain it; `tests/test_freshbox_selfcontained.py` stays green (the value is `$BOT_DIR`-anchored). One CHANGELOG line,
+  naming the activation below and that a `CLAUDNA_STATE_DIR` set in a `.env` tier is now overridden by the composed line
+  (`start-bot.sh:219-229` sources `bot.conf` after the tiers). Verify: `./.venv/bin/pytest tests/test_composer.py
+  tests/test_freshbox_selfcontained.py -q`. Commit: `feat(compose): each bot gets its own clauDNA root,
+  CLAUDNA_STATE_DIR="$BOT_DIR/data/claudna" (#2145 F14)`.
+- [ ] **Step 2 — the order-3 PR's validation and activation: the canary-root check and F14(a)'s seal (operator-run;
+  unheld).** `E` is the installed plugin's store entrypoint. No `entrypoint.json` exists before 0.28, so `E` is the
+  plugin-cache path the F14 runbook names as its fallback (Task 7):
+  `~/.claude/plugins/cache/Claudfather/claudna/<version>/lib/claudna/session_store` (under the bot's `CLAUDE_CONFIG_DIR`
+  when it has one, `composer.py:1046`), 0.26 or later (`list --bot`, `seal` and `sweep` with `--root` are 0.26's —
+  Evidence). Run with `CLAUDNA_SESSION_SUMMARY` **unset** in the operator's shell: `seal` hands that environment to the
+  summary gate, and unset, a bot session gates `headless` — the seal costs no model spend (`project.py:276-287`).
+  (i) **Before merge, the canary root** (mandatory runtime validation, `CLAUDE.md:262`;
+  `documentation/validating-bot-changes.md:35-50`): after the canary bot restarts under the new composition, show
+  `$BOT_DIR/data/claudna/sessions/<sid>/` written by its new session and nothing new for that bot under `~/.claudna`
+  (`python3 -S "$E" list --bot <b> --json --since 1h --root ~/.claudna` lists no session opened after the restart); cite
+  both in the PR body. After merge, the fleet's activation runs the same check per bot as `host activate` restarts it.
+  (ii) **Seal the old root's open bot sessions,** per bot `<b>` once it has restarted onto its own root:
+  `python3 -S "$E" list --bot <b> --json --limit 100000 --include-private --root ~/.claudna | jq -r '.[] |
+  select(.status == "open") | .sid'`, then `python3 -S "$E" seal <sid> --root ~/.claudna` for each. **Never** `seal` for
+  "every open session": `seal` passes no owner pid, so it would close the service user's live interactive sessions in the
+  same root (`cli.py:506-512`, `store.py:322-338`). `--limit` lifts `list`'s default of 50, which would hide the oldest
+  strays; `--include-private` keeps a private bot session from stranding. Where two fleets on the host name a bot alike,
+  seal it only after both have switched — `list --bot` matches a name or an id, never a fleet.
+  (iii) **Sweep the stragglers** (a session with no bot actor, a bot since removed, a `claude -p` run): at least an hour
+  after the last bot restart, `CLAUDNA_UNCLOSED_AFTER_H=1 python3 -S "$E" sweep --root ~/.claudna`, repeated until its
+  `closed` list is empty — it closes at most 5 per run, and only sessions whose `claude` is gone and that sat idle past the
+  hour, so a live session of either kind is never touched (Evidence).
+  F14(a)'s rest — leave the old root until its retention window passes, then remove it — is Task 7's, held on A-F14.
+- [ ] **Step 3 (tests first) — 6b.** `tests/test_composer.py`: Step 1's line is in place (this assertion verifies it,
+  X21), and every `bot.conf` carries exactly one `export CLAUDNA_SESSION_SUMMARY=` line:
   `claudna: {session_summary: true}` composes `=1`; `false` **and unset** compose `=0` (the gate then answers
   `disabled`, `project.py:276-287` — never `headless`, which is what an unset variable yields for a bot);
   `claudna: {harvest: true}` composes `export CLAUDNA_HARVEST=1` **and** `CLAUDNA_SESSION_SUMMARY=1` (the gate never
   summarizes a bot on harvest alone); `harvest: true` with `session_summary: false` is a `ValueError` at load naming both
   keys; `defaults.claudna.harvest: true` reaches every bot and a bot's own `false` wins (field-wise); a string `"true"` is
   a `ValueError` naming the key (`_strict_bool`); an unknown key under `claudna:` is refused naming the accepted keys.
-  `tests/test_env_register.py`'s `config explain` cell gains `config explain bot.claudna.harvest --bot B` → (`fleet.defaults`,
-  `fleet.defaults.claudna.harvest`) when set under `defaults:`. Existing tests pinning full `bot.conf` text gain the new
-  lines. `tests/test_freshbox_selfcontained.py` stays green (the value is `$BOT_DIR`-anchored).
-- [ ] **Step 2.** `claudlobby/config.py`, beside `IsolationConfig` (`:658`):
+  Existing tests pinning full `bot.conf` text gain the new lines. `tests/test_validator.py`, Step 9's warnings: a fleet- or
+  bot-tier `.env` assigning `CLAUDNA_SESSION_SUMMARY=1` → one `claudna-env` warning naming the tier and `claudna:`;
+  `bots.<b>.env: {CLAUDNA_HARVEST: "1"}` → the same, naming the bot; the same key in the operator's own `os.environ` →
+  nothing; a bot arming `claudna.harvest` → one `claudna-harvest-pin` warning; neither is ever an error.
+  `tests/test_validate_warning_discipline.py`: both categories are named at their raise sites and fold per cause.
+- [ ] **Step 4 (tests first) — the strict-mapping helper's own cells (canonical here).** Plan 4's cells (j) and (k),
+  carried here: in `tests/test_config.py`, loading fleets through `load_fleet` the way `tests/test_host_override.py` builds
+  roots, `scalar_config_origin(..., "claudna.harvest", bot=...)` returns `("bot", "fleet.bots.<b>.claudna.harvest")`,
+  `("fleet.defaults", "fleet.defaults.claudna.harvest")` and `("built_in", None)` for the three sources, and `"claudna"`
+  whole still raises `NotImplementedError`; `_parse_strict_mapping` parametrized over `_STRICT_MAPPING_FIELDS` — every
+  registered mapping refuses an unknown key by name (P2-a's `telemetry` joins the cell when it registers). In
+  `tests/test_env_register.py`, beside the `config explain` cells (`:135-179`): `config explain bot.claudna.harvest --bot B`
+  → (`fleet.defaults`, `fleet.defaults.claudna.harvest`) when set under `defaults:`; `config explain bot.claudna --bot B` →
+  `claudna is a mapping — name a sub-field: claudna.<key>`; an unknown head (`bot.nonesuch.x`) → `configuration key is not
+  a declared model field`.
+- [ ] **Step 5 — the helpers (plan 4 Task 3 Step 2's bodies, carried here).** `claudlobby/config.py`, beside
+  `IsolationConfig` (`:658`) — **one** strict-mapping parser and **one** field-wise merger for every strict sub-mapping on
+  `BotConfig`; the second mapping to land registers in one line, never a second copy, and there are no
+  `_parse_claudna`/`_merge_claudna` wrappers:
+
+```python
+def _parse_strict_mapping(raw: Any, where: str, fields: dict[str, Callable[[str, Any], Any]]) -> dict:
+    """One tier's strict mapping → the fields it SETS (absent keys stay absent so the merge inherits
+    them; `null` unsets, so `harvest: null` inherits). Unknown keys are refused by name."""
+    if raw is None:
+        return {}
+    raw = _shaped(f"'{where}'", raw, dict, "{" + next(iter(fields)) + ": …}")
+    unknown = sorted(str(k) for k in raw if k not in fields)
+    if unknown:
+        raise ValueError(f"'{where}': unknown key(s) {', '.join(unknown)} — accepted: {', '.join(fields)}")
+    return {k: parse(f"{where}.{k}", raw[k]) for k, parse in fields.items() if raw.get(k) is not None}
+
+def _merge_fieldwise(cls, defaults_raw: Any, bot_raw: Any, name: str, key: str, fields: dict):
+    """Field-wise: bot over defaults over built-in (observability's precedence, isolation's strictness)."""
+    return cls(**{**_parse_strict_mapping(defaults_raw, f"defaults.{key}", fields),
+                  **_parse_strict_mapping(bot_raw, f"bots.{name}.{key}", fields)})
+
+#: BotConfig field → its strict sub-mapping's parsers. The ONE registry `scalar_config_origin` and
+#: `config_explain._config_field` read (one provenance rule, one error text). The literal is the first
+#: lander's — P3's here, placed after `_CLAUDNA_FIELDS` (Step 7); P2-a adds `"telemetry": _TELEMETRY_FIELDS`.
+_STRICT_MAPPING_FIELDS: dict[str, dict] = {"claudna": _CLAUDNA_FIELDS}
+```
+
+- [ ] **Step 6 — provenance (plan 4 Task 3 Step 3, carried here).** `scalar_config_origin` (`config.py:2271-2296`;
+  `NotImplementedError` for mappings today): before the final `raise`, when `field` is `<head>.<sub>` with `<head>` in
+  `_STRICT_MAPPING_FIELDS` and `<sub>` among its keys, answer from the raw tiers — `("bot", f"fleet.bots.{bot}.{field}")`
+  if the bot's mapping sets `<sub>`, else `("fleet.defaults", f"fleet.defaults.{field}")` if `raw_fleet["defaults"][head]`
+  does, else `("built_in", None)`. `config_explain._config_field` (`commands/config_explain.py:10-35`) accepts one dotted
+  level when the head is a `BotConfig` field (`field.split(".", 1)[0] in model.__dataclass_fields__`), splits `:32`'s one
+  message in two — `configuration key is not a declared model field` for an unknown head, `<head> is a mapping — name a
+  sub-field: <head>.<key>` when a registered strict mapping is named whole — and the `effective` read at `:70` walks the
+  path with `functools.reduce(getattr, field.split("."), obj)`.
+- [ ] **Step 7 — `ClaudnaConfig`.** `claudlobby/config.py`, beside the helpers:
 
 ```python
 @dataclass(frozen=True)
@@ -206,51 +324,54 @@ _CLAUDNA_FIELDS = {
     "session_summary": lambda where, v: _strict_bool(f"'{where}'", v),
     "harvest": lambda where, v: _strict_bool(f"'{where}'", v),
 }
-# P2 Task 3's registry, with this PR's one line (whichever of P2-a/P3 lands first carries the helpers and the literal):
-_STRICT_MAPPING_FIELDS: dict[str, dict] = {
-    "telemetry": _TELEMETRY_FIELDS,   # P2-a
-    "claudna": _CLAUDNA_FIELDS,       # this PR — the one line
-}
+# Step 5's registry literal sits here, after the parsers it names: {"claudna": _CLAUDNA_FIELDS} (P2-a adds its one line).
 def _check_claudna(cfg: ClaudnaConfig, where: str) -> ClaudnaConfig: ...   # the post-merge cross-field rule: harvest is True and session_summary is False → ValueError(f"'{where}': claudna.harvest: true needs session_summary unset or true — clauDNA's gate never summarizes a bot on harvest alone")
 # BotConfig (after claudron_session_loop, :776):
     claudna: ClaudnaConfig = field(default_factory=ClaudnaConfig)
-# _coerce_bot (beside observability, :1884-1887) — the generic field-wise merge (unknown keys refused by name, bot over
+# _coerce_bot (beside observability, :1884-1887) — Step 5's field-wise merge (unknown keys refused by name, bot over
 # defaults over built-in), then the cross-field check on the MERGED value, where it is known:
     claudna=_check_claudna(_merge_fieldwise(ClaudnaConfig, defaults.get("claudna"), raw.get("claudna"), name, "claudna", _CLAUDNA_FIELDS), f"bots.{name}"),
 ```
 
-  `_parse_strict_mapping(raw, where, fields) -> dict` and `_merge_fieldwise(cls, defaults_raw, bot_raw, name, key,
-  fields)` are P2 Task 3's one strict-mapping parser and field-wise merger, adopted by name and signature — no
-  `_parse_claudna`/`_merge_claudna` wrappers; whichever of P2-a/P3 lands first carries them, the registry of
-  strict-mapping fields that `scalar_config_origin` (`config.py:2271-2296`; `NotImplementedError` for mappings today)
-  reads, and the one-level `_config_field` change in `commands/config_explain.py` (its message split into "not a field"
-  vs "a mapping sub-field"); the second rebases onto it (X13). `claudna` registers `session_summary` and `harvest`, so
-  `config explain bot.claudna.harvest --bot B` names its source; `_check_claudna` stays this plan's own — the cross-field
-  rule a generic merger cannot express, applied to the merged `ClaudnaConfig`. Shape, decided and shown once in
-  `fleet-yaml-schema.md`: the **nested** `claudna: {session_summary, harvest}` mapping holds what clauDNA reads at
-  session open; `claudna_version` stays the flat install pin it is (`:127`; boot-time `plugin_ensure`, a different
-  lifecycle) — no alias; Claudosseum's `CLAUDNA_TELEMETRY` stays an operator `env:` knob outside the mapping, and
-  clauDNA's docs that said Claudlobby sets it are corrected in the P3 clauDNA plan (its Task 6).
+  `claudna` registers `session_summary` and `harvest` (Step 5's literal), so `config explain bot.claudna.harvest --bot B`
+  names its source; `_check_claudna` stays this plan's own — the cross-field rule a generic merger cannot express, applied
+  to the merged `ClaudnaConfig`. Shape, decided and shown once in `fleet-yaml-schema.md`: the **nested** `claudna:
+  {session_summary, harvest}` mapping holds what clauDNA reads at session open; `claudna_version` stays the flat field it
+  is (`:127`) — it exports `CLAUDNA_VERSION`, and nothing pins the installed plugin today (`plugin_ensure` runs `claude
+  plugin update`, `lib-common.sh:4693-4710`) — no alias; Claudosseum's `CLAUDNA_TELEMETRY` stays an operator `env:` knob
+  outside the mapping, and clauDNA's docs that said Claudlobby sets it are corrected in the P3 clauDNA plan (its Task 6).
 
-- [ ] **Step 3.** `compose_bot_conf` (`composer.py:1319-1330`): the `# Ecosystem` header becomes unconditional, followed by
-  `export CLAUDNA_STATE_DIR="$BOT_DIR/data/claudna"` (why: the per-bot root is a composition invariant, not a knob — a shared
-  `~/.claudna` strands sessions, F14), then the existing three optional lines, then — **always** —
+- [ ] **Step 8 — compose.** `compose_bot_conf`, after Step 1's line and the existing three optional lines — **always** —
   `export CLAUDNA_SESSION_SUMMARY={'1' if (session_summary or harvest) else '0'}` (unset is `0`, so an unarmed bot's
   segments export as `skipped: {reason: disabled}`), and `export CLAUDNA_HARVEST={'1' if harvest else '0'}` when `harvest`
   is not `None` (the shell-boolean rule, `:1201-1207`). Comment the block with the spec reference, the gate order
   (`project.py:276-287`) and that clauDNA reads these at session open.
-- [ ] **Step 4 (docs).** `fleet-yaml-schema.md`: the shape block (`:127-130`) gains `claudna: { session_summary: true|false,
+- [ ] **Step 9 — two validator warnings (warn-never-fail).** `validator._validate_bots`, per bot, each category registered
+  in `WARNING_CATEGORIES` (`validator.py:152`) and named at its raise site. **`claudna-env`:** a `.env` tier assigns
+  `CLAUDNA_STATE_DIR`, `CLAUDNA_SESSION_SUMMARY` or `CLAUDNA_HARVEST` — read through `env_tiers.resolve`
+  (`env_tiers.py:239-243`, the `env-tiers.sh` door `start-bot.sh:213-214` consumes; never `os.environ`, the operator's own
+  shell) — and the composed line, sourced after the tiers (`start-bot.sh:219-229`), silently overrides it; or
+  `bots.<b>.env` assigns one, which is emitted after the composed lines (`composer.py:1366-1370`) and silently beats the
+  mapping, so the switch tables misreport the bot. Either way the finding names `claudna:` as the one knob — `report.warn`
+  for the bot's own tier or `env:`, `shared.add` for a fleet or host tier, as the required-env check folds (`:880-901`).
+  **`claudna-harvest-pin`:** a bot arms `claudna.harvest` while the install pin is Claudron `v0.6.1` (6b ships before 6a;
+  harvest calls `capture --stdin`/`amend`, which need ≥ 0.8.0 — Task 3's compat row): "arm it once PR 6a is on the host".
+  Task 3 deletes this warning with the bump.
+- [ ] **Step 10 (docs).** `fleet-yaml-schema.md`: the shape block (`:127-130`) gains `claudna: { session_summary: true|false,
   harvest: true|false }  # OPTIONAL — STRICT bools; see bots.<name>.claudna`; a new `### bots.<name>.claudna /
   fleet.defaults.claudna` section in the paired-heading form of `heavy_slot` (`:547-564`) after `:928`, naming the two env
   vars, that `CLAUDNA_STATE_DIR` and `CLAUDNA_SESSION_SUMMARY` are always composed, which reason an unarmed bot's segments
   export with (`disabled`; `harvest: true` implies summaries), the spend, the "Claudron ≥ 0.8.0 on the host first (PR 6a)"
-  line for `harvest`, that `claudna_version` is a separate install pin, and the canary paragraph. `fleet.yaml.example:333-337`
-  gains a commented `claudna:` block. `environment-variables.md` Ecosystem table (`:181-185`) gains three rows:
+  line for `harvest`, that a `.env` tier or `env:` assigning the three keys warns `claudna-env` (Step 9), that
+  `claudna_version` is a separate field (it exports `CLAUDNA_VERSION` and pins nothing), and the canary paragraph.
+  `fleet.yaml.example:333-337` gains a commented `claudna:` block. `environment-variables.md` Ecosystem table (`:181-185`) gains three rows:
   `CLAUDNA_STATE_DIR` (source: *composed, always* — `$BOT_DIR/data/claudna`), `CLAUDNA_SESSION_SUMMARY` (source: *composed,
   always* — `0` unless `bots.<name>.claudna.session_summary`/`harvest` or the `defaults.claudna.*` twin arms it) and
   `CLAUDNA_HARVEST` (source: `bots.<name>.claudna.harvest` / `defaults.claudna.harvest`).
-- [ ] **Step 5.** Verify: `./.venv/bin/pytest tests/test_composer.py tests/test_config.py tests/test_freshbox_selfcontained.py -q`.
-  Commit: `feat(compose): per-bot CLAUDNA_STATE_DIR, and the claudna knobs composed from a strict fleet-level mapping (#2145 P3)`.
+- [ ] **Step 11.** Verify: `./.venv/bin/pytest tests/test_composer.py tests/test_config.py tests/test_env_register.py
+  tests/test_validator.py tests/test_validate_warning_discipline.py tests/test_freshbox_selfcontained.py -q`.
+  Commit: `feat(compose): the claudna knobs composed from a strict fleet-level mapping — one strict-mapping helper with
+  provenance, and env-override warnings (#2145 P3)`.
 
 ### Task 2: the two opt-in switch rows and the `session-export` opt-out row
 
@@ -258,7 +379,7 @@ def _check_claudna(cfg: ClaudnaConfig, where: str) -> ClaudnaConfig: ...   # the
 `system-yaml-schema.md:141-174`, `architecture/observable-plane.md:386-402`).
 
 - [ ] **Step 1 (tests first).** `tests/test_switches.py:99-178` allowlist gains `"claudna-session-summary"` and
-  `"claudna-harvest"` with the comment `# model spend — session-digest's class, which these replace`; a new test asserts both
+  `"claudna-harvest"` with the comment `# model spend — the retired digest hook's class, which these replace`; a new test asserts both
   are `DOOR`/`OPT_IN`/`COMPOSE_BOT` with `config` under `claudna.`, and that `resolve()` reports `fleet.yaml claudna.harvest —
   1 of 2 bot(s)` for a fleet with one armed bot (`_enroll_state`, `:872-884`); `session-export` is `FLEET_JOB`/`OPT_OUT`/
   `ENV_FLEET` with `env="SESSION_EXPORT_ENABLED"` and `job="session-export"` (the `task-recheck` shape, `:249-260`), so
@@ -338,13 +459,23 @@ def _check_claudna(cfg: ClaudnaConfig, where: str) -> ClaudnaConfig: ...   # the
   index rebuild; in order — (1) upgrade the install on the host (`pip install -e .` picks up the pin); (2) from **one** clone,
   `claudron doctor --fix --json --vault <vault>` (it commits); (3) `git pull` on every other clone (vault-sync does it on its
   next run); (4) `claudlobby config plan` — the `claudron-migration` warning is gone; canary one host first. Also the "arm
-  `claudna.harvest` only after this PR is on the host" line (6b documents the same from its side).
+  `claudna.harvest` only after this PR is on the host" line (6b documents the same from its side), and the bump deletes 6b's
+  `claudna-harvest-pin` warning (Task 1 Step 9) with its `WARNING_CATEGORIES` entry and test — the pin now provides what
+  harvest calls.
 - [ ] **Step 5.** Verify: `./.venv/bin/pytest tests/test_claudron_compat.py tests/test_claudron_loop.py tests/test_doctor*.py
   tests/test_validate_warning_discipline.py -q`; with `pip install -e '.[dev,vault]'`: `pytest -q -m "vault and not quarantine"`
   (`TestSnippetParity`, `:452-500`, unchanged snippet shape). `CHANGELOG.md` `[Unreleased]`: one `### Changed — …` for the
   pin, in the shape of the v0.6.1 pin entry (`CHANGELOG.md:314-316`; 6b's entries are Task 7c's). Commit (PR 6a):
   `chore(claudron): pin v0.9.0, a compat row for clauDNA harvest, and config plan warns on a session loop over an unmigrated
   vault`.
+- [ ] **Step 6 — 6a's canary and gate** (6a is its own PR, so Task 8's gate is not its gate). **Canary root** (mandatory
+  runtime validation, `CLAUDE.md:262`): one host with Claudron v0.9.0 installed and the vault migrated per Step 4's
+  runbook; `config plan` on the canary fleet is silent with the migrated vault and warns `claudron-migration` (with the
+  named fix) against a scratch clone left at format 2; a canary bot with `claudna.harvest: true` composes with no
+  `claudna-harvest-pin` warning and, after its next sealed segment, has a draft filed through `claudron capture`. Cite the
+  observation in 6a's PR body behind `no_names`. **Mutant** (committed code): the migration warning firing on D009.
+  **The two-leg gate** against 6a's own before-leg (Task 0), CI on Linux, and `pytest -q -m "vault and not quarantine"`
+  under the vault extra (Step 5).
 
 ### Task 4: the `session-export` fleet job and the `session_summary` event
 
@@ -376,11 +507,19 @@ def _check_claudna(cfg: ClaudnaConfig, where: str) -> ClaudnaConfig: ...   # the
   serialize under `DATA_CAP_BYTES` with `arc` cut first, lists second, and the JSON still parses; (i) `SESSION_EXPORT_ENABLED=0`
   → the loud line, exit 0, nothing run; (j) **the wedge test (X20):** emit seg 1 without acking (the fake `run` drops the ack),
   then the envelope gains seg 2 → the next run commits seg 2, seg 1 is `duplicate`, **both** acked; (k) a `ContractViolation` on
-  one item → that item is re-emitted as `{status: "skipped", skipped_reason: "unexportable"}` (identity and segment fields only),
-  the sid is acked, the tick says so; (l) three consecutive failed ticks for one bot → one `export_stalled` system event
-  at `critical` on the bot's actor, the fourth tick emits none (one per stall; a tick that acks re-arms it); (m) `doctor`'s
-  `session-export` rung reads the per-bot files and warns on `consecutive_failures >= 3` or `last_ack_at` older than 24 h while
-  `pending > 0`, and says nothing for a bot that has never sealed a segment.
+  one item → that item is re-emitted as `{status: "skipped", skipped_reason: "unexportable"}` (identity and segment fields only)
+  under **its own** `event_id`, `derive_uid("ev", f"session_summary_unexportable:{fleet}:{sid}:{seg}")`, the sid is acked, the
+  tick says so; the item's derived id pre-seeded in `ingest_ledger` with no family row (the ledger/family divergence,
+  `ingest.py:633-639`) → the same fallback lands and the sid is acked; the fallback's id pre-seeded the same way too → the
+  refusal is recorded as `last_unexportable` in the per-bot file and the sid is **still acked** (the terminal rule); (l) three
+  consecutive failed ticks for one bot → one `export_stalled` row at `notice` on the bot's actor **and** one alert-door call
+  (a fake `notify` records `notify_fleet(level="alert", event="export_stalled", …)`); the fourth tick emits neither (one per
+  stall; a tick that acks re-arms it); the stall's record raising on the third tick → it is not marked recorded and the
+  fourth tick retries it (under the same derived id), while a page already submitted is not sent again — the #900 rule;
+  a page that fails is retried the same way; (m) `doctor`'s `session-export` rung reads the per-bot files through
+  `source_state.probe_source`: absent → nothing (a bot that has never sealed a segment), unreadable or unparseable → `warn`;
+  it warns on `consecutive_failures >= 3` or `last_ack_at` older than 24 h while `pending > 0`, and a `last_skip` renders
+  `pass` with the reason in its detail.
 - [ ] **Step 2 — `claudlobby/session_export.py`** (stdlib + the plane):
 
 ```python
@@ -388,7 +527,7 @@ ENTRYPOINT_SCHEMA = "claudna.entrypoint/1"; EXPORT_SCHEMA = "claudna.export/1"; 
 EMITTER = "session-export"; DATA_SCHEMA = "session_summary/1"; EXPORT_TIMEOUT_S = 60.0
 DATA_CAP_BYTES = cap_for("system", "data") - 4_096      # registries.py:81 — 16 384 today, so 12 288; the headroom is the envelope around data.data
 MIN_PLUGIN_VERSION = (0, 28, 0)                          # the clauDNA release that writes entrypoint.json (X18)
-STALL_AFTER = 3                                          # consecutive failed ticks per bot before one export_stalled event
+STALL_AFTER = 3                                          # consecutive failed ticks per bot before one export_stalled record + one page
 CAPS = {"title": 300, "intent": 300, "outcome": 300, "arc": 2_000, "list_items": 12, "list_item": 300, "skipped_reason": 64}
 
 @dataclass(frozen=True) class Entrypoint: python: str; entrypoint: str; plugin_version: str | None; runtime: str | None
@@ -398,10 +537,11 @@ def read_entrypoint(state_dir: Path) -> Entrypoint | str: ...          # the str
 def export_argv(entry, state_dir) -> list[str]: ...                     # [entry.python or sys.executable, "-S", entry.entrypoint, "export", "--root", str(state_dir), "--consumer", CONSUMER, "--include-skipped", "--json"]
 def ack_argv(entry, state_dir, sid, through) -> list[str]: ...
 def summary_record(item: dict, *, fleet: str, bot: str, now: datetime) -> tuple[dict, datetime]: ...   # (data.data, occurred_at) — the spec's field block; skipped → turns/transcript_bytes/journey/blocks/procedures/producer None
-def unexportable_record(item: dict, *, fleet: str, bot: str, now: datetime) -> tuple[dict, datetime]: ...   # identity + segment fields, status "skipped", skipped_reason "unexportable" — the cursor must advance
+def unexportable_record(item: dict, *, fleet: str, bot: str, now: datetime) -> tuple[dict, datetime]: ...   # identity + segment fields, status "skipped", skipped_reason "unexportable" — the cursor must advance; emitted under its OWN id, derive_uid("ev", f"session_summary_unexportable:{fleet}:{sid}:{seg}")
 def bound(record: dict) -> dict: ...                                    # CAPS, then drop arc, then lists, until len(json.dumps(...).encode()) <= DATA_CAP_BYTES
 def _system_event("session_summary", *, fleet, bot, sid, seg, occurred_at, observed_at, data) -> dict: ...   # returns fleet_event_request(event_type, fleet=fleet, subject_kind="actor", subject=f"bot:{fleet}/{bot}", bot=bot, source=EMITTER, data=data, occurred_at=…, observed_at=observed_at, event_id=…) — P1 Task 9b; the literal first argument is what tests/test_event_type_registry.py scans; _system_event("export_stalled", …) is the second call site
 def export_bot(root, fleet, bot, state_dir, *, run=subprocess.run, now=None) -> BotOutcome: ...   # read → export → per sid: per item emit_batch(root, [event], require_commit=False) → ack next[sid] → next sid; a failure stops this bot and is recorded
+def report_stall(root, fleet, bot, state: dict, *, emit=emit_batch, notify=notify_fleet) -> dict: ...   # at STALL_AFTER: the export_stalled record (notice; event_id derived from fleet, bot and stall.since) + the alert-door page; marks each part only once it landed (#900)
 ```
 
   `summary_record`: `status` = `"skipped"` when `item["summary"] is None` else `"ok"`; `skipped_reason = item.get("skipped", {}).get("reason")`
@@ -421,20 +561,36 @@ def export_bot(root, fleet, bot, state_dir, *, run=subprocess.run, now=None) -> 
   (alias form, `ingest.py:313-322`), `source=EMITTER`, `occurred_at` (the seal), `event_id` (the derived id above) and
   `observed_at` (the run instant — the helper's `observed_at` slot). Interpreter: the hook's own recorded `python`
   (proven to run the store on this host), else `sys.executable` — never a PATH lookup, because a timer unit's environment is
-  closed. **Why in-process (X22):** resident services post to the daemon socket (`daemon.py:1-30` — the socket front of the
-  same `emit_batch`); one-shot timer ticks and CLI doors call `emit_batch` in-process, as the task doors do
-  (`task_operations.py:351`). **The job cannot wedge (X20):** one `emit_batch` per item — a batch that mixes an already-ingested
-  id with a new one is refused as mixed state (`ingest.py:598-605`) and would hold the cursor forever (the alternative, equally
+  closed. **Why in-process (X22):** the epic's transport rule, stated once in its §6 P2 intake spec, puts one-shot Python ticks
+  (`task-recheck`, `session-export`) and Python CLI doors on `emit_batch` in-process, as the task doors do
+  (`task_operations.py:351`); this job is such a tick. **The job cannot wedge (X20):** one `emit_batch` per item — a batch
+  that mixes an already-ingested id with a new one is refused as mixed state (`ingest.py:598-605`) and would hold the cursor
+  forever (the alternative, equally
   acceptable: pre-read `ingest_ledger` for the derived `event_id`s and emit only the unseen, still one commit per item); ack
   per `sid` right after that session's items land; a `committed`, `duplicate` or `spooled` outcome (`require_commit=False`,
   daemon down: durably staged) all count as landed and **are acked**; a deterministic refusal of one item (`ContractViolation`,
-  or `RuntimeError` from `_verify_duplicates`) is re-emitted as an `unexportable` status item (built by `unexportable_record`) so the cursor advances and the item stays
-  visible as a `skipped` row; a transient exception (`sqlite3.Error`, `OSError`) stops **this bot** for this tick, acks nothing
-  further for it, and increments `consecutive_failures` in `<fleet_state>/session-export/<bot>.json` (`paths.fleet_state`,
-  `paths.py:673`: `{"last_tick", "last_ack_at", "pending", "consecutive_failures", "last_skip", "last_failure"}`); at
-  `STALL_AFTER` the tick emits one `export_stalled` system event at `critical` (the `reload_failed` precedent, `registries.py:135`)
-  on the bot's actor and re-arms only after a tick that acks; a skip reason (`no_entrypoint` … `stale_entrypoint`) is **not** a
-  failure (the bot has nothing to export yet) and is recorded as `last_skip`.
+  or `RuntimeError` from `_verify_duplicates`, `ingest.py:605-642`) is re-emitted as an `unexportable` status item (built by
+  `unexportable_record`) under **its own** id, `derive_uid("ev", f"session_summary_unexportable:{fleet}:{sid}:{seg}")` — the
+  refusals keyed on the item's existing ledger row (the idempotency conflict, `:608-613`; the ledger/family and `ingest_seq`
+  divergences, `:633-645`) would refuse a re-emission under the same id the same way — so the cursor advances and the item stays
+  visible as a `skipped` row. **Terminal rule:** if the fallback is refused too, the job records `last_unexportable` (`sid`,
+  `seg`, both errors) in the per-bot file and acks anyway — a deterministic refusal never holds the cursor. A transient
+  exception (`sqlite3.Error`, `OSError`) stops **this bot** for this tick, acks nothing further for it, and increments
+  `consecutive_failures` in `<fleet_state>/session-export/<bot>.json` (`paths.fleet_state`, `paths.py:673`: `{"last_tick",
+  "last_ack_at", "pending", "consecutive_failures", "last_skip", "last_failure", "last_unexportable", "stall"}`). That file
+  is written as `automation_state._write` writes its state — temp file in the same directory, `fsync`, `os.replace`,
+  directory `fsync` (`automation_state.py:118-139`) — under a `<file>.lock` held the way `_state_lock` holds one (`:32-49`,
+  used at `:182`): the most complete of the repo's private atomic writers, named here rather than re-derived (no shared helper
+  exists). **The stall:** at `STALL_AFTER` the tick reports once (`report_stall`) — an `export_stalled` record at **`notice`**
+  on the bot's actor (`_system_event`, `event_id` derived from `(fleet, bot, stall.since)`, the stall's first failing tick) and
+  a page through the existing alert door, `fleet_notification.notify_fleet(level="alert", event="export_stalled", message=…)`
+  (`fleet_notification.py:54`), which records a fleet-anchored `fleet_alert` — built by Task 9b's helper — and pushes it to the
+  manager and Telegram even when the plane is what is failing (it records best-effort, `:99-104`). `stall` in the per-bot file
+  marks each part reported **only once it landed** — the record `committed`/`duplicate`/`spooled`, the page's
+  `notification == "submitted"` — `debounce_notify`'s #900 rule (`lib-common.sh:3732-3742`: the marker is written only when
+  the notify succeeded), so a later failing tick retries whichever part did not land, and a tick that acks clears `stall` and
+  re-arms it. A skip reason (`no_entrypoint` … `stale_entrypoint`) is **not** a failure (the bot has nothing to export yet) and
+  is recorded as `last_skip`.
 - [ ] **Step 3 — the command and the timer.** `claudlobby/commands/session_export.py`: `tick(args)` (the `task_recheck.tick`
   shape, `:202-215`): `SESSION_EXPORT_ENABLED == "0"` → `print("session-export: OFF here (SESSION_EXPORT_ENABLED=0); nothing is
   exported")`, return 0; else `resolve_operation_scope(root=args.root, fleet=args.tick_fleet)` (`operation_context.py:222-228`),
@@ -442,28 +598,37 @@ def export_bot(root, fleet, bot, state_dir, *, run=subprocess.run, now=None) -> 
   A-F14, epic §16, if ratified, would revert it to one host store grouped by `actor.bot_id`), one `export_bot` per bot, one
   line per bot (`session-export: <bot>: 3 emitted (1 duplicate), acked through seg 4` / `skipped: stale_entrypoint <path>`), JSON
   `{"fleet", "bots": [BotOutcome…]}`, exit 0 on every operating path, 2 only for a malformed call; after each bot the tick
-  rewrites `<fleet_state>/session-export/<bot>.json` (the doctor rung's read-only source); `--dry-run` runs the export and
-  prints the records without emitting or acking — the operator's hand run, **never** the monitor's door (it spawns every bot's
-  export from the caller's session; the monitor reads `host doctor`'s rung and `event list`, Task 5). `commands/_parsers.py`
-  beside `:66-68`:
+  rewrites `<fleet_state>/session-export/<bot>.json` (the doctor rung's and the monitor's read-only source); `--dry-run` runs
+  the export and prints the records without emitting or acking — the operator's hand run, **never** the monitor's door (it
+  spawns every bot's export from the caller's session; the monitor reads the per-bot state files with its granted `jq`, and
+  `event list`, Task 5). `commands/_parsers.py` beside `:66-68`:
   `sub.add_parser("_session-export-tick", help=argparse.SUPPRESS)` with `tick_fleet` and `--dry-run`, `set_defaults(func=_command("session_export", "tick"))`.
   `claudlobby/system.yaml` after `task-recheck` (`:538`), with a comment in the file's register (why it ships on: spends nothing,
   deletes nothing, sends nothing; the spend is clauDNA's and gated by Task 2's switches): `session-export: { script:
   "$CLAUDLOBBY_CLI --root $CLAUDLOBBY_ROOT _session-export-tick", interval: 900, type: oneshot }`. Regenerate `system.yaml.example`
   with the recipe at `tests/test_fleet_mission.py:228-231`; update the composed-timer-set pins in `tests/test_composer.py`
   (grep `task-recheck` there). The unit carries `Environment=SESSION_EXPORT_ENABLED=…` from `FLEET_JOB_ARMING` by construction.
-- [ ] **Step 4 — registry and its gate.** `registries.py`, after `:204`: `# #2145 F6: one per sealed clauDNA segment, recorded by
+- [ ] **Step 4 — registry and its gate.** `plane/registries.py`, after `:204`: `# #2145 F6: one per sealed clauDNA segment, recorded by
   the session-export fleet job from the store's export; the monitor's substrate, never an alert. session_digest above stays
-  registered so history classifies.` / `"session_summary": "notice",` and, in the critical block beside `reload_failed` (`:135`):
-  `# #2145 P3: the session-export job failed STALL_AFTER ticks in a row for one bot — its cursor is not moving; one per stall.` /
-  `"export_stalled": "critical",`. `tests/test_event_type_registry.py`: `PY_WRITERS` (`:275-278`) gains
+  registered so history classifies.` / `"session_summary": "notice",` and after it: `# #2145 P3: the session-export job
+  failed STALL_AFTER ticks in a row for one bot — its cursor is not moving; one per stall. notice: the record, read by event
+  list and the session-export doctor rung; the alert door pages (notify_fleet, level=alert — its fleet_alert is the critical
+  row).` / `"export_stalled": "notice",` — notice by the registry's own rule (`:100-104`: a type a writer records directly is
+  notice, and a FLEET ALERT is critical — here the alert door raises it), so the `reload_failed` analogy goes. It is not in a
+  bot's brief, whose ALERTS read that bot's own critical events only (`brief.py:566-608`); fleet-pulse pages a fixed list
+  (`_CRITICAL_ESCALATION_TYPES`, `fleet-pulse.sh:769` at `cd292cb`), which the alert door's own push makes unnecessary.
+  `tests/test_event_type_registry.py`: `PY_WRITERS` (`:275-278`) gains
   `"claudlobby/session_export.py": "_system_event"`; `:323` drops `session_digest` (its shell writer is gone) and `:328-330`
   gains `session_summary` and `export_stalled`; `:396` drops `RS + "transcript-digest.sh"`.
 - [ ] **Step 5 — the doctor rung.** `doctor.check_session_export(fleet, paths, report)` beside `check_switches` (`doctor.py:1099`):
-  for each bot, read `<fleet_state>/session-export/<bot>.json`; absent → nothing (never ran, or nothing sealed); `consecutive_failures
-  >= STALL_AFTER` → warn `session-export-stalled` with `last_failure`; `pending > 0` and `last_ack_at` older than 24 h → warn
-  `session-export-cursor-age` naming the bot and the age; a `last_skip` → an info line naming the reason (a stale entrypoint is the
-  operator's cue to restart the bot). This is the monitor's read-only door for "is the export moving" (Task 5).
+  for each bot, probe `<fleet_state>/session-export/<bot>.json` with `source_state.probe_source` (`source_state.py:136`;
+  `check_workstream_residual` is the precedent for a file in the same directory, `doctor.py:1023-1048`): absent → nothing (never
+  ran, or nothing sealed); unreadable, or unparseable JSON → `warn` naming the file (an unreadable state file is not the same
+  fact as no state file); `consecutive_failures >= STALL_AFTER` → warn `session-export-stalled` with `last_failure`;
+  `pending > 0` and `last_ack_at` older than 24 h → warn `session-export-cursor-age` naming the bot and the age; a `last_skip` →
+  `pass` with the reason in its detail (a stale entrypoint is the operator's cue to restart the bot) — `Check.status` has no
+  info level (`doctor.py:34-37`; `format_report` prints anything but pass/warn/skip as FAIL, `:1497-1510`), and `skip` means a
+  rung an operator turned off (#1745). This is the operator's view of the files the monitor reads with `jq` (Task 5).
 - [ ] **Step 6.** `documentation/architecture/module-map.md:11` names `session_export.py` beside `task_recheck`. Verify:
   `./.venv/bin/pytest tests/test_session_export.py tests/test_event_type_registry.py tests/test_fleet_mission.py tests/test_composer.py
   tests/test_doctor*.py -q`.
@@ -483,13 +648,13 @@ def export_bot(root, fleet, bot, state_dir, *, run=subprocess.run, now=None) -> 
 |---|---|
 | `fleet-digest/SKILL.md:3,26-27,41,58,60` | `session_digest` → `session_summary`; "no `transcript-digest` file" → "recorded by the `session-export` fleet job from clauDNA's export" |
 | `:64` jq | unchanged shape — `.data` **is** the summary record (`legacy_event_row` lifts `detail.data`) |
-| `:82-90` | the job ships on: zero rows + no error means no bot sealed a segment in the window, or the fleet set `SESSION_EXPORT_ENABLED=0`, or every bot's entrypoint is stale/old — say which, from the **read-only** door `claudlobby host doctor` (the `session-export` rung names per-bot skips, cursor age and stalls; never `_session-export-tick --dry-run`, a suppressed private command that spawns every bot's export from the monitor's session). **A second stop rule (B5):** every row in the window `skipped` → print `COVERAGE: summaries armed on 0 of N bots (all rows skipped: <reason tally>)` and stop — identity and volume are real, but there is no journey to reason over. Week one reads exactly that way on most fleets: N bots × status rows, journeys only where `claudna.session_summary` is armed |
+| `:82-90` | the job ships on: zero rows + no error means no bot sealed a segment in the window, or the fleet set `SESSION_EXPORT_ENABLED=0`, or every bot's entrypoint is stale/old — say which, from the job's per-bot state files, `<fleet_state>/session-export/<bot>.json` (`last_skip`, `last_ack_at`, `pending`, `consecutive_failures`, `stall`; `paths.fleet_state`, `paths.py:671-679`: the fleet's `runtime/`, i.e. `"$BOT_DIR/../.."` for a manager in an overlay fleet), read with the skill's granted `jq` (`SKILL.md:5-8`) — not `claudlobby host doctor`, which neither monitor skill is granted and which runs the whole `validate()` and, after 6a, a per-vault `claudron doctor` probe of up to 60 s; never `_session-export-tick --dry-run`, a suppressed private command that spawns every bot's export from the monitor's session. **A second stop rule (B5):** every row in the window `skipped` → print `COVERAGE: summaries armed on 0 of N bots (all rows skipped: <reason tally>)` and stop — identity and volume are real, but there is no journey to reason over. Week one reads exactly that way on most fleets: N bots × status rows, journeys only where `claudna.session_summary` is armed |
 | `:102,113` | `by_status` keeps working; counts are `ok · skipped` (no `error` class) |
 | `:115-116` | "`skipped` means the summarizer did not run: `skipped_reason` names why — `disabled` (summaries off for the bot: the composed default, `CLAUDNA_SESSION_SUMMARY=0`), `headless` (a run with the variable unset — not a composed bot), `trivial`, `no_transcript`, `gave_up`, `retired`, `unexportable` (the job could not record the item); any other value is still a skip (A-F10, epic §16, may add `no_summarizer`). Not a failure." |
 | `:120-121,125-133` | rubric → `journey.title/intent/outcome/done/in_progress/next`; volume jq sums `prompts`, `failures` over every row and `turns`, `transcript_bytes` over `ok` rows only (both are `null` on a skipped row — the template says `turns · bytes: ok rows only`); drop `tool_calls` — its successor is not promised here: when P2's plane leg lands, *that* PR grants `fleet-digest` the `plane samples` door (`SKILL.md:5-8` grants `jq`, `python3`, `event list` only) and adds the `session.tool_calls` step (A-F3's sequencing, epic §16); friction jq selects `status=="ok"` rows with `journey.outcome != "completed"` or `failures > 0` or non-empty `journey.next`, keeping `session_id, bot, fleet, ts` |
 | `:173-174,187-192` | cut order: `skipped` rows (count only) first, then `ok` rows with an empty `journey`; template `rows: N ok · N skipped`, `VOLUME: sessions · turns · prompts · failures` |
 | `fleet-observe/SKILL.md:34-35,39,43-49,52` | `failed`/`would_change` → `journey.outcome` not `completed` + `journey.next`; `worked`/`reusable` → `journey.done` + `blocks.count/kinds`; "rubric left empty" (`:43-45`) → a `skipped_reason: disabled` row on a substantial session is **not an instrument failing** — the instrument is off by composition, which `:47-49` ("a gap you can name is a finding") already covers: name it once as *coverage* ("summaries armed on k of N bots"), never per session; the stop rule mirrors `fleet-digest`'s (all rows skipped → the coverage line, stop); token bloat → `transcript_bytes` and `prompts` over `ok` rows (tool totals come with P2's plane leg, see above) |
-| `fleet-monitoring.md:39-41,98,102-115,119-122` | `:39-41` "Nothing watches for sessions ending … no poller" → "A session ending is still an event the session reports — clauDNA's SessionEnd seals the segment inside the session; the plane learns of it when the `session-export` timer reads the store's export door (every 15 min): a poll of a contract door, never of transcripts or liveness"; source row → `session_summary`; the contract block becomes the spec's field table (identity `ts · session_id · session_uid · runtime · bot · fleet`; `status` + `skipped_reason`; volume `turns · transcript_bytes` (`null` on skipped) `· prompts · skills · failures · interrupts`; `journey.*`; `blocks.count/kinds`, `procedures`; `producer.model/duration_ms/cost_usd`; `seg · sealed_at · sealed_by`); the dormancy paragraph → "the job runs by default; a bot with summaries off still yields a `skipped` row, so an **empty** window means no sealed segment, a disabled job, or a stale entrypoint — name which (`host doctor`'s `session-export` rung)"; cite #1456/#1503: the digest's rows never reached this reader |
+| `fleet-monitoring.md:39-41,98,102-115,119-122` | `:39-41` "Nothing watches for sessions ending … no poller" → "A session ending is still an event the session reports — clauDNA's SessionEnd seals the segment inside the session; the plane learns of it when the `session-export` timer reads the store's export door (every 15 min): a poll of a contract door, never of transcripts or liveness"; source row → `session_summary`; the contract block becomes the spec's field table (identity `ts · session_id · session_uid · runtime · bot · fleet`; `status` + `skipped_reason`; volume `turns · transcript_bytes` (`null` on skipped) `· prompts · skills · failures · interrupts`; `journey.*`; `blocks.count/kinds`, `procedures`; `producer.model/duration_ms/cost_usd`; `seg · sealed_at · sealed_by`); the dormancy paragraph → "the job runs by default; a bot with summaries off still yields a `skipped` row, so an **empty** window means no sealed segment, a disabled job, or a stale entrypoint — name which (the job's per-bot state files, `<fleet_state>/session-export/<bot>.json`, read with `jq`; `host doctor`'s `session-export` rung is the operator's view of them)"; cite #1456/#1503: the digest's rows never reached this reader |
 | `ai-platform-monitor.md:22` | "The plane's `session_summary` events (`claudlobby event list --type session_summary`) \| One per sealed segment — the journey (title, intent, outcome, done, next) when summaries are on for the bot; identity and volume always" |
 
   File now, independent of P3 (PC): the reader-filter defect — `plane-readers.py:1155-1164`'s `fleet-events:` filter silently
@@ -504,14 +669,21 @@ def export_bot(root, fleet, bot, state_dir, *, run=subprocess.run, now=None) -> 
 `tests/test_transcript_digest.sh` (auto-collected by `tests/test_sh_suites.py:33` — deleting it is the change),
 `tests/test_transcript_digest_isolation.py`, `tests/test_plane_session_hook.py`; edits listed below (including `claudlobby/plane/ids.py:25-28`).
 
-- [ ] **Step 1 (test first).** A new test in `tests/test_composer.py`: no composed `settings.local.json` names either script and
-  the package `system.yaml` has no `SessionEnd` entry and no `plane-session-start` `SessionStart` entry; `grep -rn
-  'transcript-digest\|plane-session-start\|\.plane-session\|SESSION_DIGEST' claudlobby/ tests/ harness/ library/ documentation/
-  CLAUDE.md AGENTS.md system.yaml.example fleet.yaml.example | grep -v documentation/plans/ | grep -v system-map-2026-07-30`
-  is the checklist criterion (empty).
+- [ ] **Step 1 (test first).** A new test in `tests/test_composer.py`, `test_no_retired_hook_is_composed`: no composed
+  `settings.local.json` names either script and the package `system.yaml` has no `SessionEnd` entry and no
+  `plane-session-start` `SessionStart` entry. **The one "no retired name left" criterion** (the Verification Checklist cites
+  it; there is no second pattern): `grep -rn 'transcript-digest\|transcript_digest\|plane-session-start\|\.plane-session\|SESSION_DIGEST\|session_digest\|session-digest'
+  claudlobby/ tests/ harness/ library/ documentation/ CLAUDE.md AGENTS.md *.example | grep -v -e documentation/plans/ -e
+  system-map-2026-07-30 -e CHANGELOG` returns **only** this allowlist of deliberate history — `claudlobby/plane/registries.py`
+  (the `session_digest` entry and its comment, `:201-204`, kept so history classifies, and Task 4's `session_summary` comment
+  that points at it); `tests/test_system_event_retention.py:74`; `tests/test_no_retired_digest_reference.py` (its docstring
+  and `RETIRED` tokens); and this test. Every other mention is removed or reworded so it names no retired file: the
+  `isolation.py` docstring, the `plane/ids.py:25-28` comment and `observable-plane.md:67-69` (Step 4) say "the digest hook" or
+  "the SessionStart hook".
 - [ ] **Step 2 — code and config.** `claudlobby/system.yaml:402-425` both comment+hook blocks removed; `system.yaml.example`
-  regenerated. `switches.py:529-540` row removed; `:397` comment names `spindown-receipt` only. `isolation.py:100-103` docstring:
-  "The one copy; the shell fallback retired with `transcript-digest.sh` (#2145 P3)". `harness/validate-bot-change.sh:3576`
+  regenerated. `switches.py:529-540` row removed and the three switch tables regenerated (Task 2 Step 3's command); `:397`
+  comment names `spindown-receipt` only. `isolation.py:100-103` docstring: "The one copy; the shell fallback retired with the
+  digest hook (#2145 P3)". `harness/validate-bot-change.sh:3576`
   loop → `update-siblings claudna-harvest code-audit-sweep`; `:3580` → grep the arm line `host doctor --switches` prints for
   `claudna-harvest` (`bots.<bot>.claudna.harvest: true …`).
 - [ ] **Step 3 — tests.** `tests/test_switches.py:99,106` (drop `session-digest`, fix the comment), `:357-358` (resolve
@@ -521,23 +693,25 @@ def export_bot(root, fleet, bot, state_dir, *, run=subprocess.run, now=None) -> 
   comment at `:148`; `tests/test_heavy_slot_match.py:158` → `-k boot_admission`. `tests/test_event_type_registry.py:323,396` were
   done in Task 4. `tests/test_system_event_retention.py:74` **unchanged**.
 - [ ] **Step 4 — docs and indexes.** `environment-variables.md:199` row removed and `:189-195` reworded (the opt-in example is
-  now `claudna.*`, carried by composition, not `env:`); `fleet-update-lifecycle.md:422-428` → the digest retired; the
-  `SPINDOWN_RECEIPT_ENABLED` half of the anecdote stands; `testing-plane-isolation.md:82` drops `transcript-digest`;
+  now `claudna.*`, carried by composition, not `env:`); `fleet-update-lifecycle.md:385,422-428` → the digest retired; the
+  `SPINDOWN_RECEIPT_ENABLED` half of the anecdote stands; `architecture/module-map.md:44`'s list of the switches that stay
+  off says "`claudna-session-summary` and `claudna-harvest` spend" where it said "`session-digest` spends" (its count
+  follows); `testing-plane-isolation.md:82` drops `transcript-digest`;
   `system-yaml-schema.md:388-389` rows removed and `:505-510` → "no opt-in self-gate remains among the composed hooks; clauDNA's
   `CLAUDNA_*` gates are composed from `bots.<name>.claudna`", roster `:425-428` gains `session-export | interval: 900 | (absent —
-  enrolled); the private tick skips on SESSION_EXPORT_ENABLED=0`; `plane/ids.py:25-28`'s comment ("minted fresh per process at SessionStart, never derived") → "`process_uid` has no minter since `plane-session-start.sh` retired (#2145 P3); the prefix stays registered so historical `proc_` rows classify" — `"process": "proc_"` is **kept** (B6); `observable-plane.md:67-69` → "Session uids are transcript-stable:
-  `ids.derive_session_uid(id, runtime)` is the one implementation (#2145 F2); the bash mirror retired with `plane-session-start.sh`",
-  `:212` removed, `:214` → ``| `claudlobby _session-export-tick` (fleet timer invokes the selected CLI) | one `session_summary`
+  enrolled); the private tick skips on SESSION_EXPORT_ENABLED=0`; `plane/ids.py:25-28`'s comment ("minted fresh per process at SessionStart, never derived") → "`process_uid` has no minter since the SessionStart hook retired (#2145 P3); the prefix stays registered so historical `proc_` rows classify" — `"process": "proc_"` is **kept** (B6);
+  `observable-plane.md:67-69` keeps P1's sentence (Half A, plan 2 Task 5 Step 1: "… other runtimes derive in Python only,
+  through `ids.session_alias` (#2145 F2)") and changes only its bash-copy clause — "the bash derivation in
+  `claudlobby/_runtime_scripts/plane-session-start.sh` is pinned byte-identical to `ids.derive_session_uid(id)` for runtime
+  `claude`" → "the bash copy retired with the SessionStart hook (#2145 P3)" — so register row 10's citation of this paragraph
+  as the join key's prose stays true; `:212` removed, `:214` → ``| `claudlobby _session-export-tick` (fleet timer invokes the selected CLI) | one `session_summary`
   system event per sealed clauDNA segment on the bot's actor — identity, volume, the journey and block tally when summaries are
   on, `skipped_reason` otherwise; `data.session_uid` is the F2 uid | `SESSION_EXPORT_ENABLED=0` in the fleet-tier `.env`;
   `PLANE_EMIT_DISABLED=1` |``; root `CLAUDE.md:124,140` rows deleted (the tick has no launcher, like `task-recheck`);
   `_runtime_scripts/CLAUDE.md:69,116` rows deleted; `cp CLAUDE.md AGENTS.md` at both levels (`tests/test_instruction_budget.py`).
-- [ ] **Step 5 — the v2 ruling.** A deliberate duplicate of plan 2 Task 5 Step 1 — a safety net, since the two PRs are authored
-  apart; if P1 already wrote it, this step is a no-op (B6). If P1 Half A did not: `2026-08-18-observable-plane-design-v2.md:606` gains one dated sentence:
-  "**Amended 2026-10 (#2145 §1.1):** the SessionStart hook and `process_uid` minting are superseded — doors derive the uid from
-  the caller's own session id with `ids.derive_session_uid` (F1(c) as ratified; A-F1 proposed, epic §16);
-  `plane-session-start.sh` retired in P3." `:588` (Phase 3) gains the
-  LangSmith supersession if absent.
+- [ ] **Step 5 — the v2 ruling, checked (one line).** Half A (a dependency) wrote it in plan 2 Task 5 Step 1: confirm
+  `2026-08-18-observable-plane-design-v2.md` carries P1's §19 item 9 and its dated note at `:606` (the SessionStart hook
+  superseded) — this PR writes neither, so the ruling keeps one author.
 - [ ] **Step 6.** Verify: `./.venv/bin/pytest tests/test_sh_suites.py tests/test_switches.py tests/test_plane_gauntlet_doors.py
   tests/test_plane_emit_class.py tests/test_fleet_claude_bin.py tests/test_instruction_budget.py tests/test_fleet_mission.py -q`;
   `bash harness/validate-bot-change.sh` directly (a harness-exercised script changed). Commit: `refactor(hooks): retire
@@ -545,19 +719,22 @@ def export_bot(root, fleet, bot, state_dir, *, run=subprocess.run, now=None) -> 
 
 ### Task 7: the F14 cutover runbook
 
-> **Held:** this task implements F14 as ratified; amendment A-F14 (epic §16) proposes otherwise. Do not start it before the operator rules.
+> **Held:** this task implements F14 as ratified; amendment A-F14 (epic §16) proposes otherwise. Do not start it before the operator rules. What is held is the old root's rename and removal (runbook steps 5–6); F14(a)'s seal is not held — it runs at §10 order 3's activation (Task 1 Step 2).
 
-**Files:** `documentation/runbooks/claudna-state-dir-cutover.md` (new). Only the runbook is held: the per-bot root (Task 1)
-and the per-bot `session-export` grouping (Task 4) ship in 6b, and 6b's CHANGELOG is Task 7c.
+**Files:** `documentation/runbooks/claudna-state-dir-cutover.md` (new). Only the runbook is held: the per-bot root and its
+seal (Task 1, §10 order 3) and the per-bot `session-export` grouping (Task 4) ship unheld, and 6b's CHANGELOG is Task 7c.
 
-- [ ] **Step 1.** The runbook, operator-run, in this order: (1) pin the P3 clauDNA release on the fleet
-  (`claudna_version`) and activate Task 1's composition; (2) restart bots through the proven sequence — each writes
-  `<BOT_DIR>/data/claudna/entrypoint.json` at its first SessionStart; (3) `E="$(jq -r .entrypoint <any bot>/data/claudna/entrypoint.json)"`
-  (fallback, **not a contract**: the plugin cache under the bot's `CLAUDE_CONFIG_DIR`, `composer.py:1046`); (4) for every open session
-  in the old root: `python3 -S "$E" list --root ~/.claudna --json` → rows with `"status": "open"` → `python3 -S "$E" seal <sid>
-  --root ~/.claudna` (the summary gate runs with the operator's shell env — leave `CLAUDNA_SESSION_SUMMARY` unset: bot sessions
-  gate `headless`, no spend; `SETUP_GUIDE.md:320`); (5) **only when** step 6's condition holds — the service user runs no
-  interactive clauDNA sessions on that host (they share the default root) — or after that user's interactive shell has been
+- [ ] **Step 1.** The runbook, operator-run, in this order: (1) Task 1's composition is already active (§10 order 3) and its
+  activation sealed the old root's bot sessions (Task 1 Step 2) — confirm with Task 1 Step 2 (i)'s check that no bot still
+  writes to `~/.claudna`; (2) once 0.28 is on the bots, each has written `<BOT_DIR>/data/claudna/entrypoint.json` at an
+  opening SessionStart; (3) `E="$(jq -r .entrypoint <any bot>/data/claudna/entrypoint.json)"` (fallback, **not a contract**: the
+  plugin cache under the bot's `CLAUDE_CONFIG_DIR`, `composer.py:1046` — the path Task 1 Step 2 uses); (4) re-run Task 1
+  Step 2's (ii)–(iii) so nothing a bot opened is still open before the rename: `python3 -S "$E" list --bot <b> --json --limit
+  100000 --include-private --root ~/.claudna` → each `"status": "open"` row → `python3 -S "$E" seal <sid> --root ~/.claudna`,
+  per bot, then `CLAUDNA_UNCLOSED_AFTER_H=1 python3 -S "$E" sweep --root ~/.claudna` until its `closed` list is empty — never
+  `seal` for "every open session", which would close the service user's live interactive sessions (`cli.py:506-512`); leave
+  `CLAUDNA_SESSION_SUMMARY` unset (bot sessions gate `headless`, no spend; `SETUP_GUIDE.md:320`); (5) **only when** step 6's
+  condition holds — the service user runs no interactive clauDNA sessions on that host (they share the default root) — or after that user's interactive shell has been
   given its own root first (`CLAUDNA_STATE_DIR` in clauDNA's `shell/` aux additions, verified with one interactive session):
   `mv ~/.claudna ~/.claudna.retired-<date>` — **rename, never `chmod -R a-w`**: under a read-only root the hook exits 0 and logs
   (`plugin-hooks/session-store.sh:22-31,43-44`; `cli.py:177-213`) and 0.28's `entrypoint.json` write fails the same silent way,
@@ -571,8 +748,11 @@ and the per-bot `session-export` grouping (Task 4) ship in 6b, and 6b's CHANGELO
 **Files:** `CHANGELOG.md`.
 
 - [ ] `CHANGELOG.md` `[Unreleased]`: one `### Added — …` for the job and event (with the consumer mapping), one
-  `### Changed — …` per Task 1/2 (Task 3's pin entry rides PR 6a), one `### Removed — …` for the two hooks naming F15's
-  waiver and the F2 single implementation. Commit: `docs: the P3 changelog (#2145)`.
+  `### Changed — …` per Task 1/2 (Task 3's pin entry rides PR 6a; the `CLAUDNA_STATE_DIR` line has its own, Task 1 Step 1),
+  one `### Removed — …` for the two hooks naming F15's waiver and the F2 single implementation. Task 1's entry carries the
+  heads-up for operators who armed summaries through env: a `CLAUDNA_SESSION_SUMMARY` or `CLAUDNA_HARVEST` set in a `.env`
+  tier is now overridden by the composed line, and one set in `env:` overrides the `claudna:` mapping — move it to
+  `claudna:` (`config validate` warns `claudna-env`). Commit: `docs: the P3 changelog (#2145)`.
 
 ### Task 8: gate, harness scenario, canary-root observation
 
@@ -588,35 +768,53 @@ and the per-bot `session-export` grouping (Task 4) ship in 6b, and 6b's CHANGELO
   `CLAUDLOBBY_HOST_SYSTEM_YAML=/nonexistent/…` (as `tests/conftest.py:150` does — the harness never pinned it, B9) and a
   `claudron` stub in `$STUB_BIN` answering `status --json`/`doctor --json` with nothing pending, so an operator's real host
   override and vault state never reach the run. Record the harness's new pass/fail pair **by name** before the two-leg comparison.
-- [ ] **Drift gate (X17).** `claudlobby/conformance.py`'s clauDNA leg already resolves and clones the pinned clauDNA
-  (`resolve_claudna_ref`, `:112-131`; CI pins `CLAUDNA_REF`). It gains one cell: vendor `schemas/export.schema.json` from the
-  clone into `claudlobby/contracts/claudna-export.schema.json` (the way clauDNA vendors `contracts/claudron.json`; the cell fails
-  when the vendored copy differs from the clone's), build a fixture store with the clone's own `tests/conftest.py` helpers
-  (`segment_summary`/`complete_segment`) or a checked-in fixture tree, run
-  `python3 -S <clone>/lib/claudna/session_store export --root <fixture> --consumer claudlobby --include-skipped --json`, validate
-  the envelope against the vendored schema, and feed every item through `session_export.summary_record` — one gate on the real
-  envelope, not on canned fixtures; `tests/test_session_export.py`'s canned envelopes are generated from that fixture once and
-  checked in.
+- [ ] **Drift gate (X17), wired to what CI actually runs.** Today `conformance.yml:61-73` checks clauDNA out at its **default
+  branch** (no `ref:`) and runs only `python -m claudlobby.conformance rename-map`; `:12` names only `vault-tests` as a
+  required check; and no job sets `CLAUDNA_REF`, which `conformance.py:116` calls "the knob CI pins its checkout to". This PR
+  adds: (1) `claudlobby/contracts/claudna.ref` (new, checked in) — the clauDNA release the export contract is read at
+  (`v0.28.0`), moved by the PR that moves the fleet to a newer clauDNA release: the `.ref` half of clauDNA's own
+  `contracts/claudron.ref` precedent; (2) `claudlobby/contracts/claudna-export.schema.json` (new) — the vendored copy of
+  clauDNA's `lib/claudna/session_store/schemas/export.schema.json` at that ref (the path is repo-relative: there is no
+  `schemas/` at the clone root); (3) a subcommand, `python -m claudlobby.conformance export-contract <clone root>`, handed the
+  checkout's root: it fails when the vendored copy differs from the clone's file; copies a checked-in fixture store
+  (`tests/fixtures/claudna_export/store/`, captured once from a real 0.28 store with identifiers scrubbed — never clauDNA's
+  `tests/conftest.py`) to a temp dir; runs `python3 -S <clone>/lib/claudna/session_store export --root <the copy> --consumer
+  claudlobby --include-skipped --json`; validates the envelope with the clone's own validator (`claudna.session_store.schema`)
+  against the vendored schema; and feeds every item through `session_export.summary_record` — one gate on the real envelope,
+  not on canned fixtures. An absent checkout prints `SKIP` and exits 0 (the module's local-first rule, `conformance.py:18-23`);
+  (4) in `conformance.yml`, an `export-contract-gate` job in the `rename-map-gate` form whose clauDNA checkout reads
+  `claudna.ref` into `ref:` (a prior step echoes it to `$GITHUB_OUTPUT`) and keeps `continue-on-error: true`, so a failed
+  checkout skips with notice; it is **not** a required check (`:12` stays `vault-tests` only) — a clauDNA outage or a moved tag
+  must never block a Claudlobby merge — and its header comment says so. The workflow edit is pushed with the `workflow` scope
+  (`5694413b`); (5) the default lane's half (`test.yml`'s `pytest` job; Claudlobby has no `make check`): an offline test in
+  `tests/test_session_export.py` checks the checked-in canned envelopes (`tests/fixtures/claudna_export/envelopes.json`,
+  generated from the fixture store once and regenerated when `claudna.ref` moves) against the vendored schema — every
+  `required` key present, with the JSON `type` its `properties` name (the keyword subset clauDNA's own validator implements,
+  `schema.py:25-29`; no new dependency). The PR also corrects `conformance.py:116`'s docstring and the epic's §14 Q8, which
+  repeat the "pinned checkout" premise. A producer-side leg (#223's form) is declined: clauDNA's own suite validates every
+  envelope against `export.schema.json` (plan 5 Task 2 Step 4), so the envelope cannot change without its schema changing, and
+  a changed schema fails (3) at the next `claudna.ref` move — a clauDNA-side job would add a cross-repo CI coupling for no new
+  signal.
 - [ ] **Mutants** (committed code): the ack before the emit; a two-item `emit_batch` (one seen, one new — ingest refuses it as
   mixed state and the cursor never moves); an item-level `ContractViolation` with no `unexportable` re-emit (the cursor wedges);
+  the fallback re-emitted under the item's own id (the ledger-keyed refusal repeats and the cursor holds); `stall` marked
+  reported before its record landed (a failed emit is never retried);
   a flat `data` (reader renders `{}`); `source_ref` without the `fleet-events:` prefix (reader returns nothing);
   `derive_uid("ev_", …)`; the bound dropped (a 50 KB arc → `detail_truncated=1`); a stale entrypoint "guessed" from the plugin
-  cache; the migration warning firing on D009 (6a); `CLAUDNA_STATE_DIR` conditional on `claudna_version`;
+  cache; `CLAUDNA_STATE_DIR` conditional on `claudna_version`;
   `CLAUDNA_SESSION_SUMMARY` absent for an unarmed bot; a `"true"` string arming `claudna.harvest`.
 - [ ] **The two-leg gate** (rc + scoped names + count line, against Task 0), CI on Linux, `bash harness/validate-bot-change.sh`
   directly.
 - [ ] **Canary root (mandatory runtime validation).** One host, one real Claude bot with `claudna.session_summary: true` (one
-  bot of many — the switch's own arm line) and a second with it unset; Claudron v0.9.0 installed; the vault migrated per Task 3's
-  step. After a `/clear` or a SessionEnd and one tick (≤ 15 min): `claudlobby --json event list --type session_summary --since 1h`
-  renders one row with `data.status == "ok"` and `data.journey.title` populated — **the thing the digest never achieved** — and one
+  bot of many — the switch's own arm line) and a second with it unset; nothing here needs Claudron v0.9.0 (6a's preconditions
+  and its `claudron-migration` check are Task 3 Step 6's). After a `/clear` or a SessionEnd and one tick (≤ 15 min):
+  `claudlobby --json event list --type session_summary --since 1h` renders one row with `data.status == "ok"` and `data.journey.title` populated — **the thing the digest never achieved** — and one
   with `data.status == "skipped"`, `data.skipped_reason == "disabled"` (the composer wrote `CLAUDNA_SESSION_SUMMARY=0` into the
   unarmed bot's `bot.conf`, so the gate answers `disabled`, `project.py:276-287` — were it `headless`, the composition never
   reached the bot); `<BOT_DIR>/data/claudna/sessions/<sid>/consumers.json` shows `claudlobby.through_seg`;
   `<BOT_DIR>/data/.plane-session` is **not** rewritten by the new session; record whether `claude plugin update` left the prior
   `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>` directory on the bot host (X18 — plan 5's live check asks the same
-  on a dev machine; the bot host is the one that matters); (6a) `config plan` on the canary fleet is silent with the migrated
-  vault and warns `claudron-migration` (with the named fix) against a scratch clone left at format 2. Cite the observation in
-  the PR body behind `no_names`.
+  on a dev machine; the bot host is the one that matters). Cite the observation in the PR body behind `no_names`.
 
 ## Door consumer tables
 
@@ -640,20 +838,24 @@ and the per-bot `session-export` grouping (Task 4) ship in 6b, and 6b's CHANGELO
   each **warn**, nothing here refuses — `config validate --strict` is the operator's refusal.
 - **F14's "then remove"** assumes the service user runs only bots; the same default root serves that user's interactive
   sessions, so the runbook renames (never chmods) the old root only under that condition, or after the interactive shell has its
-  own `CLAUDNA_STATE_DIR`. A-F14 (epic §16) asks whether the cutover is needed at all; Task 7 is held on it.
-- **`config explain bot.claudna.<key> --bot B`** works through the strict-mapping provenance registry that whichever of P2-a/P3
-  lands first carries (X13); until then `scalar_config_origin` still raises for mappings (`config.py:2271-2296`) and the second PR
-  rebases onto the first's helper — a merge-order fact, not a limitation of the design.
+  own `CLAUDNA_STATE_DIR`. A-F14 (epic §16) asks whether the cutover is needed at all; Task 7 (the rename and removal) is held
+  on it — the seal is not, and it touches bot sessions only (`list --bot`, then a `sweep` that closes only dead, idle sessions;
+  Task 1 Step 2).
+- **`config explain bot.claudna.<key> --bot B`** works through the strict-mapping provenance registry Task 1 carries (Steps 4–6,
+  the canonical copy); if P2-a lands first instead, it carries those steps and 6b registers `claudna` in one line (X13) — a
+  merge-order fact, not a limitation of the design.
 
 ## Test Plan
 
 Unit: `tests/test_session_export.py` (new — the per-item emit, the wedge test, `unexportable`, `export_stalled`, the null rule),
 `tests/test_doctor*.py` (the `session-export` rung), `tests/test_composer.py` (the always-composed `CLAUDNA_SESSION_SUMMARY`,
-the no-retired-hook test, timer-set pins), `tests/test_config.py` (the `claudna:` mapping and its cross-field check),
-`tests/test_env_register.py` (the provenance cell), `tests/test_switches.py`, `tests/test_claudron_compat.py`,
-`tests/test_claudron_loop.py` (validator warning cells; `TestSnippetParity` under the vault extra),
-`tests/test_validate_warning_discipline.py`, `tests/test_event_type_registry.py`, `tests/test_no_retired_digest_reference.py`,
-`tests/test_fleet_mission.py` (example pin), `tests/test_instruction_budget.py`; the conformance leg's export cell (Task 8).
+the no-retired-hook test, timer-set pins, the order-3 line), `tests/test_config.py` (the `claudna:` mapping, its cross-field
+check, and the strict-mapping helper's cells), `tests/test_env_register.py` (the `config explain` provenance cells),
+`tests/test_validator.py` (Task 1's `claudna-env` and `claudna-harvest-pin` warnings), `tests/test_switches.py`,
+`tests/test_claudron_compat.py`, `tests/test_claudron_loop.py` (6a's validator warning cells; `TestSnippetParity` under the
+vault extra), `tests/test_validate_warning_discipline.py`, `tests/test_event_type_registry.py`,
+`tests/test_no_retired_digest_reference.py`, `tests/test_fleet_mission.py` (example pin), `tests/test_instruction_budget.py`;
+the offline canned-envelope check in `tests/test_session_export.py` and the `export-contract` conformance leg (Task 8).
 Removed suites: `test_transcript_digest.sh`, `test_transcript_digest_isolation.py`, `test_plane_session_hook.py`. Bash: the harness
 scenario through `harness/validate-bot-change.sh` directly. The two-leg gate against Task 0's before-leg; CI on Linux.
 
@@ -661,23 +863,29 @@ scenario through `harness/validate-bot-change.sh` directly. The two-leg gate aga
 
 - [ ] `grep -c 'export CLAUDNA_STATE_DIR="$BOT_DIR/data/claudna"' <every composed bot.conf>` prints 1; `grep -c 'export CLAUDNA_SESSION_SUMMARY='`
   prints 1, and the value is `0` on every bot with neither `claudna.session_summary` nor `claudna.harvest` armed.
+- [ ] (Order 3) The PR body cites Task 1 Step 2 (i)'s canary-root check; after the fleet's activation,
+  `list --bot <b> --json --limit 100000 --include-private --root ~/.claudna` shows no `open` row for any switched bot, the last
+  `sweep` printed an empty `closed` list, and no `seal` was run on a session `list --bot` did not return.
 - [ ] `tests/test_session_export.py` wedge cell: seg 1 emitted unacked, seg 2 sealed → seg 2 `committed`, seg 1 `duplicate`, both
   acked; the two-item-batch mutant holds the cursor (shown, restored).
-- [ ] `grep -rn 'transcript-digest\|plane-session-start\|\.plane-session\|SESSION_DIGEST\|session_digest' claudlobby/ tests/ harness/
-  library/ documentation/ CLAUDE.md AGENTS.md *.example | grep -v -e documentation/plans/ -e system-map-2026-07-30 -e CHANGELOG`
-  returns only `registries.py:201-204`, `test_system_event_retention.py:74` and `test_no_retired_digest_reference.py`.
+- [ ] Task 6 Step 1's one "no retired name left" grep returns only its allowlist (`plane/registries.py`'s `session_digest`
+  entry and the comments on it, `test_system_event_retention.py:74`, `test_no_retired_digest_reference.py`,
+  `tests/test_composer.py::test_no_retired_hook_is_composed`) — no other line, and no second pattern anywhere in this plan.
 - [ ] `claudlobby host doctor --switches` names `claudna-session-summary`, `claudna-harvest` (off) and `session-export` (on); the
   three doc tables equal the render (`tests/test_switches.py:957-969`).
-- [ ] `tests/test_claudron_compat.py::test_vault_pin_satisfies_compat_floor` is red at `@v0.6.1` (shown, restored) and green at `@v0.9.0`.
+- [ ] (6a) `tests/test_claudron_compat.py::test_vault_pin_satisfies_compat_floor` is red at `@v0.6.1` (shown, restored) and green at `@v0.9.0`.
 - [ ] `tests/test_session_export.py` read-side cell: `fleet_events(... event_type="session_summary")[0]["data"]["journey"]["title"]`
   is populated; the flat-`data` mutant renders `{}` (shown, restored).
 - [ ] Harness: `session_summary` rows via `val_events`, acks after emits, no row on the second run, the stale-entrypoint skip line.
 - [ ] Live, canary root: `claudlobby --json event list --type session_summary --since 1h` shows one `ok` row with
   `data.journey.title` and one `skipped` row with `data.skipped_reason == "disabled"`; `consumers.json` carries `claudlobby`;
-  no fresh `.plane-session`; (6a) `config plan` warns `claudron-migration` with the `claudron doctor --fix` line against the
-  format-2 scratch clone, and is silent after the migration.
-- [ ] Conformance: the clauDNA leg's export cell runs the pinned clone's real door through `summary_record`, and the vendored
-  `claudlobby/contracts/claudna-export.schema.json` equals the clone's `schemas/export.schema.json`.
+  no fresh `.plane-session`.
+- [ ] (6a, Task 3 Step 6) Live, canary root: `config plan` warns `claudron-migration` with the `claudron doctor --fix` line
+  against the format-2 scratch clone, and is silent after the migration; no `claudna-harvest-pin` warning remains.
+- [ ] Conformance: `python -m claudlobby.conformance export-contract <clone root>`, against a clauDNA checkout at
+  `claudlobby/contracts/claudna.ref`, runs the real door through `summary_record`; the vendored
+  `claudlobby/contracts/claudna-export.schema.json` equals the clone's `lib/claudna/session_store/schemas/export.schema.json`;
+  CI's `export-contract-gate` job ran it (not a required check); the offline canned-envelope check passes in the default lane.
 - [ ] The two-leg diff introduces no new failure names; the harness pair matches the Test Plan by name.
 
 ## What NOT To Do
@@ -692,8 +900,13 @@ scenario through `harness/validate-bot-change.sh` directly. The two-leg gate aga
   state (`ingest.py:598-605`) and holds the cursor forever (X20).
 - Do not compose `CLAUDNA_HARVEST=1` without `CLAUDNA_SESSION_SUMMARY=1`: the gate never summarizes a bot on harvest alone
   (`project.py:276-287`).
-- Do not point the monitor at `_session-export-tick --dry-run`; its read-only door is `host doctor`'s `session-export` rung.
+- Do not point the monitor at `_session-export-tick --dry-run` or `claudlobby host doctor` (neither is granted to it; `host
+  doctor` runs `validate()` and, after 6a, a 60 s vault probe): its read-only source is the job's per-bot state files, read with
+  `jq` (Task 5).
 - Do not `chmod -R a-w` the old `~/.claudna`: rename it, and only under the runbook's condition (F14 step 5).
+- Do not `seal` every open session in the old root: `seal` passes no owner pid and would close the service user's live
+  interactive sessions — seal the bot sessions `list --bot` returns, and let `sweep` (dead `claude`, idle past the hour) take
+  the rest (Task 1 Step 2).
 - Do not read a worker's session uid from `.plane-session`; do not keep a bash derivation (epic §11).
 - Do not refuse a plan on any doctor finding — a pending migration is a named warning (warn-never-fail; `--strict` is the
   operator's refusal) and D007–D010/structure findings are nothing; never run `claudron doctor --fix` from Claudlobby (it
@@ -705,8 +918,12 @@ scenario through `harness/validate-bot-change.sh` directly. The two-leg gate aga
 
 ## Context
 
-area: compose / plane / library · effort: **M** per the epic index — 6b (Tasks 1–2, 4–6, 7c and 8; the held Task 7 runbook
-when A-F14 is ruled) is M, 6a (Task 3) is S plus the operator-run migration · risk: medium (a fleet timer that spawns a
+area: compose / plane / library · effort: 6b **M → L** (Task 1 Steps 3–11, Tasks 2, 4–6, 7c and 8; the held Task 7 runbook
+rides it only if A-F14 is ruled by then): the cycle-1 wedge-proofing made Task 4 alone per-item emit, per-sid ack,
+`unexportable`, `export_stalled`, the doctor rung, six skip reasons and 13 test legs, on top of two hook retirements and four
+consumer re-points, and cycle 2 adds the canonical strict-mapping helpers, two validator warnings and the drift gate's CI
+job · §10 order 3's one-line PR (Task 1 Steps 1–2) is S plus its operator-run activation · 6a (Task 3) is S plus the
+operator-run migration · risk: medium (a fleet timer that spawns a
 subprocess per bot; a `config plan` probe of an external CLI that warns; a library re-point that changes what the monitor reads) · priority: P3 · related: #2145 (epic), #1503 (the digest's
 plane cutover), #1456 (the rows the reader dropped), #1961 (the waived comparison, F15), #785 (the monitor), Claudron #190/#201
 (doctor), clauDNA plan 5 (`2026-10-04-runtime-neutral-observability-p3-claudna-export-contract.md`).
@@ -715,8 +932,8 @@ Spec spellings corrected here, decisions unchanged: `derive_uid("ev", …)` not 
 fleet-event helper's (`fleet-events:` prefix; no `session-summary:<sid>/<seg>` sub-grammar — `event_id` is the dedup key);
 `EmitRequest.occurred_at` is `contracts.py:811`; the test that binds the protocol rewrite to the registry entry is
 `test_no_retired_digest_reference.py` plus `test_event_type_registry.py:323`, not gate (d) (`fleet-monitoring.md` is outside
-`DOCS`, `:404-408`); the epic's P3 bullet says composition "refuses" a session loop on an unmigrated vault — this plan warns
-(Task 3, B3), for the reasons given there.
+`DOCS`, `:404-408`); the epic's P3 bullet, which said composition "refuses" a session loop on an unmigrated vault, now reads
+~~refuses~~ **warns** (epic `:1378`), as this plan does (Task 3, B3), for the reasons given there.
 
 Answered here, carried to the epic: *why the record rides into the plane rather than a thin row fetched through the export
 door* — the four consumers are manager-bot skills whose only door is `claudlobby event list` (`fleet-digest/SKILL.md:5-8`),

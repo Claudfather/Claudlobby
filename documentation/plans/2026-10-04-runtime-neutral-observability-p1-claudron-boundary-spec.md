@@ -14,13 +14,16 @@ repos: Claudfather/Claudron
 # P1 — the boundary-spec amendment, one SNIPPET_EVENTS, the ops-log id regex (Claudron)
 
 > **Status:** draft, authored by `/claudna:forge` on 2026-10-04 from epic plan §6 P1 (the three Claudron
-> bullets) and §10 order 1. Code references are to Claudron `6ca2b94` (the `v0.9.0` tag; `origin/main`
-> `8e895cb` adds only `.github/workflows/tests.yml` and three CHANGELOG lines). `spec:` above is a path in
-> the **Claudron** repo. Depends on: nothing — this is the epic's first PR. Waits on canaries: **C1, for
-> Task 3 only**; Tasks 1, 2 and 4 do not wait. Reforged 2026-10-05 from ironclad cycle 1 (directives
-> C1–C7; cross-cutting X1, X7, X14) and its interim fold (the P4 flag's naming caveat, the `session_alias`
-> default, row 10's flipper named as P1 Claudlobby's unheld Half A, row 11's `session.runtime`) — no fork or
-> decision changed.
+> bullets) and §10, where this PR is **order 4**: P0's Claude batch (order 1), P2-b (order 2) and the per-bot
+> `CLAUDNA_STATE_DIR` line (order 3) precede it. Code references are to Claudron `6ca2b94` (the `v0.9.0` tag;
+> `origin/main` `8e895cb` adds only `.github/workflows/tests.yml` and three CHANGELOG lines). `spec:` above is
+> a path in the **Claudron** repo. Depends on: no code in another repo; its Codex values rest on the mission
+> decision **D1** (Dependencies — if D1 is unruled when the PR is ready, the Codex names wait for the ruling and
+> nothing else does). Waits on canaries: **C1, for Task 3 only**; Tasks 1, 2 and 4 do not wait. Reforged
+> 2026-10-05 from ironclad cycle 1 (directives C1–C7; cross-cutting X1, X7, X14) and its interim fold (the P4
+> flag's naming caveat, the `session_alias` default, row 10's flipper named as P1 Claudlobby's unheld Half A,
+> row 11's `session.runtime`), then from ironclad cycle 2 (the §10 order, the D1 dependency, row 10 names no
+> attribute) — no fork or decision changed.
 
 ## Summary
 
@@ -105,7 +108,15 @@ name or normalization text (P2, Claudlobby); the Claudlobby `claudron` pin bump 
 ## Implementation Plan
 
 ### Dependencies
-None. F1–F17 are ratified (2026-10-04); this is order 1 of the epic's six PRs (§10.1).
+None in code. F1–F17 are ratified (2026-10-04); this is §10 order 4 (after P0's Claude batch, P2-b and the
+order-3 per-bot `CLAUDNA_STATE_DIR` line) and plan 1 of §10.1's six. **The mission decision it rests on: D1**
+(Claudlobby#2145 §16, the proposed fork F18). This PR rests on D1 for the Codex values in §10.2 and rows 10/12;
+Claudron's own mission (`PROJECT_MISSION.md:17`, "any agent fleet") needs no amendment. If the PR is ready
+before D1 is ruled, the clauses that name Codex — Step 3's §10.2 *Owns* sentence, R8's two parentheticals,
+row 10's `runtime` set, row 12, the amendment section's items 3 and 5 and Task 4's CHANGELOG bullet — are
+written as "a second composed runtime (Claudlobby#2145 D1/F18)", and the name lands with the ruling in a
+one-line follow-up Claudron PR (the row-flip form, Blocks). Task 3 is untouched by this: it waits on C1, a
+Codex-install canary, anyway.
 
 ### Blocks
 P2 (Claudlobby) — the attribute contract needs its owner named first (R1/R2). P4 Claudron — row 12 fixes
@@ -189,7 +200,7 @@ Line numbers are pre-edit; edit bottom-up or re-grep. Every touched sentence car
 
 ```markdown
 | 5 | **Session-loop protocol** (roles, ordering, single-prompt rule, claim mechanism) | Claudron (knowledge roles) | `docs/CLI_CONTRACT.md` §Session-loop protocol *(amended 2026-10-04 — was "none — changelog lore"; C2 #84 landed it, 0.4.0)* | ✓ the claim is structural — a front-end defers on the registered `hook pre-compact` entry; the `hooks.py:62` sniff is gone (R5 met); Claudlobby composes the loop per bot behind an R3 gate (`tests/test_claudron_loop.py`); a second host's snippet is row 12 |
-| 10 | **Session join key** `(runtime, session_id)` — `runtime ∈ {claude, codex}`; `session_id` the id the runtime hands its hooks, in the class `[A-Za-z0-9][A-Za-z0-9._-]{0,127}` — stated **here, once**: clauDNA `paths.py:32` (`_SID_RE`) and Claudron `ops.py:33` (`_ID_RE`) are its two copies and their tests cite this row (C1 may widen it; Task 3 leg B and the clauDNA mirror move together); plane uid `sess_` + sha256(`session_alias(id, runtime)`)[:32], where `session_alias(platform_session_id, runtime="claude")` is the raw id for `claude` (the default) and `"<runtime>:" + id` otherwise (Claudlobby#2145 F2) | Claudlobby | **planned** (P1 Claudlobby Task 4; P1 Claudlobby Task 10, Half A, opens the Claudron PR that flips this cell): `ids.session_alias(platform_session_id, runtime="claude")` composed into `derive_session_uid(platform_session_id, runtime="claude")` in `claudlobby/plane/ids.py` (today `:79-89`, Claude-only) — the F2 material rule exists in that one function and nowhere else; its text in `documentation/architecture/observable-plane.md`; until then Claudlobby#2145 §2.2 | consumers conform: clauDNA keys sessions by `session_id` and records `runtime` at open (P1 clauDNA); P2's intake sets its session `subject = session_alias(id, runtime)` and its test pins the composition, not a coincidence; Claudron treats provenance `session:<runtime>/<sid>:<seg>` (F9) as an opaque string in both channels (`engine.py:160-161`, `amend.py:37,63,84`) — no engine change; the bought layer's `gen_ai.conversation.id` + `agent.runtime` carry the same key (§10.2) |
+| 10 | **Session join key** `(runtime, session_id)` — `runtime ∈ {claude, codex}`; `session_id` the id the runtime hands its hooks, in the class `[A-Za-z0-9][A-Za-z0-9._-]{0,127}` — stated **here, once**: clauDNA `paths.py:32` (`_SID_RE`) and Claudron `ops.py:33` (`_ID_RE`) are its two copies and their tests cite this row (C1 may widen it; Task 3 leg B and the clauDNA mirror move together); plane uid `sess_` + sha256(`session_alias(id, runtime)`)[:32], where `session_alias(platform_session_id, runtime="claude")` is the raw id for `claude` (the default) and `"<runtime>:" + id` otherwise (Claudlobby#2145 F2) | Claudlobby | **planned** (P1 Claudlobby Task 4; P1 Claudlobby Task 10, Half A, opens the Claudron PR that flips this cell): `ids.session_alias(platform_session_id, runtime="claude")` composed into `derive_session_uid(platform_session_id, runtime="claude")` in `claudlobby/plane/ids.py` (today `:79-89`, Claude-only) — the F2 material rule exists in that one function and nowhere else; its text in `documentation/architecture/observable-plane.md`; until then Claudlobby#2145 §2.2 | consumers conform: clauDNA keys sessions by `session_id` and records `runtime` at open (P1 clauDNA); P2's intake sets its session `subject = session_alias(id, runtime)` and its test pins the composition, not a coincidence; Claudron treats provenance `session:<runtime>/<sid>:<seg>` (F9) as an opaque string in both channels (`engine.py:160-161`, `amend.py:37,63,84`) — no engine change; the normalized session attribute carries the same key (§10.2) |
 | 11 | **clauDNA export contract** — `claudna.export/1` and its planned additions: item `session.runtime` (P1), `--include-skipped` status items and `segment{sealed_at,sealed_by,counts}` (P3), and the `entrypoint.json` record (`claudna.entrypoint/1`, F16, P3) | clauDNA | `documentation/specs/2026-09-28-session-store-design.md` §8 (the envelope: shipped, v0.26.0); the additions **planned** there (P1/P3 clauDNA; P3 clauDNA Task 9 opens the Claudron PR that flips this cell) | consumer: Claudlobby's `session-export` job (P3) conforms to §8 and reads `entrypoint.json` for the door's path — never Claude Code's `installed_plugins.json` (F16); R6: Claudlobby asserts no field before the clauDNA release that ships it |
 | 12 | **Codex session-loop snippet** — the normative Codex `hooks.json` shape for the engine's roles; same `<executable> --vault <root> hook <event>` command form and `hook <event>` identity suffix (`CLI_CONTRACT.md:320-323,366-370`) | Claudron | **planned** (P4 Claudron, after C1/C3 — P4 itself flips this cell): its own `##` section in `docs/CLI_CONTRACT.md` with a parity test (`doc_parity.fenced_block` reads one fence per `##` section) and a capability (e.g. `codex-session-loop`) gated per §Capability probe | R6: no composer renders it before the release that ships it; the companion (Claudlobby#2149) bumps the pin afterwards. If C3 shows Codex cannot block at PreCompact, the P4 text records R-capture-prompt as not held on Codex |
 ```
@@ -197,6 +208,9 @@ Line numbers are pre-edit; edit bottom-up or re-grep. Every touched sentence car
   Each *planned* cell names the PR that flips it to the shipped text (X14): row 10 — P1 Claudlobby Task 10,
   Half A (that plan's unheld release N carries everything the cell cites); row 11 — P3 clauDNA Task 9; row 12
   — P4 Claudron. Until that PR merges the cell stays *planned* (R6), whatever the sibling has shipped.
+  Row 10 names **no attribute** (ironclad cycle 2): §10.2 (Step 3) names F5's attributes as the ratified state,
+  so if A-F5 (epic §16) makes them intake-internal, only §10.2's parenthetical is re-amended — never the
+  join-key row.
 
 - [ ] **Step 7 — §10.8 item 12, after item 11 (`:716`):**
 
@@ -431,10 +445,16 @@ def test_the_session_id_class_is_the_documented_one():
   `##`.
 - [ ] `grep -n "^| 1[0-2] |" <spec>` prints three rows; each "Authoritative text" cell of rows 10–12
   contains `planned` and names its flipping PR; row 10 contains `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`,
-  `session_alias(platform_session_id, runtime="claude")` and `Task 10, Half A`; row 11 contains `session.runtime`;
+  `session_alias(platform_session_id, runtime="claude")` and `Task 10, Half A`, and no attribute name
+  (`grep -n "^| 10 |" <spec> | grep -c "gen_ai\.\|agent\.runtime"` prints 0 — §10.2 alone names them); row 11 contains `session.runtime`;
   `grep -c "amended 2026-10-04" <spec>` = 3 (the three case-sensitive stamps the steps
   write: §10.2 Claudron *Never*, §10.3 Q1, row 5) and `grep -ci "amended 2026-10-04" <spec>` = 4 (adds the
   status sentence's "Amended"); the Claudlobby *Owns* "Added" and R8's "added" stamps are counted by neither.
+- [ ] D1 (Dependencies): ruled before review → the Codex clauses (§10.2 Claudlobby *Owns*, R8, rows 10 and 12,
+  the amendment section's items 3 and 5, Task 4's CHANGELOG bullet) name Codex; unruled → each reads "a second
+  composed runtime (Claudlobby#2145 D1/F18)", `git diff origin/main -- <spec> | grep '^+' | grep -ci codex`
+  prints 0, and the follow-up that lands the name is opened when D1 is ruled. Claudron's `PROJECT_MISSION.md`
+  is untouched either way.
 - [ ] `grep -n "event_cmds" claudron/hooks.py` prints nothing; `grep -n "SNIPPET_EVENTS" claudron/hooks.py`
   prints five lines (the definition `:235`, `settings_snippet` `:264`, `settings_shape_error`'s docstring
   `:277` and loop `:287`, `merge_settings`).
@@ -470,10 +490,12 @@ def test_the_session_id_class_is_the_documented_one():
 
 area: boundary spec · hooks adapter · ops log — effort: **S** — risk: **Low** (a plan-tier document, a
 refactor pinned by the existing parity tests, a conditional regex pin; on leg A no contract text changes) —
-priority: P1, order 1 of 6 (epic §10.1) — related: Claudfather/Claudlobby#2145 (epic), Claudlobby#2149
+priority: P1, §10 order 4 (plan 1 of 6 in epic §10.1) — mission decision: D1 (Claudlobby#2145 §16), for
+the Codex values only — related: Claudfather/Claudlobby#2145 (epic), Claudlobby#2149
 (companion, reads rows 10–12), clauDNA#404, Claudron#84/#85/#102 (the facts the stale lines are fixed to),
 Claudron#178/#179 (prior art row 12 and C3 carry) — reforged 2026-10-05 (ironclad cycle 1: C1–C7, X1, X7,
-X14; the Collector wording is neutral so A-F4, if ratified, touches only Claudlobby's plans).
+X14; the Collector wording is neutral so A-F4, if ratified, touches only Claudlobby's plans; cycle 2: the §10
+order, D1, row 10 attribute-free so A-F5, if ratified, re-amends only §10.2's parenthetical).
 
 ## Canary answers this PR waits on
 
