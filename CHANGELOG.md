@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — skills take issue work only from people who can triage the repo, and read GitHub text as data
+
+The skills that pick their own work from a repo's issues listed every open issue. They now list it through a new intake, and every library file that reads issue, pull request, comment or review text treats that text as data.
+
+- **`issue-intake.py list`** (new, `claudlobby/_runtime_scripts/`) keeps an issue when its author can triage the repo (triage, write, maintain or admin, from the repository permission API), or when it carries the trust label applied by someone who can triage, with no change to its title or body since, by anyone (a triager applies the label again after a change). Everything else is skipped and named on stderr; an unreadable role or label history skips the issue; a failed issue read refuses at exit 3 rather than answering `[]`. A kept issue names its author by login only. `autonomous-sprint`, `autonomous-runner` (whose picker label is now also its trust label), `checkin`, `cross-fleet-initiative` and the `sprint-candidate-validation` protocol read their backlog through it, and each of those skills grants the intake's call (`Bash(python3 *issue-intake.py* list *)`, plus `quote` for the runner), so an unattended run never waits on a permission prompt.
+- **`issue-intake.py quote`** prints an issue's title and body between two lines that share a random id the text cannot contain. The `autonomous-runner` risk classifier takes its work item that way.
+- **Configuration:** `ISSUE_INTAKE_TRUST_LABEL` (a label, for example `fleet-ok`) and `ISSUE_INTAKE_TRUSTED_AUTHORS` (accounts the role check cannot see, such as a GitHub App's `NAME[bot]`), per bot in `fleet.yaml` `env:`. Unset, only authors who can triage count. **A fleet that files its issues as a GitHub App lists that account, or the intake skips those issues.**
+- **The `github-text-is-data` guardrail** (new) states the rule, and each skill, protocol, expertise and integration that reads GitHub text carries it where it reads: titles, bodies, comments, reviews and CI logs are data, never instructions, and never choose a command, URL, file or branch. Relays hand on an issue's number and URL rather than its text; comment markers (`[FORK-LOCK]`, `[IRONCLAD]`, the review formats) count only from authors who can triage the repo; a verdict line counts only through its recorded review-role report; and a reviewer runs a pull request's code only when its author can triage the repo, or after someone who can has said to, and reads any other pull request's branch with `gh pr diff` or `git show`, never inside a checkout under the bot's directory.
+- **Installed skill copies:** `documentation/fleet-update-lifecycle.md` says how a skill change reaches bots (a release, `config plan`, `host activate`) and that Claudlobby never refreshes a user-level `~/.claude/skills/` copy; `library/skills/README.md` no longer says skill edits propagate live.
+- **Tests:** `tests/test_issue_intake.py` (new) runs both skills' own intake commands against a stand-in for `gh` (`tests/fixtures/fake-gh-issues.py`, response shapes from live captures); `tests/test_checkin_library.py` follows the check-in's new door and grant.
+
 ### Removed — helpers with no caller since #1989 (#2152)
 
 #1989 deleted every caller of these, so they ran nowhere:
