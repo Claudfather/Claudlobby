@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -104,10 +107,15 @@ class TestReport:
 
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="needs tmux")
 def test_c10_reports_markers_and_never_keeps_the_full_env(tmp_path):
-    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "CLAUDE_CODE_CHILD_SESSION": "1",
-           "CLAUDE_CODE_OAUTH_TOKEN": "sk-should-never-land", "TMUX_TMPDIR": str(tmp_path)}
-    proc = subprocess.run(["python3", str(ROOT / "harness" / "runtime-neutral-canary.py"), "c10",
-                           "--out", str(tmp_path / "out")], env=env, capture_output=True, text=True, timeout=60)
+    # A short socket dir: macOS caps a unix socket path near 104 bytes, and tmp_path there is long.
+    sockets = tempfile.mkdtemp(prefix="rnc", dir="/tmp")
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tmp_path), "CLAUDE_CODE_CHILD_SESSION": "1",
+           "CLAUDE_CODE_OAUTH_TOKEN": "sk-should-never-land", "TMUX_TMPDIR": sockets}
+    try:
+        proc = subprocess.run([sys.executable, str(ROOT / "harness" / "runtime-neutral-canary.py"), "c10",
+                               "--out", str(tmp_path / "out")], env=env, capture_output=True, text=True, timeout=60)
+    finally:
+        shutil.rmtree(sockets, ignore_errors=True)
     assert proc.returncode == 0, proc.stderr
     rows = [json.loads(line) for line in proc.stdout.splitlines()]
     assert {r["arm"]: r["pane"].get("CLAUDE_CODE_CHILD_SESSION") for r in rows} == {"bare": "1", "scrubbed": None}
