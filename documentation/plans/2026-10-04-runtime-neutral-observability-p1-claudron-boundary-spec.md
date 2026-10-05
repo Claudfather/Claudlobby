@@ -18,19 +18,24 @@ repos: Claudfather/Claudron
 > `CLAUDNA_STATE_DIR` line (order 3) precede it. Code references are to Claudron `6ca2b94` (the `v0.9.0` tag;
 > `origin/main` `8e895cb` adds only `.github/workflows/tests.yml` and three CHANGELOG lines). `spec:` above is
 > a path in the **Claudron** repo. Depends on: no code in another repo; its Codex values rest on the mission
-> decision **D1** (Dependencies — if D1 is unruled when the PR is ready, the Codex names wait for the ruling and
-> nothing else does). Waits on canaries: **C1, for Task 3 only**; Tasks 1, 2 and 4 do not wait. Reforged
-> 2026-10-05 from ironclad cycle 1 (directives C1–C7; cross-cutting X1, X7, X14) and its interim fold (the P4
-> flag's naming caveat, the `session_alias` default, row 10's flipper named as P1 Claudlobby's unheld Half A,
+> decision **D1, ratified**: F18 (a) locked 2026-10-05
+> ([FORK-LOCK F18](https://github.com/Claudfather/Claudlobby/pull/2144#issuecomment-6000050806)) — Claudlobby
+> composes Claude Code and, by name, Codex. Waits on canaries: **C1, for Task 3 only**; Tasks 1, 2 and 4 do not
+> wait. Reforged 2026-10-05 from ironclad cycle 1 (directives C1–C7; cross-cutting X1, X7, X14) and its interim
+> fold (the P4 flag's naming caveat, the `session_alias` default, row 10's flipper named as P1 Claudlobby's Half A,
 > row 11's `session.runtime`), then from ironclad cycle 2 (the §10 order, the D1 dependency, row 10 names no
-> attribute) — no fork or decision changed.
+> attribute), then the operator's rulings of 2026-10-05 were applied: F18 (a) locked, so the Codex names are written
+> plainly; A-F5 ratified ([FORK-LOCK F5](https://github.com/Claudfather/Claudlobby/pull/2144#issuecomment-6000051858)),
+> so §10.2 names no semantic-convention attribute and gives the vendor→house mapping to the `plane-otel` intake.
+> No step waits on a ruling, and no mission decision is pending.
 
 ## Summary
 
 Three small things in one PR, so the boundary spec names the agent runtimes before any code assumes them.
 (a) Amend `documentation/plans/2026-07-20-claudfather-boundary-separation.md`: §10.2 gives Claudlobby the
-*bought layer* (the normalization layer and the normalized attribute names — worded mechanism-neutrally, so
-the Collector question, F4 and its proposed amendment A-F4 in the epic's §16, never re-amends the register);
+*bought layer* (the normalization layer and the normalized attribute names; the vendor→house mapping is the
+`plane-otel` intake's — F4 and F5 as re-locked 2026-10-05 — and the register names no semantic-convention
+attribute, so a change in how Claudlobby implements the mapping never re-amends it);
 §10.4 gains rule R8 (the epic's §2.3 rule — runtime-specific signals are enrichment only) and register rows
 10–12 for the `(runtime, session_id)` join key (Claudlobby), clauDNA's export-contract additions and
 `entrypoint.json` (clauDNA), and the Codex session-loop snippet (Claudron, landing in P4) — each unshipped
@@ -108,22 +113,24 @@ name or normalization text (P2, Claudlobby); the Claudlobby `claudron` pin bump 
 ## Implementation Plan
 
 ### Dependencies
-None in code. F1–F17 are ratified (2026-10-04); this is §10 order 4 (after P0's Claude batch, P2-b and the
-order-3 per-bot `CLAUDNA_STATE_DIR` line) and plan 1 of §10.1's six. **The mission decision it rests on: D1**
-(Claudlobby#2145 §16, the proposed fork F18). This PR rests on D1 for the Codex values in §10.2 and rows 10/12;
-Claudron's own mission (`PROJECT_MISSION.md:17`, "any agent fleet") needs no amendment. If the PR is ready
-before D1 is ruled, the clauses that name Codex — Step 3's §10.2 *Owns* sentence, R8's two parentheticals,
-row 10's `runtime` set, row 12, the amendment section's items 3 and 5 and Task 4's CHANGELOG bullet — are
-written as "a second composed runtime (Claudlobby#2145 D1/F18)", and the name lands with the ruling in a
-one-line follow-up Claudron PR (the row-flip form, Blocks). Task 3 is untouched by this: it waits on C1, a
-Codex-install canary, anyway.
+None in code. F1–F18 are locked (F1–F17 ratified 2026-10-04; F3, F4, F5 and F17 re-locked and F18 locked on
+2026-10-05); this is §10 order 4 (after P0's Claude batch, P2-b and the order-3 per-bot `CLAUDNA_STATE_DIR` line)
+and plan 1 of §10.1's six. **The mission decision it rests on, D1, is ratified** (Claudlobby#2145 §16): F18 (a),
+[FORK-LOCK F18](https://github.com/Claudfather/Claudlobby/pull/2144#issuecomment-6000050806), 2026-10-05 —
+Claudlobby composes and supervises agent CLIs, Claude Code today and Codex through #2149, a further CLI by its
+own fork. So every clause that names Codex — Step 3's §10.2 *Owns* sentence, R8's two parentheticals, row 10's
+`runtime` set, row 12, the amendment section's items 3 and 5 and Task 4's CHANGELOG bullet — names it plainly.
+Claudron's own mission (`PROJECT_MISSION.md:17`, "any agent fleet") needs no amendment. §10.2's attribute wording
+follows F5 as re-locked by A-F5 ([FORK-LOCK F5](https://github.com/Claudfather/Claudlobby/pull/2144#issuecomment-6000051858)):
+the GenAI semantic-convention names are the intake's internal mapping, so the register names none. Task 3 waits on
+C1, a Codex-install canary.
 
 ### Blocks
 P2 (Claudlobby) — the attribute contract needs its owner named first (R1/R2). P4 Claudron — row 12 fixes
 the owner and the parity-reader constraint the Codex snippet must satisfy; Task 2 is the shape its event
 map extends. The companion (Claudlobby#2149) — reads rows 10–12 under R6. Row flips: P1 Claudlobby Task 10,
-Half A (row 10 — after Claudlobby's release N, which ships everything the cell cites; the held Half B changes
-none of it), P3 clauDNA Task 9 (row 11) and P4 Claudron (row 12) each open the one-line Claudron PR that turns
+Half A (row 10 — after Claudlobby's release N, which ships everything the cell cites; Half B changes none of
+it), P3 clauDNA Task 9 (row 11) and P4 Claudron (row 12) each open the one-line Claudron PR that turns
 a *planned* cell into the shipped text — never before the owning release exists.
 
 ### Steps
@@ -168,13 +175,17 @@ Line numbers are pre-edit; edit bottom-up or re-grep. Every touched sentence car
 - [ ] **Step 3 — §10.2 Claudlobby *Owns* (`:424-427`), the bought layer.** Append: "*(Added 2026-10-04)*
   **And the bought layer:** the agent runtimes (Claude Code, Codex) export their own intra-session
   telemetry; Claudlobby owns **the normalization layer** that turns it into the plane's vocabulary and **the
-  normalized attribute names** that come out (`gen_ai.conversation.id`, `agent.runtime`, … — OTel GenAI
-  semconv plus house names, Claudlobby#2145 F5). That is a contract with one owner (R1 here; R2 when P2
-  lands its text in Claudlobby); neither sibling implements OpenTelemetry. See §Amendment — 2026-10-04."
-  The wording is **mechanism-neutral on purpose** (X7): whether the layer is an `otelcol-contrib`
-  configuration (F4 as ratified) or the `plane-otel` intake's own mapping (A-F4, epic §16) is Claudlobby's
-  to decide under its own plans, and swapping one for the other must never re-amend this register. The word
-  "Collector" does not enter the spec.
+  normalized attribute names** that come out — the plane's registry names, which are the reader surface. The
+  normalized session attribute carries the plane's house key (the join key, #10); the vendor→house mapping is
+  the intake's — the `plane-otel` intake's one mapping dict is the F5 artefact (Claudlobby#2145 F4/F5) — and this
+  register names no semantic-convention attribute. That is a contract with one owner (R1 here; R2 when P2 lands
+  its text in Claudlobby); neither sibling implements OpenTelemetry. See §Amendment — 2026-10-04."
+  The wording **names where the mapping lives, not how it is built** (X7, as ruled): F4 was re-locked on
+  2026-10-05 (A-F4 — no Collector; each bot exports OTLP/HTTP-JSON straight to the opt-in `plane-otel` intake) and
+  F5 with it (A-F5 — the GenAI semconv names are the intake's internal vendor→house mapping; the plane's registry
+  names are the reader surface; the Claudron register names no semconv attribute), so the register says the
+  mapping is the intake's and names no attribute; how the intake implements it is Claudlobby's, under its own
+  plans, and never re-amends this register. The word "Collector" does not enter the spec.
 - [ ] **Step 4 — §10.3 Q1 (`:449-450`).** "(Claudron's `hooks.py` is the engine's Claude Code adapter;
   *amended 2026-10-04:* one adapter per agent runtime, and nothing past the adapter is runtime-specific —
   R8)."
@@ -206,11 +217,11 @@ Line numbers are pre-edit; edit bottom-up or re-grep. Every touched sentence car
 ```
 
   Each *planned* cell names the PR that flips it to the shipped text (X14): row 10 — P1 Claudlobby Task 10,
-  Half A (that plan's unheld release N carries everything the cell cites); row 11 — P3 clauDNA Task 9; row 12
+  Half A (that plan's release N carries everything the cell cites); row 11 — P3 clauDNA Task 9; row 12
   — P4 Claudron. Until that PR merges the cell stays *planned* (R6), whatever the sibling has shipped.
-  Row 10 names **no attribute** (ironclad cycle 2): §10.2 (Step 3) names F5's attributes as the ratified state,
-  so if A-F5 (epic §16) makes them intake-internal, only §10.2's parenthetical is re-amended — never the
-  join-key row.
+  Row 10 names **no attribute** (ironclad cycle 2), and since A-F5 was ratified (2026-10-05) §10.2 (Step 3) names
+  none either: the attribute names are the plane's registry — Claudlobby's text under R2 — and the vendor→house
+  mapping is the intake's, so neither the join-key row nor §10.2 moves when a name does.
 
 - [ ] **Step 7 — §10.8 item 12, after item 11 (`:716`):**
 
@@ -230,14 +241,16 @@ Line numbers are pre-edit; edit bottom-up or re-grep. Every touched sentence car
 ## Amendment — 2026-10-04: the agent runtimes enter the frame
 
 Recorded for Claudlobby#2145 (`2026-10-04-runtime-neutral-observability-plan.md`, Claudlobby repo; forks
-F1–F17 ratified 2026-10-04); grounds in its §2.1 (layers and owners), §2.2 (the join key) and §2.3
-(enrichment only). **The triad stands; the frame gains a fourth participant that owns nothing here — the
-agent runtimes — and the register names who owns what we buy from them.**
+F1–F17 ratified 2026-10-04, F18 — Claudlobby composes Codex by name — locked 2026-10-05); grounds in its §2.1
+(layers and owners), §2.2 (the join key) and §2.3 (enrichment only). **The triad stands; the frame gains a
+fourth participant that owns nothing here — the agent runtimes — and the register names who owns what we buy
+from them.**
 
 1. **§10.2 — the bought layer is Claudlobby's.** Both runtimes export OpenTelemetry natively; the fleet's
    own per-tool-call events duplicated it (84% of system-event volume, read by nothing — #2145 §1). The
    normalization layer and the normalized attribute names are a contract: one owner now (R1), text
-   when P2 writes it in Claudlobby (R2), consumers by gate after that (R3).
+   when P2 writes it in Claudlobby (R2), consumers by gate after that (R3). The vendor→house mapping is the
+   `plane-otel` intake's (#2145 F4/F5); the register names no semantic-convention attribute.
 2. **§10.4 R8** — #2145 §2.3, made a register rule because it bounds what *any* system may build on from a
    surface no sibling owns.
 3. **§10.4 rows 10–12** — the join key (Claudlobby), the export-contract additions (clauDNA), the Codex
@@ -445,16 +458,18 @@ def test_the_session_id_class_is_the_documented_one():
   `##`.
 - [ ] `grep -n "^| 1[0-2] |" <spec>` prints three rows; each "Authoritative text" cell of rows 10–12
   contains `planned` and names its flipping PR; row 10 contains `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`,
-  `session_alias(platform_session_id, runtime="claude")` and `Task 10, Half A`, and no attribute name
-  (`grep -n "^| 10 |" <spec> | grep -c "gen_ai\.\|agent\.runtime"` prints 0 — §10.2 alone names them); row 11 contains `session.runtime`;
+  `session_alias(platform_session_id, runtime="claude")` and `Task 10, Half A`, and no attribute name; row 11
+  contains `session.runtime`. **A-F5:** `grep -c "gen_ai\.\|agent\.runtime" <spec>` prints 0 — neither row 10 nor
+  §10.2 names an attribute — and `grep -ci "collector" <spec>` prints 0; §10.2's Claudlobby *Owns* sentence says
+  the vendor→house mapping is the intake's and its mapping dict the F5 artefact;
   `grep -c "amended 2026-10-04" <spec>` = 3 (the three case-sensitive stamps the steps
   write: §10.2 Claudron *Never*, §10.3 Q1, row 5) and `grep -ci "amended 2026-10-04" <spec>` = 4 (adds the
   status sentence's "Amended"); the Claudlobby *Owns* "Added" and R8's "added" stamps are counted by neither.
-- [ ] D1 (Dependencies): ruled before review → the Codex clauses (§10.2 Claudlobby *Owns*, R8, rows 10 and 12,
-  the amendment section's items 3 and 5, Task 4's CHANGELOG bullet) name Codex; unruled → each reads "a second
-  composed runtime (Claudlobby#2145 D1/F18)", `git diff origin/main -- <spec> | grep '^+' | grep -ci codex`
-  prints 0, and the follow-up that lands the name is opened when D1 is ruled. Claudron's `PROJECT_MISSION.md`
-  is untouched either way.
+- [ ] D1 ratified (F18 (a), Dependencies): the Codex clauses (§10.2 Claudlobby *Owns*, R8, rows 10 and 12, the
+  amendment section's items 3 and 5, Task 4's CHANGELOG bullet) name Codex plainly — `grep -c "second composed
+  runtime" <spec>` prints 0 — and the amendment section's opening line names F18; the PR body links the
+  [FORK-LOCK F18](https://github.com/Claudfather/Claudlobby/pull/2144#issuecomment-6000050806) comment. Claudron's
+  `PROJECT_MISSION.md` is untouched.
 - [ ] `grep -n "event_cmds" claudron/hooks.py` prints nothing; `grep -n "SNIPPET_EVENTS" claudron/hooks.py`
   prints five lines (the definition `:235`, `settings_snippet` `:264`, `settings_shape_error`'s docstring
   `:277` and loop `:287`, `merge_settings`).
@@ -477,7 +492,9 @@ def test_the_session_id_class_is_the_documented_one():
 - Do not "unify" the tests' `EVENT_CMD` copies (`test_hooks.py:467`, `test_doctor_hooks.py:25`) with
   `SNIPPET_EVENTS` — a test that imports the map it checks pins nothing.
 - Do not put R8, the rows or the bought layer into `docs/` (`docs/CLAUDE.md:24-27`); contract *text* for
-  rows 10–12 lands in each owner's repo when it ships (R2). Do not word any of them as existing (R6).
+  rows 10–12 lands in each owner's repo when it ships (R2). Do not word any of them as existing (R6). Do not
+  name a semantic-convention or registry attribute anywhere in the spec (A-F5: the mapping is the intake's,
+  the names are Claudlobby's text), and do not write "Collector".
 - Do not refresh every stale fact in the spec (the `@v0.2.0` pin at `:429`, §10.5.1's envisaged claim
   mechanism, §10.5.5, §10.7, the "25 lessons"): only the lines this amendment touches, plus the §10.8 item
   that tells a reader which sections are history. Do not edit §1–§9 (§10 preamble, `:358-362`).
@@ -490,12 +507,13 @@ def test_the_session_id_class_is_the_documented_one():
 
 area: boundary spec · hooks adapter · ops log — effort: **S** — risk: **Low** (a plan-tier document, a
 refactor pinned by the existing parity tests, a conditional regex pin; on leg A no contract text changes) —
-priority: P1, §10 order 4 (plan 1 of 6 in epic §10.1) — mission decision: D1 (Claudlobby#2145 §16), for
-the Codex values only — related: Claudfather/Claudlobby#2145 (epic), Claudlobby#2149
+priority: P1, §10 order 4 (plan 1 of 6 in epic §10.1) — mission decision: none pending (D1 ratified: F18 (a),
+locked 2026-10-05, Codex named plainly) — related: Claudfather/Claudlobby#2145 (epic), Claudlobby#2149
 (companion, reads rows 10–12), clauDNA#404, Claudron#84/#85/#102 (the facts the stale lines are fixed to),
 Claudron#178/#179 (prior art row 12 and C3 carry) — reforged 2026-10-05 (ironclad cycle 1: C1–C7, X1, X7,
-X14; the Collector wording is neutral so A-F4, if ratified, touches only Claudlobby's plans; cycle 2: the §10
-order, D1, row 10 attribute-free so A-F5, if ratified, re-amends only §10.2's parenthetical).
+X14, the bought layer worded without a mechanism; cycle 2: the §10 order, D1, row 10 attribute-free; the
+2026-10-05 rulings: F18 (a) locked, and A-F5 ratified — §10.2 names no attribute and gives the mapping to the
+`plane-otel` intake).
 
 ## Canary answers this PR waits on
 

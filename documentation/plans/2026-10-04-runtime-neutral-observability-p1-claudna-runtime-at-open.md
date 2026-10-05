@@ -18,15 +18,17 @@ repos: Claudfather/clauDNA
 > `skills/session/resume.md` and `CHANGELOG.md`). Depends on: nothing in another repo (the Claudron
 > boundary-spec PR, §10.1 row 1, should merge first so register rule R2 is satisfied before the export
 > contract changes, but no code here waits on it). Waits on canaries: **none** — every value this PR
-> records is clauDNA's own vocabulary; the Codex host that will write `runtime: "codex"` is P4. Depends on
-> one operator decision: **D2** (Task 5 Step 2b — the clauDNA mission amendment, proposed here and ratified by
-> approving this PR). 0.27.0 is cut after D2; if D2 is declined, or explicitly deferred by the operator ("deferred"
-> is an operator statement, never D2 merely unruled), 0.27 ships `choices=("claude",)` and no mission text, and
-> `codex` and the mission text land with the ruling. Reforged 2026-10-05 from
+> records is clauDNA's own vocabulary; the Codex host that will write `runtime: "codex"` is P4. Carries one
+> operator decision: **D2 — ratified 2026-10-05**
+> ([rulings comment](https://github.com/Claudfather/Claudlobby/pull/2144#issuecomment-6000052137), which records
+> D2): the clauDNA mission amendment as worded in Task 5 Step 2b; this PR carries it, and 0.27.0 ships the closed
+> `{claude, codex}` vocabulary with that mission text. Reforged 2026-10-05 from
 > ironclad cycle 1 (N1–N9; cross-cutting X4, X6, X11, X16, X21) and its interim fold (the item field spelled
-> `session.runtime`; the Claudlobby pieces this plan names are P1 Claudlobby's unheld Half A), then from
-> ironclad cycle 2 (the D2 wording corrected for five defects, the D2 gate and contingency, spec rules 1 and 2
-> mechanism-neutral and cited, the P3 release floors) — no fork changed.
+> `session.runtime`; the Claudlobby pieces this plan names are P1 Claudlobby's Half A), then from
+> ironclad cycle 2 (the D2 wording corrected for five defects, spec rules 1 and 2 mechanism-neutral and cited,
+> the P3 release floors), then the operator's rulings of 2026-10-05 were applied: D2 ratified (Task 5 Step 2b is
+> unconditional) and A-F10 declined for this epic (F10(a) stands, so mission `:24` takes the F10(a) reading).
+> No step waits on a ruling.
 
 ## Summary
 
@@ -39,8 +41,8 @@ spec §8 the item-field table it never had — this plan is that table's one aut
 Qualify harvest provenance for non-Claude sessions per F9 (`session:<runtime>/<sid>:<seg>`; Claude refs
 byte-identical). Amend spec §1.1 rule 1 (the plane stops recording tool calls after P2) and rule 4 (F15:
 comparison waived — the frozen pre-registration is withdrawn by name, one summarizer, coverage kept by F6),
-the Claude-only wording in §4.1/§4.2/§6.2/§7.2/§10, and propose the clauDNA mission amendment (D2) the closed
-`{claude, codex}` vocabulary needs. Release 0.27.0: the P3 plans consume these fields.
+the Claude-only wording in §4.1/§4.2/§6.2/§7.2/§10, and carry the clauDNA mission amendment (D2, ratified
+2026-10-05) the closed `{claude, codex}` vocabulary needs. Release 0.27.0: the P3 plans consume these fields.
 Deliberately left to later PRs: `--include-skipped`, `entrypoint.json` and the item's `segment` object
 (P3); the `host_claude`/`host_codex` split, `--host` selection and any Codex payload (P4).
 
@@ -140,7 +142,7 @@ to validate a `/1` document would be to serve it, and serving it could report `c
 ## Implementation Plan
 
 ### Dependencies
-None in code. Register order: the Claudron boundary-spec PR (§10.1 row 1) ideally merges first (R2). **The mission decision this plan depends on (N6/X11): D2** — clauDNA's `PROJECT_MISSION.md` says "for Claude Code" (`:5`, `:15`) and "clauDNA does not handle telemetry" / "No phone-home" (`:33`, `:62`), while this PR ships a closed `{claude, codex}` runtime vocabulary, the store already records `tool.failed`/`skill.invoked` locally and clauDNA already writes opt-in `skill_invocation` lines (`CLAUDNA_TELEMETRY=1`); Task 5 Step 2b proposes the amendment (what clauDNA writes — only to the user's disk, never transmitted — and which surfaces each agent host receives: #315 already admits Cursor, so the question is surfaces, not hosts), and the operator ratifies it by approving this PR (D2 is approval-by-PR, epic §16). **0.27.0 is cut after D2. If D2 is declined or deferred, 0.27 ships `choices=("claude",)` and no mission text; `codex` and the mission text land with the ruling** (Task 7). The epic's §16 records D2.
+None in code. Register order: the Claudron boundary-spec PR (§10.1 row 1) ideally merges first (R2). **The mission decision this plan carries (N6/X11): D2, ratified 2026-10-05** by the operator ([rulings comment on #2144](https://github.com/Claudfather/Claudlobby/pull/2144#issuecomment-6000052137): "D2 — clauDNA's mission amendment, as worded in plan 3 Task 5 Step 2b after cycle 2 — ratified; the plan 3 PR carries it"). clauDNA's `PROJECT_MISSION.md` says "for Claude Code" (`:5`, `:15`) and "clauDNA does not handle telemetry" / "No phone-home" (`:33`, `:62`), while this PR ships a closed `{claude, codex}` runtime vocabulary, the store already records `tool.failed`/`skill.invoked` locally and clauDNA already writes opt-in `skill_invocation` lines (`CLAUDNA_TELEMETRY=1`); Task 5 Step 2b lands the ratified amendment (what clauDNA writes — only to the user's disk, never transmitted — and which surfaces each agent host receives: #315 already admits Cursor, so the question is surfaces, not hosts). **0.27.0 ships the `{claude, codex}` vocabulary and the mission text together** (Task 7). The same comment reaffirms F10(a) (A-F10 declined for this epic; §14 Q10 is its revisit trigger, with P4), which fixes mission `:24`'s reading (Task 5 Step 2b). The epic's §16 records D2.
 
 ### Blocks
 P3 clauDNA (`2026-10-04-runtime-neutral-observability-p3-claudna-export-contract.md`: `--include-skipped`,
@@ -392,7 +394,8 @@ Tasks follow as H3 siblings.
   waiver is that the digest's `session_digest` rows never reached their consumers (Claudlobby#1456/#1503), so
   there was no baseline to compare against." Rule 1 names no mechanism — "normalized by Claudlobby when its
   pipeline (P2-a) is armed", "may have no runtime telemetry export", never "Collector" — as the Claudron
-  register is worded (A-F4 in the epic's §16 may replace the Collector; this spec must not need re-amending).
+  register is worded (F4, re-locked 2026-10-05 by A-F4, has no Collector at all; how Claudlobby normalizes is its
+  own to name, so this spec never needs re-amending for it).
 - [ ] **Step 1b — the pre-registration, withdrawn by name (N3).** `documentation/plans/2026-09-30-summarizer-comparison-preregistration.md:3`
   currently opens `**Status:** ratified by the owner as written, 2026-09-30, and frozen: …`. Prepend a new
   status line and keep the old one as history: `**Status:** withdrawn 2026-10-04 — Claudlobby#2145 F15; the
@@ -418,19 +421,20 @@ Tasks follow as H3 siblings.
   land later without touching the core (#2145 P4)." (N3), then append "The adapter records its runtime at open
   (`runtime: "claude"`); a second host's adapter (#2145 P4) records its own, and everything past the adapter —
   the detached summarizer worker included — reads `SessionFacts.runtime`."
-- [ ] **Step 2b — the clauDNA mission amendment (D2; the operator ratifies by approving this PR; 0.27.0 is cut
-  after D2).** `PROJECT_MISSION.md` (last amended 2026-07-06, the docs-audit note at `:40` is the dated-note
-  form) excludes or misstates what this PR ships and what clauDNA already ships: `:33` "clauDNA does not handle
+- [ ] **Step 2b — the clauDNA mission amendment (D2, ratified 2026-10-05 —
+  [rulings comment](https://github.com/Claudfather/Claudlobby/pull/2144#issuecomment-6000052137); this PR carries
+  it and 0.27.0 ships it).** `PROJECT_MISSION.md` (last amended 2026-07-06, the docs-audit note at `:40` is the
+  dated-note form) excludes or misstates what this PR ships and what clauDNA already ships: `:33` "clauDNA does not handle
   telemetry. Claudosseum does." and `:62` "**Telemetry collection.** No phone-home. Telemetry lives in
   Claudosseum, opt-in." against a store that records `tool.failed`, `skill.invoked`, prompt metadata and segment
   boundaries locally and exports them through `session export`, and against the opt-in `skill_invocation`
   writer (`plugin-hooks/telemetry-emit.sh`, `lib/claudna/session_store/telemetry.py`: a local file under
   `CLAUDNA_TELEMETRY=1`, no network path); `:5` "for Claude Code" against a closed `{claude, codex}` vocabulary,
   `host_codex.py` and a Codex manifest in P4 — and against the Cursor manifest shipped since #315, after the
-  mission's last amendment. Proposed wording, recorded in the epic's §16 as D2 and corrected in ironclad cycle 2
-  for five defects — the earlier text omitted Cursor, extended every surface to Codex where F12 ships store hooks
-  only, cited F8 for hosts where F7/F12 decide them, cast `CLAUDNA_TELEMETRY=1` as hosted telemetry, and left
-  `:24` unread for a Codex host:
+  mission's last amendment. The wording, recorded in the epic's §16 as D2, corrected in ironclad cycle 2 for five
+  defects — the earlier text omitted Cursor, extended every surface to Codex where F12 ships store hooks only,
+  cited F8 for hosts where F7/F12 decide them, cast `CLAUDNA_TELEMETRY=1` as hosted telemetry, and left `:24`
+  unread for a Codex host — and ratified as worded here:
   - `:5`'s first sentence → "clauDNA is the canonical set of skills, hooks, and agents for Claude Code,
     distributed as a marketplace plugin; another agent host receives the surfaces its plugin model can carry,
     each by an approval-gated decision — Cursor: skills and agents, no hooks (#315); Codex: the session store's
@@ -443,23 +447,18 @@ Tasks follow as H3 siblings.
   - `:62` → "**Telemetry collection.** No phone-home. clauDNA writes only to the user's disk — the session
     store, which exports on request (spec §1.1 rule 1, §8), and, with `CLAUDNA_TELEMETRY=1`, the
     `skill_invocation` lines Claudosseum ingests; scoring and any hosted telemetry live in Claudosseum."
-  - `:24` gains one clause, **chosen with A-F10** (epic §16): (i) if A-F10 is ratified (each host summarizes
-    with its own runner) — "Installing clauDNA never requires an account or API key beyond the host's own.";
-    (ii) while F10(a) stands — "Installing clauDNA never requires an account or API key; a Codex host's
-    summaries run through `claude -p` under F10(a)." "The plugin is self-contained." stays either way. The PR
-    carries the reading the ruling selects; A-F10 is ruled with P4, so if it is unruled at approval the PR
-    carries (ii), the ratified state, and a later ratification swaps in (i) with the P4 clauDNA PR.
+  - `:24` gains one clause: "Installing clauDNA never requires an account or API key; a Codex host's summaries
+    run through `claude -p` under F10(a)." F10(a) stands — A-F10 (a per-host summarizer runner) was declined for
+    this epic on 2026-10-05, and §14 Q10 is its revisit trigger, with P4. "The plugin is self-contained." stays.
   - Optionally `:30` → "…a marketplace plugin that Claudlobby bots install and any Claude Code (or Cursor)
     user can install…".
   - `:15` stays (Claude Code remains the north star's host). A dated note after `:24` in the `:40` form (a `>`
     blockquote with a bold dated lead) names #2145, D2, F7/F12 (the Codex surfaces) and F8 (the activity-layer
     direction behind `:33`/`:62`).
 
-  The CHANGELOG bullet below names it; the PR body quotes the replacements and asks for ratification in so many
-  words. **If D2 is declined or deferred, 0.27 ships `choices=("claude",)` and no mission text** — the schema's
-  `enum` follows the registry (the vocabulary gate pins the two together) and the test legs that open a `codex`
-  session wait with it; `codex` and the mission text land with the ruling. (The Claudlobby sibling is D1 — the
-  P1 Claudlobby plan's Task 5 Step 2, in its Half A.)
+  The CHANGELOG bullet below names it; the PR body quotes the replacements and links the ratification (the
+  rulings comment above). (The Claudlobby sibling is D1 — F18 (a), locked 2026-10-05 — which the P1 Claudlobby
+  plan's Task 5 Step 2 lands in its Half A.)
 - [ ] **Step 3:** `CHANGELOG.md` `## [Unreleased]` (house format: bold headline, issue in parentheses, prose
   naming files and fields; `### Added` before `### Changed`, above the existing `### Fixed`):
   - Added — **Sessions record which agent runtime opened them** (Claudlobby#2145 P1): `session.opened.runtime`
@@ -483,8 +482,8 @@ Tasks follow as H3 siblings.
     to the user's disk: the session store, exported on request, and, with `CLAUDNA_TELEMETRY=1`, the
     `skill_invocation` lines Claudosseum ingests; it never transmits — and which surfaces each agent host
     receives, each by an approval-gated decision: Cursor skills and agents without hooks (#315), Codex the
-    session store's hooks only (F7/F12); `:24` reads for a Codex host as A-F10's ruling selects; the north star
-    is unchanged. (Absent if D2 was declined or deferred: 0.27's runtime vocabulary is then `claude` only.)
+    session store's hooks only (F7/F12); `:24` says a Codex host's summaries run through `claude -p` (F10(a));
+    the north star is unchanged.
 - [ ] **Step 4:** Commit: `docs(spec): runtime at open, qualified provenance, rules 1 and 4 amended, the F15 pre-registration withdrawn, the mission amended (D2); changelog`.
 
 ### Task 6: the gate — `make check`, the 3.9 runtime leg, the contract leg
@@ -510,9 +509,8 @@ Tasks follow as H3 siblings.
   titled `release: v0.27.0` (the convention of #401), merge, push the tag. The marketplace tracks the default
   branch (CONTRIBUTING "What a marketplace user receives"), so the merge is what users receive. P3 builds on
   it: plan 5 (P3 clauDNA) builds on 0.27.0 and ships 0.28.0, and plan 6 (P3 Claudlobby)'s floor is 0.28.0.
-  0.27.0 is cut after D2 (Task 5 Step 2b): it is the first release whose vocabulary names a non-Claude runtime,
-  and the mission says so first. If D2 is declined or deferred, 0.27 ships `choices=("claude",)` and no mission
-  text; `codex` and the mission text land with the ruling.
+  0.27.0 carries D2's mission text (ratified 2026-10-05; Task 5 Step 2b): it is the first release whose
+  vocabulary names a non-Claude runtime, and the mission says so in the same release.
   Claudlobby bots receive it at their next restart (`start-bot.sh`'s `plugin_ensure`), not on a schedule this
   repo controls.
 
@@ -548,9 +546,9 @@ Claudron` jobs.
 - [ ] `PROJECT_MISSION.md:5` carries the Cursor clause (`Cursor: skills and agents, no hooks (#315)`) and the
   Codex clause citing `F7/F12` and clauDNA#404 — F8 appears only in the dated note; `:33` and `:62` carry the
   `CLAUDNA_TELEMETRY=1` sentence (the `skill_invocation` lines, `plugin-hooks/telemetry-emit.sh`,
-  `telemetry.py`, "never transmits" / "No phone-home"); `:24` carries the A-F10 reading the PR chose; the dated
-  note names #2145, D2, F7/F12 and F8; `:15` is unchanged. If D2 was declined or deferred: the file is
-  unchanged and `events.py`'s `runtime` choices are `("claude",)`.
+  `telemetry.py`, "never transmits" / "No phone-home"); `:24` carries "a Codex host's summaries run through
+  `claude -p` under F10(a)"; the dated note names #2145, D2, F7/F12 and F8; `:15` is unchanged; `events.py`'s
+  `runtime` choices are `("claude", "codex")` and the schema `enum` matches (the vocabulary gate).
 - [ ] `./scripts/release.sh --dry-run minor` prints 0.27.0 and the five CHANGELOG bullets it would move.
 
 ## What NOT To Do
@@ -570,18 +568,20 @@ Claudron` jobs.
 - Do not edit the frozen text of the summarizer pre-registration: the withdrawal is one dated status line citing
   F15 (`ab-gating-rollout.md:39`); the 2026-09-30 document stays legible beneath it.
 - Do not define any §8 item field anywhere but the "Item fields and rules" table (P3 extends it; P4 cites it).
-- Do not cut 0.27.0 with `codex` in the vocabulary before D2 is ratified (declined or deferred: `choices=("claude",)`
-  and no mission text, Task 7); do not write "Collector" into the spec (the normalization layer is Claudlobby's
-  to name).
+- Do not ship the `{claude, codex}` vocabulary without the mission text: D2 is ratified and this PR carries both
+  (Task 5 Step 2b, Task 7); do not write "Collector" into the spec (the normalization layer is Claudlobby's to
+  name).
 
 ## Context
 
 area: session store (events, projection, export, harvest provenance) · spec and mission text · effort: M · risk:
 Low–Med (a projection tag bump touches every reader; mixed-version writers rebuild — lossless, bounded by one
 bot restart cycle, documented) · priority: P1 (§10 order 6, §10.1 row 3; releases before P3) · related: Claudlobby#2145
-(epic; F2, F6, F7, F8, F9, F12, F13, F15; D2; A-F10 for the `:24` clause), Claudlobby#1961 (spec rule 4), Claudlobby#1456/#1503 (the digest never
+(epic; F2, F6, F7, F8, F9, F10, F12, F13, F15; D2, ratified 2026-10-05; A-F10 declined, so the `:24` clause reads
+under F10(a)), Claudlobby#1961 (spec rule 4), Claudlobby#1456/#1503 (the digest never
 reached its consumers — the ground for F15), clauDNA#373 (the pre-registration), clauDNA#395 (the canary-table
-form), clauDNA#300/#306 (Codex adapter prior art) · reforged 2026-10-05 (ironclad cycle 1).
+form), clauDNA#300/#306 (Codex adapter prior art) · reforged 2026-10-05 (ironclad cycles 1 and 2; the 2026-10-05
+rulings applied).
 
 ## Canary answers this PR waits on
 
