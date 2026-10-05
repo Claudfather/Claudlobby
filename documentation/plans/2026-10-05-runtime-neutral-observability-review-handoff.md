@@ -23,7 +23,7 @@ has merged; the review merged nothing by design.
 | `5df2429b` | Ironclad cycle 1 fold (7 lenses; [comment](https://github.com/Claudfather/Claudlobby/pull/2144#issuecomment-5987380718)): facts corrected; nine fork amendments and two decisions recorded in epic §16 for the operator. |
 | `a1deeacc` | Interim fold: PR packaging honours the holds; one spelling per name. |
 | `74e40fce` | Ironclad cycle 2 fold (7 lenses on Opus; [comment](https://github.com/Claudfather/Claudlobby/pull/2144#issuecomment-5999082732), [correction](https://github.com/Claudfather/Claudlobby/pull/2144#issuecomment-5999138836)): no plan-fixable Blocker left; D1/D2 gates stated; F18 recorded; D2 wording made ratifiable; F14(a)'s seal on the order-3 PR; drift gate rewritten. |
-| *(this branch's next commit)* | **Rulings applied.** The operator ruled all eleven items on 2026-10-05; the fold removed every `Held:` line and every "if ratified" branch and wrote the ratified amendments into their forks. |
+| `c26c5b99` | **Rulings applied.** The operator ruled all eleven items on 2026-10-05; the fold removed every `Held:` line and every "if ratified" branch and wrote the ratified amendments into their forks. This handoff landed in the same commit. |
 
 Lock record on #2144 (fork lifecycle protocol): [F18](https://github.com/Claudfather/Claudlobby/pull/2144#issuecomment-6000050806) ·
 [F17](https://github.com/Claudfather/Claudlobby/pull/2144#issuecomment-6000051065) · [F4](https://github.com/Claudfather/Claudlobby/pull/2144#issuecomment-6000051327) ·
