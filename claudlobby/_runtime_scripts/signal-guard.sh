@@ -10,40 +10,47 @@
 # 15 hours (#2158). Warnings were composed into every bot and did not stop it,
 # and the host's bare Bash allow means no permission rule can refuse it.
 #
-# PROVENANCE, NOT VERB. Killing by pid is safe only for a pid the same command
-# started, so signal-decide.py refuses a signal whose target is a lookup's
-# answer, a name or pattern, every process (kill -1), or a typed pid that is
-# this session's own ancestor, and allows $!, job specs, $$, group 0, a pid
-# file and kill -0. It reads only the command text: a script file, eval of a
-# variable or a pid passed through a file is out of reach, and the per-bot
-# subreaper (#2158) is the backstop for those.
+# PROVENANCE, NOT VERB. Killing by pid is safe only for a pid the caller
+# started, so signal-decide.py allows a signal only to the caller's own
+# handles ($!, job specs, $$, a pid file) and refuses the rest. What it
+# refuses, what it allows and what is out of its reach are stated once, in
+# its docstring.
 #
 # FAILS OPEN, LOUDLY. Missing jq or python3, an unparseable payload, or a
 # decider that cannot answer allows the call and leaves a breadcrumb: refusing
 # every kill fleet-wide on a broken install is worse than the hazard it guards.
 set -uo pipefail
 
-LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLANE_EMIT_CLASS=hook   # a live Claude Code turn waits on its plane record: its socket deadline (#1693, claudlobby/_runtime_scripts/plane-emit.sh)
 
 _allow() { exit 0; }   # no decision — normal permission flow applies
 
 # --- zero-fork prefilters ----------------------------------------------------
 # A payload naming none of kill, pkill, killall, skill or fuser cannot send a
-# signal through any form the decider judges. Deliberately over-matches
-# (skills, kill-port): a false positive costs one python start. Quotes and
-# backslashes are stripped first, still without a fork, so a name split by
-# quoting (k'ill', p"k"ill) is still seen.
+# signal through any form the decider judges. Quotes and backslashes are
+# stripped first, so a name split by quoting (k'ill', p"k"ill) is still seen,
+# and the word skills (a directory every bot names) is dropped, since no
+# signal verb is a part of it. An ANSI-C string can spell a name in escapes,
+# so a payload holding one goes to the decider whatever it names. The strip
+# runs on bytes: a quote byte never occurs inside a UTF-8 sequence.
 payload="$(cat)"
-_bare="${payload//[\"\'\\]/}"
+_bare_payload() { local LC_ALL=C; _bare="${payload//[\"\'\\]/}"; _bare="${_bare//[sS]kills/}"; }
+_bare_payload
 case "$_bare" in
 *kill*|*fuser*) ;;
-*) _allow ;;
+*)
+    case "$payload" in
+    *"\$'"*) ;;
+    *) _allow ;;
+    esac
+    ;;
 esac
 case "$payload" in
 *Bash*) ;;
 *) _allow ;;
 esac
+
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 _bail() { # <reason> — fail open, but leave a breadcrumb
     # shellcheck source=lib-common.sh
@@ -76,12 +83,9 @@ PY_BIN="$(command -v python3 || true)"
 DECIDER="$LIB_DIR/signal-decide.py"
 [ -r "$DECIDER" ] || _bail "signal-decide.py missing"
 
-tool="$(jq -r '.tool_name // empty' <<<"$payload" 2>/dev/null)" || _bail "unparseable hook payload"
-case "$tool" in
-Bash) ;;
-*) _allow ;;
-esac
-cmd="$(jq -r '.tool_input.command // empty' <<<"$payload" 2>/dev/null)" || _bail "unparseable hook payload"
+# One jq for both fields: another tool's call has no command to judge.
+cmd="$(jq -r 'if .tool_name == "Bash" then .tool_input.command // empty else empty end' <<<"$payload" 2>/dev/null)" \
+    || _bail "unparseable hook payload"
 [ -n "$cmd" ] || _allow
 
 verdict="$("$PY_BIN" "$DECIDER" <<<"$cmd" 2>/dev/null)" || _bail "decider failed"

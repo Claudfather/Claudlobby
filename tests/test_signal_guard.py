@@ -7,13 +7,16 @@ runs them all. On 2026-10-05 a cleanup loop killed a pattern match and its
 parent by pid and stopped every bot on a host for 15 hours (#2158). OUTAGE_LOOP
 is that command with its names neutralised. It killed by pid, as #1069's
 interim fix asked, so a guard keyed on the verb would have passed it: this one
-keys on where each pid came from. Every form in REFUSED is refused; the forms
-in ALLOWED (own children, job specs, pid files, liveness checks, and text that
-only mentions a kill) pass untouched.
+keys on where each pid came from, and allows only the caller's own handles.
+
+The REFUSED and ALLOWED tables run through the decider in-process; the tests
+after them run the hook itself, for its prefilter, its deny, its fail-open
+paths and its plane record.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shutil
@@ -25,15 +28,32 @@ import yaml
 
 from claudlobby.plane.registries import SYSTEM_EVENT_SEVERITY
 from tests.conftest import constructed_env, read_fleet_events
+from tests.test_credential_echo_guard import _decision
 from tests.test_plane_events_door import _serving
 
 REPO = Path(__file__).resolve().parent.parent
 GUARD = REPO / "claudlobby/_runtime_scripts" / "signal-guard.sh"
 
 
+def _decider():
+    spec = importlib.util.spec_from_file_location(
+        "signal_decide", GUARD.with_name("signal-decide.py")
+    )
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+D = _decider()
+
+
 def _run(
-    command: str, env: dict | None = None, tool: str = "Bash", guard: Path = GUARD
-):
+    command: str,
+    env: dict | None = None,
+    tool: str = "Bash",
+    guard: Path = GUARD,
+    raw: str | None = None,
+) -> subprocess.CompletedProcess:
     # The keys of a live PreToolUse payload (as in test_credential_echo_guard), identifiers faked.
     payload = {
         "session_id": "s",
@@ -48,7 +68,7 @@ def _run(
     }
     return subprocess.run(
         ["bash", str(guard)],
-        input=json.dumps(payload),
+        input=json.dumps(payload) if raw is None else raw,
         capture_output=True,
         text=True,
         env=env or constructed_env(),
@@ -56,11 +76,11 @@ def _run(
     )
 
 
-def _decision(p: subprocess.CompletedProcess):
-    if not p.stdout.strip():
-        return None
-    out = json.loads(p.stdout)["hookSpecificOutput"]
-    return out.get("permissionDecision"), out.get("permissionDecisionReason", "")
+def _refusal(command: str, **kw) -> str:
+    """Run the hook and return its reason, asserting that it refused."""
+    verdict = _decision(_run(command, **kw))
+    assert verdict is not None and verdict[0] == "deny", (command, verdict)
+    return verdict[1]
 
 
 # The 2026-10-05 01:30:24Z command, structure verbatim, names neutralised.
@@ -72,19 +92,20 @@ OUTAGE_LOOP = (
 )
 
 REFUSED = [
-    OUTAGE_LOOP,
     # by name or pattern: the #1069 instances, the 2026-10-03 one among them
     "pkill -f 'sleep 60'",
     "pkill -x -f 'sleep 60'",
     "pkill sleep",
     "/usr/bin/pkill -f watcher",
     "pk'ill' -f watcher",
+    "p$'\\x6b'ill -f watcher",  # a name spelled in an ANSI-C escape
     "killall node",
     "killall5 -9",
     "skill watcher",
     "fuser -k 8080/tcp",
     "fuser -km /mnt/data",
     "/bin/kill watcher",  # util-linux kill takes a name
+    "find /proc -maxdepth 1 -name '[0-9]*' -exec kill {} +",
     # a pid read back from a lookup or $PPID, however it arrives
     "kill $PPID",
     'kill -9 "${PPID}"',
@@ -100,20 +121,31 @@ REFUSED = [
     "a=$(pgrep watcher); b=$a; kill $b",
     "pids=($(pgrep watcher)); kill ${pids[@]}",
     "for p in $(pgrep watcher); do kill $p; done",
+    "for d in /proc/[0-9]*; do grep -q watcher $d/cmdline && kill ${d#/proc/}; done",
     "pgrep watcher | while read p; do kill $p; done",
     'while read p; do kill "$p"; done < <(pgrep watcher)',
     "mapfile -t pids < <(pgrep watcher); kill ${pids[@]}",
+    "cat <<'EOF' | bash | while read p; do kill $p; done\npgrep watcher\nEOF",
     "kill -s $SIG $(pgrep watcher)",  # a signal it cannot read still sends
+    # a pid from a source the guard does not know as the caller's own
+    "kill $(busybox pgrep watcher)",
+    "kill $(cat /sys/fs/cgroup/app/cgroup.procs)",
+    "kill $(jq -r .pid state.json)",  # by design: read a pid file with cat
+    "kill $SSH_AGENT_PID",  # each Bash call starts a fresh shell: not set here
     # xargs fed by a lookup
     "pgrep -f watcher | xargs -r kill -9",
     "pgrep watcher | xargs -I{} kill {}",
+    "pgrep watcher | xargs --replace kill {}",
+    "pgrep watcher | xargs -rI {} kill {}",
     "ps aux | grep watcher | awk '{print $2}' | xargs kill",
     "lsof -ti :8080 | xargs kill",
     "pgrep watcher | xargs -n1 sh -c 'kill $0'",
-    # every process, PID 1
+    "xargs kill < /proc/4242/task/4242/children",
+    # every process, PID 1, through a variable too
     "kill -9 -1",
     "kill -- -1",
     "kill -s KILL -1",
+    "s=-1; kill -9 $s",
     "kill 1",
     # where a command can stand
     "ls && pkill watcher",
@@ -121,13 +153,20 @@ REFUSED = [
     "echo done\npkill watcher",
     "if pgrep watcher >/dev/null; then pkill watcher; fi",
     "sudo kill $(pidof watcher)",
+    "sudo -nu root kill $(pgrep watcher)",
     "nohup kill $(pgrep watcher) &",
     "time -p kill $(pgrep watcher)",
     "timeout 5 kill $(pgrep watcher)",
+    "watch -n 5 'pkill -f watcher'",
+    "su -c 'pkill -f watcher'",
+    "flock /tmp/lock -c 'pkill -f watcher'",
     "bash -c 'kill $(pgrep watcher)'",
     "bash -lc 'pkill -f watcher'",
+    "bash -o pipefail -c 'pkill -f watcher'",
+    "bash -c $'pkill -f watcher'",
     "trap 'pkill -f watcher' EXIT; sleep 1",
     "eval 'pkill watcher'",
+    "eval $'kill $(pgrep watcher)'",
     'echo "$(pkill -f watcher)"',
     'echo "$(case x in x) pkill -f watcher;; esac)"',  # a case pattern's parenthesis
     "bash <<'EOF'\npkill -f watcher\nEOF",  # a heredoc fed to a shell is commands
@@ -142,21 +181,30 @@ ALLOWED = [
     "sleep 100 & pid=$!; ps -p $pid >/dev/null && kill $pid",  # a lookup that feeds no kill
     "sleep 100 & kill %1",
     "sleep 100 & kill %%",
+    "sleep 100 & sig=1; kill -$sig $!",  # -$sig is a signal, not group 1
+    "sleep 100 & echo $! | xargs kill",
     "setsid job.sh & kill -- -$!",
     "kill -- -$$",
     "kill 0",  # the tool shell leads its own process group
     "kill $(jobs -p)",
     # a pid file
     "kill $(cat /tmp/job.pid)",
+    "kill $(< job.pid)",
+    "kill $(cat job.pid | tr -d ' ')",
+    'kill -TERM -- -"$(cat job.pgid)"',
     'kill "$(cat /tmp/job.pid)"; sleep 1; ps aux | grep watcher',
     "for p in $(cat pids.txt); do kill $p; done",
+    "while read p; do kill $p; done < pids.txt",
     "cat job.pid | xargs kill",
-    # sends nothing
+    "cat job.pid | xargs -I PID kill PID",  # a named placeholder is not a process name
+    # sends nothing, or runs nothing
     "kill -0 $pid",
     "kill -0 $(pgrep watcher) && echo alive",
     "kill -s 0 4242",
     "kill -l",
     "kill -l 15",
+    "command -v pkill",
+    "command -V killall",
     "ps aux | grep watcher; pgrep -a watcher",
     "until ! pgrep -f '[b]in/pytest' >/dev/null; do sleep 30; done",
     "timeout 5 sleep 10",
@@ -172,28 +220,26 @@ ALLOWED = [
 
 @pytest.mark.parametrize("command", REFUSED)
 def test_a_signal_to_a_process_the_caller_did_not_start_is_refused(command):
-    verdict = _decision(_run(command))
-    assert verdict is not None and verdict[0] == "deny", (command, verdict)
+    assert D.decide(command), command
 
 
 @pytest.mark.parametrize("command", ALLOWED)
 def test_what_the_caller_started_and_text_that_mentions_a_kill_are_allowed(command):
-    assert _decision(_run(command)) is None, command
+    assert D.decide(command) == [], command
 
 
-def test_the_outage_loop_is_refused_for_both_of_its_pids():
-    verdict = _decision(_run(OUTAGE_LOOP))
-    assert verdict is not None and verdict[0] == "deny"
-    assert "`$p`" in verdict[1] and "`$PP`" in verdict[1], verdict[1]
-
-
-def test_a_typed_pid_or_group_of_an_ancestor_is_refused():
-    # This test process is an ancestor of the hook it starts, as a bot's claude,
-    # its tmux server and the user manager are of a bot's hook.
-    for command in (f"kill -9 {os.getpid()}", f"kill -- -{os.getpgid(0)}"):
-        verdict = _decision(_run(command))
-        assert verdict is not None and verdict[0] == "deny", (command, verdict)
-        assert "ancestor" in verdict[1], verdict[1]
+def test_a_typed_pid_of_an_ancestor_is_refused_however_it_is_held():
+    # This test process is an ancestor of the decider's own process, as a bot's
+    # claude, its tmux server and the user manager are of a bot's hook.
+    me, group = os.getpid(), os.getpgid(0)
+    for command in (
+        f"kill -9 {me}",
+        f"kill -- -{group}",
+        f"PP={me}; kill $PP",
+        f"for p in 4242 {me}; do kill $p; done",
+    ):
+        found = D.decide(command)
+        assert [kind for kind, _ in found] == ["ancestor"], (command, found)
 
 
 def test_a_typed_pid_that_is_not_an_ancestor_is_allowed():
@@ -201,17 +247,36 @@ def test_a_typed_pid_that_is_not_an_ancestor_is_allowed():
     # is the stated bound: another bot's pid, typed, passes (#2158 backstops it).
     child = subprocess.Popen(["sleep", "30"])
     try:
-        assert _decision(_run(f"kill {child.pid}")) is None
+        for command in (f"kill {child.pid}", f"PP={child.pid}; kill $PP"):
+            assert D.decide(command) == [], command
     finally:
         child.kill()
         child.wait()
 
 
+def test_the_hook_refuses_the_outage_loop_for_both_of_its_pids():
+    reason = _refusal(OUTAGE_LOOP)
+    assert "`$p`" in reason and "`$PP`" in reason, reason
+
+
+@pytest.mark.parametrize("command", ["pk'ill' -f watcher", "p$'\\x6b'ill -f watcher"])
+def test_the_hook_prefilter_sees_a_name_split_by_quoting_or_spelled_in_escapes(command):
+    _refusal(command)
+
+
+def test_the_hook_refuses_a_typed_pid_of_its_own_ancestor():
+    assert "ancestor" in _refusal(f"kill -9 {os.getpid()}")
+
+
+@pytest.mark.parametrize("command", ["sleep 100 & kill $!", "ls ~/.claude/skills"])
+def test_the_hook_allows_what_the_caller_started_and_a_path_that_names_skills(command):
+    assert _decision(_run(command)) is None, command
+
+
 def test_the_refusal_names_the_safe_pattern_and_the_guardrail():
-    verdict = _decision(_run("pkill -f watcher"))
-    assert verdict is not None and verdict[0] == "deny"
+    reason = _refusal("pkill -f watcher")
     for needle in ("$!", "kill %1", "kill -0", "signal-only-what-you-started"):
-        assert needle in verdict[1], (needle, verdict[1])
+        assert needle in reason, (needle, reason)
 
 
 def test_another_tool_is_untouched():
@@ -219,14 +284,7 @@ def test_another_tool_is_untouched():
 
 
 def test_a_malformed_payload_fails_open():
-    p = subprocess.run(
-        ["bash", str(GUARD)],
-        input="Bash pkill {not json",
-        capture_output=True,
-        text=True,
-        env=constructed_env(),
-        timeout=60,
-    )
+    p = _run("", raw="Bash pkill {not json")
     assert p.returncode == 0 and _decision(p) is None
 
 
@@ -268,13 +326,12 @@ def test_a_refusal_is_recorded_with_its_kinds_and_never_the_command(
         **scratch_plane_env(root, initialize=True),
     )
     with _serving(root, scratch_plane_env) as socket:
-        p = _run(
+        _refusal(
             "pkill -f CANARY_watcher_x7q2", env={**env, "PLANE_SOCKET": str(socket)}
         )
-    assert _decision(p) is not None and _decision(p)[0] == "deny", p.stderr
     rows = [json.loads(line) for line in read_fleet_events(root).splitlines()]
     refused = [r for r in rows if r["type"] == "signal_guard_refused"]
-    assert len(refused) == 1, (rows, p.stderr)
+    assert len(refused) == 1, rows
     assert refused[0]["source"] == "signal-guard", refused[0]
     assert refused[0]["data"] == {"kinds": ["selector"]}, refused[0]
     assert "CANARY_watcher_x7q2" not in json.dumps(rows)

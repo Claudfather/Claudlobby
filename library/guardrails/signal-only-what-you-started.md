@@ -5,7 +5,7 @@ description: Never send a signal to a process you did not start. A pid read back
 
 # Signal only what you started
 
-Send a signal only to a process the same command started, or to one whose pid you saved when you started it. Every bot on a host runs as one user, so `pkill`, `killall`, `fuser -k` and a pid read back from `ps`, `pgrep`, `pidof`, `lsof` or `$PPID` can belong to another bot. An orphaned job is re-parented to the user manager, so its "parent" is the process that runs every bot, and one `kill` of it stops them all.
+Send a signal only to a process you started, through the handle you got when you started it. Every bot on a host runs as one user, so `pkill`, `killall`, `fuser -k` and a pid read back from `ps`, `pgrep`, `pidof`, `lsof` or `$PPID` can belong to another bot. An orphaned job is re-parented to the user manager, so its "parent" is the process that runs every bot, and one `kill` of it stops them all.
 
 The safe pattern:
 
@@ -15,6 +15,6 @@ The safe pattern:
 - A background tool call has its own stop control. Use it.
 - `kill -0 PID` sends nothing, so a liveness check is always safe.
 
-If you did not start it, do not signal it: ask whoever did.
+If neither you nor an earlier session of yours started it, do not signal it: ask whoever did.
 
-`signal-guard.sh`, a PreToolUse hook on Bash, refuses the unsafe forms and says why. It reads only the command text, so a script file, `eval`, or a pid passed through a variable or a file gets past it. So does a pid copied from an earlier `ps` output, unless it is one of your own session's ancestors. The rule still applies there.
+`signal-guard.sh`, a PreToolUse hook on Bash, refuses the unsafe forms and says why. It reads only the command text, so some forms get past it; `signal-decide.py` lists them at its top. The rule applies there too.

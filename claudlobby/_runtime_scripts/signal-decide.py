@@ -8,101 +8,105 @@ the caller did not start. Prints one line:
     deny<TAB><kinds><TAB><reason>
 
 <kinds> lists what was refused, comma-separated, for the plane record:
-selector, fuser, every-process, by-name, lookup, xargs, ancestor.
+selector, fuser, every-process, by-name, ancestor, lookup, unknown.
 
-Killing by pid is safe only for a pid the same command started, so the decision
-keys on where a pid came from, not on the verb alone:
-- pkill, killall, killall5 and skill pick processes by name or pattern, and
-  fuser -k picks whatever holds a file or port: refused outright.
-- A kill operand read back from a process lookup (ps, pgrep, pidof, pstree,
-  lsof, fuser, ss, netstat, top, tmux, screen, a read under /proc) or from
-  $PPID is refused, whether it arrives directly, through a variable, a for
-  loop, a read loop or xargs.
-- kill -1 (every process the user can signal) and kill NAME (util-linux kills
-  by name) are refused.
-- A pid or group typed as a number shows no provenance, so its target decides:
-  refused when it is an ancestor of this hook (the session's claude, its tmux
-  server, the user manager, PID 1), allowed otherwise.
-Allowed: $!, $$, $BASHPID, job specs (%1), group 0, a pid read from a file,
-and kill -0 and kill -l, which send nothing.
+Killing by pid is safe only for a pid the caller started, so the decision keys
+on where each pid comes from, and the safe sources are a short list: $!, $$,
+$BASHPID, a job spec (%1), group 0, `jobs -p`, and a pid file read with cat,
+head, tail or `<` (and reshaped with tr, cut, sort, uniq, grep, sed or awk)
+outside /proc and /sys. A pid from anywhere else is refused, whether it arrives
+directly, through a variable, a for loop, a read loop, xargs or find -exec:
+`lookup` names a process lookup (ps, pgrep, pidof, pstree, lsof, fuser, ss,
+netstat, top, tmux, screen, /proc, $PPID), `unknown` anything else. pkill,
+killall, killall5 and skill pick processes by name or pattern, and fuser -k
+whatever holds a file or port: refused outright, as are kill -1 (every process
+the user can signal) and kill NAME (util-linux kill takes a name). A pid typed
+as a number shows no provenance, so its target decides, typed directly or held
+in a variable or a loop word: refused when it is an ancestor of this hook (the
+session's claude, its tmux server, the user manager, PID 1), allowed otherwise.
+kill -0 and kill -l send nothing and are always allowed.
 
-Bounds, so nobody reads this as a fix for the class. It reads the command text:
-a tripwire for honest mistakes, not a sandbox. A script file, eval of a
-variable, a function or alias, a pid passed through a file, a name built by
-expansion or spelled in escapes, a command echoed into a shell, and a signal
-sent from another interpreter are out of its reach, and a typed pid of another
-bot's process passes. The per-bot subreaper of #2158 is the backstop for those.
+Bounds, stated once here (the hook, the guardrail and the CHANGELOG point
+here). It reads the command text: a tripwire for honest mistakes, not a
+sandbox. Out of its reach: a script file; eval of a variable; a function or
+alias; a pid passed through a file in the same command; a name built by
+expansion; env -S; a command echoed into a shell; a signal sent from another
+interpreter or by a tool that picks its own targets (npx kill-port, GNU
+parallel); process control that is not a signal verb (tmux kill-server and
+kill-session, screen -X quit, a stop or kill through the user manager); and a
+typed pid of another bot's process. The per-bot subreaper of #2158 is the
+backstop for those.
 """
 
 from __future__ import annotations
 
+import functools
+import importlib.util
 import os
 import re
-import subprocess
 import sys
+from pathlib import Path
 
-LOOKUPS = frozenset(
-    "ps pgrep pidof pstree lsof fuser ss netstat top htop tmux screen".split()
+LIB = Path(__file__).resolve().parent
+_spec = importlib.util.spec_from_file_location(
+    "credential_echo_decide", LIB / "credential-echo-decide.py"
 )
+_ced = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(
+    _ced
+)  # its wrapper table, option scanner, shell-call reader and ANSI-C decoder, not a second copy
+
 SELECTORS = frozenset("pkill killall killall5 skill".split())
-SHELLS = frozenset("sh bash dash zsh ksh".split())
-# Reserved words skipped where a command starts; the closing ones end a command.
+LOOKUPS = frozenset(
+    "ps pgrep pidof pstree lsof fuser ss netstat top tmux screen".split()
+)
+READERS = frozenset(
+    "cat head tail tr cut sort uniq grep sed awk jobs echo printf".split()
+)
+OWN = frozenset(["!", "$", "BASHPID"])  # the shell's own handles
+DECLARES = frozenset("export local declare readonly typeset".split())
 KEYWORDS = frozenset("if then else elif do while until ! { } in fi done".split())
-CLOSERS = frozenset("fi done }".split())
 SEPARATORS = frozenset([";", "&", "&&", "||", "\n", "(", ")", ";;", ";&", ";;&"])
 PIPES = frozenset(["|", "|&"])
 REDIRECTS = frozenset(
     ["<", ">", ">>", "<<", "<<-", "<<<", "<&", ">&", "&>", "&>>", "<>", ">|"]
 )
+INPUTS = frozenset(["<", "<<", "<<-", "<<<"])
 OPERATORS = sorted(SEPARATORS | PIPES | REDIRECTS, key=len, reverse=True)
-# Programs that run the command after their own options, and the options among
-# those that consume the next word.
-WRAPPERS = {
-    "sudo": {"-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-T", "--user"},
-    "doas": {"-u", "-C"},
-    "nohup": set(),
-    "exec": {"-a"},
-    "command": set(),
-    "builtin": set(),
-    "time": {"-f", "-o", "--format", "--output"},
-    "nice": {"-n", "--adjustment"},
-    "ionice": {"-c", "-n", "--class", "--classdata"},
-    "setsid": set(),
-    "stdbuf": {"-i", "-o", "-e"},
-    "env": {"-u", "-C", "-S", "--unset", "--chdir", "--split-string"},
-    "timeout": {"-s", "-k", "--signal", "--kill-after"},
-    "flock": {"-w", "-E", "--wait", "--timeout", "--conflict-exit-code"},
-    "xargs": {
-        "-a",
-        "-d",
-        "-E",
-        "-I",
-        "-L",
-        "-n",
-        "-P",
-        "-s",
-        "--arg-file",
-        "--delimiter",
-        "--max-args",
-        "--max-lines",
-        "--max-procs",
-        "--max-chars",
-        "--replace",
-    },
+# Wrappers beside credential-echo-decide.py's table, in its shape: the short
+# options that take a value, and the long options that do.
+EXTRA_WRAPPERS = {
+    "ionice": ("cn", {"--class": True, "--classdata": True}),
+    "env": ("uCS", {"--unset": True, "--chdir": True, "--split-string": True}),
+    "flock": ("wE", {"--wait": True, "--timeout": True, "--conflict-exit-code": True}),
+    "xargs": (
+        "adEILnPs",
+        {
+            "--arg-file": True,
+            "--delimiter": True,
+            "--max-args": True,
+            "--max-procs": True,
+            "--max-chars": True,
+            "--process-slot-var": True,
+        },
+    ),
 }
 POSITIONAL_BEFORE_COMMAND = {"timeout": 1, "flock": 1}  # the duration, the lock file
+WATCH_LONG = {"--interval": True, "--equexit": True}
 NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+PARAM_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|[!$#?@*0-9-]")
 ASSIGN_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)(\[[^]]*\])?\+?=")
 PROCESS_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.+-]*")
-PROC_RE = re.compile(r"(?<![\w.])/proc(/|$)")
-SAFE = (
-    "Bots on one host share a user, so a pid you looked up can belong to another "
-    "bot, and an orphaned job's parent is the user manager that runs every bot "
-    "(#2158). Stop only what you started: save $! when you start a job "
-    '(job & echo $! > job.pid), then kill "$(cat job.pid)"; in the same command '
-    "use kill %1 or kill $!; stop a background tool call with its own stop "
-    "control. kill -0 is always allowed. Guardrail: "
-    "library/guardrails/signal-only-what-you-started.md (#1069)."
+SYSTEM_PATH_RE = re.compile(r"(?<![\w.])/(proc|sys)(/|$)")
+PLAIN_RE = re.compile(r"[^ \t\r\n;&|()<>\\'\"$`]+")  # a run of characters with no meaning
+DQ_PLAIN_RE = {'"': re.compile(r'[^"\\$`]+'), None: re.compile(r"[^\\$`]+")}
+SIGNALLERS = SELECTORS | {"kill", "fuser", "find"}
+GUARDRAIL = (
+    LIB.parent
+    / "_resources"
+    / "library"
+    / "guardrails"
+    / "signal-only-what-you-started.md"
 )
 
 
@@ -134,9 +138,14 @@ class Cmd:
     def __init__(self, pipe):
         self.words = []
         self.assigns = []
-        self.redirects = []  # [operator, target Word, heredoc body, body Word]
+        self.redirects = []  # [operator, Word, heredoc body]; an expanding body's Word
         self.pipe = pipe
-        self.inline = None  # code-string blocks, parsed once by code_blocks
+        self.resolved = None  # resolve()'s answer, once
+        self.inline = None  # code_blocks()'s answer, once
+
+
+def code_of(w):
+    return "".join(w.code)
 
 
 class Parser:
@@ -144,16 +153,21 @@ class Parser:
         self.s = src
         self.n = len(src)
 
+    def closing(self, j, opener, closer):
+        """Index of the `closer` that balances the `opener` at s[j], or the end."""
+        depth = 0
+        while j < self.n:
+            depth += {opener: 1, closer: -1}.get(self.s[j], 0)
+            if depth == 0:
+                return j
+            j += 1
+        return j
+
     def dollar(self, i, w):
         s, n = self.s, self.n
         nxt = s[i + 1] if i + 1 < n else ""
         if s.startswith("$((", i):  # arithmetic: its names are variables
-            depth, j = 0, i + 1
-            while j < n:
-                depth += {"(": 1, ")": -1}.get(s[j], 0)
-                if depth == 0:
-                    break
-                j += 1
+            j = self.closing(i + 1, "(", ")")
             w.vars.update(NAME_RE.findall(s[i + 3 : j]))
             w.expanded = True
             w.code.append(s[i : j + 1])
@@ -165,14 +179,9 @@ class Parser:
             w.code.append(s[i:j])
             return j
         if nxt == "{":
-            depth, j = 0, i + 1
-            while j < n:
-                depth += {"{": 1, "}": -1}.get(s[j], 0)
-                if depth == 0:
-                    break
-                j += 1
+            j = self.closing(i + 1, "{", "}")
             inner = s[i + 2 : j]
-            m = re.match(r"[A-Za-z_][A-Za-z0-9_]*|[!$#?@*0-9-]", inner)
+            m = PARAM_RE.match(inner)
             rest = inner
             if m and not (inner.startswith("!") and len(inner) > 1):  # not ${!x}
                 w.vars.add(m.group(0))
@@ -185,27 +194,24 @@ class Parser:
             w.expanded = True
             w.code.append(s[i : j + 1])
             return j + 1
-        if nxt == "'":  # $'...', kept as written
-            j = i + 2
-            while j < n and s[j] != "'":
-                j += 2 if s[j] == "\\" else 1
-            w.literal(s[i + 2 : j], s[i : j + 1])
+        if nxt == "'":  # $'...', decoded as bash does: a name can be spelled in escapes
+            try:
+                text, j = _ced._ansi_c(s, i + 2)
+            except _ced.Unparsed:
+                text, j = s[i + 2 :], n
+            w.literal(text)
             w.quoted = True
-            return j + 1
+            return j
         if nxt == '"':
             w.quoted = True
             return self.dquote(i + 2, w, stop='"')
-        m = NAME_RE.match(s, i + 1)
+        m = PARAM_RE.match(s, i + 1)
         if m:
-            w.vars.add(m.group(0))
+            name = m.group(0) if NAME_RE.match(m.group(0)) else m.group(0)[0]
+            w.vars.add(name)
             w.expanded = True
-            w.code.append(s[i : m.end()])
-            return m.end()
-        if nxt and nxt in "!$#?@*-0123456789":
-            w.vars.add(nxt)
-            w.expanded = True
-            w.code.append(s[i : i + 2])
-            return i + 2
+            w.code.append(s[i : i + 1 + len(name)])
+            return i + 1 + len(name)
         w.literal("$")
         return i + 1
 
@@ -219,7 +225,7 @@ class Parser:
                 continue
             inner.append(s[j])
             j += 1
-        w.subs.append(Parser("".join(inner)).block(0, None)[0])
+        w.subs.append(parse("".join(inner)))
         w.expanded = True
         w.code.append(s[i : j + 1])
         return j + 1
@@ -240,11 +246,12 @@ class Parser:
             elif c == "`":
                 i = self.backtick(i, w)
             else:
-                w.literal(c)
-                i += 1
+                j = DQ_PLAIN_RE[stop].match(s, i).end()
+                w.literal(s[i:j])
+                i = j
         return i
 
-    def word(self, i, close):
+    def word(self, i):
         s, n = self.s, self.n
         w, start = Word(), i
         m = ASSIGN_RE.match(s, i)
@@ -254,16 +261,13 @@ class Parser:
             i = m.end()
             if i < n and s[i] == "(":  # NAME=(array words)
                 block, i = self.block(i + 1, ")")
-                for cmd in block:
-                    for x in cmd.words:
-                        w.vars |= x.vars
-                        w.subs += x.subs
-                        w.expanded = w.expanded or x.expanded
-                w.src = s[start:i]
-                return w, i
+                for x in (x for cmd in block for x in all_words(cmd)):
+                    w.vars |= x.vars
+                    w.subs += x.subs
+                    w.expanded = w.expanded or x.expanded
         while i < n:
             c = s[i]
-            if c in " \t\r\n;&|()<>" or (close == "`" and c == "`"):
+            if c in " \t\r\n;&|()<>":
                 break
             if c == "\\":
                 if s.startswith("\\\n", i):
@@ -286,13 +290,14 @@ class Parser:
             elif c == "`":
                 i = self.backtick(i, w)
             else:
-                w.literal(c)
-                i += 1
+                j = PLAIN_RE.match(s, i).end()
+                w.literal(s[i:j])
+                i = j
         w.src = s[start:i]
         return w, i
 
     def block(self, i, close):
-        """Parse a command list from i up to an unmatched `close` (")" or "`");
+        """Parse a command list from i up to an unmatched `close` (")" or None);
         return ([Cmd], the index after it)."""
         s, n = self.s, self.n
         cmds, pipe = [], 0
@@ -323,9 +328,6 @@ class Parser:
             if c == ")" and close == ")" and depth == 0:
                 finish()
                 return cmds, i + 1
-            if c == "`" and close == "`":
-                finish()
-                return cmds, i + 1
             if c == "#" and target is None:  # a word starts here: a comment
                 j = s.find("\n", i)
                 i = n if j < 0 else j
@@ -338,7 +340,7 @@ class Parser:
                 w.src = s[i:j]
                 i = j
             else:
-                op = next((o for o in OPERATORS if s.startswith(o, i)), None)
+                op = c in ";&|\n()<>" and next((o for o in OPERATORS if s.startswith(o, i)), None)
                 if op:
                     i += len(op)
                     if pattern:  # `(` before a pattern, `|` between patterns
@@ -358,7 +360,7 @@ class Parser:
                         pipe += 1
                         cur.pipe = pipe
                     continue
-                w, i = self.word(i, close)
+                w, i = self.word(i)
                 if (
                     target is None
                     and w.text
@@ -368,32 +370,25 @@ class Parser:
                 ):
                     continue  # a descriptor number, as in 2>&1
             if target is not None:
-                entry = [target, w, None, None]
+                entry = [target, w, None]
                 cur.redirects.append(entry)
                 if target in ("<<", "<<-"):
-                    heredocs.append(
-                        ("".join(w.pieces), target == "<<-", not w.quoted, entry)
-                    )
+                    heredocs.append(entry)
                 target = None
-            elif case and case[1] == "subject":
-                case[1] = "in"
-            elif case and case[1] == "in":
-                case[1] = "pattern"
+            elif case and case[1] in ("subject", "in"):
+                case[1] = "in" if case[1] == "subject" else "pattern"
             elif pattern:
                 if w.text == "esac":
                     cases.pop()
-                    finish()
-            elif w.assign and not cur.words:
+            elif cur.words or cur.assigns:
+                cur.words.append(w)
+            elif w.assign:
                 cur.assigns.append(w)
-            elif not cur.words and not cur.assigns and w.text == "case":
+            elif w.text == "case":
                 cases.append([depth, "subject"])
-            elif not cur.words and not cur.assigns and w.text == "esac" and case:
+            elif w.text == "esac" and case:
                 cases.pop()
-                finish()
-            elif not cur.words and not cur.assigns and w.text in KEYWORDS:
-                if w.text in CLOSERS:
-                    finish()
-            else:
+            elif w.text not in KEYWORDS:
                 cur.words.append(w)
         self.read_heredocs(i, heredocs)
         finish()
@@ -401,23 +396,27 @@ class Parser:
 
     def read_heredocs(self, i, heredocs):
         """Read the bodies of the heredocs opened on the line that just ended.
-        An unquoted delimiter's body runs its substitutions."""
+        An unquoted delimiter's body runs its substitutions, so its Word replaces
+        the delimiter's."""
         s = self.s
         while heredocs:
-            delim, strip, expands, entry = heredocs.pop(0)
+            entry = heredocs.pop(0)
+            op, delim = entry[0], entry[1]
             lines = []
             while i < self.n:
                 j = s.find("\n", i)
                 j = self.n if j < 0 else j
                 line = s[i:j]
                 i = j + 1
-                if (line.lstrip("\t") if strip else line) == delim:
+                if (line.lstrip("\t") if op == "<<-" else line) == "".join(
+                    delim.pieces
+                ):
                     break
                 lines.append(line)
             entry[2] = "\n".join(lines)
-            if expands:
-                entry[3] = Word()
-                Parser(entry[2]).dquote(0, entry[3], stop=None)
+            if not delim.quoted:
+                entry[1] = Word()
+                Parser(entry[2]).dquote(0, entry[1], stop=None)
         return min(i, self.n)
 
 
@@ -425,85 +424,84 @@ def parse(src):
     return Parser(src).block(0, None)[0]
 
 
+def all_words(cmd):
+    return cmd.assigns + cmd.words + [w for _, w, _ in cmd.redirects if w is not None]
+
+
 def resolve(cmd):
-    """(program, its arguments, xargs replace-string, fed by xargs) for a command."""
-    words, i, fed, replace = cmd.words, 0, False, None
-    while i < len(words):
-        name = os.path.basename(words[i].text or "")
-        if name not in WRAPPERS:
-            break
-        takes = WRAPPERS[name]
-        fed = fed or name == "xargs"
-        i += 1
+    """(program, its arguments, fed by xargs) after a command's wrappers;
+    program None when nothing runs (`command -v` looks a name up)."""
+    if cmd.resolved is None:
+        words, texts = cmd.words, [w.text or "" for w in cmd.words]
+        i, fed = 0, False
         while i < len(words):
-            t = words[i].text or ""
-            if t == "--":
-                i += 1
+            name = os.path.basename(texts[i])
+            table = _ced._WRAPPERS.get(name) or EXTRA_WRAPPERS.get(name)
+            if table is None:
                 break
-            if name == "env" and words[i].assign:
-                i += 1
-            elif t.startswith("-") and len(t) > 1:
-                if name == "xargs" and (t == "--replace" or t[:2] in ("-I", "-i")):
-                    nxt = (
-                        words[i + 1].text if t == "-I" and i + 1 < len(words) else None
-                    )
-                    replace = t[2:] or nxt or "{}"
-                i += 2 if t in takes else 1
-            else:
+            j = _ced._options_end(texts, i + 1, *table)
+            if name == "command" and any(
+                t[:1] == "-" and t != "--" and ("v" in t or "V" in t)
+                for t in texts[i + 1 : j]
+            ):
+                i = len(words)
                 break
-        i += POSITIONAL_BEFORE_COMMAND.get(name, 0)
-    if i >= len(words):
-        return None, [], replace, fed
-    return os.path.basename(words[i].text or ""), words[i + 1 :], replace, fed
+            while name == "env" and j < len(words) and words[j].assign:
+                j += 1
+            fed = fed or name == "xargs"
+            i = j + POSITIONAL_BEFORE_COMMAND.get(name, 0)
+            if name == "flock" and i < len(words) and texts[i] in ("-c", "--command"):
+                cmd.resolved = (
+                    "sh",
+                    words[i:],
+                    fed,
+                )  # the -c form runs its string in a shell
+                return cmd.resolved
+        if i >= len(words):
+            cmd.resolved = (None, [], fed)
+        else:
+            cmd.resolved = (os.path.basename(texts[i]), words[i + 1 :], fed)
+    return cmd.resolved
 
 
-def stdin_texts(cmd, block):
-    """Text a command reads on stdin: its own heredocs and here-strings, and
-    those of the stages before it in its pipeline (cat <<EOF | bash)."""
-    texts = []
-    for other in block:
-        if other is cmd or other.pipe == cmd.pipe:
-            for op, w, body, _ in other.redirects:
-                if body is not None:
-                    texts.append(body)
-                elif op == "<<<":
-                    texts.append("".join(w.code))
-        if other is cmd:
-            break
-    return texts
+def stages(cmd, block):
+    """The commands before this one in its pipeline: what feeds its stdin."""
+    return [o for o in block[: block.index(cmd)] if o.pipe == cmd.pipe]
 
 
 def code_blocks(cmd, block):
-    """Code a command runs from a string: sh -c, a shell's stdin, eval, trap,
-    su -c, watch."""
-    if cmd.inline is not None:
-        return cmd.inline
-    name, args, _, _ = resolve(cmd)
-    texts = []
-    if name in SHELLS:
-        for k, a in enumerate(args):
-            t = a.text or ""
-            if t.startswith("-") and not t.startswith("--") and "c" in t[1:]:
-                if k + 1 < len(args):
-                    texts.append("".join(args[k + 1].code))
-                break
-            if not t.startswith("-"):
-                break  # a script file: out of reach
-        else:
-            texts += stdin_texts(cmd, block)
-    elif name == "eval":
-        texts.append(" ".join("".join(a.code) for a in args))
-    elif name == "trap" and args and (args[0].text or "") not in ("-p", "-l"):
-        first = args[1] if args[0].text == "--" and len(args) > 1 else args[0]
-        texts.append("".join(first.code))
-    elif name == "su":
-        for k, a in enumerate(args[:-1]):
-            if a.text in ("-c", "--command"):
-                texts.append("".join(args[k + 1].code))
-    elif name == "watch":
-        rest = [a for a in args if not (a.text or "").startswith("-")]
-        texts.append(" ".join("".join(a.code) for a in rest))
-    cmd.inline = [parse(t) for t in texts]
+    """Code a command runs from a string: a shell's -c string or stdin, eval,
+    trap, su -c, watch, flock -c."""
+    if cmd.inline is None:
+        name, args, _ = resolve(cmd)
+        texts = []
+        if name in _ced._SHELLS:
+            kind, code = _ced._shell_call([code_of(a) for a in args])
+            if kind == "c" and code:
+                texts.append(code)
+            elif kind == "stdin":
+                texts += [
+                    body if body is not None else code_of(w)
+                    for c in stages(cmd, block) + [cmd]
+                    for op, w, body in c.redirects
+                    if body is not None or op == "<<<"
+                ]
+        elif name == "eval":
+            texts.append(" ".join(code_of(a) for a in args))
+        elif name == "trap" and args and args[0].text not in ("-p", "-l"):
+            texts.append(
+                code_of(args[1] if args[0].text == "--" and len(args) > 1 else args[0])
+            )
+        elif name == "su":
+            texts += [
+                code_of(b)
+                for a, b in zip(args, args[1:])
+                if a.text in ("-c", "--command")
+            ]
+        elif name == "watch":
+            j = _ced._options_end([a.text or "" for a in args], 0, "nq", WATCH_LONG)
+            texts.append(" ".join(code_of(a) for a in args[j:]))
+        cmd.inline = [parse(t) for t in texts]
     return cmd.inline
 
 
@@ -518,105 +516,152 @@ def blocks(block):
             yield from blocks(sub)
 
 
-def all_words(cmd):
-    redirected = [x for _, w, _, b in cmd.redirects for x in (w, b) if x is not None]
-    return cmd.assigns + cmd.words + redirected
+class Trace:
+    """Where the pids each variable can hold come from, and the numbers typed
+    into it, followed to a fixed point over the whole command."""
 
-
-def word_tainted(w, tainted):
-    return bool(w.vars & tainted) or any(looks_up(sub, tainted) for sub in w.subs)
-
-
-def looks_up(block, tainted):
-    """True when a block's output can carry pids read back from a lookup."""
-    for blk in blocks(block):
-        for cmd in blk:
-            if resolve(cmd)[0] in LOOKUPS:
-                return True
-            for w in all_words(cmd):
-                if PROC_RE.search("".join(w.pieces)) or word_tainted(w, tainted):
-                    return True
-    return False
-
-
-def fed_by_lookup(cmd, block, tainted):
-    """True when a lookup feeds this command's stdin: an earlier stage of its
-    pipeline, or a redirected source such as < <(pgrep x)."""
-    for other in block:
-        if other is cmd:
-            break
-        if other.pipe == cmd.pipe and looks_up([other], tainted):
-            return True
-    return any(
-        op in ("<", "<<<") and word_tainted(w, tainted)
-        for c in block
-        for op, w, _, _ in c.redirects
-    )
-
-
-def tainted_vars(top):
-    """Variables that hold pids read back from a lookup, to a fixed point."""
-    tainted = {"PPID"}
-    while True:
-        before = len(tainted)
-        for blk in blocks(top):
-            for cmd in blk:
-                name, args, _, _ = resolve(cmd)
-                for w in cmd.assigns + [a for a in args if a.assign]:
-                    if word_tainted(w, tainted):
-                        tainted.add(w.assign)
-                words = cmd.words
-                if len(words) > 3 and words[0].text in ("for", "select"):
-                    if words[2].text == "in" and any(
-                        word_tainted(x, tainted) for x in words[3:]
-                    ):
-                        tainted.add(words[1].text or "")
-                if name in ("read", "mapfile", "readarray") and fed_by_lookup(
-                    cmd, blk, tainted
-                ):
-                    names = [
-                        a.text for a in args if a.text and NAME_RE.fullmatch(a.text)
-                    ]
-                    tainted.update(names or ["REPLY", "MAPFILE"])
-        if len(tainted) == before:
-            return tainted
-
-
-class Ancestors:
-    """Pids and process groups from this process up to PID 1, read on demand."""
-
-    def __init__(self):
-        self.pids = None
-        self.pgids = set()
+    def __init__(self, top):
+        defs = [
+            d for blk in blocks(top) for cmd in blk for d in self.definitions(cmd, blk)
+        ]
+        self.defined = {name for name, _, _ in defs}
+        self.verdicts, self.values = {}, {}
+        for _ in range(16):  # bounded: a=$b; b=-$a grows a value every round
+            before = (len(self.verdicts), sum(map(len, self.values.values())))
+            for name, feed, reader in defs:
+                if name not in self.verdicts:
+                    verdict = (
+                        self.stdin(*reader, wide=True) if reader else self.first(feed)
+                    )
+                    if verdict:
+                        self.verdicts[name] = verdict
+                for w in feed:
+                    self.values.setdefault(name, set()).update(self.typed(w))
+            if (len(self.verdicts), sum(map(len, self.values.values()))) == before:
+                return
 
     @staticmethod
-    def _stat(pid):
-        try:
-            with open(f"/proc/{pid}/stat", "rb") as fh:
-                fields = fh.read().rsplit(b")", 1)[1].split()
-            return int(fields[1]), int(fields[2])
-        except OSError:
-            out = subprocess.run(
-                ["ps", "-o", "ppid=,pgid=", "-p", str(pid)],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            ).stdout.split()
-            return (int(out[0]), int(out[1])) if len(out) == 2 else None
+    def definitions(cmd, blk):
+        """(variable, the words it takes its value from, (cmd, blk) when it reads stdin)."""
+        name, args, _ = resolve(cmd)
+        declared = [a for a in args if a.assign] if name in DECLARES else []
+        out = [(w.assign, [w], None) for w in cmd.assigns + declared]
+        words = cmd.words
+        if len(words) > 1 and words[0].text in ("for", "select"):
+            feed = words[3:] if len(words) > 2 and words[2].text == "in" else []
+            out.append((words[1].text or "", feed, None))
+        if name in ("read", "mapfile", "readarray"):
+            names = [a.text for a in args if a.text and NAME_RE.fullmatch(a.text)]
+            out += [(n, [], (cmd, blk)) for n in names or ["REPLY", "MAPFILE"]]
+        return out
 
-    def hit(self, n, group):
-        if self.pids is None:
-            self.pids, pid = {1}, os.getpid()
-            for _ in range(64):
-                st = self._stat(pid)
-                if st is None:
-                    break
-                self.pids.add(pid)
-                self.pgids.add(st[1])
-                if pid <= 1:
-                    break
-                pid = st[0]
-        return n in self.pids or (group and n in self.pgids)
+    def first(self, words):
+        return next((v for v in map(self.word, words) if v), None)
+
+    def word(self, w):
+        """None when every pid this word can carry is the caller's own, else (kind, where from)."""
+        if SYSTEM_PATH_RE.search("".join(w.pieces)):
+            return "lookup", "a read under /proc or /sys"
+        for v in sorted(w.vars - OWN):
+            if v in self.verdicts:
+                return self.verdicts[v]
+            if v == "PPID":
+                return (
+                    "lookup",
+                    "$PPID, the tool shell's parent: this session's own claude",
+                )
+            if v not in self.defined:
+                return "unknown", f"${v}, which is not set in this command"
+        return next((v for v in (self.block(sub) for sub in w.subs) if v), None)
+
+    def block(self, blk):
+        return next((v for v in (self.command(cmd, blk) for cmd in blk) if v), None)
+
+    def command(self, cmd, blk):
+        """None when all this command can print is the caller's own pids."""
+        for op, w, _ in cmd.redirects:
+            if op in INPUTS and w is not None and (verdict := self.word(w)):
+                return verdict
+        if not cmd.words or cmd.words[0].text in ("for", "select"):
+            return (
+                None  # an assignment, a redirect alone or a loop header prints nothing
+            )
+        name = resolve(cmd)[0]
+        if name in READERS:
+            return self.first(resolve(cmd)[1])
+        if name in LOOKUPS:
+            return "lookup", f"`{name}`, a process lookup"
+        return (
+            "unknown",
+            f"`{name or cmd.words[0].src}`, which the guard does not know as yours",
+        )
+
+    def stdin(self, cmd, blk, wide):
+        """None when all this command can read on stdin is the caller's own pids:
+        its pipeline's earlier stages and its input redirects (a loop's redirect
+        sits after `done`, so a read takes the whole block's: `wide`)."""
+        feeds = [self.command(o, blk) for o in stages(cmd, blk)]
+        feeds += [
+            self.word(w)
+            for c in (blk if wide else [cmd])
+            for op, w, _ in c.redirects
+            if op in INPUTS
+        ]
+        if not feeds:
+            return "unknown", "a read with no input the guard can see"
+        return next((v for v in feeds if v), None)
+
+    def typed(self, w):
+        """The literal values a word can hold: its own text, or one variable's typed values."""
+        text = "".join(w.pieces)
+        if w.assign:
+            text = text.split("=", 1)[1]
+        if not w.expanded:
+            return {text}
+        if not w.subs and len(w.vars) == 1 and text in ("", "-"):
+            return {text + v for v in self.values.get(next(iter(w.vars)), ())}
+        return set()
+
+
+@functools.lru_cache(maxsize=None)
+def ancestry():
+    """(pids, process groups) from this process up to PID 1: /proc on Linux,
+    else one ps snapshot (macOS). supervisor-caller.py's ancestry() forks ps
+    for every step and keeps no groups, so it is not called here."""
+    if os.path.exists("/proc/self/stat"):
+        parent = _proc_stat
+    else:
+        import subprocess  # only here: a cost every allowed command would pay
+
+        try:
+            rows = subprocess.run(
+                ["ps", "-axo", "pid=,ppid=,pgid="], capture_output=True, text=True, timeout=5
+            ).stdout.split("\n")
+        except (OSError, subprocess.SubprocessError):
+            rows = []
+        table = {int(r[0]): (int(r[1]), int(r[2])) for r in map(str.split, rows) if len(r) == 3}
+        parent = table.get
+    pids, pgids, pid = {1}, set(), os.getpid()
+    for _ in range(64):
+        st = parent(pid)
+        if st is None:
+            break
+        pids.add(pid)
+        pgids.add(st[1])
+        if pid <= 1:
+            break
+        pid = st[0]
+    return pids, pgids
+
+
+def _proc_stat(pid):
+    """(parent pid, process group) of pid from /proc, or None."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            fields = fh.read().rsplit(b")", 1)[1].split()
+        return int(fields[1]), int(fields[2])
+    except (OSError, IndexError, ValueError):
+        return None
 
 
 def kill_operands(args):
@@ -625,6 +670,9 @@ def kill_operands(args):
     while i < len(args):
         t = args[i].text
         if t is None:
+            if i == 0 and code_of(args[0]).startswith("-"):
+                sig, i = "?", 1  # -$SIG: a signal, whatever it expands to
+                continue
             break
         if t == "--":
             i += 1
@@ -651,57 +699,63 @@ def kill_operands(args):
     return sig.upper().removeprefix("SIG") != "0", args[i:]
 
 
+def sends_signal(cmd):
+    name, args, _ = resolve(cmd)
+    return name in SELECTORS or (name == "kill" and kill_operands(args)[0])
+
+
 def _quote(w):
     src = " ".join(w.src.split())
     return src if len(src) <= 60 else src[:57] + "..."
 
 
-def operand_finding(w, tainted, ancestors, replace):
-    t = w.text
-    if t is not None:
-        if t.startswith("%") or t == "0" or (replace and replace in t):
-            return None
-        if t == "-1":
-            return (
-                "every-process",
-                "`kill -1` signals every process this user can reach",
-            )
-        m = re.fullmatch(r"(-?)(\d+)", t)
-        if m:
-            if ancestors.hit(int(m.group(2)), bool(m.group(1))):
-                return (
-                    "ancestor",
-                    f"pid {t} is an ancestor of this session: its claude, "
-                    "its tmux server, the user manager or PID 1",
-                )
-            return None
-        if PROCESS_NAME_RE.fullmatch(t):
-            return "by-name", f"`kill {t}` picks processes by name"
+def literal_finding(t, fed, held_by=None):
+    """A typed operand's finding: its own text, or a value a variable holds."""
+    held = f"`{_quote(held_by)}` holds {t}: " if held_by else ""
+    if t.startswith("%") or t == "0":
         return None
-    if w.vars & tainted:
+    if t == "-1":
         return (
-            "lookup",
-            f"`{_quote(w)}` holds a pid read back from a process lookup or $PPID",
+            "every-process",
+            f"{held}kill -1 signals every process this user can reach",
         )
-    if any(looks_up(sub, tainted) for sub in w.subs):
-        return "lookup", f"`{_quote(w)}` reads pids back from a process lookup"
+    m = re.fullmatch(r"(-?)(\d+)", t)
+    if m:
+        pids, pgids = ancestry()
+        n = int(m.group(2))
+        if n in pids or (m.group(1) and n in pgids):
+            return (
+                "ancestor",
+                f"{held}pid {t} is an ancestor of this session: its claude, "
+                "its tmux server, the user manager or PID 1",
+            )
+        return None
+    if not fed and PROCESS_NAME_RE.fullmatch(t):  # under xargs a word is a placeholder
+        return "by-name", f"{held}kill {t} picks processes by name"
     return None
 
 
-def sends_signal(cmd):
-    name, args, _, _ = resolve(cmd)
-    return name in SELECTORS or (name == "kill" and kill_operands(args)[0])
+def operand_finding(w, trace, fed):
+    if not w.expanded:
+        return literal_finding(w.text, fed)
+    for value in sorted(trace.typed(w)):
+        finding = literal_finding(value, fed, held_by=w)
+        if finding:
+            return finding
+    verdict = trace.word(w)
+    if verdict:
+        return verdict[0], f"`{_quote(w)}` carries a pid from {verdict[1]}"
+    return None
 
 
-def command_findings(cmd, block, tainted, ancestors):
-    name, args, replace, fed = resolve(cmd)
+def command_findings(cmd, blk, trace):
+    name, args, fed = resolve(cmd)
     found = []
-    if fed and fed_by_lookup(cmd, block, tainted):
-        inner = (c for sub in code_blocks(cmd, block) for b in blocks(sub) for c in b)
-        if sends_signal(cmd) or any(sends_signal(c) for c in inner):
-            found.append(
-                ("xargs", "`xargs` signals pids read back from a process lookup")
-            )
+    inner = (c for sub in code_blocks(cmd, blk) for b in blocks(sub) for c in b)
+    if fed and (sends_signal(cmd) or any(map(sends_signal, inner))):
+        verdict = trace.stdin(cmd, blk, wide=False)
+        if verdict:
+            found.append((verdict[0], f"`xargs` feeds a signal pids from {verdict[1]}"))
     if name in SELECTORS:
         found.append(("selector", f"`{name}` picks processes by name or pattern"))
     elif name == "fuser" and any(
@@ -709,10 +763,16 @@ def command_findings(cmd, block, tainted, ancestors):
         for a in args
     ):
         found.append(("fuser", "`fuser -k` signals whatever holds the file or port"))
+    elif name == "find" and any(
+        a.text in ("-exec", "-execdir", "-ok", "-okdir")
+        and (os.path.basename(b.text or "") in SELECTORS or b.text == "kill")
+        for a, b in zip(args, args[1:])
+    ):
+        found.append(("unknown", "`find -exec` signals whatever find matched"))
     elif name == "kill":
         sends, operands = kill_operands(args)
         for w in operands if sends else []:
-            finding = operand_finding(w, tainted, ancestors, replace)
+            finding = operand_finding(w, trace, fed)
             if finding:
                 found.append(finding)
     return found
@@ -721,11 +781,12 @@ def command_findings(cmd, block, tainted, ancestors):
 def decide(command):
     """The findings that refuse a command: [(kind, reason)], empty to allow."""
     top = parse(command)
-    tainted = tainted_vars(top)
-    ancestors, found = Ancestors(), []
+    if not any(resolve(cmd)[0] in SIGNALLERS for blk in blocks(top) for cmd in blk):
+        return []  # nothing here can send a signal: skip the trace
+    trace, found = Trace(top), []
     for blk in blocks(top):
         for cmd in blk:
-            for finding in command_findings(cmd, blk, tainted, ancestors):
+            for finding in command_findings(cmd, blk, trace):
                 if finding not in found:
                     found.append(finding)
     return found
@@ -739,9 +800,20 @@ def main() -> int:
     if not found:
         print("allow")
         return 0
+    guardrail = (
+        GUARDRAIL
+        if GUARDRAIL.is_file()
+        else "signal-only-what-you-started.md in the library"
+    )
+    reason = (
+        f"signal-guard refused this command: {'; '.join(r for _, r in found)}. Bots on one host "
+        "share a user, so a pid you looked up can belong to another bot, and an orphaned job's "
+        "parent is the user manager that runs every bot (#2158). Stop only what you started: save "
+        '$! when you start a job (job & echo $! > job.pid), then kill "$(cat job.pid)"; in the '
+        "same command use kill %1 or kill $!; stop a background tool call with its own stop "
+        f"control. kill -0 is always allowed. Guardrail: {guardrail} (#1069)."
+    )
     kinds = ",".join(dict.fromkeys(kind for kind, _ in found))
-    reason = "; ".join(r for _, r in found)
-    reason = f"signal-guard refused this command: {reason}. {SAFE}"
     print(f"deny\t{kinds}\t{' '.join(reason.split())}")
     return 0
 

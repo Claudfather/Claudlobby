@@ -394,9 +394,9 @@ defaults:
       # manager that runs every bot: a kill loop that took a pattern match
       # and its parent by pid stopped every bot on a host for 15 h (#2158).
       # Composed warnings did not prevent it, so this is a mechanism. It
-      # refuses pkill and killall and a kill whose pid is read back from a
-      # process lookup or $PPID, and allows $!, job specs and kill -0. It
-      # reads only the command text; the subreaper of #2158 is the backstop.
+      # refuses pkill and killall, and a kill whose pid is not the caller's
+      # own ($!, a job spec, a pid file), and allows kill -0. It reads only
+      # the command text; the subreaper of #2158 is the backstop.
       # Matcher-scoped to Bash; fails open, loudly.
       - command: "$CLAUDLOBBY_NATIVE_DIR/signal-guard.sh"
         matcher: "Bash"
