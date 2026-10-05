@@ -1091,7 +1091,8 @@ warning, the one-week canary — then **P2-a2** (S–M) — the plane leg, landi
   - `OTEL_METRICS_EXPORTER=otlp` and `OTEL_LOGS_EXPORTER=otlp`;
   - `OTEL_EXPORTER_OTLP_PROTOCOL=http/json` and `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:<port>` — the `plane-otel` intake's port;
   - `OTEL_RESOURCE_ATTRIBUTES` with `claudlobby.fleet=<fleet name>` (the alias, never a uid), `claudlobby.bot=bot:<fleet>/<bot>`, `claudlobby.content` and `agent.runtime=claude`;
-  - the content gates (`OTEL_LOG_USER_PROMPTS`, `OTEL_LOG_TOOL_DETAILS`) only when `content: full`.
+  - `OTEL_LOG_TOOL_DETAILS=1` on every armed bot (§14 Q17, ruled 2026-10-05: tool, MCP, skill and subagent names come
+    only with it; the intake trims the inputs it also carries), and `OTEL_LOG_USER_PROMPTS` only when `content: full`.
 
   Applied at the bot's next restart. When an enabled bot's host has no enrolled intake, `validate()` — behind `config plan`, `config validate` and `doctor` — adds a named warning and the `host doctor` rung reports it; it never refuses (A-F4b). Test both.
 - [ ] The `plane-otel` host service (F3(b), F4 as amended): its own localhost service, not the daemon or the view, which are pinned to their scopes, with its own `Switch` row (`HOST_SERVICE`, `OPT_IN`, `ENROLL_HOST`, `plane=True`, `why_opt_in`: a resident dependency that also writes and rotates data — one row per service, `switches.py:290-310`) and `host.jobs.plane-otel` (`unit: service`). There is **no** `otel-collector` row, no third-party binary or binary resolution, no `requires_binary` and no `otelcol-contrib validate` CI leg (A-F4). In P2-a1 the intake is the receiver and the raw sink:
@@ -1216,9 +1217,10 @@ export OTEL_LOGS_EXPORTER=otlp
 export OTEL_EXPORTER_OTLP_PROTOCOL=http/json
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:<port>
 export OTEL_RESOURCE_ATTRIBUTES="claudlobby.fleet=<fleet>,claudlobby.bot=bot:<fleet>/<bot>,claudlobby.content=metadata,agent.runtime=claude"
+# every armed bot (§14 Q17): names for MCP tools, skills and subagents; the intake drops the inputs it carries
+export OTEL_LOG_TOOL_DETAILS=1
 # content: full only — the disclosed act (design v2 §11); claudlobby.content=full above, and:
 export OTEL_LOG_USER_PROMPTS=1
-export OTEL_LOG_TOOL_DETAILS=1
 ```
 
 `<port>` is the `plane-otel` intake's port — the `--port` on its `system.yaml` script line (4319 in the shipped
@@ -2275,7 +2277,13 @@ Added by ironclad cycle 1 (2026-10-05) — carried to the operator; answered whe
     MCP detail lives only in transcripts; (b) keep a name-only `tool_call` row for `mcp__*` tools in `bot-vitals.sh`
     after P2-b; (c) arm `OTEL_LOG_TOOL_DETAILS` for `metadata` bots and have the intake drop everything but the names
     before the raw write. Lean: (a) for P2 — no reader names an MCP tool today (§14 Q9's audit applies) — revisited
-    if one appears. Decides plan 4 Task 1's marker-only scope and Task 9's mapping.
+    if one appears. Decides plan 4 Task 1's marker-only scope and Task 9's mapping. **Answered 2026-10-05 — (c), one
+    pipeline:** every armed bot exports with `OTEL_LOG_TOOL_DETAILS=1`; for non-`full` bots the intake keeps only the
+    names in `tool_parameters` (`mcp_server_name`, `mcp_tool_name`, `skill_name`, `subagent_type`) and drops
+    `tool_input` and every other detail before the raw write — inputs cross `127.0.0.1` into the intake's memory
+    only, on a box whose transcripts already hold them. And **P2-b keeps the plane's `tool_call` emit until P2-a2 is
+    live**, so tool names are never unrecorded: P2-a2 retires it in the same PR that names every tool from OTel
+    (plan 4 Tasks 1, 3, 6, 9).
 
 ## 15. Forge change log (2026-10-04)
 

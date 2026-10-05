@@ -102,6 +102,14 @@ Tasks follow as H3 siblings, in shipping order: leg P2-b (Tasks 1–2) first, th
 
 ### Task 1 (PR P2-b, first): `bot-vitals.sh` becomes the marker — `tool_call` stops, `session_event` is #2140's, #874's cwd fallback goes
 
+> **Ruled 2026-10-05 (epic §14 Q17) — read before the steps.** P2-b **keeps the `tool_call` emit** (`:62-64`): the plane's
+> rows are the only record of which MCP tool ran until P2-a2 names every tool from OTel. P2-b ships #874's cwd fallback
+> and the dead `session_event` path; Step 2's deletion of the `tool_call` emit, and Step 1's zero-rows assertion for
+> `tool_call`, move to Task 9 (P2-a2), which retires the emit in the PR that lands its replacement. Also observed on the
+> Pi (run log, 2026-10-05): every production bot composes `bot-vitals.sh` twice (the release's and the legacy
+> `$CLAUDLOBBY_ROOT/lib/` copy). P2-b's before-leg records whether that duplicate comes from this repo's composition or
+> from stale host state; if from composition, P2-b removes the legacy entry.
+
 **Files:** `claudlobby/_runtime_scripts/bot-vitals.sh`, `tests/test_plane_cutover_keepalive.py`, `tests/test_plane_emit_class.py`, `tests/test_event_type_registry.py`, `documentation/guides/observability.md`, `documentation/fleet-yaml-schema.md`, `fleet.yaml.example`, `CLAUDE.md`/`AGENTS.md`, `claudlobby/_runtime_scripts/CLAUDE.md`/`AGENTS.md`, `CHANGELOG.md`. **Untouched by design:** `system.yaml:369,393` (the hooks stay — they are the marker), `registries.py:196` and `retention.py:88-91` (`tool_call` stays registered and prunable so existing rows classify and age out), `tests/test_system_event_retention.py:100`, `library/protocols/fleet-observability.md` (no `tool_call` row exists; its `session_event` row `:66` is `ef86465a`'s). Line numbers below are at `cd292cb`; on `ef86465a` the header is one line longer and `:77-79` is already gone — re-grep at PR-open.
 
 - [ ] **Step 1 (tests first):** `tests/test_plane_cutover_keepalive.py:94-110` → the hook exits 0, `data/.last-tool-call` exists, no JSONL, and **zero** rows (`SELECT COUNT(*) FROM events WHERE event IN ('tool_call','session_event')` = 0 after the run, no `_await`); a run with `BOT_DIR` unset (env without it, cwd a scratch dir) exits 0 and writes **no** `data/.last-tool-call` under the cwd (the #874 cell). `tests/test_plane_emit_class.py:170-185`: the two bot-vitals cells retire with the emit; one replacement asserts the hook completes with no socket deadline knob set and no plane row. `tests/test_event_type_registry.py:99-104` (`:103-106` on `c74ad034`): remove the `bot-vitals.sh` `VARIABLE_TYPES` entry (its positive control would fail on a script that no longer calls `evt`). The writer change must pass the #2122/#2140 writer-scan gate as `c74ad034` tightened it — gate (a) now reads "no other place in those texts names a writer" — so the new header names no writer function (say "records nothing on the plane", never `emit_fleet_event`).
@@ -189,13 +197,13 @@ _STRICT_MAPPING_FIELDS: dict[str, dict] = {"claudna": _CLAUDNA_FIELDS, "telemetr
         attrs = (f"claudlobby.fleet={fleet.name},claudlobby.bot=bot:{fleet.name}/{bot.bot_id},"
                  f"claudlobby.content={bot.telemetry.content},agent.runtime=claude")
         lines.append(f"export OTEL_RESOURCE_ATTRIBUTES={_shq(attrs)}")
+        lines.append("export OTEL_LOG_TOOL_DETAILS=1")   # §14 Q17: tool/MCP/skill names; the intake drops the inputs
         if bot.telemetry.content == "full":
             lines.append("# content: full — the disclosed act (design v2 §11)")
             lines.append("export OTEL_LOG_USER_PROMPTS=1")
-            lines.append("export OTEL_LOG_TOOL_DETAILS=1")
 ```
 
-  `composer.py`'s `known_values` import (`:51`) gains `OTEL_INTAKE_PORT`. The names and values are the F4 spec's; the one spelling difference is `_shq` single-quoting (this file's frozen sink, `:543-548`) where the spec drew double quotes. `bot:<fleet>/<bot>` is the alias `emit_fleet_event` stamps (`lib-common.sh:2145`), so ingest resolves it with no uid on the wire. **The RC incident (#533, `27813876`)** is why this block is measured, never assumed safe: `known_values.py:94-103` records that RC's flag evaluation rides the telemetry channel and that *disabling* telemetry killed every channel reply fleet-wide; *enabling* it is the direction that measurement did not cover, so the canary bot (Task 8) is an RC/Telegram bot and the day-1/day-7 delivered-reply criterion is the pass line — a test cannot stand in for it. Tests in `tests/test_composer.py` beside the `OBSERVABILITY_BRIDGE_HEAL` cases (`:3170-3185`): absent by default (no `OTEL_` substring); an armed Claude bot gets exactly those six `export` lines, `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4319` read from `OTEL_INTAKE_PORT`, `OTEL_RESOURCE_ATTRIBUTES` carrying `claudlobby.content=metadata`, and **no** `OTEL_LOG_*`; `content: full` adds the two gates (eight lines) and stamps `claudlobby.content=full`; a `runtime: codex` bot gets no block. The composer test pins whatever C6a recorded for the env names and the `http/json` value.
+  `composer.py`'s `known_values` import (`:51`) gains `OTEL_INTAKE_PORT`. The names and values are the F4 spec's; the one spelling difference is `_shq` single-quoting (this file's frozen sink, `:543-548`) where the spec drew double quotes. `bot:<fleet>/<bot>` is the alias `emit_fleet_event` stamps (`lib-common.sh:2145`), so ingest resolves it with no uid on the wire. **The RC incident (#533, `27813876`)** is why this block is measured, never assumed safe: `known_values.py:94-103` records that RC's flag evaluation rides the telemetry channel and that *disabling* telemetry killed every channel reply fleet-wide; *enabling* it is the direction that measurement did not cover, so the canary bot (Task 8) is an RC/Telegram bot and the day-1/day-7 delivered-reply criterion is the pass line — a test cannot stand in for it. Tests in `tests/test_composer.py` beside the `OBSERVABILITY_BRIDGE_HEAL` cases (`:3170-3185`): absent by default (no `OTEL_` substring); an armed Claude bot gets exactly seven `export` lines, `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4319` read from `OTEL_INTAKE_PORT`, `OTEL_RESOURCE_ATTRIBUTES` carrying `claudlobby.content=metadata`, `OTEL_LOG_TOOL_DETAILS=1` (§14 Q17) and **no** `OTEL_LOG_USER_PROMPTS`; `content: full` adds that one gate (eight lines) and stamps `claudlobby.content=full`; a `runtime: codex` bot gets no block. The composer test pins whatever C6a recorded for the env names and the `http/json` value.
 - [ ] **Step 5:** Verify: `./.venv/bin/pytest tests/test_telemetry_config.py tests/test_composer.py tests/test_env_register.py -q` (the `config explain` tests live in `tests/test_env_register.py:135-179`; there is no `tests/test_config_explain*.py`). Commit: `feat(config): per-bot telemetry (#2145 F4) — TelemetryConfig and the composed OTLP/HTTP-JSON export block to the plane-otel intake`.
 
 ### Task 4 (PR P2-a1): the raw writer — rotated `state/otel/` lines, `--retention-days`, the content gate, 0700 and `UMask=0077`, the `otel sink` rung
@@ -212,7 +220,10 @@ MAX_MEGABYTES, MAX_FILES = 64, 15                    # per signal: the active fi
 RAW_SINK_CEILING_MIB = MAX_MEGABYTES * MAX_FILES * len(SIGNALS)   # 1,920 MiB ≈ 1.92 GB ≤ 2 GB — the `otel sink` rung's bound
 DEFAULT_RETENTION_DAYS = 14
 #: content-bearing log-record attributes, kept off disk unless the bot was composed `content: full` (design v2 §11)
-CONTENT_KEYS = ("prompt", "prompt_text", "response", "tool_input", "tool_parameters", "arguments", "output", "body")
+CONTENT_KEYS = ("prompt", "prompt_text", "response", "tool_input", "arguments", "output", "body")
+#: §14 Q17 (ruled 2026-10-05): tool_parameters is kept for every bot, trimmed for non-`full` bots to these names only
+#: (it is a JSON string; anything unparsable is dropped whole). Detail keys such as full_command and file_path go.
+TOOL_PARAMETER_NAMES = ("mcp_server_name", "mcp_tool_name", "skill_name", "subagent_type")
 #: account identity on every Claude Code event (C6a), dropped on the same condition (epic §14 Q16, answered 2026-10-05)
 IDENTITY_KEYS = ("user.email", "user.account_uuid", "user.account_id", "user.id", "organization.id")
 def sink_dir(root: Path) -> Path: ...                # <root>/state/otel
@@ -221,7 +232,10 @@ def retention_parser() -> argparse.ArgumentParser: ...   # add_help=False parent
 def retention_days(script: str) -> int: ...          # the rung's read-only use: composer._native_script_argv(script, {})[1:] through
                                                      # retention_parser().parse_known_args (the script line also carries --port)
 def strip_content(body: dict) -> int: ...            # per resourceLogs entry whose resource is not claudlobby.content=full (absent → not full):
-                                                     # delete CONTENT_KEYS from each logRecord's attributes; returns how many were removed
+                                                     # delete CONTENT_KEYS from each logRecord's attributes and trim tool_parameters
+                                                     # to TOOL_PARAMETER_NAMES; returns how many were removed. Test: a metadata
+                                                     # tool_result with tool_input and tool_parameters {mcp_server_name, mcp_tool_name,
+                                                     # full_command} is written with no tool_input and only the two names
 class RawSink:                                       # one per process (the intake); a threading.Lock serializes append, rotation and prune
     def __init__(self, root: Path, *, days: int): ...    # mkdir state/otel 0700; refuse "not_private" (scan_sink's check) before any write
     def append(self, signal: str, body: dict) -> None: ...   # logs: strip_content(body) first; then ONE line, json.dumps(body, separators=(",", ":"),
@@ -333,6 +347,11 @@ def serve(root, host, port, *, retention_days, install_signals=True)   # os.umas
 - [ ] **Run log:** an entry in `documentation/plans/2026-10-04-runtime-neutral-observability-run-log.md` in `2026-09-28-unified-cli-run-log.md`'s voice (`**Measured:** …`, `**Read from code:** …`): the week's figures, the coverage column, the token ratios, the RC day-1/day-7 result and the C6a facts the composer test pinned. PR P2-a1's body cites the day-1 observation and the entry; it merges when the pass criteria hold.
 
 ### Task 9 (PR P2-a2): the plane leg with its first reader — the vendor→house mapping (F5), the allowlist, derive-not-mint, the `usage_read`/`brief_read` repoint, the gate, the §9b decision (F3)
+
+> **Ruled 2026-10-05 (epic §14 Q17):** this PR also retires `bot-vitals.sh`'s `tool_call` emit (Task 1's former Step 2
+> deletion and zero-rows test move here). The mapping names a tool from `tool_name`, except `mcp_tool`, which becomes
+> `mcp__<mcp_server_name>__<mcp_tool_name>` from the trimmed `tool_parameters` — the spelling the plane's rows carry
+> today, so readers see no change of name.
 
 **Files:** `claudlobby/plane/contracts.py`, `claudlobby/plane/identity.py`, `claudlobby/plane/ingest.py`, `claudlobby/plane/samples.py`, `claudlobby/plane/registries.py`, `claudlobby/migration_plan.py`, `claudlobby/plane/otel_intake.py` (the mapping dict, the windows, the flusher), `claudlobby/commands/_parsers.py` (`--socket`, `--window-seconds`), `claudlobby/switches.py` (the `plane-otel` row's `what`; the three regenerated tables), `claudlobby/commands/usage_read.py`, `claudlobby/commands/brief_read.py`, `claudlobby/brief.py`, `tests/fixtures/otel/claude-logs-window.json`, `claude-metrics-window.json` (new, cut from P2-a1's raw files), `tests/test_plane_otel_intake.py`, `tests/test_plane_daemon.py` (the `send_batch` contract pin), `tests/test_plane_contracts.py`, `tests/test_plane_registry.py`, `tests/test_plane_samples.py`, `tests/test_migration_plan.py`, `tests/test_event_type_registry.py` (the `PY_WRITERS` entry, Step 7), `tests/test_checkin_cli.py`, `tests/test_transcript_usage.py`, `tests/test_brief.py`, `harness/validate-bot-change.sh`, `library/protocols/fleet-observability.md`, `documentation/guides/observability.md` (the two event rows — gate (d) binds them to the registry in the same PR), `documentation/architecture/observable-plane.md` (the families table names `session.*`; the "what did session X cost" `jq`), `documentation/plans/2026-08-18-observable-plane-design-v2.md` (§9b, `:409-426`), `CHANGELOG.md`, the run log. `claudlobby/transcript_usage.py` is unchanged: its evaluation surface stays.
 
@@ -477,7 +496,7 @@ class Flusher(threading.Thread)          # flushes a window once the newest time
 
 - [ ] (P2-b) zero `tool_call` rows after activation for the canary bot over 48 h; `data/.last-tool-call` mtime advances on tool calls; `bash bot-vitals.sh` with `BOT_DIR` unset creates no file under `$PWD`; `grep -c emit_fleet_event claudlobby/_runtime_scripts/bot-vitals.sh` prints 0.
 - [ ] (P2-b) `PRUNABLE_SYSTEM_EVENTS == {"tool_call", "wip_uncommitted"}` is unchanged and `plane prune` still ages old `tool_call` rows; the PR body carries the two coverage columns per session (the before-leg's `tool_call` rows / the transcripts' distinct `tool_use` ids, with the ratios) and the Claudosseum answer.
-- [ ] (P2-a1) `grep -c '^export OTEL_\|^export CLAUDE_CODE_ENABLE_TELEMETRY' <armed bot's bot.conf>` prints 6 for `metadata`, 8 for `full` (C6a measured delta by default: no temporality line), and 0 for every unarmed bot; the armed bot's `OTEL_EXPORTER_OTLP_ENDPOINT` is `http://127.0.0.1:4319` and its `OTEL_EXPORTER_OTLP_PROTOCOL` is `http/json`.
+- [ ] (P2-a1) `grep -c '^export OTEL_\|^export CLAUDE_CODE_ENABLE_TELEMETRY' <armed bot's bot.conf>` prints 7 for `metadata`, 8 for `full` (C6a measured delta by default: no temporality line; `OTEL_LOG_TOOL_DETAILS` on both, §14 Q17), and 0 for every unarmed bot; the armed bot's `OTEL_EXPORTER_OTLP_ENDPOINT` is `http://127.0.0.1:4319` and its `OTEL_EXPORTER_OTLP_PROTOCOL` is `http/json`.
 - [ ] (P2-a1) `claudlobby config plan …` on a fleet with one enabled bot and no `plane-otel` enrollment **stages** and prints the `telemetry-intake` warning naming the bot (A-F4b — never `conflict`), and `host doctor` shows the `plane-otel` warn rung; after `enroll: true` in the host override the warning is gone, and `config diff` lists `claudlobby-plane-otel.*` carrying `UMask=0077` (systemd) / `Umask` 63 (launchd).
 - [ ] (P2-a1) On the canary root: `stat` shows `state/otel` at 700 and its files at 600; `plane doctor` shows a green `otel sink` rung ("<size> of <ceiling>, oldest <n> d"); `host doctor` shows `plane-otel: enrolled, listening on 127.0.0.1:4319`; `host doctor --switches` lists `telemetry` and `plane-otel`.
 - [ ] (P2-a1) A Bash tool call inside the armed bot prints no `OTEL_*` in `env`; `state/otel/logs.jsonl` contains no `prompt` attribute for a `metadata` bot.
