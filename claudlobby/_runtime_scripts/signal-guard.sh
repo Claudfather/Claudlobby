@@ -28,13 +28,14 @@ _allow() { exit 0; }   # no decision — normal permission flow applies
 # --- zero-fork prefilters ----------------------------------------------------
 # A payload naming none of kill, pkill, killall, skill or fuser cannot send a
 # signal through any form the decider judges. Quotes and backslashes are
-# stripped first, so a name split by quoting (k'ill', p"k"ill) is still seen,
-# and the word skills (a directory every bot names) is dropped, since no
-# signal verb is a part of it. An ANSI-C string can spell a name in escapes,
+# stripped first, so a name split by quoting (k'ill', p"k"ill) or by a line
+# continuation (the JSON text \\\n, deleted first) is still seen, and the
+# word skills (a directory every bot names) is dropped, since no signal verb
+# is a part of it. An ANSI-C string can spell a name in escapes,
 # so a payload holding one goes to the decider whatever it names. The strip
 # runs on bytes: a quote byte never occurs inside a UTF-8 sequence.
 payload="$(cat)"
-_bare_payload() { local LC_ALL=C; _bare="${payload//[\"\'\\]/}"; _bare="${_bare//[sS]kills/}"; }
+_bare_payload() { local LC_ALL=C; _bare="${payload//\\\\\\n/}"; _bare="${_bare//[\"\'\\]/}"; _bare="${_bare//[sS]kills/}"; }
 _bare_payload
 case "$_bare" in
 *kill*|*fuser*) ;;

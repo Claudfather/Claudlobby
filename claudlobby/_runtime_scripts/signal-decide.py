@@ -99,6 +99,8 @@ PROCESS_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.+-]*")
 SYSTEM_PATH_RE = re.compile(r"(?<![\w.])/(proc|sys)(/|$)")
 PLAIN_RE = re.compile(r"[^ \t\r\n;&|()<>\\'\"$`]+")  # a run of characters with no meaning
 DQ_PLAIN_RE = {'"': re.compile(r'[^"\\$`]+'), None: re.compile(r"[^\\$`]+")}
+# What a backslash escapes in double quotes; a heredoc body keeps it before `"`.
+DQ_ESCAPES = {'"': '$`"\\', None: "$`\\"}
 SIGNALLERS = SELECTORS | {"kill", "fuser", "find"}
 SYSTEM_READ = ("lookup", "a read under /proc or /sys")
 GUARDRAIL = (
@@ -236,10 +238,9 @@ class Parser:
             c = s[i]
             if stop and c == stop:
                 return i + 1
-            if c == "\\" and i + 1 < n:
-                w.literal(
-                    s[i + 1] if s[i + 1] in '$`"\\\n' else s[i : i + 2], s[i : i + 2]
-                )
+            if c == "\\" and i + 1 < n:  # quote removal, so a `sh -c` string is re-read as the shell gets it
+                nxt = s[i + 1]
+                w.literal("" if nxt == "\n" else nxt if nxt in DQ_ESCAPES[stop] else s[i : i + 2])
                 i += 2
             elif c == "$":
                 i = self.dollar(i, w)
@@ -273,7 +274,7 @@ class Parser:
                 if s.startswith("\\\n", i):
                     i += 2
                     continue
-                w.literal(s[i + 1 : i + 2], s[i : i + 2])
+                w.literal(s[i + 1 : i + 2])
                 w.quoted = True
                 i += 2
             elif c == "'":
@@ -396,8 +397,8 @@ class Parser:
 
     def read_heredocs(self, i, heredocs):
         """Read the bodies of the heredocs opened on the line that just ended.
-        An unquoted delimiter's body runs its substitutions, so its Word replaces
-        the delimiter's."""
+        An unquoted delimiter's body runs its substitutions and quote removal, so
+        its Word replaces the delimiter's and a shell reading it gets that Word's code."""
         s = self.s
         while heredocs:
             entry = heredocs.pop(0)
@@ -417,6 +418,7 @@ class Parser:
             if not delim.quoted:
                 entry[1] = Word()
                 Parser(entry[2]).dquote(0, entry[1], stop=None)
+                entry[2] = code_of(entry[1])
         return min(i, self.n)
 
 

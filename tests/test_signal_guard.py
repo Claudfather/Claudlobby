@@ -91,6 +91,12 @@ OUTAGE_LOOP = (
     ' && echo "killed $p (+ outer $PP)"; done; sleep 1; ps -eo pid,args | grep -c "[m]sg-stale"'
 )
 
+
+def _double_quoted(code: str) -> str:
+    """``code`` as a double-quoted shell word, as one writes it for ``bash -c "..."``."""
+    return '"' + "".join("\\" + c if c in '\\"$`' else c for c in code) + '"'
+
+
 REFUSED = [
     # by name or pattern: the #1069 instances, the 2026-10-03 one among them
     "pkill -f 'sleep 60'",
@@ -175,6 +181,20 @@ REFUSED = [
     "bash <<'EOF'\npkill -f watcher\nEOF",  # a heredoc fed to a shell is commands
     "cat <<'EOF' | bash\npkill -f watcher\nEOF",
     "cat <<EOF\n$(pkill -f watcher)\nEOF",  # an unquoted heredoc runs its substitutions
+    # an escaped dollar is the inner shell's dollar: quote removal comes first
+    'bash -c "kill \\$(pgrep -f watcher)"',
+    'sh -c "for p in \\$(pgrep watcher); do kill \\$p; done"',
+    'eval "kill \\$(pgrep -f watcher)"',
+    'eval "kill \\$PPID"',
+    'su -c "kill \\$(pgrep watcher)"',
+    'watch -n 5 "kill \\$(pgrep watcher)"',
+    'timeout 5 bash -c "kill \\$(pgrep watcher)"',
+    'flock /tmp/lock -c "kill \\$(pgrep watcher)"',
+    "bash -c " + _double_quoted(OUTAGE_LOOP),
+    'bash -c "ki\\\nll -9 \\$PPID"',  # a line continuation inside the string
+    "bash -c kill\\ \\$\\(pgrep\\ watcher\\)",  # escapes outside quotes
+    'bash <<< "kill \\$(pgrep watcher)"',
+    "bash <<EOF\nkill \\$(pgrep watcher)\nEOF",  # and an unquoted heredoc
 ]
 
 ALLOWED = [
@@ -215,6 +235,9 @@ ALLOWED = [
     "ps aux | grep watcher; pgrep -a watcher",
     "until ! pgrep -f '[b]in/pytest' >/dev/null; do sleep 30; done",
     "timeout 5 sleep 10",
+    'bash -c "kill \\$(cat x.pid)"',
+    'bash -c "sleep 5 & kill \\$!"',
+    "bash <<EOF\nsleep 5 & kill \\$!\nEOF",
     # text that only mentions a kill
     "grep -rn 'pkill -f' lib/",
     "git commit -m 'refuse pkill -f and kill $PPID'",
@@ -266,8 +289,11 @@ def test_the_hook_refuses_the_outage_loop_for_both_of_its_pids():
     assert "`$p`" in reason and "`$PP`" in reason, reason
 
 
-@pytest.mark.parametrize("command", ["pk'ill' -f watcher", "p$'\\x6b'ill -f watcher"])
-def test_the_hook_prefilter_sees_a_name_split_by_quoting_or_spelled_in_escapes(command):
+@pytest.mark.parametrize(
+    "command",
+    ["pk'ill' -f watcher", "p$'\\x6b'ill -f watcher", "ki\\\nll -9 $PPID", "pk\\\nill -f watcher"],
+)
+def test_the_hook_prefilter_sees_a_name_split_or_spelled_in_escapes(command):
     _refusal(command)
 
 
