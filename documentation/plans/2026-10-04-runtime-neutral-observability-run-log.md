@@ -21,7 +21,7 @@ value is kept as its type and length. Prompts, tool inputs and responses never r
 
 | Canary | Answer so far | Decides | Still owed |
 |---|---|---|---|
-| **C6a** confirmation leg | **Passes off the floor host.** Claude Code 2.1.289 exports OTLP/HTTP-JSON logs and metrics straight to a local endpoint under the plan's env block; the resource attributes land verbatim on every row; temporality is delta by default; `session.id` = hook `session_id` across `--resume`. | F4 stays locked on this evidence; **F4's gate is the floor host**, so P2-a1 still waits on the operator leg. | Floor host (Pi): the same run; bot-hour volume and receiver footprint; the 24 h `tool_call` overlap; RC day 1. |
+| **C6a** confirmation leg | **Passes off the floor host.** Claude Code 2.1.289 exports OTLP/HTTP-JSON logs and metrics straight to a local endpoint under the plan's env block; the resource attributes land verbatim on every row; temporality is delta by default; `session.id` = hook `session_id` across `--resume`. | F4 stays locked on this evidence; **F4's gate is the floor host**, so P2-a1 still waits on the operator leg. | **Answered (legs 2–3):** PASS on the Pi; RC ×2, exact overlap (63/63), ≈ 3.3 MB per busy hour, receiver ≈ 21 MB — on a borrowed worker over 21 min, not 24 h. Rare day-long events move to C6b. |
 | **C6a** side legs | Log events emitted while the endpoint is down are **dropped, not retried** (35 s outage). Summarizer `claude -p` children **export full sessions** under their own random `session.id`, carrying the bot's resource attributes. Every event carries `user.email`, `user.account_uuid`, `user.id`, `organization.id`. Prompt/response attributes are the literal `<REDACTED>` at default settings. The prefixed event name is the log **body** (`claude_code.api_request`); the `event.name` attribute is bare (`api_request`). | Plan 4 (`records()` reads the body; the 6/8 line counts; the restart risk); §14 Q15, Q16 for the operator. | — |
 | **C10** | **Leaks — all of it.** A tmux server started from a Claude Bash tool hands the pane `CLAUDE_CODE_CHILD_SESSION=1`, `CLAUDECODE=1` *and the caller's* `CLAUDE_CODE_SESSION_ID`. But a `claude` started with those leaked markers **replaces the id with its own and sets the marker itself** on every child (headless). | Plan 2 Task 7b as written is a no-op: unsetting the marker changes nothing a hook or tool sees. Task 7b is re-scoped to the open interactive question below. | **Answered (operator leg 1):** it boots, but the leaked marker **turns transcript saving off** — Task 7b ships (unset the three markers before exec). |
 | **C11** | **Yes, from both (headless).** Main-thread Bash, an Agent subagent's Bash and every hook (including the subagent's `PostToolUse`) carry the SessionStart `session_id`. **Every one of them also carries `CLAUDE_CODE_CHILD_SESSION=1`**, the main thread included. The hook payload's `agent_id`/`agent_type` is what tells a subagent's hook from the parent's. | `SUBAGENT_SHELL_SHARES_SESSION_ID = True` (plan 2 Task 7), and the marker branch is dropped: it discriminates nothing. **Plan 5 Task 5 is struck**: a guard that records nothing under the marker would record nothing for every session. | **Answered (operator leg 1, interactive tmux):** same readings — closed; Half B's gate is met. |
@@ -144,6 +144,61 @@ a Claude session would run without a transcript: no `--resume`, nothing for clau
 persistence — so **Task 7b ships** in Half A: `start-bot.sh` unsets `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION` and
 `CLAUDE_CODE_SESSION_ID` before `exec $CLAUDE`. Removing the cause is preferred to setting
 `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1`, which would mask it.
+
+### 2026-10-05 20:23–21:53 UTC — operator legs 2 and 3: the Pi (F4's gate) and a borrowed production worker
+
+Run by a Claude Code session on the operator's Mac mini over SSH (`pi-canary-runbook`). Full report kept by the
+operator (`~/rnc-results.md`). The instrument was copied alone to the Pi, with sha256 checked on both ends: the Pi's
+`~/claudlobby` is the live root on `main` and was only read.
+
+**Measured, leg 2 (F4's gate) — PASS on the floor host.** Pi `aarch64`, Debian 12, Claude Code **2.1.281**, Python
+3.11.2, 16 GB (5.2 GB available). A headless session (`--setting-sources "" --strict-mcp-config`, so as not to load
+the production user-level plugins, Telegram servers and clauDNA summarizer) exported to the raw receiver on
+`127.0.0.1:14319`. Result: every request `application/json`; `/v1/logs` 2, `/v1/metrics` 1; resource attributes on
+every row; the one exported `session.id` matched the hook's, none without; delta; log lag 5.5 s. Receiver RSS
+**21 MB**. **F4 stays locked, confirmed on the floor host.**
+
+**Measured, leg 3 — a borrowed production worker instead of a canary root (operator decision).** No canary root
+existed on the Pi (55 production `com.crog.*` units). The operator chose to arm one idle production worker, `rajan`
+(fleet `crog-eng-team`, 38.5 % busy over 24 h), by appending the six telemetry exports to its own `.env` (backed
+up, restored byte-identical afterwards) and restarting it twice through the release's `bot restart`. Armed
+**21.3 minutes**, not 24 h: the soak was compressed into a driven exercise.
+- **RC: PASS twice** (21:35 and 21:47), DM in, reply delivered, with telemetry on — #533's failure mode did not occur.
+- **Overlap, exact, 21:30:14–21:47:56 (17.7 min):** OTel `tool_result` ids **63** = transcript `tool_use` ids **63**
+  (main 59, subagent 4), no id on one side only — subagent, MCP and failed calls included; subagent calls export
+  under the parent session id. The plane held **248** `tool_call` rows for those 63 calls (double registration,
+  below): halved, 63 `PreToolUse` and 61 `PostToolUse` — the 2 failed calls have no plane completion row, while OTel
+  records them as `success: "false"`.
+- **Volume:** 72 requests, 1.04 MB of OTLP payload over 21.3 min (≈ 3.3 MB per busy hour; ≈ 31 MB/day at a 38.5 %
+  busy share, an estimate — idle volume not measured); receiver RSS 20.4–20.9 MB; 620 KB stored (shapes only).
+- **Live-bot shape:** MCP tools export as **`tool_name: "mcp_tool"`** at default settings (server and tool unnamed;
+  the plane keeps the real name); `success` is the string `"true"`/`"false"`; new names `mcp_server_connection`,
+  `skill_activated`, `subagent_completed`, metrics `claude_code.code_edit_tool.decision` and
+  `claude_code.lines_of_code.count`; `hook_execution_start`/`_complete` are 136 of the first 250 rows; **max log lag
+  12.9 s** on the busy bot (5.5 s headless).
+- **Not observed in the compressed window:** watchdog restarts, summarizer child sessions, intake outages, idle
+  volume. They move to C6b (P2-a1's canary week).
+
+**Measured, fleet findings outside this epic's code (operator to decide on issues):**
+1. **Every one of the Pi's 21 bots composes `bot-vitals.sh` twice** in the same `PreToolUse`/`PostToolUse` group —
+   `$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh` and the legacy `$CLAUDLOBBY_ROOT/lib/bot-vitals.sh` — so the plane
+   writes two `tool_call` rows per hook event. The legacy entry will point at a deleted script once the checkout
+   pulls #1989.
+2. **`bot restart` reports `ok: false`, rc 6, "bot lifecycle effect is unverified" on successful restarts** (2 of 2),
+   returning during the unit's `ExecStartPre=/bin/sleep 30` stagger; both stops also left tmux/claude/MCP processes
+   in the unit's cgroup ("Found left-over process … unclean termination"), gone within about a minute.
+3. **`documentation/system-yaml-schema.md:313-317,332`** still describes the retired `walk_back_uncomposed_host_units`
+   path (`lib-common.sh:5404`), which disables and deletes every `claudlobby-*` unit absent from a given dir.
+
+**Read from code (the runbook's Part 2a, not executed):** `config plan`/`config diff`/`host activate` refuse
+`--fleet` (`commands/releases.py:22-24`; the fleet is found under `$DATA/local/*/fleet.yaml`). A second data root
+on a one-user host still shares `~/.claude` (plugin install/update at boot, `lib-common.sh:4693`), the host `~/.env`
+tier, the enrolled host jobs (`claude-update`, `orphan-browser-reaper`, `plane-view` on `:8899`), the user
+manager's `daemon-reload`, and the Telegram access file; `config diff` hides unit names (they are in
+`plan.json .effects.units[]`). Plan 4 Task 8 carries these.
+
+**Harness fix (`setup --fleet`):** `claudlobby.fleet` was hard-coded to `canary`; a borrowed bot is now labelled with
+its real fleet.
 
 ## Plan changes this log caused (2026-10-05)
 

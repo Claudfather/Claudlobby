@@ -831,8 +831,11 @@ clauDNA's phase-3 canary table (§5.1).
     direct export works (`application/json`, `/v1/logs` and `/v1/metrics`, the resource attributes verbatim on
     every row, delta, 5 s/60 s), `session.id` = hook `session_id` across `resume`, a 35 s outage drops that
     window's log events (metrics survive), and the summarizer children export full sessions under their own ids
-    (§14 Q15). Every event also carries the account's identity attributes (§14 Q16). **Owed (operator):** the
-    floor-host run that is F4's gate, bot-hour volume and footprint, the 24-hour overlap, RC day 1.
+    (§14 Q15). Every event also carries the account's identity attributes (§14 Q16). **Closed (operator legs 2–3,
+    2026-10-05):** the direct export **passes on the Pi** (F4 confirmed); on a borrowed production worker over
+    21 min (operator decision, in place of 24 h on a canary root): RC replies ×2, OTel `tool_result` ids = transcript
+    `tool_use` ids (63/63, subagent, MCP and failures included), ≈ 3.3 MB per busy hour, receiver ≈ 21 MB RSS, log
+    lag ≤ 12.9 s. MCP tools export unnamed (§14 Q17). Day-long rare events (restarts, summaries, outages) move to C6b.
 - [ ] **C6b** Claude OTel under the intake — inside P2-a1's one-week canary (§6 P2; ironclad cycle 2): intake RSS;
   intake handler latency (the time to `200`, with the raw write behind it); `state/otel/` growth per bot-hour against
   the raw sink's bound; fleet-level RSS/CPU on the canary host before and after (the mission metric is the fleet
@@ -2190,7 +2193,8 @@ answered are marked so (§16 *Rulings*).
 4. **The P2 budget figures.** ~~The Collector-and-intake spec proposes RSS ≤ 192 MiB and ≤ 3 % of a core for the
    Collector on the smallest host class; C6a replaces them with measurements before the one-week canary starts~~ —
    **answered 2026-10-05 — A-F4 ratified** for the Collector half: no Collector budget remains. The intake's
-   ≤ 64 MiB stands, measured by C6b in P2-a1's canary week.
+   ≤ 64 MiB stands, measured by C6b in P2-a1's canary week. *(C6a on the Pi: the raw receiver held 20–21 MB RSS at
+   ≈ 3.3 MB of payload per busy bot-hour — the figure the 64 MiB is set against.)*
 5. **Session metric semantics.** The plane stores *uncached* input tokens so both runtimes compare, which
    departs from semconv's inclusive `gen_ai.usage.input_tokens` (the raw files keep each vendor's own figure —
    Claude's exclusive, Codex's inclusive — A-F5; the rule is stated once in `METRIC_NAMES`). Confirm, or store the
@@ -2263,6 +2267,15 @@ Added by ironclad cycle 1 (2026-10-05) — carried to the operator; answered whe
     `IDENTITY_KEYS` drop beside `CONTENT_KEYS` for non-`full` bots — no reader names them, the bot and fleet come
     from `claudlobby.*`, and the raw files then hold nothing personal; decides one line and one test in plan 4 Task 6.
     **Answered 2026-10-05 — drop unless `full`:** plan 4 Task 6 adds `IDENTITY_KEYS` beside `CONTENT_KEYS`.
+
+17. **MCP tools arrive unnamed** (C6a on a live bot, 2026-10-05). At default settings Claude Code exports an MCP
+    call as `tool_name: "mcp_tool"`; the server and tool names come only with `OTEL_LOG_TOOL_DETAILS=1`, which is
+    the `content: full` gate (it also carries tool inputs). The plane's `tool_call` rows name them today, and P2-b
+    makes those rows marker-only. Options: (a) accept — `session.tool_calls` counts MCP calls unnamed, and per-tool
+    MCP detail lives only in transcripts; (b) keep a name-only `tool_call` row for `mcp__*` tools in `bot-vitals.sh`
+    after P2-b; (c) arm `OTEL_LOG_TOOL_DETAILS` for `metadata` bots and have the intake drop everything but the names
+    before the raw write. Lean: (a) for P2 — no reader names an MCP tool today (§14 Q9's audit applies) — revisited
+    if one appears. Decides plan 4 Task 1's marker-only scope and Task 9's mapping.
 
 ## 15. Forge change log (2026-10-04)
 

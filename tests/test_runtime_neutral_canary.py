@@ -121,3 +121,10 @@ def test_c10_reports_markers_and_never_keeps_the_full_env(tmp_path):
     assert {r["arm"]: r["pane"].get("CLAUDE_CODE_CHILD_SESSION") for r in rows} == {"bare": "1", "scrubbed": None}
     assert "sk-should-never-land" not in (tmp_path / "out" / "c10.jsonl").read_text()
     assert not list((tmp_path / "out").glob("c10-*.env"))
+
+
+def test_env_block_labels_the_bots_real_fleet():
+    """A borrowed production bot is labelled with its own fleet, not `canary` (Pi run, 2026-10-05)."""
+    attrs = rnc.env_block(14319, "rajan", "crog-eng-team")["OTEL_RESOURCE_ATTRIBUTES"]
+    assert "claudlobby.bot=rajan" in attrs and "claudlobby.fleet=crog-eng-team" in attrs
+    assert "claudlobby.fleet=canary" in rnc.env_block(14319, "c")["OTEL_RESOURCE_ATTRIBUTES"]

@@ -226,7 +226,7 @@ def cmd_hook(args) -> int:
 
 # --- setup -----------------------------------------------------------------------------------------
 
-def env_block(port: int, bot: str) -> dict:
+def env_block(port: int, bot: str, fleet: str = "canary") -> dict:
     """The bot env block of epic §6 P2 for ``content: metadata``, pointed at the canary receiver."""
     return {
         "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
@@ -234,7 +234,7 @@ def env_block(port: int, bot: str) -> dict:
         "OTEL_LOGS_EXPORTER": "otlp",
         "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
         "OTEL_EXPORTER_OTLP_ENDPOINT": f"http://127.0.0.1:{port}",
-        "OTEL_RESOURCE_ATTRIBUTES": f"agent.runtime=claude,claudlobby.bot={bot},claudlobby.fleet=canary",
+        "OTEL_RESOURCE_ATTRIBUTES": f"agent.runtime=claude,claudlobby.bot={bot},claudlobby.fleet={fleet}",
     }
 
 
@@ -245,7 +245,7 @@ def cmd_setup(args) -> int:
     hook = f"python3 {me} hook --log {shlex.quote(str(root / 'hooks.jsonl'))}"
     settings = {"hooks": {ev: [{"hooks": [{"type": "command", "command": hook}]}] for ev in HOOK_EVENTS}}
     (root / "settings.json").write_text(json.dumps(settings, indent=2) + "\n")
-    env = env_block(args.port, args.bot)
+    env = env_block(args.port, args.bot, args.fleet)
     (root / "otel.env").write_text("".join(f"export {k}={shlex.quote(v)}\n" for k, v in env.items()))
     print(f"""Wrote {root}/settings.json (hooks → {root}/hooks.jsonl) and {root}/otel.env.
 
@@ -370,6 +370,7 @@ def main(argv=None) -> int:
     p.add_argument("--dir", required=True)
     p.add_argument("--port", type=int, default=4319)
     p.add_argument("--bot", default="canary")
+    p.add_argument("--fleet", default="canary", help="the claudlobby.fleet label (a borrowed bot's real fleet)")
     p.set_defaults(fn=cmd_setup)
     p = sub.add_parser("c10")
     p.add_argument("--out", required=True)
