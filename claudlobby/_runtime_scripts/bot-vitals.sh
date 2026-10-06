@@ -16,9 +16,9 @@
 # "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh", runs the hook twice and records every
 # tool call twice (#2062).
 #
-# It needs BOT_DIR (bot.conf exports it). Without one it does nothing (#874): a
-# bot's working directory is its project checkout, so neither the marker nor a
-# plane row may fall back to it.
+# It needs BOT_DIR, an existing absolute dir (bot.conf exports it). Without one it
+# does nothing (#874): a bot's working directory is its project checkout, so
+# neither the marker nor a plane row may fall back to it.
 #
 # Each event: <type>\t<data-json>, handed to emit_fleet_event (source "vitals").
 
@@ -28,6 +28,20 @@ trap 'exit 0' ERR
 
 set -euo pipefail
 
+# No bot to anchor to → nothing to do (#874). Checked before lib-common is
+# sourced, so the no-op path costs one fork. BOT_DIR must be an existing
+# absolute dir: a relative or empty value would resolve against the cwd, which
+# is the bot's project checkout.
+case "${BOT_DIR:-}" in
+    /*) [ -d "$BOT_DIR" ] || BOT_DIR="" ;;
+    *)  BOT_DIR="" ;;
+esac
+if [ -z "$BOT_DIR" ]; then
+    cat >/dev/null 2>&1 || true   # drain the payload; the writer must not see a closed pipe
+    echo "bot-vitals: BOT_DIR unset or not an absolute directory — recording nothing, touching no marker (#874)" >&2
+    exit 0
+fi
+
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLANE_EMIT_CLASS=hook   # a live Claude Code turn waits on its plane record: its socket deadline (#1693, claudlobby/_runtime_scripts/plane-emit.sh)
 # shellcheck source=lib-common.sh
@@ -35,11 +49,6 @@ PLANE_EMIT_CLASS=hook   # a live Claude Code turn waits on its plane record: its
 
 # --- Read hook payload from stdin (Claude Code sends JSON) ---
 payload="$(cat)"
-
-if [ -z "${BOT_DIR:-}" ]; then
-    echo "bot-vitals: BOT_DIR unset — recording nothing, touching no marker (#874)" >&2
-    exit 0
-fi
 
 bot="${BOT_ID:-unknown}"
 

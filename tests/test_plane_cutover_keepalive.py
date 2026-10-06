@@ -13,6 +13,7 @@ from __future__ import annotations
 from tests.plane_setup import initialize_plane
 
 import json
+import pytest
 import subprocess
 import sys
 import time
@@ -110,24 +111,28 @@ def test_the_vitals_hook_lands_its_events_through_the_door(tmp_path, *, scratch_
         ("b1", "tool_call", "vitals", {"tool": "Read", "event": "PostToolUse", "session": "s-1"})
 
 
-def test_the_vitals_hook_never_falls_back_to_the_cwd(tmp_path, *, scratch_plane_env):
-    """#874: with no BOT_DIR, the hook writes no marker into whatever dir it runs in (a bot's cwd is its
-    project checkout) and records no row against a bot it cannot name. It still exits 0."""
+@pytest.mark.parametrize("bot_dir", [None, "", "runtime/bots/b1"], ids=["unset", "empty", "relative"])
+def test_the_vitals_hook_never_falls_back_to_the_cwd(tmp_path, bot_dir, *, scratch_plane_env):
+    """#874: with no usable BOT_DIR (unset, empty or relative) the hook writes no marker into the dir it runs
+    in (a bot's cwd is its project checkout) and records no row against a bot it cannot name. It exits 0."""
     libdir, bot, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
     (libdir / "bot-vitals.sh").symlink_to(LIB / "bot-vitals.sh")
     env = {k: v for k, v in {**env, "BOT_ID": "b1", "FLEET_NAME": FLEET}.items() if k != "BOT_DIR"}
+    if bot_dir is not None:
+        env["BOT_DIR"] = bot_dir
     cwd = tmp_path / "project-checkout"
     (cwd / "data").mkdir(parents=True)
+    (cwd / "runtime" / "bots" / "b1" / "data").mkdir(parents=True)   # a relative BOT_DIR would resolve here
     payload = json.dumps({"hook_event_name": "PostToolUse", "tool_name": "Read", "session_id": "s-1"})
     r = subprocess.run(["bash", str(libdir / "bot-vitals.sh")], input=payload, capture_output=True, text=True,
                        timeout=180, env=env, cwd=cwd)
     assert r.returncode == 0, r.stderr
-    assert "BOT_DIR unset" in r.stderr
-    assert not (cwd / "data" / ".last-tool-call").exists()
+    assert "recording nothing" in r.stderr
+    assert not list(cwd.rglob(".last-tool-call"))
     assert not (bot / "data" / ".last-tool-call").exists()
-    if db_path(tmp_path).exists():
-        with connect(db_path(tmp_path)) as conn:
-            assert conn.execute("SELECT COUNT(*) FROM events WHERE event = 'tool_call'").fetchone()[0] == 0
+    # Replay anything the hook staged before reading the plane, so an emit that slipped through is counted.
+    assert _await(tmp_path, "SELECT COUNT(*) FROM events WHERE event = 'tool_call'", 0, timeout=3) in (0, None)
+    assert not list((tmp_path / "state" / "plane").rglob("*.batch"))
 
 
 # --- uptime ------------------------------------------------------------------------

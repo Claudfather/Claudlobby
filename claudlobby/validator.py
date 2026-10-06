@@ -149,6 +149,9 @@ def _operator_reverse_insteadof() -> str | None:
 #: baseline file names them, so a slug is renamed only on purpose. A category
 #: is a KIND of finding, grouped by remedy; the value is the one line a reader
 #: gets when a category appears that a baseline did not have.
+#: The root checkout's lib/ is retired (#1989); hook commands there run beside the release's copy (#2062).
+RETIRED_HOOK_PREFIX = "$CLAUDLOBBY_ROOT/lib/"
+
 WARNING_CATEGORIES: dict[str, str] = {
     # a declared reference that resolves to nothing
     "voice-missing": "a declared voice is not in voices/",
@@ -189,6 +192,7 @@ WARNING_CATEGORIES: dict[str, str] = {
     "obs-range": "an observability value outside its accepted range",
     "model-unknown": "a model name outside the known set (passed through as-is)",
     "hook-unknown": "a hook event Claude Code does not recognise",
+    "hook-retired-path": "a hook command points into the retired root lib/; the release composes its own copy",
     "account-unknown": "a bot's account is not in fleet.accounts",
     "autonomous-runner": "an autonomous_runner field outside its expected shape",
     "briefing-no-source": "a briefing-equipped bot has no integration or MCP server to read",
@@ -1292,6 +1296,21 @@ def _validate_bots(
                     f"Known events: {', '.join(sorted(KNOWN_HOOK_EVENTS))}. "
                     f"This hook will be silently ignored by Claude Code."
                 )
+
+        # A hook command under the retired root lib/ (#2062). Dedup keys on
+        # (command, matcher), so it never collapses into the release's
+        # $CLAUDLOBBY_NATIVE_DIR copy: both run, and bot-vitals records every
+        # tool call twice. Warn, not error, so existing manifests still compose.
+        for event, entries in bot.hooks.items():
+            for entry in entries or []:
+                command = str((entry or {}).get("command", ""))
+                if RETIRED_HOOK_PREFIX in command:
+                    report.warn(
+                        "hook-retired-path",
+                        f"bot '{bot_name}': {event} hook '{command}' points into the retired root lib/ — "
+                        f"delete it from fleet.yaml; the release composes its own "
+                        f"$CLAUDLOBBY_NATIVE_DIR copy, so both run (#2062)"
+                    )
 
         # RC-killing env vs remote-control/channels (error, #533). extra_flags
         # is checked too so a raw "--remote-control" there gets the same guard.

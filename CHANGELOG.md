@@ -10,10 +10,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 `bot-vitals.sh` used `${BOT_DIR:-$PWD}` both for the activity marker and as the bot dir it handed the plane emit. Run without `BOT_DIR`, it wrote `data/.last-tool-call` into whatever directory it ran in, which for a bot is its project checkout, and recorded a `tool_call` row against that directory.
 
-- **With no `BOT_DIR`, the hook now does nothing.** It writes no marker, records no row, notes the reason on stderr, and exits 0, so a tool call is never blocked. Every composed bot has `BOT_DIR` from `bot.conf`, so its markers and `tool_call` rows are unchanged.
-- **`fleet.yaml.example` no longer shows the retired `$CLAUDLOBBY_ROOT/lib/bot-vitals.sh`.** Hook dedup compares the command string, so a manifest that copied that path ran the hook twice beside the release's default and recorded every tool call twice (#2062). The example now uses the release's own `$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh`, and the script's header says not to declare it again. Manifests that already carry the old path still need the one-time clean-up #2062 describes.
+- **Without a usable `BOT_DIR`, the hook now does nothing.** Unset, empty, relative or not a directory all count as unusable. It writes no marker, records no row, notes the reason on stderr and exits 0, so a tool call is never blocked. The check runs before `lib-common.sh` is sourced, so the no-op path is one fork. Every composed bot has an absolute `BOT_DIR` from `bot.conf`, so its markers and `tool_call` rows are unchanged.
+- **The double registration of #2062 now gets a warning, and the example no longer teaches it.** Hook dedup keys on `(command, matcher)`, so a manifest hook at the retired `$CLAUDLOBBY_ROOT/lib/bot-vitals.sh` ran beside the release's default and recorded every tool call twice.
+  - `config validate` now warns `hook-retired-path` on any hook command under the retired root `lib/`. It is a warning, not an error, so existing manifests still compose. Delete those entries.
+  - `fleet.yaml.example` uses the release's `$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh` and explains the dedup key.
+  - The script's header says not to declare the hook again.
 - **`tool_call` rows stay.** They are the only record of which MCP tool ran until the plane takes tool names from OpenTelemetry (#2145 §14 Q17, P2-a2).
-- **Test:** `tests/test_plane_cutover_keepalive.py::test_the_vitals_hook_never_falls_back_to_the_cwd`.
+- **Tests:** `tests/test_plane_cutover_keepalive.py::test_the_vitals_hook_never_falls_back_to_the_cwd` covers an unset, empty and relative `BOT_DIR`, replaying staged batches before it counts rows. `tests/test_validate_warning_discipline.py` raises `hook-retired-path`.
 
 ### Added — a composed guard refuses a signal to a process the caller did not start (#1069)
 

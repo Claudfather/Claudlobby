@@ -182,14 +182,15 @@ def test_every_warning_has_a_category_and_the_counts_sum(fleet_dir, monkeypatch)
             "w2": "      voice: no-such-voice\n      skills: [no-such-skill]\n",
             "w3": "      guardrails: [no-such-guardrail]\n      mcp: [no-such-mcp]\n",
             "w4": "      model: gpt-banana\n      reports_to: nobody\n",
-            "w5": "      observability:\n        pulse_interval: 0\n",
+            "w5": "      observability:\n        pulse_interval: 0\n"
+                  '      hooks:\n        PreToolUse:\n          - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"\n',
         },
     )
     report = _validate(fleet_dir)
     raised = set(report.warning_categories)
     assert {
         "voice-missing", "skill-missing", "guardrail-missing", "mcp-missing",
-        "model-unknown", "topology", "obs-range", "retired-key", "env-unset",
+        "model-unknown", "topology", "obs-range", "retired-key", "env-unset", "hook-retired-path",
     } <= raised, report.categorized()
     assert UNCATEGORIZED not in raised, report.categorized()
     assert raised <= set(WARNING_CATEGORIES), raised - set(WARNING_CATEGORIES)

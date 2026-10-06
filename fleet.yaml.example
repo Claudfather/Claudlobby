@@ -95,8 +95,9 @@ fleet:
 
     # Hooks (bot-vitals.sh) and observability come from system defaults.
     # Override: declare hooks/observability here (your version wins via dedup —
-    # dedup compares the command string, so spell a default hook exactly as the
-    # release does; a different path, e.g. the retired root lib/, runs it twice, #2062).
+    # dedup keys on (command, matcher), so spell a default hook exactly as the
+    # release does, matcher included; a different path, e.g. the retired root
+    # lib/, runs it twice and `config validate` warns hook-retired-path, #2062).
     # Disable: system_defaults: false (or per-category: system_defaults: { hooks: false })
     #
     # hooks:                                       # uncomment to override system default hooks
