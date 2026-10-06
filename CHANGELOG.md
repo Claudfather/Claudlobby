@@ -18,6 +18,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **The reviewer protocols say to pass the URL:** `same-identity-fallback` posts the verdict review through `gh api`, which returns its `html_url`, and names it on the report with `--artifact`; `report-back`, `review-flow`, `paired-work-review`, `pr-comment-hygiene`, `code-review` and the GitHub integration say the same. The verdict header and its `— reviewed at <sha>` anchor are unchanged.
 - **Tests:** `tests/test_who_reviewed.py` replays the four cases measured in #1537 through a real Plane with the report door's own encoding, a comment-URL and a review-URL join, the REST listing's failures (HTTP 403, a timeout, an error body at exit 0, a non-JSON body), a review past the first page of the listing (merged and back-to-back pages), and the URL shapes that name a verdict.
 
+### Fixed — the protocols name only addresses a reader can open, never a bot's own `data/` (#1708)
+
+`token-efficiency` and `comms-topology` listed a path under the author's own `data/` as a stable address for compressed detail, and `report-back` sent a report's detail to "a doc in your `data/`". That directory exists and stays put, but the composed rules of every other bot in the fleet deny reading anything in a bot's directory, the manager's included, so the pointer arrived unreadable. In one fleet's recorded reports over 16 days, 13 of 1,502 handed the reader such a path.
+
+- **The test, stated where the addresses are listed:** "The detail must be at an address the addressee can open, not merely one that exists." The addresses that pass are a PR or issue (on a public repo, no business names or secrets), a doc in the fleet's `shared/` or a vault note, and a repo path at a pushed commit or the pushed branch. Never the author's own `data/` or anything else in its bot directory, which stays for scratch only its author re-reads.
+- **`token-efficiency`:** rule zero states the test, and the bars table sends a report summary's overflow to `shared/` instead of `data/`.
+- **`comms-topology`:** *Bot to bot* opens with the test, and *To disk* asks for an address its reader can open. "A worklog" leaves the list, since its spec (#881) puts worklogs in the worker's `data/`. The claim that the deny does not block is replaced by the measurement that it does.
+- **`report-back`:** the detail goes to an address the manager can open.
+- `tests/test_report_addresses.py` pins every `data/` line in `library/` per file with its reason, the text a worker's composed `CLAUDE.md` carries, and the manager's composed deny rules the text relies on.
+
 ### Added — each bot session gets its own child subreaper, so its orphans never re-parent to the user manager (#2158)
 
 On 2026-10-05 a kill loop killed a pattern match and then its parent. The match was an orphaned job, and an orphan in a bot session re-parented to the systemd user manager, which runs every bot: it exited on SIGTERM, and every bot on the host stopped for 15 hours. #1069's guard refuses that command; this bounds the damage when one gets past it.
