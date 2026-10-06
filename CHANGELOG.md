@@ -17,6 +17,27 @@ Every composed `bot.conf` now carries `export CLAUDNA_STATE_DIR="$BOT_DIR/data/c
 - **Activation step (operator).** A clean restart closes the bot's old-root session itself. Once a bot has restarted onto its own root, seal whatever it still has open in the old root by bot name: only sessions a crash, kill or hard reboot stranded. Never seal before the restart, which labels a clean close `abandoned`. Never seal all open sessions: that closes live interactive ones. `list --bot` matches a name and never a fleet, so where two fleets on the host have a bot with the same name, wait until both have switched. After the last restart, sweep the stragglers. The commands are in `documentation/plans/2026-10-04-runtime-neutral-observability-p3-claudlobby-summaries.md`, Task 1 Step 2.
 - **Readers** build a bot's root as `bot_runtime(bot) / CLAUDNA_STATE_SUBDIR` (`composer.py`). `bot.conf`'s `$BOT_DIR/...` text is expanded only by a sourcing shell.
 
+### Fixed — `fleet status` names a bot's current task by state, then latest transition, and says when more than one is open (#2179)
+
+A bot with two or more open assignments had its `current_task` read from whichever had the lowest task id. Task ids are random, so the pick was arbitrary. An assignment recorded but never delivered could read as the work in progress while the bot worked on another, and a manager routing by that line could skip the delivery.
+
+- **The order:** `read_fleet_work` ranks a bot's open assignments `active`, then `blocked`, then `assigned`. Within a state, the latest transition comes first, in the Plane's ingest order. That is the assignment's newest state-changing event (`accepted`, `progress`, `resumed` or `blocked_waiting`), else its own record. A manager's or the operator's act on the task (`escalated`, `nudged`) is not the bot moving to it. Delivery is a communication, not a task event. So neither moves the order. The ids only break a tie. `current_task` is the first.
+- **More than one is said, never picked silently:**
+  - `fleet status --json` and `fleet utilization --json` carry `open_assignments` beside `current_task`. It is null when the work is unavailable.
+  - The status table adds `(+N open)` after the task, kept clear of the column's truncation.
+  - The bot detail reads `Task: <title> (1 of N open)` above its assignment lines.
+- **One source:** both commands read the same `read_fleet_work`, so utilization inherits the order.
+- **The check-in skill:** it names `open_assignments`. Before a manager dispatches to a worker with more than one open, the skill has it check the worker's `assigned` rows: one still awaiting delivery is delivered, not assigned again.
+- **Tests:** `tests/test_current_task_order.py` covers:
+  - an active assignment beside a newer assigned one, in both task-id orders;
+  - active, blocked and assigned against the id order;
+  - two assigned ones by their latest transition, in both id orders;
+  - two active ones where a later progress event decides;
+  - an escalation, or a nudge on the older assigned row, does not decide, in both id orders;
+  - the count, including null when the work is unavailable;
+  - the status JSON, table and detail;
+  - utilization's count.
+
 ### Fixed — `task reviews` attributes a verdict to the reviewed report that names its URL, before any time window (#1537)
 
 `task reviews` tied a verdict to a reviewed report only by time: the report had to land from 10 s before the verdict to 120 s after it. So a careful write-up (a report 332 s after its verdict), a corrected verdict (posted 115 s after the report already on file) and two reviewers posting 5 s apart read UNKNOWN or AMBIGUOUS. A block nobody could attribute could not be superseded either, so it outlived its own reviewer's later approve.

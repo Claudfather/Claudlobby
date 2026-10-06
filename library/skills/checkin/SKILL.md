@@ -85,8 +85,14 @@ A step that fails is **recorded, never guessed around**: add its name to
    `utilization` entry (#891) is **not an input** of this skill; ignore it.
 1b. **The roster, and who is idle** — `claudlobby --fleet "$FLEET_NAME" fleet status
    --json`: `data.bots[]`, each with `name` (the id the ACT line takes as `<worker>`),
-   `state`, `pane_state` (`BUSY` / `IDLE`), `tmux_alive`, `current_task`, and
-   `plane_unreachable` (non-null when the plane could not be read for that bot). A
+   `state`, `pane_state` (`BUSY` / `IDLE`), `tmux_alive`, `current_task`,
+   `open_assignments`, and `plane_unreachable` (non-null when the plane could not be
+   read for that bot). With more than one open assignment, `current_task` is the
+   first of them (active, then blocked, then assigned, latest transition first), and
+   `work_assignments` lists every one with its state: an `assigned` one there may
+   still await delivery. Before dispatching to such a worker, check its `assigned`
+   rows: one still awaiting delivery is delivered with `assignment deliver`, not
+   assigned again, and `current_task` is not the only work the worker holds. A
    `null` `pane_state` — with or without `plane_unreachable` set (a fleet with no
    heartbeats yet) — means the worker is UNOBSERVED, not idle. `dispatch` needs an
    alive, observed, idle worker; the rationale names the worker and its observed
