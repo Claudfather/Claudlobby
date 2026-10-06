@@ -85,7 +85,7 @@ def session_alias(platform_session_id: str, runtime: str = "claude") -> str:
     so far; any other runtime is "<runtime>:<id>", so two vendors' ids never
     collide. P2's intake sets its session `subject` from this function; clauDNA
     and Claudron cite register row 10, which states this rule once. The
-    vocabulary is config's (known_values.KNOWN_RUNTIMES); this module refuses
+    vocabulary is config's (known_values.KNOWN_AGENT_CLIS); this module refuses
     only an empty runtime."""
     if not platform_session_id or not platform_session_id.strip():
         raise ValueError("empty platform session id — refusing to derive")

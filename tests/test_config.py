@@ -235,22 +235,22 @@ class TestCoerceBot:
         assert bot.preferred_notif_channel == "terminal_bell"
         assert bot.disable_nonessential_traffic is True  # unset → headless default
 
-    def test_runtime_defaults_to_claude_and_follows_bot_over_defaults(self):
-        """#2145: `runtime` is an inherited scalar with a built-in `claude`. An
+    def test_agent_cli_defaults_to_claude_and_follows_bot_over_defaults(self):
+        """#2145: `agent_cli` is an inherited scalar with a built-in `claude`. An
         explicit bot-level null reads as `claude`, never None — the composer always
         needs a string to write into bot.conf."""
-        assert _coerce_bot("t", {"expertise": ["eng"]}, {}).runtime == "claude"
-        assert _coerce_bot("t", {"expertise": ["eng"]}, {"runtime": "codex"}).runtime == "codex"
-        bot = _coerce_bot("t", {"expertise": ["eng"], "runtime": "claude"}, {"runtime": "codex"})
-        assert bot.runtime == "claude"
-        bot = _coerce_bot("t", {"expertise": ["eng"], "runtime": None}, {"runtime": "codex"})
-        assert bot.runtime == "claude"
+        assert _coerce_bot("t", {"expertise": ["eng"]}, {}).agent_cli == "claude"
+        assert _coerce_bot("t", {"expertise": ["eng"]}, {"agent_cli": "codex"}).agent_cli == "codex"
+        bot = _coerce_bot("t", {"expertise": ["eng"], "agent_cli": "claude"}, {"agent_cli": "codex"})
+        assert bot.agent_cli == "claude"
+        bot = _coerce_bot("t", {"expertise": ["eng"], "agent_cli": None}, {"agent_cli": "codex"})
+        assert bot.agent_cli == "claude"
 
-    def test_runtime_rejects_unknown_values(self):
-        with pytest.raises(ValueError, match=r"Invalid runtime 'code'.*Did you mean 'codex'"):
-            _coerce_bot("t", {"expertise": ["eng"], "runtime": "code"}, {})
-        with pytest.raises(ValueError, match="Invalid runtime"):
-            _coerce_bot("t", {"expertise": ["eng"], "runtime": 1}, {})
+    def test_agent_cli_rejects_unknown_values(self):
+        with pytest.raises(ValueError, match=r"Invalid agent_cli 'code'.*Did you mean 'codex'"):
+            _coerce_bot("t", {"expertise": ["eng"], "agent_cli": "code"}, {})
+        with pytest.raises(ValueError, match="Invalid agent_cli"):
+            _coerce_bot("t", {"expertise": ["eng"], "agent_cli": 1}, {})
 
     def test_skip_permission_prompts_default_true(self):
         """G6: both first-run consent skip-flags default True (skip the prompt) so a

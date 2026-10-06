@@ -1099,7 +1099,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
     lines.append(f"export FLEET_NAME={_shq(fleet.name)}")
     # #2145 §2.2: the doors derive the caller's session uid from its runtime's
     # session-id env; this names the runtime so they derive with the right rule.
-    lines.append(f"export CLAUDLOBBY_RUNTIME={_shq(bot.runtime)}")
+    lines.append(f"export CLAUDLOBBY_RUNTIME={_shq(bot.agent_cli)}")
     # #1722. The ONE provenance value that may live here, and only because it is
     # CONTENT-derived: it changes exactly when fleet.yaml changes, which is
     # exactly when `generate` would legitimately rewrite bot.conf anyway. So

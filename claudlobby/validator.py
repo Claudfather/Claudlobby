@@ -1261,11 +1261,11 @@ def _validate_bots(
             )
 
         # #2145 F11: the vocabulary ships now; only the Claude adapter exists.
-        if bot.runtime != "claude":
+        if bot.agent_cli != "claude":
             report.errors.append(
-                f"bot '{bot_name}': runtime '{bot.runtime}' — execution adapter not shipped. "
+                f"bot '{bot_name}': agent_cli '{bot.agent_cli}' — execution adapter not shipped. "
                 f"This release composes and launches Claude Code bots only; the Codex adapter is the "
-                f"companion epic (#2149). Set runtime: claude, or remove the bot until it lands."
+                f"companion epic (#2149). Set agent_cli: claude, or remove the bot until it lands."
             )
 
         # Model validation (warn + pass-through)

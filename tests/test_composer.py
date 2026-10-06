@@ -1112,7 +1112,7 @@ class TestBotConfExportsTheRuntime:
         lines = self._conf(tmp_path).splitlines()
         assert [ln for ln in lines if "CLAUDLOBBY_RUNTIME" in ln] == ["export CLAUDLOBBY_RUNTIME=claude"]
         # Constructed directly: the validator (which refuses codex) is not in the composer's path.
-        lines = self._conf(tmp_path / "codex", runtime="codex").splitlines()
+        lines = self._conf(tmp_path / "codex", agent_cli="codex").splitlines()
         assert [ln for ln in lines if "CLAUDLOBBY_RUNTIME" in ln] == ["export CLAUDLOBBY_RUNTIME=codex"]
 
 

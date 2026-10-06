@@ -164,15 +164,15 @@ def test_config_explain_scalar_sources_follow_loader_without_values(world, capsy
     assert (fallback["source"], fallback["state"], fallback["declaration"]) == (
         "built_in", "unset", None)
 
-    # #2145: `runtime` is an inherited scalar on effort's path; its built-in is set.
-    assert main([*argv, "bot.runtime", "--bot", "solo"]) == 0
+    # #2145: `agent_cli` is an inherited scalar on effort's path; its built-in is set.
+    assert main([*argv, "bot.agent_cli", "--bot", "solo"]) == 0
     runtime = json.loads(capsys.readouterr().out)["data"]
     assert (runtime["source"], runtime["state"], runtime["declaration"]) == (
         "built_in", "set", None)
-    manifest.write_text(manifest.read_text().replace("mcp: [github]", "mcp: [github]\n    runtime: claude"))
-    assert main([*argv, "bot.runtime", "--bot", "solo"]) == 0
+    manifest.write_text(manifest.read_text().replace("mcp: [github]", "mcp: [github]\n    agent_cli: claude"))
+    assert main([*argv, "bot.agent_cli", "--bot", "solo"]) == 0
     runtime = json.loads(capsys.readouterr().out)["data"]
-    assert (runtime["source"], runtime["declaration"]) == ("fleet.defaults", "fleet.defaults.runtime")
+    assert (runtime["source"], runtime["declaration"]) == ("fleet.defaults", "fleet.defaults.agent_cli")
 
 
 def test_config_explain_refuses_unsupported_or_unknown_config_paths(world, capsys, monkeypatch):

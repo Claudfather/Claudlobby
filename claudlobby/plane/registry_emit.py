@@ -434,7 +434,7 @@ def bot_payload(paths, fleet, bot, vault_rev: str | None) -> dict:
     # busy db is drained by the daemon, and a daemon older than this field
     # quarantines the key (#1724); a claude keyframe keeps the shape every
     # daemon accepts, and absence reads as claude.
-    runtime = {"runtime": bot.runtime} if bot.runtime != "claude" else {}
+    runtime = {"runtime": bot.agent_cli} if bot.agent_cli != "claude" else {}
     payload.update(runtime)
     # declared = the declaration's stable projection (equipment + org +
     # posture + model), independent of composed artifacts. The runtime is a

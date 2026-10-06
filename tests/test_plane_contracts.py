@@ -234,8 +234,8 @@ def test_bot_keyframe_may_name_its_runtime():
 def test_bot_keyframe_runtime_vocabulary_matches_config():
     from typing import get_args
 
-    from claudlobby.known_values import KNOWN_RUNTIMES
+    from claudlobby.known_values import KNOWN_AGENT_CLIS
     from claudlobby.plane.contracts import BotPayload
 
     literal = next(a for a in get_args(BotPayload.model_fields["runtime"].annotation) if a is not type(None))
-    assert frozenset(get_args(literal)) == KNOWN_RUNTIMES
+    assert frozenset(get_args(literal)) == KNOWN_AGENT_CLIS

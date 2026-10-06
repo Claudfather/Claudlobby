@@ -33,7 +33,7 @@ Does Claudlobby compose agent CLIs beyond Claude Code? Fork F18 of the runtime-n
 - The name clash recorded in #1997: `runtime` already names release activation, the Claude Code binary update
   (`host update runtime`) and the composed-output audit (`config validate --runtime`). #1997 proposed
   `agent_cli:` as the `fleet.yaml` key for this reason; the key name is the epic's §14 Q1, decided separately
-  from this fork.
+  from this fork (answered 2026-10-06 by the operator: `agent_cli:`).
 
 ## Decision: **(a)**
 
@@ -55,7 +55,8 @@ ratified fork, through the mission's "Requires approval" gate — never by widen
   "What it's becoming" and LLM-provider non-goal lines, the #2145 sprint-focus item and the "A new agent CLI
   runtime" approval gate. `README.md` and `CLAUDE.md` (and its `AGENTS.md` copy) carry the same scope in one line
   each. All land in #2145 P1 Half A.
-- The runtime vocabulary (`runtime: claude | codex`, `known_values.KNOWN_RUNTIMES`) ships in the same change;
+- The vocabulary (`agent_cli: claude | codex` in `fleet.yaml`, `known_values.KNOWN_AGENT_CLIS`; the plane and the
+  session join key call the value the bot's runtime) ships in the same change;
   `codex` is refused by the validator until the execution adapter (#2149) composes and launches it.
 - The design-v2 record of the superseded session-identity mechanics is
   `documentation/plans/2026-08-18-observable-plane-design-v2.md` §19 item 9; it is cited here, not restated.

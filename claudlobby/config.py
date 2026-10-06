@@ -19,7 +19,7 @@ from . import defaults as _defaults
 
 from .known_values import (
     KNOWN_EFFORTS,
-    KNOWN_RUNTIMES,
+    KNOWN_AGENT_CLIS,
     PROJECT_KEYS,
     SHELL_IDENT_RE,
     VALID_PERMISSION_MODES,
@@ -711,7 +711,9 @@ class BotConfig:
     account: str = "default"
     model: str | None = None
     effort: str | None = None
-    runtime: str = "claude"  # claude | codex — #2145; see known_values.KNOWN_RUNTIMES
+    # claude | codex — #2145; see known_values.KNOWN_AGENT_CLIS. The plane, the
+    # session join key and CLAUDLOBBY_RUNTIME call this value the bot's runtime.
+    agent_cli: str = "claude"
     # Claude Code CLI flags — composed into CLAUDE_FLAGS in bot.conf.
     remote_control: bool = True  # --remote-control
     # Conservative default: with neither field set the composer emits
@@ -1827,12 +1829,12 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         effort=_parse_enum(
             "effort", _select_bot_scalar(raw, defaults, "effort")[0], KNOWN_EFFORTS
         ),
-        runtime=_parse_enum(
-            "runtime",
-            # An explicit `runtime: null` reads as the built-in default: the
+        agent_cli=_parse_enum(
+            "agent_cli",
+            # An explicit `agent_cli: null` reads as the built-in default: the
             # composer always needs a string.
-            _select_bot_scalar(raw, defaults, "runtime", "claude")[0] or "claude",
-            KNOWN_RUNTIMES,
+            _select_bot_scalar(raw, defaults, "agent_cli", "claude")[0] or "claude",
+            KNOWN_AGENT_CLIS,
         ),
         remote_control=_bool("remote_control", True),
         dangerously_skip_permissions=_bool("dangerously_skip_permissions", False),
@@ -2283,7 +2285,7 @@ _EXPLAIN_FLEET_SCALARS = frozenset({
     "human_telegram_id", "mission", "mission_file",
 })
 _EXPLAIN_BOT_INHERITED_SCALARS = frozenset({
-    "account", "model", "effort", "runtime", "remote_control", "dangerously_skip_permissions",
+    "account", "model", "effort", "agent_cli", "remote_control", "dangerously_skip_permissions",
     "skip_auto_permission_prompt", "skip_dangerous_mode_permission_prompt",
     "prompt_suggestions", "disable_nonessential_traffic", "spinner_tips_enabled",
     "preferred_notif_channel", "prefers_reduced_motion",

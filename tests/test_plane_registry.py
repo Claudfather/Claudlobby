@@ -539,7 +539,7 @@ def test_bot_payload_names_the_runtime_only_when_it_says_something(tmp_path):
     assert claude["declared_hash"] == canonical_hash(
         {"org": claude["org"], "equipment": claude["equipment"], "posture": claude["posture"],
          "model": claude["model"], "effort": bot.effort})
-    codex = bot_payload(paths, fleet, replace(bot, runtime="codex"), "v1")
+    codex = bot_payload(paths, fleet, replace(bot, agent_cli="codex"), "v1")
     assert codex["runtime"] == "codex"
     assert codex["declared_hash"] != claude["declared_hash"]
 

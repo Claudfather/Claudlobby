@@ -57,7 +57,7 @@ fleet:
   defaults:
     model: opus
     effort: max
-    # runtime: claude                          # claude | codex — codex waits for the execution adapter (#2149)
+    # agent_cli: claude                        # claude | codex — codex waits for the execution adapter (#2149)
     account: default
     prompt_suggestions: false                # disable autocomplete suggestions (headless bots don't need them)
     # Headless config defaults (all overridable per bot):

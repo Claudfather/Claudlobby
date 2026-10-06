@@ -893,6 +893,7 @@ Claudlobby:
     the Claude Code binary update and the composed-output audit. Forge's lean is to keep `runtime:` (it is
     the cross-repo vocabulary F2/F9 already use, and `host update runtime` already means the agent binary)
     and to document the distinction from `runtime/`; the operator decides before this PR opens.
+    **Answered 2026-10-06 (operator): `agent_cli:`** (§14 Q1).
   - **Mission (§14 Q2; D1 in §16, ratified 2026-10-05):** `PROJECT_MISSION.md:114` excludes "per-bot LLM provider
     abstraction", and `:5`/`:11`, `README.md:3,12`, `CLAUDE.md:3` say Claude Code. F11 decides *where* Codex
     launching lives, not *whether*; F18, locked (a) on 2026-10-05, decides that Claudlobby composes agent CLIs —
@@ -2181,7 +2182,10 @@ answered are marked so (§16 *Rulings*).
 1. **The `fleet.yaml` key for the runtime.** `runtime:` (this plan) or `agent_cli:` (#1997, which documents the
    naming clash). Lean: `runtime:`, documented against `runtime/`; the cross-repo vocabulary is already in F2/F9.
    Whichever is chosen, the one-mapping-sentence approach is right; `CLAUDLOBBY_RUNTIME` joins a crowded
-   namespace (extension-check).
+   namespace (extension-check). **Answered 2026-10-06 (operator): `agent_cli:`** — the fleet.yaml key, the
+   `BotConfig` field and `KNOWN_AGENT_CLIS` say `agent_cli`; `CLAUDLOBBY_RUNTIME`, `BotPayload.runtime`,
+   `derive_session_uid(…, runtime=)` and F2/F9 keep `runtime`, with one mapping sentence in the schema doc
+   (plan 2 Task 1 Q1).
 2. **`PROJECT_MISSION.md:114` — and `:5`/`:11`, `README.md:3,12`, `CLAUDE.md:3`.** They exclude per-bot provider
    abstraction and say Claude Code; no fork in F1–F17 decides that Claudlobby composes Codex bots (F11 decides
    *where* Codex launching lives, not *whether*). ~~Amend it in the P1 Claudlobby PR, or record that F11's

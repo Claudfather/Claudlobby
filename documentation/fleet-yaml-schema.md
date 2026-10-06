@@ -25,7 +25,7 @@ fleet:
   defaults:                             # applied to every bot unless overridden
     model: opus | sonnet | haiku | fable   # or a pinned model ID, e.g. claude-opus-4-8
     effort: low | medium | high | max
-    runtime: claude | codex              # agent CLI (default: claude; codex refused until #2149)
+    agent_cli: claude | codex            # agent CLI (default: claude; codex refused until #2149)
     account: default
     prompt_suggestions: true | false    # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION (default: false)
     disable_nonessential_traffic: true | false  # RC-safe headless trim set (default: true)
@@ -90,7 +90,7 @@ fleet:
       account: <account-key>
       model: <model>
       effort: <effort>
-      runtime: <runtime>
+      agent_cli: <agent_cli>
       skills: [<list>]                  # appended to defaults.skills
       mcp: [<list>]
       integrations: [<list>]            # auto-paired with mcp; explicit overrides
@@ -213,7 +213,7 @@ Omit the field entirely for the common case — everything defaults to `true`. U
 Applied to every bot. Merge rules by type:
 
 - **Lists** (skills, expertise, guardrails, protocols, resources, lessons, principles, permissions, post_actions, mcp, integrations) — bot-level **appends to** defaults (deduped, order-preserved).
-- **Scalars** (model, effort, runtime, account, mission) — bot-level **overrides** defaults.
+- **Scalars** (model, effort, agent_cli, account, mission) — bot-level **overrides** defaults.
 - **Telegram** — merged **field-by-field**. Bot-level fields override individual defaults fields (e.g., a bot can override `require_mention` while inheriting `token_env`).
 - **Sandbox** — lists (network_allowed_domains, filesystem_allow_write) are **unioned**; booleans (auto_allow_bash) use bot-level value.
 - **Tools** — deny/allow lists are **unioned** across defaults and bot-level.
@@ -888,9 +888,11 @@ the `--dangerously-skip-permissions` CLI flag above: these suppress the one-time
 first-run prompts a headless, supervised bot would otherwise hang on with no terminal to answer
 them. Can be set in `defaults:`; bot-level overrides.
 
-### `bots.<name>.runtime`
+### `bots.<name>.agent_cli`
 
-String enum, `claude` (default) or `codex`. The agent CLI the bot runs under; composed into `bot.conf` as `CLAUDLOBBY_RUNTIME` and read by every door that derives the bot's session uid (#2145 §2.2). `codex` is accepted by the parser and **refused by the validator** (`execution adapter not shipped`) until the Codex execution adapter ships (#2149). Can be set in `defaults:`. Not to be confused with `host update runtime` (the Claude Code binary) or `config validate --runtime` (the composed-output audit).
+String enum, `claude` (default) or `codex`. The agent CLI the bot runs under; composed into `bot.conf` as `CLAUDLOBBY_RUNTIME` and read by every door that derives the bot's session uid (#2145 §2.2). `codex` is accepted by the parser and **refused by the validator** (`execution adapter not shipped`) until the Codex execution adapter ships (#2149). Can be set in `defaults:`.
+
+The plane (the bot keyframe's `runtime`), the session join key (`derive_session_uid(id, runtime=)`) and `CLAUDLOBBY_RUNTIME` call this value the bot's *runtime* (#2145 F2); the `fleet.yaml` key is `agent_cli` because `runtime` already names release activation (`activation_runtime.py`, `runtime_admission.py`), the Claude Code binary update (`host update runtime`) and the composed-output audit (`config validate --runtime`) (#1997).
 
 ### `bots.<name>.remote_control`
 
@@ -1077,7 +1079,7 @@ does not own.
 
 - **Hard fail** — bot's `expertise:` list is empty or references missing files
 - **Hard fail** — `fleet.yaml` itself is invalid YAML or missing required keys
-- **Hard fail** — a bot's `runtime:` is not `claude` (`execution adapter not shipped`, until #2149)
+- **Hard fail** — a bot's `agent_cli:` is not `claude` (`execution adapter not shipped`, until #2149)
 - **Warn** — bot references a `skill` / `mcp` / `guardrail` / `protocol` / `resource` / `lesson` / `post_action` that doesn't exist (skipped during generate)
 - **Warn** — MCP fragment references an env var (`${FOO}`) that's not set in the current environment
 - **Warn** — `voice:` path doesn't resolve
