@@ -1,7 +1,7 @@
 ---
 title: "Run log — runtime-neutral observability (#2145): P0 canaries"
 type: run-log
-status: P0 Claude batch — headless legs measured; the floor-host and interactive bot legs are the operator's
+status: P0 Claude legs done; §10 orders 2–3 merged and activated on the floor host (2026-10-06)
 created: 2026-10-05
 epic: 2026-10-04-runtime-neutral-observability-plan.md
 issue: Claudfather/Claudlobby#2145
@@ -199,6 +199,52 @@ manager's `daemon-reload`, and the Telegram access file; `config diff` hides uni
 
 **Harness fix (`setup --fleet`):** `claudlobby.fleet` was hard-coded to `canary`; a borrowed bot is now labelled with
 its real fleet.
+
+### 2026-10-06 — §10 orders 2 (P2-b) and 3 (F14): live validation, merge, and the floor host's activation
+
+Run by Claude Code sessions on the operator's Mac mini over SSH, driven by runbooks from the planning session. Full
+reports kept by the operator (`~/rnc-results-2.md`, `~/rnc-results-3.md`).
+
+**Live validation before merge (a borrowed idle production worker, put back byte-identical).**
+- **#2172 (per-bot `CLAUDNA_STATE_DIR`), reproduced through the bot's own `.env`.** The new session landed in
+  `$BOT_DIR/data/claudna/sessions/<sid>/`, together with `hooks/` and `runs/` (the whole root moves). Nothing new
+  reached `~/.claudna`. The bot answered a DM. **Finding:** a clean restart closes the old-root session itself
+  (`close_reason: other`), and sealing a live session first labels its clean close `abandoned`. The activation step
+  became "after the restarts, seal only stranded sessions" (#2172's CHANGELOG and plan 6 Task 1 Step 2).
+- **#2173 (bot-vitals never falls back to the cwd).** The PR's script recorded a row and advanced the marker with
+  `BOT_DIR` set. Unset, empty and relative `BOT_DIR` each wrote nothing. The release's own script, run from a scratch
+  dir, reproduced both halves of #874. `hook-retired-path` counts **once per hook event** (42 = 21 bots × 2 against
+  the Oct 2 manifests). **Finding:** the live double `tool_call` rows came from a stale activation (bots on the Oct 2
+  plan), not from the already-cleaned manifests.
+
+Both merged, with #2191 (getting-started: the `[plane-ui]` extra) and clauDNA #405 (`--since 30m`).
+
+**Floor host activation (Pi 5, 21 bots, 4 fleets): `fd1a1e5` → a release from `main` at `d02f057`.**
+- **Plan review.** 21 restarts. `CLAUDNA_STATE_DIR` in 21/21 `bot.conf`. The retired `lib/bot-vitals.sh` went from
+  42 hook entries to 0. Same 196 units, the plane view kept. No SQL migration. 0 `hook-retired-path`.
+- **Activation.** It stopped once at `sessions_quiesced`: one unit's stop hit the 90 s timeout, and the pause refuses a
+  `failed` service (#2193). Recovered with `reset-failed` + `--resume`, then `committed` / `active`. The fleet was
+  offline about 16 minutes as a whole, about 15 to 35 minutes per bot.
+- **Verified live.**
+  - One `tool_call` row per hook event (before: pairs).
+  - Every bot writes to its own `data/claudna`, and every live old-root session closed itself. The 9 stragglers from
+    Oct 2 to 3 were sealed, and the sweep found nothing more.
+  - `bot restart` returns rc 0 (#2087). The stop takes 45 ms: `KillMode=process` with `MainPID=0`, so the #2158
+    subreaper can't hold a stop.
+  - DMs answered, plane view up, host doctor failures unchanged from before.
+- **Load.** After `producers_resumed`, the 1-minute load peaked at 48.5 on 4 CPUs. Two fleet-pulse runs timed out, a
+  catch-up briefing ran twice, and the plane's staged emits peaked at 218 and drained (#2197).
+
+**Process lessons (now in the runbook or filed).**
+- Build with the selected release's extras: the walkthrough's default omits `[plane-ui]`, and the plan would drop the
+  view (#2191, #2198).
+- Stage from a login shell: `config plan` resolves tools from the caller's `PATH` (#2194).
+- `migration plan` can race live writes, and a repeat passes (#2195).
+- `handed_off` is recorded even when the 30 s wait timed out, which happened for 7 of 21 bots (#2196).
+- A restart's SessionEnd could be killed between sealing and closing, leaving the session `open`. clauDNA #406 writes
+  both in one append.
+- The stale local-scope clauDNA records in `installed_plugins.json` are harmless (the bots run the user-scope
+  release), but `claude plugin list` can't say which one applies. The session-store format is the reliable signal.
 
 ## Plan changes this log caused (2026-10-05)
 
