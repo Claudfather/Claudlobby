@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Docs — the cold-host build shows how to include the plane UI
+
+`documentation/getting-started.md` built the wheelhouse without the `[plane-ui]` extra and never said how to add it, though the plane-view runbook pointed there for exactly that. A release built that way has no fastapi or uvicorn, composes no `claudlobby-plane-view` unit, and activating it removes a running view. The walkthrough now takes the requirement as `WHEEL_REQ`, shows the `[plane-ui]` form, and says to match the selected release's extras when upgrading. Found while staging a production upgrade (#2145).
+
 ### Fixed — bot-vitals never falls back to the working directory (#874, #2145 P2-b)
 
 `bot-vitals.sh` used `${BOT_DIR:-$PWD}` both for the activity marker and as the bot dir it handed the plane emit. Run without `BOT_DIR`, it wrote `data/.last-tool-call` into whatever directory it ran in, which for a bot is its project checkout, and recorded a `tool_call` row against that directory.
