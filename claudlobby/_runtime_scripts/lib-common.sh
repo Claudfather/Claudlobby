@@ -2004,6 +2004,13 @@ bot_tmux() {
     "$_TMUX_BIN" -L "$socket" "$@" 9<&-
 }
 
+# Create a bot's tmux session: the one place start-bot.sh starts a session.
+bot_session_spawn() {
+    local socket="${1?Usage: bot_session_spawn <socket> <session> <command>}"
+    local session="${2?}" command="${3?}"
+    bot_tmux "$socket" new-session -d -s "$session" "$command"
+}
+
 # emit_fleet_event <type> <source> [data_json] [bot_dir] [bot_id]
 # Record one fleet event on the plane — the ONE door behind fleet-pulse /
 # code-audit-sweep's checks, the keepalive tick's transitions, the vitals hook,

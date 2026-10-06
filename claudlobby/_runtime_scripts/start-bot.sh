@@ -322,7 +322,7 @@ if command -v "$CLAUDE" >/dev/null 2>&1 && [ -n "${FLEET_PLUGINS_REQUIRED:-}" ];
     done
 fi
 
-bot_tmux "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" "$CLAUDE_CMD"
+bot_session_spawn "$TMUX_SOCKET" "$TMUX_SESSION" "$CLAUDE_CMD"
 
 # Spawn marker — its mtime is this bot's last session (re)start. fleet-pulse
 # reads it to grace the Telegram bridge poller while it spins up, so a (re)start
