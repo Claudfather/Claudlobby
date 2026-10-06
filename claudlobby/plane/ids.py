@@ -25,7 +25,10 @@ _UID_PREFIX = {
     # F12 refinement (§19.6, delivered PR-B T7): session_uid is the TRANSCRIPT
     # identity (stable across resume — empirically confirmed 2026-08-25);
     # process_uid distinguishes the concurrent RESUMES of one transcript —
-    # minted fresh per process at SessionStart, never derived.
+    # minted fresh per process at SessionStart, never derived. (#2145 P1 note:
+    # its only minter, plane-session-start.sh, retires in #2145 P3; the proc_
+    # prefix stays registered so historical rows classify — P3 rewrites this
+    # comment.)
     "process": "proc_",
 }
 
@@ -76,17 +79,32 @@ def mint_assignment_id() -> str:
     return mint("asg_")
 
 
-def derive_session_uid(platform_session_id: str) -> str:
+def session_alias(platform_session_id: str, runtime: str = "claude") -> str:
+    """The F2 material (#2145 §2.2): the ONE place the (runtime, session_id) join
+    key is spelled. `claude` is the raw id — byte-identical to every row written
+    so far; any other runtime is "<runtime>:<id>", so two vendors' ids never
+    collide. P2's intake sets its session `subject` from this function; clauDNA
+    and Claudron cite register row 10, which states this rule once. The
+    vocabulary is config's (known_values.KNOWN_RUNTIMES); this module refuses
+    only an empty runtime."""
+    if not platform_session_id or not platform_session_id.strip():
+        raise ValueError("empty platform session id — refusing to derive")
+    if not runtime or not runtime.strip():
+        raise ValueError("empty runtime — refusing to derive")
+    return platform_session_id if runtime == "claude" else f"{runtime}:{platform_session_id}"
+
+
+def derive_session_uid(platform_session_id: str, runtime: str = "claude") -> str:
     """sess_ uid DERIVED from the platform session id (sha256, first 32 hex).
 
     Deliberately deterministic, not random (§9d): any emitter — bash included,
     via shasum — computes the same uid for the same session with no registry
-    lookup, and the transcript/OTel join needs exactly that stability."""
+    lookup, and the transcript/OTel join needs exactly that stability.
 
-    if not platform_session_id or not platform_session_id.strip():
-        raise ValueError("empty platform session id — refusing to derive")
-    digest = hashlib.sha256(platform_session_id.encode("utf-8")).hexdigest()
-    return "sess_" + digest[:32]
+    #2145 F2: composed from session_alias — never a second spelling of the
+    rule. A `claude` uid is byte-identical to the one derived before #2145 (the
+    bash mirror in plane-session-start.sh is Claude-only and stays so)."""
+    return derive_uid("sess", session_alias(platform_session_id, runtime))
 
 
 def mint_uid(kind: str) -> str:
