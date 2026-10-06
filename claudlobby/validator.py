@@ -1666,6 +1666,24 @@ def _validate_fleet(fleet: FleetConfig, report: ValidationReport) -> None:
             )
 
 
+# Env names composed into every bot.conf as invariants. A bot's env: and
+# secret_files: blocks are emitted after them, so the same key there would
+# silently win at source time (last assignment wins). Reserved, hard error.
+RESERVED_BOT_ENV_KEYS = ("CLAUDNA_STATE_DIR",)  # #2145 F14: the per-bot clauDNA root
+
+
+def _validate_reserved_env(fleet: FleetConfig, report: ValidationReport) -> None:
+    """Refuse a bot env:/secret_files: key that would override a composed invariant."""
+    for bot_name, bot in fleet.bots.items():
+        for block, keys in (("env", bot.env), ("secret_files", bot.secret_files)):
+            for key in keys:
+                if key in RESERVED_BOT_ENV_KEYS:
+                    report.errors.append(
+                        f"bot '{bot_name}': {block} key '{key}' is reserved — bot.conf "
+                        "composes it for every bot, and this entry would override it"
+                    )
+
+
 # projects.yaml keys become PROJECT_TIER_<SLUG> env names — same charset as
 # bot ids so ProjectConfig.env_slug always yields a shell identifier.
 _PROJECT_KEY_RE = re.compile(r"^[a-z][a-z0-9-]*$")
@@ -2532,6 +2550,7 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_mission(fleet, paths, report)
     _validate_workstreams(fleet, report)
     _validate_sweep(fleet, report)
+    _validate_reserved_env(fleet, report)
     _validate_projects(fleet, paths, report)
     _validate_goal_binding(fleet, paths, report, doors=_ign_doors)
     _validate_cross_fleet_collisions(fleet, paths, report)

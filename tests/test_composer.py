@@ -832,15 +832,29 @@ class TestComposeBotConfExportedVars:
         for conf in (_conf(), _conf(claudna_version="0.26.0")):
             lines = conf.splitlines()
             assert lines.count(line) == 1
-            bot_dir_at = next(i for i, l in enumerate(lines) if l.startswith("BOT_DIR="))
+            bot_dir_at = next(i for i, ln in enumerate(lines) if ln.startswith("BOT_DIR="))
             assert lines.index(line) > bot_dir_at
         # Sourced the way start-bot.sh sources it (set -a), the root lands under the bot's runtime dir.
         conf_file = tmp_path / "bot.conf"
         conf_file.write_text(_conf())
         out = subprocess.run(
-            ["bash", "-c", f'set -a; CLAUDLOBBY_ROOT={tmp_path / "cl"}; . "{conf_file}"; printf %s "$CLAUDNA_STATE_DIR"'],
+            ["bash", "-c", f'set -a; . "{conf_file}"; printf %s "$CLAUDNA_STATE_DIR"'],
             capture_output=True, text=True, check=True).stdout
-        assert out.endswith("/runtime/bots/w/data/claudna"), out
+        assert out == str(tmp_path / "cl" / "runtime" / "bots" / "w" / "data" / "claudna"), out
+
+    def test_a_bot_cannot_override_its_claudna_root(self, tmp_path):
+        """env:/secret_files: are emitted after the invariant, so the validator reserves the key."""
+        from claudlobby.validator import ValidationReport, _validate_reserved_env
+
+        for block in ("env", "secret_files"):
+            bot = BotConfig(bot_id="w", name="w", expertise=["eng"], telegram=TelegramConfig(handle="w_bot"),
+                            **{block: {"CLAUDNA_STATE_DIR": "/tmp/x", "OTHER": "y"}})
+            fleet = FleetConfig(manager="w", bots={"w": bot}, name="test-fleet", service_prefix="com.test",
+                                telegram_group_chat_id="-100999")
+            report = ValidationReport()
+            _validate_reserved_env(fleet, report)
+            assert report.errors == [f"bot 'w': {block} key 'CLAUDNA_STATE_DIR' is reserved — bot.conf composes "
+                                     "it for every bot, and this entry would override it"]
 
 
 class TestComposeBotConfServicePrefix:

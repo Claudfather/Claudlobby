@@ -6,13 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Changed — each bot keeps its clauDNA session store under its own runtime dir (#2145 F14)
+### Changed — each bot keeps its clauDNA state under its own runtime dir (#2145 F14)
 
 Every composed `bot.conf` now carries `export CLAUDNA_STATE_DIR="$BOT_DIR/data/claudna"`, for every bot and with no knob. Until now all bots on a host and the operator's own sessions shared `~/.claudna`, so no single bot's sessions could be sealed, swept or exported alone.
 
-- **It overrides the `.env` tiers.** `start-bot.sh` sources `bot.conf` after the tiers, so a `CLAUDNA_STATE_DIR` set in a `.env` no longer applies to a bot.
-- **It takes effect per bot at its next restart.** The bot's new sessions open in `runtime/bots/<bot>/data/claudna/`. Sessions it left open in `~/.claudna` stay there.
-- **Activation step (operator).** Once a bot has restarted onto its own root, seal its open sessions in the old root by bot name, never all open sessions, which would close live interactive ones. After the last restart, sweep the stragglers. The commands are in `documentation/plans/2026-10-04-runtime-neutral-observability-p3-claudlobby-summaries.md`, Task 1 Step 2.
+- **The whole clauDNA root moves, not just the session store.** That includes harvest and review status (`harvest/liveness.txt`, `review.txt`), the ops log (`runs/`), hook logs and the pre-compact markers. A bot's SessionStart harvest and review status lines start empty until its own root records a run. The history stays in `~/.claudna`.
+- **It cannot be overridden per bot.** `config validate` refuses `CLAUDNA_STATE_DIR` in a bot's `env:` or `secret_files:`, which are composed after it. Because `start-bot.sh` sources `bot.conf` after the `.env` tiers, a value set in a `.env` no longer applies to a bot.
+- **`spin-down-bot.sh --purge` now deletes the bot's clauDNA sessions with its runtime dir.** Export or harvest anything you need from a throwaway bot before purging it.
+- **It takes effect per bot at its next restart.** New sessions open in `runtime/bots/<bot>/data/claudna/`. Sessions the bot left open in `~/.claudna` stay there.
+- **Activation step (operator).** Once a bot has restarted onto its own root, seal its open sessions in the old root by bot name. Never seal all open sessions: that closes live interactive ones. `list --bot` matches a name and never a fleet, so where two fleets on the host have a bot with the same name, wait until both have switched. After the last restart, sweep the stragglers. The commands are in `documentation/plans/2026-10-04-runtime-neutral-observability-p3-claudlobby-summaries.md`, Task 1 Step 2.
+- **Readers** build a bot's root as `bot_runtime(bot) / CLAUDNA_STATE_SUBDIR` (`composer.py`). `bot.conf`'s `$BOT_DIR/...` text is expanded only by a sourcing shell.
 
 ### Added — a composed guard refuses a signal to a process the caller did not start (#1069)
 

@@ -692,6 +692,10 @@ def fleet_alert_sender_state_dir(fleet: FleetConfig) -> str | None:
 
 
 GITCONFIG_FILENAME = ".gitconfig"
+# The bot's own clauDNA root, relative to BOT_DIR (#2145 F14). Readers that need a bot's
+# store build it from bot_runtime(b) / CLAUDNA_STATE_SUBDIR, never from bot.conf's
+# "$BOT_DIR/..." text, which only a sourcing shell expands.
+CLAUDNA_STATE_SUBDIR = "data/claudna"
 # Sibling of the composed .gitconfig holding ONLY the App [user] block, pulled
 # in by a per-org `includeIf hasconfig:remote.*.url` from the main file when an
 # App declares `orgs:` + an identity (#1300). Kept separate because includeIf
@@ -1324,7 +1328,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
     # a composition invariant, not a knob: in the shared ~/.claudna every bot's
     # sessions sit beside the operator's, so no one bot's can be sealed or swept
     # alone (#2145 F14). bot.conf is sourced after the .env tiers, so this wins.
-    lines.append('export CLAUDNA_STATE_DIR="$BOT_DIR/data/claudna"')
+    lines.append(f'export CLAUDNA_STATE_DIR="$BOT_DIR/{CLAUDNA_STATE_SUBDIR}"')
     if bot.claudna_version:
         lines.append(f"export CLAUDNA_VERSION={_shq(bot.claudna_version)}")
     if bot_is_vault_wired(bot):
