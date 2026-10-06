@@ -12,7 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Without a usable `BOT_DIR`, the hook now does nothing.** Unset, empty, relative or not a directory all count as unusable. It writes no marker, records no row, notes the reason on stderr and exits 0, so a tool call is never blocked. The check runs before `lib-common.sh` is sourced, so the no-op path is one fork. Every composed bot has an absolute `BOT_DIR` from `bot.conf`, so its markers and `tool_call` rows are unchanged.
 - **The double registration of #2062 now gets a warning, and the example no longer teaches it.** Hook dedup keys on `(command, matcher)`, so a manifest hook at the retired `$CLAUDLOBBY_ROOT/lib/bot-vitals.sh` ran beside the release's default and recorded every tool call twice.
-  - `config validate` now warns `hook-retired-path` on any hook command under the retired root `lib/`. It is a warning, not an error, so existing manifests still compose. Delete those entries.
+  - `config validate` now warns `hook-retired-path` on any hook command under the retired root `lib/`, once per hook event that names it (a bot whose manifest names it under two events gets two). It is a warning, not an error, so existing manifests still compose. Delete those entries, then activate: a bot keeps running the hooks of the plan it was last activated with, so a cleaned manifest stops the double row only at the next activation.
   - `fleet.yaml.example` uses the release's `$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh` and explains the dedup key.
   - The script's header says not to declare the hook again.
 - **`tool_call` rows stay.** They are the only record of which MCP tool ran until the plane takes tool names from OpenTelemetry (#2145 §14 Q17, P2-a2).
