@@ -142,6 +142,9 @@ def _operator_reverse_insteadof() -> str | None:
     return None
 
 
+#: The root checkout's lib/ is retired (#1989); hook commands there run beside the release's copy (#2062).
+RETIRED_HOOK_PREFIX = "$CLAUDLOBBY_ROOT/lib/"
+
 #: The category of every warning ``validate`` emits, passed at the site that
 #: raises it (``ValidationReport.warn``) and never derived from the message,
 #: whose wording is free to improve. The slugs are an API: doctor's
@@ -189,6 +192,7 @@ WARNING_CATEGORIES: dict[str, str] = {
     "obs-range": "an observability value outside its accepted range",
     "model-unknown": "a model name outside the known set (passed through as-is)",
     "hook-unknown": "a hook event Claude Code does not recognise",
+    "hook-retired-path": "a hook command points into the retired root lib/; the release composes its own copy",
     "account-unknown": "a bot's account is not in fleet.accounts",
     "autonomous-runner": "an autonomous_runner field outside its expected shape",
     "briefing-no-source": "a briefing-equipped bot has no integration or MCP server to read",
@@ -1281,8 +1285,19 @@ def _validate_bots(
                         f"bot '{bot_name}': model_strategy.{field_name} '{val}' not in known models{hint}"
                     )
 
-        # Hook event keys (warn)
-        for event in bot.hooks:
+        # Hook event keys, and hook commands under the retired root lib/ (warn).
+        # Dedup keys on (command, matcher), so a retired-lib command never folds
+        # into the release's $CLAUDLOBBY_NATIVE_DIR copy and both run (#2062).
+        for event, entries in bot.hooks.items():
+            for entry in entries or []:
+                command = str((entry or {}).get("command", ""))
+                if RETIRED_HOOK_PREFIX in command:
+                    report.warn(
+                        "hook-retired-path",
+                        f"bot '{bot_name}': {event} hook '{command}' points into the retired root lib/ — "
+                        f"delete it from fleet.yaml; the release composes its own "
+                        f"$CLAUDLOBBY_NATIVE_DIR copy, so both run (#2062)"
+                    )
             if event not in KNOWN_HOOK_EVENTS:
                 suggestion = closest_match(event, KNOWN_HOOK_EVENTS)
                 hint = f" — did you mean '{suggestion}'?" if suggestion else ""
@@ -1292,6 +1307,7 @@ def _validate_bots(
                     f"Known events: {', '.join(sorted(KNOWN_HOOK_EVENTS))}. "
                     f"This hook will be silently ignored by Claude Code."
                 )
+
 
         # RC-killing env vs remote-control/channels (error, #533). extra_flags
         # is checked too so a raw "--remote-control" there gets the same guard.
@@ -1666,6 +1682,32 @@ def _validate_fleet(fleet: FleetConfig, report: ValidationReport) -> None:
             )
 
 
+def _validate_reserved_env(fleet: FleetConfig, report: ValidationReport) -> None:
+    """Refuse a bot env:/secret_files: key that would override a composed value.
+
+    Both blocks are emitted after everything else in bot.conf, so the same key
+    there silently wins at source time (last assignment wins). Reserved, hard
+    error: the composer's invariants (``COMPOSED_INVARIANT_ENV``) always, and the
+    projects tier map's namespace when projects.yaml composes one.
+    """
+    from .composer import COMPOSED_INVARIANT_ENV  # local: composer imports config, not us
+
+    project_prefixes = ("PROJECT_TIER_", "PROJECT_REPOS_") if fleet.projects else ()
+    for bot_name, bot in fleet.bots.items():
+        for block, keys in (("env", bot.env), ("secret_files", bot.secret_files)):
+            for key in keys:
+                if key in COMPOSED_INVARIANT_ENV:
+                    report.errors.append(
+                        f"bot '{bot_name}': {block} key '{key}' is reserved — bot.conf "
+                        "composes it for every bot, and this entry would override it"
+                    )
+                elif project_prefixes and key.startswith(project_prefixes):
+                    report.errors.append(
+                        f"bot '{bot_name}': {block} key '{key}' is in the reserved projects "
+                        "namespace — it would clobber the tier map composed from projects.yaml"
+                    )
+
+
 # projects.yaml keys become PROJECT_TIER_<SLUG> env names — same charset as
 # bot ids so ProjectConfig.env_slug always yields a shell identifier.
 _PROJECT_KEY_RE = re.compile(r"^[a-z][a-z0-9-]*$")
@@ -1675,21 +1717,8 @@ def _validate_projects(
     fleet: FleetConfig, paths: Paths, report: ValidationReport
 ) -> None:
     """Validate the optional projects.yaml tier (goal-aware fleet, P2)."""
-    if fleet.projects:
-        # bot env: blocks are emitted AFTER the projects tier map in
-        # bot.conf, so an env: key in this namespace silently overrides the
-        # project's declared closure bar at source time (last assignment
-        # wins — a human-tier project flips to auto with zero warning).
-        # Reserved namespace, hard error.
-        for bot_name, bot in fleet.bots.items():
-            for env_key in bot.env:
-                if env_key.startswith(("PROJECT_TIER_", "PROJECT_REPOS_")):
-                    report.errors.append(
-                        f"bot '{bot_name}': env key '{env_key}' is in the "
-                        f"reserved projects namespace — it would clobber the "
-                        f"tier map composed from projects.yaml"
-                    )
-
+    # A bot env:/secret_files: key in the PROJECT_TIER_/PROJECT_REPOS_ namespace is
+    # refused by _validate_reserved_env, with the composer's other reserved names.
     repo_owners: dict[str, str] = {}
     # A derived registry is validated exactly like a declared one — the tier,
     # slug and whitespace rules are properties of what composes, not of who
@@ -2558,6 +2587,7 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_mission(fleet, paths, report)
     _validate_workstreams(fleet, report)
     _validate_sweep(fleet, report)
+    _validate_reserved_env(fleet, report)
     _validate_projects(fleet, paths, report)
     _validate_goal_binding(fleet, paths, report, doors=_ign_doors)
     _validate_cross_fleet_collisions(fleet, paths, report)

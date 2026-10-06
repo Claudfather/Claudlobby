@@ -180,6 +180,7 @@ Emitted into **every** bot's `bot.conf` from `projects.yaml` — one pair per pr
 
 | Variable | Source | Description |
 |----------|--------|-------------|
+| `CLAUDNA_STATE_DIR` | always `$BOT_DIR/data/claudna` (reserved: not settable in `env:`/`secret_files:`) | The bot's own clauDNA root — session store, harvest status, ops log, hook logs (#2145 F14); overrides any `.env` tier |
 | `CLAUDNA_VERSION` | `bots.<name>.claudna_version` | clauDNA plugin version pin |
 | `CLAUDRON_VAULT_PATH` | `bots.<name>.claudron_vault_path` | Claudron vault root; the bot's `claudron` CLI resolves the vault from it (Claudron `docs/CLI_CONTRACT.md` §Environment) |
 | `CLAUDOSSEUM_TENANT_ID` | `bots.<name>.claudosseum_tenant_id` | Claudosseum telemetry tenant ID |

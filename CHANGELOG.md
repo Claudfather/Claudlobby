@@ -27,6 +27,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - The harness's #1019 scenario runs the real guard on 36 new cases. Against main's guard, 29 of its 59 checks fail; against this PR's first round, 19.
   - `tests/test_mention_rewrite.py` covers the JSON mode.
 
+### Docs — the cold-host build shows how to include the plane UI
+
+`documentation/getting-started.md` built the wheelhouse without the `[plane-ui]` extra and never said how to add it, though the plane-view runbook pointed there for exactly that. A release built that way has no fastapi or uvicorn, composes no `claudlobby-plane-view` unit, and activating it removes a running view. The walkthrough now takes the requirement as `WHEEL_REQ`, shows the `[plane-ui]` form, and says to match the selected release's extras when upgrading. Found while staging a production upgrade (#2145).
+
+### Fixed — bot-vitals never falls back to the working directory (#874, #2145 P2-b)
+
+`bot-vitals.sh` used `${BOT_DIR:-$PWD}` both for the activity marker and as the bot dir it handed the plane emit. Run without `BOT_DIR`, it wrote `data/.last-tool-call` into whatever directory it ran in, which for a bot is its project checkout, and recorded a `tool_call` row against that directory.
+
+- **Without a usable `BOT_DIR`, the hook now does nothing.** Unset, empty, relative or not a directory all count as unusable. It writes no marker, records no row, notes the reason on stderr and exits 0, so a tool call is never blocked. The check runs before `lib-common.sh` is sourced, so the no-op path is one fork. Every composed bot has an absolute `BOT_DIR` from `bot.conf`, so its markers and `tool_call` rows are unchanged.
+- **The double registration of #2062 now gets a warning, and the example no longer teaches it.** Hook dedup keys on `(command, matcher)`, so a manifest hook at the retired `$CLAUDLOBBY_ROOT/lib/bot-vitals.sh` ran beside the release's default and recorded every tool call twice.
+  - `config validate` now warns `hook-retired-path` on any hook command under the retired root `lib/`, once per hook event that names it (a bot whose manifest names it under two events gets two). It is a warning, not an error, so existing manifests still compose. Delete those entries, then activate: a bot keeps running the hooks of the plan it was last activated with, so a cleaned manifest stops the double row only at the next activation.
+  - `fleet.yaml.example` uses the release's `$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh` and explains the dedup key.
+  - The script's header says not to declare the hook again.
+- **`tool_call` rows stay.** They are the only record of which MCP tool ran until the plane takes tool names from OpenTelemetry (#2145 §14 Q17, P2-a2).
+- **Tests:** `tests/test_plane_cutover_keepalive.py::test_the_vitals_hook_never_falls_back_to_the_cwd` covers an unset, empty and relative `BOT_DIR`, replaying staged batches before it counts rows. `tests/test_validate_warning_discipline.py` raises `hook-retired-path`.
+
+### Changed — each bot keeps its clauDNA state under its own runtime dir (#2145 F14)
+
+Every composed `bot.conf` now carries `export CLAUDNA_STATE_DIR="$BOT_DIR/data/claudna"`, for every bot and with no knob. Until now all bots on a host and the operator's own sessions shared `~/.claudna`, so no single bot's sessions could be sealed, swept or exported alone.
+
+- **The whole clauDNA root moves, not just the session store.** That includes harvest and review status (`harvest/liveness.txt`, `review.txt`), the ops log (`runs/`), hook logs and the pre-compact markers. A bot's SessionStart harvest and review status lines start empty until its own root records a run. The history stays in `~/.claudna`.
+- **It cannot be overridden per bot.** `config validate` refuses `CLAUDNA_STATE_DIR` in a bot's `env:` or `secret_files:`, which are composed after it. Because `start-bot.sh` sources `bot.conf` after the `.env` tiers, a value set in a `.env` no longer applies to a bot.
+- **`spin-down-bot.sh --purge` now deletes the bot's clauDNA sessions with its runtime dir.** Export or harvest anything you need from a throwaway bot before purging it.
+- **It takes effect per bot at its next restart.** New sessions open in `runtime/bots/<bot>/data/claudna/`. Sessions the bot left open in `~/.claudna` stay there.
+- **Activation step (operator).** A clean restart closes the bot's old-root session itself. Once a bot has restarted onto its own root, seal whatever it still has open in the old root by bot name: only sessions a crash, kill or hard reboot stranded. Never seal before the restart, which labels a clean close `abandoned`. Never seal all open sessions: that closes live interactive ones. `list --bot` matches a name and never a fleet, so where two fleets on the host have a bot with the same name, wait until both have switched. After the last restart, sweep the stragglers. The commands are in `documentation/plans/2026-10-04-runtime-neutral-observability-p3-claudlobby-summaries.md`, Task 1 Step 2.
+- **Readers** build a bot's root as `bot_runtime(bot) / CLAUDNA_STATE_SUBDIR` (`composer.py`). `bot.conf`'s `$BOT_DIR/...` text is expanded only by a sourcing shell.
+
 ### Fixed — `fleet status` names a bot's current task by state, then latest transition, and says when more than one is open (#2179)
 
 A bot with two or more open assignments had its `current_task` read from whichever had the lowest task id. Task ids are random, so the pick was arbitrary. An assignment recorded but never delivered could read as the work in progress while the bot worked on another, and a manager routing by that line could skip the delivery.

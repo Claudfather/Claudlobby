@@ -239,7 +239,10 @@ explain`'s cells live there; there is no `tests/test_config_explain*.py`), `test
   `$BOT_DIR/data/claudna/sessions/<sid>/` written by its new session and nothing new for that bot under `~/.claudna`
   (`python3 -S "$E" list --bot <b> --json --since 1h --root ~/.claudna` lists no session opened after the restart); cite
   both in the PR body. After merge, the fleet's activation runs the same check per bot as `host activate` restarts it.
-  (ii) **Seal the old root's open bot sessions,** per bot `<b>` once it has restarted onto its own root:
+  (ii) **Seal the old root's open bot sessions,** per bot `<b>` once it has restarted onto its own root. A clean
+  restart closes the old session itself (its SessionEnd writes `session.closed`, `close_reason: other`), so this usually
+  finds nothing; it is for sessions a crash, kill or hard reboot left open. Run it **after** the restart, never before:
+  sealing a session whose `claude` is still running labels a clean close `abandoned` (observed on the canary, #2172):
   `python3 -S "$E" list --bot <b> --json --limit 100000 --include-private --root ~/.claudna | jq -r '.[] |
   select(.status == "open") | .sid'`, then `python3 -S "$E" seal <sid> --root ~/.claudna` for each. **Never** `seal` for
   "every open session": `seal` passes no owner pid, so it would close the service user's live interactive sessions in the
