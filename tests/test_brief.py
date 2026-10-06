@@ -783,6 +783,50 @@ def test_alerts_are_labeled_as_the_bots_own(paths: Paths):
     assert _find(brief, "alerts", "#903") == []    # the hand-list label is gone
 
 
+def _losses(paths: Paths, *rows: str) -> None:
+    plane = paths.root / "state" / "plane"
+    plane.mkdir(parents=True, exist_ok=True)
+    (plane / ".emit-losses").write_text("".join(f"{row}\n" for row in rows))
+
+
+def test_a_known_emit_loss_labels_the_alerts_it_may_hide(paths: Paths):
+    """#2165: an emit the plane did not record (here #2169's stage_empty) is a
+    gap in what alerts can show, and only plane doctor read the counter. The
+    brief, which a manager reads at every check-in, labels alerts with the
+    count while a known loss sits in the 24 h window."""
+    _seed_plane(paths)
+    _losses(paths, f"{NOW - 60}\tstage_empty\t-\t.1-ev_x.batch.9.tmp",
+            f"{NOW - 120}\treap\temit_fleet_event\tbound=10s")
+    brief = build_brief(_fleet(), paths, "alex", NOW)
+
+    entry = _find(brief, "alerts", "#2165")
+    assert entry and entry[0]["mode"] == "labeled" and entry[0]["count"] == 1, entry
+    assert "stage_empty" in entry[0]["reason"], entry
+    assert "plane spool list --quarantined" in entry[0]["reason"], entry
+
+
+def test_reaps_alone_do_not_label_the_alerts(paths: Paths):
+    """A reaped emit's fate is unknown, and a loaded host reaps hundreds a day:
+    a label that never clears gets read past, so reaps alone add none, and a
+    known loss past the 24 h window adds none either."""
+    _seed_plane(paths)
+    _losses(paths, f"{NOW - 60}\treap\temit_fleet_event\tbound=10s",
+            f"{NOW - 90000}\tstage_empty\t-\t.0-ev_old.batch.8.tmp")
+    brief = build_brief(_fleet(), paths, "alex", NOW)
+
+    assert _find(brief, "alerts", "#2165") == []
+
+
+def test_an_unreadable_loss_counter_labels_the_alerts_unknown(paths: Paths):
+    """A counter that cannot be read is a gap, not a zero."""
+    _seed_plane(paths)
+    (paths.root / "state" / "plane" / ".emit-losses").mkdir(parents=True)
+    brief = build_brief(_fleet(), paths, "alex", NOW)
+
+    entry = _find(brief, "alerts", "#2165")
+    assert entry and entry[0]["mode"] == "labeled" and "unknown" in entry[0]["reason"], entry
+
+
 def test_utilization_is_recorded_as_omitted(paths: Paths):
     """The cut section is an answer, not a gap to be inferred from absence."""
     _seed_plane(paths)
