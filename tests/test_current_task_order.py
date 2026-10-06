@@ -132,3 +132,25 @@ def test_utilization_inherits_the_order_and_the_count():
     util = compute_bot_utilization("alice", [], work=work)
     assert util.current_task == "Review Claudlobby #2174 for a merge"
     assert util.open_assignments == 2
+
+
+@pytest.mark.parametrize("a, b", [("wi_aaaa", "wi_bbbb"), ("wi_bbbb", "wi_aaaa")])
+def test_an_escalation_is_not_the_bots_transition(conn, a, b):  # noqa: F811
+    """An escalation carries the assignment id, but it says the task waits on a
+    person, not that the bot moved to it, so it does not decide the current task."""
+    _bot(conn)
+    _open(conn, a, "Progress reported last", "accepted")
+    _open(conn, b, "Escalated to a human", "accepted")
+    _event(conn, a, "progress")
+    _event(conn, b, "escalated")
+    assert _work(conn).current_task == "Progress reported last"
+
+
+@pytest.mark.parametrize("older, newer", [("wi_aaaa", "wi_bbbb"), ("wi_bbbb", "wi_aaaa")])
+def test_a_nudge_on_the_older_assigned_row_does_not_make_it_current(conn, older, newer):  # noqa: F811
+    """A nudge is the operator asking the manager to act: not the bot's transition."""
+    _bot(conn)
+    _open(conn, older, "Assigned first")
+    _open(conn, newer, "Assigned second")
+    _event(conn, older, "nudged")
+    assert _work(conn).current_task == "Assigned second"
