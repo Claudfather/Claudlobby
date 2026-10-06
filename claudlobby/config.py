@@ -192,6 +192,10 @@ FLEET_PULSE_ENV_KEYS: dict[str, str] = {
 }
 
 
+# fleet_pulse.timeout_s, validated and clamped to this range (seconds).
+FLEET_PULSE_TIMEOUT_RANGE = (30, 3600)
+
+
 @dataclass
 class FleetPulseConfig:
     """Fleet-pulse escalation knobs — the alert-volume controls (#1120).
@@ -222,6 +226,10 @@ class FleetPulseConfig:
     escalation_state_dir: str | None = None
     renotify_after_s: int | None = None
     rearm_window_s: int | None = None
+    # The sweep's time cap in seconds (#2059). Read by claudlobby/fleet_pulse.py
+    # from this config, not the unit's Environment=, so a hand-run
+    # `claudlobby fleet pulse` gets it too; unset, the cap scales with load.
+    timeout_s: int | None = None
 
     def env(self) -> dict[str, str]:
         """The subset actually set, as ``VAR: value``. Unset stays unset so the
@@ -1462,6 +1470,7 @@ def _coerce_fleet_pulse(raw: dict | None) -> FleetPulseConfig | None:
         escalation_state_dir=None if sender in (None, "") else sender,
         renotify_after_s=_int("renotify_after_s"),
         rearm_window_s=_int("rearm_window_s"),
+        timeout_s=_int("timeout_s"),
     )
 
 

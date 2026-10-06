@@ -24,7 +24,7 @@
 # timestamp describing a DIFFERENT event, so a later reader gets a confident
 # wrong answer rather than an absent one.
 #
-# Now the clock. keepalive is OnBootSec=60/OnUnitActiveSec=60 and every restart
+# Now the clock. keepalive ticks every 60 s (OnUnitActiveSec=60) and every restart
 # branch re-runs start-bot.sh, so every keepalive restart overwrites .spawn. On
 # the 2026-09-07 boot (18:24:17, ladder end 18:25:43, last session 18:28:00) a
 # pass at ladder-end+60s fires 18:26:43 and misses NINE of 21 bots whose
