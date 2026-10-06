@@ -224,6 +224,24 @@ def report(text: str, bot_names: set[str], allowlist: set[str]) -> list[tuple[in
     return hits
 
 
+def json_strings(obj) -> list[str]:
+    """Every string value in a decoded JSON document, keys excepted.
+
+    A request body passed with `gh api --input FILE` is JSON, and in its raw text
+    a body line that starts with a handle reads `\n@handle`: the `n` of the
+    escape sits before the sigil, so `_MENTION` cannot see it, and a code fence
+    is not at a line start either. Decoded, each value is the text GitHub will
+    render, so report() sees it exactly as it sees a body file.
+    """
+    if isinstance(obj, str):
+        return [obj]
+    if isinstance(obj, dict):
+        return [s for v in obj.values() for s in json_strings(v)]
+    if isinstance(obj, list):
+        return [s for v in obj for s in json_strings(v)]
+    return []
+
+
 def _load(path: str | None) -> set[str]:
     if not path:
         return set()
@@ -245,6 +263,12 @@ def main(argv: list[str] | None = None) -> int:
         help="print line:handle for mentions that would be rewritten; exit 1 if any",
     )
     ap.add_argument(
+        "--json-strings",
+        action="store_true",
+        help="with --report: read stdin as JSON and report on each string value "
+        "(text that is not JSON is read as text)",
+    )
+    ap.add_argument(
         "--field",
         action="append",
         default=[],
@@ -256,13 +280,13 @@ def main(argv: list[str] | None = None) -> int:
     raw = sys.stdin.read()
 
     if args.report:
-        hits = report(raw, bots, allow)
-        for n, h in hits:
-            print(f"{n}:{h}")
-        return 1 if hits else 0
-
-    if args.report:
-        hits = report(raw, bots, allow)
+        texts = [raw]
+        if args.json_strings:
+            try:
+                texts = json_strings(json.loads(raw))
+            except ValueError:
+                texts = [raw]  # not JSON: what gh sends is this text, so read it as text
+        hits = [hit for text in texts for hit in report(text, bots, allow)]
         for n, h in hits:
             print(f"{n}:{h}")
         return 1 if hits else 0

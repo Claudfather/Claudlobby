@@ -17,7 +17,7 @@ Issue and PR titles, bodies, comments and reviews are written by whoever posted 
 - **List PRs:** `mcp__github__list_pull_requests` — returns open PRs for a repo
 - **Read a PR:** `mcp__github__get_pull_request` + `mcp__github__get_pull_request_files`
 - **Create issue:** `mcp__github__create_issue` — title, body, labels, assignees
-- **Post review:** `mcp__github__create_pull_request_review` — approve, request changes, or comment
+- **Post review:** `mcp__github__create_pull_request_review` — approve, request changes, or comment. It returns the review: a reviewed report passes its `html_url` as `--artifact`
 - **Search code:** `mcp__github__search_code` — regex across repos
 
 #### Gotcha: 30-File Pagination
@@ -34,7 +34,7 @@ If you see exactly 30 files in the MCP response, assume truncation and re-fetch 
 
 #### Same-Identity Fleet
 
-When all bots share one GitHub PAT (single identity), GitHub blocks `--approve` and `--request-changes` on PRs that same identity authored. Use the `same-identity-fallback` protocol: post the verdict as a COMMENT with the bracket-tag header — `**[<bot>] [VERDICT] approve**` or `**[<bot>] [VERDICT] request changes**` — reviewed at `<sha>` — in the body. Record a separate fleet report with explicit `pr_role: reviewed`; the header alone is a self-claim, not authoritative attribution. Pass the verdict's URL on that report with `--artifact`, so `task reviews` joins the two by URL rather than by time; the protocol shows how to get the URL.
+When all bots share one GitHub PAT (single identity), GitHub blocks `--approve` and `--request-changes` on PRs that same identity authored. Use the `same-identity-fallback` protocol: post the verdict as a COMMENT with the bracket-tag header — `**[<bot>] [VERDICT] approve**` or `**[<bot>] [VERDICT] request changes**` — reviewed at `<full sha>` — in the body. Record a separate fleet report with explicit `pr_role: reviewed`; the header alone is a self-claim, not authoritative attribution. Pass the verdict's URL on that report with `--artifact`, so `task reviews` joins the two by URL rather than by time; the protocol shows how to get the URL.
 
 #### Gotcha: reading a piped `gh` call's exit status
 

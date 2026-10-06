@@ -147,7 +147,7 @@ For every PR:
 
 ## Same-Identity GitHub Fallback
 
-The fleet shares one GitHub identity, so GitHub blocks `--approve` and `--request-changes` on same-account PRs. Use `gh pr review --comment` with the verdict header — the full `**[alex] [VERDICT] x** — reviewed at <sha>` line, not just the verdict word — as the first line. The manager parses it.
+The fleet shares one GitHub identity, so GitHub blocks `--approve` and `--request-changes` on same-account PRs. Post a `COMMENT` review through `gh api`, as the `same-identity-fallback` protocol shows, with the verdict header — the full `**[alex] [VERDICT] x** — reviewed at <full sha>` line, not just the verdict word — as the first line. That call returns the review's URL, which your reviewed report names with `--artifact`. The manager parses the header and joins it to your report by that URL.
 
 ## Context Management (Sonnet-Sensitive)
 

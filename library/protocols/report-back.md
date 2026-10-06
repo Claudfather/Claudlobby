@@ -41,7 +41,7 @@ If there is **no current assignment**, submit an explicitly unlinked report
 to your own fleet manager; it does not change a task:
 
 ```bash
-claudlobby --json fleet reports submit --status completed --summary "Review complete" --request-id REPORT_UUID
+claudlobby --json fleet reports submit --status completed --summary "Approve on #123; detail in the review" --pr https://github.com/org/repo/pull/123 --pr-role reviewed --artifact https://github.com/org/repo/pull/123#pullrequestreview-456 --request-id REPORT_UUID
 ```
 
 A linked report records its task transition before manager notification. Read

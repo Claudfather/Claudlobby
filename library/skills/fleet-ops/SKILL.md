@@ -314,7 +314,8 @@ claudlobby --json assignment show ASSIGNMENT_ID
 For a setback, use `assignment block`, `return`, or `fail` with `--reason`,
 never an old task ID. `assignment progress` alone may include `--percent 0..100`;
 reports may carry `--pr URL --pr-role authored|reviewed`, repeatable
-`--artifact URL` and `--issue URL`, and `--skill NAME`. Check each verb's help.
+`--artifact URL` and `--issue URL`, and `--skill NAME`; a reviewed report names
+its verdict's URL with `--artifact`. Check each verb's help.
 The manager can inspect `task withdraw --help` and `task reassign --help` for
 reasoned changes. To record a request for human guidance, including before
 assignment, use `task escalate TASK_ID --question "The decision needed" --request-id UUID`.
