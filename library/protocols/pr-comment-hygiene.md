@@ -84,7 +84,7 @@ Examples:
 
 ### Verdict
 
-A review bot's overall assessment of the plan. **Bold the bracket tag and anchor the commit you reviewed** — this is the same header `claudlobby task reviews` parses on a code PR to assess the verdict and its current-head anchor; unbolded or unanchored, it cannot prove a live verdict. Record a separate review-role fleet report for actor attribution:
+A review bot's overall assessment of the plan. **Bold the bracket tag and anchor the commit you reviewed** — this is the same header `claudlobby task reviews` parses on a code PR to assess the verdict and its current-head anchor; unbolded or unanchored, it cannot prove a live verdict. Record a separate review-role fleet report for actor attribution, with the verdict's URL as `--artifact`:
 
 ```
 **[<bot-name>] [VERDICT] <approve|request-changes|comment>** — reviewed at `<sha>` — <one-line summary>
