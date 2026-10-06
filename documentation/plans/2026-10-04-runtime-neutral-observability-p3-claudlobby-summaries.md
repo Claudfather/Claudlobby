@@ -16,7 +16,7 @@ repos: Claudfather/Claudlobby
 > **Status:** draft, authored by `/claudna:forge` on 2026-10-04 from epic plan §6 P3 (Claudlobby bullets) and its two
 > `#### Spec:` subsections (`the session_summary plane event`, `the clauDNA export contract additions`). Code references
 > are to Claudlobby `cd292cb` (the checkout `2dd0aad5` is identical for every line cited). Depends on: P1 Claudlobby
-> **Half A** (release N: `BotConfig.runtime`, composed `CLAUDLOBBY_RUNTIME`, `derive_session_uid(id, runtime)`, the
+> **Half A** (release N: `BotConfig.agent_cli`, composed `CLAUDLOBBY_RUNTIME`, `derive_session_uid(id, runtime)`, the
 > design-v2 §1.1 amendment, Task 9b's `fleet_event_request`, and — if C10 leaked — Task 7b's conditional `start-bot.sh`
 > scrub; nothing from Half B); the P3 clauDNA
 > release (plan 5: `export --include-skipped`, the item's `segment` object, `session.runtime`,
