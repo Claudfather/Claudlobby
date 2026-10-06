@@ -19,6 +19,7 @@ from . import defaults as _defaults
 
 from .known_values import (
     KNOWN_EFFORTS,
+    KNOWN_RUNTIMES,
     PROJECT_KEYS,
     SHELL_IDENT_RE,
     VALID_PERMISSION_MODES,
@@ -710,6 +711,7 @@ class BotConfig:
     account: str = "default"
     model: str | None = None
     effort: str | None = None
+    runtime: str = "claude"  # claude | codex — #2145; see known_values.KNOWN_RUNTIMES
     # Claude Code CLI flags — composed into CLAUDE_FLAGS in bot.conf.
     remote_control: bool = True  # --remote-control
     # Conservative default: with neither field set the composer emits
@@ -1731,6 +1733,11 @@ def _parse_enum(label: str, value: str | None, known: frozenset[str]) -> str | N
     """Validate a string field against a known set. Returns value or raises."""
     if value is None:
         return None
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Invalid {label} {value!r}: expected a string. "
+            f"Must be one of: {', '.join(sorted(known))}"
+        )
     if value not in known:
         suggestion = closest_match(value, known)
         hint = f" Did you mean '{suggestion}'?" if suggestion else ""
@@ -1819,6 +1826,13 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         model=_select_bot_scalar(raw, defaults, "model")[0],
         effort=_parse_enum(
             "effort", _select_bot_scalar(raw, defaults, "effort")[0], KNOWN_EFFORTS
+        ),
+        runtime=_parse_enum(
+            "runtime",
+            # An explicit `runtime: null` reads as the built-in default: the
+            # composer always needs a string.
+            _select_bot_scalar(raw, defaults, "runtime", "claude")[0] or "claude",
+            KNOWN_RUNTIMES,
         ),
         remote_control=_bool("remote_control", True),
         dangerously_skip_permissions=_bool("dangerously_skip_permissions", False),
@@ -2269,7 +2283,7 @@ _EXPLAIN_FLEET_SCALARS = frozenset({
     "human_telegram_id", "mission", "mission_file",
 })
 _EXPLAIN_BOT_INHERITED_SCALARS = frozenset({
-    "account", "model", "effort", "remote_control", "dangerously_skip_permissions",
+    "account", "model", "effort", "runtime", "remote_control", "dangerously_skip_permissions",
     "skip_auto_permission_prompt", "skip_dangerous_mode_permission_prompt",
     "prompt_suggestions", "disable_nonessential_traffic", "spinner_tips_enabled",
     "preferred_notif_channel", "prefers_reduced_motion",

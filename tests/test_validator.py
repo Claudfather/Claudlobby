@@ -112,6 +112,28 @@ class TestValidate:
         report = validate(fleet, paths)
         assert not report.has_errors
 
+    def test_codex_runtime_is_refused_until_the_adapter_ships(self, fleet_dir, monkeypatch):
+        """#2145 F11: `codex` parses (the vocabulary ships) but is an error, so
+        `config plan` refuses it, until the execution adapter (#2149) lands."""
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test123")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        manifest = fleet_dir / "fleet.yaml"
+        base = manifest.read_text()
+        anchor = "    worker-1:\n      expertise: [software-engineering]\n"
+        assert anchor in base, "the fixture's worker-1 stanza moved"
+        paths = _make_paths(fleet_dir)
+
+        manifest.write_text(base.replace(anchor, anchor + "      runtime: codex\n"))
+        report = validate(load_fleet(manifest)[0], paths)
+        refused = [e for e in report.errors if "execution adapter not shipped" in e]
+        assert report.has_errors
+        assert len(refused) == 1 and "'worker-1'" in refused[0], report.errors
+
+        manifest.write_text(base.replace(anchor, anchor + "      runtime: claude\n"))
+        report = validate(load_fleet(manifest)[0], paths)
+        assert not report.has_errors, report.errors
+
     def test_missing_expertise_is_error(self, fleet_dir, monkeypatch):
         # Overwrite fleet.yaml with a bot referencing nonexistent expertise
         yaml_text = (fleet_dir / "fleet.yaml").read_text()

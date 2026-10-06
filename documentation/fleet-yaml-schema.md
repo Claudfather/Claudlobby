@@ -25,6 +25,7 @@ fleet:
   defaults:                             # applied to every bot unless overridden
     model: opus | sonnet | haiku | fable   # or a pinned model ID, e.g. claude-opus-4-8
     effort: low | medium | high | max
+    runtime: claude | codex              # agent CLI (default: claude; codex refused until #2149)
     account: default
     prompt_suggestions: true | false    # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION (default: false)
     disable_nonessential_traffic: true | false  # RC-safe headless trim set (default: true)
@@ -89,6 +90,7 @@ fleet:
       account: <account-key>
       model: <model>
       effort: <effort>
+      runtime: <runtime>
       skills: [<list>]                  # appended to defaults.skills
       mcp: [<list>]
       integrations: [<list>]            # auto-paired with mcp; explicit overrides
@@ -211,7 +213,7 @@ Omit the field entirely for the common case — everything defaults to `true`. U
 Applied to every bot. Merge rules by type:
 
 - **Lists** (skills, expertise, guardrails, protocols, resources, lessons, principles, permissions, post_actions, mcp, integrations) — bot-level **appends to** defaults (deduped, order-preserved).
-- **Scalars** (model, effort, account, mission) — bot-level **overrides** defaults.
+- **Scalars** (model, effort, runtime, account, mission) — bot-level **overrides** defaults.
 - **Telegram** — merged **field-by-field**. Bot-level fields override individual defaults fields (e.g., a bot can override `require_mention` while inheriting `token_env`).
 - **Sandbox** — lists (network_allowed_domains, filesystem_allow_write) are **unioned**; booleans (auto_allow_bash) use bot-level value.
 - **Tools** — deny/allow lists are **unioned** across defaults and bot-level.
@@ -886,6 +888,10 @@ the `--dangerously-skip-permissions` CLI flag above: these suppress the one-time
 first-run prompts a headless, supervised bot would otherwise hang on with no terminal to answer
 them. Can be set in `defaults:`; bot-level overrides.
 
+### `bots.<name>.runtime`
+
+String enum, `claude` (default) or `codex`. The agent CLI the bot runs under; composed into `bot.conf` as `CLAUDLOBBY_RUNTIME` and read by every door that derives the bot's session uid (#2145 §2.2). `codex` is accepted by the parser and **refused by the validator** (`execution adapter not shipped`) until the Codex execution adapter ships (#2149). Can be set in `defaults:`. Not to be confused with `host update runtime` (the Claude Code binary) or `config validate --runtime` (the composed-output audit).
+
 ### `bots.<name>.remote_control`
 
 Boolean (default `true`). Controls whether the bot runs with `--remote-control`, which allows dispatch via `tmux send-keys`. Disable for standalone bots that should only respond to Telegram messages. Can be set in `defaults:`.
@@ -1071,6 +1077,7 @@ does not own.
 
 - **Hard fail** — bot's `expertise:` list is empty or references missing files
 - **Hard fail** — `fleet.yaml` itself is invalid YAML or missing required keys
+- **Hard fail** — a bot's `runtime:` is not `claude` (`execution adapter not shipped`, until #2149)
 - **Warn** — bot references a `skill` / `mcp` / `guardrail` / `protocol` / `resource` / `lesson` / `post_action` that doesn't exist (skipped during generate)
 - **Warn** — MCP fragment references an env var (`${FOO}`) that's not set in the current environment
 - **Warn** — `voice:` path doesn't resolve

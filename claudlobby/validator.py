@@ -1260,6 +1260,14 @@ def _validate_bots(
                 f"1..10 (got {obs.bridge_heal_max_attempts})"
             )
 
+        # #2145 F11: the vocabulary ships now; only the Claude adapter exists.
+        if bot.runtime != "claude":
+            report.errors.append(
+                f"bot '{bot_name}': runtime '{bot.runtime}' — execution adapter not shipped. "
+                f"This release composes and launches Claude Code bots only; the Codex adapter is the "
+                f"companion epic (#2149). Set runtime: claude, or remove the bot until it lands."
+            )
+
         # Model validation (warn + pass-through)
         if bot.model and bot.model not in KNOWN_MODELS:
             suggestion = closest_match(bot.model, KNOWN_MODELS)
