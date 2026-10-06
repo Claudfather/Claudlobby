@@ -94,14 +94,16 @@ fleet:
       # filesystem_allow_write: []           # additional write paths (bot dir is always writable)
 
     # Hooks (bot-vitals.sh) and observability come from system defaults.
-    # Override: declare hooks/observability here (your version wins via dedup).
+    # Override: declare hooks/observability here (your version wins via dedup —
+    # dedup compares the command string, so spell a default hook exactly as the
+    # release does; a different path, e.g. the retired root lib/, runs it twice, #2062).
     # Disable: system_defaults: false (or per-category: system_defaults: { hooks: false })
     #
     # hooks:                                       # uncomment to override system default hooks
     #   PreToolUse:
-    #     - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"
+    #     - command: "$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh"
     #   PostToolUse:
-    #     - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"
+    #     - command: "$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh"
     # observability:                               # uncomment to override system default values
     #   pulse_interval: 300
     #   # Mirror watchdog (#1024): flag a worker that reported and was then

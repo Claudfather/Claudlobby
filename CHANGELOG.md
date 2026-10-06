@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — bot-vitals never falls back to the working directory (#874, #2145 P2-b)
+
+`bot-vitals.sh` used `${BOT_DIR:-$PWD}` both for the activity marker and as the bot dir it handed the plane emit. Run without `BOT_DIR`, it wrote `data/.last-tool-call` into whatever directory it ran in, which for a bot is its project checkout, and recorded a `tool_call` row against that directory.
+
+- **With no `BOT_DIR`, the hook now does nothing.** It writes no marker, records no row, notes the reason on stderr, and exits 0, so a tool call is never blocked. Every composed bot has `BOT_DIR` from `bot.conf`, so its markers and `tool_call` rows are unchanged.
+- **`fleet.yaml.example` no longer shows the retired `$CLAUDLOBBY_ROOT/lib/bot-vitals.sh`.** Hook dedup compares the command string, so a manifest that copied that path ran the hook twice beside the release's default and recorded every tool call twice (#2062). The example now uses the release's own `$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh`, and the script's header says not to declare it again. Manifests that already carry the old path still need the one-time clean-up #2062 describes.
+- **`tool_call` rows stay.** They are the only record of which MCP tool ran until the plane takes tool names from OpenTelemetry (#2145 §14 Q17, P2-a2).
+- **Test:** `tests/test_plane_cutover_keepalive.py::test_the_vitals_hook_never_falls_back_to_the_cwd`.
+
 ### Added — a composed guard refuses a signal to a process the caller did not start (#1069)
 
 On 2026-10-05 a manager bot's ad-hoc kill loop killed each process matching a pattern and its parent, read back with `ps -o ppid=`. The pattern matched the bot's own tool shell as well as its job; killing the shell orphaned the job to the user manager, and the next "parent" the loop killed was the manager. Every bot on the host stopped for 15 hours (#2158). The loop killed by pid, as #1069's interim advice asked, and warnings about `pkill` composed into every bot did not prevent it.
