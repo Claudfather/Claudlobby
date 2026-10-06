@@ -136,6 +136,16 @@ Doctor flags unreadable, full, stale, or undrainable pending data. An
 initialized plane with a never-started daemon needs attention. A staged batch
 never satisfies a linked/task operation's committed-recording requirement.
 
+**The quarantine and the counted losses (#2165).**
+
+- **Listing the quarantine.** `plane spool list --quarantined` lists every quarantined entry, newest first. Each item shows when the entry was written and when it was quarantined, its size, whether it is empty, and its reason. The listing pages with `--limit` and `--cursor`, states its coverage, and reads only files, never the database.
+- **Reading one entry.** `plane spool inspect NAME` reads a single entry. That includes a refused stage, whose name has the form `<time_ns>-<lead event>[.batch.<pid>].json`.
+- **The loss counter.** `emit_losses_summary` in `plane/health.py` reads `state/plane/.emit-losses` once, for three readers:
+  - `plane doctor`'s emit-losses rung;
+  - `plane status`, as `emit_losses`;
+  - the brief, which labels `alerts` (`#2165`) while a known loss sits in the 24 h window.
+- **Unreadable is not zero.** An unreadable quarantine or counter is reported as unreadable, never as zero.
+
 **The deadline follows who waits (#1693).** The client's total deadline is
 1.0 s unless the caller's class says otherwise. `PLANE_EMIT_CLASS` is `hook`
 (a live turn waits), `background` (nothing reads the result;

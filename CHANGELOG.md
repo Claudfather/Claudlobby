@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — the plane's quarantine is listed, and its counted losses show where a manager looks (#2165)
+
+Until now, `plane doctor` and `plane status` only counted the quarantine, and the trust panel named its newest five entries; nothing listed the rest. The `.emit-losses` rows, including #2164's `stage_empty`, were read by `plane doctor` alone, and nothing schedules the doctor.
+
+- **`claudlobby plane spool list --quarantined`** lists every quarantined entry, newest first.
+  - Each item shows `written_at`, `quarantined_at` (from the `.reason` sidecar), `size`, `empty` and `reason`.
+  - It pages with `--limit` and `--cursor`, and every page carries `coverage`: `total`, `returned`, `vanished` and `reasons_unreadable`.
+  - It is read-only. It reads files only, never the plane database or the daemon.
+  - A quarantine that cannot be enumerated is `unavailable`, never an empty list.
+- **`plane spool inspect`** now also reads a refused stage's quarantined name (`<time_ns>-<lead event>[.batch.<pid>].json`), and reports an empty entry as `empty: true` instead of failing.
+- **One loss summary.** `emit_losses_summary` (`plane/health.py`) counts the 24 h window by each row's epoch, keeping `reap` (fate unknown) apart from known losses. `plane doctor`'s rung now reads it, and so counts only the window it names. `plane status` carries it as `emit_losses`.
+- **The brief labels `alerts`.** While a known loss sits in the window, `alerts` carries a `#2165` entry with the count, because the alerts the brief shows travel the path those emits were lost on. Reaps alone add no label. An unreadable counter labels `alerts` as unknown.
+- **Tests:**
+  - `tests/test_plane_quarantine_and_losses.py` (new) covers the list door, its pages, an unreadable quarantine, the summary, `plane status` and the doctor's window.
+  - `tests/test_brief.py` gains three tests for the label.
+
 ### Changed — interval timers start after their own startup delay, and the fleet pulse's cap scales with load (#2059)
 
 On 2026-10-05 a restarted user manager started every interval timer on a host that had been up for days. Each `OnBootSec=` point was already past, so systemd fired every producer in the same second into bots that were still starting; task-recheck failed because its managers were not up. Every `host activate` did the same, because it restarts every enrolled timer.
