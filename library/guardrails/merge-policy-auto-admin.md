@@ -25,7 +25,7 @@ The manager auto-merges PRs using `--admin` when ALL of:
 
    **A mismatch means you do not yet know what you are merging.** It is not a slow answer to wait out — it is two sources disagreeing about which commit the PR *is*, and there is no rule for picking a winner. Refuse, confirm the push landed (`git ls-remote <remote> refs/heads/$BR` against your local `HEAD`), and start the rungs again.
 
-1. **Peer review posted — and attributed BY HAND.** A reviewer has posted an `APPROVE` verdict, or a `COMMENT` with a `**[<bot>] [VERDICT] approve**` verdict line, anchored to the reviewed SHA (same-identity fallback). The review must be from a different bot than the PR author — no self-reviews. `claudlobby --json task reviews OWNER/REPO --pr N` reads the recorded reviewer attribution and current-head verdict, but does not establish authorship or authorize merging.
+1. **Peer review posted — and attributed BY HAND.** A reviewer has posted an `APPROVE` verdict, or a `COMMENT` with a `**[<bot>] [VERDICT] approve**` verdict line, anchored to the reviewed SHA (same-identity fallback). The review must be from a different bot than the PR author — no self-reviews. `claudlobby --json task reviews OWNER/REPO --pr N` reads the recorded reviewer attribution and current-head verdict, but does not establish authorship or authorize merging. A verdict counts only when that read attributes it `MATCH` to a recorded review-role report; one it reads `UNKNOWN` or `AMBIGUOUS` never counts.
 
    **MULTIPLE VERDICTS RESOLVE PER REVIEWER, NEVER GLOBAL-LATEST.** Each reviewer's own latest verdict stands, and the PR is blocked while **any** reviewer's latest is `REQUEST-CHANGES`.
 

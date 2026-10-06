@@ -93,6 +93,7 @@ SHELL_WRITERS = {
 # A script's own wrapper around a writer; its calls are scanned like a writer's.
 LOCAL_WRAPPERS = {
     RS + "credential-echo-guard.sh": {"_event": 1},
+    RS + "signal-guard.sh": {"_event": 1},
     RS + "vault-git-guard.sh": {"_event": 1},
 }
 # A writer call whose type is a variable, keyed (file, writer, the argument as
@@ -114,6 +115,7 @@ FORWARDED_TYPES = {
         ("emit_failure_alert", "emit_fleet_notice"),
     (RS + "lib-common.sh", "emit_fleet_notice", '"$etype"'): ("notify_currency",),
     (RS + "credential-echo-guard.sh", "emit_fleet_event", '"$1"'): ("_event",),
+    (RS + "signal-guard.sh", "emit_fleet_event", '"$1"'): ("_event",),
     (RS + "vault-git-guard.sh", "emit_fleet_event", '"$1"'): ("_event",),
 }
 
