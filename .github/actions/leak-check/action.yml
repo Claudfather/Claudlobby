@@ -1,0 +1,38 @@
+name: leak-check
+description: >-
+  Refuse a pull request that adds use-case-specific data (#2042): generic
+  identifiers (layer 1) and an operator's private terms (layer 2, from an
+  Actions secret). It reads the change as data and never runs its code, and it
+  never prints what matched: a hit is a file, a line and a rule.
+inputs:
+  private-terms:
+    description: >-
+      The operator's private list: pass secrets.LEAK_CHECK_TERMS. One
+      case-insensitive pattern per line, # for comments. Unset or empty fails
+      the check closed.
+    required: false
+    default: ''
+  allowlist:
+    description: The repository's layer-1 allowlist, read from the pull request's head.
+    required: false
+    default: .github/leak-check-allow.txt
+runs:
+  using: composite
+  steps:
+    - name: Fetch the pull request as data
+      shell: bash
+      env:
+        PR: ${{ github.event.pull_request.number }}
+      run: |
+        if [ -z "$PR" ]; then
+          echo "::error::leak-check runs on pull_request_target: no pull request in this event"
+          exit 2
+        fi
+        git fetch --no-tags --quiet origin "+refs/pull/${PR}/head:refs/leak-check/head"
+    - name: Check the added lines
+      shell: bash
+      env:
+        LEAK_CHECK_TERMS: ${{ inputs.private-terms }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        ALLOW: ${{ inputs.allowlist }}
+      run: python3 "$GITHUB_ACTION_PATH/leak_check.py" --git "$BASE_SHA" refs/leak-check/head --allow "$ALLOW"

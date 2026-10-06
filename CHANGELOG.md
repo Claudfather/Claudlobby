@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — a blocking check on every pull request for use-case-specific data (#2042)
+
+`.github/actions/leak-check/`, a composite action (stdlib Python), reads a pull request's added lines and the paths it touches, and fails on use-case-specific data, whoever contributes it.
+
+- **Layer 1, generic patterns kept in the repository:** Telegram chat ids and bot tokens, GitHub and vendor API tokens, email addresses outside the reserved example domains, home paths, IPv4 addresses outside localhost and the documentation ranges, and UUIDs. The placeholders CLAUDE.md prescribes pass, and so do other obvious stand-ins.
+- **Layer 2, an operator's private list:** one case-insensitive pattern per line, from the `LEAK_CHECK_TERMS` Actions secret. If the secret is unset or empty, the check fails closed and says so.
+- **Output is a location and a rule, never what matched:** `path:line: <class>`, or `path:line: private term #<n>`. Logs on a public repository are world-readable, and masking hides only a secret's verbatim value.
+- **The escape is visible:** `.github/leak-check-allow.txt` (`<path glob> <class> <reason>`), read from the pull request itself, so an entry is reviewed in the same diff. The private list has no escape.
+- **Forks are checked too:** the workflow runs on `pull_request_target`, checks out the base commit and reads the head as git objects, so no code from the pull request runs. The other three repositories call the action pinned by sha.
+- **The diff is read by its own structure:** each hunk by its line counts, and in `--git` mode every path from git's own list, renames and binary files included. A binary file's bytes are checked against the private list only.
+- **Tests:** `tests/test_leak_check.py` covers:
+  - a planted positive for each class, and an invented private term, each failing the check;
+  - the placeholders, passing;
+  - no matched text in any output;
+  - the fail-closed paths;
+  - the allowlist;
+  - `--git` mode, renames and binary files;
+  - a diff crafted to steer the reader (a line shaped like a file header, a carriage return, a hunk that does not match its counts).
+
 ### Added — each bot session gets its own child subreaper, so its orphans never re-parent to the user manager (#2158)
 
 On 2026-10-05 a kill loop killed a pattern match and then its parent. The match was an orphaned job, and an orphan in a bot session re-parented to the systemd user manager, which runs every bot: it exited on SIGTERM, and every bot on the host stopped for 15 hours. #1069's guard refuses that command; this bounds the damage when one gets past it.
