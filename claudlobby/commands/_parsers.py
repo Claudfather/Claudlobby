@@ -219,6 +219,12 @@ def register_subparsers(sub) -> None:
     psp = psub.add_parser("spool", help="Inspect/drain the emit spool")
     psp.add_argument("spool_action", choices=["list", "inspect", "retry", "quarantine"])
     psp.add_argument("name", nargs="?", help="Spool file name (inspect/quarantine)")
+    psp.add_argument("--quarantined", action="store_true",
+                     help="list: the quarantine's entries, newest written first, with their times,"
+                          " size, emptiness and reason (read-only)")
+    psp.add_argument("--limit", type=int, default=None,
+                     help="list --quarantined: entries per page (1-500, default 50)")
+    psp.add_argument("--cursor", default=None, help="list --quarantined: continue after a next_cursor")
     psp.add_argument("--json", action="store_true", help="Schema-1 result")
 
     def _spool_dispatch(args):

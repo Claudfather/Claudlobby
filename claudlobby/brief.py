@@ -3,7 +3,9 @@
 ``claudlobby brief [--bot X] [--json]`` composes five sections off the
 plane (once five unrelated files, read by hand-rolled jq against stale schemas):
 mission pointers, canonical fleet work, workstreams, unacked reports, and recent critical
-events. Skills consume THIS, never the plane db by hand — that is the coupling
+events. The fleet's manager gets the unacked reports' rows, the oldest
+``REPORT_ROW_LIMIT`` of them; any other viewer gets their count and the command
+that lists them (#2159). Skills consume THIS, never the plane db by hand — that is the coupling
 the door exists to kill. Explicit ``--usage-since`` adds a bounded transcript
 count for the selected viewer; default and boot reads do not scan transcripts.
 
@@ -35,14 +37,15 @@ class of untruth it was added to prevent:
       recorded as such, never dropped silently by a reader. The re-scan this
       module carried, and its label, went with the files.
 
-  ``#903`` event-type SSOT
-      DETECTED, structurally. ``CRITICAL_TYPES`` is a hand-maintained
-      nine-literal list that omits every host-job alert type (``disk_high``,
-      ``memory_high``, ``briefing_failed``, ...), so the alert section is
-      incomplete by construction and no measurement taken here could show it —
-      the missing rows are exactly the ones the filter never returns. #903
-      ships an event-type registry in ``known_values``; the label is keyed on
-      that symbol existing, so it clears when the SSOT lands and not before.
+  ``#2109`` fleet- and host-level alerts
+      LABELED, unconditionally, because the bound is this module's own read:
+      the alerts section asks the plane for THIS bot's critical events. A
+      FLEET ALERT is recorded against the fleet (``reload_failed``,
+      ``keepalive_failed``, ...), or, from a host job that runs with no fleet,
+      against the host (``disk_high``, ``memory_high``, ...), so no bot's read
+      returns it. Which types are
+      critical is the one registry, ``plane.registries.SYSTEM_EVENT_SEVERITY``
+      (#903); the label goes when this read takes those rows too, not before.
 
   ``#891`` uptime windows
       OMITTED. ``claudlobby fleet uptime`` counts missing keepalive history as
@@ -117,7 +120,7 @@ def _assert_selected_identity(plane, fleet: str, bot_id: str,
 ALERT_WINDOW_H = 24
 
 # Rows any ONE text section will print before truncating. The JSON envelope is
-# never capped — R4 consumes that and wants everything.
+# not capped, except its reports section (``REPORT_ROW_LIMIT``, below).
 #
 # Measured need, not a round number: this fleet's live brief rendered 335 unacked
 # reports as 335 lines. The read door's job is to route attention, and a section
@@ -128,6 +131,16 @@ ALERT_WINDOW_H = 24
 # truncated list is the end that is rotting: the report that has gone unacted-on
 # longest is the #1024 incident shape, not the one that just arrived.
 TEXT_ROW_LIMIT = 10
+
+# The fleet's unacknowledged reports are the fleet manager's to act on (#2159). A
+# viewer that never acknowledges, which is every worker, would carry every report the
+# fleet ever filed: 840 rows, 98% of a 353,814-byte worker brief on 2026-10-05, all
+# ahead of its own work. So any other viewer gets their count and this command, and
+# the manager the oldest REPORT_ROW_LIMIT rows: about a day of one fleet's reports
+# (840 in 15 days) and about 20 KB at the measured mean row of 411 bytes. The cut is
+# labeled in `degraded[]`, with the count.
+REPORTS_LIST_COMMAND = "claudlobby --json fleet reports list --unacknowledged"
+REPORT_ROW_LIMIT = 50
 
 # Workstream staleness window, in days, shared with selected fleet policy.
 DEFAULT_LEASE_DAYS = 14
@@ -308,6 +321,12 @@ def ack_request(fleet: str, bot: str, *, acked_through_seq: int, acked_through_t
 # --- sections -----------------------------------------------------------------
 
 
+def _manages_fleet(fleet, bot_id: str) -> bool:
+    """Whether the viewer is the fleet's manager, from the activated config: the one
+    question the work and reports sections ask of the viewer's role."""
+    return bot_id in fleet.manager_bots()
+
+
 def _mission_section(fleet, bot, paths: Paths) -> dict:
     """Pointers, not inlined charters (#986 P2: pointers, never derivations).
 
@@ -362,7 +381,7 @@ def _work_section(
             reason=f"canonical fleet work cannot be read: {exc}; no empty list is served"))
         return {}
 
-    manager = bot_id == fleet.manager
+    manager = _manages_fleet(fleet, bot_id)
     entry = plane.roster.get(bot_id.lower())
     bot_uids = set((entry or {}).get("uids", ()))
     if not manager and not bot_uids:
@@ -430,6 +449,16 @@ def _work_section(
             "historical_references": list(task.display_ids),
             "issues": [asdict(issue) for issue in task.issues],
         })
+    # #2044: the title IS the dispatch text, the only thing that tells a
+    # respawned worker what a row asks. The contract refuses an empty title at
+    # ingest, so a missing one is said here, whatever left it so, and is never
+    # rendered as a blank that reads like a row with nothing to say.
+    untitled = sum(1 for item in items if not (item["title"] or "").strip())
+    if untitled:
+        degraded.append(Degradation(
+            field="work.title", mode="labeled", issue="#2044",
+            reason=f"{untitled} open task(s) have no recorded title, so they are "
+                   "listed by id only"))
     if missing_attention and not any(d.field == "work.attention" for d in degraded):
         degraded.append(Degradation(
             field="work.attention", mode="labeled", issue="#1747",
@@ -492,7 +521,7 @@ def _workstream_section(
 
 def _reports_section(
     paths: Paths, bot_id: str, terminal: set[str], degraded: list[Degradation],
-    plane=None,
+    plane=None, *, manager: bool,
 ) -> dict:
     """Terminal reports newer than the viewer's newest ack — fleet-wide, on purpose.
 
@@ -502,6 +531,12 @@ def _reports_section(
     finish that I have not acted on", so filtering to the viewer's own reports
     would answer the wrong one. Every row carries ``bot``, so a consumer that
     does want a narrower view can take it.
+
+    That question is the manager's (``manager``, decided by the caller from the
+    activated config), so only the manager's view carries rows, and at most the
+    oldest ``REPORT_ROW_LIMIT``. Every view carries ``count`` and
+    ``list_command``; a cut, and a view with no rows, are named in ``degraded``
+    with the count (#2159).
     """
     # The plane, the only source (F18 R2b) — for the reports AND for the
     # viewer's read position (chunk K: the newest `reports_acked` event on the
@@ -546,43 +581,48 @@ def _reports_section(
          "task_id": r["task_id"], "summary": r["summary"], "pr_url": r["pr_url"]}
         for r in session.pr.unacked_rows(rows, ack["seq"] if ack else None, terminal)
     ]
-    # The reports section keeps its three keys (`cursor` = the ack's legacy-form ts);
-    # the card, not the brief, carries when and by whom. Keys INSIDE a row may
-    # be added (additive; `seq` is one); the top-level key set is the contract.
-    return {"cursor": ack["ts"] if ack else None, "unacked": unacked, "source": "plane"}
+    # `cursor` is the ack's legacy-form ts; the card, not the brief, carries when
+    # and by whom. Keys INSIDE a row may be added (additive; `seq` is one); the
+    # top-level key set is the contract, `unacked` present in the manager's view only.
+    section = {"cursor": ack["ts"] if ack else None, "source": "plane",
+               "count": len(unacked), "list_command": REPORTS_LIST_COMMAND}
+    if not manager:
+        degraded.append(Degradation(
+            field="reports.unacked", mode="omitted", issue="#2159", count=len(unacked),
+            reason="this viewer is not the fleet's manager, so the brief counts the fleet's"
+                   " unacknowledged reports and lists none; list them with "
+                   + REPORTS_LIST_COMMAND))
+        return section
+    if len(unacked) > REPORT_ROW_LIMIT:
+        degraded.append(Degradation(
+            field="reports.unacked", mode="labeled", issue="#2159", count=len(unacked),
+            reason=f"showing the oldest {REPORT_ROW_LIMIT} of {len(unacked)} unacknowledged"
+                   " reports; list them all with " + REPORTS_LIST_COMMAND))
+    section["unacked"] = unacked[:REPORT_ROW_LIMIT]
+    return section
 
 
 def _alerts_section(
     paths: Paths, bot_id: str, now: int, degraded: list[Degradation], plane=None
 ) -> list[dict]:
-    """Critical events for the bot within the lookback window.
+    """This bot's own critical events within the lookback window.
 
-    Incomplete by construction until #903 lands — see the module docstring.
-    The degradation is keyed on the SSOT symbol rather than a hardcoded flag,
-    so it retires itself when the registry ships.
+    Labeled on every call: fleet- and host-level alerts are not read here
+    (#2109) — see the module docstring.
     """
-    try:
-        from . import known_values
-
-        has_ssot = hasattr(known_values, "FLEET_EVENT_TYPES")
-    except ImportError:  # pragma: no cover - known_values is a sibling module
-        has_ssot = False
-
-    if not has_ssot:
-        degraded.append(
-            Degradation(
-                field="alerts",
-                mode="labeled",
-                reason=(
-                    "critical events are filtered by CRITICAL_TYPES, a "
-                    "hand-maintained list that omits every host-job alert type "
-                    "(disk_high, memory_high, briefing_failed, ...); alerts "
-                    "shown are real, but absence of an alert is not evidence of "
-                    "health"
-                ),
-                issue="#903",
-            )
+    degraded.append(
+        Degradation(
+            field="alerts",
+            mode="labeled",
+            reason=(
+                "alerts shown are this bot's own critical events; fleet- and "
+                "host-level alerts (disk_high, memory_high, reload_failed, ...) "
+                "are not read here, so absence of an alert is not evidence of "
+                "health"
+            ),
+            issue="#2109",
         )
+    )
 
     cutoff = (
         (datetime.fromtimestamp(now, timezone.utc) - timedelta(hours=ALERT_WINDOW_H))
@@ -622,6 +662,36 @@ def _alerts_section(
         for e in events
         if isinstance(e.get("ts"), str) and e["ts"] >= cutoff
     ]
+
+
+def _emit_losses_label(paths: Paths, now: int, degraded: list[Degradation]) -> None:
+    """#2165: the emits this host did NOT record label `alerts`.
+
+    The critical events `alerts` shows travel the bounded emit path whose losses
+    `state/plane/.emit-losses` counts, so a known loss there is an alert that may
+    be missing here. It is read from that file, never the plane, so a lagging or
+    stopped plane does not hide it. Reaped emits alone add no label: their fate
+    is unknown, and a loaded host reaps hundreds a day. Work, reports and
+    check-ins commit in-process and are not affected.
+    """
+    from .plane.health import emit_losses_summary
+    losses = emit_losses_summary(paths.root, now)
+    if losses["state"] == "unreadable":
+        degraded.append(Degradation(
+            field="alerts", mode="labeled", issue="#2165",
+            reason=("this host's emit-loss counter (state/plane/.emit-losses) cannot be read, so it is "
+                    "unknown whether alerts were lost before the plane recorded them; see "
+                    "`claudlobby plane doctor`")))
+        return
+    lost = losses["not_recorded_total"]
+    if not lost:
+        return
+    kinds = ", ".join(f"{kind} {n}" for kind, n in losses["not_recorded"].items()) or "unclassified"
+    degraded.append(Degradation(
+        field="alerts", mode="labeled", issue="#2165", count=lost,
+        reason=(f"{lost} emit(s) on this host were NOT recorded in the last 24 h ({kinds}); an alert "
+                "among them cannot appear here. See `claudlobby plane doctor`; the quarantine is "
+                "listed by `claudlobby --json plane spool list --quarantined`")))
 
 
 # --- composition --------------------------------------------------------------
@@ -666,7 +736,8 @@ def build_brief(fleet, paths: Paths, bot_id: str, now: int, *,
                 "work": _work_section(doors, paths, fleet, bot_id, now, degraded,
                                       plane=plane),
                 "workstreams": _workstream_section(fleet, paths, now, degraded, plane=plane),
-                "reports": _reports_section(paths, bot_id, terminal, degraded, plane=plane),
+                "reports": _reports_section(paths, bot_id, terminal, degraded, plane=plane,
+                                            manager=_manages_fleet(fleet, bot_id)),
                 "alerts": _alerts_section(paths, bot_id, now, degraded, plane=plane),
             }
     brief = {
@@ -677,6 +748,8 @@ def build_brief(fleet, paths: Paths, bot_id: str, now: int, *,
         "mission": _mission_section(fleet, bot, paths),
         **sections,
     }
+
+    _emit_losses_label(paths, now, degraded)
 
     # Cut from v1 with two independent reasons pointing the same way; recorded
     # so its absence is an answer rather than a gap.
@@ -699,6 +772,14 @@ def build_brief(fleet, paths: Paths, bot_id: str, now: int, *,
 
 
 # --- rendering ----------------------------------------------------------------
+
+
+def _row_text(title: str | None) -> str:
+    """A row's text on one line: the title clipped exactly as the re-check
+    digest clips it (`task_recheck._clip`), so the two surfaces cannot drift,
+    or a stated absence, never a blank. ``--json`` keeps the title whole."""
+    from .task_recheck import _clip
+    return _clip(title) if (title or "").strip() else "(title not recorded)"
 
 
 def _short(ts: str | None) -> str:
@@ -769,7 +850,7 @@ def format_brief(brief: dict) -> str:
         shown, more = rows(items)
         for item in shown:
             out.append(
-                f"    {item['task_id']}  {item['state']}  {item['title']}"
+                f"    {item['task_id']}  {item['state']}  {_row_text(item['title'])}"
             )
             assignment = item["assignment"]
             if assignment:
@@ -838,20 +919,28 @@ def format_brief(brief: dict) -> str:
         out.append(f"REPORTS{mark('reports')}")
         out.append("  (unavailable — see DEGRADED)")
     else:
-        unacked = r.get("unacked", [])
-        out.append(f"REPORTS — unacked ({len(unacked)}){mark('reports')}")
+        count = r["count"]
+        out.append(f"REPORTS — unacked ({count}){mark('reports')}")
         if r.get("cursor"):
             out.append(f"  since {_short(r['cursor'])}")
-        shown, more = rows(unacked)
-        for row in shown:
-            out.append(
-                f"  {_short(row['ts'])}  {(row['bot'] or '?'):<12} "
-                f"{(row['status'] or '?'):<10} {(row['summary'] or '')[:60]}"
-            )
-        out.extend(more)
-        if unacked:
-            out.append("  -> claudlobby --json fleet reports list --unacknowledged")
-            out.append("     claudlobby fleet reports ack --through ACK_CURSOR --request-id UUID")
+        if "unacked" not in r:
+            if count:
+                out.append("  counted, not listed: they are the fleet manager's to act on")
+        else:
+            # The JSON may itself be a cut (REPORT_ROW_LIMIT), so the disclosure
+            # counts against `count`, and the full list is the reports door.
+            shown = r["unacked"][:TEXT_ROW_LIMIT]
+            for row in shown:
+                out.append(
+                    f"  {_short(row['ts'])}  {(row['bot'] or '?'):<12} "
+                    f"{(row['status'] or '?'):<10} {(row['summary'] or '')[:60]}"
+                )
+            if count > len(shown):
+                out.append(f"    ... showing the oldest {len(shown)} of {count}")
+        if count:
+            out.append(f"  -> {r['list_command']}")
+            if "unacked" in r:
+                out.append("     claudlobby fleet reports ack --through ACK_CURSOR --request-id UUID")
     out.append("")
 
     alerts = brief.get("alerts", [])
@@ -1000,7 +1089,8 @@ def _boot_detail_lines(work: dict, now: int) -> tuple[list[str], int]:
         elif status == "overdue":
             overdue_s = observation.get("elapsed_past_deadline_s") or 0
             note = f" (+{overdue_s // 60}m past deadline)"
-        lines.append(f"  {status.upper()} {item['task_id']}{assignment_id} — {age} old{note}")
+        lines.append(f"  {status.upper()} {item['task_id']}{assignment_id} — {age} old{note}:"
+                     f" {_row_text(item['title'])}")
     return lines, max(0, len(ordered) - BOOT_DETAIL_LIMIT)
 
 

@@ -1,14 +1,17 @@
 """One ordinary send to a bot, with a receipt but no transport replay.
 
 The public caller must hold runtime mutation_admission for the whole operation.
-This owner neither resolves a route nor verifies receiver delivery or idle Enter.
+This owner neither resolves a route nor verifies receiver delivery. After its
+caller's receipt wait finds no receipt, repair_held_delivery may press the Enter
+an idle, held box is waiting for (#2105); it never sends the payload again.
 """
 
 from __future__ import annotations
 
 from contextlib import closing, contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 import re
 import sqlite3
@@ -16,10 +19,11 @@ import sys
 from typing import Callable, Mapping
 from uuid import UUID
 
-from .message_context import MessageRoute
+from .message_context import HumanReplyRoute, MessageRoute
 from .message_payload import (MessageBody, encode_communication, encode_transmission,
                               native_message_envelope, native_unlinked_report_envelope)
 from .message_queries import pending_transmission_proof
+from . import message_transport as _native_transport
 from .message_transport import TransportOutcome, send as native_send
 from .plane.db import connect_ro, db_file
 from .plane.emit_api import _load_capture_config, emit_batch, validate_item
@@ -55,6 +59,7 @@ class MessageSendResult:
     exit_code: int
     retryable: bool = False
     alert: object | None = None
+    native_returncode: int | None = None  # the transport's, when it observed one
 
 
 @dataclass(frozen=True)
@@ -83,13 +88,18 @@ class NativeAttemptResult:
     event_id: str
 
 
-def _identity_proof(conn, route: MessageRoute) -> None:
-    expected = (("fleet", route.selected.fleet.name, route.selected_fleet_uid, None),
-                ("fleet", route.peer_context.fleet.name, route.peer_fleet_uid, None),
-                ("actor", route.caller.alias, route.caller.uid, route.caller_fleet_uid),
-                ("actor", route.peer.alias, route.peer.uid, route.peer_fleet_uid),
-                ("actor", route.manager.alias, route.manager.uid, route.selected_fleet_uid))
-    if route.origin is not None:
+def _identity_proof(conn, route: MessageRoute | HumanReplyRoute) -> None:
+    if isinstance(route, HumanReplyRoute):
+        expected = (("fleet", route.selected.fleet.name, route.selected_fleet_uid, None),
+                    ("actor", route.caller.alias, route.caller.uid, route.caller_fleet_uid),
+                    ("actor", route.peer.alias, route.peer.uid, None))
+    else:
+        expected = (("fleet", route.selected.fleet.name, route.selected_fleet_uid, None),
+                    ("fleet", route.peer_context.fleet.name, route.peer_fleet_uid, None),
+                    ("actor", route.caller.alias, route.caller.uid, route.caller_fleet_uid),
+                    ("actor", route.peer.alias, route.peer.uid, route.peer_fleet_uid),
+                    ("actor", route.manager.alias, route.manager.uid, route.selected_fleet_uid))
+    if isinstance(route, MessageRoute) and route.origin is not None:
         expected += (("fleet", route.origin.fleet.name, route.caller_fleet_uid, None),)
     for kind, alias, uid, parent in expected:
         row = conn.execute("SELECT uid, parent_uid FROM identity_registry WHERE kind=? AND alias=?",
@@ -554,7 +564,9 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
                                  persistence[0], native_result.replayed,
                                  not degraded and delivery == "submitted",
                                  code, 11 if degraded else (0 if delivery == "submitted" else 5),
-                                 alert=alert)
+                                 alert=alert,
+                                 native_returncode=(native_result.observation.native_returncode
+                                                    if native_result.observation else None))
 
     # Distinguish unavailable request persistence from an existing receipt.
     # A failed read after lock acquisition never becomes a fresh send.
@@ -595,3 +607,200 @@ def send_unlinked_report(route: MessageRoute, package: PackageResources, report:
     return send_message(route, package, MessageBody(report.to_body()), request_id=request_id,
                         retry_uncertain=retry_uncertain, trusted_tiers=trusted_tiers,
                         transport=transport, notify=notify, clear=clear, _report=report)
+
+
+def record_reply_to_human(route: HumanReplyRoute, package: PackageResources, body: MessageBody, *,
+                          request_id: str, parent_message_id: str) -> MessageSendResult:
+    """Record a bot's answer to its human sender; carry it nowhere (#2068).
+
+    A human has no pane, so nothing is submitted and no transmission is
+    written: delivery stays not_requested. The answer is the recorded
+    communication, linked to its question, which the asking session reads
+    with `message wait --for reply`. With no carrier to fall back on, the
+    request is durable before any write, and an unproven recording fails.
+    """
+    if not isinstance(route, HumanReplyRoute) or not isinstance(body, MessageBody):
+        raise MessageConflict("frozen human reply route and validated body required")
+    root = route.selected.paths.root
+    if package != route.selected.paths.package or route.origin.paths.root != root:
+        raise MessageConflict("human reply route and package differ")
+    try:
+        if str(UUID(request_id)) != request_id:
+            raise ValueError("noncanonical")
+    except (ValueError, AttributeError) as exc:
+        raise MessageConflict("canonical request UUID required") from exc
+    if not isinstance(parent_message_id, str) or not re.fullmatch(ID_PATTERNS["msg"], parent_message_id):
+        raise MessageConflict("reply requires an exact parent message ID")
+    try:
+        if (root / "state/host-uid").read_text().strip() != route.host_uid:
+            raise MessageConflict("active host identity differs from frozen route")
+    except OSError as exc:
+        raise MessageConflict("active host identity is unavailable") from exc
+    modes = _load_capture_config(root)  # Invalid capture policy is a refusal.
+    semantic = semantic_digest({"body": body.text.encode("utf-8"), "kind": "answer",
+                                "parent_message_id": parent_message_id})
+    parties = {route.caller.alias: route.caller.uid, route.peer.alias: route.peer.uid}
+    binding = route.receipt_binding(parent_message_id)
+    at = datetime.now(timezone.utc)
+    persistence = [True]
+    with locked_request(root, route.selected_fleet_uid, request_id) as store:
+        existing = store.load()
+        if existing is not None:
+            old = existing.intent
+            if (old.operation != "message.reply" or old.operation_version != 1
+                    or old.host_uid != route.host_uid or old.fleet_uid != route.selected_fleet_uid
+                    or old.caller_uid != route.caller.uid or old.recipient_uid != route.peer.uid
+                    or old.semantic_sha256 != semantic or not same_native_route(old.route, binding)
+                    or len(old.stages[0].facts) != 1):
+                raise ReceiptConflict("request UUID already has different message semantics or route")
+            message_id, event_id = old.message_id, old.stages[0].facts[0].event_id
+        else:
+            message_id, event_id = mint_msg_id(), mint_event_id()
+        frozen = existing.intent.route if existing is not None else binding
+        draft = RequestIntent("message.reply", 1, route.host_uid, route.selected_fleet_uid,
+                              route.caller.uid, route.peer.uid, semantic, (StagePlan("recording"),),
+                              message_id=message_id, route=frozen)
+        raw = encode_communication(draft, body, request_id=request_id, event_id=event_id,
+                                   occurred_at=at.isoformat(), parent_message_id=parent_message_id)
+        facts = (expected_fact(validate_item(raw, modes)[0], host_uid=route.host_uid,
+                               fleet_uid=route.selected_fleet_uid, parties=parties),)
+        if existing is not None:
+            if existing.intent.stages[0].facts != facts:
+                raise ReceiptConflict("capture policy or communication projection changed")
+            receipt = existing
+        else:
+            receipt = store.prepare(RequestIntent(
+                "message.reply", 1, route.host_uid, route.selected_fleet_uid, route.caller.uid,
+                route.peer.uid, semantic, (StagePlan("recording", facts),),
+                message_id=message_id, route=frozen))
+        if receipt.stages[0].status != "committed":
+            store.begin_attempt()  # each invocation that may write is its own attempt
+        status = _record(root, route, raw, facts, store=store, stage=0, attempt_no=None,
+                         persistence=persistence)
+    committed = status == "committed"
+    return MessageSendResult(request_id, message_id, "not_requested", status, persistence[0],
+                             existing is not None, committed, "ok" if committed else "unavailable",
+                             0 if committed else 6, retryable=not committed)
+
+
+# --- the receipt-gated idle Enter repair (#2105) ------------------------------------
+# The transport presses Enter once and never verifies it (PANE_SEND_VERIFY_TICKS=0),
+# and defers this repair to its owner. It supersedes S2-03's "no automatic Enter
+# repair" (documentation/plans/2026-09-30-unified-cli-finalization.md) for one case
+# only: a box that still holds this message's text, or one paste chip in a box that
+# was empty just before the send, in a pane where pane_is_busy sees no running turn
+# and no menu is open, gets at most the two Enters the operator recipe and Chris's
+# rule for clog allow. The payload itself is never sent twice.
+
+_REPAIR_RECHECK_S = 12
+
+
+@dataclass(frozen=True)
+class EnterRepairAttempt:
+    at: str
+    verdict: str
+    pressed: bool
+    match: str | None = None
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class HeldDeliveryRepair:
+    attempts: tuple[EnterRepairAttempt, ...]
+    recording: str  # committed, unknown, or not_requested when nothing was pressed
+
+    @property
+    def pressed(self) -> int:
+        return sum(1 for attempt in self.attempts if attempt.pressed)
+
+    @property
+    def match(self) -> str | None:
+        first = next((attempt for attempt in self.attempts if attempt.pressed), None)
+        if first is None or first.match is None:
+            return None
+        return "chip" if first.match.startswith("chip") else "text"
+
+    def as_dict(self) -> dict:
+        return {"pressed": self.pressed, "match": self.match, "recording": self.recording,
+                "attempts": [asdict(attempt) for attempt in self.attempts]}
+
+
+def read_recipient_box(route: MessageRoute, package: PackageResources) -> str:
+    """read_box for this route's recipient, taken just before a send (#2105): a
+    paste chip carries no message id, so the repair presses one only when the
+    box was ``empty`` before the send."""
+    return _native_transport.read_box(package, route.peer_destination)
+
+
+def repair_held_delivery(route: MessageRoute, package: PackageResources, message_id: str, *,
+                         observe: Callable[[float], object], first, recheck_s: float | None = None,
+                         box_before: str | None = None, press=None, record=None, now=None):
+    """Press the Enter a held delivery is waiting for, at most twice (#2105).
+
+    ``first`` is the caller's receipt observation after its own wait. Only when it
+    found no receipt (``missing`` or ``no_history``; never ``unavailable``, where the
+    proof is still queued) does this look at the recipient's box. Each look presses
+    ONE Enter, and only on held_delivery_match's text or chip verdict; a chip only
+    when ``box_before`` (the owner's read_box just before its send) is ``empty``,
+    since a chip carries no message id. A second look
+    comes only after a further ``recheck_s`` receipt wait (``observe``) found no
+    receipt, and presses only on the same match: a first Enter can only strip the CR
+    a swallowed Enter left in the box (#1236), and the second then submits. Never a
+    third Enter, never the payload. Any press is recorded on the Plane as
+    ``delivery_enter_repaired`` with every look, so a held, then repaired delivery
+    is visible and a misfire on someone else's paste can be found. It is recorded
+    even when a receipt read after the press raises; the error then goes on up.
+
+    Returns ``(None, first)`` when no look was due, else ``(repair, observation)``
+    with the last receipt observation."""
+    if getattr(first, "receipt_observation", None) not in {"missing", "no_history"}:
+        return None, first
+    press = press or _native_transport.press_held_enter
+    clock = now or (lambda: datetime.now(timezone.utc))
+    wait = _REPAIR_RECHECK_S if recheck_s is None else recheck_s
+    attempts: list[EnterRepairAttempt] = []
+    observed, expect = first, None
+    recording = "not_requested"
+    try:
+        for _look in (1, 2):
+            at = clock()
+            outcome = press(package, route.peer_destination, message_id=message_id, expect=expect,
+                            before=box_before)
+            attempts.append(EnterRepairAttempt(at.isoformat(), outcome.verdict, outcome.pressed,
+                                               outcome.match, outcome.reason))
+            if not outcome.pressed:
+                break
+            expect = outcome.match
+            observed = observe(wait)
+            if getattr(observed, "receipt_observation", None) == "received":
+                break
+    finally:
+        # A press is recorded even when the receipt read after it raised.
+        if any(attempt.pressed for attempt in attempts):
+            recording = (record or _record_enter_repair)(route, message_id, tuple(attempts), observed)
+    return HeldDeliveryRepair(tuple(attempts), recording), observed
+
+
+def _record_enter_repair(route: MessageRoute, message_id: str,
+                         attempts: tuple[EnterRepairAttempt, ...], observed) -> str:
+    """One fleet event on the recipient: what was matched and every look."""
+    at = datetime.now(timezone.utc)
+    pressed = next(attempt for attempt in attempts if attempt.pressed)
+    chip = pressed.match if pressed.match and pressed.match.startswith("chip") else None
+    raw = {"event_id": mint_event_id(), "event_type": "system", "emitter": "message-enter-repair",
+           "fleet": route.peer_destination.fleet,
+           "source_ref": "fleet-events:sha:" + sha256(
+               f"delivery_enter_repaired:{message_id}".encode("ascii")).hexdigest(),
+           "payload": {"event": "delivery_enter_repaired", "subject_kind": "actor",
+                       "subject": route.peer.alias,
+                       "data": {"source": "message", "legacy_ts": at.isoformat(),
+                                "data": {"msg_id": message_id, "sender": route.caller.alias,
+                                         "match": "chip" if chip else "text", "chip": chip,
+                                         "enters": sum(1 for attempt in attempts if attempt.pressed),
+                                         "attempts": [asdict(attempt) for attempt in attempts],
+                                         "receipt": getattr(observed, "receipt_observation", None)}}}}
+    try:
+        recorded = emit_batch(route.selected.paths.root, [raw], require_commit=True)[0]
+    except Exception:
+        return "unknown"
+    return "committed" if recorded.status in {"committed", "duplicate"} else "unknown"

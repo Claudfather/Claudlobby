@@ -221,7 +221,7 @@ def test_brief_unacked_from_the_plane_and_the_cursor_keeps_comparing(tmp_path, m
     wi2, asg2 = "wi_" + "2".rjust(32, "0"), "asg_" + "2".rjust(32, "0")
     _report(root, wi2, asg2, "2026-09-02T12:00:00Z", event="completed", extra={"summary": "one"})
     deg = []
-    before = _reports_section(paths, "mgr", TERMINAL, deg)
+    before = _reports_section(paths, "mgr", TERMINAL, deg, manager=True)
     assert before["source"] == "plane"
     assert [(x["task_id"], x["summary"]) for x in before["unacked"]] == [("t-1-aaaa", ""), ("t-2-bbbb", "one")]
     for key, value in scratch_plane_env(root).items():
@@ -232,16 +232,16 @@ def test_brief_unacked_from_the_plane_and_the_cursor_keeps_comparing(tmp_path, m
         count=len(before["unacked"]))], require_commit=True)
     assert len(acked) == 1 and acked[0].status == "committed"                    # the ack, a plane fact
     deg = []
-    after = _reports_section(paths, "mgr", TERMINAL, deg)
+    after = _reports_section(paths, "mgr", TERMINAL, deg, manager=True)
     assert after["unacked"] == []                                                    # everything acked
     _report(root, wi2, asg2, "2026-09-02T12:00:01Z", event="failed", extra={"summary": "two"})
     deg = []
-    later = _reports_section(paths, "mgr", TERMINAL, deg)
+    later = _reports_section(paths, "mgr", TERMINAL, deg, manager=True)
     assert [(x["summary"], x["status"], x["ts"]) for x in later["unacked"]] == [("two", "failed", "2026-09-02T12:00:01Z")]
     assert not any(x.field == "reports" and x.mode == "omitted" for x in deg)
     _drop_plane(root)
     deg = []
-    assert _reports_section(paths, "mgr", TERMINAL, deg) == {}                       # unreachable: omitted, never 0
+    assert _reports_section(paths, "mgr", TERMINAL, deg, manager=True) == {}                       # unreachable: omitted, never 0
     assert any(x.field == "reports" and x.mode == "omitted" and x.issue == "#1467" for x in deg)
 
 
@@ -252,7 +252,7 @@ def test_brief_omits_the_section_when_the_matcher_is_unreachable(tmp_path):
     root, paths, _, _ = _scene(tmp_path)
     paths = _without_matcher(paths, tmp_path / "native")
     deg = []
-    assert _reports_section(paths, "mgr", TERMINAL, deg) == {}
+    assert _reports_section(paths, "mgr", TERMINAL, deg, manager=True) == {}
     assert any(x.field == "reports" and x.mode == "omitted" for x in deg)
 
 

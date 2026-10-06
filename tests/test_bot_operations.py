@@ -3,6 +3,7 @@
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -30,6 +31,7 @@ def test_private_control_uses_one_exact_native_send(tmp_path):
     (private / "lib-common.sh").write_text("""
 tmux_session_name() { printf 'worker'; }
 bot_tmux() { printf 'tmux %s\\n' "$*" >> "$CONTROL_LOG"; }
+pane_send_key() { printf 'key %s\\n' "$*" >> "$CONTROL_LOG"; }
 pane_send_verified() {
     printf 'pane %s %s %s ticks=%s\\n' "$1" "$2" "$3" "$PANE_SEND_VERIFY_TICKS" >> "$CONTROL_LOG"
 }
@@ -46,7 +48,9 @@ pane_send_verified() {
 
     interrupt = run("interrupt")
     assert interrupt.returncode == 0 and interrupt.stdout == "control-submitted\n"
-    assert log.read_text() == "tmux worker.socket send-keys -t worker Escape\n"
+    # #2036: the Escape is a keystroke into the pane, so it takes the pane's send
+    # lock through pane_send_key, never a bare send-keys.
+    assert log.read_text() == "key worker.socket worker Escape interrupt\n"
     log.unlink()
     compact = run("compact")
     assert compact.returncode == 0 and compact.stdout == "control-submitted\n"
@@ -246,9 +250,18 @@ def test_explicit_handoff_keeps_running_session_env_while_stop_cleans_it(tmp_pat
     assert not secret_env.exists()
 
 
-@pytest.mark.parametrize("stalled", [False, True])
-def test_self_restart_witness_survives_requesting_process_exit(tmp_path, stalled):
-    """The one-shot witness, not the dying pane, owns the final outcome."""
+@pytest.mark.parametrize("stalled, late_witness", [
+    pytest.param(False, False, id="False"),
+    pytest.param(True, False, id="True"),
+    pytest.param(False, True, id="False-late-witness"),
+    pytest.param(True, True, id="True-late-witness"),
+])
+def test_self_restart_witness_survives_requesting_process_exit(tmp_path, stalled, late_witness):
+    """The one-shot witness, not the dying pane, owns the final outcome.
+
+    A late witness is descheduled for a second between its admission and its wait
+    (#2137). Looking late at a caller that has exited, it still logs complete: the
+    caller finished, so the restart is safe."""
     bot_dir = tmp_path / "bot"
     (bot_dir / ".claude").mkdir(parents=True)
     (bot_dir / "logs").mkdir()
@@ -264,6 +277,13 @@ from claudlobby import bot_operations as b
 root, bot_dir = map(Path, sys.argv[1:3])
 stalled = sys.argv[3] == '1'
 b._SELF_RESPONSE_WAIT_S = 0.05 if stalled else 30
+if sys.argv[4] == '1':
+    parent, real_select = os.getpid(), b.select.select
+    def late_select(*args):
+        if os.getpid() != parent:
+            time.sleep(1)
+        return real_select(*args)
+    b.select.select = late_select
 b.read_selection = lambda _: {'release_id': 'selected'}
 def restart(**kwargs):
     kwargs['_on_lock']()
@@ -274,11 +294,16 @@ b.set_bot_running = restart
 b._schedule_self_restart(root=root, fleet='fleet', bot='bot', ceiling=None,
                          bot_dir=bot_dir)
 if stalled:
-    time.sleep(0.15)
+    # Stalled means still alive when the witness's wait ends, so stay until it
+    # logs that verdict: a fixed sleep raced the witness's own scheduling (#2137).
+    log, deadline = bot_dir / 'logs/startup.log', time.monotonic() + 8
+    while time.monotonic() < deadline and not (
+            log.exists() and '"status":"incomplete"' in log.read_text()):
+        time.sleep(0.01)
 os._exit(0)  # even an abrupt caller death releases the child to finish
 """
     process = subprocess.run([os.sys.executable, "-c", code, str(tmp_path), str(bot_dir),
-                              "1" if stalled else "0"],
+                              "1" if stalled else "0", "1" if late_witness else "0"],
                              capture_output=True, text=True, timeout=10)
     assert process.returncode == 0, process.stderr
     log = bot_dir / "logs/startup.log"
@@ -296,7 +321,12 @@ os._exit(0)  # even an abrupt caller death releases the child to finish
         assert (bot_dir / "native-effect").read_text() == "attempted"
 
 
-def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatch, capsys):  # noqa: F811
+def _worker_cli(cold, monkeypatch, capsys, *, exec_start_pre=None):
+    """The selected worker's bot CLI over a fake native adapter.
+
+    ``exec_start_pre`` seals the worker's systemd unit with that
+    ExecStartPre line, the way the compositor renders a boot stagger.
+    """
     root, release, plan, host = cold
     # Add the real selected bot.conf output absent from the general activation
     # fixture. Its other sealed inputs/units remain unchanged.
@@ -308,6 +338,17 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
     builder.file(root / "runtime/bots/worker/bot.conf",
                  b"BOT_ID=worker\nBOT_NAME=worker\nFLEET_NAME=example\n"
                  b"BOT_SERVICE=com.example.worker\nTMUX_SOCKET=com.example.worker\n")
+    if exec_start_pre is not None:
+        # Seal the worker's unit with this ExecStartPre line, as a staggered
+        # bot's composed unit carries it; the unit digest moves with its bytes.
+        (unit,) = [unit for unit in builder.effects["units"]
+                   if unit["source"].endswith("/com.example.worker.service")]
+        staggered = builder.contents[unit["sha256"]].replace(
+            b"[Service]\n", f"[Service]\nExecStartPre={exec_start_pre}\n".encode(), 1)
+        unit["sha256"] = hashlib.sha256(staggered).hexdigest()
+        builder.contents[unit["sha256"]] = staggered
+        change = builder.changes[unit["source"]]
+        builder.changes[unit["source"]] = replace(change, after={**change.after, "sha256": unit["sha256"]})
     plan = builder.seal()
     host.plan = plan
     host.by_name = {decl.source.name: (decl, item) for decl, item in planned_units(plan, "Linux")}
@@ -329,6 +370,7 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
             self.fence_args = []
             self.target = "com.example.worker.service"
             self.manager = "Linux"
+            self.enroll_needs_s = 0
 
         def call(self, function, *args, timeout=30):
             self.calls.append(function)
@@ -370,6 +412,10 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
                 Path(args[1]).write_bytes(Path(args[0]).read_bytes())
                 host.states[target] = ("unchanged loaded inactive" if self.manager == "Darwin"
                                        else "enabled loaded active")
+                if timeout < self.enroll_needs_s:
+                    # systemctl blocks through the unit's ExecStartPre: the
+                    # adapter kills the client at its budget, the job runs on.
+                    raise subprocess.TimeoutExpired([function], timeout)
                 value = ""
             else:
                 raise AssertionError(f"unexpected native call: {function}")
@@ -399,6 +445,14 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
         result = json.loads(capsys.readouterr().out)
         assert result["ok"] is (expected == 0)
         return result
+    return SimpleNamespace(root=root, release=release, plan=plan, host=host,
+                           native=native, call=call)
+
+
+def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatch, capsys):  # noqa: F811
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    root, release, plan, host, native, call = (worker.root, worker.release, worker.plan,
+                                               worker.host, worker.native, worker.call)
 
     healthy = call("bot", "start", "worker")["data"]
     assert healthy["state"] == "running" and healthy["changed"] is False
@@ -650,3 +704,46 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
     assert "failed" in refused_restart["error"]["message"]
     assert "bot stop" in refused_restart["error"]["message"]
     assert len(native.actions) == before_failed + 1
+
+
+def test_a_staggered_unit_restarts_and_starts_within_its_boot_delay(cold, monkeypatch, capsys):  # noqa: F811
+    """systemctl restart and enable --now block through ExecStartPre. A worker
+    staggered 30 s returned at 32.9 s on the host, past the enroll call's fixed
+    30 s, so a restart that worked read as an unverified effect (#2087)."""
+    worker = _worker_cli(cold, monkeypatch, capsys, exec_start_pre="/bin/sleep 30")
+    worker.native.enroll_needs_s = 33
+    restarted = worker.call("bot", "restart", "worker")["data"]
+    assert restarted["state"] == "running" and restarted["readiness"] == "bridge_ready"
+    worker.host.states[worker.native.target] = "enabled loaded inactive"
+    started = worker.call("bot", "start", "worker")["data"]
+    assert started["state"] == "running" and started["changed"] is True
+    assert worker.native.actions == ["start", "start"]
+
+
+def test_a_hang_past_the_units_own_stagger_stays_unverified(cold, monkeypatch, capsys):  # noqa: F811
+    """The budget grows by the unit's stagger and no more: a hang is still unknown."""
+    worker = _worker_cli(cold, monkeypatch, capsys, exec_start_pre="/bin/sleep 30")
+    worker.native.enroll_needs_s = 61
+    hung = worker.call("bot", "restart", "worker", expected=6)
+    assert hung["error"]["message"] == "bot lifecycle effect is unverified; inspect native state"
+    assert hung["data"]["native_outcome"] == "unknown"
+
+
+def test_an_unstaggered_unit_keeps_the_fixed_enroll_budget(cold, monkeypatch, capsys):  # noqa: F811
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    worker.native.enroll_needs_s = 31
+    slow = worker.call("bot", "restart", "worker", expected=6)
+    assert slow["data"]["native_outcome"] == "unknown"
+
+
+def test_a_changed_unit_is_refused_before_any_effect(cold, monkeypatch, capsys):  # noqa: F811
+    """The budget reads only sealed bytes: activation admits a plain /bin/sleep
+    stagger alone, and a unit changed since is refused before any native effect,
+    so no enroll ever runs on a guessed delay."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    source = worker.root / "runtime/bots/worker/com.example.worker.service"
+    source.write_bytes(source.read_bytes().replace(
+        b"[Service]\n", b"[Service]\nExecStartPre=/bin/sh -c 'sleep 33'\n", 1))
+    refused = worker.call("bot", "restart", "worker", expected=4)
+    assert refused["error"]["code"] == "conflict"
+    assert "svc_bot_enroll_exact" not in worker.native.calls and worker.native.actions == []

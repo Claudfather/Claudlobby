@@ -32,6 +32,32 @@ to that selected root; using a second fleet inside the production root does not
 provide an independent release switch. On-demand skills, hooks and permissions
 are published only after the activation owner has quiesced affected consumers.
 
+### Refreshing a skill's installed copies
+
+A bot's skills are copies, frozen into `runtime/bots/<bot>/.claude/skills/` when a plan
+is activated. They never follow `library/` or a source checkout on their own: a changed
+skill reaches a bot only through the steps above, a release that contains it, then
+`config plan`, `config diff` and `host activate`. `config diff --bot` does not compare
+skills, so to confirm a bot carries the new copy, read its
+`.claude/skills/<name>/SKILL.md` after activation.
+
+Claudlobby never writes a user-level `~/.claude/skills/<name>/`. A copy there was put
+there by hand or by the operator's own sync, so no release or activation refreshes it
+and nothing reports when it drifts. Every bot whose Claude config directory is
+`~/.claude` (the default) loads it too, beside its own copy, and which of two
+same-named skills a session runs is not established here. After a skill changes,
+compare each such copy with a bot's activated one, then replace or delete it:
+
+```bash
+diff -r ~/.claude/skills/<name> <data-root>/<fleet-overlay>/runtime/bots/<bot>/.claude/skills/<name>
+```
+
+## The rule as the root CLAUDE.md stated it
+
+The root `CLAUDE.md` stated the rule in this paragraph until #2035; it now keeps a summary. The paragraph predates sealed releases: where it says `generate`, read activation.
+
+**Changing a running fleet:** a change reaches a bot by one of several carriers, and they differ on whether they reach a *running* process and whether they survive a restart. **The discriminator is WHEN THE ARTIFACT IS READ, not what type of file it is** (#1310). Read **once at session start** — composed `CLAUDE.md` text, `bot.conf` env, `.mcp.json` — and a canary window exists. Read **on demand, per use** — skill symlinks, hook scripts — and there is **no canary window at all**: the change is live on every bot the instant `generate` writes it. Sorting by artifact type collapses those two, and a composed *skill* is a composed *file*: it was filed under the restart row and has no restart gate, which is how a live-estate `generate` got run without a canary. `settings.local.json` **splits the two**: the session process does not re-read it (strace, two bots), yet a composed `deny` is **enforced on the very next tool call** — measured mid-session, both directions, three bots, Read tool only, `claude 2.1.240` on Linux. So permissions have **no canary window**; *where* that read happens is unestablished. The leaf-manager check-in default is a worked instance of the same rule: the `checkin` protocol's prose is composed `CLAUDE.md` text, read once at session start, so equipping or un-equipping a manager reaches a *running* manager only at its next restart, while the protocol's `requires:`-linked skill symlink and grants are live the moment `generate` writes them.
+
 ## Artifact read timing
 
 The read timing below explains why activation must control publication, including

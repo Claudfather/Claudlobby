@@ -1,14 +1,18 @@
 ---
 title: PR A — the boot policy truth, the renderer boundary, the supervisor adapter
 type: plan
-status: draft
-date: 2026-09-20
+status: completed
+created: 2026-09-20
+owner: claudlobby maintainers
 epic: documentation/plans/2026-09-20-boot-admission-plan.md
 spec: documentation/plans/2026-09-20-boot-admission-and-supervision-consolidation-design.md
 issue: "#1573"
 ---
 
 # PR A — the boot policy truth, the renderer boundary, the supervisor adapter
+
+> **Paths moved under #1989 (2026-09-30):** the runtime scripts this document cites as `lib/<script>` now live at `claudlobby/_runtime_scripts/<script>`, and `lib/validate-bot-change.sh` at `harness/validate-bot-change.sh`. Citations pinned to a named commit remain correct at that commit.
+
 
 ## Summary
 

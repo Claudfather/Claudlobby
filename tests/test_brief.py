@@ -142,7 +142,8 @@ def _iso(epoch: int) -> str:
 _SEQ = [0]
 
 
-def _land(paths: Paths, row: dict, *, fleet: str = FLEET) -> tuple[str, str]:
+def _land(paths: Paths, row: dict, *, fleet: str = FLEET,
+          title: str = "t") -> tuple[str, str]:
     """Land one legacy-shaped dispatch row on the plane under ``paths.root``
     as the live door lands it (work item + assignment + communication) —
     the importer suite's helper, with the fleet the brief's carrier names."""
@@ -153,7 +154,8 @@ def _land(paths: Paths, row: dict, *, fleet: str = FLEET) -> tuple[str, str]:
     wi, asg, _msg = _live_dispatch(
         paths.root, n, tid, ts=_iso(row["dispatched_at"]), bot=row["bot"],
         expected_by=_iso(row["expected_by"]) if isinstance(row.get("expected_by"), int) else None,
-        fleet=fleet, ref=None if row.get("task_id") else f"dispatch-log:sha:{n:0>32}")
+        fleet=fleet, ref=None if row.get("task_id") else f"dispatch-log:sha:{n:0>32}",
+        title=title)
     return wi, asg
 
 
@@ -298,7 +300,11 @@ def test_brief_json_schema_v2(paths: Paths):
         assert key in brief, f"envelope is missing {key}"
     assert set(brief["work"]) == {"scope", "items", "issues"}
     assert "dispatches" not in brief
-    assert set(brief["reports"]) == {"cursor", "unacked", "source"}
+    # alex is a worker (the fleet's manager is ari): the count and the list
+    # command, never the rows (#2159); the manager's view also carries the rows.
+    assert set(brief["reports"]) == {"cursor", "count", "list_command", "source"}
+    manager = build_brief(_fleet(), paths, "ari", NOW)
+    assert set(manager["reports"]) == {"cursor", "count", "list_command", "source", "unacked"}
     # Round-trips as JSON — R4 consumes this envelope, not the text form.
     json.dumps(brief)
 
@@ -382,6 +388,94 @@ def test_respawn_marks_the_canonical_assignment_orphaned(paths: Paths):
     assert task_id in format_boot_brief(brief, boot_provenance(paths, NOW))
 
 
+# --- #2044: each open row's TEXT --------------------------------------------
+# After a respawn a worker's brief named its rows by id alone, so nothing said
+# what they asked. The work item's title is the dispatch text: whole in --json,
+# clipped in text exactly as the re-check digest clips it, and never a blank.
+
+LONG_TITLE = (
+    "Fix the pane send lock: hold one sender per recipient pane across the whole send,\n"
+    "including the verify and the repair, then report with the task id and the head."
+) * 2
+
+
+def _row_line(text: str, task_id: str) -> str:
+    return next(line for line in text.splitlines()
+                if task_id in line and "assignment" not in line)
+
+
+def test_json_work_rows_carry_the_whole_title(paths: Paths):
+    task_id, _ = _land(paths, _dispatch("alex", NOW - 500, NOW + 5000, task_id="t-long"),
+                       title=LONG_TITLE)
+    item = build_brief(_fleet(), paths, "alex", NOW)["work"]["items"][0]
+    assert item["task_id"] == task_id
+    assert item["title"] == LONG_TITLE
+
+
+def test_text_work_rows_clip_the_title_as_the_recheck_digest_does(paths: Paths):
+    from claudlobby.task_recheck import _clip
+    task_id, _ = _land(paths, _dispatch("alex", NOW - 500, NOW + 5000, task_id="t-long"),
+                       title=LONG_TITLE)
+    text = format_brief(build_brief(_fleet(), paths, "alex", NOW))
+    assert _clip(LONG_TITLE) in _row_line(text, task_id)
+    assert LONG_TITLE.splitlines()[1] not in text  # one line per row, never the whole text
+
+
+def test_boot_brief_names_each_open_row_by_its_text(paths: Paths):
+    from claudlobby.task_recheck import _clip
+    task_id, _ = _land(paths, _dispatch("alex", NOW - 9000, NOW - 3000, task_id="t-orph"),
+                       title=LONG_TITLE)
+    os.utime(paths.runtime_bots / "alex" / "data" / ".spawn", (NOW - 100, NOW - 100))
+    brief = build_brief(_fleet(), paths, "alex", NOW)
+    boot = format_boot_brief(brief, boot_provenance(paths, NOW))
+    assert _clip(LONG_TITLE) in next(line for line in boot.splitlines() if task_id in line)
+
+
+def test_three_titled_rows_still_fit_the_boot_budget(paths: Paths):
+    from claudlobby.brief import BOOT_CHAR_BUDGET
+    ids = [_land(paths, _dispatch("alex", NOW - 9000 + i, NOW - 3000, task_id=f"t-b{i}"),
+                 title=LONG_TITLE)[0] for i in range(3)]
+    os.utime(paths.runtime_bots / "alex" / "data" / ".spawn", (NOW - 100, NOW - 100))
+    boot = format_boot_brief(build_brief(_fleet(), paths, "alex", NOW), boot_provenance(paths, NOW))
+    assert all(task_id in boot for task_id in ids) and "more capped" not in boot
+    assert len(boot) <= BOOT_CHAR_BUDGET
+
+
+def test_a_row_with_no_recorded_title_says_so_and_is_degraded(paths: Paths, monkeypatch):
+    # The contract refuses an empty title at ingest, so the title is blanked
+    # after the read: this pins the render and the disclosure for a row whose
+    # text is missing, whatever left it so, rather than a reachable ingest path.
+    import claudlobby.task_state as task_state
+    real = task_state.read_tasks
+
+    def blanked(conn, **kw):
+        snap = real(conn, **kw)
+        return replace(snap, tasks=tuple(replace(t, title="") for t in snap.tasks))
+
+    monkeypatch.setattr(task_state, "read_tasks", blanked)
+    task_id, _ = _land(paths, _dispatch("alex", NOW - 500, NOW + 5000, task_id="t-blank"))
+    brief = build_brief(_fleet(), paths, "alex", NOW)
+    assert _find(brief, "work.title", "#2044")
+    text = format_brief(brief)
+    assert "(title not recorded)" in _row_line(text, task_id)
+    boot = format_boot_brief(brief, boot_provenance(paths, NOW))
+    assert "(title not recorded)" in next(line for line in boot.splitlines() if task_id in line)
+
+
+def test_the_managers_fleet_view_carries_each_rows_text_too(paths: Paths):
+    # #2044 asks for the text on the rows a manager dispatched as well as on a
+    # worker's own. A manager's brief lists the fleet's whole intake, so the
+    # same row reads the same way from the manager's side, in all three forms.
+    from claudlobby.task_recheck import _clip
+    task_id, _ = _land(paths, _dispatch("alex", NOW - 500, NOW + 5000, task_id="t-mgr"),
+                       title=LONG_TITLE)
+    brief = build_brief(_fleet(), paths, "ari", NOW)
+    assert brief["work"]["scope"] == "fleet"
+    assert [item["title"] for item in brief["work"]["items"]] == [LONG_TITLE]
+    assert _clip(LONG_TITLE) in _row_line(format_brief(brief), task_id)
+    boot = format_boot_brief(brief, boot_provenance(paths, NOW))
+    assert _clip(LONG_TITLE) in next(line for line in boot.splitlines() if task_id in line)
+
 def test_terminal_report_closes_canonical_work(paths: Paths):
     _land(paths, _dispatch("alex", NOW - 9000, NOW - 3000, task_id="old-done"))
     _land_report(paths, _report("alex", _iso(NOW - 100), task_id="old-done"))
@@ -438,42 +532,42 @@ def test_brief_ack_is_a_plane_fact_and_the_unacked_list_shrinks(paths: Paths):
         _land_report(paths, row)
     fleet = _fleet()
 
-    brief = build_brief(fleet, paths, "alex", NOW)
+    brief = build_brief(fleet, paths, "ari", NOW)
     unacked = brief["reports"]["unacked"]
     # progress is not terminal — it closes nothing and acks nothing.
     assert [r["status"] for r in unacked] == ["completed", "blocked"]
     assert all(isinstance(r["seq"], int) for r in unacked)
     assert brief["reports"]["cursor"] is None
 
-    out = _ack(paths, "alex", unacked)
+    out = _ack(paths, "ari", unacked)
     assert out.status == "committed", out
-    again = build_brief(fleet, paths, "alex", NOW)
+    again = build_brief(fleet, paths, "ari", NOW)
     assert again["reports"]["unacked"] == []
     assert again["reports"]["cursor"] == "2026-08-08T11:00:00Z"   # the legacy-form ts, for the render
 
     (alias, severity, detail), = _acked_events(paths)
-    assert alias == f"bot:{FLEET}/alex" and severity == "notice"
+    assert alias == f"bot:{FLEET}/ari" and severity == "notice"
     data = json.loads(detail)
     assert set(data) == {"acked_through_seq", "acked_through_ts", "count"}
     assert data["acked_through_seq"] == max(r["seq"] for r in unacked) and data["count"] == 2
 
     # a report landing after the ack reads unacked again
     _land_report(paths, _report("vera", "2026-08-08T12:00:00Z", status="completed"))
-    assert [r["ts"] for r in build_brief(fleet, paths, "alex", NOW)["reports"]["unacked"]] == [
+    assert [r["ts"] for r in build_brief(fleet, paths, "ari", NOW)["reports"]["unacked"]] == [
         "2026-08-08T12:00:00Z"]
     assert not list(paths.root.rglob("brief-cursor-*"))        # no JSON state, anywhere
 
 
 def test_ack_is_per_viewer_on_the_plane(paths: Paths):
-    """Two managers acking the same reports must not clobber each other: the
-    fact is anchored on the acking bot's own actor."""
+    """Each viewer's read position is its own actor's newest ack: the manager's
+    ack clears its own list and leaves another viewer's count where it was."""
     _seed_plane(paths)
     _land_report(paths, _report("vera", "2026-08-08T10:00:00Z"))
-    alex = build_brief(_fleet(), paths, "alex", NOW)["reports"]["unacked"]
-    assert _ack(paths, "alex", alex).status == "committed"
+    ari = build_brief(_fleet(), paths, "ari", NOW)["reports"]["unacked"]
+    assert _ack(paths, "ari", ari).status == "committed"
 
-    assert build_brief(_fleet(), paths, "alex", NOW)["reports"]["unacked"] == []
-    assert len(build_brief(_fleet(), paths, "ari", NOW)["reports"]["unacked"]) == 1
+    assert build_brief(_fleet(), paths, "ari", NOW)["reports"]["unacked"] == []
+    assert build_brief(_fleet(), paths, "alex", NOW)["reports"]["count"] == 1
 
 
 def test_a_malformed_ack_is_no_read_position_and_erases_none(paths: Paths):
@@ -487,18 +581,18 @@ def test_a_malformed_ack_is_no_read_position_and_erases_none(paths: Paths):
         return emit_batch(paths.root, [{
             "event_type": "system", "emitter": "brief", "fleet": FLEET,
             "payload": {"event": "reports_acked", "subject_kind": "actor",
-                        "subject": f"bot:{FLEET}/alex", "data": {"note": "no cursor here"}}}])[0].status
+                        "subject": f"bot:{FLEET}/ari", "data": {"note": "no cursor here"}}}])[0].status
 
     _seed_plane(paths)
     _land_report(paths, _report("vera", "2026-08-08T10:00:00Z"))
     assert malformed() == "committed"
-    reports = build_brief(_fleet(), paths, "alex", NOW)["reports"]
+    reports = build_brief(_fleet(), paths, "ari", NOW)["reports"]
     assert len(reports["unacked"]) == 1 and reports["cursor"] is None
 
-    assert _ack(paths, "alex", reports["unacked"]).status == "committed"
-    assert build_brief(_fleet(), paths, "alex", NOW)["reports"]["unacked"] == []
+    assert _ack(paths, "ari", reports["unacked"]).status == "committed"
+    assert build_brief(_fleet(), paths, "ari", NOW)["reports"]["unacked"] == []
     assert malformed() == "committed"
-    again = build_brief(_fleet(), paths, "alex", NOW)["reports"]
+    again = build_brief(_fleet(), paths, "ari", NOW)["reports"]
     assert again["unacked"] == [] and again["cursor"] == "2026-08-08T10:00:00Z"
 
 
@@ -518,14 +612,14 @@ def test_a_fleets_reports_are_the_room_axis_and_progress_is_never_unacked(paths:
         "event_type": "communication", "emitter": "report-back", "fleet": "other",
         "source_ref": "report-back:msg_" + "9" * 32, "occurred_at": "2026-08-08T11:00:00Z",
         "payload": {"msg_id": "msg_" + "9" * 32, "sender": "bot:other/zed",
-                    "recipient": f"bot:{FLEET}/alex", "recipient_raw": "alex",
+                    "recipient": f"bot:{FLEET}/ari", "recipient_raw": "ari",
                     "message_class": "report",
                     "body": "[BOTREPORT] zed | completed | cross-fleet done"}}])
-    reports = build_brief(_fleet(), paths, "alex", NOW)["reports"]
+    reports = build_brief(_fleet(), paths, "ari", NOW)["reports"]
     assert [(r["bot"], r["status"]) for r in reports["unacked"]] == [
         ("vera", "completed"), ("other/zed", "completed")]
-    assert _ack(paths, "alex", reports["unacked"]).status == "committed"
-    assert build_brief(_fleet(), paths, "alex", NOW)["reports"]["unacked"] == []
+    assert _ack(paths, "ari", reports["unacked"]).status == "committed"
+    assert build_brief(_fleet(), paths, "ari", NOW)["reports"]["unacked"] == []
 
 
 def test_no_cursor_file_is_written_or_read_anywhere():
@@ -544,9 +638,60 @@ def test_reports_are_fleet_wide_not_self_scoped(paths: Paths):
     _land_report(paths, _report("mason", "2026-08-08T10:05:00Z"))
     bots = {
         r["bot"]
-        for r in build_brief(_fleet(), paths, "alex", NOW)["reports"]["unacked"]
+        for r in build_brief(_fleet(), paths, "ari", NOW)["reports"]["unacked"]
     }
     assert bots == {"vera", "mason"}
+
+
+WORKER_REPORT = "an invented summary " * 15   # 300 bytes, near a real row's size
+
+
+@pytest.mark.parametrize("manager", ["ari", "alex"])
+def test_a_viewer_that_is_not_the_manager_gets_the_count_not_the_rows(paths: Paths, manager):
+    """#2159: a worker never acknowledges reports, so the fleet's reports past its read
+    position only grow, and every row came before its own work. Its view carries how
+    many there are and the command that lists them, in a section whose size does not
+    grow with them; the fleet's manager, read from the activated config, keeps the rows."""
+    _seed_plane(paths)
+    for n in range(40):   # under the manager's bound, so its view below is whole
+        _land_report(paths, _report("vera", f"2026-08-08T10:{n:02d}:00Z", summary=WORKER_REPORT))
+    fleet = _fleet(manager=manager)
+    worker = "alex" if manager == "ari" else "ari"
+
+    brief = build_brief(fleet, paths, worker, NOW)
+    reports = brief["reports"]
+    assert "unacked" not in reports
+    assert reports["count"] == 40
+    assert reports["list_command"] == "claudlobby --json fleet reports list --unacknowledged"
+    assert len(json.dumps(reports)) < 300, "a worker's reports section grew with the reports"
+    entry, = _find(brief, "reports.unacked", "#2159")
+    assert entry["mode"] == "omitted" and entry["count"] == 40
+    text = format_brief(brief)
+    assert "REPORTS — unacked (40)" in text and "fleet reports list --unacknowledged" in text
+    assert "an invented summary" not in text
+
+    managed = build_brief(fleet, paths, manager, NOW)
+    assert len(managed["reports"]["unacked"]) == managed["reports"]["count"] == 40
+    assert _find(managed, "reports.unacked") == []
+
+
+def test_the_managers_rows_stop_at_the_bound_and_say_so(paths: Paths, monkeypatch):
+    """The manager's view keeps the oldest rows up to the bound (#2159): the count
+    stays whole and the cut is labeled, so the rows never read as all of them."""
+    import claudlobby.brief as brief_mod
+
+    monkeypatch.setattr(brief_mod, "REPORT_ROW_LIMIT", 3, raising=False)
+    _seed_plane(paths)
+    for n in range(5):
+        _land_report(paths, _report("vera", f"2026-08-08T10:0{n}:00Z"))
+    brief = build_brief(_fleet(), paths, "ari", NOW)
+    reports = brief["reports"]
+    assert [r["ts"] for r in reports["unacked"]] == [
+        "2026-08-08T10:00:00Z", "2026-08-08T10:01:00Z", "2026-08-08T10:02:00Z"]
+    assert reports["count"] == 5
+    entry, = _find(brief, "reports.unacked", "#2159")
+    assert entry["mode"] == "labeled" and entry["count"] == 5
+    assert "showing the oldest 3 of 5" in format_brief(brief)
 
 
 # --- workstreams --------------------------------------------------------------
@@ -621,26 +766,65 @@ def test_the_911_label_retired_with_the_ledgers(paths: Paths):
     _land_report(paths, _report("vera", "2026-08-08T10:00:00Z"))
     brief = build_brief(_fleet(), paths, "alex", NOW)
     assert [d for d in brief["degraded"] if d["issue"] == "#911"] == []
-    assert len(brief["reports"]["unacked"]) == 1
+    assert brief["reports"]["count"] == 1
 
 
-def test_alerts_are_labeled_until_the_event_type_ssot_lands(paths: Paths):
-    """#903: absence of an alert is not evidence of health, and says so."""
+def test_alerts_are_labeled_as_the_bots_own(paths: Paths):
+    """#2109: fleet- and host-level alerts are not read here, so absence of an
+    alert is not evidence of health, and says so."""
     _seed_plane(paths)
     brief = build_brief(_fleet(), paths, "alex", NOW)
 
-    entry = _find(brief, "alerts", "#903")
+    entry = _find(brief, "alerts", "#2109")
     assert entry and entry[0]["mode"] == "labeled"
+    assert "this bot's own critical events" in entry[0]["reason"]
+    assert "fleet- and host-level alerts" in entry[0]["reason"]
     assert "absence of an alert is not evidence of health" in entry[0]["reason"]
+    assert _find(brief, "alerts", "#903") == []    # the hand-list label is gone
 
 
-def test_alert_label_clears_when_the_ssot_symbol_appears(paths: Paths, monkeypatch):
-    """Keyed on #903's actual deliverable, so it retires itself."""
-    from claudlobby import known_values
+def _losses(paths: Paths, *rows: str) -> None:
+    plane = paths.root / "state" / "plane"
+    plane.mkdir(parents=True, exist_ok=True)
+    (plane / ".emit-losses").write_text("".join(f"{row}\n" for row in rows))
 
-    monkeypatch.setattr(known_values, "FLEET_EVENT_TYPES", {"disk_high"}, raising=False)
+
+def test_a_known_emit_loss_labels_the_alerts_it_may_hide(paths: Paths):
+    """#2165: an emit the plane did not record (here #2169's stage_empty) is a
+    gap in what alerts can show, and only plane doctor read the counter. The
+    brief, which a manager reads at every check-in, labels alerts with the
+    count while a known loss sits in the 24 h window."""
     _seed_plane(paths)
-    assert _find(build_brief(_fleet(), paths, "alex", NOW), "alerts", "#903") == []
+    _losses(paths, f"{NOW - 60}\tstage_empty\t-\t.1-ev_x.batch.9.tmp",
+            f"{NOW - 120}\treap\temit_fleet_event\tbound=10s")
+    brief = build_brief(_fleet(), paths, "alex", NOW)
+
+    entry = _find(brief, "alerts", "#2165")
+    assert entry and entry[0]["mode"] == "labeled" and entry[0]["count"] == 1, entry
+    assert "stage_empty" in entry[0]["reason"], entry
+    assert "plane spool list --quarantined" in entry[0]["reason"], entry
+
+
+def test_reaps_alone_do_not_label_the_alerts(paths: Paths):
+    """A reaped emit's fate is unknown, and a loaded host reaps hundreds a day:
+    a label that never clears gets read past, so reaps alone add none, and a
+    known loss past the 24 h window adds none either."""
+    _seed_plane(paths)
+    _losses(paths, f"{NOW - 60}\treap\temit_fleet_event\tbound=10s",
+            f"{NOW - 90000}\tstage_empty\t-\t.0-ev_old.batch.8.tmp")
+    brief = build_brief(_fleet(), paths, "alex", NOW)
+
+    assert _find(brief, "alerts", "#2165") == []
+
+
+def test_an_unreadable_loss_counter_labels_the_alerts_unknown(paths: Paths):
+    """A counter that cannot be read is a gap, not a zero."""
+    _seed_plane(paths)
+    (paths.root / "state" / "plane" / ".emit-losses").mkdir(parents=True)
+    brief = build_brief(_fleet(), paths, "alex", NOW)
+
+    entry = _find(brief, "alerts", "#2165")
+    assert entry and entry[0]["mode"] == "labeled" and "unknown" in entry[0]["reason"], entry
 
 
 def test_utilization_is_recorded_as_omitted(paths: Paths):
@@ -677,7 +861,7 @@ def test_format_marks_degraded_sections_inline_and_lists_them(paths: Paths):
     _seed_plane(paths)
     text = format_brief(build_brief(_fleet(), paths, "alex", NOW))
 
-    assert "ALERTS" in text and "[degraded: #903]" in text
+    assert "ALERTS" in text and "[degraded: #2109]" in text
     assert "DEGRADED — fields this door will not serve as plain truth" in text
     assert "degraded field(s)" in text  # the top-of-output banner
     for section in ("MISSION", "WORK", "WORKSTREAMS", "REPORTS"):
@@ -760,10 +944,10 @@ def test_text_output_caps_long_sections_and_discloses_the_cap(paths: Paths):
     _seed_plane(paths)
     for n in range(25):
         _land_report(paths, _report("vera", f"2026-08-08T10:{n:02d}:00Z"))
-    brief = build_brief(_fleet(), paths, "alex", NOW)
+    brief = build_brief(_fleet(), paths, "ari", NOW)
     text = format_brief(brief)
 
-    # JSON is never capped — R4 consumes that.
+    # The manager's JSON carries every row up to its bound (#2159); the text shows 10.
     assert len(brief["reports"]["unacked"]) == 25
     assert "REPORTS — unacked (25)" in text
     assert "showing the oldest 10 of 25" in text
@@ -1328,7 +1512,7 @@ def test_build_brief_opens_the_plane_once_for_every_section(paths: Paths, monkey
 
     monkeypatch.setattr(brief_mod, "load_dispatch_doors", lambda p: _Counting(real(p)))
     brief = build_brief(_fleet(), paths, "alex", NOW)
-    assert "items" in brief["work"] and "unacked" in brief["reports"] and "active" in brief["workstreams"]
+    assert "items" in brief["work"] and "count" in brief["reports"] and "active" in brief["workstreams"]
     assert len(opened) == 1, opened
 
 

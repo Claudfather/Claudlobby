@@ -5,8 +5,9 @@ only at their explicit startup phase. Every enrolled declaration must carry the
 shared admission owner's verified guard. This matters on Linux: publication in
 a user config directory can take precedence over a parked runtime mask.
 
-The coordinator owns zero-process proofs, native reload/unmask/start/readiness,
-and stopping candidates before rollback. Publication never starts a unit.
+The coordinator owns zero-process proofs, native start/readiness and stopping
+candidates before rollback. Publication never starts a unit; on Linux it only
+removes the original pause's own runtime masks that its new bytes supersede.
 ConfigInstall owns all file writes,
 interruption recovery and exact removal; original restoration is UnitPause's.
 """
@@ -25,7 +26,7 @@ from .config_install import apply_config, prepare_config, read_config_install, r
 from .config_plan import ConfigPlan, ConfigPlanBuilder, path_state, read_plan
 from .config_units import current_declarations, planned_units
 from .releases import read_release
-from .supervision_inventory import Adapter, _catalog, _environment, _properties
+from .supervision_inventory import Adapter, _catalog, _environment, _properties, runtime_mask
 
 
 _OWNER = "activation-enrollment-v1"
@@ -239,8 +240,34 @@ class EnrollmentPublication:
         return _digest(vars(self))
 
 
+def _owned_pause_mask(path: Path, entry: dict, prior: dict | None) -> bool:
+    """The original pause's own runtime mask on an exact frozen original target.
+
+    Only an originally unmasked unit (so the mask is the pause's, not the
+    operator's), a link and directory owned by this user in its runtime
+    directory, linked to /dev/null. Phase publication removes it after the
+    candidate bytes are published; preparation leaves it untouched.
+    """
+    return (entry["original"] and prior is not None and bool(prior["installed"])
+            and dict(prior["properties"]).get("LoadState") == "loaded"
+            and runtime_mask(path, Path(entry["installed"]).name))
+
+
+def _runtime_units() -> Path:
+    return Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}") / "systemd/user"
+
+
+def _native(adapter, function, *args):
+    # Disclose only the operation and rc; native stderr stays out of errors.
+    result = adapter.call(function, *args)
+    if result.returncode:
+        raise ActivationError(f"{function} refused ({result.returncode}): native owner")
+    return result.stdout.strip()
+
+
 def _check_targets(adapter, enrollment, entries, *, allow_candidate):
     manager, domain, directories, _, loaded = _catalog_now(adapter, enrollment)
+    original = {unit["target"]: unit for unit in enrollment["units"]}
     for entry in entries:
         _check_enablement(entry, allow_candidate=allow_candidate)
         destination = Path(entry["installed"])
@@ -251,6 +278,9 @@ def _check_targets(adapter, enrollment, entries, *, allow_candidate):
             path = directory / destination.name
             state = path_state(path)["node"]
             if state["kind"] != "absent" and (not allow_candidate or path != destination or state != entry["after"]):
+                if (manager == "Linux" and path != destination
+                        and _owned_pause_mask(path, entry, original.get(entry["target"]))):
+                    continue  # native quiescence below still requires it inactive
                 raise ActivationError(f"foreign or changed candidate collision: {path}")
             candidate_exists |= path == destination and state == entry["after"]
         # A new unit cannot inherit an unrelated loaded definition. Original
@@ -540,8 +570,25 @@ def install_candidate_units(store: ActivationStore, activation_id: str, phase: s
     else:
         _check_targets(adapter, enrollment, entries, allow_candidate=True)
     apply_config(store.root, journal_id(activation_id, phase))
-    # No daemon-reload here. Native state reconciliation/start is a separate
-    # coordinator effect; this evidence claims exact installed files/links only.
+    if not already_started and enrollment["manager"] == "Linux":
+        # The published higher-priority bytes now hide the original pause's
+        # runtime masks, including on paired services never started directly.
+        # Reload, re-prove exact inactive candidates, then remove only those
+        # owned masks. Nothing starts; a start-recovery never replays this.
+        original = {unit["target"]: unit for unit in enrollment["units"]}
+        masked = [entry for entry in entries
+                  if _owned_pause_mask(_runtime_units() / Path(entry["installed"]).name,
+                                       entry, original.get(entry["target"]))]
+        if masked:
+            _native(adapter, "svc_activation_reload")
+            _check_targets(adapter, enrollment, entries, allow_candidate=True)
+            for entry in masked:
+                snapshot = _native(adapter, "svc_activation_snapshot", entry["installed"], entry["target"])
+                if snapshot.split()[1:] != ["loaded", "inactive"]:
+                    raise ActivationError(f"published candidate does not supersede its pause mask: {entry['target']}")
+                _native(adapter, "svc_activation_clear_runtime_mask", entry["installed"], entry["target"], snapshot)
+    # Native start remains a separate coordinator effect; this evidence claims
+    # exact installed files/links and no surviving owned pause mask.
     return EnrollmentPublication(phase, journal_id(activation_id, phase), plan.plan_id,
                                  tuple(entry["target"] for entry in entries), "published")
 

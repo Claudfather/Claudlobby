@@ -3,7 +3,8 @@
 Phase 1 ships FIELD_POLICY (the classification registry — the ENFORCEMENT
 source of truth: contracts read caps from here, the capture door reads
 CONTENT membership from here; editing a cap HERE changes behavior).
-SYSTEM_EVENT_TYPES and METRIC_NAMES join in Phase 2b.
+SYSTEM_EVENT_SEVERITY (the system-event vocabulary, each type with its
+severity) and METRIC_NAMES joined in Phase 2b.
 """
 
 from __future__ import annotations
@@ -84,9 +85,23 @@ def cap_for(family: str, field: str) -> int:
 # kind=system severity is REGISTRY-OWNED (§9b: "ingest stamps it from the
 # package-owned seed module; callers cannot set it; unknown type => null").
 # A caller-supplied severity is a caller bug (ContractViolation via the strict
-# wire model). Phase 2b grows this seed into the full SYSTEM_EVENT_TYPES
-# registry (F19: unknown tokens still INGEST — they just carry NULL severity
-# until the registry learns them).
+# wire model).
+#
+# This dict is the fleet's one event-type vocabulary: every type the runtime,
+# the library and the package record is a key (a harness records only into its
+# own throwaway plane). An unknown token still INGESTS (F19), but with NULL
+# severity, so no critical read can show it, and registering it later does not
+# re-stamp the rows already stored. tests/test_event_type_registry.py fails on
+# a writer whose type is missing here, and on a document whose own list
+# disagrees with this one; tests/test_service_is_crash_looping.py fails on a
+# fleet-pulse list that names a type not critical here.
+#
+# critical is what `event list --critical` and a bot's brief select, and what
+# fleet-pulse's two reads choose their types from; notice is the record. The
+# rule for a new type: raised through emit_failure_alert (a FLEET ALERT),
+# critical; through emit_fleet_notice or notify_currency (a FLEET NOTICE),
+# notice; recorded directly by a writer, notice unless it is a fault that writer
+# pages someone to fix.
 SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "fleet_alert": "critical",
     "fleet_notice": "notice",
@@ -107,11 +122,10 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # cutover chunk 7a — a report whose status reached no task event (a terminal
     # note that resolved nothing): the status the idle-worker check reads.
     "report_status": "notice",
-    # cutover Phase B — the fleet events (once the per-bot data/events files,
-    # gone since F18 R1) on the plane: every `emit_fleet_event` type the estate emits, registered with the
-    # severity `claudlobby events`' CRITICAL_TYPES implies (critical pages the
-    # operator through fleet-pulse's escalation; notice is the record). An
-    # unregistered type still ingests with NULL severity (F19).
+    # The faults the runtime records about a bot or its fleet: a session or
+    # unit gone, a pane that stopped working, a failed script, an overdue
+    # dispatch, a bridge down, a reload or restart that failed, a start that
+    # never settled.
     "session_missing": "critical",
     "service_down": "critical",
     "activity_stuck": "critical",
@@ -125,10 +139,16 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # gate had been reading as "boot in flight" forever. Critical so the
     # escalation read (severity = 'critical') can page it.
     "crash_loop": "critical",
+    # #2070: a bot whose input box holds text that was never submitted, with no
+    # turn running (keepalive's HELD verdict), paged in place of activity_stuck.
+    # Critical like the page it replaces; the remedy is an operator Enter, not
+    # a restart, so it is not one of fleet-pulse's Telegram escalation types.
+    "input_held": "critical",
     # #1924: historical launchd reenrollment deferral, retained for old facts.
     "job_reenroll_deferred": "notice",
     "alert_delivery_failed": "notice",
     "dispatch_orphaned": "notice",
+    # fleet-pulse pushes it to the manager, but as routing, not a fault.
     "worker_unassigned": "notice",
     "pane_stuck": "notice",
     "wip_uncommitted": "notice",
@@ -136,8 +156,24 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "send_retry": "notice",
     "send_blind": "notice",
     "send_blind_recovered": "notice",
+    # #1236: a send that was not submitted. The box never showed the typed
+    # payload, so the Enter was withheld (payload-not-shown), or it still showed
+    # it after the last Enter (payload-still-in-box). The text is in the box, or
+    # may still land there, unsubmitted.
+    "send_unsubmitted": "notice",
+    # #2105: a CLI delivery the receiver had not submitted after the receipt wait,
+    # whose box held exactly that message in an idle pane, got one or two Enters
+    # from the messaging operation owner. data.match says whether the box showed
+    # the message's text or only a paste chip.
+    "delivery_enter_repaired": "notice",
+    # #2036: a pane send that went out WITHOUT the recipient's send lock,
+    # because no lock could be taken at all (a refused one is send_miss).
+    "send_unlocked": "notice",
     "resume_skipped": "notice",
     "plugin_marketplace_failed": "notice",
+    # #2158: a bot session started on Linux without its own child subreaper,
+    # so its orphans re-parent to the user manager; data.report says why.
+    "bot_subreaper_unavailable": "notice",
     "briefing_deferred": "notice",
     "briefing_dispatched": "notice",
     "briefing_failed": "notice",
@@ -164,7 +200,6 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "keepalive_skip": "notice",
     "keepalive_reload": "notice",
     "tool_call": "notice",
-    "session_event": "notice",
     # chunk K (#1467): `claudlobby fleet reports ack` records the viewer's read
     # position as a plane fact — informational, never an alert
     "reports_acked": "notice",
@@ -178,15 +213,89 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "checkin_decision": "notice",
     "checkin_dispatch": "notice",
     # #1686: the host's heavy-job slot. A hold and its release, a call refused
-    # because every slot was taken, a hold whose holder died without a release
-    # (across_reset: it was running when the host reset, #1644's evidence), and
-    # a heavy-looking command the matcher would not parse. The record, never a
-    # page.
+    # because every slot was taken or a free one was another caller's turn, a
+    # hold whose holder died without a release (across_reset: it was running
+    # when the host reset, #1644's evidence), a heavy-looking command the
+    # matcher would not parse, and (#2124) a queue ticket dropped because its
+    # holder stayed silent once a slot was free. The record, never a page.
     "heavy_slot_acquired": "notice",
     "heavy_slot_released": "notice",
     "heavy_slot_refused": "notice",
     "heavy_slot_unreleased": "notice",
     "heavy_slot_unparsed": "notice",
+    "heavy_slot_ticket_dropped": "notice",
+    # The public-write guard: a refused GitHub-bound write (the record), and an
+    # armed guard that found no host list. That one is critical because the
+    # protection someone armed is off until the list is written: it shows in
+    # `claudlobby event list --critical` and under ALERTS in the bot's brief. It
+    # does not page (fleet-pulse pages a fixed list of types).
+    "public_write_refused": "notice",
+    "public_write_guard_unarmed": "critical",
+    # #2090: the credential-echo guard. A Bash call refused because it would
+    # print an env-held credential (the row and the CLI, never the command),
+    # and a command its decider could not read (allowed, and counted). The
+    # record, never a page.
+    "credential_echo_refused": "notice",
+    "credential_echo_unparsed": "notice",
+    # #1069: the signal guard. A Bash call refused because it would signal a
+    # process the caller did not start (the kinds of target, never the
+    # command). The record, never a page.
+    "signal_guard_refused": "notice",
+    # FLEET ALERTs (emit_failure_alert): each records its caller's own type and
+    # pages the manager and Telegram. Where each row lands is in the
+    # fleet-observability protocol's table. From the host jobs: disk-monitor,
+    # fleet-memory-check, host-health-check (one of three types, by finding),
+    # update-claude-code and vault-sync.
+    "disk_high": "critical",
+    "memory_high": "critical",
+    "undervoltage": "critical",
+    "storage_stall": "critical",
+    "host_health": "critical",
+    "binary_update_failed": "critical",
+    "binary_unrunnable": "critical",
+    "vault_sync_failed": "critical",
+    # ...and from the fleet jobs: a bot's keepalive that failed to run
+    # (keepalive-all), a halted rolling restart, and the alert target checks of
+    # fleet-pulse and creds-check.
+    "keepalive_failed": "critical",
+    "rolling_restart_stalled": "critical",
+    "alert_target_refused": "critical",
+    "alert_pair_unreachable": "critical",
+    # FLEET NOTICEs (emit_fleet_notice): the same channels, framed as routine.
+    "orphan_browser_reaped": "notice",
+    "binary_update_skipped": "notice",
+    "binary_prune_skipped": "notice",
+    "binary_repaired": "notice",
+    "vault_sync_recovered": "notice",
+    # notify_currency: the debounced source-currency notices of notify-behind
+    # and update-siblings.
+    "source_behind": "notice",
+    "source_release_gap": "notice",
+    "sibling_update_blocked": "notice",
+    "sibling_update_failed": "notice",
+    "sibling_updated": "notice",
+    # Records nobody is paged for: which manager a host-scoped signal reached
+    # (lib-common), a failed App token mint (git-credential-github-app), each
+    # declared bot at a host boot and the boot's summary (boot-capture), the
+    # vault git-state guard's denials and the targets it could not read,
+    # vault-sync's failed-sync row on the vault itself (its page is
+    # vault_sync_failed), and the code-audit-sweep skill's completion, which
+    # the agent records.
+    "alert_recipient_resolved": "notice",
+    "auth_mint_failed": "notice",
+    "boot_capture": "notice",
+    "boot_capture_summary": "notice",
+    "vault_guard_denied": "notice",
+    "vault_guard_unresolved": "notice",
+    "vault_sync": "notice",
+    "audit_completed": "notice",
+    # The Python writers' records: a local operator's first contact
+    # (operation_context), a task re-check and an empty one (task_recheck), and
+    # an empty workstream prune (workstream_operations).
+    "operator_first_seen": "notice",
+    "task_recheck": "notice",
+    "task_recheck_noop": "notice",
+    "workstream_prune_noop": "notice",
 }
 
 # ---------------------------------------------------------------------------

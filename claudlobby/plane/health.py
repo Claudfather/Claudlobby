@@ -91,3 +91,56 @@ def staged_summary(root: Path) -> dict:
             "oldest_age_s": (int(max(0, time.time() - scan.oldest_mtime))
                              if readable and scan.oldest_mtime is not None else None),
             "full": scan.full if readable else None}
+
+
+#: `.emit-losses` rows counted by the summary below: the last day, by each
+#: row's own epoch (its writers rotate it on that window, with some slack).
+EMIT_LOSS_WINDOW_S = 86400
+
+
+def emit_losses_summary(root: Path, now: float | None = None) -> dict:
+    """`state/plane/.emit-losses` read once for every surface that shows it (#2165):
+    `plane doctor`, `plane status` and the brief, so they cannot disagree about
+    the same file.
+
+    Rows are `<epoch>\t<kind>\t<door>\t<detail>` (lib-common's plane_emit_loss,
+    the socket client's refusals, the daemon's #2164 replay). `reap` is an emit
+    whose fate is unknown; every other kind is a known loss, NOT recorded:
+    `stage_empty`, `staged_full`, `stage_refused`, `stage_failed`. A row whose
+    epoch cannot be read stays in the window: it cannot be shown to be old.
+
+    Absent is zero: the file is created on the first loss. Unreadable withholds
+    every count (None): a counter that cannot be read is a gap, not a zero.
+    Never creates, rotates or rewrites the file.
+    """
+    now = time.time() if now is None else now
+    path = root / "state" / "plane" / ".emit-losses"
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        text = ""
+    except OSError as exc:
+        return {"state": "unreadable", "error": type(exc).__name__, "window_s": EMIT_LOSS_WINDOW_S,
+                "reaped": None, "reap_doors": None, "not_recorded": None, "not_recorded_total": None}
+    reaped, doors, kinds, total = 0, set(), {}, 0
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split("\t")
+        try:
+            if int(fields[0]) < now - EMIT_LOSS_WINDOW_S:
+                continue
+        except ValueError:
+            pass
+        if len(fields) > 1 and fields[1] == "reap":
+            reaped += 1
+            if len(fields) > 2:
+                doors.add(fields[2])
+            continue
+        total += 1
+        if len(fields) > 1:
+            kinds[fields[1]] = kinds.get(fields[1], 0) + 1
+    return {"state": "ok", "window_s": EMIT_LOSS_WINDOW_S, "reaped": reaped,
+            "reap_doors": sorted(doors), "not_recorded": dict(sorted(kinds.items())),
+            "not_recorded_total": total}
+

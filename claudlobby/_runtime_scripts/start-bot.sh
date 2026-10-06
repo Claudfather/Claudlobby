@@ -322,7 +322,7 @@ if command -v "$CLAUDE" >/dev/null 2>&1 && [ -n "${FLEET_PLUGINS_REQUIRED:-}" ];
     done
 fi
 
-bot_tmux "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" "$CLAUDE_CMD"
+bot_session_spawn "$TMUX_SOCKET" "$TMUX_SESSION" "$CLAUDE_CMD"
 
 # Spawn marker — its mtime is this bot's last session (re)start. fleet-pulse
 # reads it to grace the Telegram bridge poller while it spins up, so a (re)start
@@ -338,6 +338,7 @@ touch "$BOT_DIR/data/.spawn" 2>/dev/null || true
 # documentation/environment-variables.md.
 LOG="$BOT_DIR/logs/startup.log"
 setup_log_dir "$LOG"
+echo "$(ts_iso) SUBREAPER ${BOT_SUBREAPER_REPORT:-}" >> "$LOG"
 _rc_timeout_s="${RC_READY_TIMEOUT_S:-90}"
 # Coerce a non-numeric/empty override to the default: a bad value would crash
 # start-bot under `set -u` ($(( abc * 2 )) → "abc: unbound variable"), crash-
@@ -533,9 +534,11 @@ if should_resume_session "$_SESSION_MD" "$_RESUME_MAX_AGE_S"; then
         # #1265: stamp the send instant. Written before the call and again
         # after, so a send that never returns leaves state=sending on disk.
         _inject_t0="$(inject_stamp "$BOT_DIR" resume sending)"
+        _send_rc=0
         PANE_READY_TICKS="$_PANE_READY_TICKS_BOOT" \
-            pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "$_RESUME_CMD"
-        inject_stamp "$BOT_DIR" resume "done" 0 "$_inject_t0" >/dev/null
+            pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "$_RESUME_CMD" || _send_rc=$?
+        inject_stamp "$BOT_DIR" resume "done" "$_send_rc" "$_inject_t0" >/dev/null
+        boot_send_settled RESUME "$_send_rc" "$LOG"
         ;;
     *)
         echo "$(ts_iso) RESUME SKIP — fresh checkpoint present but no resume capability [$_resume_status]; starting clean, handoff left at $_SESSION_MD" >> "$LOG"
@@ -556,9 +559,11 @@ if [ -n "${STARTUP_PROMPT:-}" ]; then
     # fired to the second while the session appeared 36-168s later, so all of
     # the variance lives here and nothing recorded it.
     _inject_t0="$(inject_stamp "$BOT_DIR" startup sending)"
+    _send_rc=0
     PANE_READY_TICKS="$_PANE_READY_TICKS_BOOT" \
-        pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "set +H; $STARTUP_PROMPT"
-    inject_stamp "$BOT_DIR" startup "done" 0 "$_inject_t0" >/dev/null
+        pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "set +H; $STARTUP_PROMPT" || _send_rc=$?
+    inject_stamp "$BOT_DIR" startup "done" "$_send_rc" "$_inject_t0" >/dev/null
+    boot_send_settled STARTUP "$_send_rc" "$LOG"
 fi
 
 # Mark bot as idle in fleet-state — non-fatal if helper is missing or fails

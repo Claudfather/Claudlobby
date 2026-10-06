@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -215,3 +216,107 @@ def test_a_migrator_that_lost_the_race_waits_instead_of_raising(tmp_path):
     finally:
         m._version_after_writer = original
     assert waited, "the loser never waited for the winner — it raised instead"
+
+
+# --- #1747 Phase E: source adoption boundary ---------------------------------
+
+_RETIRED_TASK_DOOR = re.compile(
+    r"\b(?:dispatch-task|report-back|task-act|checkin-record)\.sh\b")
+_TASK_FAMILY_LITERAL = re.compile(
+    r"(?:\\?[\"'])event_type(?:\\?[\"'])\s*:\s*(?:\\?[\"'])"
+    r"(?:work_item|assignment|task)(?:\\?[\"'])"
+    r"|(?:\\?[\"'])kind(?:\\?[\"'])\s*:\s*(?:\\?[\"'])task(?:\\?[\"'])"
+    r"|\b_raw\s*\([^\n]*?,[^\n]*?,\s*[\"'](?:work_item|assignment|task)[\"']"
+    r"|\bplane\s+emit\s+(?:work_item|assignment|task)\b")
+_TASK_FAMILY_OWNERS = {
+    "claudlobby/task_operations.py",
+    "claudlobby/report_payload.py",
+    "claudlobby/plane/expiry.py",
+    # Ingest maps accepted wire facts to stored rows; it does not originate a batch.
+    "claudlobby/plane/ingest.py",
+}
+
+
+def _is_code_comment(text: str, offset: int, path: Path) -> bool:
+    if path.suffix not in {".py", ".sh"}:
+        return False
+    line_start = text.rfind("\n", 0, offset) + 1
+    return text[line_start:offset].lstrip().startswith("#")
+
+
+def _task_source_violations(root: Path) -> list[str]:
+    """Catch obvious authored task writes and retired recipes, not dynamic construction."""
+    violations = []
+    for directory in ("library", "templates"):
+        for path in sorted((root / directory).rglob("*")):
+            if not path.is_file():
+                continue
+            text = path.read_text(encoding="utf-8")
+            for match in _RETIRED_TASK_DOOR.finditer(text):
+                if _is_code_comment(text, match.start(), path):
+                    continue
+                line = text.count("\n", 0, match.start()) + 1
+                violations.append(f"{path.relative_to(root)}:{line}: retired task door")
+            for match in _TASK_FAMILY_LITERAL.finditer(text):
+                if _is_code_comment(text, match.start(), path):
+                    continue
+                line = text.count("\n", 0, match.start()) + 1
+                violations.append(f"{path.relative_to(root)}:{line}: direct task-family fact")
+    for path in sorted((root / "claudlobby").rglob("*")):
+        if path.suffix not in {".py", ".sh"} or "_resources" in path.parts:
+            continue
+        relative = path.relative_to(root).as_posix()
+        if relative in _TASK_FAMILY_OWNERS:
+            continue
+        text = path.read_text(encoding="utf-8")
+        for match in _TASK_FAMILY_LITERAL.finditer(text):
+            if _is_code_comment(text, match.start(), path):
+                continue
+            line = text.count("\n", 0, match.start()) + 1
+            violations.append(f"{relative}:{line}: direct task-family fact")
+    return sorted(violations)
+
+
+def test_composable_sources_use_the_owned_task_doors():
+    root = Path(__file__).resolve().parent.parent
+    assert _task_source_violations(root) == []
+
+
+def test_task_source_guard_catches_competing_writer_and_retired_recipe(tmp_path):
+    recipe = tmp_path / "library" / "skills" / "dispatch" / "SKILL.md"
+    recipe.parent.mkdir(parents=True)
+    recipe.write_text(
+        "Run dispatch-task.sh --worker example\n"
+        "Run claudlobby plane emit task here.\n", encoding="utf-8")
+    tool = tmp_path / "library" / "tools" / "shortcut" / "tool.sh"
+    tool.parent.mkdir(parents=True)
+    tool.write_text(
+        r'''printf "{\"event_type\":\"task\"}" | plane-emit.sh''' + "\n",
+        encoding="utf-8")
+    writer = tmp_path / "claudlobby" / "competing_writer.py"
+    writer.parent.mkdir()
+    writer.write_text(
+        'batch = {"events": [{"event_type": "assignment", "payload": {}}]}\n'
+        'row = {"kind": "task", "event": "progress"}\n'
+        '_raw(ctx, request_id, "work_item", payload, receipt)\n'
+        'other = {"event_type": "communication"}\n', encoding="utf-8")
+    owner = tmp_path / "claudlobby" / "task_operations.py"
+    owner.write_text('owned = {"event_type": "task"}\n', encoding="utf-8")
+    observer = tmp_path / "claudlobby" / "_runtime_scripts" / "observer.sh"
+    observer.parent.mkdir()
+    observer.write_text(
+        '# {"event_type": "task"} describes historical input\n'
+        'printf \'{"event_type":"system"}\' | plane-emit.sh\n'
+        'printf \'{"event_type":"communication"}\' | plane-emit.sh\n',
+        encoding="utf-8")
+    recipe_ok = tmp_path / "templates" / "claude.md.j2"
+    recipe_ok.parent.mkdir()
+    recipe_ok.write_text("Use claudlobby task assign.\n", encoding="utf-8")
+    assert _task_source_violations(tmp_path) == [
+        "claudlobby/competing_writer.py:1: direct task-family fact",
+        "claudlobby/competing_writer.py:2: direct task-family fact",
+        "claudlobby/competing_writer.py:3: direct task-family fact",
+        "library/skills/dispatch/SKILL.md:1: retired task door",
+        "library/skills/dispatch/SKILL.md:2: direct task-family fact",
+        "library/tools/shortcut/tool.sh:1: direct task-family fact",
+    ]

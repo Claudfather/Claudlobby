@@ -1,5 +1,6 @@
 """Cold-host activation with real durable owners and a private native manager."""
 
+from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import replace
 import json
@@ -8,6 +9,7 @@ from pathlib import Path
 import plistlib
 import shlex
 import shutil
+import socket
 import sqlite3
 import subprocess
 from types import SimpleNamespace
@@ -29,7 +31,7 @@ from claudlobby.supervision_inventory import FileSnapshot
 from tests.test_releases import installed
 from tests.test_migration_plan import _database, _event_request, _pending
 from tests.test_task_audit import _insert
-from tests.test_activation_units import _prepare as _prepare_pause, enrollment  # noqa: F401
+from tests.test_activation_units import _pause_all, _prepare as _prepare_pause, enrollment  # noqa: F401
 
 
 @pytest.fixture
@@ -49,6 +51,7 @@ class NativeHost:
         self.registry = []
         self.external_result = 0
         self.fail_bot = None
+        self.dead, self.quiet_unknown = set(), False
         self.ready_kind = "bridge-ready"
         self.by_name = {d.source.name: (d, item) for d, item in planned_units(plan, "Linux")}
 
@@ -85,6 +88,13 @@ class NativeHost:
             else:
                 self.ready.append(bot)
                 output = self.ready_kind
+        elif function == "svc_activation_quiet":
+            if self.quiet_unknown:
+                rc = 3
+            elif args[1] in self.dead or self.states.get(args[1], "inactive").split()[-1] != "active":
+                output = "inactive\tno-cgroup-witness"
+            else:
+                output = "active\tcgroup-populated"
         elif function == "svc_activation_start":
             file, target = Path(args[0]), args[1]
             assert file.is_file()
@@ -310,6 +320,56 @@ def test_first_adoption_refuses_to_start_deliberately_stopped_bot_before_record(
     _no_activation_effect(root, host)
 
 
+@pytest.mark.parametrize("prior", ["early_abort", "same_id_abort", "unfinished_abort",
+                                   "unproven_abort", "cancelled_before_effects", "same_id_cancelled",
+                                   "naked_rolled_back"])
+def test_fresh_adoption_admits_only_a_verified_early_abort_prior_record(cold, monkeypatch, prior):
+    from claudlobby import config_install
+    root, _, plan, host = cold
+    old = "cutover" if prior.startswith("same_id") else "aborted"
+    with state.locked_activation(root) as store:
+        store.prepare(old, plan, recovery_release_id=plan.release_id,
+                      enrollment_digest="1" * 64, legacy_source=True)
+        if prior in ("cancelled_before_effects", "same_id_cancelled", "naked_rolled_back"):
+            # The owner's receipt names this unstarted configuration journal.
+            config_install.prepare_config(plan, old)
+            record = store.cancel_prepared(old)
+            assert record.body["cancellation"]["journals"] == [old]
+            if prior == "naked_rolled_back":
+                del record.body["cancellation"]
+                store._save(record)
+        else:
+            store.begin(old, "producers_paused")
+            store.begin_adoption_abort(old, reason="early abort", release_id=plan.release_id,
+                                       artifact_id="artifact", sql_user_version=12)
+            if prior != "unfinished_abort":
+                record = store.finish_adoption_abort(old, evidence_digest="3" * 64, resumed=[])
+            if prior == "unproven_abort":
+                record.body["adoption_abort"]["result"]["evidence"] = "unverified"
+                store._save(record)
+    before = state.read_activation(root, old).body
+    # The deliberately stopped bot is the first refusal after the prior-record gate.
+    units = _legacy_handoff_estate(root, ("manager",), assigned=False, stopped=("worker",))
+    adopt = _adopt_legacy(root, plan, host, monkeypatch, units)
+    if prior in ("early_abort", "cancelled_before_effects"):
+        with pytest.raises(state.ActivationRefusal, match="deliberately stopped bots"):
+            adopt()
+        _no_activation_effect(root, host)
+        # Past the gate, the next adoption's own record and journal coexist
+        # with the old attempt's retained journals.
+        with state.locked_activation(root) as store:
+            fresh = store.prepare("fresh", plan, recovery_release_id=plan.release_id,
+                                  enrollment_digest="1" * 64, legacy_source=True)
+            config_install.prepare_config(plan, "fresh")
+        assert fresh.status == "prepared" and fresh.body["intent"]["source_kind"] == "legacy-unsealed"
+        assert config_install.read_config_install(root, "fresh").status == "prepared"
+    else:
+        with pytest.raises(state.ActivationError, match=f"existing activation {old} requires explicit repair"):
+            adopt()
+        assert host.calls == [] and state.read_selection(root) is None
+    assert state.read_activation(root, old).body == before
+
+
 @pytest.mark.parametrize("properties", [
     (("ActiveState", "inactive"), ("LoadState", "loaded"), ("UnitFileState", "enabled")),
     (("ActiveState", "inactive"), ("LoadState", "loaded"), ("UnitFileState", "disabled")),
@@ -381,8 +441,8 @@ def test_run_intent_accepts_recorded_pause_new_bots_and_omitted_bots(tmp_path):
 @pytest.mark.parametrize("installed_bots, appended, message", [
     (("manager",), False, "no reviewed old bot actor"),
     (("worker",), False, "old fleet manager has no installed handoff owner"),
-    (("manager", "worker"), True, "existing canonical handoff section is malformed"),
-], ids=["stopped-worker", "uninstalled-manager", "appended-section"])
+    (("manager", "worker"), True, "existing canonical handoff section is unreadable"),
+], ids=["stopped-worker", "uninstalled-manager", "damaged-section"])
 def test_first_adoption_refuses_standing_handoff_blockers_before_record_or_pause(
         cold, monkeypatch, installed_bots, appended, message):
     root, _, plan, host = cold
@@ -390,8 +450,9 @@ def test_first_adoption_refuses_standing_handoff_blockers_before_record_or_pause
     handoff = root.resolve() / "legacy-runtime" / installed_bots[0] / ".claude/session.md"
     if appended:
         handoff.parent.mkdir()
+        # A section at the end, where the refresh writes it, that lost its status.
         handoff.write_bytes(b"old notes\n\n" + _HANDOFF_BEGIN + b"\n```json\n{}\n```\n"
-                            + _HANDOFF_END + b"\n\n## Later notes\n")
+                            + _HANDOFF_END + b"\n")
     before = handoff.read_bytes() if appended else None
     inventory = SimpleNamespace(manager="Linux", catalog=f"manager\tLinux\ndirectory\t{host.directory}\n",
                                 units=tuple(units))
@@ -431,13 +492,14 @@ def cold(installed, monkeypatch, tmp_path):
            "CLAUDLOBBY_NATIVE_DIR": str(release.native_path),
            "CLAUDLOBBY_LIBRARY_DIR": str(directory / "library"),
            "CLAUDLOBBY_ARTIFACT_ID": release.inputs.artifact_id}
+    tmux_dir = tmp_path / "private-tmux"  # Never the host's shared /tmp sockets.
     for stem, phase, bot in (("claudlobby-plane-daemon", "ingest", None),
                              ("com.example.worker", "bots", "worker"),
                              ("com.example.manager", "bots", "manager"),
                              ("claudlobby-keepalive", "producers", None)):
         working = root / "runtime/bots" / bot if bot else root
         destination = working if bot else root / "runtime/_host/timers"
-        unit_env = {**env, **({"TMUX_TMPDIR": "/tmp"} if bot else {})}
+        unit_env = {**env, **({"TMUX_TMPDIR": str(tmux_dir)} if bot else {})}
         command = ([str(release.native_path / "start-bot.sh"), str(working)] if bot else
                    [str(release.native_path / "keepalive-all.sh")] if phase == "producers" else
                    [str(release.native_path / "plane-daemon.sh")])
@@ -446,7 +508,7 @@ def cold(installed, monkeypatch, tmp_path):
         files = {stem + ".plist": (plistlib.dumps({"Label": stem, "WorkingDirectory": str(working),
                     "EnvironmentVariables": unit_env, "ProgramArguments": list(argv)}), 0o644),
                  stem + ".service": ((f"[Service]\nWorkingDirectory={working}\n"
-                    + ("Environment=TMUX_TMPDIR=/tmp\n" if bot else "") +
+                    + (f"Environment=TMUX_TMPDIR={tmux_dir}\n" if bot else "") +
                     f"ExecStart={admission.unit_systemd_command(argv)}\n" +
                     ("" if phase == "producers" else "[Install]\nWantedBy=default.target\n")).encode(), 0o644)}
         if phase == "producers":
@@ -464,6 +526,7 @@ def cold(installed, monkeypatch, tmp_path):
     native_directory = tmp_path / "private-native-user"
     native_directory.mkdir()
     host = NativeHost(root, release, plan, native_directory, package)
+    host.tmux_dir = tmux_dir
     monkeypatch.setattr(activation, "get_resources", lambda: package)
     monkeypatch.setattr(admission.RuntimeIdentity, "current", classmethod(lambda cls:
         admission.RuntimeIdentity(release.cli_path, release.native_path, release.inputs.artifact_id)))
@@ -522,11 +585,11 @@ def test_upgrade_binds_applied_selected_plan_as_exact_source(cold, monkeypatch, 
                            if d.bot == "manager" and d.source.suffix in (".plist", ".service"))
         assert "TMUX_TMPDIR" not in dict(declaration.environment)
         installed = FileSnapshot.read(declaration.source)
-        environment = {**dict(declaration.environment), "TMUX_TMPDIR": "/tmp"}
+        environment = {**dict(declaration.environment), "TMUX_TMPDIR": str(host.tmux_dir)}
         unit = SimpleNamespace(declaration=declaration, installed=(installed,),
                                properties=(("Environment", " ".join(
                                    f"{key}={shlex.quote(value)}" for key, value in environment.items())),))
-        assert activation._original_bot_tmpdir(unit) == "/tmp"
+        assert activation._original_bot_tmpdir(unit) == str(host.tmux_dir)
 
     if same_release:
         candidate = source
@@ -739,6 +802,176 @@ def test_bootstrap_resume_reconciles_started_unit_without_native_resend(cold, fa
     assert tuple(resumed.body["completed"]) == state.STEPS
 
 
+_WORKER_UNIT = "com.example.worker.service"
+
+
+def _failed_worker_start(cold):
+    root, _, plan, host = cold
+    host.fail_bot = "worker"
+    with pytest.raises(state.ActivationError):
+        activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    record = state.read_activation(root, "cold")
+    assert record.body["pending"] == "bots_started"
+    return record
+
+
+@pytest.mark.parametrize("case", ["active", "unknown", "fleet", "bot", "succeeded", "reason",
+                                  "multiline", "hosted", "ancestry-unknown", "missing", "locked"])
+def test_start_repair_refuses_live_unknown_wrong_identity_and_recorded_success(cold, case):
+    root, _, _, host = cold
+    before = _failed_worker_start(cold).body
+    host.quiet_unknown = case == "unknown"
+    if case in ("hosted", "ancestry-unknown"):
+        host.dead.add(_WORKER_UNIT)  # Otherwise repairable: only native ancestry refuses.
+        host.external_result = 1 if case == "hosted" else 3
+    fleet = "other" if case == "fleet" else "example"
+    bot = "manager" if case == "succeeded" else "nobody" if case == "bot" else "worker"
+    starts = list(host.starts)
+    reason = " " if case == "reason" else "exited\nbefore bridge" if case == "multiline" else "exited"
+    message = {"active": "unit is not verified inactive", "locked": "holds the lock",
+               "missing": "could not verify the recorded activation"}.get(case)
+    with state.locked_activation(root) if case == "locked" else nullcontext():
+        with pytest.raises(state.ActivationRefusal, match=message):
+            activation.repair_failed_bot_start(root, "absent" if case == "missing" else "cold",
+                                               fleet=fleet, bot=bot, reason=reason, adapter=host)
+    assert state.read_activation(root, "cold").body == before
+    assert host.starts == starts
+
+
+def test_start_repair_accepts_stale_refused_private_socket(cold):
+    root, _, _, host = cold
+    _failed_worker_start(cold)
+    host.dead.add(_WORKER_UNIT)
+    stale = host.tmux_dir / f"tmux-{os.getuid()}" / "com.example.worker"
+    if len(str(stale)) > 100:
+        pytest.skip("AF_UNIX path limit; run with a short private TMPDIR")
+    stale.parent.mkdir(parents=True)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+        server.bind(str(stale))  # Bound, never listening: an unclean tmux exit's leftover.
+    repaired = activation.repair_failed_bot_start(root, "cold", fleet="example", bot="worker",
+                                                  reason="exited", adapter=host)
+    assert repaired.body["start_repairs"][0]["dead_evidence"]["details"]["socket_state"] == "refused"
+    assert stale.exists()  # Evidence is observed, never removed.
+
+
+def test_legacy_adoption_resume_after_start_repair_reproves_old_bot_quiet(enrollment, monkeypatch):
+    inventory, phases, plan, adapter, _, _ = enrollment
+    # First adoption: unsealed original declarations, no prior selection or active record.
+    inventory = replace(inventory, legacy_source=True, units=tuple(
+        replace(unit, declaration=replace(unit.declaration, release_id="")) for unit in inventory.units))
+    root = inventory.data_root
+    directory = Path(inventory.catalog.split("directory\t", 1)[1].splitlines()[0])
+    release = state.read_release(root, plan.release_id)
+    package = type("Package", (), {"native": release.native_path, "artifact_id": release.inputs.artifact_id})()
+    adapter.package = package
+    monkeypatch.setattr(activation, "get_resources", lambda: package)
+    monkeypatch.setattr(activation.RuntimeIdentity, "current", classmethod(lambda cls:
+        activation.RuntimeIdentity(release.cli_path, release.native_path, release.inputs.artifact_id)))
+    monkeypatch.setattr(activation.sys, "executable", str(release.directory / release.paths.interpreter))
+    bot = next(unit for unit in inventory.units if unit.declaration.scope == "bot")
+    builder = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, ("alpha",), effects={})
+    builder.file(Path(bot.generated.path), bot.generated.content, mode=bot.generated.mode)
+    candidate_plan = builder.seal()
+    item = {"enroll": True, "phase": "bots", "sha256": bot.generated.sha256}
+    monkeypatch.setattr(activation, "planned_units", lambda _plan, _manager: ((bot.declaration, item),))
+    monkeypatch.setattr(activation, "validate_unit_admission", lambda *_args: object())
+    monkeypatch.setattr(activation, "_roster", lambda *_args: ({}, ()))
+    fence = {"ceiling": 210, "fence": "RR_FENCE_member"}
+    with state.locked_activation(root) as store:
+        assert state.read_selection(root) is None
+        _prepare_pause(store, inventory, phases, candidate_plan, adapter, install_directory=directory)
+        intent = state.read_activation(root, "cutover").body["intent"]
+        assert intent["source_kind"] == "legacy-unsealed" and intent["source_release_id"] is None
+        _pause_all(store, adapter)
+        for step in ("backup_saved", "migration_applied", "selection_switched",
+                     "configuration_applied", "ingest_started"):
+            store.begin("cutover", step)
+            if step == "selection_switched":
+                store.select("cutover")
+            else:
+                store.complete("cutover", step, evidence_digest="a" * 64)
+        store.begin("cutover", "bots_started")
+        store.record_start_phase("cutover", phase="bots", publication_digest="b" * 64, registry=[])
+        store.record_start_intent("cutover", phase="bots", source=str(bot.declaration.source),
+                                  target=bot.target, sha256=bot.generated.sha256, fence=fence)
+        # The journal owner's archive; the old bot is no longer exempt as a started candidate.
+        archived = store.archive_failed_bot_start(
+            "cutover", source=str(bot.declaration.source), target=bot.target,
+            sha256=bot.generated.sha256, fence=fence, evidence={"details": {}, "digest": "c" * 64},
+            reason="exited before bridge", repair_artifact=release.inputs.artifact_id).body["start_repairs"]
+    accepting, quiet = [True], []
+    monkeypatch.setattr(activation, "_legacy_bot_socket",
+                        lambda *_args, **_kwargs: (root / "old.sock", accepting[0]))
+    monkeypatch.setattr(activation, "assert_quiescent",
+                        lambda _adapter, **kwargs: quiet.append(kwargs["target"]))
+    monkeypatch.setattr(activation, "_finish_running_activation",
+                        lambda *_args, **_kwargs: state.read_activation(root, "cutover"))
+    calls_before = list(adapter.calls)
+    with pytest.raises(state.ActivationError, match="old private bot server is present"):
+        activation.resume_activation(root, "cutover", candidate_plan.plan_id, directory, adapter=adapter)
+    accepting[0] = False
+    resumed = activation.resume_activation(root, "cutover", candidate_plan.plan_id, directory, adapter=adapter)
+    assert resumed.body["start_repairs"] == archived and resumed.body["start_effects"] == {}
+    assert bot.target in quiet  # The repaired bot's old unit is proved quiet again.
+    assert adapter.calls == calls_before  # No native start or handoff replay.
+
+
+def test_start_repair_archives_dead_attempt_then_resume_starts_it_once(cold):
+    root, _, plan, host = cold
+    failed = _failed_worker_start(cold).body
+    source, attempt = next((s, e) for s, e in failed["start_effects"].items() if e["target"] == _WORKER_UNIT)
+    others = {s: e for s, e in failed["start_effects"].items() if s != source}
+    host.dead.add(_WORKER_UNIT)
+    starts = list(host.starts)
+    repaired = activation.repair_failed_bot_start(root, "cold", fleet="example", bot="worker",
+                                                  reason="exited before bridge", adapter=host)
+    assert host.starts == starts  # The repair itself starts nothing.
+    archived = repaired.body["start_repairs"]
+    assert len(archived) == 1 and archived[0]["attempt"] == attempt and archived[0]["source"] == source
+    assert archived[0]["dead_evidence"]["details"]["native"] == "inactive\tno-cgroup-witness"
+    assert archived[0]["dead_evidence"]["details"]["socket_state"] == "absent"
+    assert Path(archived[0]["dead_evidence"]["details"]["socket_path"]).parent.parent == host.tmux_dir
+    assert repaired.body["start_effects"] == others
+    assert {k: v for k, v in repaired.body.items() if k not in ("start_effects", "start_repairs")} == {
+        k: v for k, v in failed.items() if k != "start_effects"}
+    with pytest.raises(state.ActivationRefusal):  # No intent left to repair until resume fences one.
+        activation.repair_failed_bot_start(root, "cold", fleet="example", bot="worker",
+                                           reason="again", adapter=host)
+    host.fail_bot = None
+    resumed = activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    assert resumed.status == "active"
+    assert host.starts == starts + [_WORKER_UNIT, "claudlobby-keepalive.timer"]
+    assert resumed.body["start_repairs"] == archived
+    assert resumed.body["start_effects"][source]["result"] is not None
+    assert all(resumed.body["start_effects"][s] == e for s, e in others.items() if e["phase"] != "producers")
+
+
+def test_start_repair_interruption_keeps_history(cold, monkeypatch):
+    root, _, plan, host = cold
+    failed = _failed_worker_start(cold).body
+    host.dead.add(_WORKER_UNIT)
+    original_write = state._write
+
+    def interrupted(path, value):
+        raise OSError("interrupted before replace")
+
+    monkeypatch.setattr(state, "_write", interrupted)
+    with pytest.raises(OSError):
+        activation.repair_failed_bot_start(root, "cold", fleet="example", bot="worker",
+                                           reason="exited", adapter=host)
+    assert state.read_activation(root, "cold").body == failed
+    monkeypatch.setattr(state, "_write", original_write)
+    archived = activation.repair_failed_bot_start(root, "cold", fleet="example", bot="worker",
+                                                  reason="exited", adapter=host).body["start_repairs"]
+    # The fresh start fails too: the archive survives beside the new unresolved intent.
+    with pytest.raises(state.ActivationError):
+        activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    record = state.read_activation(root, "cold").body
+    assert record["start_repairs"] == archived and record["pending"] == "bots_started"
+    fresh = [e for e in record["start_effects"].values() if e["target"] == _WORKER_UNIT]
+    assert len(fresh) == 1 and fresh[0]["result"] is None
+
+
 def test_selected_bindings_refuse_loss_foreign_scope_and_ambiguous_actors(cold):
     root, _, plan, host = cold
     activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
@@ -852,13 +1085,13 @@ def test_quiesced_handoff_refusal_repairs_forward_with_same_activation_id(enroll
     identity.write_text(host + "\n")
     identity.chmod(0o600)
 
-    # The old bot's session appended notes after a previous canonical section.
+    # The old bot's handoff ends in a previous canonical section that is damaged.
     member_dir = next(unit.declaration.working_directory for unit in inventory.units
                       if unit.declaration.scope == "bot")
     handoff = member_dir / ".claude/session.md"
     handoff.parent.mkdir(parents=True, exist_ok=True)
     notes = b"---\nlast_updated: 2020-01-01T00:00:00Z\n---\n\n## Next Steps\n- held note\n"
-    malformed = notes + b"\n\n" + _HANDOFF_BEGIN + b"\n```json\n{}\n```\n" + _HANDOFF_END + b"\n\n## Later\n"
+    malformed = notes + b"\n\n" + _HANDOFF_BEGIN + b"\n```json\n{}\n```\n" + _HANDOFF_END + b"\n"
     handoff.write_bytes(malformed)
 
     with state.locked_activation(root) as store:
@@ -900,10 +1133,11 @@ def test_quiesced_handoff_refusal_repairs_forward_with_same_activation_id(enroll
     monkeypatch.setattr(activation, "apply_migration", migration)
     calls = list(adapter.calls)
 
-    with pytest.raises(state.ActivationError, match="existing canonical handoff section is malformed"):
+    with pytest.raises(state.ActivationError, match="existing canonical handoff section is unreadable"):
         activation.resume_activation(root, "cutover", plan.plan_id, directory, adapter=adapter)
     refused = state.read_activation(root, "cutover")
     assert refused.status == "activating" and refused.body["pending"] == "queues_classified"
+    recorded = refused.body["handoff_refreshed"]  # recorded before any handoff was written
     assert activation.resumable_running_step(refused) == "queues_classified"
     assert handoff.read_bytes() == malformed
 
@@ -917,5 +1151,8 @@ def test_quiesced_handoff_refusal_repairs_forward_with_same_activation_id(enroll
     assert state.read_selection(root)["activation_id"] == "previous"
     repaired = handoff.read_bytes()
     assert notes in repaired and repaired.rstrip().endswith(_HANDOFF_END)
+    # The repaired step reuses the time its refused attempt recorded (#2094).
+    assert resumed.body["handoff_refreshed"] == recorded
+    assert f"\nreferences_refreshed: {recorded}\n".encode() in repaired.split(b"\n---\n", 1)[0] + b"\n"
     assert task.encode() in repaired and assignment.encode() in repaired
     assert adapter.calls == calls  # no native pause, handoff or start replay

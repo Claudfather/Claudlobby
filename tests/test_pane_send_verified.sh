@@ -93,6 +93,9 @@ PY
 # send-keys cannot express. #860 is an ordering defect — the payload was sent
 # into a pane whose input box did not exist yet — so the property under test is
 # "no send precedes a drawn capture", not "how many sends happened".
+# Each line also names the frame a capture returned and whether a keystroke was
+# text or the Enter (#1236): the send contract is a sequence too, since the
+# Enter may go out only after a capture that showed the payload.
 ORDER_LOG="$TMPD/order.log"
 : > "$ORDER_LOG"
 
@@ -103,6 +106,9 @@ ORDER_LOG="$TMPD/order.log"
 export PANE_READY_POLL_S=0.02 PANE_READY_TICKS=6
 # And the recovery budget for a box that never drew (production 60 x 0.2s = 12s).
 export PANE_RECOVER_TICKS=2
+# And the wait for the box to show the typed payload before the Enter (#1236;
+# production 50 x 0.2s = 10s).
+export PANE_SEND_SHOWN_TICKS=3
 
 # #1493: every send-keys INVOCATION, verbatim, and every keystroke chunk as its
 # own file so a byte count and a first-byte inspection are exact. SENT_LOG keeps
@@ -129,7 +135,11 @@ bot_tmux() {
                 printf '%s' "${1:-}" > "$CHUNK_DIR/$(printf '%03d' "$CHUNK_N")"
             fi
             printf '%s\n' "$*" >> "$SENT_LOG"
-            printf 'send\n' >> "$ORDER_LOG"
+            if [ "$#" -eq 1 ] && [ "$1" = "Enter" ]; then
+                printf 'send:Enter\n' >> "$ORDER_LOG"
+            else
+                printf 'send:text\n' >> "$ORDER_LOG"
+            fi
             # A tmux that fails MID-PAYLOAD (chunk O fold, F6). Recorded first,
             # so the failing chunk is still visible in the log; the caller sees
             # the non-zero exit a dying pane would give it.
@@ -146,32 +156,90 @@ bot_tmux() {
             # Classify for the order log by the same signal the gate uses, so the
             # log cannot disagree with the code about what "drawn" means.
             if [ -n "$(pane_input_region "$(cat "$fixture")")" ]; then
-                printf 'capture:drawn\n' >> "$ORDER_LOG"
+                printf 'capture:drawn:%s\n' "${fixture##*/}" >> "$ORDER_LOG"
             else
-                printf 'capture:predraw\n' >> "$ORDER_LOG"
+                printf 'capture:predraw:%s\n' "${fixture##*/}" >> "$ORDER_LOG"
             fi
             cat "$fixture"
             ;;
     esac
 }
 
-# run_send <text> <fixture...> -> echoes the number of send-keys calls made.
-# 2 = text + Enter (clean submit). 3 = text + Enter + retry Enter.
-run_send() {
-    local text="$1"; shift
+# _send_prep <fixture...>: a clean slate for one send (empty logs and chunk
+# dir) and the frames the stub's captures return, in order.
+_send_prep() {
     : > "$SENT_LOG"; : > "$ORDER_LOG"; : > "$RAW_LOG"
     rm -f "$CHUNK_DIR"/*; CHUNK_N=0
     printf '%s\n' "$@" > "$PANE_SCRIPT"
+}
+
+# run_send <text> <fixture...> -> echoes the number of send-keys calls made.
+# 2 = text + Enter (clean submit). 3 = text + Enter + one retry Enter.
+run_send() {
+    local text="$1"; shift
+    _send_prep "$@"
     pane_send_verified sock "$SYNTH_ID" "$text"
     cap_refresh
     wc -l < "$SENT_LOG" | tr -d ' '
 }
 
+# run_send_rc <text> <fixture...> -> "<send-keys calls> <rc>". The send's own
+# status is part of the contract once it can decline to submit (#1236), and
+# run_send above drops it. Its stderr is kept in SEND_ERR for the assertions.
+SEND_ERR="$TMPD/send.err"
+run_send_rc() {
+    local text="$1"; shift
+    _send_prep "$@"
+    local rc=0
+    pane_send_verified sock "$SYNTH_ID" "$text" 2>"$SEND_ERR" || rc=$?
+    cap_refresh
+    printf '%s %s\n' "$(wc -l < "$SENT_LOG" | tr -d ' ')" "$rc"
+}
+
+# enter_follows <fixture-basename> -> "yes" when the first Enter went out after
+# a capture that returned that frame, "no" when it went out before one, and
+# "no-enter" when no Enter was sent at all.
+enter_follows() {
+    awk -v want="$1" '
+        /^capture:/ { f = $0; sub(/^capture:[a-z]+:/, "", f); if (f == want) seen = 1 }
+        $0 == "send:Enter" { found = 1; print (seen ? "yes" : "no"); exit }
+        END { if (!found) print "no-enter" }' "$ORDER_LOG"
+}
+
+# The send waits for the box to show the payload before its Enter (#1236), so a
+# clean submit is TYPED, then GONE, and a case needs the frame the TUI draws once
+# it has read the keystrokes. HINT is the live frame of a drawn, empty box (its
+# placeholder hint showing). typed_frame <base> <payload> prints the path of a
+# frame DERIVED from a live one: the same pane with <payload> typed into its
+# input line (the LAST line matching _PANE_INPUT_GLYPH_RE, as pane_input_region
+# finds it) after the glyph and the NBSP the TUI draws there. One rendered
+# line, so for short payloads, which is every caller here.
+HINT="$FIXTURES/input-placeholder-hint.txt"
+typed_frame() {
+    local out
+    out=$(mktemp "$TMPD/typed.XXXXXX")
+    _TF_PAYLOAD="$2" LC_ALL=C awk -v re="$_PANE_INPUT_GLYPH_RE" '
+        { line[NR] = $0; if (match($0, re)) { last = NR; glyph = substr($0, 1, RLENGTH) } }
+        END { for (i = 1; i <= NR; i++)
+                  print (i == last ? glyph "\302\240" ENVIRON["_TF_PAYLOAD"] : line[i]) }' \
+        "$1" > "$out"
+    printf '%s\n' "$out"
+}
+
+# sent_frames <payload> [after] [base] -> the frames of a clean send of
+# <payload>, one per line, for an unquoted argument list: the drawn box, the box
+# once it shows the payload, and the box after the submit (by default the empty
+# box of a clean submit, the payload echoed above it).
+sent_frames() {
+    local base="${3:-$HINT}"
+    printf '%s\n' "$base" "$(typed_frame "$base" "$1")" "${2:-$FIXTURES/input-clean-submit.txt}"
+}
+
 # Did any send happen before the first capture that showed a drawn input box?
 # "none" is the healthy answer; "sent-blind" is #860.
 send_before_draw() {
-    awk '/^send$/ { print "sent-blind"; exit }
-         /^capture:drawn$/ { print "none"; exit }
+    awk '/^send:/ { print "sent-blind"; exit }
+         /^capture:drawn:/ { print "none"; exit }
          END { if (!NR) print "none" }' "$ORDER_LOG"
 }
 
@@ -201,8 +269,14 @@ assert_eq "pane with no prompt glyph yields an empty region" "0" "$r"
 
 echo "=== pane_send_verified: retry fires only on positive evidence ==="
 
-r=$(run_send '/claudna:session resume --auto' "$FIXTURES/input-stuck-literal.txt")
-assert_eq "literal text stuck at the input line -> Enter resent" "3" "$r"
+# stuck_then_gone <frame>: a box still holding the payload one verify window
+# after the Enter, then empty once the retry Enter took it. The frames: the
+# readiness wait, the wait for the payload to show, the verify after the Enter,
+# the verify after the retry. A box that holds it for good is no submit at all
+# (#1236; the bounded Enters below).
+stuck_then_gone() { printf '%s\n' "$1" "$1" "$1" "$FIXTURES/input-clean-submit.txt"; }
+r=$(run_send_rc '/claudna:session resume --auto' $(stuck_then_gone "$FIXTURES/input-stuck-literal.txt"))
+assert_eq "literal text stuck at the input line -> Enter resent, then submitted" "3 0" "$r"
 
 # craig's failure: a large payload renders as a collapsed placeholder, so the
 # literal text is nowhere in the pane and no text probe can match it.
@@ -210,17 +284,23 @@ big="set +H; [BOTCOMMAND] ari | task | $(printf 'filler %.0s' $(seq 1 60))"
 r=$(printf '%s\n' "$(cat "$FIXTURES/input-stuck-collapsed-paste.txt")" | grep -cF "${big:0:60}" || true)
 assert_eq "collapsed-paste pane contains none of the payload text" "0" "$r"
 # One chunk, as this placeholder case was built: an explicit 900, whatever the default.
-r=$(PANE_SEND_CHUNK_BYTES=900 run_send "$big" "$FIXTURES/input-stuck-collapsed-paste.txt")
-assert_eq "collapsed paste stuck at the input line -> Enter resent" "3" "$r"
+r=$(PANE_SEND_CHUNK_BYTES=900 run_send_rc "$big" $(stuck_then_gone "$FIXTURES/input-stuck-collapsed-paste.txt"))
+assert_eq "collapsed paste stuck at the input line -> Enter resent, then submitted" "3 0" "$r"
 
-r=$(run_send 'PROBE763TRANSCRIPT reply ok' "$FIXTURES/input-clean-submit.txt")
+r=$(run_send 'PROBE763TRANSCRIPT reply ok' $(sent_frames 'PROBE763TRANSCRIPT reply ok'))
 assert_eq "clean submit (text visible in transcript) -> NO spurious Enter" "2" "$r"
 
-r=$(run_send 'QUEUEDPAYLOAD763 follow-up' "$FIXTURES/input-queued-hint.txt")
+r=$(run_send 'QUEUEDPAYLOAD763 follow-up' $(sent_frames 'QUEUEDPAYLOAD763 follow-up' "$FIXTURES/input-queued-hint.txt"))
 assert_eq "send queued against a busy pane (TUI hint in box) -> NO spurious Enter" "2" "$r"
 
-r=$(run_send 'anything' "$FIXTURES/busy-spinner.txt")
-assert_eq "no prompt glyph (mid-turn) -> NO spurious Enter" "2" "$r"
+r=$(run_send 'anything' $(sent_frames 'anything' "$FIXTURES/busy-spinner.txt"))
+assert_eq "no prompt glyph AFTER the Enter (mid-turn) -> NO spurious Enter" "2" "$r"
+
+# BEFORE the Enter, a pane with no input box cannot show the payload, so the
+# Enter is withheld. This used to read as "nothing unsubmitted" and, with an
+# Enter already sent blind, as a clean submit (#1236).
+r=$(run_send_rc 'anything' "$FIXTURES/busy-spinner.txt")
+assert_eq "no prompt glyph BEFORE the Enter -> the text alone, Enter withheld (rc 3)" "1 3" "$r"
 
 echo "=== pane_send_verified: never sends into a pane with no input box (#860) ==="
 
@@ -237,23 +317,23 @@ echo "=== pane_send_verified: never sends into a pane with no input box (#860) =
 # test_keepalive_classify's UNKNOWN cases — an edit made to serve classify_pane
 # would silently change what these assertions mean.
 r=$(run_send 'STARTUP860 payload' \
-    "$FIXTURES/predraw-empty.txt" "$FIXTURES/predraw-empty.txt" \
-    "$FIXTURES/idle-prompt.txt" "$FIXTURES/input-clean-submit.txt")
+    "$FIXTURES/predraw-empty.txt" "$FIXTURES/predraw-empty.txt" $(sent_frames 'STARTUP860 payload' "$FIXTURES/idle-prompt.txt" "$FIXTURES/idle-prompt.txt"))
 assert_eq "pre-draw pane: payload is NOT sent before the box is drawn" "none" "$(send_before_draw)"
 assert_eq "pre-draw pane: payload still lands once the box appears" "2" "$r"
 
 # A drawn pane must not pay for the gate: one capture, then send.
-r=$(run_send 'PROBE763TRANSCRIPT reply ok' "$FIXTURES/input-clean-submit.txt")
+r=$(run_send 'PROBE763TRANSCRIPT reply ok' $(sent_frames 'PROBE763TRANSCRIPT reply ok'))
 assert_eq "already-drawn pane: no send precedes the draw check" "none" "$(send_before_draw)"
 assert_eq "already-drawn pane: still exactly two sends" "2" "$r"
 
 # The gate is best-effort, never a block: a pane that never draws must still get
-# the payload rather than hanging start-bot or silently dropping it.
+# the payload rather than hanging start-bot or silently dropping it. No box ever
+# shows it, so its Enter is withheld (#1236) and the send says so (rc 3).
 # Zero the capture first — earlier glyph-less cases in this file exhaust the same
 # budget and emit too, and this assertion counts an exact total.
 cap_reset
-r=$(run_send 'NEVERDRAWN860' "$FIXTURES/predraw-empty.txt")
-assert_eq "box never drawn: payload is still sent (best-effort, not dropped)" "2" "$r"
+r=$(run_send_rc 'NEVERDRAWN860' "$FIXTURES/predraw-empty.txt")
+assert_eq "box never drawn: payload is still typed (best-effort), its Enter withheld" "1 3" "$r"
 r=$(grep -cE '"reason": ?"input-box-never-drawn"' "$CAPTURE" || true)
 assert_eq "box never drawn: emits evidence rather than failing silently" "1" "$r"
 
@@ -326,22 +406,26 @@ echo "=== glyph-less at verify: the latch decides, not the frame (#860) ==="
 # The two causes have opposite correct responses, so no single predicate over the
 # current frame can serve. What separates them is a second signal with the
 # opposite blind spot: the frame knows only the present, the latch knows only
-# whether a box was EVER confirmed.
+# whether a box was EVER confirmed. Since #1236 a third signal settles case (a):
+# the send SAW the payload in the box before its Enter, so a glyph-less frame
+# after it is a submit. The latch still decides the pre-draw repair, case (b).
 
-# (a) Box confirmed, then glyph-less at verify -> mid-turn. The payload went into
-# a box that demonstrably existed, so its absence means submitted. No resend.
-r=$(run_send 'MIDTURN860 payload' \
-    "$FIXTURES/idle-prompt.txt" "$FIXTURES/busy-spinner.txt")
+# (a) Box confirmed, then glyph-less at verify -> mid-turn. The payload was SEEN
+# in a box that demonstrably existed before its Enter (#1236), so its absence
+# now means submitted. No resend.
+r=$(run_send 'MIDTURN860 payload' $(sent_frames 'MIDTURN860 payload' "$FIXTURES/busy-spinner.txt" "$FIXTURES/idle-prompt.txt"))
 assert_eq "drawn box then glyph-less verify -> submitted, no resend" "2" "$r"
 
 # (b) Box never drawn, then a box appears holding nothing -> the keystrokes were
 # typed at a TUI that did not exist and are gone. Resending Enter repairs nothing
-# (there is no text in the box to submit), so the PAYLOAD goes again.
+# (there is no text in the box to submit), so the PAYLOAD goes again, and its one
+# Enter waits for the box to show it (#1236): three sends, the first Enter never
+# having gone out blind.
 # Pre-fix this returned success on tick 1 and the prompt was lost silently.
 cap_reset
 r=$(run_send 'LOSTPAYLOAD860' \
-    $(rep "$PANE_READY_TICKS" "$FIXTURES/predraw-empty.txt") "$FIXTURES/idle-prompt.txt")
-assert_eq "never-drawn then a box appears empty -> full payload resent" "4" "$r"
+    $(rep "$PANE_READY_TICKS" "$FIXTURES/predraw-empty.txt") $(sent_frames 'LOSTPAYLOAD860' "$FIXTURES/idle-prompt.txt" "$FIXTURES/idle-prompt.txt"))
+assert_eq "never-drawn then a box appears empty -> full payload resent, then one Enter" "3" "$r"
 r=$(grep -cE '"reason": ?"resent-after-box-drew"' "$CAPTURE" || true)
 assert_eq "the recovery is staged for Plane replay (an invisible repair is how this hid)" "1" "$r"
 
@@ -353,12 +437,13 @@ assert_eq "the resend carries the payload itself, twice in total" "2" "$r"
 echo "=== the recovery needs positive evidence too (#860) ==="
 
 # Symmetric discipline to pane_holds_unsubmitted: never act on an absence. If the
-# payload is visible ANYWHERE in the frame it did arrive, so resending would
-# double-deliver a startup prompt. The transcript echo is the evidence — a
-# submitted payload leaves the input box and is rendered above it.
-r=$(run_send 'PROBE763TRANSCRIPT reply ok' \
+# payload is visible ANYWHERE in the frame, typing it again could double it, so
+# it is not resent. Before any Enter, though, a copy in the transcript cannot be
+# this send's own, and the box holds nothing to submit: the Enter is withheld,
+# never sent blind, and the send says so (#1236).
+r=$(run_send_rc 'PROBE763TRANSCRIPT reply ok' \
     $(rep "$PANE_READY_TICKS" "$FIXTURES/predraw-empty.txt") "$FIXTURES/input-clean-submit.txt")
-assert_eq "never-drawn but the payload shows in the transcript -> NOT resent" "2" "$r"
+assert_eq "never-drawn but the payload shows in the transcript -> NOT resent, Enter withheld" "1 3" "$r"
 
 # A payload past the paste threshold renders as [Pasted text #N], so its literal
 # text is nowhere in the pane even when it landed perfectly. Matching on text
@@ -370,31 +455,169 @@ assert_eq "never-drawn but the payload shows in the transcript -> NOT resent" "2
 # four: the Enter fires, the payload does not go again.
 big="set +H; [BOTCOMMAND] ari | task | $(printf 'filler %.0s' $(seq 1 60))"
 r=$(PANE_SEND_CHUNK_BYTES=900 run_send "$big" \
-    $(rep "$PANE_READY_TICKS" "$FIXTURES/predraw-empty.txt") "$FIXTURES/input-stuck-collapsed-paste.txt")
+    $(rep "$PANE_READY_TICKS" "$FIXTURES/predraw-empty.txt") "$FIXTURES/input-stuck-collapsed-paste.txt" \
+    "$FIXTURES/input-stuck-collapsed-paste.txt" "$FIXTURES/input-clean-submit.txt")
 assert_eq "never-drawn but a collapsed paste landed -> Enter resent, not the payload" "3" "$r"
 r=$(grep -cF "$big" "$SENT_LOG" || true)
 assert_eq "the collapsed payload is sent exactly once (no double-delivery)" "1" "$r"
 
-# A box that never appears at all: nothing to recover and nothing to submit. The
-# post-budget Enter must NOT fire — it would spend a send on a pane that cannot
-# receive it and file a send_retry, misattributing a pre-draw loss as a post-draw
+# A box that never appears at all: nothing to recover and nothing to submit. No
+# Enter may fire — it would spend a send on a pane that cannot receive it, and a
+# retry would file a send_retry, misattributing a pre-draw loss as a post-draw
 # swallow. fleet-pulse reads those rows; the two must not blur.
 cap_reset
-r=$(run_send 'NEVERAPPEARS860' "$FIXTURES/predraw-empty.txt")
-assert_eq "box never appears -> no phantom Enter retry" "2" "$r"
+r=$(run_send_rc 'NEVERAPPEARS860' "$FIXTURES/predraw-empty.txt")
+assert_eq "box never appears -> no Enter at all, and the send says so (rc 3)" "1 3" "$r"
+r=$(grep -cE '"event": ?"send_unsubmitted"' "$CAPTURE" || true)
+assert_eq "box never appears -> the withheld Enter is recorded as send_unsubmitted" "1" "$r"
 r=$(grep -cE '"reason": ?"enter-swallowed"' "$CAPTURE" || true)
 assert_eq "box never appears -> no send_retry misattribution" "0" "$r"
 r=$(grep -cE '"reason": ?"input-box-never-drawn"' "$CAPTURE" || true)
 assert_eq "box never appears -> the loss IS recorded as send_blind" "1" "$r"
 
+echo "=== #1236: the Enter waits for the box to SHOW the payload; a submit is seen, then gone ==="
+
+# The defect, reproduced live (20 of 20 holds, 0 of 4 controls). When the TUI
+# has not yet read the typed text, the Enter reaches it in the SAME read, and
+# Claude Code keeps that CR in the box as an invisible character: the prompt is
+# held, and the next Enter only strips the CR and stops for review. Meanwhile
+# the verify read its first frame, drawn before the text, as a submit. The two
+# frames are live captures from that reproduction (claude 2.1.285; identifiers
+# scrubbed, geometry kept): the drawn box still showing its placeholder hint,
+# and the same box once the typed text is drawn, before any Enter. The literal
+# six-character escape is in the capture; keeping it keeps the real wrap point.
+typed='set +H; You just started up. Read your CLAUDE.md. You are Unit — post a brief ready message to Telegram, then remain running. Wait for task assignments via Telegram or tmux. PROBE1236A'
+shown="$FIXTURES/input-typed-unsubmitted.txt"
+r=$(pane_holds_unsubmitted "$(cat "$shown")" "$typed" && echo yes || echo no)
+assert_eq "fixture: the typed frame shows the payload" "yes" "$r"
+r=$(pane_holds_unsubmitted "$(cat "$HINT")" "$typed" && echo yes || echo no)
+assert_eq "fixture: the placeholder frame does not" "no" "$r"
+
+# (a) Render lag: the first frame after the keystrokes still predates them.
+r=$(run_send_rc "$typed" "$HINT" "$HINT" "$shown" "$HINT")
+assert_eq "render lag: the Enter goes out only after a frame shows the payload" \
+    "yes" "$(enter_follows input-typed-unsubmitted.txt)"
+assert_eq "render lag: the text and one Enter, reported submitted" "2 0" "$r"
+
+# (b) A payload the box never shows gets NO Enter. A blind one is the defect: it
+# is read together with the text and kept as a CR. The text still lands, typed
+# and unsubmitted, which one later Enter clears; the caller is told.
+cap_reset
+r=$(run_send_rc "$typed" "$HINT")
+assert_eq "never shown: no Enter is sent" "no-enter" "$(enter_follows input-typed-unsubmitted.txt)"
+assert_eq "never shown: the text alone, and the send reports no submit (rc 3)" "1 3" "$r"
+r=$(grep -cE '"event": ?"send_unsubmitted"' "$CAPTURE" || true)
+assert_eq "never shown: recorded as send_unsubmitted" "1" "$r"
+r=$(grep -cE '"reason": ?"payload-not-shown"' "$CAPTURE" || true)
+assert_eq "never shown: the event names the reason" "1" "$r"
+r=$(grep -c 'Enter was withheld' "$SEND_ERR" || true)
+assert_eq "never shown: stderr says the Enter was withheld" "1" "$r"
+
+# (c) The END must show, not merely some part. The first chunk of a chunked
+# payload can be drawn while the last is still unread, and an Enter then is read
+# with that last chunk: the same kept CR. The partial frame is DERIVED from the
+# live one (its last content line removed, a blank row added on top so it stays
+# 24 rows), so it keeps the real geometry. Any-part matching reads it as held.
+partial="$TMPD/input-typed-partial.txt"
+{ printf '\n'; grep -vF 'PROBE1236A' "$shown"; } > "$partial"
+assert_eq "fixture: the partial frame keeps 24 rows" "24" "$(wc -l < "$partial" | tr -d ' ')"
+r=$(pane_holds_unsubmitted "$(cat "$partial")" "$typed" && echo yes || echo no)
+assert_eq "fixture: the partial frame still holds part of the payload" "yes" "$r"
+r=$(PANE_SEND_CHUNK_BYTES=100 run_send_rc "$typed" "$HINT" "$partial" "$shown" "$HINT")
+assert_eq "chunked: the Enter waits for the payload's END, not its first chunk" \
+    "yes" "$(enter_follows input-typed-unsubmitted.txt)"
+assert_eq "chunked: two chunks and one Enter, reported submitted" "3 0" "$r"
+
+# (d) With the verify off (the message door, bot compact) the one Enter still
+# waits: the CR is kept whoever presses it.
+r=$(PANE_SEND_VERIFY_TICKS=0 run_send_rc "$typed" "$HINT" "$HINT" "$shown")
+assert_eq "verify off: the one Enter still waits for the payload to show" \
+    "yes" "$(enter_follows input-typed-unsubmitted.txt)"
+assert_eq "verify off: the text and one Enter, no repair" "2 0" "$r"
+
+# (e) The pre-draw repair (#860) types the payload again; that Enter waits too.
+cap_reset
+r=$(run_send_rc "$typed" \
+    $(rep "$PANE_READY_TICKS" "$FIXTURES/predraw-empty.txt") "$HINT" "$shown" "$HINT")
+assert_eq "pre-draw repair: the resend's Enter waits for the payload to show" \
+    "yes" "$(enter_follows input-typed-unsubmitted.txt)"
+assert_eq "pre-draw repair: the text, the resend, one Enter" "3 0" "$r"
+r=$(grep -cE '"reason": ?"resent-after-box-drew"' "$CAPTURE" || true)
+assert_eq "pre-draw repair: the resend is still recorded" "1" "$r"
+
+# (f) A paste-framed payload. A busy TUI that reads the chunks together, past its
+# 800-byte paste threshold, frames them as a paste: the box then shows only the
+# placeholder, never the payload's bytes. The placeholder IS the payload shown,
+# so the Enter follows it (a live frame). Bound, said in the source: a TUI that
+# framed only the FIRST chunks and has not read the rest shows the same
+# placeholder, and that Enter can still meet the unread tail.
+paste="$FIXTURES/input-stuck-collapsed-paste.txt"
+r=$(pane_shows_payload_end "$(pane_input_region "$(cat "$paste")")" "$big" && echo yes || echo no)
+assert_eq "paste-framed: the placeholder counts as the payload shown" "yes" "$r"
+r=$(run_send_rc "$big" "$HINT" "$paste" "$FIXTURES/input-clean-submit.txt")
+assert_eq "paste-framed: the Enter follows the placeholder" \
+    "yes" "$(enter_follows input-stuck-collapsed-paste.txt)"
+assert_eq "paste-framed: two chunks and one Enter, reported submitted" "3 0" "$r"
+
+# (g) An Enter that leaves the text in the box gets another, bounded. A box keeps
+# the text past an Enter that met a CR already held there: that Enter strips it
+# and stops for review, and the next sends (20 of 20 in the reproduction). Each
+# further Enter follows a verify window in which the box still showed the text,
+# and past PANE_SEND_ENTER_TRIES (4) Enters the send reports the text
+# unsubmitted, never sent.
+cap_reset
+r=$(run_send_rc "$typed" "$HINT" "$shown" "$shown" "$HINT")
+assert_eq "held past one Enter: a second Enter, then submitted" "3 0" "$r"
+r=$(grep -cE '"reason": ?"enter-swallowed"' "$CAPTURE" || true)
+assert_eq "held past one Enter: the retry is recorded" "1" "$r"
+cap_reset
+r=$(run_send_rc "$typed" "$HINT" "$shown")
+assert_eq "held past every Enter: four Enters in all, and no submit (rc 3)" "5 3" "$r"
+r=$(grep -cE '"event": ?"send_retry"' "$CAPTURE" || true)
+assert_eq "held past every Enter: each retry recorded" "3" "$r"
+r=$(grep -cE '"reason": ?"payload-still-in-box"' "$CAPTURE" || true)
+assert_eq "held past every Enter: recorded as unsubmitted, still in the box" "1" "$r"
+r=$(grep -cF 'still showed the payload after every Enter (4 in all)' "$SEND_ERR" || true)
+assert_eq "held past every Enter: stderr says it was not submitted" "1" "$r"
+r=$(PANE_SEND_ENTER_TRIES=2 run_send_rc "$typed" "$HINT" "$shown")
+assert_eq "PANE_SEND_ENTER_TRIES=2: two Enters, then no submit" "3 3" "$r"
+r=$(PANE_SEND_ENTER_TRIES=junk run_send_rc "$typed" "$HINT" "$shown")
+assert_eq "a malformed PANE_SEND_ENTER_TRIES falls back to four Enters" "5 3" "$r"
+
+# (h) A receiver mid-turn: the Enter queues the message. Live frames (claude
+# 2.1.285, a turn held open by a local stand-in API): the box holding a tracked
+# payload while the turn runs, then, after one Enter, the message queued above
+# the spinner and the box showing only "Press up to edit queued messages". That
+# counts as gone, so the one Enter is the only one.
+busy_payload=$(printf 'set +H; [BOTCOMMAND] mgr | task | CAPQ1: the shape of an assignment delivery, a few hundred bytes of prose with an id and a pointer, sent while the receiver is in a long turn, so that the queue path is what gets measured here and not the idle one. Read the issue and the plan first, then report back. CAPQ1\n\342\237\246plane:msg_0123456789abcdef0123456789abcdef\342\237\247')
+cap_reset
+r=$(run_send_rc "$busy_payload" "$HINT" "$FIXTURES/input-typed-busy.txt" "$FIXTURES/input-queued-turn.txt")
+assert_eq "mid-turn: the Enter follows the box showing the payload" \
+    "yes" "$(enter_follows input-typed-busy.txt)"
+# Read off ORDER_LOG, not the send count: this payload carries a newline (the
+# receipt line's own), so its one send takes two lines in SENT_LOG.
+assert_eq "mid-turn: the queued frame counts as submitted (rc 0)" "0" "${r#* }"
+assert_eq "mid-turn: the text and one Enter" "send:text send:Enter" \
+    "$(grep '^send:' "$ORDER_LOG" | tr '\n' ' ' | sed 's/ $//')"
+r=$(grep -cE '"event": ?"send_retry"' "$CAPTURE" || true)
+assert_eq "mid-turn: no retry Enter into the queue hint" "0" "$r"
+
 echo "=== pane_send_verified: the poll gives a slow render time to settle ==="
 
 # Two ticks: still stuck on the first capture, cleared by the second. The old
 # fixed post-Enter sleep either waited too long or fired a needless retry.
+# Frames: the readiness wait, the wait for the payload to show, then the two
+# verify ticks. This case used to hand over two frames and never reach a second
+# tick, because the readiness wait took the first; the order is asserted now.
 export PANE_SEND_VERIFY_TICKS=3
 r=$(run_send '/claudna:session resume --auto' \
+        "$FIXTURES/input-stuck-literal.txt" "$FIXTURES/input-stuck-literal.txt" \
         "$FIXTURES/input-stuck-literal.txt" "$FIXTURES/input-clean-submit.txt")
 assert_eq "box clears on a later poll tick -> NO retry" "2" "$r"
+r=$(awk '/^send:Enter$/ { e = 1; next }
+         e && /^capture:/ { sub(/^capture:[a-z]+:/, ""); printf "%s%s", sep, $0; sep = "," }' "$ORDER_LOG")
+assert_eq "...and it was the SECOND verify tick that cleared" \
+    "input-stuck-literal.txt,input-clean-submit.txt" "$r"
 export PANE_SEND_VERIFY_TICKS=1
 
 # A zero budget must mean "no verification", not "resend blind". Getting this
@@ -416,14 +639,14 @@ count_events() { cap_refresh; grep -cE "$1" "$CAPTURE" || true; }
 # Zero the capture: earlier run_send calls already emitted retries into it and
 # the counts below assert exact totals.
 cap_reset
-run_send '/claudna:session resume --auto' "$FIXTURES/input-stuck-literal.txt" >/dev/null
+run_send_rc '/claudna:session resume --auto' $(stuck_then_gone "$FIXTURES/input-stuck-literal.txt") >/dev/null
 r=$(count_events '"event": ?"send_retry"')
 assert_eq "a fired retry emits a send_retry event" "1" "$r"
 r=$(count_events '"reason": ?"enter-swallowed"')
 assert_eq "the event names the reason" "1" "$r"
 
 # A clean submit must stay silent — otherwise the plane fills with non-events.
-run_send 'PROBE763TRANSCRIPT reply ok' "$FIXTURES/input-clean-submit.txt" >/dev/null
+run_send_rc 'PROBE763TRANSCRIPT reply ok' $(sent_frames 'PROBE763TRANSCRIPT reply ok') >/dev/null
 r=$(count_events '"event": ?"send_retry"')
 assert_eq "a clean submit emits NO send_retry event" "1" "$r"
 
@@ -437,7 +660,7 @@ r=$(printf '%s\n' "$wpane" | grep -qF "$wrapped" && echo yes || echo no)
 assert_eq "the full payload matches no single rendered line (it is wrapped)" "no" "$r"
 r=$(pane_holds_unsubmitted "$wpane" "$wrapped" && echo yes || echo no)
 assert_eq "reversed containment still detects it (late wrap)" "yes" "$r"
-r=$(run_send "$wrapped" "$FIXTURES/input-stuck-wrapped.txt")
+r=$(run_send "$wrapped" $(stuck_then_gone "$FIXTURES/input-stuck-wrapped.txt"))
 assert_eq "wrapped payload stuck at the input line -> Enter resent" "3" "$r"
 
 # THE REGRESSION THIS FILE PREVIOUSLY MISSED, and the reason it missed it.
@@ -464,7 +687,7 @@ r=$(printf '%s\n' "$epane" | grep -qF "${early:0:60}" && echo yes || echo no)
 assert_eq "a 60-char prefix probe does NOT match an early wrap (the bug)" "no" "$r"
 r=$(pane_holds_unsubmitted "$epane" "$early" && echo yes || echo no)
 assert_eq "reversed containment DOES detect it (early wrap)" "yes" "$r"
-r=$(run_send "$early" "$FIXTURES/input-stuck-wrapped-early.txt")
+r=$(run_send "$early" $(stuck_then_gone "$FIXTURES/input-stuck-wrapped-early.txt"))
 assert_eq "early-wrapped payload stuck -> Enter resent" "3" "$r"
 
 # The direction that must never regress: an EMPTY box is not evidence of a held
@@ -501,7 +724,12 @@ r=$([ "$_PANE_SEND_CHUNK_BYTES_DEFAULT" -le 800 ] && echo under || echo over)
 assert_eq "the default chunk cap is at most 800 bytes (#1876)" "under" "$r"
 
 payload2500=$(printf 'x%.0s' $(seq 1 2500))
-r=$(run_send "$payload2500" "$FIXTURES/input-clean-submit.txt")
+# A clean send of a big payload, as frames: the readiness wait, the box once it
+# shows the payload (the live capture of a big payload in the box), then the
+# empty box after the submit. The send waits for the middle one before its
+# Enter (#1236). These cases assert the shape of the crossing, not rendering.
+BIG_SENT=("$HINT" "$FIXTURES/input-stuck-collapsed-paste.txt" "$FIXTURES/input-clean-submit.txt")
+r=$(run_send "$payload2500" "${BIG_SENT[@]}")
 # At the default 400: 400, 399, 400, 399, 400, 399, 103 (the tie-break shortens
 # each chunk that would repeat the one before it), then exactly one Enter.
 assert_eq "a 2500-byte payload becomes 7 keystroke chunks" "7" "$(chunk_count)"
@@ -541,7 +769,7 @@ dashes=""
 i=0; while [ $i -lt 800 ]; do dashes="${dashes}—"; i=$((i + 1)); done
 mbpayload="${pad899}${dashes}"
 # An explicit 900: this payload is built around byte 900, whatever the default.
-r=$(PANE_SEND_CHUNK_BYTES=900 run_send "$mbpayload" "$FIXTURES/input-clean-submit.txt")
+r=$(PANE_SEND_CHUNK_BYTES=900 run_send "$mbpayload" "${BIG_SENT[@]}")
 
 # A continuation byte is 0x80-0xBF (128-191). No chunk may START with one: given
 # the byte-exact rejoin below, that is exactly "no chunk ENDS mid-character".
@@ -583,7 +811,7 @@ echo "=== PANE_SEND_CHUNK_BYTES=0 restores the legacy single send (#1493) ==="
 # EXACTLY — one send-keys, no -l — or the A/B measures two things at once and
 # attributes the difference to the wrong one.
 export PANE_SEND_CHUNK_BYTES=0
-r=$(run_send "$payload2500" "$FIXTURES/input-clean-submit.txt")
+r=$(run_send "$payload2500" "${BIG_SENT[@]}")
 assert_eq "unchunked arm: one payload send + one Enter" "2" "$r"
 assert_eq "unchunked arm: no -l chunks recorded at all" "0" "$(chunk_count)"
 r=$(grep -c -- '-l' "$RAW_LOG" || true)
@@ -594,7 +822,7 @@ unset PANE_SEND_CHUNK_BYTES
 # inside startup and watchdog paths and a typo in an env file must not strand a
 # bot.
 export PANE_SEND_CHUNK_BYTES=notanumber
-r=$(run_send "$payload2500" "$FIXTURES/input-clean-submit.txt")
+r=$(run_send "$payload2500" "${BIG_SENT[@]}")
 assert_eq "a malformed cap falls back to the default (7 chunks at 400)" "7" "$(chunk_count)"
 unset PANE_SEND_CHUNK_BYTES
 
@@ -605,23 +833,25 @@ unset PANE_SEND_CHUNK_BYTES
 # reads. Asserted through a real multi-chunk send, since a single-chunk one
 # never reaches the sleep at all and would pass on a broken guard.
 export PANE_SEND_CHUNK_SETTLE_S=not-a-number
-r=$(run_send "$payload2500" "$FIXTURES/input-clean-submit.txt")
+r=$(run_send "$payload2500" "${BIG_SENT[@]}")
 assert_eq "a malformed settle falls back to the default (send completes)" "8" "$r"
 export PANE_SEND_CHUNK_SETTLE_S=0
 
 echo "=== the pre-draw repair resends CHUNKED too (#1493) ==="
 
-# _pane_recover_unconfirmed_send resends the whole payload when the box was
+# The wait for the payload to show resends the whole payload when the box was
 # never confirmed and appears empty. Sending that one unchunked would repair a
 # pre-draw loss by committing a 1 KB one — and it is the path that carries the
-# BIGGEST payloads, since start-bot's STARTUP_PROMPT is what arms the wait.
+# BIGGEST payloads, since start-bot's STARTUP_PROMPT is what arms the wait. The
+# one Enter follows the resend, once the box shows it (#1236).
 cap_reset
 r=$(PANE_SEND_CHUNK_BYTES=900 run_send "$payload2500" \
-    $(rep "$PANE_READY_TICKS" "$FIXTURES/predraw-empty.txt") "$FIXTURES/idle-prompt.txt")
-assert_eq "repair path: 3 chunks + Enter, twice over" "8" "$r"
+    $(rep "$PANE_READY_TICKS" "$FIXTURES/predraw-empty.txt") "$FIXTURES/idle-prompt.txt" \
+    "$FIXTURES/input-stuck-collapsed-paste.txt" "$FIXTURES/input-clean-submit.txt")
+assert_eq "repair path: 3 chunks, twice over, then one Enter" "7" "$r"
 assert_eq "repair path: six keystroke chunks in total, all -l" "6" "$(chunk_count)"
 r=$(grep -c '^Enter$' "$SENT_LOG" || true)
-assert_eq "repair path: one Enter per send, never per chunk" "2" "$r"
+assert_eq "repair path: one Enter in all, never one per chunk" "1" "$r"
 r=$(grep -cE '"reason": ?"resent-after-box-drew"' "$CAPTURE" || true)
 assert_eq "repair path: still staged for Plane replay" "1" "$r"
 
@@ -656,7 +886,7 @@ assert_eq "a chunk with no ';' is passed through byte for byte" \
     'no semicolon at all' "$_PANE_SEND_ARG"
 
 # ...and the door actually uses it: the ARGV tmux receives, not just the helper.
-r=$(run_send 'a payload that ends in a semicolon;' "$FIXTURES/input-clean-submit.txt")
+r=$(run_send 'a payload that ends in a semicolon;' $(sent_frames 'a payload that ends in a semicolon;'))
 assert_eq "the door sends the ESCAPED argument, not the raw chunk" \
     'a payload that ends in a semicolon\;' "$(cat "$CHUNK_DIR/001")"
 
@@ -760,7 +990,7 @@ export PANE_SEND_CHUNK_SETTLE_S=0.3
 export PANE_SEND_SETTLE_S=0.7          # distinct, so the pre-Enter settle is countable
 export PANE_SEND_CHUNK_BYTES=900       # three chunks, as this block counts them
 : > "$SLEEP_LOG"
-r=$(run_send "$payload2500" "$FIXTURES/input-clean-submit.txt")
+r=$(run_send "$payload2500" "${BIG_SENT[@]}")
 assert_eq "a 3-chunk payload still sends 3 chunks + 1 Enter" "4" "$r"
 assert_eq "...and settles exactly twice BETWEEN the three chunks" "2" "$(count_sleeps 0.3)"
 assert_eq "...at the configured inter-chunk value, not the default" "0" "$(count_sleeps 0.15)"
@@ -769,14 +999,14 @@ assert_eq "...and the pre-Enter settle is its own, separate, single sleep" \
 
 # One chunk, no boundary, no settle: the common send pays nothing for this.
 : > "$SLEEP_LOG"
-run_send 'short payload' "$FIXTURES/input-clean-submit.txt" >/dev/null
+run_send_rc 'short payload' $(sent_frames 'short payload') >/dev/null
 assert_eq "a single-chunk payload sleeps between no chunks at all" "0" "$(count_sleeps 0.3)"
 
 # A malformed value falls back to the DEFAULT, and the fallback is what runs —
 # the existing pin proves the send completes, this one proves it still settles.
 export PANE_SEND_CHUNK_SETTLE_S=not-a-number
 : > "$SLEEP_LOG"
-run_send "$payload2500" "$FIXTURES/input-clean-submit.txt" >/dev/null
+run_send_rc "$payload2500" "${BIG_SENT[@]}" >/dev/null
 assert_eq "a malformed settle still settles, at the default value" \
     "2" "$(count_sleeps 0.15)"
 
@@ -792,23 +1022,19 @@ echo "=== a mid-payload chunk failure is DISCLOSED (F6) ==="
 # NEXT send concatenates onto it. It is not repaired here on purpose: the
 # obvious clear is a C-c, and a second Ctrl-C in Claude Code exits the session,
 # which is a failure path that can kill a bot. So it is said, and recorded.
+# run_send_failing <text> <fixture...> -> the send's rc alone (stderr in SEND_ERR).
 run_send_failing() {
-    local text="$1"; shift
-    : > "$SENT_LOG"; : > "$ORDER_LOG"; : > "$RAW_LOG"
-    rm -f "$CHUNK_DIR"/*; CHUNK_N=0
-    printf '%s\n' "$@" > "$PANE_SCRIPT"
-    local rc=0
-    pane_send_verified sock "$SYNTH_ID" "$text" 2>"$TMPD/send-stderr.log" || rc=$?
-    cap_refresh
-    printf '%s' "$rc"
+    local r
+    r=$(run_send_rc "$@")
+    printf '%s' "${r#* }"
 }
 
 cap_reset
 r=$(PANE_SEND_CHUNK_BYTES=900 FAIL_ON_CHUNK=2 run_send_failing "$payload2500" "$FIXTURES/input-clean-submit.txt")
 assert_eq "a chunk that fails mid-payload fails the send (never a silent partial)" "1" "$r"
-r=$(grep -c 'chunk 2 of 3 failed' "$TMPD/send-stderr.log" || true)
+r=$(grep -c 'chunk 2 of 3 failed' "$SEND_ERR" || true)
 assert_eq "the door says WHICH chunk failed" "1" "$r"
-r=$(grep -c '900 bytes left unsubmitted in the box' "$TMPD/send-stderr.log" || true)
+r=$(grep -c '900 bytes left unsubmitted in the box' "$SEND_ERR" || true)
 assert_eq "...and how many bytes it left in the box for the next send to run into" "1" "$r"
 r=$(grep -cE '"event": ?"send_miss"' "$CAPTURE" || true)
 assert_eq "the partial is staged as a send_miss (the send did NOT land)" "1" "$r"
@@ -830,9 +1056,9 @@ echo "=== chunking off is a NAMED, LOUD switch (F8) ==="
 # silent no-op is indistinguishable from a working send.
 export PANE_SEND_CHUNK_BYTES=0
 run_send_failing "$payload2500" "$FIXTURES/input-clean-submit.txt" >/dev/null
-r=$(grep -c 'chunking OFF (PANE_SEND_CHUNK_BYTES=0)' "$TMPD/send-stderr.log" || true)
+r=$(grep -c 'chunking OFF (PANE_SEND_CHUNK_BYTES=0)' "$SEND_ERR" || true)
 assert_eq "the unchunked door names itself and its variable on stderr" "1" "$r"
-r=$(grep -c 'lose their head' "$TMPD/send-stderr.log" || true)
+r=$(grep -c 'lose their head' "$SEND_ERR" || true)
 assert_eq "...and says what it costs" "1" "$r"
 # The trailing-';' guard applies to the legacy shape too: the pre-fix primitive
 # had the same defect on the payload's last byte, and leaving it in would make
@@ -860,15 +1086,14 @@ echo "=== chunk P (#1501): the plane routing trailer rides bot_tmux_send ==="
 # the real sanitize -> append -> chunk path, not a re-derivation.
 run_bot_send() {
     local text="$1"; shift
-    : > "$SENT_LOG"; : > "$ORDER_LOG"; : > "$RAW_LOG"
-    rm -f "$CHUNK_DIR"/*; CHUNK_N=0
-    printf '%s\n' "$@" > "$PANE_SCRIPT"
-    bot_tmux_send sock "$SYNTH_ID" "$text"
+    _send_prep "$@"
+    BOT_SEND_RC=0
+    bot_tmux_send sock "$SYNTH_ID" "$text" || BOT_SEND_RC=$?
 }
 VALID_MSGID="msg_0123456789abcdef0123456789abcdef"
 
 export PLANE_MSG_ID="$VALID_MSGID"
-run_bot_send "[BOTCOMMAND] mgr | task | do the thing" "$FIXTURES/input-clean-submit.txt"
+run_bot_send "[BOTCOMMAND] mgr | task | do the thing" $(sent_frames "$(printf '%s\n%s' "[BOTCOMMAND] mgr | task | do the thing" "⟦plane:${VALID_MSGID}⟧")")
 cat "$CHUNK_DIR"/[0-9]* > "$TMPD/joined"
 joined=$(cat "$TMPD/joined")
 r=$(grep -c "⟦plane:$VALID_MSGID⟧" "$TMPD/joined" || true)
@@ -878,6 +1103,7 @@ assert_eq "the trailer is the payload's OWN final line" "yes" "$r"
 lastchunk=$(ls "$CHUNK_DIR"/[0-9]* | sort | tail -1)
 case "$(cat "$lastchunk")" in *"⟦plane:$VALID_MSGID⟧") r=yes ;; *) r=no ;; esac
 assert_eq "the trailer is intact in the LAST chunk" "yes" "$r"
+assert_eq "...and the send completed: the box showed the payload, trailer last" "0" "$BOT_SEND_RC"
 unset PLANE_MSG_ID
 
 # The load-bearing survival property: a 2.5KB tokened dispatch chunks (chunk O),
@@ -885,7 +1111,7 @@ unset PLANE_MSG_ID
 # built — the multibyte trailer included — so the join key survives the head
 # loss that #1493 measured, riding the last chunk.
 export PLANE_MSG_ID="$VALID_MSGID"
-run_bot_send "$payload2500" "$FIXTURES/input-clean-submit.txt"
+run_bot_send "$payload2500" "${BIG_SENT[@]}"
 chunk_count=$(ls "$CHUNK_DIR"/[0-9]* | wc -l | tr -d ' ')
 [ "$chunk_count" -gt 1 ] && r=yes || r=no
 assert_eq "a 2.5KB tokened payload is chunked (more than one chunk)" "yes" "$r"
@@ -899,7 +1125,7 @@ unset PLANE_MSG_ID
 
 # No PLANE_MSG_ID -> no trailer (a raw human prompt / keepalive reload is
 # untracked and must stay byte-for-byte what was asked).
-run_bot_send "plain dispatch with no plane id" "$FIXTURES/input-clean-submit.txt"
+run_bot_send "plain dispatch with no plane id" $(sent_frames "plain dispatch with no plane id")
 cat "$CHUNK_DIR"/[0-9]* > "$TMPD/joined"
 r=$(grep -c "plane:msg_" "$TMPD/joined" || true)
 assert_eq "no PLANE_MSG_ID -> no trailer appended" "0" "$r"
@@ -907,7 +1133,7 @@ assert_eq "no PLANE_MSG_ID -> no trailer appended" "0" "$r"
 # A non-minted PLANE_MSG_ID must never inject a newline or a stray glyph — it is
 # refused and disclosed, the send proceeds untagged.
 export PLANE_MSG_ID="not-a-minted-id; rm -rf /"
-run_bot_send "dispatch with a garbage id" "$FIXTURES/input-clean-submit.txt" 2>"$TMPD/bt-stderr.log"
+run_bot_send "dispatch with a garbage id" $(sent_frames "dispatch with a garbage id") 2>"$TMPD/bt-stderr.log"
 cat "$CHUNK_DIR"/[0-9]* > "$TMPD/joined"
 r=$(grep -c "⟦plane:" "$TMPD/joined" || true)
 assert_eq "a non-minted PLANE_MSG_ID appends NO trailer" "0" "$r"
@@ -920,7 +1146,7 @@ unset PLANE_MSG_ID
 # payload. The added embedded-newline guard must refuse it: no trailer, no wire
 # proof, disclosed on stderr.
 export PLANE_MSG_ID="$VALID_MSGID"$'\n'
-run_bot_send "dispatch with a newline-suffixed id" "$FIXTURES/input-clean-submit.txt" 2>"$TMPD/bt-nl.log"
+run_bot_send "dispatch with a newline-suffixed id" $(sent_frames "dispatch with a newline-suffixed id") 2>"$TMPD/bt-nl.log"
 cat "$CHUNK_DIR"/[0-9]* > "$TMPD/joined"
 r=$(grep -c "⟦plane:" "$TMPD/joined" || true)
 assert_eq "a newline-suffixed PLANE_MSG_ID appends NO trailer (F6)" "0" "$r"
@@ -937,7 +1163,7 @@ echo "=== chunk P fold F1: bot_tmux_send records the SENDER's wire proof ==="
 # EXCLUDES the trailer (the receiver hashes arrival-minus-trailer, so both ends
 # must span the same bytes).
 export PLANE_MSG_ID="$VALID_MSGID"
-run_bot_send "[BOTCOMMAND] mgr | task | do the thing" "$FIXTURES/input-clean-submit.txt"
+run_bot_send "[BOTCOMMAND] mgr | task | do the thing" $(sent_frames "$(printf '%s\n%s' "[BOTCOMMAND] mgr | task | do the thing" "⟦plane:${VALID_MSGID}⟧")")
 _expect_safe="$(sanitize_tmux_input "[BOTCOMMAND] mgr | task | do the thing")"
 assert_eq "the wire proof sha is sha256_prefixed(sanitize(payload))" \
     "$(sha256_prefixed "$_expect_safe")" "${PLANE_WIRE_SHA256:-}"
@@ -946,5 +1172,26 @@ assert_eq "the wire proof byte length is len(safe), trailer EXCLUDED" \
 unset PLANE_MSG_ID
 
 echo ""
+echo "=== start-bot: a withheld boot Enter is logged and the boot goes on (#1236) ==="
+
+# start-bot runs under set -e and an error trap, so an unguarded rc 3 would end
+# the boot, with a critical script_error, over a prompt that merely was not
+# submitted. boot_send_settled says so in the startup log and lets the boot go
+# on; any other failure is returned, so it still ends the boot as before.
+blog="$TMPD/startup.log"; : > "$blog"
+r=$(boot_send_settled STARTUP 3 "$blog"; echo "rc=$?")
+assert_eq "rc 3: the boot goes on" "rc=0" "$r"
+r=$(grep -c 'STARTUP — NOT SUBMITTED' "$blog" || true)
+assert_eq "rc 3: the startup log says the prompt was not submitted" "1" "$r"
+r=$(boot_send_settled RESUME 0 "$blog"; echo "rc=$?")
+assert_eq "rc 0: the boot goes on" "rc=0" "$r"
+r=$(boot_send_settled RESUME 1 "$blog"; echo "rc=$?")
+assert_eq "rc 1: returned, so set -e still ends the boot" "rc=1" "$r"
+assert_eq "only the withheld Enter is logged" "1" "$(wc -l < "$blog" | tr -d ' ')"
+# Both boot sends go through it: the property, not one literal line.
+r=$(grep -cE '^[[:space:]]*boot_send_settled (RESUME|STARTUP) "\$_send_rc" "\$LOG"$' \
+    "$SCRIPT_DIR/../claudlobby/_runtime_scripts/start-bot.sh" || true)
+assert_eq "start-bot settles both of its boot sends" "2" "$r"
+
 echo "=== $PASS/$TOTAL passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

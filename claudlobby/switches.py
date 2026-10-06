@@ -644,6 +644,21 @@ SWITCHES: tuple[Switch, ...] = (
              "file records what was running if the host resets (#1686)",
     ),
     Switch(
+        key="public-write-guard",
+        scope=GENERATE,
+        polarity=OPT_IN,
+        carrier=COMPOSE_BOT,
+        config="public_write_guard",
+        why_opt_in="no deployment gate: a composed hook is live on every bot the "
+                   "next generate composes it for (#1310), with no restart in "
+                   "between, and this one refuses GitHub writes, so the manifest "
+                   "is the only place one bot can go first",
+        what="refuse a GitHub-bound write (the gh writers, git commit and push, "
+             "every GitHub MCP writer) that would put a term from the host's "
+             "list (~/.config/claudlobby/public-write-terms) into a PUBLIC "
+             "repository, read live at write time; a private one is untouched",
+    ),
+    Switch(
         key="boot-brief",
         scope=DOOR,
         polarity=OPT_IN,

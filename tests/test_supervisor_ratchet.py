@@ -98,7 +98,7 @@ CALL_PATTERN = re.compile(r"(^|[^A-Za-z_-])(systemctl|launchctl)( |$)")
 
 def _current_counts() -> dict[str, int]:
     """Measured NOW, over every regular file under claudlobby/_runtime_scripts/ recursively, minus
-    the adapter itself -- EVERY scanned file, zero-count ones included. Never
+    the adapter itself and markdown -- EVERY scanned file, zero-count ones included. Never
     read from the allowlist -- the allowlist is the claim being checked, not
     the source of truth for what exists on disk.
 
@@ -115,6 +115,12 @@ def _current_counts() -> dict[str, int]:
             continue
         rel = path.relative_to(REPO_DIR).as_posix()
         if rel == ADAPTER_REL:
+            continue
+        # Markdown is never executed. The scripts' CLAUDE.md (and the AGENTS.md
+        # copy of it) quotes `systemctl --user stop` and the like while
+        # documenting them, and prose naming a call is not a call site. A
+        # script's own comments still count: this skips documents, not comments.
+        if path.suffix == ".md":
             continue
         n = 0
         for line in path.read_text(errors="ignore").splitlines():

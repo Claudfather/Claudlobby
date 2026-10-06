@@ -86,7 +86,10 @@ SHELL_OPERATORS = {"||", "&&", "|", ";", "&", ">", ">>", "<", "2>&1"}
 def _steps(lane):
     workflow, job = lane
     doc = yaml.safe_load((WORKFLOWS / workflow).read_text())
-    return doc["jobs"][job]["steps"]
+    # A job that calls a reusable workflow (`uses:` at job level, as
+    # rollout-check.yml's does) has no steps of its own. The workflow it calls
+    # is a file here, and the finder scans that file's jobs as themselves.
+    return doc["jobs"][job].get("steps", [])
 
 
 def _pytest_argvs(lane):

@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from claudlobby.plane.db import db_path
+from claudlobby.plane.daemon import probe_daemon
 from tests.test_plane_events_door import _serving
 
 REPO = Path(__file__).resolve().parent.parent
@@ -266,8 +267,9 @@ def test_the_wal_size_is_recorded_once_a_plane_exists(tmp_path, *, scratch_plane
         held.commit()
         wal = Path(str(db_path(root)) + "-wal")
         with _serving(root, scratch_plane_env) as socket:
-            # The daemon may extend WAL as it opens; measure only after it
-            # is serving, immediately before the probe's own stat.
+            # Socket publication precedes startup writes; a read-only reply
+            # proves those writes finished before measuring the WAL.
+            assert probe_daemon(socket)
             before = wal.stat().st_size
             assert before > 65536
             assert _run(root, {**env, "PLANE_SOCKET": str(socket)}).returncode == 0

@@ -1,6 +1,6 @@
 # library/skills/
 
-Slash-command-style action packages. Each skill is a directory with a `SKILL.md` (the prompt) and optional helper files. The compositor symlinks selected skills into the bot's `.claude/skills/` directory.
+Slash-command-style action packages. Each skill is a directory with a `SKILL.md` (the prompt) and optional helper files. Activation copies each selected skill into the bot's `.claude/skills/` directory, frozen at that release.
 
 ## What belongs here
 
@@ -92,7 +92,7 @@ Live credentials never belong in CI. If you take the second path, say why in the
 
 ## Composition
 
-Skills are symlinked, not copied — edits to `library/skills/<name>/SKILL.md` propagate live to every bot using that skill. Listed in fleet.yaml: `skills: [dispatch, fleet-status, prs]`.
+In a sealed release, activation copies the selected skills into each bot as frozen bytes; only the development-only composition the test harness uses links them. So an edit to `library/skills/<name>/SKILL.md` reaches a running fleet only through a release, `config plan` and `host activate` (`documentation/fleet-update-lifecycle.md`, "Refreshing a skill's installed copies"). Listed in fleet.yaml: `skills: [dispatch, fleet-status, prs]`.
 
 ## Naming
 

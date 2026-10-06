@@ -55,14 +55,14 @@ Read bot event logs at these natural decision points — not continuously, not o
 
 | Event type | Source | Manager action |
 |------------|--------|---------------|
-| `activity_stuck` | pulse | Bot has made **no tool call** for longer than its threshold AND keepalive has not classified it as idle (no recent `data/.idle` marker). Uses marker-file mtime comparison, not pane regex. Investigate; restart only if `safe-worker-restart` guards pass. |
+| `activity_stuck` | pulse | Bot has made **no tool call** for longer than its threshold AND keepalive has not classified it as idle (no recent `data/.idle` marker). Uses marker-file mtime comparison, not pane regex. Investigate; restart only if `safe-worker-restart` guards pass. A bot whose input box holds text it never submitted gets `input_held` instead (below). |
+| `input_held` | pulse | The bot's **input box holds text that was never submitted** and no turn is running (keepalive's `HELD` verdict, held past `OBSERVABILITY_INPUT_HELD_THRESHOLD`, default 300 s). It is not hung, and **do not restart it**: a restart discards the text. Ask an operator to press **one Enter** in its pane, wait about 10 s, and press **one more** only if the text is still there. If it is still there after that, **stop and look**: a menu or a modal (a safeguards pause) may be taking the Enter, where an Enter picks an option. Never typed text, and do not message the bot first: a message typed into a held box joins the held text. |
 | `overdue_dispatch` | pulse | A task you dispatched to this bot passed its deadline with no terminal linked report. Check the bot (cross-reference `activity_stuck`): if hung, recover it; if mis-scoped or wedged, re-dispatch or reassign; if it needs a human, escalate. Don't silently wait. |
 | `pane_stuck` (>5 min) | pulse | Investigate pane content, restart if confirmed stuck. Note: a live spinner animates the pane, so an animated-but-hung bot shows up as `activity_stuck`, not `pane_stuck`. |
 | `crash_loop` | pulse | The unit is **failing its start over and over** and systemd is already restarting it (`restarts` in the payload is how many times running). **Do NOT restart it** — another restart only zeroes the counter; the unit is enrolled, so `bot start` is not the fix either. The cause is in the bot's `logs/startup.log` (on 2026-09-23 it was a broken `claude` install, printed on every attempt). Fix the cause, or escalate to the human. Before #1769 this read as "boot in flight" indefinitely and paged no one. |
 | `service_down` | pulse | If the bot is meant to run, the selected manager calls `claudlobby --json bot start BOT_ID` with its literal declared ID; inspect state and readiness. |
 | `session_missing` | pulse | If the bot is meant to run, the selected manager calls `claudlobby --json bot start BOT_ID` with its literal declared ID; inspect state and readiness. |
 | `wip_uncommitted` | pulse | Do NOT restart — task is in flight. **Decide on the payload's `paths`, never on `dirty_files`**: a count cannot separate `M lib/foo.py` from `?? .venv/`, and reading it as a count is what made this alert fire forever and get skipped (#1728). `dirty_tracked`/`dirty_untracked` are facts to read, not a filter — an unadded new source file is untracked and is the unrecoverable case. `unchanged_for_s` is a floor measured from the sweep's first sighting; past ~2h on a source path, check for staleness. |
-| `session_event` | vitals | Informational — log awareness of session lifecycle |
 | `audit_selected` | audit | Informational — the rolling sweep picked this repo as stalest. |
 | `audit_dispatched` | audit | Informational — the audit was dispatched into the owner bot's session. |
 | `audit_deferred` | audit | Owner was busy; the sweep skipped this tick and retries next run. No action. |
@@ -80,7 +80,7 @@ session. Do not fall back to a raw launcher.
 
 ## Active Notifications (push)
 
-Reading events at decision points is the default, but silent stalls — the reason `activity_stuck` exists — are exactly the case where a manager *can't* rely on remembering to poll. So `fleet-pulse.sh` also **pushes** a one-line note into your tmux session for high-severity events (`activity_stuck`, `session_missing`, `service_down`, `crash_loop`), debounced to once per episode:
+Reading events at decision points is the default, but silent stalls — the reason `activity_stuck` exists — are exactly the case where a manager *can't* rely on remembering to poll. So `fleet-pulse.sh` also **pushes** a one-line note into your tmux session for the findings that need you (`crash_loop`, `session_missing`, `service_down`, `bridge_down`, `input_held`, `activity_stuck`, `overdue_dispatch`, and `worker_unassigned` where `OBSERVABILITY_UNASSIGNED_CHECK=1` arms it), debounced to once per episode:
 
 ```
 [FLEET-PULSE] <bot> activity_stuck — no tool calls for 11400s while not idle (likely hung mid-task)
@@ -183,13 +183,29 @@ defaults to 50; a nonempty cursor means more matching events remain. Continue
 with `--cursor TOKEN` and the same filters. Set an explicit limit when scanning
 a large window.
 
-**`--critical` also does not cover every actionable type in the decision table above.** It follows
-the Plane severity registry (`session_missing`, `service_down`, `activity_stuck`, `script_error`,
-`overdue_dispatch`, `bridge_down`, `reload_failed`, `restart_failed`, `rc_timeout`, `crash_loop`) that omits
-`pane_stuck`, `wip_uncommitted`, `sweep_repo_unreachable`, and `audit_failed` — all actionable per
-the table above. Same hand-maintained-list gap `brief.py`'s alerts section already discloses
-(#903); this protocol inherits it rather than reintroducing it. Until #903 closes, pair
-`--critical` with either a periodic unfiltered `--limit N` sweep, or explicit per-type calls:
+**`--critical` reads the severity the plane stamped from its registry** (`SYSTEM_EVENT_SEVERITY` in
+`claudlobby/plane/registries.py`), and these are the registry's critical types:
+
+| Critical type | Raised by | Recorded against |
+|---------------|-----------|------------------|
+| `session_missing`, `service_down`, `bridge_down`, `crash_loop`, `activity_stuck`, `input_held`, `overdue_dispatch` | fleet-pulse, per bot | the bot |
+| `rc_timeout` | `start-bot.sh`, once per (re)start | the bot |
+| `script_error` | a runtime script's ERR trap | its bot; the fleet or the host for a script with none |
+| `bridge_down`, `reload_failed`, `restart_failed`, `keepalive_failed`, `alert_target_refused`, `alert_pair_unreachable`, `fleet_alert` | a FLEET ALERT raised with a fleet in scope: a fleet job, a bot's bring-up, `fleet notify --level alert` (`fleet_alert`) | the fleet, read as bot `fleet` |
+| `rolling_restart_stalled` | a FLEET ALERT from `rolling-restart.sh` when a roll halts | the fleet of the shell that ran it, else the host: not the fleet it was rolling (#2112) |
+| `disk_high`, `memory_high`, `undervoltage`, `storage_stall`, `host_health`, `binary_update_failed`, `binary_unrunnable`, `vault_sync_failed` | a FLEET ALERT from a host job, which runs with no fleet | the host, as is any FLEET ALERT raised with no fleet in scope; no fleet's `event list` reads it |
+| `public_write_guard_unarmed` | the public-write guard (opt-in), on each GitHub write it checks while the host has no term list | the bot |
+| `shadow_parity_diverged` | nothing now (the plane cutover's shadow) | kept so its old rows classify |
+
+**Where an alert is recorded decides who can read it (#2109).** Fleet-pulse's escalation and a bot's
+`brief` read bot rows only, so neither shows a fleet- or host-recorded alert; this fleet's `event
+list` shows the fleet's but never the host's. Each FLEET ALERT still reaches a manager's pane and
+Telegram when it is raised: treat a `[FLEET-ALERT]` line like a linked report.
+
+**`--critical` does not cover every actionable type in the decision table above.** `pane_stuck`,
+`wip_uncommitted`, `sweep_repo_unreachable` and `audit_failed` are registered `notice`, and each is
+actionable per the table. Pair `--critical` with either a periodic unfiltered `--limit N` sweep, or
+explicit per-type calls:
 
 ```bash
 for t in pane_stuck wip_uncommitted sweep_repo_unreachable audit_failed; do

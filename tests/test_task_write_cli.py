@@ -222,6 +222,8 @@ def test_withdrawn_assignment_is_absent_from_the_pulse_overdue_read(active, caps
     assert doors.overdue_all(now, max_age=0, fleet="example", root=str(root)).get("worker")
     _call(capsys, root, "task", "withdraw", task_id, "--reason", "Cancelled by manager",
           "--request-id", str(uuid4()))
+    # Read after the withdrawal, even when it crosses a wall-clock second.
+    now = int(datetime.now(timezone.utc).timestamp())
     assert not doors.overdue_all(now, max_age=0, fleet="example", root=str(root)).get("worker")
 
 

@@ -94,8 +94,12 @@ def test_real_native_send_uses_exact_session_and_pane_target():
         subprocess.run([tmux, "-L", socket, "-f", "/dev/null", "new-session",
                         "-d", "-s", "worker-extra", "cat"], env=env, check=True)
         try:
-            subprocess.run([tmux, "-L", socket, "new-session", "-d", "-s", "worker", "cat"],
-                           env=env, check=True)
+            # The worker draws an input box that shows what is typed: the send
+            # presses Enter only once the box shows the payload (#1236), so a
+            # bare `cat` pane would correctly never be submitted to.
+            box = Path(__file__).resolve().parent / "fixtures" / "input-box-stub.py"
+            subprocess.run([tmux, "-L", socket, "new-session", "-d", "-s", "worker",
+                            f"python3 {shlex.quote(str(box))}"], env=env, check=True)
             destination = transport.TransportDestination(root, "fleet", socket, "worker", sockets)
             package = replace(source_package(), native=Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts")
             body = "X" * 1450 + "END_OF_PRIVATE_MESSAGE"

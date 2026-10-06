@@ -45,7 +45,13 @@
 #
 # Job entries accept optional systemd timer knobs: `persistent: true`
 # (catch up missed runs) and `randomized_delay: <seconds>` (start jitter);
-# launchd has no equivalent, so plists ignore them.
+# launchd has no equivalent, so plists ignore them. An interval job's
+# `startup_delay: <seconds>` is its first run, counted from the timer's own
+# start (OnActiveSec=), never from boot (#2059); without one a job waits its
+# interval, at most 900 s. The cadence (OnUnitActiveSec=) counts from the
+# job's last start, which the user manager keeps, so a timer restarted when its
+# job is overdue (as at an activation) runs it at once. launchd has no
+# first-run delay: StartInterval first runs one interval after load.
 #
 # DEFAULTS RULE (ruled 2026-09-07). A job or door is ON by default unless it
 # DELETES DATA, SPENDS MONEY, MUTATES OPERATOR SOURCE, or SENDS OUTBOUND TO
@@ -152,6 +158,7 @@ host:
     plane-host-probe:
       script: "$CLAUDLOBBY_NATIVE_DIR/plane-host-probe.sh"
       interval: 60
+      startup_delay: 75
       type: oneshot
     # Source-currency REPORT (read-only, never pulls): how far each framework
     # checkout -- claudlobby AND its discovered siblings -- is behind its newest
@@ -359,6 +366,7 @@ host:
       enroll: false
       script: "$CLAUDLOBBY_NATIVE_DIR/boot-capture.sh"
       interval: 30
+      startup_delay: 30
       type: oneshot
 
   # Boot policy (design doc 2026-09-20-boot-admission-and-supervision-
@@ -414,6 +422,19 @@ defaults:
       # bot's projects/ checkout at once. A bot with no CLAUDRON_VAULT_PATH
       # gets no decision. Matcher-scoped to Bash; fails open, loudly.
       - command: "$CLAUDLOBBY_NATIVE_DIR/vault-git-guard.sh"
+        matcher: "Bash"
+      - command: "$CLAUDLOBBY_NATIVE_DIR/credential-echo-guard.sh"
+        matcher: "Bash"
+      # No bot signals a process it did not start (#1069). Every bot on a
+      # host runs as one user, and an orphaned job's parent is the user
+      # manager that runs every bot: a kill loop that took a pattern match
+      # and its parent by pid stopped every bot on a host for 15 h (#2158).
+      # Composed warnings did not prevent it, so this is a mechanism. It
+      # refuses pkill and killall, and a kill whose pid is not the caller's
+      # own ($!, a job spec, a pid file), and allows kill -0. It reads only
+      # the command text; the subreaper of #2158 is the backstop.
+      # Matcher-scoped to Bash; fails open, loudly.
+      - command: "$CLAUDLOBBY_NATIVE_DIR/signal-guard.sh"
         matcher: "Bash"
     PostToolUse:
       - command: "$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh"
@@ -490,13 +511,20 @@ defaults:
     dispatch_deadline: 86400
 
   jobs:
+    # After a user-manager start, interval jobs start staggered (startup_delay):
+    # the watchdog first, then the pulse once bots are up, then the producers
+    # that message managers, then housekeeping. Each frequent job sits in its
+    # own 15 s slot of the minute (keepalive :00, check-in :15, pulse :30,
+    # recheck :45), so its later ticks stay apart under AccuracySec=10.
     fleet-pulse:
       script: "$CLAUDLOBBY_NATIVE_DIR/fleet-pulse.sh"
       interval_from: observability.pulse_interval
+      startup_delay: 330
       type: oneshot
     keepalive:
       script: "$CLAUDLOBBY_NATIVE_DIR/keepalive-all.sh"
       interval: 60
+      startup_delay: 60
       type: oneshot
       # The per-bot plane emit is backgrounded and reaped on its own clock;
       # it must outlive the sweep. Without this the supervisor's control-group
@@ -506,6 +534,7 @@ defaults:
     log-rotation:
       script: "$CLAUDLOBBY_NATIVE_DIR/log-rotate-fleet.sh"
       interval: 86400
+      startup_delay: 1230
       type: oneshot
     creds-check:
       script: "$CLAUDLOBBY_NATIVE_DIR/creds-check.sh"
@@ -561,6 +590,7 @@ defaults:
     task-recheck:
       script: "$CLAUDLOBBY_CLI --root $CLAUDLOBBY_ROOT _task-recheck-tick"
       interval: 21600
+      startup_delay: 945
       type: oneshot
     # PR 2 of the manager check-in build (chunk 2): every 15 min, inject
     # `/checkin` into an idle, EQUIPPED manager through the beat
@@ -581,4 +611,5 @@ defaults:
       enroll: false
       script: "$CLAUDLOBBY_NATIVE_DIR/manager-checkin.sh"
       interval: 900
+      startup_delay: 615
       type: oneshot

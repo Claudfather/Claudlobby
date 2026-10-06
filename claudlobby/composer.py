@@ -2299,6 +2299,13 @@ BRIEF_HOOK_TIMEOUT_S = 10
 #: the slot itself is host state under the data root.
 HEAVY_SLOT_HOOK = "$CLAUDLOBBY_NATIVE_DIR/heavy-slot-guard.sh"
 
+#: The public-write guard's PreToolUse hook, composed for a bot that set
+#: `public_write_guard: true` and for no other. It matches Bash and every
+#: GitHub MCP tool. Its script and decider are the selected release's native
+#: code; the host's list, its off switch and its cache are read per use.
+PUBLIC_WRITE_GUARD_HOOK = "$CLAUDLOBBY_NATIVE_DIR/public-write-guard.sh"
+PUBLIC_WRITE_GUARD_MATCHER = "Bash|mcp__.*github.*"
+
 
 @functools.cache
 def _brief_cli_probe() -> tuple[str | None, str]:
@@ -2376,6 +2383,21 @@ def _with_heavy_slot_hook(
     opt in runs no process for it at all."""
     out = {k: list(v) for k, v in hooks.items()}
     out.setdefault("PreToolUse", []).append({"command": HEAVY_SLOT_HOOK, "matcher": "Bash"})
+    return out
+
+
+def _with_public_write_guard_hook(
+    hooks: dict[str, list[dict[str, Any]]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Return a copy of the flat fleet.yaml-shaped hooks with the public-write
+    guard's PreToolUse entry appended, matched on Bash and the GitHub MCP tools.
+
+    Composed only for a bot whose ``public_write_guard`` is true, for the same
+    reason as the heavy-job slot: a composed hook is live on every bot the
+    moment ``generate`` writes it (#1310), so the manifest key is the canary."""
+    out = {k: list(v) for k, v in hooks.items()}
+    out.setdefault("PreToolUse", []).append(
+        {"command": PUBLIC_WRITE_GUARD_HOOK, "matcher": PUBLIC_WRITE_GUARD_MATCHER})
     return out
 
 
@@ -2829,6 +2851,9 @@ def compose_settings_local(
 
     settings: dict = {
         "autoMemoryDirectory": memory_dir,
+        # The data root's developer guide is outside the bot's sealed release.
+        # Exclude only that file, preserving bot and project instructions (#2057).
+        "claudeMdExcludes": [str(paths.root / "CLAUDE.md")],
     }
 
     # Build permissions block — layered composition
@@ -3076,6 +3101,8 @@ def compose_settings_local(
         )
     if bot.heavy_slot:
         bot_hooks = _with_heavy_slot_hook(bot_hooks)
+    if bot.public_write_guard:
+        bot_hooks = _with_public_write_guard_hook(bot_hooks)
     hooks = _compose_hooks(bot_hooks)
     # No vault, no hooks: an explicit `claudron_session_loop: true` with no
     # `claudron_vault_path` has no address to render. The engine refuses to
@@ -3979,11 +4006,19 @@ def _resolve_timer_schedule(timer_cfg: dict, merged_defaults: dict) -> dict:
     """Resolve timer scheduling from config.
 
     Returns a dict describing the schedule type:
-      {"type": "interval", "seconds": 300}
+      {"type": "interval", "seconds": 300, "startup": 300}
       {"type": "calendar", "expression": "*-*-* 06:00:00"}
+
+    ``startup`` is the first run's delay, counted from the timer's own start
+    (OnActiveSec=): the job's ``startup_delay``, else its interval up to 900 s.
+    A past OnBootSec= or OnStartupSec= point fires a timer at once
+    (systemd.timer(5)), and an activation restarts every timer. OnUnitActiveSec=
+    counts from the service's last start, which the manager keeps across a timer
+    restart, so a job overdue on its interval still runs at once.
     """
     if "schedule" in timer_cfg:
         return {"type": "calendar", "expression": timer_cfg["schedule"]}
+    seconds = int(timer_cfg.get("interval", 300))
     if "interval_from" in timer_cfg:
         ref = timer_cfg["interval_from"]
         section, _, field = ref.partition(".")
@@ -3991,8 +4026,10 @@ def _resolve_timer_schedule(timer_cfg: dict, merged_defaults: dict) -> dict:
             obs = merged_defaults.get("observability", {})
             val = obs.get(field)
             if val is not None:
-                return {"type": "interval", "seconds": int(val)}
-    return {"type": "interval", "seconds": timer_cfg.get("interval", 300)}
+                seconds = int(val)
+    startup = timer_cfg.get("startup_delay")
+    startup = min(seconds, 900) if startup is None else int(startup)
+    return {"type": "interval", "seconds": seconds, "startup": startup}
 
 
 # The system.yaml fleet job whose script reads the FLEET_PULSE_* knobs (#1120).
@@ -4298,7 +4335,7 @@ def _write_timer_units(
             [
                 "",
                 "[Timer]",
-                f"OnBootSec={secs}",
+                f"OnActiveSec={sched['startup']}",
                 f"OnUnitActiveSec={secs}",
                 "AccuracySec=10",
             ]

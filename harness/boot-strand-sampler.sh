@@ -10,17 +10,23 @@
 #
 # Per-boot classification, three independent evidence sources:
 #   clean  — the session transcript (CLAUDE_CONFIG_DIR/projects/*/*.jsonl)
-#            contains a USER-role record carrying the probe marker: the prompt
-#            became a submitted message. Ground truth independent of pane
-#            geometry, so a transcript echo can never fake a verdict.
+#            contains a USER-role record whose typed text carries the probe
+#            marker, or a queued_command attachment carrying it (how a prompt
+#            typed mid-turn reaches the running turn): the prompt became a
+#            submitted message. Ground truth independent of pane geometry, so
+#            a transcript echo can never fake a verdict.
 #   strand — classification deadline passed with no submitted record AND the
 #            input box still holds the payload, judged by pane_holds_unsubmitted
 #            — the #837 primitive itself: anchored to the LAST prompt-glyph
 #            line (a submitted command is echoed into the transcript with the
 #            same glyph, so first-match reads a healthy pane as stranded), with
 #            the collapsed-paste placeholder branch.
-#   other  — neither (session died, auth wall, start-bot failure). Counted and
-#            reported separately; NEVER folded into clean.
+#   other  — neither (session died, auth wall, start-bot failure; a prompt the
+#            TUI queued but never delivered by the deadline is
+#            other:queued_undelivered; under --resume, a boot whose resume
+#            command was never injected is other:resume_not_injected, since it
+#            does not test the resume boot). Counted and reported separately;
+#            NEVER folded into clean.
 # A clean boot whose ledger gained a send_retry event is counted clean_via_retry
 # — the #837 retry visibly doing its job on a send that would have stranded.
 #
@@ -76,6 +82,8 @@
 #
 # Usage: boot-strand-sampler.sh [-n N] [--arms "A B C"] [--seed K]
 #                               [--deadline SECS] [--load N] [--keep]
+#                               [--no-channels] [--model M] [--resume]
+#                               [--minimal-plugins]
 #   -n N             sample size, default 20 (a warm-up boot runs first and is
 #                    reported separately, never counted). With --arms this is
 #                    the number of BLOCKS, so the run is N x len(arms) boots
@@ -108,6 +116,33 @@
 #                    crash of this script nor a pattern match on its own command
 #                    line can leave the host loaded.
 #   --keep           keep $ROOT artifacts (secrets are scrubbed either way)
+#   --no-channels    compose the probe with `channels: []` and REFUSE to boot if
+#                    its bot.conf still carries --channels. The default probe
+#                    starts the Telegram channel with no token, and a channel a
+#                    bot cannot authenticate poisons the host-global MCP auth
+#                    cache every bot reads (five bots Telegram-dark on
+#                    2026-08-25, from another canary). Parity cost, printed in
+#                    the run: the channel's MCP server no longer spawns.
+#   --model M        the probe's model (`model:` in its fleet.yaml), e.g. haiku.
+#                    The measurement is the pane, and every clean boot spends a
+#                    turn on the account the probe borrows.
+#   --resume         seed a FRESH session handoff before every boot instead of
+#                    deleting it, so start-bot takes the RESUME path: it sends
+#                    the resume command, then types STARTUP_PROMPT into the turn
+#                    that command starts — the boot order behind held startup
+#                    prompts in the field. Each boot then spends a resume turn
+#                    as well, so give it a longer --deadline (240 is ample for
+#                    haiku). A boot whose startup.log shows no injected resume
+#                    command is other:resume_not_injected.
+#   --minimal-plugins  copy only what the probe loads from the host plugin cache
+#                    (its registry files, marketplaces, and the cache directory
+#                    of each enabled plugin) instead of the whole cache, whose
+#                    copy can by itself load an SD-card host past a stop. The
+#                    run prints the copy's digest, so two runs can show they
+#                    started from the same copy, and its first boot prints its
+#                    fingerprint (initial skills, SessionStart hooks, MCP
+#                    servers): compare it with a full-cache run's to show the
+#                    boot work is unchanged.
 # Env: CLAUDLOBBY_SRC (checkout under test, default: this script's repo),
 #      CLAUDE_BIN (default: real `claude` — the point), SAMPLER_MEM_FLOOR_MB
 #      (default 1200; refuses to run on a starved host, which would both risk
@@ -178,6 +213,13 @@ ARMS=""
 # the control for "instrumenting a race can move it". Same shuffle, same
 # blocking, same per-boot in-force recording -- only the knob differs.
 ARM_AXIS="settle"
+# --no-channels and --model: what the probe is composed with (see usage).
+NO_CHANNELS=""
+PROBE_MODEL=""
+# --resume: seed a fresh handoff before each boot (see usage).
+RESUME=""
+# --minimal-plugins: copy only the plugins the probe loads (see usage).
+MINIMAL_PLUGINS=""
 SEED=""
 
 # PIDs of the synthetic-load burners, so teardown targets what this run started
@@ -233,25 +275,135 @@ list_descendants() {
     return 0
 }
 
-# submitted_evidence <config_dir> <newer_than_file> <marker>
-# rc 0 iff a session transcript newer than the boot marker holds a USER-role
-# record containing <marker> — the prompt was genuinely submitted. Assistant
-# records are excluded so a model echo of the marker can never count.
+# _transcript_hit <config_dir> <newer_than_file> <marker> <jq_filter>
+# rc 0 iff a session transcript newer than the boot marker holds a record that
+# <jq_filter> maps to a string containing <marker>. jq reports a record its
+# filter cannot index and goes on to the next, so one record of an unexpected
+# shape cannot hide a later one.
 # Glob + builtin -nt, not find(1): this runs every poll tick, and fork churn
 # during the boot under measurement is the perturbation lib-common warns about.
 # The jq re-parse per tick is an accepted O(file-size x ticks) bound — offset
 # bookkeeping is not worth it under a deadline-bounded loop.
-submitted_evidence() {
-    local cfg="$1" newer="$2" marker="$3" f hit=""
+_transcript_hit() {
+    local cfg="$1" newer="$2" marker="$3" filter="$4" f hit=""
     for f in "$cfg"/projects/*/*.jsonl; do
         [ -f "$f" ] && [ "$f" -nt "$newer" ] || continue
         grep -q -- "$marker" "$f" 2>/dev/null || continue
         hit="$(jq -rc --arg m "$marker" \
-            'select(.type=="user") | (.message.content | tostring) | select(contains($m)) | "hit"' \
+            "($filter) | select(type == \"string\" and contains(\$m)) | \"hit\"" \
             "$f" 2>/dev/null | head -1)" || true
         [ "$hit" = "hit" ] && return 0
     done
     return 1
+}
+
+# submitted_evidence <config_dir> <newer_than_file> <marker>
+# rc 0 iff the prompt reached the model: a USER-role record whose typed text
+# carries <marker>, or a queued_command attachment carrying it (a prompt typed
+# mid-turn reaches the running turn that way, with no user record; claude
+# 2.1.285). Tool results are not typed text: a --resume boot's resume turn runs
+# tools, and their output could carry anything. Assistant records never count,
+# so a model echo of the marker cannot.
+submitted_evidence() {
+    _transcript_hit "$1" "$2" "$3" \
+        'if .type == "user" then
+             ((.message.content // "") | if type == "string" then .
+              elif type == "array" then map(select(type == "object" and .type == "text") | .text // "") | join("\n")
+              else "" end)
+         elif .type == "attachment" and .attachment.type == "queued_command" then (.attachment.prompt | tostring)
+         else empty end'
+}
+
+# queued_evidence <config_dir> <newer_than_file> <marker>
+# rc 0 iff a queue-operation ENQUEUE carries <marker>: the TUI took the Enter and
+# queued the prompt behind a running turn. Not a submission by itself
+# (submitted_evidence decides that); a prompt queued and still undelivered at
+# the deadline is other:queued_undelivered.
+queued_evidence() {
+    _transcript_hit "$1" "$2" "$3" \
+        'if .type == "queue-operation" and .operation == "enqueue" then (.content | tostring) else empty end'
+}
+
+# seed_resume_handoff <bot_dir> — a fresh session handoff for a --resume boot.
+# Its last_updated is now, which start-bot's age gate (should_resume_session)
+# reads, so start-bot sends the resume command and then types STARTUP_PROMPT
+# into the turn that command starts. It never carries the probe marker: the
+# resume turn reads this file, and a tool result must not look like the prompt.
+# Written to a temp file and moved, so start-bot never reads half of it.
+seed_resume_handoff() {
+    local bot_dir="$1" now
+    now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    mkdir -p "$bot_dir/.claude" || return 1
+    printf -- '---\ncwd: %s\nlast_updated: %s\nschema_version: 2\n---\n\n## Next Steps\n- %s — Nothing to resume: this probe session exists to measure how its startup prompt is delivered.\n' \
+        "$bot_dir" "$now" "$now" > "$bot_dir/.claude/session.md.tmp" || return 1
+    mv -f "$bot_dir/.claude/session.md.tmp" "$bot_dir/.claude/session.md"
+}
+
+# copy_minimal_plugins <host_plugins> <dest> <settings_local_json>
+# The probe's plugin dir with only what it loads: every entry of the host
+# cache except cache/, then the cache directory of each plugin the composed
+# settings enable, at the install path installed_plugins.json records. The full
+# cache also holds installed plugins the probe never enables, and older
+# versions; on the reference Pi it is 11,839 files (95 MB), and on an SD card
+# its copy alone moves load1 by 10. An enabled plugin with no install, or one
+# installed outside cache/, is named on stdout and not copied, as a full copy
+# would not have it either.
+copy_minimal_plugins() {
+    local src="$1" dst="$2" settings="$3" entry keys key path rel
+    [ -f "$src/installed_plugins.json" ] && [ -f "$settings" ] || return 1
+    mkdir -p "$dst" || return 1
+    for entry in "$src"/* "$src"/.[!.]*; do
+        [ -e "$entry" ] || continue
+        [ "${entry##*/}" = cache ] && continue
+        cp -a "$entry" "$dst/" || return 1
+    done
+    keys="$(jq -r '.enabledPlugins // {} | to_entries[] | select(.value == true) | .key' "$settings")" || return 1
+    while IFS= read -r key; do
+        [ -n "$key" ] || continue
+        path="$(jq -r --arg k "$key" \
+            '.plugins[$k] | (if type == "array" then .[0] else . end) | .installPath // empty' \
+            "$src/installed_plugins.json")" || return 1
+        case "$path" in
+            "$src"/cache/?*) ;;
+            *) printf 'minimal plugins: %s not copied (installed at %s)\n' "$key" "${path:-nowhere}"; continue ;;
+        esac
+        rel="${path#"$src"/}"
+        mkdir -p "$dst/${rel%/*}" && cp -a "$path" "$dst/$rel" || return 1
+    done <<<"$keys"
+}
+
+# tree_digest <dir> — one checksum over every file's checksum, size and path
+# under <dir> (POSIX cksum), so two runs can show they started from the same
+# plugin copy.
+tree_digest() {
+    (cd "$1" && find . -type f -exec cksum {} + | LC_ALL=C sort | cksum | cut -d' ' -f1)
+}
+
+# boot_fingerprint <config_dir> <newer_than_file> — what a boot loaded and ran
+# at session start, one sorted line each, from the transcript newer than the
+# boot marker: the initial skill listing, every SessionStart hook record (its
+# outcome, name and command, which names the plugin root unexpanded), and the
+# MCP servers announced. Two boots whose fingerprints are equal loaded the same
+# plugins and ran the same boot hooks, wherever their files were copied from.
+boot_fingerprint() {
+    local cfg="$1" newer="$2" f
+    for f in "$cfg"/projects/*/*.jsonl; do
+        [ -f "$f" ] && [ "$f" -nt "$newer" ] || continue
+        jq -r 'select(.type == "attachment") | .attachment |
+            if .type == "skill_listing" and (.isInitial // false) then (.names // [])[] | "skill " + .
+            elif (.type // "" | startswith("hook_")) and .hookEvent == "SessionStart" then
+                "hook " + .type + " " + (.hookName // "?") + " " + (.command // "?" | tostring)
+            elif .type == "mcp_instructions_delta" then (.addedNames // [])[] | "mcp " + .
+            else empty end' "$f" 2>/dev/null
+    done | LC_ALL=C sort -u
+}
+
+# resume_injected <startup_log> <byte_offset> — rc 0 iff start-bot logged, past
+# <byte_offset> (this boot's part of the log), the line it writes when it
+# injects the resume command.
+resume_injected() {
+    [ -f "$1" ] || return 1
+    tail -c +"$(($2 + 1))" "$1" 2>/dev/null | grep -q -F 'RESUME — injecting'
 }
 
 # final_verdict <pane_text> <probe> — the no-submission-evidence outcomes.
@@ -346,7 +498,10 @@ count_send_retries() {
 # in start-bot.sh starts honoring it with no sampler change — but INERT today:
 # start-bot.sh arms its own value at both pane_send_verified call sites
 # (start-bot.sh:371,381 as of #1109), so a forwarded override cannot reach the
-# injection path. knob_disclosure says so in the output.
+# injection path. knob_disclosure says so in the output. PANE_SEND_SHOWN_TICKS
+# (#1236) bounds the wait for the box to show the payload before the Enter, the
+# step a boot strand is now decided in, and PANE_SEND_ENTER_TRIES how many
+# Enters a payload still in the box after it gets.
 #
 # Unforwarded — no pre-registered ladder sweeps them. Set in the caller env
 # they are dropped by env -i, and knob_disclosure prints them as SCRUBBED
@@ -357,9 +512,12 @@ count_send_retries() {
 # whole boot. Forwarding them here would put a second, unpinned arm axis into a
 # design whose arm identity is already pre-registered. PANE_RECEIPT_WAIT_S
 # (#1099) is here because no boot send calls the receipt gate: it is
-# dispatch-task.sh's.
-_FORWARDED_PANE_KNOBS="PANE_SEND_VERIFY_TICKS PANE_SEND_SETTLE_S PANE_READY_TICKS PANE_VERIFY_TRACE"
-_UNFORWARDED_PANE_KNOBS="PANE_READY_POLL_S PANE_RECOVER_TICKS PANE_SEND_CHUNK_BYTES PANE_SEND_CHUNK_SETTLE_S PANE_RECEIPT_WAIT_S"
+# dispatch-task.sh's. The #2036 send-lock knobs are here too: the lock wait
+# only ever runs when another sender holds the pane, which a boot sample does
+# not arrange, and PANE_SEND_LOCK_DIR is a test seam that a measurement must
+# never move (senders that disagree on it do not exclude each other).
+_FORWARDED_PANE_KNOBS="PANE_SEND_VERIFY_TICKS PANE_SEND_SETTLE_S PANE_SEND_SHOWN_TICKS PANE_SEND_ENTER_TRIES PANE_READY_TICKS PANE_VERIFY_TRACE"
+_UNFORWARDED_PANE_KNOBS="PANE_READY_POLL_S PANE_RECOVER_TICKS PANE_SEND_CHUNK_BYTES PANE_SEND_CHUNK_SETTLE_S PANE_RECEIPT_WAIT_S PANE_SEND_LOCK_WAIT_S PANE_SEND_LOCK_DIR"
 
 # Field separator for the fate records below: ASCII unit separator, NOT a tab.
 # Tab is an IFS-whitespace character, so `IFS=<tab> read` collapses adjacent
@@ -399,6 +557,8 @@ pane_knob_fate() {
         PANE_READY_TICKS)       inforce="$_PANE_READY_TICKS_BOOT"; src="boot-armed" ;;
         PANE_SEND_SETTLE_S)     default_val="$_PANE_SEND_SETTLE_DEFAULT" ;;
         PANE_SEND_VERIFY_TICKS) default_val="$_PANE_SEND_VERIFY_TICKS_DEFAULT" ;;
+        PANE_SEND_SHOWN_TICKS)  default_val="$_PANE_SEND_SHOWN_TICKS_DEFAULT" ;;
+        PANE_SEND_ENTER_TRIES)  default_val="$_PANE_SEND_ENTER_TRIES_DEFAULT" ;;
         # #1236. This knob has no default VALUE: unset IS off, and off is the
         # production condition. Recording it as `default` would assert a
         # fallback constant lib-common does not have, and
@@ -664,6 +824,10 @@ main() {
             --deadline) DEADLINE="${2:?--deadline needs a value}"; shift 2 ;;
             --load)     LOAD_BURNERS="${2:?--load needs a value}"; shift 2 ;;
             --keep)     KEEP=1; shift ;;
+            --no-channels) NO_CHANNELS=1; shift ;;
+            --model)    PROBE_MODEL="${2:?--model needs a value}"; shift 2 ;;
+            --resume)   RESUME=1; shift ;;
+            --minimal-plugins) MINIMAL_PLUGINS=1; shift ;;
             -h|--help)  usage; exit 0 ;;
             *)          printf 'unknown arg: %s\n' "$1" >&2; usage >&2; exit 1 ;;
         esac
@@ -821,6 +985,15 @@ main() {
         pat_note="github MCP token: present"
     fi
 
+    # The channel plugin production pins (the claudfather fork), NOT the
+    # config-level default: the bridge under test must be the bridge the fleet
+    # runs. --no-channels declares the empty list, because omitting the key is
+    # not opting out (the composer defaults a bot to a channel).
+    local channels_yaml='      channels:
+        - "plugin:telegram@claudfather-plugins"'
+    [ -z "$NO_CHANNELS" ] || channels_yaml='      channels: []'
+    local model_yaml=""
+    [ -z "$PROBE_MODEL" ] || model_yaml="      model: $PROBE_MODEL"
     cat > "$ROOT/fleet.yaml" <<YAML
 fleet:
   name: $PROBE_FLEET
@@ -838,11 +1011,8 @@ fleet:
         - software-engineering
       mcp:
         - github
-      # The channel plugin production pins (the claudfather fork), NOT the
-      # config-level default — the bridge under test must be the bridge the
-      # fleet runs.
-      channels:
-        - "plugin:telegram@claudfather-plugins"
+$channels_yaml
+$model_yaml
       telegram:
         handle: bsprobe_probe_bot
       startup_prompt: "$STARTUP_PROMPT_TEXT"
@@ -867,8 +1037,20 @@ YAML
     # never the edit).
     harness_check "composer pinned CLAUDE_CONFIG_DIR at the throwaway dir" \
         "$([ "$(bot_conf_get "$BOT_DIR" CLAUDE_CONFIG_DIR "")" = "$CONFIG_DIR" ] && echo yes || echo no)"
-    harness_check "composed CLAUDE_FLAGS carry --channels (telegram plugin will spawn)" \
-        "$(bot_conf_get "$BOT_DIR" CLAUDE_FLAGS "" | grep -q -- '--channels' && echo yes || echo no)"
+    # The composed file is checked, never the declaration: under --no-channels
+    # a --channels flag here would start the unauthenticated channel the option
+    # exists to keep off the host, so it refuses before boot 1.
+    if [ -n "$NO_CHANNELS" ]; then
+        harness_check "--no-channels: composed CLAUDE_FLAGS carry NO --channels (no unauthenticated channel)" \
+            "$(bot_conf_get "$BOT_DIR" CLAUDE_FLAGS "" | grep -q -- '--channels' && echo no || echo yes)"
+    else
+        harness_check "composed CLAUDE_FLAGS carry --channels (telegram plugin will spawn)" \
+            "$(bot_conf_get "$BOT_DIR" CLAUDE_FLAGS "" | grep -q -- '--channels' && echo yes || echo no)"
+    fi
+    if [ -n "$PROBE_MODEL" ]; then
+        harness_check "--model: composed CLAUDE_FLAGS carry --model $PROBE_MODEL" \
+            "$(bot_conf_get "$BOT_DIR" CLAUDE_FLAGS "" | grep -qF -- "--model $PROBE_MODEL" && echo yes || echo no)"
+    fi
     harness_check "composed STARTUP_PROMPT carries the probe marker" \
         "$(bot_conf_get "$BOT_DIR" STARTUP_PROMPT "" | grep -qF "$MARKER" && echo yes || echo no)"
     harness_check "probe declares EXPECT_NO_TOKEN=1 (tokenless canary, no readiness burn)" \
@@ -908,7 +1090,11 @@ YAML
     # installed plugins, so a cold marketplace clone per boot would sample a
     # different (slower) condition — and versions match production exactly.
     local plugins_note="plugins: cold (no host cache found — warm-up boot installs)"
-    if [ -d "$HOST_PLUGINS" ]; then
+    if [ -d "$HOST_PLUGINS" ] && [ -n "$MINIMAL_PLUGINS" ]; then
+        copy_minimal_plugins "$HOST_PLUGINS" "$CONFIG_DIR/plugins" "$BOT_DIR/.claude/settings.local.json" \
+            || { printf 'ERROR: the minimal plugin copy failed\n'; exit 1; }
+        plugins_note="plugins: minimal copy from host cache, $(find "$CONFIG_DIR/plugins" -type f | wc -l | tr -d ' ') files, digest $(tree_digest "$CONFIG_DIR/plugins") (the enabled plugins: $(jq -r '[.enabledPlugins // {} | to_entries[] | select(.value == true) | .key] | join(", ")' "$BOT_DIR/.claude/settings.local.json"))"
+    elif [ -d "$HOST_PLUGINS" ]; then
         cp -a "$HOST_PLUGINS" "$CONFIG_DIR/plugins"
         plugins_note="plugins: warm-copied from host cache"
     fi
@@ -917,6 +1103,17 @@ YAML
     bot_tmux "$SOCKET" kill-server 2>/dev/null || true
 
     printf 'probe composed. %s; %s\n' "$plugins_note" "$pat_note"
+    if [ -n "$NO_CHANNELS" ]; then
+        printf 'channels: NONE (--no-channels): no channel MCP server spawns; parity reduced, by choice\n'
+    else
+        printf 'channels: telegram, tokenless (EXPECT_NO_TOKEN=1)\n'
+    fi
+    printf 'model: %s\n' "${PROBE_MODEL:-composer default}"
+    if [ -n "$RESUME" ]; then
+        printf 'boot path: RESUME (--resume): a fresh handoff is seeded before each boot\n'
+    else
+        printf 'boot path: clean start (any handoff is removed before each boot)\n'
+    fi
     # Sample size is the plan minus its single warm-up, so the banner cannot
     # drift from what actually runs.
     local plan_n=${#_BOOT_PLAN[@]}
@@ -944,11 +1141,12 @@ YAML
         printf 'load arm: %d burners, loadavg now %s (contended boot — see divergence 2)\n' \
             "$LOAD_BURNERS" "$(loadavg_1m)"
     else
-        printf 'load arm: OFF — this samples the IDLE boot, which is not the condition that strands (#933)\n'
+        printf 'load arm: OFF (no burners); loadavg now %s: the boots sample whatever the host carries, recorded per boot\n' \
+            "$(loadavg_1m)"
     fi
 
     # ── boot loop ─────────────────────────────────────────────────────────────
-    local i=0 kind session outcome t_startbot t_submit rc pane pids p
+    local i=0 kind session outcome t_startbot t_submit rc pane pids p log_off
     local events_before events_after="" retry_fired parity boot_art
     local glyph_at_inject t_glyph boot_la
     local entry blk pos arm ord
@@ -961,8 +1159,21 @@ YAML
 
         # Per-boot resets: a session handoff written by a prior probe session
         # would flip the next boot onto the RESUME path and change the condition
-        # mid-sample.
-        rm -f "$BOT_DIR/.claude/session.md" 2>/dev/null || true
+        # mid-sample. Under --resume that path IS the condition, so every boot
+        # gets a freshly seeded handoff instead of whatever the last one left;
+        # a boot that cannot be seeded starts clean and is classified
+        # other:resume_not_injected below, never as a resume boot.
+        if [ -n "$RESUME" ]; then
+            seed_resume_handoff "$BOT_DIR" || {
+                rm -f "$BOT_DIR/.claude/session.md" 2>/dev/null || true
+                printf 'boot %02d: could not seed the resume handoff\n' "$i" >&2
+            }
+        else
+            rm -f "$BOT_DIR/.claude/session.md" 2>/dev/null || true
+        fi
+        # This boot's part of startup.log begins here (resume_injected).
+        log_off=0
+        [ -f "$BOT_DIR/logs/startup.log" ] && log_off="$(wc -c < "$BOT_DIR/logs/startup.log" | tr -d ' ')"
         outcome=""; t_submit=""; pane=""; pids=""; glyph_at_inject=""; t_glyph=""
         # Carry the ledger count forward — boot i's "before" is boot i-1's
         # "after"; only the first boot scans cold.
@@ -1064,8 +1275,33 @@ YAML
             pane="$(bot_tmux "$SOCKET" capture-pane -t "$session" -p 2>/dev/null || true)"
             printf '%s\n' "$pane" > "$boot_art/pane.txt"
             if [ -z "$outcome" ]; then
-                outcome="$(final_verdict "$pane" "$PROBE")"
+                # An enqueue is the TUI taking the Enter: the prompt left the
+                # box for the queue, so it is not held there, but nothing shows
+                # it reached the model either.
+                if queued_evidence "$CONFIG_DIR" "$ROOT/.boot-marker" "$MARKER"; then
+                    outcome="other:queued_undelivered"
+                else
+                    outcome="$(final_verdict "$pane" "$PROBE")"
+                fi
             fi
+        fi
+        # A --resume boot whose resume command was never injected did not test
+        # the resume boot, whatever became of its startup prompt.
+        if [ -n "$RESUME" ] && [ "$rc" -eq 0 ] \
+            && ! resume_injected "$BOT_DIR/logs/startup.log" "$log_off"; then
+            outcome="other:resume_not_injected"
+        fi
+        # The run's first boot shows what it loaded, so a minimal-copy run can
+        # be compared with a full-cache one (see --minimal-plugins).
+        if [ "$i" -eq 0 ]; then
+            boot_fingerprint "$CONFIG_DIR" "$ROOT/.boot-marker" > "$boot_art/fingerprint.txt" || true
+            printf 'boot 00 fingerprint: %s, %s lines (%s skills, %s SessionStart hook records, %s MCP servers)\n' \
+                "$(sha256_hex32 "$(cat "$boot_art/fingerprint.txt")" | cut -c1-12)" \
+                "$(wc -l < "$boot_art/fingerprint.txt" | tr -d ' ')" \
+                "$(grep -c '^skill ' "$boot_art/fingerprint.txt" || true)" \
+                "$(grep -c '^hook ' "$boot_art/fingerprint.txt" || true)" \
+                "$(grep -c '^mcp ' "$boot_art/fingerprint.txt" || true)"
+            sed 's/^/  fp /' "$boot_art/fingerprint.txt"
         fi
 
         # Per-boot evidence beyond the verdict: did the #837 retry fire, and
@@ -1093,8 +1329,11 @@ YAML
             --arg burners "$LOAD_BURNERS" --arg la "${boot_la:-}" \
             --arg blk "${blk:-}" --arg pos "${pos:-}" \
             --arg ord "${ord:-}" --arg seed "${SEED:-}" \
+            --arg resume "${RESUME:-}" --arg minimal "${MINIMAL_PLUGINS:-}" \
             --argjson arm "${_ARM_KNOBS_JSON:-null}" \
             '{i: ($i|tonumber), kind: $kind, outcome: $outcome,
+              resume: ($resume != ""),
+              plugins_copy: (if $minimal != "" then "minimal" else "full" end),
               t_startbot_s: ($t_startbot|tonumber),
               t_submit_s: (if $t_submit == "" then null else ($t_submit|tonumber) end),
               retry_fired: (if $retry == "" then null else ($retry|tonumber) end), parity_procs: $parity,

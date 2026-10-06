@@ -17,7 +17,7 @@ from .activation_state import ActivationError, read_selection
 from .context import Context
 from .message_transport import TransportDestination
 from .operation_context import resolve_operation_scope
-from .request_receipts import MessageRouteBinding, NativeDestination
+from .request_receipts import MessageRouteBinding, NativeDestination, RecordedReplyBinding
 from .resources import PackageResources
 from .supervision import build_supervision_spec
 from .task_operations import TaskActor, TaskOperationContext
@@ -159,3 +159,61 @@ def resolve_message_route(target: str, *, root: Path | None = None, fleet: str |
                         selected_ids["fleet_uid"], peer_ids["fleet_uid"], caller,
                         recipient, manager, _transport(peer, bot_id),
                         _transport(selected, manager_id))
+
+
+@dataclass(frozen=True)
+class HumanReplyRoute:
+    """A generated bot answering its recorded human sender (#2068). There is no
+    native destination, so nothing on this route is sent, only recorded."""
+
+    origin: Context
+    selected: Context
+    activation_id: str
+    plan_id: str
+    release_id: str
+    host_uid: str
+    caller_fleet_uid: str
+    selected_fleet_uid: str
+    caller: TaskActor
+    peer: TaskActor
+
+    def receipt_binding(self, parent_message_id: str) -> RecordedReplyBinding:
+        return RecordedReplyBinding(
+            activation_id=self.activation_id, plan_id=self.plan_id,
+            release_id=self.release_id, caller_fleet_uid=self.caller_fleet_uid,
+            caller_alias=self.caller.alias, recipient_alias=self.peer.alias,
+            parent_message_id=parent_message_id)
+
+
+def resolve_human_reply_route(sender: TaskActor, *, root: Path | None = None,
+                              fleet: str | None = None,
+                              package: PackageResources | None = None) -> HumanReplyRoute:
+    """Freeze a generated bot's answer to the recorded human `sender`, without Plane.
+
+    Only a generated bot answers, inside its own fleet. The human is the
+    parent's recorded sender, never a target the caller names, so `message
+    send` to a human stays refused.
+    """
+    selected, origin = resolve_operation_scope(root=root, fleet=fleet, package=package)
+    if origin is None or origin.bot_id is None:
+        raise MessageContextError("only a generated bot answers a human sender")
+    if (origin.paths.root != selected.paths.root or origin.paths.package != selected.paths.package
+            or origin.fleet.name != selected.fleet.name):
+        raise MessageContextError("a reply to a human stays in the caller's own fleet")
+    if (not isinstance(sender, TaskActor) or not isinstance(sender.alias, str)
+            or not re.fullmatch(r"human:[^\s:/]+", sender.alias)):
+        raise MessageContextError("reply recipient is not a recorded human sender")
+    selection = read_selection(selected.paths.root)
+    if selection is None:
+        raise ActivationError("host has no active configuration")
+    ids = read_selected_identity_bindings(selected.paths.root, selected.fleet.name,
+                                          package=selected.paths.package)
+    if (ids["manager"] != selected.fleet.manager or set(ids["bots"]) != set(selected.fleet.bots)
+            or origin.bot_id not in ids["bots"]):
+        raise MessageContextError(f"active identity bindings differ from frozen fleet {selected.fleet.name}")
+    if read_selection(selected.paths.root) != selection:
+        raise MessageContextError("active host selection changed during message resolution")
+    caller = TaskActor(ids["bots"][origin.bot_id], f"bot:{origin.fleet.name}/{origin.bot_id}")
+    return HumanReplyRoute(origin, selected, selection["activation_id"], selection["plan_id"],
+                           selection["release_id"], ids["host_uid"], ids["fleet_uid"],
+                           ids["fleet_uid"], caller, sender)

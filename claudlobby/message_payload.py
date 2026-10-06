@@ -17,7 +17,7 @@ from .plane import PLANE_SCHEMA_VERSION
 from .plane.contracts import cap_body
 from .plane.ids import ID_PATTERNS
 from .plane.registries import cap_for
-from .request_receipts import MessageRouteBinding, RequestIntent, TransportObservation
+from .request_receipts import MessageRouteBinding, RecordedReplyBinding, RequestIntent, TransportObservation
 
 
 MESSAGE_EMITTER = "claudlobby.message.v1"
@@ -77,8 +77,10 @@ def _request_id(value: str) -> None:
         raise MessagePayloadError("canonical request UUID required") from exc
 
 
-def _ordinary_intent(intent: RequestIntent) -> MessageRouteBinding:
-    if not isinstance(intent, RequestIntent) or not isinstance(intent.route, MessageRouteBinding):
+def _ordinary_intent(intent: RequestIntent) -> MessageRouteBinding | RecordedReplyBinding:
+    if not isinstance(intent, RequestIntent) or not (
+            isinstance(intent.route, MessageRouteBinding)
+            or isinstance(intent.route, RecordedReplyBinding) and intent.operation == "message.reply"):
         raise MessagePayloadError("frozen message intent and route required")
     if intent.task_id is not None or intent.assignment_id is not None:
         raise MessagePayloadError("ordinary messages cannot carry work or assignment links")
@@ -107,6 +109,9 @@ def _message_class(intent: RequestIntent, *, kind: SendKind | None,
         _id(parent_message_id, "msg")
         if parent_message_id == intent.message_id:
             raise MessagePayloadError("reply cannot name itself as parent")
+        if (isinstance(intent.route, RecordedReplyBinding)
+                and parent_message_id != intent.route.parent_message_id):
+            raise MessagePayloadError("reply parent differs from its frozen route")
         return "answer"
     raise AssertionError("unreachable message operation")
 
@@ -116,8 +121,10 @@ def _envelope(intent: RequestIntent, *, request_id: str, event_id: str,
     _request_id(request_id)
     _id(event_id, "event")
     route = intent.route
+    fleet = (route.manager_destination.fleet if isinstance(route, MessageRouteBinding)
+             else route.caller_alias.split(":", 1)[1].split("/", 1)[0])
     return {"event_type": family, "emitter": MESSAGE_EMITTER,
-            "fleet": route.manager_destination.fleet,
+            "fleet": fleet,
             "source_ref": f"request:{request_id}", "event_id": event_id,
             "occurred_at": occurred_at, "schema_version": PLANE_SCHEMA_VERSION}
 
@@ -134,10 +141,15 @@ def encode_communication(intent: RequestIntent, body: MessageBody, *, request_id
     if not isinstance(body, MessageBody):
         raise MessagePayloadError("validated message body required")
     route = intent.route
-    payload = {"msg_id": intent.message_id, "sender": route.caller_alias,
-               "recipient": route.recipient_alias,
-               "recipient_raw": route.peer_destination.session,
-               "message_class": message_class, "body": body.text}
+    if isinstance(route, RecordedReplyBinding):  # a human has no native address
+        payload = {"msg_id": intent.message_id, "sender": route.caller_alias,
+                   "recipient": route.recipient_alias,
+                   "message_class": message_class, "body": body.text}
+    else:
+        payload = {"msg_id": intent.message_id, "sender": route.caller_alias,
+                   "recipient": route.recipient_alias,
+                   "recipient_raw": route.peer_destination.session,
+                   "message_class": message_class, "body": body.text}
     if parent_message_id is not None:
         payload["reply_to_msg_id"] = parent_message_id
     return {**_envelope(intent, request_id=request_id, event_id=event_id,
@@ -154,6 +166,8 @@ def native_message_envelope(intent: RequestIntent, body: MessageBody, *, request
     """
     message_class = _message_class(intent, kind=kind, parent_message_id=parent_message_id)
     _request_id(request_id)
+    if isinstance(intent.route, RecordedReplyBinding):
+        raise MessagePayloadError("a reply recorded for a human has no native envelope")
     if not isinstance(body, MessageBody) or type(recording_degraded) is not bool:
         raise MessagePayloadError("validated message body and degradation flag required")
     route = intent.route

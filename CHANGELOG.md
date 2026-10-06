@@ -25,6 +25,368 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - `--git` mode, renames and binary files;
   - a diff crafted to steer the reader (a line shaped like a file header, a carriage return, a hunk that does not match its counts).
 
+### Added — each bot session gets its own child subreaper, so its orphans never re-parent to the user manager (#2158)
+
+On 2026-10-05 a kill loop killed a pattern match and then its parent. The match was an orphaned job, and an orphan in a bot session re-parented to the systemd user manager, which runs every bot: it exited on SIGTERM, and every bot on the host stopped for 15 hours. #1069's guard refuses that command; this bounds the damage when one gets past it.
+
+- **`bot-subreaper.py`:** `start-bot.sh` creates the session through it (`bot_session_spawn` in `lib-common.sh`). It sets `PR_SET_CHILD_SUBREAPER` and runs the tmux client; the server daemonizes, so the server and every process the session orphans re-parent to it. A kill aimed at an orphan's parent lands on it, and it ignores the termination signals, so #2158's loop leaves the user manager untouched.
+- **It stays out of the session.** It sits above tmux, so the pane is still `claude`. It ignores signals only after the client ran, so the session inherits nothing; it never sends a signal; and it holds no inherited descriptor, fd 9 (the activation lock) included.
+- **It never outlives its last child.** A stop that leaves nothing behind ends it with the tmux server, so the unit's cgroup empties as before. A process that outlives the session, such as a running Bash tool shell (each runs in its own session), keeps it until that process ends.
+- **Linux only, and it fails open.** macOS has no child subreaper, and an orphan there re-parents to launchd, PID 1, which a user cannot signal. When the subreaper did not run the client, `bot_session_spawn` runs it as before, unless the session already exists. `startup.log` has a `SUBREAPER` line either way, and a Linux session left without its subreaper records `bot_subreaper_unavailable` (notice).
+- **`orphan-browser-reaper.sh`** treats `bot-subreaper` as an orphan's parent, as it does `systemd`. **The signal guard** now says an orphan's parent *can be* the user manager, and names the subreaper among the session's ancestors.
+- **Tests:** `tests/test_bot_subreaper.py` starts real tmux sessions the way `start-bot.sh` does, under a stand-in user manager that records each signal it receives. An orphan of the session re-parents to the subreaper; #2158's loop, run in the session with its kill confined to the stand-in's tree, never reaches the stand-in; the subreaper survives what a stray kill sends, waits for what outlives the session, leaves with its last child, holds nothing it inherited, passes the session no signal disposition, fails open, and never starts a session twice. `tests/test_native_admission.py` checks that neither the subreaper nor what it adopts keeps the activation lock, and `tests/test_orphan_browser_reaper.sh` gains a row.
+
+### Added — the plane's quarantine is listed, and its counted losses show where a manager looks (#2165)
+
+Until now, `plane doctor` and `plane status` only counted the quarantine, and the trust panel named its newest five entries; nothing listed the rest. The `.emit-losses` rows, including #2164's `stage_empty`, were read by `plane doctor` alone, and nothing schedules the doctor.
+
+- **`claudlobby plane spool list --quarantined`** lists every quarantined entry, newest first.
+  - Each item shows `written_at`, `quarantined_at` (from the `.reason` sidecar), `size`, `empty` and `reason`.
+  - It pages with `--limit` and `--cursor`, and every page carries `coverage`: `total`, `returned`, `vanished` and `reasons_unreadable`.
+  - It is read-only. It reads files only, never the plane database or the daemon.
+  - A quarantine that cannot be enumerated is `unavailable`, never an empty list.
+- **`plane spool inspect`** now also reads a refused stage's quarantined name (`<time_ns>-<lead event>[.batch.<pid>].json`), and reports an empty entry as `empty: true` instead of failing.
+- **One loss summary.** `emit_losses_summary` (`plane/health.py`) counts the 24 h window by each row's epoch, keeping `reap` (fate unknown) apart from known losses. `plane doctor`'s rung now reads it, and so counts only the window it names. `plane status` carries it as `emit_losses`.
+- **The brief labels `alerts`.** While a known loss sits in the window, `alerts` carries a `#2165` entry with the count, because the alerts the brief shows travel the path those emits were lost on. Reaps alone add no label. An unreadable counter labels `alerts` as unknown.
+- **Tests:**
+  - `tests/test_plane_quarantine_and_losses.py` (new) covers the list door, its pages, an unreadable quarantine, the summary, `plane status` and the doctor's window.
+  - `tests/test_brief.py` gains three tests for the label.
+
+### Fixed — a stage that died before writing its batch is counted as a lost emit, not quarantined as malformed (#2164)
+
+The bounded emit reaps its stager at 10 s. A reap that came after the stager created its temp file in `state/plane/staged/`, but before it wrote the batch, left the file empty. An hour later replay quarantined it as a malformed batch, so the event was lost and counted nowhere. One host had 5 such losses from 2026-10-02 to 10-05.
+
+- **Replay counts it.** An hour-old temp file that is empty, and whose writer pid (recorded in its name) is no longer running, is removed and recorded as one `stage_empty` row in `state/plane/.emit-losses`. `plane doctor`'s emit-losses rung reports that row as an emit NOT recorded. The row is written before the file is removed; if the row cannot be written, the file is quarantined as before.
+- **Unchanged:**
+  - A complete orphan is still replayed.
+  - These are still quarantined: a torn orphan, an empty one whose writer may still be running, and one whose name carries no pid.
+  - Younger temp files are left alone.
+- **Not prevented:** the batch's bytes never reached the disk. Preventing the loss would mean not killing a stager mid-stage, which is #1657's question. Empty files quarantined before this change stay where they are; #2165 covers listing the quarantine.
+- **Tests:** `tests/test_plane_daemon.py` runs the client's own `_stage` in a child that dies between creating its temp file and writing it, then replays the file (`test_a_stage_killed_before_its_write_is_counted_lost_not_quarantined`). Four more tests pin the cases that keep today's handling.
+
+### Changed — interval timers start after their own startup delay, and the fleet pulse's cap scales with load (#2059)
+
+On 2026-10-05 a restarted user manager started every interval timer on a host that had been up for days. Each `OnBootSec=` point was already past, so systemd fired every producer in the same second into bots that were still starting; task-recheck failed because its managers were not up. Every `host activate` did the same, because it restarts every enrolled timer.
+
+- **Interval timers count their first run from their own start.** `OnActiveSec=<startup_delay>` replaces `OnBootSec=<interval>`, and `OnUnitActiveSec=<interval>` keeps the cadence. `OnStartupSec=` would not do: a past `OnBootSec=` or `OnStartupSec=` point fires a timer at once (systemd.timer(5), and measured on a host up for days), which is the case for every timer an activation restarts.
+- **The packaged startup delays are staggered,** and the frequent ones sit in separate 15 s slots of the minute so their later ticks stay apart under `AccuracySec=10`: keepalive 60 s, check-in 615 s, fleet-pulse 330 s, task-recheck 945 s, log-rotation 1230 s; on the host, plane-host-probe 75 s and boot-capture 30 s. A job with no `startup_delay` waits its interval, at most 900 s, and `config validate` warns on a delay outside 1-3600.
+- **What does not change:** calendar timers (`Persistent=` applies only to them); each job's timers across fleets still fire together, which keeps their holds on the activation lock overlapping; and launchd, whose `StartInterval` with no `RunAtLoad` first runs one interval after load, so on a Mac activated more often than a job's interval that job waits a full interval each time.
+- **The fleet pulse's cap, a stopgap for #907:** `fleet_pulse.timeout_s` from `fleet.yaml` (clamped to 30-3600), else 120 s × load1 per CPU, from 120 up to 240 s. The ceiling keeps a sweep and its grace under the 300 s cadence: every timer job holds the activation lock shared while it runs, and `host activate` takes it exclusive without waiting. This does not make a sweep cheaper. How long a sweep needs under load is unmeasured, because a fixed 120 s cut all 92 measured timeouts short, and concurrent sweeps raise the load the next cap reads.
+- **A sweep that reaches the cap** gets SIGTERM, so its traps clean up, then SIGKILL after 10 s, and exits 8. Its summary is replaced, with the file's 0600 mode, by one that starts `TIMED OUT` and names what the tick skipped (the bots after the stop, the fleet escalation and escalated-task paging), and the last complete summary is kept beside it.
+- **It reaches a host at the next `host activate`,** which rewrites every enrolled unit and restarts the timers once the bots are ready. A user-manager restart, the 2026-10-05 case, then staggers every job, because no service has a last start yet. An activation staggers only part of them. `OnUnitActiveSec=` counts from the service's last start, which the user manager keeps across a timer restart, so a job whose last run started more than one interval earlier runs as soon as its timer restarts (measured on systemd 252). That is keepalive and plane-host-probe nearly always, and the pulse when its last tick began more than 300 s earlier; the check-in, task-recheck and log rotation wait their startup delay.
+- **Tests:** `tests/test_system_defaults.py` (`TestTimerStartupDelay`: no composed timer counts from boot, the packaged delays, their slots, the default, a fleet override and its validation, launchd's limitation pinned) and `tests/test_fleet_pulse_cap.py` (the cap's sources and clamps, the ceiling under the cadence, a real sweep that times out twice, a summary that cannot be written, coercion and validation), plus the existing timer and pulse assertions updated.
+
+### Added — a composed guard refuses a signal to a process the caller did not start (#1069)
+
+On 2026-10-05 a manager bot's ad-hoc kill loop killed each process matching a pattern and its parent, read back with `ps -o ppid=`. The pattern matched the bot's own tool shell as well as its job; killing the shell orphaned the job to the user manager, and the next "parent" the loop killed was the manager. Every bot on the host stopped for 15 hours (#2158). The loop killed by pid, as #1069's interim advice asked, and warnings about `pkill` composed into every bot did not prevent it.
+
+- **`signal-guard.sh`** is a PreToolUse hook on Bash, composed into every bot through `claudlobby/system.yaml` next to `credential-echo-guard.sh`. A signal goes through only when its target is the caller's own: `$!`, `$$`, a job spec (`kill %1`), group 0, `jobs -p`, or a pid file read with `cat`, `head`, `tail` or `<`. A pid from anything else is refused, whether it arrives directly, through a variable, a `for` loop, a `read` loop, `xargs` or `find -exec`; the refusal names a process lookup (`ps`, `pgrep`, `$PPID`, `/proc` and others) when it sees one.
+- **Also refused:** `pkill`, `killall`, `killall5` and `skill`, which pick by name or pattern; `fuser -k`; `kill -1` and `kill NAME`; and a pid typed as a number, directly or through a variable or a loop word, when it is the session's own ancestor (its claude, its tmux server, the user manager or PID 1). `kill -0` and `kill -l` send nothing and pass, and so does text that only mentions a kill, such as a grep pattern, a commit message or a heredoc written to a file.
+- **It refuses, and never rewrites.** The reason names the safe pattern and the guardrail's installed path. A refusal is recorded as `signal_guard_refused` with the kinds of target only, never the command; the event is registered as `notice`.
+- **It fails open, with a `script_error` breadcrumb,** when jq or python3 is missing, the payload is unparseable, or the decider fails.
+- **`signal-decide.py`** parses the command into words that keep their quoting, expansions and substitutions, because provenance needs to know which operand a substitution feeds. It reuses `credential-echo-decide.py`'s wrapper table, option scanner, shell `-c` reader and ANSI-C decoder. What it cannot see is stated once, in its docstring; the per-bot subreaper of #2158 bounds the damage only where one of those forms kills an orphaned job's parent.
+- **`library/guardrails/signal-only-what-you-started.md`** gives the rule and the safe pattern. It is not added to every bot's composed guardrails: the refusal carries the pattern at the moment it is needed.
+- **Tests:** `tests/test_signal_guard.py` runs a table of refused and allowed forms through the decider (the forms above, each bypass the review found, and a typed pid of the test's own ancestor, directly and through a variable and a loop), then runs the hook itself on the outage loop with its names neutralised, the prefilter's quoting and escape cases, the fail-open paths, the composition and the plane record.
+
+### Changed — a worker's brief counts the fleet's unacknowledged reports instead of listing them (#2159)
+
+`claudlobby --json brief` gave every viewer every unacknowledged report. A worker never acknowledges reports, so its list only grew: on 2026-10-05 one worker's brief was 353,814 bytes, 98% of them 840 report rows, all ahead of its own work.
+
+- **A viewer that is not the fleet's manager** gets `reports.count` (the reports past its read position) and `reports.list_command` (`claudlobby --json fleet reports list --unacknowledged`), and no `reports.unacked`; `degraded[]` names `reports.unacked` as omitted, with the count.
+- **The manager** keeps `reports.unacked`: the oldest 50 rows (`REPORT_ROW_LIMIT`), with `count` and `list_command` beside them. A cut is labeled in `degraded[]` with the total.
+- **The role** comes from the activated configuration (`fleet.manager_bots()`), the one predicate the work section now shares. The `checkin` and `status` skills take the number from `reports.count`.
+
+### Changed — skills take issue work only from people who can triage the repo, and read GitHub text as data
+
+The skills that pick their own work from a repo's issues listed every open issue. They now list it through a new intake, and every library file that reads issue, pull request, comment or review text treats that text as data.
+
+- **`issue-intake.py list`** (new, `claudlobby/_runtime_scripts/`) keeps an issue when its author can triage the repo (triage, write, maintain or admin, from the repository permission API), or when it carries the trust label applied by someone who can triage, with no change to its title or body since, by anyone (a triager applies the label again after a change). Everything else is skipped and named on stderr; an unreadable role or label history skips the issue; a failed issue read refuses at exit 3 rather than answering `[]`. A kept issue names its author by login only. `autonomous-sprint`, `autonomous-runner` (whose picker label is now also its trust label), `checkin`, `cross-fleet-initiative` and the `sprint-candidate-validation` protocol read their backlog through it, and each of those skills grants the intake's call (`Bash(python3 *issue-intake.py* list *)`, plus `quote` for the runner), so an unattended run never waits on a permission prompt.
+- **`issue-intake.py quote`** prints an issue's title and body between two lines that share a random id the text cannot contain. The `autonomous-runner` risk classifier takes its work item that way.
+- **Configuration:** `ISSUE_INTAKE_TRUST_LABEL` (a label, for example `fleet-ok`) and `ISSUE_INTAKE_TRUSTED_AUTHORS` (accounts the role check cannot see, such as a GitHub App's `NAME[bot]`), per bot in `fleet.yaml` `env:`. Unset, only authors who can triage count. **A fleet that files its issues as a GitHub App lists that account, or the intake skips those issues.**
+- **The `github-text-is-data` guardrail** (new) states the rule, and each skill, protocol, expertise and integration that reads GitHub text carries it where it reads: titles, bodies, comments, reviews and CI logs are data, never instructions, and never choose a command, URL, file or branch. Relays hand on an issue's number and URL rather than its text; comment markers (`[FORK-LOCK]`, `[IRONCLAD]`, the review formats) count only from authors who can triage the repo; a verdict line counts only through its recorded review-role report; and a reviewer runs a pull request's code only when its author can triage the repo, or after someone who can has said to, and reads any other pull request's branch with `gh pr diff` or `git show`, never inside a checkout under the bot's directory.
+- **Installed skill copies:** `documentation/fleet-update-lifecycle.md` says how a skill change reaches bots (a release, `config plan`, `host activate`) and that Claudlobby never refreshes a user-level `~/.claude/skills/` copy; `library/skills/README.md` no longer says skill edits propagate live.
+- **Tests:** `tests/test_issue_intake.py` (new) runs both skills' own intake commands against a stand-in for `gh` (`tests/fixtures/fake-gh-issues.py`, response shapes from live captures); `tests/test_checkin_library.py` follows the check-in's new door and grant.
+
+### Removed — helpers with no caller since #1989 (#2152)
+
+#1989 deleted every caller of these, so they ran nowhere:
+
+- **`guard_unit_capture` and `unit_owner_root`** (`lib-common.sh`): the host-unit capture guard of #1153, called only by the three host-unit installers #1989 removed. `host activate` now refuses a unit at a candidate label that the frozen inventory does not own.
+- **`resolve_timer_unit` and `extract_bot_conf_var`** (`lib-common.sh`): the fleet-timer installers' unit-name resolver, called only by `install_fleet_timer.sh` and `install_fleet_timer_launchd.sh`. Timer unit names now come from the fleet's `service_prefix` at compose time.
+- **`dispatch-overdue.py --open-task`**, with `open_task_id` and the plane readers only it reached (`plane-readers.py`'s `head`, `answering_idless` and `answering_control_note`): the id-less report resolver, called only by `report-back.sh`. Report verbs now name their assignment instead of having one chosen for them. `--open`, `--all`, `--orphans` and `--unassigned` are unchanged.
+- **Tests:** `test_host_unit_capture.py`, `test_extract_bot_conf_var.py` and `test_resolver_control_note_guard.py` go with the code they tested, as do the resolver cases in `test_plane_readers_resolver.py`, `test_dispatch_overdue.py` and `test_plane_readers_matcher.py`. Open-list tests that also asserted the resolver keep their open-list assertions.
+
+### Fixed — two senders to one pane no longer interleave their chunks (#2036)
+
+`pane_send_verified` has typed a payload in 400-byte chunks 0.15 s apart since #1493, so a large send takes seconds, and nothing serialised the senders of ONE pane. A second send that started in that window wrote its chunks between the first one's. On 2026-09-30 a manager's query landed inside a worker's report in a third bot's pane, splitting it mid-word, and both receipt trailers broke.
+
+- **One sender at a time per recipient.** The whole send (the wait for an input box, the chunks, the Enter, the verify and any repair) runs holding the recipient's send lock, keyed by tmux socket and session, in `$CLAUDLOBBY_ROOT/state/pane-send/`. The key reduces a target to its session name, since the CLI's transport names a pane `=<session>:` and every other injector names it bare.
+- **Every other keystroke into a pane takes the same lock,** since an Enter or an Escape pressed between another sender's chunks acts on that payload half-typed: `pane_await_receipt`'s repair Enter; the messaging owner's held-delivery repair (#2105), whose look and Enter both run under it with a 5 s wait inside the call's 15 s bound; and `bot interrupt`'s Escape, through the new `pane_send_key`.
+- **Portable, and released on every exit path.** macOS has no `flock(1)`, so a python child takes `flock(2)` through `fcntl` on a descriptor the sending subshell holds. The kernel releases it with the last descriptor, on a return, a failure, `set -e`, SIGTERM or SIGKILL alike, so there is no stale-holder recovery to get wrong. `plane_emit_bounded` closes that descriptor for the emit it backgrounds, so an orphaned emit cannot keep a pane locked.
+- **A bounded wait, and never a send past a holder.** A sender still refused after `PANE_SEND_LOCK_WAIT_S` (default 60 s) sends nothing. It names the holder on stderr, records `send_miss` with reason `recipient-lock-timeout`, and returns 75, so the dispatch and report doors record the send as `failed`.
+- **A lock that cannot be taken at all** (no lock dir, no python) is no evidence of a concurrent sender. That send goes out without the lock, loudly: stderr, plus a new `send_unlocked` event (notice). Failing closed there would stop every dispatch, report and startup prompt on the host at once over a directory permission.
+- **Cost:** one python start per send, about 54 ms on the Pi at load 15.
+- **Tests:** `tests/test_pane_send_lock.sh` (new: concurrent senders against a fake pane, the bounded refusal, release on every exit path, both unlocked paths, the receipt Enter, a swallowed Enter's retry under a second sender, both spellings of a pane, and a single key), a real-tmux case in `tests/test_message_enter_repair.py` (the owner's repair waits for a held lock), a ratchet, `tests/test_send_keys_ratchet.py`, that fails on any `send-keys` outside a function running under the lock, and a `validate-bot-change.sh` scenario that runs two senders into a real raw-mode tmux pane, with a no-shared-lock control that has to interleave.
+
+### Fixed — the event-type gate reads every place a script names a writer, and bot-vitals drops a type no payload can produce (#2140)
+
+Two items #2122 left open from #903.
+
+- **`session_event` is gone.** `bot-vitals.sh` recorded it when the hook payload carried a `session_event` field, and no PreToolUse or PostToolUse payload carries one, so the type was never written. Its branch, its registry key (notice), its rows in the observability protocol's decision table and the observability guide, and the gate's list of the values bot-vitals records leave together, because the gate checks them against one another. Rows already stored keep the severity they were stamped with.
+- **The writer gate no longer reads past a call it cannot parse.** `tests/test_event_type_registry.py` checked a type only where its call scan read the call. A writer named anywhere else either never runs (`timeout`, `nice`, `env` and `command` start a program, never a shell function, and a `bash -c` string starts a shell that has not loaded one) or records a type nothing checks (`eval`, `trap`, backticks, a name kept in a variable). A new test fails on every place the runtime shell scripts or the library's fenced blocks name a writer, unless it is a call the scan reads, the writer's own definition, a `command -v` probe, a usage message, or a label handed to `plane_armed` or `plane_emit_bounded`. The call scan now knows every reserved word that starts a command (`if`, `while`, `time` and the rest), so a guarded call is read, not flagged. `public-write-guard.py`, which runs a writer through `bash -c`, has its helper scanned like the other Python writers, and a tripwire fails on any Python module that names a shell writer without that. Its bound: a writer whose name is assembled at run time is named nowhere, so no scan of the text sees it.
+
+### Fixed — the heavy slot serves its waiters in turn (#2124)
+
+The heavy-job slot bounded concurrency but did not share it. After a release, the next process to call `flock` won the slot, so a driver that took it again at once beat every waiter that polls on a timer, of another fleet or its own. `claudlobby/_runtime_scripts/heavy-slot.py` now keeps a queue. A call that cannot take a slot takes a ticket under its fleet and bot and still exits 75, and a free slot goes only to the oldest ticket from a fleet other than the one that took a slot last, else the oldest. A waiter keeps its place by calling again: nothing expires while every slot is held, and once a slot is free, a ticket whose holder has been silent for 180 s (`TICKET_IDLE_S`; `HEAVY_SLOT_TICKET_IDLE_S` in the environment overrides it) is dropped. `status` lists the queue with that limit beside each wait, a refusal and the take its ticket waited for carry the ticket's number, and `state/heavy-slot/no-queue` switches the queue off.
+
+### Fixed — fleet-pulse no longer counts a push the manager's box never took as delivered, never types into a held box, and bounds a box that takes no input (#2120)
+
+`notify_manager` ended `bot_tmux_send ... || true`. So a push typed and never submitted (rc 3 since #2108) returned 0, and `debounce_notify` closed the alert's window: the alert went quiet until its 6-hour re-notify, though nobody had read it. And since #2108, a push to a box that never shows it waits up to 10 s before giving up, once per alert, all ahead of the sweep's Telegram escalation.
+
+- **The push's status is the delivery verdict.** A push typed and not submitted (rc 3) or not sent (rc 1) leaves the window open, so the next sweep pushes it again (#900's rule). A submitted push closes it, as before. No manager, or no manager session, still counts as sent: the recipient token re-fires the alert once a manager appears (#831).
+- **No push types into a box that already holds text.** Before each push, the shipped `pane_is_held` reads the manager's box. If it holds anything, the push is skipped, the window stays open, and the alert's plane record is left to the escalation. Typing would glue the alert to that text, which is the opposite of the fleet's own held-box remedy, and a glued box is the operator's call.
+- **After a push the box did not take, a floor.** That manager gets no push for `FLEET_PULSE_HELD_PUSH_FLOOR_S` (default 30 minutes, the shape of #1088's re-arm bound), with no wait and no typing in between. So a box that takes no input costs one wait per floor, not one per sweep or per alert, and a submitted push clears the floor. The floor is that manager instance's (#831's recipient token, not the tmux session id, which a restarted manager reuses), so a restarted manager, a new box, gets the alerts that re-fire to it. A floor marker dated ahead of the clock, as after a reboot of a host with no real-time clock, is expired, not fresh.
+- **A push waits for the manager's box to be drawn.** The first tick after a manager restart can reach it before its box is drawn (9 to 19 s for a production-shaped bot, #860), and keys typed then are lost (#2138). The push arms the boot's box wait (`FLEET_PULSE_PUSH_BOX_TICKS`, default 60 polls of 0.5 s), so the alert lands in that tick instead of costing the new instance a floor. A drawn box costs one capture and no wait.
+
+### Added — an opt-in guard that refuses a GitHub write putting a listed term into a public repository
+
+A PreToolUse hook, `claudlobby/_runtime_scripts/public-write-guard.sh` (with its decider `claudlobby/_runtime_scripts/public-write-guard.py`), composed for a bot that sets `public_write_guard: true` (a strict bool, per bot or through `fleet.defaults`, like `heavy_slot`). It refuses, and never rewrites, a GitHub-bound write that would put a term from the host's list into a **public** repository. A private or internal repository is untouched.
+
+- **The list is host configuration:** `~/.config/claudlobby/public-write-terms`, one case-insensitive regular expression per line. It is never repository content, and the tests use invented terms.
+- **What it reads is what the write puts in the repository:**
+  - every `mcp__github__*` tool except `get_`/`list_`/`search_`;
+  - the `gh` issue, pr, release, gist, repo and label commands except their reads, and `gh api` with fields (not a GET, not a GraphQL query), including body files and standard input;
+  - `git commit`: messages, added lines, and the new files an earlier `git add` in the same command names;
+  - `git push`: the messages, added lines and new paths of every outgoing commit, and of any commit made earlier in the same command, which does not exist yet when the guard runs.
+
+  It reads the command as the shell does: a backslash-newline continues the line, an issue or PR URL names the target only when it is a positional word after the verb (a URL inside a body, title or comment is text), `env NAME=value` and `NAME=value` set what the command sees, and the commands inside a command substitution are read. It does not read removed lines, a `cd` directory, a body file's path or the target's name, so a clean-up commit passes and so does a clean write made from a path that contains a term.
+- **Public is read live, only on a hit:** `gh api repos/OWNER/REPO`, cached for 10 minutes. A REST call that fails fast is asked again over GraphQL (`gh repo view`), since a REST throttle leaves GraphQL working. When both fail, an answer cached up to a day ago stands in. An unknown answer is never cached, and a cache stamp from the future is not trusted.
+- **Failure directions:**
+  - no list: allow, plus a critical `public_write_guard_unarmed` event;
+  - a broken list (a line that does not compile, or one that can match an empty string, so every write would be a hit): refuse every guarded write, naming the line and column, never its text;
+  - a payload that is not JSON: allow, with a `script_error` breadcrumb;
+  - a hit whose repository or visibility is unknown: refuse;
+  - content it cannot read counts as a hit: a missing body file, a program's output piped into the write or substituted into its content (`$(...)` or backticks, except `cat` of a file or of a heredoc, in a commit message, a body, title, notes, subject, comment or description flag, or a `gh api` field such as `body` or `query`), a git command run from a directory it cannot name. A substitution in any other flag, such as the sha in `--match-head-commit "$(gh api …)"`, is left as written: it is not content.
+- **Its events name the bot**, the refusal, the no-list alarm and the fail-open breadcrumb alike, so `claudlobby event list --bot <bot>` and the bot's brief see them.
+- **Its ceiling:** it does not follow `eval`, functions, aliases or scripts, and it does not read an annotated tag's own message. Three writes publish content that is not a word of the command, and are not read: `gh pr create --fill` (its title and body come from commits already pushed), `gh repo create --source --push` (the local history), and the asset files of `gh release create` and `upload`. It keeps accidents out; it is not a boundary against a caller trying to get past it.
+- **Off switch:** `state/public-write-guard/disabled`, host-wide. `python3 claudlobby/_runtime_scripts/public-write-guard.py --check` says whether a host's guard is armed, the list and the off switch, without printing a term.
+- **Opt-in:** registered in the switch registry as opt-in for the `heavy_slot` reason. A composed hook has no deployment gate (#1310), so the manifest key is where one bot goes first.
+- **Tests:** `tests/test_public_write_guard.py` drives the real hook with a fake `gh` and real git repositories, in both directions for each shape; `tests/test_public_write_guard_compose.py` covers the composition.
+
+### Fixed — the debounce rehearsal waits for its manager's box (#2136)
+
+`tests/test_debounce_recipient_harness.py` has failed in single CI lanes since #2108: the runner sometimes started the manager's stand-in after the first pulse. The stand-in enters raw mode before it draws its box, and entering raw mode discards keys typed before it. So neither alert of that tick was submitted, and the debounce marked both sent.
+
+- **The rehearsal starts a manager only once its box is drawn,** through lib-common's `pane_await_input_box`, and fails by name when the box does not come within 20 s.
+- **It counts what each manager instance was submitted,** from the stand-in's new `--log`, never the text its pane shows. Read from the pane, a push whose Enter was withheld passed as pushed.
+- **`REHEARSE_MANAGER_START_DELAY` forces the race.** Every test of the rehearsal now runs twice, the second time with each manager starting 3 s late.
+
+### Fixed — a rollout check run that has not completed blocks the merge, whatever its `startedAt` (#2116 follow-up)
+
+The merge guardrails' rung 2 read the newest `rollout-check / Rollout check` run by sorting on `startedAt`. Under `gh`'s jq a null or zero `startedAt` sorts before a started run, so a queued run reported that way would hand the read the older run, and a stale green would pass (ravi's note on #2116). On this change's own push GitHub reported queued runs with their queue time, so that case was not seen. The read now names any run that has not completed `PENDING`, so the rung refuses until every run of the check has completed, and then reads the newest.
+
+### Fixed — one registry for event types: every type the runtime writes is registered, and its writers, fleet-pulse's lists and the docs are gated against it (#903)
+
+The plane stamps a system event's severity at ingest from `SYSTEM_EVENT_SEVERITY` in `claudlobby/plane/registries.py`, and stores a type the registry lacks with no severity. Nothing checked the types the runtime writes against it, and four readers kept lists of their own. Most FLEET ALERT types were stored with no severity. Those recorded against a fleet (`keepalive_failed`, `alert_target_refused`, ...) now show in `event list --critical`. Those recorded against the host (`disk_high`, `memory_high`, ...) are stamped critical now too, but no read shows host rows yet (#2109).
+
+- **Every type the runtime writes is registered**, 34 of them new. A FLEET ALERT type (`emit_failure_alert`) is `critical`. A FLEET NOTICE type (`emit_fleet_notice`, `notify_currency`) is `notice`. A type a writer records directly is `notice`, because no writer of a new one pages anyone. No existing severity changed. The plane daemon stamps from the registry it loaded at start, so restart it after the update. Rows stored before then keep no severity.
+- **`tests/test_event_type_registry.py` gates it.** It checks the type arguments of the shell writers in every runtime script and every library shell block; a call whose type is a variable must be listed with each value it can take. It also checks every hand-built system row and Python writer. fleet-pulse's two critical lists stay checked by `tests/test_service_is_crash_looping.py`, and their rationale, each a deliberate subset of the critical types, now sits beside them in `fleet-pulse.sh`. Finally it reads the event tables of the fleet-observability protocol, the fleet-pulse skill and the observability guide. Each scan has a positive control.
+- **`CRITICAL_TYPES` is gone** from `commands/events.py`. Nothing read it at runtime, and its tests now read the registry.
+- **The brief's alerts label is narrowed, not removed** (#2109). It said alerts were filtered by a hand list. It now says the section shows only this bot's own critical events and does not read fleet- or host-level alerts, so an absent alert is still not evidence of health. It no longer probes `known_values` for a symbol, and the status skill's worked example follows it.
+- **The docs agree with the registry.** The observability guide's critical table lists exactly the critical types: `input_held` is added, and `bot_teardown_started` moves to the informational table. The `keepalive` type, which nothing writes, gives way to the four keepalive transitions. The fleet-observability protocol's `--critical` list is now the registry's, recorded with where each type lands, and its push list matches what fleet-pulse pushes.
+- Not done here: the read that brings fleet- and host-level alerts to a brief, fleet-pulse's escalation and `event list` (#2109); keepalive's two `UNKNOWN` events, which record nothing (#1653); a halted rolling restart recorded against the wrong fleet (#2112). The plane readers' SQL names the single types it queries, and no gate reads those names; each is registered today.
+
+### Fixed — the shared busy check sees a running turn whose activity line opens its parenthesis with a word (#2130)
+
+#2105 taught `pane_is_busy` a running turn's activity line, but read its parenthesis only when it opened with a digit, the elapsed time (`● Misting… (58m 4s · …)`). A running turn opens it with a word while it runs its hooks (`● Combobulating… (running PreToolUse hooks… 0/6 · 17m 50s · …)`), and can for other progress too. In vera's live pass after #2121, every running turn the check missed had that shape, about one in fifteen. In four minutes of one working session here, 197 of 960 frames drew it, every one a turn running its hooks. A miss reads a running turn as not busy to every consumer. #2105's repair then presses its Enter into a busy box, where it lands on the delivery's own text and is queued behind the turn. The keystroke injectors' `bot_is_busy` reaches this check once the bot's last tool call is older than its active window (180 s by default).
+
+- **The shape accepts any parenthesis after the ellipsis.** Its live positive control is `tests/fixtures/pane-states/hooks-running-turn.txt`, a turn running its hooks, captured on this host.
+- **The shape's edges are pinned.** These read not busy: typed text in the box that ends in an ellipsis, a lowercase word, more words after the ellipsis, an indented copy, and a finished turn's summary.
+- **#2105's box read is pinned.** It happens before the send and reaches every look, on the message and the assignment paths, and `read_box` answers `unknown` on every failure.
+
+### Fixed — a CLI delivery held in an idle bot's box is submitted (#2105)
+
+Since #1989, every CLI delivery (`message send` and `reply`, `assignment deliver`, `task nudge` and `recheck`) has pressed Enter once with verification off. No layer repaired an Enter the box ate: the transport left it to the operation owner, and the owner said it did not verify. A message that landed in an idle box could sit there until a person pressed Enter. On 2026-10-02 the pulse paged 24 such holds on 14 bots.
+
+- **The operation owner now repairs the Enter, after the receipt wait finds no receipt.** It looks at the recipient's box, and presses one Enter only when `held_delivery_match` finds this message in it.
+  - A text match: the box starts with a Claudlobby envelope, has no second one, and ends with this message's trailer, the only trailer in it.
+  - A chip match: a long payload is drawn only as `[Pasted text #N +M lines]`. The box must hold that one chip and nothing else, and M must be the wire's single newline or one more. A chip names no message, so the box must also have been empty when the owner read it just before its send: then the chip is this send's, or a sender's racing between that read and the keystrokes.
+  - Either way, `pane_is_busy` must see no running turn, and no menu may be open.
+- **`pane_is_busy` sees a running turn that draws no interrupt hint.** Claude Code 2.1.285 draws "esc to interrupt" in few running turns. The shared check now also reads the turn's activity line: one glyph at the start of the line, a word and an ellipsis (`✻ Transmogrifying…`, `● Misting… (58m 4s · …)`). Every consumer gets it: keepalive's pane classifier, the keystroke injectors' `bot_is_busy`, this repair, and fleet-pulse's `pane_stuck`. So a pane whose last five lines have not changed past the threshold, with no recent tool call, raises no `pane_stuck` while it shows an activity line. That quiets a long-thinking turn, and also a client hung on its activity line.
+- **At most two Enters, the operators' recipe.** A swallowed Enter leaves a CR in the box, and the next Enter only strips it (#1236). So a second Enter is pressed only after another receipt wait finds no receipt, and only on the same match. Never a third, and never the payload again. A held delivery's command can now take about 34 s.
+- **#1236's rc 3 is covered too.** When the box never showed the payload, the transport withheld its Enter; the receipt wait and the repair now run on that send as well, so text that lands later is still submitted.
+- **Every repair is a fleet event on the recipient,** `delivery_enter_repaired` (notice). It records whether the match was by text or by chip, and every look, so a misfire on someone else's paste can be found. The command's JSON carries `enter_repair`.
+- This supersedes S2-03's "no automatic Enter repair" for this one case only (`documentation/plans/2026-09-30-unified-cli-finalization.md`).
+
+### Added — every PR names the production check that proves it, and the merger runs it once the change is live (#2111)
+
+CI, a green deploy and a healthy service prove that a system still runs, not that a merged change does what it was merged to do. Until now that check lived in individual managers' memory, when it happened at all, and nothing posted a result after a merge.
+
+- **`library/guardrails/verify-rollout.md`** (opt-in). The author writes a `## Rollout check` with four lines: Observe, Control, When and Who. A reviewer treats a missing or vacuous one as request-changes. Once the change is live by the target's own record, the merger runs the check and posts PASS, FAIL or PENDING on the PR. For the framework, "live" means the active release's `source_revision` contains the merge commit.
+  - **PENDING** is a task on the plane, one per check.
+  - **A check only the operator can run** goes to them through `task escalate`, one per message.
+  - **A FAIL stops that repo's merge train.** The merger opens a `rollout-hold` issue, which only the fix or revert PR may close.
+- **`.github/workflows/verify-rollout.yml`**, a reusable workflow, and this repo's caller, `rollout-check.yml`. A repo adopts the check with one caller file, and it reads as `rollout-check / Rollout check` in the status rollup. What the checker does:
+  - It reads the body and the changed files live through the API, and the docs and tests paths from the caller file on the default branch, so the PR under check cannot widen its own exemption.
+  - It fails a missing section, an empty or `N/A` field, a heading inside a fenced block or a comment, an `N/A` that is not `docs-only` or `tests-only`, an exemption the changed paths do not bear out, and any failed lookup.
+  - It reads a field as GitHub renders it: a field ends with its list item, so text after a blank line (the footer most bodies end with) is not its answer, and a comment hides text up to its `-->` across the lines of one paragraph.
+  - It flags a PR that changes a workflow file, because such a PR can replace the job that checks it.
+- **The merge guardrails** (`merge-policy-auto-admin`, `merge-policy-auto-after-review`) read that check by name, and every read they add fails closed:
+  - only a 404 on the default branch's caller file says a repo has not adopted the check;
+  - only the check's newest run at the head counts;
+  - the merger reads a PR's changed files from the API, and a PR that changes a workflow file merges only on the rung 1 verdict that names each one.
+  - The new rung 5 refuses a merge while a `rollout-hold` issue is open, in a repo that has adopted the check. The only exception is a PR that closes it and whose rung 1 verdict names it: a closing keyword alone is the author's to write. In a repo that has not adopted the check, rung 5 lists nothing and cannot refuse, so a fleet that composes the guardrail without opting in gains no new way to fail.
+- `.github/pull_request_template.md` carries the section. `canary-rollout` gains a row and a pointer for the rollout check.
+
+### Fixed — a self restart after a checkpoint reads the session's capture, not the activation's envelope (#2119)
+
+Since #2110, each activation tops every bot's handoff with an envelope that carries `references_refreshed:`, not `last_updated:`. The self-restart check (`claudlobby bot restart` on yourself) read only the file's first frontmatter, so a session that checkpointed below the envelope and then restarted itself was refused, however fresh its capture.
+
+- **The check reads the session's capture below a recognised envelope.** It finds the envelope with the activation's own reader, so the two agree on what an envelope is.
+- **An envelope that reader refuses is refused here too, by name:** "the reference refresh envelope at its top is malformed". The obvious repair, adding `last_updated:` to the envelope, used to pass this check and then block the next activation. Delete the envelope block instead; a handoff without one is read by both.
+- **No envelope time vouches for a capture.** Editing the old envelope's `last_updated:`, the repair before #2094, no longer passes a stale capture. A handoff whose only `last_updated:` is in an old envelope now refuses until the session writes its own frontmatter.
+- **A fresh handoff whose first 8 KiB end inside a multi-byte character no longer refuses:** only the frontmatter is decoded.
+
+### Fixed — a heavy-slot test no longer fails when its poll reads the slot's lock file mid-write (#2125)
+
+The held-slot test's poll parsed `slot-0.lock` as it found it. `heavy-slot.py` creates that file empty and truncates it before each write, so a poll in that window failed the test with `JSONDecodeError` (CI run 37104705081). The tests now read the record as the module's own reader does: an empty or half-written file is no record yet, and the poll tries again. Test-only; the module already read it this way.
+
+### Fixed — a lone backtick in a double-quoted string no longer hides its line from the credential-echo guard (#2103)
+
+#2099 reads a double-quoted `$(` it cannot delimit as text, so the rest of the line is still judged. A lone backtick in the same string still made the line unreadable, and an unreadable line is allowed. A comment ending in a backslash inside the substitution reaches that state, because the tokenizer joins the backslash-newline before it reads comments, so the comment swallows the `)`. This line was refused before #2099, allowed after it, and printed the canary under bash:
+
+````
+echo "$(echo a # `x \
+)" && gh auth token
+````
+
+- **A lone backtick in a double-quoted string is read as text,** as `_substitutions` already reads it, so the line is judged and that form is refused again.
+
+### Fixed — a send presses Enter only once the box shows the typed text, and a held box is never counted as sent (#1236)
+
+`pane_send_verified`, the one door every keystroke injector uses, sent the Enter 0.3 s after the text whether or not the TUI had read it. A TUI that had not read the text yet read the text and the Enter together, and kept the Enter as an invisible character in the box: the prompt stayed there unsubmitted, and the next Enter only removed that character. The verify then read the first frame after the Enter, which under load was often drawn before the text, as a submit.
+
+- The send now waits until the input box shows the END of the payload (`pane_shows_payload_end`) and only then presses Enter. A submit counts only when the payload was seen in the box and is then gone. A TUI that draws the text at once is seen at the first check, so the common send costs one more pane capture than before (the one before the Enter).
+- When the box never shows the payload within `PANE_SEND_SHOWN_TICKS` (default 50 x 0.2 s = 10 s), the Enter is withheld, never sent blind: `pane_send_verified` returns 3, records a `send_unsubmitted` event (`payload-not-shown`) and says so on stderr. The text may still land in the box unsubmitted, where one Enter sends it.
+- A box that still shows the payload a verify window after the Enter gets another Enter, up to `PANE_SEND_ENTER_TRIES` (default 4) in all, each recorded as `send_retry`. One retry used to be the limit, after which the send returned 0 unchecked. A payload still in the box after the last Enter now returns 3 and records `send_unsubmitted` (`payload-still-in-box`). A paste-framed payload counts as shown by its `[Pasted text` placeholder, and a message queued behind a running turn counts as gone: the box then shows only "Press up to edit queued messages".
+- `start-bot.sh` logs a boot prompt that was not submitted (`NOT SUBMITTED`, through `boot_send_settled`) and goes on booting; any other send failure still ends the boot. keepalive leaves a reload pending for the next idle tick when its reload commands did not submit. `dispatch.sh` no longer reports every failed send as an unreachable session. The message transport already reports any result but 0 or a missing session as `unknown`.
+- The #860 pre-draw repair, which types the payload again when the box appears without it, now runs inside that wait, so its Enter waits too.
+- Test stand-ins draw a box: every pane a send must land in, in the unit tests, in `harness/validate-bot-change.sh` and in the debounce and vault-sync rehearsals, is now `tests/fixtures/input-box-stub.py`, which draws an input box and consumes what is typed. A `cat` or `sleep` pane draws none and is, correctly, never submitted to. `harness/validate-bot-change.sh` now tears itself down when it is stopped (TERM, INT, HUP) or its parent dies (seen at its next write), and reaps every tmux server in its own socket dir; a SIGKILL to the run itself still reaches no trap. `harness/boot-strand-sampler.sh` gains `--no-channels`, which keeps an unauthenticated channel off a shared host, `--model`, and `--resume`, which seeds a fresh handoff before each boot so the startup prompt is typed into the turn the resume command starts. It now counts a prompt delivered mid-turn (a `queued_command` attachment) as submitted, and never a tool result that carries its marker. `--minimal-plugins` copies only what the probe loads from the host plugin cache, and the run's first boot prints what it loaded.
+
+### Fixed — the resume gate reads a handoff's capture time, not the activation's reference refresh (#2094)
+
+Every activation rewrites each bot's handoff with a refresh envelope at the top. The envelope carried `last_updated:`, the field that start-bot's resume gate and clauDNA's readers take as the capture's freshness. So after an activation the gate measured the refresh: an old handoff looked fresh, and a fresh capture written under a day-old envelope looked stale.
+
+- **The envelope carries `references_refreshed:` instead,** so `last_updated:` belongs to the capture again. The reader still accepts the old envelope and files with none; the next activation rewrites them.
+- **A refresh no longer makes an old handoff resume.** It used to, by design, so that a booting bot would read its references. A booting bot gets its IDs from the boot brief (#2049).
+- **The refresh time comes from the activation's own record,** never from a file a session can edit. It is `handoff_refreshed`, written before the handoffs, reused by a retried step, and read by the next activation's 12-hour rule.
+- **The markers count only where the refresh writes them:** the envelope at the top, the section at the end. A note that quotes one no longer refuses the host's activation; a damaged envelope or section in those places still does.
+- **A refresh keeps the handoff's mtime,** which the gate falls back to when a capture has no `last_updated:` of its own.
+
+### Fixed — `fleet uptime` reports uptime as the share of observed time, and MTBR as the gap between restarts (#891, #1616)
+
+The uptime percentage divided up-time by the whole window, so it measured how much history the plane held. Measured on a live four-bot fleet, it equalled the observed coverage to the decimal in every window (36.9% over 30 days for bots up 99.99–100% of the time on record). MTBR divided up-time by the restart rows in the window, and every kickstart on boot after a host outage was a restart.
+
+- **`uptime_pct` is up ÷ observed time,** and null when nothing was observed. `observed_pct` and `observed_seconds` say how much of the window that was, and `down_seconds` how much was a dead session. Time between samples is credited as before, capped at 10 minutes; a restart event marks an episode and adds no time, so an event whose samples have aged out cannot add downtime.
+- **Restarts are episodes.** RESTART and DOWN rows with no up sample between them and no gap over 10 minutes are one restart. It counts as the bot's only if the bot was seen up in the 10 minutes before it. One that follows a longer stretch with no up sample (a host outage, a recording gap) is reported as `restarts_after_silence` and left out of the count and of MTBR. `restart_events` keeps every row.
+- **`mtbr_seconds` is the mean gap between consecutive counted restarts,** for each one that starts in the window, measured back past the window's edge. One restart has no gap and reads null. Restart events are never pruned, so a sample prune does not move it.
+- **First Boot is the first up sample after the last restart,** not the DOWN sample keepalive lands with it.
+- **The table says what it divides by:** `Up (obs)` and `Observed` columns, a line under the table, and a line per bot for restarts it did not count. The JSON carries a `meaning`.
+- `library/skills/fleet-ops/SKILL.md` describes the figures `fleet uptime` now reports.
+- Not done here: a row naming host outages (#1616), and a utilization figure in `brief`, whose standing `utilization: omitted` entry other surfaces depend on.
+
+### Fixed — a quoted substitution the credential-echo guard cannot delimit no longer hides the rest of its line (#2097)
+
+The guard from #2090 judged a double-quoted `$(...)` by first finding its closing parenthesis. A heredoc post whose prose held an apostrophe or an unmatched parenthesis defeated that search, the whole line read as unparsed, and an unparsed line is allowed. So `gh auth token` or `neonctl --help` beside such a post ran unjudged.
+
+- **A substitution is now delimited as bash reads it.** A parenthesis inside quotes, a comment, a heredoc body or a case pattern does not count.
+- **One that still cannot be delimited is read as text,** in a double-quoted string and in an unquoted heredoc body (a lone backtick too), and the rest of the line is judged.
+
+### Fixed — a bot can answer a message from a human sender (#2068)
+
+`message reply` refused any parent whose sender was not a bot, and `message send` takes bots only. A bot that a person asked a question over the plane had no door to answer it.
+
+- **A reply to a `human:` sender is recorded on the plane and carried by nothing.** A human has no pane, so nothing is submitted and no transmission is written. The reply reports delivery and transport `not_requested`, and the session that asked reads it with `message wait PARENT --for reply` or `message show`.
+- **The shape is keyed on positive facts only:** a `message.reply`, from a generated bot, to a parent addressed to it whose recorded sender is `human:NAME`. Its request receipt freezes a `RecordedReplyBinding`, with no native destination, and plans one recording stage. The receipt validator refuses that shape for a bot recipient, and still refuses a reply on a native route that has no delivery stage.
+- **With no carrier to fall back on, the request is durable before any write,** and a recording that cannot be proven fails as `unavailable`, retryable with the same request UUID.
+- **`message receipt` says `not_applicable`** for a message addressed to a human, never `missing`.
+- **`message send` to a human stays refused,** so a bot answers only someone who asked it.
+- `library/skills/fleet-ops/SKILL.md` says how a reply to a human behaves.
+
+### Added — a composed guard refuses a CLI form that prints an env-held credential (#2090)
+
+A bare `neonctl --help` in a live bot session printed the real `NEON_API_KEY` into a session transcript, because the CLI shows the variable as the default of `--api-key`. Every bot inherits that variable, and the only mitigation was prose in one agent file. The host's settings carry a bare `Bash` allow, so no permission rule could refuse the command.
+
+- **`credential-echo-guard.sh`** is a PreToolUse hook on Bash, composed into every bot through `claudlobby/system.yaml` next to `vault-git-guard.sh`. It refuses the forms in #2090's table A, which were measured with canaries:
+  - neonctl and neon help and usage screens: `--help`, a bare call, a command group without a verb, an unknown or incomplete top-level option. An unknown command prints only an error, so it passes.
+  - A `DEBUG` trace in front of neonctl.
+  - `pip config list` and `pip config debug` while `PIP_INDEX_URL` or `PIP_EXTRA_INDEX_URL` can be set.
+  - `gh auth token`.
+- **The safe form is allowed.** A form passes only when its variables are removed in the same command (`env -u VAR`, `env -i`, an empty `VAR=`, or an `unset VAR` earlier in the line that always runs: not after `&&`, `||` or `|`, not inside an `if`, a loop or a function body). The `DEBUG` trace and `gh auth token` are refused even then, because each falls back to a stored login; `gh auth token` passes with its stdout sent to a file, and its reason leads with letting gh read the token itself.
+- **It refuses, and never rewrites.** The reason names the safe form and repeats nothing from the command. A refusal is recorded as `credential_echo_refused` with the row and the CLI name only. Both of its events are registered as `notice` in the plane's severity registry.
+- **It fails open, with a `script_error` breadcrumb.** That happens when jq or python3 is missing, the payload is unparseable, or the decider fails. A command the decider cannot read is allowed and counted as `credential_echo_unparsed`.
+- **`credential-echo-decide.py`** holds the table as data, plus neonctl's command tree and pip's options. It reads quotes, ANSI-C strings and abbreviated long options as the shell and the CLI do. It follows a shell's `-c` string, a heredoc or here-string fed to a shell, substitutions inside double quotes and unquoted heredocs, `env` (with `-S`), wrappers such as `command`, `time`, `setsid` and `sudo`, and `npx`, `bunx` and `pnpm|npm|yarn dlx|exec`. It skips quoted arguments, comments and heredoc bodies that are data. `eval`, scripts, aliases, `xargs`, `find -exec` and names built by expansion are out of its reach.
+- **Tests:** `tests/test_credential_echo_guard.py` replays the canary probe kit's table A (`tests/fixtures/credential_echo/registry-rows.json`). Every echoing row is refused as written. Every `unset` row passes under each way of removing its variables. The controls pass untouched. Around the rows it covers separators, subshells, wrappers, scoping traps, the stdout-to-file rule, fail-open, and the plane record.
+
+### Fixed — `bot restart` and `bot start` no longer report a successful start of a staggered unit as unverified (#2087)
+
+On Linux, `systemctl --user restart` and `enable --now` block through a bot unit's `ExecStartPre=/bin/sleep` boot stagger, and the enroll call had a fixed 30 s budget. A unit staggered 30 s or more was cut off before its start returned. A restart that worked was reported as "bot lifecycle effect is unverified", and the readiness wait never ran.
+
+- **`unit_start_budget`** (activation_runtime) returns 30 s plus the unit's sealed `/bin/sleep` delay. This is the rule activation already used for its own starts, and `_start_budget` now delegates to it.
+- **`set_bot_running`** reads that budget from the sealed unit before the readiness fence and gives it to the enroll call. A call that outlasts the unit's own stagger is still reported unverified. An unstaggered unit and a Darwin plist keep 30 s.
+- **Tests:** `tests/test_bot_operations.py` seals a worker staggered 30 s, whose fake enroll is cut off at its budget while the start still completes. It adds controls for a hang past the stagger, an unstaggered unit, and a unit changed after activation. `tests/test_activation_runtime.py` pins the helper.
+
+### Fixed — a held input box is named HELD and paged with its remedy, never as a hang (#2070)
+
+When a bot's input box held text that was never submitted and no turn was running, keepalive logged `UNKNOWN` on every tick and fleet-pulse paged the manager with `activity_stuck` "likely hung mid-task": a page that points at a restart, which discards the text, when the remedy is an operator Enter. Seen on 2026-10-01 after a restart and under load: 26 consecutive `UNKNOWN` ticks on one bot, three "likely hung" pages on another, and two ordinary sends held at a 1-minute load of 34 and 44, each cleared with exactly two Enters.
+
+- **`pane_is_held`** (lib-common): positive evidence of text on the input box's line, read through `pane_input_region` and `_pane_strip_chrome`, with no length floor. Claude Code's own text there is never held: an empty box's suggestion (`Try "…"`), the queued-message hint behind a running turn, and a menu (a numbered option, or an offered "Esc to cancel"), where an Enter would choose. Byte-safe under any locale.
+- **keepalive** asks it after `BUSY` and before `IDLE`. The `HELD` verdict is logged and rides the heartbeat; `data/.held` holds the time it was first seen; no `.idle` is written and no key is sent, so no reload or bridge heal goes into a held box. Before, with no UTF-8 locale, the idle pattern matched a held box's border bytes and called it `IDLE`.
+- **fleet-pulse** pages `input_held` (critical) in place of `activity_stuck` once a fresh `data/.held` has held for `OBSERVABILITY_INPUT_HELD_THRESHOLD` (default 300 s). The manager's push names the remedy: an operator Enter, one more only if the text is still there after about 10 s, and if it is still there after that, stop and look, since a menu or a modal may be taking the Enter; never typed text, never a restart.
+- **Readers:** `uptime` counts `HELD` ticks as up time, as it did while they read `UNKNOWN`, and `status` shows `held`. The operator plane's presence still renders `HELD` as `unknown`.
+- **Tests:** `tests/test_pane_is_held.sh` (new), held cases and negative controls in `tests/test_keepalive_classify.sh` under both locales, four fixtures in a live capture's shape, the real keepalive tick, uptime, status, and a `validate-bot-change.sh` scenario that drives keepalive and fleet-pulse end to end.
+
+### Fixed — a reload-fleet test failed on macOS in its own cleanup (#2077)
+
+Two tests in `tests/test_reload_fleet_native.py` end by killing the process group they
+started, ignoring only ESRCH. In one of them the test body has already killed that group
+and reaped its leader, and on macOS runners that second kill has answered EPERM, failing
+a test whose assertions had passed. The cleanup is one helper now, and it ignores EPERM
+too, as `tests/test_bridge_state.py` already does; a new test pins that it still kills a
+live group. Tests only.
+
+### Fixed — the brief says what each open row asks (#2044)
+
+After a respawn, a worker's brief named its open rows by id alone, so nothing it could read said what they asked: two bots hand-rolled a plane read for the text in one hour. The work item's title is the dispatch text, and the brief's `work` section already reads it from the canonical reducer in the same session, so no second read is added.
+
+- **Text mode:** each WORK row ends with its title on one line, clipped to 80 characters by `task_recheck._clip`, the helper the re-check digest uses, so the two cannot drift. A long or multi-line title no longer spills across the section.
+- **The boot brief:** each SessionStart detail line now ends with the same clipped title, the case the issue is about. Three titled rows still fit the 1,000-character budget.
+- **Both views:** a worker's own rows and a manager's fleet view, which holds the rows it dispatched, carry the same text the same way.
+- **`--json`:** unchanged; every `work.items[]` row already carried `title`, whole. Schema-1's top-level keys are unchanged.
+- **A row with no recorded title** renders as `(title not recorded)` and is disclosed in `degraded[]` as `work.title`, never as a blank. The contract refuses an empty title at ingest, so this covers a row whatever left it so.
+
+### Fixed — composed bots exclude the data root's developer instructions (#2057)
+
+Every bot's local settings exclude the exact absolute data-root `CLAUDE.md` path,
+so new sessions use their composed instructions without inheriting the checkout's
+developer guide outside release activation. Bot and project instruction files
+remain eligible to load. The exclusion takes effect at the next session start.
+
+### Fixed — a broken link and three stale lines in the moved script reference (#2035 follow-up)
+
+- `documentation/test-suite.md` links `testing-plane-isolation.md` from its own folder. The link moved one folder down with its text in #2035 and pointed at `documentation/documentation/`.
+- The `reload-fleet.sh` reference row says what the script has done since #1989: a plugin refresh for the selected fleet, then marking running bots for an idle reload. It no longer says the script runs generate; authored config changes only through host activation.
+- The `pull-root.sh` row is gone: #1989 removed the script, and the CLI refuses the job. The `update-siblings.sh` row now gives the current reason the root is excluded: a Claudlobby release needs an operator's sealed build, plan and activation.
+
+### Changed — the root CLAUDE.md is an index again, and AGENTS.md mirrors every CLAUDE.md for Codex (#2035)
+
+The root `CLAUDE.md` had grown to 168k characters, past Claude Code's 150k warning, almost all of it the scripts table. Every session in this checkout loads it whole, and so does every bot: bot directories sit under the root, and Claude Code reads the `CLAUDE.md` of each parent directory. Codex reads `AGENTS.md` within one 32 KiB budget for the whole chain from the root to the folder it starts in (measured). The root is now a ~27k index with one line per runtime script (all 74). The full reference moved verbatim: the runtime and CLI rows to `claudlobby/_runtime_scripts/CLAUDE.md`, which loads only when a session opens a file there, and the harness rows to a new `harness/CLAUDE.md`, which also indexes all 26 harness scripts. The Python module map moved to `documentation/architecture/module-map.md`, which keeps the Codex chain into `_runtime_scripts/` within budget; the test-suite guidance to `documentation/test-suite.md`; and the full text of the sections the root now summarises to `documentation/validating-bot-changes.md` and `documentation/fleet-update-lifecycle.md`.
+
+- Every `CLAUDE.md` has a committed `AGENTS.md` beside it that is a byte-for-byte copy, and each `.agents/skills/<name>/` is a copy of `.claude/skills/<name>/`, so Claude Code and Codex read the same text. Copies, not symlinks: `tests/prepare_resources.py` refuses a symlink in the index, and Codex's skill loader skips a symlinked `SKILL.md` file (measured). Codex reads `AGENTS.md` at the root and nested, within one shared 32 KiB budget (measured).
+- `tests/test_instruction_budget.py` fails a PR when a Codex chain to any folder's rules passes 32 KiB, a nested instruction file passes 150k characters (naming the rows to move), an index misses, duplicates or invents a script or holds anything but one-line entries, or an `AGENTS.md` or Codex skill differs from its Claude source.
+- `tests/test_supervisor_ratchet.py` skips `.md` files: prose that names `systemctl` is not a call site, and the moved reference quotes three.
+- `claudlobby library list` and the `bot create --interactive` voice picker no longer offer `voices/CLAUDE.md`, or its new `AGENTS.md`, as a voice, and the generate-time skill-reference scan skips an `AGENTS.md` that mirrors the `CLAUDE.md` beside it, so each reference is reported once.
+
 ### Changed — main integration for the unified CLI (#1747, #1989)
 
 The aggregate incorporates main through `dd789c52` without restoring retired

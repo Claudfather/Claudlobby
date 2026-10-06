@@ -414,6 +414,30 @@ def test_linux_bootstrap_classifies_stock_alias_mask_and_shadowed_vendor_units(t
                            bootstrap_empty=True).require_complete()
 
 
+def test_linux_runtime_mask_reporting_its_own_link_is_exact_owned_only(tmp_path, monkeypatch):
+    # `mask --runtime` reports its link as FragmentPath (measured on the Pi).
+    obs = Observations(tmp_path)
+    runtime = tmp_path / "xdg-runtime"
+    (runtime / "systemd/user").mkdir(parents=True)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    obs.search_dirs.append(runtime / "systemd/user")
+    unit = obs.add("paused.service", declared=False)
+    unit.unlink()
+    link = runtime / "systemd/user/paused.service"
+    link.symlink_to("/dev/null")
+    obs.properties[unit.name].update(LoadState="masked", UnitFileState="masked-runtime",
+                                     FragmentPath=str(link), WorkingDirectory="",
+                                     Environment="", ExecStart="")
+    inventory = collect_enrollment(obs.root, (), package=obs.package, runner=obs.runner,
+                                   bootstrap_empty=True).require_complete()
+    assert str(link) in inventory.foreign
+    # The same link outside this user's runtime directory is not an owned mask.
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "other-runtime"))
+    with pytest.raises(InventoryError, match="masked installed ownership is unknown"):
+        collect_enrollment(obs.root, (), package=obs.package, runner=obs.runner,
+                           bootstrap_empty=True).require_complete()
+
+
 def test_linux_bootstrap_classifies_pi_ghost_special_template_and_continued_units(tmp_path):
     """Classes observed read-only on a Raspberry Pi user manager (2026-09-30)."""
     obs = Observations(tmp_path)
@@ -621,6 +645,52 @@ def test_unsealed_linux_sources_preserve_owned_host_fleet_bot_and_foreign_units(
     fleet_source.write_bytes(fleet_source.read_bytes().replace(
         b"Environment=CLAUDLOBBY_FLEET=alpha", b"Environment=CLAUDLOBBY_FLEET=other"))
     with pytest.raises(InventoryError, match="different root or fleet owner"):
+        legacy_linux_declarations(plan)
+
+
+def test_legacy_linux_units_without_fleet_root_adopt_only_proven_environment(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from claudlobby import config_units
+
+    # 8bc588a-generated fleet and bot units carry no FLEET_ROOT; the candidate
+    # roster still declares one.
+    obs = Observations(tmp_path)
+    fleet_root = str(obs.root / "local/alpha")
+    obs.env = {"CLAUDLOBBY_ROOT": str(obs.root), "CLAUDLOBBY_FLEET": "alpha"}
+    obs.add("alpha-sweep.service", scope="fleet", working=obs.root)
+    obs.add("alpha-sweep.timer", scope="fleet", working=obs.root, service="alpha-sweep.service")
+    obs.env = {"CLAUDLOBBY_ROOT": str(obs.root), "TMUX_TMPDIR": "/tmp"}
+    bot = obs.add("alpha.worker.service", scope="bot")
+    candidate = [replace(item, environment=(*item.environment, ("FLEET_ROOT", fleet_root)))
+                 for item in obs.declarations]
+    plan = SimpleNamespace(data_root=obs.root, check_fresh=lambda: None)
+    monkeypatch.setattr(config_units, "planned_units", lambda _plan, manager:
+                        tuple((item, {}) for item in candidate) if manager == "Linux" else ())
+    declarations = legacy_linux_declarations(plan)
+    assert all("FLEET_ROOT" not in dict(item.environment) for item in declarations)
+    inventory = collect_enrollment(obs.root, declarations, package=obs.package,
+                                   runner=obs.runner, legacy_source=True).require_complete()
+    assert {unit.target for unit in inventory.units} == {
+        "alpha-sweep.service", "alpha-sweep.timer", "alpha.worker.service"}
+
+    # An effective FLEET_ROOT the reviewed source does not carry is not adopted.
+    effective = obs.properties["alpha.worker.service"]["Environment"]
+    obs.properties["alpha.worker.service"]["Environment"] = effective + " FLEET_ROOT=/other"
+    with pytest.raises(InventoryError, match="loaded data/fleet/release identity differs"):
+        collect_enrollment(obs.root, declarations, package=obs.package,
+                           runner=obs.runner, legacy_source=True).require_complete()
+    obs.properties["alpha.worker.service"]["Environment"] = effective
+
+    # A present but different fleet root still refuses.
+    source = obs.root / "generated/alpha.worker.service"
+    source.write_bytes(source.read_bytes() + b"Environment=FLEET_ROOT=/other\n")
+    with pytest.raises(InventoryError, match="different root or fleet owner"):
+        legacy_linux_declarations(plan)
+    source.write_bytes(bot.read_bytes())
+
+    # Without FLEET_ROOT, a bot working directory shared with another unit is ambiguous.
+    candidate.append(replace(candidate[-1], source=obs.root / "generated/alpha.other.service", bot="other"))
+    with pytest.raises(InventoryError, match="no unique working directory"):
         legacy_linux_declarations(plan)
 
 

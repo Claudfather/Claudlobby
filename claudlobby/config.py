@@ -192,6 +192,10 @@ FLEET_PULSE_ENV_KEYS: dict[str, str] = {
 }
 
 
+# fleet_pulse.timeout_s, validated and clamped to this range (seconds).
+FLEET_PULSE_TIMEOUT_RANGE = (30, 3600)
+
+
 @dataclass
 class FleetPulseConfig:
     """Fleet-pulse escalation knobs — the alert-volume controls (#1120).
@@ -222,6 +226,10 @@ class FleetPulseConfig:
     escalation_state_dir: str | None = None
     renotify_after_s: int | None = None
     rearm_window_s: int | None = None
+    # The sweep's time cap in seconds (#2059). Read by claudlobby/fleet_pulse.py
+    # from this config, not the unit's Environment=, so a hand-run
+    # `claudlobby fleet pulse` gets it too; unset, the cap scales with load.
+    timeout_s: int | None = None
 
     def env(self) -> dict[str, str]:
         """The subset actually set, as ``VAR: value``. Unset stays unset so the
@@ -793,6 +801,11 @@ class BotConfig:
     # heavy-job slot, a PreToolUse hook composed for this bot only
     # (composer._with_heavy_slot_hook).
     heavy_slot: bool = False
+    # Opt-in per bot: refuse a GitHub-bound write that would put a term from the
+    # host's list (~/.config/claudlobby/public-write-terms) into a PUBLIC
+    # repository, a PreToolUse hook composed for this bot only
+    # (composer._with_public_write_guard_hook).
+    public_write_guard: bool = False
     # #1665 Layer 0b, opt-in per bot: deny rules on the shared config dir, the
     # .env tiers and the install's code (composer.compose_settings_local).
     isolation: IsolationConfig = field(default_factory=IsolationConfig)
@@ -1457,6 +1470,7 @@ def _coerce_fleet_pulse(raw: dict | None) -> FleetPulseConfig | None:
         escalation_state_dir=None if sender in (None, "") else sender,
         renotify_after_s=_int("renotify_after_s"),
         rearm_window_s=_int("rearm_window_s"),
+        timeout_s=_int("timeout_s"),
     )
 
 
@@ -1919,6 +1933,10 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         heavy_slot=_strict_bool(
             "'heavy_slot'",
             raw.get("heavy_slot", defaults.get("heavy_slot", False)),
+        ),
+        public_write_guard=_strict_bool(
+            "'public_write_guard'",
+            raw.get("public_write_guard", defaults.get("public_write_guard", False)),
         ),
         isolation=_parse_isolation(
             defaults.get("isolation"), raw.get("isolation"), name

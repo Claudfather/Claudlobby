@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""plane-readers.py — the plane answering the LIST readers and the RESOLVER, stdlib
-(cutover chunks 5 + 6a).
+"""plane-readers.py — the plane answering the LIST readers, stdlib (cutover chunk 5).
 
 The matcher (``dispatch-overdue.py``) is a stdlib script every consumer shells,
 so importing its plane source must stay dependency-light. The report capability
@@ -16,18 +15,6 @@ This module is the stdlib twin of the package definitions — keep them in step
                       passed, the expiry cap, the bot's own ``progress`` inside
                       the grace — the watchdog's rules, mirrored; id-less rows
                       are KEPT, as that reader keeps them)
-- ``answering_idless`` / ``head`` ↔ ``dispatch-overdue._answering_an_idless_dispatch``
-                      + ``open_task_id`` (the resolver, chunk 6a: while the bot's
-                      NEWEST assignment is an id-less dispatch nothing has
-                      answered, resolve nothing — the next terminal report
-                      answers THAT, never the oldest id'd row, #1418). The
-                      report door closes id-less assignments on the bot's next
-                      terminal report (``plane-lookup.py --open-idless``), which
-                      is what makes the guard answerable from the plane.
-- ``answering_control_note`` (#1981): the same guard for a CONTROL note, which
-                      lands no assignment since #1491 and so is invisible to
-                      ``answering_idless`` -- read off the note's COMMUNICATION
-                      instead, and held until an id-less report answers it.
 
 Read-only (``mode=ro`` + ``query_only``). A missing or unopenable db raises
 ``PlaneUnreachable`` — the caller refuses, it never falls back to the JSONL:
@@ -284,17 +271,6 @@ LAST_PROGRESS_SQL = (
 )
 DISPATCH = "dispatch-log:"
 IDLESS = DISPATCH + "sha:"
-# The bot's newest assignment across its uids, as of an instant (one query, the
-# same tie-break the open list uses: occurred_at, then ingest order).
-_NEWEST_SQL = (
-    "SELECT a.occurred_at, a.source_ref, a.assignment_id, a.work_item_id FROM assignments a"
-    " WHERE a.assignee_uid IN (%s) AND (? IS NULL OR a.occurred_at <= ?)"
-    " ORDER BY a.occurred_at DESC, a.ingest_seq DESC LIMIT 1"
-)
-ASSIGNMENT_TERMINAL_SQL = (
-    "SELECT 1 FROM events e WHERE e.kind = 'task' AND e.event IN " + _TERMINAL +
-    " AND e.assignment_id = ? AND (? IS NULL OR e.occurred_at <= ?) LIMIT 1"
-)
 WORK_ITEM_SQL = "SELECT work_item_id FROM assignments WHERE assignment_id = ?"
 
 
@@ -502,105 +478,6 @@ def overdue_rows(conn: sqlite3.Connection, fleet: str, bot: str, *, now: int, ma
         if deadline_status(now, da, exp, last_progress, max_age, progress_grace) == "overdue":
             out.append((da, exp, now - exp, tid))
     return out
-
-
-def answering_idless(conn: sqlite3.Connection, fleet: str, bot: str, at: Optional[str] = None,
-                     *, entry: Optional[dict] = None) -> bool:
-    """True while the bot's NEWEST assignment (as of *at*) is an id-less
-    dispatch nothing has answered: a ``sha:``-keyed assignment with no
-    terminal task event of its own. The report door lands that event on the
-    bot's next terminal report (any status the legacy ledger calls
-    terminal), so the guard releases exactly when the legacy one does."""
-    entry = entry if entry is not None else bot_entry(conn, fleet, bot)
-    uids = (entry or {}).get("uids", [])
-    if not uids:
-        return False
-    row = conn.execute(_NEWEST_SQL % ",".join("?" * len(uids)), (*uids, at, at)).fetchone()
-    if row is None or not (row[1] or "").startswith(IDLESS):
-        return False
-    return conn.execute(ASSIGNMENT_TERMINAL_SQL, (row[2], at, at)).fetchone() is None
-
-
-# The control-note guard (#1981). A `query` / `cancel` / `compact` / `restart`
-# note lands its COMMUNICATION alone (#1491: no assignment, so no row a report
-# could fail to close), and `answering_idless` reads the bot's newest
-# ASSIGNMENT, so a note stopped holding the resolver back: the worker's id-less
-# answer to it was stamped with the live task and closed it as `completed`
-# (ravi's #917 row, 2026-09-29). This reads the NOTE instead: the resolver is
-# held while ANY control note sent to the bot has no id-less report from the
-# bot after it, so the newest such note decides (a report after it is after
-# every older one). A report naming one of the bot's own tasks, and a newer
-# task, leave the hold standing: neither answers a note, and a wrong
-# completion is worse than an open row (the ruling on #1984). The cost is at
-# most one id-less report per note that resolves to no task; an id'd row it
-# was really finishing stays open and pages as overdue. The hold is on
-# RESOLUTION only: the report door's id-less closer still closes raw-text rows
-# on that report.
-# The note is selected by the dispatch door's provenance (`dispatch-log:`),
-# never by message class alone, since other doors send classes like `question`
-# too. Two arms, each on an index: the recipient alias the door records
-# whenever it resolves the worker (every dispatch on the live plane,
-# 2026-09-29), and `recipient_raw` in the sender's fleet, the door's disclosed
-# fallback when it cannot. A report is id-less when its communication carries
-# no `assignment_id`, which the report door sets whenever it links one, so a
-# `--task` that links to none of the bot's tasks counts as id-less and releases
-# the hold (measured on #1984). The public CLI never resolves: `task report`
-# links explicitly and `fleet reports submit` is the unlinked report (#1984's
-# `--no-task`), so this guard keeps only the private `--open-task` resolver honest.
-CONTROL_COMMANDS = ("query", "cancel", "compact", "restart")
-_NEWEST_NOTE_SQL = (
-    "SELECT occurred_at, ingest_seq FROM ("
-    "SELECT c.occurred_at, c.ingest_seq FROM communications c"
-    " WHERE c.recipient_fleet = ? AND c.recipient_uid IN (%s)"
-    " AND c.source_ref LIKE 'dispatch-log:%%' AND c.command_type IN (%s)"
-    " AND (? IS NULL OR c.occurred_at <= ?)"
-    " UNION ALL"
-    " SELECT c.occurred_at, c.ingest_seq FROM communications c"
-    " WHERE c.fleet_uid = ? AND c.recipient_alias IS NULL AND lower(c.recipient_raw) = ?"
-    " AND c.source_ref LIKE 'dispatch-log:%%' AND c.command_type IN (%s)"
-    " AND (? IS NULL OR c.occurred_at <= ?))"
-    " ORDER BY occurred_at DESC, ingest_seq DESC LIMIT 1"
-)
-_IDLESS_REPORT_SINCE_SQL = (
-    "SELECT 1 FROM communications r WHERE r.message_class = 'report' AND r.sender_uid IN (%s)"
-    " AND r.assignment_id IS NULL"
-    " AND (r.occurred_at > ? OR (r.occurred_at = ? AND r.ingest_seq > ?))"
-    " AND (? IS NULL OR r.occurred_at <= ?) LIMIT 1"
-)
-
-
-def answering_control_note(conn: sqlite3.Connection, fleet: str, bot: str,
-                           at: Optional[str] = None, *, entry: Optional[dict] = None) -> bool:
-    """True while any control note sent to the bot (as of *at*) has no id-less
-    report from the bot after it: the bot's next id-less report answers THAT
-    note, so the resolver must not hand it an open task (#1981)."""
-    entry = entry if entry is not None else bot_entry(conn, fleet, bot)
-    uids = (entry or {}).get("uids", [])
-    if not uids:
-        return False
-    marks, ctl = ",".join("?" * len(uids)), ",".join("?" * len(CONTROL_COMMANDS))
-    fleet_row = conn.execute(FLEET_UID_SQL, (fleet,)).fetchone()
-    note = conn.execute(_NEWEST_NOTE_SQL % (marks, ctl, ctl),
-                        (fleet, *uids, *CONTROL_COMMANDS, at, at,
-                         fleet_row[0] if fleet_row else None, bot.lower(),
-                         *CONTROL_COMMANDS, at, at)).fetchone()
-    if note is None:
-        return False
-    return conn.execute(_IDLESS_REPORT_SINCE_SQL % marks,
-                        (*uids, note[0], note[0], note[1], at, at)).fetchone() is None
-
-
-def head(conn: sqlite3.Connection, fleet: str, bot: str, at: Optional[str] = None,
-         *, entry: Optional[dict] = None) -> Optional[str]:
-    """The resolver's answer from the plane: the oldest open id'd dispatch,
-    or None — including None while an id-less dispatch or a control note is
-    unanswered."""
-    entry = entry if entry is not None else bot_entry(conn, fleet, bot)
-    if entry is None or answering_idless(conn, fleet, bot, at, entry=entry) \
-            or answering_control_note(conn, fleet, bot, at, entry=entry):
-        return None
-    rows = open_rows(conn, fleet, bot, at, entry=entry, idd_only=True)
-    return rows[0][2] if rows else None
 
 
 # The idle-worker check (chunk 7a, the last reader to get a plane path): per

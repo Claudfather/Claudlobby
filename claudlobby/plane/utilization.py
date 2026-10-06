@@ -24,17 +24,24 @@ from datetime import datetime, timedelta, timezone
 from ..utilization import compute_busy_pct, find_state_transition
 from .queries import fleet_alias_range
 
-# Fleet scope is applied IN SQL (a LIKE on the alias) — the lens measured
+# Fleet scope is applied IN SQL (an alias range) — the lens measured
 # 730 ms at 21 bots × 7 d when every fleet's rows were fetched and parsed
-# before Python discarded the other fleets'. Measured trade (round 2): a
-# scan with a LIKE, not a seek (no alias index) — ~1.4× faster for a
-# scoped read on a multi-fleet host, ~15% SLOWER for fleet=None ("all")
-# where nothing is discarded. The scoped read is the common one.
+# before Python discarded the other fleets'. The CROSS JOIN pins SQLite's
+# join order: scope the small identity_registry first, then search each kept
+# identity's heartbeats on idx_samples_subject (subject_uid, metric, ...).
+# Left to the planner it drove from metric_samples and walked the host's
+# whole sample history before the fleet filter (measured: >15 s on a
+# ~650MB plane).
 HEARTBEAT_SERIES_SQL = (
     "SELECT i.alias AS alias, m.occurred_at AS occurred_at, m.value AS value"
-    " FROM metric_samples m JOIN identity_registry i ON i.uid = m.subject_uid"
-    " WHERE m.metric = 'bot.heartbeat' AND m.occurred_at >= ?"
+    " FROM identity_registry i CROSS JOIN metric_samples m"
+    "  ON m.subject_uid = i.uid AND m.metric = 'bot.heartbeat'"
+    " WHERE m.occurred_at >= ?"
     f" AND (? IS NULL OR {fleet_alias_range('i.alias')})"
+    # optional one bot: the alias's tail after its last '/', case-folded
+    # (substr, not LIKE, so a '_' in a name is literal)
+    " AND (? IS NULL OR lower(substr(i.alias, length(i.alias) - length(?)))"
+    "  = '/' || lower(?))"
     " ORDER BY i.alias, m.occurred_at, m.ingest_seq"
 )
 
@@ -48,7 +55,8 @@ def _parse(ts: str) -> datetime | None:
 
 
 def heartbeat_series(conn, *, now: datetime | None = None,
-                     fleet: str | None = None, days: int = 7) -> dict[str, list[tuple[datetime, str]]]:
+                     fleet: str | None = None, days: int = 7,
+                     bot: str | None = None) -> dict[str, list[tuple[datetime, str]]]:
     """``{alias: [(instant, BUSY|IDLE|UNKNOWN), ...]}`` in TIME order — the
     recorded (instant, verdict) pairs EVERY keepalive-derived read consumes
     (this surface, ``claudlobby.utilization``, ``claudlobby status``; F18
@@ -61,7 +69,8 @@ def heartbeat_series(conn, *, now: datetime | None = None,
     series: dict[str, list] = {}
     # Fetched whole before parsing: over the live cursor, the snapshot would be
     # held while every one of tens of thousands of rows is parsed (#1905).
-    for alias, occ, raw in conn.execute(HEARTBEAT_SERIES_SQL, (since, like, like, like)).fetchall():
+    params = (since, like, like, like, bot, bot, bot)
+    for alias, occ, raw in conn.execute(HEARTBEAT_SERIES_SQL, params).fetchall():
         ts = _parse(occ)
         try:
             state = (json.loads(raw) if isinstance(raw, str) else raw or {}).get("state")

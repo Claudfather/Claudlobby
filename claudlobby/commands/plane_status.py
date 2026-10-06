@@ -9,7 +9,7 @@ import sqlite3
 from ..command_result import CommandFailure, CommandOutput
 from ..context import resolve_paths
 from ..plane.db import connect_ro, db_file
-from ..plane.health import staged_summary
+from ..plane.health import emit_losses_summary, staged_summary
 from ..plane.identity import provisional_actors
 from ..plane.migrations import DowngradeError
 from ..plane.schema_state import PendingMigrationError, require_current_schema
@@ -76,8 +76,19 @@ def dispatch(args) -> CommandOutput:
         else:
             quarantine["count"] = len(scan.quarantined)
             lines.append(f"quarantine: {quarantine['count']}")
+        # The emits the plane did not record (#2165): the same reading as
+        # plane doctor's rung, read from the counter file, not the database.
+        emit_losses = emit_losses_summary(root)
+        if emit_losses["state"] == "unreadable":
+            lines.append("emit losses: unreadable — cannot count (a gap, not a zero)")
+        else:
+            kinds = ", ".join(f"{kind} {n}" for kind, n in emit_losses["not_recorded"].items())
+            lines.append(f"emit losses, last 24h: {emit_losses['not_recorded_total']} NOT recorded"
+                         + (f" ({kinds})" if kinds else "")
+                         + f", {emit_losses['reaped']} reaped (fate unknown)")
         return CommandOutput({"database": database, "spool": spool,
-                              "staged": staged, "quarantine": quarantine}, lines=tuple(lines))
+                              "staged": staged, "quarantine": quarantine,
+                              "emit_losses": emit_losses}, lines=tuple(lines))
     except PendingMigrationError as exc:
         raise CommandFailure("migration_required", f"Plane status refused: {exc}") from exc
     except DowngradeError as exc:

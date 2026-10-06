@@ -129,12 +129,25 @@ unwritable queue refuses and records a best-effort `.emit-losses` breadcrumb.
 Daemon replay uses the normal `emit_batch()` owner, at most 200 batches or
 0.5 seconds per serving tick. Invalid capture configuration or an existing identity-parent conflict leaves
 batches pending for later repair instead of quarantining them. An interrupted stage's
-`.<event id>.tmp` becomes eligible for replay after an hour.
+`.<event id>.tmp` becomes eligible for replay after an hour. One left empty, because the
+stage was reaped before writing its batch, never reached the disk: once its writer is
+gone, replay records it as a `stage_empty` loss in `.emit-losses` and removes it, instead
+of quarantining it as a malformed batch (#2164).
 
 `plane doctor`, `plane status`, and the trust panel expose staged depth.
 Doctor flags unreadable, full, stale, or undrainable pending data. An
 initialized plane with a never-started daemon needs attention. A staged batch
 never satisfies a linked/task operation's committed-recording requirement.
+
+**The quarantine and the counted losses (#2165).**
+
+- **Listing the quarantine.** `plane spool list --quarantined` lists every quarantined entry, newest first. Each item shows when the entry was written and when it was quarantined, its size, whether it is empty, and its reason. The listing pages with `--limit` and `--cursor`, states its coverage, and reads only files, never the database.
+- **Reading one entry.** `plane spool inspect NAME` reads a single entry. That includes a refused stage, whose name has the form `<time_ns>-<lead event>[.batch.<pid>].json`.
+- **The loss counter.** `emit_losses_summary` in `plane/health.py` reads `state/plane/.emit-losses` once, for three readers:
+  - `plane doctor`'s emit-losses rung;
+  - `plane status`, as `emit_losses`;
+  - the brief, which labels `alerts` (`#2165`) while a known loss sits in the 24 h window.
+- **Unreadable is not zero.** An unreadable quarantine or counter is reported as unreadable, never as zero.
 
 **The deadline follows who waits (#1693).** The client's total deadline is
 1.0 s unless the caller's class says otherwise. `PLANE_EMIT_CLASS` is `hook`
@@ -201,8 +214,10 @@ program keeps refusing.
 
 | Door | Records | Silenced by |
 |---|---|---|
-| `lib/dispatch-task.sh` | for a TRACKED shape (a `task`, and a raw-text send which inherits type=task) work_item + assignment + communication; for a CONTROL type (`query` / `cancel` / `compact` / `restart`) the communication ALONE — an open assignment for a note that asks nothing is a row no report can close and it blanks the resolver head (#1491), so a control type mints none. Both carry the `pane_submitted` / `carrier_queued` / `failed` transmission after the send, and `--supersedes` sets `supersedes_msg_id` and a terminal `superseded` on the retired assignment whatever the type (the note retires its target even though the note itself is untracked); a raw-text dispatch is keyed by the content hash of its dispatch row | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
-| `lib/report-back.sh` | the report as a communication; task events on the assignment the legacy task id resolves to (`claudlobby/_runtime_scripts/plane-lookup.py`); an id-less terminal report closes the bot's open id-less dispatches | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
+| `claudlobby task admit` / `task assign` | admission records a queued work item; assignment records its owner separately. Neither sends a message | committed recording required; an unavailable Plane refuses the mutation |
+| `claudlobby assignment deliver` | the generated fleet manager records a communication linked to the committed assignment, then attempts native delivery; transmission and receiver receipt remain separate evidence | committed recording required before delivery; an unknown outcome is not automatically resent |
+| `claudlobby assignment accept` / `progress` / `block` / `return` / `complete` / `fail` | the assigned bot accepts or transitions its current assignment; linked reports record the transition and communication, with manager notification reported separately | committed recording required; notification failure does not undo the recorded transition |
+| `claudlobby message send` / `fleet reports submit` | ordinary messages and explicitly unlinked reports record a communication without transitioning an assignment | recording outages allow delivery with an explicit degraded result and bounded fleet alert; delivery and recording outcomes remain separate |
 | `claudlobby/_runtime_scripts/keepalive.sh` | `bot.heartbeat` + `bot.session_up` metric samples per tick (presence's recorded half) | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
 | `claudlobby/_runtime_scripts/plane-telegram-in.sh` / `-out.sh` / `plane-rc-relay-out.sh` (hooks) | the operator's inbound messages, the bot's replies, RC-relayed final answers, with honest transmission states (carrier `telegram-bridge`) | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
 | `claudlobby/_runtime_scripts/plane-dispatch-in.sh` (UserPromptSubmit hook) | a `received` transmission for a tracked dispatch, report, or briefing whose final-line plane marker reaches the receiving bot; records the received wire byte count and hash so delivery can be checked against the sender's proof, while ordinary prompts record nothing | `PLANE_EMIT_DISABLED=1` |

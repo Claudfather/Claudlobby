@@ -141,6 +141,11 @@ def scan_tree(tree: Path, skills: Iterable[str]) -> list[Finding]:
         return []
     findings: list[Finding] = []
     for path in sorted(tree.rglob("*.md")):
+        # An AGENTS.md is a byte-for-byte copy of the CLAUDE.md beside it
+        # (tests/test_instruction_budget.py): the same text, which this walk
+        # also reads under its real name. Reading both reports each ref twice.
+        if path.name == "AGENTS.md" and (path.parent / "CLAUDE.md").is_file():
+            continue
         text = path.read_text(encoding="utf-8", errors="replace")
         for lineno, token in iter_refs(text):
             result = resolve_ref(token, skills)

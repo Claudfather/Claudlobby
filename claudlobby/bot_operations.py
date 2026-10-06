@@ -25,7 +25,8 @@ import sys
 from uuid import uuid4
 
 from .activation_enrollment import selected_bot_entry, _target
-from .activation_runtime import assert_quiescent
+from .activation_handoffs import _strip_envelope
+from .activation_runtime import assert_quiescent, unit_start_budget
 from .activation_state import ActivationError, read_selection
 from .config_plan import path_state, read_plan
 from .config_units import current_declarations, planned_units
@@ -92,7 +93,13 @@ class BotControlResult:
 
 
 def _fresh_self_handoff(bot_dir: Path, *, observed_capture: bool = False) -> None:
-    """Require a fresh owned handoff; explicit capture already witnessed its write."""
+    """Require a fresh owned handoff; explicit capture already witnessed its write.
+
+    The session capture's own frontmatter decides. Under the activation's
+    reference refresh envelope (#2094) that is the capture below it: the
+    activation's own reader finds the envelope, so the two agree on it, and
+    one that reader refuses is refused here by name (#2119).
+    """
     handoff_dir = bot_dir / ".claude"
     try:
         bot_info = bot_dir.lstat()
@@ -109,10 +116,20 @@ def _fresh_self_handoff(bot_dir: Path, *, observed_capture: bool = False) -> Non
             info = os.fstat(stream.fileno())
             if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
                 raise BotLifecycleError("self restart requires an owned handoff file")
-            header = stream.read(8192).decode("utf-8")
-        if not header.startswith("---\n") or "\n---\n" not in header[4:]:
+            head = stream.read(8192)
+        try:
+            head = _strip_envelope(head, bot_dir, path)
+        except ActivationError as exc:
+            raise BotLifecycleError(
+                "self restart requires a fresh owned session handoff, and the reference refresh"
+                " envelope at its top is malformed (the next activation refuses it too):"
+                " delete that envelope block") from exc
+        close = head.find(b"\n---\n", 4)
+        if not head.startswith(b"---\n") or close < 0:
             raise ValueError("missing handoff frontmatter")
-        frontmatter = header[4:].split("\n---\n", 1)[0]
+        # Only the frontmatter is decoded: the read can end inside a character.
+        header = head[:close + 5].decode("utf-8")
+        frontmatter = header[4:-5]
         if len(re.findall(r"^last_updated\s*:", frontmatter, re.MULTILINE)) != 1:
             raise ValueError("missing UTC handoff timestamp")
         fields, _ = parse_frontmatter(header)
@@ -660,12 +677,17 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                                             unavailable=True)
             elif not unit.installed:
                 _confirm_stopped(adapter, installed, entry["target"], socket)
+            # systemctl restart and enable --now block through the unit's
+            # ExecStartPre stagger, so the enroll call gets that delay on top
+            # of its own 30 s (#2087). Read before the fence: no effect yet.
+            enroll_budget = unit_start_budget(declaration.source, declaration.source.read_bytes())
             fence_args = (root, spec.bot_dir) if ceiling is None else (root, spec.bot_dir, str(ceiling))
             fence = _native(adapter, "svc_activation_bot_fence", *fence_args).split("\t")
             if len(fence) != 2 or not fence[0].isdigit() or not fence[1]:
                 raise BotLifecycleError("bot readiness fence is incomplete")
             try:
-                _native(adapter, "svc_bot_enroll_exact", declaration.source, installed, entry["target"])
+                _native(adapter, "svc_bot_enroll_exact", declaration.source, installed, entry["target"],
+                        timeout=enroll_budget)
                 _observed(root, declarations, adapter, entry["target"], installed)
                 readiness = _native(adapter, "svc_activation_bot_ready", root, spec.bot_dir,
                                     fence[0], fence[1], timeout=int(fence[0]) + 30)

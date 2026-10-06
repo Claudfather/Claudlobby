@@ -679,7 +679,9 @@ svc_bot_control_exact() (
     if [ "$control" = interrupt ]; then
         # Esc requests one turn/tool cancellation without Ctrl-C's idle-prompt
         # exit behavior. Tmux submission does not verify Claude cancelled it.
-        bot_tmux "$expected" send-keys -t "$session" Escape || return 3
+        # It takes the pane's send lock (#2036): an Escape landing inside
+        # another sender's chunks would act on that half-typed payload.
+        pane_send_key "$expected" "$session" Escape interrupt || return 3
     else
         # Keep the existing chunked pane primitive, but disable its optional
         # Enter repair: this explicit control is never automatically resent.
@@ -700,6 +702,48 @@ svc_bot_control_exact() (
 _svc_activation_unknown() {
     printf 'activation supervision unknown: %s\n' "$*" >&2
     return 3
+}
+
+# `mask --runtime` reports its own link as FragmentPath, not /dev/null. Accept
+# only this user's exact runtime link for TARGET, and only to /dev/null.
+_svc_activation_runtime_mask() {
+    local link="$1" target="$2" runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    case "$runtime" in /*) ;; *) return 1 ;; esac
+    [ "$link" = "$runtime/systemd/user/$target" ] && [ -L "$link" ] && [ -O "${link%/*}" ] \
+        && [ "$(readlink "$link")" = /dev/null ]
+}
+
+# Reload this user's manager once so observations see files the caller just
+# restored (early adoption abort) or published (Linux phase publication).
+# Never starts, stops or retries.
+svc_activation_reload() {
+    [ "$_OS" = Linux ] || { _svc_activation_unknown "reload is Linux-only"; return 3; }
+    systemctl --user daemon-reload
+}
+
+# A higher-priority installed file hides a surviving runtime mask from load
+# state. Remove only this user's exact mask link for TARGET; never start, stop
+# or retry. Callers: early adoption abort, whose SAVED is the frozen originally
+# unmasked state; and Linux phase publication, whose SAVED is the candidate's
+# fresh snapshot, so its ownership proof is Python's frozen-original check.
+svc_activation_clear_runtime_mask() {
+    local file="$1" target="$2" saved="$3" link
+    [ "$_OS" = Linux ] || { _svc_activation_unknown "runtime masks are Linux-only"; return 3; }
+    _svc_activation_saved "$saved" || return 3
+    [ "$SVC_ACT_OLD_LOAD" = loaded ] || { _svc_activation_unknown "$target was not originally unmasked"; return 3; }
+    _svc_activation_read "$file" "$target" || return 3
+    [ "$SVC_ACT_LOAD" = loaded ] || { _svc_activation_unknown "$target restored file does not load"; return 3; }
+    link="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/systemd/user/$target"
+    if [ -e "$link" ] || [ -L "$link" ]; then
+        _svc_activation_runtime_mask "$link" "$target" || { _svc_activation_unknown "$target runtime node is not a mask"; return 3; }
+        systemctl --user unmask --runtime "$target" || return $?
+        [ ! -e "$link" ] && [ ! -L "$link" ] || { _svc_activation_unknown "$target runtime mask remains"; return 3; }
+        printf 'removed\n'
+    else
+        printf 'absent\n'
+    fi
+    _svc_activation_read "$file" "$target" || return 3
+    [ "$SVC_ACT_FILE_STATE $SVC_ACT_LOAD" = "$SVC_ACT_OLD_FILE $SVC_ACT_OLD_LOAD" ]
 }
 
 _svc_activation_read() {
@@ -746,7 +790,7 @@ EOF
             fi
             case "$SVC_ACT_LOAD" in
                 loaded) [ "$fragment" = "$file" ] || return 3 ;;
-                masked) [ "$fragment" = /dev/null ] || return 3 ;;
+                masked) [ "$fragment" = /dev/null ] || _svc_activation_runtime_mask "$fragment" "$target" || return 3 ;;
                 not-found) [ ! -e "$file" ] || return 3; SVC_ACT_FILE_STATE=not-found ;;
                 *) return 3 ;;
             esac
@@ -911,7 +955,9 @@ EOF
 }
 
 svc_activation_pause() {
-    local file="$1" target="$2" saved="$3" remaining=20
+    local file="$1" target="$2" saved="$3" remaining=20 reset=0 timer_owned="${5:-}"
+    case "$timer_owned" in ""|timer-owned) ;; *) return 3 ;; esac
+    [ -z "$timer_owned" ] || { [ "$_OS" = Linux ] && [ "${target##*.}" = service ]; } || return 3
     _svc_activation_saved "$saved" || return 3
     svc_activation_assert_external "$file" "$target" "${4:-$$}" || return $?
     case "$_OS" in
@@ -930,6 +976,24 @@ svc_activation_pause() {
                 _svc_activation_read "$file" "$target" || return 3
                 if [ "$SVC_ACT_LOAD" = masked ] && [ "$SVC_ACT_ACTIVE" = inactive ]; then
                     break
+                fi
+                # Parking a timer's service first fails the timer ("Unit to
+                # trigger vanished"); stop does not clear that. Reset only this
+                # exact masked, stopped timer, once; a failed service refuses.
+                if [ "$reset" = 0 ] && [ "${target##*.}" = timer ] \
+                        && [ "$SVC_ACT_LOAD:$SVC_ACT_ACTIVE" = masked:failed ]; then
+                    systemctl --user reset-failed "$target" || return $?
+                    reset=1
+                    continue
+                fi
+                # The owner supplies this capability only from frozen timer
+                # membership. Preserve native failure history; never run the job.
+                if [ "$reset" = 0 ] && [ "$timer_owned" = timer-owned ] \
+                        && [ "$SVC_ACT_LOAD:$SVC_ACT_ACTIVE:$SVC_ACT_MAIN_PID:$SVC_ACT_CONTROL_PID" = masked:failed:0:0 ]; then
+                    printf 'activation parking: %s raw state masked failed MainPID=0 ControlPID=0\n' "$target" >&2
+                    systemctl --user reset-failed "$target" || return $?
+                    reset=1
+                    continue
                 fi
                 [ "$remaining" -gt 0 ] || {
                     _svc_activation_unknown "$target did not settle after stop"; return 3;
@@ -1012,6 +1076,12 @@ svc_activation_start() {
                 systemctl --user unmask --runtime "$target" || return $?
                 systemctl --user daemon-reload || return $?
             fi
+            # Publication removes the original pause's hidden runtime masks; a
+            # surviving runtime node under a loaded candidate is never started.
+            local link="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/systemd/user/$target"
+            [ ! -e "$link" ] && [ ! -L "$link" ] || {
+                _svc_activation_unknown "$target runtime mask survives publication"; return 3;
+            }
             _svc_activation_read "$file" "$target" || return 3
             [ "$SVC_ACT_LOAD $SVC_ACT_ACTIVE" = 'loaded inactive' ] || return 3
             systemctl --user start "$target" || return $?

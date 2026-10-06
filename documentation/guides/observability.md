@@ -12,7 +12,7 @@ description: Decision tree for diagnosing fleet issues from logs, events, and CL
 | Is the fleet healthy? | Fleet status dashboard | `claudlobby fleet status` |
 | What happened recently? | The plane (`state/plane/plane.db`) | `claudlobby event list --critical --limit 20` |
 | Is a specific bot stuck? | The plane's heartbeat samples | `claudlobby fleet status` (the newest heartbeat) / `claudlobby fleet uptime --bot <bot>` (the history) / `claudlobby event list --bot <bot> --source keepalive` (the transitions) |
-| Why did a bot restart? | Keepalive events + journal | `claudlobby event list --bot <bot> --type keepalive` |
+| Why did a bot restart? | Keepalive events + journal | `claudlobby event list --bot <bot> --type keepalive_restart` |
 | Did a script fail? | Script error events | `claudlobby event list --type script_error` |
 | Is a service down? | systemd journal | `journalctl --user -u <BOT_SERVICE> -n 30` |
 | What's the bot doing right now? | tmux pane | `tmux -L "$(tmux_socket_for_bot runtime/bots/<bot>)" capture-pane -t <bot> -p \| tail -10` |
@@ -24,7 +24,7 @@ description: Decision tree for diagnosing fleet issues from logs, events, and CL
 | Last pulse snapshot | The fleet's pulse summary file | `cat state/pulse/<fleet>.pulse-summary.txt` |
 | Is the observable-plane kernel healthy? | Plane kernel status (db/spool/quarantine) | `claudlobby plane doctor` |
 
-> Every bot runs its own private tmux server (`-L <socket>`, the socket name is the bot's `BOT_SERVICE`/`TMUX_SOCKET`) since per-bot-tmux-socket isolation shipped. A bare `tmux -t <bot>` targets the shared *default* server, which has none of your bots on it, and silently reports no session instead of erroring. The commands above resolve the socket via `tmux_socket_for_bot <bot-dir>` — `source claudlobby/_runtime_scripts/lib-common.sh` first (from the claudlobby repo root) to get it in scope — or skip raw tmux entirely and dispatch through `claudlobby/_runtime_scripts/dispatch.sh` / the `bot_tmux`/`bot_tmux_send` wrappers. See [advanced-patterns.md](../advanced-patterns.md) for the full model.
+> Every bot runs its own private tmux server (`-L <socket>`, the socket name is the bot's `BOT_SERVICE`/`TMUX_SOCKET`) since per-bot-tmux-socket isolation shipped. A bare `tmux -t <bot>` targets the shared *default* server, which has none of your bots on it. For the read-only pane inspection above, source `claudlobby/_runtime_scripts/lib-common.sh` from the repository root to resolve `tmux_socket_for_bot <bot-dir>`. To send work, use the public CLI's separate `task admit`, `task assign`, and `assignment deliver` operations; ordinary messages use `message send`. See [the CLI examples](../advanced-patterns.md#5-inter-bot-communication-and-reports) and `/fleet-ops` for arguments and receipt handling.
 
 > **The plane is the fleet's only record.** `emit_fleet_event` and fleet doors land on `state/plane/plane.db`; `claudlobby event list` / `fleet reports list` / `fleet uptime` / `fleet status` / `brief` read it; `plane prune` ages its metric samples. Health: `claudlobby plane status` / `plane doctor`.
 
@@ -37,7 +37,7 @@ Bot activity
   └─► fleet-pulse.sh (cron)     ──► emit_fleet_event ──► the plane (source: pulse)
                                 ──► state/pulse/<fleet>.pulse-summary.txt (human-readable)
                                 ──► [FLEET-PULSE] notification to manager tmux
-  └─► emit_failure_alert / emit_fleet_notice ──► emit_fleet_event ──► the plane (anchored on the fleet, source: alert/notice)
+  └─► emit_failure_alert / emit_fleet_notice ──► emit_fleet_event ──► the plane (anchored on the fleet, or the host for a host job; source: alert/notice)
       (start-bot.sh, reload-fleet.sh, …)      ──► [FLEET-ALERT]/[FLEET-NOTICE] nudge to manager tmux
 Readers: claudlobby event list / fleet reports list / fleet uptime / fleet status / brief; the plane's samples age under `plane prune`.
 ```
@@ -51,26 +51,40 @@ Readers: claudlobby event list / fleet reports list / fleet uptime / fleet statu
 | `session_missing` | pulse | Bot's tmux session is gone |
 | `service_down` | pulse | Bot's systemd/launchd unit is not active |
 | `activity_stuck` | pulse | Bot is animating but hasn't made a tool call in >threshold seconds |
+| `input_held` | pulse | The bot's input box holds text that was never submitted and no turn is running, past `OBSERVABILITY_INPUT_HELD_THRESHOLD` (default 300 s). It is not hung: an operator presses Enter in its pane, and a restart would discard the text |
 | `overdue_dispatch` | pulse | A dispatched task passed its deadline with no report |
 | `script_error` | lib | A lifecycle script exited non-zero |
 | `bridge_down` | pulse / alert | Live tmux session, but the bot's Telegram bridge (channel poller) isn't delivering. Raised per-pulse by `fleet-pulse.sh` once down past `OBSERVABILITY_BRIDGE_DOWN_GRACE` seconds, and separately by `start-bot.sh` at bring-up on a verified-dark bridge or missing token |
-| `bot_teardown_started` | spin-down | `spin-down-bot.sh` was invoked on a bot: records the door (`action`), `actor`, `fleet`, `bot_dir`, `expected_return`, and `reason`. Emitted BEFORE the teardown legs run, so it records an intent, not a confirmed outcome — a crash mid-teardown still leaves the record. **Dormant unless the fleet sets `SPINDOWN_RECEIPT_ENABLED=1`**, so an unarmed fleet writes no rows and an empty result means *not armed*, not *no teardowns* |
 | `reload_failed` | alert | Daily `reload-fleet.sh` plugin/skill update or `claudlobby generate` failed, or a run was killed or aborted before it finished (the reason names the step it died in; a SIGKILL is raised by the next run, #1924) |
 | `restart_failed` | alert | Weekly worker bounce (`weekly-worker-restart.sh`) failed to bring the bot back up |
 | `rc_timeout` | startup / alert | `start-bot.sh`'s readiness poll (the Telegram poller's `bridge_state=up`, session-scoped) hit its `RC_READY_TIMEOUT_S` ceiling before the poller came up, so channel replies drop while inbound still arrives (the #533 outage class). Emitted once per (re)start; `fleet-pulse.sh` escalates it like its other crit types, so a fleet-wide TIMEOUT pages instead of sitting silent in every `startup.log` |
 | `crash_loop` | pulse | The bot's unit fails EVERY start and systemd keeps restarting it: it is mid-start (`activating/*`, `active/running`) with at least 2 automatic restarts in this streak (`NRestarts`; #1769). Data: `unit`, `restarts`, `state`. Critical: `fleet-pulse.sh` escalates it and pushes the manager a note naming `logs/startup.log`, and for that bot raises no `session_missing` or `service_down`, whose remedies (re-enroll, restart) are wrong while systemd is already retrying; keepalive skips it rather than restarting. Both hold except in the few-millisecond `deactivating/stop-post` window between two attempts, which reads no verdict. **Its severity is stamped at ingest by the resident plane daemon, from the registry it loaded at start: a daemon started before a type was registered stores it with no severity until restarted, so it never reaches the escalation, `brief` or `events --critical` (the manager push still fires)** |
+| `rolling_restart_stalled` | alert | `rolling-restart.sh` halted: a bot failed its restart or its bridge readiness, so the rest of the fleet was not restarted |
+| `keepalive_failed` | alert | `keepalive-all.sh`: keepalive failed to run for a bot (admission or runtime), so the watchdog that restarts a dead session did not run for it |
+| `alert_target_refused` | alert | The fleet's alert Telegram target was refused (`fleet-pulse.sh`, `creds-check.sh`): the watchdog's page channel is dark by configuration |
+| `alert_pair_unreachable` | alert | `creds-check.sh`: the fleet's alert chat is not reachable by its sender, or the sender holds no token |
+| `disk_high` | alert | `disk-monitor.sh`: disk usage on the checked mount past its threshold |
+| `memory_high` | alert | `fleet-memory-check.sh`: the fleet's memory use against the host's available RAM, past its threshold |
+| `undervoltage`, `storage_stall`, `host_health` | alert | `host-health-check.sh`: Pi under-voltage or throttling, an SD/MMC storage stall, or (`host_health`) a finding that is neither |
+| `binary_update_failed`, `binary_unrunnable` | alert | `update-claude-code.sh`: the staged `claude` binary failed to install, or the binary the fleet launches cannot run |
+| `vault_sync_failed` | alert | `vault-sync.sh`: a scheduled vault sync failed; the job never resolves a conflict |
+| `fleet_alert` | fleet-notify | `claudlobby fleet notify --level alert`: the caller's own event name and message ride in its data |
+| `public_write_guard_unarmed` | hook | The public-write guard is on, but the host has no term list (`~/.config/claudlobby/public-write-terms`), so it lets each GitHub write it checks through and records this. It does not page; `public-write-guard.py --check` says whether a host is armed |
+| `shadow_parity_diverged` | plane | Historical: the plane cutover's shadow recorded it. Nothing records it now; it stays registered so its rows still classify |
 
-> **One plane, one reader:** `reload_failed`, `restart_failed`, and `bridge_down` raised at bot bring-up are anchored on the FLEET's identity (a fleet-level receipt), the pulse-sourced `bridge_down` on the bot's; `claudlobby event list` reads both from the plane, so a type can appear from either. `bot_teardown_started` is deliberately **not** in `CRITICAL_TYPES` — `spin-down-bot.sh` is also the throwaway-canary reaper, so `--critical` would fill with expected noise. Query it explicitly (`claudlobby event list --type bot_teardown_started`).
+> **Where an alert is recorded decides who can read it.** A FLEET ALERT (`alert` source) raised by a fleet job or at a bot's bring-up is anchored on the FLEET's identity (a fleet-level receipt, bot `fleet` in `claudlobby event list`), the pulse-sourced `bridge_down` on the bot's; `event list` reads both, so a type can appear from either. A host job runs with no fleet, so its alerts (`disk_high`, `memory_high`, `undervoltage`, `storage_stall`, `host_health`, `binary_update_failed`, `binary_unrunnable`, `vault_sync_failed`) are anchored on the host and appear in no fleet's `event list`. A bot's `brief` reads only that bot's own rows, so it shows neither kind (#2109). Every FLEET ALERT still reaches a manager's pane and Telegram when it is raised.
+
+> **Severity is the registry's,** `SYSTEM_EVENT_SEVERITY` in `claudlobby/plane/registries.py`, stamped at ingest. `bot_teardown_started` is registered **notice**, not critical: `spin-down-bot.sh` is also the throwaway-canary reaper, so `--critical` would fill with expected noise. Query it explicitly (`claudlobby event list --type bot_teardown_started`).
 
 ### Informational
 
 | Type | Source | Meaning |
 |------|--------|---------|
 | `tool_call` | vitals | Bot used a tool (high volume — filter or skip in queries) |
-| `keepalive` | keepalive | Periodic state check: BUSY, IDLE, RESTART, UNKNOWN |
+| `keepalive_restart`, `keepalive_skip`, `keepalive_reload`, `bridge_heal` | keepalive | A keepalive transition: it restarted a dead session, declined a restart (the session reappeared, a crash loop, a boot in flight), sent an idle bot `/reload-plugins` and `/reload-skills`, or bounced or reset a dark Telegram bridge. The per-tick verdict (BUSY, IDLE, HELD, UNKNOWN) rides the `bot.heartbeat` sample, not an event |
+| `bot_teardown_started` | spin-down | `spin-down-bot.sh` was invoked on a bot: records the door (`action`), `actor`, `fleet`, `bot_dir`, `expected_return`, and `reason`. Emitted BEFORE the teardown legs run, so it records an intent, not a confirmed outcome — a crash mid-teardown still leaves the record. **Dormant unless the fleet sets `SPINDOWN_RECEIPT_ENABLED=1`**, so an unarmed fleet writes no rows and an empty result means *not armed*, not *no teardowns* |
 | `pane_stuck` | pulse | Bot's pane content unchanged for >5 min |
 | `wip_uncommitted` | pulse | Bot has uncommitted changes in a project repo |
-| `session_event` | vitals | Session lifecycle (start, stop) |
 | `send_miss` | dispatch | A cross-socket tmux send (dispatch, cross-bot nudge) found no live session on the resolved socket — logged breadcrumb, not escalated |
 | `job_reenroll_deferred` | notice | Historical notice from the retired fleet setup path: a launchd job could not apply its changed plist while it was running its own enrollment. Kept readable for older Plane records; sealed host activation now owns enrollment. |
 

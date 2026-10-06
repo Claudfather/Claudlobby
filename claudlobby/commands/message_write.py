@@ -95,13 +95,50 @@ def _alert_tiers(route):
     return {key: selected[key].value for key in _TIER_KEYS if key in selected}, True
 
 
+def _answer_human(selected, origin, parent, body, *, request_id, release_id) -> CommandOutput:
+    """A generated bot's answer to its human sender (#2068): recorded on the
+    Plane, carried by nothing, read with `message wait --for reply`."""
+    from ..message_context import resolve_human_reply_route
+    from ..message_operations import record_reply_to_human
+    from ..task_operations import TaskActor
+
+    route = resolve_human_reply_route(TaskActor(parent.sender.uid, parent.sender.alias),
+                                      root=selected.paths.root, fleet=selected.fleet.name,
+                                      package=selected.paths.package)
+    if route.release_id != release_id:
+        raise CommandFailure("release_mismatch", "message route differs from selected release",
+                             release_id=release_id)
+    if (route.caller.alias != f"bot:{origin.fleet.name}/{origin.bot_id}"
+            or route.caller.uid != parent.destination.uid):
+        raise CommandFailure("conflict", "reply route differs from recorded parent participants",
+                             release_id=release_id)
+    outcome = record_reply_to_human(route, selected.paths.package, body, request_id=request_id,
+                                    parent_message_id=parent.message_id)
+    data = {"fleet": route.selected.fleet.name, "message_id": outcome.message_id,
+            "sender": {"uid": route.caller.uid, "alias": route.caller.alias},
+            "destination": {"uid": route.peer.uid, "alias": route.peer.alias},
+            "recording": outcome.recording, "request_persisted": outcome.request_persisted,
+            "transport": "not_requested", "delivery": "not_requested",
+            "receipt_observation": None, "integrity_verdict": None,
+            "replayed": outcome.replayed, "alert": None, "reply_to_message_id": parent.message_id}
+    if outcome.recording != "committed":
+        raise CommandFailure(
+            "unavailable", f"message {outcome.message_id}: recording {outcome.recording}. A reply to a "
+            "human has no carrier, so it exists only once it is recorded",
+            data=data, release_id=release_id, retryable=True,
+            hint=f"Retry the same request UUID {request_id}; a retry cannot duplicate the answer.")
+    return CommandOutput(data, release_id=release_id,
+                         lines=(f"{outcome.message_id}\trecording=committed\tdelivery=not_requested",))
+
+
 def dispatch(args) -> CommandOutput:
     from ..activation_state import ActivationError
     from ..config_plan import PlanError
     from ..context import BotNotFoundError
     from ..message_context import MessageContextError, resolve_message_route
     from ..message_operations import (MessageConflict, MessageIdentityUnavailable,
-                                      send_message, send_unlinked_report)
+                                      read_recipient_box, repair_held_delivery, send_message,
+                                      send_unlinked_report)
     from ..message_queries import MessageQueryError, receipt, show_message
     from ..operation_context import (OperationContextError, OperationContextUnavailableError,
                                      bind_task_context, resolve_operation_scope,
@@ -153,12 +190,15 @@ def dispatch(args) -> CommandOutput:
                 parent_ctx = (human_ctx if human_ctx is not None else
                               bind_task_context(selected, origin=origin))
                 parent = show_message(parent_ctx, parent_message_id)
-                if (parent.destination is None
-                        or parent.destination.uid != parent_ctx.caller.uid
-                        or parent.destination.alias != parent_ctx.caller.alias
-                        or not parent.sender.alias.startswith("bot:")
-                        or parent.sender.fleet_uid is None):
-                    raise CommandFailure("conflict", "reply requires a recorded bot sender and this caller as recipient",
+                addressed = (parent.destination is not None
+                             and parent.destination.uid == parent_ctx.caller.uid
+                             and parent.destination.alias == parent_ctx.caller.alias)
+                if (addressed and origin is not None and parent.sender.fleet_uid is None
+                        and parent.sender.alias.startswith("human:")):
+                    return _answer_human(selected, origin, parent, body,
+                                         request_id=request_id, release_id=release_id)
+                if not addressed or not parent.sender.alias.startswith("bot:") or parent.sender.fleet_uid is None:
+                    raise CommandFailure("conflict", "reply requires a recorded bot or human sender and this caller as recipient",
                                          release_id=release_id)
                 target = parent.sender.alias.removeprefix("bot:")
             route = resolve_message_route(target, root=selected.paths.root,
@@ -179,6 +219,8 @@ def dispatch(args) -> CommandOutput:
                 raise CommandFailure("conflict", "reply route differs from recorded parent participants",
                                      release_id=release_id)
             trusted_tiers, tiers_available = _alert_tiers(route)
+            # The box just before the send, for the chip repair (#2105).
+            box_before = read_recipient_box(route, selected.paths.package)
             if is_report:
                 outcome = send_unlinked_report(route, selected.paths.package, report,
                                                request_id=request_id,
@@ -208,17 +250,29 @@ def dispatch(args) -> CommandOutput:
                 raise _effect_failure("recording_degraded",
                                      "message recording is degraded; inspect the request before retrying",
                                      data=data, request_id=request_id, release_id=release_id)
-            if outcome.delivery != "submitted":
+            # rc 3 (#1236): the box never showed the payload, so the transport
+            # withheld its Enter. The text can still land; the receipt wait and
+            # the held-box repair below decide (#2105).
+            withheld = outcome.delivery == "unknown" and getattr(outcome, "native_returncode", None) == 3
+            if outcome.delivery != "submitted" and not withheld:
                 code = "delivery_failed" if outcome.delivery == "failed" else "delivery_unknown"
                 raise _effect_failure(code, "message transport was not confirmed; inspect the request",
                                      data=data, request_id=request_id, release_id=release_id)
             # A tmux success is only submission. This read owns the final byte
-            # integrity verdict and never repairs or resends the native payload.
+            # integrity verdict. It never resends the native payload; when no
+            # receipt came, the owner may press the Enter a held box waits for.
             try:
                 ctx = (human_ctx if human_ctx is not None else
                        bind_task_context(route.selected, origin=route.origin))
                 observed = receipt(ctx, outcome.message_id, destination=route.peer.alias,
                                    wait=_RECEIPT_WAIT_S)
+                repair, observed = repair_held_delivery(
+                    route, selected.paths.package, outcome.message_id, first=observed,
+                    box_before=box_before,
+                    observe=lambda wait: receipt(ctx, outcome.message_id,
+                                                 destination=route.peer.alias, wait=wait))
+                if repair is not None:
+                    data["enter_repair"] = repair.as_dict()
             except (OperationContextUnavailableError, OperationContextError,
                     MessageQueryError, PendingMigrationError, DowngradeError,
                     OSError, sqlite3.Error) as exc:
