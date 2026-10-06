@@ -113,6 +113,7 @@ class ReplayReport:
     duplicates: int = 0
     spooled: int = 0
     quarantined: int = 0
+    lost: int = 0          # empty orphan stages counted in .emit-losses (#2164)
     limited: bool = False
     refused: tuple[str, ...] = ()
     error: str | None = None
@@ -149,7 +150,37 @@ def _serving_identity(root: Path) -> dict:
 # file is a finished batch with pre-minted ids, so it is replayed like a staged
 # one, never deleted. Only once it is this old: a younger one may still be
 # inside its stager's fsync, and every stager is reaped long before an hour.
+# A stage reaped after creating the file but before writing it leaves it EMPTY
+# (#2164): its batch never reached the disk, and the file is the only record of
+# that. Once its writer is provably gone it is counted as a lost emit in
+# .emit-losses and removed, never quarantined as a malformed batch.
 STAGED_ORPHAN_AGE_S = 3600.0
+
+# The client names its temp `.<time_ns>-<lead event>.batch.<pid>.tmp`.
+_ORPHAN_WRITER = re.compile(r"\.\d+-[^/]+\.batch\.(\d+)\.tmp")
+
+
+def _never_written(f: Path, content: bytes) -> bool:
+    """An aged orphan that provably never received its batch: it is empty, and
+    the writer its name records is gone. Size 0 shows that no write completed;
+    only a gone writer shows that none ever will, because the stager is a single
+    process holding the file's only descriptor. A running pid (perhaps a reused
+    one) or a name without a pid proves neither, and keeps today's handling."""
+    if content:
+        return False
+    found = _ORPHAN_WRITER.fullmatch(f.name)
+    if not found:
+        return False
+    pid = int(found.group(1))
+    if pid <= 1:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except (OSError, OverflowError):
+        return False
+    return False
 
 
 def _orphaned_stages(entries: list) -> list:
@@ -540,6 +571,31 @@ class PlaneDaemon:
                 "remaining": report.remaining,
             })
 
+    def _count_lost_stage(self, f: Path) -> bool:
+        """Record an empty orphan stage as a lost emit, then remove it (#2164).
+        One `.emit-losses` row in the client's format (`<epoch> stage_empty -
+        <file>`), which `plane doctor` reports as an emit NOT recorded. The row
+        is written first: when it cannot be, this returns False and the file is
+        quarantined as before, so the only record of the loss is never dropped."""
+        row = f"{int(time.time())}\tstage_empty\t-\t{f.name}\n"
+        try:
+            with open(staged_dir(self.root).parent / ".emit-losses", "a", encoding="utf-8") as losses:
+                losses.write(row)
+        except OSError as exc:
+            print(f"plane-daemon: could not count lost stage {f.name} ({type(exc).__name__}); "
+                  "quarantining it", file=sys.stderr)
+            return False
+        try:
+            f.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            print(f"plane-daemon: counted lost stage {f.name} but could not remove it "
+                  f"({type(exc).__name__}); a later tick may count it again", file=sys.stderr)
+        print(f"plane-daemon: counted lost stage {f.name}: empty past the hour with its "
+              "writer gone (stage_empty in .emit-losses)", file=sys.stderr)
+        return True
+
     def _replay_staged(self, *, approved: dict[str, str] | None = None,
                        max_batches: int | None = None, deadline: float | None = None) -> ReplayReport:
         """Batches the shim STAGED when the socket missed, instead of spawning
@@ -574,6 +630,9 @@ class PlaneDaemon:
                 content = f.read_bytes()
                 if approved is not None and hashlib.sha256(content).hexdigest() != approved[f.name]:
                     report.refused += (f.name,)
+                    continue
+                if f.name.endswith(".tmp") and _never_written(f, content) and self._count_lost_stage(f):
+                    report.lost += 1
                     continue
                 events = json.loads(content)["events"]
                 if not isinstance(events, list) or not events:
