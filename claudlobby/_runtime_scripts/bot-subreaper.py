@@ -53,6 +53,23 @@ def parent(pid):
         return int(stat.read().rsplit(")", 1)[1].split()[1])
 
 
+def close_above(fd):
+    """Close every descriptor above `fd`. SC_OPEN_MAX is -1 under an unlimited
+    soft limit, which would make closerange a no-op and leave the caller's
+    descriptors open for the session's life, so close from this process's
+    own descriptor list then."""
+    limit = os.sysconf("SC_OPEN_MAX")
+    if limit > fd:
+        os.closerange(fd + 1, limit)
+        return
+    for held in sorted(int(name) for name in os.listdir("/proc/self/fd")):
+        if held > fd:
+            try:
+                os.close(held)
+            except OSError:
+                pass  # the listing's own descriptor, closed already
+
+
 def keep(argv, report):
     """Become the subreaper, run the client, report on `report`, then reap."""
     import ctypes  # only this phase needs these: the reaper stays small
@@ -95,7 +112,7 @@ def keep(argv, report):
         os.dup2(null, 0)
         os.dup2(null, 2)
         os.closerange(3, report)
-        os.closerange(report + 1, os.sysconf("SC_OPEN_MAX"))
+        close_above(report)
         os.write(report, f"{status} subreaper={subreaper} server={server} adopted={adopted}\n".encode())
         os.close(report)
     if not flagged:
