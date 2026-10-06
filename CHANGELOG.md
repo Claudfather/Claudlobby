@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — a composed guard refuses a signal to a process the caller did not start (#1069)
+
+On 2026-10-05 a manager bot's ad-hoc kill loop killed each process matching a pattern and its parent, read back with `ps -o ppid=`. The pattern matched the bot's own tool shell as well as its job; killing the shell orphaned the job to the user manager, and the next "parent" the loop killed was the manager. Every bot on the host stopped for 15 hours (#2158). The loop killed by pid, as #1069's interim advice asked, and warnings about `pkill` composed into every bot did not prevent it.
+
+- **`signal-guard.sh`** is a PreToolUse hook on Bash, composed into every bot through `claudlobby/system.yaml` next to `credential-echo-guard.sh`. A signal goes through only when its target is the caller's own: `$!`, `$$`, a job spec (`kill %1`), group 0, `jobs -p`, or a pid file read with `cat`, `head`, `tail` or `<`. A pid from anything else is refused, whether it arrives directly, through a variable, a `for` loop, a `read` loop, `xargs` or `find -exec`; the refusal names a process lookup (`ps`, `pgrep`, `$PPID`, `/proc` and others) when it sees one.
+- **Also refused:** `pkill`, `killall`, `killall5` and `skill`, which pick by name or pattern; `fuser -k`; `kill -1` and `kill NAME`; and a pid typed as a number, directly or through a variable or a loop word, when it is the session's own ancestor (its claude, its tmux server, the user manager or PID 1). `kill -0` and `kill -l` send nothing and pass, and so does text that only mentions a kill, such as a grep pattern, a commit message or a heredoc written to a file.
+- **It refuses, and never rewrites.** The reason names the safe pattern and the guardrail's installed path. A refusal is recorded as `signal_guard_refused` with the kinds of target only, never the command; the event is registered as `notice`.
+- **It fails open, with a `script_error` breadcrumb,** when jq or python3 is missing, the payload is unparseable, or the decider fails.
+- **`signal-decide.py`** parses the command into words that keep their quoting, expansions and substitutions, because provenance needs to know which operand a substitution feeds. It reuses `credential-echo-decide.py`'s wrapper table, option scanner, shell `-c` reader and ANSI-C decoder. What it cannot see is stated once, in its docstring; the per-bot subreaper of #2158 is the backstop for those forms.
+- **`library/guardrails/signal-only-what-you-started.md`** gives the rule and the safe pattern. It is not added to every bot's composed guardrails: the refusal carries the pattern at the moment it is needed.
+- **Tests:** `tests/test_signal_guard.py` runs a table of refused and allowed forms through the decider (the forms above, each bypass the review found, and a typed pid of the test's own ancestor, directly and through a variable and a loop), then runs the hook itself on the outage loop with its names neutralised, the prefilter's quoting and escape cases, the fail-open paths, the composition and the plane record.
+
 ### Changed — a worker's brief counts the fleet's unacknowledged reports instead of listing them (#2159)
 
 `claudlobby --json brief` gave every viewer every unacknowledged report. A worker never acknowledges reports, so its list only grew: on 2026-10-05 one worker's brief was 353,814 bytes, 98% of them 840 report rows, all ahead of its own work.
