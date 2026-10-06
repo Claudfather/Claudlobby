@@ -85,8 +85,13 @@ def _read(args) -> CommandOutput:
             for event in pr["events"]:
                 actor = event["actor"] or ", ".join(
                     candidate["actor"] for candidate in event["candidates"])
+                # The method tells an exact URL join from a timed window, and a
+                # window used because the verdict's URL could not be read says why (#1537).
+                method = event["method"] + (f": {event['fallback_reason']}"
+                                            if event["fallback_reason"] else "")
                 lines.append(f"  #{pr['number']} {event['event_id'][0]} "
-                             f"{event['ts']}: {event['verdict']} {actor or event['reason']}")
+                             f"{event['ts']}: {event['verdict']} {actor or event['reason']}"
+                             f" [{method}]")
         return CommandOutput(data, release_id=release_id, lines=tuple(lines))
     except CommandFailure:
         raise

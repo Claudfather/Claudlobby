@@ -20,9 +20,11 @@ Report work against that same assignment:
 
 ```bash
 claudlobby --json assignment progress ASSIGNMENT_ID --summary "Review started; first check passed" --request-id PROGRESS_UUID
-claudlobby --json assignment complete ASSIGNMENT_ID --summary "Review complete; evidence in PR" --pr https://github.com/org/repo/pull/123 --pr-role reviewed --request-id COMPLETE_UUID
+claudlobby --json assignment complete ASSIGNMENT_ID --summary "Review complete; evidence in PR" --pr https://github.com/org/repo/pull/123 --pr-role reviewed --artifact https://github.com/org/repo/pull/123#pullrequestreview-456 --request-id COMPLETE_UUID
 claudlobby --json assignment block ASSIGNMENT_ID --reason "Missing required credential" --request-id BLOCK_UUID
 ```
+
+Every reviewed report names its verdict's URL with `--artifact`: the URL GitHub returned when the verdict was posted (the `same-identity-fallback` protocol shows how). `claudlobby task reviews` joins the verdict to the report that names it; a report that names none is matched only by time, from 10 s before the verdict to 120 s after it.
 
 `block` leaves the assignment with you while you await guidance. If you cannot
 keep ownership, return it; for terminal unsuccessful work, fail it:
@@ -60,7 +62,7 @@ For example: `--summary "Request changes on #943: two search checks fail; eviden
 routes the decision without pasting the entire review into the manager's
 notification.
 
-**Where the detail goes:** the PR or issue comment, a doc in your `data/` or the fleet's `shared/`, or the branch itself. Put it somewhere addressable *first*, then cite the address. If it has no address yet, that is what to fix — not the wording.
+**Where the detail goes:** an address your manager can open — the PR or issue comment (on a public repo, no business names or secrets), a doc in the fleet's `shared/` or a vault note, or the pushed branch. Never your own `data/` or anything else in your bot directory: your manager cannot open it, so it is only for your scratch. Put it somewhere addressable *first*, then cite the address. If it has no address yet, that is what to fix — not the wording.
 
 **Never truncate these to fit:** the blocker itself in `--reason`, verbatim
 error output, and any substitution of the instrument or method from what was
