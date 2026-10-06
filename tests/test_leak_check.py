@@ -118,7 +118,8 @@ def test_a_failing_check_says_what_to_do_and_a_passing_one_says_nothing(tmp_path
     advice = [ln for ln in out.splitlines() if ln.startswith("leak-check: replace each value")]
     assert len(advice) == 1, out
     assert "allow.txt as `<path glob> <class> <reason>`" in advice[0]
-    assert "a private term cannot be allowed" in advice[0]
+    assert "A private term cannot be allowed" in advice[0]
+    assert "ask a maintainer, who can see the list" in advice[0]
     rc, out, err = run(tmp_path, diff_of(*PLACEHOLDERS))
     assert rc == 0 and "replace each value" not in out
 
@@ -156,10 +157,36 @@ def test_no_list_is_loud_and_fails_closed(tmp_path):
             terms,
             err,
         )
+        # Its reader is a contributor, who cannot set a secret and did not cause this.
+        assert "A maintainer must set" in err and "nothing in this change caused this" in err
+        assert "--terms-optional" not in err
     rc, out, err = run(
         tmp_path, diff_of("ok line"), terms=None, extra=["--terms-optional"]
     )
     assert rc == 0 and "layer 1 only" in err
+
+
+def test_unarmed_still_reports_layer1_hits_before_it_fails(tmp_path):
+    """No list: layer 1 runs and its hits are printed above the NOT ARMED
+    failure, so a contributor still sees the leaks they can fix."""
+    d = tmp_path / "change.diff"
+    d.write_text(diff_of("ok line", PLANTED["email"]))
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("LEAK_CHECK_TERMS", "GITHUB_ACTIONS", "GITHUB_STEP_SUMMARY")}
+    p = subprocess.run([sys.executable, str(SCRIPT), "--diff", str(d), "--allow", str(tmp_path / "none")],
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env, timeout=60)
+    assert p.returncode == 2, p.stdout
+    lines = p.stdout.splitlines()
+    hit = lines.index("docs/notes.md:2: email")
+    failure = next(i for i, ln in enumerate(lines) if "NOT ARMED" in ln)
+    assert hit < failure, p.stdout
+    assert any(ln.startswith("leak-check: replace each value") for ln in lines[:failure])
+
+
+def test_an_address_at_a_target_domain_is_still_an_address(tmp_path):
+    # `.target` is a systemd unit type, and also a live top-level domain.
+    rc, out, err = run(tmp_path, diff_of("mail " + "ops" + "@" + "shop" + ".target"))
+    assert rc == 1 and "docs/notes.md:1: email" in out, (out, err)
 
 
 @pytest.mark.parametrize("line", ["broken[", "(?P=quillon)", "a|", ".*", "\\b"])

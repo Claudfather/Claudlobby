@@ -26,7 +26,10 @@ allowlist (``<path glob> <class> <reason>``), read from the change itself, so an
 entry is part of what is reviewed. Layer 2 has none.
 
 Fails closed: an unset or empty list, a list line that does not compile or
-matches an empty string, or a diff it cannot read exits 2 and says which.
+matches an empty string, or a diff it cannot read exits 2 and says which. With
+the list unset or empty, layer 1 still runs and reports its hits first, so a
+contributor sees what they can fix; only then does the check fail, saying that a
+maintainer must set the list and that nothing in the change caused it.
 
 usage:
   leak_check.py --git BASE HEAD [--allow PATH] [--terms-optional]
@@ -102,8 +105,9 @@ _RESERVED_DOMAIN = re.compile(
 
 
 _PLACEHOLDER_LOCALS = {"someone", "user", "username", "you", "me", "name", "foo", "bar", "test"}
+#: systemd's unit types, less ``target``: that is also a live top-level domain.
 _UNIT_SUFFIX = re.compile(
-    r"\.(?:service|socket|timer|target|mount|automount|path|scope|slice|swap|device)$"
+    r"\.(?:service|socket|timer|mount|automount|path|scope|slice|swap|device)$"
 )
 
 
@@ -247,6 +251,10 @@ class CannotCheck(Exception):
     """Something this check needs is missing or broken: exit 2, never a pass."""
 
 
+class NotArmed(CannotCheck):
+    """The private list is unset or empty: layer 1 runs first, then exit 2."""
+
+
 def load_terms(raw: str | None, required: bool) -> list[re.Pattern]:
     """The private list, one pattern per non-comment line. The reasons name a
     line number, never its text."""
@@ -254,9 +262,10 @@ def load_terms(raw: str | None, required: bool) -> list[re.Pattern]:
     lines = [ln for ln in lines if ln and not ln.startswith("#")]
     if not lines:
         if required:
-            raise CannotCheck(
-                "layer 2 is NOT ARMED: the private list is empty or unset. Set the "
-                "LEAK_CHECK_TERMS Actions secret (one case-insensitive pattern per line)."
+            raise NotArmed(
+                "layer 2 is NOT ARMED: the private list is empty or unset, so no private term "
+                "was checked. A maintainer must set the LEAK_CHECK_TERMS Actions secret (one "
+                "case-insensitive pattern per line); nothing in this change caused this."
             )
         return []
     out = []
@@ -573,12 +582,26 @@ def advise(allow_path: str, out=sys.stdout) -> None:
     """What to do about a hit, said where the failure is read."""
     text = (f"replace each value with an obvious placeholder. A false positive of a pattern "
             f"class can be allowed in {_shown(allow_path)} as `<path glob> <class> <reason>`, "
-            f"reviewed in the same diff; a private term cannot be allowed.")
+            f"reviewed in the same diff. A private term cannot be allowed: if you think one is "
+            f"wrong, ask a maintainer, who can see the list.")
     print(f"leak-check: {text}", file=out)
     step = os.environ.get("GITHUB_STEP_SUMMARY")
     if step:
         with open(step, "a") as fh:
             fh.write(f"\n{text[0].upper()}{text[1:]}\n")
+
+
+def cannot_check(exc: CannotCheck) -> int:
+    """Exit 2, saying why, after whatever was already reported."""
+    sys.stdout.flush()  # the hits above stay above the failure in a merged log
+    print(f"leak-check: CANNOT CHECK: {exc}", file=sys.stderr)
+    if _in_actions():
+        print(f"::error::{_msg('leak-check: ' + str(exc))}", file=sys.stderr)
+    step = os.environ.get("GITHUB_STEP_SUMMARY")
+    if step:
+        with open(step, "a") as fh:
+            fh.write(f"\n**Could not check.** {exc}\n")
+    return 2
 
 
 def main(argv=None) -> int:
@@ -592,8 +615,12 @@ def main(argv=None) -> int:
     ap.add_argument("--terms-optional", action="store_true",
                     help="run layer 1 alone when no private list is set (local runs)")
     args = ap.parse_args(argv)
+    unarmed = None
     try:
-        terms = load_terms(os.environ.get("LEAK_CHECK_TERMS"), required=not args.terms_optional)
+        try:
+            terms = load_terms(os.environ.get("LEAK_CHECK_TERMS"), required=not args.terms_optional)
+        except NotArmed as exc:
+            terms, unarmed = [], exc  # layer 1 still runs and reports first
         if args.git:
             base, head = args.git
             try:
@@ -617,11 +644,8 @@ def main(argv=None) -> int:
             binaries = [p for p, _ in blobs]
         allow = load_allow(allow_text)
     except CannotCheck as exc:
-        print(f"leak-check: CANNOT CHECK: {exc}", file=sys.stderr)
-        if _in_actions():
-            print(f"::error::{_msg('leak-check: ' + str(exc))}", file=sys.stderr)
-        return 2
-    if not terms:
+        return cannot_check(exc)
+    if not terms and unarmed is None:
         print("leak-check: layer 2 not armed (--terms-optional): layer 1 only", file=sys.stderr)
     if binaries:
         how = ("their bytes checked against the private list only" if blobs is not None
@@ -633,6 +657,8 @@ def main(argv=None) -> int:
     report(hits)
     if hits:
         advise(args.allow)
+    if unarmed is not None:
+        return cannot_check(unarmed)
     return 1 if hits else 0
 
 
