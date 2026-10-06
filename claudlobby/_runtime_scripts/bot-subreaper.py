@@ -99,11 +99,13 @@ def keep(argv, report):
         elif server:
             line = f"{status} subreaper=none server={server} adopted=no"
     finally:
+        # Hold nothing the caller had open by the time the caller reads the report.
+        os.dup2(null, 0)
+        os.dup2(null, 2)
+        os.closerange(3, report)
+        os.closerange(report + 1, os.sysconf("SC_OPEN_MAX"))
         os.write(report, line.encode() + b"\n")
         os.close(report)
-    os.dup2(null, 0)
-    os.dup2(null, 2)
-    os.closerange(3, os.sysconf("SC_OPEN_MAX"))  # hold nothing the caller had open
     if not flagged:
         return 0
     try:
