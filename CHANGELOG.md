@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — `fleet status` names a bot's current task by state, then latest transition, and says when more than one is open (#2179)
+
+A bot with two or more open assignments had its `current_task` read from whichever had the lowest task id. Task ids are random, so the pick was arbitrary. An assignment recorded but never delivered could read as the work in progress while the bot worked on another, and a manager routing by that line could skip the delivery.
+
+- **The order:** `read_fleet_work` ranks a bot's open assignments `active`, then `blocked`, then `assigned`. Within a state, the latest transition comes first: the assignment's newest event, else its own record, in the Plane's ingest order. The ids only break a tie. `current_task` is the first.
+- **More than one is said, never picked silently:**
+  - `fleet status --json` and `fleet utilization --json` carry `open_assignments` beside `current_task`. It is null when the work is unavailable.
+  - The status table adds `(+N open)` after the task, kept clear of the column's truncation.
+  - The bot detail reads `Task: <title> (1 of N open)` above its assignment lines.
+- **One source:** both commands read the same `read_fleet_work`, so utilization inherits the order. The check-in skill names `open_assignments` and says that an `assigned` row in `work_assignments` may still await delivery.
+- **Tests:** `tests/test_current_task_order.py` covers:
+  - an active assignment beside a newer assigned one, in both task-id orders;
+  - active, blocked and assigned against the id order;
+  - two assigned ones by their latest transition, in both id orders;
+  - two active ones where a later progress event decides;
+  - the count, including null when the work is unavailable;
+  - the status JSON, table and detail;
+  - utilization's count.
+
 ### Fixed — the protocols name only addresses a reader can open, never a bot's own `data/` (#1708)
 
 `token-efficiency` and `comms-topology` listed a path under the author's own `data/` as a stable address for compressed detail, and `report-back` sent a report's detail to "a doc in your `data/`". That directory exists and stays put, but the composed rules of every other bot in the fleet deny reading anything in a bot's directory, the manager's included, so the pointer arrived unreadable. In one fleet's recorded reports over 16 days, 13 of 1,502 handed the reader such a path.

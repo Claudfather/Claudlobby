@@ -87,6 +87,9 @@ class BotStatus:
     name: str
     state: str = "unknown"  # idle/working/blocked/offline/unknown
     current_task: str | None = None
+    # How many assignments are open: more than one means current_task is the
+    # first by state, then latest transition, of several (#2179).
+    open_assignments: int | None = None
     last_completed: str | None = None
     work_assignments: tuple[CurrentWork, ...] = ()
     work_issues: tuple[dict, ...] = ()
@@ -388,6 +391,7 @@ def collect_fleet_status(
         if work is not None:
             bot_work = work.bots[bot_id]
             bs.current_task = bot_work.current_task
+            bs.open_assignments = bot_work.open_assignments
             bs.last_completed = bot_work.last_completed
             bs.work_assignments = bot_work.assignments
             bs.work_issues = tuple(asdict(issue) for issue in work.issues)
@@ -654,7 +658,12 @@ def format_table(statuses: list[BotStatus], fleet_name: str,
         activity = ("work unresolved" if bs.work_unresolved else
                     bs.current_task or bs.last_completed or
                     ("work unknown" if bs.work_unavailable else ""))
-        activity = _truncate(activity, 40)
+        # Never pick silently (#2179): the count of the other open assignments
+        # is kept clear of the column's truncation.
+        others = ((bs.open_assignments or 1) - 1
+                  if bs.current_task and activity == bs.current_task else 0)
+        more = f" (+{others} open)" if others > 0 else ""
+        activity = _truncate(activity, 40 - len(more)) + more
         if bs.work_unresolved or bs.work_unavailable:
             activity_display = _yellow(activity)
         elif bs.current_task:
@@ -729,7 +738,9 @@ def format_bot_detail(bs: BotStatus) -> str:
     lines.append(f"  Busy age:   {_busy_age_display(bs)}")
 
     if bs.current_task:
-        lines.append(f"  Task:       {bs.current_task}")
+        of = (f" (1 of {bs.open_assignments} open)"
+              if bs.open_assignments and bs.open_assignments > 1 else "")
+        lines.append(f"  Task:       {bs.current_task}{of}")
     for assignment in bs.work_assignments:
         lines.append(f"  Assignment: {assignment.assignment_id} / {assignment.task_id} ({assignment.state})")
     if bs.last_completed:
@@ -770,6 +781,7 @@ def format_json(statuses: list[BotStatus], fleet_name: str,
                 # The observed BUSY run, separate from assignment state.
                 "busy_age_secs": bs.busy_age_secs,
                 "current_task": bs.current_task,
+                "open_assignments": bs.open_assignments,
                 "last_completed": bs.last_completed,
                 "work_assignments": [asdict(a) for a in bs.work_assignments],
                 "work_issues": list(bs.work_issues),
