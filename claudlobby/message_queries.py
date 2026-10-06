@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 import json
 import math
 import os
@@ -106,7 +107,34 @@ class ReplyObservation:
 
 _PENDING_FILES = 256
 _PENDING_BYTES = 8 * 1024 * 1024
+#: Entries a check will stat to set aside those written before its message.
+#: Past it the check stops at the listing: the staged queue alone holds 2000.
+_LISTED_FILES = 8192
+#: How long before its message's recorded instant a queue file may have been
+#: written and still be read. One host clock stamps both, so only a clock step
+#: can reorder them; a file written earlier than this cannot hold its proof.
+_CLOCK_SLACK_S = 300.0
 _SUBMISSION_PROOF = frozenset({"received", "pane_submitted"})
+#: Why a probe of the ingest daemon leaves absence unproven (#2086). Only "down"
+#: says ingest is down; the rest say what the probe saw, never a guess at more.
+_DAEMON_DOUBT = {
+    "down": "Plane ingest is down: nothing listens on its socket",
+    "unanswered": ("the Plane daemon is listening but did not answer within {timeout:g}s,"
+                   " so it is slow or stuck (a stopped daemon refuses the connection)"),
+    "unreachable": "the Plane ingest socket cannot be reached",
+    "invalid": "the Plane ingest socket did not answer as the daemon does",
+}
+
+
+@dataclass(frozen=True)
+class QueuedProof:
+    """What the pending queues hold of one message's transmission proof.
+
+    `reason` names why an "unavailable" answer could not settle it (#2086):
+    the bound, an entry it could not read, or what a daemon probe saw.
+    """
+    state: Literal["pending", "absent", "unavailable"]
+    reason: str | None = None
 
 
 def _queued_proof(value, message_id) -> bool:
@@ -145,8 +173,25 @@ def _queued_bytes(path: Path, limit: int) -> bytes | None:
         os.close(fd)
 
 
+def _written_before(path: Path, instant: float) -> bool:
+    """A regular file last written before `instant`, less the clock slack.
+    Anything else, or a file that cannot be read now, is kept for the read."""
+    try:
+        st = path.lstat()
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and st.st_mtime < instant - _CLOCK_SLACK_S
+
+
 def pending_transmission_proof(root: Path, message_id: str, *,
                                probe_timeout: float = 0.5) -> Literal["pending", "absent", "unavailable"]:
+    """`queued_transmission_proof` over every queued entry, for a caller that
+    has no recorded instant for the message, such as the retry gate."""
+    return queued_transmission_proof(root, message_id, probe_timeout=probe_timeout).state
+
+
+def queued_transmission_proof(root: Path, message_id: str, *, written_after: float | None = None,
+                              probe_timeout: float = 0.5) -> QueuedProof:
     """Submission/receiver proof for one message still awaiting Plane ingest.
 
     Bounded and read-only over the existing staged and spool queues: it never
@@ -155,34 +200,53 @@ def pending_transmission_proof(root: Path, message_id: str, *,
     unreadable, non-regular, torn or over-bound queue entry is unavailable,
     never absent. A root using the staged handshake also needs a live ingest
     daemon: a dead one may hold unstaged proof, so absence is then unproven.
+
+    `written_after` is the message's recorded instant (epoch seconds). Its
+    proof is emitted only after the message exists, so an entry last written
+    before that, less _CLOCK_SLACK_S, cannot hold it and is neither read nor
+    counted. Orphaned stages wait an hour for replay, so a burst of them held
+    every later receipt past the bound (#2086). One written after the message
+    may hold its proof and is read like any other.
     """
     probe, entries = scan_queue_dir(staged_dir(root))
     spool = scan_spool(root)
     if probe.state == SOURCE_UNREADABLE or spool.spool_state == "unreadable":
-        return "unavailable"
+        return QueuedProof("unavailable", "a Plane queue cannot be listed")
     files = ([entry for entry in entries if staged_payload(entry)] if probe.state == SOURCE_OK else [])
     files += spool.pending + spool.inflight
+    scope = "queued Plane entries"
+    if written_after is not None:
+        if len(files) > _LISTED_FILES:
+            return QueuedProof("unavailable", f"{len(files)} {scope} are more than the"
+                                              f" {_LISTED_FILES} a receipt check lists")
+        files = [path for path in files if not _written_before(path, written_after)]
+        scope = "queued Plane entries that may hold this message's proof"
     if len(files) > _PENDING_FILES:
-        return "unavailable"
+        return QueuedProof("unavailable", f"{len(files)} {scope} are more than the"
+                                          f" {_PENDING_FILES} a receipt check reads")
     budget, needle = _PENDING_BYTES, message_id.encode()
     for path in files:
         data = _queued_bytes(path, budget)
         if data is None:
-            return "unavailable"
+            return QueuedProof("unavailable", f"queued Plane entry {path.name} cannot be read")
         budget -= len(data)
         if budget < 0:
-            return "unavailable"
+            return QueuedProof("unavailable", f"the {scope} come to more than the"
+                                              f" {_PENDING_BYTES} bytes a receipt check reads")
         try:
             value = json.loads(data)
         except ValueError:
-            return "unavailable"  # A torn entry cannot establish irrelevance.
+            # A torn entry cannot establish irrelevance.
+            return QueuedProof("unavailable", f"queued Plane entry {path.name} is not a whole batch"
+                                              " (a write in progress, or one cut short)")
         if needle in data and _queued_proof(value, message_id):
-            return "pending"
+            return QueuedProof("pending")
     if probe.state != SOURCE_ABSENT:
-        from .plane.daemon import probe_daemon, socket_path
-        if not probe_daemon(socket_path(root), timeout=probe_timeout):
-            return "unavailable"
-    return "absent"
+        from .plane.daemon import probe_daemon_state, socket_path
+        daemon = probe_daemon_state(socket_path(root), timeout=probe_timeout)
+        if daemon != "serving":
+            return QueuedProof("unavailable", _DAEMON_DOUBT[daemon].format(timeout=probe_timeout))
+    return QueuedProof("absent")
 
 
 def _message_id(value):
@@ -290,6 +354,22 @@ def _destination(conn, ctx, message, supplied):
     return target
 
 
+def _recorded_instant(ctx: TaskOperationContext, message_id: str) -> float | None:
+    """The message's recorded instant, read before any queue scan, or None when
+    it is unreadable or has no zone: the scan then reads every entry, and the
+    receipt loop reports why the message could not be read."""
+    try:
+        with _snapshot(ctx) as conn:
+            occurred = _show(conn, ctx, message_id).occurred_at
+    except MessageUnavailableError:
+        return None
+    try:
+        instant = datetime.fromisoformat(occurred.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        return None
+    return instant.timestamp() if instant.tzinfo is not None else None
+
+
 def receipt(ctx: TaskOperationContext, message_id: str, *, destination: str | None = None,
             wait: float = 0) -> ReceiptObservation:
     """Wait for final byte integrity, never just a receipt and never a send.
@@ -301,8 +381,9 @@ def receipt(ctx: TaskOperationContext, message_id: str, *, destination: str | No
     _seconds(wait, 0, "wait")
     deadline = time.monotonic() + wait
     message = None
+    since = _recorded_instant(ctx, message_id)
     while True:
-        queued = pending_transmission_proof(ctx.root, message_id)
+        queued = queued_transmission_proof(ctx.root, message_id, written_after=since)
         try:
             with _snapshot(ctx, deadline=deadline) as conn:
                 observed = _show(conn, ctx, message_id)
@@ -327,7 +408,7 @@ def receipt(ctx: TaskOperationContext, message_id: str, *, destination: str | No
             return ReceiptObservation(message_id, str(ctx.root), message.sender if message else None,
                 message.destination if message else None, "unavailable", "unknown", 6, "unavailable", str(exc))
         # Uncommitted or unobservable proof is neither missing nor absent history.
-        observation = ("received" if received else "unavailable" if queued != "absent" else
+        observation = ("received" if received else "unavailable" if queued.state != "absent" else
                        "missing" if history else "no_history")
         verdict = proof["delivery"] or ("unconfirmed" if received else "unknown")
         if verdict in ("delivered", "truncated", "altered"):
@@ -340,9 +421,8 @@ def receipt(ctx: TaskOperationContext, message_id: str, *, destination: str | No
                 continue
             code, exit_code = "unavailable", 6
             reason = ("transmission proof for this message is staged (pending Plane ingest); "
-                      "not yet queryable" if queued == "pending" else
-                      "Plane ingest is down or its pending queues cannot be inspected; "
-                      "receipt absence is unproven")
+                      "not yet queryable" if queued.state == "pending" else
+                      f"{queued.reason}; receipt absence is unproven")
         elif observation == "no_history":
             code, exit_code = "receipt_unobservable", 9
             reason = (f"no receipt history for {message.destination.alias} under {ctx.root}; "

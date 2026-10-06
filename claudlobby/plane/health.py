@@ -13,22 +13,31 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .capture_policy import STAGED_MAX_BATCHES, STAGED_MAX_BYTES
-from .queue_paths import scan_queue_dir, staged_dir, staged_payload
+from .queue_paths import (STAGED_ORPHAN_AGE_S, scan_queue_dir, staged_dir, staged_orphan,
+                          staged_payload)
 
 #: A pending batch older than this, beside a serving daemon, means replay is
-#: not keeping up or is paused (a replay tick is ~1 s; a paused one 30 s).
+#: not keeping up or is paused (a replay tick is ~1 s; a paused one 30 s). An
+#: orphaned stage waits STAGED_ORPHAN_AGE_S for its replay by design, and is
+#: late only this long past that: measured, they leave within ~50 s (#2086).
 STAGED_STALE_S = 300.0
 
 
 @dataclass
 class StagedScan:
     """state: "ok" (absent counts as empty) or "unreadable" (counts withheld:
-    a number from a queue that could not be enumerated is a green-zero lie)."""
+    a number from a queue that could not be enumerated is a green-zero lie).
+    The count, size and oldest cover every stage, as the client's bound does.
+    `orphans` of them are temp stages (`staged_orphan`), replayed only at the
+    hour, so their age is kept apart from the batches' (#2086)."""
 
     state: str
     count: int = 0
     size: int = 0
     oldest_mtime: float | None = None
+    orphans: int = 0
+    oldest_batch_mtime: float | None = None
+    oldest_orphan_mtime: float | None = None
 
     @property
     def full(self) -> bool:
@@ -55,30 +64,47 @@ def scan_staged(root: Path) -> StagedScan:
         scan.size += st.st_size
         if scan.oldest_mtime is None or st.st_mtime < scan.oldest_mtime:
             scan.oldest_mtime = st.st_mtime
+        if staged_orphan(entry):
+            scan.orphans += 1
+            if scan.oldest_orphan_mtime is None or st.st_mtime < scan.oldest_orphan_mtime:
+                scan.oldest_orphan_mtime = st.st_mtime
+        elif scan.oldest_batch_mtime is None or st.st_mtime < scan.oldest_batch_mtime:
+            scan.oldest_batch_mtime = st.st_mtime
     return scan
 
 
 def staged_rung(scan: StagedScan, serving: bool) -> tuple[bool, str]:
     """(ok, detail) for `plane doctor`'s staged-depth rung. Non-empty is
     ATTENTION when no daemon serves (nothing will replay it), when the queue
-    is at its bound (emits are being refused), or when its oldest batch is
-    stale beside a serving daemon."""
+    is at its bound (emits are being refused), when its oldest batch is
+    stale beside a serving daemon, or when an orphaned stage is STAGED_STALE_S
+    past its replay at the hour. Before that, its wait is the daemon's rule,
+    not a stalled replay (#2086)."""
     if scan.state == "unreadable":
         return False, "UNREADABLE — cannot enumerate (a gap, not a zero)"
     if not scan.count:
         return True, "0 pending"
-    age = int(max(0.0, time.time() - (scan.oldest_mtime or time.time())))
+    now = time.time()
+    age = int(max(0.0, now - (scan.oldest_mtime or now)))
     detail = (f"{scan.count} pending ({scan.size} bytes, oldest {age}s)"
               f" — bound {STAGED_MAX_BATCHES} batches / {STAGED_MAX_BYTES} bytes")
+    orphan_age = int(max(0.0, now - (scan.oldest_orphan_mtime or now)))
+    if scan.orphans:
+        detail += (f"; {scan.orphans} of them orphaned stage(s) (a write never renamed),"
+                   f" replayed once {STAGED_ORPHAN_AGE_S:.0f}s old (oldest {orphan_age}s)")
     if scan.full:
         return False, detail + (" — FULL: new emits are refused and counted in"
                                 " .emit-losses until the daemon replays it")
     if not serving:
         return False, detail + (" — NOT recorded: only a serving plane daemon"
                                 " replays this queue")
-    if age > STAGED_STALE_S:
+    batch_age = int(max(0.0, now - (scan.oldest_batch_mtime or now)))
+    if batch_age > STAGED_STALE_S:
         return False, detail + (" — replay is not keeping up or is paused; see"
                                 " the daemon log")
+    if orphan_age > STAGED_ORPHAN_AGE_S + STAGED_STALE_S:
+        return False, detail + (f" — an orphaned stage is {orphan_age - STAGED_ORPHAN_AGE_S:.0f}s"
+                                " past its replay at the hour; see the daemon log")
     return True, detail + " — daemon replaying"
 
 
@@ -90,7 +116,9 @@ def staged_summary(root: Path) -> dict:
             "bytes": scan.size if readable else None,
             "oldest_age_s": (int(max(0, time.time() - scan.oldest_mtime))
                              if readable and scan.oldest_mtime is not None else None),
-            "full": scan.full if readable else None}
+            "full": scan.full if readable else None,
+            # Of `pending`, the orphaned stages the daemon replays at the hour (#2086).
+            "orphaned": scan.orphans if readable else None}
 
 
 #: `.emit-losses` rows counted by the summary below: the last day, by each
