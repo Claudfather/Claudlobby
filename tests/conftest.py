@@ -37,7 +37,7 @@ def _require_prepared_resources():
             raise ValueError("missing source inventory")
         indexed = subprocess.check_output(
             ["git", "ls-files", "-z", "--", "claudlobby/_runtime_scripts", "library",
-             "templates", "voices", "fleet.yaml.seed", "fleet.yaml.example",
+             "templates", "fleet.yaml.seed", "fleet.yaml.example",
              "projects.yaml.seed", ".env.seed.example", "missions/fleet.md.seed"],
             cwd=_TEST_TREE, timeout=10).decode().split("\0")
         indexed = {name for name in indexed if name and name not in {
@@ -749,7 +749,7 @@ def fleet_dir(tmp_path: Path) -> Path:
     )
 
     # Voices dir
-    (root / "voices").mkdir()
+    (root / "library" / "voices").mkdir(parents=True, exist_ok=True)
 
     # Runtime dir
     (root / "runtime" / "bots").mkdir(parents=True)

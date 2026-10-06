@@ -12,7 +12,7 @@ def register_bot_create(children, dispatch):
         "--voice", help="Path to voice file (e.g. voices/erlich-bachman.md)"
     )
     pn.add_argument(
-        "--voice-text", help="Inline voice description (creates voices/<name>.md)"
+        "--voice-text", help="Inline voice description (creates library/voices/<name>.md)"
     )
     pn.add_argument("--mission", help="One-paragraph charter")
     pn.add_argument("--model", help="opus / sonnet / haiku")

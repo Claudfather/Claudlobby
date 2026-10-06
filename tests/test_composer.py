@@ -3055,7 +3055,7 @@ class TestComposeBotEventsDir:
         )
         (root / "runtime" / "bots").mkdir(parents=True)
         (root / "lib").mkdir()
-        (root / "voices").mkdir()
+        (root / "library" / "voices").mkdir(parents=True, exist_ok=True)
 
         paths = Paths(root=root, fleet_dir=root, package=source_package())
         bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
@@ -3256,7 +3256,7 @@ class TestComposePermissions:
             (perm_dir / f"{name}.md").write_text(content)
         install_real_template(root)
         (root / "runtime" / "bots").mkdir(parents=True)
-        (root / "voices").mkdir()
+        (root / "library" / "voices").mkdir(parents=True, exist_ok=True)
         paths = Paths(root=root, fleet_dir=root, package=source_package())
         return compose_claude_md, paths
 
@@ -3558,6 +3558,43 @@ class TestDefaultStartupPromptIgnition:
         assert not any("brief --bot" in p for p in allow)
 
 
+class TestVoiceLayouts:
+    """#2150 moves voices into library/; only the location moves, so the
+    composed text must not."""
+
+    def _setup(self, tmp_path):
+        from claudlobby.composer import compose_claude_md
+
+        root = tmp_path / "claudlobby"
+        (root / "library" / "expertise").mkdir(parents=True)
+        (root / "library" / "expertise" / "eng.md").write_text("# Eng\n\nBuild.\n")
+        install_real_template(root)
+        (root / "runtime" / "bots").mkdir(parents=True)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"],
+                        voice="voices/custom.md")
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
+        return compose_claude_md, paths, bot, fleet
+
+    def test_an_overlay_voice_composes_the_same_bytes_from_the_old_and_new_path(self, tmp_path):
+        compose_claude_md, paths, bot, fleet = self._setup(tmp_path)
+        paths.legacy_overlay_voices.mkdir()
+        old = paths.legacy_overlay_voices / "custom.md"
+        old.write_text("---\nname: Custom\n---\n\nSpeak plainly.\n")
+        before = compose_claude_md(bot, fleet, paths)
+        assert "## Voice: Custom" in before and "Speak plainly." in before
+        paths.overlay_voices.mkdir(parents=True)
+        old.rename(paths.overlay_voices / "custom.md")
+        assert compose_claude_md(bot, fleet, paths) == before
+
+    def test_a_package_voice_composes_the_same_under_either_spelling(self, tmp_path):
+        compose_claude_md, paths, bot, fleet = self._setup(tmp_path)
+        short = compose_claude_md(replace(bot, voice="voices/vito-corleone.md"), fleet, paths)
+        assert "## Voice: Vito Corleone" in short
+        spelled = compose_claude_md(replace(bot, voice="library/voices/vito-corleone.md"), fleet, paths)
+        assert spelled == short
+
+
 class TestComposeAutonomousRunner:
     """compose_claude_md renders the autonomous_runner block when configured."""
 
@@ -3570,7 +3607,7 @@ class TestComposeAutonomousRunner:
         (root / "library" / "expertise" / "eng.md").write_text("# Eng\n\nBuild.\n")
         install_real_template(root)
         (root / "runtime" / "bots").mkdir(parents=True)
-        (root / "voices").mkdir()
+        (root / "library" / "voices").mkdir(parents=True, exist_ok=True)
         paths = Paths(root=root, fleet_dir=root, package=source_package())
         return compose_claude_md, paths
 

@@ -108,7 +108,7 @@ def _copy_installed_dependencies(wheel, installed):
 def test_installed_resources_match_direct_and_sdist_wheels(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
-    for directory in ("claudlobby", "library", "voices", "templates", "missions"):
+    for directory in ("claudlobby", "library", "templates", "missions"):
         shutil.copytree(REPO / directory, source / directory,
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "_artifact.json", "_resources"))
     for name in ("pyproject.toml", "setup.py", "README.md", ".gitignore", "fleet.yaml.seed", "fleet.yaml.example",
@@ -148,7 +148,7 @@ def test_installed_resources_match_direct_and_sdist_wheels(tmp_path):
 
     source_inputs = {source / "setup.py", source / "pyproject.toml"}
     # Assert complete base assets, not just a sentinel file in each directory.
-    for directory in ("library", "voices", "templates"):
+    for directory in ("library", "templates"):
         expected = {path.relative_to(source).as_posix(): path for path in
                     (source / directory).rglob("*") if path.is_file()
                     and path.relative_to(source).as_posix() not in ignored}
@@ -159,6 +159,9 @@ def test_installed_resources_match_direct_and_sdist_wheels(tmp_path):
         for name, path in expected.items():
             assert payload[prefix + name] == (path.read_bytes(), path.stat().st_mode & 0o111)
         source_inputs.update(expected.values())
+    # Voices are library content (#2150): they ship there and nowhere else.
+    assert "claudlobby/_resources/library/voices/vito-corleone.md" in payload
+    assert not any(name.startswith("claudlobby/_resources/voices/") for name in payload)
     for name in ("fleet.yaml.seed", "fleet.yaml.example", "projects.yaml.seed", ".env.seed.example",
                  "missions/fleet.md.seed"):
         assert payload["claudlobby/_resources/seeds/" + name][0] == (source / name).read_bytes()

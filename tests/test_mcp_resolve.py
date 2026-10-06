@@ -196,7 +196,7 @@ class TestRoundTrip:
 
         (root / "templates").mkdir()
         (root / "templates" / "claude.md.j2").write_text("# {{ bot.name }}\n")
-        (root / "voices").mkdir()
+        (root / "library" / "voices").mkdir(parents=True, exist_ok=True)
         (root / "runtime" / "bots").mkdir(parents=True)
 
         return root, Paths(root=root, fleet_dir=None, package=source_package())

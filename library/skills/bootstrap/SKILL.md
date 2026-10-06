@@ -51,9 +51,9 @@ For each bot the user wants to create, collect:
    ```
 2. **Pick a personality** — Show available voices:
    ```bash
-   ls voices/ | sed 's/.md$//'
+   ls library/voices/ | sed 's/.md$//'
    ```
-   Offer to show a preview (`head -5 voices/<name>.md`). Optional.
+   Offer to show a preview (`head -5 library/voices/<name>.md`). Optional.
 3. **What repos should it work on?** — GitHub org + repo list for scope.
 4. **Model** — Explain the trade-offs: Opus (most capable, highest cost), Sonnet (balanced), Haiku (fastest, cheapest). Default: Sonnet.
 5. **Timezone** — Ask: "What timezone are you in? e.g., America/New_York, Europe/London, Asia/Tokyo". Used for human-friendly timestamps in bot output. Set as `env: { TZ: "<value>" }` in the bot's fleet.yaml stanza.

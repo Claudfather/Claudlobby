@@ -48,7 +48,7 @@ library/                                         ├── CLAUDE.md      (compo
   permissions/                                   └── projects/      (git checkouts, gitignored)
   post_actions/
   tools/
-voices/
+  voices/
 templates/claude.md.j2
 ```
 
@@ -63,7 +63,7 @@ The compositor reads `fleet.yaml` (which declares bots, their expertise, skills,
 - **Protocols** — Reusable workflow patterns (dispatch, review-flow, context-management).
 - **Tools** — Composited bot scripts in `library/tools/<name>/` (`tool.yaml` + Jinja template), rendered per-bot into `<bot_dir>/tools/` (0755) with compose-time params; secrets stay runtime env reads. See `library/tools/README.md`.
 - **Plugins** — Claude Code plugins installed fleet-wide. `claudna@Claudfather` is a built-in default; extras via `fleet.plugins.additional`. Auto-installed on bot start.
-- **Voices** — Optional personality overlays from `voices/`.
+- **Voices** — Optional personality overlays in `library/voices/`.
 
 ### Runtime model
 
@@ -179,8 +179,7 @@ One line per script, for routing; operators use the public CLI. **Before changin
 
 Everything in these top-level directories is committed and shared:
 
-- `library/` — All composable building blocks (see Architecture above)
-- `voices/` — Personality overlays
+- `library/` — All composable building blocks, voices included (see Architecture above)
 - `templates/` — Jinja2 templates for CLAUDE.md generation
 - `claudlobby/_runtime_scripts/` — Lifecycle and utility scripts
 - `claudlobby/` — Python compositor source
@@ -192,7 +191,7 @@ Everything in these top-level directories is committed and shared:
 These are ALL gitignored — never commit them:
 
 - `fleet.yaml` — Your active fleet config. Copy from `fleet.yaml.example`.
-- `local/` — Fleet overlays. Each `local/<fleet>/` contains fleet.yaml, local library overrides, voices, and runtime output. **All fleet-specific content lives here.**
+- `local/` — Fleet overlays. Each `local/<fleet>/` contains fleet.yaml, local library overrides (voices in `library/voices/`), and runtime output. **All fleet-specific content lives here.**
 - `local/<fleet>/runtime/bots/` — Generated bot directories
 - `local/<fleet>/library/` — Fleet-specific library content not general enough for shared
 - `.env` — Secrets (tokens, PATs, OAuth credentials). Never committed.

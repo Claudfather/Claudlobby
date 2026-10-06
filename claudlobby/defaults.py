@@ -148,8 +148,22 @@ _UNARGUED = (
 ROLE_MANAGER = "manager"
 ROLE_LEAF_MANAGER = "leaf-manager"
 
+#: Folders under `library/` that hold composable content but are NOT entity
+#: types, so they carry no disposition: nothing merges a default list from them
+#: into a bot. The completeness guards subtract exactly these from the folders on
+#: disk, so each exception is named and argued here, never in a test.
+NON_ENTITY_FOLDERS: dict[str, str] = {
+    "voices": (
+        "A voice is one scalar per bot (`voice:`), found by `Paths.find_voice_file`. "
+        "No list of voices merges in `_coerce_bot`, and a default voice would change "
+        "how every bot speaks without it asking. #2150 moved voices into library/ as "
+        "content, not as a thirteenth entity type."
+    ),
+}
+
 #: Every library entity type, with an explicit disposition. A thirteenth type
-#: added to `library/` without an entry here fails `test_defaults_registry.py`.
+#: added to `library/` without an entry here fails `test_defaults_registry.py`
+#: (a folder in `NON_ENTITY_FOLDERS` is content, not a type).
 REGISTRY: dict[str, Disposition] = {
     # --- RESTRICT ------------------------------------------------------------
     "guardrails": Disposition(

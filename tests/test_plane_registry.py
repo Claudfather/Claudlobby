@@ -719,6 +719,23 @@ def test_library_walk_discovers_integrations(tmp_path, *, scratch_plane_env):
     assert "shared/integrations/github-app" in aliases
 
 
+def test_library_walk_records_voices_and_skips_folder_instructions(tmp_path):
+    """#2150: voices are a library folder now, so the discovered walk records
+    each packaged voice. The folder's CLAUDE.md/AGENTS.md describe it and are
+    never items (the package ships both, so this is a live case)."""
+    from claudlobby.plane.registry_emit import library_items
+
+    paths = Paths(root=tmp_path, package=source_package())
+    assert (paths.base_voices / "CLAUDE.md").is_file()
+    items, skipped = library_items(paths, "test-fleet", None)
+    aliases = {alias for alias, _payload in items}
+    assert skipped == 0
+    assert "shared/voices/vito-corleone" in aliases
+    assert not {"shared/voices/CLAUDE", "shared/voices/AGENTS"} & aliases
+    assert {payload["category"] for alias, payload in items
+            if alias.startswith("shared/voices/")} == {"voices"}
+
+
 # ---------------------------------------------------------------------------
 # Gauntlet round-2 pins
 # ---------------------------------------------------------------------------

@@ -27,7 +27,7 @@
 #   eng-1:
 #     <<: *engineer-base                         # merges all keys from anchor
 #     expertise: [software-engineering]           # bot-specific keys override
-#     voice: voices/dinesh.md
+#     voice: voices/dinesh-chugtai.md
 
 fleet:
   name: example-fleet

@@ -128,7 +128,7 @@ def _wheel_contents(wheel: Path, content: bytes) -> tuple[dict, dict[str, tuple[
             raise ReleaseError("candidate wheel has unsupported artifact metadata")
         Compatibility.from_dict(artifact.get("compatibility"))
         package = {name: value for name, value in files.items() if name.startswith("claudlobby/")}
-        for prefix in ("_runtime_scripts/", "_resources/library/", "_resources/voices/",
+        for prefix in ("_runtime_scripts/", "_resources/library/", "_resources/library/voices/",
                        "_resources/templates/", "_resources/seeds/"):
             if not any(name.startswith("claudlobby/" + prefix) for name in package):
                 raise ReleaseError(f"candidate wheel is missing packaged {prefix}")

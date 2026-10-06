@@ -252,9 +252,10 @@ PY
 # guardrail file content. Composed-output isolation is asserted afterwards.
 # _link_library_tree <dest_lib_dir> <real_subdir> — mirror $SRC/library as
 # symlinks with ONE subdir carved out real (the experiment's variant axis),
-# plus the templates/lib/voices links every compose root needs. Shared by both
-# experiments in this file so the mirror cannot drift between them (it already
-# had once: one copy linked voices, the other did not).
+# plus the templates/lib links every compose root needs (voices ride in the
+# library mirror since #2150). Shared by both experiments in this file so the
+# mirror cannot drift between them (it already had once: one copy linked
+# voices, the other did not).
 _link_library_tree() {
     local dest="$1" real_subdir="$2" root e name
     root="$(dirname "$dest")"
@@ -267,7 +268,6 @@ _link_library_tree() {
     done
     ln -s "$SRC/templates" "$root/templates"
     ln -s "$SRC/claudlobby/_runtime_scripts" "$root/lib"
-    ln -s "$SRC/voices" "$root/voices" 2>/dev/null || true
 }
 
 # _generate_or_die <root> <label> — the compose-or-fail block, once.

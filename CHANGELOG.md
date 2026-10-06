@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — voices live in `library/voices/`; a fleet's old `voices/` is read for one more release (#2150)
+
+Voices are library content, so the package's `voices/` moved to `library/voices/`, and a fleet overlay's `local/<fleet>/voices/` becomes `local/<fleet>/library/voices/`. Only the location moved: each bot that composes a voice composes a byte-identical `CLAUDE.md` before and after (measured on a live host's fleets; the PR has the hashes).
+
+- **`voice: voices/<name>.md` in fleet.yaml is unchanged.** It names a voice. `library/voices/<name>.md` and a bare name resolve the same way.
+- **A fleet voice still at the old `voices/` composes in this release.** Lookup reads the overlay's `library/voices/`, then its old `voices/`, then the package. `config validate` and doctor's fleet-yaml rung name each file still at the old path, once per file (`voice-legacy-path`). Move it before #2202 stops reading the old path in the next release.
+- **`bot create --voice-text` writes `library/voices/<name>.md`,** and refuses a name whose voice is still at the old path, which the new file would outrank.
+- **The wheel ships voices at `_resources/library/voices/`,** and `host setup` requires them there.
+- **The plane's library registry now records the packaged voices** (`shared/voices/<name>`). It discovers categories from `library/`'s folders, and voices used to sit outside it. It skips a folder's `CLAUDE.md`/`AGENTS.md`.
+
 ### Fixed — the at-mention guard reads `gh api --input` request bodies, and the reviewer instructions agree on the route (#1537)
 
 #2181 taught reviewers to post a verdict with `gh api -X POST …/pulls/N/reviews --input review.json`, so that GitHub returns the review's URL. The at-mention guard (#1019) did not cover that route. It had no `@` in the command, and `--input` was neither a writer nor a file it scanned. So a handle in the review's body went out unchecked, and so did one in the issue-comment variant.

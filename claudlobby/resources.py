@@ -54,7 +54,7 @@ def get_resources() -> PackageResources:
             "into the selected release; an editable checkout is not a release."
         ) from exc
     assets = package / "_resources"
-    paths = [assets / name for name in ("library", "voices", "templates", "seeds")]
+    paths = [assets / name for name in ("library", "library/voices", "templates", "seeds")]
     paths.extend((package / "_runtime_scripts", package / "system.yaml"))
     if metadata.get("schema") != 1 or any(not path.exists() for path in paths):
         raise RuntimeError("Claudlobby release resources are incomplete or unsupported")
