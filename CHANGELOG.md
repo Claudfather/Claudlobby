@@ -11,7 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 `.github/actions/leak-check/`, a composite action (stdlib Python), reads a pull request's added lines and the paths it touches, and fails on use-case-specific data, whoever contributes it.
 
 - **Layer 1, generic patterns kept in the repository:** Telegram chat ids and bot tokens, GitHub and vendor API tokens, email addresses outside the reserved example domains, home paths, IPv4 addresses outside localhost and the documentation ranges, and UUIDs. The placeholders CLAUDE.md prescribes pass, and so do other obvious stand-ins.
-- **Layer 2, an operator's private list:** one case-insensitive pattern per line, from the `LEAK_CHECK_TERMS` Actions secret. If the secret is unset or empty, the check fails closed and says so.
+- **Layer 2, an operator's private list:** one case-insensitive pattern per line, from the `LEAK_CHECK_TERMS` Actions secret. If the secret is unset or empty, layer 1 still runs and reports its hits, then the check fails closed, saying that a maintainer must set the secret and that nothing in the change caused it.
 - **Output is a location and a rule, never what matched:** `path:line: <class>`, or `path:line: private term #<n>`. Logs on a public repository are world-readable, and masking hides only a secret's verbatim value.
 - **The escape is visible:** `.github/leak-check-allow.txt` (`<path glob> <class> <reason>`), read from the pull request itself, so an entry is reviewed in the same diff. The private list has no escape.
 - **Forks are checked too:** the workflow runs on `pull_request_target`, checks out the base commit and reads the head as git objects, so no code from the pull request runs. The other three repositories call the action pinned by sha.
