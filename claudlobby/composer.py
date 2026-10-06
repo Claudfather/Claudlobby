@@ -692,6 +692,13 @@ def fleet_alert_sender_state_dir(fleet: FleetConfig) -> str | None:
 
 
 GITCONFIG_FILENAME = ".gitconfig"
+# The bot's own clauDNA root, relative to BOT_DIR (#2145 F14). Readers that need a bot's
+# store build it from bot_runtime(b) / CLAUDNA_STATE_SUBDIR, never from bot.conf's
+# "$BOT_DIR/..." text, which only a sourcing shell expands.
+CLAUDNA_STATE_SUBDIR = "data/claudna"
+# Env names compose_bot_conf exports for every bot as invariants. bot.env/secret_files
+# are emitted after them, so the validator reserves these names (_validate_reserved_env).
+COMPOSED_INVARIANT_ENV = frozenset({"CLAUDNA_STATE_DIR"})
 # Sibling of the composed .gitconfig holding ONLY the App [user] block, pulled
 # in by a per-org `includeIf hasconfig:remote.*.url` from the main file when an
 # App declares `orgs:` + an identity (#1300). Kept separate because includeIf
@@ -1316,18 +1323,19 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
                     f"{_shq(' '.join(sections))}"
                 )
 
-    # Ecosystem — clauDNA version pin, Claudron vault, Claudosseum tenant
-    if bot.claudna_version or bot.claudron_vault_path or bot.claudosseum_tenant_id:
-        lines.append("")
-        lines.append("# Ecosystem")
-        if bot.claudna_version:
-            lines.append(f"export CLAUDNA_VERSION={_shq(bot.claudna_version)}")
-        if bot_is_vault_wired(bot):
-            lines.append(f"export CLAUDRON_VAULT_PATH={_shq(bot.claudron_vault_path)}")
-        if bot.claudosseum_tenant_id:
-            lines.append(
-                f"export CLAUDOSSEUM_TENANT_ID={_shq(bot.claudosseum_tenant_id)}"
-            )
+    # Ecosystem — the per-bot clauDNA root (an invariant, #2145 F14; bot.conf is
+    # sourced after the .env tiers, so it wins), then the optional pins.
+    lines.append("")
+    lines.append("# Ecosystem")
+    lines.append(f'export CLAUDNA_STATE_DIR="$BOT_DIR/{CLAUDNA_STATE_SUBDIR}"')
+    if bot.claudna_version:
+        lines.append(f"export CLAUDNA_VERSION={_shq(bot.claudna_version)}")
+    if bot_is_vault_wired(bot):
+        lines.append(f"export CLAUDRON_VAULT_PATH={_shq(bot.claudron_vault_path)}")
+    if bot.claudosseum_tenant_id:
+        lines.append(
+            f"export CLAUDOSSEUM_TENANT_ID={_shq(bot.claudosseum_tenant_id)}"
+        )
 
     # Plugin sync — restore third-party plugins on session start. Union the
     # plugins this bot's channels pin (see _channel_plugins) so a cold box
