@@ -38,7 +38,6 @@ from .plane.ids import derive_uid
 from .transcript_usage import _loads, compaction_row, session_transcripts, transcript_source
 
 CURSOR_FILE = "compaction-cursor.json"
-EVENT = "compaction"
 EMITTER = "fleet-compactions"
 READ_CAP = 8 * 1024 * 1024
 FIRST_READ = 8 * 1024 * 1024
@@ -49,12 +48,12 @@ _ACCEPTED = {"committed", "duplicate", "spooled"}
 
 
 def compaction_event(fleet: str, bot: str, row: dict, session: str, observed_at: str) -> dict:
-    material = "\x1f".join((EVENT, fleet, bot, session, row["uuid"] or row["at"]))
+    material = "\x1f".join(("compaction", fleet, bot, session, row["uuid"] or row["at"]))
     return {"event_id": derive_uid("ev", material), "event_type": "system",
             "emitter": EMITTER, "fleet": fleet, "occurred_at": row["at"],
             "observed_at": observed_at,
             "source_ref": "fleet-events:sha:" + sha256(material.encode("utf-8")).hexdigest(),
-            "payload": {"event": EVENT, "subject_kind": "actor", "subject": f"bot:{fleet}/{bot}",
+            "payload": {"event": "compaction", "subject_kind": "actor", "subject": f"bot:{fleet}/{bot}",
                         "data": {"source": "compactions", "legacy_ts": row["at"],
                                  "data": {"trigger": row["trigger"],
                                           "pre_tokens": row["pre_tokens"],
@@ -165,8 +164,8 @@ def record_compactions(paths, fleet, *, emit, read_cap: int = READ_CAP,
     of raw requests and returns one outcome (``.status``) for each."""
     started_ns = time.time_ns()
     observed_at = datetime.now(timezone.utc).isoformat()
-    cursor_path = Path(paths.fleet_state) / CURSOR_FILE
-    cursor, reset = _load(cursor_path)
+    state_file = Path(paths.fleet_state) / CURSOR_FILE
+    cursor, reset = _load(state_file)
     rows, events, nexts = [], [], {}
     for bot in sorted(fleet.bots):
         state = cursor.get(bot) if isinstance(cursor.get(bot), dict) else {}
@@ -201,7 +200,7 @@ def record_compactions(paths, fleet, *, emit, read_cap: int = READ_CAP,
         refused = set(owner.values())
         cursor.update({bot: nxt for bot, nxt in nexts.items() if bot not in refused})
     cursor = {bot: state for bot, state in cursor.items() if bot in fleet.bots}
-    _save(cursor_path, cursor)
+    _save(state_file, cursor)
     return {"fleet": fleet.name, "error": error, "cursor_reset": reset,
             "recorded": sum(row["recorded"] for row in rows),
-            "cursor": str(cursor_path), "bots": rows}
+            "cursor": str(state_file), "bots": rows}
