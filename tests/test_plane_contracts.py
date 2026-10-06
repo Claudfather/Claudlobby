@@ -209,3 +209,33 @@ def test_the_acts_authored_text_is_capped_and_by_survives_a_metadata_capture():
         validate_request(_req(reason="r" * 4097))
     with _pytest.raises(ContractViolation):
         validate_request(_req(question="q" * 4097))
+
+
+def _bot_keyframe(**over) -> dict:
+    """A bot keyframe in the shape of tests/test_plane_registry.py::bot_stub."""
+    entity = {"alias": "bot:example-fleet/alpha", "account": "default", "service": "com.x.z",
+              "model": "opus", "posture": {"permissions_mode": "acceptEdits"},
+              "composed_hashes": {}, "declared_hash": "dh", "schema_version": "1", **over}
+    return _req("registry_snapshot", {"entity_type": "bot", "entity_alias": entity["alias"],
+                                      "payload": entity, "cause": "generate", "scan_id": "s1"})
+
+
+def test_bot_keyframe_may_name_its_runtime():
+    """#2145: additive and optional — a keyframe without the key (every emitter
+    before P1, and every claude bot after) still validates; an unknown runtime is
+    a contract verdict at the door."""
+    validate_request(_bot_keyframe())
+    validate_request(_bot_keyframe(runtime="codex"))
+    validate_request(_bot_keyframe(runtime="claude"))
+    with pytest.raises(ContractViolation):
+        validate_request(_bot_keyframe(runtime="gemini"))
+
+
+def test_bot_keyframe_runtime_vocabulary_matches_config():
+    from typing import get_args
+
+    from claudlobby.known_values import KNOWN_RUNTIMES
+    from claudlobby.plane.contracts import BotPayload
+
+    literal = next(a for a in get_args(BotPayload.model_fields["runtime"].annotation) if a is not type(None))
+    assert frozenset(get_args(literal)) == KNOWN_RUNTIMES

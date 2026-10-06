@@ -522,6 +522,28 @@ def test_assembly_is_deterministic(tmp_path):
     assert canonical_hash(a) == canonical_hash(b)
 
 
+def test_bot_payload_names_the_runtime_only_when_it_says_something(tmp_path):
+    """#2145: a claude bot's keyframe has no `runtime` key and its declared_hash is
+    the one computed without it (the shape every daemon accepts, #1724); a
+    non-claude bot carries the key and hashes differently."""
+    from dataclasses import replace
+
+    from claudlobby.plane.canonical import canonical_hash
+
+    root = _fleet_root(tmp_path)
+    fleet, _ = load_fleet(root / "fleet.yaml")
+    paths = Paths(root=root, package=source_package())
+    bot = fleet.bots["lead"]
+    claude = bot_payload(paths, fleet, bot, "v1")
+    assert "runtime" not in claude
+    assert claude["declared_hash"] == canonical_hash(
+        {"org": claude["org"], "equipment": claude["equipment"], "posture": claude["posture"],
+         "model": claude["model"], "effort": bot.effort})
+    codex = bot_payload(paths, fleet, replace(bot, runtime="codex"), "v1")
+    assert codex["runtime"] == "codex"
+    assert codex["declared_hash"] != claude["declared_hash"]
+
+
 def test_scan_completed_names_scope_and_counts(tmp_path, *, scratch_plane_env):
     root = _fleet_root(tmp_path)
     _scan(root, scratch_plane_env=scratch_plane_env)
