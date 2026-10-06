@@ -42,11 +42,14 @@ mkdir -p "$WORK/dist" "$WORK/wheelhouse"
 "$PYTHON" -m venv "$WORK/bootstrap"
 "$WORK/bootstrap/bin/python" -m pip install 'build>=1,<2' 'setuptools>=77' wheel
 "$WORK/bootstrap/bin/python" -m build --wheel --no-isolation --outdir "$WORK/dist" .
+WHEEL_REQ="$(ls "$WORK"/dist/*.whl)"   # or "$(ls "$WORK"/dist/*.whl)[plane-ui]", below
 "$WORK/bootstrap/bin/python" -m pip download --only-binary=:all: \
-  --dest "$WORK/wheelhouse" "$WORK"/dist/*.whl
+  --dest "$WORK/wheelhouse" "$WHEEL_REQ"
 "$WORK/bootstrap/bin/python" -m pip install --no-index \
   --find-links "$WORK/wheelhouse" "$WORK"/dist/*.whl
 ```
+
+**The operator plane UI needs the `[plane-ui]` extra in this wheelhouse.** The assembler installs exactly the lock below, and the lock lists exactly this wheelhouse, so an extra left out here is absent from the release. A release without fastapi and uvicorn composes no `claudlobby-plane-view` unit, and activating it onto a host that runs the view removes that unit ([plane-view runbook](runbooks/plane-view.md)). To include it, set `WHEEL_REQ="$(ls "$WORK"/dist/*.whl)[plane-ui]"` before the download; the `pip install` line stays as written. When upgrading a host, build with the same extras as the selected release: compare its `dependency.lock` (under `DATA/state/releases/<id>/`) for `fastapi` and `uvicorn`.
 
 Verify the installed CLI from outside the source checkout before proceeding; a successful import from the checkout can hide a missing installation (#2004):
 
