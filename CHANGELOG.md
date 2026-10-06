@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — `task reviews` attributes a verdict to the reviewed report that names its URL, before any time window (#1537)
+
+`task reviews` tied a verdict to a reviewed report only by time: the report had to land from 10 s before the verdict to 120 s after it. So a careful write-up (a report 332 s after its verdict), a corrected verdict (posted 115 s after the report already on file) and two reviewers posting 5 s apart read UNKNOWN or AMBIGUOUS. A block nobody could attribute could not be superseded either, so it outlived its own reviewer's later approve.
+
+- **The URL decides first.** A reviewed report that names the verdict's URL in `--artifact` is that verdict's report, at any distance in time. Two bots naming one verdict's URL read AMBIGUOUS, never a guess.
+- **The window is the fallback,** and only for a report that names no verdict URL. A report that names one verdict is never another's by timing, so a corrected verdict needs its own report naming its own URL.
+- **A comment's URL comes with `gh pr view`; a review's does not,** since `gh pr view` gives a review only an opaque node id. When a report names a review URL, `task reviews` reads the REST review listing (`gh api --paginate …/pulls/N/reviews?per_page=100`) and joins on its `node_id`. If that read fails (an HTTP error, a timeout, an unreadable body), the affected verdicts fall back to the window, and each says so.
+- **Every attributed event carries its method:** `url`, `window` or `window-after-failure`, plus the URL it joined on or the reason the URL could not be read. Each PR's `review_urls` says whether the REST listing was needed, read or unavailable, and `observed_attribution.methods` counts the verdicts by method.
+- **A report's URLs live in its body,** which is content: metadata capture withholds them, and those reports are matched by the window as before. Every fleet on the default `full` capture keeps them.
+- **The reviewer protocols say to pass the URL:** `same-identity-fallback` posts the verdict review through `gh api`, which returns its `html_url`, and names it on the report with `--artifact`; `report-back`, `review-flow`, `paired-work-review`, `pr-comment-hygiene`, `code-review` and the GitHub integration say the same. The verdict header and its `— reviewed at <sha>` anchor are unchanged.
+- **Tests:** `tests/test_who_reviewed.py` replays the four cases measured in #1537 through a real Plane with the report door's own encoding, a comment-URL and a review-URL join, the REST listing's failures (HTTP 403, a timeout, an error body at exit 0, a non-JSON body), a review past the first page of the listing (merged and back-to-back pages), and the URL shapes that name a verdict.
+
 ### Fixed — the protocols name only addresses a reader can open, never a bot's own `data/` (#1708)
 
 `token-efficiency` and `comms-topology` listed a path under the author's own `data/` as a stable address for compressed detail, and `report-back` sent a report's detail to "a doc in your `data/`". That directory exists and stays put, but the composed rules of every other bot in the fleet deny reading anything in a bot's directory, the manager's included, so the pointer arrived unreadable. In one fleet's recorded reports over 16 days, 13 of 1,502 handed the reader such a path.
