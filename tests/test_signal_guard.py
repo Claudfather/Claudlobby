@@ -2,8 +2,8 @@
 caller did not start.
 
 Every bot on a host runs as one user, so a pid read back from a process lookup
-can belong to any bot, and an orphaned job's parent is the user manager that
-runs them all. On 2026-10-05 a cleanup loop killed a pattern match and its
+can belong to any bot, and an orphaned job's parent can be the user manager
+that runs them all. On 2026-10-05 a cleanup loop killed a pattern match and its
 parent by pid and stopped every bot on a host for 15 hours (#2158). OUTAGE_LOOP
 is that command with its names neutralised. It killed by pid, as #1069's
 interim fix asked, so a guard keyed on the verb would have passed it: this one
