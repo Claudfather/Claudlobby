@@ -20,9 +20,11 @@ Report work against that same assignment:
 
 ```bash
 claudlobby --json assignment progress ASSIGNMENT_ID --summary "Review started; first check passed" --request-id PROGRESS_UUID
-claudlobby --json assignment complete ASSIGNMENT_ID --summary "Review complete; evidence in PR" --pr https://github.com/org/repo/pull/123 --pr-role reviewed --request-id COMPLETE_UUID
+claudlobby --json assignment complete ASSIGNMENT_ID --summary "Review complete; evidence in PR" --pr https://github.com/org/repo/pull/123 --pr-role reviewed --artifact https://github.com/org/repo/pull/123#pullrequestreview-456 --request-id COMPLETE_UUID
 claudlobby --json assignment block ASSIGNMENT_ID --reason "Missing required credential" --request-id BLOCK_UUID
 ```
+
+Every reviewed report names its verdict's URL with `--artifact`: the URL GitHub returned when the verdict was posted (the `same-identity-fallback` protocol shows how). `claudlobby task reviews` joins the verdict to the report that names it; a report that names none is matched only by time, from 10 s before the verdict to 120 s after it.
 
 `block` leaves the assignment with you while you await guidance. If you cannot
 keep ownership, return it; for terminal unsuccessful work, fail it:
