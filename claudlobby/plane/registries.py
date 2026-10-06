@@ -171,8 +171,9 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "send_unlocked": "notice",
     "resume_skipped": "notice",
     "plugin_marketplace_failed": "notice",
-    # #2158: a bot session started on Linux without its own child subreaper,
-    # so its orphans re-parent to the user manager; data.report says why.
+    # #2158: a bot session start on Linux that did not run under its own child
+    # subreaper, so the session's orphans (if it started) re-parent to the user
+    # manager; data.report says why, or why the start failed.
     "bot_subreaper_unavailable": "notice",
     "briefing_deferred": "notice",
     "briefing_dispatched": "notice",

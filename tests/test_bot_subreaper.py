@@ -257,6 +257,7 @@ def test_an_orphan_of_the_session_reparents_to_the_bots_subreaper(scratch, start
         f"the orphan re-parented to {adopter}; the stand-in user manager is {session.manager.pid}")
     assert parent(session.server) == session.subreaper
     assert parent(session.subreaper) == session.manager.pid
+    assert session.events() == [], "a healthy start records no event"
 
 
 def test_the_outage_loop_leaves_the_user_manager_untouched(scratch, start):
@@ -334,10 +335,27 @@ def test_it_reaps_and_waits_for_what_outlives_the_session(scratch, start):
     wait_for(lambda: not live(session.subreaper), "the subreaper to leave after its last child")
 
 
+def test_it_sleeps_while_it_waits(start):
+    # The reap loop blocks in waitpid. One that polls leaves at the same
+    # moments, so only its CPU time tells them apart.
+    session = start("exec sleep 600\n")
+    wait_for(lambda: comm(session.subreaper) == "bot-subreaper", "the subreaper's re-execution")
+
+    def cpu():
+        fields = Path(f"/proc/{session.subreaper}/stat").read_text().rsplit(")", 1)[1].split()
+        return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")  # utime + stime
+
+    before = cpu()
+    time.sleep(1)
+    assert cpu() - before < 0.05, "the subreaper spends CPU while it has nothing to reap"
+
+
 def test_it_holds_nothing_it_inherited(scratch, start):
-    # The starter holds a file open on fd 8, as start-bot.sh holds its own; by
-    # the time the caller reads the report, the subreaper has let go of it.
+    # The starter holds a file open on fd 8, as start-bot.sh holds its own; the
+    # subreaper lets go of it before it reports. Read once it has re-executed:
+    # for a few ms before that, the interpreter holds its own script open.
     session = start("exec sleep 600\n", hold=scratch / "held")
+    wait_for(lambda: comm(session.subreaper) == "bot-subreaper", "the subreaper's re-execution")
     assert sorted(os.listdir(f"/proc/{session.subreaper}/fd"), key=int) == ["0", "1", "2"]
 
 
