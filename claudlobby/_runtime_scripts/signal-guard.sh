@@ -4,7 +4,7 @@
 #
 # WHY A HOOK. Every bot on a host runs as one user, so pkill, killall and a
 # pid read back from ps, pgrep or $PPID can reach another bot. Worse, an
-# orphaned job is re-parented to the user manager, so a "parent" read back
+# orphaned job can be re-parented to the user manager, so a "parent" read back
 # with ps -o ppid= can be the manager that runs every bot: a cleanup loop that
 # killed a pattern match and its parent by pid stopped every bot on a host for
 # 15 hours (#2158). Warnings were composed into every bot and did not stop it,
