@@ -696,6 +696,9 @@ GITCONFIG_FILENAME = ".gitconfig"
 # store build it from bot_runtime(b) / CLAUDNA_STATE_SUBDIR, never from bot.conf's
 # "$BOT_DIR/..." text, which only a sourcing shell expands.
 CLAUDNA_STATE_SUBDIR = "data/claudna"
+# Env names compose_bot_conf exports for every bot as invariants. bot.env/secret_files
+# are emitted after them, so the validator reserves these names (_validate_reserved_env).
+COMPOSED_INVARIANT_ENV = frozenset({"CLAUDNA_STATE_DIR"})
 # Sibling of the composed .gitconfig holding ONLY the App [user] block, pulled
 # in by a per-org `includeIf hasconfig:remote.*.url` from the main file when an
 # App declares `orgs:` + an identity (#1300). Kept separate because includeIf
@@ -1320,14 +1323,10 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
                     f"{_shq(' '.join(sections))}"
                 )
 
-    # Ecosystem — the bot's own clauDNA root, then the optional clauDNA version
-    # pin, Claudron vault and Claudosseum tenant.
+    # Ecosystem — the per-bot clauDNA root (an invariant, #2145 F14; bot.conf is
+    # sourced after the .env tiers, so it wins), then the optional pins.
     lines.append("")
     lines.append("# Ecosystem")
-    # Each bot keeps its clauDNA session store under its own runtime dir. This is
-    # a composition invariant, not a knob: in the shared ~/.claudna every bot's
-    # sessions sit beside the operator's, so no one bot's can be sealed or swept
-    # alone (#2145 F14). bot.conf is sourced after the .env tiers, so this wins.
     lines.append(f'export CLAUDNA_STATE_DIR="$BOT_DIR/{CLAUDNA_STATE_SUBDIR}"')
     if bot.claudna_version:
         lines.append(f"export CLAUDNA_VERSION={_shq(bot.claudna_version)}")

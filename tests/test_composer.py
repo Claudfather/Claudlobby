@@ -783,26 +783,20 @@ class TestComposeBotConfExportedVars:
         conf = compose_bot_conf(bot, fleet, paths)
         assert "export BOT_ID=astrid" in conf
 
+    @staticmethod
+    def _conf(tmp_path, **kw):
+        bot = BotConfig(bot_id="w", name="w", expertise=["eng"], telegram=TelegramConfig(handle="w_bot"), **kw)
+        fleet = FleetConfig(manager=bot.bot_id, bots={bot.bot_id: bot}, name="test-fleet",
+                            service_prefix="com.test", telegram_group_chat_id="-100999")
+        root = tmp_path / "cl"
+        (root / "runtime" / "bots" / "w").mkdir(parents=True, exist_ok=True)
+        (root / "lib").mkdir(exist_ok=True)
+        return compose_bot_conf(bot, fleet, Paths(root=root, fleet_dir=root, package=source_package()))
+
     def test_disable_nonessential_traffic_default_and_override(self, tmp_path):
 
         def _conf(**kw):
-            bot = BotConfig(
-                bot_id="w",
-                name="w",
-                expertise=["eng"],
-                telegram=TelegramConfig(handle="w_bot"),
-                **kw,
-            )
-            fleet = FleetConfig(
-                manager=bot.bot_id, bots={bot.bot_id: bot},
-                name="test-fleet",
-                service_prefix="com.test",
-                telegram_group_chat_id="-100999",
-            )
-            root = tmp_path / "cl"
-            (root / "runtime" / "bots" / "w").mkdir(parents=True, exist_ok=True)
-            (root / "lib").mkdir(exist_ok=True)
-            return compose_bot_conf(bot, fleet, Paths(root=root, fleet_dir=root, package=source_package()))
+            return self._conf(tmp_path, **kw)
 
         # Default on → the RC-safe granular set, never the umbrella (which
         # silently disables --remote-control — #533).
@@ -819,14 +813,7 @@ class TestComposeBotConfExportedVars:
         import subprocess
 
         def _conf(**kw):
-            bot = BotConfig(bot_id="w", name="w", expertise=["eng"],
-                            telegram=TelegramConfig(handle="w_bot"), **kw)
-            fleet = FleetConfig(manager=bot.bot_id, bots={bot.bot_id: bot}, name="test-fleet",
-                                service_prefix="com.test", telegram_group_chat_id="-100999")
-            root = tmp_path / "cl"
-            (root / "runtime" / "bots" / "w").mkdir(parents=True, exist_ok=True)
-            (root / "lib").mkdir(exist_ok=True)
-            return compose_bot_conf(bot, fleet, Paths(root=root, fleet_dir=root, package=source_package()))
+            return self._conf(tmp_path, **kw)
 
         line = 'export CLAUDNA_STATE_DIR="$BOT_DIR/data/claudna"'
         for conf in (_conf(), _conf(claudna_version="0.26.0")):
@@ -844,7 +831,11 @@ class TestComposeBotConfExportedVars:
 
     def test_a_bot_cannot_override_its_claudna_root(self, tmp_path):
         """env:/secret_files: are emitted after the invariant, so the validator reserves the key."""
+        from claudlobby.composer import COMPOSED_INVARIANT_ENV
         from claudlobby.validator import ValidationReport, _validate_reserved_env
+
+        conf = self._conf(tmp_path)
+        assert all(f"\nexport {k}=" in conf for k in COMPOSED_INVARIANT_ENV)  # each reserved name is composed
 
         for block in ("env", "secret_files"):
             bot = BotConfig(bot_id="w", name="w", expertise=["eng"], telegram=TelegramConfig(handle="w_bot"),
@@ -853,8 +844,8 @@ class TestComposeBotConfExportedVars:
                                 telegram_group_chat_id="-100999")
             report = ValidationReport()
             _validate_reserved_env(fleet, report)
-            assert report.errors == [f"bot 'w': {block} key 'CLAUDNA_STATE_DIR' is reserved — bot.conf composes "
-                                     "it for every bot, and this entry would override it"]
+            assert len(report.errors) == 1, report.errors
+            assert f"{block} key 'CLAUDNA_STATE_DIR' is reserved" in report.errors[0]
 
 
 class TestComposeBotConfServicePrefix:
