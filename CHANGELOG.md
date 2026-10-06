@@ -12,15 +12,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **`gh api … --input FILE` is a writer,** and the guard scans FILE.
 - **The scan reads JSON decoded.** Each string value is checked as text, so a handle at the start of a body line counts. In raw JSON that line reads `\n` then the handle, and the `n` hides it from the scan. A code fence counts as it does in a body file. Text that is not JSON is read as text.
-- **What the guard cannot read before the post is refused,** never allowed unread:
+- **What the guard cannot read before the post, or cannot pin to the file gh will send, is refused,** never allowed unread and never guessed:
   - `--input -` (STDIN);
-  - a file the same command writes, such as `jq … > review.json; gh api … --input review.json`, since the hook runs before the command and would read the old content or none;
+  - a path the shell builds as the command runs: a variable, `$(…)`, backticks, `~`, a glob or an escape;
+  - a relative path in a command that runs anything besides `gh`. The hook runs before the command, from the directory the command starts in, so a `cd`, `pushd`, subshell or sourced script before `gh` makes gh send a different file. With a clean file of the same name where the hook ran, a dirty body passed. No list of the ways to change directory is complete, so the rule is that `gh` is the whole command;
+  - a file the same command writes, such as `jq … > review.json; gh api … --input review.json`, since the hook would read the old content or none;
   - a file that does not exist yet.
 
-  Each refusal says what to do: write the body in one command, then post it in the next.
-- **The reviewer instructions agree.** `same-identity-fallback` says to run the two steps as two commands, and that a nonzero exit prints gh's error rather than a URL. `code-review`'s same-identity section, `worker-lifecycle`'s completion step and row, `report-back`'s unlinked example, `fleet-ops` and the GitHub integration's review route now all name the verdict's URL with `--artifact`. So do `task reviews`' advice and OFF-STANDARD texts.
+  Each refusal names the route that works: an absolute path, or the body written in one command and posted, with `gh` alone, in the next.
+- **The body-file forms read what they missed.** A quoted path (`--body-file "FILE"`, `'FILE'`, `--body-file="FILE"`, `-F body=@"FILE"`) was never scanned, because the pattern could not start a path with a quote. A relative path in a command that can change directory (`cd`, `pushd`, `popd`, `source`, `eval`, `.`, `env -C`, `find -execdir`) is now refused. There, unlike `--input`, a relative path beside other commands is still read, and a path built at run time still passes unread: the one-line form that writes the body with a heredoc and posts it carries the text in the command, which the guard rewrites.
+- **A command split with a backslash-newline is read joined.** The writer test reads one line at a time, so `gh api … \` with `--input FILE` or `-f body=…` on the next line passed as a read.
+- **The reviewer instructions agree.** `same-identity-fallback` says to run the two steps as two commands, the post with nothing else in it, and that a nonzero exit prints gh's error rather than a URL. `code-review`'s same-identity section, `worker-lifecycle`'s completion step and row, `report-back`'s unlinked example, `fleet-ops` and the GitHub integration's review route now all name the verdict's URL with `--artifact`. So do `task reviews`' advice and OFF-STANDARD texts. The verdict anchor reads `— reviewed at <full sha>` wherever it is taught: the merge gate pins the 40-character form.
 - **Tests:**
-  - The harness's #1019 scenario runs the real guard on 9 new cases. Against main's guard, its 7 new refusal checks fail.
+  - The harness's #1019 scenario runs the real guard on 36 new cases. Against main's guard, 29 of its 59 checks fail; against this PR's first round, 19.
   - `tests/test_mention_rewrite.py` covers the JSON mode.
 
 ### Fixed — `task reviews` attributes a verdict to the reviewed report that names its URL, before any time window (#1537)

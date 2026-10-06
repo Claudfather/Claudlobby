@@ -143,6 +143,12 @@ case "$payload" in
 *)
     cmd="$(jq -r '.tool_input.command // empty' <<<"$payload" 2>/dev/null)" || _bail "unparseable hook payload"
     [ -n "$cmd" ] || _allow
+    # A backslash-newline continues a line, and grep tests one line at a time:
+    # unjoined, `gh api … \` and the `--input FILE` or `body=` on the next line
+    # never meet, and the write passes as a read (#1537's review). Every test
+    # below reads the joined text; step 3 still rewrites the original.
+    _nl=$'\n'
+    cmdj=${cmd//"\\$_nl"/ }
     # Only gh invocations that WRITE something a person can be notified by.
     # `gh api … body=` is included deliberately: it is a real writer, and the
     # scrub of this very incident was performed with it.
@@ -181,10 +187,10 @@ case "$payload" in
     # ─────────────────────────────────────────────────────────────────────
     # `gh api … --input FILE` sends FILE as the request body: the review and
     # comment POSTs the same-identity protocol teaches (#1537) go that way.
-    if grep -Eq '(^|[;&|(]|\s)gh\s+(issue|pr)\s+(comment|create|edit|review)\b' <<<"$cmd" \
-        || grep -Eq '(^|[;&|(]|\s)gh\s+api\b.*\b(body|title)=' <<<"$cmd" \
-        || grep -Eq '(^|[;&|(]|\s)gh\s+api\b.*\s--input([= ]|$)' <<<"$cmd" \
-        || grep -Eq '(^|[;&|(]|\s)gh\s+release\s+create\b' <<<"$cmd"; then
+    if grep -Eq '(^|[;&|(]|\s)gh\s+(issue|pr)\s+(comment|create|edit|review)\b' <<<"$cmdj" \
+        || grep -Eq '(^|[;&|(]|\s)gh\s+api\b.*\b(body|title)=' <<<"$cmdj" \
+        || grep -Eq '(^|[;&|(]|\s)gh\s+api\b.*\s--input([= ]|$)' <<<"$cmdj" \
+        || grep -Eq '(^|[;&|(]|\s)gh\s+release\s+create\b' <<<"$cmdj"; then
         surface="bash"
     else
         _allow
@@ -226,43 +232,115 @@ if [ "$surface" = "bash" ]; then
     # cannot see (that is the manufactured all-clear shape), so it refuses and
     # names the one-line fix. Verified before ruling: nothing in claudlobby/_runtime_scripts/, library/
     # or claudlobby/ pipes stdin to gh, so this breaks no shipped tooling.
-    if grep -Eq -- '--body-file[= ]+-([[:space:]]|$)|(body|title)=@-([[:space:]]|$)' <<<"$cmd"; then
+    if grep -Eq -- '--body-file[= ]+-([[:space:]]|$)|(body|title)=@-([[:space:]]|$)' <<<"$cmdj"; then
         _deny "gh reading the body from STDIN cannot be checked for @-mentions — the content is in a pipeline this hook cannot read, and every fleet bot name is a real GitHub account (#1019). Write the body to a temp file and pass --body-file <path>; the file is scanned and passes untouched when it holds no mention."
     fi
 
-    # (b) A FILE ON DISK — readable, so scan it. Covers --body-file, --notes-file
-    # (both space- and equals-separated), -F/--field/-f/--raw-field body=@FILE,
+    # --- reading a path the way gh will -------------------------------------
+    # This hook runs BEFORE the command, in the Bash tool's current directory,
+    # so it reads a relative path from where the command STARTS. It reads the
+    # file gh will send or it refuses; a best guess is the bypass. #1537's
+    # review: `cd sub && gh api … --input review.json` passed on a clean
+    # review.json beside the hook while gh sent a dirty sub/review.json.
+    _PATH='("[^"]*"|'"'"'[^'"'"']*'"'"'|[^[:space:]"'"'"';&|()<>]+)'
+    _refpaths() { # <ERE prefix> — each path written after it, quotes kept, one per line
+        grep -oE -- "$1$_PATH" <<<"$cmdj" | sed -E "s/^$1//"
+    }
+    _catpaths() { # each word inside a `$(cat …)` body, one per line
+        local _l _w
+        grep -oE -- '\$\(cat [^)]+\)' <<<"$cmdj" | sed -E 's/^\$\(cat //; s/\)$//' | while IFS= read -r _l; do
+            read -r -a _w <<<"$_l"
+            [ "${#_w[@]}" -gt 0 ] && printf '%s\n' "${_w[@]}"
+        done
+    }
+    _literal() { # <path as written> — print the path the shell hands gh, or fail when the shell builds it as the command runs
+        local p=$1
+        case "$p" in
+        \'*\')
+            p=${p#\'}
+            p=${p%\'}
+            ;; # single quotes: nothing expands
+        \"*\")
+            p=${p#\"}
+            p=${p%\"}
+            case "$p" in *'$'* | *'`'* | *'\'*) return 1 ;; esac
+            ;;
+        *) case "$p" in *'$'* | *'`'* | *'\'* | *'*'* | *'?'* | *'['* | *'{'* | '~'*) return 1 ;; esac ;;
+        esac
+        printf '%s' "$p"
+    }
+    _gh_alone() { # gh is the whole command, so nothing runs before it that could change directory
+        local bare
+        grep -Eq '^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:];&|]*[[:space:]]+)*gh[[:space:]]' <<<"$cmdj" || return 1
+        case "$cmdj" in *"$_nl"*) return 1 ;; esac
+        bare=$(sed -E "s/'[^']*'|\"([^\"\\\\]|\\\\.)*\"//g" <<<"$cmdj") || return 1
+        ! grep -Eq ';|\||(^|[^<>])&([^<>]|$)' <<<"$bare"
+    }
+    _cd_in_cmd() { # the command holds a way to change directory: cd, pushd, popd, source, eval, `.`, env -C, -execdir
+        grep -Eq -- '(^|[^[:alnum:]_./-])(cd|pushd|popd)([[:space:];&|)]|$)|(^|[;&|({`]|\$\(|[[:space:]](if|then|else|elif|do|while|until))[[:space:]]*(source|eval|\.)[[:space:]]|(^|[^[:alnum:]_./-])env[[:space:]]([^;&|]*[[:space:]])?(-C|--chdir)|--chdir|[[:space:]]-(execdir|okdir)([[:space:]]|$)' <<<"$cmdj"
+    }
+
+    # (b) A FILE ON DISK — readable, so scan it. Covers --body-file and
+    # --notes-file (space- or equals-separated, quoted or not: a quoted path was
+    # never read before #1537's review), -F/--field/-f/--raw-field body=@FILE,
     # and --body "$(cat FILE)".
-    _refs=$(grep -oE -- '--(body|notes)-file[= ]+[^[:space:]"]+|(body|title)=@[^[:space:]"]+|\$\(cat [^)]+\)' <<<"$cmd" \
-        | sed -E 's/^--(body|notes)-file[= ]+//; s/^(body|title)=@//; s/^\$\(cat //; s/\)$//' | tr -d '"' | sort -u)
-    for _f in $_refs; do
-        [ "$_f" = "-" ] && continue
-        [ -r "$_f" ] || continue   # unreadable/nonexistent: nothing to scan
+    #   - A relative path in a command that can change directory is refused:
+    #     gh could send a different file than the one read here.
+    #   - Unlike (b2), a relative path beside other commands is still read, and
+    #     one built when the command runs, or not written yet, passes unread.
+    #     The common one-line form writes the body with a heredoc in this same
+    #     command, whose text step 3 rewrites, and refusing these would refuse
+    #     that form. A list of ways to change directory is never complete, so
+    #     this is the weaker rule; tightening it waits on a measure of how
+    #     often the fleet uses each form (#1537's follow-up issue).
+    while IFS= read -r _raw; do
+        [ -n "$_raw" ] || continue
+        _f=$(_literal "$_raw") || continue
+        [ "$_f" = "-" ] && continue # STDIN: refused in (a)
+        case "$_f" in
+        /*) ;;
+        *)
+            if _cd_in_cmd; then
+                _deny "$(printf '%s is a relative path in a command that can change directory (cd, pushd, popd, source, eval, env -C or find -execdir). This guard reads it from the directory the command starts in, before anything runs, so gh could send a different file (#1019). Pass an absolute path.' "$_f")"
+            fi
+            ;;
+        esac
+        [ -r "$_f" ] || continue # not written yet: nothing to scan
         if _hits=$("$PY_BIN" "$REWRITER" --bots "$BOTS_FILE" --allow "$ALLOW_FILE" --report < "$_f"); then
-            continue               # exit 0 => no mention => allow untouched
+            continue # exit 0 => no mention => allow untouched
         fi
         _deny "$(printf '%s carries @-mentions that would notify real GitHub accounts (#1019):\n%s\nEvery fleet bot name is a real account, and so are handles like Botfather, latest and 216. Edit the file to use backticks (`name`) and retry — the file is NOT modified for you, because it is yours.' "$_f" "$_hits")"
-    done
+    done <<<"$(_refpaths '--(body|notes)-file[=[:space:]]+'; _refpaths '(body|title)=@'; _catpaths)"
 
-    # (b2) gh api --input FILE — the whole request body, usually JSON. Three
-    # ways it could pass unread, each refused rather than allowed, because a
-    # guard that appears to cover a path it cannot see is the defect (#1537):
+    # (b2) gh api --input FILE — the whole request body, usually JSON. Each way
+    # the hook could read a different file than gh sends, or none, is refused,
+    # because a guard that appears to cover a path it cannot see is the defect
+    # (#1537), and one that reads its best guess repeats it:
     #   - `--input -` reads STDIN, unreadable here, as in (a);
-    #   - the same command writes FILE (`jq … > FILE; gh api … --input FILE`):
-    #     this hook runs before the command, so it would read the file's OLD
-    #     content, or none;
+    #   - a path built when the command runs ($VAR, $(…), backticks, ~, a glob,
+    #     an escape) names no file the hook can read;
+    #   - a RELATIVE path is read only when gh is the whole command: anything
+    #     before gh could change directory, and no list of the ways is complete;
+    #   - the same command writes FILE (`jq … > FILE; gh api … --input FILE`),
+    #     so the hook would read its OLD content, or none;
     #   - FILE does not exist yet, so there is nothing to read.
+    # The taught route (same-identity-fallback) writes the body in one command
+    # and posts it with gh alone in the next, so it passes every rule above.
     # A readable FILE is scanned with --json-strings: each decoded string is
     # read as text, so a body line starting with a handle (`\n@name` in the
     # raw JSON) and a code fence count exactly as they do in a body file.
-    _inputs=$(grep -oE -- '--input[= ]+("[^"]+"|'"'"'[^'"'"']+'"'"'|[^[:space:]"'"'"';&|]+)' <<<"$cmd" \
-        | sed -E 's/^--input[= ]+//' | tr -d "\"'" | sort -u)
-    for _f in $_inputs; do
+    while IFS= read -r _raw; do
+        [ -n "$_raw" ] || continue
+        _f=$(_literal "$_raw") || _deny "$(printf 'The --input path %s is built when the command runs (a variable, ~, a glob, an escape or a command substitution), so this guard cannot know which file gh will send, and it does not guess (#1019). Pass a literal path: an absolute one, or a relative one with gh api as the whole command.' "$_raw")"
         if [ "$_f" = "-" ]; then
             _deny "gh api --input - reads the request body from STDIN, which cannot be checked for @-mentions before the post (#1019). Write the body to a file in one command, then post it with --input <file> in the next."
         fi
+        case "$_f" in
+        /*) ;;
+        *) _gh_alone || _deny "$(printf '%s is a relative path in a command that runs more than gh. This guard reads it from the directory the command starts in, before anything runs, and cannot tell whether something before gh changes directory (cd, pushd, a subshell, a sourced script), so gh could send a different file (#1019). Pass --input an absolute path, or post with gh api as the whole command, as the protocol does.' "$_f")" ;;
+        esac
         _q=$(printf '%s' "$_f" | sed 's/[.[\*^$/]/\\&/g')
-        if grep -Eq -- "(>|>>|\btee\b[^;&|]*|[[:space:]]-o[[:space:]]*)[[:space:]]*[\"']?${_q}[\"']?([[:space:];&|)]|$)" <<<"$cmd"; then
+        if grep -Eq -- "(>|>>|\btee\b[^;&|]*|[[:space:]]-o[[:space:]]*)[[:space:]]*[\"']?${_q}[\"']?([[:space:];&|)]|$)" <<<"$cmdj"; then
             _deny "$_f is written by this same command, so the @-mention guard would read its old content or none before the post runs (#1019). Write it in one command, then post it with gh api --input in the next."
         fi
         [ -r "$_f" ] || _deny "$_f does not exist yet, so it cannot be checked for @-mentions before the post (#1019). Write the request body first, then post it with gh api --input in the next command."
@@ -270,7 +348,7 @@ if [ "$surface" = "bash" ]; then
             continue
         fi
         _deny "$(printf '%s carries @-mentions that would notify real GitHub accounts (#1019):\n%s\nEvery fleet bot name is a real account, and so are handles like Botfather, latest and 216. Edit the text the request body is built from to use backticks (`name`), rebuild it, and retry: the file is NOT modified for you.' "$_f" "$_hits")"
-    done
+    done <<<"$(_refpaths '--input[=[:space:]]+')"
 
     # (c) NOT COVERED, stated rather than pretended: `gh pr create --fill` takes
     # the body from commit messages, which is scannable via git log but is more
