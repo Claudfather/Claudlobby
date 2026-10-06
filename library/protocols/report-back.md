@@ -60,7 +60,7 @@ For example: `--summary "Request changes on #943: two search checks fail; eviden
 routes the decision without pasting the entire review into the manager's
 notification.
 
-**Where the detail goes:** the PR or issue comment, a doc in your `data/` or the fleet's `shared/`, or the branch itself. Put it somewhere addressable *first*, then cite the address. If it has no address yet, that is what to fix — not the wording.
+**Where the detail goes:** an address your manager can open — the PR or issue comment (on a public repo, no business names or secrets), a doc in the fleet's `shared/` or a vault note, or the pushed branch. Never your own `data/` or anything else in your bot directory: your manager cannot open it, so it is only for your scratch. Put it somewhere addressable *first*, then cite the address. If it has no address yet, that is what to fix — not the wording.
 
 **Never truncate these to fit:** the blocker itself in `--reason`, verbatim
 error output, and any substitution of the instrument or method from what was

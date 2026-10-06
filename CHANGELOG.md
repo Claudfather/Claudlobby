@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the protocols name only addresses a reader can open, never a bot's own `data/` (#1708)
+
+`token-efficiency` and `comms-topology` listed a path under the author's own `data/` as a stable address for compressed detail, and `report-back` sent a report's detail to "a doc in your `data/`". That directory exists and stays put, but the composed rules of every other bot in the fleet deny reading anything in a bot's directory, the manager's included, so the pointer arrived unreadable. In one fleet's recorded reports over 16 days, 13 of 1,502 handed the reader such a path.
+
+- **The test, stated where the addresses are listed:** "The detail must be at an address the addressee can open, not merely one that exists." The addresses that pass are a PR or issue (on a public repo, no business names or secrets), a doc in the fleet's `shared/` or a vault note, and a repo path at a pushed commit or the pushed branch. Never the author's own `data/` or anything else in its bot directory, which stays for scratch only its author re-reads.
+- **`token-efficiency`:** rule zero states the test, and the bars table sends a report summary's overflow to `shared/` instead of `data/`.
+- **`comms-topology`:** *Bot to bot* opens with the test, and *To disk* asks for an address its reader can open. "A worklog" leaves the list, since its spec (#881) puts worklogs in the worker's `data/`. The claim that the deny does not block is replaced by the measurement that it does.
+- **`report-back`:** the detail goes to an address the manager can open.
+- `tests/test_report_addresses.py` pins every `data/` line in `library/` per file with its reason, the text a worker's composed `CLAUDE.md` carries, and the manager's composed deny rules the text relies on.
+
 ### Added — the plane's quarantine is listed, and its counted losses show where a manager looks (#2165)
 
 Until now, `plane doctor` and `plane status` only counted the quarantine, and the trust panel named its newest five entries; nothing listed the rest. The `.emit-losses` rows, including #2164's `stage_empty`, were read by `plane doctor` alone, and nothing schedules the doctor.
