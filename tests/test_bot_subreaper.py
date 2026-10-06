@@ -156,7 +156,7 @@ class Session:
         self.env = {"PATH": os.environ["PATH"], "HOME": str(scratch / "h"),
                     "TMUX_TMPDIR": str(scratch / "s"), "PLANE_EMIT_DISABLED": "1",
                     "CLAUDLOBBY_ROOT": str(scratch / "root")}
-        hold = (f"exec 9<{shlex.quote(str(lock))}\n"
+        hold = (f"exec 9<{shlex.quote(str(lock))} 8>>{shlex.quote(str(lock))}.other\n"
                 f"{shlex.quote(sys.executable)} -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_SH)'\n"
                 if lock else "")
         starter = (f". {shlex.quote(str(LIB))} >/dev/null 2>&1\nset +e\n"
@@ -316,9 +316,11 @@ def test_it_holds_no_activation_lock(scratch, start):
     lock = scratch / "activation.lock"
     lock.write_text("")
     # The starter takes the lock on fd 9, as start-bot.sh holds it, and exits
-    # without releasing it, as a SIGKILLed start-bot.sh would.
+    # without releasing it, as a SIGKILLed start-bot.sh would. It also holds an
+    # unrelated file open on fd 8, which the subreaper must not keep either.
     session = start("exec sleep 600\n", lock=lock)
     assert session.subreaper and live(session.subreaper)
+    assert sorted(os.listdir(f"/proc/{session.subreaper}/fd")) == ["0", "1", "2"]
     with lock.open("rb") as stream:
         fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
@@ -346,7 +348,8 @@ def test_without_a_subreaper_the_session_starts_as_before(start, override, why):
 
 def test_it_names_itself_and_carries_no_session_command(start):
     session = start("exec sleep 600\n")
-    assert comm(session.subreaper) == "bot-subreaper"
+    # It names itself once it has re-executed, a moment after it reports.
+    wait_for(lambda: comm(session.subreaper) == "bot-subreaper", "the subreaper's name")
     argv = Path(f"/proc/{session.subreaper}/cmdline").read_bytes().split(b"\0")
     assert b"reap" in argv
     assert not [arg for arg in argv if b"pane-" in arg or b"new-session" in arg], argv

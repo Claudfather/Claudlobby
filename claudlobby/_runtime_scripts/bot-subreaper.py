@@ -68,21 +68,29 @@ def keep(argv, report):
     os.setsid()
     null = os.open(os.devnull, os.O_RDWR)
     os.dup2(null, 1)  # the caller reads this process's report, never its stdout
-    import ctypes  # only this phase needs these: the reaper stays small
-    import subprocess
+    import ctypes  # only this phase needs it: the reaper stays small
 
     flagged = ctypes.CDLL(None, use_errno=True).prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) == 0
-    # restore_signals=False: the client gets the dispositions this process got.
-    client = subprocess.Popen(argv, stdout=subprocess.PIPE, close_fds=False,
-                              restore_signals=False)
-    status = client.wait()
+    # A plain fork and exec, so the client gets exactly the dispositions and
+    # descriptors this process got. (subprocess takes glibc's posix_spawn path
+    # here, which leaves glibc's internal signals ignored in the child.)
+    out_r, out_w = os.pipe()
+    client = os.fork()
+    if client == 0:
+        try:
+            os.dup2(out_w, 1)
+            os.execvp(argv[0], argv)
+        finally:
+            os._exit(127)
+    os.close(out_w)
+    status = os.waitstatus_to_exitcode(os.waitpid(client, 0)[1])
     status = 128 - status if status < 0 else status
     line = f"{status} subreaper=none server=unknown adopted=no"
     try:
         ignore_stray()
-        os.set_blocking(client.stdout.fileno(), False)
+        os.set_blocking(out_r, False)
         try:
-            out = os.read(client.stdout.fileno(), 64).decode(errors="replace").strip()
+            out = os.read(out_r, 64).decode(errors="replace").strip()
         except BlockingIOError:
             out = ""
         server = int(out) if out.isdigit() else 0
@@ -93,7 +101,6 @@ def keep(argv, report):
     finally:
         os.write(report, line.encode() + b"\n")
         os.close(report)
-    client.stdout.close()
     os.dup2(null, 0)
     os.dup2(null, 2)
     os.closerange(3, os.sysconf("SC_OPEN_MAX"))  # hold nothing the caller had open
