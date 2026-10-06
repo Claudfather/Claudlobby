@@ -890,7 +890,9 @@ them. Can be set in `defaults:`; bot-level overrides.
 
 ### `bots.<name>.agent_cli`
 
-String enum, `claude` (default) or `codex`. The agent CLI the bot runs under; composed into `bot.conf` as `CLAUDLOBBY_RUNTIME` and read by every door that derives the bot's session uid (#2145 §2.2). `codex` is accepted by the parser and **refused by the validator** (`execution adapter not shipped`) until the Codex execution adapter ships (#2149). Can be set in `defaults:`.
+String enum, `claude` (default) or `codex`. The agent CLI the bot runs under; composed into `bot.conf` as `CLAUDLOBBY_RUNTIME`, which names the rule the bot's session uid is derived with (#2145 §2.2; the doors that record the caller's session read it from #2145 P1 Half B). `codex` is accepted by the parser and **refused by the validator** (`execution adapter not shipped`) until the Codex execution adapter ships (#2149). An explicit `null` reads as `claude`; any other value outside the set fails to parse. Can be set in `defaults:`.
+
+`runtime:` was this key's draft spelling and is not read. A `runtime:` key in a bot stanza or under `defaults:` gets a `retired-key` warning naming `agent_cli:`, and is an **error** when its value is not the CLI the bot runs (`runtime: codex` would otherwise run `claude` in silence).
 
 The plane (the bot keyframe's `runtime`), the session join key (`derive_session_uid(id, runtime=)`) and `CLAUDLOBBY_RUNTIME` call this value the bot's *runtime* (#2145 F2); the `fleet.yaml` key is `agent_cli` because `runtime` already names release activation (`activation_runtime.py`, `runtime_admission.py`), the Claude Code binary update (`host update runtime`) and the composed-output audit (`config validate --runtime`) (#1997).
 
@@ -1080,6 +1082,7 @@ does not own.
 - **Hard fail** — bot's `expertise:` list is empty or references missing files
 - **Hard fail** — `fleet.yaml` itself is invalid YAML or missing required keys
 - **Hard fail** — a bot's `agent_cli:` is not `claude` (`execution adapter not shipped`, until #2149)
+- **Hard fail** — a leftover `runtime:` key (bot or `defaults:`) whose value is not the bot's `agent_cli` (warn, `retired-key`, when it matches)
 - **Warn** — bot references a `skill` / `mcp` / `guardrail` / `protocol` / `resource` / `lesson` / `post_action` that doesn't exist (skipped during generate)
 - **Warn** — MCP fragment references an env var (`${FOO}`) that's not set in the current environment
 - **Warn** — `voice:` path doesn't resolve

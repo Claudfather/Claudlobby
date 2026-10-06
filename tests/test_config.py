@@ -251,6 +251,21 @@ class TestCoerceBot:
             _coerce_bot("t", {"expertise": ["eng"], "agent_cli": "code"}, {})
         with pytest.raises(ValueError, match="Invalid agent_cli"):
             _coerce_bot("t", {"expertise": ["eng"], "agent_cli": 1}, {})
+        # Only null reads as the default: a falsy value is checked like any other,
+        # never quietly taken for claude.
+        for falsy in ("", 0, False):
+            with pytest.raises(ValueError, match="Invalid agent_cli"):
+                _coerce_bot("t", {"expertise": ["eng"], "agent_cli": falsy}, {})
+            with pytest.raises(ValueError, match="Invalid agent_cli"):
+                _coerce_bot("t", {"expertise": ["eng"]}, {"agent_cli": falsy})
+
+    def test_a_leftover_runtime_key_is_recorded_not_read(self):
+        """#2145 Q1: `runtime:` is the draft spelling of `agent_cli:`. It never sets
+        the agent CLI; the bot carries it so `validate` can say so."""
+        bot = _coerce_bot("t", {"expertise": ["eng"], "runtime": "codex"}, {"runtime": "codex"})
+        assert bot.agent_cli == "claude"
+        assert bot.retired_keys == {"runtime": "codex"}
+        assert _coerce_bot("t", {"expertise": ["eng"]}, {"runtime": "codex"}).retired_keys == {}
 
     def test_skip_permission_prompts_default_true(self):
         """G6: both first-run consent skip-flags default True (skip the prompt) so a
