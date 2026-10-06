@@ -142,6 +142,9 @@ def _operator_reverse_insteadof() -> str | None:
     return None
 
 
+#: The root checkout's lib/ is retired (#1989); hook commands there run beside the release's copy (#2062).
+RETIRED_HOOK_PREFIX = "$CLAUDLOBBY_ROOT/lib/"
+
 #: The category of every warning ``validate`` emits, passed at the site that
 #: raises it (``ValidationReport.warn``) and never derived from the message,
 #: whose wording is free to improve. The slugs are an API: doctor's
@@ -149,9 +152,6 @@ def _operator_reverse_insteadof() -> str | None:
 #: baseline file names them, so a slug is renamed only on purpose. A category
 #: is a KIND of finding, grouped by remedy; the value is the one line a reader
 #: gets when a category appears that a baseline did not have.
-#: The root checkout's lib/ is retired (#1989); hook commands there run beside the release's copy (#2062).
-RETIRED_HOOK_PREFIX = "$CLAUDLOBBY_ROOT/lib/"
-
 WARNING_CATEGORIES: dict[str, str] = {
     # a declared reference that resolves to nothing
     "voice-missing": "a declared voice is not in voices/",
@@ -1285,22 +1285,9 @@ def _validate_bots(
                         f"bot '{bot_name}': model_strategy.{field_name} '{val}' not in known models{hint}"
                     )
 
-        # Hook event keys (warn)
-        for event in bot.hooks:
-            if event not in KNOWN_HOOK_EVENTS:
-                suggestion = closest_match(event, KNOWN_HOOK_EVENTS)
-                hint = f" — did you mean '{suggestion}'?" if suggestion else ""
-                report.warn(
-                    "hook-unknown",
-                    f"bot '{bot_name}': hook event '{event}' not recognized{hint}. "
-                    f"Known events: {', '.join(sorted(KNOWN_HOOK_EVENTS))}. "
-                    f"This hook will be silently ignored by Claude Code."
-                )
-
-        # A hook command under the retired root lib/ (#2062). Dedup keys on
-        # (command, matcher), so it never collapses into the release's
-        # $CLAUDLOBBY_NATIVE_DIR copy: both run, and bot-vitals records every
-        # tool call twice. Warn, not error, so existing manifests still compose.
+        # Hook event keys, and hook commands under the retired root lib/ (warn).
+        # Dedup keys on (command, matcher), so a retired-lib command never folds
+        # into the release's $CLAUDLOBBY_NATIVE_DIR copy and both run (#2062).
         for event, entries in bot.hooks.items():
             for entry in entries or []:
                 command = str((entry or {}).get("command", ""))
@@ -1311,6 +1298,16 @@ def _validate_bots(
                         f"delete it from fleet.yaml; the release composes its own "
                         f"$CLAUDLOBBY_NATIVE_DIR copy, so both run (#2062)"
                     )
+            if event not in KNOWN_HOOK_EVENTS:
+                suggestion = closest_match(event, KNOWN_HOOK_EVENTS)
+                hint = f" — did you mean '{suggestion}'?" if suggestion else ""
+                report.warn(
+                    "hook-unknown",
+                    f"bot '{bot_name}': hook event '{event}' not recognized{hint}. "
+                    f"Known events: {', '.join(sorted(KNOWN_HOOK_EVENTS))}. "
+                    f"This hook will be silently ignored by Claude Code."
+                )
+
 
         # RC-killing env vs remote-control/channels (error, #533). extra_flags
         # is checked too so a raw "--remote-control" there gets the same guard.

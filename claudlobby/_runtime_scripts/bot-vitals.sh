@@ -28,15 +28,8 @@ trap 'exit 0' ERR
 
 set -euo pipefail
 
-# No bot to anchor to → nothing to do (#874). Checked before lib-common is
-# sourced, so the no-op path costs one fork. BOT_DIR must be an existing
-# absolute dir: a relative or empty value would resolve against the cwd, which
-# is the bot's project checkout.
-case "${BOT_DIR:-}" in
-    /*) [ -d "$BOT_DIR" ] || BOT_DIR="" ;;
-    *)  BOT_DIR="" ;;
-esac
-if [ -z "$BOT_DIR" ]; then
+# #874 (see header). Checked before lib-common is sourced: the no-op path is one fork.
+if [[ "${BOT_DIR:-}" != /* || ! -d "$BOT_DIR" ]]; then
     cat >/dev/null 2>&1 || true   # drain the payload; the writer must not see a closed pipe
     echo "bot-vitals: BOT_DIR unset or not an absolute directory — recording nothing, touching no marker (#874)" >&2
     exit 0

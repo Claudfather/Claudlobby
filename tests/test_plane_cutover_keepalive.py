@@ -130,8 +130,11 @@ def test_the_vitals_hook_never_falls_back_to_the_cwd(tmp_path, bot_dir, *, scrat
     assert "recording nothing" in r.stderr
     assert not list(cwd.rglob(".last-tool-call"))
     assert not (bot / "data" / ".last-tool-call").exists()
-    # Replay anything the hook staged before reading the plane, so an emit that slipped through is counted.
-    assert _await(tmp_path, "SELECT COUNT(*) FROM events WHERE event = 'tool_call'", 0, timeout=3) in (0, None)
+    # The hook has exited; replay anything it staged, then read once: an emit that slipped through is counted.
+    _replay_pending(tmp_path)
+    if db_path(tmp_path).exists():
+        with connect(db_path(tmp_path)) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM events WHERE event = 'tool_call'").fetchone()[0] == 0
     assert not list((tmp_path / "state" / "plane").rglob("*.batch"))
 
 
