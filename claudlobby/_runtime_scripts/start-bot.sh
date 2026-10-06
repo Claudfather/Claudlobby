@@ -338,6 +338,7 @@ touch "$BOT_DIR/data/.spawn" 2>/dev/null || true
 # documentation/environment-variables.md.
 LOG="$BOT_DIR/logs/startup.log"
 setup_log_dir "$LOG"
+echo "$(ts_iso) SUBREAPER ${BOT_SUBREAPER_REPORT:-}" >> "$LOG"
 _rc_timeout_s="${RC_READY_TIMEOUT_S:-90}"
 # Coerce a non-numeric/empty override to the default: a bad value would crash
 # start-bot under `set -u` ($(( abc * 2 )) → "abc: unbound variable"), crash-

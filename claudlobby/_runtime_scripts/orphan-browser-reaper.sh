@@ -61,9 +61,10 @@ install_error_trap ""
 DEFAULT_PATTERN='^(chromium|chromium-browser|chrome|google-chrome|google-chrome-stable|Google Chrome|Google Chrome Helper|chrome_crashpad_handler|crashpad_handler|headless_shell|playwright|playwright.sh|msedge|Microsoft Edge)$'
 
 # Parents that mean "nothing owns this any more": init/launchd (pid 1) and the
-# subreapers that adopt in its place. Narrow on purpose -- a browser whose parent
-# is a real task (node, python, a bot session) is in use, not leaked.
-DEFAULT_ORPHAN_PARENTS='^(systemd|launchd|init)$'
+# subreapers that adopt in its place, a bot session's own among them (#2158).
+# Narrow on purpose -- a browser whose parent is a real task (node, python, a bot
+# session) is in use, not leaked.
+DEFAULT_ORPHAN_PARENTS='^(systemd|launchd|init|bot-subreaper)$'
 
 MAX_AGE_HOURS=6
 PATTERN="$DEFAULT_PATTERN"

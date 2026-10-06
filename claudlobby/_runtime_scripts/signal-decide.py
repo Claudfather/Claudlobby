@@ -23,7 +23,8 @@ whatever holds a file or port: refused outright, as are kill -1 (every process
 the user can signal) and kill NAME (util-linux kill takes a name). A pid typed
 as a number shows no provenance, so its target decides, typed directly or held
 in a variable or a loop word: refused when it is an ancestor of this hook (the
-session's claude, its tmux server, the user manager, PID 1), allowed otherwise.
+session's claude, its tmux server, its subreaper, the user manager, PID 1),
+allowed otherwise.
 kill -0 and kill -l send nothing and are always allowed.
 
 Bounds, stated once here (the hook, the guardrail and the CHANGELOG point
@@ -761,7 +762,7 @@ def literal_finding(t, fed, held_by=None):
             return (
                 "ancestor",
                 f"{held}pid {t} is an ancestor of this session: its claude, "
-                "its tmux server, the user manager or PID 1",
+                "its tmux server, its subreaper, the user manager or PID 1",
             )
         return None
     if not fed and PROCESS_NAME_RE.fullmatch(t):  # under xargs a word is a placeholder
@@ -842,7 +843,7 @@ def main() -> int:
     reason = (
         f"signal-guard refused this command: {'; '.join(r for _, r in found)}. Bots on one host "
         "share a user, so a pid you looked up can belong to another bot, and an orphaned job's "
-        "parent is the user manager that runs every bot (#2158). Stop only what you started: save "
+        "parent can be the user manager that runs every bot (#2158). Stop only what you started: save "
         '$! when you start a job (job & echo $! > job.pid), then kill "$(cat job.pid)"; in the '
         "same command use kill %1 or kill $!; stop a background tool call with its own stop "
         f"control. kill -0 is always allowed. Guardrail: {guardrail} (#1069)."

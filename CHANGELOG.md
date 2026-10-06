@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — each bot session gets its own child subreaper, so its orphans never re-parent to the user manager (#2158)
+
+On 2026-10-05 a kill loop killed a pattern match and then its parent. The match was an orphaned job, and an orphan in a bot session re-parented to the systemd user manager, which runs every bot: it exited on SIGTERM, and every bot on the host stopped for 15 hours. #1069's guard refuses that command; this bounds the damage when one gets past it.
+
+- **`bot-subreaper.py`:** `start-bot.sh` creates the session through it (`bot_session_spawn` in `lib-common.sh`). It sets `PR_SET_CHILD_SUBREAPER` and runs the tmux client; the server daemonizes, so the server and every process the session orphans re-parent to it. A kill aimed at an orphan's parent lands on it, and it ignores the termination signals, so #2158's loop leaves the user manager untouched.
+- **It stays out of the session.** It sits above tmux, so the pane is still `claude`. It ignores signals only after the client ran, so the session inherits nothing; it never sends a signal; and it holds no inherited descriptor, fd 9 (the activation lock) included.
+- **It never outlives its last child.** A stop that leaves nothing behind ends it with the tmux server, so the unit's cgroup empties as before. A process that outlives the session, such as a running Bash tool shell (each runs in its own session), keeps it until that process ends.
+- **Linux only, and it fails open.** macOS has no child subreaper, and an orphan there re-parents to launchd, PID 1, which a user cannot signal. When the subreaper did not run the client, `bot_session_spawn` runs it as before; `startup.log` has a `SUBREAPER` line either way.
+- **`orphan-browser-reaper.sh`** treats `bot-subreaper` as an orphan's parent, as it does `systemd`. **The signal guard** now says an orphan's parent *can be* the user manager, and names the subreaper among the session's ancestors.
+- **Tests:** `tests/test_bot_subreaper.py` starts real tmux sessions the way `start-bot.sh` does, under a stand-in user manager that records each signal it receives. An orphan of the session re-parents to the subreaper; #2158's loop, run in the session with its kill confined to the stand-in's tree, never reaches the stand-in; the subreaper survives what a stray kill sends, waits for what outlives the session, leaves with its last child, holds no activation lock, passes the session no signal disposition, and fails open. `tests/test_orphan_browser_reaper.sh` gains a row.
+
 ### Added — a composed guard refuses a signal to a process the caller did not start (#1069)
 
 On 2026-10-05 a manager bot's ad-hoc kill loop killed each process matching a pattern and its parent, read back with `ps -o ppid=`. The pattern matched the bot's own tool shell as well as its job; killing the shell orphaned the job to the user manager, and the next "parent" the loop killed was the manager. Every bot on the host stopped for 15 hours (#2158). The loop killed by pid, as #1069's interim advice asked, and warnings about `pkill` composed into every bot did not prevent it.

@@ -79,6 +79,7 @@ One line per script, for routing; operators use the public CLI. **Before changin
 
 **Bot lifecycle and supervision**
 - `start-bot.sh` — launch a bot's tmux session on its own socket and wait until ready
+- `bot-subreaper.py` — each bot session's child subreaper: its orphans re-parent to it, never to the user manager
 - `spin-up-bot.sh` — enroll a bot as a supervised service, then start it (idempotent)
 - `spin-down-bot.sh` — full teardown for canary/throwaway bots; `--purge` also deletes the bot dir
 - `pre-stop-handoff.sh` — graceful context handoff before a service stop

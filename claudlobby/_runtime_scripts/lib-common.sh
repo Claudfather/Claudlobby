@@ -1272,8 +1272,8 @@ bridge_state() {
         printf '%s' "no_bridge"; return 1
     fi
 
-    # Lineage: a poller whose `claude` died reparents to the session subreaper
-    # (systemd --user / init) and delivers nothing while still holding the
+    # Lineage: a poller whose `claude` died reparents to a subreaper (the bot's
+    # own, systemd --user or init) and delivers nothing while still holding the
     # single-consumer token slot — a deaf orphan that must NOT read `up`. Require
     # a live `claude` ANCESTOR. The telegram plugin's MCP command is `bun … start`,
     # so the real tree is  claude → bun (`bun … start`) → bun server.ts  — `claude`
@@ -2004,10 +2004,31 @@ bot_tmux() {
     "$_TMUX_BIN" -L "$socket" "$@" 9<&-
 }
 
-# Create a bot's tmux session: the one place start-bot.sh starts a session.
+# Create a bot's tmux session under the bot's own child subreaper (#2158): the
+# one place start-bot.sh starts a session. The tmux server daemonizes, so it and
+# every process the session orphans re-parent to the nearest live subreaper,
+# which without one of the bot's own is the user manager that runs every bot: a
+# kill aimed at an orphan's parent could stop them all. bot-subreaper.py runs
+# the client and stays as that subreaper until its last child is gone. Linux
+# only: macOS has no child subreaper, and an orphan there re-parents to launchd,
+# PID 1, which a user cannot signal. Fails open: when the subreaper did not run
+# the client, the client runs as before. BOT_SUBREAPER_REPORT says which.
 bot_session_spawn() {
     local socket="${1?Usage: bot_session_spawn <socket> <session> <command>}"
-    local session="${2?}" command="${3?}"
+    local session="${2?}" command="${3?}" report rc=0
+    if [ "$_OS" != Linux ]; then
+        BOT_SUBREAPER_REPORT="not used: $_OS has no child subreaper"
+    elif [ -z "$socket" ] || [ ! -x "${_NATIVE_ADMISSION_PYTHON:-}" ]; then
+        BOT_SUBREAPER_REPORT="not used: no private socket or release interpreter"
+    else
+        report=$("$_NATIVE_ADMISSION_PYTHON" -I -B "$_LIB_COMMON_DIR/bot-subreaper.py" \
+            "$_TMUX_BIN" -L "$socket" new-session -d -s "$session" -P -F '#{pid}' \
+            "$command" 9<&-) || rc=$?
+        case "$report" in
+            subreaper=*) BOT_SUBREAPER_REPORT="$report"; return "$rc" ;;
+        esac
+        BOT_SUBREAPER_REPORT="not used: the subreaper did not run the client (exit $rc)"
+    fi
     bot_tmux "$socket" new-session -d -s "$session" "$command"
 }
 
