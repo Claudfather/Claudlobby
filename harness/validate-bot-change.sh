@@ -1451,7 +1451,26 @@ _rln="$(printf '%s\n' "$pane_fresh" | grep -n '/claudna:session resume' | head -
 _sln="$(printf '%s\n' "$pane_fresh" | grep -n 'ZZZ_STARTUPMARK' | head -1 | cut -d: -f1 || true)"
 { [ -n "$_rln" ] && [ -n "$_sln" ] && [ "$_rln" -lt "$_sln" ]; } && r=yes || r=no
 harness_check "resume keystroke precedes STARTUP_PROMPT in the pane" "$r"
+# #2158: on Linux the real start-bot.sh starts the session under the bot's own
+# child subreaper, which adopts the tmux server, and leaves with the session.
+if [ "$_OS" = Linux ]; then
+    _sr_line="$(grep ' SUBREAPER ' "$RB_DIR/logs/startup.log" 2>/dev/null | tail -1 || true)"
+    _sr_pid="$(sed -n 's/.* subreaper=\([0-9][0-9]*\) .*/\1/p' <<<"$_sr_line")"
+    _sr_srv="$(sed -n 's/.* server=\([0-9][0-9]*\) .*/\1/p' <<<"$_sr_line")"
+    { [ -n "$_sr_pid" ] && [ -n "$_sr_srv" ] \
+        && [ "$(ps -o comm= -p "$_sr_pid" 2>/dev/null)" = bot-subreaper ] \
+        && [ "$(ps -o ppid= -p "$_sr_srv" 2>/dev/null | tr -d ' ')" = "$_sr_pid" ]; } && r=yes || r=no
+    harness_check "start-bot.sh starts the session under the bot's own subreaper (#2158)" "$r"
+fi
 pane_stale="$(_run_startbot stale)"
+if [ "$_OS" = Linux ]; then
+    r=no
+    if [ -n "${_sr_pid:-}" ]; then
+        _sr_state="$(ps -o stat= -p "$_sr_pid" 2>/dev/null || true)"
+        case "$_sr_state" in ""|Z*) r=yes ;; esac
+    fi
+    harness_check "the subreaper leaves once its session is gone (#2158)" "$r"
+fi
 printf '%s' "$pane_stale" | grep -q '/claudna:session resume' && r=no || r=yes
 harness_check "stale session.md -> resume injection skipped (clean start)" "$r"
 grep -q 'RESUME SKIP' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no

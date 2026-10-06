@@ -83,14 +83,19 @@ echo "orphan-browser-reaper: selection contract"
 
 # --- 1. the #807 shapes: orphaned browser, both parent flavors ---------------
 # 4001 is parented to init (pid 1). 4002 is parented to a subreaper: systemd
-# --user adopts what a bot session orphans, so its ppid is NOT 1 -- the shape a
-# naive `ppid == 1` test misses, which on a systemd host is the common one.
+# --user adopts what runs outside a bot session, so its ppid is NOT 1 -- the shape
+# a naive `ppid == 1` test misses, which on a systemd host is the common one.
+# 4003 was orphaned inside a bot session, so the bot's own subreaper (#2158)
+# adopted it.
 TABLE_ORPHANS=' 4001     1 10:00:00 512000 chromium
  4002   960 10:00:00 512000 chromium
+ 4003   970 10:00:00 512000 chromium
+  970   960 1-00:00:00   9000 bot-subreaper
   960     1 6-09:00:00   7952 systemd'
 out=$(run_case "$TABLE_ORPHANS")
 assert_eq "orphan parented to init is selected"      yes "$(selected "$out" 4001)"
 assert_eq "orphan adopted by subreaper is selected"  yes "$(selected "$out" 4002)"
+assert_eq "orphan adopted by a bot's subreaper is selected" yes "$(selected "$out" 4003)"
 
 # --- 2. a browser with a live parent is someone's session --------------------
 TABLE_LIVE=' 4010  4009 10:00:00 512000 chromium
