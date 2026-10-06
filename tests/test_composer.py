@@ -813,6 +813,35 @@ class TestComposeBotConfExportedVars:
         # Override off → omitted entirely (never "=0", which CC could read as truthy).
         assert "DISABLE_AUTOUPDATER" not in _conf(disable_nonessential_traffic=False)
 
+    def test_every_bot_gets_its_own_claudna_root(self, tmp_path):
+        """#2145 F14: the clauDNA store root is per bot, composed unconditionally (no pin needed),
+        once, after BOT_DIR= so the shell expands it, and it resolves under the bot's runtime dir."""
+        import subprocess
+
+        def _conf(**kw):
+            bot = BotConfig(bot_id="w", name="w", expertise=["eng"],
+                            telegram=TelegramConfig(handle="w_bot"), **kw)
+            fleet = FleetConfig(manager=bot.bot_id, bots={bot.bot_id: bot}, name="test-fleet",
+                                service_prefix="com.test", telegram_group_chat_id="-100999")
+            root = tmp_path / "cl"
+            (root / "runtime" / "bots" / "w").mkdir(parents=True, exist_ok=True)
+            (root / "lib").mkdir(exist_ok=True)
+            return compose_bot_conf(bot, fleet, Paths(root=root, fleet_dir=root, package=source_package()))
+
+        line = 'export CLAUDNA_STATE_DIR="$BOT_DIR/data/claudna"'
+        for conf in (_conf(), _conf(claudna_version="0.26.0")):
+            lines = conf.splitlines()
+            assert lines.count(line) == 1
+            bot_dir_at = next(i for i, l in enumerate(lines) if l.startswith("BOT_DIR="))
+            assert lines.index(line) > bot_dir_at
+        # Sourced the way start-bot.sh sources it (set -a), the root lands under the bot's runtime dir.
+        conf_file = tmp_path / "bot.conf"
+        conf_file.write_text(_conf())
+        out = subprocess.run(
+            ["bash", "-c", f'set -a; CLAUDLOBBY_ROOT={tmp_path / "cl"}; . "{conf_file}"; printf %s "$CLAUDNA_STATE_DIR"'],
+            capture_output=True, text=True, check=True).stdout
+        assert out.endswith("/runtime/bots/w/data/claudna"), out
+
 
 class TestComposeBotConfServicePrefix:
     """compose_bot_conf derives BOT_SERVICE and SERVICE_PREFIX from fleet config."""

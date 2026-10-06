@@ -1316,18 +1316,23 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
                     f"{_shq(' '.join(sections))}"
                 )
 
-    # Ecosystem — clauDNA version pin, Claudron vault, Claudosseum tenant
-    if bot.claudna_version or bot.claudron_vault_path or bot.claudosseum_tenant_id:
-        lines.append("")
-        lines.append("# Ecosystem")
-        if bot.claudna_version:
-            lines.append(f"export CLAUDNA_VERSION={_shq(bot.claudna_version)}")
-        if bot_is_vault_wired(bot):
-            lines.append(f"export CLAUDRON_VAULT_PATH={_shq(bot.claudron_vault_path)}")
-        if bot.claudosseum_tenant_id:
-            lines.append(
-                f"export CLAUDOSSEUM_TENANT_ID={_shq(bot.claudosseum_tenant_id)}"
-            )
+    # Ecosystem — the bot's own clauDNA root, then the optional clauDNA version
+    # pin, Claudron vault and Claudosseum tenant.
+    lines.append("")
+    lines.append("# Ecosystem")
+    # Each bot keeps its clauDNA session store under its own runtime dir. This is
+    # a composition invariant, not a knob: in the shared ~/.claudna every bot's
+    # sessions sit beside the operator's, so no one bot's can be sealed or swept
+    # alone (#2145 F14). bot.conf is sourced after the .env tiers, so this wins.
+    lines.append('export CLAUDNA_STATE_DIR="$BOT_DIR/data/claudna"')
+    if bot.claudna_version:
+        lines.append(f"export CLAUDNA_VERSION={_shq(bot.claudna_version)}")
+    if bot_is_vault_wired(bot):
+        lines.append(f"export CLAUDRON_VAULT_PATH={_shq(bot.claudron_vault_path)}")
+    if bot.claudosseum_tenant_id:
+        lines.append(
+            f"export CLAUDOSSEUM_TENANT_ID={_shq(bot.claudosseum_tenant_id)}"
+        )
 
     # Plugin sync — restore third-party plugins on session start. Union the
     # plugins this bot's channels pin (see _channel_plugins) so a cold box

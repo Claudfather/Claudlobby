@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — each bot keeps its clauDNA session store under its own runtime dir (#2145 F14)
+
+Every composed `bot.conf` now carries `export CLAUDNA_STATE_DIR="$BOT_DIR/data/claudna"`, for every bot and with no knob. Until now all bots on a host and the operator's own sessions shared `~/.claudna`, so no single bot's sessions could be sealed, swept or exported alone.
+
+- **It overrides the `.env` tiers.** `start-bot.sh` sources `bot.conf` after the tiers, so a `CLAUDNA_STATE_DIR` set in a `.env` no longer applies to a bot.
+- **It takes effect per bot at its next restart.** The bot's new sessions open in `runtime/bots/<bot>/data/claudna/`. Sessions it left open in `~/.claudna` stay there.
+- **Activation step (operator).** Once a bot has restarted onto its own root, seal its open sessions in the old root by bot name, never all open sessions, which would close live interactive ones. After the last restart, sweep the stragglers. The commands are in `documentation/plans/2026-10-04-runtime-neutral-observability-p3-claudlobby-summaries.md`, Task 1 Step 2.
+
 ### Added — a composed guard refuses a signal to a process the caller did not start (#1069)
 
 On 2026-10-05 a manager bot's ad-hoc kill loop killed each process matching a pattern and its parent, read back with `ps -o ppid=`. The pattern matched the bot's own tool shell as well as its job; killing the shell orphaned the job to the user manager, and the next "parent" the loop killed was the manager. Every bot on the host stopped for 15 hours (#2158). The loop killed by pid, as #1069's interim advice asked, and warnings about `pkill` composed into every bot did not prevent it.
