@@ -260,3 +260,27 @@ def test_plane_doctor_counts_only_the_window_it_names(plane):
     assert rung["detail"].endswith(
         "; 2 emit(s) NOT recorded (stage_empty, staged_full) — see state/plane/.emit-losses"
     ), rung
+
+
+def test_inspect_reads_a_refused_stage_by_its_quarantined_name(plane):
+    """The list names what inspect reads. A refused stage keeps its stage name
+    in the quarantine, which inspect refused as an invalid spool name; and an
+    empty entry is an answer (empty), not an unreadable one. A move into the
+    quarantine still takes spool names only."""
+    lead = "ev_" + "b" * 32
+    empty_name = f"1791014920681394733-{lead}.batch.569239.json"
+    _quarantine(plane, empty_name, "", EMPTY_REASON, 600)
+    out = _json(_run(plane, "plane", "spool", "inspect", empty_name, "--json"))
+    assert out["ok"], out
+    assert out["data"]["empty"] is True and out["data"]["entry"] is None, out
+    assert out["data"]["quarantine_reason"] == EMPTY_REASON, out
+
+    named = f"1791014920681394734-{lead}.json"
+    _quarantine(plane, named, '{"events": [1]}\n', "contract violation on replay: x", 600)
+    out = _json(_run(plane, "plane", "spool", "inspect", named, "--json"))
+    assert out["ok"] and out["data"]["entry"] == {"events": [1]}, out
+    assert out["data"]["empty"] is False, out
+
+    moved = _json(_run(plane, "plane", "spool", "quarantine", empty_name, "--json"))
+    assert not moved["ok"] and moved["error"]["code"] == "invalid_argument", moved
+
