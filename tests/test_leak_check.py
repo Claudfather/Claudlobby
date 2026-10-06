@@ -57,11 +57,14 @@ PLACEHOLDERS = [
     "NOTION_TOKEN=" + "ntn_your_integration_token and SLACK=" + "xoxp-your-token",
     "a string holding " + "\\n@pytest.mark.skipif(True)",
     "Co-Authored-By: Claude <" + "noreply" + "@anthropic.com>",
-    "mail " + "someone" + "@vera.com",
+    "mail " + "someone" + "@mailhost.com",
     "ls " + "/Users/x/Library /Users" + "/Shared/data /home/user./x /Users" + "/YOUR_USERNAME/.claude /home/alice",
     "dns " + "8.8.8.8",
     "sa " + "reporter" + "@your-project.iam.gserviceaccount.com",
     "fixture " + "5f0c2d1e" + "-0000-4000-8000-" + "000000000001",
+    "REQUEST = " + "00112233" + "-4455-6677-8899-" + "aabbccddeeff",
+    "example " + "550e8400" + "-e29b-41d4-a716-" + "446655440000" + " and urn:uuid:" + "f81d4fae" + "-7dec-11d0-a765-" + "00a0c91e6bf6",
+    "unit " + "wireplumber" + "@" + "main.service" + " and getty" + "@" + "tty1.service",
 ]
 
 
@@ -106,6 +109,17 @@ def test_every_class_is_planted():
 def test_the_private_list_fires_on_an_invented_term(tmp_path):
     rc, out, err = run(tmp_path, diff_of("ok line", INVENTED_TEXT))
     assert rc == 1 and "docs/notes.md:2: private term #1" in out
+
+
+def test_a_failing_check_says_what_to_do_and_a_passing_one_says_nothing(tmp_path):
+    rc, out, err = run(tmp_path, diff_of("ok line", INVENTED_TEXT, PLANTED["email"]))
+    assert rc == 1
+    advice = [ln for ln in out.splitlines() if ln.startswith("leak-check: replace each value")]
+    assert len(advice) == 1, out
+    assert "allow.txt as `<path glob> <class> <reason>`" in advice[0]
+    assert "a private term cannot be allowed" in advice[0]
+    rc, out, err = run(tmp_path, diff_of(*PLACEHOLDERS))
+    assert rc == 0 and "replace each value" not in out
 
 
 def test_placeholders_and_ordinary_text_pass(tmp_path):

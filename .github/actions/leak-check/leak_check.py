@@ -102,6 +102,9 @@ _RESERVED_DOMAIN = re.compile(
 
 
 _PLACEHOLDER_LOCALS = {"someone", "user", "username", "you", "me", "name", "foo", "bar", "test"}
+_UNIT_SUFFIX = re.compile(
+    r"\.(?:service|socket|timer|target|mount|automount|path|scope|slice|swap|device)$"
+)
 
 
 def _email(m: re.Match) -> bool:
@@ -110,6 +113,8 @@ def _email(m: re.Match) -> bool:
         return False  # a reserved domain, or a stand-in (you@yourdomain.com)
     if "noreply" in local or "no-reply" in local:
         return False  # a service's sender, not a person
+    if _UNIT_SUFFIX.search(domain):
+        return False  # a systemd unit instance (name@instance.service), not an address
     return not (local == "git" and domain in ("github.com", "gitlab.com"))
 
 
@@ -150,12 +155,21 @@ def _ip(m: re.Match) -> bool:
     return not any(ip in n for n in _DOC_NETS)
 
 
+#: The documentation examples everyone copies: Wikipedia's and RFC 4122's own.
+_TEXTBOOK_UUIDS = {"550e8400e29b41d4a716446655440000", "f81d4fae7dec11d0a76500a0c91e6bf6"}
+
+
 def _uuid(m: re.Match) -> bool:
-    """A random UUID uses about 14 of the 16 hex digits and has no long run of
-    zeros; a stand-in (all zeros, ``aaaaaaaa-bbbb-…``, ``12345678-1234-5678-…``,
-    ``5f0c2d1e-0000-4000-8000-000000000001``) has one or the other."""
+    """A random UUID uses about 14 of the 16 hex digits, has no long run of
+    zeros and never runs in order; a stand-in (all zeros, ``aaaaaaaa-bbbb-…``,
+    ``12345678-1234-5678-…``, ``5f0c2d1e-0000-4000-8000-000000000001``,
+    ``00112233-4455-6677-8899-aabbccddeeff``) has one of those, or is a textbook
+    example."""
     hexes = m.group(0).replace("-", "").lower()
-    return len(set(hexes)) > 8 and "0000000" not in hexes
+    digits = [int(c, 16) for c in hexes]
+    ordered = digits == sorted(digits) or digits == sorted(digits, reverse=True)
+    return (len(set(hexes)) > 8 and "0000000" not in hexes and not ordered
+            and hexes not in _TEXTBOOK_UUIDS)
 
 
 LAYER1: list[tuple[str, re.Pattern, object]] = [
@@ -555,6 +569,18 @@ def report(hits, out=sys.stdout) -> None:
                 fh.write("| (none) | 0 |\n")
 
 
+def advise(allow_path: str, out=sys.stdout) -> None:
+    """What to do about a hit, said where the failure is read."""
+    text = (f"replace each value with an obvious placeholder. A false positive of a pattern "
+            f"class can be allowed in {_shown(allow_path)} as `<path glob> <class> <reason>`, "
+            f"reviewed in the same diff; a private term cannot be allowed.")
+    print(f"leak-check: {text}", file=out)
+    step = os.environ.get("GITHUB_STEP_SUMMARY")
+    if step:
+        with open(step, "a") as fh:
+            fh.write(f"\n{text[0].upper()}{text[1:]}\n")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     src = ap.add_mutually_exclusive_group(required=True)
@@ -605,6 +631,8 @@ def main(argv=None) -> int:
         note_allowlist_edit(args.allow, paths)
     hits = scan(lines, paths, allow, terms, blobs or ())
     report(hits)
+    if hits:
+        advise(args.allow)
     return 1 if hits else 0
 
 
