@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a stage that died before writing its batch is counted as a lost emit, not quarantined as malformed (#2164)
+
+The bounded emit reaps its stager at 10 s. A reap that came after the stager created its temp file in `state/plane/staged/`, but before it wrote the batch, left the file empty. An hour later replay quarantined it as a malformed batch, so the event was lost and counted nowhere. One host had 5 such losses from 2026-10-02 to 10-05.
+
+- **Replay counts it.** An hour-old temp file that is empty, and whose writer pid (recorded in its name) is no longer running, is removed and recorded as one `stage_empty` row in `state/plane/.emit-losses`. `plane doctor`'s emit-losses rung reports that row as an emit NOT recorded. The row is written before the file is removed; if the row cannot be written, the file is quarantined as before.
+- **Unchanged:**
+  - A complete orphan is still replayed.
+  - These are still quarantined: a torn orphan, an empty one whose writer may still be running, and one whose name carries no pid.
+  - Younger temp files are left alone.
+- **Not prevented:** the batch's bytes never reached the disk. Preventing the loss would mean not killing a stager mid-stage, which is #1657's question. Empty files quarantined before this change stay where they are; #2165 covers listing the quarantine.
+- **Tests:** `tests/test_plane_daemon.py` runs the client's own `_stage` in a child that dies between creating its temp file and writing it, then replays the file (`test_a_stage_killed_before_its_write_is_counted_lost_not_quarantined`). Four more tests pin the cases that keep today's handling.
+
 ### Changed — interval timers start after their own startup delay, and the fleet pulse's cap scales with load (#2059)
 
 On 2026-10-05 a restarted user manager started every interval timer on a host that had been up for days. Each `OnBootSec=` point was already past, so systemd fired every producer in the same second into bots that were still starting; task-recheck failed because its managers were not up. Every `host activate` did the same, because it restarts every enrolled timer.
