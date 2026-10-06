@@ -10,17 +10,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 A bot with two or more open assignments had its `current_task` read from whichever had the lowest task id. Task ids are random, so the pick was arbitrary. An assignment recorded but never delivered could read as the work in progress while the bot worked on another, and a manager routing by that line could skip the delivery.
 
-- **The order:** `read_fleet_work` ranks a bot's open assignments `active`, then `blocked`, then `assigned`. Within a state, the latest transition comes first: the assignment's newest event, else its own record, in the Plane's ingest order. The ids only break a tie. `current_task` is the first.
+- **The order:** `read_fleet_work` ranks a bot's open assignments `active`, then `blocked`, then `assigned`. Within a state, the latest transition comes first, in the Plane's ingest order. That is the assignment's newest state-changing event (`accepted`, `progress`, `resumed` or `blocked_waiting`), else its own record. A manager's or the operator's act on the task (`escalated`, `nudged`) is not the bot moving to it. Delivery is a communication, not a task event. So neither moves the order. The ids only break a tie. `current_task` is the first.
 - **More than one is said, never picked silently:**
   - `fleet status --json` and `fleet utilization --json` carry `open_assignments` beside `current_task`. It is null when the work is unavailable.
   - The status table adds `(+N open)` after the task, kept clear of the column's truncation.
   - The bot detail reads `Task: <title> (1 of N open)` above its assignment lines.
-- **One source:** both commands read the same `read_fleet_work`, so utilization inherits the order. The check-in skill names `open_assignments` and says that an `assigned` row in `work_assignments` may still await delivery.
+- **One source:** both commands read the same `read_fleet_work`, so utilization inherits the order.
+- **The check-in skill:** it names `open_assignments`. Before a manager dispatches to a worker with more than one open, the skill has it check the worker's `assigned` rows: one still awaiting delivery is delivered, not assigned again.
 - **Tests:** `tests/test_current_task_order.py` covers:
   - an active assignment beside a newer assigned one, in both task-id orders;
   - active, blocked and assigned against the id order;
   - two assigned ones by their latest transition, in both id orders;
   - two active ones where a later progress event decides;
+  - an escalation, or a nudge on the older assigned row, does not decide, in both id orders;
   - the count, including null when the work is unavailable;
   - the status JSON, table and detail;
   - utilization's count.

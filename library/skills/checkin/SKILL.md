@@ -90,7 +90,9 @@ A step that fails is **recorded, never guessed around**: add its name to
    read for that bot). With more than one open assignment, `current_task` is the
    first of them (active, then blocked, then assigned, latest transition first), and
    `work_assignments` lists every one with its state: an `assigned` one there may
-   still await delivery. A
+   still await delivery. Before dispatching to such a worker, check its `assigned`
+   rows: one still awaiting delivery is delivered with `assignment deliver`, not
+   assigned again, and `current_task` is not the only work the worker holds. A
    `null` `pane_state` — with or without `plane_unreachable` set (a fleet with no
    heartbeats yet) — means the worker is UNOBSERVED, not idle. `dispatch` needs an
    alive, observed, idle worker; the rationale names the worker and its observed

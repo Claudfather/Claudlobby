@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
-from .task_state import TaskIssue, read_tasks
+from .task_state import _ACTIVITY, TaskIssue, read_tasks
 
 
 @dataclass(frozen=True)
@@ -80,10 +80,14 @@ def read_fleet_work(conn: sqlite3.Connection, *, fleet_uid: str, fleet: str,
             continue
         assignment = task.current_assignment
         if task.open and assignment is not None:
-            # The assignment's latest transition: its newest event, else its own
-            # record. Ingest order is the Plane's ordering authority, so no clock
-            # decides between two assignments.
-            latest = max([assignment.ingest_seq, *(e.ingest_seq for e in assignment.history)])
+            # The assignment's latest transition: its newest state-changing event
+            # (accepted, progress, resumed, blocked_waiting), else its own record.
+            # A manager's or the operator's act on the task (escalated, nudged) is
+            # not the bot moving to it, and delivery is a communication, not a task
+            # event, so neither counts. Ingest order is the Plane's ordering
+            # authority, so no clock decides between two assignments.
+            latest = max([assignment.ingest_seq, *(e.ingest_seq for e in assignment.history
+                                                   if e.event in _ACTIVITY)])
             rank = (_STATE_ORDER.get(assignment.state, len(_STATE_ORDER)), -latest,
                     task.task_id, assignment.assignment_id)
             for name in bot_names:
