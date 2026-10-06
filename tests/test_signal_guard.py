@@ -195,6 +195,15 @@ REFUSED = [
     "bash -c kill\\ \\$\\(pgrep\\ watcher\\)",  # escapes outside quotes
     'bash <<< "kill \\$(pgrep watcher)"',
     "bash <<EOF\nkill \\$(pgrep watcher)\nEOF",  # and an unquoted heredoc
+    # an escaped backslash before a live expansion: the outer shell expands it first
+    'bash -c "kill \\\\$PPID"',
+    'eval "kill \\\\$PPID"',
+    'x=$PPID; bash -c "kill \\\\$x"',
+    'bash -c "kill \\\\${PPID}"',
+    'bash -c "kill \\\\$(pgrep -f watcher)"',
+    "bash -c kill\\ \\\\$PPID",  # and in a bare word
+    'bash -c "kill \\`pgrep -f watcher\\`"',  # an escaped backtick is the inner shell's
+    'bash <<EOF\necho \\"; kill $PPID; echo \\"\nEOF',  # a heredoc keeps \\", so the kill runs
 ]
 
 ALLOWED = [
@@ -238,6 +247,9 @@ ALLOWED = [
     'bash -c "kill \\$(cat x.pid)"',
     'bash -c "sleep 5 & kill \\$!"',
     "bash <<EOF\nsleep 5 & kill \\$!\nEOF",
+    'bash -c "kill \\\\\\$PPID"',  # three backslashes: an escaped dollar, a literal inside
+    'sleep 5 & pid=$!; bash -c "kill \\\\$pid"',
+    'sleep 5 & bash -c "kill \\\\$!"',
     # text that only mentions a kill
     "grep -rn 'pkill -f' lib/",
     "git commit -m 'refuse pkill -f and kill $PPID'",

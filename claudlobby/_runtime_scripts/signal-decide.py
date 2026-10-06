@@ -36,10 +36,10 @@ from another interpreter or by a tool that picks its own targets (npx
 kill-port, GNU parallel); process control that is not a signal verb (tmux
 kill-server and kill-session, screen -X quit, a stop or kill through the user
 manager); a typed pid of another bot's process; and a command run by a tool
-other than Bash, which is all the hook matches. A command nesting $( more than
-about 110 deep overflows this decider's stack, and the hook then fails open
-with its script_error breadcrumb. The per-bot subreaper of #2158 is the
-backstop for those.
+other than Bash, which is all the hook matches. A command nesting $( deeply
+overflows this decider's stack, from about 110 to 330 levels by the shape of
+each level, and the hook then fails open with its script_error breadcrumb.
+The per-bot subreaper of #2158 is the backstop for those.
 """
 
 from __future__ import annotations
@@ -137,6 +137,15 @@ class Word:
         self.pieces.append(text)
         self.code.append(text if code is None else code)
 
+    def expansion(self, text):
+        """Keep an expansion live in the code. The outer shell expands it before an
+        inner shell reads the code, so an unpaired backslash left in front of it
+        (from `\\\\` in double quotes) must not escape it there."""
+        joined = "".join(self.code)
+        if (len(joined) - len(joined.rstrip("\\"))) % 2:
+            self.code = [joined[:-1]]
+        self.code.append(text)
+
 
 class Cmd:
     """A simple command, with the pipeline it stands in."""
@@ -176,13 +185,13 @@ class Parser:
             j = self.closing(i + 1, "(", ")")
             w.vars.update(NAME_RE.findall(s[i + 3 : j]))
             w.expanded = True
-            w.code.append(s[i : j + 1])
+            w.expansion(s[i : j + 1])
             return j + 1
         if nxt == "(":
             block, j = self.block(i + 2, ")")
             w.subs.append(block)
             w.expanded = True
-            w.code.append(s[i:j])
+            w.expansion(s[i:j])
             return j
         if nxt == "{":
             j = self.closing(i + 1, "{", "}")
@@ -198,7 +207,7 @@ class Parser:
                 w.vars |= nested.vars
                 w.subs += nested.subs
             w.expanded = True
-            w.code.append(s[i : j + 1])
+            w.expansion(s[i : j + 1])
             return j + 1
         if nxt == "'":  # $'...', decoded as bash does: a name can be spelled in escapes
             try:
@@ -216,7 +225,7 @@ class Parser:
             name = m.group(0) if NAME_RE.match(m.group(0)) else m.group(0)[0]
             w.vars.add(name)
             w.expanded = True
-            w.code.append(s[i : i + 1 + len(name)])
+            w.expansion(s[i : i + 1 + len(name)])
             return i + 1 + len(name)
         w.literal("$")
         return i + 1
@@ -233,7 +242,7 @@ class Parser:
             j += 1
         w.subs.append(parse("".join(inner)))
         w.expanded = True
-        w.code.append(s[i : j + 1])
+        w.expansion(s[i : j + 1])
         return j + 1
 
     def dquote(self, i, w, stop):
