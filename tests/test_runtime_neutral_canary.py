@@ -114,8 +114,52 @@ class TestCodexHook:
             assert rnc.main(["hook", "--log", str(log), "--stdout", "nonce-123", "--hold", "10"]) == 0
         assert capsys.readouterr().out.strip() == "nonce-123"
         out = rnc.report(tmp_path)
-        assert out["holds"] == [{"event": "SessionEnd", "session_id": SID, "completed": True}]
+        (hold,) = out["holds"]
+        assert hold["event"] == "SessionEnd" and hold["session_id"] == SID and hold["hold_ms"] == 10
+        assert hold["completed"] is True and hold["held_after_s"] >= 0.01
         assert out["payload_keys_by_event"]["SessionEnd"] == ["hook_event_name", "reason", "session_id"]
+
+    def test_holds_pair_by_hook_pid_and_a_held_line_is_not_a_payload(self, tmp_path):
+        # Stop fires twice for one session: the first hook finishes its hold, the second is killed. A held
+        # PostToolUse line must not read as a payload (it carries no env), and a hook run without --hold is no hold.
+        env = {"names": [], "values": {}}
+        rows = [{"ts": 1.0, "pid": 10, "hook_event_name": "Stop", "session_id": SID, "hold": 500, "keys": {}},
+                {"ts": 1.5, "pid": 10, "hook_event_name": "Stop", "session_id": SID, "held": 500},
+                {"ts": 2.0, "pid": 11, "hook_event_name": "Stop", "session_id": SID, "hold": 500, "keys": {}},
+                {"ts": 3.0, "pid": 12, "hook_event_name": "PostToolUse", "session_id": SID, "hold": 5, "keys": {}},
+                {"ts": 3.1, "pid": 12, "hook_event_name": "PostToolUse", "session_id": SID, "held": 5},
+                {"ts": 4.0, "pid": 13, "hook_event_name": "SessionEnd", "session_id": SID, "keys": {}}]
+        rows = [{"env": env, **r} if "keys" in r else r for r in rows]
+        (tmp_path / "hooks.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+        out = rnc.report(tmp_path)
+        assert [(h["event"], h["completed"], h["held_after_s"]) for h in out["holds"]] == [
+            ("Stop", True, 0.5), ("Stop", False, None), ("PostToolUse", True, 0.1)]
+        assert out["main_tool_hooks_env"] == ["{}"] and out["ancestor_comms"] == []
+
+
+class TestAncestors:
+    """C2's owner walk reads one ``ps`` snapshot; a macOS ``comm`` is a full path, kept as its basename."""
+
+    MACOS = ("    1     0 /sbin/launchd\n"
+             "  400     1 /Applications/Some App.app/Contents/MacOS/Some App\n"
+             "  500   400 /Users/you/.local/bin/codex\n"
+             "  600   500 /bin/zsh\n"
+             "  700   600 /usr/bin/python3\n")
+
+    def test_the_walk_keeps_basenames_and_records_pid_1(self):
+        chain = rnc.ancestors(700, table=self.MACOS)
+        assert chain == [{"pid": 600, "comm": "zsh"}, {"pid": 500, "comm": "codex"},
+                         {"pid": 400, "comm": "Some App"}, {"pid": 1, "comm": "launchd"}]
+        assert "/Users/you" not in json.dumps(chain)
+
+    def test_a_missing_or_failed_ps_costs_only_the_chain(self, monkeypatch):
+        assert rnc.ancestors(700, table="") == [] and rnc.ancestors(700, depth=1, table=self.MACOS) == [
+            {"pid": 600, "comm": "zsh"}]
+
+        def boom(*a, **k):
+            raise subprocess.TimeoutExpired("ps", 2)
+        monkeypatch.setattr(rnc.subprocess, "run", boom)
+        assert rnc.ancestors(os.getpid()) == []
 
 
 class TestReport:

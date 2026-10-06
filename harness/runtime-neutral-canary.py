@@ -30,9 +30,10 @@ Verbs:
     ``CLAUDE_CODE_*`` and ``CODEX_*`` variables (values only for the id and
     marker variables), and the process's ancestors' command names (the owner
     process, C2). ``--stdout`` prints TEXT for the runtime to read (C3's
-    injection nonce, or a JSON decision). ``--hold`` sleeps MS milliseconds and
-    then appends a second ``held`` line, so a killed hook shows as a missing
-    one (C1's ``SessionEnd`` budget). It always exits 0.
+    injection nonce, or a JSON decision). ``--hold`` marks the line with MS,
+    sleeps MS milliseconds and then appends a second ``held`` line with the same
+    pid, so a killed hook shows as a hold with no ``held`` line (C1's
+    ``SessionEnd`` budget). It always exits 0.
 ``setup --dir D --port P``
     Writes a throwaway settings file wiring ``hook`` to every event the
     canaries need, plus the bot env block of epic §6 P2. Then it prints the
@@ -72,7 +73,7 @@ VALUE_KEYS = frozenset({
 #: Placeholders an exporter writes in place of withheld content. Kept verbatim, so a report can tell a
 #: redacted attribute from one carrying text without the receiver ever storing the text.
 REDACTION_MARKERS = frozenset({"<REDACTED>", "[REDACTED]", "REDACTED"})
-#: Claude markers whose values the hook and the C10 probe keep. They are ids or flags.
+#: Runtime markers whose values the hook and the C10 probe keep. They are ids or flags.
 ENV_VALUES = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT",
               "CODEX_SESSION_ID", "CODEX_THREAD_ID")
 #: Runtime marker prefixes whose variable *names* a hook records.
@@ -165,24 +166,30 @@ def payload_shape(payload: dict) -> dict:
     return {k: shape(v) for k, v in sorted(payload.items())}
 
 
-def ancestors(pid: int, depth: int = 8) -> list:
-    """``[{pid, comm}]`` from ``pid``'s parent upwards: the owner-process walk C2 asks for (Linux and macOS)."""
-    chain = []
-    for _ in range(depth):
+def ancestors(pid: int, depth: int = 8, table: str | None = None) -> list:
+    """``[{pid, comm}]`` from ``pid``'s parent upwards: the owner-process walk C2 asks for (Linux and macOS).
+
+    One ``ps -A -o pid=,ppid=,comm=`` snapshot (both ``ps`` take it), so the walk costs one process and a ``ps``
+    that fails or times out costs only the chain. ``comm`` is kept as its basename: macOS prints the full path,
+    which can name the user. pid 1 is recorded (a container's runtime can be it) and ends the walk.
+    """
+    if table is None:
         try:
-            out = subprocess.run(["ps", "-o", "ppid=,comm=", "-p", str(pid)], capture_output=True, text=True,
-                                 timeout=2).stdout.strip()
+            table = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,comm="], capture_output=True, text=True,
+                                   timeout=2).stdout
         except (OSError, subprocess.SubprocessError):
-            break
-        if not out:
-            break
-        ppid, _, comm = out.partition(" ")
-        if not ppid.strip().isdigit() or int(ppid) <= 1:
-            break
-        pid = int(ppid)
-        parent = subprocess.run(["ps", "-o", "comm=", "-p", str(pid)], capture_output=True, text=True,
-                                timeout=2).stdout.strip()
-        chain.append({"pid": pid, "comm": os.path.basename(parent)})
+            return []
+    procs = {}
+    for row in table.splitlines():
+        parts = row.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            procs[int(parts[0])] = (int(parts[1]), os.path.basename(parts[2].rstrip("/")))
+    chain = []
+    pid = procs.get(pid, (0, ""))[0]
+    while pid >= 1 and pid in procs and len(chain) < depth:
+        ppid, comm = procs[pid]
+        chain.append({"pid": pid, "comm": comm})
+        pid = ppid if ppid != pid else 0
     return chain
 
 
@@ -259,7 +266,9 @@ def cmd_hook(args) -> int:
         line = hook_record(json.loads(sys.stdin.read() or "{}"), dict(os.environ), time.time(),
                            lineage=ancestors(os.getpid()))
     except Exception as exc:  # noqa: BLE001 - a canary must never break a session
-        line = {"ts": time.time(), "hook_event_name": "canary-error", "error": repr(exc)}
+        line = {"ts": time.time(), "hook_event_name": "canary-error", "error": repr(exc), "pid": os.getpid()}
+    if args.hold:
+        line["hold"] = args.hold  # a hold asked for: its `held` line, by pid, says whether it finished
     try:
         _append(Path(args.log), line)
     except OSError:
@@ -269,7 +278,7 @@ def cmd_hook(args) -> int:
     if args.hold:
         time.sleep(args.hold / 1000)
         try:
-            _append(Path(args.log), {"ts": time.time(), "held": args.hold,
+            _append(Path(args.log), {"ts": time.time(), "held": args.hold, "pid": line["pid"],
                                      "hook_event_name": line.get("hook_event_name"),
                                      "session_id": line.get("session_id")})
         except OSError:
@@ -364,7 +373,19 @@ def _read(path: Path) -> list:
 
 def report(root: Path) -> dict:
     """Verdicts per measured leg, from whatever the run left in ``root``."""
-    hooks = _read(root / "hooks.jsonl")
+    hooks, holds, open_hold = [], [], {}
+    for h in _read(root / "hooks.jsonl"):
+        if "held" in h:  # `--hold`'s second line: it closes the latest open hold of the same pid
+            row, started = open_hold.pop(h.get("pid"), (None, 0))
+            if row is not None:
+                row.update(completed=True, held_after_s=round(h["ts"] - started, 3))
+            continue
+        hooks.append(h)
+        if h.get("hold"):
+            row = {"event": h.get("hook_event_name"), "session_id": h.get("session_id"), "hold_ms": h["hold"],
+                   "completed": False, "held_after_s": None}
+            open_hold[h.get("pid")] = (row, h["ts"])
+            holds.append(row)
     requests = _read(root / "otlp" / "requests.jsonl")
     metrics = _read(root / "otlp" / "metrics.jsonl")
     logs = _read(root / "otlp" / "logs.jsonl")
@@ -407,11 +428,8 @@ def report(root: Path) -> dict:
         for ev in sorted({str(h.get("hook_event_name")) for h in events})}
     out["env_values_seen"] = sorted({json.dumps(h["env"]["values"], sort_keys=True) for h in events})
     out["env_names_seen"] = sorted({n for h in events for n in h["env"]["names"]})
-    out["ancestor_comms"] = sorted({tuple(a["comm"] for a in h.get("ancestors", [])) for h in events})
-    held = {(h.get("hook_event_name"), h.get("session_id")) for h in hooks if "held" in h}
-    out["holds"] = [{"event": h.get("hook_event_name"), "session_id": h.get("session_id"),
-                     "completed": (h.get("hook_event_name"), h.get("session_id")) in held}
-                    for h in events if h.get("hook_event_name") in ("SessionEnd", "Stop")]
+    out["ancestor_comms"] = sorted({tuple(a["comm"] for a in h["ancestors"]) for h in events if h.get("ancestors")})
+    out["holds"] = holds
     return out
 
 
