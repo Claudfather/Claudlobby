@@ -283,16 +283,17 @@ def cmd_plane_doctor(args) -> int:
             # Absent is legitimately clean: the file is created on first loss.
             rung(True, "emit losses", "none recorded")
         else:
-            try:
-                rows = [r for r in losses.read_text().splitlines() if r.strip()]
-            except OSError as exc:
-                rung(False, "emit losses", f"UNREADABLE — {exc} (a gap, not a zero)")
-                rows = None
-            if rows is not None:
-                reaps = [r for r in rows if "\treap\t" in r]
-                detail = f"{len(reaps)} reaped emit(s) in the last 24h"
+            # One reading shared with `plane status` and the brief (#2165), so
+            # the three cannot disagree, counting the last 24 h it names.
+            from ..plane.health import emit_losses_summary
+            losses_now = emit_losses_summary(root)
+            if losses_now["state"] == "unreadable":
+                rung(False, "emit losses",
+                     f"UNREADABLE — {losses_now['error']} (a gap, not a zero)")
+            else:
+                reaps, doors = losses_now["reaped"], losses_now["reap_doors"]
+                detail = f"{reaps} reaped emit(s) in the last 24h"
                 if reaps:
-                    doors = sorted({r.split("\t")[2] for r in reaps if len(r.split("\t")) > 2})
                     detail += (f" — doors: {', '.join(doors[:4])}"
                                f"{' …' if len(doors) > 4 else ''}."
                                " Each is a batch whose commit is UNDETERMINED:"
@@ -303,11 +304,10 @@ def cmd_plane_doctor(args) -> int:
                 # writing its batch (stage_empty, counted at replay, #2164): its
                 # fate is known — NOT recorded — and it must not hide behind a
                 # green rung (S5a-01).
-                refused = [r for r in rows if "\treap\t" not in r]
+                refused = losses_now["not_recorded_total"]
                 if refused:
-                    kinds = sorted({r.split("\t")[1] for r in refused if len(r.split("\t")) > 1})
-                    detail += (f"; {len(refused)} emit(s) NOT recorded"
-                               f" ({', '.join(kinds)}) — see state/plane/.emit-losses")
+                    detail += (f"; {refused} emit(s) NOT recorded"
+                               f" ({', '.join(losses_now['not_recorded'])}) — see state/plane/.emit-losses")
                 rung(not reaps and not refused, "emit losses", detail)
 
         # The breaker's own state. Not a defect in itself — measured on this
