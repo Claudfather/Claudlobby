@@ -587,6 +587,17 @@ class TestRestReviewListing:
         if failure == "http-403":
             assert "403" in state["error"]
 
+    def test_a_failure_after_the_first_page_returns_no_partial_listing(self, monkeypatch):
+        """gh can print a whole first page and then exit nonzero while fetching
+        the next. That page parses cleanly, so only the exit status shows the
+        listing is short; reading it as complete would silently lose reviews."""
+        first_page = [{"id": 900 + i, "node_id": f"PRR_{i}", "html_url": _review_url(900 + i)}
+                      for i in range(100)]
+        monkeypatch.setattr(who.subprocess, "run", _rest_gh(
+            json.dumps(first_page), 1, "gh: Server Error (HTTP 502)\n"))
+        with pytest.raises(who.ReviewUrlsUnavailable, match="HTTP 502"):
+            who.fetch_review_urls(LREPO, LPR)
+
     def test_the_listing_is_paged_100_at_a_time(self, monkeypatch):
         calls = []
         monkeypatch.setattr(who.subprocess, "run", _rest_gh("[]", calls=calls))
