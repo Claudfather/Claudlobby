@@ -2,6 +2,7 @@
 #
 # One entry per line. The class is one of: telegram-chat-id, telegram-bot-token,
 # github-token, api-token, email, home-path, ip-address, uuid. The reason is
-# required. The check reads this file from the pull request itself, so adding
-# an entry is part of the diff under review. The private list has no allowlist.
+# required. The check reads this file from the base branch, never from the pull
+# request, so an entry takes effect only once it is merged: land it in a pull
+# request of its own first. The private list has no allowlist.
 library/skills/network/SKILL.md email LinkedIn's own sender addresses, which the skill sorts mail by

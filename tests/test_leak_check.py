@@ -11,7 +11,9 @@ import os
 import re
 import subprocess
 import sys
+import warnings
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -74,7 +76,7 @@ def diff_of(*lines: str, path: str = "docs/notes.md") -> str:
     return f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1,0 +1,{len(lines)} @@\n{body}"
 
 
-def run(tmp_path, diff: str, terms: str | None = INVENTED, allow: str = "", extra=()):
+def run(tmp_path, diff: str, terms: str | None = INVENTED, allow: str = "", extra=(), summary=None):
     d = tmp_path / "change.diff"
     d.write_text(diff)
     a = tmp_path / "allow.txt"
@@ -86,6 +88,8 @@ def run(tmp_path, diff: str, terms: str | None = INVENTED, allow: str = "", extr
     }
     if terms is not None:
         env["LEAK_CHECK_TERMS"] = terms
+    if summary is not None:
+        env["GITHUB_STEP_SUMMARY"] = str(summary)
     p = subprocess.run(
         [sys.executable, str(SCRIPT), "--diff", str(d), "--allow", str(a), *extra],
         capture_output=True,
@@ -288,49 +292,21 @@ def test_in_actions_each_hit_is_an_annotation_without_its_text(tmp_path):
     assert "wombat" not in text.lower() and "fastmail" not in text
 
 
-def test_git_mode_reads_the_change_as_data_and_its_allowlist_from_head(tmp_path):
-    g = ["git", "-C", str(tmp_path)]
-    env = dict(
-        os.environ,
-        GIT_AUTHOR_NAME="t",
-        GIT_AUTHOR_EMAIL="t@example.invalid",
-        GIT_COMMITTER_NAME="t",
-        GIT_COMMITTER_EMAIL="t@example.invalid",
-    )
-    subprocess.run([*g, "init", "-q", "-b", "main"], check=True, env=env)
-    (tmp_path / "a.md").write_text(
-        PLANTED["email"] + "\n"
-    )  # already committed: never read
-    subprocess.run([*g, "add", "a.md"], check=True, env=env)
-    subprocess.run([*g, "commit", "-qm", "base"], check=True, env=env)
-    base = subprocess.run(
-        [*g, "rev-parse", "HEAD"], capture_output=True, text=True, check=True
-    ).stdout.strip()
-    (tmp_path / "b.json").write_text(PLANTED["uuid"] + "\n")
-    subprocess.run([*g, "add", "b.json"], check=True, env=env)
-    subprocess.run([*g, "commit", "-qm", "change"], check=True, env=env)
-
-    def check():
-        e = {k: v for k, v in env.items() if k != "GITHUB_ACTIONS"}
-        e["LEAK_CHECK_TERMS"] = INVENTED
-        return subprocess.run(
-            [sys.executable, str(SCRIPT), "--git", base, "HEAD"],
-            capture_output=True,
-            text=True,
-            env=e,
-            cwd=tmp_path,
-            timeout=60,
-        )
-
-    p = check()
-    assert p.returncode == 1 and "b.json:1: uuid" in p.stdout and "a.md" not in p.stdout
+def test_git_mode_reads_the_change_as_data_and_its_allowlist_from_base(tmp_path):
+    """The allowlist is read from BASE: an entry that arrives with the change
+    exempts nothing until it is merged, and one already at the base does."""
+    g, env = _scratch_repo(tmp_path)
+    (tmp_path / "a.md").write_text(PLANTED["email"] + "\n")  # already committed: never read
+    base = _commit(g, env, "base")
     (tmp_path / ".github").mkdir()
-    (tmp_path / ".github" / "leak-check-allow.txt").write_text(
-        "*.json uuid synthetic fixture\n"
-    )
-    subprocess.run([*g, "add", ".github"], check=True, env=env)
-    subprocess.run([*g, "commit", "-qm", "allow it"], check=True, env=env)
-    p = check()
+    (tmp_path / ".github" / "leak-check-allow.txt").write_text("*.json uuid synthetic fixture\n")
+    merged_first = _commit(g, env, "the entry, merged first")
+    (tmp_path / "b.json").write_text(PLANTED["uuid"] + "\n")
+    _commit(g, env, "change")
+    p = _check_git(tmp_path, base, env)  # the entry arrives with the change
+    assert p.returncode == 1 and "b.json:1: uuid" in p.stdout and "a.md" not in p.stdout, p.stdout + p.stderr
+    assert "an entry takes effect only once merged" in p.stdout
+    p = _check_git(tmp_path, merged_first, env)  # the entry is at the base
     assert p.returncode == 0, p.stdout + p.stderr
 
 
@@ -373,10 +349,10 @@ def _commit(g, env, msg):
     return subprocess.run([*g, "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
 
 
-def _check_git(tmp_path, base, env):
+def _check_git(tmp_path, base, env, extra=()):
     e = {k: v for k, v in env.items() if k != "GITHUB_ACTIONS"}
     e["LEAK_CHECK_TERMS"] = INVENTED
-    return subprocess.run([sys.executable, str(SCRIPT), "--git", base, "HEAD"],
+    return subprocess.run([sys.executable, str(SCRIPT), "--git", base, "HEAD", *extra],
                           capture_output=True, text=True, env=e, cwd=tmp_path, timeout=60)
 
 
@@ -405,6 +381,7 @@ def test_a_change_that_edits_the_allowlist_says_so(tmp_path):
     _commit(g, env, "allow")
     p = _check_git(tmp_path, base, env)
     assert p.returncode == 0 and "edits the allowlist" in p.stdout
+    assert "an entry takes effect only once merged" in p.stdout
 
 
 def test_annotation_values_are_escaped(tmp_path):
@@ -447,8 +424,9 @@ def test_nothing_from_the_pull_request_is_checked_out_or_run():
     assert "permissions" not in job  # the workflow's `contents: read` is the job's
     steps = job["steps"]
     uses = [str(s.get("uses", "")) for s in steps]
-    assert [u for u in uses if u.startswith("actions/checkout")] == ["actions/checkout@v4"]
-    assert uses.index("./.github/actions/leak-check") > uses.index("actions/checkout@v4")
+    checkouts = [u for u in uses if u.startswith("actions/checkout")]
+    assert len(checkouts) == 1 and re.fullmatch(r"actions/checkout@[0-9a-f]{40}", checkouts[0]), checkouts
+    assert uses.index("./.github/actions/leak-check") > uses.index(checkouts[0])
     assert not [u for u in uses if u.startswith(("actions/cache", "actions/upload-artifact"))]
     action = yaml.safe_load((SCRIPT.parent / "action.yml").read_text())
     runs = [str(s.get("run", "")) for s in steps + action["runs"]["steps"]]
@@ -591,3 +569,249 @@ def test_all_mode_reads_text_and_binary_files(tmp_path):
     assert p.returncode == 1, p.stdout + p.stderr
     assert "t.md:1: private term #1" in p.stdout
     assert "b.bin (binary content): private term #1" in p.stdout
+
+
+# --- who gets the private list, and the files' own wiring (#2048 review) ----------
+
+OFF = ["--private-layer", "off"]
+SAME_REPO = ("github.event.pull_request.head.repo.id == github.event.pull_request.base.repo.id"
+             " && github.actor != 'dependabot[bot]'")
+
+
+def test_a_write_access_run_arms_layer_2_and_fails_closed_without_its_list(tmp_path):
+    on = ["--private-layer", "on"]
+    rc, out, err = run(tmp_path, diff_of("ok line", INVENTED_TEXT), extra=on)
+    assert rc == 1 and "docs/notes.md:2: private term #1" in out, (out, err)
+    assert lc.PRIVATE_OFF not in out
+    rc, out, err = run(tmp_path, diff_of("ok line"), terms=None, extra=on)
+    assert rc == 2 and "NOT ARMED" in err, (out, err)
+
+
+@pytest.mark.parametrize("terms", [None, "", INVENTED, "broken["])
+def test_an_outside_run_reads_no_list_and_never_fails_unarmed(tmp_path, terms):
+    """The list absent, empty, handed in by a wiring slip, or broken: an outside
+    run never reads it, so a private term passes and a broken line is never
+    compiled, while a generic hit still fails. One fixed line says layer 2 did
+    not run, in the log and in the step summary."""
+    summary = tmp_path / "summary.md"
+    rc, out, err = run(tmp_path, diff_of("ok line", INVENTED_TEXT), terms=terms, extra=OFF, summary=summary)
+    assert rc == 0, (out, err)
+    assert "private term" not in out and "NOT ARMED" not in err and "pattern #" not in err
+    assert out.splitlines().count("leak-check: " + lc.PRIVATE_OFF) == 1, out
+    assert summary.read_text().count(lc.PRIVATE_OFF) == 1
+    rc, out, err = run(tmp_path, diff_of("ok line", PLANTED["email"]), terms=terms, extra=OFF)
+    assert rc == 1 and "docs/notes.md:2: email" in out, (out, err)
+
+
+def test_a_warning_from_compiling_the_list_is_never_printed(tmp_path):
+    """A warning can quote a pattern (Python 3.10 and older do for a flag inside
+    one), so none is printed. This pattern draws a FutureWarning here."""
+    re.purge()
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        re.compile("(?:[[]quillon)", re.IGNORECASE)
+    assert seen, "this Python does not warn on the pattern: pick one that does"
+    rc, out, err = run(tmp_path, diff_of("ok line"), terms=INVENTED + "\n[[]quillon\n")
+    assert rc == 0 and "Warning" not in err and "quillon" not in out + err, (out, err)
+
+
+def test_a_crafted_binary_file_name_runs_nothing(tmp_path):
+    """A binary file's bytes are read by naming the file to git, so the name
+    must reach git as an argument, never through a shell."""
+    g, env = _scratch_repo(tmp_path)
+    (tmp_path / "a.md").write_text("plain\n")
+    base = _commit(g, env, "base")
+    for name in ("x$(touch ran1).bin", "x`touch ran2`.bin", "x;touch ran3;.bin"):
+        (tmp_path / name).write_bytes(b"\x00\x01 binary\n")
+    _commit(g, env, "crafted names")
+    p = _check_git(tmp_path, base, env)
+    assert p.returncode == 0 and "3 binary file(s)" in p.stderr, p.stdout + p.stderr
+    assert not [f for f in ("ran1", "ran2", "ran3") if (tmp_path / f).exists()]
+
+
+def _without_descriptions(node):
+    if isinstance(node, dict):
+        return {k: _without_descriptions(v) for k, v in node.items() if k != "description"}
+    if isinstance(node, list):
+        return [_without_descriptions(v) for v in node]
+    return node
+
+
+def test_the_workflow_and_the_action_keep_exactly_their_reviewed_shape():
+    """Every key and value of both files but their prose. Any change to either
+    file fails here until this test changes with it, in the same review. The
+    two copies of the private-layer test are one string."""
+    import yaml
+
+    wf = yaml.safe_load((REPO / ".github" / "workflows" / "leak-check.yml").read_text())
+    assert _without_descriptions(wf) == {
+        "name": "leak-check",
+        True: {"pull_request_target": {"types": ["opened", "synchronize", "reopened"]}},  # YAML 1.1: `on` is true
+        "permissions": {"contents": "read"},
+        "concurrency": {"group": "leak-check-${{ github.event.pull_request.number }}", "cancel-in-progress": True},
+        "jobs": {"leak-check": {
+            "runs-on": "ubuntu-latest",
+            "timeout-minutes": 10,
+            "steps": [
+                {"uses": "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+                 "with": {"ref": "${{ github.event.pull_request.base.sha }}", "fetch-depth": 0,
+                          "persist-credentials": False}},
+                {"uses": "./.github/actions/leak-check",
+                 "with": {"private-terms": "${{ " + SAME_REPO + " && secrets.LEAK_CHECK_TERMS || '' }}"}},
+            ],
+        }},
+    }
+    action = yaml.safe_load((SCRIPT.parent / "action.yml").read_text())
+    assert _without_descriptions(action) == {
+        "name": "leak-check",
+        "inputs": {
+            "private-terms": {"required": False, "default": ""},
+            "allowlist": {"required": False, "default": ".github/leak-check-allow.txt"},
+        },
+        "runs": {"using": "composite", "steps": [
+            {"name": "Fetch the pull request as data", "shell": "bash",
+             "env": {"PR": "${{ github.event.pull_request.number }}"},
+             "run": 'if [ -z "$PR" ]; then\n'
+                    '  echo "::error::leak-check runs on pull_request_target: no pull request in this event"\n'
+                    "  exit 2\n"
+                    "fi\n"
+                    'git fetch --no-tags --quiet origin "+refs/pull/${PR}/head:refs/leak-check/head"\n'},
+            {"name": "Check the added lines", "shell": "bash",
+             "env": {"LEAK_CHECK_TERMS": "${{ inputs.private-terms }}",
+                     "PRIVATE_LAYER": "${{ " + SAME_REPO + " && 'on' || 'off' }}",
+                     "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
+                     "ALLOW": "${{ inputs.allowlist }}"},
+             "run": 'python3 "$GITHUB_ACTION_PATH/leak_check.py" --git "$BASE_SHA" refs/leak-check/head'
+                    ' --allow "$ALLOW" --private-layer "$PRIVATE_LAYER"'},
+        ]},
+    }
+
+
+_EXPR_TOKEN = re.compile(r"\s*(?:(?P<s>'[^']*')|(?P<op>==|!=|&&|\|\|)|(?P<p>[A-Za-z_][\w.-]*))\s*")
+
+
+def _gh_value(value, ctx):
+    """A workflow or action value as the runner evaluates it, for the part of
+    GitHub's expression language these files use: a whole-value ``${{ }}`` of
+    context paths, quoted strings, ==, !=, && and ||, where && and || return an
+    operand, as GitHub's do. A stand-in, not GitHub's engine: it compares strings
+    case-sensitively, and a missing path reads as null."""
+    if not isinstance(value, str) or "${{" not in value:
+        return value
+    m = re.fullmatch(r"\$\{\{(.*)\}\}", value, re.S)
+    assert m, f"not a whole-value expression: {value!r}"
+    body, pos, src, vals = m.group(1), 0, [], []
+    for t in _EXPR_TOKEN.finditer(body):
+        assert t.start() == pos, f"cannot read {body[pos:]!r}"
+        pos = t.end()
+        if t["s"]:
+            src.append(repr(t["s"][1:-1]))
+        elif t["op"]:
+            src.append({"&&": " and ", "||": " or "}.get(t["op"], f" {t['op']} "))
+        else:
+            node = ctx
+            for part in t["p"].split("."):
+                node = node.get(part) if isinstance(node, dict) else None
+            vals.append(node)
+            src.append(f"_v[{len(vals) - 1}]")
+    assert pos == len(body), f"cannot read {body[pos:]!r}"
+    return eval("".join(src), {"__builtins__": {}}, {"_v": vals})
+
+
+def _as_env(v):
+    return "" if v is None else "true" if v is True else "false" if v is False else str(v)
+
+
+class ActionRun(NamedTuple):
+    rc: int  # the first failing step's exit code, or the last step's
+    out: str
+    err: str
+    summary: str
+    inputs: dict  # what the action received from the workflow's `with:`
+
+
+def _run_the_action(tmp_path, head_files, head_repo, actor="maintainer", secret=None) -> ActionRun:
+    """One pull_request_target event, run as the runner runs this repository's
+    workflow: a scratch origin publishes the head as refs/pull/7/head, the
+    checkout step's ref is checked out, and the action's own run texts run in
+    order with their env evaluated against the event. The base already holds a
+    hit, which a correctly wired check never reads."""
+    import yaml
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    origin, src, ws = tmp_path / "origin.git", tmp_path / "src", tmp_path / "ws"
+    env = _git_env(tmp_path)
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True, env=env)
+    src.mkdir()
+    g, _ = _scratch_repo(src)
+    (src / "a.md").write_text(PLANTED["email"] + "\n")
+    base = _commit(g, env, "base")
+    for name, text in head_files.items():
+        (src / name).parent.mkdir(parents=True, exist_ok=True)
+        (src / name).write_text(text)
+    head = _commit(g, env, "the pull request")
+    subprocess.run([*g, "push", "-q", str(origin), f"{base}:refs/heads/main", f"{head}:refs/pull/7/head"],
+                   check=True, env=env)
+    ctx = {
+        "github": {"actor": actor, "event": {"pull_request": {
+            "number": 7,
+            "base": {"sha": base, "repo": {"id": 1001}},
+            "head": {"sha": head, "repo": None if head_repo is None else {"id": head_repo}},
+        }}},
+        "secrets": {} if secret is None else {"LEAK_CHECK_TERMS": secret},
+    }
+    checkout, call = yaml.safe_load((REPO / ".github" / "workflows" / "leak-check.yml").read_text())[
+        "jobs"]["leak-check"]["steps"]
+    subprocess.run(["git", "clone", "-q", str(origin), str(ws)], check=True, env=env)
+    subprocess.run(["git", "-C", str(ws), "checkout", "-q", "--detach", _gh_value(checkout["with"]["ref"], ctx)],
+                   check=True, env=env)
+    action = yaml.safe_load((SCRIPT.parent / "action.yml").read_text())
+    inputs = {k: v.get("default", "") for k, v in action["inputs"].items()}
+    inputs.update({k: _as_env(_gh_value(v, ctx)) for k, v in call["with"].items()})
+    summary = tmp_path / "summary.md"
+    summary.write_text("")
+    out = err = ""
+    for i, step in enumerate(action["runs"]["steps"]):
+        script = tmp_path / f"step{i}.sh"
+        script.write_text(step["run"])
+        step_env = {k: _as_env(_gh_value(v, {**ctx, "inputs": inputs})) for k, v in step.get("env", {}).items()}
+        p = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)],
+                           capture_output=True, text=True, cwd=ws, timeout=60,
+                           env={**env, "GITHUB_ACTIONS": "true", "GITHUB_STEP_SUMMARY": str(summary),
+                                "GITHUB_ACTION_PATH": str(SCRIPT.parent), **step_env})
+        out, err = out + p.stdout, err + p.stderr
+        if p.returncode:
+            break
+    return ActionRun(p.returncode, out, err, summary.read_text(), inputs)
+
+
+def test_end_to_end_a_write_access_run_checks_both_layers(tmp_path):
+    """A branch in this repository: the list arrives and layer 2 runs on the
+    head's added lines only, and without the list the check fails closed."""
+    r = _run_the_action(tmp_path / "1", {"b.md": "ok\n" + INVENTED_TEXT + "\n"}, head_repo=1001, secret=INVENTED)
+    assert r.rc == 1 and "b.md:2: private term #1" in r.out, (r.out, r.err)
+    assert r.inputs["private-terms"] == INVENTED and "a.md" not in r.out and lc.PRIVATE_OFF not in r.out
+    r = _run_the_action(tmp_path / "2", {"b.md": "ok\n"}, head_repo=1001)
+    assert r.rc == 2 and "NOT ARMED" in r.err, (r.out, r.err)
+
+
+@pytest.mark.parametrize("head_repo, actor", [(2002, "outsider"), (None, "outsider"), (1001, "dependabot[bot]")],
+                         ids=["fork", "deleted fork", "dependabot"])
+def test_end_to_end_an_outside_run_never_holds_the_list(tmp_path, head_repo, actor):
+    """A fork, a deleted fork, and Dependabot, which pushes branches here but
+    whose runs receive no Actions secrets. Each is handed the list anyway (for
+    Dependabot, as if a Dependabot secret had the same name): it never reaches
+    the action, layer 2 does not run and says so, and nothing fails for want
+    of it."""
+    r = _run_the_action(tmp_path, {"b.md": "ok\n" + INVENTED_TEXT + "\n"}, head_repo=head_repo, actor=actor,
+                        secret=INVENTED)
+    assert r.rc == 0, (r.out, r.err)
+    assert r.inputs["private-terms"] == "" and "private term" not in r.out and "NOT ARMED" not in r.err
+    assert "leak-check: " + lc.PRIVATE_OFF in r.out and lc.PRIVATE_OFF in r.summary
+
+
+def test_end_to_end_a_fork_s_own_allowlist_cannot_silence_its_hit(tmp_path):
+    head = {"b.json": PLANTED["uuid"] + "\n", ".github/leak-check-allow.txt": "*.json uuid synthetic fixture\n"}
+    r = _run_the_action(tmp_path, head, head_repo=2002, actor="outsider", secret=INVENTED)
+    assert r.rc == 1 and "b.json:1: uuid" in r.out, (r.out, r.err)
+    assert "an entry takes effect only once merged" in r.out

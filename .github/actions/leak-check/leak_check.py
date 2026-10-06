@@ -10,6 +10,10 @@ Two layers, one verdict:
 2. An operator's private terms, which never go in a repository: one
    case-insensitive regular expression per line (``#`` starts a comment line),
    read from the environment variable ``LEAK_CHECK_TERMS`` (an Actions secret).
+   ``--private-layer off`` skips this layer without reading the variable, even
+   when it is set, and says so in one fixed line. The action passes it for
+   every pull request whose author cannot already read the secret, since a hit
+   or a pass on a line they chose would tell them what the list holds.
 
 It reads ADDED lines only, and the paths of files the change touches, so what
 is already committed does not fail every change. ``--all`` reads every tracked
@@ -22,19 +26,21 @@ Actions logs on a public repository are world-readable, and log masking hides
 only a secret's verbatim value, never text a regular expression matched.
 
 A layer-1 false positive has a visible, reviewable escape: the repository's
-allowlist (``<path glob> <class> <reason>``), read from the change itself, so an
-entry is part of what is reviewed. Layer 2 has none.
+allowlist (``<path glob> <class> <reason>``). With ``--git`` it is read from
+BASE, never from the change, so a change cannot exempt its own hits: an entry
+takes effect once it is merged. Layer 2 has none.
 
-Fails closed: an unset or empty list, a list line that does not compile or
-matches an empty string, or a diff it cannot read exits 2 and says which. With
+Fails closed: an unset or empty list where layer 2 is on, a list line that does
+not compile or matches an empty string, or a diff it cannot read exits 2 and
+says which. With
 the list unset or empty, layer 1 still runs and reports its hits first, so a
 contributor sees what they can fix; only then does the check fail, saying that a
 maintainer must set the list and that nothing in the change caused it.
 
 usage:
-  leak_check.py --git BASE HEAD [--allow PATH] [--terms-optional]
-  leak_check.py --diff FILE [--allow FILE] [--terms-optional]
-  leak_check.py --all [--allow FILE] [--terms-optional]
+  leak_check.py --git BASE HEAD [--allow PATH] [--terms-optional] [--private-layer on|off]
+  leak_check.py --diff FILE [--allow FILE] [--terms-optional] [--private-layer on|off]
+  leak_check.py --all [--allow FILE] [--terms-optional] [--private-layer on|off]
 exit: 0 clean, 1 hits, 2 could not check.
 """
 
@@ -47,6 +53,7 @@ import os
 import re
 import subprocess
 import sys
+import warnings
 from pathlib import Path
 
 CLASSES = (
@@ -271,7 +278,11 @@ def load_terms(raw: str | None, required: bool) -> list[re.Pattern]:
     out = []
     for n, p in enumerate(lines, 1):
         try:
-            rx = re.compile(f"(?:{p})", re.IGNORECASE)
+            with warnings.catch_warnings():
+                # A warning can quote the pattern (Python 3.10 and older do for a
+                # flag inside one), and warnings are printed: keep them out of the log.
+                warnings.simplefilter("ignore")
+                rx = re.compile(f"(?:{p})", re.IGNORECASE)
         except re.error:
             raise CannotCheck(f"private list pattern #{n} does not compile") from None
         if any(m.start() == m.end() for probe in _PROBES for m in rx.finditer(probe)):
@@ -540,18 +551,32 @@ def _in_actions() -> bool:
 
 
 def note_allowlist_edit(allow_path: str, paths, out=sys.stdout) -> None:
-    """The allowlist is read from the change itself, so a change can exempt its
-    own hits: say so where a reviewer cannot miss it."""
+    """The allowlist is read from the base, so an entry this change adds exempts
+    nothing yet: say so where a reviewer cannot miss it."""
     rel = os.path.normpath(allow_path)
     if rel not in paths:
         return
-    print(f"leak-check: this change edits the allowlist ({_shown(rel)}): review its entries", file=out)
+    text = "this change edits the allowlist: an entry takes effect only once merged; review its entries"
+    print(f"leak-check: {text} ({_shown(rel)})", file=out)
     if _in_actions():
-        print(f"::notice file={_prop(rel)}::{_msg('leak-check: this change edits the allowlist; review its entries')}", file=out)
+        print(f"::notice file={_prop(rel)}::{_msg('leak-check: ' + text)}", file=out)
     step = os.environ.get("GITHUB_STEP_SUMMARY")
     if step:
         with open(step, "a") as fh:
-            fh.write("**This change edits the allowlist.** Review its entries.\n\n")
+            fh.write("**This change edits the allowlist.** An entry takes effect only once merged; "
+                     "review its entries.\n\n")
+
+
+PRIVATE_OFF = "layer 2 did not run: the private list is not checked for this author, only the generic patterns"
+
+
+def private_layer_off(out=sys.stdout) -> None:
+    """One fixed line, in the log and the step summary, whatever the change holds."""
+    print(f"leak-check: {PRIVATE_OFF}", file=out)
+    step = os.environ.get("GITHUB_STEP_SUMMARY")
+    if step:
+        with open(step, "a") as fh:
+            fh.write(f"**leak-check:** {PRIVATE_OFF}.\n\n")
 
 
 def report(hits, out=sys.stdout) -> None:
@@ -581,8 +606,9 @@ def report(hits, out=sys.stdout) -> None:
 def advise(allow_path: str, out=sys.stdout) -> None:
     """What to do about a hit, said where the failure is read."""
     text = (f"replace each value with an obvious placeholder. A false positive of a pattern "
-            f"class can be allowed in {_shown(allow_path)} as `<path glob> <class> <reason>`, "
-            f"reviewed in the same diff. A private term cannot be allowed: if you think one is "
+            f"class can be allowed in {_shown(allow_path)} as `<path glob> <class> <reason>`: "
+            f"the check reads that file from the base branch, so the entry must be merged first, "
+            f"in a pull request of its own. A private term cannot be allowed: if you think one is "
             f"wrong, ask a maintainer, who can see the list.")
     print(f"leak-check: {text}", file=out)
     step = os.environ.get("GITHUB_STEP_SUMMARY")
@@ -611,22 +637,27 @@ def main(argv=None) -> int:
     src.add_argument("--diff", metavar="FILE")
     src.add_argument("--all", action="store_true")
     ap.add_argument("--allow", default=".github/leak-check-allow.txt",
-                    help="allowlist path; with --git it is read from HEAD")
+                    help="allowlist path; with --git it is read from BASE, never from HEAD")
     ap.add_argument("--terms-optional", action="store_true",
                     help="run layer 1 alone when no private list is set (local runs)")
+    ap.add_argument("--private-layer", choices=("on", "off"), default="on",
+                    help="off: skip layer 2 without reading the private list, even when it is set")
     args = ap.parse_args(argv)
     unarmed = None
     try:
-        try:
-            terms = load_terms(os.environ.get("LEAK_CHECK_TERMS"), required=not args.terms_optional)
-        except NotArmed as exc:
-            terms, unarmed = [], exc  # layer 1 still runs and reports first
+        if args.private_layer == "off":
+            terms = []
+        else:
+            try:
+                terms = load_terms(os.environ.get("LEAK_CHECK_TERMS"), required=not args.terms_optional)
+            except NotArmed as exc:
+                terms, unarmed = [], exc  # layer 1 still runs and reports first
         if args.git:
             base, head = args.git
             try:
-                allow_text = _git("show", f"{head}:{args.allow}")
+                allow_text = _git("show", f"{base}:{args.allow}")
             except CannotCheck:
-                allow_text = ""  # no allowlist in the change: nothing is allowed
+                allow_text = ""  # no allowlist at the base: nothing is allowed
             lines, _, binaries = read_diff(diff_of(base, head))
             paths = changed_paths(base, head)
             blobs = [(p, blob(f"{head}:{p}")) for p in binaries]
@@ -645,11 +676,14 @@ def main(argv=None) -> int:
         allow = load_allow(allow_text)
     except CannotCheck as exc:
         return cannot_check(exc)
-    if not terms and unarmed is None:
+    if args.private_layer == "off":
+        private_layer_off()
+    elif not terms and unarmed is None:
         print("leak-check: layer 2 not armed (--terms-optional): layer 1 only", file=sys.stderr)
     if binaries:
-        how = ("their bytes checked against the private list only" if blobs is not None
-               else "not checked: the diff does not carry their content")
+        how = ("not checked: the diff does not carry their content" if blobs is None
+               else "their bytes checked against the private list only" if terms
+               else "not checked: only the private list reads their bytes, and it did not run")
         print(f"leak-check: {len(binaries)} binary file(s): {how}", file=sys.stderr)
     if not args.all:
         note_allowlist_edit(args.allow, paths)

@@ -1,11 +1,11 @@
 name: leak-check
 
 # Every pull request's added lines, checked for use-case-specific data (#2042).
-# pull_request_target, so a pull request from a fork is checked against the
-# private list too: this job checks out the BASE commit, fetches the head as
-# git objects and diffs the two. Nothing from the pull request is checked out
-# or run. The action comes from the base checkout, so a pull request cannot
-# change the check that gates it; the other repositories pin it by sha.
+# pull_request_target, so a pull request from a fork is checked too: this job
+# checks out the BASE commit, fetches the head as git objects and diffs the
+# two. Nothing from the pull request is checked out or run. The action comes
+# from the base checkout, so a pull request cannot change the check that gates
+# it; the other repositories pin it by sha.
 on:
   pull_request_target:
     types: [opened, synchronize, reopened]
@@ -13,15 +13,24 @@ on:
 permissions:
   contents: read
 
+# The trigger skips the approval wait, so any pull request can start a job on
+# every push: one at a time per pull request, and bounded.
+concurrency:
+  group: leak-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   leak-check:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: ./.github/actions/leak-check
         with:
-          private-terms: ${{ secrets.LEAK_CHECK_TERMS }}
+          # The list goes only to a run whose private layer is on: the action's
+          # own test, repeated here so that an outside run never holds it.
+          private-terms: ${{ github.event.pull_request.head.repo.id == github.event.pull_request.base.repo.id && github.actor != 'dependabot[bot]' && secrets.LEAK_CHECK_TERMS || '' }}

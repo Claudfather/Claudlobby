@@ -7,13 +7,17 @@ description: >-
 inputs:
   private-terms:
     description: >-
-      The operator's private list: pass secrets.LEAK_CHECK_TERMS. One
-      case-insensitive pattern per line, # for comments. Unset or empty fails
-      the check closed.
+      The operator's private list: pass secrets.LEAK_CHECK_TERMS, and only to a
+      run whose private layer is on (the test in the check step below), so a run
+      that does not use the list never holds it. One case-insensitive pattern
+      per line, # for comments. Where the private layer is on, unset or empty
+      fails the check closed; where it is off, the list is never read.
     required: false
     default: ''
   allowlist:
-    description: The repository's layer-1 allowlist, read from the pull request's head.
+    description: >-
+      The repository's layer-1 allowlist, read from the base commit, never from
+      the pull request: an entry takes effect once it is merged.
     required: false
     default: .github/leak-check-allow.txt
 runs:
@@ -33,6 +37,12 @@ runs:
       shell: bash
       env:
         LEAK_CHECK_TERMS: ${{ inputs.private-terms }}
+        # The private layer is on only for a pull request whose head branch is
+        # in this repository, which only an author with write access can push,
+        # so its answers tell that author nothing they cannot already read. Ids,
+        # not names: a deleted fork has no head repository and compares unequal.
+        # Dependabot's runs receive no Actions secrets, so they are off as well.
+        PRIVATE_LAYER: ${{ github.event.pull_request.head.repo.id == github.event.pull_request.base.repo.id && github.actor != 'dependabot[bot]' && 'on' || 'off' }}
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
         ALLOW: ${{ inputs.allowlist }}
-      run: python3 "$GITHUB_ACTION_PATH/leak_check.py" --git "$BASE_SHA" refs/leak-check/head --allow "$ALLOW"
+      run: python3 "$GITHUB_ACTION_PATH/leak_check.py" --git "$BASE_SHA" refs/leak-check/head --allow "$ALLOW" --private-layer "$PRIVATE_LAYER"
