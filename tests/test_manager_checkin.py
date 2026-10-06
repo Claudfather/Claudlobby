@@ -712,7 +712,7 @@ def test_the_unit_execs_the_trigger_with_the_fleet_as_its_argument(tmp_path):
 def test_the_beat_is_fifteen_minutes(tmp_path):
     timers = _checkin_timers(tmp_path)
     timer = (timers / "com.checkin.manager-checkin.timer").read_text()
-    assert "OnBootSec=900" in timer
+    assert "OnActiveSec=615" in timer  # the first beat, counted from the timer's own start (#2059)
     assert "OnUnitActiveSec=900" in timer
 
 
