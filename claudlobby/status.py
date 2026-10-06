@@ -116,6 +116,9 @@ class BotStatus:
     busy_pct_24h: float | None = None
     idle_since: datetime | None = None
     busy_age_secs: int | None = None
+    # the live context (#2206): transcript_usage.current_context's answer,
+    # tokens None with its reason when the transcript cannot answer
+    context: dict | None = None
 
     @property
     def service_undetermined(self) -> bool:
@@ -327,6 +330,18 @@ def _read_service_label(bot_dir: Path) -> str:
     return ""
 
 
+def _live_context(paths: Paths, fleet: FleetConfig, bot_id: str) -> dict:
+    """The newest main-chain usage row's context, from the reader `fleet
+    usage` uses; a reader fault costs this field, never the status read."""
+    from .transcript_usage import current_context
+
+    try:
+        return current_context(paths, fleet, bot_id)
+    except Exception as exc:  # noqa: BLE001 - named in the field, not raised
+        return {"tokens": None, "at": None, "reason": f"context_read_failed: {type(exc).__name__}",
+                "session": None, "compacted_after": None, "bytes_read": 0, "cap": None}
+
+
 def collect_fleet_status(
     fleet: FleetConfig,
     paths: Paths,
@@ -421,6 +436,8 @@ def collect_fleet_status(
             bs.busy_pct_24h = util.busy_pct_24h
             bs.busy_age_secs = util.busy_age_secs
             bs.idle_since = util.idle_since
+        bs.context = _live_context(paths, fleet, bot_id)
+
         # STATE and TMUX now answer the SAME question from the SAME verdict.
         # A current blocked assignment decorates an observed idle presence;
         # it cannot turn a BUSY pane into an idle one.
@@ -616,6 +633,31 @@ def switches_off_note(fleet_name: str, switch_states: list | None) -> str:
     ) + " — this reaction will not happen (claudlobby host doctor --switches)"
 
 
+def _context_display(bs: BotStatus) -> str:
+    tokens = (bs.context or {}).get("tokens")
+    if tokens is None:
+        return "?"
+    if tokens < 1000:
+        return str(tokens)
+    return f"{tokens / 1000:.0f}k" if tokens < 999_500 else f"{tokens / 1_000_000:.1f}M"
+
+
+def _count(tokens: int | None) -> str:
+    return "unknown" if tokens is None else f"{tokens:,}"
+
+
+def _context_detail(context: dict | None) -> str:
+    context = context or {}
+    if context.get("tokens") is None:
+        return f"unknown ({context.get('reason') or 'not read'})"
+    line = f"{context['tokens']:,} tokens at {context['at']} (the newest main-chain call)"
+    after = context.get("compacted_after")
+    if after:
+        line += (f"; compacted after it at {after['at']}, "
+                 f"{_count(after['pre_tokens'])} -> {_count(after['post_tokens'])}")
+    return line
+
+
 def format_table(statuses: list[BotStatus], fleet_name: str,
                  switch_states: list | None = None) -> str:
     """Format the status table as a string."""
@@ -648,6 +690,7 @@ def format_table(statuses: list[BotStatus], fleet_name: str,
         f"{'BUSY%':<6}  "
         f"{'IDLE':<8}  "
         f"{'BUSY AGE':<8}  "
+        f"{'CONTEXT':<7}  "
         f"ACTIVITY"
     )
     lines.append(_dim(hdr))
@@ -683,6 +726,7 @@ def format_table(statuses: list[BotStatus], fleet_name: str,
             f"{_pad(_busy_pct_display(bs), 6)}  "
             f"{_pad(_idle_since_display(bs, now), 8)}  "
             f"{_pad(_busy_age_display(bs), 8)}  "
+            f"{_pad(_context_display(bs), 7)}  "
             f"{activity_display}"
         )
         lines.append(row)
@@ -736,6 +780,7 @@ def format_bot_detail(bs: BotStatus) -> str:
     now = datetime.now(timezone.utc)
     lines.append(f"  Idle since: {_idle_since_display(bs, now)}")
     lines.append(f"  Busy age:   {_busy_age_display(bs)}")
+    lines.append(f"  Context:    {_context_detail(bs.context)}")
 
     if bs.current_task:
         of = (f" (1 of {bs.open_assignments} open)"
@@ -780,6 +825,9 @@ def format_json(statuses: list[BotStatus], fleet_name: str,
                 "idle_since": (bs.idle_since.isoformat() if bs.idle_since else None),
                 # The observed BUSY run, separate from assignment state.
                 "busy_age_secs": bs.busy_age_secs,
+                # The newest main-chain usage row (#2206); tokens null with a
+                # reason when the transcript cannot answer, never 0.
+                "context": bs.context,
                 "current_task": bs.current_task,
                 "open_assignments": bs.open_assignments,
                 "last_completed": bs.last_completed,

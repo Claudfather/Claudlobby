@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — each bot's live context in `fleet status`, and each compaction as a plane event (#2206)
+
+Nothing reported a bot's current context or recorded a compaction, so a manager read each worker's newest transcript by hand before compacting it. Both now come from the transcript reader that `fleet usage` already uses (`transcript_usage.py`), with one reader for its usage rows.
+
+- **`fleet status` and `bot status` carry each bot's `context`:** the input, cache-read and cache-write tokens of its newest main-chain call, and that call's time. The table gains a CONTEXT column. When no such row can be read, `tokens` is null with a `reason`, never 0: no transcript directory, no session, no usage row yet, a read past the cap, or an unreadable file. Sidechain rows are skipped, and so are the rows Claude Code writes itself for an error or an interrupt (model `<synthetic>`, every usage field 0). `compacted_after` names a compaction written after that call. Each read lists the bot's transcript directory once, then reads its newest session backwards in 64 KiB blocks, stopping at the row and never past 2 MiB.
+- **`brief --usage-since` adds the viewed bot's `context`,** from the same reader. Ordinary and boot briefs still read no transcript.
+- **Each compaction becomes one `compaction` event** (notice), recorded from its `compact_boundary` row. It carries `trigger`, `pre_tokens`, `post_tokens` (null until the compaction ends) and `session`, at the compaction's own time, on the bot, with the `fleet-events:` provenance that `event list` reads.
+  - The pulse records them each tick through the new `claudlobby fleet compactions record`, which a manager can also run after `bot compact`.
+  - It reads only what each transcript appended since a cursor kept in the fleet's state, and the event id is derived from the row, so a row read twice is stored once.
+  - An unreadable transcript records nothing, is named with its reason and keeps its cursor, so its rows wait for a pass that reads. Bytes appended past 8 MiB in one pass are skipped and counted.
+- **No bound yet.** A threshold that acts on the context is the operator's cost decision (#2206's proposal 3).
+
 ### Fixed — the at-mention guard reads `gh api --input` request bodies, and the reviewer instructions agree on the route (#1537)
 
 #2181 taught reviewers to post a verdict with `gh api -X POST …/pulls/N/reviews --input review.json`, so that GitHub returns the review's URL. The at-mention guard (#1019) did not cover that route. It had no `@` in the command, and `--input` was neither a writer nor a file it scanned. So a handle in the review's body went out unchecked, and so did one in the issue-comment variant.

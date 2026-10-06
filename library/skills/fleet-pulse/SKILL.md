@@ -10,7 +10,7 @@ Run external liveness checks against the fleet, summarize findings, and take cor
 
 ## How it works
 
-`claudlobby fleet pulse` admits the selected fleet and runs its private sweep. The sweep checks tmux sessions, supervised services, pane freshness, and git WIP. Its completed result means the tick finished, not that all bots are healthy. Findings are recorded on the plane as fleet events. Read those events and the returned summary before acting.
+`claudlobby fleet pulse` admits the selected fleet and runs its private sweep. The sweep checks tmux sessions, supervised services, pane freshness, and git WIP, and records each bot's new Claude Code compactions as `compaction` events (read them with `claudlobby --json event list --type compaction`). Its completed result means the tick finished, not that all bots are healthy. Findings are recorded on the plane as fleet events. Read those events and the returned summary before acting.
 
 ## Steps
 
@@ -54,6 +54,7 @@ Run external liveness checks against the fleet, summarize findings, and take cor
 | `session_missing` | After checking this bot is meant to run, `claudlobby --json bot start BOT_ID` with its literal declared ID. |
 | `service_down` | After checking this bot is meant to run, `claudlobby --json bot start BOT_ID` with its literal declared ID. |
 | `pane_stuck` (>5 min) | Read `claudlobby --json bot session BOT_ID` and `claudlobby --json bot logs BOT_ID --lines 50` with its literal declared ID, and inspect for genuine stuck state. If confirmed stuck, restart the bot. If output shows active work, or the reads refuse or are unknown, skip and report it. Do not use `tmux` directly: bots run on the fleet's private socket. |
+| `compaction` | Informational, no action. A `bot compact` you sent appears here once the pulse records it (`trigger: manual`, `pre_tokens` to `post_tokens`); `claudlobby --json fleet compactions record` records it at once. An `auto` one means the bot reached Claude Code's own limit. |
 | `wip_uncommitted` | **Read `paths`, not `dirty_files`.** The count cannot tell a mid-edit from a virtualenv — `M lib/foo.py` and `?? .venv/` are both `1`. Any path that is source, config or content: do NOT restart, task in flight. Only artifact paths you recognise (`.venv/`, `node_modules/`, a build dir): not work in flight — say which paths you saw and why you judged them artifacts. `unchanged_for_s` past ~2h on a *source* path is stale WIP: flag to the human. Never read it as a licence to restart, because a brand-new source file is untracked too. |
 
 `bot start` is manager-to-other only. Report supervised session recovery only

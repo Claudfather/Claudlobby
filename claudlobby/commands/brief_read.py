@@ -111,11 +111,13 @@ def dispatch(args) -> CommandOutput:
             brief = build_brief(context.fleet, context.paths, viewer, now,
                                 selected_identity=selected_identity)
             if usage_window is not None:
-                from ..transcript_usage import collect_bot_usage
+                from ..transcript_usage import collect_bot_usage, current_context
 
                 since, until = usage_window
                 brief["usage"] = collect_bot_usage(context.paths, context.fleet,
                                                    viewer, since, until)
+                # #2206: the same reader's live context, the newest main-chain call.
+                brief["context"] = current_context(context.paths, context.fleet, viewer)
             lines = ((format_boot_brief(brief, boot_provenance(
                 context.paths, now, fleet_name=context.fleet.name, viewer=viewer,
                 selected_identity=selected_identity)).rstrip("\n"),)

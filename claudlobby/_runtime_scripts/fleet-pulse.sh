@@ -220,6 +220,20 @@ python3 "$LIB_DIR/dispatch-overdue.py" --all --fleet "$fleet" \
 python3 "$LIB_DIR/dispatch-overdue.py" --orphans --fleet "$fleet" \
     --bots-dir "$BOTS_DIR" 2>/dev/null > "$_orphan_cache" || true
 
+# --- Pre-sweep: compactions (#2206), once, not per bot ---
+# Each bot's Claude Code compactions go onto the plane as `compaction` events,
+# once each, through the CLI door: it reads only what each transcript appended
+# since its cursor in the fleet's state. A refusal is reported here and retried
+# next pass (no cursor moved); it never stops the sweep. The `|| rc` form keeps
+# a refusal clear of set -e and the inherited ERR trap.
+_compactions_err=$(safe_mktemp)
+_compactions_rc=0
+claudlobby_cli --root "$CLAUDLOBBY_ROOT" --fleet "$fleet" --json fleet compactions record \
+    >/dev/null 2>"$_compactions_err" || _compactions_rc=$?
+if [ "$_compactions_rc" -ne 0 ]; then
+    echo "fleet-pulse: compactions not recorded (rc=${_compactions_rc}): $(tail -c 300 "$_compactions_err" 2>/dev/null | tr '\n' ' ' || true)" >&2
+fi
+
 
 # --- ONE send-and-disclose primitive for every debounced reader-outage page
 # (the fold's F7): `_overdue_page`, `_events_page` and `_esc_task_page` were
