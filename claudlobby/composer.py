@@ -4009,20 +4009,70 @@ def bot_boot_delay_s(bot: BotConfig, fleet: FleetConfig, paths: Paths,
 # Fleet-level timer generation
 # ---------------------------------------------------------------------------
 
+# The most that one interval job's copies on a host are spread over, or the
+# job's interval when that is shorter. With four fleets the pulse sweeps start
+# 30 s apart, so sweeps shorter than a minute overlap two at a time at most.
+# Each running job holds the activation lock shared, and host activate refuses
+# while any does, so a wider spread would leave it less of each cycle; and no
+# copy's first run moves by 150 s or more.
+_INTERVAL_SPREAD_S = 150
 
-def _resolve_timer_schedule(timer_cfg: dict, merged_defaults: dict) -> dict:
+
+def _host_timer_slot(paths: Paths, *, host: bool = False) -> tuple[int, int]:
+    """This fleet's slot among the host's copies of an interval job, and how many slots there are.
+
+    Every fleet composes the same interval timers, and identical timers fire
+    in the same second: an activation counts each timer's first run from its
+    last daemon-reload, one instant for the whole host, and each later tick
+    counts from the job's last start. A slot per fleet moves each copy's first
+    run, and so every later tick, away from the other fleets' copies.
+
+    Fleets are numbered in the sorted overlay enumeration the boot ladder uses
+    (``_iter_fleet_dirs``), so every compose path assigns the same slots, and
+    host jobs take the slot after the last fleet's. A fleet with no place under
+    ``local/`` (root mode, or an overlay pointed at explicitly) takes slot 0,
+    as it ladders standalone. Slots come from the manifests present at compose
+    time: adding, removing or renaming a fleet moves the fleets after it, and a
+    staged host plan composes every fleet at once, so one activation moves them
+    all together.
+    """
+    fleets = [directory.resolve() for directory in _iter_fleet_dirs(paths.root / "local")
+              if (directory / "fleet.yaml").is_file()]
+    slots = max(len(fleets), 1) + 1
+    if host:
+        return slots - 1, slots
+    here = paths.fleet_dir.resolve() if paths.fleet_dir is not None else None
+    return (fleets.index(here) if here in fleets else 0), slots
+
+
+def _interval_phase_s(interval_s: int, slot: tuple[int, int]) -> int:
+    """How much later than slot 0's copy this slot's copy of an interval job first runs.
+
+    The copies sit in equal steps across the shorter of the interval and
+    ``_INTERVAL_SPREAD_S``, so the offset is always less than the interval.
+    """
+    index, slots = slot
+    return index * (min(interval_s, _INTERVAL_SPREAD_S) // slots)
+
+
+def _resolve_timer_schedule(timer_cfg: dict, merged_defaults: dict,
+                            slot: tuple[int, int] | None = None) -> dict:
     """Resolve timer scheduling from config.
 
     Returns a dict describing the schedule type:
-      {"type": "interval", "seconds": 300, "startup": 300}
+      {"type": "interval", "seconds": 300, "startup": 360, "phase": 30}
       {"type": "calendar", "expression": "*-*-* 06:00:00"}
 
     ``startup`` is the first run's delay, counted from the timer's own start
-    (OnActiveSec=): the job's ``startup_delay``, else its interval up to 900 s.
-    A past OnBootSec= or OnStartupSec= point fires a timer at once
-    (systemd.timer(5)), and an activation restarts every timer. OnUnitActiveSec=
-    counts from the service's last start, which the manager keeps across a timer
-    restart, so a job overdue on its interval still runs at once.
+    (OnActiveSec=): the job's ``startup_delay``, else its interval up to 900 s,
+    plus ``phase``, this copy's offset for its host ``slot``
+    (``_host_timer_slot``; 0 without one). A past OnBootSec= or OnStartupSec=
+    point fires a timer at once (systemd.timer(5)), and an activation restarts
+    every timer. OnUnitActiveSec= counts from the service's last start. A plain
+    timer restart keeps that start, so a job overdue on its interval runs at
+    once; an activation replaces the units and does not keep it, so every first
+    run after one counts from its last daemon-reload. A daemon-reload also
+    re-arms OnActiveSec= for a waiting timer, counted from the reload.
     """
     if "schedule" in timer_cfg:
         return {"type": "calendar", "expression": timer_cfg["schedule"]}
@@ -4037,7 +4087,8 @@ def _resolve_timer_schedule(timer_cfg: dict, merged_defaults: dict) -> dict:
                 seconds = int(val)
     startup = timer_cfg.get("startup_delay")
     startup = min(seconds, 900) if startup is None else int(startup)
-    return {"type": "interval", "seconds": seconds, "startup": startup}
+    phase = _interval_phase_s(seconds, slot) if slot is not None else 0
+    return {"type": "interval", "seconds": seconds, "startup": startup + phase, "phase": phase}
 
 
 # The system.yaml fleet job whose script reads the FLEET_PULSE_* knobs (#1120).
@@ -4339,10 +4390,14 @@ def _write_timer_units(
         timer_lines.append(
             f"Description=claudlobby {name} timer ({scope}) -- tick every {secs}s"
         )
+        timer_lines.extend(["", "[Timer]"])
+        if sched.get("phase"):
+            timer_lines.append(
+                f"# First run: a {sched['startup'] - sched['phase']} s startup delay,"
+                f" plus {sched['phase']} s for this unit's slot on the host."
+            )
         timer_lines.extend(
             [
-                "",
-                "[Timer]",
                 f"OnActiveSec={sched['startup']}",
                 f"OnUnitActiveSec={secs}",
                 "AccuracySec=10",
@@ -5022,8 +5077,9 @@ def compose_fleet_timers(
     composed_jobs: set[str] = set()
 
     if emit_defaults:
+        slot = _host_timer_slot(paths)
         for name, cfg in timers.items():
-            sched = _resolve_timer_schedule(cfg, merged_defaults)
+            sched = _resolve_timer_schedule(cfg, merged_defaults, slot)
             script = cfg.get("script", "")
             svc_type = cfg.get("type", "oneshot")
             _write_timer_units(
@@ -5285,6 +5341,7 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
 
     timers_dir.mkdir(parents=True, exist_ok=True)
     _host_cascade: dict = {}      # lazily filled by the first job that asks
+    host_slot = _host_timer_slot(paths, host=True)
     for name, cfg in host_jobs.items():
         unit = host_unit_name(name, prefix=prefix)
         # COMPOSE-TIME DORMANCY, now for every host job shape (F7). A host
@@ -5348,7 +5405,7 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
                 phase=RESIDENT_UNIT_PHASES.get(name, "producers"),
             )
             continue
-        sched = _resolve_timer_schedule(cfg, {})
+        sched = _resolve_timer_schedule(cfg, {}, host_slot)
         # Switch carrier for a self-gated host door (chunk 3a.1): a host timer
         # starts with a CLOSED env, so a door that consults a flag needs it
         # stamped as an Environment= line — the same problem the keepalive

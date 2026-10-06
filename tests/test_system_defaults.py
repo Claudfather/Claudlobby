@@ -596,7 +596,7 @@ class TestComposeFleetTimers:
             {"interval_from": "observability.pulse_interval"},
             {"observability": {"pulse_interval": 600}},
         )
-        assert sched == {"type": "interval", "seconds": 600, "startup": 600}
+        assert sched == {"type": "interval", "seconds": 600, "startup": 600, "phase": 0}
 
     def test_calendar_schedule(self, tmp_path):
         from claudlobby.composer import _resolve_timer_schedule
@@ -611,7 +611,7 @@ class TestComposeFleetTimers:
         from claudlobby.composer import _resolve_timer_schedule
 
         sched = _resolve_timer_schedule({"interval": 60}, {})
-        assert sched == {"type": "interval", "seconds": 60, "startup": 60}
+        assert sched == {"type": "interval", "seconds": 60, "startup": 60, "phase": 0}
 
     def test_calendar_timer_uses_oncalendar(self, tmp_path):
         from claudlobby.composer import compose_fleet_timers
@@ -1581,9 +1581,11 @@ fleet:
         assert f"OnActiveSec={startup}" in lines, lines
         assert f"OnUnitActiveSec={interval}" in lines, lines
 
-    def test_the_host_probe_starts_off_the_keepalive_minute(self, startup_delay_units):
+    def test_the_host_probe_takes_the_slot_after_the_fleets_keepalive(self, startup_delay_units):
+        # This root holds no fleet under local/, so there are two slots: one for a
+        # fleet and the host's. The probe's first run is keepalive's 60 s, plus 60 // 2.
         lines = (startup_delay_units[1] / "claudlobby-plane-host-probe.timer").read_text().splitlines()
-        assert "OnActiveSec=75" in lines and "OnUnitActiveSec=60" in lines
+        assert "OnActiveSec=90" in lines and "OnUnitActiveSec=60" in lines
 
     def test_launchd_starts_an_interval_job_one_interval_after_load(self, startup_delay_units):
         """A known limitation, pinned: launchd has no first-run delay apart from the
@@ -1600,8 +1602,8 @@ fleet:
         assert {n for n, j in interval_jobs.items() if "startup_delay" not in j} == set()
 
     def test_the_frequent_fleet_producers_sit_in_separate_slots_of_the_minute(self):
-        # AccuracySec=10 merges timers due within 10 s, and each later tick counts
-        # from the last start, so the first runs set where the ticks fall.
+        # The first runs after a start, which AccuracySec=10 would merge if they fell
+        # within 10 s. Later ticks drift out of these slots (see system.yaml).
         jobs = _load_system_defaults()["defaults"]["jobs"]
         slots = {n: jobs[n]["startup_delay"] % 60
                  for n in ("keepalive", "fleet-pulse", "manager-checkin", "task-recheck")}

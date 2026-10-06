@@ -216,7 +216,7 @@ Applied to every bot. Merge rules by type:
 - **Sandbox** — lists (network_allowed_domains, filesystem_allow_write) are **unioned**; booleans (auto_allow_bash) use bot-level value.
 - **Tools** — deny/allow lists are **unioned** across defaults and bot-level.
 - **Hooks** — bot-level entries are **appended after** defaults per event. Same-matcher hooks group together.
-- **Jobs** — `defaults.jobs` merges by job name over the system defaults (system.yaml → fleet.yaml, shallow per-entry spread; sibling jobs are preserved). Drives the composed fleet timer units.
+- **Jobs** — `defaults.jobs` merges by job name over the system defaults (system.yaml → fleet.yaml, shallow per-entry spread; sibling jobs are preserved). Drives the composed fleet timer units. An interval job's first run is its `startup_delay` plus this fleet's slot on the host, so the fleets' copies of one job do not fire in the same second; `randomized_delay` is for calendar jobs. See [`system-yaml-schema.md`](system-yaml-schema.md) for both.
 
 #### `fleet.defaults.jobs.<name>.enroll`
 

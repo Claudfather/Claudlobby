@@ -20,10 +20,14 @@
 # launchd has no equivalent, so plists ignore them. An interval job's
 # `startup_delay: <seconds>` is its first run, counted from the timer's own
 # start (OnActiveSec=), never from boot (#2059); without one a job waits its
-# interval, at most 900 s. The cadence (OnUnitActiveSec=) counts from the
-# job's last start, which the user manager keeps, so a timer restarted when its
-# job is overdue (as at an activation) runs it at once. launchd has no
-# first-run delay: StartInterval first runs one interval after load.
+# interval, at most 900 s. The composer adds each copy's slot on the host
+# (#1654): every fleet's copy of a job starts a step after the previous
+# fleet's, and host jobs take the slot after the last fleet's, so identical
+# timers do not fire in the same second. The cadence (OnUnitActiveSec=) counts
+# from the job's last start. A plain timer restart keeps that start, so an
+# overdue job runs at once; an activation does not, so every first run counts
+# from its last daemon-reload. launchd has no first-run delay or slot:
+# StartInterval first runs one interval after load.
 #
 # DEFAULTS RULE (ruled 2026-09-07). A job or door is ON by default unless it
 # DELETES DATA, SPENDS MONEY, MUTATES OPERATOR SOURCE, or SENDS OUTBOUND TO
@@ -127,10 +131,12 @@ host:
     # ships on beside it -- the two are one decision). ON by default: a
     # read-only emitter with no gate of its own beyond the estate silencer
     # (PLANE_EMIT_DISABLED=1), and the Host card is blank without it.
+    # Its startup delay is keepalive's: the two share a cadence, and the probe
+    # takes the slot after the last fleet's keepalive.
     plane-host-probe:
       script: "$CLAUDLOBBY_NATIVE_DIR/plane-host-probe.sh"
       interval: 60
-      startup_delay: 75
+      startup_delay: 60
       type: oneshot
     # Source-currency REPORT (read-only, never pulls): how far each framework
     # checkout -- claudlobby AND its discovered siblings -- is behind its newest
@@ -485,9 +491,12 @@ defaults:
   jobs:
     # After a user-manager start, interval jobs start staggered (startup_delay):
     # the watchdog first, then the pulse once bots are up, then the producers
-    # that message managers, then housekeeping. Each frequent job sits in its
-    # own 15 s slot of the minute (keepalive :00, check-in :15, pulse :30,
-    # recheck :45), so its later ticks stay apart under AccuracySec=10.
+    # that message managers, then housekeeping. Each frequent job's first run
+    # sits in its own 15 s slot of the minute (keepalive :00, check-in :15,
+    # pulse :30, recheck :45). Later ticks leave those slots: each counts from
+    # the last start, and AccuracySec=10 lets a start come up to 10 s late, so
+    # different jobs drift past each other. The copies of one job share a
+    # cadence, so the slot the composer adds per fleet keeps them apart.
     fleet-pulse:
       script: "$CLAUDLOBBY_NATIVE_DIR/fleet-pulse.sh"
       interval_from: observability.pulse_interval

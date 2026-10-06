@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — each fleet's copy of an interval timer gets its own slot on the host, so the copies no longer fire in the same second (#1654)
+
+On a host with several fleets, every fleet composed the same interval timers, and each job's copies fired together: four keepalives and the host probe in one second every minute, four pulse sweeps every five minutes. An activation counts every timer's first run from its last daemon-reload, one instant for the whole host, and each later tick counts from the job's last start, so equal delays stayed in step.
+
+- **A slot per fleet.** Each fleet's copy of an interval job first runs one step after the previous fleet's, in the sorted overlay order the boot ladder uses, and host jobs take the slot after the last fleet's. A step is the shorter of the interval and 150 s, divided by the number of fleets plus one: with four fleets, 12 s for keepalive and 30 s for the other jobs. The offset goes into `OnActiveSec=`, and the unit says so in a comment. The cadence (`OnUnitActiveSec=`) and `AccuracySec=` do not change, and neither do calendar jobs or launchd plists.
+- **The host probe's startup delay is keepalive's,** 60 s instead of 75, so it takes the slot after the last fleet's keepalive rather than a fixed 15 s offset that a fleet's slot can land on.
+- **Root mode is unchanged:** a fleet outside `local/` takes slot 0, which adds nothing.
+- **What the docs claimed, corrected.** `system.yaml` and the schema doc said an activation runs an overdue job at once; it counts every first run from its last daemon-reload instead. They also said each frequent job's 15 s slot of the minute holds for its later ticks; `AccuracySec=10` lets each start come up to 10 s late, so later ticks drift out of those slots.
+- **Tests:** `tests/test_timer_phase.py` composes four fleets and the host's jobs on one data root.
+
 ### Fixed — the at-mention guard reads `gh api --input` request bodies, and the reviewer instructions agree on the route (#1537)
 
 #2181 taught reviewers to post a verdict with `gh api -X POST …/pulls/N/reviews --input review.json`, so that GitHub returns the review's URL. The at-mention guard (#1019) did not cover that route. It had no `@` in the command, and `--input` was neither a writer nor a file it scanned. So a handle in the review's body went out unchecked, and so did one in the issue-comment variant.
