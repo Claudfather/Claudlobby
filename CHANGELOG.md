@@ -18,6 +18,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`tool_call` rows stay.** They are the only record of which MCP tool ran until the plane takes tool names from OpenTelemetry (#2145 §14 Q17, P2-a2).
 - **Tests:** `tests/test_plane_cutover_keepalive.py::test_the_vitals_hook_never_falls_back_to_the_cwd` covers an unset, empty and relative `BOT_DIR`, replaying staged batches before it counts rows. `tests/test_validate_warning_discipline.py` raises `hook-retired-path`.
 
+### Changed — each bot keeps its clauDNA state under its own runtime dir (#2145 F14)
+
+Every composed `bot.conf` now carries `export CLAUDNA_STATE_DIR="$BOT_DIR/data/claudna"`, for every bot and with no knob. Until now all bots on a host and the operator's own sessions shared `~/.claudna`, so no single bot's sessions could be sealed, swept or exported alone.
+
+- **The whole clauDNA root moves, not just the session store.** That includes harvest and review status (`harvest/liveness.txt`, `review.txt`), the ops log (`runs/`), hook logs and the pre-compact markers. A bot's SessionStart harvest and review status lines start empty until its own root records a run. The history stays in `~/.claudna`.
+- **It cannot be overridden per bot.** `config validate` refuses `CLAUDNA_STATE_DIR` in a bot's `env:` or `secret_files:`, which are composed after it. Because `start-bot.sh` sources `bot.conf` after the `.env` tiers, a value set in a `.env` no longer applies to a bot.
+- **`spin-down-bot.sh --purge` now deletes the bot's clauDNA sessions with its runtime dir.** Export or harvest anything you need from a throwaway bot before purging it.
+- **It takes effect per bot at its next restart.** New sessions open in `runtime/bots/<bot>/data/claudna/`. Sessions the bot left open in `~/.claudna` stay there.
+- **Activation step (operator).** A clean restart closes the bot's old-root session itself. Once a bot has restarted onto its own root, seal whatever it still has open in the old root by bot name: only sessions a crash, kill or hard reboot stranded. Never seal before the restart, which labels a clean close `abandoned`. Never seal all open sessions: that closes live interactive ones. `list --bot` matches a name and never a fleet, so where two fleets on the host have a bot with the same name, wait until both have switched. After the last restart, sweep the stragglers. The commands are in `documentation/plans/2026-10-04-runtime-neutral-observability-p3-claudlobby-summaries.md`, Task 1 Step 2.
+- **Readers** build a bot's root as `bot_runtime(bot) / CLAUDNA_STATE_SUBDIR` (`composer.py`). `bot.conf`'s `$BOT_DIR/...` text is expanded only by a sourcing shell.
+
 ### Fixed — `fleet status` names a bot's current task by state, then latest transition, and says when more than one is open (#2179)
 
 A bot with two or more open assignments had its `current_task` read from whichever had the lowest task id. Task ids are random, so the pick was arbitrary. An assignment recorded but never delivered could read as the work in progress while the bot worked on another, and a manager routing by that line could skip the delivery.

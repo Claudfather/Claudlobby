@@ -1682,6 +1682,32 @@ def _validate_fleet(fleet: FleetConfig, report: ValidationReport) -> None:
             )
 
 
+def _validate_reserved_env(fleet: FleetConfig, report: ValidationReport) -> None:
+    """Refuse a bot env:/secret_files: key that would override a composed value.
+
+    Both blocks are emitted after everything else in bot.conf, so the same key
+    there silently wins at source time (last assignment wins). Reserved, hard
+    error: the composer's invariants (``COMPOSED_INVARIANT_ENV``) always, and the
+    projects tier map's namespace when projects.yaml composes one.
+    """
+    from .composer import COMPOSED_INVARIANT_ENV  # local: composer imports config, not us
+
+    project_prefixes = ("PROJECT_TIER_", "PROJECT_REPOS_") if fleet.projects else ()
+    for bot_name, bot in fleet.bots.items():
+        for block, keys in (("env", bot.env), ("secret_files", bot.secret_files)):
+            for key in keys:
+                if key in COMPOSED_INVARIANT_ENV:
+                    report.errors.append(
+                        f"bot '{bot_name}': {block} key '{key}' is reserved — bot.conf "
+                        "composes it for every bot, and this entry would override it"
+                    )
+                elif project_prefixes and key.startswith(project_prefixes):
+                    report.errors.append(
+                        f"bot '{bot_name}': {block} key '{key}' is in the reserved projects "
+                        "namespace — it would clobber the tier map composed from projects.yaml"
+                    )
+
+
 # projects.yaml keys become PROJECT_TIER_<SLUG> env names — same charset as
 # bot ids so ProjectConfig.env_slug always yields a shell identifier.
 _PROJECT_KEY_RE = re.compile(r"^[a-z][a-z0-9-]*$")
@@ -1691,21 +1717,8 @@ def _validate_projects(
     fleet: FleetConfig, paths: Paths, report: ValidationReport
 ) -> None:
     """Validate the optional projects.yaml tier (goal-aware fleet, P2)."""
-    if fleet.projects:
-        # bot env: blocks are emitted AFTER the projects tier map in
-        # bot.conf, so an env: key in this namespace silently overrides the
-        # project's declared closure bar at source time (last assignment
-        # wins — a human-tier project flips to auto with zero warning).
-        # Reserved namespace, hard error.
-        for bot_name, bot in fleet.bots.items():
-            for env_key in bot.env:
-                if env_key.startswith(("PROJECT_TIER_", "PROJECT_REPOS_")):
-                    report.errors.append(
-                        f"bot '{bot_name}': env key '{env_key}' is in the "
-                        f"reserved projects namespace — it would clobber the "
-                        f"tier map composed from projects.yaml"
-                    )
-
+    # A bot env:/secret_files: key in the PROJECT_TIER_/PROJECT_REPOS_ namespace is
+    # refused by _validate_reserved_env, with the composer's other reserved names.
     repo_owners: dict[str, str] = {}
     # A derived registry is validated exactly like a declared one — the tier,
     # slug and whitespace rules are properties of what composes, not of who
@@ -2574,6 +2587,7 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_mission(fleet, paths, report)
     _validate_workstreams(fleet, report)
     _validate_sweep(fleet, report)
+    _validate_reserved_env(fleet, report)
     _validate_projects(fleet, paths, report)
     _validate_goal_binding(fleet, paths, report, doors=_ign_doors)
     _validate_cross_fleet_collisions(fleet, paths, report)
