@@ -17,6 +17,22 @@ Every composed `bot.conf` now carries `export CLAUDNA_STATE_DIR="$BOT_DIR/data/c
 - **Activation step (operator).** Once a bot has restarted onto its own root, seal its open sessions in the old root by bot name. Never seal all open sessions: that closes live interactive ones. `list --bot` matches a name and never a fleet, so where two fleets on the host have a bot with the same name, wait until both have switched. After the last restart, sweep the stragglers. The commands are in `documentation/plans/2026-10-04-runtime-neutral-observability-p3-claudlobby-summaries.md`, Task 1 Step 2.
 - **Readers** build a bot's root as `bot_runtime(bot) / CLAUDNA_STATE_SUBDIR` (`composer.py`). `bot.conf`'s `$BOT_DIR/...` text is expanded only by a sourcing shell.
 
+### Added — the plane's quarantine is listed, and its counted losses show where a manager looks (#2165)
+
+Until now, `plane doctor` and `plane status` only counted the quarantine, and the trust panel named its newest five entries; nothing listed the rest. The `.emit-losses` rows, including #2164's `stage_empty`, were read by `plane doctor` alone, and nothing schedules the doctor.
+
+- **`claudlobby plane spool list --quarantined`** lists every quarantined entry, newest first.
+  - Each item shows `written_at`, `quarantined_at` (from the `.reason` sidecar), `size`, `empty` and `reason`.
+  - It pages with `--limit` and `--cursor`, and every page carries `coverage`: `total`, `returned`, `vanished` and `reasons_unreadable`.
+  - It is read-only. It reads files only, never the plane database or the daemon.
+  - A quarantine that cannot be enumerated is `unavailable`, never an empty list.
+- **`plane spool inspect`** now also reads a refused stage's quarantined name (`<time_ns>-<lead event>[.batch.<pid>].json`), and reports an empty entry as `empty: true` instead of failing.
+- **One loss summary.** `emit_losses_summary` (`plane/health.py`) counts the 24 h window by each row's epoch, keeping `reap` (fate unknown) apart from known losses. `plane doctor`'s rung now reads it, and so counts only the window it names. `plane status` carries it as `emit_losses`.
+- **The brief labels `alerts`.** While a known loss sits in the window, `alerts` carries a `#2165` entry with the count, because the alerts the brief shows travel the path those emits were lost on. Reaps alone add no label. An unreadable counter labels `alerts` as unknown.
+- **Tests:**
+  - `tests/test_plane_quarantine_and_losses.py` (new) covers the list door, its pages, an unreadable quarantine, the summary, `plane status` and the doctor's window.
+  - `tests/test_brief.py` gains three tests for the label.
+
 ### Fixed — a stage that died before writing its batch is counted as a lost emit, not quarantined as malformed (#2164)
 
 The bounded emit reaps its stager at 10 s. A reap that came after the stager created its temp file in `state/plane/staged/`, but before it wrote the batch, left the file empty. An hour later replay quarantined it as a malformed batch, so the event was lost and counted nowhere. One host had 5 such losses from 2026-10-02 to 10-05.
