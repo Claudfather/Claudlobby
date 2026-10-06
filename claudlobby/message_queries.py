@@ -108,7 +108,7 @@ class ReplyObservation:
 _PENDING_FILES = 256
 _PENDING_BYTES = 8 * 1024 * 1024
 #: Entries a check will stat to set aside those written before its message.
-#: Past it the check stops at the listing: the staged queue alone holds 2000.
+#: Past it the check stops at the listing: the staged queue alone may hold 2000.
 _LISTED_FILES = 8192
 #: How long before its message's recorded instant a queue file may have been
 #: written and still be read. One host clock stamps both, so only a clock step
@@ -175,7 +175,7 @@ def _queued_bytes(path: Path, limit: int) -> bytes | None:
 
 def _written_before(path: Path, instant: float) -> bool:
     """A regular file last written before `instant`, less the clock slack.
-    Anything else, or a file that cannot be read now, is kept for the read."""
+    Anything else, or a file whose status cannot be read now, is kept for the read."""
     try:
         st = path.lstat()
     except OSError:
@@ -218,7 +218,7 @@ def queued_transmission_proof(root: Path, message_id: str, *, written_after: flo
     if written_after is not None:
         if len(files) > _LISTED_FILES:
             return QueuedProof("unavailable", f"{len(files)} {scope} are more than the"
-                                              f" {_LISTED_FILES} a receipt check lists")
+                                              f" {_LISTED_FILES} whose write times a receipt check reads")
         files = [path for path in files if not _written_before(path, written_after)]
         scope = "queued Plane entries that may hold this message's proof"
     if len(files) > _PENDING_FILES:
