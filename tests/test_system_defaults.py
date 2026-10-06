@@ -518,8 +518,9 @@ class TestComposeFleetTimers:
         assert '"--fleet" "test-fleet" "fleet" "pulse"' in svc_text
 
         timer_text = timer.read_text()
-        assert "OnBootSec=300" in timer_text
+        assert "OnActiveSec=330" in timer_text
         assert "OnUnitActiveSec=300" in timer_text
+        assert "OnBootSec" not in timer_text
 
     def test_timer_units_carry_telegram_group_chat_id(self, tmp_path):
         """Fleet timers carry the fleet Telegram group, so a scheduled job's
@@ -595,7 +596,7 @@ class TestComposeFleetTimers:
             {"interval_from": "observability.pulse_interval"},
             {"observability": {"pulse_interval": 600}},
         )
-        assert sched == {"type": "interval", "seconds": 600}
+        assert sched == {"type": "interval", "seconds": 600, "startup": 600}
 
     def test_calendar_schedule(self, tmp_path):
         from claudlobby.composer import _resolve_timer_schedule
@@ -610,7 +611,7 @@ class TestComposeFleetTimers:
         from claudlobby.composer import _resolve_timer_schedule
 
         sched = _resolve_timer_schedule({"interval": 60}, {})
-        assert sched == {"type": "interval", "seconds": 60}
+        assert sched == {"type": "interval", "seconds": 60, "startup": 60}
 
     def test_calendar_timer_uses_oncalendar(self, tmp_path):
         from claudlobby.composer import compose_fleet_timers
@@ -627,6 +628,8 @@ class TestComposeFleetTimers:
         assert timer.is_file()
         timer_text = timer.read_text()
         assert "OnCalendar=" in timer_text
+        # a calendar timer takes no startup delay and no monotonic cadence (#2059)
+        assert "OnActiveSec" not in timer_text and "OnUnitActiveSec" not in timer_text
 
         # A daily timer (no weekday in its OnCalendar) gets no launchd Weekday.
         plist_text = (timers_dir / "com.test.creds-check.plist").read_text()
@@ -958,10 +961,10 @@ class TestJobsComposition:
         for ext in ("service", "timer", "plist"):
             assert not (timers_dir / f"com.test.manager-checkin.{ext}").is_file()
         # keepalive static interval unchanged
-        assert "OnBootSec=60" in (timers_dir / "com.test.keepalive.timer").read_text()
+        assert "OnUnitActiveSec=60" in (timers_dir / "com.test.keepalive.timer").read_text()
         # interval_from resolves end-to-end (observability.pulse_interval = 300)
         assert (
-            "OnBootSec=300" in (timers_dir / "com.test.fleet-pulse.timer").read_text()
+            "OnUnitActiveSec=300" in (timers_dir / "com.test.fleet-pulse.timer").read_text()
         )
         # weekly calendar expression unchanged
         assert (
@@ -988,7 +991,9 @@ fleet:
       expertise: [eng]
 """,
         )
-        assert "OnBootSec=30" in (timers_dir / "com.test.keepalive.timer").read_text()
+        keepalive = (timers_dir / "com.test.keepalive.timer").read_text()
+        # the override sets the cadence; the packaged startup delay merges in beside it
+        assert "OnUnitActiveSec=30" in keepalive and "OnActiveSec=60" in keepalive
         assert (timers_dir / "com.test.fleet-pulse.service").is_file()
         assert (timers_dir / "com.test.reload-fleet.service").is_file()
 
@@ -1519,3 +1524,113 @@ class TestLeafManagerCheckinOptOut:
         assert worker_got == {
             "section": False, "symlink": False, "grant": False,
         }, worker_got
+
+
+@pytest.fixture(scope="module")
+def startup_delay_units(tmp_path_factory):
+    """The default fleet's and the host's timers, composed once for TestTimerStartupDelay."""
+    from claudlobby.composer import compose_fleet_timers, compose_host_timers
+
+    base = tmp_path_factory.mktemp("startup-delay")
+    root = base / "claudlobby"
+    fleet, merged = load_fleet(_write_fleet(root, _NO_OVERRIDE_FLEET))
+    fleet_timers = compose_fleet_timers(fleet, Paths(root=root, fleet_dir=root, package=source_package()), merged)
+    host = base / "host"
+    host.mkdir()
+    (host / "lib").mkdir()
+    return fleet_timers, compose_host_timers(Paths(root=host, fleet_dir=host, package=source_package()))
+
+
+class TestTimerStartupDelay:
+    """An interval timer counts its first run from its own start (OnActiveSec=,
+    #2059) and keeps its cadence with OnUnitActiveSec=. A past OnBootSec= or
+    OnStartupSec= point fires a timer at once (systemd.timer(5)), and an
+    activation restarts every timer."""
+
+    # job: (startup delay, interval), as system.yaml ships them
+    PACKAGED = {
+        "keepalive": (60, 60),
+        "fleet-pulse": (330, 300),
+        "task-recheck": (945, 21600),
+        "log-rotation": (1230, 86400),
+    }
+    OVERRIDE = """
+fleet:
+  name: test-fleet
+  manager: worker
+  service_prefix: com.test
+  defaults:
+    jobs:
+      task-recheck:
+        startup_delay: {delay}
+  bots:
+    worker:
+      expertise: [eng]
+"""
+
+    def test_no_composed_timer_counts_from_boot(self, startup_delay_units):
+        timers = [t for d in startup_delay_units for t in sorted(d.glob("*.timer"))]
+        assert timers, "nothing composed: the check would pass vacuously"
+        for timer in timers:
+            assert "OnBootSec=" not in timer.read_text(), timer.name
+
+    @pytest.mark.parametrize("job", sorted(PACKAGED))
+    def test_a_packaged_interval_job_starts_after_its_delay_then_keeps_its_cadence(self, startup_delay_units, job):
+        startup, interval = self.PACKAGED[job]
+        lines = (startup_delay_units[0] / f"com.test.{job}.timer").read_text().splitlines()
+        assert f"OnActiveSec={startup}" in lines, lines
+        assert f"OnUnitActiveSec={interval}" in lines, lines
+
+    def test_the_host_probe_starts_off_the_keepalive_minute(self, startup_delay_units):
+        lines = (startup_delay_units[1] / "claudlobby-plane-host-probe.timer").read_text().splitlines()
+        assert "OnActiveSec=75" in lines and "OnUnitActiveSec=60" in lines
+
+    def test_launchd_starts_an_interval_job_one_interval_after_load(self, startup_delay_units):
+        """A known limitation, pinned: launchd has no first-run delay apart from the
+        interval, so after each load a long-interval job waits a full interval."""
+        plist = (startup_delay_units[0] / "com.test.task-recheck.plist").read_text()
+        assert "<key>StartInterval</key>" in plist and "<integer>21600</integer>" in plist
+        assert "RunAtLoad" not in plist
+
+    def test_every_packaged_interval_job_names_its_startup_delay(self):
+        data = _load_system_defaults()
+        jobs = {**data["host"]["jobs"], **data["defaults"]["jobs"]}
+        interval_jobs = {n: j for n, j in jobs.items() if "interval" in j or "interval_from" in j}
+        assert interval_jobs
+        assert {n for n, j in interval_jobs.items() if "startup_delay" not in j} == set()
+
+    def test_the_frequent_fleet_producers_sit_in_separate_slots_of_the_minute(self):
+        # AccuracySec=10 merges timers due within 10 s, and each later tick counts
+        # from the last start, so the first runs set where the ticks fall.
+        jobs = _load_system_defaults()["defaults"]["jobs"]
+        slots = {n: jobs[n]["startup_delay"] % 60
+                 for n in ("keepalive", "fleet-pulse", "manager-checkin", "task-recheck")}
+        for a in slots:
+            for b in slots:
+                if a < b:
+                    gap = abs(slots[a] - slots[b])
+                    assert min(gap, 60 - gap) >= 15, (a, b, slots)
+
+    def test_a_job_without_a_startup_delay_waits_its_interval_up_to_15_minutes(self):
+        from claudlobby.composer import _resolve_timer_schedule
+
+        assert _resolve_timer_schedule({"interval": 7200}, {})["startup"] == 900
+        assert _resolve_timer_schedule({"interval": 120, "startup_delay": 45}, {})["startup"] == 45
+
+    def test_a_fleet_override_sets_its_own_startup_delay(self, tmp_path):
+        from claudlobby.composer import compose_fleet_timers
+
+        root = tmp_path / "claudlobby"
+        fleet, merged = load_fleet(_write_fleet(root, self.OVERRIDE.format(delay=1800)))
+        timers = compose_fleet_timers(fleet, Paths(root=root, fleet_dir=root, package=source_package()), merged)
+        lines = (timers / "com.test.task-recheck.timer").read_text().splitlines()
+        assert "OnActiveSec=1800" in lines and "OnUnitActiveSec=21600" in lines
+
+    @pytest.mark.parametrize("delay,warns", [(1800, False), (0, True), (7200, True)])
+    def test_the_validator_bounds_a_startup_delay(self, tmp_path, delay, warns):
+        from claudlobby.validator import ValidationReport, _validate_timers
+
+        fleet, _ = load_fleet(_write_fleet(tmp_path / "claudlobby", self.OVERRIDE.format(delay=delay)))
+        report = ValidationReport()
+        _validate_timers(fleet, report)
+        assert any("startup_delay" in w for w in report.warnings) == warns, report.warnings

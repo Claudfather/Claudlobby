@@ -841,6 +841,8 @@ plane_kill_tree() {
 # This independent breadcrumb covers unknown fate (a reap may follow a commit)
 # and explicit staging refusals (stage_refused/staged_full/stage_failed). The
 # kind distinguishes them; refusal means NOT recorded, never an unknown commit.
+# The daemon's replay adds stage_empty: a stage reaped after creating its temp
+# file but before writing its batch, found empty with its writer gone (#2164).
 # A successful cooldown stage is pending with known fate and does not qualify.
 # The socket client rotates refusal rows with the same one-day retention.
 #

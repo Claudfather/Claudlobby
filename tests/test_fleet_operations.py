@@ -10,6 +10,7 @@ import pytest
 from claudlobby import fleet_operations as fleet
 from claudlobby import fleet_pulse
 from claudlobby.bot_operations import BotLifecycleError, BotLifecycleResult
+from claudlobby.config import FleetPulseConfig
 
 
 def _scope(tmp_path, *, origin=None):
@@ -116,7 +117,8 @@ def test_pulse_uses_selected_native_once_and_reports_tick_not_health(tmp_path, m
     (native / "fleet-pulse.sh").touch()
     release = SimpleNamespace(native_path=native, cli_path=tmp_path / "bin/claudlobby",
                               release_id="selected-release")
-    destination = SimpleNamespace(fleet=SimpleNamespace(name="example", manager="manager"),
+    destination = SimpleNamespace(fleet=SimpleNamespace(name="example", manager="manager",
+                                                        fleet_pulse=FleetPulseConfig(timeout_s=450)),
                                   paths=SimpleNamespace(root=tmp_path, lib=native))
 
     @contextmanager
@@ -130,13 +132,15 @@ def test_pulse_uses_selected_native_once_and_reports_tick_not_health(tmp_path, m
                         lambda **_kwargs: (destination, None))
     called = []
 
-    def run(command, env):
-        called.append((command, env["CLAUDLOBBY_PRIVATE_PULSE_RELEASE"]))
+    def run(command, env, **kwargs):
+        called.append((command, env["CLAUDLOBBY_PRIVATE_PULSE_RELEASE"], kwargs))
         return "worker DOWN\n", "watchdog dark\n", 0
 
     monkeypatch.setattr(fleet_pulse, "_sweep", run)
     result = fleet_pulse.pulse_fleet(root=tmp_path, fleet="example")
-    assert called == [([str(native / "fleet-pulse.sh"), "example"], "selected-release")]
+    # fleet.yaml's cap and the summary path reach the sweep (#2059)
+    assert called == [([str(native / "fleet-pulse.sh"), "example"], "selected-release",
+                       {"timeout_s": 450, "summary_path": tmp_path / "state/pulse/example.pulse-summary.txt"})]
     assert result.summary == "worker DOWN\n"
     assert result.stderr_tail == "watchdog dark\n"
     assert result.summary_path == tmp_path / "state/pulse/example.pulse-summary.txt"
@@ -149,15 +153,15 @@ def test_pulse_uses_selected_native_once_and_reports_tick_not_health(tmp_path, m
     assert len(called) == 1
 
 
-def test_pulse_preserves_native_warning_and_summary(capfd):
+def test_pulse_preserves_native_warning_and_summary(capfd, tmp_path):
     summary, tail, code = fleet_pulse._sweep(
         ["/bin/sh", "-c", "printf 'worker DOWN\\n'; printf 'watchdog dark\\n' >&2"],
-        dict(os.environ))
+        dict(os.environ), summary_path=tmp_path / "pulse-summary.txt")
     assert (summary, tail, code) == ("worker DOWN\n", "watchdog dark\n", 0)
     assert "watchdog dark" in capfd.readouterr().err
 
 
-def test_pulse_timeout_kills_its_private_process_group(monkeypatch):
+def test_pulse_timeout_kills_its_private_process_group(monkeypatch, tmp_path):
     child = SimpleNamespace(pid=731, calls=0)
     def communicate(*, timeout=None):
         child.calls += 1
@@ -170,9 +174,10 @@ def test_pulse_timeout_kills_its_private_process_group(monkeypatch):
     killed = []
     monkeypatch.setattr(fleet_pulse.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
     with pytest.raises(fleet_pulse.FleetPulseError) as failure:
-        fleet_pulse._sweep(["private-pulse"], {})
+        fleet_pulse._sweep(["private-pulse"], {}, summary_path=tmp_path / "pulse-summary.txt")
     assert failure.value.code == "timeout" and failure.value.effect_attempted
-    assert killed == [(731, fleet_pulse.signal.SIGKILL)]
+    # SIGTERM first, so the sweep's own traps can clean up; SIGKILL what is left.
+    assert killed == [(731, fleet_pulse.signal.SIGTERM), (731, fleet_pulse.signal.SIGKILL)]
 
 
 def test_selected_private_pulse_refuses_direct_entry(tmp_path):
