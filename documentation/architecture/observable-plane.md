@@ -129,7 +129,10 @@ unwritable queue refuses and records a best-effort `.emit-losses` breadcrumb.
 Daemon replay uses the normal `emit_batch()` owner, at most 200 batches or
 0.5 seconds per serving tick. Invalid capture configuration or an existing identity-parent conflict leaves
 batches pending for later repair instead of quarantining them. An interrupted stage's
-`.<event id>.tmp` becomes eligible for replay after an hour.
+`.<event id>.tmp` becomes eligible for replay after an hour. One left empty, because the
+stage was reaped before writing its batch, never reached the disk: once its writer is
+gone, replay records it as a `stage_empty` loss in `.emit-losses` and removes it, instead
+of quarantining it as a malformed batch (#2164).
 
 `plane doctor`, `plane status`, and the trust panel expose staged depth.
 Doctor flags unreadable, full, stale, or undrainable pending data. An
