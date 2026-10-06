@@ -96,12 +96,12 @@ class TestCodexHook:
 
     def test_a_codex_payload_keeps_key_names_and_codex_ids_only(self):
         payload = {"hook_event_name": "SessionStart", "session_id": "0199aaaa-bbbb", "source": "startup",
-                   "transcript_path": "/Users/someone/.codex/sessions/rollout.jsonl", "prompt": SECRET,
+                   "transcript_path": "/Users/you/.codex/sessions/rollout.jsonl", "prompt": SECRET,
                    "turn_id": "t1"}
         env = {"CODEX_SESSION_ID": "0199aaaa-bbbb", "CODEX_THREAD_ID": "th-1", "CODEX_API_KEY": "sk-never"}
         line = rnc.hook_record(payload, env, now=1.0, lineage=[{"pid": 2, "comm": "codex"}])
         dumped = json.dumps(line)
-        assert SECRET not in dumped and "sk-never" not in dumped and "someone" not in dumped
+        assert SECRET not in dumped and "sk-never" not in dumped and "/Users/you" not in dumped
         assert line["keys"]["transcript_path"].startswith("str:") and line["keys"]["prompt"] == f"str:{len(SECRET)}"
         assert line["env"]["values"] == {"CODEX_SESSION_ID": "0199aaaa-bbbb", "CODEX_THREAD_ID": "th-1"}
         assert "CODEX_API_KEY" in line["env"]["names"] and line["ancestors"] == [{"pid": 2, "comm": "codex"}]
