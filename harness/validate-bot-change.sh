@@ -3112,6 +3112,70 @@ harness_check "  BY-REF: gh api --input of a file the same command writes is ref
 grep -q 'worker-2' "$GM_JDIRTY" && r=yes || r=no
 harness_check "  BY-REF: the refused --input file is NOT modified on disk" "$r"
 
+# --- a path the hook cannot pin to the file gh sends (#1537's review) ---------
+# The hook runs BEFORE the command, in the Bash tool's current directory, so it
+# reads a relative path from where the command STARTS. A `cd` earlier in the same
+# command sends gh a different file, and with a clean twin where the hook runs a
+# dirty body would pass. So the hook never guesses: --input reads a relative path
+# only when gh is the whole command (the taught route), the body-file forms
+# refuse one in a command that can change directory, and a path built when the
+# command runs ($VAR, ~, a glob) is refused as such. An absolute path is read.
+mkdir -p "$GM_ROOT/sub"
+cp "$GM_JCLEAN" "$GM_ROOT/review.json"; cp "$GM_CLEAN" "$GM_ROOT/body.md"          # clean twins where the hook runs
+cp "$GM_JDIRTY" "$GM_ROOT/sub/review.json"; cp "$GM_DIRTY" "$GM_ROOT/sub/body.md"  # what gh sends after `cd sub`
+_payload() { jq -nc --arg c "$1" '{tool_name: "Bash", tool_input: {command: $c}}'; }
+_dec_cmd() { ( cd "$GM_ROOT" && _dec "$(_payload "$1")" ); }  # the hook's cwd is the case dir, as live
+_why_cmd() {
+    ( cd "$GM_ROOT" && gm_inv "$(_payload "$1")" ) | jq -r '.hookSpecificOutput.permissionDecisionReason // empty' 2>/dev/null
+}
+_r='gh api -X POST repos/o/r/pulls/1/reviews'
+[ "$(_dec_cmd "cd sub && $_r --input review.json")" = deny ] && r=yes || r=no
+harness_check "  BY-REF: a relative --input after cd is REFUSED, though a clean twin sits where the hook runs" "$r"
+_why_cmd "cd sub && $_r --input review.json" | grep -q 'absolute path' && r=yes || r=no
+harness_check "  BY-REF: ...and the refusal names the route that works (an absolute path)" "$r"
+[ "$(_dec_cmd "cd sub && gh pr comment 1 --body-file body.md")" = deny ] && r=yes || r=no
+harness_check "  BY-REF: a relative --body-file after cd is REFUSED, though a clean twin sits where the hook runs" "$r"
+for _c in "pushd sub && $_r --input review.json" "(cd sub && $_r --input review.json)" \
+          "bash -c 'cd sub && $_r --input review.json'" "source env.sh && $_r --input review.json" \
+          "env -C sub $_r --input review.json" "ls && $_r --input review.json" \
+          "$_r --input review.json && cd sub"; do
+    [ "$(_dec_cmd "$_c")" = deny ] && r=yes || r=no
+    harness_check "  BY-REF: a relative --input where gh is not the whole command is REFUSED ($_c)" "$r"
+done
+[ "$(_dec_cmd "$_r --input review.json --jq .html_url")" = none ] && r=yes || r=no
+harness_check "  BY-REF: the taught route, a relative --input with gh the whole command, is read (clean passes)" "$r"
+[ "$(_dec_cmd "$(printf '%s \\\n  --input review.json' "$_r")")" = none ] && r=yes || r=no
+harness_check "  BY-REF: ...also split over lines with a backslash" "$r"
+# The writer test reads one line at a time, so `gh api … \` and its --input on the
+# next line never met, and the post passed as a read. Its clean twin above
+# cannot tell that from a read, so this is the check that can.
+[ "$(_dec_cmd "$(printf '%s \\\n  --input sub/review.json' "$_r")")" = deny ] && r=yes || r=no
+harness_check "  BY-REF: a dirty --input split over lines with a backslash is REFUSED (no longer read as a read)" "$r"
+_gm=$(cd "$GM_ROOT" && gm_inv "$(_payload "$(printf 'gh api repos/o/r/issues/1/comments \\\n  -f body="thanks @worker-2"')")")
+printf '%s' "$_gm" | grep -q '"updatedInput"' && ! printf '%s' "$_gm" | grep -q '@worker-2' && r=yes || r=no
+harness_check "  a gh api body= split over lines with a backslash is rewritten, sigil gone" "$r"
+[ "$(_dec_cmd "$_r --input sub/review.json")" = deny ] && r=yes || r=no
+harness_check "  BY-REF: ...and a dirty one there is refused" "$r"
+[ "$(_dec_cmd "cd sub && $_r --input $GM_JCLEAN")" = none ] && r=yes || r=no
+harness_check "  BY-REF: an ABSOLUTE --input after cd is read (clean passes)" "$r"
+[ "$(_dec_cmd "cd sub && $_r --input $GM_ROOT/sub/review.json")" = deny ] && r=yes || r=no
+harness_check "  BY-REF: ...and a dirty absolute one is refused" "$r"
+[ "$(_dec_cmd "ls && gh pr comment 1 --body-file body.md")" = none ] && r=yes || r=no
+harness_check "  BY-REF: a relative --body-file in a command that cannot change directory is read (clean passes)" "$r"
+for _p in '"$D/review.json"' '~/review.json' 'sub/revie*.json' '"$(ls sub/*.json)"'; do
+    _why_cmd "$_r --input $_p" | grep -q 'built when the command runs' && r=yes || r=no
+    harness_check "  BY-REF: an --input path built when the command runs is REFUSED as such ($_p)" "$r"
+done
+# A QUOTED body-file path was never scanned: the pattern could not start a path
+# with a quote, so the commonest way to write one passed unread.
+for _c in "gh issue comment 1 --body-file \"$GM_DIRTY\"" "gh issue comment 1 --body-file '$GM_DIRTY'" \
+          "gh issue comment 1 --body-file=\"$GM_DIRTY\"" "gh api repos/o/r/issues/1/comments -F body=@\"$GM_DIRTY\""; do
+    [ "$(_dec_cmd "$_c")" = deny ] && r=yes || r=no
+    harness_check "  BY-REF: a QUOTED body-file path with a mention is REFUSED ($_c)" "$r"
+done
+[ "$(_dec_cmd "gh issue comment 1 --body-file \"$GM_CLEAN\"")" = none ] && r=yes || r=no
+harness_check "  BY-REF: ...and a quoted clean one passes untouched" "$r"
+
 rm -rf "$GM_ROOT"
 
 # ===========================================================================
