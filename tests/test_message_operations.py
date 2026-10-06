@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 import json
+import shutil
 import sqlite3
 from uuid import uuid4
 
@@ -24,6 +25,7 @@ from claudlobby.request_receipts import ReceiptConflict, RequestStore, locked_re
 from claudlobby.report_payload import ReportPayload
 from claudlobby.task_operations import TaskActor, TaskOperationContext
 from claudlobby import task_operations as tasks
+from tests.ingest_listener import listening_socket, short_socket_dir
 from tests.package_fixtures import source_package
 from tests.plane_setup import initialize_plane
 
@@ -236,8 +238,13 @@ def test_uncertain_retry_refuses_staged_or_uninspectable_receiver_proof_only(est
     with pytest.raises(ReceiptConflict, match="recorded submission"):
         _call(route, package, request_id, transport=transport, retry_uncertain=True)
     assert len(calls) == 1 and len(_receipt(route, request_id).message_attempts) == 1
-    monkeypatch.setattr(daemon, "probe_daemon", lambda _path, timeout: True)  # healthy ingest
-    retried = _call(route, package, request_id, transport=transport, retry_uncertain=True)
+    directory = short_socket_dir("mo-")
+    try:  # healthy ingest: a listener that gives the daemon's own answer
+        with listening_socket(directory / "s") as sock:
+            monkeypatch.setattr(daemon, "socket_path", lambda _root: sock)
+            retried = _call(route, package, request_id, transport=transport, retry_uncertain=True)
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
     assert retried.delivery == "submitted" and len(calls) == 2
     assert (staged / "1-ev_unrelated.batch").is_file()  # the gate never drains a queue
 
