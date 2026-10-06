@@ -664,6 +664,36 @@ def _alerts_section(
     ]
 
 
+def _emit_losses_label(paths: Paths, now: int, degraded: list[Degradation]) -> None:
+    """#2165: the emits this host did NOT record label `alerts`.
+
+    The critical events `alerts` shows travel the bounded emit path whose losses
+    `state/plane/.emit-losses` counts, so a known loss there is an alert that may
+    be missing here. It is read from that file, never the plane, so a lagging or
+    stopped plane does not hide it. Reaped emits alone add no label: their fate
+    is unknown, and a loaded host reaps hundreds a day. Work, reports and
+    check-ins commit in-process and are not affected.
+    """
+    from .plane.health import emit_losses_summary
+    losses = emit_losses_summary(paths.root, now)
+    if losses["state"] == "unreadable":
+        degraded.append(Degradation(
+            field="alerts", mode="labeled", issue="#2165",
+            reason=("this host's emit-loss counter (state/plane/.emit-losses) cannot be read, so it is "
+                    "unknown whether alerts were lost before the plane recorded them; see "
+                    "`claudlobby plane doctor`")))
+        return
+    lost = losses["not_recorded_total"]
+    if not lost:
+        return
+    kinds = ", ".join(f"{kind} {n}" for kind, n in losses["not_recorded"].items()) or "unclassified"
+    degraded.append(Degradation(
+        field="alerts", mode="labeled", issue="#2165", count=lost,
+        reason=(f"{lost} emit(s) on this host were NOT recorded in the last 24 h ({kinds}); an alert "
+                "among them cannot appear here. See `claudlobby plane doctor`; the quarantine is "
+                "listed by `claudlobby --json plane spool list --quarantined`")))
+
+
 # --- composition --------------------------------------------------------------
 
 
@@ -718,6 +748,8 @@ def build_brief(fleet, paths: Paths, bot_id: str, now: int, *,
         "mission": _mission_section(fleet, bot, paths),
         **sections,
     }
+
+    _emit_losses_label(paths, now, degraded)
 
     # Cut from v1 with two independent reasons pointing the same way; recorded
     # so its absence is an answer rather than a gap.

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+from datetime import datetime, timezone
 import json
 import os
 import re
@@ -20,6 +23,15 @@ from ..runtime_admission import RuntimeIdentity, mutation_admission
 
 
 _SPOOL_NAME = re.compile(r"ev_[0-9a-f]{32}\.json")
+# What else the quarantine holds (#2165): a staged batch or orphan stage that
+# replay refused keeps its stage name, `<time_ns>-<lead event>[.batch.<pid>].json`.
+# `inspect` reads these too; `quarantine` (a move) still takes spool names only.
+_QUARANTINED_NAME = re.compile(r"(?:\d+-)?ev_[0-9a-f]{32}(?:\.batch\.\d+)?\.json")
+
+QUARANTINE_LIST_LIMIT = 50
+QUARANTINE_LIST_MAX = 500
+_REASON_READ_BYTES = 4096
+_REASON_SHOWN = 300           # as the trust panel cuts a reason
 
 
 def _root(args):
@@ -35,9 +47,111 @@ def _schema_failure(exc):
     return CommandFailure("downgrade", f"REFUSED: {exc}")
 
 
+def _iso_ns(ns: int) -> str:
+    return datetime.fromtimestamp(ns / 1e9, timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _quarantine_cursor(scope: dict, after: tuple[int, str]) -> str:
+    raw = json.dumps({"v": 1, "scope": scope, "after": list(after)},
+                     sort_keys=True, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _quarantine_after(token: str | None, scope: dict) -> tuple[int, str] | None:
+    if token is None:
+        return None
+    try:
+        if not 1 <= len(token) <= 4096:
+            raise ValueError
+        value = json.loads(base64.b64decode(token + "=" * (-len(token) % 4), altchars=b"-_", validate=True))
+        if (not isinstance(value, dict) or set(value) != {"v", "scope", "after"}
+                or value["v"] != 1 or value["scope"] != scope):
+            raise ValueError
+        key = value["after"]
+        if not isinstance(key, list) or len(key) != 2 or type(key[0]) is not int or not isinstance(key[1], str):
+            raise ValueError
+        return key[0], key[1]
+    except (ValueError, TypeError, UnicodeError, binascii.Error) as exc:
+        raise CommandFailure("invalid_argument", "invalid quarantine cursor, or one from another root") from exc
+
+
+def _reason(entry) -> tuple[str | None, str | None, bool]:
+    """(the reason's first line, when it was written, readable). The sidecar
+    `quarantine_entry` writes first, at the quarantine; absent is no reason."""
+    sidecar = entry.with_name(entry.name + ".reason")
+    try:
+        fd = os.open(sidecar, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except FileNotFoundError:
+        return None, None, True
+    except OSError:
+        return None, None, False
+    try:
+        written = os.fstat(fd).st_mtime_ns
+        raw = os.read(fd, _REASON_READ_BYTES)
+    except OSError:
+        return None, None, False
+    finally:
+        os.close(fd)
+    lines = raw.decode("utf-8", "replace").strip().splitlines()
+    return (lines[0].strip()[:_REASON_SHOWN] if lines else ""), _iso_ns(written), True
+
+
+def _list_quarantined(root, args) -> CommandOutput:
+    """Every quarantined entry, newest written first (#2165). Read-only: it lists
+    and stats the quarantine through scan_spool and reads each reason sidecar,
+    never the plane database or daemon. A quarantine that cannot be enumerated
+    is unavailable, never an empty list; an entry gone between the listing and
+    its stat is counted as vanished, not dropped silently."""
+    limit = QUARANTINE_LIST_LIMIT if getattr(args, "limit", None) is None else args.limit
+    if not 1 <= limit <= QUARANTINE_LIST_MAX:
+        raise CommandFailure("invalid_argument", f"--limit must be 1-{QUARANTINE_LIST_MAX}")
+    scan = scan_spool(root)
+    if scan.quarantine_state == "unreadable":
+        raise CommandFailure("unavailable", "Plane quarantine cannot be enumerated (a gap, not an empty list)")
+    if not spool_path(root).exists() and not db_file(root).exists():
+        raise CommandFailure("unavailable", "Plane storage is absent at this root")
+    scope = {"root": str(root), "list": "quarantine"}
+    after = _quarantine_after(getattr(args, "cursor", None), scope)
+    rows, vanished = [], 0
+    for path in scan.quarantined:
+        try:
+            st = path.lstat()
+        except FileNotFoundError:
+            vanished += 1
+            continue
+        except OSError as exc:
+            raise CommandFailure("unavailable", "a quarantined entry cannot be read") from exc
+        rows.append((st.st_mtime_ns, path.name, st.st_size, path))
+    rows.sort(key=lambda row: (row[0], row[1]), reverse=True)
+    if after is not None:
+        rows = [row for row in rows if (row[0], row[1]) < after]
+    page = rows[:limit]
+    items, unreadable = [], 0
+    for mtime_ns, name, size, path in page:
+        reason, quarantined_at, readable = _reason(path)
+        unreadable += not readable
+        items.append({"name": name, "written_at": _iso_ns(mtime_ns), "quarantined_at": quarantined_at,
+                      "size": size, "empty": size == 0, "reason": reason})
+    next_cursor = _quarantine_cursor(scope, (page[-1][0], page[-1][1])) if len(rows) > limit else None
+    coverage = {"state": "ok", "total": len(scan.quarantined), "returned": len(items),
+                "vanished": vanished, "reasons_unreadable": unreadable}
+    lines = tuple(f"{item['written_at']}  {'EMPTY' if item['empty'] else str(item['size']) + ' B':>9}"
+                  f"  {item['name']}  {item['reason'] or '(no reason recorded)'}" for item in items)
+    lines = lines or ("No quarantined entries.",)
+    if next_cursor:
+        lines += (f"next_cursor: {next_cursor}",)
+    lines += (f"coverage: {len(items)} of {len(scan.quarantined)} listed, {vanished} vanished,"
+              f" {unreadable} reason(s) unreadable",)
+    return CommandOutput({"items": items, "next_cursor": next_cursor, "coverage": coverage}, lines=lines)
+
+
 def spool(args) -> CommandOutput:
     root = _root(args)
     action = args.spool_action
+    if action == "list" and getattr(args, "quarantined", False):
+        return _list_quarantined(root, args)
+    if getattr(args, "limit", None) is not None or getattr(args, "cursor", None) is not None:
+        raise CommandFailure("invalid_argument", "--limit and --cursor page the quarantine: use list --quarantined")
     if action == "list":
         scan = scan_spool(root)
         if scan.spool_state == "unreadable" or scan.quarantine_state == "unreadable":
@@ -56,7 +170,8 @@ def spool(args) -> CommandOutput:
             for entry in entries))
     if action in {"inspect", "quarantine"}:
         name = args.name or ""
-        if not _SPOOL_NAME.fullmatch(name):
+        if not (_SPOOL_NAME.fullmatch(name)
+                or action == "inspect" and _QUARANTINED_NAME.fullmatch(name)):
             raise CommandFailure("invalid_argument", "invalid spool entry name")
         if action == "inspect":
             scan = scan_spool(root)
@@ -70,12 +185,15 @@ def spool(args) -> CommandOutput:
             if not source.exists():
                 raise CommandFailure("not_found", f"no such spool entry: {name}")
             try:
-                entry = json.loads(source.read_text())
+                raw = source.read_bytes()
+                # An empty entry is a stage that died before writing (#2164):
+                # nothing to parse, which is the answer, not a read failure.
+                entry = json.loads(raw) if raw else None
                 reason_file = source.with_name(source.name + ".reason")
                 reason = reason_file.read_text().strip() if reason_file.exists() else None
             except (OSError, json.JSONDecodeError) as exc:
                 raise CommandFailure("unavailable", "spool entry is unreadable") from exc
-            return CommandOutput({"name": name, "entry": entry, "quarantine_reason": reason},
+            return CommandOutput({"name": name, "entry": entry, "empty": not raw, "quarantine_reason": reason},
                                  lines=tuple(filter(None, (f"quarantined: {reason}" if reason else "",
                                                      json.dumps(entry, indent=2, sort_keys=True, default=str)))))
         try:
