@@ -711,8 +711,8 @@ class BotConfig:
     account: str = "default"
     model: str | None = None
     effort: str | None = None
-    # claude | codex — #2145; see known_values.KNOWN_AGENT_CLIS. The plane, the
-    # session join key and CLAUDLOBBY_RUNTIME call this value the bot's runtime.
+    # claude | codex — #2145; see known_values.KNOWN_AGENT_CLIS. The same name in
+    # bot.conf (CLAUDLOBBY_AGENT_CLI), the bot keyframe and the session join key.
     agent_cli: str = "claude"
     # Bot-level keys that have no reader (config._RETIRED_BOT_KEYS) and their
     # values — carried so `validate` can say so, never consumed by a door.

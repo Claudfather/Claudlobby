@@ -220,22 +220,22 @@ def _bot_keyframe(**over) -> dict:
                                       "payload": entity, "cause": "generate", "scan_id": "s1"})
 
 
-def test_bot_keyframe_may_name_its_runtime():
+def test_bot_keyframe_may_name_its_agent_cli():
     """#2145: additive and optional — a keyframe without the key (every emitter
-    before P1, and every claude bot after) still validates; an unknown runtime is
+    before P1, and every claude bot after) still validates; an unknown agent CLI is
     a contract verdict at the door."""
     validate_request(_bot_keyframe())
-    validate_request(_bot_keyframe(runtime="codex"))
-    validate_request(_bot_keyframe(runtime="claude"))
+    validate_request(_bot_keyframe(agent_cli="codex"))
+    validate_request(_bot_keyframe(agent_cli="claude"))
     with pytest.raises(ContractViolation):
-        validate_request(_bot_keyframe(runtime="gemini"))
+        validate_request(_bot_keyframe(agent_cli="gemini"))
 
 
-def test_bot_keyframe_runtime_vocabulary_matches_config():
+def test_bot_keyframe_agent_cli_vocabulary_matches_config():
     from typing import get_args
 
     from claudlobby.known_values import KNOWN_AGENT_CLIS
     from claudlobby.plane.contracts import BotPayload
 
-    literal = next(a for a in get_args(BotPayload.model_fields["runtime"].annotation) if a is not type(None))
+    literal = next(a for a in get_args(BotPayload.model_fields["agent_cli"].annotation) if a is not type(None))
     assert frozenset(get_args(literal)) == KNOWN_AGENT_CLIS

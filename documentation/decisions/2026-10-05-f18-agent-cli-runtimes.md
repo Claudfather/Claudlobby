@@ -55,8 +55,8 @@ ratified fork, through the mission's "Requires approval" gate — never by widen
   "What it's becoming" and LLM-provider non-goal lines, the #2145 sprint-focus item and the "A new agent CLI
   runtime" approval gate. `README.md` and `CLAUDE.md` (and its `AGENTS.md` copy) carry the same scope in one line
   each. All land in #2145 P1 Half A.
-- The vocabulary (`agent_cli: claude | codex` in `fleet.yaml`, `known_values.KNOWN_AGENT_CLIS`; the plane and the
-  session join key call the value the bot's runtime) ships in the same change;
+- The vocabulary (`agent_cli: claude | codex` in `fleet.yaml`, `known_values.KNOWN_AGENT_CLIS`, and the same name in
+  `bot.conf`, the bot keyframe and the session join key `(agent_cli, session_id)`) ships in the same change;
   `codex` is refused by the validator until the execution adapter (#2149) composes and launches it.
 - The design-v2 record of the superseded session-identity mechanics is
   `documentation/plans/2026-08-18-observable-plane-design-v2.md` §19 item 9; it is cited here, not restated.

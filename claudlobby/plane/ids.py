@@ -79,22 +79,22 @@ def mint_assignment_id() -> str:
     return mint("asg_")
 
 
-def session_alias(platform_session_id: str, runtime: str = "claude") -> str:
-    """The F2 material (#2145 §2.2): the ONE place the (runtime, session_id) join
-    key is spelled. `claude` is the raw id — byte-identical to every row written
-    so far; any other runtime is "<runtime>:<id>", so two vendors' ids never
-    collide. P2's intake sets its session `subject` from this function; clauDNA
-    and Claudron cite register row 10, which states this rule once. The
-    vocabulary is config's (known_values.KNOWN_AGENT_CLIS); this module refuses
-    only an empty runtime."""
+def session_alias(platform_session_id: str, agent_cli: str = "claude") -> str:
+    """The F2 material (#2145 §2.2): the ONE place the (agent_cli, session_id)
+    join key is spelled. `claude` is the raw id — byte-identical to every row
+    written so far; any other agent CLI is "<agent_cli>:<id>", so two vendors'
+    ids never collide. P2's intake sets its session `subject` from this
+    function; clauDNA and Claudron cite register row 10, which states this rule
+    once. The vocabulary is config's (known_values.KNOWN_AGENT_CLIS); this
+    module refuses only an empty agent CLI."""
     if not platform_session_id or not platform_session_id.strip():
         raise ValueError("empty platform session id — refusing to derive")
-    if not runtime or not runtime.strip():
-        raise ValueError("empty runtime — refusing to derive")
-    return platform_session_id if runtime == "claude" else f"{runtime}:{platform_session_id}"
+    if not agent_cli or not agent_cli.strip():
+        raise ValueError("empty agent_cli — refusing to derive")
+    return platform_session_id if agent_cli == "claude" else f"{agent_cli}:{platform_session_id}"
 
 
-def derive_session_uid(platform_session_id: str, runtime: str = "claude") -> str:
+def derive_session_uid(platform_session_id: str, agent_cli: str = "claude") -> str:
     """sess_ uid DERIVED from the platform session id (sha256, first 32 hex).
 
     Deliberately deterministic, not random (§9d): any emitter — bash included,
@@ -104,7 +104,7 @@ def derive_session_uid(platform_session_id: str, runtime: str = "claude") -> str
     #2145 F2: composed from session_alias — never a second spelling of the
     rule. A `claude` uid is byte-identical to the one derived before #2145 (the
     bash mirror in plane-session-start.sh is Claude-only and stays so)."""
-    return derive_uid("sess", session_alias(platform_session_id, runtime))
+    return derive_uid("sess", session_alias(platform_session_id, agent_cli))
 
 
 def mint_uid(kind: str) -> str:

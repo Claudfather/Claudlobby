@@ -1094,7 +1094,7 @@ class TestComposerProvidedPathAnchorsExported:
 
 
 class TestBotConfExportsTheRuntime:
-    """#2145: bot.conf names the bot's agent CLI as CLAUDLOBBY_RUNTIME, always —
+    """#2145: bot.conf names the bot's agent CLI as CLAUDLOBBY_AGENT_CLI, always —
     a door with no value reads `claude`, so an un-regenerated bot behaves the same."""
 
     def _conf(self, tmp_path, **bot_fields):
@@ -1108,12 +1108,12 @@ class TestBotConfExportsTheRuntime:
         (root / "lib").mkdir(parents=True)
         return compose_bot_conf(bot, fleet, Paths(root=root, fleet_dir=fleet_dir, package=source_package()))
 
-    def test_bot_conf_exports_the_runtime(self, tmp_path):
+    def test_bot_conf_exports_the_agent_cli(self, tmp_path):
         lines = self._conf(tmp_path).splitlines()
-        assert [ln for ln in lines if "CLAUDLOBBY_RUNTIME" in ln] == ["export CLAUDLOBBY_RUNTIME=claude"]
+        assert [ln for ln in lines if "CLAUDLOBBY_AGENT_CLI" in ln] == ["export CLAUDLOBBY_AGENT_CLI=claude"]
         # Constructed directly: the validator (which refuses codex) is not in the composer's path.
         lines = self._conf(tmp_path / "codex", agent_cli="codex").splitlines()
-        assert [ln for ln in lines if "CLAUDLOBBY_RUNTIME" in ln] == ["export CLAUDLOBBY_RUNTIME=codex"]
+        assert [ln for ln in lines if "CLAUDLOBBY_AGENT_CLI" in ln] == ["export CLAUDLOBBY_AGENT_CLI=codex"]
 
 
 class TestComposeHooks:

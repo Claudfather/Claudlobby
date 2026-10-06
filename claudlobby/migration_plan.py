@@ -422,9 +422,9 @@ def build_migration_manifest(data_root: Path, source: ReleaseManifest | None,
                    "wire_additions": [{"family": "workstream_event", "field": "waiting_on",
                                        "location": "event.detail", "classification": "optional_metadata",
                                        "old_reader": "blocked row remains visible with unknown addressee"},
-                                      {"family": "registry_snapshot", "field": "runtime",
+                                      {"family": "registry_snapshot", "field": "agent_cli",
                                        "location": "payload (entity bot)", "classification": "optional_metadata",
-                                       "old_reader": "a keyframe without it reads as runtime claude"}]}
+                                       "old_reader": "a keyframe without it reads as agent_cli claude"}]}
     observed = {"receipt_format": receipts["versions"],
                 "task_model": operational["task_model_versions"]}
     for name, versions in observed.items():

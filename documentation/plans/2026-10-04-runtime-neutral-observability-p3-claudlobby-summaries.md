@@ -16,10 +16,10 @@ repos: Claudfather/Claudlobby
 > **Status:** draft, authored by `/claudna:forge` on 2026-10-04 from epic plan §6 P3 (Claudlobby bullets) and its two
 > `#### Spec:` subsections (`the session_summary plane event`, `the clauDNA export contract additions`). Code references
 > are to Claudlobby `cd292cb` (the checkout `2dd0aad5` is identical for every line cited). Depends on: P1 Claudlobby
-> **Half A** (release N: `BotConfig.agent_cli`, composed `CLAUDLOBBY_RUNTIME`, `derive_session_uid(id, runtime)`, the
+> **Half A** (release N: `BotConfig.agent_cli`, composed `CLAUDLOBBY_AGENT_CLI`, `derive_session_uid(id, agent_cli)`, the
 > design-v2 §1.1 amendment, Task 9b's `fleet_event_request`, and — if C10 leaked — Task 7b's conditional `start-bot.sh`
 > scrub; nothing from Half B); the P3 clauDNA
-> release (plan 5: `export --include-skipped`, the item's `segment` object, `session.runtime`,
+> release (plan 5: `export --include-skipped`, the item's `segment` object, `session.agent_cli`,
 > `<CLAUDNA_STATE_DIR>/entrypoint.json`, `lib/claudna/session_store/schemas/export.schema.json`); Claudron `v0.9.0`
 > (`6ca2b94`, tagged) for PR 6a. Waits on canaries: none — this PR reads no `CLAUDE_*` variable and composes no Codex bot.
 > Mission decisions: **D1** (F18 (a) — Claudlobby composes agent CLIs: Claude Code today, Codex through #2149) and
@@ -128,7 +128,7 @@ them the `plane samples` door; P2-a2, the plane leg, serves `usage_read`/`brief_
   range, sha256, turns}`, `producer{model, prompt_version, duration_ms, cost_usd}`, `journey{title, intent, outcome, arc, done,
   in_progress, next}`, `blocks[]`, `procedures[]`; `claudna.segment/2` has `sealed_at`, `sealed_by`, `counts{prompts, skills,
   failures, interrupts}`; the export item is `{sid, seg, session: SESSION_FIELDS subset, summary}` (`export.py:124-128`), plus
-  P3's `segment{sealed_at, sealed_by, counts}` and `skipped{reason}` status items, P1's `session.runtime`. The cursor never
+  P3's `segment{sealed_at, sealed_by, counts}` and `skipped{reason}` status items, P1's `session.agent_cli`. The cursor never
   moves back (`export.py:135-149`); retention caps at `CLAUDNA_RETAIN_DAYS` = 30 (`retention.py:41-42`).
 - **clauDNA's summary gate** (`lib/claudna/session_store/project.py:276-287`, `summary_gate`): `CLAUDNA_SESSION_SUMMARY=0` →
   `disabled`; `=1` → summarize; else an actor of kind `headless`/`bot` → `headless`; else no harvest → `disabled`. So
@@ -148,7 +148,7 @@ them the `plane samples` door; P2-a2, the plane leg, serves `usage_read`/`brief_
 
 ### Dependencies
 
-P1 Claudlobby **Half A** merged (release N: `derive_session_uid(id, runtime)`, `CLAUDLOBBY_RUNTIME`, Task 9b's
+P1 Claudlobby **Half A** merged (release N: `derive_session_uid(id, agent_cli)`, `CLAUDLOBBY_AGENT_CLI`, Task 9b's
 `fleet_event_request` that `_system_event` calls, and — if C10 leaked — Task 7b's conditional `start-bot.sh` scrub; nothing
 here waits on Half B; Half A carries the D1 mission text and clauDNA 0.27 the D2 one, both ratified 2026-10-05 —
 [F18 lock](https://github.com/Claudfather/Claudlobby/pull/2144#issuecomment-6000050806),
@@ -494,8 +494,8 @@ def _check_claudna(cfg: ClaudnaConfig, where: str) -> ClaudnaConfig: ...   # the
   `source_ref.startswith("fleet-events:")` (the helper's; the reader selects on the prefix and `event_id` carries the dedup key —
   no `session-summary:<sid>/<seg>` sub-grammar, X2), `event_id == derive_uid("ev", f"session_summary:{fleet}:{sid}:{seg}")`,
   `occurred_at == segment.sealed_at`, `observed_at` the run instant, subject `actor`/`bot:<fleet>/<bot>`, `data ==
-  {"source": "session-export", "legacy_ts": …, "data": {…}}` with `data.data.session_uid == derive_session_uid(sid, runtime)`
-  and `runtime` absent → `"claude"`; on the skipped row `turns`, `transcript_bytes`, `journey`, `blocks`, `procedures`,
+  {"source": "session-export", "legacy_ts": …, "data": {…}}` with `data.data.session_uid == derive_session_uid(sid, agent_cli)`
+  and `agent_cli` absent → `"claude"`; on the skipped row `turns`, `transcript_bytes`, `journey`, `blocks`, `procedures`,
   `producer` are all `None` while `sealed_at`/`sealed_by`/the four counts are populated (the null rule, X19); (b) **the read-side
   pin the digest never had:** `load_lib_module("plane-readers.py").fleet_events(conn, fleet, event_type="session_summary")`
   renders `data["status"]`, `data["journey"]["title"]`, `data["session_id"]` populated; (c) emit then ack: argv shows
@@ -534,7 +534,7 @@ MIN_PLUGIN_VERSION = (0, 28, 0)                          # the clauDNA release t
 STALL_AFTER = 3                                          # consecutive failed ticks per bot before one export_stalled record + one page
 CAPS = {"title": 300, "intent": 300, "outcome": 300, "arc": 2_000, "list_items": 12, "list_item": 300, "skipped_reason": 64}
 
-@dataclass(frozen=True) class Entrypoint: python: str; entrypoint: str; plugin_version: str | None; runtime: str | None
+@dataclass(frozen=True) class Entrypoint: python: str; entrypoint: str; plugin_version: str | None; agent_cli: str | None
 @dataclass(frozen=True) class BotOutcome: bot: str; emitted: int; duplicate: int; spooled: int; unexportable: int; acked: dict[str, int]; skipped: str | None; failed: str | None
 
 def read_entrypoint(state_dir: Path) -> Entrypoint | str: ...          # the str is the skip reason: no_entrypoint | unknown_schema | old_entrypoint | stale_entrypoint
@@ -549,8 +549,8 @@ def report_stall(root, fleet, bot, state: dict, *, emit=emit_batch, notify=notif
 ```
 
   `summary_record`: `status` = `"skipped"` when `item["summary"] is None` else `"ok"`; `skipped_reason = item.get("skipped", {}).get("reason")`
-  (an unknown reason is still a skip, as plan 5's spec §8 text says); `runtime = item["session"].get("runtime") or "claude"`;
-  `session_uid = derive_session_uid(sid, runtime)`; on an `ok` item `turns = summary["input"]["turns"]`,
+  (an unknown reason is still a skip, as plan 5's spec §8 text says); `agent_cli = item["session"].get("agent_cli") or "claude"`;
+  `session_uid = derive_session_uid(sid, agent_cli)`; on an `ok` item `turns = summary["input"]["turns"]`,
   `transcript_bytes = range.end - range.start`; **on a skipped item they are `None`** — `summary` is `null`, so there is nothing to
   read them from, and the item carries no transcript pointer to compute them from (X19; F6(b)); `sealed_at`/`sealed_by`/counts from
   `item.get("segment")` (absent on an older clauDNA → `None`; `occurred_at` then falls back to `session.closed_at`, else
@@ -657,7 +657,7 @@ def report_stall(root, fleet, bot, state: dict, *, emit=emit_batch, notify=notif
 | `:120-121,125-133` | rubric → `journey.title/intent/outcome/done/in_progress/next`; volume jq sums `prompts`, `failures` over every row and `turns`, `transcript_bytes` over `ok` rows only (both are `null` on a skipped row — the template says `turns · bytes: ok rows only`); drop `tool_calls` — its successor is not promised here: P2-a2, the plane leg, writes `session.tool_calls` samples but serves `usage_read`/`brief_read` first (A-F3, ratified 2026-10-05), so the `session.tool_calls` step waits for a PR that grants `fleet-digest` the `plane samples` door (`SKILL.md:5-8` grants `jq`, `python3`, `event list` only); friction jq selects `status=="ok"` rows with `journey.outcome != "completed"` or `failures > 0` or non-empty `journey.next`, keeping `session_id, bot, fleet, ts` |
 | `:173-174,187-192` | cut order: `skipped` rows (count only) first, then `ok` rows with an empty `journey`; template `rows: N ok · N skipped`, `VOLUME: sessions · turns · prompts · failures` |
 | `fleet-observe/SKILL.md:34-35,39,43-49,52` | `failed`/`would_change` → `journey.outcome` not `completed` + `journey.next`; `worked`/`reusable` → `journey.done` + `blocks.count/kinds`; "rubric left empty" (`:43-45`) → a `skipped_reason: disabled` row on a substantial session is **not an instrument failing** — the instrument is off by composition, which `:47-49` ("a gap you can name is a finding") already covers: name it once as *coverage* ("summaries armed on k of N bots"), never per session; the stop rule mirrors `fleet-digest`'s (all rows skipped → the coverage line, stop); token bloat → `transcript_bytes` and `prompts` over `ok` rows (tool totals wait for the `plane samples` grant, see above) |
-| `fleet-monitoring.md:39-41,98,102-115,119-122` | `:39-41` "Nothing watches for sessions ending … no poller" → "A session ending is still an event the session reports — clauDNA's SessionEnd seals the segment inside the session; the plane learns of it when the `session-export` timer reads the store's export door (every 15 min): a poll of a contract door, never of transcripts or liveness"; source row → `session_summary`; the contract block becomes the spec's field table (identity `ts · session_id · session_uid · runtime · bot · fleet`; `status` + `skipped_reason`; volume `turns · transcript_bytes` (`null` on skipped) `· prompts · skills · failures · interrupts`; `journey.*`; `blocks.count/kinds`, `procedures`; `producer.model/duration_ms/cost_usd`; `seg · sealed_at · sealed_by`); the dormancy paragraph → "the job runs by default; a bot with summaries off still yields a `skipped` row, so an **empty** window means no sealed segment, a disabled job, or a stale entrypoint — name which (the job's per-bot state files, `<fleet_state>/session-export/<bot>.json`, read with `jq`; `host doctor`'s `session-export` rung is the operator's view of them)"; cite #1456/#1503: the digest's rows never reached this reader |
+| `fleet-monitoring.md:39-41,98,102-115,119-122` | `:39-41` "Nothing watches for sessions ending … no poller" → "A session ending is still an event the session reports — clauDNA's SessionEnd seals the segment inside the session; the plane learns of it when the `session-export` timer reads the store's export door (every 15 min): a poll of a contract door, never of transcripts or liveness"; source row → `session_summary`; the contract block becomes the spec's field table (identity `ts · session_id · session_uid · agent_cli · bot · fleet`; `status` + `skipped_reason`; volume `turns · transcript_bytes` (`null` on skipped) `· prompts · skills · failures · interrupts`; `journey.*`; `blocks.count/kinds`, `procedures`; `producer.model/duration_ms/cost_usd`; `seg · sealed_at · sealed_by`); the dormancy paragraph → "the job runs by default; a bot with summaries off still yields a `skipped` row, so an **empty** window means no sealed segment, a disabled job, or a stale entrypoint — name which (the job's per-bot state files, `<fleet_state>/session-export/<bot>.json`, read with `jq`; `host doctor`'s `session-export` rung is the operator's view of them)"; cite #1456/#1503: the digest's rows never reached this reader |
 | `ai-platform-monitor.md:22` | "The plane's `session_summary` events (`claudlobby event list --type session_summary`) \| One per sealed segment — the journey (title, intent, outcome, done, next) when summaries are on for the bot; identity and volume always" |
 
   File now, independent of P3 (PC): the reader-filter defect — `plane-readers.py:1155-1164`'s `fleet-events:` filter silently
@@ -766,7 +766,7 @@ The seal itself is not this document's: it ran at order 3's activation (Task 1 S
   unarmed bot, and no `SESSION_DIGEST`; the composed
   `settings.local.json` names neither retired script; seed `runtime/bots/<b>/data/claudna/entrypoint.json` pointing at a stub
   `session_store/__main__.py` that prints a canned `claudna.export/1` envelope (one `ok` item, one `skipped` item, both with
-  `segment{}` and `session.runtime`) and appends `--ack` argv to a file; `"$VAL_CLI" --root "$ROOT" _session-export-tick "$FLEET"`;
+  `segment{}` and `session.agent_cli`) and appends `--ack` argv to a file; `"$VAL_CLI" --root "$ROOT" _session-export-tick "$FLEET"`;
   `val_events "$ROOT" "$FLEET" "$BOT" session_summary` shows two rows with `"status":"ok"` / `"status":"skipped"` and a
   `session_uid`; the ack file has exactly the `next` entries; a second run adds no row; a stale `entrypoint` → the skip line and
   zero rows; `SESSION_EXPORT_ENABLED=0` stamped on the unit → the OFF line. The scenario runs with
@@ -827,7 +827,7 @@ The seal itself is not this document's: it ran at order 3's activation (Task 1 S
 |---|---|---|
 | `event list --type session_digest` | `fleet-digest/SKILL.md:58,60` (→ `fleet-observe` reads its output), `fleet-monitoring.md:98`, `ai-platform-monitor.md:22` (prose) | all four read `--type session_summary`; `test_no_retired_digest_reference.py` fails on any `library/` line that still names the digest |
 | `$BOT_DIR/data/.plane-session` | `transcript-digest.sh:256` only (`test_plane_gauntlet_doors.py:148` is a dangling comment) | no reader, no writer |
-| `derive_session_uid` | Python `plane/ids.py:79-89`; bash mirror `plane-session-start.sh:59-70`, parity-pinned by `tests/test_plane_session_hook.py:31-46` | Python only (`(id, runtime)` from P1); the parity suite retires with the mirror |
+| `derive_session_uid` | Python `plane/ids.py:79-89`; bash mirror `plane-session-start.sh:59-70`, parity-pinned by `tests/test_plane_session_hook.py:31-46` | Python only (`(id, agent_cli)` from P1); the parity suite retires with the mirror |
 | `claudron doctor --json` | `doctor._claudron_doctor` (`doctor.py:795-870`) | `claudron_compat.vault_migration_state` — read by `doctor` (rows) and `validator` (the `claudron-migration` warning, PR 6a) |
 
 ## Stated limitations
