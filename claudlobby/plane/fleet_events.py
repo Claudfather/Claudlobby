@@ -33,12 +33,13 @@ def fleet_event_request(event_type: str, *, fleet: str, subject_kind: str, subje
     `occurred_at` defaults to now in UTC, in the form bash stamps."""
     now = occurred_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     ts = legacy_ts or now
-    who = bot or ("fleet" if subject_kind == "fleet" else "host" if subject_kind == "host"
-                  else subject.rsplit("/", 1)[-1])
-    compact = json.dumps(data, separators=(",", ":"))
-    legacy = f'{{"ts":"{ts}","bot":"{who}","type":"{event_type}","source":"{source}","data":{compact}}}'
+    if not key:  # the content key, built only when the caller brought none
+        who = bot or ("fleet" if subject_kind == "fleet" else "host" if subject_kind == "host"
+                      else subject.rsplit("/", 1)[-1])
+        compact = json.dumps(data, separators=(",", ":"))
+        key = f'{{"ts":"{ts}","bot":"{who}","type":"{event_type}","source":"{source}","data":{compact}}}'
     row = {"event_id": event_id or mint_event_id(), "event_type": "system", "emitter": source,
-           "source_ref": "fleet-events:sha:" + derive_hex(key or legacy), "fleet": fleet,
+           "source_ref": "fleet-events:sha:" + derive_hex(key), "fleet": fleet,
            "occurred_at": now,
            "payload": {"event": event_type, "subject_kind": subject_kind, "subject": subject,
                        "data": {"source": source, "legacy_ts": ts, "data": data}}}
