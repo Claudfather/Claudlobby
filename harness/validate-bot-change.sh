@@ -1464,8 +1464,11 @@ if [ "$_OS" = Linux ]; then
 fi
 pane_stale="$(_run_startbot stale)"
 if [ "$_OS" = Linux ]; then
-    _sr_state="$(ps -o stat= -p "${_sr_pid:-0}" 2>/dev/null || true)"
-    case "$_sr_state" in ""|Z*) r=yes ;; *) r=no ;; esac
+    r=no
+    if [ -n "${_sr_pid:-}" ]; then
+        _sr_state="$(ps -o stat= -p "$_sr_pid" 2>/dev/null || true)"
+        case "$_sr_state" in ""|Z*) r=yes ;; esac
+    fi
     harness_check "the subreaper leaves once its session is gone (#2158)" "$r"
 fi
 printf '%s' "$pane_stale" | grep -q '/claudna:session resume' && r=no || r=yes

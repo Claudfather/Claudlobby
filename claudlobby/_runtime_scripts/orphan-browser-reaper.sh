@@ -16,13 +16,14 @@
 # browser is abandoned. --pattern cannot override that safety boundary.
 # On Linux, a process is reaped only when ALL of these hold:
 #   1. orphaned         — its parent is init/launchd, or a subreaper that adopted
-#                         it. "ppid == 1" alone is NOT the test: systemd --user
-#                         sets itself a subreaper, so a browser orphaned by a bot
-#                         session is adopted by the user manager and keeps a
-#                         non-1 ppid. On this fleet that is the common case --
-#                         bot sessions ARE systemd user services -- so a ppid==1
-#                         test would miss exactly the leak #807 is about. The
-#                         parent's comm is matched instead (--orphan-parents).
+#                         it. "ppid == 1" alone is NOT the test: a browser
+#                         orphaned by a bot session is adopted by that bot's own
+#                         subreaper (bot-subreaper, #2158), or else by the user
+#                         manager, which also sets itself a subreaper, so it
+#                         keeps a non-1 ppid. On this fleet that is the common
+#                         case, so a ppid==1 test would miss exactly the leak
+#                         #807 is about. The parent's comm is matched instead
+#                         (--orphan-parents).
 #                         A browser with a live parent is someone's working
 #                         session and is never touched.
 #   2. comm matches     — the executable's BASENAME is a known browser binary.

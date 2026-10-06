@@ -40,7 +40,8 @@ manager); a typed pid of another bot's process; and a command run by a tool
 other than Bash, which is all the hook matches. A command nesting $( deeply
 overflows this decider's stack, from about 110 to 330 levels by the shape of
 each level, and the hook then fails open with its script_error breadcrumb.
-The per-bot subreaper of #2158 is the backstop for those.
+The per-bot subreaper of #2158 bounds one route among those: an orphaned job's
+parent is its own bot's subreaper, not the user manager.
 """
 
 from __future__ import annotations
