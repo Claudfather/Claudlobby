@@ -322,7 +322,7 @@ if command -v "$CLAUDE" >/dev/null 2>&1 && [ -n "${FLEET_PLUGINS_REQUIRED:-}" ];
     done
 fi
 
-bot_tmux "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" "$CLAUDE_CMD"
+bot_session_spawn "$TMUX_SOCKET" "$TMUX_SESSION" "$CLAUDE_CMD"
 
 # Spawn marker — its mtime is this bot's last session (re)start. fleet-pulse
 # reads it to grace the Telegram bridge poller while it spins up, so a (re)start
@@ -338,6 +338,7 @@ touch "$BOT_DIR/data/.spawn" 2>/dev/null || true
 # documentation/environment-variables.md.
 LOG="$BOT_DIR/logs/startup.log"
 setup_log_dir "$LOG"
+echo "$(ts_iso) SUBREAPER ${BOT_SUBREAPER_REPORT:-}" >> "$LOG"
 _rc_timeout_s="${RC_READY_TIMEOUT_S:-90}"
 # Coerce a non-numeric/empty override to the default: a bad value would crash
 # start-bot under `set -u` ($(( abc * 2 )) → "abc: unbound variable"), crash-

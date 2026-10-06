@@ -1274,8 +1274,8 @@ bridge_state() {
         printf '%s' "no_bridge"; return 1
     fi
 
-    # Lineage: a poller whose `claude` died reparents to the session subreaper
-    # (systemd --user / init) and delivers nothing while still holding the
+    # Lineage: a poller whose `claude` died reparents to a subreaper (the bot's
+    # own, systemd --user or init) and delivers nothing while still holding the
     # single-consumer token slot — a deaf orphan that must NOT read `up`. Require
     # a live `claude` ANCESTOR. The telegram plugin's MCP command is `bun … start`,
     # so the real tree is  claude → bun (`bun … start`) → bun server.ts  — `claude`
@@ -1984,6 +1984,7 @@ resolve_peer_socket() {
 # bot_tmux <socket> <tmux-args...>
 # The single chokepoint for socket-targeted tmux calls: runs a subcommand
 # against the per-bot server identified by <socket> (`tmux -L <socket> ...`).
+# One exception: bot_session_spawn has bot-subreaper.py exec the same argv.
 # A native start keeps admission FD 9 in its parent shell. The tmux client can
 # spawn a persistent server, so close that descriptor only for this child:
 # a killed start shell must not leave its shared activation lock in the server.
@@ -2004,6 +2005,48 @@ bot_tmux() {
         return $?
     fi
     "$_TMUX_BIN" -L "$socket" "$@" 9<&-
+}
+
+# Create a bot's tmux session under the bot's own child subreaper (#2158): the
+# one place start-bot.sh starts a session. The tmux server daemonizes, so it and
+# every process the session orphans re-parent to the nearest live subreaper,
+# which without one of the bot's own is the user manager that runs every bot: a
+# kill aimed at an orphan's parent could stop them all. bot-subreaper.py runs
+# the client and stays as that subreaper until its last child is gone. Linux
+# only: macOS has no child subreaper, and an orphan there re-parents to launchd,
+# PID 1, which a user cannot signal. Fails open: when the subreaper did not run
+# the client, the client runs as before, unless the session already exists
+# (the subreaper died after its client ran). BOT_SUBREAPER_REPORT says which,
+# and a Linux session that did not get its subreaper records
+# bot_subreaper_unavailable.
+bot_session_spawn() {
+    local socket="${1?Usage: bot_session_spawn <socket> <session> <command>}"
+    local session="${2?}" command="${3?}" report="" rc=0
+    local why="no private socket or release interpreter"
+    if [ "$_OS" != Linux ]; then
+        BOT_SUBREAPER_REPORT="not used: $_OS has no child subreaper"
+        bot_tmux "$socket" new-session -d -s "$session" "$command"
+        return
+    fi
+    if [ -n "$socket" ] && [ -x "${_NATIVE_ADMISSION_PYTHON:-}" ]; then
+        report=$("$_NATIVE_ADMISSION_PYTHON" -I -B -S "$_LIB_COMMON_DIR/bot-subreaper.py" \
+            "$_TMUX_BIN" -L "$socket" new-session -d -s "$session" -P -F '#{pid}' \
+            "$command" 9<&-) || rc=$?
+        why="the subreaper did not run the client (exit $rc)"
+    fi
+    case "$report" in
+        subreaper=*" adopted=yes") BOT_SUBREAPER_REPORT="$report"; return "$rc" ;;
+        subreaper=*) BOT_SUBREAPER_REPORT="$report" ;;  # the client ran: its status stands
+        *)
+            BOT_SUBREAPER_REPORT="not used: $why"
+            rc=0
+            bot_tmux "$socket" has-session -t "=$session" 2>/dev/null \
+                || bot_tmux "$socket" new-session -d -s "$session" "$command" || rc=$?
+            ;;
+    esac
+    emit_fleet_event "bot_subreaper_unavailable" "startup" \
+        "{\"report\":\"$(json_escape "$BOT_SUBREAPER_REPORT")\"}"
+    return "$rc"
 }
 
 # emit_fleet_event <type> <source> [data_json] [bot_dir] [bot_id]
