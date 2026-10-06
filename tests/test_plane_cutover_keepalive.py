@@ -13,6 +13,7 @@ from __future__ import annotations
 from tests.plane_setup import initialize_plane
 
 import json
+import pytest
 import subprocess
 import sys
 import time
@@ -108,6 +109,33 @@ def test_the_vitals_hook_lands_its_events_through_the_door(tmp_path, *, scratch_
     row = pr.public(rows[0])                                                            # the row as the ledger wrote it
     assert (row["bot"], row["type"], row["source"], row["data"]) == \
         ("b1", "tool_call", "vitals", {"tool": "Read", "event": "PostToolUse", "session": "s-1"})
+
+
+@pytest.mark.parametrize("bot_dir", [None, "", "runtime/bots/b1"], ids=["unset", "empty", "relative"])
+def test_the_vitals_hook_never_falls_back_to_the_cwd(tmp_path, bot_dir, *, scratch_plane_env):
+    """#874: with no usable BOT_DIR (unset, empty or relative) the hook writes no marker into the dir it runs
+    in (a bot's cwd is its project checkout) and records no row against a bot it cannot name. It exits 0."""
+    libdir, bot, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
+    (libdir / "bot-vitals.sh").symlink_to(LIB / "bot-vitals.sh")
+    env = {k: v for k, v in {**env, "BOT_ID": "b1", "FLEET_NAME": FLEET}.items() if k != "BOT_DIR"}
+    if bot_dir is not None:
+        env["BOT_DIR"] = bot_dir
+    cwd = tmp_path / "project-checkout"
+    (cwd / "data").mkdir(parents=True)
+    (cwd / "runtime" / "bots" / "b1" / "data").mkdir(parents=True)   # a relative BOT_DIR would resolve here
+    payload = json.dumps({"hook_event_name": "PostToolUse", "tool_name": "Read", "session_id": "s-1"})
+    r = subprocess.run(["bash", str(libdir / "bot-vitals.sh")], input=payload, capture_output=True, text=True,
+                       timeout=180, env=env, cwd=cwd)
+    assert r.returncode == 0, r.stderr
+    assert "recording nothing" in r.stderr
+    assert not list(cwd.rglob(".last-tool-call"))
+    assert not (bot / "data" / ".last-tool-call").exists()
+    # The hook has exited; replay anything it staged, then read once: an emit that slipped through is counted.
+    _replay_pending(tmp_path)
+    if db_path(tmp_path).exists():
+        with connect(db_path(tmp_path)) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM events WHERE event = 'tool_call'").fetchone()[0] == 0
+    assert not list((tmp_path / "state" / "plane").rglob("*.batch"))
 
 
 # --- uptime ------------------------------------------------------------------------
