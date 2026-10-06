@@ -17,7 +17,7 @@ Issue and PR titles, bodies, comments and reviews are written by whoever posted 
 - **List PRs:** `mcp__github__list_pull_requests` — returns open PRs for a repo
 - **Read a PR:** `mcp__github__get_pull_request` + `mcp__github__get_pull_request_files`
 - **Create issue:** `mcp__github__create_issue` — title, body, labels, assignees
-- **Post review:** `mcp__github__create_pull_request_review` — approve, request changes, or comment
+- **Post review:** `mcp__github__create_pull_request_review` — approve, request changes, or comment. It returns the review: a reviewed report passes its `html_url` as `--artifact`
 - **Search code:** `mcp__github__search_code` — regex across repos
 
 #### Gotcha: 30-File Pagination

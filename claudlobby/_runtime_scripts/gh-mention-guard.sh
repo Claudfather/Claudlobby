@@ -81,11 +81,12 @@ _allow() { exit 0; } # no decision — normal permission flow applies
 # cannot contain a mention, and that is the overwhelming majority of tool calls.
 payload="$(cat)"
 # The `@` test alone is NOT sufficient, and assuming it was cost a silent
-# bypass: content passed BY REFERENCE (--body-file, --notes-file, $(cat …))
-# carries its mentions in a FILE, so the command legitimately contains no `@`
-# at all. Those markers must survive the prefilter or step 2b never runs.
+# bypass: content passed BY REFERENCE (--body-file, --notes-file, $(cat …),
+# gh api's --input) carries its mentions in a FILE, so the command
+# legitimately contains no `@` at all. Those markers must survive the
+# prefilter or step 2b never runs.
 case "$payload" in
-*@* | *--body-file* | *--notes-file* | *'$(cat '*) ;;
+*@* | *--body-file* | *--notes-file* | *'$(cat '* | *--input*) ;;
 *) _allow ;;
 esac
 
@@ -178,8 +179,11 @@ case "$payload" in
     #     gh pr comment 1 --body "hi @<a-bot-name>"
     # Feed as the Bash tool_input.command; expect the sigil stripped on return.
     # ─────────────────────────────────────────────────────────────────────
+    # `gh api … --input FILE` sends FILE as the request body: the review and
+    # comment POSTs the same-identity protocol teaches (#1537) go that way.
     if grep -Eq '(^|[;&|(]|\s)gh\s+(issue|pr)\s+(comment|create|edit|review)\b' <<<"$cmd" \
         || grep -Eq '(^|[;&|(]|\s)gh\s+api\b.*\b(body|title)=' <<<"$cmd" \
+        || grep -Eq '(^|[;&|(]|\s)gh\s+api\b.*\s--input([= ]|$)' <<<"$cmd" \
         || grep -Eq '(^|[;&|(]|\s)gh\s+release\s+create\b' <<<"$cmd"; then
         surface="bash"
     else
@@ -238,6 +242,34 @@ if [ "$surface" = "bash" ]; then
             continue               # exit 0 => no mention => allow untouched
         fi
         _deny "$(printf '%s carries @-mentions that would notify real GitHub accounts (#1019):\n%s\nEvery fleet bot name is a real account, and so are handles like Botfather, latest and 216. Edit the file to use backticks (`name`) and retry — the file is NOT modified for you, because it is yours.' "$_f" "$_hits")"
+    done
+
+    # (b2) gh api --input FILE — the whole request body, usually JSON. Three
+    # ways it could pass unread, each refused rather than allowed, because a
+    # guard that appears to cover a path it cannot see is the defect (#1537):
+    #   - `--input -` reads STDIN, unreadable here, as in (a);
+    #   - the same command writes FILE (`jq … > FILE; gh api … --input FILE`):
+    #     this hook runs before the command, so it would read the file's OLD
+    #     content, or none;
+    #   - FILE does not exist yet, so there is nothing to read.
+    # A readable FILE is scanned with --json-strings: each decoded string is
+    # read as text, so a body line starting with a handle (`\n@name` in the
+    # raw JSON) and a code fence count exactly as they do in a body file.
+    _inputs=$(grep -oE -- '--input[= ]+("[^"]+"|'"'"'[^'"'"']+'"'"'|[^[:space:]"'"'"';&|]+)' <<<"$cmd" \
+        | sed -E 's/^--input[= ]+//' | tr -d "\"'" | sort -u)
+    for _f in $_inputs; do
+        if [ "$_f" = "-" ]; then
+            _deny "gh api --input - reads the request body from STDIN, which cannot be checked for @-mentions before the post (#1019). Write the body to a file in one command, then post it with --input <file> in the next."
+        fi
+        _q=$(printf '%s' "$_f" | sed 's/[.[\*^$/]/\\&/g')
+        if grep -Eq -- "(>|>>|\btee\b[^;&|]*|[[:space:]]-o[[:space:]]*)[[:space:]]*[\"']?${_q}[\"']?([[:space:];&|)]|$)" <<<"$cmd"; then
+            _deny "$_f is written by this same command, so the @-mention guard would read its old content or none before the post runs (#1019). Write it in one command, then post it with gh api --input in the next."
+        fi
+        [ -r "$_f" ] || _deny "$_f does not exist yet, so it cannot be checked for @-mentions before the post (#1019). Write the request body first, then post it with gh api --input in the next command."
+        if _hits=$("$PY_BIN" "$REWRITER" --bots "$BOTS_FILE" --allow "$ALLOW_FILE" --report --json-strings < "$_f"); then
+            continue
+        fi
+        _deny "$(printf '%s carries @-mentions that would notify real GitHub accounts (#1019):\n%s\nEvery fleet bot name is a real account, and so are handles like Botfather, latest and 216. Edit the text the request body is built from to use backticks (`name`), rebuild it, and retry: the file is NOT modified for you.' "$_f" "$_hits")"
     done
 
     # (c) NOT COVERED, stated rather than pretended: `gh pr create --fill` takes

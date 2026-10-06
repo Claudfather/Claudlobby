@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the at-mention guard reads `gh api --input` request bodies, and the reviewer instructions agree on the route (#1537)
+
+#2181 taught reviewers to post a verdict with `gh api -X POST …/pulls/N/reviews --input review.json`, so that GitHub returns the review's URL. The at-mention guard (#1019) did not cover that route. It had no `@` in the command, and `--input` was neither a writer nor a file it scanned. So a handle in the review's body went out unchecked, and so did one in the issue-comment variant.
+
+- **`gh api … --input FILE` is a writer,** and the guard scans FILE.
+- **The scan reads JSON decoded.** Each string value is checked as text, so a handle at the start of a body line counts. In raw JSON that line reads `\n` then the handle, and the `n` hides it from the scan. A code fence counts as it does in a body file. Text that is not JSON is read as text.
+- **What the guard cannot read before the post is refused,** never allowed unread:
+  - `--input -` (STDIN);
+  - a file the same command writes, such as `jq … > review.json; gh api … --input review.json`, since the hook runs before the command and would read the old content or none;
+  - a file that does not exist yet.
+
+  Each refusal says what to do: write the body in one command, then post it in the next.
+- **The reviewer instructions agree.** `same-identity-fallback` says to run the two steps as two commands, and that a nonzero exit prints gh's error rather than a URL. `code-review`'s same-identity section, `worker-lifecycle`'s completion step and row, `report-back`'s unlinked example, `fleet-ops` and the GitHub integration's review route now all name the verdict's URL with `--artifact`. So do `task reviews`' advice and OFF-STANDARD texts.
+- **Tests:**
+  - The harness's #1019 scenario runs the real guard on 9 new cases. Against main's guard, its 7 new refusal checks fail.
+  - `tests/test_mention_rewrite.py` covers the JSON mode.
+
 ### Fixed — `task reviews` attributes a verdict to the reviewed report that names its URL, before any time window (#1537)
 
 `task reviews` tied a verdict to a reviewed report only by time: the report had to land from 10 s before the verdict to 120 s after it. So a careful write-up (a report 332 s after its verdict), a corrected verdict (posted 115 s after the report already on file) and two reviewers posting 5 s apart read UNKNOWN or AMBIGUOUS. A block nobody could attribute could not be superseded either, so it outlived its own reviewer's later approve.

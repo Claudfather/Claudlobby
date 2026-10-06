@@ -16,7 +16,7 @@ When the fleet shares a single GitHub PAT (every bot commits as the same identit
    gh api -X POST repos/OWNER/REPO/pulls/N/reviews --input review.json --jq .html_url
    ```
 
-   On success it prints `https://github.com/OWNER/REPO/pull/N#pullrequestreview-…`; a nonzero exit means nothing was posted. Build the body as JSON with jq and `--input`, never `-F body=@<file>`, which can post the file's name instead of its text (#2178).
+   Run them as two separate commands. The at-mention guard reads `review.json` before the post runs, so it refuses a file the same command writes, one that does not exist yet, `--input -`, and a body that would @-mention anyone (#1019). On success the post prints `https://github.com/OWNER/REPO/pull/N#pullrequestreview-…`. A nonzero exit means nothing was posted, and what it printed is gh's error, not a URL. Build the body as JSON with jq and `--input`, never `-F body=@<file>`, which can post the file's name instead of its text (#2178).
 2. Lead the comment body with the verdict: `**[<bot>] [VERDICT] approve** — reviewed at <sha>`, `**[<bot>] [VERDICT] request changes** — reviewed at <sha>`, or `**Comment**` (no verdict) — leave a plain `**Comment**` bare, never bracket-tag it: `claudlobby task reviews` treats an unrecognized bracket-tagged word as vocabulary drift, not as a neutral note. Record the review-role fleet report for authoritative actor attribution, and pass the review's URL as `--artifact`:
 
    ```bash
