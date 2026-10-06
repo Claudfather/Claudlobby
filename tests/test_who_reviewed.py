@@ -11,8 +11,17 @@ historical report-row examples; the current query tests explicit review roles.
 
 from __future__ import annotations
 
+import itertools
+import json
+import subprocess
+
+import pytest
+
 from tests.conftest import report_row as _report
 from claudlobby import review_queries as who, review_rules
+from claudlobby.plane.emit_api import emit_batch
+from claudlobby.report_payload import ReportLink, ReportPayload, encode_report_facts
+from tests.plane_fixtures import plane_root, ro
 
 REPO = "Claudfather/Claudlobby"
 URL = f"https://github.com/{REPO}/pull/1046"
@@ -326,3 +335,309 @@ def test_host_review_rows_keep_only_explicit_review_role_and_both_report_legs(tm
     assert result["prs"][0]["attribution"]["ambiguous"] == 2
     assert "identity is AMBIGUOUS" in review_rules.attribution_advice(
         result["prs"][0]["attribution"])
+
+
+# ---------------------------------------------------------------------------
+# #1537: a reviewed report that names its verdict's URL in --artifact joins that
+# verdict exactly, with no time window. The window stays only as the fallback
+# for a report that names no verdict URL, and every attribution says which of
+# the two it used.
+# ---------------------------------------------------------------------------
+
+LREPO = "org/repo"
+LPR = 77
+LPR_URL = f"https://github.com/{LREPO}/pull/{LPR}"
+HEAD = "c14e56506537c309c716c6553b0b1a1523f5eff5"
+OLD = "c4d6fe8611111111111111111111111111111111"
+_MSG = itertools.count(1)
+
+
+def _comment_url(cid):
+    return f"{LPR_URL}#issuecomment-{cid}"
+
+
+def _review_url(rid):
+    return f"{LPR_URL}#pullrequestreview-{rid}"
+
+
+def _verdict(bot, word="approve", sha=HEAD):
+    return f"**[{bot}] [VERDICT] {word}** — reviewed at {sha}"
+
+
+def _payload(reviews=(), comments=()):
+    return {"number": LPR, "title": "t", "headRefOid": HEAD,
+            "reviews": list(reviews), "comments": list(comments)}
+
+
+def _gh_comment(ts, body, cid):
+    """A comment as `gh pr view --json comments` returns it: with its URL."""
+    return {"createdAt": ts, "body": body, "url": _comment_url(cid)}
+
+
+def _gh_review(ts, body, node):
+    """A review as `gh pr view --json reviews` returns it: an opaque node id and
+    no URL, so the REST listing is the only way to its #pullrequestreview link."""
+    return {"submittedAt": ts, "body": body, "id": node, "state": "COMMENTED"}
+
+
+def _reviewed(root, bot, ts, *artifacts, fleet="f", linked=False):
+    """One reviewed report as the report door records it: the communication that
+    carries the typed body (and its artifacts), plus the companion — a task
+    event when linked, the report_status marker when not."""
+    n = next(_MSG)
+    link = ReportLink(f"wi_{n:032x}", f"asg_{n:032x}", "completed") if linked else None
+    facts = encode_report_facts(
+        ReportPayload("completed", summary=f"review {n}", pr_url=LPR_URL, pr_role="reviewed",
+                      artifacts=tuple(artifacts)),
+        fleet=fleet, sender=f"bot:{fleet}/{bot}", recipient=f"bot:{fleet}/mgr",
+        msg_id=f"msg_{n:032x}", event_ids=(f"ev_{2 * n:032x}", f"ev_{2 * n + 1:032x}"),
+        occurred_at=ts, link=link)
+    emit_batch(root, list(facts), require_commit=True)
+
+
+def _assess(root, payload, monkeypatch, review_urls=None):
+    """assess_payloads over a real plane, with the REST review listing stubbed.
+    A test that names no review URL must never make that read."""
+    def listing(repo, number):
+        assert (repo, number) == (LREPO, LPR)
+        assert review_urls is not None, "the REST review listing ran with no review URL named"
+        return dict(review_urls)
+    monkeypatch.setattr(who, "fetch_review_urls", listing, raising=False)
+    with ro(root) as conn:
+        return who.assess_payloads(conn, [payload], LREPO)
+
+
+def _events(result):
+    return result["attribution_events"][0]["events"]
+
+
+def _seen(event):
+    return event["verdict"], event.get("actor"), event.get("method")
+
+
+class TestTheFourMeasuredCases:
+    """The four cases measured in #1537, each as its report would now be filed."""
+
+    def test_case_1_a_careful_review_reported_332s_later_matches_by_url(self, tmp_path, monkeypatch):
+        """#1535: the verdict comment at 22:17:01Z, the report at 22:22:33Z."""
+        root = plane_root(tmp_path, initialize=True)
+        _reviewed(root, "w1", "2026-09-10T22:22:33Z", _comment_url(101))
+        result = _assess(root, _payload(comments=[
+            _gh_comment("2026-09-10T22:17:01Z", _verdict("w1"), 101)]), monkeypatch)
+        [event] = _events(result)
+        assert _seen(event) == ("MATCH", "bot:f/w1", "url")
+        assert event.get("url") == _comment_url(101)
+        assert result["prs"][0]["resolved"]["bot:f/w1"]["anchor"] == HEAD
+
+    def test_case_2_a_late_reported_block_is_superseded_by_its_reviewers_approve(
+            self, tmp_path, monkeypatch):
+        """#1537's second case: a REQUEST-CHANGES review nobody could attribute
+        outlived the same reviewer's later approve, as `UNKNOWN@reviews:0`."""
+        root = plane_root(tmp_path, initialize=True)
+        _reviewed(root, "w1", "2026-10-02T10:06:40Z", _review_url(501), linked=True)  # +400 s
+        _reviewed(root, "w1", "2026-10-02T11:00:05Z", _review_url(502))
+        payload = _payload(reviews=[
+            _gh_review("2026-10-02T10:00:00Z", _verdict("w1", "mechanical fixes", OLD), "PRR_a"),
+            _gh_review("2026-10-02T11:00:00Z", _verdict("w1"), "PRR_b")])
+        result = _assess(root, payload, monkeypatch,
+                         review_urls={"PRR_a": _review_url(501), "PRR_b": _review_url(502)})
+        assert [_seen(e) for e in _events(result)] == [("MATCH", "bot:f/w1", "url")] * 2
+        pr = result["prs"][0]
+        assert pr["blocking"] == []
+        assert pr["resolved"]["bot:f/w1"]["verdict"] == review_rules.APPROVE
+
+    def test_case_3_a_paired_review_5s_apart_attributes_each_reviewer(self, tmp_path, monkeypatch):
+        """#1537's third case: two reviewers re-anchor one head 5 s apart and
+        each report falls in the other's window, so both read AMBIGUOUS."""
+        root = plane_root(tmp_path, initialize=True)
+        _reviewed(root, "w1", "2026-10-03T06:28:42Z", _comment_url(201))
+        _reviewed(root, "w2", "2026-10-03T06:28:47Z", _comment_url(202), fleet="g")
+        payload = _payload(comments=[
+            _gh_comment("2026-10-03T06:28:39Z", _verdict("w1"), 201),
+            _gh_comment("2026-10-03T06:28:44Z", _verdict("w2"), 202)])
+        result = _assess(root, payload, monkeypatch)
+        assert [_seen(e) for e in _events(result)] == [
+            ("MATCH", "bot:f/w1", "url"), ("MATCH", "bot:g/w2", "url")]
+        assert result["prs"][0]["observed_attribution"]["complete"] is True
+
+    def test_case_4_a_corrected_verdict_matches_the_report_that_names_it(self, tmp_path, monkeypatch):
+        """#2166: verdict A at 01:24:45Z had no anchor, and its report came 8 s
+        later. The corrected verdict B at 01:26:48Z was 115 s after that report,
+        past the -10 s bound, so B read UNKNOWN. A report that names B's URL
+        attributes B however long the write-up takes (here 150 s)."""
+        root = plane_root(tmp_path, initialize=True)
+        _reviewed(root, "w1", "2026-10-06T01:24:53Z", _comment_url(301), linked=True)
+        _reviewed(root, "w1", "2026-10-06T01:29:18Z", _comment_url(302))
+        payload = _payload(comments=[
+            _gh_comment("2026-10-06T01:24:45Z", f"**[w1] [VERDICT] approve** at `{HEAD[:8]}`", 301),
+            _gh_comment("2026-10-06T01:26:48Z", _verdict("w1"), 302)])
+        result = _assess(root, payload, monkeypatch)
+        assert [_seen(e) for e in _events(result)] == [("MATCH", "bot:f/w1", "url")] * 2
+        pr = result["prs"][0]
+        assert pr["resolved"]["bot:f/w1"]["anchor"] == HEAD
+        assert pr["unanchored"] == []
+
+
+class TestUrlJoin:
+    def test_a_comment_verdict_joins_the_report_that_names_its_url(self, tmp_path, monkeypatch):
+        root = plane_root(tmp_path, initialize=True)
+        _reviewed(root, "w1", "2026-10-04T12:10:00Z", _comment_url(701))  # +600 s
+        result = _assess(root, _payload(comments=[
+            _gh_comment("2026-10-04T12:00:00Z", _verdict("w1"), 701)]), monkeypatch)
+        [event] = _events(result)
+        assert _seen(event) == ("MATCH", "bot:f/w1", "url")
+        assert event["candidates"][0].get("url") == _comment_url(701)
+        # No report named a review URL, so the REST listing was never needed.
+        assert result["attribution_events"][0].get("review_urls", {}).get("state") == "not-needed"
+
+    def test_a_review_verdict_joins_its_report_through_the_rest_listing(self, tmp_path, monkeypatch):
+        root = plane_root(tmp_path, initialize=True)
+        _reviewed(root, "w1", "2026-10-04T12:10:00Z", _review_url(601))  # +600 s
+        result = _assess(root, _payload(reviews=[
+            _gh_review("2026-10-04T12:00:00Z", _verdict("w1"), "PRR_x")]), monkeypatch,
+            review_urls={"PRR_x": _review_url(601)})
+        [event] = _events(result)
+        assert _seen(event) == ("MATCH", "bot:f/w1", "url")
+        assert event.get("url") == _review_url(601)
+        assert result["attribution_events"][0].get("review_urls", {}).get("state") == "read"
+
+    def test_two_bots_naming_one_verdict_url_is_ambiguous_not_a_guess(self, tmp_path, monkeypatch):
+        root = plane_root(tmp_path, initialize=True)
+        _reviewed(root, "w1", "2026-10-04T12:05:00Z", _comment_url(702))
+        _reviewed(root, "w2", "2026-10-04T12:06:00Z", _comment_url(702))
+        result = _assess(root, _payload(comments=[
+            _gh_comment("2026-10-04T12:00:00Z", _verdict("w1"), 702)]), monkeypatch)
+        [event] = _events(result)
+        assert (event["verdict"], event.get("method")) == ("AMBIGUOUS", "url")
+        assert {c["actor"] for c in event["candidates"]} == {"bot:f/w1", "bot:f/w2"}
+
+    def test_a_report_that_names_one_verdict_is_no_window_candidate_for_another(
+            self, tmp_path, monkeypatch):
+        """The window is only for a report that names no verdict URL. This report
+        names A, and B landing 7 s after it does not make it B's report."""
+        root = plane_root(tmp_path, initialize=True)
+        _reviewed(root, "w1", "2026-10-04T12:00:08Z", _comment_url(703))
+        result = _assess(root, _payload(comments=[
+            _gh_comment("2026-10-04T12:00:00Z", _verdict("w1", sha=HEAD[:8]), 703),
+            _gh_comment("2026-10-04T12:00:15Z", _verdict("w1"), 704)]), monkeypatch)
+        a, b = _events(result)
+        assert _seen(a) == ("MATCH", "bot:f/w1", "url")
+        assert (b["verdict"], b.get("method")) == ("UNKNOWN", "window")
+
+    def test_a_report_naming_no_verdict_url_still_matches_in_the_window(self, tmp_path, monkeypatch):
+        root = plane_root(tmp_path, initialize=True)
+        _reviewed(root, "w1", "2026-10-04T12:00:12Z", "https://example.com/ci/run/9")
+        result = _assess(root, _payload(comments=[
+            _gh_comment("2026-10-04T12:00:00Z", _verdict("w1"), 705)]), monkeypatch)
+        [event] = _events(result)
+        assert _seen(event) == ("MATCH", "bot:f/w1", "window")
+
+    def test_a_withheld_report_body_falls_back_to_the_window_and_says_why(self, tmp_path, monkeypatch):
+        """Under metadata capture the artifacts are withheld with the body, so
+        there is no URL to join; the report stays a window candidate."""
+        root = plane_root(tmp_path, capture='{"*": "metadata"}', initialize=True)
+        _reviewed(root, "w1", "2026-10-04T12:00:05Z", _comment_url(706))
+        result = _assess(root, _payload(comments=[
+            _gh_comment("2026-10-04T12:00:00Z", _verdict("w1"), 706)]), monkeypatch)
+        [event] = _events(result)
+        assert _seen(event) == ("MATCH", "bot:f/w1", "window")
+        assert event["candidates"][0].get("content") == "withheld"
+
+
+def _rest_gh(stdout="", returncode=0, stderr="", raises=None, calls=None):
+    def run(cmd, **kwargs):
+        if calls is not None:
+            calls.append(cmd)
+        if raises is not None:
+            raise raises
+        return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
+    return run
+
+
+class TestRestReviewListing:
+    """The extra read is REST, which throttles apart from gh pr view's GraphQL.
+    Its status is checked unpiped and its body is read (#1066)."""
+
+    @pytest.mark.parametrize("failure", ["http-403", "timeout", "error-body", "not-json"])
+    def test_a_failed_listing_falls_back_to_the_window_and_says_so_per_verdict(
+            self, tmp_path, monkeypatch, failure):
+        root = plane_root(tmp_path, initialize=True)
+        _reviewed(root, "w1", "2026-10-04T12:00:05Z", _review_url(801))  # inside the window
+        _reviewed(root, "w2", "2026-10-04T13:10:00Z", _review_url(802))  # 600 s late
+        payload = _payload(reviews=[
+            _gh_review("2026-10-04T12:00:00Z", _verdict("w1"), "PRR_1"),
+            _gh_review("2026-10-04T13:00:00Z", _verdict("w2"), "PRR_2")])
+        run = {
+            "http-403": _rest_gh('{"message":"API rate limit exceeded"}', 1,
+                                 "gh: API rate limit exceeded (HTTP 403)\n"),
+            "timeout": _rest_gh(raises=subprocess.TimeoutExpired(["gh"], 60)),
+            # Exit 0 and a JSON body that is not a listing: read the body (#1066).
+            "error-body": _rest_gh('{"message":"Not Found"}'),
+            "not-json": _rest_gh("<html>unavailable</html>"),
+        }[failure]
+        monkeypatch.setattr(who.subprocess, "run", run)
+        with ro(root) as conn:
+            result = who.assess_payloads(conn, [payload], LREPO)
+        first, second = _events(result)
+        assert _seen(first) == ("MATCH", "bot:f/w1", "window-after-failure")
+        assert (second["verdict"], second.get("method")) == ("UNKNOWN", "window-after-failure")
+        state = result["attribution_events"][0].get("review_urls", {})
+        assert state.get("state") == "unavailable" and state.get("error")
+        assert first.get("fallback_reason") == second.get("fallback_reason") == state["error"]
+        if failure == "http-403":
+            assert "403" in state["error"]
+
+    def test_the_listing_is_paged_100_at_a_time(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(who.subprocess, "run", _rest_gh("[]", calls=calls))
+        assert who.fetch_review_urls(LREPO, LPR) == {}
+        assert calls == [["gh", "api", "--paginate", f"repos/{LREPO}/pulls/{LPR}/reviews?per_page=100"]]
+
+    @pytest.mark.parametrize("pages", ["merged", "concatenated"])
+    def test_a_review_past_the_first_page_is_not_lost(self, tmp_path, monkeypatch, pages):
+        """A PR with more reviews than one page: the 101st still joins. gh 2.92
+        merges REST array pages into one array; older gh prints them one after
+        another. Both parse to every review."""
+        listing = [{"id": 900 + i, "node_id": f"PRR_{i}", "html_url": _review_url(900 + i)}
+                   for i in range(101)]
+        stdout = (json.dumps(listing) if pages == "merged"
+                  else json.dumps(listing[:100]) + json.dumps(listing[100:]))
+        root = plane_root(tmp_path, initialize=True)
+        _reviewed(root, "w1", "2026-10-04T14:00:00Z", _review_url(1000))
+        monkeypatch.setattr(who.subprocess, "run", _rest_gh(stdout))  # after the emit
+        reviews = [_gh_review("2026-10-04T12:00:00Z", "a note, not a verdict", f"PRR_{i}")
+                   for i in range(100)]
+        reviews.append(_gh_review("2026-10-04T13:00:00Z", _verdict("w1"), "PRR_100"))
+        with ro(root) as conn:
+            result = who.assess_payloads(conn, [_payload(reviews=reviews)], LREPO)
+        assert _seen(_events(result)[-1]) == ("MATCH", "bot:f/w1", "url")
+        assert result["attribution_events"][0]["review_urls"] == {
+            "state": "read", "reviews": 101, "error": None}
+
+
+class TestVerdictUrlKey:
+    def test_comment_and_review_urls(self):
+        assert who.verdict_url_key(_comment_url(5), LREPO, LPR) == ("issuecomment", "5")
+        assert who.verdict_url_key(_review_url(6), LREPO, LPR) == ("pullrequestreview", "6")
+
+    def test_the_issues_route_names_the_same_comment(self):
+        url = f"https://github.com/{LREPO}/issues/{LPR}#issuecomment-5"
+        assert who.verdict_url_key(url, LREPO, LPR) == ("issuecomment", "5")
+
+    def test_owner_and_repo_case_do_not_matter(self):
+        url = f"https://github.com/ORG/Repo/pull/{LPR}#issuecomment-5"
+        assert who.verdict_url_key(url, LREPO, LPR) == ("issuecomment", "5")
+
+    @pytest.mark.parametrize("url", [
+        f"https://github.com/org/other/pull/{LPR}#issuecomment-5",       # another repository
+        f"https://github.com/xorg/repo/pull/{LPR}#issuecomment-5",       # an owner ending in ours
+        f"https://github.com/org/repo/pull/{LPR}1#issuecomment-5",       # a longer PR number
+        f"https://github.com/org/repo/pull/{LPR}#discussion_r5",         # an inline comment
+        f"https://github.com/org/repo/pull/{LPR}",                       # no verdict fragment
+        f"https://github.com/org/repo/issues/{LPR}#pullrequestreview-5", # a review on an issue path
+        f"https://gist.github.com/org/repo/pull/{LPR}#issuecomment-5",   # another host
+        f"http://github.com/org/repo/pull/{LPR}#issuecomment-5",         # not https
+        "not a url",
+    ])
+    def test_anything_else_names_no_verdict(self, url):
+        assert who.verdict_url_key(url, LREPO, LPR) is None
