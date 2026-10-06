@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""P0 canaries for the runtime-neutral observability epic (#2145): the Claude-only batch.
+"""P0 canaries for the runtime-neutral observability epic (#2145): the Claude batch and the Codex batch.
 
 Three canaries gate the first PRs (epic §6 P0, §10 order 1):
 
@@ -23,10 +23,16 @@ Verbs:
     each export (metric names, temporality, attribute keys, event names) and
     the values of a short allowlist of id and enum keys. Never a prompt, a tool
     input or an output.
-``hook --log FILE``
-    For a hook command: appends one line per payload. It keeps ids, event names
-    and the names of the process's ``CLAUDE_CODE_*`` variables (values only for
-    the id and marker variables). It always exits 0.
+``hook --log FILE [--stdout TEXT] [--hold MS]``
+    For a hook command, under either runtime: appends one line per payload. It
+    keeps ids, event names, every payload key's *name and type* (never its
+    value, unless it is an id or enum key), the names of the process's
+    ``CLAUDE_CODE_*`` and ``CODEX_*`` variables (values only for the id and
+    marker variables), and the process's ancestors' command names (the owner
+    process, C2). ``--stdout`` prints TEXT for the runtime to read (C3's
+    injection nonce, or a JSON decision). ``--hold`` sleeps MS milliseconds and
+    then appends a second ``held`` line, so a killed hook shows as a missing
+    one (C1's ``SessionEnd`` budget). It always exits 0.
 ``setup --dir D --port P``
     Writes a throwaway settings file wiring ``hook`` to every event the
     canaries need, plus the bot env block of epic §6 P2. Then it prints the
@@ -67,10 +73,13 @@ VALUE_KEYS = frozenset({
 #: redacted attribute from one carrying text without the receiver ever storing the text.
 REDACTION_MARKERS = frozenset({"<REDACTED>", "[REDACTED]", "REDACTED"})
 #: Claude markers whose values the hook and the C10 probe keep. They are ids or flags.
-ENV_VALUES = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")
+ENV_VALUES = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT",
+              "CODEX_SESSION_ID", "CODEX_THREAD_ID")
+#: Runtime marker prefixes whose variable *names* a hook records.
+ENV_PREFIXES = ("CLAUDE_CODE_", "CODEX_")
 #: Hook payload fields worth keeping. Anything else (a prompt, a tool input or output) is dropped.
-PAYLOAD_KEPT = ("hook_event_name", "session_id", "source", "reason", "tool_name", "tool_use_id",
-                "agent_id", "agent_type")
+PAYLOAD_KEPT = ("hook_event_name", "session_id", "source", "reason", "trigger", "tool_name", "tool_use_id",
+                "agent_id", "agent_type", "turn_id")
 HOOK_EVENTS = ("SessionStart", "SessionEnd", "PostToolUse", "PostToolUseFailure", "SubagentStart", "SubagentStop")
 TEMPORALITY = {0: "unspecified", 1: "delta", 2: "cumulative"}
 OTLP_PATHS = ("/v1/logs", "/v1/metrics", "/v1/traces")
@@ -142,15 +151,48 @@ def logs_shape(doc: dict, received: float) -> list:
 
 
 def env_markers(env: dict) -> dict:
-    """The Claude markers in an environment: names of every ``CLAUDE_CODE_*``, values for the id/flag ones."""
-    names = sorted(k for k in env if k.startswith("CLAUDE_CODE_") or k == "CLAUDECODE")
+    """The runtime markers in an environment: names of every ``CLAUDE_CODE_*``/``CODEX_*``, values for the id/flag ones."""
+    names = sorted(k for k in env if k.startswith(ENV_PREFIXES) or k == "CLAUDECODE")
     return {"names": names, "values": {k: env[k] for k in ENV_VALUES if k in env}}
 
 
-def hook_record(payload: dict, env: dict, now: float) -> dict:
+def payload_shape(payload: dict) -> dict:
+    """Every payload key's type (and a string's length): the field names C1 asks for, with no values."""
+    def shape(value):
+        if isinstance(value, str):
+            return f"str:{len(value)}"
+        return type(value).__name__
+    return {k: shape(v) for k, v in sorted(payload.items())}
+
+
+def ancestors(pid: int, depth: int = 8) -> list:
+    """``[{pid, comm}]`` from ``pid``'s parent upwards: the owner-process walk C2 asks for (Linux and macOS)."""
+    chain = []
+    for _ in range(depth):
+        try:
+            out = subprocess.run(["ps", "-o", "ppid=,comm=", "-p", str(pid)], capture_output=True, text=True,
+                                 timeout=2).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            break
+        if not out:
+            break
+        ppid, _, comm = out.partition(" ")
+        if not ppid.strip().isdigit() or int(ppid) <= 1:
+            break
+        pid = int(ppid)
+        parent = subprocess.run(["ps", "-o", "comm=", "-p", str(pid)], capture_output=True, text=True,
+                                timeout=2).stdout.strip()
+        chain.append({"pid": pid, "comm": os.path.basename(parent)})
+    return chain
+
+
+def hook_record(payload: dict, env: dict, now: float, *, lineage: list | None = None) -> dict:
     """The log line for one hook payload: ids and names only, never conversation text."""
-    return {"ts": now, **{k: payload[k] for k in PAYLOAD_KEPT if payload.get(k) is not None},
-            "env": env_markers(env), "pid": os.getpid(), "ppid": os.getppid()}
+    row = {"ts": now, **{k: payload[k] for k in PAYLOAD_KEPT if payload.get(k) is not None},
+           "keys": payload_shape(payload), "env": env_markers(env), "pid": os.getpid(), "ppid": os.getppid()}
+    if lineage is not None:
+        row["ancestors"] = lineage
+    return row
 
 
 # --- receiver --------------------------------------------------------------------------------------
@@ -214,13 +256,24 @@ def cmd_receiver(args) -> int:
 
 def cmd_hook(args) -> int:
     try:
-        line = hook_record(json.loads(sys.stdin.read() or "{}"), dict(os.environ), time.time())
+        line = hook_record(json.loads(sys.stdin.read() or "{}"), dict(os.environ), time.time(),
+                           lineage=ancestors(os.getpid()))
     except Exception as exc:  # noqa: BLE001 - a canary must never break a session
         line = {"ts": time.time(), "hook_event_name": "canary-error", "error": repr(exc)}
     try:
         _append(Path(args.log), line)
     except OSError:
         pass
+    if args.stdout:
+        print(args.stdout, flush=True)
+    if args.hold:
+        time.sleep(args.hold / 1000)
+        try:
+            _append(Path(args.log), {"ts": time.time(), "held": args.hold,
+                                     "hook_event_name": line.get("hook_event_name"),
+                                     "session_id": line.get("session_id")})
+        except OSError:
+            pass
     return 0
 
 
@@ -348,6 +401,17 @@ def report(root: Path) -> dict:
     main_hooks = [h for h in hooks if not h.get("agent_id") and h.get("hook_event_name") == "PostToolUse"]
     out["main_tool_hooks_env"] = sorted({json.dumps(h["env"]["values"], sort_keys=True) for h in main_hooks})
     out["c10"] = _read(root / "c10.jsonl")
+    events = [h for h in hooks if "keys" in h]
+    out["payload_keys_by_event"] = {
+        ev: sorted({k for h in events if h.get("hook_event_name") == ev for k in h["keys"]})
+        for ev in sorted({str(h.get("hook_event_name")) for h in events})}
+    out["env_values_seen"] = sorted({json.dumps(h["env"]["values"], sort_keys=True) for h in events})
+    out["env_names_seen"] = sorted({n for h in events for n in h["env"]["names"]})
+    out["ancestor_comms"] = sorted({tuple(a["comm"] for a in h.get("ancestors", [])) for h in events})
+    held = {(h.get("hook_event_name"), h.get("session_id")) for h in hooks if "held" in h}
+    out["holds"] = [{"event": h.get("hook_event_name"), "session_id": h.get("session_id"),
+                     "completed": (h.get("hook_event_name"), h.get("session_id")) in held}
+                    for h in events if h.get("hook_event_name") in ("SessionEnd", "Stop")]
     return out
 
 
@@ -365,6 +429,8 @@ def main(argv=None) -> int:
     p.set_defaults(fn=cmd_receiver)
     p = sub.add_parser("hook")
     p.add_argument("--log", required=True)
+    p.add_argument("--stdout", default="", help="text to print for the runtime to read (C3)")
+    p.add_argument("--hold", type=int, default=0, help="sleep MS, then log a 'held' line (C1's SessionEnd budget)")
     p.set_defaults(fn=cmd_hook)
     p = sub.add_parser("setup")
     p.add_argument("--dir", required=True)

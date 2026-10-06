@@ -91,6 +91,33 @@ class TestHook:
         assert "CLAUDE_CODE_OAUTH_TOKEN" in line["env"]["names"]  # its name, never its value
 
 
+class TestCodexHook:
+    """The Codex batch (C1-C3) uses the same hook logger: field names and shapes, never values."""
+
+    def test_a_codex_payload_keeps_key_names_and_codex_ids_only(self):
+        payload = {"hook_event_name": "SessionStart", "session_id": "0199aaaa-bbbb", "source": "startup",
+                   "transcript_path": "/Users/someone/.codex/sessions/rollout.jsonl", "prompt": SECRET,
+                   "turn_id": "t1"}
+        env = {"CODEX_SESSION_ID": "0199aaaa-bbbb", "CODEX_THREAD_ID": "th-1", "CODEX_API_KEY": "sk-never"}
+        line = rnc.hook_record(payload, env, now=1.0, lineage=[{"pid": 2, "comm": "codex"}])
+        dumped = json.dumps(line)
+        assert SECRET not in dumped and "sk-never" not in dumped and "someone" not in dumped
+        assert line["keys"]["transcript_path"].startswith("str:") and line["keys"]["prompt"] == f"str:{len(SECRET)}"
+        assert line["env"]["values"] == {"CODEX_SESSION_ID": "0199aaaa-bbbb", "CODEX_THREAD_ID": "th-1"}
+        assert "CODEX_API_KEY" in line["env"]["names"] and line["ancestors"] == [{"pid": 2, "comm": "codex"}]
+
+    def test_stdout_and_hold_are_written_and_the_report_sees_a_completed_hold(self, tmp_path, capsys):
+        log = tmp_path / "hooks.jsonl"
+        payload = json.dumps({"hook_event_name": "SessionEnd", "session_id": SID, "reason": "other"})
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(sys, "stdin", __import__("io").StringIO(payload))
+            assert rnc.main(["hook", "--log", str(log), "--stdout", "nonce-123", "--hold", "10"]) == 0
+        assert capsys.readouterr().out.strip() == "nonce-123"
+        out = rnc.report(tmp_path)
+        assert out["holds"] == [{"event": "SessionEnd", "session_id": SID, "completed": True}]
+        assert out["payload_keys_by_event"]["SessionEnd"] == ["hook_event_name", "reason", "session_id"]
+
+
 class TestReport:
     def test_ids_join_across_hook_bash_and_exporter(self, tmp_path):
         (tmp_path / "otlp").mkdir()

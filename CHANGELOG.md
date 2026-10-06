@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — the P0 canary harness records Codex hook payloads (#2145, Codex batch)
+
+`harness/runtime-neutral-canary.py hook` now serves the Codex batch (C1–C3) as well as Claude's. Each line keeps every payload key's name and type (a string's length, never its value), the names of the process's `CODEX_*` variables with values only for `CODEX_SESSION_ID`/`CODEX_THREAD_ID`, and its ancestors' command names (the owner-process walk, C2). `--stdout TEXT` prints a nonce or a JSON decision for the runtime to read (C3), and `--hold MS` logs a second line after a sleep, so a hook the runtime kills shows as a missing one (C1's `SessionEnd` budget). `report` adds the payload keys per event, the env names and values seen, the ancestor chains and the holds. A measurement instrument; nothing in production calls it.
+
 ### Fixed — the at-mention guard reads `gh api --input` request bodies, and the reviewer instructions agree on the route (#1537)
 
 #2181 taught reviewers to post a verdict with `gh api -X POST …/pulls/N/reviews --input review.json`, so that GitHub returns the review's URL. The at-mention guard (#1019) did not cover that route. It had no `@` in the command, and `--input` was neither a writer nor a file it scanned. So a handle in the review's body went out unchecked, and so did one in the issue-comment variant.
