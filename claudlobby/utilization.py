@@ -61,6 +61,8 @@ class BotUtilization:
     # Observed heartbeat BUSY streak, not assignment age.
     busy_age_secs: int | None = None
     current_task: str | None = None
+    # Open assignments: more than one means current_task is the first of them (#2179).
+    open_assignments: int | None = None
     state: str = "unknown"
     stall: bool = False
     work_assignments: tuple[CurrentWork, ...] = ()
@@ -188,6 +190,7 @@ def compute_bot_utilization(
         idle_since=idle_since,
         busy_age_secs=busy_age_secs,
         current_task=work.current_task if work else None,
+        open_assignments=work.open_assignments if work else None,
         state=state,
         stall=stall,
         work_assignments=work.assignments if work else (),
