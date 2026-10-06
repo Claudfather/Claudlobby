@@ -314,3 +314,44 @@ def test_backtick_is_decided_by_the_span_parser_not_the_lookbehind():
 
     closed = "`@vera` is code"
     assert mr.rewrite(closed, {"vera"}, set(), style="backtick") == closed
+
+
+# --- --report --json-strings: a request body passed with `gh api --input` (#1537) ---
+# The same-identity protocol posts a review with `gh api … --input review.json`,
+# and that file is JSON: a body line that starts with a handle reads as the
+# escape `\n`, then the sigil, then the name, in its raw text; the escape's `n`
+# hides the sigil from _MENTION.
+
+import json
+import subprocess
+import sys
+
+
+def _cli(tmp_path, stdin, *flags):
+    bots = tmp_path / "bots"
+    bots.write_text("\n".join(sorted(BOTS)) + "\n")
+    return subprocess.run([sys.executable, str(_SRC), "--bots", str(bots), "--report", *flags],
+                          input=stdin, capture_output=True, text=True, timeout=30)
+
+
+def test_json_strings_reads_every_string_value_and_no_key():
+    doc = {"event": "COMMENT", "body": "a", "comments": [{"body": "b", "line": 3}], "n": 3}
+    assert mr.json_strings(doc) == ["COMMENT", "a", "b"]
+
+
+def test_a_handle_at_a_body_line_start_is_caught_only_when_the_json_is_decoded(tmp_path):
+    body = json.dumps({"event": "COMMENT", "body": f"verdict\n{AT}vera please re-run\n"})
+    raw = _cli(tmp_path, body)
+    assert raw.returncode == 0 and raw.stdout == "", "the raw text hides it: the case this mode exists for"
+    decoded = _cli(tmp_path, body, "--json-strings")
+    assert decoded.returncode == 1 and decoded.stdout.split() == ["2:vera"]
+
+
+def test_json_strings_respects_a_fence_as_a_body_file_does(tmp_path):
+    body = json.dumps({"body": f"verdict\n```\n{AT}vera inside a fence\n```\n"})
+    assert _cli(tmp_path, body, "--json-strings").returncode == 0
+
+
+def test_json_strings_reads_text_that_is_not_json_as_text(tmp_path):
+    out = _cli(tmp_path, f"plain\n{AT}ravi hello\n", "--json-strings")
+    assert out.returncode == 1 and out.stdout.split() == ["2:ravi"]

@@ -3086,6 +3086,32 @@ harness_check "  BY-REF: STDIN is refused — unreadable, so unverifiable" "$r"
 grep -q 'worker-2' "$GM_DIRTY" && r=yes || r=no
 harness_check "  BY-REF: the refused file is NOT modified on disk (it is the author's)" "$r"
 
+# --- gh api --input: the review and comment POSTs the same-identity protocol
+# teaches (#1537). The request body is JSON, read with each string decoded, so a
+# handle at a body line's start (`\n@name` in the raw text) counts too. A body
+# the hook cannot read before the post (stdin, a file this same command writes,
+# a file that does not exist yet) is refused, never allowed unread.
+GM_JDIRTY="$GM_ROOT/dirty.json"; jq -Rs '{event: "COMMENT", body: .}' "$GM_DIRTY" > "$GM_JDIRTY"
+GM_JCLEAN="$GM_ROOT/clean.json"; jq -Rs '{event: "COMMENT", body: .}' "$GM_CLEAN" > "$GM_JCLEAN"
+GM_JSTART="$GM_ROOT/linestart.json"
+printf 'verdict\n@worker-2 please re-run\n' | jq -Rs '{event: "COMMENT", body: .}' > "$GM_JSTART"
+for _shape in "-X POST repos/o/r/pulls/1/reviews --input $GM_JDIRTY" \
+              "-X POST repos/o/r/issues/1/comments --input $GM_JDIRTY" \
+              "-X POST repos/o/r/pulls/1/reviews --input=$GM_JDIRTY" \
+              "-X POST repos/o/r/pulls/1/reviews --input $GM_JSTART" \
+              "-X POST repos/o/r/pulls/1/reviews --input $GM_ROOT/missing.json"; do
+    [ "$(_dec '{"tool_name":"Bash","tool_input":{"command":"gh api '"$_shape"'"}}')" = deny ] && r=yes || r=no
+    harness_check "  BY-REF: gh api --input with a mention or unreadable is REFUSED ($_shape)" "$r"
+done
+[ "$(_dec '{"tool_name":"Bash","tool_input":{"command":"gh api -X POST repos/o/r/pulls/1/reviews --input '"$GM_JCLEAN"'"}}')" = none ] && r=yes || r=no
+harness_check "  BY-REF: gh api --input with a clean body passes untouched" "$r"
+[ "$(_dec '{"tool_name":"Bash","tool_input":{"command":"jq -Rs . x.md | gh api -X POST repos/o/r/issues/1/comments --input -"}}')" = deny ] && r=yes || r=no
+harness_check "  BY-REF: gh api --input - (STDIN) is refused" "$r"
+[ "$(_dec '{"tool_name":"Bash","tool_input":{"command":"jq -Rs . x.md > '"$GM_JCLEAN"'; gh api -X POST repos/o/r/pulls/1/reviews --input '"$GM_JCLEAN"'"}}')" = deny ] && r=yes || r=no
+harness_check "  BY-REF: gh api --input of a file the same command writes is refused" "$r"
+grep -q 'worker-2' "$GM_JDIRTY" && r=yes || r=no
+harness_check "  BY-REF: the refused --input file is NOT modified on disk" "$r"
+
 rm -rf "$GM_ROOT"
 
 # ===========================================================================
