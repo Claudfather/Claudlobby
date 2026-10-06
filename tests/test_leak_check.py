@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -406,6 +407,51 @@ def test_the_workflow_keeps_its_own_safety_properties():
     action = yaml.safe_load((SCRIPT.parent / "action.yml").read_text())
     for step in steps + action["runs"]["steps"]:
         assert "${{" not in str(step.get("run", "")), step
+
+
+def test_nothing_from_the_pull_request_is_checked_out_or_run():
+    """pull_request_target hands the job the base repository's secrets, so the
+    job runs nothing of the pull request's: one checkout, of the base, the check
+    taken from that checkout, and the head fetched as git objects to be diffed."""
+    import yaml
+
+    wf = yaml.safe_load((REPO / ".github" / "workflows" / "leak-check.yml").read_text())
+    job = wf["jobs"]["leak-check"]
+    assert "permissions" not in job  # the workflow's `contents: read` is the job's
+    steps = job["steps"]
+    uses = [str(s.get("uses", "")) for s in steps]
+    assert [u for u in uses if u.startswith("actions/checkout")] == ["actions/checkout@v4"]
+    assert uses.index("./.github/actions/leak-check") > uses.index("actions/checkout@v4")
+    assert not [u for u in uses if u.startswith(("actions/cache", "actions/upload-artifact"))]
+    action = yaml.safe_load((SCRIPT.parent / "action.yml").read_text())
+    runs = [str(s.get("run", "")) for s in steps + action["runs"]["steps"]]
+    verbs = r"\bgit\s+(?:checkout|switch|worktree|reset|merge|pull|apply|am|cherry-pick|submodule)\b"
+    assert not [r for r in runs if re.search(verbs, r)], runs
+    assert [r for r in runs if "refs/pull/${PR}/head:refs/leak-check/head" in r]
+    assert [r for r in runs if r.startswith('python3 "$GITHUB_ACTION_PATH/leak_check.py"')]
+
+
+def test_no_diff_driver_runs_even_when_git_configuration_names_one(tmp_path):
+    """The change is read with --no-ext-diff and --no-textconv: an external diff
+    or a textconv driver, selected by the change's own .gitattributes and
+    defined in the environment's git configuration, never runs."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    g, env = _scratch_repo(repo)
+    (repo / "a.md").write_text("base\n")
+    base = _commit(g, env, "base")
+    marker = tmp_path / "driver-ran"
+    driver = tmp_path / "driver.sh"
+    driver.write_text(f"#!/bin/sh\ntouch {marker}\ncat \"$1\" 2>/dev/null\n")
+    driver.chmod(0o755)
+    (repo / ".gitattributes").write_text("* diff=planted\n")
+    (repo / "b.md").write_text("ok\n" + INVENTED_TEXT + "\n")
+    _commit(g, env, "change")
+    env = dict(env, GIT_EXTERNAL_DIFF=str(driver), GIT_CONFIG_COUNT="1",
+               GIT_CONFIG_KEY_0="diff.planted.textconv", GIT_CONFIG_VALUE_0=str(driver))
+    p = _check_git(repo, base, env)
+    assert not marker.exists(), "a diff driver ran while the change was read"
+    assert p.returncode == 1 and "b.md:2: private term #1" in p.stdout, (p.stdout, p.stderr)
 
 
 def test_the_action_never_traces_or_echoes_the_list():
