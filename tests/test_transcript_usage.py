@@ -434,3 +434,178 @@ class TestCommsShareCostWeighted:
         comms_est = (len(TG_TEXT) + len(BASH_COMMS_CMD)) // 4
         exp_share = 100.0 * comms_est * 5.0 / MAIN["cw"]
         assert f"{exp_share:.2f}% of spend" in out.stdout
+
+
+# --- the live context and compaction rows (#2206) --------------------------
+
+
+def _usage(ts, inp, cc, cr, out=9, *, sidechain=False, model=MODEL):
+    row = _turn({"input_tokens": inp, "cache_creation_input_tokens": cc,
+                 "cache_read_input_tokens": cr, "output_tokens": out},
+                [{"type": "text", "text": "ok"}], sidechain=sidechain, model=model)
+    row["timestamp"] = ts
+    return row
+
+
+def _said(ts, text="go on"):
+    return {"type": "user", "isSidechain": False, "sessionId": "s1", "timestamp": ts,
+            "message": {"role": "user", "content": text}}
+
+
+def _boundary(ts, pre, post=None, trigger="manual", uuid="b1"):
+    """A compact_boundary row: keys from a live 2.1 transcript, values invented."""
+    meta = {"trigger": trigger, "preTokens": pre}
+    if post is not None:
+        meta["postTokens"] = post
+    return {"parentUuid": None, "logicalParentUuid": "p0", "isSidechain": False,
+            "type": "system", "subtype": "compact_boundary",
+            "content": "Conversation compacted", "level": "info", "compactMetadata": meta,
+            "uuid": uuid, "timestamp": ts, "sessionId": "s1"}
+
+
+def _one_bot(tmp_path, bot="b"):
+    """One bot whose account directory is under tmp_path, and where its
+    current-cwd transcripts go."""
+    from types import SimpleNamespace
+    from claudlobby.isolation import transcript_slug
+
+    fleet = SimpleNamespace(name="f", bots={bot: SimpleNamespace(account=bot)},
+                            accounts={bot: str(tmp_path / "acct" / bot)})
+    paths = SimpleNamespace(root=tmp_path, bot_runtime=lambda b: tmp_path / "runtime" / b)
+    directory = tmp_path / "acct" / bot / "projects" / transcript_slug(paths.bot_runtime(bot))
+    return fleet, paths, directory
+
+
+def _session(directory, name, rows, *, mtime=None):
+    import os
+
+    directory.mkdir(parents=True, exist_ok=True)
+    path = _write(directory, rows, name)
+    if mtime is not None:
+        os.utime(path, (mtime, mtime))
+    return path
+
+
+class TestCurrentContext:
+    """#2206 proposal 1: a bot's live context is its newest main-chain usage
+    row (input + cache read + cache creation) with that row's time; null with
+    a reason, never 0, when no such row can be read."""
+
+    def test_the_context_is_the_newest_main_chain_usage_row(self, tmp_path):
+        fleet, paths, d = _one_bot(tmp_path)
+        _session(d, "s1.jsonl", [
+            _usage("2026-10-06T20:00:00Z", 5, 100, 1000),
+            _said("2026-10-06T20:00:30Z"),
+            # 7 + 300 + 503079 = 503386; output (999) is not context
+            _usage("2026-10-06T20:31:02.250Z", 7, 300, 503079, out=999),
+            _said("2026-10-06T20:31:05Z", "x" * 5000)])
+        ctx = tu.current_context(paths, fleet, "b")
+        assert ctx["tokens"] == 503386
+        assert ctx["at"] == "2026-10-06T20:31:02.250000+00:00"
+        assert (ctx["reason"], ctx["session"], ctx["compacted_after"]) == (None, "s1", None)
+
+    def test_a_sidechain_row_is_never_the_context(self, tmp_path):
+        fleet, paths, d = _one_bot(tmp_path)
+        _session(d, "s1.jsonl", [_usage("2026-10-06T20:00:00Z", 1, 2, 3),
+                                 _usage("2026-10-06T20:01:00Z", 50, 60, 70, sidechain=True)])
+        assert tu.current_context(paths, fleet, "b")["tokens"] == 6  # 1 + 2 + 3
+
+    def test_only_the_newest_top_level_transcript_is_read(self, tmp_path):
+        fleet, paths, d = _one_bot(tmp_path)
+        _session(d, "old.jsonl", [_usage("2026-10-06T23:00:00Z", 9, 9, 900000)], mtime=1_000)
+        _session(d, "new.jsonl", [_usage("2026-10-06T20:00:00Z", 1, 1, 18)], mtime=2_000)
+        # A subagent's transcript nests below its session, newer than both.
+        _session(d / "new" / "subagents", "agent-1.jsonl",
+                 [_usage("2026-10-06T23:30:00Z", 4, 4, 400000)], mtime=3_000)
+        ctx = tu.current_context(paths, fleet, "b")
+        assert (ctx["tokens"], ctx["session"]) == (20, "new")
+
+    def test_no_transcript_is_null_with_a_reason_never_zero(self, tmp_path):
+        fleet, paths, d = _one_bot(tmp_path)
+        missing = tu.current_context(paths, fleet, "b")
+        assert missing["tokens"] is None
+        assert missing["reason"] == "transcript_directory_missing_or_untrusted"
+        d.mkdir(parents=True)
+        empty = tu.current_context(paths, fleet, "b")
+        assert (empty["tokens"], empty["reason"]) == (None, "no_transcript")
+        fleet.accounts["b"] = "relative/account"
+        unresolved = tu.current_context(paths, fleet, "b")
+        assert (unresolved["tokens"], unresolved["reason"]) == (
+            None, "account_directory_unresolved")
+
+    def test_a_session_without_a_usage_row_is_null_not_zero(self, tmp_path):
+        fleet, paths, d = _one_bot(tmp_path)
+        _session(d, "s1.jsonl", [_said("2026-10-06T20:00:00Z")])
+        ctx = tu.current_context(paths, fleet, "b")
+        assert (ctx["tokens"], ctx["reason"]) == (None, "no_main_usage_row_in_transcript")
+
+    def test_a_synthetic_zero_usage_row_is_not_the_context(self, tmp_path):
+        """Claude Code writes its own assistant row for an error or an
+        interrupt (model <synthetic>, every usage field 0). It is no API call,
+        so it is no context; three of four real sessions measured hold one."""
+        fleet, paths, d = _one_bot(tmp_path)
+        synthetic = _usage("2026-10-06T20:01:00Z", 0, 0, 0, out=0, model="<synthetic>")
+        _session(d, "s1.jsonl", [_usage("2026-10-06T20:00:00Z", 2, 3, 4), synthetic])
+        assert tu.current_context(paths, fleet, "b")["tokens"] == 9
+        _session(d, "s2.jsonl", [synthetic], mtime=4_000_000_000)
+        ctx = tu.current_context(paths, fleet, "b")
+        assert (ctx["tokens"], ctx["session"]) == (None, "s2")
+
+    def test_the_read_is_bounded_and_runs_from_the_end(self, tmp_path):
+        fleet, paths, d = _one_bot(tmp_path)
+        path = _session(d, "s1.jsonl", [_said("2026-10-06T19:00:00Z", "y" * 200_000),
+                                        _usage("2026-10-06T20:00:00Z", 1, 2, 3),
+                                        _said("2026-10-06T20:00:01Z", "z" * 3000)])
+        found = tu.current_context(paths, fleet, "b")
+        assert found["tokens"] == 6
+        assert found["bytes_read"] < path.stat().st_size  # the 200 KB head is never read
+        capped = tu.current_context(paths, fleet, "b", cap=1024)
+        assert (capped["tokens"], capped["reason"]) == (None, "no_main_usage_row_within_cap")
+        assert capped["bytes_read"] <= 1024
+
+    def test_a_compaction_after_the_newest_usage_row_is_named(self, tmp_path):
+        fleet, paths, d = _one_bot(tmp_path)
+        before = _usage("2026-10-06T20:31:02Z", 7, 300, 503079)
+        boundary = _boundary("2026-10-06T20:33:29.519Z", 503386, 17666)
+        _session(d, "s1.jsonl", [before, boundary])
+        ctx = tu.current_context(paths, fleet, "b")
+        assert ctx["tokens"] == 503386
+        assert ctx["compacted_after"] == {"at": "2026-10-06T20:33:29.519000+00:00",
+                                          "trigger": "manual", "pre_tokens": 503386,
+                                          "post_tokens": 17666}
+        # Once a call follows the compaction, that call is the context.
+        _session(d, "s1.jsonl", [before, boundary, _usage("2026-10-06T20:34:00Z", 3, 17000, 900)])
+        later = tu.current_context(paths, fleet, "b")
+        assert (later["tokens"], later["compacted_after"]) == (17903, None)
+
+    def test_an_unreadable_transcript_is_null_with_a_reason(self, tmp_path):
+        import os
+        import pytest
+
+        if os.geteuid() == 0:
+            pytest.skip("root reads a mode-000 file")
+        fleet, paths, d = _one_bot(tmp_path)
+        path = _session(d, "s1.jsonl", [_usage("2026-10-06T20:00:00Z", 1, 2, 3)])
+        path.chmod(0)
+        try:
+            ctx = tu.current_context(paths, fleet, "b")
+        finally:
+            path.chmod(0o600)
+        assert (ctx["tokens"], ctx["reason"]) == (None, "unreadable_transcript_file")
+
+
+class TestCompactionRow:
+    def test_a_boundary_row_reads_trigger_tokens_and_time(self):
+        row = tu.compaction_row(_boundary("2026-10-06T20:33:29.519Z", 503386, 17666, uuid="u9"))
+        assert row == {"at": "2026-10-06T20:33:29.519000+00:00", "trigger": "manual",
+                       "pre_tokens": 503386, "post_tokens": 17666, "session": "s1", "uuid": "u9"}
+
+    def test_an_unfinished_boundary_reads_post_tokens_null_not_zero(self):
+        assert tu.compaction_row(_boundary("2026-10-06T20:33:29Z", 503386))["post_tokens"] is None
+
+    def test_other_rows_are_not_compactions(self):
+        assert tu.compaction_row(_usage("2026-10-06T20:00:00Z", 1, 2, 3)) is None
+        assert tu.compaction_row({"type": "system", "subtype": "api_error"}) is None
+        undated = _boundary("2026-10-06T20:33:29Z", 1, 2)
+        del undated["timestamp"]
+        assert tu.compaction_row(undated) is None

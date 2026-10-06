@@ -887,3 +887,48 @@ class TestCollectFleetStatus:
         assert alex.tmux_alive is False
         assert alex.state == "down", alex.state
         assert (alex.state == "down") == (not alex.tmux_alive)
+
+
+# -- each bot's live context (#2206) -------------------------------------------
+
+
+class TestContextInStatus:
+    """Each bot's live context rides fleet status from the transcript reader
+    `fleet usage` uses: null with the reader's reason when the transcript
+    cannot answer, never 0."""
+
+    def _transcript(self, mock_paths, bot, rows):
+        from claudlobby.isolation import transcript_slug
+        from tests.conftest import write_jsonl
+
+        directory = Path.home() / ".claude" / "projects" / transcript_slug(
+            mock_paths.bot_runtime(bot))
+        directory.mkdir(parents=True)
+        write_jsonl(directory / "s1.jsonl", rows)
+
+    def test_each_bots_context_rides_fleet_status(self, mock_fleet, mock_paths):
+        self._transcript(mock_paths, "alice", [{
+            "type": "assistant", "isSidechain": False, "sessionId": "s1",
+            "timestamp": "2026-10-06T20:31:02Z",
+            "message": {"role": "assistant", "model": "m", "content": [],
+                        "usage": {"input_tokens": 7, "cache_creation_input_tokens": 300,
+                                  "cache_read_input_tokens": 503079, "output_tokens": 9}}}])
+        with (
+            patch("claudlobby.status._check_tmux_sessions", return_value=set()),
+            patch("claudlobby.status._check_systemd_service", return_value=(True, "exited")),
+        ):
+            results = collect_fleet_status(mock_fleet, mock_paths)
+        alice = next(bs for bs in results if bs.name == "alice")
+        bob = next(bs for bs in results if bs.name == "bob")
+        assert alice.context["tokens"] == 503386          # 7 + 300 + 503079
+        assert bob.context["tokens"] is None              # no transcript: unknown, not 0
+        assert bob.context["reason"] == "transcript_directory_missing_or_untrusted"
+        rows = {row["name"]: row for row in json.loads(format_json(results, "f"))["bots"]}
+        assert rows["alice"]["context"]["tokens"] == 503386
+        assert rows["alice"]["context"]["at"] == "2026-10-06T20:31:02+00:00"
+        assert rows["bob"]["context"]["tokens"] is None
+        table = format_table(results, "test-fleet")
+        assert "CONTEXT" in table and "503k" in table
+        assert "Context:    503,386 tokens" in format_bot_detail(alice)
+        assert ("Context:    unknown (transcript_directory_missing_or_untrusted)"
+                in format_bot_detail(bob))
