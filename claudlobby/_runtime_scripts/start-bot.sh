@@ -265,7 +265,16 @@ TGTOKEOF
 CLAUDE="$(fleet_claude_bin)"
 # CLAUDE_FLAGS is composed into every bot.conf; the :- guard keeps a minimal or
 # hand-written conf that omits it from aborting boot under `set -u`.
-CLAUDE_CMD=". '$BOT_ENV_FILE'; exec $CLAUDE ${CLAUDE_FLAGS:-} --name \"$SESSION_NAME\""
+# CLAUDECODE, CLAUDE_CODE_CHILD_SESSION and CLAUDE_CODE_SESSION_ID are scrubbed
+# in the pane shell, after the env file and right before exec. A tmux server
+# started from inside a Claude Code session hands its panes that session's
+# markers and id (#2145 C10, measured 2026-10-05), and an interactive claude
+# that inherits the child marker boots with transcript saving off: no
+# transcript, so no --resume and nothing for a transcript reader. The bot's own
+# claude sets all three for its children, so unsetting the leaked ones costs
+# nothing. Removing the cause beats forcing persistence back on, which would
+# mask it.
+CLAUDE_CMD=". '$BOT_ENV_FILE'; unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID; exec $CLAUDE ${CLAUDE_FLAGS:-} --name \"$SESSION_NAME\""
 
 # Update third-party plugins before launch. Handles cold start (fresh
 # host with no plugins installed) through full lifecycle: register

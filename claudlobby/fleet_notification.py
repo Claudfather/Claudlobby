@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from hashlib import sha256
 import os
 from pathlib import Path
 import re
@@ -16,6 +15,7 @@ from .env_tiers import resolve as resolve_tiers
 from .message_context import _transport
 from .operation_context import resolve_operation_scope
 from .plane.emit_api import emit_batch
+from .plane.fleet_events import fleet_event_request
 from .plane.ids import mint_event_id
 from .recording_alerts import (_TIER_KEYS, ChannelOutcome, RecordingAlertOutcome,
                                send_fleet_notification)
@@ -88,14 +88,12 @@ def notify_fleet(*, root: Path | None, fleet: str | None, level: str,
         event_id = mint_event_id()
         request_id = str(uuid4())
         at = datetime.now(timezone.utc)
-        raw = {"event_id": event_id, "event_type": "system", "emitter": "fleet-notify",
-               "fleet": selected.fleet.name,
-               "source_ref": "fleet-events:sha:" + sha256(request_id.encode("ascii")).hexdigest(),
-               "payload": {"event": "fleet_alert" if level == "alert" else "fleet_notice",
-                           "subject_kind": "fleet", "subject": selected.fleet.name,
-                           "data": {"source": "fleet-notify", "legacy_ts": at.isoformat(),
-                                    "data": {"event": event, "message": message,
-                                             "request_id": request_id, "at": at.isoformat()}}}}
+        raw = fleet_event_request(
+            "fleet_alert" if level == "alert" else "fleet_notice",
+            fleet=selected.fleet.name, subject_kind="fleet", subject=selected.fleet.name,
+            source="fleet-notify",
+            data={"event": event, "message": message, "request_id": request_id, "at": at.isoformat()},
+            occurred_at=at.isoformat(), legacy_ts=at.isoformat(), event_id=event_id, key=request_id)
         try:
             recorded = emit(selected.paths.root, [raw], require_commit=True)[0]
             recording = "committed" if recorded.status in {"committed", "duplicate"} else "unknown"

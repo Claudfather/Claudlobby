@@ -677,6 +677,10 @@ class BotPayload(_Strict):
     service: str
     model: str
     effort: Optional[str] = None
+    # #2145: absent = claude (keyframes before P1, and every claude keyframe —
+    # registry_emit writes the key only for a non-claude bot). Mirrors
+    # known_values.KNOWN_AGENT_CLIS (pinned by tests/test_plane_contracts.py).
+    agent_cli: Optional[Literal["claude", "codex"]] = None
     org: dict = {}
     equipment: dict = {}
     posture: _BotPosture
