@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — the P0 canary harness records Codex hook payloads (#2145, Codex batch)
+
+`harness/runtime-neutral-canary.py hook` now serves the Codex batch (C1–C3) as well as Claude's. Each line keeps every payload key's name and type (a string's length, never its value), the names of the process's `CODEX_*` variables with values only for `CODEX_SESSION_ID`/`CODEX_THREAD_ID`, and its ancestors' command names from one `ps` snapshot, basenames only (the owner-process walk, C2). `--stdout TEXT` prints a nonce or a JSON decision for the runtime to read (C3), and `--hold MS` marks the line, sleeps, then logs a second line under the same pid, so a hook the runtime kills shows as a hold that never completed (C1's `SessionEnd` budget). `report` adds the payload keys per event, the env names and values seen, the ancestor chains, and each hold with whether it completed and after how long. A measurement instrument; nothing in production calls it.
+
 ### Fixed — a receipt check and `plane doctor` no longer call a working ingest down (#2086)
 
 When a receipt check could not settle whether its message's proof was still queued, it said "Plane ingest is down or its pending queues cannot be inspected", whatever had stopped it. `plane doctor` called the hour an orphaned stage waits for replay "not keeping up or is paused", and called a daemon that missed one 2 s probe "not serving". On a loaded host all three appeared while ingest was up.
