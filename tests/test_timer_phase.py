@@ -13,6 +13,7 @@ second. Any other interval keeps OnUnitActiveSec= with only a first-run offset.
 from __future__ import annotations
 
 from datetime import datetime
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -421,18 +422,19 @@ def test_an_interval_with_no_clock_points_is_not_anchored(interval):
 def test_systemd_reads_each_anchored_expression_as_one_run_per_interval(job):
     interval, expressions = EXPECTED[job]
     for expression in expressions:
+        # systemd-analyze prints each elapse in the local zone, with an extra
+        # "(in UTC)" line only when that zone is not UTC: pin the zone.
         out = subprocess.run(
             ["systemd-analyze", "calendar", "--iterations=3", expression],
             capture_output=True,
             text=True,
             check=True,
+            env={**os.environ, "TZ": "UTC"},
         ).stdout
         elapses = [
-            datetime.strptime(
-                line.split("):", 1)[1].strip(), "%a %Y-%m-%d %H:%M:%S UTC"
-            )
-            for line in out.splitlines()
-            if line.strip().startswith("(in UTC)")
+            datetime.strptime(line.split(": ", 1)[1], "%a %Y-%m-%d %H:%M:%S UTC")
+            for line in map(str.strip, out.splitlines())
+            if line.startswith(("Next elapse:", "Iter. #"))
         ]
         assert len(elapses) == 3, out
         assert [(b - a).total_seconds() for a, b in zip(elapses, elapses[1:])] == [
