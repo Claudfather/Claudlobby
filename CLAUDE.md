@@ -84,13 +84,13 @@ One line per script, for routing; operators use the public CLI. **Before changin
 - `spin-down-bot.sh` — full teardown for canary/throwaway bots; `--purge` also deletes the bot dir
 - `pre-stop-handoff.sh` — graceful context handoff before a service stop
 - `keepalive.sh` — per-bot watchdog: restarts a dead session and records heartbeat samples
-- `usage-limit.py` — reads a pane for a usage-limit stop: the limit, its reset, and what holds the screen
-- `usage-limit-hook.sh` — StopFailure and Stop hook: the bot's own record of a usage-limit stop
+- `usage-limit.py` — reads a pane for a usage-limit stop and its reset time
+- `usage-limit-hook.sh` — StopFailure/Stop hook: records a usage-limit stop
 - `keepalive-all.sh` — run keepalive for every bot
 - `reconcile-fleet.sh` — audit supervision state: healthy, orphan, missing, unsupervised-down, unbound
-- `supervisor.sh` — systemd/launchd adapter; the one door for new `systemctl`/`launchctl` calls (other files are ratcheted at their current count)
+- `supervisor.sh` — systemd/launchd adapter; the one door for new `systemctl`/`launchctl` calls
 - `supervisor-caller.py` — kernel ancestry check for the adapter, so a bot cannot stop its own coordinator
-- `bot-unit-owner.py` — reads a unit's working directory for the adapter without running it; foreign units are left alone, unreadable ownership refuses
+- `bot-unit-owner.py` — reads a unit's working directory for the adapter without running it
 - `runtime-admission.sh` — startup and watchdog release check, and the activation lock
 - `rolling-restart.sh` — restart bots one at a time, each gated on a fresh Telegram `BRIDGE_READY`
 - `weekly-worker-restart.sh` — weekly lossless restart of workers (not managers) onto the staged binary (opt-in)
@@ -151,7 +151,7 @@ One line per script, for routing; operators use the public CLI. **Before changin
 - `git-pull-all.sh` — pull every repo in a bot's `projects/`
 - `data-sweep.sh` — weekly purge of vetted ephemeral files in bots' `data/`
 - `check-npx-cache.sh` — check that MCP server packages are cached
-- `update-claude-code.sh` — daily Claude Code update, no fleet bounce; in place by default (a failed install leaves no runnable `claude`), staged only when armed (opt-in)
+- `update-claude-code.sh` — daily Claude Code update, no fleet bounce; in place by default, staged only when armed (opt-in)
 - `update-siblings.sh` — weekly fast-forward of sibling checkouts to their newest release (opt-in)
 - `bot-sweep-cron.sh` — periodic bot sweep via cron
 - `code-audit-sweep.sh` — picks the stalest repo for a code audit, hands it to its owner (opt-in)

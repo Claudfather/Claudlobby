@@ -424,11 +424,15 @@ def test_the_resume_is_a_plane_event_and_the_tick_a_limit_sample(
     deadline = time.monotonic() + 20
     rows: list[dict] = []
     while time.monotonic() < deadline:
+        # The heartbeat emit is backgrounded, so a batch can be staged after
+        # the replay: replay and read again until a read sees no staged batch.
         _replay_pending(tmp_path)
-        rows = [
-            json.loads(l)
-            for l in read_fleet_events(tmp_path, allow_absent=True).splitlines()
-        ]
+        try:
+            text = read_fleet_events(tmp_path, allow_absent=True)
+        except AssertionError:
+            time.sleep(0.2)
+            continue
+        rows = [json.loads(l) for l in text.splitlines()]
         if any(row.get("type") == "keepalive_limit_resume" for row in rows):
             break
         time.sleep(0.2)

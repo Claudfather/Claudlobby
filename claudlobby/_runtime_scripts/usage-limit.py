@@ -235,8 +235,11 @@ def read_pane(text, anchor, tz_name=None):
     title = [k for k, l in enumerate(rest) if l.strip() == MENU_TITLE]
     if title:
         options = rest[title[0] + 1 :]
+        # An option's label: its line without the pointer, the indent and the
+        # number, so the wait option is found by its words on any line.
         labels = [
-            _OPTION_NUM_RE.sub("", _POINTER_RE.sub("", l)).strip() for l in options
+            _OPTION_NUM_RE.sub("", _POINTER_RE.sub("", l).strip()).strip()
+            for l in options
         ]
         if WAIT_LABEL not in labels:
             return ("modal", epoch, "-", native, name, reset)

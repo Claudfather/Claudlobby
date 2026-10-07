@@ -253,13 +253,13 @@ def test_another_menu_over_a_limit_is_another_dialog():
 
 
 def test_a_frame_with_neither_the_box_nor_the_menu_is_another_dialog():
-    """A safeguards pause, a permission prompt, a frame mid-redraw: no box under
-    the limit line and no usage-limit menu, so the reader claims nothing."""
+    """A safeguards pause, a permission prompt, any dialog Claude Code draws in
+    place of the box: no box under the limit line and no usage-limit menu, so
+    the reader claims nothing it could send a key to."""
     lines = _frame("held").split("\n")
     cut = next(i for i, l in enumerate(lines) if set(l.strip()) == {"─"})
-    frame = "\n".join(
-        lines[:cut] + ["", "  This conversation is paused.", "   Esc to dismiss"]
-    )
+    frame = "\n".join(lines[:cut] + ["▔" * 80, "   This conversation is paused.", "",
+                                     "   Esc to dismiss"])
     assert _read(frame)[0] == "modal"
 
 
