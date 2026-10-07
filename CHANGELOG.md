@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the oversize-request daemon test passes when the daemon closes before the test's shutdown (#2215)
+
+`test_oversize_request_refused_not_fatal` guarded its send but not the `shutdown(SHUT_WR)` after it. When the send fit and the daemon refused and closed before that shutdown, macOS raised ENOTCONN where Linux returns, and a macOS lane failed (CI run 37550245839, attempt 1). The shutdown now sits inside the send's guard, so either order is an expected outcome. The test still checks any refusal it reads, and that the daemon serves the next request. Test-only.
+
 ### Fixed — a receipt check and `plane doctor` no longer call a working ingest down (#2086)
 
 When a receipt check could not settle whether its message's proof was still queued, it said "Plane ingest is down or its pending queues cannot be inspected", whatever had stopped it. `plane doctor` called the hour an orphaned stage waits for replay "not keeping up or is paused", and called a daemon that missed one 2 s probe "not serving". On a loaded host all three appeared while ingest was up.
