@@ -139,7 +139,8 @@ def _activate(args, root):
         record = activate(root, args.activation_id, plan.plan_id, directory)
     except Exception as exc:
         from subprocess import TimeoutExpired
-        from ..activation_state import ActivationError, ActivationRefusal, CandidateDisabledOverride
+        from ..activation_state import (ANOTHER_ACTIVATION, ActivationError, ActivationRefusal,
+                                        CandidateDisabledOverride, lock_busy)
         recorded = _recorded(root, args.activation_id)
         # The owner prepares the record before any pause or effect; no record
         # for this ID means the refusal happened while the host was unchanged.
@@ -182,8 +183,10 @@ def _activate(args, root):
                                "required handoff or start evidence is missing")
                     hint = ("inspect the exact pending step and repair its native/journal witness "
                             "before retrying the same activation ID")
-            if data["recorded_activation"] is None and str(exc) == "another host activation holds the lock":
-                message = "conflict: host activation lock is held; no activation record was created"
+            if data["recorded_activation"] is None and lock_busy(str(exc)):
+                message = ("conflict: host activation lock is held; no activation record was created"
+                           if str(exc) == ANOTHER_ACTIVATION else
+                           f"conflict: {exc}; no activation record was created")
                 hint = "inspect running host operations and activation.lock holders before retrying"
         elif isinstance(exc, (ValueError, RuntimeError)):
             code, message = "conflict", f"conflict: activation did not complete; {pending}"
@@ -301,14 +304,16 @@ def _repair_start(args, root):
     data = {"activation_id": args.repair_activation_id, "fleet": args.repair_fleet, "bot": args.bot,
             "executing_release_id": executing, "recorded_activation": None, "recording": "unchanged"}
     from ..activation import repair_failed_bot_start
-    from ..activation_state import ActivationError, ActivationRefusal
+    from ..activation_state import ANOTHER_ACTIVATION, ActivationError, ActivationRefusal, lock_busy
     try:
         record = repair_failed_bot_start(root, args.repair_activation_id, fleet=args.repair_fleet,
                                          bot=args.bot, reason=args.reason)
     except ActivationRefusal as exc:
         # The backend raises every failure before its single journal write as a refusal.
-        held = str(exc) == "another host activation holds the lock"
-        raise CommandFailure("conflict", "conflict: host activation lock is held; no change recorded" if held
+        held = lock_busy(str(exc))
+        raise CommandFailure("conflict", "conflict: host activation lock is held; no change recorded"
+                             if str(exc) == ANOTHER_ACTIVATION else
+                             f"conflict: {exc}; no change recorded" if held
                              else f"conflict: start repair refused: {exc}; no change recorded",
                              data={**data, "recorded_activation": _recorded(root, args.repair_activation_id)},
                              release_id=executing,

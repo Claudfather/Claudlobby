@@ -3,6 +3,7 @@
 from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import replace
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ import shutil
 import socket
 import sqlite3
 import subprocess
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -236,6 +238,51 @@ def test_bootstrap_resume_from_quiesced_queue_reuses_same_id(cold, monkeypatch):
     monkeypatch.setattr(activation, "build_migration_manifest", original)
     resumed = activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
     assert resumed.status == "active" and resumed.activation_id == "cold"
+
+
+def _job_holding_the_lock(root, seconds):
+    """A timer job's hold on the activation lock (shared), let go after *seconds*."""
+    fd = os.open(root / "state/activation.lock", os.O_RDONLY | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    job = threading.Timer(seconds, os.close, (fd,))
+    job.start()
+    return job
+
+
+def test_bootstrap_and_upgrade_wait_for_a_running_job_instead_of_refusing(cold, monkeypatch):
+    root, source, source_plan, host = cold
+    job = _job_holding_the_lock(root, 1.0)
+    record = activation.bootstrap_activation(root, "cold", source_plan.plan_id, host.directory, adapter=host)
+    job.join()
+    assert record.status == "active"
+
+    class PastTheLock(Exception):
+        pass
+
+    def enrollment(*_args, **_kwargs):
+        raise PastTheLock  # the upgrade's first step under the lock
+
+    monkeypatch.setattr(activation, "collect_enrollment", enrollment)
+    plan = ConfigPlanBuilder(root, source.release_id, source.seal_sha256, ("example",), effects={}).seal()
+    job = _job_holding_the_lock(root, 1.0)
+    with pytest.raises(PastTheLock):
+        activation.upgrade_activation(root, "upgrade", plan.plan_id, host.directory, adapter=host)
+    job.join()
+
+
+def test_resume_waits_for_a_running_job_instead_of_refusing(cold, monkeypatch):
+    root, _, plan, host = cold
+    original = activation.build_migration_manifest
+    def interrupted(*_args, **_kwargs):
+        raise state.ActivationError("fixture interrupted after empty native pause")
+    monkeypatch.setattr(activation, "build_migration_manifest", interrupted)
+    with pytest.raises(state.ActivationError, match="fixture interrupted"):
+        activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    monkeypatch.setattr(activation, "build_migration_manifest", original)
+    job = _job_holding_the_lock(root, 1.0)
+    resumed = activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    job.join()
+    assert resumed.status == "active"
 
 
 def test_legacy_pending_queue_blocks_before_activation_record_or_native_pause(cold):
