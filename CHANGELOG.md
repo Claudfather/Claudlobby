@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — `host activate` waits for running timer jobs instead of refusing, and jobs that start meanwhile back off (#2208)
+
+`host activate` took the host activation lock without waiting, and every composed timer job, host operation and native bot start holds that lock shared while it runs. An activation attempted while any of them ran was refused, and the refusal said another activation held the lock. On a four-fleet host some job held it 21% of the time in normal operation; per-fleet timer slots (#2209) raise that to about 58%.
+
+- **It marks itself pending, then waits.** Every activation first holds `state/activation-pending.lock` exclusively until it ends. A job or operation that starts meanwhile takes the path it already took during an activation: a scheduled job waits for it, a CLI mutation refuses, and the watchdog pauses. `host activate` (first adoption, upgrade and resume) then polls the lock for up to 300 s while the holders already running finish. The longest timer job, the pulse, is capped under its 300 s cadence.
+- **Refusals say why.** Another activation, running or pending, still refuses at once. A job or operation that outlasts the wait refuses with "a running job or host operation still holds the lock after a 300 s wait", and the CLI reports that no activation record was created. Start repair, early abort and fleet move still refuse at once, but now name a running job or operation instead of another activation.
+- **Tests:** `tests/test_activation_lock_wait.py` covers the wait, the back-off and the refusals; `tests/test_activation.py` has bootstrap, upgrade and resume each waiting for a job.
+
 ### Fixed — a receipt check and `plane doctor` no longer call a working ingest down (#2086)
 
 When a receipt check could not settle whether its message's proof was still queued, it said "Plane ingest is down or its pending queues cannot be inspected", whatever had stopped it. `plane doctor` called the hour an orphaned stage waits for replay "not keeping up or is paused", and called a daemon that missed one 2 s probe "not serving". On a loaded host all three appeared while ingest was up.
