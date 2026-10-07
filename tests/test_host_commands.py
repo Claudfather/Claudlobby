@@ -323,6 +323,15 @@ def test_activate_discloses_lock_preflight_without_claiming_a_pending_step(candi
     assert result["error"]["message"] == (
         "conflict: host activation lock is held; no activation record was created")
     assert "pending step" not in result["error"]["hint"]
+    # Jobs that outlast host activate's wait are named, not taken for another activation (#2208).
+    jobs = "a running job or host operation still holds the lock after a 300 s wait"
+    monkeypatch.setattr(activation, "bootstrap_activation", lambda *_:
+                        (_ for _ in ()).throw(state.ActivationError(jobs)))
+    busy = call(capsys, ["--root", str(root), "--json", "host", "activate", plan.plan_id,
+                         "--install-directory", str(directory)], 4)
+    assert busy["data"]["recorded_activation"] is None
+    assert busy["error"]["message"] == f"conflict: {jobs}; no activation record was created"
+    assert "pending step" not in busy["error"]["hint"]
 
     target = "gui/501/claudlobby-browser-reaper"
     monkeypatch.setattr(activation, "bootstrap_activation", lambda *_:

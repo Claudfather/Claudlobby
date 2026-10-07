@@ -27,6 +27,14 @@ release files or generated bot output. See [getting started](getting-started.md)
 for cold-host assembly and the [implementation record](plans/2026-09-28-unified-cli-run-log.md)
 for measured canary evidence and remaining platform limits.
 
+**While jobs run.** Every composed timer job, host operation and native bot start holds
+the host activation lock shared while it runs, and activation takes it exclusively.
+`host activate` first marks itself pending, so a job or operation that starts meanwhile
+backs off as if the activation were already running. It then waits up to 300 s for the
+ones already running to finish; the longest timer job, the pulse, is capped under its
+300 s cadence. It refuses at once only when another activation is running or pending. A
+refusal after the wait names a running job or host operation, not another activation (#2208).
+
 A canary must have its own root, Plane and native unit names. Activation is scoped
 to that selected root; using a second fleet inside the production root does not
 provide an independent release switch. On-demand skills, hooks and permissions

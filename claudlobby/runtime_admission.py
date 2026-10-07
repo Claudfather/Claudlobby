@@ -258,6 +258,33 @@ def _match_identity(root: Path, release: ReleaseManifest, identity: RuntimeIdent
         raise ReleaseMismatch(root, release.release_id, f"{identity.artifact_id} at {identity.cli}")
 
 
+def _take_shared(root: Path, fd: int) -> None:
+    """SH on the activation lock unless an activation is pending; else BlockingIOError.
+
+    An activation holds activation-pending.lock exclusively from before it
+    waits for the holders already running until it ends, so a job or operation
+    starting meanwhile backs off as if the activation were running. Holding the
+    marker shared while taking its own lock means none can slip in after the
+    activation marks itself. A host where no activation has run has no marker.
+    """
+    try:
+        pending = os.open(root / "state/activation-pending.lock",
+                          os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        pending = None
+    except OSError as exc:
+        raise ActivationError("host activation pending lock unavailable") from exc
+    try:
+        if pending is not None:
+            if not stat.S_ISREG(os.fstat(pending).st_mode):
+                raise ActivationError("host activation pending lock was replaced or redirected")
+            fcntl.flock(pending, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    finally:
+        if pending is not None:
+            os.close(pending)
+
+
 @contextmanager
 def mutation_admission(root: Path, *, identity: RuntimeIdentity | None = None,
                        expected_release: str | None = None):
@@ -278,7 +305,7 @@ def mutation_admission(root: Path, *, identity: RuntimeIdentity | None = None,
         raise ActivationError(f"host activation lock unavailable under {root}") from exc
     try:
         try:
-            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            _take_shared(root, fd)
         except BlockingIOError as exc:
             raise ActivationError("host activation is running; no mutation performed") from exc
         info, linked = os.fstat(fd), lock.lstat()
@@ -381,7 +408,7 @@ def admit_native(root: Path, fd: int, *, owner_pid: int, operation: str,
     request = _start_request(root, operation, bot_dir, expected_release, identity)
     request["pid"] = owner_pid
     try:
-        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        _take_shared(root, fd)
     except BlockingIOError as exc:
         if operation == "keepalive":
             raise WatchdogActivationPause("host activation is running; watchdog remains paused") from exc
@@ -501,7 +528,7 @@ def _await_scheduled(target: UnitStart, fd: int, selected: dict) -> None:
     while True:
         time.sleep(0.5)
         try:
-            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            _take_shared(target.root, fd)
         except BlockingIOError:
             if time.monotonic() >= deadline:
                 raise ActivationError("scheduled producer was not admitted before its wait ended; no job ran")
@@ -540,7 +567,7 @@ def run_unit(argv, *, identity: RuntimeIdentity | None = None, environment=None,
     try:
         _native_lock(target.root, fd, os.getppid())
         try:
-            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            _take_shared(target.root, fd)
         except BlockingIOError:
             selected = _scheduled_candidate(target)
             if selected is None:
