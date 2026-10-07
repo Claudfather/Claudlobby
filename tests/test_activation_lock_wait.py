@@ -52,6 +52,7 @@ def test_an_activation_waits_for_a_running_job_then_takes_the_lock(tmp_path):
 
 def test_a_job_starting_while_an_activation_waits_backs_off_until_it_ends(tmp_path):
     root = _root(tmp_path)
+    marker = root / "state/activation-pending.lock"
     running = _hold(root / "state/activation.lock", fcntl.LOCK_SH)
     inside, leave = threading.Event(), threading.Event()
 
@@ -62,24 +63,23 @@ def test_a_job_starting_while_an_activation_waits_backs_off_until_it_ends(tmp_pa
 
     activation = threading.Thread(target=activate)
     activation.start()
+    late = os.open(root / "state/activation.lock", os.O_RDONLY)
     try:
         deadline = time.monotonic() + 10
-        while not a._exclusively_held(root / "state/activation-pending.lock"):
-            assert time.monotonic() < deadline, (
-                "the activation never marked itself pending"
-            )
+        while not (marker.exists() and a._exclusively_held(marker)):  # the thread creates the marker
+            assert time.monotonic() < deadline, "the activation never marked itself pending"
             time.sleep(0.01)
-        late = os.open(root / "state/activation.lock", os.O_RDONLY)
         with pytest.raises(BlockingIOError):
             _take_shared(root, late)  # pending: a job starting now backs off
         assert not inside.is_set()
         os.close(running)  # the job that was already running finishes
-        assert inside.wait(10), (
-            "the activation did not take the lock once the job finished"
-        )
+        running = None
+        assert inside.wait(10), "the activation did not take the lock once the job finished"
         with pytest.raises(BlockingIOError):
             _take_shared(root, late)  # running
     finally:
+        if running is not None:
+            os.close(running)
         leave.set()
         activation.join(30)
     _take_shared(root, late)  # ended: jobs start again
