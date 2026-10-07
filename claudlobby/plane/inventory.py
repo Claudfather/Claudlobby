@@ -29,6 +29,8 @@ the story surface.
 
 from __future__ import annotations
 
+from pathlib import PurePosixPath
+
 from . import registry_read as _rr
 
 # equipment categories rendered on the card, in a stable operator-facing
@@ -154,7 +156,9 @@ def fleet_inventory(conn, fleet: str | None = None) -> dict:
                 for n in names:
                     equips.setdefault((cat, str(n)), []).append(short)
             elif isinstance(names, str) and names:
-                equips.setdefault((cat, names), []).append(short)
+                # a bot declares its one voice as a path (voices/<name>.md); its library item is (voices, <name>)
+                key = ("voices", PurePosixPath(names).stem) if cat == "voice" else (cat, names)
+                equips.setdefault(key, []).append(short)
 
     # library_search_dirs is overlay-first: when a fleet overlay carries the
     # same (category, name) as a shared item, only the OVERLAY is composed.

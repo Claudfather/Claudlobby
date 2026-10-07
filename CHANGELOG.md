@@ -15,6 +15,7 @@ Voices are library content, so the package's `voices/` moved to `library/voices/
 - **`bot create --voice-text` writes `library/voices/<name>.md`,** and refuses a name whose voice is still at the old path, which the new file would outrank.
 - **The wheel ships voices at `_resources/library/voices/`,** and `host setup` requires them there.
 - **The plane's library registry now records the packaged voices** (`shared/voices/<name>`). It discovers categories from `library/`'s folders, and voices used to sit outside it. It skips a folder's `CLAUDE.md`/`AGENTS.md`.
+- **The plane's content room counts a declared voice as in use.** A bot declares `voice: voices/<name>.md`, and the voice's library item is `voices/<name>`. The inventory now joins the two, so each voice names the bots that use it instead of reading unused.
 
 ### Fixed — a receipt check and `plane doctor` no longer call a working ingest down (#2086)
 
