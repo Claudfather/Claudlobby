@@ -218,7 +218,7 @@ Applied to every bot. Merge rules by type:
 - **Sandbox** — lists (network_allowed_domains, filesystem_allow_write) are **unioned**; booleans (auto_allow_bash) use bot-level value.
 - **Tools** — deny/allow lists are **unioned** across defaults and bot-level.
 - **Hooks** — bot-level entries are **appended after** defaults per event. Same-matcher hooks group together.
-- **Jobs** — `defaults.jobs` merges by job name over the system defaults (system.yaml → fleet.yaml, shallow per-entry spread; sibling jobs are preserved). Drives the composed fleet timer units. An interval job whose interval divides an hour or a day is anchored to the clock at its own second on the host, in this fleet's slot, so the fleets' copies of one job never start in the same second; any other interval keeps `OnUnitActiveSec=` with a slot for its first run only. `randomized_delay` is for calendar jobs. See `startup_delay` in [`system-yaml-schema.md`](system-yaml-schema.md) for both.
+- **Jobs** — `defaults.jobs` merges by job name over the system defaults (system.yaml → fleet.yaml, shallow per-entry spread; sibling jobs are preserved). Drives the composed fleet timer units. An interval job whose interval divides an hour or a day is anchored to the clock at its own second on the host, in this fleet's slot, so the fleets' copies of one job are never due in the same second; any other interval keeps `OnUnitActiveSec=` with a slot for its first run only. `randomized_delay` is for calendar jobs. See `startup_delay` in [`system-yaml-schema.md`](system-yaml-schema.md) for both.
 
 #### `fleet.defaults.jobs.<name>.enroll`
 

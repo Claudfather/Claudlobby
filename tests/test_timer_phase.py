@@ -1,4 +1,4 @@
-"""Each copy of an interval timer gets its own slot on the host, and keeps it (#1654).
+"""Each copy of an interval timer is anchored to its own second on the host (#1654).
 
 Identical interval timers on one host fire in the same second. A timer that counts
 from its last start (OnUnitActiveSec=) cannot keep copies apart: every start pulled
@@ -6,7 +6,7 @@ early by a wake of the user manager, or delayed by load, moves all its later tic
 So an interval that divides an hour or a day is anchored to the clock (OnCalendar=,
 UTC). The minute is split into one band of seconds per slot, fleets in the sorted
 overlay order the boot ladder uses and the host's jobs last, and each anchored job
-takes its own second in its owner's band: no two units on the host start in the same
+takes its own second in its owner's band: no two units on the host are due in the same
 second. Any other interval keeps OnUnitActiveSec= with only a first-run offset.
 """
 

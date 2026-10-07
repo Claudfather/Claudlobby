@@ -4013,12 +4013,13 @@ def bot_boot_delay_s(bot: BotConfig, fleet: FleetConfig, paths: Paths,
 # ---------------------------------------------------------------------------
 
 # An interval job whose interval divides an hour or a day is anchored to the
-# clock (OnCalendar=, in UTC) at its own second of the minute, so its copies
-# keep their spacing at every tick. A timer counting from its last start
-# (OnUnitActiveSec=) does not: every start pulled early by a wake of the user
-# manager, or delayed by load, moves all its later ticks, and copies that meet
-# share a wake from then on. AccuracySec=1 keeps each start within a second of
-# its anchor.
+# clock (OnCalendar=, in UTC) at its own second of the minute. Every run is due
+# at its own clock point, so a late start delays only that run. A timer
+# counting from its last start (OnUnitActiveSec=) cannot keep copies apart:
+# every start pulled early by a wake of the user manager, or delayed by load,
+# moves all its later ticks, and copies that meet share a wake from then on.
+# AccuracySec=1 lets a start come up to a second after its point; a stalled
+# user manager can start it later still.
 _ANCHORED_ACCURACY_S = 1
 # Any other interval keeps OnUnitActiveSec=, and only its first run after a
 # start gets a slot: copies spread over at most this long, or the interval when
@@ -4031,8 +4032,8 @@ def _host_timer_slot(paths: Paths, *, host: bool = False) -> tuple[int, int]:
 
     Every fleet composes the same interval timers, and identical timers fire in
     the same second. Each slot owns its own band of seconds of every minute
-    (``_calendar_seconds``), so an anchored unit never starts in the same second
-    as any other unit on the host; a job longer than a minute also runs one
+    (``_calendar_seconds``), so no anchored unit is due in the same second as
+    any other unit on the host; a job longer than a minute also runs one
     minute after the previous slot's copy. An unanchored interval gets only a
     first-run offset (``_interval_phase_s``), which later ticks lose.
 
@@ -4081,7 +4082,7 @@ def _calendar_seconds(schedules: dict, slot: tuple[int, int]) -> dict[str, int]:
     The minute is split into one band per slot (12 s each with four fleets and
     the host). Each anchored job the owner declares takes its own second in the
     owner's band, the shortest interval first, so no two units on the host
-    start in the same second while a band holds all its owner's jobs. A fleet
+    are due in the same second while a band holds all its owner's jobs. A fleet
     ranks the jobs it declares, composed or not, so whether a gated job
     composes never moves another job's second.
     """

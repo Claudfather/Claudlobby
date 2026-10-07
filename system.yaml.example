@@ -50,14 +50,15 @@
 # UTC; #1654): it runs `startup_delay` into each cycle, rounded down to the
 # minute, at its own second of the minute. Each fleet and the host own a band
 # of seconds (12 s each with four fleets), and a job longer than a minute runs
-# a minute after the previous fleet's copy, so no two units on a host start in
-# the same second and the copies keep their spacing. Its first run after any
-# start is its next point, and it never catches up a missed run. Any other
-# interval keeps `startup_delay` as its first run, counted from the timer's
-# own start (OnActiveSec=), never from boot (#2059), with its cadence counted
-# from its last start (OnUnitActiveSec=); only that first run gets a slot.
-# Without a `startup_delay` a job uses its interval, at most 900 s. launchd
-# keeps StartInterval with no slot: its first run is one interval after load.
+# a minute after the previous fleet's copy, so no two units on a host are due
+# in the same second, and a late start delays only that run. Its first run
+# after any start is its next point, and it never catches up a missed run.
+# Any other interval keeps `startup_delay` as its first run, counted from the
+# timer's own start (OnActiveSec=), never from boot (#2059), with its cadence
+# counted from its last start (OnUnitActiveSec=); only that first run gets a
+# slot. Without a `startup_delay` a job uses its interval, at most 900 s.
+# launchd keeps StartInterval with no slot: its first run is one interval
+# after load.
 #
 # DEFAULTS RULE (ruled 2026-09-07). A job or door is ON by default unless it
 # DELETES DATA, SPENDS MONEY, MUTATES OPERATOR SOURCE, or SENDS OUTBOUND TO
