@@ -224,11 +224,14 @@ python3 "$LIB_DIR/dispatch-overdue.py" --orphans --fleet "$fleet" \
 # Each bot's Claude Code compactions go onto the plane as `compaction` events,
 # once each, through the CLI door: it reads only what each transcript appended
 # since its cursor in the fleet's state. A refusal is reported here and retried
-# next pass (no cursor moved); it never stops the sweep. The `|| rc` form keeps
-# a refusal clear of set -e and the inherited ERR trap.
+# next pass (no cursor moved); it never stops the sweep. It runs in a subshell
+# with no ERR trap and no errexit: on macOS the escalation page went missing in
+# the harness only while this step ran unisolated, so whatever a shell does with
+# a failure in there (bash 3.2 included) costs this step and nothing after it.
 _compactions_err=$(safe_mktemp)
 _compactions_rc=0
-claudlobby_cli --root "$CLAUDLOBBY_ROOT" --fleet "$fleet" --json fleet compactions record \
+( trap - ERR; set +e
+  claudlobby_cli --root "$CLAUDLOBBY_ROOT" --fleet "$fleet" --json fleet compactions record ) \
     >/dev/null 2>"$_compactions_err" || _compactions_rc=$?
 if [ "$_compactions_rc" -ne 0 ]; then
     echo "fleet-pulse: compactions not recorded (rc=${_compactions_rc}): $(tail -c 300 "$_compactions_err" 2>/dev/null | tr '\n' ' ' || true)" >&2
