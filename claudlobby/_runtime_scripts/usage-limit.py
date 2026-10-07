@@ -204,6 +204,8 @@ def read_pane(text, anchor, tz_name=None):
         return none
     i = hits[-1]
     name, reset, when, used = _limit_at(lines, i, anchor, tz_name)
+    # Never an empty field before the last: bash's read collapses two tabs.
+    name = name or "limit"
     j = i + used
     native = "-"
     while j < len(lines):

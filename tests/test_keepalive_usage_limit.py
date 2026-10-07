@@ -283,6 +283,19 @@ def test_after_the_reset_one_resume_prompt_is_submitted(rig):
     assert done_reset == r.data(".limit").read_text().split()[1]
 
 
+def test_an_earlier_answer_ending_in_an_ellipsis_does_not_block_the_resume(rig):
+    """Busy is read where classify_pane reads it, the last 10 lines. An answer
+    higher up that ends in an ellipsis looks like a running turn's activity
+    line, and read over the whole pane it would hold the resume off forever."""
+    r = rig()
+    hit, reset = _past_reset()
+    held = _frame("held", reset).replace("❯ harness: say hello", "● Checking…\n\n❯ harness: say hello")
+    r.show(held, on_submit=_frame("resumed", reset))
+    r.hook_record(hit)
+    r.tick()
+    assert _typed(r.keys()).startswith(PROMPT_START), r.log()
+
+
 # --- one action per limit -------------------------------------------------------------
 
 

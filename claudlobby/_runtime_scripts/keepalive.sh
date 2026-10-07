@@ -504,7 +504,9 @@ _limit_resume() {
     pane=$(bot_tmux "$TMUX_SOCKET" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null) || pane=""
     v=$(usage_limit_read "$pane" "${_ul_hit:-$reset}")
     IFS=$'\t' read -r ustate vreset pointer _ <<< "$v"
-    if [ "$vreset" != "$reset" ] || pane_is_busy "$pane"; then
+    # Busy and held are read where classify_pane reads them, the last 10 lines:
+    # an answer higher up that ends in an ellipsis is not a running turn.
+    if [ "$vreset" != "$reset" ] || pane_is_busy "$(printf '%s\n' "$pane" | tail -10)"; then
         echo "$(ts_iso) LIMIT — the pane changed before the resume (now: ${ustate:-unread}); no keys this tick" >> "$LOG"
         return 0
     fi
@@ -535,7 +537,7 @@ _limit_resume() {
             return 0
             ;;
     esac
-    if pane_is_held "$pane"; then
+    if pane_is_held "$(printf '%s\n' "$pane" | tail -10)"; then
         echo "$(ts_iso) LIMIT — reset passed, but the input box holds text; no keys (an operator Enter submits it)" >> "$LOG"
         [ "$menu" = none ] || _limit_resume_event "$reset" "$text" "$name" "$menu" box-held
         return 0
