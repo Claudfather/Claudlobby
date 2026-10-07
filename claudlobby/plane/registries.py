@@ -175,6 +175,10 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # subreaper, so the session's orphans (if it started) re-parent to the user
     # manager; data.report says why, or why the start failed.
     "bot_subreaper_unavailable": "notice",
+    # #2184: the pulse found a live session's tmux server whose parent is not
+    # a bot-subreaper (it died mid-session, or never took its name);
+    # data.parent names what the server's parent is now.
+    "bot_subreaper_missing": "notice",
     "briefing_deferred": "notice",
     "briefing_dispatched": "notice",
     "briefing_failed": "notice",

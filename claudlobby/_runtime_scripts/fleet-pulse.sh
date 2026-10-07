@@ -560,6 +560,20 @@ for bot_dir in "$BOTS_DIR"/*/; do
         fi
     fi
 
+    # --- Check 2c: the session's own subreaper (#2184; Linux) ---
+    # bot_session_spawn starts each session under its bot's bot-subreaper
+    # (#2158), and nothing else looks again once the start has passed. A live
+    # server whose parent is anything else has lost it (or the subreaper never
+    # took its name): the session's orphans go to the user manager again. A
+    # notice, not a page: the bot still works, and a restart at a quiet moment
+    # gives it a new subreaper.
+    if [ "$_session_alive" -eq 1 ]; then
+        _subreaper_lost=$(bot_subreaper_lost "$_bot_socket")
+        if [ -n "$_subreaper_lost" ]; then
+            emit_fleet_event "bot_subreaper_missing" "pulse" "$_subreaper_lost" "$bot_dir" "$bot_id"
+        fi
+    fi
+
     # --- Check 3: pane stuck (>5 min unchanged) ---
     if [ -n "$_pane_buf" ]; then
         pane_content=$(echo "$_pane_buf" | tail -5)

@@ -40,7 +40,7 @@ def reap():
         with open("/proc/self/comm", "wb") as comm:
             comm.write(NAME)
     except OSError:
-        pass
+        pass  # not silent: the pulse reports a server whose parent lacks NAME
     while True:
         try:
             os.waitpid(-1, 0)

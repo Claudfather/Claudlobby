@@ -497,3 +497,56 @@ def test_it_never_sends_a_signal():
     libc = [node.attr for node in ast.walk(module) if isinstance(node, ast.Attribute)
             and isinstance(node.value, ast.Call) and getattr(node.value.func, "attr", "") == "CDLL"]
     assert libc == ["prctl"], libc
+
+
+# A subreaper lost mid-session (#2184): what fleet-pulse.sh reads for each live
+# session, and records as bot_subreaper_missing.
+
+def lost(socket, env, os_name=""):
+    """bot_subreaper_lost on one socket, as the pulse calls it."""
+    script = (f". {shlex.quote(str(LIB))} >/dev/null 2>&1\nset +e\n"
+              + (f"_OS={os_name}\n" if os_name else "")
+              + 'bot_subreaper_lost "$1"\n')
+    done = subprocess.run(["bash", "-c", script, "_", socket], env=env,
+                          capture_output=True, text=True, timeout=30)
+    assert done.returncode == 0, done.stderr
+    return done.stdout.strip()
+
+
+def test_a_session_under_its_subreaper_reads_as_kept(start):
+    session = start("exec sleep 600\n")
+    assert session.report.get("adopted") == "yes", session.report_text
+    wait_for(lambda: comm(session.subreaper) == "bot-subreaper", "the subreaper's name")
+    assert lost(session.socket, session.env) == ""
+
+
+def test_a_session_whose_subreaper_died_reads_as_lost(start):
+    session = start("exec sleep 600\n")
+    wait_for(lambda: comm(session.subreaper) == "bot-subreaper", "the subreaper's name")
+    os.kill(session.subreaper, signal.SIGKILL)  # the one signal it cannot ignore
+    wait_for(lambda: parent(session.server) == session.manager.pid, "the server's re-adoption")
+    found = json.loads(lost(session.socket, session.env))
+    assert found == {"server": session.server, "parent": comm(session.manager.pid)}
+    # Off Linux there is no subreaper to lose, so no verdict.
+    assert lost(session.socket, session.env, os_name="Darwin") == ""
+
+
+def test_a_session_started_without_its_subreaper_reads_as_lost(start):
+    session = start("exec sleep 600\n", python="/bin/false")
+    server = int(session.tmux("display-message", "-p", "#{pid}").stdout)
+    assert parent(server) == session.manager.pid
+    found = json.loads(lost(session.socket, session.env))
+    assert found == {"server": server, "parent": comm(session.manager.pid)}
+
+
+def test_with_no_server_on_the_socket_there_is_no_verdict(scratch):
+    env = constructed_env(TMUX_TMPDIR=scratch / "s", CLAUDLOBBY_ROOT=scratch / "root")
+    assert lost(f"sr{random.randrange(10**6)}", env) == ""
+
+
+def test_the_pulse_records_a_live_session_that_lost_its_subreaper():
+    src = (LIB.parent / "fleet-pulse.sh").read_text()
+    check = src[src.index("# --- Check 2c"):src.index("# --- Check 3")]
+    assert 'if [ "$_session_alive" -eq 1 ]; then' in check
+    assert '_subreaper_lost=$(bot_subreaper_lost "$_bot_socket")' in check
+    assert 'emit_fleet_event "bot_subreaper_missing" "pulse" "$_subreaper_lost" "$bot_dir" "$bot_id"' in check
