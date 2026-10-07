@@ -11,7 +11,6 @@ from __future__ import annotations
 from contextlib import closing, contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from hashlib import sha256
 from pathlib import Path
 import re
 import sqlite3
@@ -27,6 +26,7 @@ from . import message_transport as _native_transport
 from .message_transport import TransportOutcome, send as native_send
 from .plane.db import connect_ro, db_file
 from .plane.emit_api import _load_capture_config, emit_batch, validate_item
+from .plane.fleet_events import fleet_event_request
 from .plane.ids import ID_PATTERNS, mint_event_id, mint_msg_id
 from .plane.schema_state import require_current_schema
 from .recording_alerts import (ChannelOutcome, RecordingAlertOutcome,
@@ -787,18 +787,16 @@ def _record_enter_repair(route: MessageRoute, message_id: str,
     at = datetime.now(timezone.utc)
     pressed = next(attempt for attempt in attempts if attempt.pressed)
     chip = pressed.match if pressed.match and pressed.match.startswith("chip") else None
-    raw = {"event_id": mint_event_id(), "event_type": "system", "emitter": "message-enter-repair",
-           "fleet": route.peer_destination.fleet,
-           "source_ref": "fleet-events:sha:" + sha256(
-               f"delivery_enter_repaired:{message_id}".encode("ascii")).hexdigest(),
-           "payload": {"event": "delivery_enter_repaired", "subject_kind": "actor",
-                       "subject": route.peer.alias,
-                       "data": {"source": "message", "legacy_ts": at.isoformat(),
-                                "data": {"msg_id": message_id, "sender": route.caller.alias,
-                                         "match": "chip" if chip else "text", "chip": chip,
-                                         "enters": sum(1 for attempt in attempts if attempt.pressed),
-                                         "attempts": [asdict(attempt) for attempt in attempts],
-                                         "receipt": getattr(observed, "receipt_observation", None)}}}}
+    raw = fleet_event_request(
+        "delivery_enter_repaired", fleet=route.peer_destination.fleet, subject_kind="actor",
+        subject=route.peer.alias, source="message",
+        data={"msg_id": message_id, "sender": route.caller.alias,
+              "match": "chip" if chip else "text", "chip": chip,
+              "enters": sum(1 for attempt in attempts if attempt.pressed),
+              "attempts": [asdict(attempt) for attempt in attempts],
+              "receipt": getattr(observed, "receipt_observation", None)},
+        occurred_at=at.isoformat(), legacy_ts=at.isoformat(),
+        key=f"delivery_enter_repaired:{message_id}")
     try:
         recorded = emit_batch(route.selected.paths.root, [raw], require_commit=True)[0]
     except Exception:

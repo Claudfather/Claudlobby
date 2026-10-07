@@ -39,6 +39,13 @@ KNOWN_MODELS: frozenset[str] = frozenset(
 # Claude Code --effort accepts exactly these.
 KNOWN_EFFORTS: frozenset[str] = frozenset({"low", "medium", "high", "max"})
 
+# ── Agent CLI ────────────────────────────────────────────────────
+# The agent CLI a bot runs under (fleet.yaml `agent_cli:`, and the same name in
+# bot.conf, the bot keyframe and the session join key, #2145). `codex` is declared
+# here so fleet.yaml, the plane and clauDNA share one spelling; composing or
+# launching a codex bot is the execution-adapter companion's (#2149, F11).
+KNOWN_AGENT_CLIS: frozenset[str] = frozenset({"claude", "codex"})
+
 # ── Hook events ──────────────────────────────────────────────────
 # The full authoritative Claude Code hook-event set. Unknown event = silently
 # ignored hook, so this must stay COMPLETE — a missing name false-warns a valid
