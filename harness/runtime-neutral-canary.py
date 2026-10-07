@@ -67,7 +67,7 @@ from pathlib import Path
 VALUE_KEYS = frozenset({
     "session.id", "service.name", "service.version", "event.name", "terminal.type",
     "os.type", "host.arch", "model", "tool_name", "tool_use_id", "decision", "success", "type",
-    "source", "agent.runtime", "bot.name", "fleet.name", "claudlobby.bot", "claudlobby.fleet",
+    "source", "claudlobby.agent_cli", "bot.name", "fleet.name", "claudlobby.bot", "claudlobby.fleet",
     "app.version", "query_source", "error", "status_code", "claudlobby.content",
 })
 #: Placeholders an exporter writes in place of withheld content. Kept verbatim, so a report can tell a
@@ -296,7 +296,7 @@ def env_block(port: int, bot: str, fleet: str = "canary") -> dict:
         "OTEL_LOGS_EXPORTER": "otlp",
         "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
         "OTEL_EXPORTER_OTLP_ENDPOINT": f"http://127.0.0.1:{port}",
-        "OTEL_RESOURCE_ATTRIBUTES": f"agent.runtime=claude,claudlobby.bot={bot},claudlobby.fleet={fleet}",
+        "OTEL_RESOURCE_ATTRIBUTES": f"claudlobby.agent_cli=claude,claudlobby.bot={bot},claudlobby.fleet={fleet}",
     }
 
 
@@ -402,7 +402,7 @@ def report(root: Path) -> dict:
         "event_names": sorted({str(r["event"]) for r in logs}),
         "resource_keys": sorted({k for row in metrics + logs for k in row["resource"]}),
         "resource_attrs_on_every_row": all(
-            {"agent.runtime", "claudlobby.bot"} <= set(row["resource"]) for row in metrics + logs) if metrics or logs else None,
+            {"claudlobby.agent_cli", "claudlobby.bot"} <= set(row["resource"]) for row in metrics + logs) if metrics or logs else None,
         "hook_session_ids": sorted(hook_sids),
         "otel_session_ids": sorted(otel_sids),
         "otel_ids_matching_a_hook": sorted(otel_sids & hook_sids),

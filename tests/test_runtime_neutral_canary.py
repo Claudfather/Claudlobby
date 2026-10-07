@@ -33,7 +33,7 @@ def _s(key, value):
 
 
 LOGS = {"resourceLogs": [{
-    "resource": {"attributes": [_s("service.name", "claude-code"), _s("agent.runtime", "claude"),
+    "resource": {"attributes": [_s("service.name", "claude-code"), _s("claudlobby.agent_cli", "claude"),
                                 _s("claudlobby.bot", "bot:canary/c6a")]},
     "scopeLogs": [{"logRecords": [
         {"timeUnixNano": "1791227500000000000", "body": {"stringValue": "claude_code.user_prompt"},
@@ -46,7 +46,7 @@ LOGS = {"resourceLogs": [{
 }]}
 
 METRICS = {"resourceMetrics": [{
-    "resource": {"attributes": [_s("agent.runtime", "claude")]},
+    "resource": {"attributes": [_s("claudlobby.agent_cli", "claude")]},
     "scopeMetrics": [{"metrics": [{
         "name": "claude_code.token.usage",
         "sum": {"aggregationTemporality": 1, "isMonotonic": True, "dataPoints": [
