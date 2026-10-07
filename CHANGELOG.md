@@ -10,6 +10,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 `harness/runtime-neutral-canary.py hook` now serves the Codex batch (C1–C3) as well as Claude's. Each line keeps every payload key's name and type (a string's length, never its value), the names of the process's `CODEX_*` variables with values only for `CODEX_SESSION_ID`/`CODEX_THREAD_ID`, and its ancestors' command names from one `ps` snapshot, basenames only (the owner-process walk, C2). `--stdout TEXT` prints a nonce or a JSON decision for the runtime to read (C3), and `--hold MS` marks the line, sleeps, then logs a second line under the same pid, so a hook the runtime kills shows as a hold that never completed (C1's `SessionEnd` budget). `report` adds the payload keys per event, the env names and values seen, the ancestor chains, and each hold with whether it completed and after how long. A measurement instrument; nothing in production calls it.
 
+### Fixed — a receipt check and `plane doctor` no longer call a working ingest down (#2086)
+
+When a receipt check could not settle whether its message's proof was still queued, it said "Plane ingest is down or its pending queues cannot be inspected", whatever had stopped it. `plane doctor` called the hour an orphaned stage waits for replay "not keeping up or is paused", and called a daemon that missed one 2 s probe "not serving". On a loaded host all three appeared while ingest was up.
+
+- **A queued file written before a message no longer counts against that message's receipt check.** A stager reaped before its rename leaves a hidden `.<name>.tmp`, which the daemon replays once it is an hour old. A burst of these held the queue over the 256 entries the check reads, for that hour. So every receipt whose proof was not yet committed read `unavailable`. A file last written before the message existed cannot hold its proof, so the check now sets it aside, allowing 5 minutes for the clock. Files written since are still read and counted, because an orphan may hold the proof.
+- **An empty orphan no longer reads as a torn entry for later messages.** A stager reaped between creating its file and writing to it leaves the file empty (#2164). The check read it as torn and answered `unavailable` at any queue depth. The same rule sets it aside for messages sent after it.
+- **The reason names what the check saw:** the count and the bound, the entry it could not read, or what the daemon probe saw.
+  - "Plane ingest is down" now means nothing listens on the socket.
+  - A daemon that takes the connection but gives no answer within the check's 0.5 s reads as listening but slow or stuck.
+  - Absence stays unproven in every case: the observation is still `unavailable` (exit 6).
+- **`plane doctor` reports orphaned stages apart from batches.** The staged-depth rung gives their count and the oldest's age. It reads ATTENTION for an orphan only once it is 300 s past the hour; measured, they leave within about 50 s. A renamed batch older than 300 s still reads "not keeping up or is paused". `plane status` and its JSON gain the orphaned count.
+- **`plane doctor` calls a listening daemon that does not answer slow, not stopped.** The daemon rung says it is listening but gave no answer within 2 s, and to run doctor again before restarting it. A daemon that refuses the connection, or has no socket, reads as before. The staged rung no longer calls that daemon's queue unrecorded.
+- **The retry gate decides as before.** It has no message instant, so it reads every queued entry, and a burst of orphans still refuses an uncertain resend.
+- **Tests:**
+  - `tests/test_message_queries.py` has a case for each path and one for the empty orphan; each fails on main.
+  - `tests/test_plane_doctor_result.py` covers both doctor rungs.
+  - `tests/test_plane_daemon.py` covers the probe's answers against a real daemon and real listeners.
+  - Two existing tests stood in for a healthy daemon by stubbing `probe_daemon`. They now run a real listener that gives the daemon's answer, so they drive the probe the code calls.
+
 ### Fixed — the at-mention guard reads `gh api --input` request bodies, and the reviewer instructions agree on the route (#1537)
 
 #2181 taught reviewers to post a verdict with `gh api -X POST …/pulls/N/reviews --input review.json`, so that GitHub returns the review's URL. The at-mention guard (#1019) did not cover that route. It had no `@` in the command, and `--input` was neither a writer nor a file it scanned. So a handle in the review's body went out unchecked, and so did one in the issue-comment variant.

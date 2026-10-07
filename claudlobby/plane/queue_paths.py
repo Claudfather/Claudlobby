@@ -24,6 +24,19 @@ def staged_payload(path: Path) -> bool:
     return path.name.endswith((".batch", ".tmp"))
 
 
+#: The daemon replays a temp stage only once it is this old (its rule and the
+#: reasons are beside `_orphaned_stages` in daemon.py). Readers that age the
+#: queue use the same number, so none reads the wait as a stalled replay (#2086).
+STAGED_ORPHAN_AGE_S = 3600.0
+
+
+def staged_orphan(path: Path) -> bool:
+    """A temp stage, `.<name>.tmp`, that was written but never renamed: its
+    writer is still inside its fsync or was reaped first. A plain listing hides
+    it, and the daemon replays it at STAGED_ORPHAN_AGE_S, not on its next tick."""
+    return path.name.startswith(".") and path.name.endswith(".tmp")
+
+
 @dataclass
 class SpoolScan:
     """One state-bearing enumeration of the spool tree — THE definition the
