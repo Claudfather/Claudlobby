@@ -267,3 +267,44 @@ class TestStartBotShReadyTimeoutFloor:
             "could not find the _rc_timeout_s=N coercion fallback in claudlobby/_runtime_scripts/start-bot.sh"
         )
         assert int(match.group(1)) == READY_TIMEOUT_FLOOR_S
+
+
+class TestStartBotShScrubsTheLeakedMarkers:
+    """#2145 C10 (run log 2026-10-05): a tmux server started from inside a Claude Code
+    session hands the pane CLAUDECODE, CLAUDE_CODE_CHILD_SESSION and that session's
+    CLAUDE_CODE_SESSION_ID, and an interactive claude inheriting the child marker
+    boots with transcript saving off. The launch command unsets all three after the
+    env file and right before exec."""
+
+    _LINE = re.compile(r"^CLAUDE_CMD=.*$", re.MULTILINE)
+
+    def _line(self) -> str:
+        lines = self._LINE.findall(_START_BOT_SH.read_text())
+        assert len(lines) == 1, lines
+        return lines[0]
+
+    def test_the_launch_command_unsets_the_leaked_markers(self):
+        assert re.search(
+            r"CLAUDE_CMD=\"\. '\$BOT_ENV_FILE'; unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION "
+            r"CLAUDE_CODE_SESSION_ID; exec \$CLAUDE ", self._line())
+
+    def test_a_bot_started_from_inside_a_claude_session_sees_no_marker(self, tmp_path):
+        import os
+        import subprocess
+
+        env_file = tmp_path / "bot.env"
+        env_file.write_text("")
+        stub = tmp_path / "claude"
+        stub.write_text('#!/bin/sh\nprintf "%s|%s|%s|%s\\n" "${CLAUDECODE-unset}" '
+                        '"${CLAUDE_CODE_CHILD_SESSION-unset}" "${CLAUDE_CODE_SESSION_ID-unset}" "$*"\n')
+        stub.chmod(0o755)
+        # The script's own assignment, expanded by bash, then run as the pane runs it.
+        script = f'{self._line()}\nexec /bin/bash -c "$CLAUDE_CMD"\n'
+        result = subprocess.run(
+            ["/bin/bash", "-c", script],
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "BOT_ENV_FILE": str(env_file),
+                 "CLAUDE": str(stub), "SESSION_NAME": "bot-session", "CLAUDE_FLAGS": "",
+                 "CLAUDECODE": "1", "CLAUDE_CODE_CHILD_SESSION": "1", "CLAUDE_CODE_SESSION_ID": "parent"},
+            capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "unset|unset|unset|--name bot-session\n"
