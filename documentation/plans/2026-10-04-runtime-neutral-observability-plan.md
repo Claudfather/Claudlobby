@@ -154,7 +154,7 @@ owner's hook adapter installed for the bot's runtime.
   (`claudron/engine.py:160-161`); clauDNA writes a runtime-qualified ref for non-Claude runtimes
   (F9).
 - **Telemetry.** The intake's mapping dict (F5 as amended) keys Claude's `session.id` — and, from the companion
-  on, Codex's `conversation.id` *(doc)* — onto one internal session key beside `agent.runtime`; the plane's
+  on, Codex's `conversation.id` *(doc)* — onto one internal session key beside `claudlobby.agent_cli`; the plane's
   `session` subject is `ids.session_alias(id, agent_cli)`, so its uid is `derive_session_uid(id, agent_cli)`.
 
 ### 2.3 Runtime-specific signals are enrichment only
@@ -264,8 +264,10 @@ two-field mapping, so it follows the `observability`/`isolation` parsing precede
 
 **F5 — Normalized attribute names.**
 - Options: (a) OTel GenAI semantic conventions (`gen_ai.conversation.id`, `gen_ai.tool.name`,
-  `gen_ai.usage.*`) plus `agent.runtime`; (b) house names.
+  `gen_ai.usage.*`) plus `claudlobby.agent_cli`; (b) house names.
 - Lean: **(a)**.
+- 2026-10-07: the attribute is `claudlobby.agent_cli`, not `agent.runtime`: it names what it is and sits in the
+  house namespace beside `claudlobby.fleet`/`claudlobby.bot`, since no OTel convention covers it (operator).
 - Ratifier: operator. Status: locked (lean), 2026-10-04; re-locked 2026-10-05 (A-F5).
 - Amended 2026-10-05 (A-F5 ratified by the operator): Decision: **(a) narrowed** — the GenAI semconv names are the
   intake's internal vendor→house mapping (the F5 artefact is the mapping dict: no OTTL, no semconv pin, raw files
@@ -1093,7 +1095,7 @@ warning, the one-week canary — then **P2-a2** (S–M) — the plane leg, landi
   - `CLAUDE_CODE_ENABLE_TELEMETRY=1`;
   - `OTEL_METRICS_EXPORTER=otlp` and `OTEL_LOGS_EXPORTER=otlp`;
   - `OTEL_EXPORTER_OTLP_PROTOCOL=http/json` and `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:<port>` — the `plane-otel` intake's port;
-  - `OTEL_RESOURCE_ATTRIBUTES` with `claudlobby.fleet=<fleet name>` (the alias, never a uid), `claudlobby.bot=bot:<fleet>/<bot>`, `claudlobby.content` and `agent.runtime=claude`;
+  - `OTEL_RESOURCE_ATTRIBUTES` with `claudlobby.fleet=<fleet name>` (the alias, never a uid), `claudlobby.bot=bot:<fleet>/<bot>`, `claudlobby.content` and `claudlobby.agent_cli=claude`;
   - `OTEL_LOG_TOOL_DETAILS=1` on every armed bot (§14 Q17, ruled 2026-10-05: tool, MCP, skill and subagent names come
     only with it; the intake trims the inputs it also carries), and `OTEL_LOG_USER_PROMPTS` only when `content: full`.
 
@@ -1219,7 +1221,7 @@ export OTEL_METRICS_EXPORTER=otlp
 export OTEL_LOGS_EXPORTER=otlp
 export OTEL_EXPORTER_OTLP_PROTOCOL=http/json
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:<port>
-export OTEL_RESOURCE_ATTRIBUTES="claudlobby.fleet=<fleet>,claudlobby.bot=bot:<fleet>/<bot>,claudlobby.content=metadata,agent.runtime=claude"
+export OTEL_RESOURCE_ATTRIBUTES="claudlobby.fleet=<fleet>,claudlobby.bot=bot:<fleet>/<bot>,claudlobby.content=metadata,claudlobby.agent_cli=claude"
 # every armed bot (§14 Q17): names for MCP tools, skills and subagents; the intake drops the inputs it carries
 export OTEL_LOG_TOOL_DETAILS=1
 # content: full only — the disclosed act (design v2 §11); claudlobby.content=full above, and:
@@ -1414,9 +1416,9 @@ launched by `_runtime_scripts/plane-otel.sh` from the `system.yaml` entry — `-
   `gen_ai.conversation.id`, `gen_ai.tool.name`, `gen_ai.request.model` — used inside the intake only: no pin, no
   contract) → the plane's registry names (`session.*`, the allowlist below). Claude's `claude_code.*` metrics and
   events come first — `session.id` is the session key; `tool_name`, `model`, the `api_request` token attributes and
-  `cost_usd` follow; the runtime is `agent.runtime` from `OTEL_RESOURCE_ATTRIBUTES`. The Codex table
-  (`conversation.id`, the `codex.*` names, the `service.name == "codex_cli_rs"` runtime rule) lands at the companion,
-  from C5. Everything is keyed on `(agent.runtime, session key)`.
+  `cost_usd` follow; the agent CLI is `claudlobby.agent_cli` from `OTEL_RESOURCE_ATTRIBUTES`. The Codex table
+  (`conversation.id`, the `codex.*` names, the `service.name == "codex_cli_rs"` agent-CLI rule) lands at the companion,
+  from C5. Everything is keyed on `(claudlobby.agent_cli, session key)`.
 - **A translator, not a plane writer (P2-a2).** It posts `{"events": […]}` batches to the daemon's socket
   (`<root>/state/plane/ingest.sock`, `daemon.py:207-208`; protocol `:16-24`) through
   `daemon.send_batch(sock_path, events, timeout=5.0)` (`daemon.py:917-941`, signature `send_batch(sock_path, events,
@@ -1430,7 +1432,7 @@ launched by `_runtime_scripts/plane-otel.sh` from the `system.yaml` entry — `-
   Python CLI doors and one-shot Python ticks (`_task-recheck-tick`, `session-export`) → `emit_batch` in-process, as
   the task doors do (`task_operations.py:351`). Transport never changes semantics — the daemon runs the same
   `emit_batch` (`daemon.py:1-30`).
-- `claudlobby.content` joins `agent.runtime`, `claudlobby.fleet` and `claudlobby.bot` in the Claude bot's
+- `claudlobby.content` joins `claudlobby.agent_cli`, `claudlobby.fleet` and `claudlobby.bot` in the Claude bot's
   `OTEL_RESOURCE_ATTRIBUTES` (F4 spec); Claude Code also copies these keys onto every datapoint and event *(doc)*,
   which is what lets the intake attribute a session to its bot. For a Codex bot the companion's lean is `[otel]
   environment = "bot:<fleet>/<bot>"` (a free string stamped as `env` on every event *(doc)*), checked by C5; until

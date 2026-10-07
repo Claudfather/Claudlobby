@@ -196,7 +196,7 @@ _STRICT_MAPPING_FIELDS: dict[str, dict] = {"claudna": _CLAUDNA_FIELDS, "telemetr
         lines.append("export OTEL_EXPORTER_OTLP_PROTOCOL=http/json")
         lines.append(f"export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:{OTEL_INTAKE_PORT}")   # known_values; the intake's --port default
         attrs = (f"claudlobby.fleet={fleet.name},claudlobby.bot=bot:{fleet.name}/{bot.bot_id},"
-                 f"claudlobby.content={bot.telemetry.content},agent.runtime=claude")
+                 f"claudlobby.content={bot.telemetry.content},claudlobby.agent_cli={bot.agent_cli}")
         lines.append(f"export OTEL_RESOURCE_ATTRIBUTES={_shq(attrs)}")
         lines.append("export OTEL_LOG_TOOL_DETAILS=1")   # §14 Q17: tool/MCP/skill names; the intake drops the inputs
         if bot.telemetry.content == "full":
@@ -441,7 +441,7 @@ def records(body) -> Iterator[Rec]  # resourceLogs[].scopeLogs[].logRecords[] �
                                     # mapping keys on; the `event.name` attribute is the bare `tool_result` (C6a, run log)
 def points(body) -> Iterator[Pt]    # resourceMetrics[].scopeMetrics[].metrics[] (sum.dataPoints; gauge for a non-sum) → Pt(name, resource, attributes, value, time)
 class Window:                       # key (agent_cli, session_id, floor(t_ns / 60e9)); fields: fleet, bot, cost_usd, tokens{…}, calls, failures, requests, errors, models{…}, active_s, api_errors[], streak{tool: n}
-def key_of(resource, attributes) -> tuple | None   # agent_cli = resource["agent.runtime"]; session = that agent CLI's table's session_attribute (attributes first, then resource); None → ignored and counted
+def key_of(resource, attributes) -> tuple | None   # agent_cli = resource["claudlobby.agent_cli"]; session = that agent CLI's table's session_attribute (attributes first, then resource); None → ignored and counted
 def fold_record(w, rec) / fold_point(w, pt)         # VENDOR_TO_HOUSE, row by row; everything else ignored
 def batches_for(w) -> list[list[dict]]   # ONE batch of up to five metric_sample rows, then ONE single-event batch per system event (never mixed);
                                          # every event_id = derive_uid("ev", f"otel:{agent_cli}:{sid}:{window}:{name}"); system rows built at
@@ -544,7 +544,7 @@ P2-b waits on none: its evidence is the two columns it produces itself (Task 2),
 |---|---|---|
 | **C6a** the confirmation leg: Claude Code exports OTLP/HTTP-JSON to `http://127.0.0.1:<port>` under the composed env names, in a framing and encoding Task 6 accepts | P2-a1 as a whole: the direct export the intake receives (A-F4) | F4 reopens — `[FORK-REOPEN F4]` on #2144 — and P2-a1 does not open until it re-locks |
 | **C6a** `session.id` == hook `session_id`, including across `resume` (`ids.py:25-28`) | the whole join: the mapping keys on `session.id`, the P1 doors on the hook id | a blocker for Task 9, not a design tweak: §2.2's one join key would need a bridge (e.g. `prompt.id`/hook `prompt_id`), which is the operator's to decide; P2-a1 still ships (raw files), P2-a2 waits **Measured 2026-10-05: equal, across `startup` and `resume`; datapoints carry `session.id`.** |
-| **C6a** resource attributes land on every datapoint and event | `key_of` reads `claudlobby.*`/`agent.runtime` from the record's attributes; the content gate reads `claudlobby.content` from the resource | the intake reads them from the OTLP `resource.attributes` block instead — `key_of` already consults both, resource first **Measured: on every request's resource, verbatim (`bot:<fleet>/<bot>` survives); the mapping reads the resource, not the record.** |
+| **C6a** resource attributes land on every datapoint and event | `key_of` reads `claudlobby.*` from the record's attributes; the content gate reads `claudlobby.content` from the resource | the intake reads them from the OTLP `resource.attributes` block instead — `key_of` already consults both, resource first **Measured: on every request's resource, verbatim (`bot:<fleet>/<bot>` survives); the mapping reads the resource, not the record.** |
 | **C6a** delta temporality; 60 s / 5 s intervals | per-window **sums**; the 60 s window | cumulative → the composed block pins `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta` (Task 3 test grows by one line) rather than the intake learning to diff **Measured: delta with no variable set; logs ≤ 5.4 s, metrics at 60 s or exit.** |
 | **C6a** the 24-hour overlap: `tool_call` rows vs OTel `tool_result` events vs transcript `tool_use` counts | recorded in P0's run log; P2-b's PR body carries its own two columns instead (Task 2), and Task 8 re-measures the OTel column against transcripts over the week | a gap is recorded and sizes Task 9's allowlist question; P2-b ships regardless — the marker is unaffected |
 | **C6a** Claude's exporter buffers and retries when the endpoint is briefly down; **C6b** the intake's time to `200` | the "a retry lands in its original window" claim; the reply-first design | no buffering → an intake restart loses that export interval and the limitation says so; latency → `ThreadingHTTPServer` is already the design, the figure sets `grace_s` **Measured: no buffering past ~35 s for logs — the limitation states the restart cost (Stated limitations).** |
