@@ -49,6 +49,15 @@ MAX_FILES = 512
 MAX_BYTES = 64 * 1024 * 1024
 MAX_ENTRIES = 8192
 
+# The live-context read (#2206) runs backwards from the end of the newest
+# transcript in blocks and stops at the first main-chain usage row, never past
+# this cap. Measured over 12,000 rows in four real sessions, the longest
+# stretch between two usage rows was 511 KB; the cap allows four times that.
+CONTEXT_TAIL_BYTES = 2 * 1024 * 1024
+_TAIL_BLOCK = 64 * 1024
+_USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_creation_input_tokens",
+                 "cache_read_input_tokens")
+
 # Evaluator-relative token weights (not a dollar price or subscription meter).
 # `cost_weighted_total` lets paired protocol cells compare their token mix.
 WEIGHTS = {"input": 1.0, "cache_creation": 1.25, "cache_read": 0.1, "output": 5.0}
@@ -252,6 +261,63 @@ def _scan_comms(content) -> tuple[int, int]:
     return blocks, chars
 
 
+def _row_instant(obj) -> datetime | None:
+    """A transcript row's time as an aware UTC instant; None when it is
+    absent, unparseable or has no offset."""
+    try:
+        instant = datetime.fromisoformat(obj["timestamp"].replace("Z", "+00:00"))
+    except (KeyError, TypeError, AttributeError, ValueError):
+        return None
+    return instant.astimezone(timezone.utc) if instant.tzinfo is not None else None
+
+
+def _row_usage(obj) -> tuple[int, int, int, int] | None:
+    """An assistant row's flat usage, in _USAGE_FIELDS order; None when it
+    carries none. The one usage-row reader: parse_file sums it over a window,
+    current_context takes the newest (#2206)."""
+    msg = obj.get("message") or {}
+    usage = msg.get("usage") if isinstance(msg, dict) else None
+    if not isinstance(usage, dict) or not usage:
+        return None
+    return tuple(_int(usage.get(name)) for name in _USAGE_FIELDS)
+
+
+def _loads(line: bytes):
+    try:
+        return json.loads(line)
+    except (ValueError, TypeError):
+        return None
+
+
+def _count(value) -> int | None:
+    return value if type(value) is int and value >= 0 else None
+
+
+def _text(value) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def compaction_row(obj) -> dict | None:
+    """One Claude Code compaction, from its ``compact_boundary`` row; None for
+    any other row (#2206).
+
+    The row is ``{"type": "system", "subtype": "compact_boundary", "timestamp",
+    "uuid", "sessionId", "compactMetadata": {"trigger", "preTokens",
+    "postTokens", ...}}``. ``postTokens`` is set when the compaction ends: an
+    absent one reads None, never 0."""
+    if (not isinstance(obj, dict) or obj.get("type") != "system"
+            or obj.get("subtype") != "compact_boundary"):
+        return None
+    meta = obj.get("compactMetadata")
+    at = _row_instant(obj)
+    if not isinstance(meta, dict) or at is None:
+        return None
+    return {"at": at.isoformat(), "trigger": _text(meta.get("trigger")),
+            "pre_tokens": _count(meta.get("preTokens")),
+            "post_tokens": _count(meta.get("postTokens")),
+            "session": _text(obj.get("sessionId")), "uuid": _text(obj.get("uuid"))}
+
+
 def parse_file(path: str, *, since: datetime | None = None,
                until: datetime | None = None, max_bytes: int | None = None) -> ParseResult:
     """Count each identified assistant message once within this file and window.
@@ -286,26 +352,19 @@ def parse_file(path: str, *, since: datetime | None = None,
             if not isinstance(obj, dict) or obj.get("type") != "assistant":
                 continue
             if since is not None or until is not None:
-                try:
-                    instant = datetime.fromisoformat(obj["timestamp"].replace("Z", "+00:00"))
-                    if instant.tzinfo is None:
-                        raise ValueError("timestamp has no offset")
-                    instant = instant.astimezone(timezone.utc)
-                except (KeyError, TypeError, AttributeError, ValueError):
+                instant = _row_instant(obj)
+                if instant is None:
                     result.missing_timestamps += 1
                     continue
                 if since is not None and instant < since:
                     continue
                 if until is not None and instant > until:
                     continue
-            msg = obj.get("message") or {}
-            usage = msg.get("usage") if isinstance(msg, dict) else None
-            if not isinstance(usage, dict) or not usage:
+            values = _row_usage(obj)
+            if values is None:
                 result.missing_usage += 1
                 continue
-            values = tuple(_int(usage.get(name)) for name in (
-                "input_tokens", "output_tokens", "cache_creation_input_tokens",
-                "cache_read_input_tokens"))
+            msg = obj["message"]
             key = (obj.get("sessionId"), msg.get("id"))
             if all(isinstance(part, str) and part for part in key):
                 if key in seen:
@@ -390,9 +449,18 @@ def _bounded_files(directory: Path, since: datetime):
     return files, issues, skipped, outside_window
 
 
-def collect_bot_usage(paths, fleet, bot_id: str, since: datetime,
-                      until: datetime) -> dict:
-    """Read current-cwd Claude transcripts for one declared bot, with coverage."""
+@dataclass(frozen=True)
+class TranscriptSource:
+    """Where one declared bot's current-cwd transcripts are, or why that is
+    unknown: the one resolution `fleet usage`, `fleet status` and the
+    compaction recorder share."""
+    sharing: list
+    directory: Path | None = None
+    issue: str | None = None
+    shared_with: tuple = ()
+
+
+def transcript_source(paths, fleet, bot_id: str) -> TranscriptSource:
     from .composer import account_dir
     from .isolation import expand_home, transcript_slug
 
@@ -401,6 +469,135 @@ def collect_bot_usage(paths, fleet, bot_id: str, since: datetime,
     sharing = (sorted(name for name, other in fleet.bots.items() if name != bot_id
                       and expand_home(account_dir(other, fleet), Path.home()) == account)
                if account is not None else [])
+    if account is None:
+        return TranscriptSource(sharing, issue="account_directory_unresolved")
+    cwd_slug = transcript_slug(paths.bot_runtime(bot_id))
+    peers = [name for name in sharing if transcript_slug(paths.bot_runtime(name)) == cwd_slug]
+    if peers:
+        return TranscriptSource(sharing, issue="ambiguous_shared_account_cwd_slug",
+                                shared_with=tuple(sorted(peers)))
+    directory = account / "projects" / cwd_slug
+    if not directory.is_dir() or directory.is_symlink():
+        return TranscriptSource(sharing, issue="transcript_directory_missing_or_untrusted")
+    return TranscriptSource(sharing, directory=directory)
+
+
+def session_transcripts(directory: Path) -> tuple[list, str | None]:
+    """A bot's session transcripts, the top-level ``*.jsonl`` files only, as
+    ``(name, size, mtime_ns)``; or why the listing is unknown. Subagent
+    transcripts nest below their session and are never one."""
+    found = []
+    entries = 0
+    try:
+        with os.scandir(directory) as listing:
+            for child in listing:
+                entries += 1
+                if entries > MAX_ENTRIES:
+                    return [], "entry_limit_reached"
+                if not child.name.endswith(".jsonl"):
+                    continue
+                try:
+                    if child.is_symlink() or not child.is_file(follow_symlinks=False):
+                        continue
+                    stat = child.stat(follow_symlinks=False)
+                except OSError:
+                    # It may be the newest: an unknown order is no answer.
+                    return [], "unreadable_transcript_entry"
+                found.append((child.name, stat.st_size, stat.st_mtime_ns))
+    except OSError:
+        return [], "unreadable_transcript_directory"
+    return found, None
+
+
+class _Tail:
+    """The complete lines of one file, newest first, read backwards in blocks
+    and never more than ``cap`` bytes from its end."""
+
+    def __init__(self, fh, size: int, cap: int):
+        self.fh, self.size, self.cap = fh, size, cap
+        self.bytes_read = 0
+        self.capped = False
+
+    def lines(self):
+        pos, carry = self.size, b""
+        while pos > 0:
+            if self.bytes_read >= self.cap:
+                self.capped = True
+                return
+            step = min(_TAIL_BLOCK, pos, self.cap - self.bytes_read)
+            pos -= step
+            self.fh.seek(pos)
+            block = self.fh.read(step)
+            if len(block) != step:
+                raise OSError("transcript shrank during the read")
+            self.bytes_read += step
+            parts = (block + carry).split(b"\n")
+            carry = parts[0]  # whole only once the read reaches the file's start
+            for part in reversed(parts[1:]):
+                if part:
+                    yield part
+        if carry:
+            yield carry
+
+
+def current_context(paths, fleet, bot_id: str, *, cap: int = CONTEXT_TAIL_BYTES) -> dict:
+    """One bot's live context (#2206): its newest main-chain usage row's input
+    + cache read + cache creation tokens and that row's time, with any
+    compaction written after the row. ``tokens`` is None, never 0, with a
+    ``reason`` when no such row can be read.
+
+    Cost per call: one listing of the bot's transcript directory (at most
+    MAX_ENTRIES entries) and reads from the end of its newest session
+    transcript, in 64 KiB blocks, stopping at the row and never past ``cap``.
+    """
+    result = {"tokens": None, "at": None, "reason": None, "session": None,
+              "compacted_after": None, "bytes_read": 0, "cap": cap}
+    source = transcript_source(paths, fleet, bot_id)
+    if source.directory is None:
+        return {**result, "reason": source.issue}
+    sessions, issue = session_transcripts(source.directory)
+    if issue or not sessions:
+        return {**result, "reason": issue or "no_transcript"}
+    name, size, _ = max(sessions, key=lambda entry: (entry[2], entry[0]))
+    result["session"] = name[:-len(".jsonl")]
+    tail = None
+    try:
+        with open(source.directory / name, "rb") as fh:
+            tail = _Tail(fh, size, cap)
+            for line in tail.lines():
+                if b'"compact_boundary"' in line:
+                    row = compaction_row(_loads(line))
+                    if row is not None and result["compacted_after"] is None:
+                        result["compacted_after"] = {key: row[key] for key in (
+                            "at", "trigger", "pre_tokens", "post_tokens")}
+                    continue
+                if b'"assistant"' not in line:
+                    continue
+                obj = _loads(line)
+                if (not isinstance(obj, dict) or obj.get("type") != "assistant"
+                        or obj.get("isSidechain")):
+                    continue
+                values, at = _row_usage(obj), _row_instant(obj)
+                tokens = values[0] + values[2] + values[3] if values else 0
+                # A row Claude Code writes itself for an error or an interrupt
+                # (model <synthetic>) carries zero usage: no call, so no context.
+                if tokens and at is not None:
+                    return {**result, "tokens": tokens, "at": at.isoformat(),
+                            "bytes_read": tail.bytes_read}
+    except OSError:
+        return {**result, "reason": "unreadable_transcript_file",
+                "bytes_read": tail.bytes_read if tail else 0}
+    return {**result, "bytes_read": tail.bytes_read,
+            "reason": ("no_main_usage_row_within_cap" if tail.capped
+                       else "no_main_usage_row_in_transcript")}
+
+
+def collect_bot_usage(paths, fleet, bot_id: str, since: datetime,
+                      until: datetime) -> dict:
+    """Read current-cwd Claude transcripts for one declared bot, with coverage."""
+    bot = fleet.bots[bot_id]
+    source = transcript_source(paths, fleet, bot_id)
+    sharing = source.sharing
     base = {"bot": bot_id, "account": bot.account,
             "attribution": "configured_account_and_current_bot_cwd_only",
             "shared_account_with_selected_fleet_bots": sharing,
@@ -410,22 +607,12 @@ def collect_bot_usage(paths, fleet, bot_id: str, since: datetime,
                             "entries": MAX_ENTRIES, "depth": 4},
             "quota": {"status": "unavailable", "reason": "no_provider_observation"}}
     empty = _counts(Usage())
-    if account is None:
+    if source.directory is None:
+        shared = {"shared_with": list(source.shared_with)} if source.shared_with else {}
         return {**base, "usage": empty, "coverage": {"status": "unavailable",
-                "issues": ["account_directory_unresolved"], "files_read": 0,
+                "issues": [source.issue], **shared, "files_read": 0,
                 "files_skipped_at_least": 0}}
-    cwd_slug = transcript_slug(paths.bot_runtime(bot_id))
-    peers = [name for name in sharing if transcript_slug(paths.bot_runtime(name)) == cwd_slug]
-    if peers:
-        return {**base, "usage": empty, "coverage": {"status": "unavailable",
-                "issues": ["ambiguous_shared_account_cwd_slug"],
-                "shared_with": sorted(peers), "files_read": 0, "files_skipped_at_least": 0}}
-    directory = account / "projects" / cwd_slug
-    if not directory.is_dir() or directory.is_symlink():
-        return {**base, "usage": empty, "coverage": {"status": "unavailable",
-                "issues": ["transcript_directory_missing_or_untrusted"],
-                "files_read": 0, "files_skipped_at_least": 0}}
-    files, issues, skipped, outside_window = _bounded_files(directory, since)
+    files, issues, skipped, outside_window = _bounded_files(source.directory, since)
     main = Usage()
     side = Usage()
     unreadable_files = 0

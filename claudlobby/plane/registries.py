@@ -207,6 +207,9 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # hook), moved off the retired transcript-digest-<date>.jsonl onto the
     # plane. Informational — the monitor's substrate, never an alert.
     "session_digest": "notice",
+    # One Claude Code compaction, from its compact_boundary transcript row,
+    # recorded once by the pulse (claudlobby.compactions, #2206).
+    "compaction": "notice",
     # manager check-in (spec §7): the decision record, and the join row a
     # `dispatch-task.sh --checkin` appends to its batch. notice — the record
     # IS the point; nothing here pages.

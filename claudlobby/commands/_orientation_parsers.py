@@ -23,6 +23,12 @@ def _usage_dispatch(args):
                    json_output=args.json)
 
 
+def _compactions_dispatch(args):
+    return execute(args.public_command,
+                   lambda: import_module(".compactions_record", __package__).dispatch(args),
+                   json_output=args.json)
+
+
 def _status_dispatch(args):
     return execute(args.public_command,
                    lambda: import_module(".status_read", __package__).dispatch(args),
@@ -114,6 +120,14 @@ def register_orientation_subparsers(sub):
                                 help="Window (default: all in JSON, 24h in text)")
             uptime.add_argument("--json", action="store_true", help="One schema-1 result object")
             uptime.set_defaults(func=_status_dispatch, public_command="fleet.uptime")
+            compactions = children.add_parser(
+                "compactions", help="Record each bot's Claude Code compactions on the Plane")
+            compaction_verbs = compactions.add_subparsers(dest="compactions_command", required=True)
+            record = compaction_verbs.add_parser(
+                "record", help="Record each compact_boundary row appended since the last pass, once")
+            record.add_argument("--json", action="store_true", help="One schema-1 result object")
+            record.set_defaults(func=_compactions_dispatch,
+                                public_command="fleet.compactions.record")
             from ._setup_parsers import register_fleet_setup
             register_fleet_setup(children)
             move = children.add_parser("move", help="Move an unselected cold fleet into a system container")
