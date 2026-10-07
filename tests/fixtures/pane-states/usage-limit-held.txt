@@ -1,0 +1,24 @@
+ ▐▛███▛█   Claude Code v2.1.292
+▝▜██████▀  Opus 5.5 with max effort · Claude Max
+ ▝▝   ▝▝   /…/harness/cwd
+
+  Get to finished work sooner with Opus 5.5. Switch anytime with /model.
+
+● Auto mode lets Claude handle permission prompts automatically — Claude
+  checks each tool call for risky actions and prompt injection before
+  executing. Actions Claude identifies as safe are executed, while
+  actions Claude identifies as risky are blocked and Claude may try a
+  different approach. Ideal for long-running tasks. Claude can make
+  mistakes that allow harmful commands to run, it's recommended to only
+  use in isolated environments. Shift+Tab to change mode.
+
+❯ harness: say hello
+  ⎿  You've hit your session limit · resets 10:36am (America/New_York)
+     /usage-credits to finish what you’re working on.
+
+✻ Baked for 0s · done 10:34 AM
+
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents

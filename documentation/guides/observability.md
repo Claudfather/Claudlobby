@@ -52,6 +52,7 @@ Readers: claudlobby event list / fleet reports list / fleet uptime / fleet statu
 | `service_down` | pulse | Bot's systemd/launchd unit is not active |
 | `activity_stuck` | pulse | Bot is animating but hasn't made a tool call in >threshold seconds |
 | `input_held` | pulse | The bot's input box holds text that was never submitted and no turn is running, past `OBSERVABILITY_INPUT_HELD_THRESHOLD` (default 300 s). It is not hung: an operator presses Enter in its pane, and a restart would discard the text |
+| `usage_limit_held` | pulse | A claude.ai usage limit stopped the bot and it is still held well after the limit's printed reset (keepalive's `LIMIT` verdict, past its resume window; #996). Data: `since_epoch`, `reset_epoch`, `limit`, `reset`, `screen`, `resume` (`off`, `armed`, or `tried` when keepalive already resumed it once for this reset). Paged in place of `activity_stuck`. The remedy is a prompt to the bot, never usage credits; no restart is needed |
 | `overdue_dispatch` | pulse | A dispatched task passed its deadline with no report |
 | `script_error` | lib | A lifecycle script exited non-zero |
 | `bridge_down` | pulse / alert | Live tmux session, but the bot's Telegram bridge (channel poller) isn't delivering. Raised per-pulse by `fleet-pulse.sh` once down past `OBSERVABILITY_BRIDGE_DOWN_GRACE` seconds, and separately by `start-bot.sh` at bring-up on a verified-dark bridge or missing token |
@@ -81,7 +82,9 @@ Readers: claudlobby event list / fleet reports list / fleet uptime / fleet statu
 | Type | Source | Meaning |
 |------|--------|---------|
 | `tool_call` | vitals | Bot used a tool (high volume — filter or skip in queries) |
-| `keepalive_restart`, `keepalive_skip`, `keepalive_reload`, `bridge_heal` | keepalive | A keepalive transition: it restarted a dead session, declined a restart (the session reappeared, a crash loop, a boot in flight), sent an idle bot `/reload-plugins` and `/reload-skills`, or bounced or reset a dark Telegram bridge. The per-tick verdict (BUSY, IDLE, HELD, UNKNOWN) rides the `bot.heartbeat` sample, not an event |
+| `keepalive_restart`, `keepalive_skip`, `keepalive_reload`, `bridge_heal` | keepalive | A keepalive transition: it restarted a dead session, declined a restart (the session reappeared, a crash loop, a boot in flight), sent an idle bot `/reload-plugins` and `/reload-skills`, or bounced or reset a dark Telegram bridge. The per-tick verdict (BUSY, IDLE, HELD, LIMIT, UNKNOWN) rides the `bot.heartbeat` sample, not an event |
+| `usage_limit_hit` | hook | `usage-limit-hook.sh` (StopFailure): a claude.ai usage limit ended the bot's turn. `limit_line` is Claude Code's own line, with the reset time it printed (#996) |
+| `keepalive_limit_resume` | keepalive | keepalive's one resume for a limit's reset (`KEEPALIVE_LIMIT_RESUME_ENABLED=1`): `menu` (`confirmed` when it chose "Stop and wait for limit to reset" by its label first, else `none`) and `outcome` (`submitted`, `unsubmitted`, `send-failed`, or why it stopped) |
 | `bot_teardown_started` | spin-down | `spin-down-bot.sh` was invoked on a bot: records the door (`action`), `actor`, `fleet`, `bot_dir`, `expected_return`, and `reason`. Emitted BEFORE the teardown legs run, so it records an intent, not a confirmed outcome — a crash mid-teardown still leaves the record. **Dormant unless the fleet sets `SPINDOWN_RECEIPT_ENABLED=1`**, so an unarmed fleet writes no rows and an empty result means *not armed*, not *no teardowns* |
 | `pane_stuck` | pulse | Bot's pane content unchanged for >5 min |
 | `wip_uncommitted` | pulse | Bot has uncommitted changes in a project repo |

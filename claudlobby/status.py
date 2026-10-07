@@ -527,6 +527,9 @@ def _tmux_display(bs: BotStatus) -> str:
             # #2070: text sits unsubmitted in the input box; an operator Enter
             # clears it, a restart would discard it.
             return _yellow("held")
+        if bs.pane_state == "LIMIT":
+            # #996: a claude.ai usage limit stopped it; it waits for the reset.
+            return _yellow("limit")
         return "up"
     return _red("down")
 

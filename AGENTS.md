@@ -84,6 +84,8 @@ One line per script, for routing; operators use the public CLI. **Before changin
 - `spin-down-bot.sh` — full teardown for canary/throwaway bots; `--purge` also deletes the bot dir
 - `pre-stop-handoff.sh` — graceful context handoff before a service stop
 - `keepalive.sh` — per-bot watchdog: restarts a dead session and records heartbeat samples
+- `usage-limit.py` — reads a pane for a usage-limit stop: the limit, its reset, and what holds the screen
+- `usage-limit-hook.sh` — StopFailure and Stop hook: the bot's own record of a usage-limit stop
 - `keepalive-all.sh` — run keepalive for every bot
 - `reconcile-fleet.sh` — audit supervision state: healthy, orphan, missing, unsupervised-down, unbound
 - `supervisor.sh` — systemd/launchd adapter; the one door for new `systemctl`/`launchctl` calls (other files are ratcheted at their current count)
