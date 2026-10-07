@@ -265,7 +265,7 @@ def test_real_renderers_bind_every_native_carrier_and_refuse_bypass(installed, m
     composer._write_service_units(destination, host_unit_name("plane-daemon", prefix=unit_prefix), "plane-daemon",
                                   "$CLAUDLOBBY_NATIVE_DIR/plane-daemon.sh", paths)
     composer._write_timer_units(destination, "com.example.maintenance", "maintenance",
-                                {"type": "interval", "seconds": 60},
+                                {"type": "interval", "seconds": 60, "startup": 60},
                                 "$CLAUDLOBBY_NATIVE_DIR/maintenance.sh --check", "oneshot",
                                 "example", paths, exec_args=["literal $HOME% & 'quoted'\\path"])
     frozen = []

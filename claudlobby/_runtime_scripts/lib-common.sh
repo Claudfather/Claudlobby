@@ -841,6 +841,8 @@ plane_kill_tree() {
 # This independent breadcrumb covers unknown fate (a reap may follow a commit)
 # and explicit staging refusals (stage_refused/staged_full/stage_failed). The
 # kind distinguishes them; refusal means NOT recorded, never an unknown commit.
+# The daemon's replay adds stage_empty: a stage reaped after creating its temp
+# file but before writing its batch, found empty with its writer gone (#2164).
 # A successful cooldown stage is pending with known fate and does not qualify.
 # The socket client rotates refusal rows with the same one-day retention.
 #
@@ -1272,8 +1274,8 @@ bridge_state() {
         printf '%s' "no_bridge"; return 1
     fi
 
-    # Lineage: a poller whose `claude` died reparents to the session subreaper
-    # (systemd --user / init) and delivers nothing while still holding the
+    # Lineage: a poller whose `claude` died reparents to a subreaper (the bot's
+    # own, systemd --user or init) and delivers nothing while still holding the
     # single-consumer token slot — a deaf orphan that must NOT read `up`. Require
     # a live `claude` ANCESTOR. The telegram plugin's MCP command is `bun … start`,
     # so the real tree is  claude → bun (`bun … start`) → bun server.ts  — `claude`
@@ -1833,93 +1835,6 @@ PY
     return 0
 }
 
-# --- Supervision-unit ownership ----------------------------------------------
-# Host units carry a FIXED, unprefixed identity (claudlobby-disk-monitor, ...)
-# and live in ONE shared directory per host, because host equipment is
-# one-per-host and not one-per-fleet. That is deliberate. What is not
-# deliberate is that enrollment used to be an unconditional copy, so whichever
-# tree enrolled LAST owned them and nothing said so: a second checkout running
-# setup-system silently re-pointed the production host's daily jobs at itself,
-# and when that tree was later deleted the jobs stayed enrolled exec-ing a path
-# that no longer existed (#1152, reproduced on real systemd before this landed).
-
-# unit_owner_root <unit_file> — the CLAUDLOBBY_ROOT recorded INSIDE a composed
-# supervision unit, or nothing when the unit carries no ownership marker.
-#
-# Read as a PROPERTY. The composer emits CLAUDLOBBY_ROOT explicitly into every
-# unit it writes, on both platforms. This deliberately does NOT fall back to
-# parsing a root out of ExecStart or ProgramArguments: that is a pattern match
-# standing in for a property check, and it silently re-scopes who owns what the
-# first time the script layout moves. A unit with no marker reports NOTHING, so
-# the caller refuses loudly instead of acting on a guess.
-unit_owner_root() {
-    local f="${1:-}"
-    [ -n "$f" ] && [ -f "$f" ] || return 0
-    case "$f" in
-        *.plist)
-            # The composer emits <key> and <string> on SEPARATE lines, so this
-            # cannot be line-oriented — a per-line matcher would report every
-            # macOS host unit as unowned and refuse every enrollment there.
-            tr '\n' ' ' < "$f" \
-                | sed -n 's|.*<key>CLAUDLOBBY_ROOT</key>[[:space:]]*<string>\([^<]*\)</string>.*|\1|p' \
-                | head -1
-            ;;
-        *)
-            # Both the bare and the systemd-quoted Environment= forms.
-            sed -n 's/^Environment="\{0,1\}CLAUDLOBBY_ROOT=\([^"]*\)"\{0,1\}$/\1/p' "$f" \
-                | head -1
-            ;;
-    esac
-    return 0
-}
-
-# guard_unit_capture <installed_unit> <enrolling_root> <label>
-#   rc 0  proceed — nothing installed yet, or this root already owns it
-#   rc 3  refuse  — a different root owns it, or ownership cannot be established
-#
-# "Already installed" and "ours" are different questions, and only the second
-# licenses a write. An unowned unit is refused rather than assumed to be ours:
-# absence of a marker is not evidence that nobody else put it there, and this
-# door overwrites host equipment.
-# The enrolling root and label are NOT mandatory parameters. An indeterminable
-# enrolling root is a real state — a unit that predates the composer's marker,
-# or a minimal hand-written one — and `${2:?}` aborted the whole enrollment on
-# it, which turned a guard against capture into a refusal to install anything.
-guard_unit_capture() {
-    local installed="${1:?}" root="${2-}" label="${3-$(basename "${1:?}")}" owner
-    # Nothing installed means nothing to capture. This is the ONLY case where
-    # an unresolvable root is uninteresting, so it is answered before asking.
-    [ -f "$installed" ] || return 0
-    owner="$(unit_owner_root "$installed")"
-    if [ -z "$owner" ] && [ -z "$root" ]; then
-        # Neither side carries a marker, so no ownership judgement is possible
-        # in either direction. Proceeding is the only non-paralysing option —
-        # every composer-emitted unit carries the marker, so this is reachable
-        # only for units this system did not write — but it is said out loud
-        # rather than waved through, because the guard is silently inert here.
-        printf 'NOTE: %s carries no CLAUDLOBBY_ROOT marker and neither does the incoming unit;\n' "$installed" >&2
-        printf '      ownership cannot be checked, proceeding.\n' >&2
-        return 0
-    fi
-    [ "$owner" = "$root" ] && return 0
-    {
-        printf 'REFUSED: %s is already installed and this root does not own it.\n' "$label"
-        if [ -n "$owner" ]; then
-            printf '  owned by:  %s\n' "$owner"
-        else
-            printf '  owned by:  UNKNOWN — %s carries no CLAUDLOBBY_ROOT marker\n' "$installed"
-        fi
-        printf '  enrolling: %s\n' "$root"
-        printf '  unit file: %s\n' "$installed"
-        printf '\n'
-        printf 'Host units are one-per-host under a fixed name, so enrolling from a second\n'
-        printf 'tree would silently re-point this job at %s. If that tree is later\n' "$root"
-        printf 'removed, the job stays enrolled exec-ing a path that no longer exists.\n'
-        printf 'Nothing has been changed. Re-run with --adopt to take ownership deliberately.\n'
-    } >&2
-    return 3
-}
-
 # --- Per-bot tmux socket isolation ------------------------------------------
 # Each bot runs its own tmux server, reached via a private socket name (the
 # `-L` argument), so one server's death can only drop one bot — not the whole
@@ -2069,6 +1984,7 @@ resolve_peer_socket() {
 # bot_tmux <socket> <tmux-args...>
 # The single chokepoint for socket-targeted tmux calls: runs a subcommand
 # against the per-bot server identified by <socket> (`tmux -L <socket> ...`).
+# One exception: bot_session_spawn has bot-subreaper.py exec the same argv.
 # A native start keeps admission FD 9 in its parent shell. The tmux client can
 # spawn a persistent server, so close that descriptor only for this child:
 # a killed start shell must not leave its shared activation lock in the server.
@@ -2089,6 +2005,48 @@ bot_tmux() {
         return $?
     fi
     "$_TMUX_BIN" -L "$socket" "$@" 9<&-
+}
+
+# Create a bot's tmux session under the bot's own child subreaper (#2158): the
+# one place start-bot.sh starts a session. The tmux server daemonizes, so it and
+# every process the session orphans re-parent to the nearest live subreaper,
+# which without one of the bot's own is the user manager that runs every bot: a
+# kill aimed at an orphan's parent could stop them all. bot-subreaper.py runs
+# the client and stays as that subreaper until its last child is gone. Linux
+# only: macOS has no child subreaper, and an orphan there re-parents to launchd,
+# PID 1, which a user cannot signal. Fails open: when the subreaper did not run
+# the client, the client runs as before, unless the session already exists
+# (the subreaper died after its client ran). BOT_SUBREAPER_REPORT says which,
+# and a Linux session that did not get its subreaper records
+# bot_subreaper_unavailable.
+bot_session_spawn() {
+    local socket="${1?Usage: bot_session_spawn <socket> <session> <command>}"
+    local session="${2?}" command="${3?}" report="" rc=0
+    local why="no private socket or release interpreter"
+    if [ "$_OS" != Linux ]; then
+        BOT_SUBREAPER_REPORT="not used: $_OS has no child subreaper"
+        bot_tmux "$socket" new-session -d -s "$session" "$command"
+        return
+    fi
+    if [ -n "$socket" ] && [ -x "${_NATIVE_ADMISSION_PYTHON:-}" ]; then
+        report=$("$_NATIVE_ADMISSION_PYTHON" -I -B -S "$_LIB_COMMON_DIR/bot-subreaper.py" \
+            "$_TMUX_BIN" -L "$socket" new-session -d -s "$session" -P -F '#{pid}' \
+            "$command" 9<&-) || rc=$?
+        why="the subreaper did not run the client (exit $rc)"
+    fi
+    case "$report" in
+        subreaper=*" adopted=yes") BOT_SUBREAPER_REPORT="$report"; return "$rc" ;;
+        subreaper=*) BOT_SUBREAPER_REPORT="$report" ;;  # the client ran: its status stands
+        *)
+            BOT_SUBREAPER_REPORT="not used: $why"
+            rc=0
+            bot_tmux "$socket" has-session -t "=$session" 2>/dev/null \
+                || bot_tmux "$socket" new-session -d -s "$session" "$command" || rc=$?
+            ;;
+    esac
+    emit_fleet_event "bot_subreaper_unavailable" "startup" \
+        "{\"report\":\"$(json_escape "$BOT_SUBREAPER_REPORT")\"}"
+    return "$rc"
 }
 
 # emit_fleet_event <type> <source> [data_json] [bot_dir] [bot_id]
@@ -5648,61 +5606,6 @@ walk_back_uncomposed_host_units() {
         done
     fi
     unset -f _wb_still_composed
-    return 0
-}
-
-# resolve_timer_unit <caller-name> <timer-name> [<fleet-name>]
-# Shared resolution for the generic timer enrollers (systemd + launchd):
-# honors the setup-backbone env overrides (TIMER_DIR / UNIT_NAME /
-# SERVICE_PREFIX), else resolves the fleet's composed-timers dir and the
-# <service_prefix>.<timer> basename. On success sets:
-#   TIMER_DIR      — source dir of composed units
-#   UNIT_BASENAME  — unit basename (systemd unit name / launchd Label)
-resolve_timer_unit() {
-    local caller="$1" timer="$2" fleet="${3:-${CLAUDLOBBY_FLEET:-}}"
-    local fleet_dir=""
-    if [ -z "${TIMER_DIR:-}" ]; then
-        if [ -z "$fleet" ]; then
-            echo "$caller: pass a fleet name, set CLAUDLOBBY_FLEET, or set TIMER_DIR" >&2
-            return 2
-        fi
-        fleet_dir=$(resolve_fleet_dir "$fleet") || fleet_dir="$CLAUDLOBBY_ROOT/local/$fleet"
-        TIMER_DIR="$fleet_dir/runtime/fleet/timers"
-    fi
-    if [ ! -d "$TIMER_DIR" ]; then
-        echo "Error: $TIMER_DIR not found — run 'claudlobby --root <data-root> config plan --release <sealed-release-id>', then 'claudlobby --root <data-root> host activate <plan-id> --install-directory <native-user-unit-dir>'." >&2
-        return 1
-    fi
-    if [ -n "${UNIT_NAME:-}" ]; then
-        UNIT_BASENAME="$UNIT_NAME"
-        return 0
-    fi
-    # Derive service prefix from bot.conf (all bots share the same
-    # SERVICE_PREFIX). The explicit SERVICE_PREFIX override supports callers
-    # before any bot.conf has been composed.
-    if [ -z "${SERVICE_PREFIX:-}" ] && [ -n "$fleet_dir" ]; then
-        local _first_conf
-        _first_conf="$(find "$fleet_dir/runtime/bots" -name bot.conf -print -quit 2>/dev/null)"
-        if [ -n "$_first_conf" ]; then
-            SERVICE_PREFIX="$(extract_bot_conf_var "$_first_conf" SERVICE_PREFIX)"
-        fi
-    fi
-    if [ -z "${SERVICE_PREFIX:-}" ]; then
-        echo "$caller: SERVICE_PREFIX not set and no bot.conf found." >&2
-        return 2
-    fi
-    UNIT_BASENAME="$SERVICE_PREFIX.$timer"
-}
-
-# extract_bot_conf_var FILE VAR_NAME
-# Extract a variable's value from a bot.conf file (strips 'export' prefix and quotes).
-# Usage: SERVICE_PREFIX="$(extract_bot_conf_var "$conf_file" SERVICE_PREFIX)"
-# An absent var is a normal state (empty output, exit 0): without the explicit
-# return, grep's no-match status becomes the pipeline's under pipefail and the
-# $(...) assignment call sites abort strict callers — same class as #610.
-extract_bot_conf_var() {
-    local conf_file="$1" var_name="$2"
-    grep -m1 "^export ${var_name}=" "$conf_file" | cut -d= -f2- | tr -d "'"
     return 0
 }
 

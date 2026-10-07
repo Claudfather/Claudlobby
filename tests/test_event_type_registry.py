@@ -93,6 +93,7 @@ SHELL_WRITERS = {
 # A script's own wrapper around a writer; its calls are scanned like a writer's.
 LOCAL_WRAPPERS = {
     RS + "credential-echo-guard.sh": {"_event": 1},
+    RS + "signal-guard.sh": {"_event": 1},
     RS + "vault-git-guard.sh": {"_event": 1},
 }
 # A writer call whose type is a variable, keyed (file, writer, the argument as
@@ -114,6 +115,7 @@ FORWARDED_TYPES = {
         ("emit_failure_alert", "emit_fleet_notice"),
     (RS + "lib-common.sh", "emit_fleet_notice", '"$etype"'): ("notify_currency",),
     (RS + "credential-echo-guard.sh", "emit_fleet_event", '"$1"'): ("_event",),
+    (RS + "signal-guard.sh", "emit_fleet_event", '"$1"'): ("_event",),
     (RS + "vault-git-guard.sh", "emit_fleet_event", '"$1"'): ("_event",),
 }
 
@@ -367,12 +369,17 @@ VARIABLE_ROWS = {
     (RS + "lib-common.sh", '"%s"'): "emit_fleet_event",
     ("claudlobby/plane/daemon.py", "event"): "_emit_system",
     ("claudlobby/plane/ingest.py", "payload.event"): None,  # stores a declaration as sent
+    ("claudlobby/plane/fleet_events.py", "event_type"): "fleet_event_request",
 }
 # A Python helper that takes a type as its first argument.
 PY_WRITERS = {
     "claudlobby/plane/daemon.py": "_emit_system",
     RS + "heavy-slot.py": "_emit",
     RS + "public-write-guard.py": "_emit",
+    # #2145: the one Python spelling of emit_fleet_event's row, and its adopters.
+    "claudlobby/plane/fleet_events.py": "fleet_event_request",
+    "claudlobby/fleet_notification.py": "fleet_event_request",
+    "claudlobby/message_operations.py": "fleet_event_request",
 }
 
 
@@ -409,9 +416,13 @@ def _py_writer_sites() -> tuple[tuple, ...]:
         text = _text(REPO / where)
         for m in re.finditer(r"(?<!def )\b" + re.escape(helper) + r"\(\s*(?P<arg>[^,)]*)", text):
             arg = m["arg"].strip()
+            line = text.count("\n", 0, m.start()) + 1
+            cond = CONDITIONAL.fullmatch(arg)   # admitted as the row scan admits it
+            if cond:
+                out.extend((where, line, helper, t, arg) for t in (cond[1], cond[2]))
+                continue
             lit = LITERAL.fullmatch(arg)
-            out.append((where, text.count("\n", 0, m.start()) + 1, helper,
-                        lit[1] if lit else None, arg))
+            out.append((where, line, helper, lit[1] if lit else None, arg))
     return tuple(out)
 
 
@@ -420,11 +431,12 @@ def test_the_row_and_python_scans_find_the_writers():
     rows = {t for *_, types, _f in _row_sites() if types for t in types}
     for t in ("vault_sync", "session_digest", "operator_first_seen", "task_recheck",
               "task_recheck_noop", "workstream_prune_noop", "reports_acked", "report_status",
-              "checkin_decision", "checkin_dispatch", "fleet_alert", "fleet_notice"):
+              "checkin_decision", "checkin_dispatch"):
         assert t in rows, t
     helpers = {lit for *_, lit, _arg in _py_writer_sites()}
     for t in ("daemon_started", "daemon_stopping", "spool_drain_completed",
-              "heavy_slot_acquired", "heavy_slot_refused", "public_write_refused"):
+              "heavy_slot_acquired", "heavy_slot_refused", "public_write_refused",
+              "fleet_alert", "fleet_notice", "delivery_enter_repaired"):
         assert t in helpers, t
 
 

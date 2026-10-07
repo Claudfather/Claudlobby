@@ -692,6 +692,13 @@ def fleet_alert_sender_state_dir(fleet: FleetConfig) -> str | None:
 
 
 GITCONFIG_FILENAME = ".gitconfig"
+# The bot's own clauDNA root, relative to BOT_DIR (#2145 F14). Readers that need a bot's
+# store build it from bot_runtime(b) / CLAUDNA_STATE_SUBDIR, never from bot.conf's
+# "$BOT_DIR/..." text, which only a sourcing shell expands.
+CLAUDNA_STATE_SUBDIR = "data/claudna"
+# Env names compose_bot_conf exports for every bot as invariants. bot.env/secret_files
+# are emitted after them, so the validator reserves these names (_validate_reserved_env).
+COMPOSED_INVARIANT_ENV = frozenset({"CLAUDNA_STATE_DIR"})
 # Sibling of the composed .gitconfig holding ONLY the App [user] block, pulled
 # in by a per-org `includeIf hasconfig:remote.*.url` from the main file when an
 # App declares `orgs:` + an identity (#1300). Kept separate because includeIf
@@ -1090,6 +1097,9 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
     lines.append("")
     lines.append("# Exports for skills + scripts")
     lines.append(f"export FLEET_NAME={_shq(fleet.name)}")
+    # #2145 §2.2: the doors derive the caller's session uid from its agent CLI's
+    # session-id env; this names the agent CLI so they derive with the right rule.
+    lines.append(f"export CLAUDLOBBY_AGENT_CLI={_shq(bot.agent_cli)}")
     # #1722. The ONE provenance value that may live here, and only because it is
     # CONTENT-derived: it changes exactly when fleet.yaml changes, which is
     # exactly when `generate` would legitimately rewrite bot.conf anyway. So
@@ -1316,18 +1326,19 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
                     f"{_shq(' '.join(sections))}"
                 )
 
-    # Ecosystem — clauDNA version pin, Claudron vault, Claudosseum tenant
-    if bot.claudna_version or bot.claudron_vault_path or bot.claudosseum_tenant_id:
-        lines.append("")
-        lines.append("# Ecosystem")
-        if bot.claudna_version:
-            lines.append(f"export CLAUDNA_VERSION={_shq(bot.claudna_version)}")
-        if bot_is_vault_wired(bot):
-            lines.append(f"export CLAUDRON_VAULT_PATH={_shq(bot.claudron_vault_path)}")
-        if bot.claudosseum_tenant_id:
-            lines.append(
-                f"export CLAUDOSSEUM_TENANT_ID={_shq(bot.claudosseum_tenant_id)}"
-            )
+    # Ecosystem — the per-bot clauDNA root (an invariant, #2145 F14; bot.conf is
+    # sourced after the .env tiers, so it wins), then the optional pins.
+    lines.append("")
+    lines.append("# Ecosystem")
+    lines.append(f'export CLAUDNA_STATE_DIR="$BOT_DIR/{CLAUDNA_STATE_SUBDIR}"')
+    if bot.claudna_version:
+        lines.append(f"export CLAUDNA_VERSION={_shq(bot.claudna_version)}")
+    if bot_is_vault_wired(bot):
+        lines.append(f"export CLAUDRON_VAULT_PATH={_shq(bot.claudron_vault_path)}")
+    if bot.claudosseum_tenant_id:
+        lines.append(
+            f"export CLAUDOSSEUM_TENANT_ID={_shq(bot.claudosseum_tenant_id)}"
+        )
 
     # Plugin sync — restore third-party plugins on session start. Union the
     # plugins this bot's channels pin (see _channel_plugins) so a cold box
@@ -4006,11 +4017,19 @@ def _resolve_timer_schedule(timer_cfg: dict, merged_defaults: dict) -> dict:
     """Resolve timer scheduling from config.
 
     Returns a dict describing the schedule type:
-      {"type": "interval", "seconds": 300}
+      {"type": "interval", "seconds": 300, "startup": 300}
       {"type": "calendar", "expression": "*-*-* 06:00:00"}
+
+    ``startup`` is the first run's delay, counted from the timer's own start
+    (OnActiveSec=): the job's ``startup_delay``, else its interval up to 900 s.
+    A past OnBootSec= or OnStartupSec= point fires a timer at once
+    (systemd.timer(5)), and an activation restarts every timer. OnUnitActiveSec=
+    counts from the service's last start, which the manager keeps across a timer
+    restart, so a job overdue on its interval still runs at once.
     """
     if "schedule" in timer_cfg:
         return {"type": "calendar", "expression": timer_cfg["schedule"]}
+    seconds = int(timer_cfg.get("interval", 300))
     if "interval_from" in timer_cfg:
         ref = timer_cfg["interval_from"]
         section, _, field = ref.partition(".")
@@ -4018,8 +4037,10 @@ def _resolve_timer_schedule(timer_cfg: dict, merged_defaults: dict) -> dict:
             obs = merged_defaults.get("observability", {})
             val = obs.get(field)
             if val is not None:
-                return {"type": "interval", "seconds": int(val)}
-    return {"type": "interval", "seconds": timer_cfg.get("interval", 300)}
+                seconds = int(val)
+    startup = timer_cfg.get("startup_delay")
+    startup = min(seconds, 900) if startup is None else int(startup)
+    return {"type": "interval", "seconds": seconds, "startup": startup}
 
 
 # The system.yaml fleet job whose script reads the FLEET_PULSE_* knobs (#1120).
@@ -4325,7 +4346,7 @@ def _write_timer_units(
             [
                 "",
                 "[Timer]",
-                f"OnBootSec={secs}",
+                f"OnActiveSec={sched['startup']}",
                 f"OnUnitActiveSec={secs}",
                 "AccuracySec=10",
             ]

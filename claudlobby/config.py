@@ -19,6 +19,7 @@ from . import defaults as _defaults
 
 from .known_values import (
     KNOWN_EFFORTS,
+    KNOWN_AGENT_CLIS,
     PROJECT_KEYS,
     SHELL_IDENT_RE,
     VALID_PERMISSION_MODES,
@@ -192,6 +193,10 @@ FLEET_PULSE_ENV_KEYS: dict[str, str] = {
 }
 
 
+# fleet_pulse.timeout_s, validated and clamped to this range (seconds).
+FLEET_PULSE_TIMEOUT_RANGE = (30, 3600)
+
+
 @dataclass
 class FleetPulseConfig:
     """Fleet-pulse escalation knobs — the alert-volume controls (#1120).
@@ -222,6 +227,10 @@ class FleetPulseConfig:
     escalation_state_dir: str | None = None
     renotify_after_s: int | None = None
     rearm_window_s: int | None = None
+    # The sweep's time cap in seconds (#2059). Read by claudlobby/fleet_pulse.py
+    # from this config, not the unit's Environment=, so a hand-run
+    # `claudlobby fleet pulse` gets it too; unset, the cap scales with load.
+    timeout_s: int | None = None
 
     def env(self) -> dict[str, str]:
         """The subset actually set, as ``VAR: value``. Unset stays unset so the
@@ -702,6 +711,12 @@ class BotConfig:
     account: str = "default"
     model: str | None = None
     effort: str | None = None
+    # claude | codex — #2145; see known_values.KNOWN_AGENT_CLIS. The same name in
+    # bot.conf (CLAUDLOBBY_AGENT_CLI), the bot keyframe and the session join key.
+    agent_cli: str = "claude"
+    # Bot-level keys that have no reader (config._RETIRED_BOT_KEYS) and their
+    # values — carried so `validate` can say so, never consumed by a door.
+    retired_keys: dict[str, Any] = field(default_factory=dict)
     # Claude Code CLI flags — composed into CLAUDE_FLAGS in bot.conf.
     remote_control: bool = True  # --remote-control
     # Conservative default: with neither field set the composer emits
@@ -1388,6 +1403,16 @@ def _merge_tool_permissions(
     )
 
 
+#: Keys a bot stanza or `defaults:` may still set that nothing reads, each with
+#: the key that is read instead. An unknown bot key is otherwise ignored, and a
+#: key that reads like a setting must not be a silent no-op (validator:
+#: `retired-key`, or an error when its value would change what the bot runs).
+_RETIRED_BOT_KEYS: dict[str, str] = {
+    # #2145 Q1 (operator, 2026-10-06): the draft spelling of `agent_cli:`; it
+    # never shipped, but plans and drafts carried it.
+    "runtime": "agent_cli",
+}
+
 # Keys that once meant something and now have no reader. `observability.reap_days`
 # aged the per-bot event files (fleet-pulse's reap_events, keepalive's own
 # reaper); the F18 closure (#1467) removed the files and the reapers with them,
@@ -1463,6 +1488,7 @@ def _coerce_fleet_pulse(raw: dict | None) -> FleetPulseConfig | None:
         escalation_state_dir=None if sender in (None, "") else sender,
         renotify_after_s=_int("renotify_after_s"),
         rearm_window_s=_int("rearm_window_s"),
+        timeout_s=_int("timeout_s"),
     )
 
 
@@ -1723,6 +1749,11 @@ def _parse_enum(label: str, value: str | None, known: frozenset[str]) -> str | N
     """Validate a string field against a known set. Returns value or raises."""
     if value is None:
         return None
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Invalid {label} {value!r}: expected a string. "
+            f"Must be one of: {', '.join(sorted(known))}"
+        )
     if value not in known:
         suggestion = closest_match(value, known)
         hint = f" Did you mean '{suggestion}'?" if suggestion else ""
@@ -1812,6 +1843,13 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         effort=_parse_enum(
             "effort", _select_bot_scalar(raw, defaults, "effort")[0], KNOWN_EFFORTS
         ),
+        # An explicit `agent_cli: null` reads as the built-in default (the
+        # composer always needs a string); every other value is checked, a falsy
+        # one ("", 0, false) included, so none of them silently reads as claude.
+        agent_cli=_parse_enum(
+            "agent_cli", _select_bot_scalar(raw, defaults, "agent_cli")[0], KNOWN_AGENT_CLIS,
+        ) or "claude",
+        retired_keys={key: raw[key] for key in _RETIRED_BOT_KEYS if key in raw},
         remote_control=_bool("remote_control", True),
         dangerously_skip_permissions=_bool("dangerously_skip_permissions", False),
         permission_mode=_parse_enum(
@@ -2261,7 +2299,7 @@ _EXPLAIN_FLEET_SCALARS = frozenset({
     "human_telegram_id", "mission", "mission_file",
 })
 _EXPLAIN_BOT_INHERITED_SCALARS = frozenset({
-    "account", "model", "effort", "remote_control", "dangerously_skip_permissions",
+    "account", "model", "effort", "agent_cli", "remote_control", "dangerously_skip_permissions",
     "skip_auto_permission_prompt", "skip_dangerous_mode_permission_prompt",
     "prompt_suggestions", "disable_nonessential_traffic", "spinner_tips_enabled",
     "preferred_notif_channel", "prefers_reduced_motion",

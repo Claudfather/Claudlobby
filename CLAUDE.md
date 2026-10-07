@@ -1,6 +1,6 @@
 # claudlobby
 
-Compositor for Claude Code agent fleets. Transforms `fleet.yaml` + `library/` into runnable bot directories with isolated identities, MCP servers, skills, and systemd/launchd supervision.
+Compositor for agent-CLI fleets — Claude Code today, Codex through the execution adapter (#2149). Transforms `fleet.yaml` + `library/` into runnable bot directories with isolated identities, MCP servers, skills, and systemd/launchd supervision.
 
 **North star:** Trivial to run a fleet of distinct, cooperating bots on cheap hardware — and to point that fleet at a goal (fleets know the mission they serve, pick work that advances it, and close it at each project's declared rigor).
 
@@ -79,6 +79,7 @@ One line per script, for routing; operators use the public CLI. **Before changin
 
 **Bot lifecycle and supervision**
 - `start-bot.sh` — launch a bot's tmux session on its own socket and wait until ready
+- `bot-subreaper.py` — each bot session's child subreaper, which adopts its orphans
 - `spin-up-bot.sh` — enroll a bot as a supervised service, then start it (idempotent)
 - `spin-down-bot.sh` — full teardown for canary/throwaway bots; `--purge` also deletes the bot dir
 - `pre-stop-handoff.sh` — graceful context handoff before a service stop
@@ -108,6 +109,7 @@ One line per script, for routing; operators use the public CLI. **Before changin
 **Dispatch and the task loop**
 - `dispatch.sh` — manager → worker dispatch helper; resolves the worker's tmux socket
 - `dispatch-overdue.py` — the plane matcher behind fleet-pulse: overdue, orphaned, open, unassigned rows
+- `issue-intake.py` — lists the issues a skill may take (author, or whoever applied the trust label, can triage the repo); `quote` wraps issue text as data
 - `briefing-trigger.sh` — fire a bot's scheduled briefing as a slash command
 - `manager-checkin.sh` — the check-in beat: prompts an idle manager to pick its next move (opt-in)
 
@@ -164,6 +166,8 @@ One line per script, for routing; operators use the public CLI. **Before changin
 - `vault-git-decide.py` — the decision half of `vault-git-guard.sh`
 - `credential-echo-guard.sh` — PreToolUse hook: refuses a CLI form that prints an env-held credential unless the variable is removed in the same command (#2090)
 - `credential-echo-decide.py` — the decision half of `credential-echo-guard.sh`
+- `signal-guard.sh` — PreToolUse hook: refuses a signal to a process the caller did not start: pkill/killall, a pid not from `$!`, a job spec or a pid file (#1069)
+- `signal-decide.py` — the decision half of `signal-guard.sh`
 - `heavy-slot-guard.sh` — PreToolUse hook: queues heavy Bash commands (suites, installs, builds) on the host's heavy-job slot (opt-in)
 - `heavy-slot.py` — the heavy-job slot: `hook` finds heavy commands, `run` holds a slot or queues a ticket, `status` names holders and the queue
 - `public-write-guard.sh` — PreToolUse hook: refuses a GitHub-bound write that would put a term from the host's list into a public repository (opt-in)

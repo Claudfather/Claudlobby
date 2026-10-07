@@ -23,6 +23,7 @@ log = logging.getLogger(__name__)
 from . import dotenv, tool_resolve
 from .claudron_compat import CLAUDRON_INTEGRATION_URL
 from .config import (
+    _RETIRED_BOT_KEYS,
     _RETIRED_OBSERVABILITY_KEYS,
     _PROJECT_VALIDATION_KEYS,
     _qualified_repo,
@@ -142,6 +143,9 @@ def _operator_reverse_insteadof() -> str | None:
     return None
 
 
+#: The root checkout's lib/ is retired (#1989); hook commands there run beside the release's copy (#2062).
+RETIRED_HOOK_PREFIX = "$CLAUDLOBBY_ROOT/lib/"
+
 #: The category of every warning ``validate`` emits, passed at the site that
 #: raises it (``ValidationReport.warn``) and never derived from the message,
 #: whose wording is free to improve. The slugs are an API: doctor's
@@ -189,6 +193,7 @@ WARNING_CATEGORIES: dict[str, str] = {
     "obs-range": "an observability value outside its accepted range",
     "model-unknown": "a model name outside the known set (passed through as-is)",
     "hook-unknown": "a hook event Claude Code does not recognise",
+    "hook-retired-path": "a hook command points into the retired root lib/; the release composes its own copy",
     "account-unknown": "a bot's account is not in fleet.accounts",
     "autonomous-runner": "an autonomous_runner field outside its expected shape",
     "briefing-no-source": "a briefing-equipped bot has no integration or MCP server to read",
@@ -1256,6 +1261,39 @@ def _validate_bots(
                 f"1..10 (got {obs.bridge_heal_max_attempts})"
             )
 
+        # #2145 F11: the vocabulary ships now; only the Claude adapter exists.
+        if bot.agent_cli != "claude":
+            report.errors.append(
+                f"bot '{bot_name}': agent_cli '{bot.agent_cli}' — execution adapter not shipped. "
+                f"This release composes and launches Claude Code bots only; the Codex adapter is the "
+                f"companion epic (#2149). Set agent_cli: claude, or remove the bot until it lands."
+            )
+
+        # A key nothing reads, in the bot's stanza or under `defaults:` (#2145
+        # Q1: `runtime:` is the draft spelling of `agent_cli:`). Said, never
+        # silently ignored; and refused when its value names a CLI other than
+        # the one the bot will run — `runtime: codex` must not quietly run claude.
+        for key, read_instead in _RETIRED_BOT_KEYS.items():
+            own = key in bot.retired_keys
+            if not own and key not in fleet.defaults:
+                continue
+            value = bot.retired_keys[key] if own else fleet.defaults[key]
+            where = f"bot '{bot_name}': {key}" if own else f"defaults.{key}"
+            if value is not None and value != getattr(bot, read_instead):
+                refusal = (
+                    f"{where} is {value!r}, but nothing reads it — the key is {read_instead}:, "
+                    f"so this would run {getattr(bot, read_instead)!r}. Rename it to {read_instead}: "
+                    f"(#2145)."
+                )
+                if refusal not in report.errors:
+                    report.errors.append(refusal)
+            elif own:
+                report.warn("retired-key", f"{where} has no reader — the key is {read_instead}: (#2145); "
+                                           f"rename or remove it")
+            else:
+                shared.add("retired-key", f"{where} has no reader — the key is {read_instead}: (#2145); "
+                                          f"rename or remove it", bot_name)
+
         # Model validation (warn + pass-through)
         if bot.model and bot.model not in KNOWN_MODELS:
             suggestion = closest_match(bot.model, KNOWN_MODELS)
@@ -1281,8 +1319,19 @@ def _validate_bots(
                         f"bot '{bot_name}': model_strategy.{field_name} '{val}' not in known models{hint}"
                     )
 
-        # Hook event keys (warn)
-        for event in bot.hooks:
+        # Hook event keys, and hook commands under the retired root lib/ (warn).
+        # Dedup keys on (command, matcher), so a retired-lib command never folds
+        # into the release's $CLAUDLOBBY_NATIVE_DIR copy and both run (#2062).
+        for event, entries in bot.hooks.items():
+            for entry in entries or []:
+                command = str((entry or {}).get("command", ""))
+                if RETIRED_HOOK_PREFIX in command:
+                    report.warn(
+                        "hook-retired-path",
+                        f"bot '{bot_name}': {event} hook '{command}' points into the retired root lib/ — "
+                        f"delete it from fleet.yaml; the release composes its own "
+                        f"$CLAUDLOBBY_NATIVE_DIR copy, so both run (#2062)"
+                    )
             if event not in KNOWN_HOOK_EVENTS:
                 suggestion = closest_match(event, KNOWN_HOOK_EVENTS)
                 hint = f" — did you mean '{suggestion}'?" if suggestion else ""
@@ -1292,6 +1341,7 @@ def _validate_bots(
                     f"Known events: {', '.join(sorted(KNOWN_HOOK_EVENTS))}. "
                     f"This hook will be silently ignored by Claude Code."
                 )
+
 
         # RC-killing env vs remote-control/channels (error, #533). extra_flags
         # is checked too so a raw "--remote-control" there gets the same guard.
@@ -1666,6 +1716,32 @@ def _validate_fleet(fleet: FleetConfig, report: ValidationReport) -> None:
             )
 
 
+def _validate_reserved_env(fleet: FleetConfig, report: ValidationReport) -> None:
+    """Refuse a bot env:/secret_files: key that would override a composed value.
+
+    Both blocks are emitted after everything else in bot.conf, so the same key
+    there silently wins at source time (last assignment wins). Reserved, hard
+    error: the composer's invariants (``COMPOSED_INVARIANT_ENV``) always, and the
+    projects tier map's namespace when projects.yaml composes one.
+    """
+    from .composer import COMPOSED_INVARIANT_ENV  # local: composer imports config, not us
+
+    project_prefixes = ("PROJECT_TIER_", "PROJECT_REPOS_") if fleet.projects else ()
+    for bot_name, bot in fleet.bots.items():
+        for block, keys in (("env", bot.env), ("secret_files", bot.secret_files)):
+            for key in keys:
+                if key in COMPOSED_INVARIANT_ENV:
+                    report.errors.append(
+                        f"bot '{bot_name}': {block} key '{key}' is reserved — bot.conf "
+                        "composes it for every bot, and this entry would override it"
+                    )
+                elif project_prefixes and key.startswith(project_prefixes):
+                    report.errors.append(
+                        f"bot '{bot_name}': {block} key '{key}' is in the reserved projects "
+                        "namespace — it would clobber the tier map composed from projects.yaml"
+                    )
+
+
 # projects.yaml keys become PROJECT_TIER_<SLUG> env names — same charset as
 # bot ids so ProjectConfig.env_slug always yields a shell identifier.
 _PROJECT_KEY_RE = re.compile(r"^[a-z][a-z0-9-]*$")
@@ -1675,21 +1751,8 @@ def _validate_projects(
     fleet: FleetConfig, paths: Paths, report: ValidationReport
 ) -> None:
     """Validate the optional projects.yaml tier (goal-aware fleet, P2)."""
-    if fleet.projects:
-        # bot env: blocks are emitted AFTER the projects tier map in
-        # bot.conf, so an env: key in this namespace silently overrides the
-        # project's declared closure bar at source time (last assignment
-        # wins — a human-tier project flips to auto with zero warning).
-        # Reserved namespace, hard error.
-        for bot_name, bot in fleet.bots.items():
-            for env_key in bot.env:
-                if env_key.startswith(("PROJECT_TIER_", "PROJECT_REPOS_")):
-                    report.errors.append(
-                        f"bot '{bot_name}': env key '{env_key}' is in the "
-                        f"reserved projects namespace — it would clobber the "
-                        f"tier map composed from projects.yaml"
-                    )
-
+    # A bot env:/secret_files: key in the PROJECT_TIER_/PROJECT_REPOS_ namespace is
+    # refused by _validate_reserved_env, with the composer's other reserved names.
     repo_owners: dict[str, str] = {}
     # A derived registry is validated exactly like a declared one — the tier,
     # slug and whitespace rules are properties of what composes, not of who
@@ -2082,6 +2145,21 @@ def _validate_timers(fleet: FleetConfig, report: ValidationReport) -> None:
             f"{sf.source} = {sf.value!r} — {sf.reason}: {sf.path} "
             "(anchor the script on $CLAUDLOBBY_ROOT)"
         )
+    for name, job in jobs.items():
+        delay = job.get("startup_delay") if isinstance(job, dict) else None
+        if delay is None:
+            continue
+        try:
+            in_range = 1 <= int(delay) <= 3600
+        except (TypeError, ValueError):
+            in_range = False
+        if not in_range:
+            report.warn(
+                "obs-range",
+                f"jobs.{name}.startup_delay must be 1-3600 seconds (got {delay!r}): 0 starts "
+                "the job with every other producer, and a long delay postpones its first "
+                "run after every manager restart",
+            )
 
     # An armed beat on a leafless fleet warns rather than staying silent. The
     # compose-time job gate (composer.LEAF_MANAGER_GATED_JOBS) filters
@@ -2154,6 +2232,16 @@ def _validate_alert_pair(fleet: FleetConfig, report: ValidationReport) -> None:
             "to the channel state dir of a bot that is a member of the escalation "
             "chat (#1771)"
         )
+
+
+def _validate_fleet_pulse_cap(fleet: FleetConfig, report: ValidationReport) -> None:
+    """fleet_pulse.timeout_s caps the pulse sweep; the sweep clamps it to the same range."""
+    from .config import FLEET_PULSE_TIMEOUT_RANGE
+
+    low, high = FLEET_PULSE_TIMEOUT_RANGE
+    cap = getattr(fleet.fleet_pulse, "timeout_s", None)
+    if cap is not None and not low <= cap <= high:
+        report.warn("obs-range", f"fleet_pulse.timeout_s must be {low}-{high} seconds (got {cap}); it is clamped")
 
 
 def _validate_ignition(
@@ -2517,6 +2605,7 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_fleet(fleet, report)
     _validate_timers(fleet, report)
     _validate_alert_pair(fleet, report)
+    _validate_fleet_pulse_cap(fleet, report)
     # Resolved once for both rungs that ask (#1680) — the cascade shells out.
     # Gated on a leaf manager because neither rung can reach a doors-consuming
     # branch without one.
@@ -2532,6 +2621,7 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_mission(fleet, paths, report)
     _validate_workstreams(fleet, report)
     _validate_sweep(fleet, report)
+    _validate_reserved_env(fleet, report)
     _validate_projects(fleet, paths, report)
     _validate_goal_binding(fleet, paths, report, doors=_ign_doors)
     _validate_cross_fleet_collisions(fleet, paths, report)

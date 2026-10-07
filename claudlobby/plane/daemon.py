@@ -81,7 +81,8 @@ from typing import Optional
 
 from .contracts import ContractViolation
 from .db import connect, connect_ro, db_file, db_path
-from .queue_paths import scan_queue_dir, scan_spool, staged_dir, staged_payload
+from .queue_paths import (STAGED_ORPHAN_AGE_S, scan_queue_dir, scan_spool, staged_dir,
+                          staged_orphan, staged_payload)
 from .capture_policy import CaptureConfigInvalid
 from .identity import IdentityConflict
 from .emit_api import emit_batch
@@ -113,6 +114,7 @@ class ReplayReport:
     duplicates: int = 0
     spooled: int = 0
     quarantined: int = 0
+    lost: int = 0          # empty orphan stages counted in .emit-losses (#2164)
     limited: bool = False
     refused: tuple[str, ...] = ()
     error: str | None = None
@@ -149,14 +151,45 @@ def _serving_identity(root: Path) -> dict:
 # file is a finished batch with pre-minted ids, so it is replayed like a staged
 # one, never deleted. Only once it is this old: a younger one may still be
 # inside its stager's fsync, and every stager is reaped long before an hour.
-STAGED_ORPHAN_AGE_S = 3600.0
+# A stage reaped after creating the file but before writing it leaves it EMPTY
+# (#2164): its batch never reached the disk, and the file is the only record of
+# that. Once its writer is provably gone it is counted as a lost emit in
+# .emit-losses and removed, never quarantined as a malformed batch. The age is
+# STAGED_ORPHAN_AGE_S, kept in queue_paths so that `plane doctor` and the
+# receipt check age the queue by the same number (#2086).
+
+# The client names its temp `.<time_ns>-<lead event>.batch.<pid>.tmp`.
+_ORPHAN_WRITER = re.compile(r"\.\d+-[^/]+\.batch\.(\d+)\.tmp")
+
+
+def _never_written(f: Path, content: bytes) -> bool:
+    """An aged orphan that provably never received its batch: it is empty, and
+    the writer its name records is gone. Size 0 shows that no write completed;
+    only a gone writer shows that none ever will, because the stager is a single
+    process holding the file's only descriptor. A running pid (perhaps a reused
+    one) or a name without a pid proves neither, and keeps today's handling."""
+    if content:
+        return False
+    found = _ORPHAN_WRITER.fullmatch(f.name)
+    if not found:
+        return False
+    pid = int(found.group(1))
+    if pid <= 1:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except (OSError, OverflowError):
+        return False
+    return False
 
 
 def _orphaned_stages(entries: list) -> list:
     cutoff = time.time() - STAGED_ORPHAN_AGE_S
     out = []
     for p in entries:
-        if p.name.startswith(".") and p.name.endswith(".tmp"):
+        if staged_orphan(p):
             try:
                 if p.stat().st_mtime < cutoff:
                     out.append(p)
@@ -263,32 +296,72 @@ def _probe_reply(path: Path, timeout: float = 2.0, *, request: dict | None = Non
     must be a JSON OBJECT (a `[]` reply crashed doctor on AttributeError),
     the read is bounded by a TOTAL deadline (a trickle listener exceeded the
     per-op timeout indefinitely), and the buffer is size-capped."""
+    return _probe_exchange(path, timeout, request=request)[0]
+
+
+def _probe_exchange(path: Path, timeout: float, *,
+                    request: dict | None = None) -> tuple[dict | None, str]:
+    """`_probe_reply`, saying what a missing reply was (#2086): (reply,
+    "replied"), or None with "absent" (no socket file), "refused" (nothing
+    listens on it), "unanswered" (a listener, but no reply within `timeout`,
+    or a backlog too full to connect), "unreachable" (another connect error)
+    or "invalid" (no whole JSON object came back)."""
     probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     deadline = time.monotonic() + timeout
     try:
         probe.settimeout(timeout)
-        probe.connect(str(path))
+        try:
+            probe.connect(str(path))
+        except FileNotFoundError:
+            return None, "absent"
+        except ConnectionRefusedError:
+            return None, "refused"
+        except (BlockingIOError, TimeoutError):
+            return None, "unanswered"   # Linux: EAGAIN is a full backlog, so a listener
+        except OSError:
+            return None, "unreachable"
         probe.sendall(b"\n" if request is None else json.dumps(request).encode() + b"\n")
         buf = b""
         while b"\n" not in buf:
             remaining = deadline - time.monotonic()
-            if remaining <= 0 or len(buf) > 65536:
-                return None
+            if remaining <= 0:
+                return None, "unanswered"
+            if len(buf) > 65536:
+                return None, "invalid"
             probe.settimeout(remaining)
             chunk = probe.recv(65536)
             if not chunk:
                 break
             buf += chunk
             if len(buf) > 65536:
-                return None
+                return None, "invalid"
         reply = json.loads(buf)
         if not isinstance(reply, dict):
-            return None
-        return reply
+            return None, "invalid"
+        return reply, "replied"
+    except TimeoutError:
+        return None, "unanswered"
     except (OSError, ValueError):
-        return None
+        return None, "invalid"
     finally:
         probe.close()
+
+
+def probe_daemon_state(path: Path, timeout: float = 2.0) -> str:
+    """The empty-request handshake, for a reader that must not call a slow
+    daemon down (#2086): "serving" (the daemon's own answer came in time),
+    "unanswered" (something listens, but gave no answer within `timeout`: slow
+    or stuck, since a stopped daemon refuses the connection), "down" (no socket
+    file, or nothing listens on it, which includes a path longer than the daemon
+    will bind), "unreachable" (the connect failed another way) or "invalid" (an
+    answer that is not the daemon's)."""
+    if len(str(path).encode()) > MAX_SOCKET_PATH_BYTES:
+        return "down"   # _check_sun_path: no daemon ever listens on a longer path
+    reply, outcome = _probe_exchange(path, timeout)
+    if outcome == "replied":
+        return ("serving" if reply.get("ok") is False and reply.get("code") == "bad_request"
+                else "invalid")
+    return "down" if outcome in ("absent", "refused") else outcome
 
 
 def probe_daemon(path: Path, timeout: float = 2.0) -> bool:
@@ -540,6 +613,31 @@ class PlaneDaemon:
                 "remaining": report.remaining,
             })
 
+    def _count_lost_stage(self, f: Path) -> bool:
+        """Record an empty orphan stage as a lost emit, then remove it (#2164).
+        One `.emit-losses` row in the client's format (`<epoch> stage_empty -
+        <file>`), which `plane doctor` reports as an emit NOT recorded. The row
+        is written first: when it cannot be, this returns False and the file is
+        quarantined as before, so the only record of the loss is never dropped."""
+        row = f"{int(time.time())}\tstage_empty\t-\t{f.name}\n"
+        try:
+            with open(staged_dir(self.root).parent / ".emit-losses", "a", encoding="utf-8") as losses:
+                losses.write(row)
+        except OSError as exc:
+            print(f"plane-daemon: could not count lost stage {f.name} ({type(exc).__name__}); "
+                  "quarantining it", file=sys.stderr)
+            return False
+        try:
+            f.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            print(f"plane-daemon: counted lost stage {f.name} but could not remove it "
+                  f"({type(exc).__name__}); a later tick may count it again", file=sys.stderr)
+        print(f"plane-daemon: counted lost stage {f.name}: empty past the hour with its "
+              "writer gone (stage_empty in .emit-losses)", file=sys.stderr)
+        return True
+
     def _replay_staged(self, *, approved: dict[str, str] | None = None,
                        max_batches: int | None = None, deadline: float | None = None) -> ReplayReport:
         """Batches the shim STAGED when the socket missed, instead of spawning
@@ -574,6 +672,9 @@ class PlaneDaemon:
                 content = f.read_bytes()
                 if approved is not None and hashlib.sha256(content).hexdigest() != approved[f.name]:
                     report.refused += (f.name,)
+                    continue
+                if f.name.endswith(".tmp") and _never_written(f, content) and self._count_lost_stage(f):
+                    report.lost += 1
                     continue
                 events = json.loads(content)["events"]
                 if not isinstance(events, list) or not events:

@@ -9,9 +9,22 @@ When the fleet shares a single GitHub PAT (every bot commits as the same identit
 
 **Fallback:**
 
-1. If `--approve` or `--request-changes` returns "Can not approve your own pull request" or equivalent — post `--comment` instead.
-2. Lead the comment body with the verdict: `**[<bot>] [VERDICT] approve** — reviewed at <sha>`, `**[<bot>] [VERDICT] request changes** — reviewed at <sha>`, or `**Comment**` (no verdict) — leave a plain `**Comment**` bare, never bracket-tag it: `claudlobby task reviews` treats an unrecognized bracket-tagged word as vocabulary drift, not as a neutral note. Record the review-role fleet report for authoritative actor attribution.
-3. The verdict line is the contract — the merge gate reads it programmatically.
+1. If `--approve` or `--request-changes` returns "Can not approve your own pull request" or equivalent — post a `COMMENT` review instead, through the API, because that call returns the review's URL:
+
+   ```bash
+   jq -Rs '{event: "COMMENT", body: .}' verdict.md > review.json
+   gh api -X POST repos/OWNER/REPO/pulls/N/reviews --input review.json --jq .html_url
+   ```
+
+   Run them as two separate commands, the post with nothing before or after `gh`. The at-mention guard reads `review.json` before the post runs, from the directory the command starts in, so it refuses a file the same command writes, one that does not exist yet, `--input -`, a path the shell builds as the command runs (`$VAR`, `~`, a glob), a relative path when anything else shares the command (a `cd` there would make gh send another file; pass an absolute path instead), and a body that would @-mention anyone (#1019). On success the post prints `https://github.com/OWNER/REPO/pull/N#pullrequestreview-…`. A nonzero exit means nothing was posted, and what it printed is gh's error, not a URL. Build the body as JSON with jq and `--input`, never `-F body=@<file>`, which can post the file's name instead of its text (#2178).
+2. Lead the comment body with the verdict: `**[<bot>] [VERDICT] approve** — reviewed at <full sha>`, `**[<bot>] [VERDICT] request changes** — reviewed at <full sha>`, or `**Comment**` (no verdict) — leave a plain `**Comment**` bare, never bracket-tag it: `claudlobby task reviews` treats an unrecognized bracket-tagged word as vocabulary drift, not as a neutral note. Record the review-role fleet report for authoritative actor attribution, and pass the review's URL as `--artifact`:
+
+   ```bash
+   claudlobby --json assignment complete ASSIGNMENT_ID --summary "Approve on #N; detail in the review" --pr https://github.com/OWNER/REPO/pull/N --pr-role reviewed --artifact https://github.com/OWNER/REPO/pull/N#pullrequestreview-123 --request-id UUID
+   ```
+
+   `task reviews` joins a verdict to the report that names its URL, however long the write-up took. A report that names none is matched only by time, from 10 s before the verdict to 120 s after it, which misses a careful review, a corrected verdict and two reviewers posting seconds apart. A corrected verdict is a new review, so it needs its own report naming its own URL. A verdict posted as an issue comment passes its comment URL the same way: `gh api -X POST repos/OWNER/REPO/issues/N/comments --input comment.json --jq .html_url`, with `comment.json` built by `jq -Rs '{body: .}'`.
+3. The verdict line is the contract — the merge gate reads it programmatically, and counts it only with its recorded review-role report: anyone can post a comment that starts with a verdict line.
 
 **Do not:**
 

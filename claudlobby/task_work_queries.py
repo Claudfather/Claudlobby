@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
-from .task_state import TaskIssue, read_tasks
+from .task_state import _ACTIVITY, TaskIssue, read_tasks
 
 
 @dataclass(frozen=True)
@@ -16,6 +16,12 @@ class CurrentWork:
     state: str
 
 
+#: How a bot's open assignments rank for its current task (#2179): the one it
+#: is working on, then one it is blocked on, then one recorded but not yet
+#: taken up. Within a state, the latest transition comes first.
+_STATE_ORDER = {"active": 0, "blocked": 1, "assigned": 2}
+
+
 @dataclass(frozen=True)
 class BotWork:
     assignments: tuple[CurrentWork, ...] = ()
@@ -24,7 +30,15 @@ class BotWork:
 
     @property
     def current_task(self) -> str | None:
+        """The first open assignment's title, in ``read_fleet_work``'s order."""
         return self.assignments[0].title if self.assignments and not self.unavailable else None
+
+    @property
+    def open_assignments(self) -> int | None:
+        """How many assignments are open, so a reader can see when
+        ``current_task`` is one of several (#2179). None when the work itself
+        is unavailable: unknown, not zero."""
+        return None if self.unavailable else len(self.assignments)
 
     @property
     def blocked(self) -> bool:
@@ -59,17 +73,27 @@ def read_fleet_work(conn: sqlite3.Connection, *, fleet_uid: str, fleet: str,
             name = alias[len(prefix):].lower()
             if name in uids:
                 uids[name].add(uid)
-    current: dict[str, list[CurrentWork]] = {name: [] for name in bot_names}
+    current: dict[str, list[tuple[tuple, CurrentWork]]] = {name: [] for name in bot_names}
     completed: dict[str, list[tuple[int, str, str]]] = {name: [] for name in bot_names}
     for task in snapshot.tasks:
         if task.blockers:
             continue
         assignment = task.current_assignment
         if task.open and assignment is not None:
+            # The assignment's latest transition: its newest state-changing event
+            # (accepted, progress, resumed, blocked_waiting), else its own record.
+            # A manager's or the operator's act on the task (escalated, nudged) is
+            # not the bot moving to it, and delivery is a communication, not a task
+            # event, so neither counts. Ingest order is the Plane's ordering
+            # authority, so no clock decides between two assignments.
+            latest = max([assignment.ingest_seq, *(e.ingest_seq for e in assignment.history
+                                                   if e.event in _ACTIVITY)])
+            rank = (_STATE_ORDER.get(assignment.state, len(_STATE_ORDER)), -latest,
+                    task.task_id, assignment.assignment_id)
             for name in bot_names:
                 if assignment.assignee_uid in uids[name.lower()]:
-                    current[name].append(CurrentWork(task.task_id, assignment.assignment_id,
-                                                     task.title, assignment.state))
+                    current[name].append((rank, CurrentWork(task.task_id, assignment.assignment_id,
+                                                            task.title, assignment.state)))
         elif task.state == "completed" and task.terminal_event is not None:
             for historical in task.assignments:
                 if historical.assignment_id != task.terminal_event.assignment_id:
@@ -80,7 +104,9 @@ def read_fleet_work(conn: sqlite3.Connection, *, fleet_uid: str, fleet: str,
                                                 task.task_id, task.title))
     bots = {}
     for name in bot_names:
-        ordered = tuple(sorted(current[name], key=lambda a: (a.task_id, a.assignment_id)))
+        # By state, then latest transition; the ids only make a tie deterministic.
+        # It used to be the ids alone, so the pick was the lowest random id (#2179).
+        ordered = tuple(work for _rank, work in sorted(current[name], key=lambda rw: rw[0]))
         recent = max(completed[name]) if completed[name] else None
         identity_count = len(uids[name.lower()])
         unavailable = (

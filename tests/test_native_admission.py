@@ -8,6 +8,8 @@ import signal
 import subprocess
 import sys
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -67,7 +69,14 @@ def test_shell_guard_preserves_temporary_pause_exit(tmp_path):
     assert result.returncode == 75
 
 
-def test_private_tmux_child_cannot_retain_native_activation_descriptor(tmp_path):
+@pytest.mark.parametrize("spawn", [
+    "bot_tmux private new-session",
+    # #2158: the session's subreaper outlives the starter as well, and adopts
+    # the server once the client exits.
+    pytest.param(f"_NATIVE_ADMISSION_PYTHON={shlex.quote(sys.executable)}; bot_session_spawn private s cmd",
+                 marks=pytest.mark.skipif(sys.platform != "linux", reason="child subreapers are Linux only")),
+])
+def test_private_tmux_child_cannot_retain_native_activation_descriptor(tmp_path, spawn):
     """A reaped starter cannot leave its admission lease in a surviving server."""
     lock = tmp_path / "activation.lock"
     lock.write_text("")
@@ -83,7 +92,7 @@ TMUX_BIN={shlex.quote(str(fake_tmux))}
 . {shlex.quote(str(ROOT / 'claudlobby/_runtime_scripts/lib-common.sh'))}
 exec 9<{shlex.quote(str(lock))}
 {shlex.quote(sys.executable)} -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_SH)'
-bot_tmux private new-session
+{spawn}
 echo ready
 read -r finish
 """

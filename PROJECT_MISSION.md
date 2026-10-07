@@ -2,19 +2,21 @@
 
 ## What this project is
 
-Claudlobby is a framework for running a fleet of always-on Claude Code bots on a single Linux or macOS host. Each bot has its own persona, its own Telegram bot for communication, its own MCP servers, isolated state, and a distinct identity. A manager bot orchestrates workers via tmux dispatch; workers report back via shared scripts and a fleet-state ledger.
+Claudlobby is a framework for running a fleet of always-on agent-CLI bots — Claude Code today, Codex through its execution adapter (#2149) — on a single Linux or macOS host. Each bot has its own persona, its own Telegram bot for communication, its own MCP servers, isolated state, and a distinct identity. A manager bot orchestrates workers via tmux dispatch; workers report back via shared scripts and a fleet-state ledger.
 
 The name is the metaphor: a COD lobby. Bots gather in a shared room (Telegram group chat), the manager assigns missions, workers execute and report back. It's a coordination layer for a squad.
 
 ## What it's becoming
 
-The reference runtime for operating Claude Code bots in production. Bots install clauDNA via marketplace plugin, get distinct GitHub App identities, query Claudron before tasks and write findings after, and optionally emit telemetry to Claudosseum. The framework stays local-first: a fleet runs on a Pi in a closet with zero required hosted dependencies. The hosted Claudosseum arena exists for those who want it.
+The reference runtime for operating agent-CLI bots in production. Bots install clauDNA via marketplace plugin, get distinct GitHub App identities, query Claudron before tasks and write findings after, and optionally emit telemetry to Claudosseum. The framework stays local-first: a fleet runs on a Pi in a closet with zero required hosted dependencies. The hosted Claudosseum arena exists for those who want it.
 
 ## North star
 
 Trivial to run a fleet of distinct, cooperating bots on cheap hardware — and to point that fleet at a goal. A fleet doesn't just *run*; it runs *toward something*: it knows the mission it serves, picks work that advances it, and closes that work at the rigor each project declares.
 
 *(The "run → run toward something" extension was ratified by the fleet owner on 2026-07-06 with the goal-aware-fleet plan — `documentation/plans/2026-07-06-goal-aware-fleet-portfolio.md`, decision forks F1–F6 locked. Those locks also satisfy this document's approval gate for the associated dispatch and lifecycle changes.)*
+
+*(The agent-CLI scope — "Claudlobby composes and supervises agent CLIs — Claude Code today, Codex through #2149; a further CLI enters by its own ratified fork" — was ratified by the fleet owner on 2026-10-05 as fork F18 (a) of the runtime-neutral observability epic (#2145; [FORK-LOCK F18](https://github.com/Claudfather/Claudlobby/pull/2144#issuecomment-6000050806)), recorded in `documentation/decisions/2026-10-05-f18-agent-cli-runtimes.md`. It amends this document's Claude-Code-only lines ("What this project is", "What it's becoming" and the LLM-provider non-goal): Codex is admitted by name, the model stays each CLI's concern, and there is no LLM-provider abstraction beneath the CLI.)*
 
 ## Guiding principles
 
@@ -81,10 +83,8 @@ Trivial to run a fleet of distinct, cooperating bots on cheap hardware — and t
 > months.
 
 1. ~~Add Claudron MCP server config to bot bootstrap~~ and document the query-before / write-after pattern — **superseded by decision C** (2026-07-18, `documentation/decisions/2026-07-18-claudron-consumption-door.md`; boundary spec §10.5.6). There is no Claudron MCP server to add to the bootstrap — it is parked as a demand-gated option. Fleet consumption goes through the **CLI door** (clauDNA's `/claudron` · `/recall` · `/capture` skills wrapping the `claudron` CLI), wired per bot by the L2 session loop: set `claudron_vault_path`, and the compositor emits `CLAUDRON_VAULT_PATH` plus the session-loop hooks. The query-before / write-after pattern is documented in a vault-wired bot's door-stamped §Shared Documentation.
-2. Optional telemetry emitter: bots write structured signal to Claudosseum if configured — still genuinely open: `CLAUDOSSEUM_TENANT_ID` is composed into `bot.conf` (see note above), but no `claudlobby/_runtime_scripts/` script or compositor module reads it to actually emit telemetry.
-
-*Item 2 carries no tracking issue, so it is **not** staleness-checkable today.
-Add one when its owner next touches it.*
+2. Optional telemetry emitter: bots write structured signal to Claudosseum if configured — `CLAUDOSSEUM_TENANT_ID` is composed into `bot.conf` (see note above), but no `claudlobby/_runtime_scripts/` script or compositor module reads it to actually emit telemetry — **deferred (#2145):** #2145 keeps telemetry local; a Claudosseum consumer would read the local files.
+3. Runtime-neutral observability — the agent runtimes' own telemetry normalized into the local plane, clauDNA-owned session summaries, and the runtime vocabulary Codex needs as a second composed CLI (#2145).
 
 ## Requires approval
 
@@ -95,6 +95,7 @@ Add one when its owner next touches it.*
 - Cross-host fleet coordination work (explicitly out of scope for v1)
 - Changes to how bot identities are provisioned (Telegram, GitHub App, MCP server config)
 - New MCP servers added to the default bot template
+- A new agent CLI runtime — Claude Code and Codex are admitted by name (#2145 F18); a further CLI enters by its own ratified fork
 
 ## Success metrics
 
@@ -111,4 +112,4 @@ Add one when its owner next touches it.*
 - **Web UI for fleet management.** Telegram + tmux + systemctl + fleet-state.json is the management surface. Adding a web UI would double the surface area for marginal benefit.
 - **Cross-host fleet coordination.** A Claudlobby fleet runs on one host. Multi-host coordination is interesting and explicitly out of scope for v1 — the architecture would change too much.
 - **Skill or knowledge management.** That's clauDNA and Claudron. Claudlobby orchestrates bots that consume those; it does not become them.
-- **Per-bot LLM provider abstraction.** Claudlobby is for Claude Code specifically. Bots running on other LLMs would require enough divergence that they belong in a different framework.
+- **Per-bot LLM provider abstraction.** Claudlobby composes and supervises agent CLIs — Claude Code today, OpenAI Codex through its execution adapter (#2145 F18/F11, #2149) — and the model stays each CLI's concern. It does not abstract LLM providers beneath the CLI, and a bot that is not an agent CLI belongs in a different framework.

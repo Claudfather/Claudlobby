@@ -25,6 +25,7 @@ fleet:
   defaults:                             # applied to every bot unless overridden
     model: opus | sonnet | haiku | fable   # or a pinned model ID, e.g. claude-opus-4-8
     effort: low | medium | high | max
+    agent_cli: claude | codex            # agent CLI (default: claude; codex refused until #2149)
     account: default
     prompt_suggestions: true | false    # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION (default: false)
     disable_nonessential_traffic: true | false  # RC-safe headless trim set (default: true)
@@ -89,6 +90,7 @@ fleet:
       account: <account-key>
       model: <model>
       effort: <effort>
+      agent_cli: <agent_cli>
       skills: [<list>]                  # appended to defaults.skills
       mcp: [<list>]
       integrations: [<list>]            # auto-paired with mcp; explicit overrides
@@ -211,7 +213,7 @@ Omit the field entirely for the common case — everything defaults to `true`. U
 Applied to every bot. Merge rules by type:
 
 - **Lists** (skills, expertise, guardrails, protocols, resources, lessons, principles, permissions, post_actions, mcp, integrations) — bot-level **appends to** defaults (deduped, order-preserved).
-- **Scalars** (model, effort, account, mission) — bot-level **overrides** defaults.
+- **Scalars** (model, effort, agent_cli, account, mission) — bot-level **overrides** defaults.
 - **Telegram** — merged **field-by-field**. Bot-level fields override individual defaults fields (e.g., a bot can override `require_mention` while inheriting `token_env`).
 - **Sandbox** — lists (network_allowed_domains, filesystem_allow_write) are **unioned**; booleans (auto_allow_bash) use bot-level value.
 - **Tools** — deny/allow lists are **unioned** across defaults and bot-level.
@@ -727,9 +729,12 @@ fleet_pulse:
   escalation_state_dir: "~/.claude/channels/telegram-<bot-handle>"
   renotify_after_s: 21600
   rearm_window_s: 0
+  timeout_s: 300
 ```
 
 Omit a key to keep the script's own default; the composer emits only what is set, so a default lives in exactly one place.
+
+`timeout_s` is the one key that is not an environment variable: it caps the sweep itself, and `claudlobby fleet pulse` reads it from this block, so a hand run gets the same cap as the timer (#2059). Unset, the cap scales with load: 120 s × load1 per CPU, from 120 up to 240 s, which keeps a sweep and its 10 s grace under the default 300 s pulse cadence. That ceiling matters because every timer job holds the host's activation lock shared while it runs, and `host activate` takes it exclusive and does not wait: a cap above the fleet's pulse interval lets sweeps run back to back and can keep activation refused while the host is loaded. Set a longer `timeout_s` only with that trade in mind; it is clamped to 30-3600 and `claudlobby config validate` warns outside it. A sweep that reaches the cap is stopped (SIGTERM, then SIGKILL after 10 s) and exits 8. Its summary file is replaced by one that starts `TIMED OUT` and names what the tick skipped, and the last complete summary is kept beside it as `<fleet>.pulse-summary.last-complete.txt`.
 
 > **Do not put these in a `.env` file.** Earlier revisions of this section said to
 > use the fleet `.env` or to edit the unit's environment. **Neither worked** (#1120):
@@ -875,6 +880,14 @@ otherwise show before auto-accepting edits or entering a dangerous permission mo
 the `--dangerously-skip-permissions` CLI flag above: these suppress the one-time interactive
 first-run prompts a headless, supervised bot would otherwise hang on with no terminal to answer
 them. Can be set in `defaults:`; bot-level overrides.
+
+### `bots.<name>.agent_cli`
+
+String enum, `claude` (default) or `codex`. The agent CLI the bot runs under; composed into `bot.conf` as `CLAUDLOBBY_AGENT_CLI`, which names the rule the bot's session uid is derived with (#2145 §2.2; the doors that record the caller's session read it from #2145 P1 Half B). `codex` is accepted by the parser and **refused by the validator** (`execution adapter not shipped`) until the Codex execution adapter ships (#2149). An explicit `null` reads as `claude`; any other value outside the set fails to parse. Can be set in `defaults:`.
+
+`runtime:` was this key's draft spelling and is not read. A `runtime:` key in a bot stanza or under `defaults:` gets a `retired-key` warning naming `agent_cli:`, and is an **error** when its value is not the CLI the bot runs (`runtime: codex` would otherwise run `claude` in silence).
+
+`agent_cli` is the one name for this value everywhere: the `fleet.yaml` key, `CLAUDLOBBY_AGENT_CLI` in `bot.conf`, the bot keyframe's `agent_cli` and the session join key `(agent_cli, session_id)` (`session_alias(id, agent_cli)`, #2145 F2). It is not `runtime`, which already names release activation, the Claude Code binary update (`host update runtime`) and the composed-output audit (`config validate --runtime`) (#1997).
 
 ### `bots.<name>.remote_control`
 
@@ -1061,6 +1074,8 @@ does not own.
 
 - **Hard fail** — bot's `expertise:` list is empty or references missing files
 - **Hard fail** — `fleet.yaml` itself is invalid YAML or missing required keys
+- **Hard fail** — a bot's `agent_cli:` is not `claude` (`execution adapter not shipped`, until #2149)
+- **Hard fail** — a leftover `runtime:` key (bot or `defaults:`) whose value is not the bot's `agent_cli` (warn, `retired-key`, when it matches)
 - **Warn** — bot references a `skill` / `mcp` / `guardrail` / `protocol` / `resource` / `lesson` / `post_action` that doesn't exist (skipped during generate)
 - **Warn** — MCP fragment references an env var (`${FOO}`) that's not set in the current environment
 - **Warn** — `voice:` path doesn't resolve

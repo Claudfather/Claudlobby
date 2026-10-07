@@ -28,6 +28,7 @@ the index and the detail.
 - `rehearse-permissions-ladder.sh` — single-factor permissions ladder on a disposable bot
 - `rehearse-vault-sync.sh` — proves `vault-sync.sh`'s outcomes against a real plane
 - `vault-git-base-rate.py` — how often state-changing git reaches the vault guard directly
+- `runtime-neutral-canary.py` — P0 canaries for #2145 (Claude C6a/C10/C11, Codex C1–C3): raw OTLP receiver, hook logger, tmux env probe (shapes and ids, never content)
 - `ab-comms-eval.sh` — A/B harness for the token-efficiency comms eval
 - `ab-comms-verdict.py` — pass bar and verdict for `ab-comms-eval.sh`
 - `ab-coverage-verdict.py` — coverage-honesty A/B analysis

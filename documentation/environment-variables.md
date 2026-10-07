@@ -39,6 +39,7 @@ one fleet sets it — it is the interface. Reasoning from "anything credential-a
 | `TMUX_SOCKET` | Derived | Per-bot tmux server socket name (`-L` argument) — equals `BOT_SERVICE`. One tmux server per bot, so one server's death drops only that bot. Peer scripts resolve it via `tmux_socket_for_bot()` (`claudlobby/_runtime_scripts/lib-common.sh`) |
 | `BOT_LABEL` | Derived | Human-readable label for the service |
 | `BOT_DIR` | Derived | Absolute path to the bot's runtime directory |
+| `CLAUDLOBBY_AGENT_CLI` | `bots.<name>.agent_cli` | The bot's agent CLI (`claude` or `codex`; `codex` is refused by the validator until #2149). Names the rule the plane's session uid is derived with (`derive_session_uid(id, agent_cli)`, #2145 F2), for the task, report and message doors that record the caller's session (#2145 P1, Half B); absent means `claude` |
 | `CLAUDLOBBY_ROOT` | Detected | Absolute path to the claudlobby repository root |
 
 ## Fleet Context
@@ -180,6 +181,7 @@ Emitted into **every** bot's `bot.conf` from `projects.yaml` — one pair per pr
 
 | Variable | Source | Description |
 |----------|--------|-------------|
+| `CLAUDNA_STATE_DIR` | always `$BOT_DIR/data/claudna` (reserved: not settable in `env:`/`secret_files:`) | The bot's own clauDNA root — session store, harvest status, ops log, hook logs (#2145 F14); overrides any `.env` tier |
 | `CLAUDNA_VERSION` | `bots.<name>.claudna_version` | clauDNA plugin version pin |
 | `CLAUDRON_VAULT_PATH` | `bots.<name>.claudron_vault_path` | Claudron vault root; the bot's `claudron` CLI resolves the vault from it (Claudron `docs/CLI_CONTRACT.md` §Environment) |
 | `CLAUDOSSEUM_TENANT_ID` | `bots.<name>.claudosseum_tenant_id` | Claudosseum telemetry tenant ID |

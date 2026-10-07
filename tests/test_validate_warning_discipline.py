@@ -95,6 +95,25 @@ class TestSharedCauseIsOneLine:
             f" — remove it ({validator_module._RETIRED_OBSERVABILITY_KEYS['reap_days']})"
         ]
 
+    def test_a_defaults_level_runtime_key_warns_once_naming_agent_cli(self, fleet_dir, monkeypatch):
+        """#2145 Q1: `runtime:` is the draft spelling of `agent_cli:` and nothing
+        reads it. An unknown bot key is otherwise ignored; this one is said."""
+        _env(monkeypatch)
+        _grow(fleet_dir, defaults="    runtime: claude\n")
+        report = _validate(fleet_dir)
+        hits = _of(report, "retired-key")
+        assert hits == ["defaults.runtime has no reader — the key is agent_cli: (#2145); rename or remove it"
+                        " — affects 6 bot(s): lead, worker-1, w2, w3 (+2 more)"], report.categorized()
+        assert not report.has_errors, report.errors
+
+    def test_a_runtime_key_in_one_bots_own_stanza_stays_that_bots(self, fleet_dir, monkeypatch):
+        _env(monkeypatch)
+        _grow(fleet_dir, bots={"w3": "      runtime: claude\n"})
+        report = _validate(fleet_dir)
+        assert _of(report, "retired-key") == [
+            "bot 'w3': runtime has no reader — the key is agent_cli: (#2145); rename or remove it"]
+        assert not report.has_errors, report.errors
+
     def test_an_env_var_set_empty_above_the_bot_tier_warns_once_and_a_bot_tier_one_stays_its_own(
         self, fleet_dir, monkeypatch
     ):
@@ -181,15 +200,16 @@ def test_every_warning_has_a_category_and_the_counts_sum(fleet_dir, monkeypatch)
         bots={
             "w2": "      voice: no-such-voice\n      skills: [no-such-skill]\n",
             "w3": "      guardrails: [no-such-guardrail]\n      mcp: [no-such-mcp]\n",
-            "w4": "      model: gpt-banana\n      reports_to: nobody\n",
-            "w5": "      observability:\n        pulse_interval: 0\n",
+            "w4": "      model: gpt-banana\n      reports_to: nobody\n      runtime: claude\n",
+            "w5": "      observability:\n        pulse_interval: 0\n"
+                  '      hooks:\n        PreToolUse:\n          - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"\n',
         },
     )
     report = _validate(fleet_dir)
     raised = set(report.warning_categories)
     assert {
         "voice-missing", "skill-missing", "guardrail-missing", "mcp-missing",
-        "model-unknown", "topology", "obs-range", "retired-key", "env-unset",
+        "model-unknown", "topology", "obs-range", "retired-key", "env-unset", "hook-retired-path",
     } <= raised, report.categorized()
     assert UNCATEGORIZED not in raised, report.categorized()
     assert raised <= set(WARNING_CATEGORIES), raised - set(WARNING_CATEGORIES)

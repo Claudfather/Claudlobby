@@ -15,7 +15,7 @@ For PRs where one lens is insufficient, dispatch two reviewers with **distinct, 
 
 1. Manager dispatches both reviewers in parallel with the **same** PR URL and **different** mandates.
 2. Each reviewer runs independently — no peeking at the other's verdict mid-review.
-3. Each posts a separate verdict comment on the PR.
-4. Manager consolidates: agreement → ship; disagreement → surface the divergence to the human, don't auto-resolve.
+3. Each posts a separate verdict comment on the PR and records its review-role report, naming its own verdict's URL with `--artifact`: two verdicts posted seconds apart are told apart only by that URL.
+4. Manager consolidates the verdicts that `claudlobby --json task reviews` attributes `MATCH` to those reports (one it reads `UNKNOWN` or `AMBIGUOUS` never counts): agreement → ship; disagreement → surface the divergence to the human, don't auto-resolve.
 
 **Why two lenses, not one:** a single reviewer drifts toward what they're best at. Two reviewers with locked mandates produce more total coverage than one generalist reviewer with both lenses.
