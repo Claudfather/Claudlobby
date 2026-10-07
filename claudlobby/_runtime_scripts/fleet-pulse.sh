@@ -688,7 +688,9 @@ for bot_dir in "$BOTS_DIR"/*/; do
         case "$_l_reset" in
             ''|*[!0-9]*)
                 _l_reset=null
-                _l_due=$(( _l_first + $(bot_conf_get "$bot_dir" OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD 1800) ))
+                _l_stuck=$(bot_conf_get "$bot_dir" OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD 1800)
+                case "$_l_stuck" in ''|*[!0-9]*) _l_stuck=1800 ;; esac
+                _l_due=$(( _l_first + _l_stuck ))
                 ;;
             *)
                 _l_grace=$(bot_conf_get "$bot_dir" KEEPALIVE_LIMIT_RESUME_GRACE_S 120)
