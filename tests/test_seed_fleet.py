@@ -104,7 +104,8 @@ class TestSeedPaths:
         """Selecting a seed does not move writable source into the package."""
         paths = Paths(root=tmp_path, seed=True, package=source_package())
         assert paths.overlay_library == tmp_path / "library"
-        assert paths.overlay_voices == tmp_path / "voices"
+        assert paths.overlay_voices == tmp_path / "library" / "voices"
+        assert paths.legacy_overlay_voices == tmp_path / "voices"
         assert paths.base_library == source_package().library
         assert paths.base_voices == source_package().voices
 
@@ -223,13 +224,13 @@ def _setup_seed_tree(tmp_path: Path) -> Paths:
     )
 
     # Voices dir + voice stub
-    (root / "voices").mkdir()
-    (root / "voices" / "vito-corleone.md").write_text(
+    (root / "library" / "voices").mkdir(parents=True, exist_ok=True)
+    (root / "library" / "voices" / "vito-corleone.md").write_text(
         "---\nname: Vito Corleone\n---\n\nVoice stub.\n"
     )
 
     package = replace(
-        source_package(), library=root / "library", voices=root / "voices",
+        source_package(), library=root / "library", voices=root / "library" / "voices",
         templates=root / "templates", seeds=root / "seeds",
     )
     data_root = tmp_path / "data"

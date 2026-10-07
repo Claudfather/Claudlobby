@@ -70,7 +70,7 @@ fleet:
     <bot-name>:
       name: <display-name>              # OPTIONAL — defaults to dict key
       expertise: [<list>]               # REQUIRED — area(s) of expertise from library/expertise/
-      voice: voices/<file>.md           # OPTIONAL — personality overlay
+      voice: voices/<file>.md           # OPTIONAL — personality overlay from library/voices/
       mission: <string>                 # OPTIONAL — one-paragraph charter
       reports_to: <bot-name>            # OPTIONAL — organizational reporting metadata
       manages: [<bot-name>, ...]        # OPTIONAL — organizational reporting metadata
@@ -999,7 +999,7 @@ defaults:            # or bots.<bot>:, which wins over defaults
 | `credentials` | `.credentials.json` in each config dir | Read + Edit |
 | `account_config` | `.config.json*` and `.claude.json*` in each config dir, and `~/.claude.json*` | Read + Edit |
 | `env` | `~/.env*`, the root `.env` and `.env.bak*`, every fleet's `.env*`, and every bot's `.env*` — **its own included** | Read + Edit |
-| `install_root` | the install's `claudlobby/_runtime_scripts/`, `claudlobby/`, `library/`, `templates/`, `voices/`, `bin/` | Edit only |
+| `install_root` | the install's `claudlobby/_runtime_scripts/`, `claudlobby/`, `library/`, `templates/`, `bin/` | Edit only |
 | `telegram` | every other bot's Telegram state dir, token included | Read + Edit |
 | `config_surfaces` | `settings.json`, `settings.local.json`, `CLAUDE.md`, `hooks/`, `skills/`, `plugins/`, `agents/`, `commands/` in each config dir | Edit only |
 

@@ -182,7 +182,7 @@ Bots can edit themselves in `runtime/bots/<name>/` during a session. `runtime/bo
 
   1. Bot edits its CLAUDE.md mid-session (e.g., learns a new pattern, codifies a rule)
   2. `claudlobby config diff --bot <bot>` identifies drifted rendered files without exposing their contents. Review the runtime file and its authored source when deciding what to retain.
-  3. Hand-edit the relevant authored source: `library/expertise/<role>.md`, `voices/<voice>.md`, `library/guardrails/<name>.md`, `library/protocols/<name>.md`, or the bot declaration in `fleet.yaml`.
+  3. Hand-edit the relevant authored source: `library/expertise/<role>.md`, `library/voices/<voice>.md`, `library/guardrails/<name>.md`, `library/protocols/<name>.md`, or the bot declaration in `fleet.yaml`.
   4. Stage with `claudlobby config plan --release <RELEASE_ID>`, inspect `claudlobby config diff <PLAN_ID>`, then activate the plan through `claudlobby host activate <PLAN_ID> --install-directory <PATH>`.
 
 This is the foundation for the future ML / self-learning layer: drift becomes training data. When the same drift shows up across multiple bots, that's a signal a guardrail or protocol should exist.

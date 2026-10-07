@@ -12,7 +12,7 @@ def package(tmp_path: Path) -> PackageResources:
     """Explicit package assets separate from every writable data fixture."""
     install = tmp_path / "installed" / "claudlobby"
     assets = install / "_resources"
-    directories = [assets / name for name in ("library", "voices", "templates", "seeds")]
+    directories = [assets / name for name in ("library", "library/voices", "templates", "seeds")]
     directories.append(install / "_runtime_scripts")
     for directory in directories:
         directory.mkdir(parents=True)
@@ -143,7 +143,8 @@ def test_base_accessors_and_root_overlay_precedence(tmp_path, package):
     assert paths.base_voices == package.voices
     assert paths.base_templates == package.templates
     assert paths.overlay_library == root / "library"
-    assert paths.overlay_voices == root / "voices"
+    assert paths.overlay_voices == root / "library" / "voices"
+    assert paths.legacy_overlay_voices == root / "voices"
     assert paths.overlay_templates == root / "templates"
     assert paths.source_dir == root
 
@@ -158,6 +159,27 @@ def test_base_accessors_and_root_overlay_precedence(tmp_path, package):
     paths.overlay_voices.mkdir()
     (paths.overlay_voices / "voice.md").write_text("overlay")
     assert paths.find_voice_file("voice.md") == paths.overlay_voices / "voice.md"
+
+
+def test_voice_lookup_reads_the_old_overlay_after_the_new_one(tmp_path, package):
+    """#2150: for one release an overlay's old voices/ still composes, but only
+    after its library/voices/; the package comes last whichever spelling the
+    declaration uses."""
+    paths = Paths(root=tmp_path / "data", package=package)
+    (package.voices / "both.md").write_text("packaged")
+    (package.voices / "packaged.md").write_text("packaged")
+    paths.legacy_overlay_voices.mkdir(parents=True)
+    (paths.legacy_overlay_voices / "both.md").write_text("old")
+    (paths.legacy_overlay_voices / "old.md").write_text("old")
+    assert paths.find_voice_file("voices/both.md") == paths.legacy_overlay_voices / "both.md"
+    assert paths.find_voice_file("old.md") == paths.legacy_overlay_voices / "old.md"
+    paths.overlay_voices.mkdir(parents=True)
+    (paths.overlay_voices / "both.md").write_text("new")
+    for spelling in ("both.md", "voices/both.md", "library/voices/both.md"):
+        assert paths.find_voice_file(spelling) == paths.overlay_voices / "both.md", spelling
+    for spelling in ("packaged.md", "voices/packaged.md", "library/voices/packaged.md"):
+        assert paths.find_voice_file(spelling) == package.voices / "packaged.md", spelling
+    assert paths.find_voice_file("voices/absent.md") is None
 
 
 def test_seed_template_does_not_become_writable_config_root(tmp_path, package):

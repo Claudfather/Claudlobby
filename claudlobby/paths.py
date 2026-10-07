@@ -2,13 +2,15 @@
 
 Two-layer model:
 
-  1. **Package base** — immutable library, voices, templates and native code
-     selected explicitly through PackageResources.
+  1. **Package base** — immutable library (voices in library/voices/),
+     templates and native code selected explicitly through PackageResources.
   2. **Source overlay** — writable content beside the selected fleet.yaml,
-     including library/ and voices/ in a root-mode data directory.
+     including library/ in a root-mode data directory.
 
 Library files are looked up in the overlay first, falling back to the
-public base. Voices the same. fleet.yaml lives at the overlay root
+public base. Voices the same, with one extra rung for one release: the
+overlay's pre-#2150 voices/ is read after its library/voices/
+(``legacy_overlay_voices``). fleet.yaml lives at the overlay root
 (`local/<fleet>/fleet.yaml`); runtime output goes to
 `local/<fleet>/runtime/bots/`.
 
@@ -409,6 +411,16 @@ class Paths:
 
     @property
     def overlay_voices(self) -> Path:
+        return self.overlay_library / "voices"
+
+    @property
+    def legacy_overlay_voices(self) -> Path:
+        """Where an overlay kept its voices before #2150 moved them into library/.
+
+        Read after ``overlay_voices`` for one release, so a host that has not
+        moved its files still composes the same text; validate names each voice
+        it finds here (``voice-legacy-path``). #2202 stops reading it.
+        """
         return self.source_dir / "voices"
 
     @property
@@ -470,7 +482,7 @@ class Paths:
 
         kind ∈ {expertise, skills, mcp, integrations, guardrails,
                 protocols, resources, lessons, post_actions, permissions,
-                tools}
+                tools, voices}
         """
         out: list[Path] = []
         if self.overlay_library:
@@ -558,14 +570,21 @@ class Paths:
         return dict(sorted(collected.items()))
 
     def find_voice_file(self, rel_path: str) -> Path | None:
-        """Voice file lookup. `rel_path` is relative to voices/ (e.g. 'erlich-bachman.md').
+        """Voice file lookup. `rel_path` is relative to library/voices/ (e.g. 'erlich-bachman.md').
 
-        Accepts a bare voice name or a source-relative 'voices/<name>.md'.
+        Accepts a bare voice name, the 'voices/<name>.md' that fleet.yaml
+        declares, or 'library/voices/<name>.md'. Order: the overlay's
+        library/voices/, its pre-#2150 voices/ (``legacy_overlay_voices``), a
+        path relative to the source directory, then the package.
         """
-        # Strip leading "voices/" if present
-        clean = rel_path.removeprefix("voices/")
+        clean = rel_path
+        for prefix in ("library/voices/", "voices/"):
+            if rel_path.startswith(prefix):
+                clean = rel_path[len(prefix):]
+                break
         candidates = []
         candidates.append(self.overlay_voices / clean)
+        candidates.append(self.legacy_overlay_voices / clean)
         # Also support a path relative to the selected fleet source directory.
         candidates.append(self.source_dir / rel_path)
         candidates.append(self.base_voices / clean)

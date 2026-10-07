@@ -154,7 +154,8 @@ RETIRED_HOOK_PREFIX = "$CLAUDLOBBY_ROOT/lib/"
 #: gets when a category appears that a baseline did not have.
 WARNING_CATEGORIES: dict[str, str] = {
     # a declared reference that resolves to nothing
-    "voice-missing": "a declared voice is not in voices/",
+    "voice-missing": "a declared voice is not in any library/voices/",
+    "voice-legacy-path": "a voice resolves from the overlay's old voices/; move it to library/voices/ before #2202 stops reading there",
     "skill-missing": "a declared skill or skill folder is not in any library/skills/",
     "integration-missing": "a declared integration is not in any library/integrations/",
     "mcp-missing": "a declared MCP fragment is not in any library/mcp/",
@@ -734,10 +735,19 @@ def _validate_bots(
 
         # Voice (warn)
         if bot.voice:
-            if paths.find_voice_file(bot.voice) is None:
+            voice_file = paths.find_voice_file(bot.voice)
+            if voice_file is None:
                 report.warn(
                     "voice-missing",
                     f"bot '{bot_name}': voice file '{bot.voice}' not found — bare expertise will be used"
+                )
+            elif voice_file.is_relative_to(paths.legacy_overlay_voices):
+                # One file, one line: every bot that declares it folds in.
+                shared.add(
+                    "voice-legacy-path",
+                    f"voice file {voice_file} is at the old voices/ path; "
+                    f"move it to {paths.overlay_voices}/",
+                    bot_name,
                 )
 
         # Skills (warn). Accepts:

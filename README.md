@@ -3,8 +3,7 @@
 A **compositor** for Claude Code agent fleets. One repo, one `fleet.yaml`, N bots — composed at runtime from a library of personas, skills, MCP fragments, guardrails, and protocols.
 
 ```
-library/  ← composable building blocks (sources of truth, in git)
-voices/   ← personality overlays
+library/  ← composable building blocks, voices included (sources of truth, in git)
 fleet.yaml ← the recipe (which bots, which pieces, which Telegram groups)
 runtime/  ← what gets generated (gitignored)
 ```
@@ -199,7 +198,7 @@ Opt-in and dormant — a fleet that declares no `github_app:` is unaffected.
 
 ## Status
 
-This repo is in active migration from the older "one-dir-per-bot" template model to the compositor. The current layout is: `library/` (sources), `claudlobby/_runtime_scripts/` (lifecycle scripts), `runtime/` (output), `voices/` (overlays).
+This repo is in active migration from the older "one-dir-per-bot" template model to the compositor. The current layout is: `library/` (sources, personality overlays in `library/voices/`), `claudlobby/_runtime_scripts/` (lifecycle scripts), `runtime/` (output).
 
 PRs welcome.
 

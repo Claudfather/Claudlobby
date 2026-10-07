@@ -276,7 +276,8 @@ def maybe_create_voice(
     """Return the voice path (relative to root) to put in fleet.yaml, or None.
 
     - voice_arg = explicit path → use as-is
-    - voice_text = inline text → write to voices/<name>.md, return that path
+    - voice_text = inline text → write to the overlay's library/voices/<name>.md,
+      return the 'voices/<name>.md' that fleet.yaml declares
     - Both None → no voice
     """
     if voice_arg:
@@ -354,7 +355,7 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
     voice_arg = None
     voice_text = None
     print("\nVoice (personality overlay, optional):")
-    print("  1. Pick existing voice file from voices/")
+    print("  1. Pick existing voice file from library/voices/")
     print("  2. Write a new voice (paste a paragraph)")
     print("  3. Skip — use bare expertise")
     choice = _ask("Choice (1/2/3)", default="3")

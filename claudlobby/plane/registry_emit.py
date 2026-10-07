@@ -54,7 +54,7 @@ from pathlib import Path
 
 from ..claude_version import measure as measure_claude_version
 from ..claudron_compat import COMPAT_FLOOR
-from ..paths import _iter_fleet_dirs
+from ..paths import INSTRUCTION_FILE_NAMES, _iter_fleet_dirs
 from .canonical import CanonicalizationError, canonical_hash
 
 log = logging.getLogger("claudlobby.plane.registry")
@@ -453,7 +453,10 @@ def library_items(paths, fleet_name: str, vault_rev: str | None):
             tier = "shared" if is_shared else "fleet-overlay"
             prefix = "shared" if is_shared else fleet_name
             for entry in sorted(base.iterdir()):
-                if entry.name.startswith(".") or entry.name == "README.md":
+                # A folder's CLAUDE.md/AGENTS.md describes the folder and is
+                # never an item in it (library/voices/ carries one, #2150).
+                if (entry.name.startswith(".") or entry.name == "README.md"
+                        or entry.name in INSTRUCTION_FILE_NAMES):
                     continue
                 try:
                     if entry.is_dir():

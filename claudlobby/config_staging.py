@@ -49,7 +49,7 @@ def _snapshot(source: Path) -> dict[str, tuple[bytes, int]]:
 
 def _inputs(builder: ConfigPlanBuilder, paths: Paths) -> None:
     for path in (paths.fleet_yaml, paths.projects_yaml, paths.overlay_library,
-                 paths.overlay_voices, paths.overlay_templates):
+                 paths.legacy_overlay_voices, paths.overlay_templates):
         builder.input(path)
     for tier in paths.env_tiers():
         if tier.path is not None:

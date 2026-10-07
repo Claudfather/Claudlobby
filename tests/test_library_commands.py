@@ -29,6 +29,8 @@ def test_list_json_preserves_nested_overlay_precedence_and_other_categories(monk
     voice = paths.overlay_voices / "nested"
     voice.mkdir(parents=True)
     (voice / "voice.md").write_text("voice")
+    paths.legacy_overlay_voices.mkdir(parents=True)
+    (paths.legacy_overlay_voices / "old.md").write_text("old")
     tool = paths.overlay_library / "tools" / "custom"
     tool.mkdir(parents=True)
     (tool / "tool.yaml").write_text("name: custom\n")
@@ -43,6 +45,8 @@ def test_list_json_preserves_nested_overlay_precedence_and_other_categories(monk
     assert items["skills", "checkin"] == "overlay"
     assert items["skills", "group/nested"] == "overlay"
     assert items["voices", "nested/voice.md"] == "overlay"
+    assert items["voices", "old.md"] == "overlay"
+    assert ("voices", "CLAUDE.md") not in items and ("voices", "AGENTS.md") not in items
     assert any(kind == "mcp" and source == "base" for (kind, _name), source in items.items())
     assert items["tools", "custom"] == "overlay"
 

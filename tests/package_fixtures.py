@@ -10,7 +10,7 @@ def source_package() -> PackageResources:
     root = Path(__file__).resolve().parents[1]
     return PackageResources(
         library=root / "library",
-        voices=root / "voices",
+        voices=root / "library" / "voices",
         templates=root / "templates",
         seeds=root,
         native=root / "claudlobby" / "_runtime_scripts",

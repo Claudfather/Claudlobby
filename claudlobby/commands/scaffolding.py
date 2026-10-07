@@ -96,6 +96,9 @@ def cmd_new_bot(args):
             paths.assert_writable(voice_path)
             if voice_path.resolve() != voice_path or voice_path.exists() or voice_path.is_symlink():
                 raise CommandFailure("conflict", "fleet voice source already exists")
+            legacy = paths.legacy_overlay_voices / f"{inp.name}.md"
+            if legacy.exists() or legacy.is_symlink():
+                raise CommandFailure("conflict", "fleet voice source already exists at the old voices/ path")
         if inp.telegram_token:
             paths.assert_writable(paths.env_file)
             if paths.env_file.resolve() != paths.env_file:

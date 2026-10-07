@@ -291,11 +291,11 @@ class TestMaybeCreateVoice:
     def test_inline_text_creates_file(self, tmp_path):
         root = tmp_path / "repo"
         root.mkdir()
-        (root / "voices").mkdir()
         paths = Paths(root=root, package=source_package())
         result = maybe_create_voice(paths, "jian", None, "Terse and blunt.")
         assert result == "voices/jian.md"
-        voice_file = root / "voices" / "jian.md"
+        assert not (root / "voices").exists()
+        voice_file = root / "library" / "voices" / "jian.md"
         assert voice_file.is_file()
         content = voice_file.read_text()
         assert "name: Jian" in content
@@ -399,7 +399,7 @@ def test_interactive_collect_retains_pasted_voice_without_writing(tmp_path, monk
 
     assert result.voice == "voices/bot-a.md"
     assert result.voice_text == "Terse and blunt."
-    assert not (root / "voices").exists()
+    assert not (root / "voices").exists() and not (root / "library" / "voices").exists()
 
 
 @pytest.mark.parametrize("mode", ["dry-run", "decline", "confirm"])
@@ -431,7 +431,7 @@ def test_new_bot_materializes_pending_voice_only_after_confirmation(
     assert main(argv) == (4 if mode == "decline" else 0)
     output = capsys.readouterr()
 
-    voice = root / "voices" / "bot-a.md"
+    voice = root / "library" / "voices" / "bot-a.md"
     backup = root / "fleet.yaml.bak"
     token_file = root / ".env"
     if mode == "confirm":
@@ -555,6 +555,39 @@ def test_bot_create_refuses_redirected_fleet_source(tmp_path, monkeypatch, capsy
     assert result["command"] == "bot.create" and result["error"]["code"] == "conflict"
     assert foreign_manifest.read_text() == FLEET_WITH_BOTS
     assert not (tmp_path / "fleet.yaml.bak").exists()
+
+
+def test_bot_create_writes_library_voices_and_never_shadows_a_voice_at_the_old_path(
+    tmp_path, monkeypatch, capsys
+):
+    """#2150: --voice-text writes the overlay's library/voices/, and refuses a
+    name whose voice still sits in the old voices/, which the new file would
+    silently outrank."""
+    import json
+    from claudlobby import context
+    from claudlobby.__main__ import main
+
+    (tmp_path / "fleet.yaml").write_text(FLEET_WITH_BOTS)
+    paths = Paths(root=tmp_path, package=source_package())
+    monkeypatch.setattr(context, "resolve_paths", lambda **kwargs: paths)
+    base = ["--root", str(tmp_path), "--json", "bot", "create", "--expertise",
+            "orchestration", "--voice-text", "Terse and blunt.", "--yes"]
+    assert main(base + ["--name", "newbie"]) == 0
+    created = json.loads(capsys.readouterr().out)["data"]
+    assert created["voice_path"] == str(tmp_path / "library" / "voices" / "newbie.md")
+    assert "Terse and blunt." in (tmp_path / "library" / "voices" / "newbie.md").read_text()
+    assert "voice: voices/newbie.md" in (tmp_path / "fleet.yaml").read_text()
+    assert not (tmp_path / "voices").exists()
+
+    old = tmp_path / "voices" / "oldie.md"
+    old.parent.mkdir()
+    old.write_text("An old voice.\n")
+    before = (tmp_path / "fleet.yaml").read_text()
+    assert main(base + ["--name", "oldie"]) == 4
+    refused = json.loads(capsys.readouterr().out)
+    assert refused["error"]["code"] == "conflict"
+    assert (tmp_path / "fleet.yaml").read_text() == before
+    assert not (tmp_path / "library" / "voices" / "oldie.md").exists()
 
 
 # ---------------------------------------------------------------------------
