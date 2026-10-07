@@ -747,6 +747,35 @@ def test_send_batch_raises_oserror_when_no_daemon(tmp_path: Path):
         shutil.rmtree(sdir, ignore_errors=True)
 
 
+def test_the_probe_state_names_what_one_probe_saw(running):
+    """#2086: the boolean probe read a listener that missed its deadline as no
+    daemon, and two readers then said ingest was down. The state probe keeps
+    what it saw: the daemon's own answer, a listener that did not answer in
+    time, no socket file, a socket file nothing listens on, a path longer than
+    the daemon binds, and an answer that is not the daemon's."""
+    import claudlobby.plane.daemon as dmod
+    from tests.ingest_listener import listening_socket
+    _root, sock, _daemon = running
+    assert dmod.probe_daemon_state(sock) == "serving" and dmod.probe_daemon(sock)
+    sdir = _short_sock_dir()
+    try:
+        assert dmod.probe_daemon_state(sdir / "absent", 0.2) == "down"
+        dead = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        dead.bind(str(sdir / "dead"))   # a socket file left by a listener that is gone
+        dead.close()
+        assert dmod.probe_daemon_state(sdir / "dead", 0.2) == "down"
+        assert dmod.probe_daemon_state(sdir / ("x" * MAX_SOCKET_PATH_BYTES), 0.2) == "down"
+        with listening_socket(sdir / "slow", answer=None) as slow:
+            started = time.monotonic()
+            assert dmod.probe_daemon_state(slow, 0.2) == "unanswered"
+            assert time.monotonic() - started >= 0.2   # it waited out its deadline
+            assert not dmod.probe_daemon(slow, 0.2)
+        with listening_socket(sdir / "other", answer=b"[]\n") as other:
+            assert dmod.probe_daemon_state(other, 0.2) == "invalid"
+    finally:
+        shutil.rmtree(sdir, ignore_errors=True)
+
+
 # =============================================================================
 # #1485 — the stale-daemon exit. REAL PROCESSES for the exit itself,
 # deliberately: the whole defect is a long-lived process holding modules the
