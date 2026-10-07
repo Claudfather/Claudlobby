@@ -4076,9 +4076,11 @@ def _calendar_seconds(schedules: dict, slot: tuple[int, int]) -> dict[str, int]:
     """The second of the minute each of one owner's anchored interval jobs runs at.
 
     The minute is split into one band per slot (12 s each with four fleets and
-    the host). Each anchored job the owner composes takes its own second in the
+    the host). Each anchored job the owner declares takes its own second in the
     owner's band, the shortest interval first, so no two units on the host
-    start in the same second while a band holds all its owner's jobs.
+    start in the same second while a band holds all its owner's jobs. A fleet
+    ranks the jobs it declares, composed or not, so whether a gated job
+    composes never moves another job's second.
     """
     index, slots = slot
     band = max(60 // slots, 1)
@@ -5141,8 +5143,11 @@ def compose_fleet_timers(
 
     if emit_defaults:
         slot = _host_timer_slot(paths)
+        # Ranked over every job the fleet declares, the leaf-manager-gated ones
+        # included, so the gate never moves another job's second.
         seconds = _calendar_seconds(
-            {name: _resolve_timer_schedule(cfg, merged_defaults) for name, cfg in timers.items()}, slot)
+            {name: _resolve_timer_schedule(cfg, merged_defaults)
+             for name, cfg in merged_defaults.get("jobs", {}).items()}, slot)
         for name, cfg in timers.items():
             sched = _resolve_timer_schedule(cfg, merged_defaults, slot, seconds.get(name))
             script = cfg.get("script", "")
