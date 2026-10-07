@@ -168,6 +168,49 @@ def _seconds_of_minute(expression: str) -> set[int]:
     )
 
 
+def _elapses(out: str) -> list[datetime]:
+    """The elapses `systemd-analyze calendar` printed under TZ=UTC: every line whose
+    value is a UTC timestamp. The labels are not read, because systemd versions name
+    the later iterations differently ("Iter. #2:", "Iteration #2:")."""
+    found = []
+    for line in out.splitlines():
+        _, sep, value = line.strip().partition(": ")
+        if sep:
+            try:
+                found.append(datetime.strptime(value, "%a %Y-%m-%d %H:%M:%S UTC"))
+            except ValueError:
+                pass
+    return found
+
+
+# `systemd-analyze calendar --iterations=3 "*-*-* *:*:00 UTC"` under TZ=UTC, as printed
+# by systemd 252 (Debian 12) and by the CI runner's (Ubuntu 24.04).
+CALENDAR_OUTPUTS = {
+    "systemd-252": dedent(
+        """\
+        Normalized form: *-*-* *:*:00 UTC
+            Next elapse: Wed 2026-10-07 19:06:00 UTC
+               From now: 51s left
+               Iter. #2: Wed 2026-10-07 19:07:00 UTC
+               From now: 1min 51s left
+               Iter. #3: Wed 2026-10-07 19:08:00 UTC
+               From now: 2min 51s left
+        """
+    ),
+    "ubuntu-24.04": dedent(
+        """\
+        Normalized form: *-*-* *:*:00 UTC
+            Next elapse: Wed 2026-10-07 19:01:00 UTC
+               From now: 41s left
+           Iteration #2: Wed 2026-10-07 19:02:00 UTC
+               From now: 1min 41s left
+           Iteration #3: Wed 2026-10-07 19:03:00 UTC
+               From now: 2min 41s left
+        """
+    ),
+}
+
+
 @pytest.fixture(scope="module")
 def host(tmp_path_factory):
     """Four fleets and the host's own jobs, composed once on one data root."""
@@ -431,17 +474,22 @@ def test_systemd_reads_each_anchored_expression_as_one_run_per_interval(job):
             check=True,
             env={**os.environ, "TZ": "UTC"},
         ).stdout
-        elapses = [
-            datetime.strptime(line.split(": ", 1)[1], "%a %Y-%m-%d %H:%M:%S UTC")
-            for line in map(str.strip, out.splitlines())
-            if line.startswith(("Next elapse:", "Iter. #"))
-        ]
+        elapses = _elapses(out)
         assert len(elapses) == 3, out
         assert [(b - a).total_seconds() for a, b in zip(elapses, elapses[1:])] == [
             interval,
             interval,
         ], out
         assert all(at.second in _seconds_of_minute(expression) for at in elapses), out
+
+
+@pytest.mark.parametrize(
+    ("version", "minutes"), [("systemd-252", [6, 7, 8]), ("ubuntu-24.04", [1, 2, 3])]
+)
+def test_the_elapses_are_read_whatever_systemd_labels_them(version, minutes):
+    assert _elapses(CALENDAR_OUTPUTS[version]) == [
+        datetime(2026, 10, 7, 19, minute) for minute in minutes
+    ]
 
 
 @pytest.mark.parametrize("slots", [2, 5, 12])
