@@ -193,14 +193,14 @@ Tasks follow as H3 siblings.
   after (the comment at `:93-95` also says "the owning agent process (Claude Code's `$CLAUDE_PID` today)" —
   F13(a): the field keeps its name until the next envelope major; only its description generalizes):
   ```python
-          # agent_cli: the agent agent_cli that opened the session (Claudlobby#2145 P1): "claude" or "codex".
+          # agent_cli: the agent CLI that opened the session (Claudlobby#2145 P1): "claude" or "codex".
           # Absent on logs written before 0.27 and read as "claude". Top-level on purpose — actor is
           # additionalProperties: false, so a key nested there would make a 0.23–0.26 reader skip the event.
           optional={"claude_pid": _OPT_INT, "harvest": _DICT, "agent_cli": _STR},
           choices={"source": ("startup", "clear", "resume", "fork"), "agent_cli": ("claude", "codex")},
   ```
 - [ ] **Step 3:** `store.py:206-235` — `open_session(..., harvest: dict | None = None, agent_cli: str | None =
-  None)`; docstring: "``agent_cli`` names the agent agent_cli (``claude``, ``codex``); the hook adapter records it,
+  None)`; docstring: "``agent_cli`` names the agent CLI (``claude``, ``codex``); the hook adapter records it,
   older logs lack it"; after `:233-234` add `if agent_cli is not None: data["agent_cli"] = agent_cli`.
 - [ ] **Step 4:** `project.py:166-175` `SessionFacts` gains `agent_cli: str = "claude"  # the first
   session.opened's that names one; a log written before 0.27 reads as claude`. `session_facts` (`:290-299`):

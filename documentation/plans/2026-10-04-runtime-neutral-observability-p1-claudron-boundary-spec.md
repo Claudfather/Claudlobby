@@ -193,7 +193,7 @@ Line numbers are pre-edit; edit bottom-up or re-grep. Every touched sentence car
 
 ```markdown
 - **R8 — runtime-specific signals are enrichment only** *(added 2026-10-04, Claudlobby#2145 §2.3).* Each
-  system meets an agent agent_cli (Claude Code, Codex) through one adapter — hook payloads, transcript
+  system meets an agent CLI (Claude Code, Codex) through one adapter — hook payloads, transcript
   reader, launcher, telemetry mapping — and everything past the adapter consumes one runtime-neutral
   model joined on `(agent_cli, session_id)` (#10). A signal only one agent_cli provides (Claude subagent span
   nesting, `TRACEPARENT`, `CLAUDE_CODE_CHILD_SESSION`, `$CLAUDE_PID`, Codex `PostCompact`) may enrich a
