@@ -25,7 +25,7 @@ def _payload(event: str, **extra) -> str:
         "hook_event_name": event,
         **extra,
     }
-    return json.dumps(p)
+    return json.dumps(p, separators=(",", ":"))  # compact, as Claude Code sends it
 
 
 def _run(bot: Path | None, payload: str) -> subprocess.CompletedProcess:
@@ -84,7 +84,12 @@ def test_a_turn_that_ends_normally_clears_the_record(bot):
     assert not marker.exists()
 
 
-@pytest.mark.parametrize("payload", ["", "not json", "[]", _payload("SessionStart")])
+@pytest.mark.parametrize("payload", [
+    "", "not json", "[]", _payload("SessionStart"),
+    # The common case, answered before python starts: a turn that ended with no record to clear.
+    _payload("Stop", stop_hook_active=False),
+    _payload("StopFailure", error="server_error", last_assistant_message="API Error: 529"),
+])
 def test_anything_else_writes_nothing(bot, payload):
     r = _run(bot, payload)
     assert (r.returncode, r.stdout) == (0, "")

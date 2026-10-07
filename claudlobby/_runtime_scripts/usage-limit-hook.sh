@@ -28,6 +28,14 @@ PLANE_EMIT_CLASS=hook   # a live Claude Code turn waits on its plane record: its
 PAYLOAD="$(cat 2>/dev/null || true)"
 [ -n "$PAYLOAD" ] || exit 0
 MARKER="$BOT_DIR/data/.usage-limit"
+# Every turn end runs this hook, and nearly every one is a Stop with no record
+# to clear: answer those without starting python (Claude Code's JSON carries no
+# space after a colon; any other spelling falls through to the parse below).
+if [ ! -e "$MARKER" ]; then
+    case "$PAYLOAD" in
+        *'"hook_event_name":"Stop"'*) exit 0 ;;
+    esac
+fi
 
 # The PROGRAM rides argv (-c) and the payload rides stdin (the #1402 lesson).
 IFS= read -r -d '' PYPROG <<'PYEOF' || true
