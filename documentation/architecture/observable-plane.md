@@ -68,6 +68,72 @@ counts the provisional ones. Session uids are transcript-stable
 (`sess_` + sha256 of the platform session id — the bash derivation in
 `claudlobby/_runtime_scripts/plane-session-start.sh` is pinned byte-identical to `ids.derive_session_uid(id)` for agent CLI `claude`; another agent CLI derives in Python only, through `ids.session_alias(id, agent_cli)` (#2145 F2)).
 
+## Owner access foundation (not enabled)
+
+`plane/owner_access.py` is an internal policy/state primitive for **direct,
+whole-deployment reads**. It does not authenticate a browser. No HTTP route,
+CLI command, environment flag, startup job or view middleware calls it yet;
+the current view is unchanged. It is a bounded part of the owner-access work
+related to #1623, not completion of that issue or permission to expose Plane.
+
+Explicit initialization requires the existing private `state/host-uid`, using
+`ids.read_host_uid` (also used by operation identity resolution). Reads never
+mint or repair it. The separate `state/plane/owner-access.db` is 0600 in a 0700
+directory, bound to that installation and schema version. It does not migrate
+or write the flight recorder. Missing, malformed, redirected, incompatible or
+wrong-installation authority fails closed. This is not protection from root
+or another process with the same OS identity, nor a solution to a clone that
+copies both the host identity and authority store.
+
+The prototype's contract:
+
+- A trusted ingress will supply a namespaced human `PrincipalRef`. This value
+  is only a reference; constructing it proves nothing. A pending pairing
+  expires after five minutes and confers no access. Separate local approval
+  must confirm its exact token and displayed principal. Only one owner is
+  active; replacement requires explicit revocation followed by fresh pairing.
+- Pairing/revocation append monotonically numbered grant changes. Concurrent
+  confirmations serialize; one wins and invalidates all pending challenges.
+  Revocation names the expected grant revision, so a stale approval cannot
+  remove a later owner's grant. There is no cloud-requested removal door or
+  claim that an undelivered removal has been applied.
+- A paired principal can establish a fresh direct session without the website.
+  Sessions last fifteen minutes in this prototype, are bound to the current
+  grant revision, and require the verified principal again for each read or
+  renewal. Renewal atomically replaces the token. Lost renewal responses need
+  fresh direct authentication; an old token cannot be replayed. Expiry and
+  session termination do not revoke the durable pairing.
+- `authorize_read` checks the supplied target installation (the caller must
+  derive it from the actual data source, never a browser claim), session expiry and current
+  owner revision from disk on every call. Applied revocation blocks the next
+  admission, renewal and fresh session, including in another process. A future
+  stream gate must call this before each private delivery and close on refusal;
+  this module does not itself protect an HTTP request or close a live stream.
+- Credentials contain 256 random bits; only SHA-256 digests are stored. Token
+  fields are omitted from object representations. Each store permits at most
+  32 pending challenges and 32 sessions, cleaning expired records on the next
+  corresponding write. Grant-change history remains local. Storage is durable
+  SQLite with explicit transactions; authorization reads are query-only.
+  Initialization publishes a complete private database atomically, without
+  replacing existing authority; interrupted preparation can leave only a
+  temporary file that is never consulted for admission.
+
+These lifetimes and limits are bounded experiment choices, not a selected
+browser protocol. The primitive grants no website membership, workspace
+binding or operational write authority. It cannot be substituted for the
+canonical action policy or Plane actor attestation (#1622).
+
+Before enabling protected endpoints, implement and validate the trusted
+Tailscale human identifier/ingress, local confirmation boundary, browser
+credential carrier, all-route gate and stream revocation. Tailscale Serve
+[documents user headers and their trust limits](https://tailscale.com/docs/features/tailscale-serve#identity-headers):
+they must not be accepted from an arbitrary directly reachable backend.
+Website-connected sessions additionally require independently verified website
+identity/workspace evidence; a supplied user/workspace string is insufficient.
+The view's GET-only contract must remain intact, with pairing/session mutations
+behind a separate authority service. No real protected use is claimed by the
+synthetic policy tests.
+
 ## The write spine
 
 `emit()` / `emit_batch()` (`claudlobby/plane/emit_api.py`) is the one

@@ -17,12 +17,11 @@ from pathlib import Path
 import pwd
 import re
 import sqlite3
-import stat
 
 from .active_config import resolve_active_context
 from .context import Context, generated_selectors
 from .plane.db import connect_ro, db_file
-from .plane.ids import ID_PATTERNS, derive_uid
+from .plane.ids import ID_PATTERNS, derive_uid, read_host_uid
 from .plane.registry_read import current_entities
 from .plane.schema_state import require_current_schema
 from .resources import PackageResources
@@ -51,20 +50,9 @@ def _valid_human_alias(alias: object) -> bool:
 
 def _host_uid(root: Path) -> str:
     try:
-        if (root / "state").is_symlink():
-            raise ValueError("redirected state")
-        fd = os.open(root / "state/host-uid", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        with os.fdopen(fd, "r") as stream:
-            info = os.fstat(stream.fileno())
-            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
-                    or stat.S_IMODE(info.st_mode) != 0o600):
-                raise ValueError("host identity is not an owned private file")
-            value = stream.read().strip()
-        if not re.fullmatch(ID_PATTERNS["host"], value):
-            raise ValueError("malformed host identity")
-        return value
-    except (OSError, ValueError, UnicodeError) as exc:
-        raise OperationContextError("existing host identity is unavailable or invalid") from exc
+        return read_host_uid(root / "state")
+    except ValueError as exc:
+        raise OperationContextError(str(exc)) from exc
 
 
 def _identity(conn, kind, alias, *, parent=None, human=False):
