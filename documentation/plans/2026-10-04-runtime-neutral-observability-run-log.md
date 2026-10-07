@@ -159,8 +159,8 @@ every row; the one exported `session.id` matched the hook's, none without; delta
 **21 MB**. **F4 stays locked, confirmed on the floor host.**
 
 **Measured, leg 3 — a borrowed production worker instead of a canary root (operator decision).** No canary root
-existed on the Pi (55 production `com.crog.*` units). The operator chose to arm one idle production worker, `rajan`
-(fleet `crog-eng-team`, 38.5 % busy over 24 h), by appending the six telemetry exports to its own `.env` (backed
+existed on the Pi (55 production units). The operator chose to arm one idle production worker
+(38.5 % busy over 24 h), by appending the six telemetry exports to its own `.env` (backed
 up, restored byte-identical afterwards) and restarting it twice through the release's `bot restart`. Armed
 **21.3 minutes**, not 24 h: the soak was compressed into a driven exercise.
 - **RC: PASS twice** (21:35 and 21:47), DM in, reply delivered, with telemetry on — #533's failure mode did not occur.
