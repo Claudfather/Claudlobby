@@ -397,7 +397,8 @@ def test_index_html_alias_is_rewritten_too(tmp_path):
         assert r.headers.get("cache-control") == "no-store"
 
 
-def test_asset_token_tracks_in_place_updates(tmp_path):
+@pytest.mark.parametrize("asset", ["app.js", "api-client.js", "workspace.css"])
+def test_asset_token_tracks_in_place_updates(tmp_path, asset):
     """The token must change when a UI file changes UNDER the running
     daemon (update-siblings pulls weekly; host services are not restarted
     by the worker restart) — a process-lifetime token went stale in exactly
@@ -409,7 +410,7 @@ def test_asset_token_tracks_in_place_updates(tmp_path):
 
     client = TestClient(create_app(tmp_path, package=source_package()))
     tok1 = _re.search(r"/app\.js\?v=([a-f0-9]+)", client.get("/").text).group(1)
-    app_js = view_mod.UI_DIR / "app.js"
+    app_js = view_mod.UI_DIR / asset
     st = app_js.stat()
     _os.utime(app_js, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
     try:
