@@ -1,5 +1,7 @@
 <!-- What changed, why, and how it was verified. -->
 
+<!-- Changelog: add changelog.d/<head branch, each / as ->.md (changelog.d/README.md), or write the line "Changelog: none — <why>". -->
+
 ## Rollout check
 <!-- What proves this change works once it is live: library/guardrails/verify-rollout.md. Fill in all four lines. A change with nothing to observe in production replaces them with one line, N/A: docs-only or N/A: tests-only, which CI checks against the paths the PR changes. -->
 - **Observe:** <!-- what to read in production (a command, endpoint, job, event or record) and the exact value or shape expected -->

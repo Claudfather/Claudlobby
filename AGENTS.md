@@ -226,6 +226,8 @@ git status           # nothing from local/, runtime/, .env should appear
 git diff --cached    # no secrets, no fleet-specific UUIDs, no hardcoded paths
 ```
 
+Changelog entries go in `changelog.d/` ([README](changelog.d/README.md)), never in `CHANGELOG.md`.
+
 ## Working on This Repo
 
 ### Instruction files: CLAUDE.md and AGENTS.md
@@ -236,7 +238,7 @@ Every session started in this checkout loads this file whole, and so does every 
 
 ### Adding library content
 
-Each library category has its own format. Check the category's `README.md` for specifics. General rules:
+Each library category's `README.md` gives its format. General rules:
 
 1. Create the file in the appropriate `library/<category>/` directory
 2. Use YAML frontmatter with `title:` and `description:` fields
@@ -251,9 +253,8 @@ Each library category has its own format. Check the category's `README.md` for s
 
 1. Edit Python source in `claudlobby/`
 2. In a disposable checkout with private HOME/TMPDIR, install the dev dependencies, prepare resources with `.venv/bin/python tests/prepare_resources.py --disposable-checkout "$PWD"`, then run the affected existing tests (details below).
-3. Test against your local fleet: `claudlobby --fleet <name> config validate` then stage `config plan --release RELEASE_ID` and inspect `config diff PLAN_ID`
-4. Run `claudlobby --fleet <name> config diff PLAN_ID` to verify no unintended rendered drift
-5. Commit to a branch, PR, review
+3. Test against your local fleet: `claudlobby --fleet <name> config validate`, then stage `config plan --release RELEASE_ID` and check `config diff PLAN_ID` for unintended rendered drift
+4. Commit to a branch, PR, review
 
 **Before writing or trusting a test, read [`documentation/test-suite.md`](documentation/test-suite.md).** Never test from a live fleet root; run unsandboxed; the suite is not green, so compare two separately prepared exports (before, after) on failing test **names**, the **counts** line and the **exit code**; never pipe pytest into grep; quarantine a flaky test (`@pytest.mark.quarantine(issue=<N>)`), never deselect it.
 

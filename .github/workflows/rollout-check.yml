@@ -12,6 +12,7 @@ name: Rollout check
 # The paths below are what an "N/A: docs-only" or "N/A: tests-only" PR may change.
 # The check reads them from this file on the default branch, not from the PR's
 # copy. library/ is composed into every bot, so it is production code here.
+# changelog.d/ is in both lists so that such a PR can carry its changelog fragment.
 
 on:
   pull_request:
@@ -25,5 +26,5 @@ jobs:
   rollout-check:
     uses: ./.github/workflows/verify-rollout.yml
     with:
-      docs-paths: "documentation/** README.md CHANGELOG.md"
-      tests-paths: "tests/**"
+      docs-paths: "documentation/** README.md CHANGELOG.md changelog.d/**"
+      tests-paths: "tests/** changelog.d/**"
