@@ -1,7 +1,7 @@
 ---
 title: "Run log — runtime-neutral observability (#2145): P0 canaries"
 type: run-log
-status: P0 Claude legs done; §10 orders 2–3 merged and activated on the floor host (2026-10-06)
+status: P0 Claude legs done; §10 orders 2–6 merged, 2–3 activated on the floor host (2026-10-07); the Codex batch and Half A's activation are outstanding
 created: 2026-10-05
 epic: 2026-10-04-runtime-neutral-observability-plan.md
 issue: Claudfather/Claudlobby#2145
@@ -245,6 +245,56 @@ Both merged, with #2191 (getting-started: the `[plane-ui]` extra) and clauDNA #4
   both in one append.
 - The stale local-scope clauDNA records in `installed_plugins.json` are harmless (the bots run the user-scope
   release), but `claude plugin list` can't say which one applies. The session-store format is the reliable signal.
+
+### 2026-10-06 to 2026-10-07 — Half A's pre-merge check, the `agent_cli` rename, and §10 orders 4–6 merged
+
+Run by a Claude Code session on the operator's Mac mini, over SSH for the Pi leg. Full report kept by the operator
+(`~/rnc-results-5.md`).
+
+**#2203 (P1 Half A) pre-merge live check, on `8e99743`, before the rename: PASS.** No bot touched, nothing activated.
+- **The marker scrub, interactive** (macOS, Claude Code 2.1.291, tmux; both arms export the three markers with a
+  foreign session id first).
+  - Control: the footer shows `Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker`, the session
+    takes a fresh id, and no transcript file is written.
+  - #2203's line (`unset …; exec claude`): no warning, the session's own id, and a 267 KB transcript.
+  - Inside the scrubbed session the tool shell still sees `CLAUDE_CODE_CHILD_SESSION=1` and `CLAUDECODE=1`, with
+    its own session id: Claude sets them on its own children (C10/C11). The evidence for the scrub is the absent
+    warning, the saved transcript and the own id, not an empty marker.
+- **The field and its refusal, read-only on the floor host's real manifests** (PR checkout outside the live root,
+  login shell).
+  - `config validate` for all four fleets: rc 0, 0 errors, warning counts, categories and text identical to the
+    selected release's.
+  - `config explain` for the field: `source: built_in`. The selected release answers "not a declared model field".
+  - On a copy of one fleet's `fleet.yaml`: `codex` on one bot gives rc 4, naming the bot and `execution adapter not
+    shipped`; `claude` gives rc 0. The live checkout's `git status` was empty before and after.
+- **Runbook lessons.** macOS `printenv A B` reads only `A`: use `env | grep`. A tmux server started from a Claude Code
+  session hands the pane that session's markers, so a test arm starts from an `env -i` base. `config explain` for a
+  bot key needs `--bot` and reports the source, not the value. Fleets live at `local/home/<fleet>/`. The warning
+  names `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1` as the override, should a bot ever need to run with an inherited
+  marker.
+
+**The rename (operator, 2026-10-06 and 2026-10-07).** `runtime` already names release activation (#1997), so the
+value is spelled `agent_cli` everywhere: the `fleet.yaml` key, `KNOWN_AGENT_CLIS`, `CLAUDLOBBY_AGENT_CLI` in
+`bot.conf`, `BotPayload.agent_cli`, `session_alias(id, agent_cli)` and the `(agent_cli, session_id)` join key. The
+OTel resource attribute the P2 plan composes is `claudlobby.agent_cli`, not `agent.runtime`. A leftover `runtime:`
+key in `fleet.yaml` warns (`retired-key`), and is refused when its value isn't the CLI the bot runs. This log's
+earlier entries keep the spelling they measured. #2203's squash commit on `main` kept its pre-rename title; its code
+and CHANGELOG carry the new names.
+
+**Merged 2026-10-07.**
+- Claudron#224 (§10 order 4): the boundary spec, `(agent_cli, session_id)` throughout.
+- #2201: the canary harness records Codex hook payloads, `CODEX_*` env names and the ancestor walk; it composes
+  `claudlobby.agent_cli`.
+- #2203 (order 5): P1 Half A.
+- clauDNA#407 (order 6): `session.opened.agent_cli`, `session.json` as `claudna.session/2`, the export item's
+  `session.agent_cli`, `session:<agent_cli>/<sid>:<seg>` provenance for non-Claude sessions (F9), the spec rules 1
+  and 4 amended (F15) and the mission amended (D2). Released as clauDNA v0.27.0 (#408).
+
+**Outstanding.**
+- Half A's activation and rollout check on the floor host (`~/rnc-results-6.md`, by 2026-10-09 per #2203). It also
+  moves every bot to clauDNA 0.27 at its restart. The Claudron PR that flips register row 10 to shipped follows it.
+- The Codex batch (C1–C5, C7–C9; `~/rnc-results-4.md`). It was numbered before the Half A check but hasn't run. C1's
+  `session_id` answer gates Claudron's ops-log id regex, P4 and #2149.
 
 ## Plan changes this log caused (2026-10-05)
 
