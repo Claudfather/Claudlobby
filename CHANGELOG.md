@@ -17,6 +17,14 @@ On a host with several fleets, every fleet composed the same interval timers, an
 - **What the docs claimed, corrected.** `system.yaml` and the schema doc said an activation runs an overdue job at once; for the interval form it counts every first run from its last daemon-reload instead. They also said a job's later ticks keep their slots; under `OnUnitActiveSec=` they do not.
 - **Tests:** `tests/test_timer_phase.py` composes four fleets and the host's jobs on one data root and checks that no two interval units share a second. When `systemd-analyze` is present, systemd's own calendar parser checks each expression.
 
+### Fixed — `host activate` waits up to 300 s for running jobs before refusing, and jobs that start meanwhile back off (#2208)
+
+`host activate` took the host activation lock without waiting, and every composed timer job, host operation and native bot start holds that lock shared while it runs. An activation attempted while any of them ran was refused, and the refusal said another activation held the lock. On a four-fleet host some job held it 21% of the time in normal operation; per-fleet timer slots (#2209) raise that to about 61%.
+
+- **It marks itself pending, then waits.** Every activation first holds `state/activation-pending.lock` exclusively until it ends. A job or operation that starts meanwhile takes the path it already took during an activation: a scheduled job waits for it, a CLI mutation refuses, and the watchdog pauses. `host activate` (first adoption, upgrade and resume) then polls the lock for up to 300 s while the holders already running finish. The longest timer job, the pulse, is capped under its 300 s cadence.
+- **Refusals say why.** Another activation, running or pending, still refuses at once. A job or operation that outlasts the wait refuses with "a running job or host operation still holds the lock after a 300 s wait", and the CLI reports that no activation record was created. Start repair, early abort and fleet move still refuse at once, but now name a running job or operation instead of another activation.
+- **Tests:** `tests/test_activation_lock_wait.py` covers the wait, the back-off and the refusals; `tests/test_activation.py` has bootstrap, upgrade and resume each waiting for a job.
+
 ### Added — a bot declares its agent CLI, and the plane's session uid is qualified by it (#2145 P1, Half A)
 
 The vocabulary and the join key the runtime-neutral observability epic (#2145) builds on. Nothing here launches, composes hooks for or validates a Codex bot, and no request receipt changes.
