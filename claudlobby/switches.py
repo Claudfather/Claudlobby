@@ -857,6 +857,13 @@ def _bot_config_value(bot, dotted: str) -> bool:
     return value is True
 
 
+def _moved_bots(sw: Switch, per_bot: dict[str, tuple[list[str], list[str]]] | None) -> list[str]:
+    """The bots that moved a per-bot switch off its shipped default: the ones
+    that armed an opt-in, or opted out of an opt-out."""
+    on, off = (per_bot or {}).get(sw.key, ([], []))
+    return off if sw.default_on else on
+
+
 def _enroll_state(sw: Switch, host_jobs: dict, fleet_jobs: dict,
                   sweep_on: bool | None,
                   per_bot: dict[str, tuple[list[str], list[str]]] | None = None,
@@ -876,9 +883,10 @@ def _enroll_state(sw: Switch, host_jobs: dict, fleet_jobs: dict,
         if seen is None:
             return None, ""
         on, off = seen
-        moved, state = (off, "off") if sw.default_on else (on, "on")
+        moved = _moved_bots(sw, per_bot)
         if not moved:
             return bool(on), "fleet.yaml"
+        state = "off" if sw.default_on else "on"
         shown = ", ".join(moved[:4]) + (f" (+{len(moved) - 4} more)" if len(moved) > 4 else "")
         return bool(on), (f"fleet.yaml {sw.config} — {state} for {len(moved)} of"
                           f" {len(on) + len(off)} bot(s): {shown}")
@@ -1001,7 +1009,7 @@ def resolve(
         # A per-bot switch some bots moved off its default names them even
         # while the fleet as a whole reads as the default (an opt-out with one
         # bot opted out is still `on`).
-        if sw.carrier == COMPOSE_BOT and " bot(s): " in where:
+        if sw.carrier == COMPOSE_BOT and _moved_bots(sw, per_bot):
             source = where
         if env_on is not None and env_on is not sw.default_on:
             source = tier
