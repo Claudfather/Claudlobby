@@ -23,7 +23,7 @@ def _call(capsys, *argv):
     return code, json.loads(capsys.readouterr().out)
 
 
-def test_the_public_command_records_once_and_event_list_serves_it(active, capsys):  # noqa: F811
+def test_the_public_command_records_a_compaction_once_on_a_selected_root(active, capsys):  # noqa: F811
     root, _release = active
     transcripts = Path.home() / ".claude/projects" / transcript_slug(root / "runtime/bots/worker")
     transcripts.mkdir(parents=True)
