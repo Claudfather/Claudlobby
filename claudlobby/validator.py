@@ -2122,9 +2122,10 @@ def _validate_timers(fleet: FleetConfig, report: ValidationReport) -> None:
         if not in_range:
             report.warn(
                 "obs-range",
-                f"jobs.{name}.startup_delay must be 1-3600 seconds (got {delay!r}): 0 starts "
-                "the job with every other producer, and a long delay postpones its first "
-                "run after every manager restart",
+                f"jobs.{name}.startup_delay must be 1-3600 seconds (got {delay!r}): for an "
+                "interval that keeps OnUnitActiveSec= (one that does not divide an hour or a "
+                "day), 0 starts the job with every other producer, and a long delay postpones "
+                "its first run after every manager restart",
             )
 
     # An armed beat on a leafless fleet warns rather than staying silent. The
