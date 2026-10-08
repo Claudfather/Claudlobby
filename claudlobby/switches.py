@@ -539,6 +539,23 @@ SWITCHES: tuple[Switch, ...] = (
              "the fleet monitor",
     ),
     Switch(
+        key="keepalive-limit-resume",
+        scope=DOOR,
+        polarity=OPT_IN,
+        # keepalive reads each bot's bot.conf on its tick, so this one bot's
+        # conf arms it there and nowhere else; a .env tier never reaches it.
+        carrier=BOT_CONF,
+        env="KEEPALIVE_LIMIT_RESUME_ENABLED",
+        why_opt_in="no deployment gate: claudlobby/_runtime_scripts/ is in "
+                   "force on every bot at activation, and this door types into "
+                   "a bot's pane, so one armed bot is the only canary",
+        what="once a usage limit's printed reset has passed, confirm the limit "
+             "menu's \"Stop and wait for limit to reset\" by its label if the "
+             "menu is up, then submit one resume prompt: one action per limit "
+             "(#996). Off, keepalive still names the stop (LIMIT) and "
+             "fleet-pulse pages usage_limit_held after the reset",
+    ),
+    Switch(
         key="code-audit-sweep",
         scope=FLEET_JOB,
         polarity=OPT_IN,
