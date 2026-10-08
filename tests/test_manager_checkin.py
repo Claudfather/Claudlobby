@@ -712,8 +712,9 @@ def test_the_unit_execs_the_trigger_with_the_fleet_as_its_argument(tmp_path):
 def test_the_beat_is_fifteen_minutes(tmp_path):
     timers = _checkin_timers(tmp_path)
     timer = (timers / "com.checkin.manager-checkin.timer").read_text()
-    assert "OnActiveSec=615" in timer  # the first beat, counted from the timer's own start (#2059)
-    assert "OnUnitActiveSec=900" in timer
+    # Every quarter hour, anchored at minute 10, 615 s into each (#1654).
+    assert "OnCalendar=*-*-* *:10/15:" in timer and "-- tick every 900s" in timer
+    assert "OnUnitActiveSec" not in timer
 
 
 def test_the_switch_row_is_opt_in_and_states_why():
