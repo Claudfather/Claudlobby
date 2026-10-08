@@ -71,9 +71,10 @@ counts the provisional ones. Session uids are transcript-stable
 ## Owner access foundation (not enabled)
 
 `plane/owner_access.py` is an internal policy/state primitive for **direct,
-whole-deployment reads**. It does not authenticate a browser. No HTTP route,
-CLI command, environment flag, startup job or view middleware calls it yet;
-the current view is unchanged. It is a bounded part of the owner-access work
+whole-deployment reads**. It does not authenticate a browser. The internal
+`plane/owner_view.py:create_owner_app` factory exercises it with an explicitly
+injected verifier; no CLI command, environment flag or startup job enables
+that factory. The current runtime view is unchanged. This is bounded owner-access work
 related to #1623, not completion of that issue or permission to expose Plane.
 
 Explicit initialization requires the existing private `state/host-uid`, using
@@ -106,9 +107,9 @@ The prototype's contract:
 - `authorize_read` checks the supplied target installation (the caller must
   derive it from the actual data source, never a browser claim), session expiry and current
   owner revision from disk on every call. Applied revocation blocks the next
-  admission, renewal and fresh session, including in another process. A future
-  stream gate must call this before each private delivery and close on refusal;
-  this module does not itself protect an HTTP request or close a live stream.
+  admission, renewal and fresh session, including in another process. The
+  internal protected view also checks before each response-body delivery and
+  closes a stream on refusal. The state module itself has no HTTP behavior.
 - Credentials contain 256 random bits; only SHA-256 digests are stored. Token
   fields are omitted from object representations. Each store permits at most
   32 pending challenges and 32 sessions, cleaning expired records on the next
@@ -123,9 +124,45 @@ browser protocol. The primitive grants no website membership, workspace
 binding or operational write authority. It cannot be substituted for the
 canonical action policy or Plane actor attestation (#1622).
 
+### Protected read factory (internal experiment)
+
+`create_owner_app` wraps the canonical `view.create_app` in one outer ASGI gate.
+The resolved source root also selects its owner authority and host UID; request
+parameters cannot select an authority store or another deployment. There is no
+path allowlist: API routes, search, grid, health details, static files, HEAD,
+errors and later-added routes all cross the gate. Even an admitted reader
+cannot use a write method or WebSocket through this factory.
+
+The required asynchronous verifier supplies an immutable `VerifiedReader`
+(principal and session token) from trusted server code. No identity headers,
+cookies, URL credentials, website user IDs or workspace IDs are interpreted.
+The test verifier is out of band and synthetic; it is not a production
+Tailscale verifier. There is no HTTP session-creation or pairing endpoint.
+
+Admission happens before calling the view and again immediately before every
+response body chunk, using current host identity, grant and session state.
+Headers are held until the first body is admitted. Every response is
+`Cache-Control: no-store`; sendfile extensions are disabled so static bytes
+cannot bypass the gate. Protected responses omit Content-Length to allow a
+held response to end normally on refusal. Before headers are sent, denial is
+403 and unavailable authority is 503, both with generic bodies. After a stream
+starts, refusal ends it without another private frame or a replacement status.
+The existing stream's one-second idle tick supplies the next admission check.
+Already delivered/in-flight bytes cannot be recalled; this is admission at
+each delivery, not a global transaction between revocation and network output.
+
+The protected factory preserves the existing lifespan and `begin_shutdown`
+signal. The normal `plane view` command continues to call the original factory.
+This experiment establishes response enforcement, not deployed protection,
+browser login, a credential transport choice or website workspace admission.
+Source binding is to the installation's local data root. It does not establish
+row provenance for an operator-copied or mixed-host database: a database-host
+ownership invariant/refusal is still required before protected activation.
+
 Before enabling protected endpoints, implement and validate the trusted
 Tailscale human identifier/ingress, local confirmation boundary, browser
-credential carrier, all-route gate and stream revocation. Tailscale Serve
+credential carrier, database ownership and end-to-end enforcement on the
+supported hosts and browsers. Tailscale Serve
 [documents user headers and their trust limits](https://tailscale.com/docs/features/tailscale-serve#identity-headers):
 they must not be accepted from an arbitrary directly reachable backend.
 Website-connected sessions additionally require independently verified website

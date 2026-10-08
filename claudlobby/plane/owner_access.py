@@ -1,9 +1,10 @@
-"""Host-owned direct-reader pairing and sessions; no network entry point yet.
+"""Host-owned direct-reader pairing and sessions; no runtime entry point yet.
 
 This is a policy/state primitive, NOT an identity verifier. A future trusted
 ingress must establish a human PrincipalRef; a separate local confirmation
 door must authorize pairing/revocation. Neither is supplied by this module.
-No CLI, HTTP route, env flag, or runtime service enables it. See the owner
+The internal owner_view factory exercises this policy with an explicitly
+injected verifier. No CLI, env flag, or runtime service enables it. See the owner
 access foundation section of documentation/architecture/observable-plane.md.
 """
 
