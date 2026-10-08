@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — The Home Assistant MCP fragment runs the server its tool list, doc and skills describe
+
+`library/mcp/homeassistant.json` pointed at HA's built-in MCP endpoint, `${HA_URL}/api/mcp/`, while its tool list, `library/integrations/homeassistant.md` and the `home`, `weather` and `status-personal` skills named the tools of the community server hass-mcp. The built-in endpoint answers only without the trailing slash and needs an HA integration set up first, so the server failed to connect at session start; connected, it would have offered none of the tools the docs and skills name.
+
+- **The fragment runs hass-mcp 0.6.0 over stdio:** `uvx --from hass-mcp==0.6.0 hass-mcp`, the shape the library's other pinned Python servers use, so `host cache warm` and `doctor` cover it. `HA_URL` and `HA_TOKEN` pass through the same env contract.
+- **`_permissions_contract.tools` lists the 29 tools 0.6.0 serves.** The 12 it listed are all among them. The composed grant is unchanged: `mcp__homeassistant__*`, the whole server.
+- **The `/home` skill calls the tools as 0.6.0 takes them.** `entity_action` accepts only `on`, `off` or `toggle`, with service data in `params`, so the skill's `turn_on` and `turn_off` examples returned an error. `call_service_tool` takes the `entity_id` inside `data`.
+- **The integration doc** says what a host installs, what the token can reach, how to check the connection, and which REST calls to use when the server does not connect.
+
 ### Fixed — `host activate` waits up to 300 s for running jobs before refusing, and jobs that start meanwhile back off (#2208)
 
 `host activate` took the host activation lock without waiting, and every composed timer job, host operation and native bot start holds that lock shared while it runs. An activation attempted while any of them ran was refused, and the refusal said another activation held the lock. On a four-fleet host some job held it 21% of the time in normal operation; per-fleet timer slots (#2209) raise that to about 61%.

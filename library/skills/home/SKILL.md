@@ -14,7 +14,7 @@ Smart home control and reporting via Home Assistant.
 |------|---------|
 | `mcp__homeassistant__list_entities` | List all entities |
 | `mcp__homeassistant__get_entity` | Get entity state/details |
-| `mcp__homeassistant__entity_action` | Control a device (turn on/off, set brightness, etc.) |
+| `mcp__homeassistant__entity_action` | Control a device: `action` is `on`, `off` or `toggle`; brightness and the like go in `params` |
 | `mcp__homeassistant__call_service_tool` | Call any HA service |
 | `mcp__homeassistant__search_entities_tool` | Search entities by name/type |
 | `mcp__homeassistant__domain_summary_tool` | Summary by domain |
@@ -69,29 +69,29 @@ Natural language → entity action:
 ```
 Tool: mcp__homeassistant__entity_action
 entity_id: light.bedroom_main
-action: turn_on
-data: {"brightness": 128}  // 0-255, 128 = 50%
+action: on
+params: {"brightness": 128}  // 0-255, 128 = 50%
 ```
 
 ```
 Tool: mcp__homeassistant__entity_action
 entity_id: light.bedroom_main
-action: turn_off
+action: off
 ```
 
 **Switches/Plugs:**
 ```
 Tool: mcp__homeassistant__entity_action
 entity_id: switch.living_room_plug_1
-action: turn_on
+action: on
 ```
 
 **Color:**
 ```
 Tool: mcp__homeassistant__entity_action
 entity_id: light.<color_panels>
-action: turn_on
-data: {"rgb_color": [255, 100, 50], "brightness": 200}
+action: on
+params: {"rgb_color": [255, 100, 50], "brightness": 200}
 ```
 
 ### 3. Home Report
@@ -127,7 +127,7 @@ Run all in parallel, then summarize.
 Tool: mcp__homeassistant__call_service_tool
 domain: "light"
 service: "turn_off"
-entity_id: "all"
+data: {"entity_id": "all"}
 ```
 
 "Movie mode" (dim lights, TV on):

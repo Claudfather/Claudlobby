@@ -224,8 +224,10 @@ Most MCP servers install on-demand via `npx` or `uvx`. Some need pre-installatio
 
 ### Home Assistant MCP
 
-This is an HTTP-type MCP entry (`library/mcp/homeassistant.json`) that connects straight to HA's
-own `/api/mcp/` endpoint — there's no server package to install or keep warm in the npx cache.
+`library/mcp/homeassistant.json` runs the community server hass-mcp, pinned to one release, over
+stdio through `uvx`; HA's built-in MCP server is not used. The host needs `uv`, which fetches a
+Python 3.13 on first run if the system has none, and `claudlobby host cache warm` pre-fetches the
+package so the first session start does not download it.
 
 ```bash
 # Needs:
