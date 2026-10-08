@@ -25,6 +25,7 @@ fleet:
   defaults:                             # applied to every bot unless overridden
     model: opus | sonnet | haiku | fable   # or a pinned model ID, e.g. claude-opus-4-8
     effort: low | medium | high | max
+    agent_cli: claude | codex            # agent CLI (default: claude; codex refused until #2149)
     account: default
     prompt_suggestions: true | false    # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION (default: false)
     disable_nonessential_traffic: true | false  # RC-safe headless trim set (default: true)
@@ -89,6 +90,7 @@ fleet:
       account: <account-key>
       model: <model>
       effort: <effort>
+      agent_cli: <agent_cli>
       skills: [<list>]                  # appended to defaults.skills
       mcp: [<list>]
       integrations: [<list>]            # auto-paired with mcp; explicit overrides
@@ -211,12 +213,12 @@ Omit the field entirely for the common case — everything defaults to `true`. U
 Applied to every bot. Merge rules by type:
 
 - **Lists** (skills, expertise, guardrails, protocols, resources, lessons, principles, permissions, post_actions, mcp, integrations) — bot-level **appends to** defaults (deduped, order-preserved).
-- **Scalars** (model, effort, account, mission) — bot-level **overrides** defaults.
+- **Scalars** (model, effort, agent_cli, account, mission) — bot-level **overrides** defaults.
 - **Telegram** — merged **field-by-field**. Bot-level fields override individual defaults fields (e.g., a bot can override `require_mention` while inheriting `token_env`).
 - **Sandbox** — lists (network_allowed_domains, filesystem_allow_write) are **unioned**; booleans (auto_allow_bash) use bot-level value.
 - **Tools** — deny/allow lists are **unioned** across defaults and bot-level.
 - **Hooks** — bot-level entries are **appended after** defaults per event. Same-matcher hooks group together.
-- **Jobs** — `defaults.jobs` merges by job name over the system defaults (system.yaml → fleet.yaml, shallow per-entry spread; sibling jobs are preserved). Drives the composed fleet timer units.
+- **Jobs** — `defaults.jobs` merges by job name over the system defaults (system.yaml → fleet.yaml, shallow per-entry spread; sibling jobs are preserved). Drives the composed fleet timer units. An interval job whose interval divides an hour or a day is anchored to the clock at its own second on the host, in this fleet's slot, so the fleets' copies of one job are never due in the same second; any other interval keeps `OnUnitActiveSec=` with a slot for its first run only. `randomized_delay` is for calendar jobs. See `startup_delay` in [`system-yaml-schema.md`](system-yaml-schema.md) for both.
 
 #### `fleet.defaults.jobs.<name>.enroll`
 
@@ -704,6 +706,8 @@ observability:
 
 **dispatch_deadline remains composed for every bot.** The default is 86400 seconds (24 hours), and a fleet override still reaches bot.conf for historical native watchdog rows. Canonical task assign takes an explicit --expected-by timestamp; it does not read this env value to manufacture a deadline. A value of 0 disables the legacy dispatch clock.
 
+`pulse_interval` also sets the `fleet-pulse` timer's cadence. A whole number of minutes that divides an hour (60, 120, 180, 240, 300, 360, 600, 720, 900, 1200, 1800 or 3600) keeps the pulse anchored in this fleet's slot on the host. Any other value runs it on `OnUnitActiveSec=` with a slot for its first run only, and that slot lasts only until the copies drift back together; on a four-fleet host, 60 s copies did so within minutes to an hour.
+
 The three threshold fields are optional integers with sensible defaults. `bridge_heal` is a boolean. Can be set in `defaults:` to apply fleet-wide; bot-level overrides (a per-bot `bridge_heal: false` opts a bot out of a fleet default-on). The validator warns if `pulse_interval` is `<= 0` or greater than `3600` (1 hour), if `reap_days` is `<= 0` or greater than `365`, and if `bridge_heal_max_attempts` is outside `1..10`. There is currently no validation on `activity_stuck_threshold` or `dispatch_deadline`.
 
 **`bridge_heal` must be set here, not via a `.env` tier.** The keepalive watchdog (`claudlobby/_runtime_scripts/keepalive.sh`) loads `bot.conf` only — it never sources the fleet `.env` tiers (those reach the bot's `claude` session via `start-bot.sh`, not the supervisor). Setting `OBSERVABILITY_BRIDGE_HEAL` in `defaults.env` (silently dropped) or a fleet `.env` file leaves keepalive's gate closed and the heal a no-op. This structured field is the one path that composes into every `bot.conf`, where keepalive's per-tick read picks it up. `bridge_heal` emits as the shell boolean `1`/`0` that the gate (`[ "${OBSERVABILITY_BRIDGE_HEAL:-0}" = "1" ]`) expects.
@@ -885,6 +889,14 @@ otherwise show before auto-accepting edits or entering a dangerous permission mo
 the `--dangerously-skip-permissions` CLI flag above: these suppress the one-time interactive
 first-run prompts a headless, supervised bot would otherwise hang on with no terminal to answer
 them. Can be set in `defaults:`; bot-level overrides.
+
+### `bots.<name>.agent_cli`
+
+String enum, `claude` (default) or `codex`. The agent CLI the bot runs under; composed into `bot.conf` as `CLAUDLOBBY_AGENT_CLI`, which names the rule the bot's session uid is derived with (#2145 §2.2; the doors that record the caller's session read it from #2145 P1 Half B). `codex` is accepted by the parser and **refused by the validator** (`execution adapter not shipped`) until the Codex execution adapter ships (#2149). An explicit `null` reads as `claude`; any other value outside the set fails to parse. Can be set in `defaults:`.
+
+`runtime:` was this key's draft spelling and is not read. A `runtime:` key in a bot stanza or under `defaults:` gets a `retired-key` warning naming `agent_cli:`, and is an **error** when its value is not the CLI the bot runs (`runtime: codex` would otherwise run `claude` in silence).
+
+`agent_cli` is the one name for this value everywhere: the `fleet.yaml` key, `CLAUDLOBBY_AGENT_CLI` in `bot.conf`, the bot keyframe's `agent_cli` and the session join key `(agent_cli, session_id)` (`session_alias(id, agent_cli)`, #2145 F2). It is not `runtime`, which already names release activation, the Claude Code binary update (`host update runtime`) and the composed-output audit (`config validate --runtime`) (#1997).
 
 ### `bots.<name>.remote_control`
 
@@ -1071,6 +1083,8 @@ does not own.
 
 - **Hard fail** — bot's `expertise:` list is empty or references missing files
 - **Hard fail** — `fleet.yaml` itself is invalid YAML or missing required keys
+- **Hard fail** — a bot's `agent_cli:` is not `claude` (`execution adapter not shipped`, until #2149)
+- **Hard fail** — a leftover `runtime:` key (bot or `defaults:`) whose value is not the bot's `agent_cli` (warn, `retired-key`, when it matches)
 - **Warn** — bot references a `skill` / `mcp` / `guardrail` / `protocol` / `resource` / `lesson` / `post_action` that doesn't exist (skipped during generate)
 - **Warn** — MCP fragment references an env var (`${FOO}`) that's not set in the current environment
 - **Warn** — `voice:` path doesn't resolve

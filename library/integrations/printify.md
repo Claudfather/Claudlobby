@@ -39,7 +39,7 @@ The `.mcp.json` points to the local build at `~/your-fork/printify-mcp/dist/inde
 
 #### Permissions
 
-Read-only tools (`get_*`, `list_*`, `how_to_use`) are auto-allowed for every bot that attaches this MCP, so headless bots never stall on a read prompt. Mutations (`create_product`, `update_product`, `delete_product`, `publish_product`, `upload_image`, `generate_*`, `set_default`, `switch_shop`) always prompt; a bot that genuinely needs an unattended write gets it via fleet.yaml `tools.allow`. Split declared in `library/mcp/printify.json` `_permissions_contract` (see `library/mcp/README.md`). A fork override adding order tools should ship a local overlay fragment extending `tools`/`read_only_tools` (and mirror `tool_grants`) for its read-tier additions (`list_orders`, `get_order`, `calculate_shipping`).
+Read-only tools (`get_*`, `list_*`, `how_to_use`) are auto-allowed for every bot that attaches this MCP, so headless bots never stall on a read prompt. Mutations (`create_product`, `update_product`, `delete_product`, `publish_product`, `upload_image`, `generate_*`, `set_default`, `switch_shop`) always prompt; a bot that genuinely needs an unattended write gets it via fleet.yaml `tool_permissions.allow`. Split declared in `library/mcp/printify.json` `_permissions_contract` (see `library/mcp/README.md`). A fork override adding order tools should ship a local overlay fragment extending `tools`/`read_only_tools` (and mirror `tool_grants`) for its read-tier additions (`list_orders`, `get_order`, `calculate_shipping`).
 
 #### Gotchas
 

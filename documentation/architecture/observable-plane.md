@@ -66,7 +66,7 @@ message from a bot the registry has not seen creates a PROVISIONAL actor that
 the next `generate` (the registry scan) confirms or tombstones; `plane doctor`
 counts the provisional ones. Session uids are transcript-stable
 (`sess_` + sha256 of the platform session id — the bash derivation in
-`claudlobby/_runtime_scripts/plane-session-start.sh` is pinned byte-identical to `ids.derive_session_uid`).
+`claudlobby/_runtime_scripts/plane-session-start.sh` is pinned byte-identical to `ids.derive_session_uid(id)` for agent CLI `claude`; another agent CLI derives in Python only, through `ids.session_alias(id, agent_cli)` (#2145 F2)).
 
 ## The write spine
 

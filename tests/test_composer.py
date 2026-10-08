@@ -1093,6 +1093,29 @@ class TestComposerProvidedPathAnchorsExported:
             assert f"{anchor}=" in conf, f"{anchor} not assigned in bot.conf"
 
 
+class TestBotConfExportsTheRuntime:
+    """#2145: bot.conf names the bot's agent CLI as CLAUDLOBBY_AGENT_CLI, always —
+    a door with no value reads `claude`, so an un-regenerated bot behaves the same."""
+
+    def _conf(self, tmp_path, **bot_fields):
+        bot = BotConfig(bot_id="kev", name="kev", expertise=["eng"],
+                        telegram=TelegramConfig(handle="kev_bot"), **bot_fields)
+        fleet = FleetConfig(manager=bot.bot_id, bots={bot.bot_id: bot}, name="tl",
+                            service_prefix="com.crog.tl", telegram_group_chat_id="-100999")
+        root = tmp_path / "claudlobby"
+        fleet_dir = root / "local" / "home" / "tl"
+        (fleet_dir / "runtime" / "bots" / "kev").mkdir(parents=True)
+        (root / "lib").mkdir(parents=True)
+        return compose_bot_conf(bot, fleet, Paths(root=root, fleet_dir=fleet_dir, package=source_package()))
+
+    def test_bot_conf_exports_the_agent_cli(self, tmp_path):
+        lines = self._conf(tmp_path).splitlines()
+        assert [ln for ln in lines if "CLAUDLOBBY_AGENT_CLI" in ln] == ["export CLAUDLOBBY_AGENT_CLI=claude"]
+        # Constructed directly: the validator (which refuses codex) is not in the composer's path.
+        lines = self._conf(tmp_path / "codex", agent_cli="codex").splitlines()
+        assert [ln for ln in lines if "CLAUDLOBBY_AGENT_CLI" in ln] == ["export CLAUDLOBBY_AGENT_CLI=codex"]
+
+
 class TestComposeHooks:
     """_compose_hooks transforms flat fleet.yaml entries into Claude Code format."""
 

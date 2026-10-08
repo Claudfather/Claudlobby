@@ -21,8 +21,8 @@ import subprocess
 import sys
 import time
 
-from .activation_state import (ActivationError, ActivationRecord, ActivationRefusal,
-                               CandidateDisabledOverride, STEPS,
+from .activation_state import (ACTIVATION_WAIT_S, ActivationError, ActivationRecord, ActivationRefusal,
+                               CandidateDisabledOverride, STEPS, lock_busy,
                                locked_activation, read_activation, read_selection)
 from .activation_identity import identity_bindings_from_registry
 from . import activation_enrollment as enrollment, activation_units as units, config_install
@@ -246,7 +246,7 @@ def bootstrap_activation(root: Path, activation_id: str, plan_id: str,
     adapter = adapter if adapter is not None else Adapter(package)
     if adapter.package.native != release.native_path:
         raise ActivationError("bootstrap adapter differs from the candidate release")
-    with locked_activation(root) as store:
+    with locked_activation(root, wait=ACTIVATION_WAIT_S) as store:
         if read_selection(root) is not None:
             raise ActivationError("bootstrap refuses an existing release selection")
         for prior in (root / "state/activations").glob("*/activation.json"):
@@ -707,7 +707,7 @@ def _running_activation(root: Path, activation_id: str, plan_id: str,
     adapter = adapter if adapter is not None else Adapter(package)
     if adapter.package.native != release.native_path:
         raise ActivationError("activation adapter differs from the candidate release")
-    with locked_activation(root) as store:
+    with locked_activation(root, wait=ACTIVATION_WAIT_S) as store:
         selected = read_selection(root)
         if legacy_source and selected is not None:
             raise ActivationError("first adoption refuses an existing release selection")
@@ -1075,8 +1075,8 @@ def repair_failed_bot_start(root: Path, activation_id: str, *, fleet: str, bot: 
     except (ActivationError, ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as exc:
         if writing:
             raise
-        if str(exc) == "another host activation holds the lock":
-            raise ActivationRefusal("another host activation holds the lock") from exc
+        if lock_busy(str(exc)):
+            raise ActivationRefusal(str(exc)) from exc
         raise ActivationRefusal("start repair could not verify the recorded activation "
                                 f"({type(exc).__name__})") from exc
 
@@ -1196,7 +1196,7 @@ def resume_activation(root: Path, activation_id: str, plan_id: str,
     adapter = adapter if adapter is not None else Adapter(package)
     if adapter.package.native != release.native_path:
         raise ActivationError("resume adapter differs from the candidate release")
-    with locked_activation(root) as store:
+    with locked_activation(root, wait=ACTIVATION_WAIT_S) as store:
         record = read_activation(root, activation_id)
         if (record.body["intent"]["plan_id"] != plan_id
                 or record.body["intent"]["release_id"] != release.release_id):

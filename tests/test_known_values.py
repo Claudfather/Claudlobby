@@ -12,6 +12,7 @@ from claudlobby.known_values import (
     CLAUDNA_SKILL_RENAMES,
     EXPERTISE_CORE_TOOLS,
     KNOWN_EFFORTS,
+    KNOWN_AGENT_CLIS,
     KNOWN_HOOK_EVENTS,
     KNOWN_MODELS,
     OUTCOME_ACTIONS,
@@ -48,6 +49,12 @@ class TestClosestMatch:
 
     def test_distant_value_returns_none(self):
         assert closest_match("x", KNOWN_EFFORTS) is None
+
+    def test_agent_cli_vocabulary_names_claude_and_codex(self):
+        """#2145 F18 (a): Claude Code and Codex are admitted by name; a further CLI
+        enters by its own ratified fork."""
+        assert KNOWN_AGENT_CLIS == frozenset({"claude", "codex"})
+        assert closest_match("code", KNOWN_AGENT_CLIS) == "codex"
 
     def test_permission_mode_typo(self):
         assert closest_match("dontask", VALID_PERMISSION_MODES) == "dontAsk"

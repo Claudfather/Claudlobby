@@ -164,6 +164,16 @@ def test_config_explain_scalar_sources_follow_loader_without_values(world, capsy
     assert (fallback["source"], fallback["state"], fallback["declaration"]) == (
         "built_in", "unset", None)
 
+    # #2145: `agent_cli` is an inherited scalar on effort's path; its built-in is set.
+    assert main([*argv, "bot.agent_cli", "--bot", "solo"]) == 0
+    agent_cli = json.loads(capsys.readouterr().out)["data"]
+    assert (agent_cli["source"], agent_cli["state"], agent_cli["declaration"]) == (
+        "built_in", "set", None)
+    manifest.write_text(manifest.read_text().replace("mcp: [github]", "mcp: [github]\n    agent_cli: claude"))
+    assert main([*argv, "bot.agent_cli", "--bot", "solo"]) == 0
+    agent_cli = json.loads(capsys.readouterr().out)["data"]
+    assert (agent_cli["source"], agent_cli["declaration"]) == ("fleet.defaults", "fleet.defaults.agent_cli")
+
 
 def test_config_explain_refuses_unsupported_or_unknown_config_paths(world, capsys, monkeypatch):
     _fleet, paths, _fleet_dir, _home = world
