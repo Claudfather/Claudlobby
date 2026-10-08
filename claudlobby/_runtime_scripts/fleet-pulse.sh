@@ -661,7 +661,66 @@ for bot_dir in "$BOTS_DIR"/*/; do
     else
         debounce_clear "$state_dir" "$bot_id" "held_alerted"
     fi
-    if [ "$_held" = 0 ] && [ -f "$marker" ]; then
+    # #996: keepalive writes data/.limit while a claude.ai usage limit holds the
+    # bot (its LIMIT verdict: the bot's own StopFailure record, and the limit
+    # still its last word on screen), re-stamped every tick. Held is expected
+    # until the reset; still held a while after it, with no tool call since, is
+    # the outage #996 lost hours to, which read as idle and paged nobody. So it
+    # pages usage_limit_held, naming the limit, its reset and the remedy, in
+    # place of activity_stuck. The while: the printed minute, plus 60 s (the
+    # print drops the seconds), plus keepalive's resume grace, plus
+    # OBSERVABILITY_USAGE_LIMIT_SLACK_S (default 300 s) for that resume to
+    # land. A reset the reader could not parse pages after the activity_stuck
+    # threshold instead, counted from the first tick that saw the limit.
+    limit_marker="$bot_dir/data/.limit"
+    _limited=0
+    if [ -f "$limit_marker" ] \
+        && marker_age_within "$limit_marker" "$_HELD_FRESH_S" \
+        && { [ ! -f "$marker" ] || marker_is_newer "$limit_marker" "$marker"; }; then
+        _limited=1
+    fi
+    if [ "$_limited" = 1 ]; then
+        debounce_clear "$state_dir" "$bot_id" "activity_alerted"
+        _l_first="" _l_reset="" _l_screen="" _l_name="" _l_text=""
+        { read -r _l_first _l_reset _l_screen _; read -r _l_name; read -r _l_text; } 2>/dev/null < "$limit_marker" || true
+        now_epoch=$(date +%s)
+        case "$_l_first" in ''|*[!0-9]*) _l_first=$now_epoch ;; esac
+        case "$_l_reset" in
+            ''|*[!0-9]*)
+                _l_reset=null
+                _l_stuck=$(bot_conf_get "$bot_dir" OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD 1800)
+                case "$_l_stuck" in ''|*[!0-9]*) _l_stuck=1800 ;; esac
+                _l_due=$(( _l_first + _l_stuck ))
+                ;;
+            *)
+                _l_grace=$(bot_conf_get "$bot_dir" KEEPALIVE_LIMIT_RESUME_GRACE_S 120)
+                case "$_l_grace" in ''|*[!0-9]*) _l_grace=120 ;; esac
+                _l_slack=$(bot_conf_get "$bot_dir" OBSERVABILITY_USAGE_LIMIT_SLACK_S 300)
+                case "$_l_slack" in ''|*[!0-9]*) _l_slack=300 ;; esac
+                _l_due=$(( _l_reset + 60 + _l_grace + _l_slack ))
+                ;;
+        esac
+        if [ "$now_epoch" -ge "$_l_due" ]; then
+            _l_resume=off
+            [ "$(bot_conf_get "$bot_dir" KEEPALIVE_LIMIT_RESUME_ENABLED 0)" = 1 ] && _l_resume=armed
+            _l_done=""
+            read -r _l_done _ _ 2>/dev/null < "$bot_dir/data/.limit-resumed" || true
+            [ -n "$_l_done" ] && [ "$_l_done" = "$_l_reset" ] && _l_resume=tried
+            emit_fleet_event "usage_limit_held" "pulse" \
+                '{"since_epoch":'"$_l_first"',"reset_epoch":'"$_l_reset"',"screen":"'"$(json_escape "$_l_screen")"'","limit":"'"$(json_escape "$_l_name")"'","reset":"'"$(json_escape "$_l_text")"'","resume":"'"$_l_resume"'"}' \
+                "$bot_dir" "$bot_id"
+            case "$_l_resume" in
+                tried) _l_remedy="keepalive already resumed it once for this reset and it is held again: look at its pane before sending anything more" ;;
+                armed) _l_remedy="keepalive's resume has not landed (see its keepalive.log): send it any prompt" ;;
+                *) _l_remedy="send it any prompt (KEEPALIVE_LIMIT_RESUME_ENABLED=1 in its fleet.yaml env lets keepalive do this once per limit)" ;;
+            esac
+            debounce_notify "$state_dir" "$bot_id" "limit_alerted" _notify_current_bot \
+                "$bot_id usage_limit_held — stopped by a usage limit (${_l_name:-limit}) since $(epoch_to_iso_utc "$_l_first"); it resets ${_l_text:-at a time keepalive could not read}, and the bot has not resumed. Remedy: $_l_remedy. If a menu is up, choose \"Stop and wait for limit to reset\" by its label, never usage credits. No restart is needed." "$_mgr_token" "$_RENOTIFY_AFTER_S"
+        fi
+    else
+        debounce_clear "$state_dir" "$bot_id" "limit_alerted"
+    fi
+    if [ "$_held" = 0 ] && [ "$_limited" = 0 ] && [ -f "$marker" ]; then
         # If idle marker is newer than tool-call marker, bot is idle — skip
         if ! marker_is_newer "$idle_marker" "$marker"; then
             threshold=$(bot_conf_get "$bot_dir" OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD 1800)
@@ -830,7 +889,7 @@ _rb_cache=$(safe_mktemp)     # the summary's read-back span
 # unit, bridge and pane. overdue_dispatch is a task's state rather than the
 # bot's (the manager push carries it), and script_error is left out too.
 _CRITICAL_ESCALATION_TYPES="service_down session_missing bridge_down rc_timeout crash_loop"
-_CRITICAL_SUMMARY_TYPES="session_missing service_down bridge_down activity_stuck input_held rc_timeout crash_loop"
+_CRITICAL_SUMMARY_TYPES="session_missing service_down bridge_down activity_stuck input_held usage_limit_held rc_timeout crash_loop"
 _rb_yesterday=$(date -u -v-1d +%Y-%m-%dT00:00:00Z 2>/dev/null || date -u -d "yesterday" +%Y-%m-%dT00:00:00Z 2>/dev/null || echo "")
 
 # --- Fleet-wide escalation: persistent critical events → Telegram -----------
