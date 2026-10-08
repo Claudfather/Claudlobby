@@ -148,7 +148,7 @@ posts** — which is the safety property, and it is weaker than the tool not
 existing. Treat `send_dm` in particular as one config mistake away, not two.
 
 A bot that genuinely needs to reply to customers gets `send_dm` explicitly via
-fleet.yaml `tools.allow`, and should carry `confirm-before-send` when it does.
+fleet.yaml `tool_permissions.allow`, and should carry `confirm-before-send` when it does.
 
 ## Customer DMs are customer PII
 

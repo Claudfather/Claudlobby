@@ -401,7 +401,7 @@ def _assert_read_only_grants(name: str, tool_grants: list[str], paths: Paths) ->
     ``_resolve_mcp_permissions`` grant role (and its superset gate) is cut:
     add a tool upstream and the directional error here names the fix. A bot
     that genuinely needs a write tool gets it explicitly via fleet.yaml
-    ``tools.allow``; that operator path is untouched here.
+    ``tool_permissions.allow``; that operator path is untouched here.
     """
     contract = _load_mcp_contract(paths, name)
     if not contract:
@@ -416,7 +416,7 @@ def _assert_read_only_grants(name: str, tool_grants: list[str], paths: Paths) ->
             f"integration {name!r}: tool_grants {extra} not auto-grantable — the mcp "
             f"fragment declares read_only_tools, so grants must be exact "
             f"mcp__{name}__<tool> entries from that read-only set. Writes stay "
-            "prompt-gated; grant one per-bot via tools.allow if genuinely needed."
+            "prompt-gated; grant one per-bot via tool_permissions.allow if genuinely needed."
         )
     missing = sorted(mirror - set(tool_grants))
     if missing:
@@ -438,7 +438,7 @@ def _assert_no_write_autoallows(
     would otherwise compose every catalog write into each equipping bot. This
     is the union-layer invariant: for every attached server whose contract
     declares ``read_only_tools``, no accumulated pattern may reach beyond the
-    read set. Runs before fleet.yaml ``tools.allow`` is appended — that layer
+    read set. Runs before fleet.yaml ``tool_permissions.allow`` is appended — that layer
     is the operator's deliberate, auditable escape hatch and stays exempt.
     """
     for entry in bot.mcp:
@@ -463,7 +463,7 @@ def _assert_no_write_autoallows(
                     f"bot {bot.bot_id!r}: allow patterns {bad} cover non-read tools "
                     f"of read-only server {server!r} — no library-derived layer "
                     "(integration, skill, expertise, guardrail) may auto-allow a "
-                    "write. Grant it per-bot via fleet.yaml tools.allow if "
+                    "write. Grant it per-bot via fleet.yaml tool_permissions.allow if "
                     "genuinely needed."
                 )
 
@@ -2994,11 +2994,11 @@ def compose_settings_local(
         _append_unique(allow_patterns, CLAUDRON_LOOP_GRANTS)
 
     # Union-layer write guardrail: with every library-derived layer accumulated
-    # (and before the operator's tools.allow escape hatch below), nothing may
+    # (and before the operator's tool_permissions.allow escape hatch below), nothing may
     # cover a non-read tool of a read-only-contracted server (#661).
     _assert_no_write_autoallows(bot, paths, allow_patterns)
 
-    # Layer 6/7: Explicit tools.allow from fleet defaults + bot config
+    # Layer 6/7: Explicit tool_permissions.allow from fleet defaults + bot config
     _append_unique(allow_patterns, bot.tool_permissions.allow)
 
     # Bot-level deny wins over all allow layers
