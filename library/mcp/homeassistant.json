@@ -42,6 +42,25 @@
       "system_overview",
       "update_card",
       "update_view"
+    ],
+    "read_only_tools": [
+      "domain_summary_tool",
+      "get_dashboard_config",
+      "get_entities_by_area",
+      "get_entity",
+      "get_error_log",
+      "get_history",
+      "get_history_range",
+      "get_statistics",
+      "get_statistics_range",
+      "get_version",
+      "list_automations",
+      "list_dashboard_backups",
+      "list_dashboards",
+      "list_entities",
+      "list_view_sections",
+      "search_entities_tool",
+      "system_overview"
     ]
   },
   "homeassistant": {
