@@ -462,6 +462,8 @@ classify_pane() {
 _LIMIT_RESUME_PROMPT="Your usage limit has reset. Continue the task you were working on when the limit was reached; do not repeat work that is already complete. (keepalive, #996)"
 _ul_verdict=""
 _ul_hit=""
+# fleet-pulse's _HELD_FRESH_S: a data/.limit older than this is no hold.
+_LIMIT_HOLD_FRESH_S=300
 
 # usage_limit_read <pane> <anchor>
 # usage-limit.py's one-line verdict for a whole pane capture: screen, reset
@@ -469,6 +471,27 @@ _ul_hit=""
 # (tab-separated). Empty when the reader cannot run, which reads as no limit.
 usage_limit_read() {
     printf '%s' "$1" | python3 -S -E "$LIB_DIR/usage-limit.py" read --anchor "$2" --tz "${TZ:-}" 2>/dev/null || true
+}
+
+# usage_limit_keep_anchor <pane>
+# A hit that prints the same limit and the same reset text as the hold it lands
+# in is that hold's limit, still up: the resumed turn, or a message, met it again
+# after the reset. Its hook record moves the anchor past the reset, and a reset
+# with no date read from there is tomorrow's: no resume and no page for a day.
+# So while data/.limit is fresh (re-stamped every LIMIT tick) and names this
+# limit and this reset text, the reset is read from the hit the hold first read
+# it from. Any other text is a new reset, read from its own hit: read from the
+# hold's first hit, a reset nearly 24 hours after the new one reads a day early.
+usage_limit_keep_anchor() {
+    local a0="" name="" text="" vname="" vtext=""
+    marker_age_within "$BOT_DIR/data/.limit" "$_LIMIT_HOLD_FRESH_S" || return 0
+    { read -r _ _ _ _ a0 _; read -r name; read -r text; } 2>/dev/null < "$BOT_DIR/data/.limit" || return 0
+    case "$a0" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$a0" != "$_ul_hit" ] || return 0
+    IFS=$'\t' read -r _ _ _ _ vname vtext <<< "$_ul_verdict"
+    [ -n "$vtext" ] && [ "$vname" = "$name" ] && [ "$vtext" = "$text" ] || return 0
+    _ul_hit=$a0
+    _ul_verdict=$(usage_limit_read "$1" "$_ul_hit")
 }
 
 # _limit_resumed_record <reset> <stage>: the one action for <reset>, recorded.
@@ -553,8 +576,9 @@ _limit_resume() {
 
 # usage_limit_tick <verdict>
 # One LIMIT tick: stamp data/.limit (first seen, reset epoch, screen, Claude
-# Code's own continue; then the limit name and the reset text), log the state
-# with its reset time, and resume once the reset has passed, when armed.
+# Code's own continue, the hit the reset was read from; then the limit name and
+# the reset text), log the state with its reset time, and resume once the reset
+# has passed, when armed.
 usage_limit_tick() {
     local ustate reset pointer native name text now first="" prev_reset="" tmp grace due plan
     IFS=$'\t' read -r ustate reset pointer native name text <<< "$1"
@@ -563,7 +587,7 @@ usage_limit_tick() {
     [ "$prev_reset" = "$reset" ] || first=""
     case "$first" in ''|*[!0-9]*) first=$now ;; esac
     tmp="$(safe_mktemp)"
-    printf '%s %s %s %s\n%s\n%s\n' "$first" "$reset" "$ustate" "$native" "$name" "$text" > "$tmp" \
+    printf '%s %s %s %s %s\n%s\n%s\n' "$first" "$reset" "$ustate" "$native" "$_ul_hit" "$name" "$text" > "$tmp" \
         && mv "$tmp" "$BOT_DIR/data/.limit"
     grace="${KEEPALIVE_LIMIT_RESUME_GRACE_S:-120}"
     case "$grace" in ''|*[!0-9]*) grace=120 ;; esac
@@ -610,6 +634,7 @@ else
             _ul_hit=$(head -n 1 "$BOT_DIR/data/.usage-limit" 2>/dev/null | tr -cd '0-9' || true)
             [ -n "$_ul_hit" ] || _ul_hit=$(date +%s)
             _ul_verdict=$(usage_limit_read "$pane_content" "$_ul_hit")
+            usage_limit_keep_anchor "$pane_content"
             case "${_ul_verdict%%$'\t'*}" in
                 limit|menu|modal) state=LIMIT ;;
             esac

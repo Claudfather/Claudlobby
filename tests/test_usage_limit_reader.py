@@ -70,11 +70,11 @@ def _frame(name: str) -> str:
         # Midnight and noon.
         ("12am (UTC)", "2026-10-07T20:00:00+00:00", None, "2026-10-08T00:00:00+00:00"),
         ("12pm (UTC)", "2026-10-07T09:00:00+00:00", None, "2026-10-07T12:00:00+00:00"),
-        # A reset a few minutes before the first tick that saw it (the bot sat
-        # busy, or keepalive was a tick behind) is still that reset, not tomorrow's.
+        # The anchor is the hit that printed the line, and the print drops the
+        # seconds: a reset in the minute before the anchor is that minute.
         (
             "10:36am (America/New_York)",
-            "2026-10-07T14:40:00+00:00",
+            "2026-10-07T14:36:59+00:00",
             None,
             "2026-10-07T14:36:00+00:00",
         ),
@@ -121,6 +121,54 @@ def _frame(name: str) -> str:
 )
 def test_the_reset_time_parses_in_each_form_it_takes(text, anchor, tz, want):
     assert ul.reset_epoch(text, _epoch(anchor), tz) == _epoch(want)
+
+
+@pytest.mark.parametrize(
+    "text,anchor,want",
+    [
+        # A hit at 10:00 EDT and a reset 23 h 55 m ahead. Claude Code prints no
+        # date up to and including 24 hours, so the 9:55am already behind the hit
+        # is not it: read from there, an armed bot was prompted at once (#2222).
+        (
+            "9:55am (America/New_York)",
+            "2026-10-07T14:00:00+00:00",
+            "2026-10-08T13:55:00+00:00",
+        ),
+        # 23 h 59 m ahead, the last minute that reads tomorrow.
+        (
+            "9:59am (America/New_York)",
+            "2026-10-07T14:00:00+00:00",
+            "2026-10-08T13:59:00+00:00",
+        ),
+        # The minute the line was printed in is that minute, not tomorrow's.
+        (
+            "10am (America/New_York)",
+            "2026-10-07T14:00:59+00:00",
+            "2026-10-07T14:00:00+00:00",
+        ),
+    ],
+)
+def test_a_reset_with_no_date_is_within_24_hours_after_its_hit(text, anchor, want):
+    assert ul.reset_epoch(text, _epoch(anchor)) == _epoch(want)
+
+
+@pytest.mark.parametrize(
+    "text,anchor",
+    [
+        # New York, 2026-11-01: 1:00 to 2:00am happens twice, EDT then EST, and
+        # 1:20am is 05:20Z or 06:20Z. A hit at 1:30am EDT has the first pass
+        # behind it: that used to move on to the next day, a day late.
+        ("1:20am (America/New_York)", "2026-11-01T05:30:02+00:00"),
+        # A hit at 12:30am EDT has both passes ahead: the first read an hour early.
+        ("1:20am (America/New_York)", "2026-11-01T04:30:02+00:00"),
+        # A date printed beyond 24 hours lands in the same hour.
+        ("Nov 1, 1:20am (America/New_York)", "2026-10-30T12:00:00+00:00"),
+    ],
+)
+def test_a_reset_in_the_hour_dst_repeats_reads_its_later_pass(text, anchor):
+    """The later pass, whichever the reset is: read an hour late, a resume waits
+    an hour; read an hour early, it is typed while the limit still holds."""
+    assert ul.reset_epoch(text, _epoch(anchor)) == _epoch("2026-11-01T06:20:00+00:00")
 
 
 @pytest.mark.parametrize(

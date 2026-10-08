@@ -214,10 +214,11 @@ def test_a_held_frame_reads_limit_with_its_reset_not_idle(rig):
     r.tick()
     assert f"LIMIT — held by a usage limit (session limit), resets {reset}" in r.log()
     assert not r.data(".idle").exists()
-    first, reset_epoch, screen, _native = (
+    first, reset_epoch, screen, _native, anchor = (
         r.data(".limit").read_text().split("\n")[0].split()
     )
     assert screen == "limit" and int(reset_epoch) > time.time()
+    assert int(anchor) == hit
     assert r.keys() == []
 
 
@@ -330,6 +331,83 @@ def test_a_new_limit_gets_its_own_action(rig):
     r.hook_record(now - 200)
     r.tick()
     assert _typed(r.keys()[first:]).startswith(PROMPT_START)
+
+
+def test_a_second_hit_after_the_reset_keeps_the_reset_its_hold_first_read(rig):
+    """The limit was not over after all: the resumed turn hits it again, and
+    Claude Code prints the same reset, now 19 minutes behind the new hit. That hit
+    rewrites the hook record; read from it, the reset is tomorrow's, with no page
+    for a day (#2222 review). The hold keeps the epoch it first read that reset
+    at, so it is the same reset: no second action, and the page stays due."""
+    r = rig()
+    now = int(time.time())
+    reset = _clock(now - 1200)
+    r.show(_frame("held", reset), on_submit=_frame("resumed", reset))
+    r.hook_record(now - 1500)
+    r.tick()
+    sent = r.keys()
+    assert _typed(sent).startswith(PROMPT_START)
+    first_reset = r.data(".limit").read_text().split()[1]
+    r.show(_frame("held", reset), on_submit=_frame("resumed", reset))
+    r.hook_record(now - 60)
+    r.tick()
+    assert r.keys() == sent
+    assert r.data(".limit").read_text().split()[1] == first_reset
+    assert "already resumed once for this reset, so no more keys" in r.log()
+
+
+def test_a_second_hit_with_another_reset_reads_it_from_its_own_hit(rig):
+    """A hit after the reset that prints another reset (a weekly limit, say,
+    23 h 52 m ahead) is read from its own hit, never from the hold's first: from
+    there it reads a day early, and the bot is prompted while the new limit holds."""
+    r = rig()
+    now = int(time.time())
+    reset = _clock(now - 1200)
+    r.show(_frame("held", reset), on_submit=_frame("resumed", reset))
+    r.hook_record(now - 1500)
+    r.tick()
+    sent = r.keys()
+    assert _typed(sent).startswith(PROMPT_START)
+    later = _clock(now - 60 + 86400 - 480)
+    r.show(_frame("held", later), on_submit=_frame("resumed", later))
+    r.hook_record(now - 60)
+    r.tick()
+    assert r.keys() == sent
+    assert int(r.data(".limit").read_text().split()[1]) > now + 86400 - 600
+
+
+def test_a_second_hit_naming_another_limit_reads_it_from_its_own_hit(rig):
+    """The same reset text under another limit's name is that limit's reset,
+    read from its own hit, never from the hold's first."""
+    r = rig(armed=False)
+    now = int(time.time())
+    reset = _clock(now - 1200)
+    r.show(_frame("held", reset))
+    r.hook_record(now - 1500)
+    r.tick()
+    assert int(r.data(".limit").read_text().split()[1]) < now
+    r.show(_frame("held", reset).replace("session limit", "weekly limit"))
+    r.hook_record(now - 60, "You've hit your weekly limit")
+    r.tick()
+    assert int(r.data(".limit").read_text().split()[1]) > now
+
+
+def test_a_stale_hold_lends_no_epoch(rig):
+    """data/.limit is the hold's only while keepalive re-stamps it (fleet-pulse
+    reads one older than 300 s as no hold). A stale one is an earlier hold's, so a
+    new hit is read from its own epoch even when it prints the same reset text."""
+    r = rig(armed=False)
+    now = int(time.time())
+    reset = _clock(now - 1200)
+    r.show(_frame("held", reset))
+    r.hook_record(now - 1500)
+    r.tick()
+    limit = r.data(".limit")
+    assert int(limit.read_text().split()[1]) < now
+    os.utime(limit, (now - 400, now - 400))
+    r.hook_record(now - 60)
+    r.tick()
+    assert int(limit.read_text().split()[1]) > now
 
 
 # --- the menu: the wait option by its label, never credits, nothing else --------------

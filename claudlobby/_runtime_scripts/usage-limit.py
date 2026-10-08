@@ -30,9 +30,12 @@ The reset text comes in each form Claude Code prints (its formatter drops the se
 shows the minutes only when they are not :00, lowercases am/pm and drops their space,
 and adds the date only beyond 24 hours, the year only when it is not this one):
     3am · 2:50am · 2:50am (America/New_York) · Oct 8, 2:50am · Oct 8, 2026, 2:50am (UTC)
-A time with no date is the first such minute after ANCHOR less SLACK_S: the line was
-printed before the reset and at most 24 hours ahead of it, and ANCHOR is the first
-tick that saw it (keepalive's data/.limit), at most a few ticks after the print.
+A time with no date is the first such minute after ANCHOR less SLACK_S. ANCHOR is
+the hit: the epoch usage-limit-hook.sh records at the StopFailure that printed the
+line, so the reset is at most 24 hours after it. keepalive passes a hold's first
+hit for as long as the bot prints the same limit and reset (data/.limit), so a
+second hit after the reset still reads that reset, not tomorrow's. In the hour that
+repeats when DST ends, the later pass is taken.
 
 Positive evidence only: a pane this reader does not recognise reads none or modal,
 never menu, and keepalive sends keys only on limit and menu. Stdlib only, Python 3.9
@@ -49,7 +52,10 @@ try:
 except ImportError:  # pragma: no cover - Python < 3.9: no zone database, no parse
     ZoneInfo = None
 
-SLACK_S = 600
+# The print drops the seconds, so the reset's minute can start up to 59 s before
+# the hit. More slack reads a reset just under 24 hours ahead as the same minute
+# today, already past: a day early.
+SLACK_S = 60
 WAIT_LABEL = "Stop and wait for limit to reset"
 MENU_TITLE = "What do you want to do?"
 _MONTHS = {
@@ -113,6 +119,9 @@ def reset_epoch(text, anchor, tz_name=None):
     if hour > 23 or minute > 59:
         return None
     here = datetime.datetime.fromtimestamp(anchor, zone)
+    # fold=1: in the hour that repeats when DST ends, the later pass. Read an hour
+    # late, a resume waits an hour; read an hour early, it is typed while the
+    # limit still holds.
     try:
         if m.group("mon"):
             year = int(m.group("year") or here.year)
@@ -123,6 +132,7 @@ def reset_epoch(text, anchor, tz_name=None):
                 hour,
                 minute,
                 tzinfo=zone,
+                fold=1,
             )
             if m.group("year") is None and when.timestamp() < anchor - 183 * 86400:
                 when = when.replace(year=year + 1)
@@ -130,7 +140,7 @@ def reset_epoch(text, anchor, tz_name=None):
         for days in (-1, 0, 1, 2):
             day = here.date() + datetime.timedelta(days=days)
             when = datetime.datetime(
-                day.year, day.month, day.day, hour, minute, tzinfo=zone
+                day.year, day.month, day.day, hour, minute, tzinfo=zone, fold=1
             )
             if when.timestamp() > anchor - SLACK_S:
                 return int(when.timestamp())
