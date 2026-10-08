@@ -125,7 +125,12 @@ class TestTheNpxPathIsUnchanged:
     def test_npx_invocation_is_byte_identical(
         self, fleet_dir: Path, monkeypatch, caplog
     ):
+        from tests.test_mcp_direct_launch import _arm
+
         equip_bot_with_mcp(fleet_dir, {"npxdemo": NPX})
+        # The npx path alone: for a bot that launches directly, the warm also
+        # installs its copy (tests/test_mcp_direct_launch.py covers that call).
+        _arm(fleet_dir, where="defaults", value="false")
         rec = SubprocessRecorder()
         monkeypatch.setattr(subprocess, "run", rec)
         with caplog.at_level(logging.INFO):

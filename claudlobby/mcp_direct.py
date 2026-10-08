@@ -165,13 +165,17 @@ def install_armed(fleet_paths) -> list[tuple[str, str, str]]:
     plan on a fresh host composes the npx fallback. A fleet this cannot load is
     staging's to report; a failed install leaves that package's servers on npx,
     which composition's own warning names."""
-    from .context import load_context  # lazy: start-bot imports this module bare
+    from .config import load_fleet  # lazy: start-bot imports this module bare
     from .mcp_grammar import grammar
 
     specs: dict[str, tuple[str, str]] = {}
     for paths in fleet_paths:
         try:
-            specs.update(armed_specs(load_context(paths).fleet, paths, grammar(paths)))
+            # Staging's own parse, without load_context's --fleet identity check: a fleet
+            # whose directory is not named as it declares itself is still composed, so
+            # its copies must still be installed.
+            fleet, _defaults = load_fleet(paths.fleet_yaml, projects_yaml=paths.projects_yaml)
+            specs.update(armed_specs(fleet, paths, grammar(paths)))
         except Exception:  # noqa: BLE001 — staging reports this fleet; this step only forgoes copies
             continue
     return [(spec, *install(fleet_paths[0].root, bare, version))
