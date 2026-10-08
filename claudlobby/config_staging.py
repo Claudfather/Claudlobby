@@ -14,6 +14,7 @@ from pathlib import Path
 import tempfile
 
 from . import composer as compose
+from . import mcp_direct
 from .config import host_override_path, host_unit_name, load_fleet_snapshot
 from .config_plan import ConfigPlan, ConfigPlanBuilder, PlanError
 from .config_units import job_units, unit_family
@@ -78,6 +79,12 @@ def _bot(builder, context, bot, delay, cascade, log) -> None:
                      "data", "data/events", "logs", "mounts"):
         builder.directory(directory / relative)
     rendered = compose.render_bot_files(bot, fleet, paths, boot_delay_s=delay, cascade=cascade)
+    # Each state/mcp copy the composed file launches is a plan input (#1604), so
+    # activation's freshness check refuses a plan whose copy went missing after
+    # staging, before any bot restarts onto a server that cannot start.
+    mcp = rendered.get(".mcp.json")
+    for _server, entry in mcp_direct.composed_copies(json.loads(mcp.content) if mcp else {}):
+        builder.input(entry)
     unit_name = f"{fleet.service_prefix}.{bot.bot_id}"
     family = {name: (rendered[name].content.encode(), rendered[name].mode)
               for name in (unit_name + ".service", unit_name + ".plist")}

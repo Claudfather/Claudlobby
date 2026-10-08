@@ -217,12 +217,16 @@ def _carrier_lines(sw: Switch) -> tuple[str, str]:
                     " silences EVERY door at once")
         return f"unset {var} — on by default", f"{var}=0 in {where}"
     if sw.carrier == COMPOSE_BOT:
+        disarm = (f"{sw.config}: false at bots.<bot> or defaults in fleet.yaml, then"
+                  f" {sw.compose_steps} ({sw.takes_effect_off})")
+        if sw.default_on:
+            return (f"on by default; {sw.config}: true at bots.<bot> or defaults in fleet.yaml"
+                    f" undoes an opt-out, then {sw.compose_steps} ({sw.takes_effect})", disarm)
         return (
             f"bots.<bot>.{sw.config}: true in fleet.yaml on an independent canary root with ONE armed bot first, then"
             f" {sw.compose_steps} ({sw.takes_effect}); widen to"
             f" defaults.{sw.config} once it has run clean",
-            f"{sw.config}: false at bots.<bot> or defaults in fleet.yaml, then"
-            f" {sw.compose_steps} ({sw.takes_effect_off})",
+            disarm,
         )
     if sw.carrier == ENROLL_HOST:
         key = sw.config or f"host.jobs.{sw.job}.enroll"
@@ -604,23 +608,16 @@ SWITCHES: tuple[Switch, ...] = (
     Switch(
         key="mcp-direct-launch",
         scope=GENERATE,
-        polarity=OPT_IN,
+        polarity=OPT_OUT,
         carrier=COMPOSE_BOT,
         config="mcp_direct_launch",
-        compose_steps=("claudlobby --root <data-root> --fleet <fleet> host cache warm,"
-                       " then config plan, config diff PLAN_ID, and claudlobby"
-                       " --root <data-root> host activate PLAN_ID"
-                       " --install-directory <native-user-unit-dir>"),
-        takes_effect=("it takes effect when that bot next restarts: .mcp.json is"
-                      " read at session start"),
+        takes_effect=("config plan installs the copies first; it takes effect when"
+                      " that bot next restarts: .mcp.json is read at session start"),
         takes_effect_off="back on npx at the bot's next restart",
-        why_opt_in="changes how every MCP server starts; warm the pinned cache "
-                   "and activate an independent canary root with one armed bot "
-                   "before widening the manifest",
         what="launch each exactly pinned npx MCP server as `node <entry>` from "
-             "the copy warm-cache installs under state/mcp/npm, instead of "
+             "the copy config plan installs under state/mcp/npm, instead of "
              "through npx, which keeps an idle `npm exec` wrapper resident as "
-             "the parent of every server (#1604: 41 of them held 1.4 GB, "
+             "the parent of every server (#1604: 42 of them held 1.4 GB, "
              "mostly swap, on the Pi). A server that cannot launch directly "
              "keeps npx, and composition says which and why",
     ),
@@ -860,9 +857,16 @@ def _bot_config_value(bot, dotted: str) -> bool:
     return value is True
 
 
+def _moved_bots(sw: Switch, per_bot: dict[str, tuple[list[str], list[str]]] | None) -> list[str]:
+    """The bots that moved a per-bot switch off its shipped default: the ones
+    that armed an opt-in, or opted out of an opt-out."""
+    on, off = (per_bot or {}).get(sw.key, ([], []))
+    return off if sw.default_on else on
+
+
 def _enroll_state(sw: Switch, host_jobs: dict, fleet_jobs: dict,
                   sweep_on: bool | None,
-                  per_bot: dict[str, tuple[list[str], int]] | None = None,
+                  per_bot: dict[str, tuple[list[str], list[str]]] | None = None,
                   ) -> tuple[bool | None, str]:
     """(enrolled, where) from the composed manifests' own config truth."""
     if sw.key == "code-audit-sweep":
@@ -871,17 +875,21 @@ def _enroll_state(sw: Switch, host_jobs: dict, fleet_jobs: dict,
         return sweep_on, "fleet.yaml sweep:"
     if sw.carrier == COMPOSE_BOT:
         # PER BOT, so neither an env var nor a job can say it: read every
-        # bot's own resolved value. On means on for at least one bot, and the
-        # source names which, because a canary is exactly one bot of many.
+        # bot's own resolved value. On means on for at least one bot. The
+        # source names the bots that moved it off the shipped default, the ones
+        # that armed an opt-in or opted out of an opt-out, because a canary or
+        # an exception is exactly one bot of many.
         seen = (per_bot or {}).get(sw.key)
         if seen is None:
             return None, ""
-        on, total = seen
-        if not on:
-            return False, "fleet.yaml"
-        shown = ", ".join(on[:4]) + (f" (+{len(on) - 4} more)" if len(on) > 4 else "")
-        return True, (f"fleet.yaml {sw.config} — {len(on)} of"
-                      f" {total} bot(s): {shown}")
+        on, off = seen
+        moved = _moved_bots(sw, per_bot)
+        if not moved:
+            return bool(on), "fleet.yaml"
+        state = "off" if sw.default_on else "on"
+        shown = ", ".join(moved[:4]) + (f" (+{len(moved) - 4} more)" if len(moved) > 4 else "")
+        return bool(on), (f"fleet.yaml {sw.config} — {state} for {len(moved)} of"
+                          f" {len(on) + len(off)} bot(s): {shown}")
     if not sw.job:
         return None, ""
     if sw.scope == HOST_SERVICE:
@@ -950,7 +958,7 @@ def resolve(
                             " is shown, not the shipped default")
     fleet_jobs: dict = {}
     sweep_on: bool | None = None
-    per_bot: dict[str, tuple[list[str], int]] = {}
+    per_bot: dict[str, tuple[list[str], list[str]]] = {}
     if fleet is not None:
         # FleetConfig.defaults IS the merged system<fleet tier (config.py
         # writes it there), so a fleet's `enroll: true` override is already
@@ -961,9 +969,10 @@ def resolve(
         # switch's dotted `config` path, so a new one needs no branch here.
         for s in SWITCHES:
             if s.carrier == COMPOSE_BOT:
-                per_bot[s.key] = (sorted(b.bot_id for b in fleet.bots.values()
-                                         if _bot_config_value(b, s.config)),
-                                  len(fleet.bots))
+                values = {b.bot_id: bool(_bot_config_value(b, s.config))
+                          for b in fleet.bots.values()}
+                per_bot[s.key] = (sorted(b for b, v in values.items() if v),
+                                  sorted(b for b, v in values.items() if not v))
 
     rows: list[SwitchState] = []
     for sw in SWITCHES:
@@ -996,6 +1005,11 @@ def resolve(
         # it" and the two lead to different edits.
         source = "default"
         if enrolled is not None and enrolled is not sw.default_on:
+            source = where
+        # A per-bot switch some bots moved off its default names them even
+        # while the fleet as a whole reads as the default (an opt-out with one
+        # bot opted out is still `on`).
+        if sw.carrier == COMPOSE_BOT and _moved_bots(sw, per_bot):
             source = where
         if env_on is not None and env_on is not sw.default_on:
             source = tier

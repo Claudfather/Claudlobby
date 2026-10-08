@@ -220,7 +220,7 @@ def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
             f"{name} ({spec + ': ' if spec else ''}{why})" for name, spec, why in npx_fallbacks
         )
         fix = (
-            " Run `claudlobby --fleet <fleet> host cache warm`, then stage and activate a new config plan."
+            f" {mcp_direct.install_fix(paths.fleet_name or '')}."
             if any(why == mcp_direct.NOT_INSTALLED for _n, _s, why in npx_fallbacks)
             else ""
         )
@@ -269,12 +269,13 @@ def mcp_launch_plan(bot: BotConfig, paths: Paths) -> tuple[dict, list[tuple[str,
 
             instance_config = copy.deepcopy(server_config)
 
-            # #1604, opt-in per bot: the pinned package runs as `node <entry>`
-            # from the copy warm-cache installed, so no `npm exec` wrapper
-            # stays resident beside the server. It goes FIRST: a PATH-global
-            # binary is whatever version someone installed, the copy is the
-            # fragment's exact pin. Anything that cannot launch directly keeps
-            # npx, which cannot break a server, only forgo the saving.
+            # #1604, on unless a bot opts out: the pinned package runs as
+            # `node <entry>` from the copy config plan (or host cache warm)
+            # installed, so no `npm exec` wrapper stays resident beside it.
+            # It goes FIRST: a PATH-global binary is whatever version someone
+            # installed, the copy is the fragment's exact pin. Anything that
+            # cannot launch directly keeps npx, which cannot break a server,
+            # only forgo the saving.
             direct_why: tuple[str, str] | None = None
             if bot.mcp_direct_launch and instance_config.get("command") == "npx":
                 direct, spec, why = mcp_direct.direct_launch(

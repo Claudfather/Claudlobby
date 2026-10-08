@@ -234,6 +234,7 @@ def _config_plan(args, root: Path) -> CommandOutput:
         paths = declared_paths(root, package, external=args.fleet_path)
     except FileNotFoundError as exc:
         raise CommandFailure("not_found", str(exc)) from exc
+    _install_direct_copies(paths)
     try:
         plan = stage_configuration(paths, release,
                                    log=lambda _: print("configuration warning reported by the validator",
@@ -245,6 +246,22 @@ def _config_plan(args, root: Path) -> CommandOutput:
                              hint=f"use the sealed candidate CLI {release.cli_path} and inspect fleet declarations") from exc
     return CommandOutput(_plan_data(plan), _executing_release(root),
                          (f"Configuration plan {plan.plan_id}: {len(plan.changes)} proposed paths.",))
+
+
+def _install_direct_copies(fleet_paths) -> None:
+    """Install each copy an armed bot launches directly before staging composes
+    (#1604; `mcp_direct.install_armed`), outside the planner, which writes
+    nothing. A failed install is named here because composition only says "not
+    installed"; npm's own text stays out, and `host cache warm` shows it."""
+    from .. import mcp_direct
+
+    for spec, outcome, _detail in mcp_direct.install_armed(fleet_paths):
+        if outcome == "installed":
+            print(f"direct-launch copy {spec}: installed", file=sys.stderr)
+        elif outcome == "failed":
+            print(f"direct-launch copy {spec}: install failed, so its servers keep npx;"
+                  " `claudlobby --fleet <fleet> host cache warm` shows npm's error",
+                  file=sys.stderr)
 
 
 def _config_diff(args, root: Path) -> CommandOutput:

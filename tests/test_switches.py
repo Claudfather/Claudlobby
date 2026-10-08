@@ -152,15 +152,6 @@ def test_exactly_the_categories_that_ship_off():
                       # per-bot key is the operator's canary choice. It
                       # only ever narrows what a bot's own tools may touch.
                       "shared-config-isolation",
-                      # #1604, the same arrival category as the isolation rules
-                      # above and argued the same way: a composed .mcp.json is
-                      # read at SESSION START, so it waits for a restart, but
-                      # restarts happen with nobody choosing them (keepalive,
-                      # context restarts). Selected activation and the manifest
-                      # let one bot go first. Nothing from the four list: it
-                      # deletes nothing, spends nothing, sends nothing, and the
-                      # install it arms writes only under state/mcp.
-                      "mcp-direct-launch",
                       # #1686, the same arrival category again: a composed hook
                       # reaches every bot the nightly generate composes it for,
                       # with nobody choosing which goes first, and this one

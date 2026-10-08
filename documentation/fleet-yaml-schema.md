@@ -247,13 +247,13 @@ Opt a fleet **out** of an on-by-default job the same way, with `enroll: false`.
 | `code-audit-sweep` | **off** — model spend + outbound GitHub issues | fleet job | fleet.yaml | sweep.enabled: true in fleet.yaml (plus owner_bot and repos), then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> |
 | `heavy-slot` | **off** — no deployment gate: a composed hook is live on every bot the next generate composes it for (#1310), with no restart in between, and this one rewrites the bot's heavy commands, so the manifest is the only place one bot can go first | composition | fleet.yaml bots.<bot> → activated composition | bots.<bot>.heavy_slot: true in fleet.yaml on an independent canary root with ONE armed bot first, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> (activation can restart selected bots; the deny then binds on the next tool call); widen to defaults.heavy_slot once it has run clean |
 | `manager-checkin` | **off** — model spend — one manager turn per idle beat — and it injects into a live session | fleet job | fleet.yaml | defaults.jobs.manager-checkin.enroll: true in fleet.yaml, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> |
-| `mcp-direct-launch` | **off** — changes how every MCP server starts; warm the pinned cache and activate an independent canary root with one armed bot before widening the manifest | composition | fleet.yaml bots.<bot> → activated composition | bots.<bot>.mcp_direct_launch: true in fleet.yaml on an independent canary root with ONE armed bot first, then claudlobby --root <data-root> --fleet <fleet> host cache warm, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> (it takes effect when that bot next restarts: .mcp.json is read at session start); widen to defaults.mcp_direct_launch once it has run clean |
 | `mcp-package-probe` | **off** — reaches the NETWORK on a compose. Planning must stay offline and fast by default, and a registry outage must never be the reason a fleet cannot compose. The offline half of the check (is the package pinned?) is unconditional and needs no flag | composition | fleet .env | CLAUDLOBBY_MCP_PROBE_ENABLED=1 in the fleet-tier .env |
 | `public-write-guard` | **off** — no deployment gate: a composed hook is live on every bot the next generate composes it for (#1310), with no restart in between, and this one refuses GitHub writes, so the manifest is the only place one bot can go first | composition | fleet.yaml bots.<bot> → activated composition | bots.<bot>.public_write_guard: true in fleet.yaml on an independent canary root with ONE armed bot first, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> (activation can restart selected bots; the deny then binds on the next tool call); widen to defaults.public_write_guard once it has run clean |
 | `session-digest` | **off** — model spend (a Haiku pass per finished session) | door | fleet.yaml env: → bot.conf | SESSION_DIGEST_ENABLED=1 in fleet.yaml bots.NAME.env: (then config plan and host activate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `shared-config-isolation` | **off** — restricts access to shared host resources used by running bots; enable for one canary bot before widening the manifest default through activation | composition | fleet.yaml bots.<bot> → activated composition | bots.<bot>.isolation.shared_config: true in fleet.yaml on an independent canary root with ONE armed bot first, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> (activation can restart selected bots; the deny then binds on the next tool call); widen to defaults.isolation.shared_config once it has run clean |
 | `weekly-worker-restart` | **off** — bounces live worker sessions (context is the thing this system exists to keep) | fleet job | fleet.yaml | defaults.jobs.weekly-worker-restart.enroll: true in fleet.yaml, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> |
 | `worker-unassigned` | **off** — pages the manager about the assignment loop and has no rate guard beyond the debounce | door | fleet.yaml env: → bot.conf | OBSERVABILITY_UNASSIGNED_CHECK=1 in fleet.yaml bots.NAME.env: (then config plan and host activate; the bot reads it at its next start — a .env tier does NOT reach a session) |
+| `mcp-direct-launch` | **on** | composition | fleet.yaml bots.<bot> → activated composition | mcp_direct_launch: false at bots.<bot> or defaults in fleet.yaml, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir> (back on npx at the bot's next restart) |
 | `pane-send-chunking` | **on** | door | fleet.yaml env: → bot.conf | PANE_SEND_CHUNK_BYTES=0 in fleet.yaml bots.NAME.env: (then config plan and host activate; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `plane-recording` | **on** | door | fleet .env | PLANE_EMIT_DISABLED=1 in the fleet-tier .env — the ruled harness exemption; silences EVERY door at once |
 | `registry-scan` | **on** | composition | fleet .env | PLANE_EMIT_ENABLED=0 in the fleet-tier .env |
@@ -604,33 +604,26 @@ To arm one canary bot, write the host's list and check it with `python3 "$CLAUDL
 
 ### `bots.<name>.mcp_direct_launch` / `fleet.defaults.mcp_direct_launch`
 
-Opt-in, off by default (#1604). `npx -y <pkg>@<version>` keeps an `npm exec` process resident as the parent of the server it starts, for the server's whole life. On the Pi, 41 of those wrappers held 45 MB of private memory and 1,388 MB of swap. With `mcp_direct_launch: true`, the bot launches each **exactly pinned** npx server as `node <entry point>` from a copy that `host cache warm` installs under `$CLAUDLOBBY_ROOT/state/mcp/npm/<name>@<version>/`. No wrapper process exists at all.
+On by default (#1604). `npx -y <pkg>@<version>` keeps an `npm exec` process resident as the parent of the server it starts, for the server's whole life; on the Pi, 42 of them held 61 MiB in RAM and 1,439 MiB in swap. A bot instead launches each **exactly pinned** npx server as `node <entry point>` from a copy under `$CLAUDLOBBY_ROOT/state/mcp/npm/<name>@<version>/`, so no wrapper process exists. `config plan` (and so `fleet setup`) installs every copy an armed bot needs before it composes; `host cache warm` installs the same set on its own.
 
 ```yaml
+defaults:
+  mcp_direct_launch: false    # opt a whole fleet out
 bots:
   ravi:
     mcp_direct_launch: true   # STRICT bool: a typo string is a parse error, never an arming
 ```
 
-To canary this change, use an independent data root with one armed bot:
-
-1. Set the key on that bot.
-2. Run `claudlobby --root <data-root> --fleet <fleet> host cache warm`. It installs the copies, and only for armed bots.
-3. Stage and inspect the candidate with `config plan --release RELEASE_ID` and `config diff PLAN_ID`, then run `host activate PLAN_ID --install-directory <native-user-unit-dir>` from an operator shell.
-4. `.mcp.json` is read at session start. Activation may restart the selected bot; until its next session, a running bot keeps its previous npx servers.
-
-To widen it, set `defaults.mcp_direct_launch: true`. A bot's own `false` still opts that bot out.
-
 Any server that can't launch directly keeps today's npx launch. That launch can't break the server; it only forgoes the saving. Composition names every such server with its reason, in one warning per bot, and the `host doctor` MCP launch rung says the same:
 
 | reason | fix |
 |---|---|
-| `not installed` | run `host cache warm` for the fleet, then stage a fresh config plan and activate it |
+| `not installed` | the plan's install did not land (offline, npm missing): `host cache warm` shows npm's error; then stage a fresh config plan and activate it |
 | `not an exact version pin` | pin the fragment. A range or dist-tag would install whatever the registry serves today |
 | `entry point is not a plain node script` | none. `node <path>` would drop a shebang's flags, and a non-node bin is not node at all |
 | `cannot tell which bin npx would run` | none. npx itself refuses an ambiguous bin |
 
-A copy removed *after* activation is different. The bot's composed file still points at it, so that server will not start at the bot's next session, while a fresh plan would quietly fall back to npx. The `host doctor` `mcp-launch-composed` rung reads every bot's composed `.mcp.json`, armed or not, and **fails** naming each such bot, server and path. Restore the exact cache with `host cache warm`, then stage and activate a fresh plan (or stage and activate without warming to return to npx).
+A copy removed *after* staging is different: the composed file still points at it, so that server will not start. `host activate` refuses a plan whose copy went missing, `start-bot.sh` raises one `mcp_copy_missing` notice naming the bot, each server and its path, and the `host doctor` `mcp-launch-composed` rung fails the same way. The remedy is `claudlobby --fleet <fleet> host cache warm`, which reinstalls the copy at the same path, then a restart of the bot. Nothing in the framework deletes a copy; a hand deletion does, and so does a `git clean -x` in a data root that is also a git checkout.
 
 The copy installs the fragment's exact pin. npm resolves the rest of its dependency tree from its own cache first (`--prefer-offline`). uvx servers are untouched. `claudlobby/_runtime_scripts/fleet-memory-check.sh` does not show the saving (#862): its fleet total never matched an `npm exec` line, and its per-bot figure counts only the pane process and its direct children.
 

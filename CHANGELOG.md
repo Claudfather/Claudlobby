@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — MCP servers launch without npx's npm wrapper by default (#1604)
+
+`npx -y <pkg>@<version>` keeps an `npm exec` process resident as the parent of every server it starts. On the Pi, 42 of them held 61 MiB in RAM and 1,439 MiB of swap while doing nothing. #1991 built the direct launch, `node <entry>` from a copy of the exact pin under `state/mcp/npm`, behind a per-bot opt-in that no bot had armed.
+
+- **On by default.** `mcp_direct_launch` is now on unless a bot or a fleet's `defaults` sets it `false`. Its switch is an opt-out, and the switch tables say so. Anything that cannot launch directly keeps npx and is named, as before.
+- **`config plan` installs the copies before it composes**, and so do `fleet setup` and `bot move`. So the first plan on a fresh host composes the direct launch, with no separate warm. A failed install never stops the plan: that package's servers keep npx, and the plan says which. `host cache warm` installs the same set, from one shared collection. An install that cannot launch directly is kept in place, so no later plan runs npm for it again.
+- **A copy that goes missing after staging is named in three places, through one predicate** (`mcp_direct.missing_copies`):
+  - `host activate` refuses a plan whose copy vanished, because each composed copy is now a plan input;
+  - `start-bot.sh` raises one `mcp_copy_missing` notice at session start, naming the bot, each server, its path and the remedy, and launches anyway;
+  - `host doctor`'s `mcp-launch-composed` rung fails with the same remedy.
+- **The remedy is one warm.** A copy whose manifest or entry script is gone is replaced by a fresh install at the same path, where it used to be reported unusable. The start-bot notice is debounced on its text, so a restart with the same copies gone pages once.
+- **`host doctor --switches` names the exceptions.** A per-bot switch names the bots that moved it off its default, so a fleet where one bot opted out says which.
+
 ### Fixed — each fleet's copy of an interval timer is anchored to the clock at its own second on the host (#1654)
 
 On a host with several fleets, every fleet composed the same interval timers, and each job's copies fired together: four keepalives and the host probe in one second every minute, four pulse sweeps every five minutes. A first-run offset alone does not last. A timer that counts from its last start (`OnUnitActiveSec=`) moves all its later ticks whenever a start is pulled early by a wake of the user manager or delayed by load, and copies that meet share a wake from then on. Measured on a four-fleet host, offset copies merged again within minutes to an hour with `AccuracySec=10`, and two of five merged within 75 minutes with `AccuracySec=1`.
