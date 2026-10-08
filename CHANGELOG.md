@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a bot session that loses its subreaper is recorded, and the subreaper's untested paths are pinned (#2184)
+
+#2176 starts each bot session under its own child subreaper (#2158), and its review left eleven notes: test gaps a regression could pass through, and a subreaper that could die without a trace.
+
+- **A lost subreaper is recorded.** `fleet-pulse.sh` now reads each live session's tmux server on Linux. When the server's parent is not a `bot-subreaper` (the subreaper died mid-session, or it never took its name), it records `bot_subreaper_missing` (notice) with the parent's name in `data.parent`, on every sweep while that holds. Until now only the start was checked (`bot_subreaper_unavailable`). A healthy server records nothing, and the check never touches a session. Restarting the bot gives it a new subreaper.
+- **Descriptors under an unlimited limit.** `SC_OPEN_MAX` is -1 under an unlimited soft descriptor limit, which made the subreaper's last `closerange` a no-op and left the caller's descriptors open for the session's life. It now closes from `/proc/self/fd` then. Under a finite limit, as on every measured host, it does what it did.
+- **Tests for the gaps.** An idle subreaper spends no CPU, so a polling reap loop fails. A healthy start records no event. The descriptor test waits for the re-exec instead of racing it. Each fallback input keeps its behaviour and its reason: an empty socket, a tmux that cannot run, output that is not a report, a session added to a server outside the subreaper, and an interpreter that is unset or cannot run. Every call in `bot-subreaper.py` is scanned for a route to a signal, aliases and `getattr` included. The guard's ancestor refusal names the bot's subreaper.
+- **`bot_subreaper_unavailable`** is also recorded when the client failed and no session started; its registry comment now says so.
+
 ### Fixed — each fleet's copy of an interval timer is anchored to the clock at its own second on the host (#1654)
 
 On a host with several fleets, every fleet composed the same interval timers, and each job's copies fired together: four keepalives and the host probe in one second every minute, four pulse sweeps every five minutes. A first-run offset alone does not last. A timer that counts from its last start (`OnUnitActiveSec=`) moves all its later ticks whenever a start is pulled early by a wake of the user manager or delayed by load, and copies that meet share a wake from then on. Measured on a four-fleet host, offset copies merged again within minutes to an hour with `AccuracySec=10`, and two of five merged within 75 minutes with `AccuracySec=1`.

@@ -171,9 +171,14 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "send_unlocked": "notice",
     "resume_skipped": "notice",
     "plugin_marketplace_failed": "notice",
-    # #2158: a bot session started on Linux without its own child subreaper,
-    # so its orphans re-parent to the user manager; data.report says why.
+    # #2158: a bot session start on Linux that did not run under its own child
+    # subreaper, so the session's orphans (if it started) re-parent to the user
+    # manager; data.report says why, or why the start failed.
     "bot_subreaper_unavailable": "notice",
+    # #2184: the pulse found a live session's tmux server whose parent is not
+    # a bot-subreaper (it died mid-session, or never took its name);
+    # data.parent names what the server's parent is now.
+    "bot_subreaper_missing": "notice",
     "briefing_deferred": "notice",
     "briefing_dispatched": "notice",
     "briefing_failed": "notice",

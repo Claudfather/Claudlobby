@@ -2049,6 +2049,31 @@ bot_session_spawn() {
     return "$rc"
 }
 
+# bot_subreaper_lost <socket>
+# Print `{"server":PID,"parent":"NAME"}` when the bot's tmux server is not the
+# child of a process named bot-subreaper: the subreaper died mid-session, or it
+# never took its name, so the session's orphans re-parent to the user manager
+# again and a kill aimed at an orphan's parent could stop every bot (#2158).
+# fleet-pulse.sh records the line as bot_subreaper_missing's data. Prints
+# nothing for a healthy server, off Linux (no child subreaper), and whenever it
+# cannot tell (no server, an unreadable /proc): no verdict, never an alarm. A
+# bad read is taken again a second later, because a subreaper takes its name
+# just after it re-executes. Always returns 0.
+bot_subreaper_lost() {
+    local socket="${1?Usage: bot_subreaper_lost <socket>}" server="" up="" name="" try
+    [ "$_OS" = Linux ] && [ -n "$socket" ] || return 0
+    for try in 1 2; do
+        server=$(bot_tmux "$socket" display-message -p '#{pid}' 2>/dev/null) || return 0
+        case "$server" in ''|*[!0-9]*) return 0 ;; esac
+        up=$(awk '{ sub(/.*\) /, ""); print $2 }' "/proc/$server/stat" 2>/dev/null) || return 0
+        case "$up" in ''|*[!0-9]*) return 0 ;; esac
+        name=$(cat "/proc/$up/comm" 2>/dev/null) || return 0
+        [ "$name" = bot-subreaper ] && return 0
+        [ "$try" = 2 ] || sleep 1
+    done
+    printf '{"server":%s,"parent":"%s"}\n' "$server" "$(json_escape "$name")"
+}
+
 # emit_fleet_event <type> <source> [data_json] [bot_dir] [bot_id]
 # Record one fleet event on the plane — the ONE door behind fleet-pulse /
 # code-audit-sweep's checks, the keepalive tick's transitions, the vitals hook,
