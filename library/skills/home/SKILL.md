@@ -22,6 +22,8 @@ Smart home control and reporting via Home Assistant.
 | `mcp__homeassistant__get_history` | Get entity history |
 | `mcp__homeassistant__system_overview` | HA system overview |
 
+`entity_action` and `call_service_tool` change devices, so they prompt unless the bot's fleet.yaml grants them in `tool_permissions.allow`; `library/integrations/homeassistant.md` shows how. The other tools here only read and come with the integration.
+
 ## Rooms & Devices
 
 This section is a *template*. Replace the example rooms/devices below with your actual Home Assistant inventory before deploying. Discover entities at runtime via `mcp__homeassistant__list_entities` or `mcp__homeassistant__domain_summary_tool`.
