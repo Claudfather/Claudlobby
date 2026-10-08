@@ -225,6 +225,7 @@ def check(repo: Path, event: dict) -> tuple[list[str], str]:
         added = entries(text) - (entries(show(repo, since, own) or "") if status[own] == "M" else 0)
     old_log, new_log = show(repo, since, CHANGELOG) or "", show(repo, head, CHANGELOG) or ""
     deleted = sorted(p for p, s in fragments.items() if s == "D")
+    reason = opt_out(pr.get("body") or "")
     if deleted:
         # A roll-up deletes fragments and needs no fragment of its own. Any other PR that
         # deletes one, such as a revert, must leave CHANGELOG.md alone and say why.
@@ -232,7 +233,7 @@ def check(repo: Path, event: dict) -> tuple[list[str], str]:
         texts = [show(repo, since, path) or "" for path in merge_order(repo, since, deleted)]
         if new_log == render(old_log, texts, version, date):
             return problems, f"a roll-up of {len(deleted)} fragment(s), exactly as assemble makes it"
-        if new_log != old_log or not opt_out(pr.get("body") or ""):
+        if new_log != old_log or not reason:
             problems.append(
                 f"This PR deletes {len(deleted)} fragment(s), but {CHANGELOG} is not exactly what "
                 "`python3 bin/changelog.py assemble` makes of them. A roll-up commits that "
@@ -248,7 +249,6 @@ def check(repo: Path, event: dict) -> tuple[list[str], str]:
         )
     if added > 0:
         return problems, f"`{own}` adds {added} {'entry' if added == 1 else 'entries'}"
-    reason = opt_out(pr.get("body") or "")
     if reason is None:
         problems.insert(0, missing(own))
     elif not reason:
