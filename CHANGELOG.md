@@ -17,6 +17,26 @@ On a host with several fleets, every fleet composed the same interval timers, an
 - **What the docs claimed, corrected.** `system.yaml` and the schema doc said an activation runs an overdue job at once; for the interval form it counts every first run from its last daemon-reload instead. They also said a job's later ticks keep their slots; under `OnUnitActiveSec=` they do not.
 - **Tests:** `tests/test_timer_phase.py` composes four fleets and the host's jobs on one data root and checks that no two interval units share a second. When `systemd-analyze` is present, systemd's own calendar parser checks each expression.
 
+### Changed — Home Assistant: the library grants hass-mcp's 17 read tools by name, not the whole server
+
+Until now a bot that attached `homeassistant` composed `mcp__homeassistant__*`, so all 29 hass-mcp tools ran without a prompt, `restart_ha` and nine tools that rewrite dashboards included.
+
+- **`library/mcp/homeassistant.json` declares `read_only_tools`:** the 17 tools that only read, each checked in the hass-mcp 0.6.0 source. The composer emits one `mcp__homeassistant__<tool>` allow for each and never the wildcard, and the `tool_grants` of `library/integrations/homeassistant.md` mirror the list, as compose requires.
+- **The other 12 prompt:** `entity_action`, `call_service_tool`, `restart_ha` and nine dashboard tools. So does any tool a later release adds, until it is listed.
+- **Upgrade:** a bot that controls devices unattended needs `mcp__homeassistant__entity_action` and `mcp__homeassistant__call_service_tool` in `bots.<name>.tool_permissions.allow` before this reaches it. Without them, its device control waits on a prompt.
+- **Not a hard boundary:** `call_service_tool` can still call `homeassistant.restart`, and every tool has the token's full reach. The integration doc says so.
+- **The per-bot grant is named by its real key.** Two compose errors and the docs for the read-only split told operators to grant a write in fleet.yaml `tools.allow`, a shape that now fails to parse. They name `tool_permissions.allow`.
+- **Tests:** `tests/test_readonly_mcp_grants.py` composes a bot from the shipped library and pins the 17, the 19 with the device-control grant, and no wildcard. The shipped-library pins cover `homeassistant` too.
+
+### Fixed — The Home Assistant MCP fragment runs the server its tool list, doc and skills describe
+
+`library/mcp/homeassistant.json` pointed at HA's built-in MCP endpoint, `${HA_URL}/api/mcp/`, while its tool list, `library/integrations/homeassistant.md` and the `home`, `weather` and `status-personal` skills named the tools of the community server hass-mcp. The built-in endpoint answers only without the trailing slash and needs an HA integration set up first, so the server failed to connect at session start; connected, it would have offered none of the tools the docs and skills name.
+
+- **The fragment runs hass-mcp 0.6.0 over stdio:** `uvx --from hass-mcp==0.6.0 hass-mcp`, the shape the library's other pinned Python servers use, so `host cache warm` and `doctor` cover it. `HA_URL` and `HA_TOKEN` pass through the same env contract.
+- **`_permissions_contract.tools` lists the 29 tools 0.6.0 serves.** The 12 it listed are all among them. The entry above narrows what the library grants.
+- **The `/home` skill calls the tools as 0.6.0 takes them.** `entity_action` accepts only `on`, `off` or `toggle`, with service data in `params`, so the skill's `turn_on` and `turn_off` examples returned an error. `call_service_tool` takes the `entity_id` inside `data`.
+- **The integration doc** says what a host installs, what the token can reach, how to check the connection, and which REST calls to use when the server does not connect.
+
 ### Fixed — `host activate` waits up to 300 s for running jobs before refusing, and jobs that start meanwhile back off (#2208)
 
 `host activate` took the host activation lock without waiting, and every composed timer job, host operation and native bot start holds that lock shared while it runs. An activation attempted while any of them ran was refused, and the refusal said another activation held the lock. On a four-fleet host some job held it 21% of the time in normal operation; per-fleet timer slots (#2209) raise that to about 61%.

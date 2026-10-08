@@ -102,7 +102,7 @@ one layer is misconfigured:
    prompting on them instead of running them unattended.
 
 Never set `META_ADS_ENABLE_WRITE_TOOLS` truthy, and never add a write tool to a
-bot's `tools.allow` — the whole point is a read-only ROI reader. Editing spend or
+bot's `tool_permissions.allow` — the whole point is a read-only ROI reader. Editing spend or
 campaigns is a deliberate, separate, reviewed change.
 
 ## Auth model
