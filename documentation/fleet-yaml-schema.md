@@ -218,7 +218,7 @@ Applied to every bot. Merge rules by type:
 - **Sandbox** — lists (network_allowed_domains, filesystem_allow_write) are **unioned**; booleans (auto_allow_bash) use bot-level value.
 - **Tools** — deny/allow lists are **unioned** across defaults and bot-level.
 - **Hooks** — bot-level entries are **appended after** defaults per event. Same-matcher hooks group together.
-- **Jobs** — `defaults.jobs` merges by job name over the system defaults (system.yaml → fleet.yaml, shallow per-entry spread; sibling jobs are preserved). Drives the composed fleet timer units.
+- **Jobs** — `defaults.jobs` merges by job name over the system defaults (system.yaml → fleet.yaml, shallow per-entry spread; sibling jobs are preserved). Drives the composed fleet timer units. An interval job whose interval divides an hour or a day is anchored to the clock at its own second on the host, in this fleet's slot, so the fleets' copies of one job are never due in the same second; any other interval keeps `OnUnitActiveSec=` with a slot for its first run only. `randomized_delay` is for calendar jobs. See `startup_delay` in [`system-yaml-schema.md`](system-yaml-schema.md) for both.
 
 #### `fleet.defaults.jobs.<name>.enroll`
 
@@ -698,6 +698,8 @@ observability:
 `observability.reap_days` is retired (F18 closure, #1467): the event files it aged are gone and the plane's `plane prune` retention replaced them — a manifest that still sets it loads, and `claudlobby config validate` warns, naming the key.
 
 **dispatch_deadline remains composed for every bot.** The default is 86400 seconds (24 hours), and a fleet override still reaches bot.conf for historical native watchdog rows. Canonical task assign takes an explicit --expected-by timestamp; it does not read this env value to manufacture a deadline. A value of 0 disables the legacy dispatch clock.
+
+`pulse_interval` also sets the `fleet-pulse` timer's cadence. A whole number of minutes that divides an hour (60, 120, 180, 240, 300, 360, 600, 720, 900, 1200, 1800 or 3600) keeps the pulse anchored in this fleet's slot on the host. Any other value runs it on `OnUnitActiveSec=` with a slot for its first run only, and that slot lasts only until the copies drift back together; on a four-fleet host, 60 s copies did so within minutes to an hour.
 
 The three threshold fields are optional integers with sensible defaults. `bridge_heal` is a boolean. Can be set in `defaults:` to apply fleet-wide; bot-level overrides (a per-bot `bridge_heal: false` opts a bot out of a fleet default-on). The validator warns if `pulse_interval` is `<= 0` or greater than `3600` (1 hour), if `reap_days` is `<= 0` or greater than `365`, and if `bridge_heal_max_attempts` is outside `1..10`. There is currently no validation on `activity_stuck_threshold` or `dispatch_deadline`.
 

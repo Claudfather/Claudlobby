@@ -190,7 +190,7 @@ def cmd_warm_cache(args, *, paths=None, fleet=None, summary=None) -> int:
     # Keyed on (runtime, argv) so a package reached by two bots is warmed once,
     # and so a pinned spec plus its separate entry point survives the round
     # trip. A set of bare names cannot represent `--from <spec> <entry>`, which
-    # is the shape two of the three shipped uvx fragments use.
+    # is the shape three of the four shipped uvx fragments use.
     targets: dict[tuple[str, tuple[str, ...]], str] = {}
     unreadable: set[str] = set()
     for bot in fleet.bots.values():

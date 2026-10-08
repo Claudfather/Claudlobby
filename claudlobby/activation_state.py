@@ -17,7 +17,9 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 import tempfile
+import time
 
 from .config_plan import ConfigPlan, read_plan
 from .releases import read_release
@@ -619,22 +621,83 @@ class ActivationStore:
         return self._complete(activation_id, "selection_restored", evidence_digest=_digest(previous))
 
 
-@contextmanager
-def locked_activation(root: Path):
-    """Nonblocking process lock; retain the lock file to avoid inode races."""
-    state = _state(root)
-    state.mkdir(parents=True, exist_ok=True)
-    lock = state / "activation.lock"
-    fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-    store = None
+# A refusal whose text is one of these changed nothing: the lock was busy
+# (lock_busy). Callers turn it into "lock held, no record created".
+ANOTHER_ACTIVATION = "another host activation holds the lock"
+_JOBS_HOLD = "a running job or host operation"
+# How long host activate waits for the jobs and operations already holding the
+# activation lock shared to let go. Ones that start while it waits back off, so
+# the wait is bounded by the longest run in progress; the pulse, the longest
+# timer job, is capped under its 300 s cadence.
+ACTIVATION_WAIT_S = 300.0
+
+
+def lock_busy(message: str) -> bool:
+    """Whether a refusal says the activation lock was busy, so nothing changed."""
+    return message == ANOTHER_ACTIVATION or message.startswith(_JOBS_HOLD + " ")
+
+
+def _exclusively_held(path: Path) -> bool:
+    """Whether some other holder has *path* exclusively: a shared probe would block."""
+    probe = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     try:
+        fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        return False
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(probe)
+
+
+def _take(fd: int, path: Path, deadline: float, interval: float, busy: str,
+          notice: str | None = None) -> None:
+    """Take *path* exclusively by *deadline*; an exclusive holder is another activation."""
+    while True:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise ActivationError("another host activation holds the lock") from exc
+            return
+        except BlockingIOError:
+            if _exclusively_held(path):
+                raise ActivationError(ANOTHER_ACTIVATION) from None
+            if time.monotonic() >= deadline:
+                raise ActivationError(busy) from None
+            if notice:
+                print(notice, file=sys.stderr, flush=True)
+                notice = None
+            time.sleep(interval)
+
+
+@contextmanager
+def locked_activation(root: Path, *, wait: float = 0.0):
+    """Exclusive host lock; retain the lock files to avoid inode races.
+
+    Another activation, running or pending, refuses at once. Running jobs and
+    host operations hold activation.lock shared. Every activation first holds
+    activation-pending.lock exclusively, until it ends, so a job or operation
+    that starts while it waits backs off as if it were already running. With a
+    positive *wait* it then polls until the holders already running let go,
+    refusing only if one outlasts the wait; without one it refuses at once.
+    """
+    state = _state(root)
+    state.mkdir(parents=True, exist_ok=True)
+    lock, marker = state / "activation.lock", state / "activation-pending.lock"
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    pending = None
+    store = None
+    try:
+        pending = os.open(marker, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        # A starting job holds the marker shared only while it takes its own lock.
+        _take(pending, marker, time.monotonic() + 5.0, 0.01, f"{_JOBS_HOLD} holds the pending lock")
+        _take(fd, lock, time.monotonic() + max(wait, 0.0), 0.5,
+              f"{_JOBS_HOLD} still holds the lock after a {wait:.0f} s wait" if wait > 0
+              else f"{_JOBS_HOLD} holds the lock",
+              f"waiting up to {wait:.0f} s for running jobs to release the host activation lock"
+              if wait > 0 else None)
         store = ActivationStore(state.parent, fd, _LOCK_TOKEN)
         yield store
     finally:
         if store is not None:
             store.held = False
         os.close(fd)
+        if pending is not None:
+            os.close(pending)
