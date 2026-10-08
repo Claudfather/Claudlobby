@@ -280,15 +280,16 @@ Read-only product analytics — funnels, trends, saved insights, event/property 
 
 ### Home Assistant
 
-Control lights, switches, sensors, automations. Requires HA running on the same network. This is an HTTP-type MCP entry that connects straight to HA's own `/api/mcp/` endpoint — there's no separate MCP server process to install or keep updated.
+Control lights, switches, sensors, automations. Requires HA reachable from the host. The entry runs the community server hass-mcp, pinned to one release, over stdio through `uvx`, so the host needs `uv`. HA's built-in MCP server (`/api/mcp`) is not used. `library/integrations/homeassistant.md` names the tools, what the token can reach, and the REST calls to use when the server does not connect.
 
 ```json
 {
   "homeassistant": {
-    "type": "http",
-    "url": "http://localhost:8123/api/mcp/",
-    "headers": {
-      "Authorization": "Bearer your_long_lived_access_token"
+    "command": "uvx",
+    "args": ["--from", "hass-mcp==0.6.0", "hass-mcp"],
+    "env": {
+      "HA_URL": "http://localhost:8123",
+      "HA_TOKEN": "your_long_lived_access_token"
     }
   }
 }
