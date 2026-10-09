@@ -174,10 +174,9 @@ def test_oversize_request_refused_not_fatal(running):
     blob = b"x" * (MAX_REQUEST_BYTES + 2)
     try:
         client.sendall(blob)
+        client.shutdown(socket.SHUT_WR)  # macOS: ENOTCONN once the daemon has closed (#2215)
     except OSError:
         pass  # daemon may reset mid-send after refusing; either way it answered/closed
-    else:
-        client.shutdown(socket.SHUT_WR)
     try:
         buf = client.recv(65536)
         if buf:
