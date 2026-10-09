@@ -507,6 +507,17 @@ defaults:
     Stop:
       - command: "$CLAUDLOBBY_NATIVE_DIR/plane-rc-relay-out.sh"
         timeout: 15
+      # #996: a turn that ended normally clears the usage-limit record below.
+      - command: "$CLAUDLOBBY_NATIVE_DIR/usage-limit-hook.sh"
+        timeout: 10
+    # #996: Claude Code ends a turn a claude.ai usage limit stopped with
+    # StopFailure (error rate_limit, the limit line in last_assistant_message).
+    # The hook keeps that fact in data/.usage-limit for keepalive's LIMIT
+    # verdict, so a limit line a bot merely quotes is never read as a stop, and
+    # records usage_limit_hit. stdout empty, exit 0 on every path.
+    StopFailure:
+      - command: "$CLAUDLOBBY_NATIVE_DIR/usage-limit-hook.sh"
+        timeout: 10
 
   observability:
     pulse_interval: 300

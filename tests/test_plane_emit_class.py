@@ -409,6 +409,7 @@ CLASSES = {
     "plane-telegram-out.sh": "hook",
     "plane-dispatch-in.sh": "hook",
     "plane-rc-relay-out.sh": "hook",
+    "usage-limit-hook.sh": "hook",
     "vault-git-guard.sh": "hook",
     "credential-echo-guard.sh": "hook",
     "signal-guard.sh": "hook",
