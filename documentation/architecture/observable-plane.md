@@ -71,7 +71,8 @@ counts the provisional ones. Session uids are transcript-stable
 ## Owner access foundation (not enabled)
 
 `plane/owner_access.py` is an internal policy/state primitive for **direct,
-whole-deployment reads**. It does not authenticate a browser. The internal
+whole-deployment reads**, with separately approved per-fleet ordinary messages.
+It does not authenticate a browser. The internal
 `plane/owner_view.py:create_owner_app` factory exercises it with an explicitly
 injected verifier; no CLI command, environment flag or startup job enables
 that factory. The current runtime view is unchanged. This is bounded owner-access work
@@ -120,9 +121,43 @@ The prototype's contract:
   temporary file that is never consulted for admission.
 
 These lifetimes and limits are bounded experiment choices, not a selected
-browser protocol. The primitive grants no website membership, workspace
-binding or operational write authority. It cannot be substituted for the
-canonical action policy or Plane actor attestation (#1622).
+browser protocol. Pairing and reader sessions grant no website membership,
+workspace binding or operational writes. The separate message grant below
+does not replace canonical operation binding or Plane actor attestation (#1622).
+
+### Explicit owner messages (internal, no browser endpoint)
+
+`OwnerAccess.allow_messages` is a local approval primitive: it binds the exact
+current owner grant to one canonical fleet UID and one existing human actor UID
+and alias. It is never callable by a remote client. Approval transactionally
+creates the optional `message_grants` table in the private authority store;
+ordinary initialization and reads do not create or migrate that table. A grant
+cannot change actor until locally revoked. Owner revocation/re-pairing invalidates
+every old message grant. Reader access alone continues to refuse messages.
+
+`plane/owner_messages.py:OwnerMessages` pins an installation and accepts only
+an already verified `VerifiedReader`. For each operation it checks the session
+and grant, binds current active host/fleet/actor identities, and refuses generated
+bot/timer environment selectors. It accepts an exact recipient UID from that
+fleet, never an alias supplied as the sender or an OS-account fallback. The
+caller must register the intended human identity separately before local approval.
+
+The send holds canonical runtime mutation admission and calls the extracted
+`commands/message_write.py:deliver_bound_message` workflow. CLI and internal
+owner sends therefore share request UUID conflict handling, recording, native
+delivery, held-box repair and receiver byte-integrity proof. Native submission
+alone is not success. Exceptions can follow effects: retain the original UUID,
+then `inspect` its bound request and receiver evidence without resending. A
+missing request does not prove no previous effect. The internal result types
+are evidence for a future adapter, not a ready-made browser response contract.
+
+Admission is rechecked at dispatch start and before returning inspection data.
+Revocation prevents subsequent admission; it does not cancel an effect already
+in progress. This slice supports ordinary messages only. It supplies no HTTP
+route, UI capability, retry control, reply, task mutation, local confirmation
+UI, trusted ingress verifier or browser origin/CSRF policy. Those and a real
+isolated bot canary remain required before enabling browser operations. Tests
+use real private activation/Plane owners with a synthetic native receiver.
 
 ### Protected read factory (internal experiment)
 

@@ -16,12 +16,18 @@ import pytest
 from claudlobby.plane.ids import ensure_host_uid, read_host_uid
 from claudlobby.plane.owner_access import (
     AccessDenied, AccessUnavailable, MAX_PENDING, MAX_SESSIONS, OwnerAccess,
+    OwnerMessageGrant,
     PAIRING_SECONDS, PrincipalRef, SESSION_SECONDS,
 )
 from tests.conftest import constructed_env
 
 OWNER = PrincipalRef("test-verifier", "human-001")
 OTHER = PrincipalRef("test-verifier", "human-002")
+FLEET = "fleet_" + "1" * 32
+OTHER_FLEET = "fleet_" + "2" * 32
+ACTOR = "actor_" + "1" * 32
+OTHER_ACTOR = "actor_" + "2" * 32
+ALIAS = "human:owner"
 
 
 @pytest.fixture
@@ -39,6 +45,11 @@ def pair(store, principal=OWNER):
 
 def admitted(store, session, principal=OWNER):
     return store.authorize_read(session.token, principal, host_uid=session.grant.host_uid)
+
+
+def allow_messages(store, owner):
+    return store.allow_messages(expected_owner=owner, fleet_uid=FLEET,
+                                actor_uid=ACTOR, actor_alias=ALIAS)
 
 
 def test_unprepared_reads_and_initialization_do_not_mint_host_identity(tmp_path):
@@ -310,6 +321,150 @@ def test_admission_reads_do_not_change_authority(access):
     with pytest.raises(AccessDenied):
         admitted(store, session, OTHER)
     assert store.path.read_bytes() == before
+
+
+def test_message_grants_are_absent_until_explicit_local_allow(access):
+    store, _ = access
+    owner = pair(store)
+    session = store.open_session(OWNER)
+    before = store.path.read_bytes()
+    with pytest.raises(AccessDenied, match="messages_not_allowed"):
+        store.authorize_message(session.token, OWNER, host_uid=owner.host_uid,
+                                fleet_uid=FLEET)
+    assert store.path.read_bytes() == before
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'message_grants'").fetchone() is None
+    assert admitted(store, session) == owner
+
+
+def test_explicit_message_allow_is_durable_fleet_scoped_and_revocable(access):
+    store, clock = access
+    owner = pair(store)
+    session = store.open_session(OWNER)
+    approved = allow_messages(store, owner)
+    assert approved == OwnerMessageGrant(owner, FLEET, ACTOR, ALIAS)
+    assert allow_messages(store, owner) == approved
+    reopened = OwnerAccess(store.root, clock=lambda: clock[0])
+    assert reopened.authorize_message(session.token, OWNER, host_uid=owner.host_uid,
+                                      fleet_uid=FLEET) == approved
+    with pytest.raises(AccessDenied, match="messages_not_allowed"):
+        reopened.authorize_message(session.token, OWNER, host_uid=owner.host_uid,
+                                   fleet_uid=OTHER_FLEET)
+    before = store.path.read_bytes()
+    assert reopened.authorize_message(session.token, OWNER, host_uid=owner.host_uid,
+                                      fleet_uid=FLEET) == approved
+    assert store.path.read_bytes() == before
+    store.revoke_messages(expected_owner=owner, fleet_uid=FLEET)
+    with pytest.raises(AccessDenied, match="messages_not_allowed"):
+        reopened.authorize_message(session.token, OWNER, host_uid=owner.host_uid,
+                                   fleet_uid=FLEET)
+    assert allow_messages(store, owner) == approved
+
+
+def test_message_binding_is_immutable_until_explicit_revoke(access):
+    store, _ = access
+    owner = pair(store)
+    approved = allow_messages(store, owner)
+    with pytest.raises(AccessDenied, match="message_binding_changed"):
+        store.allow_messages(expected_owner=owner, fleet_uid=FLEET,
+                             actor_uid=OTHER_ACTOR, actor_alias=ALIAS)
+    with pytest.raises(AccessDenied, match="message_binding_changed"):
+        store.allow_messages(expected_owner=owner, fleet_uid=FLEET,
+                             actor_uid=ACTOR, actor_alias="human:other")
+    assert store.authorize_message(store.open_session(OWNER).token, OWNER,
+                                   host_uid=owner.host_uid, fleet_uid=FLEET) == approved
+    store.revoke_messages(expected_owner=owner, fleet_uid=FLEET)
+    changed = store.allow_messages(expected_owner=owner, fleet_uid=FLEET,
+                                   actor_uid=OTHER_ACTOR, actor_alias="human:other")
+    assert changed.actor_uid == OTHER_ACTOR and changed.actor_alias == "human:other"
+
+
+def test_competing_message_approvals_cannot_replace_first_binding(access):
+    store, _ = access
+    owner = pair(store)
+    barrier = threading.Barrier(2)
+
+    def approve(actor_uid):
+        barrier.wait(timeout=5)
+        try:
+            return store.allow_messages(expected_owner=owner, fleet_uid=FLEET,
+                                        actor_uid=actor_uid, actor_alias=ALIAS)
+        except AccessDenied as exc:
+            assert exc.code == "message_binding_changed"
+            return None
+
+    with ThreadPoolExecutor(2) as pool:
+        results = list(pool.map(approve, (ACTOR, OTHER_ACTOR)))
+    winners = [result for result in results if result is not None]
+    assert len(winners) == 1
+    session = store.open_session(OWNER)
+    assert store.authorize_message(session.token, OWNER, host_uid=owner.host_uid,
+                                   fleet_uid=FLEET) == winners[0]
+
+
+def test_message_admission_requires_current_session_principal_host_and_fleet(access):
+    store, clock = access
+    owner = pair(store)
+    allow_messages(store, owner)
+    session = store.open_session(OWNER)
+    for principal in (OTHER, PrincipalRef("other-verifier", OWNER.subject)):
+        with pytest.raises(AccessDenied):
+            store.authorize_message(session.token, principal, host_uid=owner.host_uid,
+                                    fleet_uid=FLEET)
+    with pytest.raises(AccessDenied, match="wrong_deployment"):
+        store.authorize_message(session.token, OWNER, host_uid="host_" + "0" * 32,
+                                fleet_uid=FLEET)
+    with pytest.raises(AccessDenied, match="messages_not_allowed"):
+        store.authorize_message(session.token, OWNER, host_uid=owner.host_uid,
+                                fleet_uid=OTHER_FLEET)
+    clock[0] += SESSION_SECONDS
+    with pytest.raises(AccessDenied, match="session_unavailable"):
+        store.authorize_message(session.token, OWNER, host_uid=owner.host_uid,
+                                fleet_uid=FLEET)
+
+
+def test_stale_message_approval_and_owner_repairing_do_not_restore_grant(access):
+    store, _ = access
+    first = pair(store)
+    allow_messages(store, first)
+    old_session = store.open_session(OWNER)
+    store.revoke_owner(expected_revision=first.revision)
+    with pytest.raises(AccessDenied, match="grant_changed"):
+        allow_messages(store, first)
+    with pytest.raises(AccessDenied, match="grant_changed"):
+        store.revoke_messages(expected_owner=first, fleet_uid=FLEET)
+    current = pair(store, OTHER)
+    current_session = store.open_session(OTHER)
+    with pytest.raises(AccessDenied):
+        store.authorize_message(old_session.token, OWNER, host_uid=first.host_uid,
+                                fleet_uid=FLEET)
+    with pytest.raises(AccessDenied, match="messages_not_allowed"):
+        store.authorize_message(current_session.token, OTHER, host_uid=current.host_uid,
+                                fleet_uid=FLEET)
+    with pytest.raises(AccessDenied, match="grant_changed"):
+        allow_messages(store, first)
+
+
+@pytest.mark.parametrize("fleet_uid,actor_uid,actor_alias", [
+    ("fleet_short", ACTOR, ALIAS),
+    ("FLEET_" + "1" * 32, ACTOR, ALIAS),
+    (FLEET, "actor_short", ALIAS),
+    (FLEET, "ACTOR_" + "1" * 32, ALIAS),
+    (FLEET, ACTOR, "bot:owner"),
+    (FLEET, ACTOR, "human:two words"),
+    (FLEET, ACTOR, "human:two/slashes"),
+    (FLEET, ACTOR, "human:"),
+    (None, ACTOR, ALIAS),
+])
+def test_message_approval_rejects_noncanonical_bindings_without_creating_table(
+        access, fleet_uid, actor_uid, actor_alias):
+    store, _ = access
+    owner = pair(store)
+    with pytest.raises(AccessDenied, match="invalid_message_binding"):
+        store.allow_messages(expected_owner=owner, fleet_uid=fleet_uid,
+                             actor_uid=actor_uid, actor_alias=actor_alias)
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'message_grants'").fetchone() is None
 
 
 @pytest.mark.parametrize("bad", ["", "short", " " * 43, "é" * 43, None])
