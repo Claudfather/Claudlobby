@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the native tests link node instead of copying it for every case (#2239)
+
+`tests/test_bridge_state.py` copied the host's `node` twice for each of its four native cases, and `tests/test_claude_session_pid.py` once for each of three cases, into pytest's `tmp_path`. On a Raspberry Pi, `node` is 122,159,120 bytes and `tmp_path` sits on the SD card, so a local run of the two files wrote 1,343,750,320 bytes of copies of it, and 35,008,480 more of copies of `bash`.
+
+- **One set of stand-ins per session, shared by both files.** `native_stand_ins` in `tests/conftest.py` makes `bun` and `claude` once. Every native case runs them and keeps its own scripts and state under its own `tmp_path`.
+- **On Linux each stand-in is a symbolic link, so nothing is copied.** Linux names a process after the path it was started from: a link named `bun` reads as `bun` in `/proc/<pid>/comm` and in `ps`, and its command line starts with the link's path. Those are what the tests and the code they test read; only `/proc/<pid>/exe` names `node`, and nothing reads it. The `bash` stand-ins in `tests/test_bridge_state.py` are links too.
+- **Elsewhere each stand-in is still a copy, now made once per session.** Whether macOS names a linked `node` after the link has not been checked, and #1012 and #1087 are why the stand-ins there are real `node` binaries.
+- **`harness/validate-bot-change.sh` uses the same helper.** Its session-scope scenario copied `node` twice per run (244,318,240 bytes) and now links it on Linux.
+- **`tests/test_stand_in_fixtures.py` pins it** with a small file in `node`'s place. It fails if a Linux stand-in holds a copy, if a copy is made more than once per name, if a copy loses its `libnode` link, or if either test file copies a file itself.
+
 ### Fixed — a usage-limit stop is named, paged, and (opt-in) resumed once after its reset (#996)
 
 A claude.ai usage limit ends a bot's turn with one line, `You've hit your session limit · resets 10:50pm (America/New_York)`, and on this estate nothing resumed it. Every bot runs with `--remote-control`, and while that bridge is up Claude Code (2.1.291 and 2.1.292, read from the binary and reproduced) arms neither its own automatic continue nor its limit menu. The pane sat at an empty prompt that keepalive read as IDLE, so `data/.idle` also kept `activity_stuck` quiet, and bots sat 75 to 85 minutes past the reset until someone noticed.
