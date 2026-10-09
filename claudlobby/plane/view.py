@@ -1810,6 +1810,7 @@ def create_app(
     # the redeploy window it was built for (gauntlet round 2). Six stats
     # per page load — index() already reads the file per request.
     _UI_FILES = ("index.html", "app.js", "panel-state.js", "api-client.js",
+                 "work-loop.js", "action-state.js",
                  "style.css", "workspace.css")
 
     def asset_token() -> str:
@@ -1848,7 +1849,15 @@ def create_app(
         # bust the intra-module import too, or the browser reuses a pinned
         # dependencies from its module map.
         token = asset_token()
-        for module in ("panel-state.js", "api-client.js"):
+        for module in ("panel-state.js", "api-client.js", "work-loop.js"):
+            js = js.replace(f'"/{module}"', f'"/{module}?v={token}"')
+        return _no_store(Response(js, media_type="text/javascript"))
+
+    @app.get("/work-loop.js")
+    def work_loop_js():
+        js = (UI_DIR / "work-loop.js").read_text()
+        token = asset_token()
+        for module in ("panel-state.js", "action-state.js"):
             js = js.replace(f'"/{module}"', f'"/{module}?v={token}"')
         return _no_store(Response(js, media_type="text/javascript"))
 

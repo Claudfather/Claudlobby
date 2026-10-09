@@ -397,7 +397,7 @@ def test_index_html_alias_is_rewritten_too(tmp_path):
         assert r.headers.get("cache-control") == "no-store"
 
 
-@pytest.mark.parametrize("asset", ["app.js", "api-client.js", "workspace.css"])
+@pytest.mark.parametrize("asset", ["app.js", "api-client.js", "workspace.css", "work-loop.js", "action-state.js"])
 def test_asset_token_tracks_in_place_updates(tmp_path, asset):
     """The token must change when a UI file changes UNDER the running
     daemon (update-siblings pulls weekly; host services are not restarted
