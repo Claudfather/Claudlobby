@@ -13,7 +13,17 @@ const channel = { children: [], querySelectorAll() { return this.children; },
 const api = runInNewContext(`${rendering}\n({threadArticle, nudgeReason, renderChannel})`, {
   ...panel, renderState() { return false; }, currentFleet: 'example', document: {
     documentElement: { style: { setProperty() {} } },
-    createElement() { return { dataset: {}, innerHTML: '' }; },
+    createElement() { return { dataset: {}, messages: [],
+      set innerHTML(value) {
+        this.html = value;
+        this.messages = [...value.matchAll(/<div class="msg" data-msg-id="([^"]+)">/g)].map(match => {
+          const details = { open: false };
+          return { dataset: { msgId: match[1] }, querySelector(selector) { return selector === 'details' ? details : null; } };
+        });
+      },
+      get innerHTML() { return this.html || ''; },
+      querySelectorAll(selector) { return selector === '.msg[data-msg-id]' ? this.messages : []; },
+    }; },
     getElementById() { return channel; },
     createDocumentFragment() { return { children: [], appendChild(node) { this.children.push(node); } }; },
   },
@@ -81,24 +91,35 @@ test('failed transmission remains a visible failure and receiver proof takes pre
 
 test('receipt-only refresh updates the card, then reuses it when evidence is unchanged', () => {
   const t = thread();
+  const otherMsg = `msg_${'3'.repeat(32)}`;
+  t.messages.push({ ...t.messages[0], msg_id: otherMsg });
   api.renderChannel({ data: { threads: [t] } });
   const first = channel.children[0];
+  const disclosure = (article, id) => article.querySelectorAll('.msg[data-msg-id]')
+    .find(message => message.dataset.msgId === id).querySelector('details');
+  disclosure(first, msg).open = true;
   assert.match(first.innerHTML, /Delivery to the lead is unconfirmed/);
   api.renderChannel({ data: { threads: [t] } });
   assert.equal(channel.children[0], first);
   t.messages[0].delivery = 'delivered';
   t.messages[0].delivery_state = 'confirmed by receiver';
+  t.messages.reverse(); // Open state follows message identity, not row position.
   api.renderChannel({ data: { threads: [t] } });
   const confirmed = channel.children[0];
   assert.notEqual(confirmed, first);
   assert.equal(confirmed.dataset.seq, first.dataset.seq);
+  assert.equal(disclosure(confirmed, msg).open, true);
+  assert.equal(disclosure(confirmed, otherMsg).open, false);
   assert.match(confirmed.innerHTML, /The lead received this update request/);
   api.renderChannel({ data: { threads: [t] } });
   assert.equal(channel.children[0], confirmed);
-  t.messages[0].delivery = null; t.messages[0].delivery_state = null;
-  t.messages[0].tx[0].event = 'failed';
+  disclosure(confirmed, msg).open = false;
+  const changed = t.messages.find(message => message.msg_id === msg);
+  changed.delivery = null; changed.delivery_state = null;
+  changed.tx[0].event = 'failed';
   api.renderChannel({ data: { threads: [t] } });
   assert.match(channel.children[0].innerHTML, /failed to reach the lead/);
+  assert.equal(disclosure(channel.children[0], msg).open, false);
 });
 
 test('maximum bounded escaped reason stays readable, malformed string boundaries stay literal', () => {
