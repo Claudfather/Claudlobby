@@ -252,3 +252,32 @@ This core module is part of the finite static graph. It reuses the document’s 
 Enrollment controllers participate in the same local admission transaction as read carriers, subscriptions and aggregate streams. Any construction failure disposes all partial resources before an explicit fresh account check; rollback never publishes a partially constructed computer as readable. Corrected visibility, paused-only resume, keyboard focus and unavailable Disconnect behavior remain shared with the read entry.
 
 Local retention bounds allow five seconds of browser clock skew; the host remains the authority on assertion and proposal expiry. Enrollment assertions share the host's 8192-character limit. Updated account metadata refreshes the displayed workspace name, and retirement clears it alongside the approval code. Forgetting a code returns focus to that computer's approval control, or its group while the pending request settles.
+
+### Connected action interface
+
+The canonical connected entry can expose ordinary messages, task nudges and task
+feedback through a separate source-bound action interface. Its bearer remains
+private to the carrier; a core read handle still exports no actions. Every host
+operation requires the current native owner, workspace binding and the existing
+independent local message/nudge/feedback grant. A read profile, website membership
+or coverage count is never an action grant. These local grants are not
+workspace-specific; the approved binding and the local grant are checked together.
+
+The entry routes an exact team from the admitted source roster. One transport
+boundary projects canonical raw host/actor/task/assignment IDs into the selected
+source's qualified UI IDs and team name, and reverses only that exact qualifier
+before the fixed connected action POST. Mixed sources, another host, changed
+scope or undeclared recipients refuse without a send. HTTP v1 message and v2 task
+metadata remain canonical and raw; the shared ActionState saves the corresponding
+qualified metadata, original UUID and digest, never the body. Direct-owner and
+browser-local contracts remain unchanged.
+
+Context/prepare/receipt have15-second deadlines; send has45seconds. Renewal,
+logout, account/reference change and observed source loss fence late replies.
+A missing action grant performs at most one pure status probe and does not end a
+healthy read session. Independent capability refusal keeps other drafts and task
+reads. A source lifecycle refresh preserves settled task details and message
+recipient/draft selection, while acquiring fresh capabilities. Preparation never
+sends; uncertain send retains the original saved UUID. Receipt lookup never
+resends. Recorded means delivery unconfirmed, delivered requires the canonical
+receiver evidence, and neither means that task work or approval occurred.

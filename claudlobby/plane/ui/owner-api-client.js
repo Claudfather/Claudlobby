@@ -8,6 +8,8 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
   setTimeout = globalThis.setTimeout, clearTimeout = globalThis.clearTimeout,
   monotonicNow = () => globalThis.performance.now(),
   requestTimeout = 8000,
+  actionTimeout = 8000,
+  onActionPause = () => {},
   onReadAdmitted = () => {},
   onDispose = () => {},
   onAccessEnded = () => location.replace('/owner') } = {}) {
@@ -179,7 +181,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
     }
   }
   const unknown = () => new Error('Action outcome unknown. Check the original receipt.');
-  async function ownerAction(path, body, timeout = 8000) {
+  async function ownerAction(path, body, timeout = actionTimeout) {
     // A request may have reached delivery even when its reply or session is lost.
     // Throw on uncertainty so ActionState keeps the original saved request ID.
     if (disposed || mode !== 'ready') throw unknown();
@@ -196,7 +198,10 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
       // the current cookie without pause/resume, which would reload context.
       // Context failures are already fenced by the controller room epoch.
       // A mutation/receipt refusal may invalidate only its original scope.
-      if (path !== 'context') mount?.onActionPause(body.scope, body.kind || 'message', body.target?.recipient);
+      if (path !== 'context') {
+        onActionPause(body.scope, body.kind || 'message', body.target?.recipient);
+        mount?.onActionPause(body.scope, body.kind || 'message', body.target?.recipient);
+      }
       await checkActionSession(gen);
       if (disposed || gen !== generation || mode !== 'ready') throw unknown();
       if (path === 'send' && result.data?.effect === 'not_started') {

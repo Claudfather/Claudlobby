@@ -17,13 +17,20 @@ const validLegacyRow = row => row && row.version !== 2 && bounded(row.request_id
 
 const exact = (value, keys) => value && typeof value === "object" && !Array.isArray(value)
   && Object.keys(value).sort().join() === [...keys].sort().join();
-const canonical = (value, prefix) => typeof value === "string" && new RegExp(`^${prefix}_[0-9a-f]{32}$`).test(value);
+const canonicalPart = (value, prefix) => {
+  if (typeof value !== "string") return null;
+  const match = value.match(new RegExp(`^(?:([a-z][a-z0-9-]{0,31})::)?${prefix}_[0-9a-f]{32}$`));
+  return match && match[0] === value ? { source: match[1] || "" } : null;
+};
 const release = value => typeof value === "string" && /^r-[0-9a-f]{64}$/.test(value);
 const uuid = value => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
 const timestamp = value => bounded(value) && /^\d{4}-\d\d-\d\dT.*(?:Z|[+-]\d\d:\d\d)$/.test(value) && Number.isFinite(Date.parse(value));
-export const validTaskActionTarget = target => exact(target, ["recipient", "task_id", "assignment_id", "release_id"])
-  && canonical(target.recipient, "actor") && canonical(target.task_id, "wi")
-  && (target.assignment_id === null || canonical(target.assignment_id, "asg")) && release(target.release_id);
+export function validTaskActionTarget(target) {
+  if (!exact(target, ["recipient", "task_id", "assignment_id", "release_id"]) || !release(target.release_id)) return false;
+  const task = canonicalPart(target.task_id, "wi"), actor = canonicalPart(target.recipient, "actor");
+  const assignment = target.assignment_id === null ? task : canonicalPart(target.assignment_id, "asg");
+  return !!(task && actor && assignment && task.source === actor.source && task.source === assignment.source);
+}
 const taskActionKeys = ["version", "request_id", "kind", "scope", "target", "submitted_at", "semantic_sha256"];
 const taskKinds = new Set(["nudge", "feedback"]);
 const validTaskActionRow = row => row?.version === 2 && taskKinds.has(row.kind) && uuid(row.request_id)
@@ -37,7 +44,9 @@ export function validTaskActionContext(context, kind = context?.actions?.[0]) {
     && exact(context.scope, FIELDS) && bounded(context.room) && context.scope.fleet === context.room && release(context.release_id)
     && Array.isArray(context.actions) && context.actions.length === 1 && context.actions[0] === kind
     && Array.isArray(context.recipients) && context.recipients.length === 1
-    && canonical(context.recipients[0].id, "actor") && bounded(context.recipients[0].label) && context.recipients[0].lead === true;
+    && !!canonicalPart(context.recipients[0].id, "actor") && bounded(context.recipients[0].label) && context.recipients[0].lead === true
+    && (!canonicalPart(context.recipients[0].id, "actor").source
+      || context.room.startsWith(canonicalPart(context.recipients[0].id, "actor").source + " / "));
 }
 export const validNudgeContext = context => validTaskActionContext(context, "nudge");
 export const validFeedbackContext = context => validTaskActionContext(context, "feedback");

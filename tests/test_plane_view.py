@@ -688,6 +688,10 @@ def test_connected_reader_asset_uses_same_versioned_owner_graph(tmp_path, monkey
     assert before.status_code == 200
     assert before.headers["cache-control"] == "no-store"
     assert 'from "./owner-api-client.js?v=' in before.text
+    assert 'from "./connected-actions.js?v=' in before.text
+    actions = client.get("/connected-actions.js")
+    assert actions.status_code == 200 and actions.headers["cache-control"] == "no-store"
+    assert 'from "./action-state.js?v=' in actions.text
     module = ui / "connected-read-client.js"
     info = module.stat()
     os.utime(module, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000))

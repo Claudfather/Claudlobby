@@ -12,6 +12,12 @@ if (contextElement) {
 const connected = contextElement ? createConnectedWorkspace({documentContext:context}) : null;
 export const mountSessionControls = connected?.mountSessionControls;
 export const dispose = connected?.dispose;
+export const interactionContext = connected?.interactionContext;
+export const nudgeContext = connected?.nudgeContext;
+export const feedbackContext = connected?.feedbackContext;
+export const prepareAction = connected?.prepareAction;
+export const sendAction = connected?.sendAction;
+export const actionReceipt = connected?.actionReceipt;
 
 export async function jget(url) {
   if (connected) return connected.jget(url);

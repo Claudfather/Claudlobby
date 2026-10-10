@@ -231,5 +231,9 @@ export function createWorkspaceReadTransport({ sources }) {
     streams.add(facade); return facade;
   }
   function dispose() { disposed = true; for (const s of [...streams]) s.close(); for (const e of entries) e.unsubscribe(); }
-  return Object.freeze({ jget, createEventSource, dispose });
+  return Object.freeze({ jget, createEventSource, dispose,
+    routeRoom(selected) {
+      const value = !disposed && rooms.get(selected);
+      return value && admitted(value.e) ? Object.freeze({key:value.e.key,fleet:value.raw.alias}) : null;
+    } });
 }

@@ -131,18 +131,29 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     let nextTransport = null;
     try {
       for (const reference of doc.references) {
-        const row = {reference, client:createClient({reference,
+        const row = {reference,key:`computer-${nextClients.length + 1}`, client:createClient({reference,
         documentContext:{issuer:doc.shell_origin, operational_origin:doc.operational_origin, subject:doc.user_id,
           workspace_id:doc.workspace_id, context_generation:doc.context_generation},
         currentContext:() => current, obtainSessionAssertion:(input,options) => accountAssertion('/api/plane/session-assertion',input,options), documentOrigin, fetch, setTimeout, clearTimeout})};
         nextClients.push(row);
+        row.actions = row.client.createActions({key:row.key,
+          onPause:(...args) => invoke(mount?.onActionPause,...args),
+          onSourceChange:() => invoke(mount?.onActionSourceChange,row.key)});
         row.enrollment = createEnrollment({reference, issuer:doc.shell_origin, operationalOrigin:doc.operational_origin,
           currentContext:() => current, obtainAssertion:(input,options) => accountAssertion('/api/plane/host-assertion',input,options),
           fetch,now,setTimeout,clearTimeout,onChange:changed});
       }
-      nextTransport = createTransport({sources:nextClients.map(({client}, index) => ({key:`computer-${index + 1}`,
+      nextTransport = createTransport({sources:nextClients.map(({client,key}, index) => ({key,
         label:`Computer ${index + 1}`, reader:client.readHandle}))});
-      for (const {client} of nextClients) nextSubscriptions.push(client.subscribe(changed));
+      for (const {client,actions,key} of nextClients) {
+        let previous = client.snapshot();
+        nextSubscriptions.push(client.subscribe(state => {
+          if (state.epoch !== previous.epoch || state.state !== previous.state) {
+            previous = state; actions.invalidate(); invoke(mount?.onActionSourceChange,key);
+          }
+          changed();
+        }));
+      }
       current = context; clients = nextClients; transport = nextTransport; unsubscribes = nextSubscriptions;
       // Source coverage owns board refreshes; account checks only resume a pause.
       for (const stream of streams) stream.attach();
@@ -200,6 +211,25 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     const ticket = sequence, active = transport;
     const value = await active.jget(url);
     return disposed || phase !== 'ready' || ticket !== sequence || active !== transport ? failure('denied') : value;
+  }
+  function actionSource(room) {
+    if (disposed || phase !== 'ready' || !current || typeof room !== 'string') return null;
+    const route = transport?.routeRoom(room);
+    const row = route && clients.find(row => row.key === route.key);
+    return row ? {row,fleet:route.fleet} : null;
+  }
+  async function actionContext(room,kind) {
+    const source = actionSource(room); if (!source) return null;
+    const ticket = sequence;
+    const value = await source.row.actions[kind](source.fleet);
+    return disposed || phase !== 'ready' || ticket !== sequence ? null : value;
+  }
+  async function actionOperation(name,value) {
+    const source = actionSource(value?.scope?.fleet);
+    if (!source) throw new Error('Action outcome unknown. Check the original receipt.');
+    const ticket = sequence, result = await source.row.actions[name](value);
+    if (disposed || phase !== 'ready' || ticket !== sequence) throw new Error('Action outcome unknown. Check the original receipt.');
+    return result;
   }
   function createEventSource(url) {
     if (url !== '/api/stream') throw new Error('Only the canonical stream is supported.');
@@ -305,8 +335,8 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         || operation === 'logout' && !['ready','unavailable'].includes(status.state);
     });
   }
-  function mountSessionControls({document, element, onPause = () => {}, onResume = () => {}}) {
-    mount = {document,element,onPause,onResume}; paused = true; invoke(onPause); changed();
+  function mountSessionControls({document, element, onPause = () => {}, onResume = () => {}, onActionPause = () => {}, onActionSourceChange = () => {}}) {
+    mount = {document,element,onPause,onResume,onActionPause,onActionSourceChange}; paused = true; invoke(onPause); changed();
     const unavailable = 'Unavailable in this connected read view. Activity and task records remain available.';
     const disable = () => {
       for (const button of document.querySelectorAll('#view-nav button, [data-bot-inspect]')) {
@@ -332,5 +362,8 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     for (const stream of [...streams]) stream.close(); listeners.clear();
   }
   return Object.freeze({jget,createEventSource,mountSessionControls,dispose,checkAccount,snapshot,act,
+    interactionContext:room => actionContext(room,'interactionContext'),
+    nudgeContext:room => actionContext(room,'nudgeContext'),feedbackContext:room => actionContext(room,'feedbackContext'),
+    prepareAction:value => actionOperation('prepareAction',value),sendAction:value => actionOperation('sendAction',value),actionReceipt:value => actionOperation('actionReceipt',value),
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); }});
 }

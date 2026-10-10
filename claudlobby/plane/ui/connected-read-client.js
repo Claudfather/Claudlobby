@@ -1,4 +1,5 @@
 import { createOwnerTransport } from "./owner-api-client.js";
+import { createSourceActionInterface } from "./connected-actions.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const HOST = /^host_[0-9a-f]{32}$/;
@@ -46,7 +47,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   let token = null, pending = null, binding = null, hostUID = null, expires = 0;
   let epoch = 0, disposed = false, ended = false, busy = false, lastNow = null, expiryTimer = null;
   const requests = new Set(), cursors = new Map();
-  let owner, handle, unsubscribe = () => {};
+  let owner, handle, actions = null, actionEpoch = 0, actionSourceChanged = () => {}, unsubscribe = () => {};
   function now() {
     const value = monotonicNow();
     if (!Number.isFinite(value) || value < 0 || (lastNow !== null && value < lastNow)) {
@@ -196,6 +197,13 @@ export function createConnectedReadClient({ reference, documentContext, currentC
       return { status: result.status, json: async () => result.data };
     }
     if (!valid(true)) throw new Error();
+    const actionPath = /^\/api\/owner\/actions\/(context|prepare|send|receipt)$/.exec(url);
+    if (actionPath) {
+      if (options.method !== 'POST') throw new Error();
+      const result = await http(ref.endpoint_origin + '/api/owner/connected/actions/' + actionPath[1],
+        {method:'POST',body:JSON.parse(options.body),signal:options.signal,timeout:actionPath[1] === 'send' ? 45000 : 15000,limit:32768});
+      return {status:result.status,json:async () => result.data};
+    }
     const route = readRoute(url);
     const result = await http(route.url, { signal: options.signal, limit: 8 * 1024 * 1024 });
     return { status: result.status, json: async () => result.data };
@@ -250,7 +258,12 @@ export function createConnectedReadClient({ reference, documentContext, currentC
           if (size > 8 * 1024 * 1024) throw new Error();
           if (!text) {
             if (data.length) this.emit(event, { type: event, data: data.join('\n'), lastEventId: id ?? cursors.get(route.key) ?? '' },
-              () => { if (id !== null) cursors.set(route.key, id); });
+              () => {
+                if (id !== null) cursors.set(route.key, id);
+                if (event === 'source') {
+                  try { if (['absent','unreadable'].includes(JSON.parse(data.join('\n')).state)) { actionEpoch++; actions?.invalidate(); actionSourceChanged(); } } catch {}
+                }
+              });
             else if (id !== null && this.live()) cursors.set(route.key, id);
             data = []; event = 'message'; id = null; size = 0;
             return;
@@ -292,9 +305,10 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   }
 
   owner = createOwnerTransport({ fetch: carrier, EventSource: FetchStream,
-    monotonicNow, setTimeout, clearTimeout, requestTimeout: 15000, onAccessEnded: () => {},
+    monotonicNow, setTimeout, clearTimeout, requestTimeout: 15000, actionTimeout:15000, onAccessEnded: () => {},
+    onActionPause:(scope,kind,recipient) => actions?.pause(scope,kind,recipient),
     onDispose() {
-      disposed = true; epoch++; wipe(); cursors.clear(); binding = null; unsubscribe();
+      disposed = true; epoch++; wipe(); actions?.invalidate(); cursors.clear(); binding = null; unsubscribe();
     },
     onReadAdmitted() {
       if (!pending || !valid()) throw new Error();
@@ -353,5 +367,12 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   return Object.freeze({ connect, start: () => handle.start(), check: () => handle.start(),
     renew: async () => { if (!busy && valid(true)) { busy = true; try { await owner.sessionControls.renew(); } finally { busy = false; } } },
     logout: async () => { if (!busy && valid(true)) { busy = true; try { await owner.sessionControls.logout(); } finally { busy = false; } } },
+    createActions({key,onPause,onSourceChange = () => {}} = {}) {
+      if (disposed || actions) throw new Error('The selected source action interface is unavailable.');
+      actionSourceChanged = onSourceChange;
+      actions = createSourceActionInterface({key,owner,snapshot:handle.snapshot,
+        stamp:() => `${epoch}:${actionEpoch}:${handle.snapshot().epoch}`,onPause});
+      return actions;
+    },
     dispose, readHandle: handle, snapshot: handle.snapshot, subscribe: handle.subscribe });
 }

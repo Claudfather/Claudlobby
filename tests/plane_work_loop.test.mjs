@@ -1444,3 +1444,15 @@ test('the all-teams channel notice does not attribute room diagnostics to the se
   assert.doesNotMatch(h.get('task-lineage-note').textContent, /in this team|task-a|web|channel window/);
   assert.equal(h.sends.length + h.preparations.length + h.lookups.length, 0);
 });
+
+for (const kind of ['nudge','feedback']) test(`connected qualified ${kind} uses the canonical selected-task composer and retains detail across source action refresh`,async()=>{
+ const source='computer-1',room=source+' / web',id=source+'::'+nudgeTaskId;
+ const capability={...ownerNudge,room,actions:[kind],scope:{...ownerNudge.scope,fleet:room},recipients:ownerNudge.recipients.map(r=>({...r,id:source+'::'+r.id}))};
+ const detail=ownerDetail();detail.data.task={...detail.data.task,task_id:id,fleet:room};
+ const h=harness({interactionContext:()=>null,[kind+'Context']:()=>capability,protected:true,jget:()=>detail,crypto:{randomUUID:()=> '11111111-1111-4111-8111-111111111111'}});
+ h.loop.setRoom(room);await settle();h.open(id,room);await settle();
+ const button=h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind===kind);assert.equal(button.disabled,false);button.onclick();await settle();
+ await h.submit();assert.equal(h.preparations.length,1);assert.equal(h.sends.length,1);assert.equal(h.sends[0].target.task_id,id);assert.equal(h.sends[0].target.assignment_id,null);
+ h.open(id,room);await settle();h.loop.refreshActions('computer-2');assert.equal(h.get('task-detail').open,true);
+ h.loop.refreshActions(source);await settle();assert.equal(h.get('task-detail').open,true);assert.match(h.get('task-detail-content').innerHTML,/Complete canonical body/);
+});

@@ -1494,6 +1494,7 @@ const ownerSession = typeof interactionApi.mountSessionControls === "function"
       },
       onResume: resumeOwnerReads,
       onActionPause(scope, kind, recipient) { workLoop.invalidate(undefined, scope, kind, recipient); },
+      onActionSourceChange(source) { workLoop.refreshActions(source); },
     }) : null;
 
 // Injected multi-source transports own their streams; disposal never signs out a host.
