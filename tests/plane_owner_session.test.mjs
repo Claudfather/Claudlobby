@@ -42,7 +42,7 @@ function harness(replies = [ready], hooks = {}) {
   const node = id => document.getElementById(`owner-session-${id}`);
   const element = document.getElementById('owner-session');
   const controls = api.mountSessionControls({ document, element,
-    onPause() { paused++; hooks.onPause?.(api); }, onResume() { resumed++; hooks.onResume?.(api); }, onActionPause(scope) { hooks.onActionPause?.(api, scope); } });
+    onPause() { paused++; hooks.onPause?.(api); }, onResume() { resumed++; hooks.onResume?.(api); }, onActionPause(scope, kind, recipient) { hooks.onActionPause?.(api, scope, kind, recipient); } });
   return { api, calls, natives, replacements, timers, timeouts, replies, node, element, controls,
     get resumed() { return resumed; }, get paused() { return paused; },
     async click(id) { node(id).click(); await flush(); },
@@ -57,10 +57,10 @@ test('default and synthetic transports do not mount session controls or probe ow
   globalThis.location = { origin: 'http://fixture.example.test', search: '' };
   try {
     const normal = await load(await readFile(new URL('../claudlobby/plane/ui/api-client.js', import.meta.url), 'utf8'));
-    assert.equal(normal.mountSessionControls, undefined);
+    assert.equal(normal.mountSessionControls, undefined);assert.equal(normal.nudgeContext,undefined);assert.equal(normal.prepareAction,undefined);
     await normal.jget('/api/tasks');
     const synthetic = await load(await readFile(new URL('./fixtures/plane_work_loop/api-client.js', import.meta.url), 'utf8'));
-    assert.equal(synthetic.mountSessionControls, undefined);
+    assert.equal(synthetic.mountSessionControls, undefined);assert.equal(synthetic.nudgeContext,undefined);assert.equal(synthetic.prepareAction,undefined);
     await synthetic.jget('/api/tasks');
     await synthetic.jget('/api/channel');
     assert.deepEqual(calls, ['/api/tasks', '/fixture/records']);
@@ -739,8 +739,8 @@ test(`late action403 invalidates only its originating composer: ${change}`, asyn
   const late = deferred(); let loop;
   const fresh = change === 'other room' ? { ...context, room: 'second-team', scope: { ...context.scope, fleet: 'second-team' } }
     : change === 'new grant scope' ? { ...context, scope: { ...context.scope, viewer: 'new-generation-viewer' } } : context;
-  const h = harness([ready, ok(context), () => late.promise, ok(fresh), ready, ok(['board'])], {
-    onActionPause(api, scope) { loop.invalidate(undefined, scope); }
+  const h = harness([ready, ok(context), ok(null), () => late.promise, ok(fresh), ok(null), ready, ok(['board'])], {
+    onActionPause(api, scope, kind, recipient) { loop.invalidate(undefined, scope, kind, recipient); }
   });
   try {
     await h.controls.ready;
@@ -769,4 +769,64 @@ test('late context403 leaves context epoch ownership with the controller', async
   late.resolve(denied); assert.equal(await old, null);
   assert.equal(invalidated, 0); assert.equal(h.node('renew').disabled, false);
   assert.deepEqual(h.replacements, []); h.controls.dispose();
+});
+
+
+const nudgeContext = {version:2,room:'synthetic',simulation:false,scope:{...context.scope,viewer:'nudge-generation'},
+  recipients:[{id:'actor_'+ 'a'.repeat(32),label:'Team lead',lead:true}],actions:['nudge'],release_id:'r-'+ 'b'.repeat(64)};
+const nudgeMetadata = {version:2,request_id:'11111111-1111-4111-8111-111111111111',kind:'nudge',scope:nudgeContext.scope,
+  target:{recipient:nudgeContext.recipients[0].id,task_id:'wi_'+ 'c'.repeat(32),assignment_id:null,release_id:nudgeContext.release_id},
+  submitted_at:'2026-10-10T12:00:00.000Z',semantic_sha256:'d'.repeat(64)};
+test('owner nudge capability, prepare, send and receipt use exact independent v2 bodies and bounded protected requests',async()=>{
+  const {semantic_sha256,...pre}=nudgeMetadata, response={...nudgeMetadata,status:'recorded'};
+  const h=harness([ready,ok(context),ok(nudgeContext),ok(nudgeMetadata),ok(response),ok(response)]);await h.controls.ready;
+  assert.deepEqual(await h.api.interactionContext('synthetic'),context);assert.deepEqual(await h.api.nudgeContext('synthetic'),nudgeContext);
+  assert.deepEqual(await h.api.prepareAction({...pre,body:'Exact reason',unexpected:'removed'}),nudgeMetadata);
+  await h.api.sendAction({...nudgeMetadata,body:'Exact reason'});await h.api.actionReceipt({...nudgeMetadata,body:'must not repeat'});
+  const bodies=h.calls.slice(1).map(call=>JSON.parse(call.options.body));
+  assert.deepEqual(bodies,[{room:'synthetic'},{room:'synthetic',kind:'nudge'},{...pre,body:'Exact reason'},
+    {...nudgeMetadata,body:'Exact reason'},nudgeMetadata]);
+  assert.deepEqual(h.calls.slice(1).map(call=>call.url),['/api/owner/actions/context','/api/owner/actions/context','/api/owner/actions/prepare','/api/owner/actions/send','/api/owner/actions/receipt']);
+  for(const call of h.calls.slice(1)) {assert.equal(call.options.credentials,'same-origin');assert.equal(call.options.cache,'no-store');assert.equal(call.options.redirect,'error');assert.equal(call.options.headers['X-Claudlobby-Owner'],'1');}
+  assert.deepEqual(h.timeouts,[8000,8000,8000,8000,45000,8000]);
+});
+test('nudge context refusal does one direct status check while message/read access remains ready',async()=>{
+  const h=harness([ready,denied,ready,ok(context),ok({state:'ok',data:{tasks:[]}})]);await h.controls.ready;
+  assert.equal(await h.api.nudgeContext('synthetic'),null);assert.equal(h.resumed,1);assert.equal(h.replacements.length,0);
+  assert.deepEqual(await h.api.interactionContext('synthetic'),context);assert.equal((await h.api.jget('/api/tasks')).state,'ok');
+  assert.equal(h.calls.filter(call=>call.url==='/api/owner/status').length,2);
+});
+test('nudge mutation refusal identifies only original nudge scope and never replays prepare or send',async()=>{
+  const pauses=[],h=harness([ready,denied,ready,ok({state:'ok'})],{onActionPause(_api,scope,kind,recipient){pauses.push({scope,kind,recipient});}});await h.controls.ready;
+  await assert.rejects(h.api.sendAction({...nudgeMetadata,body:'Reason'}),/unknown/);
+  assert.deepEqual(pauses,[{scope:nudgeMetadata.scope,kind:'nudge',recipient:nudgeMetadata.target.recipient}]);assert.equal(h.resumed,1);assert.equal(h.replacements.length,0);
+  assert.equal((await h.api.jget('/api/tasks')).state,'ok');assert.equal(h.calls.filter(call=>call.url.endsWith('/send')).length,1);
+  assert.ok(!h.calls.some(call=>call.url.endsWith('/prepare')));
+});
+for(const lifecycle of ['renew','logout'])
+test(`session ${lifecycle} fences late nudge prepare and send results without mutation replay`,async()=>{
+  const {semantic_sha256,...pre}=nudgeMetadata;
+  for(const path of ['prepare','send']) {
+    const late=deferred(),h=harness([ready,()=>late.promise,ok(lifecycle==='renew'?{state:'ready'}:{state:'signed_out'})]);await h.controls.ready;
+    const operation=path==='prepare'?h.api.prepareAction({...pre,body:'Reason'}):h.api.sendAction({...nudgeMetadata,body:'Reason'});
+    const rejected=assert.rejects(operation,/unknown/);await h.click(lifecycle);
+    late.resolve(ok(path==='prepare'?nudgeMetadata:{...nudgeMetadata,status:'delivered'}));await rejected;
+    assert.equal(h.calls.filter(call=>call.url.endsWith('/'+path)).length,1);
+    assert.equal(h.calls.filter(call=>call.url.endsWith('/prepare')).length,path==='prepare'?1:0);
+  }
+});
+test('owner rejects missing assignment and legacy synthetic nudges before any network operation',async()=>{
+  const h=harness([ready]);await h.controls.ready;
+  for(const changed of [{version:1},{version:undefined},{target:{...nudgeMetadata.target,assignment_id:''}},
+    {target:{recipient:nudgeMetadata.target.recipient,task_id:nudgeMetadata.target.task_id,release_id:nudgeMetadata.target.release_id}}])
+    await assert.rejects(h.api.sendAction({...nudgeMetadata,...changed,body:'Reason'}),/Unsupported/);
+  assert.equal(h.calls.length,1);
+});
+
+
+test('app forwards capability kind and original scope without globally pausing task reads',async()=>{
+  const app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
+  const body=app.match(/onActionPause\(scope, kind, recipient\) \{([^}]+)\}/)[1],calls=[];
+  runInNewContext(`(function(scope,kind,recipient){${body}})(scope,kind,recipient)`,{scope:nudgeMetadata.scope,kind:'nudge',recipient:nudgeMetadata.target.recipient,workLoop:{invalidate(...args){calls.push(args);}}});
+  assert.deepEqual(calls,[[undefined,nudgeMetadata.scope,'nudge',nudgeMetadata.target.recipient]]);
 });

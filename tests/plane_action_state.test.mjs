@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ActionState, validContext } from '../claudlobby/plane/ui/action-state.js';
+import { ActionState, validContext, validNudgeContext } from '../claudlobby/plane/ui/action-state.js';
 
 const context = {version:1, room:'web', simulation:true,
   scope:{workspace:'example', host:'workshop', fleet:'web', viewer:'owner'},
@@ -171,4 +171,65 @@ test('mixed and over-capacity saved arrays retain valid IDs for copy without rew
     state.clearCorruptStorage();
     assert.equal(state.recoverable.length,0);
   }
+});
+
+
+const nudgeContext = {version:2,room:'web',simulation:false,scope:{...context.scope,viewer:'nudge-generation'},
+  recipients:[{id:'actor_'+ 'a'.repeat(32),label:'Team lead',lead:true}],actions:['nudge'],release_id:'r-'+ 'b'.repeat(64)};
+const nudgeTarget = {recipient:nudgeContext.recipients[0].id,task_id:'wi_'+ 'c'.repeat(32),assignment_id:null,release_id:nudgeContext.release_id};
+const nudgeId = '11111111-1111-4111-8111-111111111111';
+const prepared = request => {const {body,...metadata}=request;return {...metadata,semantic_sha256:'d'.repeat(64)};};
+const nudgeReceipt = (request,status='delivered') => {const {body,...metadata}=request;return {...metadata,status};};
+test('v2 preparation is nonmutating; saved queued-null metadata reloads without reason alongside unchanged v1 rows',()=>{
+  const store=storage(),state=new ActionState(store),legacy=state.begin(context,'message',{recipient:'lead',task_id:null},'Message draft','legacy-id');
+  const before=store.getItem(state.key), request=state.prepare(nudgeContext,nudgeTarget,'Exact nudge reason',nudgeId);
+  assert.equal(store.getItem(state.key),before);assert.equal(state.pending.length,1);assert.equal(state.sentBodies.has(nudgeId),false);
+  const sending=state.beginPrepared(nudgeContext,request,prepared(request));
+  assert.equal(sending.body,'Exact nudge reason');assert.ok(!store.getItem(state.key).includes('Exact nudge reason'));
+  const restored=new ActionState(store);assert.equal(restored.storageError,false);assert.deepEqual(restored.pending[0],state.metadata(legacy));
+  assert.equal(restored.pending[1].target.assignment_id,null);assert.equal(restored.pending[1].semantic_sha256,'d'.repeat(64));
+  restored.accept(restored.pending[1],nudgeReceipt(sending,'recorded'));assert.equal(restored.pending.length,2);
+  restored.accept(restored.pending[1],nudgeReceipt(sending));assert.equal(restored.pending.length,1);
+});
+test('nudge receipts bind digest, timestamp and every frozen precondition; logical task guard cannot be evaded',()=>{
+  const state=new ActionState(storage()),request=state.prepare(nudgeContext,nudgeTarget,'Reason',nudgeId);
+  const sending=state.beginPrepared(nudgeContext,request,prepared(request));
+  for(const target of [{...nudgeTarget,assignment_id:'asg_'+ 'e'.repeat(32)},{...nudgeTarget,release_id:'r-'+ 'e'.repeat(64)}])
+    assert.throws(()=>state.prepare({...nudgeContext,release_id:target.release_id},target,'New reason','22222222-2222-4222-8222-222222222222'),/original receipt/);
+  for(const changed of [{semantic_sha256:'e'.repeat(64)},{submitted_at:'2026-01-02T00:00:00Z'},
+    {target:{...nudgeTarget,assignment_id:'asg_'+ 'e'.repeat(32)}},{target:{...nudgeTarget,release_id:'r-'+ 'e'.repeat(64)}},
+    {target:{...nudgeTarget,recipient:'actor_'+ 'e'.repeat(32)}},{version:1},{kind:'message'},{status:'unknown'},{body:'unrequested body'}])
+    assert.throws(()=>state.accept(sending,{...nudgeReceipt(sending),...changed}),/does not match/);
+  assert.equal(state.pending.length,1);
+});
+test('nudge preparation requires canonical explicit preconditions and exact returned metadata',()=>{
+  const state=new ActionState(storage());assert.equal(validNudgeContext(nudgeContext),true);
+  for(const bad of [{...nudgeContext,actions:['message','nudge']},{...nudgeContext,simulation:true},{...nudgeContext,release_id:'bad'}])
+    assert.equal(validNudgeContext(bad),false);
+  for(const target of [{recipient:nudgeTarget.recipient,task_id:nudgeTarget.task_id,release_id:nudgeTarget.release_id},
+    {...nudgeTarget,assignment_id:undefined},{...nudgeTarget,assignment_id:''},{...nudgeTarget,assignment_id:'task-alias'},
+    {...nudgeTarget,recipient:'lead'},{...nudgeTarget,task_id:'task-alias'},{...nudgeTarget,release_id:'r-bad'}])
+    assert.throws(()=>state.prepare(nudgeContext,target,'Reason',nudgeId),/unavailable/);
+  assert.throws(()=>state.prepare(nudgeContext,nudgeTarget,'Bad \uD800 reason',nudgeId),/reason/);
+  const request=state.prepare(nudgeContext,nudgeTarget,'Reason',nudgeId);
+  for(const changed of [{body:'Reason'},{status:'recorded'},{target:{...nudgeTarget,assignment_id:'asg_'+ 'e'.repeat(32)}},
+    {request_id:'22222222-2222-4222-8222-222222222222'},{semantic_sha256:'bad'}])
+    assert.throws(()=>state.beginPrepared(nudgeContext,request,{...prepared(request),...changed}),/did not match/);
+  assert.equal(state.pending.length,0);
+});
+test('combined pending capacity and serialized write ceiling fail before either action can send',()=>{
+  const store=storage(),state=new ActionState(store);
+  for(let i=0;i<19;i++) state.begin(context,'message',{recipient:'lead',task_id:`legacy-${i}`},'Body',`id-${i}`);
+  const request=state.prepare(nudgeContext,nudgeTarget,'Reason',nudgeId);state.beginPrepared(nudgeContext,request,prepared(request));
+  assert.equal(state.pending.length,20);
+  assert.throws(()=>state.prepare(nudgeContext,{...nudgeTarget,task_id:'wi_'+ 'e'.repeat(32)},'Reason','22222222-2222-4222-8222-222222222222'),/Nothing was sent/);
+  const oversized=new ActionState(storage()), escaped={...context,scope:Object.fromEntries(Object.keys(context.scope).map(key=>[key,'\u0000'.repeat(240)]))};
+  let ceilingBlocked=false;
+  for(let i=0;i<20;i++) {
+    try {oversized.begin(escaped,'message',{recipient:'lead',task_id:`task-${i}`},'Body',`oversized-${i}`);}
+    catch(error) {assert.match(error.message,/Nothing was sent/);ceilingBlocked=true;break;}
+  }
+  assert.equal(ceilingBlocked,true);assert.ok(oversized.pending.length<20);assert.ok(oversized.storage.getItem(oversized.key).length<=50000);
+  const broken=storage();broken.setItem=()=>{throw Error('quota');};const blocked=new ActionState(broken),pre=blocked.prepare(nudgeContext,nudgeTarget,'Reason',nudgeId);
+  assert.throws(()=>blocked.beginPrepared(nudgeContext,pre,prepared(pre)),/Nothing was sent/);assert.equal(blocked.pending.length,0);
 });

@@ -4,14 +4,45 @@ const VERBS = new Set(["message", "feedback", "nudge"]);
 const FIELDS = ["workspace", "host", "fleet", "viewer"];
 const bounded = value => typeof value === "string" && value.length > 0 && value.length <= 240;
 export const scopeKey = scope => JSON.stringify(FIELDS.map(key => scope?.[key]));
-const targetKey = target => JSON.stringify([target?.recipient, target?.task_id || ""]);
-export const rowKey = row => JSON.stringify([scopeKey(row.scope), row.kind, targetKey(row.target)]);
+const targetKey = (target, version) => JSON.stringify(version === 2
+  ? [target?.recipient, target?.task_id, target?.assignment_id, target?.release_id]
+  : [target?.recipient, target?.task_id || ""]);
+export const rowKey = row => JSON.stringify([scopeKey(row.scope), row.kind, targetKey(row.target, row.version)]);
 const validScope = scope => scope && FIELDS.every(key => bounded(scope[key]));
 const validTarget = target => target && bounded(target.recipient)
   && (target.task_id === null || bounded(target.task_id));
-const validRow = row => row && bounded(row.request_id) && validScope(row.scope)
+const validLegacyRow = row => row && row.version !== 2 && bounded(row.request_id) && validScope(row.scope)
   && VERBS.has(row.kind) && validTarget(row.target) && bounded(row.submitted_at)
   && Number.isFinite(Date.parse(row.submitted_at));
+
+const exact = (value, keys) => value && typeof value === "object" && !Array.isArray(value)
+  && Object.keys(value).sort().join() === [...keys].sort().join();
+const canonical = (value, prefix) => typeof value === "string" && new RegExp(`^${prefix}_[0-9a-f]{32}$`).test(value);
+const release = value => typeof value === "string" && /^r-[0-9a-f]{64}$/.test(value);
+const uuid = value => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
+const timestamp = value => bounded(value) && /^\d{4}-\d\d-\d\dT.*(?:Z|[+-]\d\d:\d\d)$/.test(value) && Number.isFinite(Date.parse(value));
+export const validNudgeTarget = target => exact(target, ["recipient", "task_id", "assignment_id", "release_id"])
+  && canonical(target.recipient, "actor") && canonical(target.task_id, "wi")
+  && (target.assignment_id === null || canonical(target.assignment_id, "asg")) && release(target.release_id);
+const nudgeKeys = ["version", "request_id", "kind", "scope", "target", "submitted_at", "semantic_sha256"];
+const validNudgeRow = row => row?.version === 2 && row.kind === "nudge" && uuid(row.request_id)
+  && exact(row.scope, FIELDS) && validScope(row.scope) && validNudgeTarget(row.target) && timestamp(row.submitted_at)
+  && typeof row.semantic_sha256 === "string" && /^[0-9a-f]{64}$/.test(row.semantic_sha256);
+const validRow = row => row?.version === 2 ? exact(row, nudgeKeys) && validNudgeRow(row) : validLegacyRow(row);
+const logicalKey = row => row.version === 2
+  ? JSON.stringify([scopeKey(row.scope), row.kind, row.target.recipient, row.target.task_id]) : rowKey(row);
+export function validNudgeContext(context) {
+  return context?.version === 2 && context.simulation === false && validScope(context.scope)
+    && exact(context.scope, FIELDS) && bounded(context.room) && context.scope.fleet === context.room && release(context.release_id)
+    && Array.isArray(context.actions) && context.actions.length === 1 && context.actions[0] === "nudge"
+    && Array.isArray(context.recipients) && context.recipients.length === 1
+    && canonical(context.recipients[0].id, "actor") && bounded(context.recipients[0].label) && context.recipients[0].lead === true;
+}
+export function samePreparation(request, prepared) {
+  return exact(prepared, nudgeKeys) && validNudgeRow(prepared)
+    && prepared.request_id === request.request_id && prepared.submitted_at === request.submitted_at
+    && rowKey(prepared) === rowKey(request);
+}
 
 export function validContext(context) {
   return context?.version === 1 && validScope(context.scope)
@@ -26,7 +57,11 @@ export function validContext(context) {
 }
 
 export function sameReceipt(request, receipt) {
-  return receipt?.version === 1 && validRow(receipt)
+  if (request?.version === 2) return exact(receipt, [...nudgeKeys, "status"]) && receipt.version === 2 && validNudgeRow(receipt)
+    && receipt.request_id === request.request_id && receipt.submitted_at === request.submitted_at
+    && receipt.semantic_sha256 === request.semantic_sha256 && rowKey(receipt) === rowKey(request)
+    && ["recorded", "delivered", "rejected"].includes(receipt.status);
+  return receipt?.version === 1 && validLegacyRow(receipt)
     && receipt.request_id === request.request_id && rowKey(receipt) === rowKey(request)
     && ["recorded", "delivered", "rejected"].includes(receipt.status);
 }
@@ -59,9 +94,11 @@ export class ActionState {
   }
 
   metadata(row) {
-    return { request_id: row.request_id, kind: row.kind,
+    return { ...(row.version === 2 ? { version: 2, semantic_sha256: row.semantic_sha256 } : {}),
+      request_id: row.request_id, kind: row.kind,
       scope: Object.fromEntries(FIELDS.map(key => [key, row.scope[key]])),
-      target: { recipient: row.target.recipient, task_id: row.target.task_id },
+      target: { recipient: row.target.recipient, task_id: row.target.task_id,
+        ...(row.version === 2 ? { assignment_id: row.target.assignment_id, release_id: row.target.release_id } : {}) },
       submitted_at: row.submitted_at };
   }
 
@@ -72,7 +109,7 @@ export class ActionState {
     else this.drafts.delete(key);
   }
 
-  unresolved(row) { return this.pending.find(p => rowKey(p) === rowKey(row)); }
+  unresolved(row) { return this.pending.find(p => logicalKey(p) === logicalKey(row)); }
 
   begin(context, kind, target, body, requestId) {
     if (!validContext(context) || !context.actions.includes(kind)
@@ -90,11 +127,46 @@ export class ActionState {
       throw new Error("Pending requests cannot be saved. Nothing was sent.");
     const rows = [...this.pending, this.metadata(request)];
     // Must succeed BEFORE the adapter can send. Never lose an uncertain ID.
-    try { this.storage.setItem(this.key, JSON.stringify(rows)); }
-    catch { throw new Error("Pending requests cannot be saved. Nothing was sent."); }
+    try {
+      const serialized = JSON.stringify(rows);
+      if (serialized.length > 50000) throw new Error();
+      this.storage.setItem(this.key, serialized);
+    } catch { throw new Error("Pending requests cannot be saved. Nothing was sent."); }
     this.pending = rows;
     this.sentBodies.set(requestId, body);
     return { ...this.metadata(request), body };
+  }
+
+  prepare(context, target, body, requestId) {
+    if (!validNudgeContext(context) || !validNudgeTarget(target)
+        || target.recipient !== context.recipients[0].id || target.release_id !== context.release_id)
+      throw new Error("This task nudge is unavailable. Refresh the task and select it again.");
+    if (typeof body !== "string" || !body.trim() || body.length > 2000 || /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(body))
+      throw new Error("Enter a reason of up to 2,000 characters.");
+    const request = { version: 2, request_id: requestId, kind: "nudge", scope: { ...context.scope },
+      target: { ...target }, submitted_at: new Date().toISOString(), body };
+    if (!uuid(requestId)) throw new Error("A safe request ID is unavailable. Nothing was sent.");
+    if (this.unresolved(request)) throw new Error("Check the original receipt before sending again.");
+    if (this.pending.some(p => p.request_id === requestId) || this.discarded.has(requestId))
+      throw new Error("This request ID was already used. Nothing was sent.");
+    if (this.storageError || this.pending.length >= 20)
+      throw new Error("Pending requests cannot be saved. Nothing was sent.");
+    return request; // Preparation is nonmutating; no saved row or sent body.
+  }
+
+  beginPrepared(context, request, prepared) {
+    if (!samePreparation(request, prepared)) throw new Error("Task nudge preparation did not match. Nothing was sent.");
+    // Recheck the capability and logical pending block after the async prepare.
+    this.prepare(context, request.target, request.body, request.request_id);
+    const row = this.metadata(prepared), rows = [...this.pending, row];
+    try {
+      const serialized = JSON.stringify(rows);
+      if (serialized.length > 50000) throw new Error();
+      this.storage.setItem(this.key, serialized);
+    } catch { throw new Error("Pending requests cannot be saved. Nothing was sent."); }
+    this.pending = rows;
+    this.sentBodies.set(row.request_id, request.body);
+    return { ...row, body: request.body };
   }
 
   // Only the explicit, confirmed UI recovery action calls this. Never clear

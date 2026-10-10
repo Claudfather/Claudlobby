@@ -162,7 +162,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
       // the current cookie without pause/resume, which would reload context.
       // Context failures are already fenced by the controller room epoch.
       // A mutation/receipt refusal may invalidate only its original scope.
-      if (path !== 'context') mount?.onActionPause(body.scope);
+      if (path !== 'context') mount?.onActionPause(body.scope, body.kind || 'message', body.target?.recipient);
       await checkActionSession(gen);
       if (disposed || gen !== generation || mode !== 'ready') throw unknown();
       if (path === 'send' && result.data?.effect === 'not_started') {
@@ -211,15 +211,40 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
       return context;
     } catch { return null; }
   }
-  function actionMetadata(value) {
-    if (value?.kind !== 'message' || value.target?.task_id !== null) throw new Error('Unsupported action.');
-    return { request_id: value.request_id, kind: value.kind,
-      scope: { workspace: value.scope?.workspace, host: value.scope?.host,
-        fleet: value.scope?.fleet, viewer: value.scope?.viewer },
+  async function nudgeContext(room) {
+    if (typeof room !== 'string' || !room || room === 'all') return null;
+    try {
+      const context = await ownerAction('context', { room, kind: 'nudge' });
+      if (context?.version !== 2 || context.simulation !== false || context.room !== room || context.scope?.fleet !== room
+          || !Array.isArray(context.actions) || context.actions.length !== 1 || context.actions[0] !== 'nudge'
+          || !Array.isArray(context.recipients) || context.recipients.length !== 1 || context.recipients[0].lead !== true
+          || !/^r-[0-9a-f]{64}$/.test(context.release_id)) return null;
+      return context; // Shared controller validates the complete capability.
+    } catch { return null; }
+  }
+  function actionMetadata(value, preparing = false) {
+    const scope = { workspace: value?.scope?.workspace, host: value?.scope?.host,
+      fleet: value?.scope?.fleet, viewer: value?.scope?.viewer };
+    if (value?.version === 2 && value.kind === 'nudge') {
+      const target = value.target;
+      if (!/^actor_[0-9a-f]{32}$/.test(target?.recipient) || !/^wi_[0-9a-f]{32}$/.test(target?.task_id)
+          || !Object.hasOwn(target, 'assignment_id') || !(target.assignment_id === null || /^asg_[0-9a-f]{32}$/.test(target.assignment_id))
+          || !/^r-[0-9a-f]{64}$/.test(target.release_id)
+          || (!preparing && !/^[0-9a-f]{64}$/.test(value.semantic_sha256))) throw new Error('Unsupported task nudge.');
+      return { version: 2, request_id: value.request_id, kind: 'nudge', scope,
+        target: { recipient: target.recipient, task_id: target.task_id, assignment_id: target.assignment_id, release_id: target.release_id },
+        submitted_at: value.submitted_at, ...(!preparing ? { semantic_sha256: value.semantic_sha256 } : {}) };
+    }
+    if (preparing || value?.kind !== 'message' || value.target?.task_id !== null || value.version !== undefined)
+      throw new Error('Unsupported action.');
+    return { request_id: value.request_id, kind: value.kind, scope,
       target: { recipient: value.target.recipient, task_id: null }, submitted_at: value.submitted_at };
   }
+  async function prepareAction(value) {
+    return ownerAction('prepare', { ...actionMetadata(value, true), body: value.body });
+  }
   async function sendAction(value) {
-    // Delivery can outlast lifecycle reads. One bounded attempt, never a retry.
+    // One bounded attempt. Timeout/abort never means native work stopped.
     return ownerAction('send', { ...actionMetadata(value), body: value.body }, 45000);
   }
   async function actionReceipt(value) {
@@ -306,7 +331,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
     pause('unavailable');
     for (const stream of [...streams]) stream.close();
   }
-  return { jget, createEventSource, mountSessionControls, interactionContext, sendAction, actionReceipt };
+  return { jget, createEventSource, mountSessionControls, interactionContext, nudgeContext, prepareAction, sendAction, actionReceipt };
 }
 
 const owner = createOwnerTransport();
@@ -316,3 +341,6 @@ export const mountSessionControls = owner.mountSessionControls;
 export const interactionContext = owner.interactionContext;
 export const sendAction = owner.sendAction;
 export const actionReceipt = owner.actionReceipt;
+
+export const nudgeContext = owner.nudgeContext;
+export const prepareAction = owner.prepareAction;
