@@ -134,7 +134,16 @@ def test_real_native_send_uses_exact_session_and_pane_target(startup_delay):
                                     timeout=30, runner=runner)
             worker = native("capture-pane", "-t", "worker", "-p", "-S", "-").stdout
             other = native("capture-pane", "-t", "worker-extra", "-p", "-S", "-").stdout
-            received = log.read_bytes() if log.exists() else b""
+            # Enter submission returns before the receiver necessarily appends
+            # its log. Observe a complete line without sending any more input.
+            deadline = time.monotonic() + 5
+            while True:
+                received = log.read_bytes() if log.exists() else b""
+                if received.endswith(b"\n"):
+                    break
+                assert time.monotonic() < deadline, (
+                    "receiver log did not complete", result, received, worker, other)
+                time.sleep(0.02)
             evidence = (result, received, worker, other)
             assert len(calls) == 1, evidence
             assert result.status == "submitted" and result.native_returncode == 0, evidence
