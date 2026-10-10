@@ -6,6 +6,84 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — private-socket owner ingress and recorder-source binding
+
+`host owner serve` runs the protected canonical Plane behind an explicitly
+configured Tailscale Serve Unix socket, with native numeric human identity,
+bounded CLI lookups and no TCP fallback. `host owner bind-source` requires local
+terminal attestation before the recorder can be served; protected queries refuse
+foreign or mixed-host storage in the same SQLite snapshot they read. Socket
+permissions, restart cleanup and revocation are exercised on disposable data.
+This adds an opt-in foreground door; it does not change the default Plane
+service, configure Tailscale, activate a fleet, or grant bot messaging. Actual
+Serve/HTTPS and Mini/Pi acceptance remain deployment work.
+
+### Added — local owner approval and direct-host sign-in page
+
+`host owner initialize|confirm|revoke` require an explicit installation root
+and interactive operator terminal; pairing codes are read with hidden input,
+never as command arguments. The terminal shows the exact principal before
+approval, and stale revocation cannot remove a replacement pairing.
+`host owner status --json` inspects authority without creating it. The internal
+browser factory serves a self-contained `/owner` page for pairing, sign-in and
+sign-out, with no website dependency or persistent browser credential storage.
+Existing private reads remain gated. Trusted Tailscale ingress and network
+activation remain separate; the default Plane service keeps its existing
+read-only behavior and serves the new inert static assets without owner APIs.
+
+### Fixed — `bot stop` waits for the stopped session to exit before proving it quiet, and `bot session` reads a cleanly stopped bot as absent (#2227)
+
+A bot unit runs with `KillMode=process`, so systemd marks it stopped as soon as its `ExecStop` (`tmux kill-server`) returns, while the session it started (the tmux server, `claude`, its MCP servers) is still exiting. `bot stop` read the unit's cgroup once, right then, so it refused and reported a stop that had worked as "bot lifecycle effect is unverified". Two stops on another fleet read that way on 2026-10-07, and each session had left the cgroup within about 2 s.
+
+- **The stop's quiet check waits, within a bound.** `svc_activation_quiet` takes an optional wait in seconds, and `assert_quiescent(..., settle_s=N)` passes it. Only "inactive, with processes still in the cgroup" is re-read, every 0.25 s, from the cgroup first seen, because systemd stops reporting the cgroup once it collects the emptied unit. Processes left after the wait still refuse, so the stop still reads unverified. Every other refusal returns at once. `bot stop` waits up to 30 s, on both of its branches. Every other caller still reads the cgroup once.
+- **A cgroup that vanishes while it is read counts as empty.** systemd removes an emptied unit's cgroup, and the kernel removes only an empty one. So the read no longer refuses at the moment the session finishes exiting.
+- **`bot session` and `fleet reconcile` read a cleanly stopped bot as absent.** tmux leaves its socket file behind after a clean exit, and `bot stop` keeps it, so the session observer read `unknown` and the bot `indeterminate`. `bot move` already handles this case, and these commands now use its kernel proof: an inactive exact unit, an empty cgroup where one is witnessed, and a socket that refuses connections. When all three hold, the session reads `absent`. Nothing is removed.
+- **Not changed:** `bot restart` (#1586), `bot start`, activation and `bot move` keep their single reading.
+- **Tests:**
+  - `tests/test_activation_supervisor.sh`: the wait, the cgroup kept as the witness, the bound, an immediate refusal and the range of the wait.
+  - `tests/test_activation_runtime.py`: the wait reaches the native check, with a call budget that covers it.
+  - `tests/test_bot_operations.py`: the stop waits, and both a session that never exits and a stop that never happened read unverified.
+  - `tests/test_fleet_operations.py`: a stale socket reads absent only by the proof.
+
+### Added — internal direct-host browser session transport
+
+An internal factory connects an explicitly verified principal to local owner
+pairing and protected Plane reads. Exact status, pairing, sign-in, renewal and
+sign-out routes reuse the existing owner authority; session credentials stay
+in a Secure/HttpOnly host cookie. Host, Origin and explicit request-intent checks
+guard lifecycle writes, while static files and SSE retain the read gate's
+per-delivery checks. No runtime command enables it. A production identity
+verifier, local confirmation UI and actual HTTPS browser validation remain
+required; website OAuth and bot action endpoints are outside this increment.
+
+### Added — internal owner-authorized ordinary-message adapter
+
+An explicitly paired host owner can receive a separately approved message grant
+for one fleet and existing human actor. The internal adapter checks that grant,
+current identities and active-release admission before using the same send and
+receiver-integrity workflow as the CLI. It retains request evidence for recovery
+without resending, including when communication recording failed. Reader sessions
+remain read-only by default. No browser endpoint or runtime service enables this
+adapter; trusted ingress, local confirmation UI and real bot canary validation
+remain required before browser operations are activated.
+
+### Fixed — the oversize-request daemon test passes when the daemon closes before the test's shutdown (#2215)
+
+`test_oversize_request_refused_not_fatal` guarded its send but not the `shutdown(SHUT_WR)` after it. When the send fit and the daemon refused and closed before that shutdown, macOS raised ENOTCONN where Linux returns, and a macOS lane failed (CI run 37550245839, attempt 1). The shutdown now sits inside the send's guard, so either order is an expected outcome. The test still checks any refusal it reads, and that the daemon serves the next request. Test-only.
+
+### Fixed — a usage-limit stop is named, paged, and (opt-in) resumed once after its reset (#996)
+
+A claude.ai usage limit ends a bot's turn with one line, `You've hit your session limit · resets 10:50pm (America/New_York)`, and on this estate nothing resumed it. Every bot runs with `--remote-control`, and while that bridge is up Claude Code (2.1.291 and 2.1.292, read from the binary and reproduced) arms neither its own automatic continue nor its limit menu. The pane sat at an empty prompt that keepalive read as IDLE, so `data/.idle` also kept `activity_stuck` quiet, and bots sat 75 to 85 minutes past the reset until someone noticed.
+
+- **keepalive reads that frame as `LIMIT`, not `IDLE`.** It takes two facts, never one. The first is the bot's own record: `usage-limit-hook.sh`, a new StopFailure and Stop hook, writes `data/.usage-limit` when Claude Code ends a turn with `error: rate_limit` and clears it when a turn ends normally. The second is the whole pane: the new `usage-limit.py` reads the limit line, which sits above `tail -10`, as the bot's last word, with its reset time and what holds the screen. A limit line a bot merely quotes writes no record, so it is never a stop. `LIMIT` writes `data/.limit`, no `.idle`, and sends no reload and no bridge heal. It rides the heartbeat sample, and `fleet status` shows `limit`.
+- **The reset is read as Claude Code prints it.** A time with no date is within 24 hours after the hit that printed it, since Claude Code adds the date only beyond 24 hours. In the hour that repeats when DST ends, it is the later pass: an hour late delays a resume, an hour early would type it while the limit holds. A later hit in the same hold that prints the same limit and reset reads the reset the hold first read, so a hit after the reset is not read as tomorrow's.
+- **fleet-pulse pages `usage_limit_held` (critical) in place of `activity_stuck`** when a bot is still held after its reset: the printed minute, plus 60 s (the print drops the seconds), plus keepalive's resume grace, plus `OBSERVABILITY_USAGE_LIMIT_SLACK_S` (300 s). The page names the limit, the reset and the remedy. Before the reset, a held bot pages nobody: that wait is expected.
+- **The resume is opt-in per bot (`KEEPALIVE_LIMIT_RESUME_ENABLED=1` in its `fleet.yaml` env).** Runtime scripts are in force on every bot at activation, and this door types into a bot's pane, so one armed bot is the only canary. Once the reset has passed, it takes one action per reset, recorded before its first key and emitted as `keepalive_limit_resume`:
+  - If the usage-limit menu is up with its pointer on the exact label "Stop and wait for limit to reset", it sends one Enter. It never chooses by position: a server flag can put usage credits first, and a pointer anywhere else gets no keys.
+  - It then sends the resume prompt.
+  - Any other menu or dialog, a box holding text, or a running turn gets no keys. Neither does a second limit with the same reset: that one goes to an operator.
+- **`usage_limit_hit`** records each stop with the limit line, and the protocol's "no instrument reports `rate_limit`" now reads: a limit that trips is recorded; position against the ceiling still is not.
+
 ### Fixed — each fleet's copy of an interval timer is anchored to the clock at its own second on the host (#1654)
 
 On a host with several fleets, every fleet composed the same interval timers, and each job's copies fired together: four keepalives and the host probe in one second every minute, four pulse sweeps every five minutes. A first-run offset alone does not last. A timer that counts from its last start (`OnUnitActiveSec=`) moves all its later ticks whenever a start is pulled early by a wake of the user manager or delayed by load, and copies that meet share a wake from then on. Measured on a four-fleet host, offset copies merged again within minutes to an hour with `AccuracySec=10`, and two of five merged within 75 minutes with `AccuracySec=1`.

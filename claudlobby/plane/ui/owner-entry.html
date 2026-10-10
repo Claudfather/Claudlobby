@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Owner access · Claudfather Plane</title>
+  <link rel="stylesheet" href="/owner-entry.css">
+  <script type="module" src="/owner-entry.js"></script>
+</head>
+<body>
+  <main class="owner-card" aria-labelledby="owner-title">
+    <p class="brand">Claudfather <span>Plane</span></p>
+    <h1 id="owner-title">Owner access</h1>
+    <p>This host’s private fleet view opens after local owner approval and a browser sign-in.</p>
+    <p id="owner-status" role="status" aria-live="polite" aria-atomic="true">Checking access…</p>
+    <section id="owner-pairing" aria-labelledby="pairing-title" hidden>
+      <h2 id="pairing-title">Approve this exact identity locally</h2>
+      <dl>
+        <dt>Identity namespace</dt><dd id="owner-namespace"></dd>
+        <dt>Identity subject</dt><dd id="owner-subject"></dd>
+        <dt>Code expires</dt><dd id="owner-expires"></dd>
+        <dt>One-time pairing code</dt><dd><output id="owner-challenge" class="pairing-code"></output></dd>
+      </dl>
+      <ol>
+        <li>On this host, run <code>claudlobby --root DATA_ROOT host owner confirm</code>. Replace <code>DATA_ROOT</code> with this host’s configured data root; no root path is sent to this page.</li>
+        <li>Paste this code at the interactive prompt. Compare the namespace and subject above before approving.</li>
+        <li>Check approval here, then choose Sign in.</li>
+      </ol>
+      <p>The code stays on this page until approval or expiry. Reloading loses it; you can start pairing again. Never put it in a URL or a command argument.</p>
+    </section>
+    <div class="actions" aria-label="Owner access actions">
+      <button id="owner-pair" type="button" hidden>Start pairing</button>
+      <button id="owner-check" type="button">Check status</button>
+      <button id="owner-login" type="button" hidden>Sign in</button>
+      <a id="owner-open" href="/" hidden>Open Plane</a>
+      <button id="owner-logout" type="button" hidden>Sign out</button>
+    </div>
+    <p class="session-note">Sign out ends only this browser session. Local owner pairing remains, so you can sign in again. Other browser sessions keep their own access.</p>
+    <noscript><p>Enable JavaScript to pair and sign in. Fleet information stays protected.</p></noscript>
+  </main>
+</body>
+</html>

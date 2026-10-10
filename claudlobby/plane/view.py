@@ -54,6 +54,7 @@ from ..task_queries import task_escalations_from_snapshot
 
 try:  # §14: optional UI features degrade without disabling the core ledger
     from fastapi import FastAPI, Request
+    from starlette.concurrency import run_in_threadpool
     from fastapi.responses import JSONResponse, StreamingResponse
     from fastapi.staticfiles import StaticFiles
 except ImportError as _exc:  # pragma: no cover - exercised via CLI refusal
@@ -71,6 +72,7 @@ from ..source_state import (
 from .daemon import probe_daemon, socket_path
 from .emit_api import CaptureConfigError, capture_mode, load_capture_config
 from .ingest import CONSTRUCT_TABLES
+from .owner_access import AccessUnavailable
 from .spool import oldest_spooled_at, scan_spool
 from .ingest import now_iso as _now_iso
 from .inventory import fleet_of, qualified, qualified_labels
@@ -238,7 +240,7 @@ def _provenance(root: Path, conn: sqlite3.Connection | None) -> dict:
     return prov
 
 
-def _envelope(root: Path, fn):
+def _envelope(root: Path, fn, *, admit_connection=None):
     """Run `fn(conn)` -> data under the panel-state contract. Classification
     of the pre-connect shape comes from source_state.probe_source — the
     decided-once rule — then sqlite/OS errors classify UNREADABLE. EMPTY
@@ -263,10 +265,14 @@ def _envelope(root: Path, fn):
                     " `claudlobby plane doctor`")
     try:
         conn = _ro_conn(db)
-    except sqlite3.Error as exc:
+    except (sqlite3.Error, OSError) as exc:
         return fail(SOURCE_UNREADABLE,
                     f"db cannot be opened: {exc} — `claudlobby plane doctor`")
     try:
+        # Admission, query and provenance share one explicit read snapshot.
+        if admit_connection is not None:
+            conn.execute("BEGIN")
+            admit_connection(conn)
         data = fn(conn)
         return {"state": SOURCE_OK, "provenance": _provenance(root, conn),
                 "data": data}
@@ -1475,6 +1481,7 @@ async def _idle_tick(app, seconds: float) -> bool:
 def create_app(
     root: Path, sampler: PaneSampler | None = None, *,
     package: PackageResources | None = None,
+    admit_connection=None,
 ):
     if FastAPI is None:  # pragma: no cover
         raise RuntimeError(
@@ -1508,33 +1515,43 @@ def create_app(
                   openapi_url=None, lifespan=_lifespan)
     started_at = _now_iso()
 
+    def envelope(fn):
+        try:
+            result = _envelope(root, fn, admit_connection=admit_connection)
+        except OSError as exc:
+            if admit_connection is None:
+                raise
+            raise AccessUnavailable("owner source unavailable") from exc
+        if admit_connection is not None and result["state"] in {SOURCE_ABSENT, SOURCE_UNREADABLE}:
+            raise AccessUnavailable("owner source unavailable")
+        return result
+
     @app.get("/api/summary")
     def summary():
-        return JSONResponse(_envelope(root, lambda c: _fetch_summary(c, root)))
+        return JSONResponse(envelope(lambda c: _fetch_summary(c, root)))
 
     @app.get("/api/channel")
     def channel(limit: int = 120, fleet: str | None = None):
         limit = max(1, min(int(limit), _CHANNEL_LIMIT_MAX))
         names = _channel_names(root)
         return JSONResponse(
-            _envelope(root,
-                      lambda c: _fetch_channel(c, names, limit, fleet)))
+            envelope(lambda c: _fetch_channel(c, names, limit, fleet)))
 
     @app.get("/api/tasks")
     def tasks(fleet: str | None = None):
-        return JSONResponse(_envelope(root, lambda c: _fetch_tasks(c, fleet)))
+        return JSONResponse(envelope(lambda c: _fetch_tasks(c, fleet)))
 
     @app.get("/api/identities")
     def identities(fleet: str | None = None):
         return JSONResponse(
-            _envelope(root, lambda c: _fetch_identities(c, fleet)))
+            envelope(lambda c: _fetch_identities(c, fleet)))
 
     @app.get("/api/fleets")
     def fleets():
         """The fleet dimension (U1): every fleet the host records, with the
         tab a first visit should open. Read from the registry's fleet
         identities, never the rail's bounded window."""
-        return JSONResponse(_envelope(root, _fetch_fleets))
+        return JSONResponse(envelope(_fetch_fleets))
 
     @app.get("/api/grid")
     def grid(focus: str | None = None, fleet: str | None = None):
@@ -1543,6 +1560,8 @@ def create_app(
         raises that pane's cadence/height for a short TTL — view-internal
         lens state, touching neither fleet nor db; the read-only ruling is
         about the FLEET, and this endpoint stays observational."""
+        if admit_connection is not None and (not sampler.available or fleet in {None, "", "all"}):
+            envelope(lambda c: None)
         if not sampler.available:
             return JSONResponse({
                 "state": "unavailable",
@@ -1553,7 +1572,7 @@ def create_app(
             })
         fleet = fleet if fleet != "all" else None
         if fleet:
-            probe = _envelope(root, lambda c: _fleet_scope(c, fleet))
+            probe = envelope(lambda c: _fleet_scope(c, fleet))
             if probe.get("state") == "unknown" and fleet not in {
                     p.get("fleet") for p in sampler.snapshot().get("panes", [])}:
                 return JSONResponse(probe)
@@ -1600,11 +1619,11 @@ def create_app(
         live, sampler_degraded = _live_panes(sampler)
         fleet = fleet if fleet != "all" else None
         if fleet:
-            probe = _envelope(root, lambda c: _fleet_scope(c, fleet))
+            probe = envelope(lambda c: _fleet_scope(c, fleet))
             if probe.get("state") == "unknown" and fleet not in {
                     p.get("fleet") for p in live}:
                 return JSONResponse(probe)
-        env = _envelope(root, _heartbeat_rows)
+        env = envelope(_heartbeat_rows)
         recorded = env["data"] if env["state"] == SOURCE_OK else []
         if fleet:
             # the tab's verdicts and counts (U1) — both halves scoped to
@@ -1642,8 +1661,8 @@ def create_app(
         live, degraded = _live_panes(sampler)
         live_poll = ("unavailable" if not sampler.available
                      else "degraded" if degraded else "ok")
-        return JSONResponse(_envelope(
-            root, lambda c: _fetch_overview(c, paths, live, live_poll)))
+        return JSONResponse(envelope(
+            lambda c: _fetch_overview(c, paths, live, live_poll)))
 
     @app.get("/api/inventory")
     def inventory(fleet: str | None = None):
@@ -1654,7 +1673,7 @@ def create_app(
         this host records."""
         from .inventory import fleet_inventory
         return JSONResponse(
-            _envelope(root, lambda c: fleet_inventory(c, _fleet_scope(c, fleet))))
+            envelope(lambda c: fleet_inventory(c, _fleet_scope(c, fleet))))
 
     @app.get("/api/equipment")
     def equipment(alias: str):
@@ -1663,7 +1682,7 @@ def create_app(
         absent ≠ empty, never a bare {} the UI would render as a blank
         card."""
         from .inventory import bot_equipment
-        env = _envelope(root, lambda c: bot_equipment(c, alias))
+        env = envelope(lambda c: bot_equipment(c, alias))
         if env.get("state") == SOURCE_OK and env.get("data") is None:
             return JSONResponse({
                 "state": "idle",
@@ -1681,7 +1700,7 @@ def create_app(
         """The reporting tree from the fleet keyframe (Phase 6): a pure
         read; no fleet keyframe yet is a typed idle state, never {}."""
         from .orgchart import org_tree
-        env = _envelope(root, lambda c: org_tree(c, _fleet_scope(c, fleet)))
+        env = envelope(lambda c: org_tree(c, _fleet_scope(c, fleet)))
         if env.get("state") == SOURCE_OK and env.get("data") is None:
             return JSONResponse({"state": "idle", "provenance": env.get("provenance", {}),
                                  "remediation": "no fleet keyframe yet — stage a config "
@@ -1694,19 +1713,19 @@ def create_app(
         """Busy/idle % per bot from the recorded heartbeat samples (Phase 6),
         the legacy rollup's math over the plane's series — one definition."""
         from .utilization import bot_utilization
-        return JSONResponse(_envelope(
-            root, lambda c: bot_utilization(c, fleet=_fleet_scope(c, fleet))))
+        return JSONResponse(envelope(
+            lambda c: bot_utilization(c, fleet=_fleet_scope(c, fleet))))
 
     @app.get("/api/search")
     def search(q: str = "", fleet: str | None = None, limit: int = 50):
         limit = max(1, min(int(limit), 200))
         return JSONResponse(
-            _envelope(root, lambda c: _fetch_search(c, q, fleet, limit)))
+            envelope(lambda c: _fetch_search(c, q, fleet, limit)))
 
     @app.get("/api/trust")
     def trust():
         return JSONResponse(
-            _envelope(root, lambda c: _fetch_trust(c, root)))
+            envelope(lambda c: _fetch_trust(c, root)))
 
     @app.get("/healthz")
     def healthz():
@@ -1728,7 +1747,7 @@ def create_app(
             data.update(_fetch_summary(conn, root))
             return data
 
-        env = _envelope(root, probe)
+        env = envelope(probe)
         return JSONResponse(env, status_code=200 if env["state"] == SOURCE_OK
                             else 503)
 
@@ -1751,10 +1770,14 @@ def create_app(
         async def gen():
             if last_event_id and last_event_id.isdigit():
                 last = int(last_event_id)
+                if admit_connection is not None:
+                    await run_in_threadpool(envelope, lambda c: None)
             elif cursor is not None:
                 last = int(cursor)
+                if admit_connection is not None:
+                    await run_in_threadpool(envelope, lambda c: None)
             else:
-                head = _envelope(root, lambda c: c.execute(
+                head = await run_in_threadpool(envelope, lambda c: c.execute(
                     "SELECT ingest_seq FROM ingest_ledger"
                     " ORDER BY ingest_seq DESC LIMIT 1").fetchone())
                 last = (head.get("data") or {"ingest_seq": 0})["ingest_seq"] \
@@ -1768,7 +1791,7 @@ def create_app(
             while True:
                 if await request.is_disconnected() or _stopping(request.app):
                     return
-                env = _envelope(root, lambda c: [
+                env = await run_in_threadpool(envelope, lambda c: [
                     dict(r) for r in c.execute(
                         "SELECT ingest_seq, family, ingested_at"
                         " FROM ingest_ledger WHERE ingest_seq > ?"
@@ -1807,9 +1830,11 @@ def create_app(
     # this estate updates source under running daemons by design
     # (update-siblings pulls weekly; weekly-worker-restart restarts BOTS,
     # not host services), so a process-lifetime token went stale in exactly
-    # the redeploy window it was built for (gauntlet round 2). Four stats
+    # the redeploy window it was built for (gauntlet round 2). Eight stats
     # per page load — index() already reads the file per request.
-    _UI_FILES = ("index.html", "app.js", "panel-state.js", "style.css")
+    _UI_FILES = ("index.html", "app.js", "panel-state.js", "api-client.js",
+                 "work-loop.js", "action-state.js",
+                 "style.css", "workspace.css")
 
     def asset_token() -> str:
         stamp = ":".join(
@@ -1826,8 +1851,8 @@ def create_app(
     def _rewritten_index() -> "HTMLResponse":
         tok = asset_token()
         html = (UI_DIR / "index.html").read_text()
-        html = (html.replace("/app.js", f"/app.js?v={tok}")
-                    .replace("/style.css", f"/style.css?v={tok}"))
+        for asset in ("app.js", "style.css", "workspace.css"):
+            html = html.replace(f"/{asset}", f"/{asset}?v={tok}")
         return _no_store(HTMLResponse(html))
 
     @app.get("/", response_class=HTMLResponse)
@@ -1840,14 +1865,22 @@ def create_app(
         # page that re-pins stale modules (gauntlet round 2, probed).
         return _rewritten_index()
 
+    def _busted_js(name, modules):
+        js = (UI_DIR / name).read_text()
+        # bust the intra-module imports too, or the browser reuses pinned
+        # dependencies from its module map.
+        token = asset_token()
+        for module in modules:
+            js = js.replace(f'"/{module}"', f'"/{module}?v={token}"')
+        return _no_store(Response(js, media_type="text/javascript"))
+
     @app.get("/app.js")
     def app_js():
-        js = (UI_DIR / "app.js").read_text()
-        # bust the intra-module import too, or the browser reuses a pinned
-        # panel-state.js from its module map.
-        js = js.replace('"/panel-state.js"',
-                        f'"/panel-state.js?v={asset_token()}"')
-        return _no_store(Response(js, media_type="text/javascript"))
+        return _busted_js("app.js", ("panel-state.js", "api-client.js", "work-loop.js"))
+
+    @app.get("/work-loop.js")
+    def work_loop_js():
+        return _busted_js("work-loop.js", ("panel-state.js", "action-state.js"))
 
     class _NoStoreStatic(StaticFiles):
         async def get_response(self, path, scope):  # pragma: no cover - thin

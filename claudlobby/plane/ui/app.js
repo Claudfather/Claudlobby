@@ -11,6 +11,9 @@
 // disagreed live with the SQL reducer.
 
 import { esc, ago, renderState, stateBlock } from "/panel-state.js";
+import { jget, createEventSource } from "/api-client.js";
+import * as interactionApi from "/api-client.js";
+import { mountWorkLoop } from "/work-loop.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -32,7 +35,7 @@ const TASK_STATUS = {
   assigned: { label: "assigned", cls: "s-open" },
   active: { label: "active", cls: "s-open" },
   blocked: { label: "blocked", cls: "s-pend" },
-  completed: { label: "completed", cls: "s-done" },
+  completed: { label: "completed", cls: "s-done s-completed" },
   failed: { label: "failed", cls: "s-bad" },
   cancelled: { label: "cancelled", cls: "s-done" },
 };
@@ -48,15 +51,6 @@ const THREAD_TERMINAL_STATUS = {
 const CLASS_TAGS = new Set(["task_request", "report", "question", "answer",
   "alert", "notice", "briefing", "nudge", "acknowledgement", "chat",
   "config_change", "raw_control"]);
-
-async function jget(url) {
-  try {
-    const r = await fetch(url);
-    return await r.json();
-  } catch {
-    return null; // renderState(null) => disconnected
-  }
-}
 
 // Signed deadline label (gauntlet, 3 reviewers: the old ago()+replace made
 // every NOT-yet-due task read "due 0s past").
@@ -374,7 +368,7 @@ function renderTasks(env) {
       ? `<div class="note">${priorCount} prior assignment(s)</div>` : "";
     return `<div class="card ${r.attention ? "attn" : ""}">
       <span class="st ${st.cls}">${esc(st.label)}</span>
-      <b>${esc(clip(r.title || "", 160) || r.task_id)}</b>
+      <button class="task-open" type="button" data-task-open="${esc(r.task_id)}" data-task-fleet="${esc(r.fleet || "")}">${esc(clip(r.title || "", 160) || r.task_id)}</button>
       <div class="sub">${esc(who)} · task ${esc(r.task_id)}`
       + `${when ? ` · ${esc(when)}` : ""}</div>`
       + taskIssueNote(r) + attentionWhy(r) + nudgeNote(r)
@@ -610,7 +604,7 @@ function renderOverview(env) {
   el.innerHTML = cards + host;
 }
 
-$("channel").addEventListener("click", (e) => {
+function toggleMessageBody(e) {
   const b = e.target.closest("button.more");
   if (!b) return;
   // by STRUCTURE, not by sibling order: anything rendered between a body and
@@ -625,7 +619,9 @@ $("channel").addEventListener("click", (e) => {
     if (open) openBodies.add(msg.dataset.msgId);
     else openBodies.delete(msg.dataset.msgId);
   }
-});
+}
+$("channel").addEventListener("click", toggleMessageBody);
+$("task-detail").addEventListener("click", toggleMessageBody);
 
 // ONE delegated listener for the strip's cards (re-rendered on every refresh;
 // per-card listeners were re-attached each time — simplify lens)
@@ -669,6 +665,7 @@ async function refreshBoards() {
     adoptFleets(await jget("/api/fleets"));
     if (gen !== generation) return;
   }
+  syncWorkRoom();
   const q = fleetQuery();
   const [ch, tk, fl, sm, ov] = await Promise.all([
     jget(channelUrl()), jget("/api/tasks" + q),
@@ -677,8 +674,10 @@ async function refreshBoards() {
   ]);
   if (gen !== generation) return;
   adoptFleets(ov);   // the overview carries the fleet list + default: one door
+  if (syncWorkRoom()) { refreshBoards(); return; }
   renderHeader(ov); renderHostFacts(ov);
   renderChannel(ch); renderTasks(tk); renderFleet(fl); renderSummary(sm);
+  workLoop.update(tk, ch);
   renderFleetTabs();
   renderOverview(ov);   // after the tabs: the strip highlights the pick
   restartSafety();
@@ -696,7 +695,7 @@ function restartSafety() {  // relative times re-render; missed pushes heal
 }
 
 function openStream() {
-  const es = new EventSource("/api/stream");  // server starts at HEAD;
+  const es = createEventSource("/api/stream");  // server starts at HEAD;
   es.onmessage = (ev) => {                    // reconnects ride Last-Event-ID
     try {
       const payload = JSON.parse(ev.data);
@@ -835,6 +834,7 @@ function renderFleetTabs() {
 // land here, so a card click can never drift from a tab click.
 function pickFleet(f) {
   currentFleet = f;
+  syncWorkRoom();
   savePick(currentFleet);
   renderFleetTabs();             // instant highlight (the strip re-renders with the boards)
   if (currentView === "fleet") pollFleet();   // the tab follows the pick
@@ -1257,8 +1257,21 @@ $("search").addEventListener("input", () => {
 // has initialized. Placed mid-file it read those bindings in their temporal
 // dead zone and threw on first load, freezing the page at its loading markup.
 $("focus-overlay").hidden = true;   // a restored-open modal never survives a load
-["channel", "tasks", "attention", "fleet"].forEach((id) =>
-  renderState($(id), { state: "loading" }));
+function showLoading() {
+  ["channel", "tasks", "attention", "fleet"].forEach((id) =>
+    renderState($(id), { state: "loading" }));
+}
+showLoading();
+const workLoop = mountWorkLoop({ api: interactionApi, renderThread: threadArticle, refresh: scheduleRefresh });
+let workRoom;
+function syncWorkRoom() {
+  const room = currentFleet || (fleets.length === 1 ? fleets[0].alias : "all");
+  if (workRoom === room) return false;
+  workRoom = room;
+  workLoop.setRoom(room);
+  showLoading();
+  return true;
+}
 refreshBoards();
 openStream();
 

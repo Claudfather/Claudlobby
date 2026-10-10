@@ -114,6 +114,12 @@ def test_exactly_the_categories_that_ship_off():
                       # Nothing from the four list: its prune deletes only
                       # versions it staged itself, never one a process runs.
                       "claude-staged-update",
+                      # no deployment gate, and the door it gates TYPES INTO
+                      # a bot's pane (#996): keepalive is a runtime script, in
+                      # force on every bot at activation, so one armed bot's
+                      # bot.conf is the only canary. Nothing from the four
+                      # list: its one prompt resumes work the limit stopped.
+                      "keepalive-limit-resume",
                       # pages a human with no rate guard beyond the debounce
                       # — outbound-to-people-at-scale's risk, not its volume
                       "worker-unassigned",
@@ -691,6 +697,10 @@ def test_the_validator_namespaces_come_from_the_registry():
         # dead. CLAUDLOBBY_ cannot collide with a fleet's own tooling, which is
         # the bound this test's docstring exists to hold.
         "CLAUDLOBBY",
+        # keepalive-limit-resume (#996). keepalive's own knobs already live
+        # here (KEEPALIVE_ACTIVE_WINDOW_S, KEEPALIVE_BUSY_PATTERNS), none of
+        # them an *_ENABLED key, so claiming it flags no existing setting.
+        "KEEPALIVE",
     }
     assert "PLANE_SHADOW_ENABLED" not in sw.env_names()
     assert "PLANE_SHADOW_ENABLED" in sw.RETIRED

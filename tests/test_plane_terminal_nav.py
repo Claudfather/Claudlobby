@@ -70,3 +70,32 @@ def test_an_alive_dot_is_green_not_the_red_base():
     s = CSS.read_text()
     assert re.search(r"(?m)^\.dot\.live\s*\{[^}]*background:\s*var\(--ok\)", s), \
         "a GLOBAL .dot.live (line-anchored) must be green (var(--ok))"
+
+
+def test_workspace_terminal_and_state_text_contrast_with_the_dark_capture():
+    # Plain capture text and loading/error panels share the terminal surface.
+    # Their tokens must be scoped there instead of inheriting the light page's
+    # dark ink; keep the existing dark ANSI background and palette intact.
+    workspace = CSS.with_name("workspace.css").read_text()
+    m = re.search(r"\.plane-workspace \.pane-card pre,\s*"
+                  r"\.plane-workspace #focus-pane\s*\{([^}]*)\}", workspace)
+    assert m, "grid and focus must both own their terminal text palette"
+    terminal = m.group(1)
+    assert re.search(r"color:\s*var\(--ink\)", terminal)
+    background = re.search(r"\.pane-card pre, #focus-pane\s*\{[^}]*"
+                           r"background:\s*(#[0-9a-f]{6})", CSS.read_text()).group(1)
+
+    def luminance(hex_color):
+        rgb = [int(hex_color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+        linear = [c / 12.92 if c <= .04045 else ((c + .055) / 1.055) ** 2.4
+                  for c in rgb]
+        return sum(c * weight for c, weight in zip(linear, (.2126, .7152, .0722)))
+
+    dark = luminance(background)
+    # label/plain text, detail/provenance/idle, error label, and remediation.
+    for token in ("ink", "dim", "bad", "warn"):
+        color = re.search(r"--" + token + r":\s*(#[0-9a-f]{6})", terminal)
+        assert color, f"terminal --{token} must be scoped for its panel states"
+        light = luminance(color.group(1))
+        contrast = (max(light, dark) + .05) / (min(light, dark) + .05)
+        assert contrast >= 4.5, f"terminal --{token} contrast is only {contrast:.2f}"

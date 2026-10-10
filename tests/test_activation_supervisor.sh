@@ -23,8 +23,11 @@ systemctl() {
             pending=$((pending - 1)); printf '%s' "$pending" > "$SETTLE_FILE"
             [ "$pending" -gt 0 ] || active=inactive
         fi
+        [ -z "${SHOWS:-}" ] || printf 'show\n' >> "$SHOWS"
+        local reported_group="$group"  # none once systemd has collected the unit
+        [ -z "${COLLECTED:-}" ] || [ ! -e "$COLLECTED" ] || reported_group=""
         printf 'Id=%s\nLoadState=%s\nActiveState=%s\nSubState=%s\nUnitFileState=%s\nFragmentPath=%s\nControlGroup=%s\nMainPID=%s\nControlPID=%s\n' \
-            "$target" "$load" "$active" "${sub:-running}" "$enabled" "$fragment" "$group" "${main_pid:-0}" "${control_pid:-0}"
+            "$target" "$load" "$active" "${sub:-running}" "$enabled" "$fragment" "$reported_group" "${main_pid:-0}" "${control_pid:-0}"
         return
     fi
     printf '%s\n' "$*" >> "$TRACE"
@@ -276,6 +279,41 @@ stop_output=$(svc_bot_disenroll_exact "$source_unit" "$installed_unit" "$target"
 [ ! -e "$installed_unit" ]
 [ "$(cat "$TRACE")" = "bootout $target" ]
 JOB_PID=600; CALLER_RC=0
+
+# KillMode=process marks a bot unit inactive while the session it started is
+# still exiting (#2227). Given settle seconds, the quiet check re-reads the
+# cgroup it first saw, kept as the witness once systemd stops reporting it,
+# until it empties. Processes left at the bound still refuse, any other refusal
+# returns at once, and without settle seconds the cgroup is read exactly once.
+_OS=Linux; file="$T/worker.service"; target=worker.service; : > "$file"
+load=loaded; enabled=disabled; active=inactive; sub=dead; main_pid=0; control_pid=0
+READS="$T/cgroup-reads"; LEFT="$T/members-left"; COLLECTED="$T/collected"; SHOWS="$T/shows"
+_svc_cgroup_members() {
+    printf '%s\n' "$1" >> "$READS"
+    : > "$COLLECTED"  # from the second reading on, systemd reports no ControlGroup
+    local left; left=$(cat "$LEFT")
+    [ "$left" -gt 0 ] || return 0
+    printf '%s' "$((left - 1))" > "$LEFT"
+    printf '4242\n'
+}
+settle_case() { group=/user.slice/worker.service; printf '%s' "$1" > "$LEFT"; : > "$READS"; : > "$SHOWS"; rm -f "$COLLECTED"; }
+settle_case 2
+quiet=$(svc_activation_quiet "$file" "$target" "" 5)
+[ "$quiet" = $'inactive\tcgroup-empty' ]
+[ "$(sort -u "$READS")" = /user.slice/worker.service ] && [ "$(( $(wc -l < "$READS") ))" = 3 ]
+settle_case 2
+expect 3 svc_activation_quiet "$file" "$target" 2>"$T/quiet-err"
+[ "$(( $(wc -l < "$READS") ))" = 1 ] && grep -q 'remaining cgroup members' "$T/quiet-err"
+settle_case 100000; started=$(date +%s)
+expect 3 svc_activation_quiet "$file" "$target" "" 1 2>"$T/quiet-err"
+[ "$(( $(date +%s) - started ))" -ge 1 ] && [ "$(( $(wc -l < "$READS") ))" -gt 1 ]
+grep -q 'remaining cgroup members after 1s' "$T/quiet-err"
+settle_case 2; active=active
+expect 3 svc_activation_quiet "$file" "$target" "" 5 2>/dev/null
+[ ! -s "$READS" ] && [ "$(( $(wc -l < "$SHOWS") ))" = 1 ]
+active=inactive
+for bad in x -1 1.5 08 1000; do settle_case 0; expect 3 svc_activation_quiet "$file" "$target" "" "$bad"; done
+unset -f _svc_cgroup_members; COLLECTED=""; SHOWS=""
 
 # Exercise the actual membership predicates with observed-data fixtures; only
 # kernel reads are replaced. No real process ownership or service is queried.
