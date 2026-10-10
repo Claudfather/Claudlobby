@@ -54,6 +54,7 @@ from ..task_queries import task_escalations_from_snapshot
 
 try:  # §14: optional UI features degrade without disabling the core ledger
     from fastapi import FastAPI, Request
+    from starlette.concurrency import run_in_threadpool
     from fastapi.responses import JSONResponse, StreamingResponse
     from fastapi.staticfiles import StaticFiles
 except ImportError as _exc:  # pragma: no cover - exercised via CLI refusal
@@ -71,6 +72,7 @@ from ..source_state import (
 from .daemon import probe_daemon, socket_path
 from .emit_api import CaptureConfigError, capture_mode, load_capture_config
 from .ingest import CONSTRUCT_TABLES
+from .owner_access import AccessUnavailable
 from .spool import oldest_spooled_at, scan_spool
 from .ingest import now_iso as _now_iso
 from .inventory import fleet_of, qualified, qualified_labels
@@ -252,9 +254,6 @@ def _envelope(root: Path, fn, *, admit_connection=None):
                 "remediation": remediation}
 
     probe = probe_source(db)
-    if admit_connection is not None and probe.state != SOURCE_OK:
-        from .owner_access import AccessUnavailable
-        raise AccessUnavailable("owner source unavailable")
     if probe.state == SOURCE_ABSENT:
         return fail(SOURCE_ABSENT,
                     "no plane db yet — it appears on the first armed emission"
@@ -267,9 +266,6 @@ def _envelope(root: Path, fn, *, admit_connection=None):
     try:
         conn = _ro_conn(db)
     except (sqlite3.Error, OSError) as exc:
-        if admit_connection is not None:
-            from .owner_access import AccessUnavailable
-            raise AccessUnavailable("owner source unavailable") from exc
         return fail(SOURCE_UNREADABLE,
                     f"db cannot be opened: {exc} — `claudlobby plane doctor`")
     try:
@@ -284,9 +280,6 @@ def _envelope(root: Path, fn, *, admit_connection=None):
         return {"state": "unknown", "provenance": _provenance(root, conn),
                 "remediation": str(exc)}
     except (sqlite3.Error, OSError, TaskStateError) as exc:
-        if admit_connection is not None:
-            from .owner_access import AccessUnavailable
-            raise AccessUnavailable("owner source unavailable") from exc
         return fail(SOURCE_UNREADABLE,
                     f"query failed: {exc} — schema drift? run"
                     " `claudlobby plane doctor`")
@@ -1522,36 +1515,43 @@ def create_app(
                   openapi_url=None, lifespan=_lifespan)
     started_at = _now_iso()
 
-    def envelope(root, fn):
-        return _envelope(root, fn, admit_connection=admit_connection)
+    def envelope(fn):
+        try:
+            result = _envelope(root, fn, admit_connection=admit_connection)
+        except OSError as exc:
+            if admit_connection is None:
+                raise
+            raise AccessUnavailable("owner source unavailable") from exc
+        if admit_connection is not None and result["state"] in {SOURCE_ABSENT, SOURCE_UNREADABLE}:
+            raise AccessUnavailable("owner source unavailable")
+        return result
 
     @app.get("/api/summary")
     def summary():
-        return JSONResponse(envelope(root, lambda c: _fetch_summary(c, root)))
+        return JSONResponse(envelope(lambda c: _fetch_summary(c, root)))
 
     @app.get("/api/channel")
     def channel(limit: int = 120, fleet: str | None = None):
         limit = max(1, min(int(limit), _CHANNEL_LIMIT_MAX))
         names = _channel_names(root)
         return JSONResponse(
-            envelope(root,
-                      lambda c: _fetch_channel(c, names, limit, fleet)))
+            envelope(lambda c: _fetch_channel(c, names, limit, fleet)))
 
     @app.get("/api/tasks")
     def tasks(fleet: str | None = None):
-        return JSONResponse(envelope(root, lambda c: _fetch_tasks(c, fleet)))
+        return JSONResponse(envelope(lambda c: _fetch_tasks(c, fleet)))
 
     @app.get("/api/identities")
     def identities(fleet: str | None = None):
         return JSONResponse(
-            envelope(root, lambda c: _fetch_identities(c, fleet)))
+            envelope(lambda c: _fetch_identities(c, fleet)))
 
     @app.get("/api/fleets")
     def fleets():
         """The fleet dimension (U1): every fleet the host records, with the
         tab a first visit should open. Read from the registry's fleet
         identities, never the rail's bounded window."""
-        return JSONResponse(envelope(root, _fetch_fleets))
+        return JSONResponse(envelope(_fetch_fleets))
 
     @app.get("/api/grid")
     def grid(focus: str | None = None, fleet: str | None = None):
@@ -1560,8 +1560,8 @@ def create_app(
         raises that pane's cadence/height for a short TTL — view-internal
         lens state, touching neither fleet nor db; the read-only ruling is
         about the FLEET, and this endpoint stays observational."""
-        if admit_connection is not None:
-            envelope(root, lambda c: None)
+        if admit_connection is not None and (not sampler.available or fleet in {None, "", "all"}):
+            envelope(lambda c: None)
         if not sampler.available:
             return JSONResponse({
                 "state": "unavailable",
@@ -1572,7 +1572,7 @@ def create_app(
             })
         fleet = fleet if fleet != "all" else None
         if fleet:
-            probe = envelope(root, lambda c: _fleet_scope(c, fleet))
+            probe = envelope(lambda c: _fleet_scope(c, fleet))
             if probe.get("state") == "unknown" and fleet not in {
                     p.get("fleet") for p in sampler.snapshot().get("panes", [])}:
                 return JSONResponse(probe)
@@ -1619,11 +1619,11 @@ def create_app(
         live, sampler_degraded = _live_panes(sampler)
         fleet = fleet if fleet != "all" else None
         if fleet:
-            probe = envelope(root, lambda c: _fleet_scope(c, fleet))
+            probe = envelope(lambda c: _fleet_scope(c, fleet))
             if probe.get("state") == "unknown" and fleet not in {
                     p.get("fleet") for p in live}:
                 return JSONResponse(probe)
-        env = envelope(root, _heartbeat_rows)
+        env = envelope(_heartbeat_rows)
         recorded = env["data"] if env["state"] == SOURCE_OK else []
         if fleet:
             # the tab's verdicts and counts (U1) — both halves scoped to
@@ -1662,7 +1662,7 @@ def create_app(
         live_poll = ("unavailable" if not sampler.available
                      else "degraded" if degraded else "ok")
         return JSONResponse(envelope(
-            root, lambda c: _fetch_overview(c, paths, live, live_poll)))
+            lambda c: _fetch_overview(c, paths, live, live_poll)))
 
     @app.get("/api/inventory")
     def inventory(fleet: str | None = None):
@@ -1673,7 +1673,7 @@ def create_app(
         this host records."""
         from .inventory import fleet_inventory
         return JSONResponse(
-            envelope(root, lambda c: fleet_inventory(c, _fleet_scope(c, fleet))))
+            envelope(lambda c: fleet_inventory(c, _fleet_scope(c, fleet))))
 
     @app.get("/api/equipment")
     def equipment(alias: str):
@@ -1682,7 +1682,7 @@ def create_app(
         absent ≠ empty, never a bare {} the UI would render as a blank
         card."""
         from .inventory import bot_equipment
-        env = envelope(root, lambda c: bot_equipment(c, alias))
+        env = envelope(lambda c: bot_equipment(c, alias))
         if env.get("state") == SOURCE_OK and env.get("data") is None:
             return JSONResponse({
                 "state": "idle",
@@ -1700,7 +1700,7 @@ def create_app(
         """The reporting tree from the fleet keyframe (Phase 6): a pure
         read; no fleet keyframe yet is a typed idle state, never {}."""
         from .orgchart import org_tree
-        env = envelope(root, lambda c: org_tree(c, _fleet_scope(c, fleet)))
+        env = envelope(lambda c: org_tree(c, _fleet_scope(c, fleet)))
         if env.get("state") == SOURCE_OK and env.get("data") is None:
             return JSONResponse({"state": "idle", "provenance": env.get("provenance", {}),
                                  "remediation": "no fleet keyframe yet — stage a config "
@@ -1714,18 +1714,18 @@ def create_app(
         the legacy rollup's math over the plane's series — one definition."""
         from .utilization import bot_utilization
         return JSONResponse(envelope(
-            root, lambda c: bot_utilization(c, fleet=_fleet_scope(c, fleet))))
+            lambda c: bot_utilization(c, fleet=_fleet_scope(c, fleet))))
 
     @app.get("/api/search")
     def search(q: str = "", fleet: str | None = None, limit: int = 50):
         limit = max(1, min(int(limit), 200))
         return JSONResponse(
-            envelope(root, lambda c: _fetch_search(c, q, fleet, limit)))
+            envelope(lambda c: _fetch_search(c, q, fleet, limit)))
 
     @app.get("/api/trust")
     def trust():
         return JSONResponse(
-            envelope(root, lambda c: _fetch_trust(c, root)))
+            envelope(lambda c: _fetch_trust(c, root)))
 
     @app.get("/healthz")
     def healthz():
@@ -1747,7 +1747,7 @@ def create_app(
             data.update(_fetch_summary(conn, root))
             return data
 
-        env = envelope(root, probe)
+        env = envelope(probe)
         return JSONResponse(env, status_code=200 if env["state"] == SOURCE_OK
                             else 503)
 
@@ -1768,14 +1768,16 @@ def create_app(
         last_event_id = request.headers.get("last-event-id")
 
         async def gen():
-            if admit_connection is not None:
-                envelope(root, lambda c: None)
             if last_event_id and last_event_id.isdigit():
                 last = int(last_event_id)
+                if admit_connection is not None:
+                    await run_in_threadpool(envelope, lambda c: None)
             elif cursor is not None:
                 last = int(cursor)
+                if admit_connection is not None:
+                    await run_in_threadpool(envelope, lambda c: None)
             else:
-                head = envelope(root, lambda c: c.execute(
+                head = await run_in_threadpool(envelope, lambda c: c.execute(
                     "SELECT ingest_seq FROM ingest_ledger"
                     " ORDER BY ingest_seq DESC LIMIT 1").fetchone())
                 last = (head.get("data") or {"ingest_seq": 0})["ingest_seq"] \
@@ -1789,7 +1791,7 @@ def create_app(
             while True:
                 if await request.is_disconnected() or _stopping(request.app):
                     return
-                env = envelope(root, lambda c: [
+                env = await run_in_threadpool(envelope, lambda c: [
                     dict(r) for r in c.execute(
                         "SELECT ingest_seq, family, ingested_at"
                         " FROM ingest_ledger WHERE ingest_seq > ?"

@@ -3,13 +3,12 @@
 from contextlib import contextmanager
 import http.client
 import json
-import os
 from pathlib import Path
 import socket
+import shutil
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 
 import pytest
@@ -17,17 +16,20 @@ import pytest
 from claudlobby.__main__ import main
 from claudlobby.plane.owner_access import OwnerAccess, PrincipalRef
 from claudlobby.plane.owner_browser import COOKIE_NAME
-from claudlobby.plane.owner_server import private_listener
-from tests.conftest import constructed_env
+from claudlobby.plane.owner_server import OwnerServerConfigurationError, private_listener
+from claudlobby.plane.owner_source import bind_source
+from tests.conftest import _short_test_directory, constructed_env
 from tests.test_plane_two_fleets import _seed
 
 
 @pytest.fixture
 def socket_path():
-    # AF_UNIX path limits are much shorter than prepared export / pytest paths.
-    # This owned private directory contains only the disposable socket.
-    with tempfile.TemporaryDirectory(prefix="cl-owner-", dir="/tmp") as directory:
-        yield Path(directory) / "owner.sock"
+    # Reuse the shared allocator without the unrelated CLI shebang preflight.
+    directory = _short_test_directory("owner-")
+    try:
+        yield directory / "owner.sock"
+    finally:
+        shutil.rmtree(directory)
 
 
 def test_private_listener_permissions_and_owned_cleanup(socket_path):
@@ -163,7 +165,6 @@ def request(path, route, *, action=False, cookie=None, headers=None):
 
 def test_foreground_cli_pair_read_revoke_and_restart_over_real_unix_socket(tmp_path, socket_path):
     _seed(tmp_path)
-    from claudlobby.plane.owner_source import bind_source
     bind_source(tmp_path)
     store = OwnerAccess.initialize(tmp_path)
     # Shape grounded in an installed native WhoIs capture; every value here is
@@ -196,3 +197,42 @@ def test_foreground_cli_pair_read_revoke_and_restart_over_real_unix_socket(tmp_p
         assert request(socket_path, "/api/summary", cookie=cookie)[0] == 200
         store.revoke_owner(expected_revision=grant.revision)
         assert request(socket_path, "/api/summary", cookie=cookie)[0] == 403
+
+
+@pytest.mark.parametrize("problem", ["binary", "origin", "existing-socket", "parent"])
+def test_cli_configuration_failure_has_specific_local_remediation(tmp_path, socket_path, capsys, problem):
+    _seed(tmp_path)
+    bind_source(tmp_path)
+    OwnerAccess.initialize(tmp_path)
+    binary = sys.executable
+    origin = "https://plane.example.test"
+    expected = ""
+    if problem == "binary":
+        binary = str(tmp_path / "missing")
+        expected = "absolute configured native Tailscale executable"
+    elif problem == "origin":
+        origin = "http://plane.example.test"
+        expected = "canonical external HTTPS origin"
+    elif problem == "existing-socket":
+        socket_path.write_text("retained")
+        expected = "socket path exists"
+    else:
+        socket_path.parent.chmod(0o755)
+        expected = "owner-only directory"
+    assert main(["--root", str(tmp_path), "host", "owner", "serve", "--origin", origin,
+                 "--tailscale", binary, "--socket", str(socket_path)]) == 6
+    error = capsys.readouterr().err
+    assert expected in error
+    assert "owner authority is unavailable" not in error and "Traceback" not in error
+
+
+def test_cli_runtime_oserror_is_not_mislabeled_as_socket_open(tmp_path, monkeypatch, capsys):
+    from claudlobby.plane import owner_server
+    def failed(*a, **k):
+        raise OSError("private runtime diagnostic")
+    monkeypatch.setattr(owner_server, "serve", failed)
+    assert main(["--root", str(tmp_path), "host", "owner", "serve",
+                 "--origin", "https://plane.example.test", "--tailscale", sys.executable]) == 6
+    error = capsys.readouterr().err
+    assert "owner server failed" in error
+    assert "open its configured private socket" not in error and "private runtime diagnostic" not in error

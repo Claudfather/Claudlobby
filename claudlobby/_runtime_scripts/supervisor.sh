@@ -1101,11 +1101,34 @@ svc_activation_start() {
     printf 'start-requested\n' # native acknowledgement, not application readiness
 }
 
-# Native inactive plus exact Linux v2 cgroup emptiness, when a group is known.
-# Darwin needs the caller's pre-stop PID/socket witnesses as well. This does
-# not infer that arbitrary detached processes on the host are absent.
-svc_activation_quiet() {
-    local file="$1" target="$2" group="${3:-}" tree paths path members
+# Print the processes in a Linux v2 cgroup tree, one pid per line: none for an
+# empty cgroup, or for one already removed (systemd removes an emptied unit's
+# cgroup, and the kernel removes only an empty one, so a tree that vanishes
+# while it is read was empty). rc 3 when a tree still present cannot be read.
+_svc_cgroup_members() {
+    local cgroup="$1" tree paths path
+    case "$cgroup" in /*) ;; *) return 3 ;; esac
+    case "$cgroup" in /|*..*|*$'\n'*) return 3 ;; esac
+    [ -r /sys/fs/cgroup/cgroup.controllers ] || { _svc_activation_unknown 'cgroup v2 unavailable'; return 3; }
+    tree="/sys/fs/cgroup$cgroup"
+    [ -e "$tree" ] || return 0
+    if [ -d "$tree" ] && [ -r "$tree/cgroup.procs" ] \
+            && paths=$(find "$tree" -type f -name cgroup.procs -print 2>/dev/null) && [ -n "$paths" ]; then
+        while IFS= read -r path; do
+            cat "$path" 2>/dev/null || [ ! -e "$path" ] || return 3
+        done <<EOF
+$paths
+EOF
+        return 0
+    fi
+    [ ! -e "$tree" ] || return 3
+}
+
+# One reading of the proof below. rc 0 prints the verdict, rc 3 refuses, and
+# rc 4 means inactive with processes still in the cgroup named by
+# _SVC_QUIET_CGROUP.
+_svc_activation_quiet_once() {
+    local file="$1" target="$2" known="${3:-}" cgroup members
     _svc_activation_read "$file" "$target" || return 3
     if [ "$_OS:$SVC_ACT_ACTIVE" != Linux:failed ]; then
         [ "$SVC_ACT_ACTIVE" = inactive ] || { _svc_activation_unknown "$target remains active"; return 3; }
@@ -1115,27 +1138,43 @@ svc_activation_quiet() {
         }
     fi
     if [ "$_OS" = Linux ]; then
-        group="${group:-$SVC_ACT_GROUP}"
-        if [ -n "$group" ]; then
-            case "$group" in /*) ;; *) return 3 ;; esac
-            case "$group" in /|*..*|*$'\n'*) return 3 ;; esac
-            [ -r /sys/fs/cgroup/cgroup.controllers ] || { _svc_activation_unknown 'cgroup v2 unavailable'; return 3; }
-            tree="/sys/fs/cgroup$group"
-            if [ -e "$tree" ]; then
-                [ -d "$tree" ] && [ -r "$tree/cgroup.procs" ] || return 3
-                paths=$(find "$tree" -type f -name cgroup.procs -print) || return 3
-                [ -n "$paths" ] || return 3
-                while IFS= read -r path; do
-                    members=$(cat "$path") || return 3
-                    [ -z "$members" ] || { _svc_activation_unknown "$target has remaining cgroup members"; return 3; }
-                done <<EOF
-$paths
-EOF
-            fi
+        cgroup="${known:-$SVC_ACT_GROUP}"
+        if [ -n "$cgroup" ]; then
+            members=$(_svc_cgroup_members "$cgroup") || return 3
+            [ -z "$members" ] || { _SVC_QUIET_CGROUP="$cgroup"; return 4; }
             printf 'inactive\tcgroup-empty\n'; return 0
         fi
     fi
     printf 'inactive\tno-cgroup-witness\n'
+}
+
+# Native inactive plus exact Linux v2 cgroup emptiness, when a group is known.
+# Darwin needs the caller's pre-stop PID/socket witnesses as well. This does
+# not infer that arbitrary detached processes on the host are absent.
+#
+# SETTLE (seconds, 0 to 999, default 0) is for a caller that has just stopped
+# the unit. With KillMode=process, systemd marks a bot unit inactive once its
+# ExecStop returns, while the session it started is still exiting (#2227). Only
+# that state is re-read, every 0.25 s, from the cgroup first seen, which stays
+# the witness when systemd collects the emptied unit and stops reporting it.
+# Processes left after SETTLE seconds still refuse; any other refusal returns
+# at once, and without SETTLE the cgroup is read exactly once.
+svc_activation_quiet() {
+    local file="$1" target="$2" known="${3:-}" settle="${4:-0}" deadline rc
+    case "$settle" in 0|[1-9]|[1-9][0-9]|[1-9][0-9][0-9]) ;; *) return 3 ;; esac
+    deadline=$((SECONDS + settle + 1))
+    while :; do
+        rc=0; _svc_activation_quiet_once "$file" "$target" "$known" || rc=$?
+        [ "$rc" = 4 ] || return "$rc"
+        known="$_SVC_QUIET_CGROUP"
+        if [ "$settle" = 0 ]; then
+            _svc_activation_unknown "$target has remaining cgroup members"; return 3
+        fi
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            _svc_activation_unknown "$target has remaining cgroup members after ${settle}s"; return 3
+        fi
+        sleep 0.25 || return 3
+    done
 }
 
 # Reuse the restart owner's readiness policy without invoking its fleet walk.
