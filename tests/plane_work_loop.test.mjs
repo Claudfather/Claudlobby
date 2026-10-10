@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { runInNewContext } from 'node:vm';
 import { ActionState } from '../claudlobby/plane/ui/action-state.js';
 
 // Exercise the real controller without a browser dependency. This small DOM
@@ -970,4 +971,39 @@ test('late delivery for the prior recipient keeps the newly selected bot draft',
   assert.equal(h.get('work-recipient').value, inspectedWorker.uid);
   assert.equal(h.get('work-body').value, 'New worker draft');
   assert.equal(h.sends.length, 1); assert.deepEqual(h.lookups, []);
+});
+
+test('production fleet adoption through overview keeps exact roster identity usable by the real message composer', async () => {
+  const app = await readFile(new URL('../claudlobby/plane/ui/app.js', import.meta.url), 'utf8');
+  const adopt = app.slice(app.indexOf('function adoptFleets('), app.indexOf('function fleetQuery('));
+  const roster = app.slice(app.indexOf('function railRow('), app.indexOf('// The header in the operator'));
+  const recipient = app.slice(app.indexOf('function equipmentRecipient()'), app.indexOf('function refreshEquipmentAction()'));
+  // Minimal sanitized actual owner-browser response shapes: fleets has uid;
+  // overview must carry that same uid when it replaces the initial dimension.
+  // Server regression verifies both actual endpoint projections against SQLite.
+  const fleet = { alias: inspectedWorker.fleet, uid: inspectedWorker.fleet_uid, bots: 2, provisional: 0 };
+  const dimension = { state: 'ok', data: { fleets: [fleet], default: fleet.alias } };
+  const overview = { state: 'ok', data: { fleets: [{ ...fleet, open: 0, attention: 0 }], default: fleet.alias } };
+  let contextReads = 0;
+  const h = harness({ interactionContext: () => { contextReads++; return inspectionContext; } });
+  h.loop.setRoom(fleet.alias); await settle();
+  const rail = new h.Element('fleet');
+  const bindings = { document: h.document, $: id => h.get(id), fleets: [], fleetsSeen: false, currentFleet: null,
+    currentView: 'channel', sessionPaused: false, sessionEpoch: 1, rosterIdentities: new Map(), rosterGeneration: 0,
+    equipmentAlias: null, equipmentSelection: null, equipmentFocus: null,
+    inventoryAliases: new Set([inspectedWorker.alias]), renderState: () => false,
+    refreshEquipmentAction() {}, esc: value => String(value), ago: () => '', loadPick: () => null };
+  runInNewContext(`${adopt}
+${roster}
+${recipient}`, bindings);
+  bindings.adoptFleets(dimension); bindings.adoptFleets(overview);
+  bindings.renderFleet({ state: 'ok', data: { identities: [{ ...inspectedWorker, kind: 'actor', short: 'Worker' }] } });
+  assert.equal(rail.querySelectorAll('[data-bot-inspect]')[0].dataset.botInspect, inspectedWorker.uid);
+  bindings.equipmentSelection = bindings.rosterIdentities.get(inspectedWorker.uid); bindings.equipmentAlias = inspectedWorker.alias;
+  const identity = bindings.equipmentRecipient();
+  assert.equal(identity.fleet_uid, fleet.uid);
+  assert.equal(h.loop.canSelectMessageRecipient(identity), true);
+  assert.equal(h.loop.selectMessageRecipient(identity), true);
+  assert.equal(h.get('work-recipient').value, inspectedWorker.uid); assert.equal(contextReads, 1);
+  assert.deepEqual(h.sends, []); assert.deepEqual(h.preparations, []); assert.deepEqual(h.lookups, []);
 });
