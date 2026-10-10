@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+# A push to a pull request cancels the run for the commit it replaced. A push
+# to main has no pull request number, so it falls back to its own run id: each
+# one is a group of its own, never cancelled and never queued behind another.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
