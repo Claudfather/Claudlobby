@@ -580,8 +580,10 @@ function renderHeader(env) {
     return;
   }
   const t = env.data.totals;
+  const coverage = env.data.coverage;
+  const coverageCopy = coverage?.partial ? ` · <small class="warn">${coverage.reachable}/${coverage.total} sources readable; totals cover readable sources</small>` : '';
   if (!t.fleets) {
-    el.innerHTML = `<span class="dim">no fleet recorded</span>`;
+    el.innerHTML = `<span class="dim">no fleet recorded in readable sources</span>` + coverageCopy;
     return;
   }
   el.innerHTML = `<b>${t.bots}</b> bots`
@@ -601,7 +603,7 @@ function renderHeader(env) {
     + ((t.recorder_gaps && t.recorder_gaps.length)
        ? ` · <b class="warn" title="the recorder itself is failing — see the`
          + ` Trust tab for detail">⚠ recorder: `
-         + `${t.recorder_gaps.map((g) => esc(g.label)).join(", ")}</b>` : "");
+         + `${t.recorder_gaps.map((g) => esc(g.label)).join(", ")}</b>` : "") + coverageCopy;
 }
 
 // The machinery rail's host line — from the OVERVIEW's host block, the same
@@ -612,6 +614,12 @@ function renderHeader(env) {
 function renderHostFacts(env) {
   const el = $("host-facts");
   if (!el) return;
+  if (env?.data?.sources) {
+    el.textContent = env.data.sources.map(s => `${s.label}: ${s.state === 'ok' && s.host
+      ? `ingest ${s.host.last_ingest_at ? ago(s.host.last_ingest_at) : 'never'} · rows ${s.host.rows} · spool ${s.host.spool_files}`
+      : s.state}`).join(' | ');
+    return;
+  }
   const h = env && env.state === "ok" && env.data ? env.data.host : null;
   el.textContent = h
     ? `host ingest ${h.last_ingest_at ? ago(h.last_ingest_at) : "never"}`
@@ -621,6 +629,13 @@ function renderHostFacts(env) {
 
 function renderSummary(env) {
   const beat = $("beat"), label = $("beat-label");
+  if (env?.data?.sources) {
+    const c = env.data.coverage;
+    beat.className = `dot ${c.partial ? 'warn' : 'ok'}`;
+    label.textContent = `${c.reachable}/${c.total} sources readable · `
+      + env.data.sources.map(s => `${s.label}: ${s.state}`).join(' · ');
+    return;
+  }
   if (!env || env.state !== "ok") {
     beat.className = "dot";
     label.textContent = env ? `source ${env.state}` : "view daemon unreachable";
@@ -661,7 +676,7 @@ function ovNum(n, word, bad = true) {
 function renderOverview(env) {
   const el = $("overview");
   if (!el) return;
-  if (!env || env.state !== "ok") {
+  if (!env || (env.state !== "ok" && !env.data?.sources)) {
     el.innerHTML = stateBlock(env ? env.state : "disconnected",
                               env && env.provenance, env && env.remediation);
     return;
@@ -692,6 +707,16 @@ function renderOverview(env) {
                 esc(f.acked_by)} ${esc(ago(f.acked_at))}</small>`}</span> ·
         <span>active ${esc(ago(f.last_activity_at))}</span></div>
     </div>`).join("");
+  if (d.sources) {
+    el.innerHTML = cards + d.sources.map(s => `<div class="ov-card ov-host">
+      <div class="ov-head"><b>${esc(s.label)}</b><span>${esc(s.state)}</span></div>
+      <div class="ov-line">${s.state === 'ok' && s.host
+        ? `${s.host.rows} rows · ${s.host.spool_files ?? 'unknown'} spooled · recorder ${s.host.daemon_serving ? 'up' : 'DOWN'}`
+        : esc(s.remediation || 'This source is not currently readable.')}</div>
+      <div class="ov-line">Separate source snapshot; recent windows are per source.</div>
+    </div>`).join('');
+    return;
+  }
   const h = d.host;
   // the lag STATE is the API's (ingest_lag_state) — the page only renders it
   const lag = h.ingest_lag_state === "none"
@@ -832,7 +857,10 @@ function openStream() {
     try {
       const payload = JSON.parse(ev.data);
       for (const row of payload.rows) pushDebugRow(row);
-      if (payload.rows.length) scheduleRefresh();
+      if (payload.rows.length || payload.coverage_changed) {
+        if (payload.coverage_changed) ++generation;
+        scheduleRefresh();
+      }
     } catch { /* malformed push — the next board refresh corrects */ }
   };
   es.addEventListener("source", (ev) => {
@@ -1451,6 +1479,13 @@ const ownerSession = typeof interactionApi.mountSessionControls === "function"
       onResume: resumeOwnerReads,
       onActionPause(scope, kind, recipient) { workLoop.invalidate(undefined, scope, kind, recipient); },
     }) : null;
+
+// Injected multi-source transports own their streams; disposal never signs out a host.
+if (typeof interactionApi.dispose === 'function') {
+  window.addEventListener('pagehide', () => interactionApi.dispose(), { once: true });
+  window.addEventListener('pageshow', event => { if (event.persisted) location.reload(); });
+}
+
 if (!ownerSession) refreshBoards();
 openStream();
 if (ownerSession) {
