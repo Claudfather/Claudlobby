@@ -473,7 +473,7 @@ function railRow(a) {
   const live = a.last_seen && (Date.now() - Date.parse(a.last_seen)) < 36e5;
   return `<div class="actor" title="${esc(a.alias)}">
     <span class="dot ${live ? "live" : ""}"></span>
-    <span>${esc(a.short)}</span>
+    ${a.kind === "actor" && a.fleet ? `<button class="bot-inspect" type="button" data-bot-inspect="${esc(a.uid)}" aria-label="Inspect ${esc(a.short)} in ${esc(a.fleet)}">${esc(a.short)}</button>` : `<span>${esc(a.short)}</span>`}
     ${a.provisional ? `<span class="prov-badge" title="provisional`
       + ` identity — unconfirmed by the registry">?</span>` : ""}
     <small>${esc(a.kind)} · ${esc(ago(a.last_seen))}</small></div>`;
@@ -497,12 +497,18 @@ function railRow(a) {
 // `all` read ever does.
 function renderFleet(env) {
   const el = $("fleet");
+  const focused = [...el.querySelectorAll("[data-bot-inspect]")].find(button => button === document.activeElement);
+  const focusedIdentity = focused && rosterIdentities.get(focused.dataset.botInspect);
   if (renderState(el, env,
-                  { idleWhenEmpty: (d) => !d.identities.length })) return;
+                  { idleWhenEmpty: (d) => !d.identities.length })) {
+    adoptRoster(new Map()); return;
+  }
   const rows = env.data.identities;
-  const fleets = new Set(rows.map((a) => a.fleet).filter(Boolean));
-  if (fleets.size < 2) { el.innerHTML = rows.map(railRow).join(""); return; }
-  el.innerHTML = groupBy(rows, (a) => a.fleet || "")
+  adoptRoster(new Map(rows.filter(a => a.kind === "actor" && a.fleet)
+    .map(a => [a.uid, Object.freeze({ uid: a.uid, alias: a.alias, fleet: a.fleet,
+      fleet_uid: fleets.find(f => f.alias === a.fleet)?.uid, provisional: !!a.provisional })])));
+  const groups = new Set(rows.map((a) => a.fleet).filter(Boolean));
+  el.innerHTML = groups.size < 2 ? rows.map(railRow).join("") : groupBy(rows, (a) => a.fleet || "")
     .sort((x, y) => (y[0].last_seen || "").localeCompare(
       x[0].last_seen || ""))
     .map((members) => {
@@ -515,6 +521,35 @@ function renderFleet(env) {
         + `<small>${esc(count)}</small></div>`
         + members.map(railRow).join("");
     }).join("");
+  el.querySelectorAll("[data-bot-inspect]").forEach(button => {
+    const identity = rosterIdentities.get(button.dataset.botInspect), version = rosterGeneration, epoch = sessionEpoch;
+    button.addEventListener("click", () => {
+      if (!button.isConnected || sessionPaused || epoch !== sessionEpoch || version !== rosterGeneration) return;
+      inspectBot(identity);
+    });
+  });
+  if (focusedIdentity) {
+    const current = rosterIdentities.get(focusedIdentity.uid);
+    if (current && Object.keys(focusedIdentity).every(key => focusedIdentity[key] === current[key])) {
+      const replacement = [...el.querySelectorAll("[data-bot-inspect]")].find(button => button.dataset.botInspect === current.uid);
+      if (replacement) {
+        if (equipmentFocus?.origin === focused) equipmentFocus.origin = replacement;
+        replacement.focus();
+      }
+    }
+  }
+}
+// The roster generation moves only when an inspectable identity changed: an
+// unchanged refresh keeps the open equipment panel instead of refetching it,
+// while any changed join still fences every button minted against the old one.
+function adoptRoster(next) {
+  const same = next.size === rosterIdentities.size && [...next].every(([uid, a]) => {
+    const b = rosterIdentities.get(uid);
+    return !!b && Object.keys(a).every(key => a[key] === b[key]);
+  });
+  if (!same) { rosterIdentities = next; ++rosterGeneration; }
+  if (!same && equipmentAlias && currentView === "fleet") void openEquipment(equipmentAlias);
+  else refreshEquipmentAction();
 }
 
 // The header in the operator's language (chunk L, #1479): the host's totals
@@ -744,8 +779,9 @@ async function refreshBoards() {
     // be known first — the old flow fetched the firehose, discovered the
     // fleets from the roster, and refetched (one wasted round trip and one
     // flash of the wrong room on every load).
-    adoptFleets(await jget("/api/fleets"));
-    if (gen !== generation) return;
+    const env = await jget("/api/fleets");
+    if (sessionPaused || gen !== generation) return;
+    adoptFleets(env);
   }
   syncWorkRoom();
   const q = fleetQuery();
@@ -855,6 +891,8 @@ function ansiToHtml(text) {
 
 let currentView = "channel";
 let equipmentAlias = null;
+let equipmentGeneration = 0, equipmentSelection = null, equipmentFocus = null, inventoryAliases = new Set();
+let rosterGeneration = 0, rosterIdentities = new Map();
 let inventoryGeneration = 0;
 let currentFleet = null;   // null = auto (single fleet, or no pick yet)
 let gridTimer = null;
@@ -917,7 +955,7 @@ function renderFleetTabs() {
 // ONE pick path — the tab row and the overview strip's cards (U3) both
 // land here, so a card click can never drift from a tab click.
 function pickFleet(f) {
-  if (currentFleet !== f) equipmentAlias = null;
+  if (currentFleet !== f) closeEquipment();
   currentFleet = f;
   syncWorkRoom();
   savePick(currentFleet);
@@ -1087,7 +1125,7 @@ function renderPresenceStrip(counts, recordedDown) {
 }
 
 function setView(view) {
-  if (view !== "fleet") equipmentAlias = null;
+  if (view !== "fleet") closeEquipment();
   currentView = view;
   $("channel").hidden = view !== "channel";
   $("search-results").hidden = true;   // any view switch closes results
@@ -1359,15 +1397,19 @@ function showLoading() {
     renderState($(id), { state: "loading" }));
 }
 showLoading();
-const workLoop = mountWorkLoop({ api: interactionApi, renderThread: threadArticle, refresh: scheduleRefresh });
+let workLoop = null;
+workLoop = mountWorkLoop({ api: interactionApi, renderThread: threadArticle, refresh: scheduleRefresh, onActionsChange: refreshEquipmentAction });
 let workRoom;
 function syncWorkRoom() {
-  const room = currentFleet || (fleets.length === 1 ? fleets[0].alias : "all");
+  const room = activeRoom();
   if (workRoom === room) return false;
   workRoom = room;
   workLoop.setRoom(room);
   showLoading();
   return true;
+}
+function activeRoom() {
+  return currentFleet || (fleets.length === 1 ? fleets[0].alias : "all");
 }
 const ownerSession = typeof interactionApi.mountSessionControls === "function"
   ? interactionApi.mountSessionControls({ document, element: $("owner-session"),
@@ -1409,6 +1451,8 @@ async function pollFleet() {
   if (sessionPaused || currentView !== "fleet") return;
   const epoch = sessionEpoch, fleet = currentFleet;
   const request = ++inventoryGeneration;
+  ++equipmentGeneration; inventoryAliases.clear();
+  rememberEquipmentFocus($("equip-detail"), equipmentAlias, equipmentSelection, epoch);
   renderState($("fleet-room"), { state: "loading" });
   // honor the fleet picker (the same fleet= the channel/search use); with
   // "all", every fleet the host records — cross-fleet twins come back
@@ -1429,6 +1473,7 @@ async function pollFleet() {
     for (const u of util.data) by[u.alias] = u;
     for (const b of inv.data.bots) { const u = by[b.alias]; if (u) b.util = u; }
   }
+  inventoryAliases = new Set(inv?.state === "ok" ? (inv.data?.bots || []).map(bot => bot.alias) : []);
   renderInventory(inv, org);
   if (equipmentAlias) void openEquipment(equipmentAlias);
 }
@@ -1507,7 +1552,13 @@ function renderInventory(env, orgEnv) {
     <h3>projects</h3>${projects}
     <h3>library</h3>${library}`;
   el.querySelectorAll(".bot-card").forEach((c) => {
-    const open = () => openEquipment(c.dataset.alias);
+    const alias = c.dataset.alias, version = inventoryGeneration, epoch = sessionEpoch, fleet = currentFleet;
+    const open = () => {
+      if (!c.isConnected || sessionPaused || currentView !== "fleet" || epoch !== sessionEpoch || version !== inventoryGeneration || fleet !== currentFleet) return;
+      equipmentSelection = [...rosterIdentities.values()].find(identity => identity.alias === alias) || null;
+      equipmentFocus = { alias, selection: equipmentSelection, epoch: sessionEpoch, origin: document.activeElement };
+      void openEquipment(alias);
+    };
     c.addEventListener("click", open);
     c.addEventListener("keydown", (e) => {
       if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
@@ -1515,22 +1566,75 @@ function renderInventory(env, orgEnv) {
   });
 }
 
+function closeEquipment() {
+  ++equipmentGeneration; equipmentAlias = null; equipmentSelection = null; equipmentFocus = null;
+  const box = $("equip-detail"); if (box) box.hidden = true;
+}
+function inspectBot(identity) {
+  if (!identity || sessionPaused) return;
+  const origin = document.activeElement;
+  const roomChanged = activeRoom() !== identity.fleet, teamOpen = currentView === "fleet";
+  if (roomChanged) pickFleet(identity.fleet);
+  equipmentSelection = identity; equipmentAlias = identity.alias;
+  equipmentFocus = { alias: identity.alias, selection: identity, epoch: sessionEpoch, origin };
+  // pickFleet already started the Team inventory read in this case.
+  if (roomChanged && teamOpen) return;
+  setView("fleet"); // Existing inventory/equipment renderer; never a write path.
+}
+function equipmentRecipient() {
+  if (sessionPaused || !equipmentSelection || !inventoryAliases.has(equipmentAlias)) return null;
+  const identity = rosterIdentities.get(equipmentSelection.uid);
+  if (!identity || identity.alias !== equipmentAlias
+      || fleets.find(fleet => fleet.alias === identity.fleet)?.uid !== identity.fleet_uid
+      || ["alias", "fleet", "fleet_uid", "provisional"].some(key => identity[key] !== equipmentSelection[key])) return null;
+  return { ...identity, current: true };
+}
+function refreshEquipmentAction() {
+  const box = $("equip-detail"), button = box?.querySelector(".ed-message");
+  if (!button) return;
+  const identity = equipmentRecipient();
+  button.disabled = !workLoop?.canSelectMessageRecipient(identity);
+  const explanation = box.querySelector(".ed-message-note");
+  if (explanation) explanation.textContent = !button.disabled ? ""
+    : sessionPaused ? "Messaging is paused."
+    : !inventoryAliases.has(equipmentAlias) ? "This bot is not in the current team. Messaging is unavailable."
+    : !identity ? "This bot’s details changed or are unavailable. Select it again after the team refreshes."
+    : identity.provisional ? "This bot is unconfirmed. Inspect it again after its identity is confirmed."
+    : "Messaging is currently unavailable.";
+}
+function rememberEquipmentFocus(box, alias, selection, epoch) {
+  const focused = document.activeElement;
+  if (box?.contains(focused)) equipmentFocus = {
+    alias, selection, epoch, origin: focused,
+    control: focused.matches(".ed-message") ? ".ed-message" : ".ed-close",
+  };
+}
 async function openEquipment(alias) {
   if (sessionPaused) return;
-  const epoch = sessionEpoch;
+  const epoch = sessionEpoch, fleet = currentFleet, inventory = inventoryGeneration, roster = rosterGeneration;
+  const request = ++equipmentGeneration;
+  const selection = equipmentSelection;
   const box = $("equip-detail");
   if (!box) return;
   equipmentAlias = alias;
+  rememberEquipmentFocus(box, alias, selection, epoch);
   box.hidden = false;
   renderState(box, { state: "loading" });
   const env = await jget(`/api/equipment?alias=${encodeURIComponent(alias)}`);
-  if (sessionPaused || epoch !== sessionEpoch || equipmentAlias !== alias || box !== $("equip-detail")) return;
+  if (sessionPaused || epoch !== sessionEpoch || request !== equipmentGeneration || fleet !== currentFleet
+      || currentView !== "fleet" || inventory !== inventoryGeneration || roster !== rosterGeneration
+      || equipmentSelection !== selection || equipmentAlias !== alias || box !== $("equip-detail")) return;
+  const closeControl = '<button class="pill ghost ed-close" type="button">Close bot inspection</button>';
   if (!env || env.state !== "ok") {
-    box.innerHTML = stateBlock(env ? env.state : "disconnected",
+    box.innerHTML = closeControl + stateBlock(env ? env.state : "disconnected",
                                env && env.provenance, env && env.remediation);
-    return;
+    finishInspection(); return;
   }
   const b = env.data;
+  if (!b || b.alias !== alias) {
+    box.innerHTML = closeControl + stateBlock("unknown", null, "Equipment did not match the selected bot. Inspect it again.");
+    finishInspection(); return;
+  }
   const chips = (arr) => (arr || []).map((x) => `<span class="chip">${esc(String(x))}</span>`).join("");
   const eq = EQUIP_ORDER.filter((k) => b.equipment[k] && (Array.isArray(b.equipment[k])
       ? b.equipment[k].length : true))
@@ -1545,7 +1649,9 @@ async function openEquipment(alias) {
   box.innerHTML = `
     <div class="ed-head"><b>${esc(b.short)}</b>
       <small>${esc(b.model || "")}${b.account ? ` · ${esc(b.account)}` : ""}</small>
-      <button class="pill ghost ed-close" type="button">close</button></div>
+      <button class="pill ghost ed-close" type="button" aria-label="Close inspection of ${esc(b.short)}">close</button></div>
+    <button class="pill ghost ed-message" type="button" disabled>Message this bot</button>
+    <p class="note ed-message-note" role="status"></p>
     ${b.org && b.org.mission ? `<div class="ed-mission">${esc(b.org.mission)}</div>` : ""}
     <div class="ed-cols">
       <div><h4>equipment</h4>${eq}</div>
@@ -1566,6 +1672,35 @@ async function openEquipment(alias) {
         </details>
       </div>
     </div>`;
-  box.querySelector(".ed-close").addEventListener("click", () => { equipmentAlias = null; box.hidden = true; });
-  box.scrollIntoView({ block: "nearest" });
+  finishInspection();
+  function finishInspection() {
+    const close = box.querySelector(".ed-close");
+    close.addEventListener("click", () => {
+      // Closing the current visible panel needs no authority. Detached controls
+      // cannot close a replacement, and only a current snapshot returns focus.
+      if (!close.isConnected || box !== $("equip-detail") || box.querySelector(".ed-close") !== close) return;
+      const returnFocus = !sessionPaused && epoch === sessionEpoch && request === equipmentGeneration
+        && inventory === inventoryGeneration && roster === rosterGeneration && fleet === currentFleet && currentView === "fleet";
+      closeEquipment();
+      if (returnFocus) [...$("fleet-room").querySelectorAll(".bot-card")].find(card => card.dataset.alias === alias)?.focus();
+    });
+    const message = box.querySelector(".ed-message");
+    if (message) message.addEventListener("click", () => {
+      if (!message.isConnected || box !== $("equip-detail") || request !== equipmentGeneration
+          || inventory !== inventoryGeneration || roster !== rosterGeneration || epoch !== sessionEpoch) return;
+      if (workLoop.selectMessageRecipient(equipmentRecipient())) {
+        closeEquipment(); $("work-loop").scrollIntoView({ block: "nearest" });
+      } else refreshEquipmentAction();
+    });
+    refreshEquipmentAction();
+    if (equipmentFocus?.alias === alias && equipmentFocus.selection === selection && equipmentFocus.epoch === epoch) {
+      const ticket = equipmentFocus, active = document.activeElement;
+      equipmentFocus = null;
+      if (!active || active === document.body || active.isConnected === false || active === ticket.origin) {
+        const control = ticket.control && box.querySelector(ticket.control);
+        (control && !control.disabled ? control : close).focus();
+      }
+    }
+    box.scrollIntoView({ block: "nearest" });
+  }
 }

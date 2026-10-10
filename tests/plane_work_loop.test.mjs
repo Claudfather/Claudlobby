@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { runInNewContext } from 'node:vm';
 import { ActionState } from '../claudlobby/plane/ui/action-state.js';
 
 // Exercise the real controller without a browser dependency. This small DOM
@@ -876,4 +877,133 @@ test(`late feedback capability refresh cannot restore access after ${loss}`,asyn
   held.resolve(ownerFeedback);await settle();h.open(nudgeTaskId);await settle();
   assert.equal(h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='feedback').disabled,true);
   assert.equal(h.get('work-form').hidden,true);assert.equal(h.sends.length,0);assert.equal(h.preparations.length,0);
+});
+
+const inspectedWorker = { uid: 'actor_' + '2'.repeat(32), alias: 'bot:web/subteam/worker',
+  fleet: 'web/subteam', fleet_uid: 'fleet_' + '3'.repeat(32), provisional: false, current: true };
+const inspectionContext = { ...context, simulation: false, room: inspectedWorker.fleet,
+  scope: { ...context.scope, fleet: inspectedWorker.fleet }, actions: ['message'],
+  recipients: [{ id: 'actor_' + '1'.repeat(32), label: 'Worker', lead: true },
+    { id: inspectedWorker.uid, label: 'Worker' }] };
+
+test('bot selection uses the exact admitted UID and room, keeps recipient drafts and never calls transport', async () => {
+  let contextReads = 0;
+  const h = harness({ interactionContext: () => { contextReads++; return inspectionContext; } });
+  h.loop.setRoom(inspectedWorker.fleet); await settle();
+  const lead = { ...inspectedWorker, uid: inspectionContext.recipients[0].id, alias: 'bot:web/subteam/lead' };
+  h.get('work-body').value = 'Draft for the lead'; h.get('work-body').emit('input');
+  assert.equal(h.loop.selectMessageRecipient(inspectedWorker), true);
+  assert.equal(h.get('work-recipient').value, inspectedWorker.uid);
+  assert.equal(h.get('work-body').value, '');
+  h.get('work-body').value = 'Draft for this worker'; h.get('work-body').emit('input');
+  assert.equal(h.loop.selectMessageRecipient(lead), true);
+  assert.equal(h.get('work-body').value, 'Draft for the lead');
+  assert.equal(h.loop.selectMessageRecipient(inspectedWorker), true);
+  assert.equal(h.get('work-body').value, 'Draft for this worker');
+  assert.equal(h.document.activeElement, h.get('work-body'));
+  assert.equal(contextReads, 1); assert.deepEqual(h.sends, []); assert.deepEqual(h.lookups, []); assert.deepEqual(h.preparations, []);
+});
+
+for (const patch of [{ uid: 'actor_' + '9'.repeat(32) }, { fleet: 'other/team' },
+  { provisional: true }, { current: false }, { uid: 'Worker' }, { fleet_uid: '' }])
+test(`bot selection refuses unavailable identity ${JSON.stringify(patch)} without lead fallback`, async () => {
+  const h = harness({ interactionContext: () => inspectionContext }); h.loop.setRoom(inspectedWorker.fleet); await settle();
+  h.get('work-body').value = 'Keep this draft'; h.get('work-body').emit('input');
+  const previous = h.get('work-recipient').value;
+  assert.equal(h.loop.canSelectMessageRecipient({ ...inspectedWorker, ...patch }), false);
+  assert.equal(h.loop.selectMessageRecipient({ ...inspectedWorker, ...patch }), false);
+  assert.equal(h.get('work-recipient').value, previous); assert.equal(h.get('work-body').value, 'Keep this draft');
+  assert.deepEqual(h.sends, []); assert.deepEqual(h.lookups, []); assert.deepEqual(h.preparations, []);
+});
+
+test('unavailable inspection selection is never queued when later authority arrives; revocation refuses selection', async () => {
+  const waiting = deferred(); let reads = 0;
+  const h = harness({ interactionContext: () => { reads++; return waiting.promise; } });
+  h.loop.setRoom(inspectedWorker.fleet); await settle();
+  assert.equal(h.loop.selectMessageRecipient(inspectedWorker), false);
+  waiting.resolve(inspectionContext); await settle();
+  assert.equal(h.get('work-recipient').value, inspectionContext.recipients[0].id);
+  h.loop.invalidate(undefined, inspectionContext.scope, 'message', inspectedWorker.uid);
+  assert.equal(h.loop.selectMessageRecipient(inspectedWorker), false);
+  assert.equal(reads, 1); assert.deepEqual(h.sends, []);
+  const readonly = harness({ interactionContext: () => null }); readonly.loop.setRoom(inspectedWorker.fleet); await settle();
+  assert.equal(readonly.loop.selectMessageRecipient(inspectedWorker), false);
+});
+
+test('bot selection preserves pending recipient UUIDs without receipt lookup or resend', async () => {
+  const storage = store(); const state = new ActionState(storage);
+  state.begin(inspectionContext, 'message', { recipient: inspectedWorker.uid, task_id: null }, 'Already submitted', 'original-worker-request');
+  const h = harness({ storage, interactionContext: () => inspectionContext }); h.loop.setRoom(inspectedWorker.fleet); await settle();
+  assert.equal(h.loop.selectMessageRecipient(inspectedWorker), true);
+  assert.equal(h.get('work-send').disabled, true);
+  assert.equal(new ActionState(storage).pending[0].request_id, 'original-worker-request');
+  assert.deepEqual(h.sends, []); assert.deepEqual(h.lookups, []);
+});
+
+test('selecting an inspected bot resets task composition and fences a pending preparation', async () => {
+  const prepare = deferred();
+  const worker = { ...inspectedWorker, fleet: 'web', alias: 'bot:web/worker' };
+  const message = { ...inspectionContext, room: 'web', scope: { ...inspectionContext.scope, fleet: 'web' } };
+  const h = harness(nudgeOptions({ interactionContext: () => message, prepareAction: () => prepare.promise }));
+  await chooseNudge(h); const submitting = h.submit(); await settle();
+  assert.equal(h.preparations.length, 1); assert.equal(h.sends.length, 0);
+  assert.equal(h.loop.selectMessageRecipient(worker), true);
+  assert.equal(h.get('work-task').textContent, ''); assert.equal(h.get('work-label').textContent, 'Message');
+  assert.equal(h.get('work-recipient').value, worker.uid); assert.equal(h.get('work-body').value, '');
+  const { body, ...metadata } = h.preparations[0]; prepare.resolve({ ...metadata, semantic_sha256: 'd'.repeat(64) });
+  await submitting;
+  assert.equal(h.sends.length, 0); assert.equal(new ActionState(h.storage).pending.length, 0);
+  assert.match(h.get('work-notice').textContent, /Task nudge was not sent\. Your reason is kept/);
+  h.open(nudgeTaskId); await settle();
+  h.get('task-detail-content').querySelectorAll('[data-kind]').find(b => b.dataset.kind === 'nudge').onclick();
+  assert.equal(h.get('work-body').value, 'Hello');
+});
+
+
+test('late delivery for the prior recipient keeps the newly selected bot draft', async () => {
+  const sent = deferred();
+  const h = harness({ interactionContext: () => inspectionContext, sendAction: () => sent.promise });
+  h.loop.setRoom(inspectedWorker.fleet); await settle();
+  const submitting = h.submit(); await settle(); assert.equal(h.sends.length, 1);
+  assert.equal(h.loop.selectMessageRecipient(inspectedWorker), true);
+  h.get('work-body').value = 'New worker draft'; h.get('work-body').emit('input');
+  sent.resolve(receipt(h.sends[0])); await submitting;
+  assert.equal(h.get('work-recipient').value, inspectedWorker.uid);
+  assert.equal(h.get('work-body').value, 'New worker draft');
+  assert.equal(h.sends.length, 1); assert.deepEqual(h.lookups, []);
+});
+
+test('production fleet adoption through overview keeps exact roster identity usable by the real message composer', async () => {
+  const app = await readFile(new URL('../claudlobby/plane/ui/app.js', import.meta.url), 'utf8');
+  const adopt = app.slice(app.indexOf('function adoptFleets('), app.indexOf('function fleetQuery('));
+  const roster = app.slice(app.indexOf('function railRow('), app.indexOf('// The header in the operator'));
+  const recipient = app.slice(app.indexOf('function equipmentRecipient()'), app.indexOf('function refreshEquipmentAction()'));
+  // Minimal sanitized actual owner-browser response shapes: fleets has uid;
+  // overview must carry that same uid when it replaces the initial dimension.
+  // Server regression verifies both actual endpoint projections against SQLite.
+  const fleet = { alias: inspectedWorker.fleet, uid: inspectedWorker.fleet_uid, bots: 2, provisional: 0 };
+  const dimension = { state: 'ok', data: { fleets: [fleet], default: fleet.alias } };
+  const overview = { state: 'ok', data: { fleets: [{ ...fleet, open: 0, attention: 0 }], default: fleet.alias } };
+  let contextReads = 0;
+  const h = harness({ interactionContext: () => { contextReads++; return inspectionContext; } });
+  h.loop.setRoom(fleet.alias); await settle();
+  const rail = new h.Element('fleet');
+  const bindings = { document: h.document, $: id => h.get(id), fleets: [], fleetsSeen: false, currentFleet: null,
+    currentView: 'channel', sessionPaused: false, sessionEpoch: 1, rosterIdentities: new Map(), rosterGeneration: 0,
+    equipmentAlias: null, equipmentSelection: null, equipmentFocus: null,
+    inventoryAliases: new Set([inspectedWorker.alias]), renderState: () => false,
+    refreshEquipmentAction() {}, esc: value => String(value), ago: () => '', loadPick: () => null };
+  runInNewContext(`${adopt}
+${roster}
+${recipient}`, bindings);
+  bindings.adoptFleets(dimension); bindings.adoptFleets(overview);
+  bindings.renderFleet({ state: 'ok', data: { identities: [{ ...inspectedWorker, kind: 'actor', short: 'Worker' }] } });
+  assert.equal(rail.querySelectorAll('[data-bot-inspect]')[0].dataset.botInspect, inspectedWorker.uid);
+  bindings.equipmentSelection = bindings.rosterIdentities.get(inspectedWorker.uid); bindings.equipmentAlias = inspectedWorker.alias;
+  const identity = bindings.equipmentRecipient();
+  assert.equal(identity.fleet_uid, fleet.uid);
+  assert.equal(h.loop.canSelectMessageRecipient(identity), true);
+  assert.equal(h.loop.selectMessageRecipient(identity), true);
+  assert.equal(h.get('work-recipient').value, inspectedWorker.uid); assert.equal(contextReads, 1);
+  assert.deepEqual(h.sends, []); assert.deepEqual(h.preparations, []); assert.deepEqual(h.lookups, []);
 });
