@@ -6,7 +6,8 @@ import pytest
 from claudlobby.plane.db import db_file
 from claudlobby.plane.ids import ensure_host_uid, read_host_uid
 from claudlobby.plane.owner_access import AccessDenied, AccessUnavailable
-from claudlobby.plane.owner_source import HOST_TABLES, admit_source, bind_source, inspect_source, source_host_uid
+from claudlobby.plane.owner_source import (HOST_TABLES, SourceDenied, SourceNeedsBinding, SourceUnavailable,
+    admit_source, bind_source, inspect_source, source_host_uid)
 from claudlobby.plane.view import _envelope
 from tests.plane_setup import initialize_plane
 from tests.plane_fixtures import ro
@@ -213,8 +214,10 @@ def test_missing_index_does_not_disable_invariant_or_repair_on_read(tmp_path):
     with sqlite3.connect(db_file(tmp_path)) as conn:
         conn.execute("DROP INDEX owner_source_work_items_host")
         conn.execute("UPDATE work_items SET host_uid='foreign-host'")
-    with pytest.raises(AccessDenied):
+    with pytest.raises(SourceNeedsBinding):
         inspect_source(tmp_path)
+    with pytest.raises(SourceDenied):
+        bind_source(tmp_path)
     with sqlite3.connect(db_file(tmp_path)) as conn:
         assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='owner_source_work_items_host'").fetchone()
 
@@ -226,3 +229,47 @@ def test_source_host_oserror_is_generic_unavailable(tmp_path, monkeypatch):
     monkeypatch.setattr(owner_source, "read_host_uid", unreadable)
     with pytest.raises(AccessUnavailable, match="^owner source unavailable$"):
         source_host_uid(tmp_path)
+
+
+@pytest.mark.parametrize("table", TABLES)
+def test_missing_covering_index_fails_fast_readonly_then_explicit_binding_restores(tmp_path, table, monkeypatch):
+    from claudlobby.plane import owner_source
+    _seed(tmp_path)
+    bind_source(tmp_path)
+    path = db_file(tmp_path)
+    with sqlite3.connect(path) as conn:
+        conn.execute(f"DROP INDEX owner_source_{table}_host")
+    before = path.read_bytes()
+    original = owner_source._retained
+    monkeypatch.setattr(owner_source, "_retained", lambda *args: pytest.fail("scanned unindexed source"))
+    with pytest.raises(SourceNeedsBinding):
+        inspect_source(tmp_path)
+    assert path.read_bytes() == before
+    monkeypatch.setattr(owner_source, "_retained", original)
+    assert bind_source(tmp_path) == inspect_source(tmp_path)
+
+
+@pytest.mark.parametrize("index", ["CREATE INDEX owner_source_work_items_host ON work_items(title)",
+    "CREATE INDEX owner_source_work_items_host ON work_items(host_uid) WHERE host_uid IS NOT NULL"])
+def test_incompatible_index_is_unavailable_and_not_silently_repaired(tmp_path, index):
+    _seed(tmp_path)
+    bind_source(tmp_path)
+    path = db_file(tmp_path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP INDEX owner_source_work_items_host")
+        conn.execute(index)
+    before = path.read_bytes()
+    for operation in (inspect_source, bind_source):
+        with pytest.raises(SourceUnavailable):
+            operation(tmp_path)
+    assert path.read_bytes() == before
+
+
+def test_foreign_marker_precedes_missing_index_remediation(tmp_path):
+    _seed(tmp_path)
+    bind_source(tmp_path)
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        conn.execute("DROP INDEX owner_source_work_items_host")
+        conn.execute("UPDATE owner_source_binding SET host_uid='foreign-host'")
+    with pytest.raises(SourceDenied):
+        inspect_source(tmp_path)

@@ -19,6 +19,7 @@ import warnings
 
 from ..command_result import CommandFailure, CommandOutput
 from ..plane.owner_access import AccessDenied, AccessUnavailable, OwnerAccess
+from ..plane.owner_source import SourceDenied, SourceNeedsBinding, SourceUnavailable
 
 _GENERATED = ("BOT_ID", "BOT_NAME", "BOT_DIR", "BOT_SERVICE", "FLEET_ROOT",
               "FLEET_NAME", "CLAUDLOBBY_FLEET", "CLAUDLOBBY_TIMER_CONTEXT")
@@ -228,12 +229,14 @@ def dispatch(args):
         paths = resolve_paths(root=args.root)
         store = OwnerAccess(paths.root)
         if args.owner_action == "serve":
-            from ..plane.owner_server import OwnerServerConfigurationError, serve
+            from ..plane.owner_server import OwnerServerConfigurationError, OwnerServerStartupError, serve
 
             try:
                 serve(paths.root, origin=args.origin, tailscale_binary=args.tailscale,
                       socket_path=args.socket,
                       package=paths.package)
+            except OwnerServerStartupError as exc:
+                raise CommandFailure("unavailable", "owner server startup failed; inspect local server logs") from exc
             except OwnerServerConfigurationError as exc:
                 raise CommandFailure("unavailable", str(exc)) from exc
             except ImportError as exc:
@@ -298,6 +301,15 @@ def dispatch(args):
             raise CommandFailure("invalid_argument", "unsupported owner command")
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid host root selector") from exc
+    except SourceNeedsBinding as exc:
+        raise CommandFailure("unavailable", "Plane source lacks required binding or indexes; verify the selected installation "
+            "and re-run host owner bind-source. Binding refuses foreign or mixed-host history.") from exc
+    except SourceDenied as exc:
+        raise CommandFailure("conflict", "Plane source is foreign or mixed-host; select the correct installation "
+            "or investigate its history. Do not rebind this source.") from exc
+    except SourceUnavailable as exc:
+        raise CommandFailure("unavailable", "Plane source cannot be verified; inspect the selected installation's "
+            "database and schema locally. Pairing again cannot repair source state.") from exc
     except AccessDenied as exc:
         raise CommandFailure("conflict", "owner request is no longer valid; inspect status and request pairing again") from exc
     except (AccessUnavailable, ValueError) as exc:

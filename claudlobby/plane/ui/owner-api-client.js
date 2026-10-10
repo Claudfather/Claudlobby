@@ -4,7 +4,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
   EventSource = globalThis.EventSource, location = globalThis.location,
   setTimeout = globalThis.setTimeout, clearTimeout = globalThis.clearTimeout } = {}) {
   let generation = 0, mode = 'checking', busy = false, disposed = false;
-  let checking = null, recoveryUsed = false;
+  let recoveryUsed = false, readRecoveryUsed = false, readRecoveryTimer = null;
   let mount = null, statusNote = null;
   const reads = new Set(), streams = new Set();
   const labels = {
@@ -23,6 +23,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
     mount.check.disabled = busy;
   }
   function pause(next) {
+    clearTimeout(readRecoveryTimer); readRecoveryTimer = null;
     generation++;
     mode = next;
     statusNote = null;
@@ -35,7 +36,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
     mode = 'ready';
     for (const stream of streams) stream.open();
     render(note);
-    if (!streams.size) mount?.onResume();
+    mount?.onResume(); // First paint does not depend on a proxy flushing SSE.
   }
   function leave(next) {
     pause(next);
@@ -53,39 +54,34 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
       // Keep the timeout through body consumption, not only response headers.
       let data;
       try { data = await response.json(); }
-      catch (error) { if (response.status !== 403) throw error; }
+      catch (error) { if (response.status !== 403 && !(error instanceof SyntaxError)) throw error; }
+      if (controller.signal.aborted) throw new Error();
       return { status: response.status, data };
     } finally {
       clearTimeout(timer);
       reads.delete(controller);
     }
   }
-  async function checkSession(recover = false) {
+  async function checkSession(recover = false, note) {
     if (disposed || busy) return;
-    if (checking) return checking;
     if (recover && recoveryUsed) { pause('unavailable'); return; }
     if (recover) recoveryUsed = true;
-    pause('checking');
     busy = true;
-    render();
+    pause('checking');
     const gen = generation;
-    checking = (async () => {
-      try {
-        const result = await request('/api/owner/status');
-        if (disposed || gen !== generation) return;
-        if (result.status === 200 && result.data?.state === 'ready') resume();
-        else if (result.status === 403 || (result.status === 200 &&
-          ['needs_pairing', 'sign_in_required'].includes(result.data?.state))) leave('denied');
-        else pause('unavailable');
-      } catch {
-        if (!disposed && gen === generation) pause('unavailable');
-      } finally {
-        busy = false;
-        checking = null;
-        render();
-      }
-    })();
-    return checking;
+    try {
+      const result = await request('/api/owner/status');
+      if (disposed || gen !== generation) return;
+      if (result.status === 200 && result.data?.state === 'ready') resume(note);
+      else if (result.status === 403 || (result.status === 200 &&
+        ['needs_pairing', 'sign_in_required'].includes(result.data?.state))) leave('denied');
+      else pause('unavailable');
+    } catch {
+      if (!disposed && gen === generation) pause('unavailable');
+    } finally {
+      busy = false;
+      render();
+    }
   }
   async function mutate(action) {
     if (disposed || busy || (action === 'renew' && mode !== 'ready')) return;
@@ -98,7 +94,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
       if (disposed || gen !== generation) return;
       if (result.status === 200 && result.data?.state === (action === 'renew' ? 'ready' : 'signed_out')) {
         if (action === 'logout') leave('signed_out');
-        else { recoveryUsed = false; resume('Session renewed. Your browser session stays signed in.'); }
+        else { recoveryUsed = false; readRecoveryUsed = false; resume('Session renewed. Your browser session stays signed in.'); }
       } else if (result.status === 403) {
         refusal = true;
       } else pause('unavailable'); // A lost logout reply is not success.
@@ -110,7 +106,22 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
     }
     // Another tab may have rotated the shared cookie during this operation.
     // Check the current cookie once; never replay a mutation or auto-login.
-    if (refusal && !disposed) { recoveryUsed = false; await checkSession(true); }
+    if (refusal && !disposed) {
+      recoveryUsed = false;
+      await checkSession(true, action === 'logout' ? 'Sign-out did not complete. You are still signed in; try again.' : undefined);
+    }
+  }
+  function unavailableRead() {
+    pause('unavailable');
+    // One read-only recovery probe per outage. A successful status response
+    // alone does not rearm it: require an admitted stream message or explicit action.
+    if (readRecoveryUsed || disposed) return;
+    readRecoveryUsed = true;
+    const gen = generation;
+    readRecoveryTimer = setTimeout(() => {
+      readRecoveryTimer = null;
+      if (!disposed && gen === generation && mode === 'unavailable' && !busy) void checkSession();
+    }, 1000);
   }
   async function jget(url) {
     if (disposed || mode !== 'ready') return null;
@@ -123,11 +134,12 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
         else await checkSession(true);
         return null;
       }
-      if (result.status !== 200) { pause('unavailable'); return null; }
+      if (result.status === 503) { unavailableRead(); return null; }
+      if (result.status !== 200) return null; // Only the affected panel degrades.
       recoveryUsed = false;
-      return result.data;
+      return result.data ?? null;
     } catch {
-      if (!disposed && gen === generation && mode === 'ready') pause('unavailable');
+      if (!disposed && gen === generation && mode === 'ready') unavailableRead();
       return null;
     }
   }
@@ -159,6 +171,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
         source.onmessage = event => {
           if (source !== native || gen !== generation || mode !== 'ready') return;
           recoveryUsed = false;
+          readRecoveryUsed = false;
           stream.onmessage?.(event);
         };
         source.onerror = event => {
@@ -191,7 +204,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
     element.hidden = false;
     mount.renew.addEventListener('click', () => { void mutate('renew'); });
     mount.logout.addEventListener('click', () => { void mutate('logout'); });
-    mount.check.addEventListener('click', () => { recoveryUsed = false; void checkSession(); });
+    mount.check.addEventListener('click', () => { recoveryUsed = false; readRecoveryUsed = false; void checkSession(); });
     render();
     const ready = checkSession();
     return { ready, dispose };

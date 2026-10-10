@@ -22,11 +22,23 @@ HOST_TABLES = (*dict.fromkeys(CONSTRUCT_TABLES.values()), "events")
 _UNAVAILABLE = (sqlite3.Error, OSError, PendingMigrationError, DowngradeError)
 
 
+class SourceUnavailable(AccessUnavailable):
+    """Recorder source cannot be verified; never an authority/pairing failure."""
+
+
+class SourceNeedsBinding(SourceUnavailable):
+    """Missing operator-owned marker/indexes; local re-attestation may restore them."""
+
+
+class SourceDenied(AccessDenied):
+    """Foreign/mixed source; must never be rebound to the selected installation."""
+
+
 def source_host_uid(root: Path) -> str:
     try:
         return read_host_uid(Path(root) / "state")
     except (ValueError, OSError) as exc:
-        raise AccessUnavailable("owner source unavailable") from exc
+        raise SourceUnavailable("owner source unavailable") from exc
 
 
 def _marker(conn: sqlite3.Connection, host_uid: str, *, required: bool) -> bool:
@@ -35,14 +47,35 @@ def _marker(conn: sqlite3.Connection, host_uid: str, *, required: bool) -> bool:
     ).fetchone()
     if not exists:
         if required:
-            raise AccessUnavailable("owner source unavailable")
+            raise SourceNeedsBinding("owner source unavailable")
         return False
     rows = conn.execute("SELECT singleton, host_uid FROM owner_source_binding LIMIT 2").fetchall()
     if len(rows) != 1 or rows[0][0] != 1 or not isinstance(rows[0][1], str):
-        raise AccessUnavailable("owner source unavailable")
+        raise SourceUnavailable("owner source unavailable")
     if rows[0][1] != host_uid:
-        raise AccessDenied("owner source denied")
+        raise SourceDenied("owner source denied")
     return True
+
+
+def _indexes(conn: sqlite3.Connection) -> None:
+    """Require the operator-created covering indexes without scanning payload rows."""
+    for table in HOST_TABLES:
+        name = f"owner_source_{table}_host"
+        row = conn.execute("SELECT tbl_name FROM sqlite_master WHERE type='index' AND name=?",
+                           (name,)).fetchone()
+        if row is None:
+            # A dropped table is corruption/schema drift, not a repairable index.
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                            (table,)).fetchone() is None:
+                raise SourceUnavailable("owner source unavailable")
+            raise SourceNeedsBinding("owner source unavailable")
+        if row[0] != table:
+            raise SourceUnavailable("owner source unavailable")
+        keys = [row for row in conn.execute(f"PRAGMA index_xinfo({name})") if row[5]]
+        listed = [row for row in conn.execute(f"PRAGMA index_list({table})") if row[1] == name]
+        if (len(keys) != 1 or keys[0][2] != "host_uid" or keys[0][4] != "BINARY"
+                or len(listed) != 1 or listed[0][4]):
+            raise SourceUnavailable("owner source unavailable")
 
 
 def _retained(conn: sqlite3.Connection, host_uid: str) -> None:
@@ -68,13 +101,13 @@ def _retained(conn: sqlite3.Connection, host_uid: str) -> None:
                     f" ORDER BY host_uid COLLATE BINARY {direction} LIMIT 1"
                 ).fetchone()
                 if row is not None and row[0] != host_uid:
-                    raise AccessDenied("owner source denied")
+                    raise SourceDenied("owner source denied")
         if conn.execute(
             "SELECT 1 FROM identity_registry WHERE kind='fleet'"
             " AND parent_uid IS NOT NULL AND parent_uid IS NOT ? LIMIT 1",
             (host_uid,),
         ).fetchone():
-            raise AccessDenied("owner source denied")
+            raise SourceDenied("owner source denied")
     finally:
         conn.set_progress_handler(None, 0)
 
@@ -82,13 +115,14 @@ def _retained(conn: sqlite3.Connection, host_uid: str) -> None:
 def admit_source(conn: sqlite3.Connection, host_uid: str) -> None:
     """Require binding and retained invariants in the caller's read transaction."""
     if not conn.in_transaction:
-        raise AccessUnavailable("owner source unavailable")
+        raise SourceUnavailable("owner source unavailable")
     try:
         require_current_schema(conn)
         _marker(conn, host_uid, required=True)
+        _indexes(conn)
         _retained(conn, host_uid)
     except _UNAVAILABLE as exc:
-        raise AccessUnavailable("owner source unavailable") from exc
+        raise SourceUnavailable("owner source unavailable") from exc
 
 
 def inspect_source(root: Path) -> str:
@@ -101,7 +135,7 @@ def inspect_source(root: Path) -> str:
         admit_source(conn, host_uid)
         return host_uid
     except _UNAVAILABLE as exc:
-        raise AccessUnavailable("owner source unavailable") from exc
+        raise SourceUnavailable("owner source unavailable") from exc
     finally:
         if conn is not None:
             conn.close()
@@ -115,12 +149,12 @@ def bind_source(root: Path, *, expected_host_uid: str | None = None) -> str:
     """
     host_uid = source_host_uid(root)
     if expected_host_uid is not None and host_uid != expected_host_uid:
-        raise AccessDenied("owner source denied")
+        raise SourceDenied("owner source denied")
     path = db_file(root)
     conn = None
     try:
         if path.resolve() != path.absolute():
-            raise AccessUnavailable("owner source unavailable")
+            raise SourceUnavailable("owner source unavailable")
         # Share the reader's regular-file check before SQLite can open a FIFO.
         probe = connect_ro(path)
         probe.close()
@@ -134,6 +168,7 @@ def bind_source(root: Path, *, expected_host_uid: str | None = None) -> str:
         for table in HOST_TABLES:
             conn.execute(f"CREATE INDEX IF NOT EXISTS owner_source_{table}_host"
                          f" ON {table}(host_uid COLLATE BINARY)")
+        _indexes(conn)
         _retained(conn, host_uid)
         if not present:
             conn.execute("CREATE TABLE owner_source_binding ("
@@ -142,11 +177,11 @@ def bind_source(root: Path, *, expected_host_uid: str | None = None) -> str:
             conn.execute("INSERT INTO owner_source_binding VALUES (1, ?)", (host_uid,))
         # A concurrent installation identity change must not bind stale state.
         if source_host_uid(root) != host_uid:
-            raise AccessUnavailable("owner source unavailable")
+            raise SourceUnavailable("owner source unavailable")
         conn.commit()
         return host_uid
     except _UNAVAILABLE as exc:
-        raise AccessUnavailable("owner source unavailable") from exc
+        raise SourceUnavailable("owner source unavailable") from exc
     finally:
         if conn is not None:
             conn.close()  # rolls back every refused binding
