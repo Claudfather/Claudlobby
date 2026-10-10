@@ -877,7 +877,10 @@ with no automatic queue retry. Cancelled HTTP waiters retain their slot until th
 owned worker ends; all completed or failed workers release capacity. No
 request automatically retries or changes UUID. Receipt inspection has no native
 effect. `delivered` requires the exact sender/recipient receiver-integrity proof;
-`recorded` requires a verified committed communication fact. Every other result,
+`recorded` requires a verified committed communication fact. Send classification
+also requires the retained semantic digest to match canonical MessageBody UTF-8
+bytes and the ordinary `chat` kind; old UUID proof cannot confirm different text.
+Every other result,
 including missing retained UUID history and exceptions after a possible effect,
 is `unknown`, never safe rejection or permission to resend. Responses contain
 metadata only and use `Cache-Control: no-store, private`. Direct-host HTTPS,
@@ -893,7 +896,8 @@ draft. Receipt checks and reused local IDs cannot use this marker to clear old
 uncertainty. Adapter-entry failures and held-response admission refusals remain
 unknown, even when their HTTP status is 403 or 503. No path automatically resends.
 
-An action 403 invalidates the composer capability and probes the read session
+A send or receipt 403 invalidates only the composer with the same complete
+originating scope; context refusals use the controller room epoch. An action 403 probes the read session
 once without pausing a valid board/SSE session or recreating a grant. Session
 pauses keep the selected team and saved draft and make no action-context request;
 a subsequent authorized resume refreshes the context. Unexpected action-context

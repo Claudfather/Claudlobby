@@ -12,7 +12,8 @@ from ..active_config import resolve_active_context
 from ..context import resolve_paths
 from ..operation_context import (bind_task_context, OperationContextError,
                                  OperationContextUnavailableError)
-from ..request_receipts import ReceiptConflict
+from ..message_payload import MessageBody
+from ..request_receipts import ReceiptConflict, semantic_digest
 from .owner_access import AccessDenied, AccessUnavailable, OwnerAccess, VerifiedReader
 from .owner_messages import OwnerMessages
 from .owner_source import inspect_source
@@ -163,6 +164,13 @@ class OwnerActions:
                 return {"version": 1, **{key: payload[key] for key in fields},
                         "status": "unknown"}
             observed = adapter.inspect(reader, **options)
+            if action == "send":
+                # Recovery may find an older use of this UUID after validation
+                # or activation failed before the canonical reservation check.
+                body = MessageBody.from_input(payload["body"])
+                expected = semantic_digest({"body": body.text.encode("utf-8"), "kind": "chat"})
+                if observed.request.semantic_sha256 != expected:
+                    raise ReceiptConflict("submission does not match retained request")
             proof = observed.receiver
             if (proof.integrity_verdict == "delivered" and proof.receipt_observation == "received"
                     and proof.sender is not None and proof.sender.uid == grant.actor_uid

@@ -1307,7 +1307,7 @@ const ownerSession = typeof interactionApi.mountSessionControls === "function"
         $("beat-label").textContent = "session access paused";
       },
       onResume: resumeOwnerReads,
-      onActionPause() { workLoop.invalidate(); },
+      onActionPause(scope) { workLoop.invalidate(undefined, scope); },
     }) : null;
 if (!ownerSession) refreshBoards();
 openStream();
