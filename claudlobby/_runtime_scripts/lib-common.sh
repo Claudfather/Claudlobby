@@ -3333,7 +3333,9 @@ pane_send_key() {
 # withheld, or it still held the payload after the last Enter. A 3 is not a
 # failure to deliver: the text is in the box, or may still arrive there, typed
 # and unsubmitted. A caller under set -e must handle it, since nothing a send
-# leaves behind is a crash.
+# leaves behind is a crash. Returns 4 when a fresh capture under the send lock
+# proves the input box already holds text: no new payload or Enter is sent, and
+# the existing input is left untouched. Unreadable captures are not held proof.
 #
 # The keystrokes go out as N chunks of at most PANE_SEND_CHUNK_BYTES, not as one
 # send-keys — see _pane_send_payload and the knobs above for the measurement
@@ -3383,6 +3385,19 @@ _pane_send_verified_locked() {
         emit_fleet_event send_blind dispatch \
             "$(printf '{"session":"%s","reason":"input-box-never-drawn","box":"%s"}' \
                 "$(json_escape "$session")" "$box")"
+    fi
+
+    # A previous send may have typed text but withheld its Enter. Appending a
+    # new payload would submit both as one prompt. Inspect after readiness and
+    # under the same recipient lock as the write; never clear or submit the hold.
+    local before
+    if before=$(bot_tmux "$socket" capture-pane -t "$session" -p 2>/dev/null) &&
+        pane_is_held "$before"; then
+        emit_fleet_event send_miss dispatch \
+            "$(printf '{"session":"%s","reason":"recipient-input-held"}' \
+                "$(json_escape "$session")")"
+        printf 'pane_send: recipient-input-held; no payload or Enter was sent\n' >&2
+        return 4
     fi
 
     # #1236: arm the trace BEFORE the send, so the one mkdir this costs happens

@@ -6,7 +6,8 @@ health. It never records Plane facts, proves receipt, or retries a payload.
 ``submitted`` means the native payload/Enter call returned successfully; receiver
 receipt plus wire-integrity evidence belong to the messaging operation owner.
 Any started send failure is unknown unless the native owner explicitly reports
-that its session precheck dropped the send before any pane write.
+that its session precheck or occupied-input check dropped the send before any
+pane write.
 
 ``press_held_enter`` is the second native call, made only by the operation owner
 after a receipt wait found no receipt (#2105): it reads the pane, and presses one
@@ -148,7 +149,8 @@ def send(package: PackageResources, destination: TransportDestination, *, messag
     """Attempt exactly one native submission; no automatic payload/Enter retry.
 
     The runner seam has subprocess byte-input semantics. Only pre-call validation
-    inability to launch, and native no-session preflight are definite failures.
+    inability to launch, native no-session preflight, and observed occupied input
+    refused before writing are definite failures.
     A timeout, partial send, malformed response, or interrupted native call is unknown.
     Wire proof describes prepared native bytes, not delivery, and may be absent
     even after submission.
@@ -198,6 +200,12 @@ def send(package: PackageResources, destination: TransportDestination, *, messag
             and b"send dropped (logged)" in stderr):
         return TransportOutcome("failed", native_returncode=1,
                                 reason="native session precheck dropped the send")
+    if (rc == result.returncode == 4
+            and b"pane_send: recipient-input-held; no payload or Enter was sent\n" in stderr):
+        # The helper computes the wire proof before admission. These prepared
+        # bytes never crossed the pane, and must not be reported as sent proof.
+        return TransportOutcome("failed", native_returncode=4,
+                                reason="recipient input already held text; nothing was sent")
     return TransportOutcome("unknown", digest, length, result.returncode,
                             "native submission did not complete with a valid success result")
 

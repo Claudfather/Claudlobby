@@ -7,6 +7,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import time
 from tempfile import TemporaryDirectory
 
 import pytest
@@ -114,6 +115,65 @@ def test_real_native_send_uses_exact_session_and_pane_target():
         finally:
             subprocess.run([tmux, "-L", socket, "kill-server"], env=env,
                            capture_output=True, timeout=5)
+
+
+def test_real_native_refuses_existing_input_without_typing_or_enter():
+    tmux = shutil.which("tmux")
+    assert tmux, "native transport requires tmux"
+    with TemporaryDirectory(prefix="cl-held-", dir="/tmp") as scratch:
+        root = Path(scratch)
+        sockets, home = root / "s", root / "h"
+        sockets.mkdir(); home.mkdir()
+        env = {"PATH": "/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin",
+               "HOME": str(home), "TMUX_TMPDIR": str(sockets), "TMPDIR": str(sockets)}
+        box = Path(__file__).resolve().parent / "fixtures" / "input-box-stub.py"
+        log = root / "submissions"
+        command = [tmux, "-L", "private-held", "-f", "/dev/null"]
+        def native(*args):
+            return subprocess.run([*command, *args], env=env, capture_output=True,
+                                  text=True, timeout=5, check=True)
+        try:
+            native("new-session", "-d", "-s", "worker",
+                   f"python3 {shlex.quote(str(box))} --chrome --log {shlex.quote(str(log))}")
+            def wait_for(text):
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    pane = native("capture-pane", "-t", "worker", "-p").stdout
+                    if text in pane:
+                        return pane
+                    time.sleep(0.02)
+                pytest.fail("private input fixture did not render expected text")
+            wait_for(">\n")
+            original = "STRANDED_PRIVATE_INPUT"
+            native("send-keys", "-t", "worker", "-l", "--", original)
+            before = wait_for(original)
+            destination = transport.TransportDestination(root, "fleet", "private-held", "worker", sockets)
+            package = replace(source_package(), native=Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts")
+            result = transport.send(package, destination, message_id=MSG,
+                                    body="NEW_PAYLOAD_MUST_NOT_APPEND", timeout=10)
+            assert result.status == "failed" and result.native_returncode == 4, result
+            assert result.wire_sha256 is result.wire_bytes is None
+            assert native("capture-pane", "-t", "worker", "-p").stdout == before
+            assert not log.exists()  # No CR submitted either the old or new text.
+        finally:
+            subprocess.run([*command, "kill-server"], env=env, capture_output=True, timeout=5)
+
+
+@pytest.mark.parametrize("marker,reported,actual,expected", [
+    (b"pane_send: recipient-input-held; no payload or Enter was sent\n", 4, 4, "failed"),
+    (b"unclassified failure", 4, 4, "unknown"),
+    (b"pane_send: recipient-input-held; no payload or Enter was sent\n", 4, 1, "unknown"),
+])
+def test_held_refusal_requires_coherent_native_proof(destination, marker, reported, actual, expected):
+    calls = []
+    def runner(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, actual,
+            f"transport-v1\tinvoked\ntransport-v1\tresult\t{reported}\t{HASH}\t42\n".encode(), marker)
+    result = transport.send(source_package(), destination, message_id=MSG, body="new", runner=runner)
+    assert result.status == expected and len(calls) == 1
+    if expected == "failed":
+        assert result.wire_sha256 is result.wire_bytes is None
 
 
 @pytest.mark.parametrize(("field", "value"), [("socket", "../foreign"), ("socket", ""),

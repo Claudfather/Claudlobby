@@ -149,6 +149,19 @@ bot_tmux() {
             ;;
         capture-pane)
             local remaining fixture
+            # The pre-write look observes the last readiness frame. Future
+            # frames describe the authored payload after send-keys, not input
+            # that existed before it. Keep this snapshot across subshells.
+            if [ "${FUNCNAME[1]:-}" = _pane_send_verified_locked ] &&
+                [ ! -s "$SENT_LOG" ] && [ -s "$TMPD/last-ready" ]; then
+                fixture=$(cat "$TMPD/last-ready")
+                if [ -n "$(pane_input_region "$(cat "$fixture")")" ]; then
+                    printf 'capture:drawn:%s\n' "${fixture##*/}" >> "$ORDER_LOG"
+                else
+                    printf 'capture:predraw:%s\n' "${fixture##*/}" >> "$ORDER_LOG"
+                fi
+                cat "$fixture"; return 0
+            fi
             remaining=$(cat "$PANE_SCRIPT")
             fixture=$(printf '%s\n' "$remaining" | head -1)
             printf '%s\n' "$remaining" | tail -n +2 > "$PANE_SCRIPT.tmp"
@@ -160,6 +173,7 @@ bot_tmux() {
             else
                 printf 'capture:predraw:%s\n' "${fixture##*/}" >> "$ORDER_LOG"
             fi
+            printf '%s' "$fixture" > "$TMPD/last-ready"
             cat "$fixture"
             ;;
     esac
@@ -168,6 +182,7 @@ bot_tmux() {
 # _send_prep <fixture...>: a clean slate for one send (empty logs and chunk
 # dir) and the frames the stub's captures return, in order.
 _send_prep() {
+    rm -f "$TMPD/last-ready"
     : > "$SENT_LOG"; : > "$ORDER_LOG"; : > "$RAW_LOG"
     rm -f "$CHUNK_DIR"/*; CHUNK_N=0
     printf '%s\n' "$@" > "$PANE_SCRIPT"
@@ -274,7 +289,7 @@ echo "=== pane_send_verified: retry fires only on positive evidence ==="
 # readiness wait, the wait for the payload to show, the verify after the Enter,
 # the verify after the retry. A box that holds it for good is no submit at all
 # (#1236; the bounded Enters below).
-stuck_then_gone() { printf '%s\n' "$1" "$1" "$1" "$FIXTURES/input-clean-submit.txt"; }
+stuck_then_gone() { printf '%s\n' "$HINT" "$1" "$1" "$FIXTURES/input-clean-submit.txt"; }
 r=$(run_send_rc '/claudna:session resume --auto' $(stuck_then_gone "$FIXTURES/input-stuck-literal.txt"))
 assert_eq "literal text stuck at the input line -> Enter resent, then submitted" "3 0" "$r"
 
@@ -611,7 +626,7 @@ echo "=== pane_send_verified: the poll gives a slow render time to settle ==="
 # tick, because the readiness wait took the first; the order is asserted now.
 export PANE_SEND_VERIFY_TICKS=3
 r=$(run_send '/claudna:session resume --auto' \
-        "$FIXTURES/input-stuck-literal.txt" "$FIXTURES/input-stuck-literal.txt" \
+        "$HINT" "$FIXTURES/input-stuck-literal.txt" \
         "$FIXTURES/input-stuck-literal.txt" "$FIXTURES/input-clean-submit.txt")
 assert_eq "box clears on a later poll tick -> NO retry" "2" "$r"
 r=$(awk '/^send:Enter$/ { e = 1; next }
@@ -624,7 +639,7 @@ export PANE_SEND_VERIFY_TICKS=1
 # backwards would make the cheap setting the most wasteful one AND fire a ghost
 # Enter into an idle pane on every send.
 export PANE_SEND_VERIFY_TICKS=0
-r=$(run_send '/claudna:session resume --auto' "$FIXTURES/input-stuck-literal.txt")
+r=$(run_send '/claudna:session resume --auto' "$HINT" "$FIXTURES/input-stuck-literal.txt")
 assert_eq "PANE_SEND_VERIFY_TICKS=0 disables the verify (no blind resend)" "2" "$r"
 export PANE_SEND_VERIFY_TICKS=1
 
@@ -1192,6 +1207,18 @@ assert_eq "only the withheld Enter is logged" "1" "$(wc -l < "$blog" | tr -d ' '
 r=$(grep -cE '^[[:space:]]*boot_send_settled (RESUME|STARTUP) "\$_send_rc" "\$LOG"$' \
     "$SCRIPT_DIR/../claudlobby/_runtime_scripts/start-bot.sh" || true)
 assert_eq "start-bot settles both of its boot sends" "2" "$r"
+
+echo "=== fresh occupied input refuses every new payload, including while busy ==="
+for held in input-stuck-literal.txt input-stuck-wrapped.txt input-stuck-collapsed-paste.txt input-typed-busy.txt; do
+    r=$(run_send_rc 'NEW PAYLOAD' "$FIXTURES/$held")
+    assert_eq "$held: no keystrokes and definite refusal" "0 4" "$r"
+done
+r=$(grep -cF 'pane_send: recipient-input-held; no payload or Enter was sent' "$SEND_ERR" || true)
+assert_eq "the refusal says that nothing was sent" "1" "$r"
+# Empty input during a running turn remains usable; its queue hint is chrome,
+# not an authored input hold. The payload disappearing into that queue submits.
+r=$(run_send_rc 'ordinary queued message' $(sent_frames 'ordinary queued message' "$FIXTURES/input-queued-hint.txt" "$FIXTURES/input-queued-hint.txt"))
+assert_eq "queued hint remains writable and is not mistaken for held input" "2 0" "$r"
 
 echo "=== $PASS/$TOTAL passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]
