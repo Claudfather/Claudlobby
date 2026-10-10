@@ -220,7 +220,8 @@ def test_rebound_human_cannot_read_previous_actors_request(gateway, monkeypatch)
 
 
 @pytest.mark.parametrize("boundary", ["before_bind", "route", "inspect", "send_return"])
-def test_expected_grant_cannot_change_during_owner_operation(gateway, monkeypatch, boundary):
+@pytest.mark.parametrize("same_actor", [False, True])
+def test_expected_grant_cannot_change_during_owner_operation(gateway, monkeypatch, boundary, same_actor):
     from claudlobby.plane import owner_messages
     adapter, reader, owner, ctx, options = gateway
     calls = native_receiver(monkeypatch)
@@ -230,7 +231,8 @@ def test_expected_grant_cannot_change_during_owner_operation(gateway, monkeypatc
     def regrant():
         adapter.access.revoke_messages(expected_owner=owner, fleet_uid=ctx.fleet_uid)
         adapter.access.allow_messages(expected_owner=owner, fleet_uid=ctx.fleet_uid,
-                                      actor_uid=other.caller.uid, actor_alias=other.caller.alias)
+                                      actor_uid=ctx.caller.uid if same_actor else other.caller.uid,
+                                      actor_alias=ctx.caller.alias if same_actor else other.caller.alias)
 
     if boundary == "inspect":
         adapter.send(reader, **options, text="Original message")
@@ -268,6 +270,60 @@ def test_expected_grant_cannot_change_during_owner_operation(gateway, monkeypatc
     assert len(calls) == (1 if boundary in {"inspect", "send_return"} else 0)
     if not calls:
         assert not list((adapter.root / "state/requests").glob("*/*.json"))
+
+
+@pytest.mark.parametrize("code", ["recording_degraded", "delivery_failed", "delivery_unknown"])
+@pytest.mark.parametrize("change", ["unchanged", "revoke", "expire", "reallow"])
+def test_failure_outcome_is_withheld_when_authority_changes(gateway, monkeypatch, code, change):
+    from claudlobby.plane import owner_messages
+    adapter, reader, owner, ctx, options = gateway
+    outcome = CommandFailure(code, "Synthetic retained outcome", data={"message_id": "sensitive-outcome"})
+
+    def deliver(*a, **k):
+        if change in {"revoke", "reallow"}:
+            adapter.access.revoke_messages(expected_owner=owner, fleet_uid=ctx.fleet_uid)
+            if change == "reallow":
+                adapter.access.allow_messages(expected_owner=owner, fleet_uid=ctx.fleet_uid,
+                                              actor_uid=ctx.caller.uid, actor_alias=ctx.caller.alias)
+        elif change == "expire":
+            adapter.access._clock = lambda: 10**12
+        raise outcome
+
+    monkeypatch.setattr(owner_messages, "deliver_bound_message", deliver)
+    with pytest.raises(CommandFailure if change == "unchanged" else AccessDenied) as error:
+        adapter.send(reader, **options, text="Synthetic message")
+    if change == "unchanged":
+        assert error.value is outcome
+    else:
+        assert not hasattr(error.value, "data")
+
+
+def test_owner_replay_never_repeats_held_enter_repair(gateway, monkeypatch):
+    from claudlobby import message_queries
+    from claudlobby.message_queries import MessageIdentity, ReceiptObservation
+    adapter, reader, _, ctx, options = gateway
+    calls = native_receiver(monkeypatch, received=False)
+    repairs = []
+
+    def receipt(_ctx, message_id, **kwargs):
+        return ReceiptObservation(message_id=message_id, root=str(adapter.root),
+            sender=MessageIdentity(ctx.caller.uid, ctx.caller.alias, ctx.caller_fleet_uid),
+            destination=MessageIdentity(ctx.bots["worker"].uid, ctx.bots["worker"].alias, ctx.fleet_uid),
+            receipt_observation="missing", integrity_verdict="unknown", exit_code=5,
+            code="delivery_unknown", reason="Synthetic held input")
+
+    def repair(*a, first, **k):
+        repairs.append(a[2])
+        return None, first
+
+    monkeypatch.setattr(message_queries, "receipt", receipt)
+    monkeypatch.setattr(message_operations, "repair_held_delivery", repair)
+    for _ in range(2):
+        with pytest.raises(CommandFailure) as error:
+            adapter.send(reader, **options, text="Held input")
+        assert error.value.error.code == "delivery_unknown"
+    assert len(calls) == 1
+    assert len(repairs) == 1, "a strict replay must not enter the native Enter-repair owner"
 
 
 @pytest.mark.parametrize("operation", ["send", "inspect"])

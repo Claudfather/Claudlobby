@@ -13,7 +13,6 @@ import getpass
 import io
 import json
 import os
-import re
 import sqlite3
 import sys
 import warnings
@@ -107,12 +106,16 @@ def _message_preview(paths, store, fleet, actor_alias, release):
             "actor_uid": ctx.caller.uid if ctx is not None else None}
 
 
+def _describe_binding(terminal, fleet_uid, actor_alias, actor_uid):
+    terminal.write("Fleet UID: " + json.dumps(fleet_uid) + "\n")
+    terminal.write("Actor: " + json.dumps(actor_alias, ensure_ascii=True) + "\n")
+    terminal.write("Actor UID: " + json.dumps(actor_uid) + "\n")
+
+
 def _describe_messages(terminal, preview):
     _describe(terminal, preview["owner"])
     terminal.write("Fleet: " + json.dumps(preview["fleet"]) + "\n")
-    terminal.write("Fleet UID: " + json.dumps(preview["bindings"]["fleet_uid"]) + "\n")
-    terminal.write("Actor: " + json.dumps(preview["actor_alias"], ensure_ascii=True) + "\n")
-    terminal.write("Actor UID: " + json.dumps(preview["actor_uid"]) + "\n")
+    _describe_binding(terminal, preview["bindings"]["fleet_uid"], preview["actor_alias"], preview["actor_uid"])
 
 
 def _unchanged(before, after):
@@ -121,10 +124,10 @@ def _unchanged(before, after):
 
 
 def _allow_messages(args, paths, store, terminal):
-    from ..operation_context import resolve_task_context, resolve_task_mutation_context
+    from ..operation_context import _valid_human_alias, resolve_task_context, resolve_task_mutation_context
     from ..runtime_admission import RuntimeIdentity, mutation_admission
 
-    if not re.fullmatch(r"human:[^\s:/]+", args.actor):
+    if not _valid_human_alias(args.actor):
         raise CommandFailure("invalid_argument", "--actor must be a canonical local human: alias")
     with mutation_admission(paths.root, identity=RuntimeIdentity.current()) as release:
         preview = _message_preview(paths, store, args.target_fleet, args.actor, release)
@@ -167,9 +170,7 @@ def _revoke_messages(args, store, terminal):
     owner = _active_owner(store)
     grant = store.current_message_grant(expected_owner=owner, fleet_uid=args.fleet_uid)
     _describe(terminal, owner)
-    terminal.write("Fleet UID: " + json.dumps(grant.fleet_uid) + "\n")
-    terminal.write("Actor: " + json.dumps(grant.actor_alias, ensure_ascii=True) + "\n")
-    terminal.write("Actor UID: " + json.dumps(grant.actor_uid) + "\n")
+    _describe_binding(terminal, grant.fleet_uid, grant.actor_alias, grant.actor_uid)
     terminal.write("Revoke only this retained ordinary-message grant. Owner read access remains.\n")
     _approve(terminal, "REVOKE-MESSAGES")
     if store.current_message_grant(expected_owner=owner, fleet_uid=args.fleet_uid) != grant:
@@ -179,15 +180,43 @@ def _revoke_messages(args, store, terminal):
                          lines=("Owner ordinary-message grant revoked. Read access remains.",))
 
 
-def dispatch(args):
-    from ..context import resolve_paths
-    from ..paths import InvalidPathSelector
-    from ..plane.ids import read_host_uid
+@contextmanager
+def _message_errors():
+    """Translate grant-authoring failures before they leave the terminal body."""
     from ..activation_state import ActivationError
     from ..operation_context import OperationContextError
     from ..runtime_admission import ReleaseMismatch
     from ..plane.schema_state import PendingMigrationError
     from ..plane.migrations import DowngradeError
+
+    try:
+        yield
+    except ReleaseMismatch as exc:
+        raise CommandFailure("release_mismatch", "owner grant requires this installation's active sealed runtime") from exc
+    except OperationContextError as exc:
+        raise CommandFailure(exc.code, "owner message identities could not be bound; verify the active fleet and actor") from exc
+    except ActivationError as exc:
+        raise CommandFailure("conflict", "active configuration is unavailable; verify the selected installation") from exc
+    except AccessDenied as exc:
+        if exc.code == "invalid_message_binding":
+            raise CommandFailure("invalid_argument", "message grants require canonical fleet and human actor bindings") from exc
+        if exc.code == "messages_not_allowed":
+            raise CommandFailure("conflict", "no retained message grant for this fleet; inspect host owner status") from exc
+        if exc.code == "message_binding_changed":
+            raise CommandFailure("conflict", "message grant changed or already belongs to another actor; inspect host owner status "
+                                 "and revoke the retained grant before approving a replacement") from exc
+        if exc.code == "grant_changed":
+            raise CommandFailure("conflict", "owner pairing changed; inspect host owner status before retrying") from exc
+        raise
+    except (PendingMigrationError, DowngradeError, sqlite3.Error, OSError) as exc:
+        raise CommandFailure("unavailable", "message grant could not be bound or persisted; inspect local authority, "
+                             "active configuration and Plane storage") from exc
+
+
+def dispatch(args):
+    from ..context import resolve_paths
+    from ..paths import InvalidPathSelector
+    from ..plane.ids import read_host_uid
 
     if any(key in os.environ for key in _GENERATED):
         raise CommandFailure("conflict", "owner commands require an operator shell without bot or fleet selectors")
@@ -213,15 +242,20 @@ def dispatch(args):
                 raise CommandFailure("unavailable", "owner server failed; inspect local logs and configured resources") from exc
             return CommandOutput({"state": "stopped"}, lines=("Owner server stopped.",))
         if args.owner_action == "status":
-            grant = store.current_grant()
+            grant, messages = store.local_status()
             state = "unpaired" if grant is None else "paired" if grant.active else "revoked"
-            return CommandOutput({"state": state, "owner": asdict(grant) if grant else None},
-                                 lines=(f"Owner access: {state}.",))
+            lines = [f"Owner access: {state}."]
+            for message in messages:
+                lines.append("Message grant: " + json.dumps(asdict(message), ensure_ascii=True))
+            return CommandOutput({"state": state, "owner": asdict(grant) if grant else None,
+                                  "message_grants": [asdict(message) for message in messages]},
+                                 lines=tuple(lines))
         with _terminal() as terminal:
-            if args.owner_action == "allow-messages":
-                return _allow_messages(args, paths, store, terminal)
-            if args.owner_action == "revoke-messages":
-                return _revoke_messages(args, store, terminal)
+            if args.owner_action in {"allow-messages", "revoke-messages"}:
+                with _message_errors():
+                    if args.owner_action == "allow-messages":
+                        return _allow_messages(args, paths, store, terminal)
+                    return _revoke_messages(args, store, terminal)
             if args.owner_action == "bind-source":
                 from ..plane.owner_source import bind_source
 
@@ -264,13 +298,7 @@ def dispatch(args):
             raise CommandFailure("invalid_argument", "unsupported owner command")
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid host root selector") from exc
-    except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "owner grant requires this installation's active sealed runtime") from exc
-    except OperationContextError as exc:
-        raise CommandFailure(exc.code, "owner message identities could not be bound; verify the active fleet and actor") from exc
-    except ActivationError as exc:
-        raise CommandFailure("conflict", "active configuration is unavailable; verify the selected installation") from exc
     except AccessDenied as exc:
         raise CommandFailure("conflict", "owner request is no longer valid; inspect status and request pairing again") from exc
-    except (AccessUnavailable, ValueError, PendingMigrationError, DowngradeError, sqlite3.Error, OSError) as exc:
+    except (AccessUnavailable, ValueError) as exc:
         raise CommandFailure("unavailable", "owner authority is unavailable; verify the selected installation") from exc
