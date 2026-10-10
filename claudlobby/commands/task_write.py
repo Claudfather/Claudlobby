@@ -353,11 +353,14 @@ def feedback_bound_task(ctx, route, package, *, request_id, task_id, body,
             "feedback recording " + ("committed" if committed else "is unconfirmed")
             + "; notification was not attempted; inspect the original request",
             data=data, release_id=route.release_id) from exc
+    # Native input collapses spaces. Escape them inside the JSON string so
+    # decoding the received comment preserves every authored byte.
+    comment = json.dumps(body.text, ensure_ascii=True).replace(" ", "\\u0020")
     # The quoted body is comment content, not a control instruction or a reply parent.
     envelope = ("[Claudlobby task feedback]\n"
                 f"Message: {result.message_id}\nFrom: {route.caller.alias}\nTo: {route.peer.alias}\n"
                 f"Task: {result.task_id}\nAssignment: {result.assignment_id or '-'}\n"
-                "Comment: " + json.dumps(body.text, ensure_ascii=True))
+                "Comment: " + comment)
     notification = _committed_notification(ctx, route, package, result, envelope,
                                            send_on_replay=False, allow_enter_repair=False)
     data = {"request_id": request_id, "fleet": ctx.context.fleet.name, "task_id": result.task_id,
