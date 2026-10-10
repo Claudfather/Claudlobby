@@ -1447,6 +1447,7 @@ async function pollFleet() {
   const epoch = sessionEpoch, fleet = currentFleet;
   const request = ++inventoryGeneration;
   ++equipmentGeneration; inventoryAliases.clear();
+  rememberEquipmentFocus($("equip-detail"), equipmentAlias, equipmentSelection, epoch);
   renderState($("fleet-room"), { state: "loading" });
   // honor the fleet picker (the same fleet= the channel/search use); with
   // "all", every fleet the host records — cross-fleet twins come back
@@ -1550,7 +1551,7 @@ function renderInventory(env, orgEnv) {
     const open = () => {
       if (!c.isConnected || sessionPaused || currentView !== "fleet" || epoch !== sessionEpoch || version !== inventoryGeneration || fleet !== currentFleet) return;
       equipmentSelection = [...rosterIdentities.values()].find(identity => identity.alias === alias) || null;
-      equipmentFocus = { alias, selection: equipmentSelection, epoch: sessionEpoch };
+      equipmentFocus = { alias, selection: equipmentSelection, epoch: sessionEpoch, origin: document.activeElement };
       void openEquipment(alias);
     };
     c.addEventListener("click", open);
@@ -1566,10 +1567,11 @@ function closeEquipment() {
 }
 function inspectBot(identity) {
   if (!identity || sessionPaused) return;
+  const origin = document.activeElement;
   const roomChanged = activeRoom() !== identity.fleet, teamOpen = currentView === "fleet";
   if (roomChanged) pickFleet(identity.fleet);
   equipmentSelection = identity; equipmentAlias = identity.alias;
-  equipmentFocus = { alias: identity.alias, selection: identity, epoch: sessionEpoch };
+  equipmentFocus = { alias: identity.alias, selection: identity, epoch: sessionEpoch, origin };
   // pickFleet already started the Team inventory read in this case.
   if (roomChanged && teamOpen) return;
   setView("fleet"); // Existing inventory/equipment renderer; never a write path.
@@ -1589,9 +1591,18 @@ function refreshEquipmentAction() {
   button.disabled = !workLoop?.canSelectMessageRecipient(identity);
   const explanation = box.querySelector(".ed-message-note");
   if (explanation) explanation.textContent = !button.disabled ? ""
-    : !identity ? "Roster identity changed or is unavailable. Inspect this bot again after the roster refreshes."
+    : sessionPaused ? "Messaging is paused."
+    : !inventoryAliases.has(equipmentAlias) ? "This bot is not in the current team. Messaging is unavailable."
+    : !identity ? "This bot’s details changed or are unavailable. Select it again after the team refreshes."
     : identity.provisional ? "This bot is unconfirmed. Inspect it again after its identity is confirmed."
-    : "Messaging is unavailable with your current access to this team.";
+    : "Messaging is currently unavailable.";
+}
+function rememberEquipmentFocus(box, alias, selection, epoch) {
+  const focused = document.activeElement;
+  if (box?.contains(focused)) equipmentFocus = {
+    alias, selection, epoch, origin: focused,
+    control: focused.matches(".ed-message") ? ".ed-message" : ".ed-close",
+  };
 }
 async function openEquipment(alias) {
   if (sessionPaused) return;
@@ -1601,6 +1612,7 @@ async function openEquipment(alias) {
   const box = $("equip-detail");
   if (!box) return;
   equipmentAlias = alias;
+  rememberEquipmentFocus(box, alias, selection, epoch);
   box.hidden = false;
   renderState(box, { state: "loading" });
   const env = await jget(`/api/equipment?alias=${encodeURIComponent(alias)}`);
@@ -1677,7 +1689,12 @@ async function openEquipment(alias) {
     });
     refreshEquipmentAction();
     if (equipmentFocus?.alias === alias && equipmentFocus.selection === selection && equipmentFocus.epoch === epoch) {
-      equipmentFocus = null; close.focus();
+      const ticket = equipmentFocus, active = document.activeElement;
+      equipmentFocus = null;
+      if (!active || active === document.body || active.isConnected === false || active === ticket.origin) {
+        const control = ticket.control && box.querySelector(ticket.control);
+        (control && !control.disabled ? control : close).focus();
+      }
     }
     box.scrollIntoView({ block: "nearest" });
   }

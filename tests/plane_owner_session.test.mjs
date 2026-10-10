@@ -598,6 +598,7 @@ test('aborted inventory from an earlier session cannot overwrite the resumed pan
   const poll = app.slice(app.indexOf('async function pollFleet()'), app.indexOf('function orgNode('));
   const inventory = deferred(), rendered = [];
   const state = { sessionPaused: false, sessionEpoch: 1, inventoryGeneration: 0, equipmentGeneration: 0, inventoryAliases: new Set(), currentFleet: 'synthetic', currentView: 'fleet',
+    equipmentAlias: null, equipmentSelection: null, rememberEquipmentFocus() {},
     fleetQuery: () => '?fleet=synthetic', $: () => ({}), renderState() {}, renderInventory(value) { rendered.push(value); },
     jget: () => inventory.promise };
   const pending = runInNewContext(`${poll}\npollFleet()`, state);
@@ -638,7 +639,7 @@ test('both resume callbacks preserve equipment through loading DOM replacement a
     const requests = [deferred(), deferred()], rendered = [], opened = [], room = {};
     let detail = { hidden: false, alias: 'synthetic-worker' }, index = 0;
     const state = { sessionPaused: true, sessionEpoch: 4, inventoryGeneration: 0, equipmentGeneration: 0, inventoryAliases: new Set(),
-      currentView: 'fleet', currentFleet: 'synthetic', equipmentAlias: 'synthetic-worker',
+      currentView: 'fleet', currentFleet: 'synthetic', equipmentAlias: 'synthetic-worker', equipmentSelection: null, rememberEquipmentFocus() {},
       fleetQuery: () => '?fleet=synthetic', refreshBoards() {},
       $: id => id === 'fleet-room' ? room : id === 'equip-detail' ? detail : { value: '' },
       renderState() { detail = null; }, // Actual loading behavior removes the detail node.
@@ -861,20 +862,25 @@ const equipmentEnvelope = alias => ({ state: 'ok', data: { alias, short: 'Worker
   changes: [], versions: 1, composed_hashes: {}, org: {} } });
 function inspectionHarness() {
   const reads = [], selections = [], buttons = new Map(), cards = [];
-  const document = { activeElement: null };
+  const document = { activeElement: null, body: { isConnected: true } };
   let box;
   function detail() {
     return { hidden: true, content: '', scrolls: 0,
       set innerHTML(value) {
-        for (const button of buttons.values()) button.isConnected = false;
+        for (const button of buttons.values()) {
+          if (document.activeElement === button) document.activeElement = document.body;
+          button.isConnected = false;
+        }
         buttons.clear(); this.content = value;
         for (const name of ['ed-close', 'ed-message', 'ed-message-note']) if (value.includes(name)) {
           buttons.set('.' + name, { isConnected: true, disabled: true, textContent: '', focusCalls: 0,
             focus() { this.focusCalls++; document.activeElement = this; },
+            matches(selector) { return selector === '.' + name; },
             addEventListener(event, listener) { this[event] = listener; } });
         }
       }, get innerHTML() { return this.content; },
       querySelector(selector) { return buttons.get(selector) || null; },
+      contains(node) { return !!node && [...buttons.values()].includes(node); },
       scrollIntoView() { this.scrolls++; } };
   }
   box = detail();
@@ -1059,12 +1065,13 @@ test('explicit inspection focuses the completed panel once; background equipment
   assert.equal(h.document.activeElement, otherControl); assert.equal(h.buttons.get('.ed-close').focusCalls, 0);
 });
 
-test('cross-fleet roster inspection retains its explicit focus request through room loading and one inventory poll', async () => {
+for (const moveToComposer of [false, true]) test(`cross-fleet inspection preserves ${moveToComposer ? 'new composer focus' : 'its focus request'} through inventory and late boards`, async () => {
   const h = inspectionHarness(), pick = inspectionApp.slice(inspectionApp.indexOf('function pickFleet('), inspectionApp.indexOf('const STATUS_DOT'));
   const room = inspectionApp.slice(inspectionApp.indexOf('function activeRoom()'), inspectionApp.indexOf('const ownerSession ='));
   const poll = inspectionApp.slice(inspectionApp.indexOf('async function pollFleet()'), inspectionApp.indexOf('function orgNode('));
   h.state.currentFleet = 'all'; h.state.currentView = 'fleet';
-  h.document.activeElement = { dataset: { botInspect: botIdentity.uid } };
+  const origin = { isConnected: true, dataset: { botInspect: botIdentity.uid } };
+  h.document.activeElement = origin;
   h.state.syncWorkRoom = () => { h.document.activeElement = null; };
   h.state.savePick = () => {}; h.state.renderFleetTabs = () => {}; h.state.refreshBoards = () => {};
   h.state.fleetQuery = () => '?fleet=' + encodeURIComponent(h.state.currentFleet);
@@ -1072,16 +1079,27 @@ test('cross-fleet roster inspection retains its explicit focus request through r
   h.state.setView = () => { throw Error('Team is already visible; a second poll is unnecessary'); };
   const get = h.state.$; h.state.$ = id => id === 'search-results' ? { hidden: true } : get(id);
   runInNewContext(`${pick}\n${room}\n${poll}`, h.state);
+  runInNewContext(rosterHelpers, h.state);
+  const twin = { ...botIdentity, uid: 'actor_' + '6'.repeat(32), fleet: 'other', alias: 'bot:other/worker' };
+  h.state.rosterIdentities.set(twin.uid, twin);
   const originalPoll = h.state.pollFleet; let pendingPoll;
   h.state.pollFleet = () => { pendingPoll = originalPoll(); return pendingPoll; };
   h.state.inspectBot(botIdentity);
   assert.equal(h.document.activeElement, null); assert.equal(h.reads.length, 3);
+  assert.equal(h.state.equipmentFocus.origin, origin);
+  const composer = { isConnected: true }; if (moveToComposer) h.document.activeElement = composer;
   h.reads[0].resolve({ state: 'ok', data: { bots: [{ alias: botIdentity.alias }] } });
   h.reads[1].resolve(null); h.reads[2].resolve(null); await pendingPoll;
   assert.equal(h.reads.length, 4); assert.match(h.reads[3].url, /^\/api\/equipment/);
   h.reads[3].resolve(equipmentEnvelope(botIdentity.alias)); await flush();
-  assert.equal(h.document.activeElement, h.buttons.get('.ed-close'));
+  assert.equal(h.document.activeElement, moveToComposer ? composer : h.buttons.get('.ed-close'));
   assert.equal(h.state.equipmentFocus, null);
+  // The fleet-filtered board can arrive after inventory and equipment.
+  h.state.adoptRoster(new Map([[botIdentity.uid, botIdentity]]));
+  assert.equal(h.document.activeElement, moveToComposer ? composer : h.document.body);
+  assert.equal(h.reads.length, 5);
+  h.reads[4].resolve(equipmentEnvelope(botIdentity.alias)); await flush();
+  assert.equal(h.document.activeElement, moveToComposer ? composer : h.buttons.get('.ed-close'));
 });
 
 test('visible close remains usable during an inventory generation change without stale focus hand-back', async () => {
@@ -1109,7 +1127,7 @@ test('changed or unavailable roster identity explains disabled messaging until e
   h.state.rosterIdentities.set(botIdentity.uid, { ...botIdentity, provisional: true });
   h.state.refreshEquipmentAction();
   assert.equal(h.buttons.get('.ed-message').disabled, true);
-  assert.match(h.buttons.get('.ed-message-note').textContent, /Inspect this bot again after the roster refreshes/);
+  assert.match(h.buttons.get('.ed-message-note').textContent, /Select it again after the team refreshes/);
   assert.equal(h.state.equipmentSelection, botIdentity); assert.deepEqual(h.selections, []);
   h.state.equipmentSelection = h.state.rosterIdentities.get(botIdentity.uid);
   h.state.refreshEquipmentAction();
@@ -1123,4 +1141,82 @@ test('explicit inspection of unavailable historical equipment still focuses a vi
   h.reads[0].resolve({ state: 'idle' }); await pending;
   assert.equal(h.document.activeElement, h.buttons.get('.ed-close')); assert.equal(h.buttons.has('.ed-message'), false);
   h.buttons.get('.ed-close').click(); assert.equal(h.box.hidden, true);
+});
+
+for (const selector of ['.ed-close', '.ed-message']) test(`background roster refresh restores focused ${selector} after real child removal`, async () => {
+  const h = inspectionHarness(); runInNewContext(rosterHelpers, h.state);
+  const first = h.state.openEquipment(botIdentity.alias); h.reads[0].resolve(equipmentEnvelope(botIdentity.alias)); await first;
+  const origin = h.buttons.get(selector); origin.focus();
+  h.state.adoptRoster(new Map([...h.state.rosterIdentities, ['actor_' + '8'.repeat(32), { ...botIdentity, uid: 'actor_' + '8'.repeat(32), alias: 'bot:team/with/slash/other' }]]));
+  assert.equal(origin.isConnected, false); assert.equal(h.document.activeElement, h.document.body);
+  h.reads[1].resolve(equipmentEnvelope(botIdentity.alias)); await flush();
+  assert.equal(h.document.activeElement, h.buttons.get(selector));
+});
+
+test('background equipment refresh falls back to close if the former message control becomes disabled', async () => {
+  const h = inspectionHarness(), first = h.state.openEquipment(botIdentity.alias);
+  h.reads[0].resolve(equipmentEnvelope(botIdentity.alias)); await first;
+  h.buttons.get('.ed-message').focus();
+  const refresh = h.state.openEquipment(botIdentity.alias); h.state.workLoop.canSelectMessageRecipient = () => false;
+  h.reads[1].resolve(equipmentEnvelope(botIdentity.alias)); await refresh;
+  assert.equal(h.buttons.get('.ed-message').disabled, true); assert.equal(h.document.activeElement, h.buttons.get('.ed-close'));
+});
+
+for (const background of [false, true]) test(`${background ? 'background' : 'explicit'} inspection response never takes focus from a live composer`, async () => {
+  const h = inspectionHarness(), origin = { isConnected: true };
+  if (background) {
+    const first = h.state.openEquipment(botIdentity.alias); h.reads[0].resolve(equipmentEnvelope(botIdentity.alias)); await first;
+    h.buttons.get('.ed-message').focus();
+  } else {
+    h.document.activeElement = origin;
+    h.state.equipmentFocus = { alias: botIdentity.alias, selection: botIdentity, epoch: h.state.sessionEpoch, origin };
+  }
+  const pending = h.state.openEquipment(botIdentity.alias), composer = { isConnected: true };
+  h.document.activeElement = composer;
+  h.reads.at(-1).resolve(equipmentEnvelope(botIdentity.alias)); await pending;
+  assert.equal(h.document.activeElement, composer); assert.equal(h.state.equipmentFocus, null);
+  assert.equal(h.buttons.get('.ed-close').focusCalls, 0);
+});
+
+test('roster refresh before the first equipment response retains explicit focus and fences the original response', async () => {
+  const h = inspectionHarness(); runInNewContext(rosterHelpers, h.state);
+  const origin = { isConnected: false };
+  h.state.equipmentFocus = { alias: botIdentity.alias, selection: botIdentity, epoch: h.state.sessionEpoch, origin };
+  const first = h.state.openEquipment(botIdentity.alias);
+  h.state.adoptRoster(new Map([...h.state.rosterIdentities, ['other', { ...botIdentity, uid: 'other' }]]));
+  h.reads[0].resolve(equipmentEnvelope(botIdentity.alias)); await first;
+  assert.equal(h.document.activeElement, null);
+  h.reads[1].resolve(equipmentEnvelope(botIdentity.alias)); await flush();
+  assert.equal(h.document.activeElement, h.buttons.get('.ed-close')); assert.equal(h.state.equipmentFocus, null);
+});
+
+test('disabled message explanation distinguishes session pause, absent inventory, and unavailable current context', async () => {
+  const h = inspectionHarness(), pending = h.state.openEquipment(botIdentity.alias);
+  h.reads[0].resolve(equipmentEnvelope(botIdentity.alias)); await pending;
+  h.state.sessionPaused = true; h.state.refreshEquipmentAction();
+  assert.match(h.buttons.get('.ed-message-note').textContent, /Messaging is paused/);
+  h.state.sessionPaused = false; h.state.inventoryAliases.clear(); h.state.refreshEquipmentAction();
+  assert.match(h.buttons.get('.ed-message-note').textContent, /not in the current team/);
+  assert.doesNotMatch(h.buttons.get('.ed-message-note').textContent, /Inspect.*again/);
+  h.state.inventoryAliases.add(botIdentity.alias); h.state.workLoop.canSelectMessageRecipient = () => false; h.state.refreshEquipmentAction();
+  assert.match(h.buttons.get('.ed-message-note').textContent, /Messaging is currently unavailable/);
+  assert.doesNotMatch(h.buttons.get('.ed-message-note').textContent, /your current access/);
+});
+
+test('inventory reload preserves panel focus through replacement of the entire detail node', async () => {
+  const h = inspectionHarness(), first = h.state.openEquipment(botIdentity.alias);
+  h.reads[0].resolve(equipmentEnvelope(botIdentity.alias)); await first;
+  h.buttons.get('.ed-message').focus();
+  const room = {}, get = h.state.$;
+  h.state.$ = id => id === 'fleet-room' ? room : get(id);
+  h.state.renderState = node => { if (node === room) { h.box.innerHTML = ''; h.replaceBox(); } else node.innerHTML = 'loading'; };
+  h.state.renderInventory = () => {}; h.state.fleetQuery = () => '?fleet=' + botIdentity.fleet;
+  const poll = inspectionApp.slice(inspectionApp.indexOf('async function pollFleet()'), inspectionApp.indexOf('function orgNode('));
+  runInNewContext(poll, h.state);
+  const loading = h.state.pollFleet();
+  assert.equal(h.document.activeElement, h.document.body);
+  h.reads[1].resolve({ state: 'ok', data: { bots: [{ alias: botIdentity.alias }] } });
+  h.reads[2].resolve(null); h.reads[3].resolve(null); await loading;
+  h.reads[4].resolve(equipmentEnvelope(botIdentity.alias)); await flush();
+  assert.equal(h.document.activeElement, h.buttons.get('.ed-message'));
 });
