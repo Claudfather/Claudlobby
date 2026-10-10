@@ -1296,6 +1296,10 @@ const ownerSession = typeof interactionApi.mountSessionControls === "function"
         sessionPaused = true;
         ++sessionEpoch;
         ++generation; ++trustGen;
+        // Invalidate the action context as well as reads. pause saves the
+        // current draft in memory; resume must fetch fresh authority for this room.
+        workLoop.pause();
+        workRoom = undefined;
         clearTimeout(refreshTimer); refreshTimer = null;
         clearTimeout(safetyTimer);
         clearTimeout(searchTimer);
@@ -1303,6 +1307,7 @@ const ownerSession = typeof interactionApi.mountSessionControls === "function"
         $("beat-label").textContent = "session access paused";
       },
       onResume: resumeOwnerReads,
+      onActionPause(scope) { workLoop.invalidate(undefined, scope); },
     }) : null;
 if (!ownerSession) refreshBoards();
 openStream();

@@ -899,3 +899,64 @@ def test_task_flock_excludes_a_different_request_in_an_independent_process(estat
                     except ProcessLookupError:
                         pass
                     os.waitpid(child, 0)
+
+
+def test_nudge_expected_assignment_is_locked_semantics_and_completed_replay_stays_original(estate):
+    ctx, conn = estate
+    task = tasks.admit(ctx, str(uuid4()), title="Selected task")
+    request = str(uuid4())
+    options = dict(reason="Inspect progress", route=_manager_route(ctx), expected_assignment_id=None)
+    original = tasks.nudge(ctx, request, task.task_id, **options)
+    assigned = tasks.assign(ctx, str(uuid4()), task.task_id, bot_id="worker")
+    before = _counts(conn)
+    replay = tasks.nudge(ctx, request, task.task_id, **options)
+    assert replay.replayed and replay.assignment_id is None and replay.message_id == original.message_id
+    assert replay.task.current_assignment.assignment_id == assigned.assignment_id
+    assert _counts(conn) == before
+    with pytest.raises(tasks.TaskConflictError, match="assignment changed"):
+        tasks.nudge(ctx, str(uuid4()), task.task_id, **options)
+    with pytest.raises(ReceiptConflict):
+        tasks.nudge(ctx, request, task.task_id, **{**options, "expected_assignment_id": assigned.assignment_id})
+    # Omitted is distinct from explicit queued, including retained request semantics.
+    with pytest.raises(ReceiptConflict):
+        tasks.nudge(ctx, request, task.task_id, reason=options["reason"], route=options["route"])
+    assert _counts(conn) == before
+    assert tasks.nudge(ctx, str(uuid4()), task.task_id, reason="CLI default", route=options["route"]).assignment_id == assigned.assignment_id
+    assert tasks.nudge(ctx, str(uuid4()), task.task_id,
+        **{**options, "expected_assignment_id": assigned.assignment_id}).assignment_id == assigned.assignment_id
+
+
+def test_nudge_rechecks_assignment_after_acquiring_task_lock(estate, monkeypatch):
+    from contextlib import contextmanager
+    ctx, conn = estate
+    task = tasks.admit(ctx, str(uuid4()), title="Task selected before routing")
+    original = tasks._locked_task
+    routed = []
+    @contextmanager
+    def concurrent_assignment(store, task_id):
+        # Change after the initial read, before this invocation acquires its lock.
+        with monkeypatch.context() as patch:
+            patch.setattr(tasks, "_locked_task", original)
+            routed.append(tasks.assign(ctx, str(uuid4()), task_id, bot_id="worker"))
+        with original(store, task_id) as check:
+            yield check
+    monkeypatch.setattr(tasks, "_locked_task", concurrent_assignment)
+    with pytest.raises(tasks.TaskConflictError, match="assignment changed"):
+        tasks.nudge(ctx, str(uuid4()), task.task_id, reason="Stale queued selection",
+                    route=_manager_route(ctx), expected_assignment_id=None)
+    assert routed and conn.execute("SELECT count(*) FROM events WHERE event='nudged'").fetchone()[0] == 0
+
+
+def test_nudge_source_admission_shares_reads_and_uses_fresh_postcommit_snapshot(estate):
+    from claudlobby.plane.owner_source import admit_source, bind_source
+    ctx, conn = estate
+    task = tasks.admit(ctx, str(uuid4()), title="Admitted snapshot")
+    bind_source(ctx.root)
+    seen = []
+    def check(snapshot):
+        assert snapshot.in_transaction
+        admit_source(snapshot, ctx.host_uid)
+        seen.append(snapshot.execute("SELECT count(*) FROM events WHERE event='nudged'").fetchone()[0])
+    result = tasks.nudge(ctx, str(uuid4()), task.task_id, reason="Check recorded work",
+                        route=_manager_route(ctx), expected_assignment_id=None, admit_read=check)
+    assert result.recording == "committed" and seen == [0, 0, 1]

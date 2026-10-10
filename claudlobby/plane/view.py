@@ -69,6 +69,7 @@ from ..source_state import (
     SOURCE_UNREADABLE,
     probe_source,
 )
+from .ids import ID_PATTERNS
 from .daemon import probe_daemon, socket_path
 from .emit_api import CaptureConfigError, capture_mode, load_capture_config
 from .ingest import CONSTRUCT_TABLES
@@ -240,7 +241,7 @@ def _provenance(root: Path, conn: sqlite3.Connection | None) -> dict:
     return prov
 
 
-def _envelope(root: Path, fn, *, admit_connection=None):
+def _envelope(root: Path, fn, *, admit_connection=None, snapshot=False):
     """Run `fn(conn)` -> data under the panel-state contract. Classification
     of the pre-connect shape comes from source_state.probe_source — the
     decided-once rule — then sqlite/OS errors classify UNREADABLE. EMPTY
@@ -270,12 +271,16 @@ def _envelope(root: Path, fn, *, admit_connection=None):
                     f"db cannot be opened: {exc} — `claudlobby plane doctor`")
     try:
         # Admission, query and provenance share one explicit read snapshot.
-        if admit_connection is not None:
+        if admit_connection is not None or snapshot:
             conn.execute("BEGIN")
-            admit_connection(conn)
+            if admit_connection is not None:
+                admit_connection(conn)
         data = fn(conn)
         return {"state": SOURCE_OK, "provenance": _provenance(root, conn),
                 "data": data}
+    except TaskDetailError as exc:
+        return {"state": exc.state, "provenance": _provenance(root, conn),
+                "remediation": exc.remediation}
     except UnknownFleet as exc:
         return {"state": "unknown", "provenance": _provenance(root, conn),
                 "remediation": str(exc)}
@@ -553,6 +558,146 @@ def _task_assignment(assignment, aliases: dict[str, str], labels: dict[str, str]
             "expected_by": assignment.expected_by, "occurred_at": assignment.occurred_at,
             "dispatch_message_id": assignment.dispatch_message_id,
             "terminal_event": _task_event(assignment.terminal_event, aliases)}
+
+
+# Presentation caps apply AFTER the canonical reducer establishes state. Never
+# feed a truncated event history into admission or lifecycle reduction.
+_TASK_DETAIL_HISTORY = 500
+_TASK_DETAIL_ASSIGNMENTS = 100
+_TASK_DETAIL_ASSIGNMENT_HISTORY = 100
+_TASK_DETAIL_ISSUES = 100
+_TASK_DETAIL_BYTES = 2 * 1024 * 1024
+
+
+class TaskDetailError(Exception):
+    def __init__(self, state, remediation):
+        self.state, self.remediation = state, remediation
+        super().__init__(remediation)
+
+
+def _detail_window(rows, limit):
+    return {"total": len(rows), "shown": min(len(rows), limit),
+            "limit": limit, "truncated": len(rows) > limit}
+
+
+# Public detail projection is deliberate: new reducer/Fact fields must never
+# expand the browser response implicitly. Raw event detail remains recorded data.
+_DETAIL_TASK_FIELDS = ("task_id", "fleet_uid", "title", "body", "repo", "project_key",
+                       "workstream_id", "created_by_uid", "occurred_at", "state")
+_DETAIL_ASSIGNMENT_FIELDS = ("assignment_id", "task_id", "assignee_uid", "assigned_by_uid",
+                             "expected_by", "dispatch_message_id", "occurred_at", "state")
+_DETAIL_EVENT_FIELDS = ("event_id", "task_id", "assignment_id", "event", "actor_uid",
+                       "occurred_at", "detail", "deadline", "successor_id")
+
+
+def _detail_event(event, aliases):
+    if event is None:
+        return None
+    alias = aliases.get(event.actor_uid)
+    return {**{key: getattr(event, key) for key in _DETAIL_EVENT_FIELDS},
+            "actor_alias": alias, "actor_short": _short(alias) or event.actor_uid}
+
+
+def _detail_assignment(assignment, aliases):
+    result = {key: getattr(assignment, key) for key in _DETAIL_ASSIGNMENT_FIELDS}
+    assignee, assigner = aliases.get(assignment.assignee_uid), aliases.get(assignment.assigned_by_uid)
+    result.update(assignee_alias=assignee, assignee_short=_short(assignee) or assignment.assignee_uid,
+        assigned_by_alias=assigner, assigned_by_short=_short(assigner) or assignment.assigned_by_uid,
+        terminal_event=_detail_event(assignment.terminal_event, aliases),
+        history=[_detail_event(e, aliases) for e in assignment.history[-_TASK_DETAIL_ASSIGNMENT_HISTORY:]],
+        history_window=_detail_window(assignment.history, _TASK_DETAIL_ASSIGNMENT_HISTORY))
+    return result
+
+
+def _detail_attention(conn, snapshot, task):
+    # Full canonical reduction precedes presentation caps: an unanswered raise
+    # survives later ignored nudges even when its event is outside the display.
+    escalation = next((item for item in task_escalations_from_snapshot(snapshot).items
+                       if item.task_id == task.task_id), None)
+    arm = None
+    if task.open and task.current_assignment and not task.blockers:
+        arm = conn.execute(ATTENTION_ARMS_SQL + " AND a.assignment_id=?",
+            (*attention_arms_params(_now_iso()), task.current_assignment.assignment_id)).fetchone()
+    reasons = (["escalated"] if escalation else []) + [name for name, _s, _a, _w in ATTENTION_ARMS
+               if name != "escalated" and arm and arm[name]]
+    lead = reasons[0] if reasons and reasons[0] in HUMAN_ARMS else None
+    return {"attention": bool(reasons) or bool(task.blockers), "attention_reason": reasons,
+            "attention_since": escalation.occurred_at if escalation else arm[reasons[0] + "_at"] if reasons else None,
+            "attention_question": escalation.question if escalation else arm[lead + "_question"] if lead else None,
+            "attention_by": escalation.by if escalation else arm[lead + "_by"] if lead else None,
+            "attention_act_reason": arm[lead + "_reason"] if lead and not escalation else None}
+
+
+def _fetch_task_detail(conn, task_id, fleet):
+    """One opaque ID, one recorded fleet UID, one canonical read projection.
+
+    Task bodies are stored work-item content; missing content is not invented
+    from a communication preview. Linked conversations remain the channel's
+    separate recent window. No registration, state inference or mutation.
+    """
+    if not re.fullmatch(ID_PATTERNS["work_item"], task_id):
+        raise TaskDetailError("invalid", "A canonical task ID is required.")
+    if not isinstance(fleet, str) or not fleet or fleet == "all" or len(fleet) > 240:
+        raise TaskDetailError("unknown", "Select the task's recorded team to read its detail.")
+    _fleet_scope(conn, fleet)
+    row = conn.execute("SELECT w.fleet_uid FROM work_items w JOIN identity_registry i"
+                       " ON i.uid=w.fleet_uid AND i.kind='fleet'"
+                       " WHERE w.work_item_id=? AND i.alias=?", (task_id, fleet)).fetchone()
+    if row is None:
+        raise TaskDetailError("not_found", "No canonical task record exists in this team for this ID.")
+    # The shipped selected-ID reducer preserves legacy siblings and malformed
+    # cross-links required to interpret this task, without reading the board.
+    snapshot = read_tasks(conn, fleet_uid=row[0], task_ids=(task_id,))
+    task = snapshot.get(task_id)
+    if task is None:
+        raise TaskDetailError("not_found", "No canonical task record exists in this team for this ID.")
+    assignments = task.assignments[-_TASK_DETAIL_ASSIGNMENTS:]
+    history = task.history[-_TASK_DETAIL_HISTORY:]
+    # Include actors from every displayed event and both terminal projections,
+    # including a current assignment outside the assignment display window.
+    displayed_assignments = [*assignments]
+    if task.current_assignment and task.current_assignment not in displayed_assignments:
+        displayed_assignments.append(task.current_assignment)
+    events = [*history, task.terminal_event]
+    actors = {task.created_by_uid}
+    for assignment in displayed_assignments:
+        actors.update((assignment.assignee_uid, assignment.assigned_by_uid))
+        events.extend(assignment.history[-_TASK_DETAIL_ASSIGNMENT_HISTORY:])
+        events.append(assignment.terminal_event)
+    actors.update(event.actor_uid for event in events if event and event.actor_uid)
+    actors = sorted(uid for uid in actors if uid)
+    aliases = {}
+    # Match the board reader's batches; assignment histories can exceed SQLite's
+    # variable limit even though each visible history is individually capped.
+    for start in range(0, len(actors), 400):
+        batch = actors[start:start + 400]
+        aliases.update(conn.execute("SELECT uid, alias FROM identity_registry WHERE uid IN ("
+            + ",".join("?" * len(batch)) + ")", batch).fetchall())
+    result = {key: getattr(task, key) for key in _DETAIL_TASK_FIELDS}
+    result.update(fleet=fleet, created_by_alias=aliases.get(task.created_by_uid),
+        resolved=not task.blockers,
+        current_assignment=_detail_assignment(task.current_assignment, aliases) if task.current_assignment else None,
+        assignments=[_detail_assignment(a, aliases) for a in assignments],
+        history=[_detail_event(e, aliases) for e in history],
+        terminal_event=_detail_event(task.terminal_event, aliases),
+        issues=[_task_issue(i) for i in task.issues[:_TASK_DETAIL_ISSUES]],
+        display_ids=list(task.display_ids[:_TASK_DETAIL_ISSUES]),
+        history_window=_detail_window(task.history, _TASK_DETAIL_HISTORY),
+        assignments_window=_detail_window(task.assignments, _TASK_DETAIL_ASSIGNMENTS),
+        issues_window=_detail_window(task.issues, _TASK_DETAIL_ISSUES),
+        display_ids_window=_detail_window(task.display_ids, _TASK_DETAIL_ISSUES))
+    result.update(_detail_attention(conn, snapshot, task))
+    message_id = None
+    if task.current_assignment:
+        row = conn.execute(ASSIGNMENT_DELIVERY_MSG_SQL.format(ph="?"),
+                           (task.current_assignment.assignment_id,)).fetchone()
+        message_id = row[1] if row and row[1] else task.current_assignment.dispatch_message_id
+    proof = conn.execute(DELIVERY_STATUS_SQL.format(ph="?"), (message_id,)).fetchone() if message_id else None
+    result["delivery"] = {"message_id": message_id, "integrity": proof["delivery"] if proof else None} if message_id else None
+    data = {"task": result, "payload_limit_bytes": _TASK_DETAIL_BYTES}
+    if len(json.dumps(data, ensure_ascii=False).encode("utf-8")) > _TASK_DETAIL_BYTES:
+        raise TaskDetailError("unavailable", "Task detail exceeds this view's size limit; use claudlobby task show for the canonical record.")
+    return data
 
 
 def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None) -> dict:
@@ -1515,9 +1660,9 @@ def create_app(
                   openapi_url=None, lifespan=_lifespan)
     started_at = _now_iso()
 
-    def envelope(fn):
+    def envelope(fn, *, snapshot=False):
         try:
-            result = _envelope(root, fn, admit_connection=admit_connection)
+            result = _envelope(root, fn, admit_connection=admit_connection, snapshot=snapshot)
         except OSError as exc:
             if admit_connection is None:
                 raise
@@ -1540,6 +1685,12 @@ def create_app(
     @app.get("/api/tasks")
     def tasks(fleet: str | None = None):
         return JSONResponse(envelope(lambda c: _fetch_tasks(c, fleet)))
+
+    @app.get("/api/tasks/{task_id}")
+    def task_detail(task_id: str, fleet: str | None = None):
+        # The same snapshot also supplies provenance for ordinary local views.
+        return JSONResponse(envelope(lambda c: _fetch_task_detail(c, task_id, fleet),
+                                     snapshot=True))
 
     @app.get("/api/identities")
     def identities(fleet: str | None = None):
@@ -1610,8 +1761,6 @@ def create_app(
         (the sampler half still renders); the sampler being unavailable
         just leaves every live status ``sampling`` (the recorded half
         still types staleness). Never a table; computed per request."""
-        from datetime import datetime, timezone
-
         now = datetime.now(timezone.utc)
         # the live half fails INDEPENDENTLY of the recorded half (the
         # endpoint's own law) — `_live_panes` owns that rule for this

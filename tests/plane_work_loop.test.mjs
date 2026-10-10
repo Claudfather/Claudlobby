@@ -68,6 +68,8 @@ function harness(options = {}) {
   const sends = [], lookups = [];
   const api = {
     interactionContext: options.interactionContext || (() => context),
+    ...(options.jget ? {jget:options.jget} : {}),
+    ...(options.protected ? {mountSessionControls(){}} : {}),
     sendAction: request => { sends.push(request); return options.sendAction ? options.sendAction(request) : receipt(request); },
     actionReceipt: request => { lookups.push(request); return options.actionReceipt ? options.actionReceipt(request) : receipt(request); },
   };
@@ -123,7 +125,7 @@ test('late receipt names its original recipient and preserves a newly selected r
   h.get('work-recipient').value = 'worker'; h.get('work-recipient').onchange();
   h.get('work-body').value = 'Worker draft'; h.get('work-body').emit('input');
   lookup.resolve(receipt(original)); await checking;
-  assert.match(h.get('work-notice').textContent, /message to lead:.*delivery confirmed/);
+  assert.match(h.get('work-notice').textContent, /message to Lead:.*delivery confirmed/);
   assert.equal(h.get('work-body').value, 'Worker draft');
   assert.equal(new ActionState(storage).pending.length, 0);
 });
@@ -132,7 +134,7 @@ test('receipt notice names its original task even if a different task was select
   h.loop.setRoom('web'); await settle(); h.update(); h.open('task-b');
   h.get('task-detail-content').querySelectorAll('[data-kind]')[0].onclick(); await settle();
   await h.pendingClick(original.request_id);
-  assert.match(h.get('work-notice').textContent, /message to lead · task task-a:/);
+  assert.match(h.get('work-notice').textContent, /message to Lead · task task-a:/);
 });
 test('reload and explicit discard never resend; discard requires the uncertainty confirmation', async () => {
   const storage = store(), original = saved(storage), h = harness({ storage, confirm: false });
@@ -190,7 +192,7 @@ test('one pending send attempts transport once and its late result preserves ano
   h.get('work-body').value = 'Keep worker draft'; h.get('work-body').emit('input');
   sending.resolve(receipt(h.sends[0])); await first;
   assert.equal(h.get('work-body').value, 'Keep worker draft');
-  assert.match(h.get('work-notice').textContent, /message to lead:.*delivery confirmed/);
+  assert.match(h.get('work-notice').textContent, /message to Lead:.*delivery confirmed/);
 });
 
 test('modal focus prefers the original panel when refreshed cards duplicate task and fleet', async () => {
@@ -250,7 +252,7 @@ test('late refusal from send and receipt lookup remains visible against its orig
     h.get('work-recipient').value = 'worker'; h.get('work-recipient').onchange();
     h.get('work-body').value = 'Keep the new draft'; h.get('work-body').emit('input');
     transport.resolve(receipt(original || h.sends[0], 'rejected')); await pending;
-    assert.match(h.get('work-notice').textContent, /message to lead.*request refused/);
+    assert.match(h.get('work-notice').textContent, /message to Lead.*request refused/);
     if (original) assert.match(h.get('work-notice').textContent, /task task-a/);
     assert.equal(h.get('work-body').value, 'Keep the new draft');
     assert.equal(new ActionState(storage).pending.length, 0);
@@ -274,7 +276,222 @@ test('receipt checks wait for their in-flight send; failed sends retain the orig
   await h.pendingClick(request.request_id);
   assert.equal(h.lookups.length, 1);
   assert.equal(h.lookups[0].request_id, request.request_id);
-  assert.match(h.get('work-notice').textContent, /message to lead:.*delivery confirmed/);
+  assert.match(h.get('work-notice').textContent, /message to Lead:.*delivery confirmed/);
   assert.equal(new ActionState(h.storage).pending.length, 0);
   assert.equal(h.sends.length, 1);
+});
+
+
+const canonicalDetail = id => ({state:'ok',data:{task:{task_id:id,fleet:'web',title:'Full selected task',body:'<body>\nFull description',
+  state:'completed',resolved:true,current_assignment:null,assignments:[],history:[{event:'completed',occurred_at:'2026-10-10T00:00:00Z',detail:'<recorded detail>'}],
+  history_window:{shown:1,total:501,truncated:true},assignments_window:{shown:0,total:0,truncated:false},issues:[]}}});
+
+test('selected canonical detail loads independently of capped board and escapes full body/history', async () => {
+  const calls=[];
+  const h=harness({jget(url){calls.push(url);return canonicalDetail('task-off-board');}});
+  h.loop.setRoom('web');await settle();h.update();h.open('task-off-board');await settle();
+  assert.deepEqual(calls,['/api/tasks/task-off-board?fleet=web']);
+  assert.match(h.get('task-detail-content').innerHTML,/Full selected task/);
+  assert.match(h.get('task-detail-content').innerHTML,/&lt;body&gt;/);
+  assert.match(h.get('task-detail-content').innerHTML,/most recent of 501/);
+  assert.match(h.get('task-detail-content').innerHTML,/recent channel window/);
+  assert.doesNotMatch(h.get('task-detail-content').innerHTML,/<body>/);
+});
+
+test('late detail cannot replace another selected task or reopen a closed dialog', async () => {
+  const first=deferred();
+  const h=harness({jget(url){return url.includes('task-a')?first.promise:canonicalDetail('task-b');}});
+  h.loop.setRoom('web');await settle();h.update();h.open('task-a');await settle();h.open('task-b');await settle();
+  first.resolve(canonicalDetail('task-a'));await settle();
+  assert.match(h.get('task-detail-content').innerHTML,/task-b/);
+  assert.doesNotMatch(h.get('task-detail-content').innerHTML,/· task-a<\/p>/);
+  const late=deferred();const closed=harness({jget(){return late.promise;}});
+  closed.loop.setRoom('web');await settle();closed.open();await settle();closed.get('task-detail-close').onclick();await settle();
+  late.resolve(canonicalDetail('task-a'));await settle();
+  assert.equal(closed.get('task-detail').open,false);
+  assert.doesNotMatch(closed.get('task-detail-content').innerHTML,/Full selected task/);
+});
+
+test('detail remains explicit snapshot until refresh and rejects a mismatched task', async () => {
+  let calls=0;const h=harness({jget(){calls++;return canonicalDetail(calls===1?'task-a':'wrong-task');}});
+  h.loop.setRoom('web');await settle();h.open();await settle();h.update();
+  assert.equal(calls,1);assert.equal(h.get('task-detail-refresh').hidden,false);
+  h.get('task-detail-refresh').onclick();await settle();
+  assert.equal(calls,2);assert.match(h.get('task-detail-content').innerHTML,/unknown/);
+  assert.doesNotMatch(h.get('task-detail-content').innerHTML,/Full selected task/);
+});
+
+test('unsupported synthetic detail retains labelled limited board snapshot; protected refusals do not', async () => {
+  for(const guarded of [false,true]) {
+    const h=harness({protected:guarded,jget(){return {state:'unavailable',remediation:'Unsupported detail route'};}});
+    h.loop.setRoom('web');await settle();h.update();h.open();await settle();
+    assert.match(h.get('task-detail-content').innerHTML,/unavailable/);
+    if(guarded) assert.doesNotMatch(h.get('task-detail-content').innerHTML,/board snapshot/);
+    else assert.match(h.get('task-detail-content').innerHTML,/limited board snapshot/);
+  }
+});
+
+test('scoped action refusal preserves another scope detail; current refusal fences its delayed read', async () => {
+  for (const field of ['workspace', 'host', 'fleet', 'viewer']) {
+    const result = deferred();
+    const h = harness({ jget() { return result.promise; } });
+    h.loop.setRoom('web'); await settle(); h.open(); await settle();
+    h.loop.invalidate(undefined, { ...context.scope, [field]: 'previous-scope' });
+    await settle();
+    assert.equal(h.get('task-detail').open, true);
+    assert.equal(h.get('work-form').hidden, false);
+    result.resolve(canonicalDetail('task-a')); await settle();
+    assert.match(h.get('task-detail-content').innerHTML, /Full selected task/);
+  }
+  const result = deferred();
+  const h = harness({ jget() { return result.promise; } });
+  h.loop.setRoom('web'); await settle(); h.open(); await settle();
+  h.loop.invalidate(undefined, context.scope); await settle();
+  assert.equal(h.get('task-detail').open, false);
+  assert.equal(h.get('work-form').hidden, true);
+  result.resolve(canonicalDetail('task-a')); await settle();
+  assert.doesNotMatch(h.get('task-detail-content').innerHTML, /Full selected task/);
+});
+
+test('fresh submission refusal removes only owned pending row and keeps draft', async () => {
+  const storage=store(); saved(storage);
+  const refusal=Object.assign(Error('Refused'),{effect:'not_started'});
+  const h=harness({storage,sendAction(){throw refusal;}});
+  h.loop.setRoom('web'); await settle();
+  h.get('work-recipient').value='worker'; h.get('work-recipient').onchange();
+  await h.submit();
+  const rows=JSON.parse(storage.getItem('plane.pending-actions.v1'));
+  assert.deepEqual(rows.map(r=>r.request_id),['saved-request']);
+  assert.equal(h.get('work-body').value,'Hello');
+  assert.match(h.get('work-notice').textContent,/This submission was refused before delivery/);
+  assert.equal(h.sends.length,1);
+});
+
+test('reused local pending UUID cannot start a send or clear its earlier row', async () => {
+  const storage=store(); saved(storage);
+  const h=harness({storage,crypto:{randomUUID:()=> 'saved-request'}});
+  h.loop.setRoom('web'); await settle();
+  h.get('work-recipient').value='worker'; h.get('work-recipient').onchange();
+  await h.submit();
+  assert.equal(h.sends.length,0);
+  assert.equal(JSON.parse(storage.getItem('plane.pending-actions.v1'))[0].request_id,'saved-request');
+});
+
+test('paused action context preserves selected team and does not fetch grants', async () => {
+  const rooms=[]; const h=harness({interactionContext(room){rooms.push(room);return context;}});
+  h.loop.setRoom('web'); await settle();
+  h.get('work-body').value='Kept';h.get('work-body').emit('input');
+  h.loop.pause(); await settle();
+  assert.deepEqual(rooms,['web']);
+  assert.equal(h.get('work-scope').textContent,'web');
+  assert.match(h.get('work-notice').textContent,/Session access is paused/);
+  assert.equal(h.get('work-send').disabled,true);
+  h.loop.setRoom('web');await settle();
+  assert.equal(h.get('work-body').value,'Kept');
+});
+
+
+test('capability invalidation hides composer without hiding the refused submission notice', async () => {
+  let h;
+  const rooms=[];
+  h=harness({interactionContext(room){rooms.push(room);return context;},sendAction(){
+    h.loop.invalidate();
+    throw Object.assign(Error('Refused'),{effect:'not_started'});
+  }});
+  h.loop.setRoom('web');await settle();await h.submit();
+  assert.equal(h.get('work-form').hidden,true);
+  assert.equal(h.get('work-send').disabled,true);
+  assert.match(h.get('work-notice').textContent,/This submission was refused before delivery/);
+  assert.deepEqual(rooms,['web']);
+  assert.deepEqual(JSON.parse(h.storage.getItem('plane.pending-actions.v1')),[]);
+});
+
+test('refusal cleanup storage failure keeps original row and is handled without resend', async () => {
+  const storage=store();
+  const h=harness({storage,sendAction(){
+    storage.setItem=()=>{throw Error('storage unavailable');};
+    throw Object.assign(Error('Refused'),{effect:'not_started'});
+  }});
+  h.loop.setRoom('web');await settle();await h.submit();
+  assert.equal(h.sends.length,1);
+  assert.equal(JSON.parse(storage.getItem('plane.pending-actions.v1'))[0].request_id,'new-request');
+  assert.match(h.get('work-notice').textContent,/saved row could not be updated/);
+  assert.equal(h.get('work-send').disabled,true);
+});
+
+
+test('canonical attention question replaces stale board question and stays escaped', async () => {
+  const value = canonicalDetail('task-a');
+  value.data.task.attention_question = 'Fresh <question>\nChoose the next step.';
+  value.data.task.attention_reason = ['escalated'];
+  const h = harness({jget(){return value;}}); h.loop.setRoom('web'); await settle();
+  h.loop.update({state:'ok',data:{tasks:[{task_id:'task-a',fleet:'web',attention_question:'Stale board question'}]}}, null);
+  h.open(); await settle();
+  const html = h.get('task-detail-content').innerHTML;
+  assert.match(html,/Needs your input/); assert.match(html,/Fresh &lt;question&gt;/);
+  assert.doesNotMatch(html,/Stale board question|Fresh <question>/);
+});
+
+test('history shows known prose and retains exact escaped JSON in closed disclosures', async () => {
+  const value = canonicalDetail('task-a');
+  const raw = JSON.stringify({summary:'Known <summary>\nSecond line',reason:'Known <reason>',question:'Known <question>',result:'Arbitrary result must stay raw'});
+  value.data.task.history[0] = {...value.data.task.history[0],detail:raw,actor_alias:'bot:web/one',actor_short:'one',actor_uid:'actor-record-id',event_id:'event-record-id'};
+  value.data.task.assignments = [{assignment_id:'assignment-record-id',state:'closed',assignee_alias:'bot:web/one',assignee_short:'one',assigned_by_alias:'bot:web/lead',assigned_by_short:'lead',history:[]}];
+  const h = harness({jget(){return value;}}); h.loop.setRoom('web'); await settle(); h.open(); await settle();
+  const html = h.get('task-detail-content').innerHTML;
+  const primary = html.slice(html.indexOf('<h3>Task history</h3>'),html.indexOf('<summary>Recorded event details</summary>'));
+  assert.match(primary,/Known &lt;summary&gt;\nSecond line/); assert.match(primary,/Known &lt;reason&gt;/);
+  assert.match(primary,/Known &lt;question&gt;/); assert.doesNotMatch(primary,/Arbitrary result|actor-record-id|event-record-id/);
+  assert.match(html,/&quot;result&quot;:&quot;Arbitrary result must stay raw&quot;/);
+  assert.doesNotMatch(html,/<summary>[^<]*assignment-record-id|class="task-state"[^>]*>[^]*?task-a<\/p>/);
+  assert.match(html,/<summary>one · closed<\/summary>/);
+  assert.match(html,/<summary>Record identifiers<\/summary>/);
+  assert.doesNotMatch(html,/<details[^>]*\bopen\b|<summary>Known/);
+});
+
+for (const raw of ['malformed <json>', '["<array>"]', 'null', '"<string>"'])
+test(`malformed or non-object recorded detail stays raw without inferred prose: ${raw}`, async () => {
+  const value = canonicalDetail('task-a'); value.data.task.history[0].detail = raw;
+  const h = harness({jget(){return value;}}); h.loop.setRoom('web'); await settle(); h.open(); await settle();
+  const html = h.get('task-detail-content').innerHTML;
+  assert.match(html,/<summary>Recorded event details<\/summary>/);
+  assert.doesNotMatch(html,/<p class="note">(?:Summary|Reason|Question)<\/p>|<json>|<array>|<string>/);
+});
+
+for (const close of ['button','escape','pause','invalidate'])
+test(`closing private task detail erases its body/history and preserves refocus: ${close}`, async () => {
+  const h = harness({jget(){return canonicalDetail('task-a');}}); h.loop.setRoom('web'); await settle();
+  const opener = h.open(); await settle(); assert.match(h.get('task-detail-content').innerHTML,/Full description/);
+  if(close === 'button') h.get('task-detail-close').onclick();
+  else if(close === 'escape') h.get('task-detail').close();
+  else if(close === 'pause') h.loop.pause();
+  else h.loop.invalidate(undefined,context.scope);
+  await settle(); assert.equal(h.get('task-detail-content').innerHTML,'');
+  assert.equal(h.document.activeElement,opener); assert.equal(h.get('task-detail').open,false);
+});
+
+test('unknown recorded team keeps only labelled readonly board snapshot, never protected fallback', async () => {
+  for(const guarded of [false,true]) {
+    let reads = 0;
+    const h = harness({protected:guarded,jget(){reads++;return null;}}); h.loop.setRoom('web'); await settle();
+    h.loop.update({state:'ok',data:{tasks:[{task_id:'task-a',resolved:false,issues:[{code:'unresolved_task'}]}]}},null);
+    h.open('task-a',''); await settle();
+    const html = h.get('task-detail-content').innerHTML;
+    assert.equal(reads,0);
+    if(guarded) { assert.match(html,/cannot be authorized/); assert.doesNotMatch(html,/board snapshot|Task history has unresolved/); }
+    else { assert.match(html,/limited board snapshot/); assert.match(html,/Team not recorded|unresolved links/); }
+  }
+});
+
+for (const actions of [[],['message'],['feedback'],['nudge'],['feedback','nudge'],['message','feedback','nudge']])
+test(`task action note describes actual capabilities only: ${actions.join(',') || 'none'}`, async () => {
+  const h = harness({interactionContext(){return {...context,actions};}}); h.loop.setRoom('web'); await settle(); h.update(); h.open(); await settle();
+  const note = h.get('task-action-note').textContent;
+  const buttons = h.get('task-detail-content').querySelectorAll('[data-kind]');
+  for(const button of buttons) assert.equal(button.disabled,!actions.includes(button.dataset.kind));
+  assert.equal(note.includes('send an ordinary message'),actions.includes('message'));
+  if(!actions.includes('feedback') && !actions.includes('nudge')) assert.match(note,/feedback and nudges are unavailable/);
+  if(actions.includes('feedback') && !actions.includes('nudge')) assert.match(note,/feedback goes.*Nudges are unavailable/);
+  if(actions.includes('nudge') && !actions.includes('feedback')) assert.match(note,/nudges go.*Feedback is unavailable/);
+  if(actions.includes('feedback') && actions.includes('nudge')) assert.match(note,/feedback and nudges go/);
 });

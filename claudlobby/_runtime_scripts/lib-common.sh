@@ -4445,15 +4445,23 @@ bot_in_fleet() {
     printf '%s\n' "$2" | grep -qx "$1"
 }
 
-# declared_bots_strict [bad_manifest_outfile]
+# declared_bots_strict [--bad-out FILE]
 # Emit "<bot><TAB><fleet><TAB><bot_dir>" for every bot DECLARED across every
-# fleet manifest on this host — the union, never a directory walk.
+# fleet manifest on this host — the union, never a directory walk. It finds the
+# manifests itself (discover_fleet_manifests) and takes none as an argument.
 #
-#   rc 0  every manifest parsed
+#   rc 0  every manifest parsed. FILE, when given, is left empty (created if it
+#         was absent).
 #   rc 1  at least one manifest was unusable. Rows for the parseable fleets are
 #         still emitted, and one "<path><TAB><reason>" line per broken manifest
-#         is written to <bad_manifest_outfile> (stderr when no file is given),
-#         so the CALLER decides whether a partial roster is acceptable.
+#         goes to FILE (stderr without --bad-out), so the CALLER decides whether
+#         a partial roster is acceptable.
+#   rc 2  refused before anything is read or written: an argument other than
+#         --bad-out FILE, or a FILE that already holds content.
+#
+# FILE is an output and must be absent or empty. The helper only appends to it,
+# so a path passed by mistake, such as a fleet.yaml read as the manifest to
+# check, keeps every byte (#1131).
 #
 # THE SECOND DOOR, and why it is not parse_fleet_bots. That helper soft-fails by
 # contract: a missing or unreadable fleet.yaml yields NO output, and bot_in_fleet
@@ -4490,8 +4498,25 @@ bot_in_fleet() {
 # happy path and diverge only on the failure path — gated by a test that runs
 # both over the same manifests.
 declared_bots_strict() {
+    local bad_out="" fleet man names b bdir rc=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --bad-out)
+                if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+                    echo "declared_bots_strict: --bad-out needs a file" >&2
+                    return 2
+                fi
+                bad_out="$2"; shift 2 ;;
+            *)
+                echo "declared_bots_strict: refusing argument '$1': the helper reads every manifest itself, and its only option is --bad-out FILE, an output for the broken-manifest lines" >&2
+                return 2 ;;
+        esac
+    done
+    if [ -n "$bad_out" ] && [ -s "$bad_out" ]; then
+        echo "declared_bots_strict: refusing --bad-out '$bad_out': it already holds content" >&2
+        return 2
+    fi
     require_data_root || return $?
-    local bad_out="${1:-}" fleet man names b bdir rc=0
     : "${CLAUDLOBBY_ROOT:?declared_bots_strict needs CLAUDLOBBY_ROOT}"
     local tmp_bad
     tmp_bad="$(mktemp "${TMPDIR:-/tmp}/declbots.XXXXXX")" || return 2
@@ -4519,9 +4544,9 @@ $(discover_fleet_manifests)
 EOF
     if [ -s "$tmp_bad" ]; then
         rc=1
-        if [ -n "$bad_out" ]; then cat "$tmp_bad" > "$bad_out"; else cat "$tmp_bad" >&2; fi
+        if [ -n "$bad_out" ]; then cat "$tmp_bad" >> "$bad_out"; else cat "$tmp_bad" >&2; fi
     elif [ -n "$bad_out" ]; then
-        : > "$bad_out"
+        : >> "$bad_out"
     fi
     rm -f "$tmp_bad"
     return "$rc"

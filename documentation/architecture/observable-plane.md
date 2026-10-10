@@ -846,6 +846,118 @@ of the fleet is REFUSED with a reason on stderr and a nonzero rc; an existing
 source with zero rows is an answer. The refusal never rides stdout, because
 `report-back.sh` and `fleet-pulse.sh` parse it.
 
+### Explicit owner task nudges (internal adapter)
+
+Task nudges require a distinct local grant; ordinary-message approval and owner
+read access never imply it. The local doors are:
+
+```bash
+claudlobby --root DATA_ROOT host owner allow-nudges --target-fleet example --actor human:local-owner
+# If the human is absent, separately approve first-contact registration:
+claudlobby --root DATA_ROOT host owner allow-nudges --target-fleet example --actor human:local-owner --register-actor
+claudlobby --root DATA_ROOT host owner status --json
+claudlobby --root DATA_ROOT host owner revoke-nudges --fleet-uid fleet_11111111111111111111111111111111
+```
+
+Registration requires `REGISTER`; nudge approval separately requires
+`ALLOW-NUDGES`. It displays the owner, host, fleet and human actor bindings and
+rechecks them under runtime admission after approval. Revocation requires
+`REVOKE-NUDGES` and compares the retained generation in the authority write
+transaction. Status lists `message_grants` and `nudge_grants`; status and
+revocation need no active config or Plane database. Each namespace is independent.
+Nudge grants start in a separate optional table with durable random generations;
+no existing message grant is converted. Repeated approval of an unchanged grant
+retains its generation; revoke/reallow changes it even for the same actor.
+
+`plane/owner_nudges.py:OwnerNudges` is an internal adapter, with no HTTP/UI door.
+Trusted callers supply `VerifiedReader`, the exact `OwnerNudgeGrant`, selected
+fleet/task/manager IDs, current release ID and `expected_assignment_id` (explicit
+null means queued). The adapter binds an existing human identity without an OS
+account fallback, admits the active package/release and bound source, and
+reauthorizes the exact grant before dispatch and before returning either success
+or an outcome-bearing command failure. Revocation prevents subsequent admission;
+an already admitted action may finish. It grants no provenance override, arbitrary
+bot recipient, reply, restart, permission decision or uncertain retry.
+
+`commands/task_write.py:nudge_bound_task` is shared by this adapter and the CLI.
+`task_operations.nudge` checks the optional expected assignment under its task
+lock and binds it into request semantics. Omission preserves the CLI's existing
+current-assignment behavior; it differs from explicit null. Canonical source
+admission covers each task-read snapshot and the fresh post-commit proof. A
+completed replay returns its original task/assignment/message coordinates with
+today's task state, even if the assignment subsequently changed.
+
+The canonical task event and manager `task_request` commit before the strict,
+durable native reservation. Failure before reservation cannot send; recording
+may already be committed. Replaying a committed nudge never fills a crash gap
+with native input, Enter repair or recording alerts. Unknown transport results
+retain their UUID; callers inspect instead of automatically retrying or choosing
+a replacement UUID. `inspect` calls the existing request and receipt read owners,
+bracketed by source and exact-grant admission, without invoking a mutation. It
+preserves the original assignment and reports receiver integrity separately from
+recording. A committed task event or submitted transport alone is not delivery.
+Prepared-export tests use a synthetic native receiver; real receiver, installed
+CLI, trusted ingress and production activation remain separate validation gates.
+
+### Grant-bound owner browser messages
+
+The trusted direct-host owner browser transport exposes three same-origin POST
+doors under `/api/owner/actions/`: `context` accepts exactly `{room}`; `send`
+accepts exactly ActionState metadata (`scope`, `kind`, `target`, `request_id`,
+`submitted_at`) plus `body`; `receipt` accepts that metadata without a body.
+These doors retain the exact Host/Origin, browser intent, trusted principal and
+secure session-cookie boundaries. JSON is size/time bounded; duplicate and
+unknown fields are refused. They never register identities or author grants.
+
+Context version 1 names the selected fleet alias in `room` and `scope.fleet`,
+returns declared bot UIDs as recipients, `simulation: false`, and only the
+`message` action. The server recomputes frozen host/fleet/actor bindings and the
+current local message grant for every request. Opaque workspace/viewer hashes
+are comparison fences, not secret capabilities; viewer binds principal, owner
+revision, frozen fleet UID, human actor and durable message-grant generation,
+and survives session-cookie rotation. Revoke/reallow creates a new viewer scope
+even for the same actor; old contexts, sends, receipts and held responses are refused.
+Submitted scope is compared to this recomputed context. Only ordinary messages
+with `task_id: null`, canonical UUIDs and nonempty bodies up to 2,000 characters
+are admitted. `submitted_at` is browser display metadata, not server acceptance.
+
+The canonical OwnerMessages adapter receives the exact recomputed expected
+grant and uses durable preparation/reservation. Source-host/session/grant
+admission precedes dispatch and private response release. Native sends run in
+an owned threadpool task that survives cancellation of the HTTP waiter. At most
+eight action workers may be active or queued; overflow is immediately unavailable,
+with no automatic queue retry. Cancelled HTTP waiters retain their slot until the
+owned worker ends; all completed or failed workers release capacity. No
+request automatically retries or changes UUID. Receipt inspection has no native
+effect. `delivered` requires the exact sender/recipient receiver-integrity proof;
+`recorded` requires a verified committed communication fact. Send classification
+also requires the retained semantic digest to match canonical MessageBody UTF-8
+bytes and the ordinary `chat` kind; old UUID proof cannot confirm different text.
+Every other result,
+including missing retained UUID history and exceptions after a possible effect,
+is `unknown`, never safe rejection or permission to resend. Responses contain
+metadata only and use `Cache-Control: no-store, private`. Direct-host HTTPS,
+trusted ingress and native receiver validation remain separate rollout gates.
+
+
+A send refusal may include `effect: "not_started"` only when that HTTP submission
+was stopped before any message adapter invocation. This is not a `rejected`
+receipt for the UUID: an earlier use of the UUID may already have had an effect,
+and missing retained history never proves otherwise. The controller can resolve
+only the fresh pending row created by that exact in-flight send, keeping its
+draft. Receipt checks and reused local IDs cannot use this marker to clear old
+uncertainty. Adapter-entry failures and held-response admission refusals remain
+unknown, even when their HTTP status is 403 or 503. No path automatically resends.
+
+A send or receipt 403 invalidates only the composer with the same complete
+originating scope; context refusals use the controller room epoch. An action 403 probes the read session
+once without pausing a valid board/SSE session or recreating a grant. Session
+pauses keep the selected team and saved draft and make no action-context request;
+a subsequent authorized resume refreshes the context. Unexpected action-context
+or response-admission failures return generic unavailable responses without
+exception text. Cancellation remains distinct and owned workers retain capacity
+until they finish.
+
 Owner source admission also requires the operator-created covering indexes. A
 table-rebuild migration may drop them even when the ownership marker survives;
 protected reads and owner-server startup refuse immediately when a required
@@ -859,3 +971,44 @@ sources and incompatible index definitions require local database/schema
 investigation, not pairing again. Browser refusals remain generic. A foreground
 owner server whose lifespan startup fails returns an unavailable exit rather
 than reporting a clean stop; its owned socket is still cleaned up.
+
+
+### Selected task detail
+
+`GET /api/tasks/{TASK_ID}?fleet=RECORDED_ALIAS` reads one canonical `wi_` ID
+through the existing selected-ID task reducer. It does not depend on the
+200-card board cap or infer identity from a legacy display name. The recorded
+fleet UID comes from that task's identity link in the same SQLite snapshot.
+Source admission, reduction and envelope provenance share the connection and
+read transaction; the existing protected view also admits the response before
+releasing private bytes. No read initializes, repairs or mutates the source.
+
+The response includes the full stored task title/body, canonical lifecycle,
+current assignment, assignments, task/assignment history and unresolved issues.
+Task, assignment and event fields use explicit public allowlists; recorder Fact
+metadata and future reducer fields do not become implicit browser fields. Alias
+lookups include displayed assignment histories and terminal events in batches
+of 400, with the existing short-label helper. Current attention questions use
+the full selected canonical snapshot and shared attention queries in the same
+read transaction, so later nudges and display caps cannot hide an unanswered raise.
+Presentation keeps the latest 500 task events, 100 assignments and 100 events per
+assignment, plus up to 100 issues/display IDs. Each bounded collection discloses
+its total, shown count and truncation. Lifecycle is reduced from the complete
+selected canonical history before presentation limits; a window is never used
+to certify task state. Bodies are not silently shortened: a detail payload above
+2 MiB is unavailable with the canonical `task show` remedy. These are response
+limits, not a bound on reducing a task with unusually large retained history.
+
+The existing dialog reads this endpoint through `jget`, fences delayed replies
+against selection/close/refresh, and refreshes only explicitly while reading.
+Closing or pausing access erases the body/history DOM as well as fencing replies.
+Known string summary/reason/question fields render as escaped prose; full exact
+raw event details (including malformed/non-object JSON) and record identifiers
+remain in collapsed disclosures. Action copy names only actually granted actions.
+Linked conversation/results remain honestly limited to the existing recent
+channel window, and completion alone does not imply review. Older non-owner or
+synthetic transports can retain a labelled limited board snapshot when full
+detail is unavailable. A task without a recorded team may show its unresolved
+board snapshot only on an unprotected read-only transport, without requesting
+a guessed team. Protected refusals and mismatched IDs never fall back to stale
+private detail. No task actions or grants are enabled by this read slice.

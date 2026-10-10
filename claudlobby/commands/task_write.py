@@ -10,6 +10,7 @@ import sqlite3
 from uuid import UUID
 
 from ..command_result import CommandFailure, CommandOutput
+from ..task_operations import UNSPECIFIED_ASSIGNMENT
 
 
 def _reference(value: str, field: str) -> str:
@@ -232,6 +233,80 @@ def _committed_notification(ctx, route, package, result, envelope, *, send_on_re
     return data
 
 
+def _task_output(result, *, fleet_name, release_id, notification_data=None):
+    outcome = "unchanged" if result.replayed else "committed"
+    recording = "unchanged" if result.replayed else result.recording
+    data = {"fleet": fleet_name, "task_id": result.task_id,
+            "assignment_id": result.assignment_id, "state": result.task.state,
+            "outcome": outcome, "recording": recording,
+            "delivery": result.delivery, "notification": result.notification,
+            "replayed": result.replayed}
+    if notification_data is not None:
+        data.update(notification_data)
+        if data["notification"] != "received" or data["request_persisted"] is not True:
+            raise CommandFailure("notification_failed",
+                                 "task recording committed; manager notification is unverified; "
+                                 "inspect the request and message receipt",
+                                 data=data, release_id=release_id)
+    lines = (f"{result.task_id}\t{result.assignment_id or '-'}\t{result.task.state}\t"
+             f"recording={recording}\tdelivery={result.delivery}\t"
+             f"notification={data['notification']}",)
+    return CommandOutput(data, release_id=release_id, lines=lines)
+
+
+def _recording_failure(exc, *, fleet_name, release_id, notification=False):
+    data = {"fleet": fleet_name,
+            "outcome": "committed" if exc.recording == "committed" else "unknown",
+            "recording": exc.recording, "task_id": exc.task_id,
+            "assignment_id": exc.assignment_id, "message_id": exc.message_id,
+            "recipient_uid": exc.recipient_uid,
+            "request_persisted": exc.request_persisted,
+            "delivery": "not_requested", "replayed": False if exc.recording == "committed" else None}
+    if notification and exc.recording == "committed":
+        data.update(notification="pending", transport="not_attempted",
+                    receipt_observation=None, integrity_verdict=None)
+        return CommandFailure("notification_failed",
+                             "task recording committed; request outcome was not retained reliably; "
+                             "notification was not attempted; inspect the request",
+                             data=data, release_id=release_id)
+    return CommandFailure("unavailable", "task recording is unconfirmed; inspect the request before retrying"
+                         if exc.recording != "committed" else
+                         "task committed but request outcome was not retained reliably; inspect the request",
+                         data=data, release_id=release_id)
+
+
+def nudge_bound_task(ctx, route, package, *, request_id, task_id, reason, by=None,
+                     expected_assignment_id=UNSPECIFIED_ASSIGNMENT, admit_read=None):
+    """Canonical nudge workflow for an admitted caller and frozen manager route.
+
+    Caller owns runtime and authorization admission. Replay only inspects the
+    original notification; it never repairs or fills a gap with a native send.
+    """
+    from ..task_operations import TaskRecordingError, nudge
+
+    _request_id(request_id)
+    _reference(task_id, "TASK_ID")
+    _text(reason, "reason")
+    if (route.host_uid != ctx.host_uid or route.selected_fleet_uid != ctx.fleet_uid
+            or route.peer_fleet_uid != ctx.fleet_uid or route.caller != ctx.caller
+            or route.caller_fleet_uid != ctx.caller_fleet_uid
+            or route.peer != ctx.bots[ctx.context.fleet.manager] or route.manager != route.peer
+            or route.selected.paths.root != ctx.root or package != route.selected.paths.package):
+        raise CommandFailure("conflict", "manager route differs from active task identities",
+                             release_id=route.release_id)
+    try:
+        result = nudge(ctx, request_id, task_id, reason=reason, by=by,
+                       route=route.receipt_binding(), expected_assignment_id=expected_assignment_id,
+                       admit_read=admit_read)
+    except TaskRecordingError as exc:
+        raise _recording_failure(exc, fleet_name=ctx.context.fleet.name,
+                                release_id=route.release_id, notification=True) from exc
+    notification = _committed_notification(ctx, route, package, result,
+        _nudge_envelope(result, route, by or ctx.caller.alias, reason), send_on_replay=False)
+    return _task_output(result, fleet_name=ctx.context.fleet.name,
+                        release_id=route.release_id, notification_data=notification)
+
+
 def dispatch(args) -> CommandOutput:
     from ..activation_state import ActivationError
     from ..config_plan import PlanError
@@ -246,7 +321,7 @@ def dispatch(args) -> CommandOutput:
     from ..request_receipts import ReceiptBusy, ReceiptConflict, ReceiptError
     from ..runtime_admission import ReleaseMismatch, RuntimeIdentity, mutation_admission
     from ..task_operations import (TaskRecordingError, accept, admit, assign, block,
-                                   complete, escalate, fail, nudge, progress, reassign,
+                                   complete, escalate, fail, progress, reassign,
                                    return_assignment, withdraw)
     from ..task_queries import TaskQueryError
     from ..task_state import TaskStateError
@@ -299,13 +374,9 @@ def dispatch(args) -> CommandOutput:
                     ctx, route, selected.paths.package, result,
                     _report_envelope(result, route, values["report"]))
             elif args.public_command == "task.nudge":
-                result = nudge(ctx, args.request_id, values["task_id"],
-                               reason=values["reason"], by=values["by"],
-                               route=route.receipt_binding())
-                notification_data = _committed_notification(
-                    ctx, route, selected.paths.package, result,
-                    _nudge_envelope(result, route, values["by"] or ctx.caller.alias,
-                                    values["reason"]), send_on_replay=False)
+                return nudge_bound_task(ctx, route, selected.paths.package,
+                    request_id=args.request_id, task_id=values["task_id"],
+                    reason=values["reason"], by=values["by"])
             elif args.public_command == "task.admit":
                 result = admit(ctx, args.request_id, **values)
             elif args.public_command == "task.assign":
@@ -318,46 +389,14 @@ def dispatch(args) -> CommandOutput:
                 result = reassign(ctx, args.request_id, values.pop("task_id"), **values)
             else:
                 result = accept(ctx, args.request_id, values["assignment_id"])
-        outcome = "unchanged" if result.replayed else "committed"
-        recording = "unchanged" if result.replayed else result.recording
-        data = {"fleet": selected.fleet.name, "task_id": result.task_id,
-                "assignment_id": result.assignment_id, "state": result.task.state,
-                "outcome": outcome, "recording": recording,
-                "delivery": result.delivery, "notification": result.notification,
-                "replayed": result.replayed}
-        if notification_data is not None:
-            data.update(notification_data)
-            if data["notification"] != "received" or data["request_persisted"] is not True:
-                raise CommandFailure("notification_failed",
-                                     "task recording committed; manager notification is unverified; "
-                                     "inspect the request and message receipt",
-                                     data=data, release_id=release_id)
-        lines = (f"{result.task_id}\t{result.assignment_id or '-'}\t{result.task.state}\t"
-                 f"recording={recording}\tdelivery={result.delivery}\t"
-                 f"notification={data['notification']}",)
-        return CommandOutput(data, release_id=release_id, lines=lines)
+        return _task_output(result, fleet_name=fleet_name, release_id=release_id,
+                            notification_data=notification_data)
     except CommandFailure:
         raise
     except TaskRecordingError as exc:
-        data = {"fleet": fleet_name,
-                "outcome": "committed" if exc.recording == "committed" else "unknown",
-                "recording": exc.recording, "task_id": exc.task_id,
-                "assignment_id": exc.assignment_id, "message_id": exc.message_id,
-                "recipient_uid": exc.recipient_uid,
-                "request_persisted": exc.request_persisted,
-                "delivery": "not_requested", "replayed": False if exc.recording == "committed" else None}
-        if (args.public_command in _REPORTS or args.public_command == "task.nudge") \
-                and exc.recording == "committed":
-            data.update(notification="pending", transport="not_attempted",
-                        receipt_observation=None, integrity_verdict=None)
-            raise CommandFailure("notification_failed",
-                                 "task recording committed; request outcome was not retained reliably; "
-                                 "notification was not attempted; inspect the request",
-                                 data=data, release_id=release_id) from exc
-        raise CommandFailure("unavailable", "task recording is unconfirmed; inspect the request before retrying"
-                             if exc.recording != "committed" else
-                             "task committed but request outcome was not retained reliably; inspect the request",
-                             data=data, release_id=release_id) from exc
+        # nudge_bound_task translates its own recording failure.
+        raise _recording_failure(exc, fleet_name=fleet_name, release_id=release_id,
+                                 notification=args.public_command in _REPORTS) from exc
     except ReleaseMismatch as exc:
         raise CommandFailure("release_mismatch", "selected release differs from this caller",
                              hint=exc.hint) from exc
