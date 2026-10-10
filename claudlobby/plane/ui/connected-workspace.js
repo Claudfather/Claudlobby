@@ -150,6 +150,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       for (const {client,actions,key} of nextClients) {
         let previous = client.snapshot();
         nextSubscriptions.push(client.subscribe(state => {
+          nextClients.find(row => row.client === client).setup.connectionChanged(state);
           if (state.epoch !== previous.epoch || state.state !== previous.state) {
             previous = state; actions.invalidate(); invoke(mount?.onActionSourceChange,key);
           }

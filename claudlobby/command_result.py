@@ -189,6 +189,10 @@ def _command_from_argv(tokens: list[str]) -> str | None:
     return None
 
 
+
+_PUBLIC.update({("host", "owner", action): "host.owner." + action
+                for action in ("allow-setup", "setup-status", "revoke-setup")})
+
 class ResultArgumentParser(argparse.ArgumentParser):
     """Structured syntax errors for migrated routes, argparse behavior elsewhere."""
     def parse_args(self, args=None, namespace=None):
@@ -210,6 +214,3 @@ class ResultArgumentParser(argparse.ArgumentParser):
             hint=f"inspect claudlobby {command.replace('.', ' ')} --help"))
         emit(result, json_output=json_output)
         self.exit(2)
-
-_PUBLIC.update({("host", "owner", action): "host.owner." + action
-                for action in ("allow-setup", "setup-status", "revoke-setup")})

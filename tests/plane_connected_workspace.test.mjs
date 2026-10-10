@@ -478,3 +478,62 @@ test('overview completed before source loss cannot consume the later recovery re
   await h.api.jget('/api/overview');assert.equal(h.calls.filter(c=>c.url===door).length,before+1);
   stream.close();h.api.dispose();
 });
+
+test('setup-only computer stays visible without blocking the other admitted dashboard',async()=>{
+  const h=harness(),a=refs[0].endpoint_origin;
+  h.overrides.set(a+'/api/owner/connected/issue',()=>reply(200,{version:1,state:'setup_only',token:'A'.repeat(43),expires_in:900,
+    setup_profile:{version:1,profile:'first-team-setup-v1',host_uid:'host_'+'a'.repeat(32)},session_context:{issuer:documentContext.shell_origin,
+      subject:documentContext.user_id,workspace_id:documentContext.workspace_id,operational_origin:documentContext.operational_origin,binding_revision:1,binding_generation:id(6)}}));
+  await h.api.checkAccount(); await h.api.act(0,'connect'); await h.api.act(1,'connect');
+  assert.equal(h.api.snapshot().computers[0].state,'setup_only');
+  const fleets=await h.api.jget('/api/fleets');
+  assert.equal(fleets.data.fleets.length,1); assert.ok(fleets.data.fleets[0].alias.includes(sourceB));
+  assert.equal(h.calls.filter(c=>c.url.startsWith(a+'/api/owner/connected/read/')).length,0);
+  h.api.dispose();
+});
+
+const {createGuidedSetup}=await import(new URL('../claudlobby/plane/ui/guided-setup.js',import.meta.url));
+function setupHarness(options={}) {
+  const calls=[],listeners=new Set(),saved=new Map(); let state={state:'setup_only',epoch:1};
+  const pending={generation:id(9),plan_id:'p-'+'a'.repeat(64),request_id:id(10)};
+  const context={version:1,template:'revenue-web-app',fleet:'shop',repository:'example-org/shop',release_id:'r-'+'b'.repeat(64),release_seal:'c'.repeat(64),generation:id(9),expires_at:1800003600,request:null};
+  const preview={...context,plan_id:pending.plan_id,fleets:['shop'],changes:[],effects:{restart_bots:['shop/lead'],reload_supervision:true},activation:'not_requested',expires_at:1800000600};
+  const client={snapshot:()=>state,subscribe(fn){listeners.add(fn);return()=>listeners.delete(fn);},
+    async setupContext(){calls.push(['context']);return context;},
+    async setupPreview(input){calls.push(['preview',input]);return preview;},
+    async setupLaunch(input){assert.equal(saved.has('test'),true);calls.push(['launch',input]);throw new Error('lost');},
+    async setupReceipt(input){calls.push(['receipt',input]);return {...input,version:1,state:'active',recorded_activation:{}};},...options.client};
+  const storage={getItem:key=>saved.get(key)??null,setItem:(key,value)=>saved.set(key,value)};
+  const api=createGuidedSetup({client,storage,storageKey:'test',newUUID:()=>id(10),now:()=>1800000000});
+  return {api,client,calls,saved,pending,context,preview,storage,
+    change(next){state={...state,...next};api.connectionChanged(state);for(const fn of listeners)fn(state);}};
+}
+test('goal preview and explicit exact-plan launch retain UUID before lost response; reload only inspects',async()=>{
+  const h=setupHarness();assert.equal(h.calls.length,0);
+  await h.api.run('context');h.api.setGoal('Improve checkout tests');await h.api.run('preview');
+  h.api.setGoal('Changed goal');assert.equal(await h.api.run('launch'),false);assert.equal(h.calls.length,2);
+  h.api.setGoal('Improve checkout tests');assert.equal(await h.api.run('launch'),false);
+  assert.deepEqual(h.api.snapshot().pending,h.pending);assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);
+  await h.api.run('launch');assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);
+  h.api.dispose();
+  const resumed=createGuidedSetup({client:h.client,storage:h.storage,storageKey:'test',now:()=>1800000000});
+  assert.deepEqual(resumed.snapshot().pending,h.pending);assert.equal(h.calls.length,3);
+  await resumed.run('receipt');assert.equal(h.calls.at(-1)[0],'receipt');assert.match(resumed.snapshot().note,/Team started/);
+  assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);resumed.dispose();
+});
+test('changed connection fences held preview, preserves goal and never launches',async()=>{
+  const held=deferred(),h=setupHarness({client:{setupPreview:()=>held.promise}});
+  await h.api.run('context');h.api.setGoal('Improve checkout tests');const reading=h.api.run('preview');
+  h.change({epoch:2,state:'unavailable'});held.resolve(h.preview);assert.equal(await reading,false);
+  assert.equal(h.api.snapshot().plan,null);assert.equal(h.api.snapshot().goal,'Improve checkout tests');
+  assert.equal(await h.api.run('launch'),false);h.api.dispose();
+});
+test('setup panel retains disclosure/focus and refuses launch without durable identifiers',async()=>{
+  const h=setupHarness(),ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  const detail=panel.children.find(e=>e.tagName==='DETAILS'); detail.open=true;detail.focus();
+  await h.api.run('context');h.api.setGoal('Improve checkout tests');await h.api.run('preview');
+  assert.equal(panel.children.find(e=>e.tagName==='DETAILS'),detail);assert.equal(detail.open,true);assert.equal(ui.document.activeElement,detail);
+  assert.ok(panel.children.some(e=>e.textContent.includes('Team shop for example-org/shop')));
+  h.storage.setItem=()=>{throw new Error('blocked');};assert.equal(await h.api.run('launch'),false);
+  assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);h.api.dispose();
+});

@@ -299,3 +299,50 @@ cards, tabs, composer scope and task detail headings show the source display
 label and raw team alias (for example Computer 1 / engineering). Recovery
 consumes its loss ticket only on an overview started after that loss; a stale
 healthy result cannot exhaust the later recovery refresh.
+
+
+## First-team setup
+
+A connected session is identity evidence. A fresh computer can return
+`setup_only` with the finite `first-team-setup-v1` profile; this is not a dashboard
+read profile. Its setup panel remains independent of other computers' admitted
+reads. Every ordinary read/action still requires the bound recorder and its
+existing explicit action grants.
+
+An operator can explicitly approve **one** first-team setup with local
+`host owner allow-setup` (see its maintained help). Approval fixes the shipped
+`revenue-web-app` template, target fleet, repository, sealed release and native
+install directory, and pins the current owner/workspace binding. It lasts at most
+24 hours. It authorizes the connected browser to author a goal, preview the
+canonical configuration plan, and explicitly launch that exact plan through the
+foreground owner server. Workspace approval alone grants none of this. Setup
+status and withdrawal use the local owner CLI. Expired/stale approvals require a
+new explicit approval; withdrawal never undoes already-started work.
+
+The finite connected setup routes are POST `context`, `preview`, `launch` and
+`receipt` under `/api/owner/connected/setup/`, with the existing exact Origin,
+header-only session and private/no-store boundary. Optional setup tables are
+created only by local approval. Preview rejects other fleets and target overlay
+or project declarations; the whole-host plan must contain exactly the approved
+first fleet. The canonical plan identity, sealed release and input/output
+freshness checks remain unchanged. The preview expires after ten minutes, never
+later than its approval. No browser field selects the install directory.
+
+The browser saves the original UUID before one launch request. The authority
+store reserves that UUID/plan before canonical activation begins. Lost responses
+and receipt reloads inspect only that original journal; they never replan, resume
+or resend activation. A reservation without a journal is **unknown**, requiring
+local operator investigation or a new explicit grant, not automatic gap filling.
+Current installation identity, private owner/workspace/session and the exact
+retained grant allow this receipt recovery even if partial activation left an
+unbound recorder. This grants no Plane-data read capability. New previews and
+launches retain the strict first-fleet boundary. Started canonical work stays
+owned and drained after response loss or server shutdown.
+
+The browser displays team/repository/goal and plan changes, with technical
+identifiers behind a disclosure. `active` is an observed canonical activation
+state; it does not prove provider credentials, GitHub access, bot health or
+business readiness. No JWT purpose, detached activation, general job store,
+credential initialization or HTTP schema repair is added. The existing operator
+shell, sealed interpreter and native kernel ancestry checks still apply in the
+foreground server. This source slice is not cold-host/native/browser acceptance.

@@ -190,7 +190,7 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
                 token = session.token
         principal = await self._principal(scope, deadline)
         admission = await self._admission(token, principal)
-        body = self._ready(admission)
+        body = await self._blocking(self._ready,admission)
         if action in {"issue", "renew"}:
             body["token"] = token
         return body, 200

@@ -12,10 +12,10 @@ export function createGuidedSetup({client, storage, storageKey,
   const active = () => !disposed && ['ready','setup_only'].includes(client.snapshot().state);
   function save(value) { try { if (!storage || typeof storage.setItem !== 'function') throw new Error(); storage.setItem(storageKey,JSON.stringify(value)); } catch { throw new Error('Save the original activation identifiers before launching.'); } }
   function changed() { render(); onChange(); }
-  const unsubscribe = client.subscribe(next => {
+  function connectionChanged(next) {
     if (next.epoch !== state.epoch || next.state !== state.state) { epoch++; context = null; plan = null; }
     state = next; changed();
-  });
+  }
   async function run(operation) {
     if (disposed || busy || !active()) return false;
     const ticket = epoch; busy = true; changed();
@@ -71,15 +71,18 @@ export function createGuidedSetup({client, storage, storageKey,
     if (!value || value.version !== 1 || !pending || !['generation','plan_id','request_id'].every(k => value[k] === pending[k])
         || !['unknown','prepared','activating','rolling_back','rolled_back','active'].includes(value.state)) throw new Error();
     note = value.state === 'active'
-      ? 'Canonical activation recorded as ' + value.state + '. Check connection explicitly for dashboard access; provider and business readiness are separate.'
-      : 'Canonical activation: ' + value.state + '. Receipt inspection does not resume or repeat work.';
+      ? 'Team started. Check connection for its dashboard. Provider and repository access have not been tested here.'
+      : value.state === 'activating' || value.state === 'prepared'
+      ? 'Still checking. Inspect the original setup receipt; this never repeats or resumes setup.'
+      : 'Setup needs attention. Keep the original identifiers and inspect this setup; do not launch again.';
   }
   function render() {
     if (!mount) return;
-    const {area, status, declaration, controls, details} = mount;
+    const {area, status, declaration, controls, details, summary} = mount;
     area.disabled = !active() || busy || !!pending;
     status.textContent = note || (active() ? 'First-team setup requires an explicit local approval on this computer.' : 'Connect this computer before setup.');
-    declaration.textContent = context ? `${context.template} · ${context.fleet} · ${context.repository} · ${context.release_id}` : '';
+    declaration.textContent = context ? `Team ${context.fleet} for ${context.repository}. Lead, engineer and reviewer; explicit human merge policy.` : '';
+    summary.textContent = plan ? `Goal: ${planGoal}. Plan changes ${plan.changes?.length || 0} generated files; ${plan.effects?.restart_bots?.length || 0} bots require starting or restarting. Review the plan before launch.` : '';
     details.textContent = plan ? JSON.stringify({plan_id:plan.plan_id,release_id:plan.release_id,release_seal:plan.release_seal,changes:plan.changes,effects:plan.effects,expires_at:plan.expires_at},null,2) : pending ? JSON.stringify(pending,null,2) : '';
     for (const [operation,button] of Object.entries(controls)) button.disabled = !active() || busy
       || operation === 'preview' && (!context || !!pending || !goal.trim() || context.expires_at <= now())
@@ -89,18 +92,20 @@ export function createGuidedSetup({client, storage, storageKey,
   function mountPanel({document,element}) {
     const heading = document.createElement('strong'); heading.textContent = 'Create the first team'; element.append(heading);
     const declaration = document.createElement('p'); element.append(declaration);
-    const area = document.createElement('textarea'); area.maxLength = 4000; area.value = goal;
+    const area = document.createElement('textarea'); area.maxLength = 2000; area.value = goal;
     area.setAttribute('aria-label','Approved repository goal'); area.addEventListener('input',() => { goal = area.value; changed(); }); element.append(area);
     const controls = {};
     for (const [operation,title] of [['context','Check setup approval'],['preview','Preview team'],['launch','Launch this exact plan'],['receipt','Check original activation receipt']]) {
       const button = document.createElement('button'); button.type = 'button'; button.textContent = title; button.className = 'pill ghost';
       button.addEventListener('click',() => { if (!button.disabled) void run(operation); }); element.append(button); controls[operation] = button;
     }
-    const details = document.createElement('pre'); element.append(details);
+    const summary = document.createElement('p'); element.append(summary);
+    const disclosure = document.createElement('details'), title = document.createElement('summary'); title.textContent = 'Plan changes and recovery identifiers'; disclosure.append(title);
+    const details = document.createElement('pre'); disclosure.append(details); element.append(disclosure);
     const status = document.createElement('p'); status.setAttribute('role','status'); status.setAttribute('aria-live','polite'); element.append(status);
-    mount = {area,status,declaration,details,controls}; render();
+    mount = {area,status,declaration,details,controls,summary}; render();
   }
-  return Object.freeze({mountPanel,run,snapshot:() => ({busy,context,plan,pending,note,goal}),
-    setGoal(value) { if (typeof value === 'string' && value.length <= 4000 && !pending) { goal = value; if (mount) mount.area.value = value; changed(); } },
-    dispose() { disposed = true; epoch++; unsubscribe(); mount = null; }});
+  return Object.freeze({mountPanel,run,connectionChanged,snapshot:() => ({busy,context,plan,pending,note,goal}),
+    setGoal(value) { if (typeof value === 'string' && value.length <= 2000 && !pending) { goal = value; if (mount) mount.area.value = value; changed(); } },
+    dispose() { disposed = true; epoch++; mount = null; }});
 }

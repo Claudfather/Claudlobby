@@ -85,7 +85,14 @@ class OwnerSetup:
             if not names & {"setup_metadata","setup_grant","setup_previews"}:
                 for statement in _SCHEMA: conn.execute(statement)
             self._schema(conn)
-            if conn.execute("SELECT 1 FROM setup_grant WHERE active=1").fetchone(): raise AccessDenied("setup_already_allowed")
+            row=conn.execute("SELECT * FROM setup_grant WHERE active=1").fetchone()
+            if row:
+                retained=self._grant(row)
+                if (retained.binding_snapshot==OwnerConnected._snapshot(binding)
+                        and retained.created_at<=self.access._now()<retained.expires_at):
+                    raise AccessDenied("setup_already_allowed")
+                # A stale/expired approval has no authority. New terminal
+                # approval explicitly replaces it with a fresh generation.
             conn.execute("INSERT OR REPLACE INTO setup_grant VALUES(1,?,1,NULL,NULL)",(_snapshot(expected),))
 
     def local(self):
@@ -104,8 +111,9 @@ class OwnerSetup:
     def revoke(self, expected):
         with self.access._connection(write=True) as conn:
             self._schema(conn)
-            binding=self.access.workspace()._active_binding(conn,self.access._grant(conn).principal)
-            if OwnerConnected._snapshot(binding)!=expected.binding_snapshot: raise AccessDenied("setup_denied")
+            # Local withdrawal uses current owner authority, not a still-active
+            # workspace. Exact retained grant equality prevents replacement races.
+            self.access._grant(conn)
             row=conn.execute("SELECT * FROM setup_grant WHERE singleton=1").fetchone()
             if not row or row["active"]!=1 or self._grant(row)!=expected: raise AccessDenied("setup_denied")
             conn.execute("UPDATE setup_grant SET active=0 WHERE singleton=1")

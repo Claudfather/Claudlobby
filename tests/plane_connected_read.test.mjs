@@ -376,3 +376,23 @@ test('an admitted source-loss frame fences a held action without replay or endin
   assert.equal(h.calls.filter(c=>new URL(c.url).pathname.endsWith('/status')).length,0);
   stream.close();h.api.dispose();assert.throws(()=>h.api.createActions({key:'computer-2'}),/unavailable/);
 });
+
+test('setup-only identity never admits reads, supports original setup requests, and upgrades only after an actual read profile', async () => {
+  const h=harness(); const setup=token=>({version:1,state:'setup_only',expires_in:900,
+    setup_profile:{version:1,profile:'first-team-setup-v1',host_uid:HOST},session_context:{...sessionContext},...(token?{token}:{})});
+  h.overrides.set('issue',()=>reply(200,setup(TOKEN)));
+  h.overrides.set('status',()=>reply(200,setup()));
+  h.overrides.set('setup/context',()=>reply(200,{version:1,request:null}));
+  assert.equal(await h.api.connect(),true); assert.equal(h.api.snapshot().state,'setup_only');
+  assert.notEqual(h.api.readHandle.snapshot().state,'ready');
+  assert.equal(await h.api.readHandle.jget('/api/tasks'),null);
+  assert.equal(h.calls.filter(c=>c.url.includes('/read/')).length,0);
+  assert.equal((await h.api.setupContext()).version,1);
+  assert.equal(h.calls.at(-1).init.credentials,'omit'); assert.equal(h.calls.at(-1).init.headers.Authorization,'Bearer '+TOKEN);
+  await h.api.check(); assert.equal(h.api.snapshot().state,'setup_only');
+  h.overrides.set('status',()=>reply(200,ready()));
+  h.overrides.set('read/tasks',init=>{assert.equal(init.headers.Authorization,'Bearer '+TOKEN);return reply(200,{state:'ok',data:{path:'read/tasks'}});});
+  await h.api.check(); assert.equal(h.api.snapshot().state,'ready');
+  assert.deepEqual(await h.api.readHandle.jget('/api/tasks'),{state:'ok',data:{path:'read/tasks'}});
+  h.api.dispose();
+});
