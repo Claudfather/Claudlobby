@@ -468,3 +468,20 @@ def test_a_left_record_the_sweep_cannot_remove_is_pushed_until_it_is_gone(
     f.sweep(scratch_plane_env)
     assert not (stuck / "data/.stopped").exists()
     assert "stop_record_alerted" not in f.markers("k"), f.markers("k")
+
+
+def test_a_stamp_with_a_leading_zero_is_read_in_base_10_so_the_bots_after_it_are_judged(
+    tmp_path, *, scratch_plane_env
+):
+    """Bash reads a number with a leading 0 as octal, and an 8 or a 9 there is an error that
+    ends the whole bot loop: every bot after it went unjudged while the sweep exited 0. The stop
+    door never writes such a stamp, but a hand-written record can, so the sweep reads it in base
+    10. Bot a is first in the loop; bot b, after it, has no unit and no record."""
+    f = Fleet(tmp_path)
+    left = f.bot("a", unit="active")
+    (left / "data" / ".stopped").write_text('{"by": "bot:f/m", "stopped_epoch": 08}\n')
+    f.bot("b")
+    f.sweep(scratch_plane_env)
+    rows = f.rows("b", "unit_missing", at_least=1)
+    assert len(rows) == 1, "the bot after the stamp went unjudged"
+    assert not (left / "data/.stopped").exists(), "a stamp of 08 is long past any stop"

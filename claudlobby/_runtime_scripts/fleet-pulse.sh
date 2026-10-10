@@ -93,9 +93,15 @@ _stop_record_read() {
     _STOP_EPOCH=""; _STOP_BY=""
     [ -f "$record" ] || return 1
     line=$(head -n 1 "$record" 2>/dev/null) || line=""
-    _STOP_EPOCH=$(printf '%s' "$line" | sed -n 's|.*"stopped_epoch": *\([0-9][0-9]*\).*|\1|p')
+    # At most 12 digits, so no sum below can overflow: a longer stamp is one
+    # that cannot be read, and the file's own time stands in for it.
+    _STOP_EPOCH=$(printf '%s' "$line" | sed -n 's|.*"stopped_epoch": *\([0-9]\{1,12\}\)[^0-9].*|\1|p')
     _STOP_BY=$(printf '%s' "$line" | sed -n 's|.*"by": *"\([A-Za-z0-9:/._@-]*\)".*|\1|p')
     [ -n "$_STOP_EPOCH" ] || _STOP_EPOCH=$(stat_mtime "$record" 2>/dev/null || date +%s)
+    # Base 10 whatever its zeros. Bash reads a leading 0 as octal, where an 08
+    # is an error that ends the whole bot loop: every later bot goes unjudged
+    # and the sweep still exits 0. The stop door never writes one; a hand can.
+    _STOP_EPOCH=$(( 10#$_STOP_EPOCH ))
     [ -n "$_STOP_BY" ] || _STOP_BY=unknown
     return 0
 }
