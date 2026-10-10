@@ -23,6 +23,11 @@ from ..plane.owner_source import SourceDenied, SourceNeedsBinding, SourceUnavail
 
 _GENERATED = ("BOT_ID", "BOT_NAME", "BOT_DIR", "BOT_SERVICE", "FLEET_ROOT",
               "FLEET_NAME", "CLAUDLOBBY_FLEET", "CLAUDLOBBY_TIMER_CONTEXT")
+_ACTION_LABELS = {
+    "message": ("ordinary messages", "ordinary-message", "ALLOW", "REVOKE-MESSAGES"),
+    "nudge": ("task nudges", "task-nudge", "ALLOW-NUDGES", "REVOKE-NUDGES"),
+    "feedback": ("task feedback", "task-feedback", "ALLOW-FEEDBACK", "REVOKE-FEEDBACK"),
+}
 
 
 @contextmanager
@@ -159,11 +164,16 @@ def _allow_action(args, paths, store, terminal, action):
     if action == "message":
         terminal.write("Allow ordinary messages only as this actor in this fleet.\n"
                        "This grants no task mutations, replies or permission decisions.\n")
-    else:
+    elif action == "nudge":
         terminal.write("Allow selected-task nudges only as this actor in this fleet.\n"
                        "Nudges record a task event and ask its fleet manager to act.\n"
                        "This grants no ordinary messages, other task mutations or permission decisions.\n")
-    _approve(terminal, "ALLOW" if action == "message" else "ALLOW-NUDGES")
+    else:
+        terminal.write("Allow task-linked comments as this actor to this fleet's configured lead.\n"
+                       "Comments may concern open or completed work.\n"
+                       "This grants no ordinary messages, nudges, task state changes or permission decisions.\n")
+    label, _, allow_word, _ = _ACTION_LABELS[action]
+    _approve(terminal, allow_word)
     with mutation_admission(paths.root, identity=RuntimeIdentity.current(),
                             expected_release=preview["release"]) as release:
         _unchanged(preview, _grant_preview(paths, store, args.target_fleet, args.actor, release))
@@ -172,23 +182,27 @@ def _allow_action(args, paths, store, terminal, action):
         if (ctx.host_uid != preview["owner"].host_uid or ctx.fleet_uid != preview["bindings"]["fleet_uid"]
                 or ctx.caller.uid != preview["actor_uid"] or ctx.caller.alias != preview["actor_alias"]):
             raise CommandFailure("conflict", "approved actor identities changed")
-        allow = store.allow_messages if action == "message" else store.allow_nudges
+        allow = {"message": store.allow_messages, "nudge": store.allow_nudges,
+                 "feedback": store.allow_feedback}[action]
         grant = allow(expected_owner=preview["owner"], fleet_uid=ctx.fleet_uid,
                                     actor_uid=ctx.caller.uid, actor_alias=ctx.caller.alias)
     return CommandOutput({"state": "allowed", "grant": asdict(grant)},
-                         lines=("Owner " + ("ordinary messages" if action == "message" else "task nudges") + " allowed for this actor and fleet.",))
+                         lines=(f"Owner {label} allowed for this actor and fleet.",))
 
 
 def _revoke_action(args, store, terminal, action):
     owner = _active_owner(store)
-    current = store.current_message_grant if action == "message" else store.current_nudge_grant
-    revoke = store.revoke_messages if action == "message" else store.revoke_nudges
+    current, revoke = {
+        "message": (store.current_message_grant, store.revoke_messages),
+        "nudge": (store.current_nudge_grant, store.revoke_nudges),
+        "feedback": (store.current_feedback_grant, store.revoke_feedback),
+    }[action]
     grant = current(expected_owner=owner, fleet_uid=args.fleet_uid)
     _describe(terminal, owner)
     _describe_binding(terminal, grant.fleet_uid, grant.actor_alias, grant.actor_uid)
-    label = "ordinary-message" if action == "message" else "task-nudge"
+    _, label, _, revoke_word = _ACTION_LABELS[action]
     terminal.write(f"Revoke only this retained {label} grant. Owner read access remains.\n")
-    _approve(terminal, "REVOKE-MESSAGES" if action == "message" else "REVOKE-NUDGES")
+    _approve(terminal, revoke_word)
     if current(expected_owner=owner, fleet_uid=args.fleet_uid) != grant:
         raise CommandFailure("conflict", f"displayed {action} grant changed; inspect and retry")
     revoke(expected_owner=owner, fleet_uid=grant.fleet_uid, expected_grant=grant)
@@ -216,7 +230,7 @@ def _grant_errors(action):
     except AccessDenied as exc:
         if exc.code == f"invalid_{action}_binding":
             raise CommandFailure("invalid_argument", f"{action} grants require canonical fleet and human actor bindings") from exc
-        if exc.code == f"{action}s_not_allowed":
+        if exc.code == ("feedback_not_allowed" if action == "feedback" else f"{action}s_not_allowed"):
             raise CommandFailure("conflict", f"no retained {action} grant for this fleet; inspect host owner status") from exc
         if exc.code == f"{action}_binding_changed":
             raise CommandFailure("conflict", f"{action} grant changed or already belongs to another actor; inspect host owner status "
@@ -268,13 +282,18 @@ def dispatch(args):
                 lines.append("Message grant: " + json.dumps(asdict(message), ensure_ascii=True))
             for nudge in nudges:
                 lines.append("Nudge grant: " + json.dumps(asdict(nudge), ensure_ascii=True))
+            for feedback in status.feedback_grants:
+                lines.append("Feedback grant: " + json.dumps(asdict(feedback), ensure_ascii=True))
             return CommandOutput({"state": state, "owner": asdict(grant) if grant else None,
                                   "message_grants": [asdict(message) for message in messages],
-                                  "nudge_grants": [asdict(nudge) for nudge in nudges]},
+                                  "nudge_grants": [asdict(nudge) for nudge in nudges],
+                                  "feedback_grants": [asdict(item) for item in status.feedback_grants]},
                                  lines=tuple(lines))
         with _terminal() as terminal:
-            if args.owner_action in {"allow-messages", "revoke-messages", "allow-nudges", "revoke-nudges"}:
-                action = "message" if args.owner_action.endswith("messages") else "nudge"
+            if args.owner_action in {"allow-messages", "revoke-messages", "allow-nudges", "revoke-nudges",
+                                     "allow-feedback", "revoke-feedback"}:
+                action = {"messages": "message", "nudges": "nudge", "feedback": "feedback"}[
+                    args.owner_action.split("-", 1)[1]]
                 with _grant_errors(action):
                     if args.owner_action.startswith("allow-"):
                         return _allow_action(args, paths, store, terminal, action)

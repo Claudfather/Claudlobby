@@ -899,6 +899,68 @@ recording. A committed task event or submitted transport alone is not delivery.
 Prepared-export tests use a synthetic native receiver; real receiver, installed
 CLI, trusted ingress and production activation remain separate validation gates.
 
+### Task-linked human feedback
+
+`task feedback` records a human comment for the configured fleet manager (the
+lead), including on resolved completed, failed or cancelled work. It records one
+`communication` with class `chat`, canonical `work_item_id` and the selected
+current assignment or null. It creates no task event, reply parent, approval,
+escalation resolution, task completion or nudge. The existing communication
+schema owns its links; no new lifecycle vocabulary or database migration applies.
+
+```bash
+claudlobby --fleet example --json task feedback wi_11111111111111111111111111111111 \
+  --actor human:reviewer --expected-assignment none \
+  --text "Please consider this in the next iteration." --request-id 11111111-1111-4111-8111-111111111111
+claudlobby --root DATA_ROOT host owner allow-feedback --target-fleet example --actor human:reviewer
+claudlobby --root DATA_ROOT host owner revoke-feedback --fleet-uid fleet_11111111111111111111111111111111
+```
+
+The local CLI requires an existing explicit human actor and a required
+`--expected-assignment ASG_ID` or `none`. It never registers an actor implicitly
+or takes its identity from an ambient account or generated bot. `none` is an
+explicit selection, not an omitted precondition. Terminal tasks select null even
+when they have historical assignments. The canonical operation checks the current
+selection under the task lock; unresolved work and stale selections refuse.
+Authored text is bounded by `MessageBody` (16,384 UTF-8 bytes); normal capture
+policy still controls readable retention. Receipts retain digests, not plaintext.
+
+Owner read pairing, message grants and nudge grants confer no feedback authority.
+`allow-feedback` separately confirms `ALLOW-FEEDBACK`; optional
+`--register-actor` first requires its own `REGISTER` confirmation. Its independent
+`OwnerFeedbackGrant` binds owner revision, host, fleet, existing human actor and
+durable generation. `REVOKE-FEEDBACK` removes only that capability. Revoke/reallow
+changes its generation even for the same actor. Status lists `feedback_grants`
+alongside existing grants without requiring an active selection. Reads of older
+stores do not create the optional feedback table or migrate message grants.
+
+`plane/owner_feedback.py:OwnerFeedback` is an internal bound adapter, with no
+HTTP/UI entry point. `submit` requires a trusted `VerifiedReader`, the exact typed
+feedback grant, task/fleet/manager identities, explicit assignment-or-null and
+selected release. It binds the existing human, admits the selected runtime and
+source, and reauthorizes before dispatch and before disclosing success or raw
+canonical failure. `inspect` brackets pure original-request/receiver reads with
+the same authority, including on errors. Revocation prevents later admission;
+it cannot recall an already executing effect. Feedback grant changes do not
+change message/nudge grants or their pending receipt authority.
+
+`task_operations.feedback` commits the one linked fact before
+`commands/task_write.feedback_bound_task` invokes strict durable reservation and
+native transport. No lock/prepare/recording/reservation failure authorizes a
+native effect. A commit followed by failed outcome persistence remains committed
+but has no notification from that invocation. Post-native persistence loss stays
+unknown. Native submission alone is not delivery: only the independent receiver
+byte-integrity proof can establish `received`/`delivered`.
+
+Feedback has no retry flag, recipient-box inspection, Enter repair or recording
+alert. A retained UUID cannot repeat recording or fill a missing notification.
+Committed replay preserves original task/assignment/message coordinates even if
+work later changes; retained uncommitted/uncertain requests are inspection-only.
+Use `request show UUID` and `message receipt MSG_ID --wait 0`, or the adapter's
+pure `inspect`, to recover evidence. Its output distinguishes comment recording
+from lead notification and labels the task state as a current read. These rules
+do not change existing ordinary-message, nudge or assignment CLI behavior.
+
 ### Grant-bound owner browser messages
 
 The trusted direct-host owner browser transport exposes three same-origin POST

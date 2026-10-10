@@ -792,3 +792,62 @@ def test_nudge_requires_current_reader_and_host(access, change):
         store.authorize_nudge(session.token, OTHER if change == "principal" else OWNER,
             host_uid="foreign-host" if change == "host" else owner.host_uid, fleet_uid=FLEET)
     assert store.path.read_bytes() == before
+
+
+def test_feedback_grants_are_independent_durable_generations_without_message_migration(access):
+    from claudlobby.plane.owner_access import OwnerFeedbackGrant
+    store, clock = access
+    owner = pair(store)
+    session = store.open_session(OWNER)
+    legacy_message_grant(store, owner)
+    before = store.path.read_bytes()
+    with pytest.raises(AccessDenied, match="feedback_not_allowed"):
+        store.authorize_feedback(session.token, OWNER, host_uid=owner.host_uid, fleet_uid=FLEET)
+    assert store.local_action_status().feedback_grants == ()
+    assert store.path.read_bytes() == before
+    options = dict(expected_owner=owner, fleet_uid=FLEET, actor_uid=ACTOR, actor_alias=ALIAS)
+    first = store.allow_feedback(**options)
+    assert type(first) is OwnerFeedbackGrant and len(first.generation) == 64
+    assert store.allow_feedback(**options) == first
+    with sqlite3.connect(store.path) as conn:
+        assert "generation" not in [row[1] for row in conn.execute("PRAGMA table_info(message_grants)")]
+    reopened = OwnerAccess(store.root, clock=lambda: clock[0])
+    assert reopened.authorize_feedback(session.token, OWNER, host_uid=owner.host_uid, fleet_uid=FLEET) == first
+    assert reopened.local_action_status().feedback_grants == (first,)
+    with pytest.raises(AccessDenied, match="feedback_not_allowed"):
+        store.authorize_feedback(session.token, OWNER, host_uid=owner.host_uid, fleet_uid=OTHER_FLEET)
+    with pytest.raises(AccessDenied, match="feedback_binding_changed"):
+        store.allow_feedback(**{**options, "actor_uid": OTHER_ACTOR})
+    store.revoke_feedback(expected_owner=owner, fleet_uid=FLEET, expected_grant=first)
+    assert store.authorize_message(session.token, OWNER, host_uid=owner.host_uid, fleet_uid=FLEET)
+    replacement = store.allow_feedback(**options)
+    assert replacement.generation != first.generation
+    with pytest.raises(AccessDenied, match="feedback_binding_changed"):
+        store.revoke_feedback(expected_owner=owner, fleet_uid=FLEET, expected_grant=first)
+    assert store.current_feedback_grant(expected_owner=owner, fleet_uid=FLEET) == replacement
+    store.revoke_messages(expected_owner=owner, fleet_uid=FLEET)
+    assert store.authorize_feedback(session.token, OWNER, host_uid=owner.host_uid, fleet_uid=FLEET) == replacement
+    store.revoke_owner(expected_revision=owner.revision)
+    with pytest.raises(AccessDenied):
+        store.authorize_feedback(session.token, OWNER, host_uid=owner.host_uid, fleet_uid=FLEET)
+    current = pair(store)
+    with pytest.raises(AccessDenied, match="feedback_not_allowed"):
+        store.current_feedback_grant(expected_owner=current, fleet_uid=FLEET)
+
+
+@pytest.mark.parametrize("change", ["host", "principal", "expired", "rotated"])
+def test_feedback_requires_current_reader_and_host(access, change):
+    store, clock = access
+    owner = pair(store)
+    session = store.open_session(OWNER)
+    store.allow_feedback(expected_owner=owner, fleet_uid=FLEET, actor_uid=ACTOR, actor_alias=ALIAS)
+    before = store.path.read_bytes()
+    if change == "expired":
+        clock[0] += SESSION_SECONDS + 1
+    elif change == "rotated":
+        store.renew_session(session.token, OWNER)
+        before = store.path.read_bytes()
+    with pytest.raises(AccessDenied):
+        store.authorize_feedback(session.token, OTHER if change == "principal" else OWNER,
+            host_uid="foreign-host" if change == "host" else owner.host_uid, fleet_uid=FLEET)
+    assert store.path.read_bytes() == before

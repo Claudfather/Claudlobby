@@ -178,7 +178,7 @@ class RequestReceipt:
 
 
 _OPERATIONS = frozenset(
-    "task.admit task.assign task.withdraw task.reassign task.escalate task.nudge task.recheck "
+    "task.admit task.assign task.withdraw task.reassign task.escalate task.nudge task.recheck task.feedback "
     "assignment.deliver assignment.accept assignment.progress assignment.block assignment.return "
     "assignment.complete assignment.fail message.send message.reply fleet.reports.submit fleet.reports.ack "
     "checkin.record workstream.open workstream.progress workstream.renew workstream.block "
@@ -194,11 +194,11 @@ _NATIVE_STAGES = {
     "message.send": "delivery", "message.reply": "delivery",
     "fleet.reports.submit": "delivery",
     "assignment.deliver": "delivery",
-    "task.nudge": "notification", "task.recheck": "notification",
+    "task.nudge": "notification", "task.recheck": "notification", "task.feedback": "notification",
     **{f"assignment.{verb}": "notification"
        for verb in ("progress", "block", "return", "complete", "fail")},
 }
-_STRICT_NATIVE = frozenset({"task.nudge", "task.recheck", "assignment.deliver", "assignment.progress", "assignment.block",
+_STRICT_NATIVE = frozenset({"task.nudge", "task.recheck", "task.feedback", "assignment.deliver", "assignment.progress", "assignment.block",
                             "assignment.return", "assignment.complete", "assignment.fail"})
 _O1_NATIVE = frozenset({"message.send", "message.reply", "fleet.reports.submit"})
 
@@ -249,7 +249,7 @@ def _message_route(intent):
     if route.caller_alias.startswith("human:"):
         if route.caller_fleet_uid is not None or not re.fullmatch(r"human:[^\s:/]+", route.caller_alias):
             raise ReceiptError("local human route has a foreign caller fleet or alias")
-        if intent.operation not in {"message.send", "message.reply", "task.nudge", "task.recheck"}:
+        if intent.operation not in {"message.send", "message.reply", "task.nudge", "task.recheck", "task.feedback"}:
             raise ReceiptError("local human route is not supported for this operation")
     else:
         _id(route.caller_fleet_uid, "fleet")
@@ -341,6 +341,17 @@ def _validate(receipt):
             raise ReceiptError("message transmission facts belong to reserved attempts")
     elif receipt.message_attempts and (intent.route is None or native_stage is None):
         raise ReceiptError("native attempts require a frozen message route")
+    if intent.operation == "task.feedback":
+        if (not isinstance(intent.route, MessageRouteBinding) or intent.task_id is None
+                or intent.route.caller_fleet_uid is not None
+                or not intent.route.caller_alias.startswith("human:")
+                or intent.recipient_uid != intent.route.manager_uid
+                or intent.route.recipient_alias != intent.route.manager_alias
+                or intent.route.peer_fleet_uid != intent.fleet_uid
+                or tuple(plan.kind for plan in intent.stages) != ("recording", "notification")
+                or len(intent.stages[0].facts) != 1
+                or intent.stages[0].facts[0].family != "communication" or intent.stages[1].facts):
+            raise ReceiptError("feedback requires one human task comment and a frozen manager notification")
     if type(receipt.attempt) is not int or receipt.attempt < 0 or len(intent.stages) != len(receipt.stages):
         raise ReceiptError("invalid receipt attempt/stages")
     seen = set()

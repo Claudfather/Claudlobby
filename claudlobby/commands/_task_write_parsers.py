@@ -67,6 +67,15 @@ def register_task_write_subparsers(task_children, assignment_children):
     nudging.add_argument("--reason", required=True, metavar="TEXT")
     nudging.add_argument("--by", metavar="ACTOR", help="Provenance, never caller authority")
 
+    feedback = _route(task_children, "feedback", "task.feedback",
+                      "Comment on resolved task work and notify its configured lead")
+    feedback.add_argument("task_id", metavar="TASK_ID")
+    feedback.add_argument("--actor", required=True, metavar="human:ACTOR",
+                          help="Explicit existing local human actor")
+    feedback.add_argument("--expected-assignment", required=True, metavar="ASG_ID|none",
+                          help="Selected current assignment, or explicit none for unassigned/terminal work")
+    feedback.add_argument("--text", required=True, metavar="TEXT")
+
     rechecking = _route(task_children, "recheck", "task.recheck",
                         "Ask the current fleet manager about overdue open work")
     from ..task_defaults import DEFAULT_MAX_AGE_H, DEFAULT_REPEAT_H

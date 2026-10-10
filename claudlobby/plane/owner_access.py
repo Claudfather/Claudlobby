@@ -138,9 +138,21 @@ class OwnerNudgeGrant:
     generation: str
 
 
+@dataclass(frozen=True)
+class OwnerFeedbackGrant:
+    """Locally approved task comments; neither messages nor nudges grant this."""
+
+    owner: OwnerGrant
+    fleet_uid: str
+    actor_uid: str
+    actor_alias: str
+    generation: str
+
+
 # Fixed internal namespaces. No request or caller chooses a table or grant type.
 _ACTION_GRANTS = {"message": ("message_grants", OwnerMessageGrant),
-                  "nudge": ("nudge_grants", OwnerNudgeGrant)}
+                  "nudge": ("nudge_grants", OwnerNudgeGrant),
+                  "feedback": ("feedback_grants", OwnerFeedbackGrant)}
 
 
 @dataclass(frozen=True)
@@ -148,6 +160,7 @@ class OwnerLocalStatus:
     owner: OwnerGrant | None
     message_grants: tuple[OwnerMessageGrant, ...]
     nudge_grants: tuple[OwnerNudgeGrant, ...]
+    feedback_grants: tuple[OwnerFeedbackGrant, ...]
 
 
 @dataclass(frozen=True)
@@ -181,7 +194,8 @@ class OwnerAccess:
     ``authorize_read`` must be called for every request and before each stream
     delivery; never cache its result. Ordinary messages require a separate,
     explicit local grant and ``authorize_message`` admission. Task nudges need
-    their distinct grant and ``authorize_nudge``. This class grants no other
+    their distinct grant and ``authorize_nudge``; task comments require a feedback
+    grant and ``authorize_feedback``. This class grants no other
     actions, website membership or workspace authority and performs no delivery.
     Same-UID processes/root can alter its files and are outside this boundary.
     """
@@ -343,20 +357,21 @@ class OwnerAccess:
         if action == "message":
             OwnerAccess._prepare_message_grants(conn)
         elif not OwnerAccess._has_grants(conn, action):
-            # New nudge grants start with generations; existing message rows
+            # New action grants start with generations; existing message rows
             # neither migrate nor confer any authority in this namespace.
-            conn.execute(_MESSAGE_GRANTS_SCHEMA.replace("message_grants", "nudge_grants"))
+            table, _ = _ACTION_GRANTS[action]
+            conn.execute(_MESSAGE_GRANTS_SCHEMA.replace("message_grants", table))
 
     @staticmethod
     def _action_grant(conn: sqlite3.Connection, owner: OwnerGrant,
                       fleet_uid: str, action: str):
         table, grant_type = _ACTION_GRANTS[action]
         if not OwnerAccess._has_grants(conn, action):
-            raise AccessDenied(f"{action}s_not_allowed")
+            raise AccessDenied("feedback_not_allowed" if action == "feedback" else f"{action}s_not_allowed")
         row = conn.execute(f"SELECT * FROM {table} WHERE owner_revision = ? AND fleet_uid = ?",
                            (owner.revision, fleet_uid)).fetchone()
         if row is None:
-            raise AccessDenied(f"{action}s_not_allowed")
+            raise AccessDenied("feedback_not_allowed" if action == "feedback" else f"{action}s_not_allowed")
         try:
             _canonical_uid(fleet_uid, "fleet", action=action)
             actor_uid = _canonical_uid(row["actor_uid"], "actor", action=action)
@@ -385,7 +400,7 @@ class OwnerAccess:
                 fleets = conn.execute(f"SELECT fleet_uid FROM {table} "
                     "WHERE owner_revision = ? ORDER BY fleet_uid", (owner.revision,)).fetchall()
                 return tuple(self._action_grant(conn, owner, row["fleet_uid"], action) for row in fleets)
-            return OwnerLocalStatus(owner, retained("message"), retained("nudge"))
+            return OwnerLocalStatus(owner, retained("message"), retained("nudge"), retained("feedback"))
 
     def local_status(self) -> tuple[OwnerGrant | None, tuple[OwnerMessageGrant, ...]]:
         """Compatibility read of pairing and its retained ordinary-message grants."""
@@ -573,6 +588,26 @@ class OwnerAccess:
                         host_uid: str, fleet_uid: str) -> OwnerNudgeGrant:
         """Admit task nudges; target/release/source validation belongs to caller."""
         return self._authorize_action("nudge", token, principal, host_uid, fleet_uid)
+
+    def allow_feedback(self, *, expected_owner: OwnerGrant, fleet_uid: str,
+                       actor_uid: str, actor_alias: str) -> OwnerFeedbackGrant:
+        """Local task-comment approval; caller binds the existing human actor."""
+        return self._allow_action("feedback", expected_owner, fleet_uid, actor_uid, actor_alias)
+
+    def current_feedback_grant(self, *, expected_owner: OwnerGrant,
+                               fleet_uid: str) -> OwnerFeedbackGrant:
+        """Read retained feedback authority without active selection or repair."""
+        return self._current_action("feedback", expected_owner, fleet_uid)
+
+    def revoke_feedback(self, *, expected_owner: OwnerGrant, fleet_uid: str,
+                        expected_grant: OwnerFeedbackGrant | None = None) -> None:
+        """Revoke only feedback; the exact generation fences replacements."""
+        self._revoke_action("feedback", expected_owner, fleet_uid, expected_grant)
+
+    def authorize_feedback(self, token: str, principal: PrincipalRef, *,
+                           host_uid: str, fleet_uid: str) -> OwnerFeedbackGrant:
+        """Admit task comments only; target/release/source belong to caller."""
+        return self._authorize_action("feedback", token, principal, host_uid, fleet_uid)
 
     def renew_session(self, token: str, principal: PrincipalRef) -> ReaderSession:
         """Atomically rotate a still-valid session; old token cannot be replayed."""

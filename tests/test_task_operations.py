@@ -973,3 +973,130 @@ def test_nudge_semantic_helper_preserves_recipe_omission_and_explicit_null():
     assert omitted != explicit
     with pytest.raises(tasks.TaskQueryError):
         tasks.nudge_semantic_digest(task_id, reason=fields['reason'], by=fields['by'], expected_assignment_id='')
+
+
+def _feedback_human(ctx, conn):
+    alias = 'human:reviewer'
+    actor = tasks.TaskActor(resolve_party(conn, alias, now='2026-09-28T00:00:00Z'), alias)
+    return replace(ctx, caller=actor, caller_fleet_uid=None)
+
+
+@pytest.mark.parametrize('state', ['queued', 'assigned', 'completed', 'failed', 'cancelled'])
+def test_feedback_records_only_linked_chat_on_resolved_work(estate, state):
+    from claudlobby.message_payload import MessageBody
+    ctx, conn = estate
+    task = tasks.admit(ctx, str(uuid4()), title='Review work')
+    assignment = None
+    if state in {'assigned', 'completed', 'failed'}:
+        assignment = tasks.assign(ctx, str(uuid4()), task.task_id, bot_id='worker').assignment_id
+        worker = replace(ctx, caller=ctx.bots['worker'])
+        if state == 'completed':
+            tasks.complete(worker, str(uuid4()), assignment, ReportPayload('completed', summary='Done'))
+        elif state == 'failed':
+            tasks.fail(worker, str(uuid4()), assignment, ReportPayload('failed', reason='Unable'))
+    elif state == 'cancelled':
+        tasks.withdraw(ctx, str(uuid4()), task.task_id, reason='Stopped')
+    human = _feedback_human(ctx, conn)
+    expected = assignment if state == 'assigned' else None
+    body = MessageBody('  Please consider café\nNext iteration  ')
+    request = str(uuid4())
+    before = _counts(conn)
+    result = tasks.feedback(human, request, task.task_id, body=body,
+                            expected_assignment_id=expected, route=_manager_route(human))
+    assert result.task.state == state and result.assignment_id == expected
+    assert _counts(conn) == (*before[:3], before[3] + 1)
+    row = conn.execute('SELECT message_class, work_item_id, assignment_id, body, command_type, '
+                       'reply_to_msg_id, sender_uid, recipient_uid FROM communications WHERE msg_id=?',
+                       (result.message_id,)).fetchone()
+    assert tuple(row) == ('chat', task.task_id, expected, body.text, None, None,
+                          human.caller.uid, ctx.bots['manager'].uid)
+    retained = _receipt(ctx, request)
+    assert retained.intent.operation == 'task.feedback'
+    assert len(retained.intent.stages[0].facts) == 1
+    assert b'Please consider' not in (ctx.root / 'state/requests' / ctx.fleet_uid / (request + '.json')).read_bytes()
+    assert tasks.feedback(human, request, task.task_id, body=body,
+        expected_assignment_id=expected, route=_manager_route(human)).replayed
+    assert _counts(conn) == (*before[:3], before[3] + 1)
+    if state in {'completed', 'failed'}:
+        with pytest.raises(tasks.TaskConflictError, match='assignment changed'):
+            tasks.feedback(human, str(uuid4()), task.task_id, body=body,
+                           expected_assignment_id=assignment, route=_manager_route(human))
+
+
+def test_feedback_replay_preserves_selection_and_unrecorded_request_never_restarts(estate):
+    from claudlobby.message_payload import MessageBody
+    ctx, conn = estate
+    human = _feedback_human(ctx, conn)
+    task = tasks.admit(ctx, str(uuid4()), title='Exact comment')
+    body = MessageBody('Original comment')
+    options = dict(body=body, expected_assignment_id=None, route=_manager_route(human))
+    request = str(uuid4())
+    original = tasks.feedback(human, request, task.task_id, **options)
+    assigned = tasks.assign(ctx, str(uuid4()), task.task_id, bot_id='worker')
+    before = _counts(conn)
+    replay = tasks.feedback(human, request, task.task_id, **options)
+    assert replay.replayed and replay.message_id == original.message_id and replay.assignment_id is None
+    assert replay.task.current_assignment.assignment_id == assigned.assignment_id
+    for changed in ({'body': MessageBody('Changed')}, {'expected_assignment_id': assigned.assignment_id}):
+        with pytest.raises(ReceiptConflict):
+            tasks.feedback(human, request, task.task_id, **{**options, **changed})
+    with pytest.raises(TypeError):
+        tasks.feedback(human, str(uuid4()), task.task_id, body=body, route=options['route'])
+    with pytest.raises(tasks.TaskConflictError, match='local human'):
+        tasks.feedback(ctx, str(uuid4()), task.task_id, **{**options, 'route': _manager_route(ctx)})
+    assert _counts(conn) == before
+    options['expected_assignment_id'] = assigned.assignment_id
+    conn.execute("CREATE TRIGGER reject_feedback BEFORE INSERT ON communications "
+                 "BEGIN SELECT RAISE(ABORT, 'private refusal'); END")
+    uncertain = str(uuid4())
+    with pytest.raises(tasks.TaskRecordingError):
+        tasks.feedback(human, uncertain, task.task_id, **options)
+    conn.execute('DROP TRIGGER reject_feedback')
+    with pytest.raises(tasks.TaskRecordingError, match='inspection-only'):
+        tasks.feedback(human, uncertain, task.task_id, **options)
+    assert _counts(conn) == before
+    assert _receipt(ctx, uncertain).message_attempts == ()
+
+
+def test_feedback_assignment_is_rechecked_under_lock_and_source_snapshot(estate, monkeypatch):
+    from contextlib import contextmanager
+    from claudlobby.message_payload import MessageBody
+    from claudlobby.plane.owner_source import admit_source, bind_source
+    ctx, conn = estate
+    human = _feedback_human(ctx, conn)
+    task = tasks.admit(ctx, str(uuid4()), title='Selection race')
+    original = tasks._locked_task
+    @contextmanager
+    def changed(store, task_id):
+        with monkeypatch.context() as patch:
+            patch.setattr(tasks, '_locked_task', original)
+            tasks.assign(ctx, str(uuid4()), task_id, bot_id='worker')
+        with original(store, task_id) as check:
+            yield check
+    with monkeypatch.context() as patch:
+        patch.setattr(tasks, '_locked_task', changed)
+        with pytest.raises(tasks.TaskConflictError, match='assignment changed'):
+            tasks.feedback(human, str(uuid4()), task.task_id, body=MessageBody('Comment'),
+                           expected_assignment_id=None, route=_manager_route(human))
+    assert conn.execute('SELECT count(*) FROM communications').fetchone()[0] == 0
+    bind_source(ctx.root)
+    seen = []
+    def check(snapshot):
+        assert snapshot.in_transaction
+        admit_source(snapshot, ctx.host_uid)
+        seen.append(snapshot.execute('SELECT count(*) FROM communications').fetchone()[0])
+    assignment = show_task(conn, task.task_id, fleet_uid=ctx.fleet_uid).current_assignment.assignment_id
+    tasks.feedback(human, str(uuid4()), task.task_id, body=MessageBody('Comment'),
+                   expected_assignment_id=assignment, route=_manager_route(human), admit_read=check)
+    assert seen == [0, 0, 1]
+
+
+def test_feedback_digest_validates_explicit_selection_and_exact_text():
+    from claudlobby.message_payload import MessageBody
+    task_id = 'wi_' + 'a' * 32
+    body = MessageBody(' comment\n')
+    digest = tasks.feedback_semantic_digest(task_id, body=body, expected_assignment_id=None)
+    assert digest != tasks.feedback_semantic_digest(task_id, body=MessageBody('comment'), expected_assignment_id=None)
+    assert digest != tasks.feedback_semantic_digest(task_id, body=body, expected_assignment_id='asg_' + 'b' * 32)
+    with pytest.raises(tasks.TaskQueryError):
+        tasks.feedback_semantic_digest(task_id, body=body, expected_assignment_id='')

@@ -327,9 +327,11 @@ def send_committed_native_attempt(route: MessageRoute, package: PackageResources
     """
     if (not isinstance(store, RequestStore) or not isinstance(receipt, RequestReceipt)
             or receipt.request_id != request_id or receipt.intent.operation not in {
-                "task.nudge", "task.recheck", "assignment.deliver", "assignment.progress", "assignment.block",
+                "task.nudge", "task.recheck", "task.feedback", "assignment.deliver", "assignment.progress", "assignment.block",
                 "assignment.return", "assignment.complete", "assignment.fail"}):
         raise MessageConflict("strict native attempt requires a frozen task or linked report request")
+    if receipt.intent.operation == "task.feedback" and retry_uncertain:
+        raise MessageConflict("feedback notification cannot retry an uncertain attempt")
     if (not isinstance(envelope, RenderedNativeEnvelope) or
             not isinstance(envelope.body, str)):
         raise MessageConflict("typed rendered native envelope required")

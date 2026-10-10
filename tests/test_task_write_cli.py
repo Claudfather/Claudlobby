@@ -473,3 +473,50 @@ def test_task_write_help_and_syntax_do_not_import_mutation_owner(monkeypatch, ca
     output = capsys.readouterr().out
     assert exited.value.code == 2 and "private-value" not in output
     assert json.loads(output)["command"] == "assignment.accept"
+
+
+def test_feedback_cli_binds_existing_explicit_human_and_original_receipt(active, monkeypatch, capsys):
+    from tests.test_plane_owner_feedback import receiver
+    root, _ = active
+    monkeypatch.setattr(operation_context, '_local_operator_alias', lambda: 'human:reviewer')
+    task_id = _call(capsys, root, 'task', 'admit', '--title', 'Review result',
+                    '--request-id', str(uuid4()))['data']['task_id']
+    monkeypatch.setattr(operation_context, '_local_operator_alias',
+                        lambda: pytest.fail('feedback must not resolve an ambient actor'))
+    calls, repairs = receiver(monkeypatch)
+    before = _counts(root)
+    bad = _call(capsys, root, 'task', 'feedback', task_id, '--actor', 'human:unregistered',
+                '--expected-assignment', 'none', '--text', 'Comment', '--request-id', str(uuid4()), expected=4)
+    assert bad['error']['code'] == 'conflict' and _counts(root) == before
+    request = str(uuid4())
+    argv = ('task', 'feedback', task_id, '--actor', 'human:reviewer', '--expected-assignment', 'none',
+            '--text', '  Please consider café\nNext iteration  ', '--request-id', request)
+    first = _call(capsys, root, *argv)
+    assert first['command'] == 'task.feedback' and first['request_id'] == request
+    assert first['data']['recording'] == 'committed' and first['data']['current_task_state'] == 'queued'
+    assert first['data']['notification'] == 'received'
+    replay = _call(capsys, root, *argv)
+    assert replay['data']['replayed'] and replay['data']['message_id'] == first['data']['message_id']
+    assert replay['data']['recording'] == 'committed'
+    retained = _call(capsys, root, 'request', 'show', request)['data']['request']
+    assert retained['operation'] == 'task.feedback' and retained['assignment_id'] is None
+    assert len(calls) == 1 and repairs == []
+    after = _counts(root)
+    assert after[:3] == before[:3] and after[3] == before[3] + 1 and after[4] == before[4]
+    monkeypatch.setenv('BOT_ID', 'worker')
+    denied = _call(capsys, root, *argv, expected=4)
+    assert denied['error']['code'] == 'conflict' and _counts(root) == after
+
+
+@pytest.mark.parametrize('change', ['body', 'selection', 'actor'])
+def test_feedback_cli_invalid_input_has_no_recording(active, monkeypatch, capsys, change):
+    root, _ = active
+    monkeypatch.setattr(operation_context, '_local_operator_alias', lambda: 'human:reviewer')
+    task_id = _call(capsys, root, 'task', 'admit', '--title', 'Selected task',
+                    '--request-id', str(uuid4()))['data']['task_id']
+    before = _counts(root)
+    result = _call(capsys, root, 'task', 'feedback', task_id,
+        '--actor', 'bot:example/manager' if change == 'actor' else 'human:reviewer',
+        '--expected-assignment', '' if change == 'selection' else 'none',
+        '--text', 'x' * 16385 if change == 'body' else 'Comment', '--request-id', str(uuid4()), expected=2)
+    assert result['error']['code'] == 'invalid_argument' and _counts(root) == before

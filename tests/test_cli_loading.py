@@ -159,7 +159,7 @@ def test_converter_syntax_error_uses_public_result_without_echoing_values(tmp_pa
     assert "private-value" not in result.stdout + result.stderr
 
 
-@pytest.mark.parametrize("action", ["allow-nudges", "revoke-nudges"])
+@pytest.mark.parametrize("action", ["allow-nudges", "revoke-nudges", "allow-feedback", "revoke-feedback"])
 def test_owner_nudge_syntax_error_names_exact_command_and_help(action, tmp_path):
     result = _run(PARSE, "--json", "host", "owner", action, tmp_path=tmp_path)
     assert result.returncode == 2 and result.stderr == ""
@@ -190,3 +190,13 @@ def test_new_parser_modules_keep_domain_imports_lazy(argv, module, tmp_path):
         assert blocked == [module], blocked
     """, *argv, module, tmp_path=tmp_path)
     assert result.returncode == 0, result.stderr
+
+
+def test_feedback_syntax_error_names_exact_command_and_required_selection(tmp_path):
+    result = _run(PARSE, '--json', 'task', 'feedback', 'private-task-value', tmp_path=tmp_path)
+    assert result.returncode == 2 and result.stderr == ''
+    payload = json.loads(result.stdout)
+    assert payload['command'] == 'task.feedback'
+    assert payload['error']['code'] == 'invalid_argument'
+    assert payload['error']['hint'] == 'inspect claudlobby task feedback --help'
+    assert 'private-task-value' not in result.stdout

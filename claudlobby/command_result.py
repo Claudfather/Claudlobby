@@ -55,7 +55,7 @@ _PUBLIC = {("brief",): "brief", ("host", "releases"): "host.releases", ("host", 
 _PUBLIC.update({(domain, verb): f"{domain}.{verb}" for domain, verbs in (
     ("context", ("show",)), ("bot", ("list", "show", "capabilities", "status", "session", "logs", "usage", "start", "stop", "restart", "handoff", "interrupt", "compact", "move", "create", "remove")),
     ("fleet", ("show", "status", "logs", "uptime", "utilization", "inbox", "usage", "start", "stop", "restart", "reconcile", "reload", "pulse", "notify", "move")), ("project", ("list", "show")),
-    ("task", ("list", "show", "reviews", "admit", "assign", "withdraw", "reassign", "escalate", "nudge")),
+    ("task", ("list", "show", "reviews", "admit", "assign", "withdraw", "reassign", "escalate", "nudge", "feedback")),
     ("assignment", ("show", "deliver", "accept", "progress", "block", "return", "complete", "fail")),
     ("message", ("show", "receipt", "wait", "send", "reply")),
     ("request", ("show",)),
@@ -65,7 +65,8 @@ _PUBLIC.update({("bot", "automation", action): f"bot.automation.{action}"
                 for action in ("status", "pause", "resume", "record")})
 _PUBLIC.update({("host", "owner", action): f"host.owner.{action}"
                 for action in ("status", "initialize", "confirm", "revoke", "serve", "bind-source",
-                               "allow-messages", "revoke-messages", "allow-nudges", "revoke-nudges")})
+                               "allow-messages", "revoke-messages", "allow-nudges", "revoke-nudges",
+                               "allow-feedback", "revoke-feedback")})
 _PUBLIC.update({("plane", action): f"plane.{action}" for action in
                 ("doctor", "emit", "emit-batch", "expire", "status", "spool", "prune", "registry")})
 _invocation = ContextVar("public_cli_invocation", default=(None, False))

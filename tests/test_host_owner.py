@@ -504,3 +504,54 @@ def test_nudge_console_refuses_owner_or_generation_replacement(message_owner, mo
         assert replacement[0].generation != first.generation
     else:
         assert call(store, "allow-nudges", "--target-fleet", "example", "--actor", ctx.caller.alias) == 4
+
+
+def test_feedback_console_registration_is_separate_and_status_revoke_need_no_active_config(message_owner, monkeypatch, capsys):
+    store, _, owner, ctx = message_owner
+    actor = "human:feedback-owner"
+    args = ("--target-fleet", "example", "--actor", actor, "--register-actor")
+    terminal(monkeypatch, iter(["REGISTER\n", "ALLOW\n"]))
+    assert call(store, "allow-feedback", *args) == 4  # message approval word is insufficient
+    with pytest.raises(AccessDenied, match="feedback_not_allowed"):
+        store.current_feedback_grant(expected_owner=owner, fleet_uid=ctx.fleet_uid)
+    output = terminal(monkeypatch, iter(["ALLOW-FEEDBACK\n"]))
+    assert call(store, "allow-feedback", *args) == 0
+    grant = store.current_feedback_grant(expected_owner=owner, fleet_uid=ctx.fleet_uid)
+    assert "task-linked comments" in output.getvalue() and grant.actor_alias == actor
+    with pytest.raises(AccessDenied, match="messages_not_allowed"):
+        store.current_message_grant(expected_owner=owner, fleet_uid=ctx.fleet_uid)
+    (store.root / "state/selected-release.json").unlink()
+    db_file(store.root).rename(store.root / "retained-plane")
+    capsys.readouterr()
+    assert call(store, "status", "--json") == 0
+    data = json.loads(capsys.readouterr().out)["data"]
+    assert data["message_grants"] == []
+    assert data["feedback_grants"][0]["generation"] == grant.generation
+    terminal(monkeypatch, iter(["REVOKE-FEEDBACK\n"]))
+    assert call(store, "revoke-feedback", "--fleet-uid", ctx.fleet_uid) == 0
+    assert store.current_grant() == owner
+
+
+@pytest.mark.parametrize("boundary", ["allow", "revoke"])
+def test_feedback_console_refuses_owner_or_generation_replacement(message_owner, monkeypatch, boundary):
+    store, _, owner, ctx = message_owner
+    binding = dict(expected_owner=owner, fleet_uid=ctx.fleet_uid,
+                   actor_uid=ctx.caller.uid, actor_alias=ctx.caller.alias)
+    first = store.allow_feedback(**binding)
+    terminal(monkeypatch, iter([]))
+    replacement = []
+    def race(*args):
+        if boundary == "revoke":
+            store.revoke_feedback(expected_owner=owner, fleet_uid=ctx.fleet_uid)
+            replacement.append(store.allow_feedback(**binding))
+        else:
+            store.revoke_owner(expected_revision=owner.revision)
+            challenge = store.begin_pairing(PRINCIPAL)
+            store.confirm_pairing(challenge.token, expected_principal=PRINCIPAL)
+    monkeypatch.setattr(host_owner, "_approve", race)
+    if boundary == "revoke":
+        assert call(store, "revoke-feedback", "--fleet-uid", ctx.fleet_uid) == 4
+        assert store.current_feedback_grant(expected_owner=owner, fleet_uid=ctx.fleet_uid) == replacement[0]
+        assert replacement[0].generation != first.generation
+    else:
+        assert call(store, "allow-feedback", "--target-fleet", "example", "--actor", ctx.caller.alias) == 4
