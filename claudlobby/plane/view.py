@@ -97,6 +97,11 @@ from .queries import (
 
 UI_DIR = Path(__file__).resolve().parent / "ui"
 _CHANNEL_LIMIT_MAX = 500
+_CHANNEL_LINEAGE_HOPS = 32
+_CHANNEL_LINEAGE_ANCESTORS = 1000
+_CHANNEL_LINEAGE_BATCH = 400
+_CHANNEL_LINEAGE_INCOMPLETE = frozenset({
+    "missing_parent", "lookup_limit", "hop_limit", "cycle", "invalid_parent"})
 
 # "[BOTCOMMAND] erlich | task | <words> | repo:x | task:t-..." -> "<words>":
 # the leading framing AND the trailing ` | key:value` envelope fields are
@@ -352,6 +357,134 @@ def _delivery_phrase(row: dict) -> str | None:
     return _DELIVERY_PHRASE.get(status, status)
 
 
+def _channel_lineage(conn, comms):
+    """Close recent reply ancestry with indexed metadata, never historic bodies.
+
+    The caller owns one read snapshot including provenance/source admission.
+    Budgets bound point lookups and every displayed path; incomplete or
+    contradictory chains retain conversation IDs but cannot inherit a task.
+    Counts describe this bounded window, never the size of historical data.
+    """
+    metadata = {}
+
+    def fetch(ids):
+        for start in range(0, len(ids), _CHANNEL_LINEAGE_BATCH):
+            batch = ids[start:start + _CHANNEL_LINEAGE_BATCH]
+            rows = conn.execute(
+                "SELECT c.msg_id,c.reply_to_msg_id,c.work_item_id,c.host_uid,c.fleet_uid,"
+                " s.parent_uid AS sender_fleet_uid,r.parent_uid AS recipient_fleet_uid"
+                " FROM communications c LEFT JOIN identity_registry s"
+                " ON s.uid=c.sender_uid AND s.kind='actor'"
+                " LEFT JOIN identity_registry r ON r.uid=c.recipient_uid AND r.kind='actor'"
+                " WHERE c.msg_id IN (" + ",".join("?" * len(batch)) + ")", batch).fetchall()
+            metadata.update((mid, None) for mid in batch)
+            metadata.update((row["msg_id"], dict(row)) for row in rows)
+
+    fetch([c["msg_id"] for c in comms])
+    looked_up = 0
+    frontier = set(metadata)
+    for _ in range(_CHANNEL_LINEAGE_HOPS):
+        parents = sorted({metadata[mid]["reply_to_msg_id"] for mid in frontier
+                          if metadata[mid] and metadata[mid]["reply_to_msg_id"]
+                          and metadata[mid]["reply_to_msg_id"] not in metadata})
+        batch = parents[:_CHANNEL_LINEAGE_ANCESTORS - looked_up]
+        if not batch:
+            break
+        fetch(batch)
+        looked_up += len(batch)  # Missing IDs also spend the lookup budget.
+        frontier = set(batch)
+
+    groups = {}
+    root_of = {}
+    for communication in comms:
+        mid = communication["msg_id"]
+        visited, candidates, fleets, hosts = set(), set(), set(), set()
+        reason = None
+        for hop in range(_CHANNEL_LINEAGE_HOPS + 1):
+            if mid in visited:
+                reason = "cycle"
+                break
+            visited.add(mid)
+            row = metadata.get(mid)
+            if row is None:
+                # Every ID within the hop bound was looked up unless the
+                # ancestor budget ran out first.
+                reason = "missing_parent" if mid in metadata else "lookup_limit"
+                break
+            hosts.add(row["host_uid"])
+            # Emitting fleet is routing metadata, not a conversation participant.
+            fleets.update(value for value in (row["sender_fleet_uid"],
+                                              row["recipient_fleet_uid"]) if value)
+            if row["work_item_id"]:
+                candidates.add(row["work_item_id"])
+            parent = row["reply_to_msg_id"]
+            if not parent:
+                break
+            if not re.fullmatch(ID_PATTERNS["msg"], parent):
+                reason = "invalid_parent"
+                break
+            if hop == _CHANNEL_LINEAGE_HOPS:
+                reason = "hop_limit"
+                break
+            mid = parent
+        if len(hosts) != 1 or None in hosts:
+            reason = "foreign_source"
+        # Complete chains share their exact root. Incomplete paths cannot
+        # retarget a sibling through an arbitrary/cyclic root choice.
+        root = mid if reason is None or reason == "missing_parent" else communication["msg_id"]
+        root_of[communication["msg_id"]] = root
+        group = groups.setdefault(root, {"tasks": set(), "fleets": set(), "hosts": set(), "reason": None})
+        group["tasks"].update(candidates)
+        group["fleets"].update(fleets)
+        group["hosts"].update(hosts)
+        if reason:
+            group["reason"] = reason
+
+    task_ids = sorted({task for group in groups.values() for task in group["tasks"]
+                       if re.fullmatch(ID_PATTERNS["work_item"], task)})
+    tasks = {}
+    for start in range(0, len(task_ids), _CHANNEL_LINEAGE_BATCH):
+        batch = task_ids[start:start + _CHANNEL_LINEAGE_BATCH]
+        rows = conn.execute("SELECT w.work_item_id,w.host_uid,w.fleet_uid,f.parent_uid"
+            " FROM work_items w JOIN identity_registry f ON f.uid=w.fleet_uid AND f.kind='fleet'"
+            " WHERE w.work_item_id IN (" + ",".join("?" * len(batch)) + ")", batch).fetchall()
+        tasks.update((row["work_item_id"], dict(row)) for row in rows)
+    def owned(task, host, fleets):
+        record = tasks.get(task)
+        return (record is not None and record["host_uid"] == host
+                and record["parent_uid"] == host and record["fleet_uid"] in fleets)
+
+    task_of = {}
+    reasons = {}
+    for root, group in groups.items():
+        reason = group["reason"]
+        task = next(iter(group["tasks"])) if len(group["tasks"]) == 1 else None
+        if len(group["tasks"]) > 1:
+            reason = "conflicting_tasks"
+        if len(group["hosts"]) != 1:
+            reason = "foreign_source"
+        if task and reason is None and not owned(
+                task, next(iter(group["hosts"])), group["fleets"]):
+            reason = "invalid_task"
+        task_of[root] = task if reason is None else None
+        group["reason"] = reason
+        if reason:
+            reasons[reason] = reasons.get(reason, 0) + 1
+    # A message's OWN recorded task is not inherited ancestry: an incomplete
+    # chain keeps it (validated against that row alone) but promotes it to
+    # no other message. Contradictory or foreign chains still fail closed.
+    direct_of = {}
+    for mid, root in root_of.items():
+        row = metadata[mid]
+        if (row["work_item_id"] and groups[root]["reason"] in _CHANNEL_LINEAGE_INCOMPLETE
+                and owned(row["work_item_id"], row["host_uid"],
+                          {row["sender_fleet_uid"], row["recipient_fleet_uid"]})):
+            direct_of[mid] = row["work_item_id"]
+    return root_of, task_of, direct_of, {"max_hops": _CHANNEL_LINEAGE_HOPS,
+        "max_ancestor_lookups": _CHANNEL_LINEAGE_ANCESTORS,
+        "ancestor_lookups": looked_up, "unresolved_threads": sum(reasons.values()), "reasons": reasons}
+
+
 def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
                    fleet: str | None = None) -> dict:
     cols = ("ingest_seq, msg_id, occurred_at, sender_alias,"
@@ -423,29 +556,12 @@ def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
     # inventory's ONE rule.
     labels = ({} if fleet else qualified_labels(
         a for c in comms for a in (c["sender_alias"], c["recipient_alias"])))
-    reply_to = {c["msg_id"]: c["reply_to_msg_id"] for c in comms}
-
-    def chain_root(mid: str) -> str:
-        seen = set()
-        while reply_to.get(mid) and mid not in seen:
-            seen.add(mid)
-            mid = reply_to[mid]
-        return mid
-
-    # Chain-root FIRST, then promote the whole chain to any member's work
-    # item (gauntlet, probed both directions): keying per-message on
-    # `work_item_id or chain` split the dispatch from its report whenever
-    # exactly one side carried the id.
-    root_of = {c["msg_id"]: chain_root(c["msg_id"]) for c in comms}
-    wi_of_root: dict = {}
-    for c in comms:
-        if c["work_item_id"]:
-            wi_of_root.setdefault(root_of[c["msg_id"]], c["work_item_id"])
+    root_of, wi_of_root, direct_wi, lineage = _channel_lineage(conn, comms)
 
     threads: dict = {}
     for c in comms:
         r = root_of[c["msg_id"]]
-        wi = c["work_item_id"] or wi_of_root.get(r)
+        wi = wi_of_root.get(r) or direct_wi.get(c["msg_id"])
         key = wi or f"chain:{r}"
         t = threads.setdefault(key, {"key": key, "work_item_id": wi,
                                      "messages": []})
@@ -514,7 +630,7 @@ def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
             + [e["ingest_seq"] for e in t["task_events"]])
         out.append(t)
     out.sort(key=lambda t: t["latest_seq"], reverse=True)
-    return {"threads": out}
+    return {"threads": out, "lineage": lineage}
 
 
 def _stale_tier(arm, now: str) -> str | None:
@@ -1680,7 +1796,7 @@ def create_app(
         limit = max(1, min(int(limit), _CHANNEL_LIMIT_MAX))
         names = _channel_names(root)
         return JSONResponse(
-            envelope(lambda c: _fetch_channel(c, names, limit, fleet)))
+            envelope(lambda c: _fetch_channel(c, names, limit, fleet), snapshot=True))
 
     @app.get("/api/tasks")
     def tasks(fleet: str | None = None):

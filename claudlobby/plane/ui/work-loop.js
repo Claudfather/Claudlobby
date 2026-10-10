@@ -327,6 +327,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       <p class="note">Task state, history and action selection are a snapshot. Use Refresh to read them again.</p>
       <h3>Recent conversation &amp; reports</h3><p class="note">This is the recent channel window, not a complete task history. Completion alone does not mean a result was reviewed.</p>
       <button id="task-conversation-update" class="pill ghost" type="button" hidden>New conversation available</button>
+      <p id="task-lineage-note" class="note" hidden></p>
       <div id="task-reports"></div>
       <div class="task-detail-actions"><button class="pill" type="button" data-kind="feedback">Give feedback</button>
       <button class="pill ghost" type="button" data-kind="nudge">Nudge task</button></div>
@@ -344,13 +345,17 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   function updateConversation(explicit = false) {
     if (!selected || !detailSnapshot || detailSnapshot.task.task_id !== selected.id
         || (detailSnapshot.task.fleet || "") !== selected.fleet) return;
-    const reports = $("task-reports"), button = $("task-conversation-update");
+    const reports = $("task-reports"), button = $("task-conversation-update"), lineageNote = $("task-lineage-note");
     // The channel is the admitted current-room read. Task IDs are opaque,
     // shared across that room's cross-fleet threads; never infer from aliases.
     const ok = channel?.state === "ok";
     const threads = ok ? channel.data.threads.filter(t => t.work_item_id === selected.id) : [];
-    const signature = JSON.stringify(ok ? threads : [channel?.state, channel?.provenance, channel?.remediation]);
-    const active = document.activeElement, held = active === button || reports.contains(active);
+    // These diagnostics describe the entire admitted room window. They do not
+    // identify an affected task, and numeric detail/reasons do not change copy.
+    const unresolved = ok && Number.isSafeInteger(channel.data.lineage?.unresolved_threads)
+      && channel.data.lineage.unresolved_threads > 0;
+    const signature = JSON.stringify(ok ? [threads, unresolved] : [channel?.state, channel?.provenance, channel?.remediation]);
+    const active = document.activeElement, held = active === button || reports.contains(active) || lineageNote.contains(active);
     // Hiding the focused button or clearing a focused message would drop focus
     // to the page. Keep it on the region; never take it from elsewhere.
     const settle = keepFocus => {
@@ -360,7 +365,8 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     if (conversation?.signature === signature) { settle(active === button); return; }
     // Focus on the region itself (left there by an explicit update) survives
     // replacement; only focus or selected text inside it would be lost.
-    const reading = (active !== reports && reports.contains(active)) || selectionTouches(reports);
+    const reading = (active !== reports && (reports.contains(active) || lineageNote.contains(active)))
+      || selectionTouches(reports) || selectionTouches(lineageNote);
     // Source loss clears stale text even during interaction. Healthy updates
     // wait for explicit consent when focus or a text selection would be lost.
     if (!explicit && ok && reading) { button.hidden = false; return; }
@@ -384,6 +390,9 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       });
       reports.replaceChildren(...articles);
     }
+    lineageNote.textContent = unresolved
+      ? `Some recent replies ${room === "all" ? "across teams" : "in this team"} couldn’t be linked. Task conversations may be incomplete.` : "";
+    lineageNote.hidden = !unresolved;
     conversation = { signature, threads: next };
     settle(explicit || held);
   }

@@ -183,6 +183,92 @@ test('task-linked chat receipt never implies assignment or work has started', ()
   assert.match(visible(html(t)), /Task history:.*accepted.*progress.*completed/);
 });
 
+test('captured parent-only answer on a queued task never invents dispatch or work', () => {
+  // Shape captured in the 2026-10-10 synthetic browser run after its comment
+  // parent left the 120-message window: answer, no direct task/assignment,
+  // no command or transmission, and no task acts. IDs and prose are synthetic.
+  const t = thread(); t.delivered = false; t.task_events = [];
+  Object.assign(t.messages[0], { emitter: 'synthetic-reply-lineage-browser', message_class: 'answer',
+    command_type: null, work_item_id: null, assignment_id: null, reply_to_msg_id: `msg_${'3'.repeat(32)}`,
+    body: 'Synthetic answer <reply> & no task progress.', body_words: 'Synthetic answer <reply> & no task progress.',
+    delivery: null, delivery_state: null, tx: [] });
+  let rendered = visible(html(t));
+  assert.match(rendered, /Synthetic answer &lt;reply&gt; &amp; no task progress/);
+  assert.doesNotMatch(rendered, /t-ladder|dispatched|working…|>delivered</);
+  // A later receipt proves this answer only, even if the thread is stamped delivered.
+  t.delivered = true; t.messages[0].delivery = 'delivered';
+  t.messages[0].delivery_state = 'confirmed by the receiver';
+  rendered = visible(html(t));
+  assert.match(rendered, /confirmed by the receiver/);
+  assert.doesNotMatch(rendered, /t-ladder|dispatched|working…|>delivered</);
+});
+
+test('task-linked messages without a task dispatch render only recorded task history', () => {
+  for (const message_class of ['report', 'question', 'notice', 'briefing', 'acknowledgement', 'task_request']) {
+    const t = thread(); t.task_events = [];
+    Object.assign(t.messages[0], { message_class, command_type: 'query',
+      body: 'Recorded conversation', body_words: 'Recorded conversation',
+      delivery: 'delivered', delivery_state: 'confirmed by the receiver' });
+    assert.doesNotMatch(visible(html(t)), /t-ladder|dispatched|working…|>delivered</, message_class);
+    t.task_events = [{ event: 'accepted' }, { event: 'progress' }, { event: 'completed' }];
+    t.terminal = 'completed';
+    const rendered = visible(html(t));
+    assert.match(rendered, /Task history:.*accepted.*progress.*completed/, message_class);
+    assert.match(rendered, /confirmed by the receiver/, message_class);
+    assert.doesNotMatch(rendered, /dispatched|working…|>delivered</, message_class);
+  }
+});
+
+test('ordinary task dispatch preserves its ladder alongside a recent answer', () => {
+  const t = thread();
+  Object.assign(t.messages[0], { command_type: 'task', assignment_id: `asg_${'3'.repeat(32)}`,
+    body: 'Do the assigned work', body_words: 'Do the assigned work',
+    delivery: 'delivered', delivery_state: 'confirmed by the receiver' });
+  t.messages.push({ ...t.messages[0], msg_id: `msg_${'4'.repeat(32)}`, message_class: 'answer',
+    command_type: null, body: 'Reply only', body_words: 'Reply only', tx: [] });
+  t.task_events = [{ event: 'accepted' }, { event: 'progress' }];
+  let rendered = visible(html(t));
+  assert.match(rendered, /step done [^"]*">dispatched/);
+  assert.match(rendered, /step done [^"]*">delivered/);
+  assert.match(rendered, />accepted<.*>progress<.*>working…</s);
+  assert.doesNotMatch(rendered, /Task history:/);
+  t.terminal = 'completed'; t.task_events.push({ event: 'completed' });
+  rendered = visible(html(t));
+  assert.match(rendered, /step done [^"]*">completed/);
+  assert.doesNotMatch(rendered, /working…/);
+});
+
+test('a received reply cannot confirm an unconfirmed task dispatch', () => {
+  const t = thread(); t.task_events = [];
+  Object.assign(t.messages[0], { command_type: 'task', assignment_id: `asg_${'3'.repeat(32)}`,
+    body: 'Do the assigned work', body_words: 'Do the assigned work',
+    delivery: 'unconfirmed', delivery_state: 'delivery unconfirmed' });
+  t.messages.push({ ...t.messages[0], msg_id: `msg_${'4'.repeat(32)}`, message_class: 'answer',
+    command_type: null, body: 'Received reply', body_words: 'Received reply',
+    delivery: 'delivered', delivery_state: 'confirmed by the receiver',
+    tx: [{ event: 'pane_submitted', activated: true, carrier: 'tmux', attempt_no: 1 }] });
+  assert.equal(t.delivered, true); // Aggregate thread delivery belongs to the reply.
+  const rendered = visible(html(t));
+  assert.match(rendered, />dispatched</);
+  assert.match(rendered, /delivery unconfirmed/);
+  assert.match(rendered, /Received reply.*confirmed by the receiver/s);
+  assert.doesNotMatch(rendered, />delivered<|working…/);
+  t.task_events = [{ event: 'accepted' }, { event: 'progress' }];
+  assert.match(visible(html(t)), />accepted<.*>progress</s);
+  assert.match(visible(html(t)), /working…/); // Recorded work is independent of delivery.
+  assert.doesNotMatch(visible(html(t)), />delivered</);
+});
+
+test('confirmed task dispatch without recorded work never claims working', () => {
+  const t = thread(); t.task_events = [];
+  Object.assign(t.messages[0], { command_type: 'task', assignment_id: `asg_${'3'.repeat(32)}`,
+    body: 'Do the assigned work', body_words: 'Do the assigned work',
+    delivery: 'delivered', delivery_state: 'confirmed by the receiver' });
+  const rendered = visible(html(t));
+  assert.match(rendered, />dispatched<.*>delivered</s);
+  assert.doesNotMatch(rendered, /working…|>accepted<|>progress</);
+});
+
 if (process.env.PLANE_FEEDBACK_FIXTURE) test('canonical queued feedback receipt stays separate from task progress', async () => {
   const t = JSON.parse(await readFile(process.env.PLANE_FEEDBACK_FIXTURE, 'utf8'));
   assert.equal(t.delivered, true); // Canonical thread delivery includes the comment.

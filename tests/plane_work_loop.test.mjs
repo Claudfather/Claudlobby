@@ -1234,3 +1234,86 @@ ${recipient}`, bindings);
   assert.equal(h.get('work-recipient').value, inspectedWorker.uid); assert.equal(contextReads, 1);
   assert.deepEqual(h.sends, []); assert.deepEqual(h.preparations, []); assert.deepEqual(h.lookups, []);
 });
+
+// Bounded-lineage diagnostics concern the room window, never this selected task.
+const lineageRead = (unresolved_threads, ...threads) => ({state:'ok',data:{threads,
+  lineage:{max_hops:32,max_ancestor_lookups:1000,ancestor_lookups:14,unresolved_threads,reasons:['<private technical reason>']}}});
+test('room lineage notice is honest with an empty selected conversation and never a failed load', async () => {
+  const h = await conversationHarness(); h.update(lineageRead(2, conversationThread('task-b')));
+  const note = h.get('task-lineage-note'), reports = h.get('task-reports');
+  assert.equal(note.hidden, false); assert.match(note.textContent, /recent replies in this team/);
+  assert.match(note.textContent, /Task conversations may be incomplete/); assert.doesNotMatch(note.textContent, /task-a|2|1000|32|private technical|<|failed|unavailable/);
+  assert.match(reports.innerHTML, /No linked conversation/); assert.doesNotMatch(reports.innerHTML, /failed|unavailable/);
+  assert.equal(h.get('task-detail-refresh').hidden, false); assert.equal(h.reads.length, 1);
+  assert.equal(h.sends.length + h.preparations.length + h.lookups.length, 0);
+});
+test('absent or invalid lineage diagnostics stay compatible and a resolved window removes the notice', async () => {
+  const h = await conversationHarness(), reports = h.get('task-reports'), first = reports.children[0], note = h.get('task-lineage-note');
+  assert.equal(note.hidden, true);
+  h.update(lineageRead(1,conversationThread())); assert.equal(note.hidden, false); assert.equal(reports.children[0], first);
+  for (const count of [0,-1,'1',null,1.5,Number.MAX_SAFE_INTEGER+1]) {
+    h.update(lineageRead(count,conversationThread())); assert.equal(note.hidden, true); assert.equal(note.textContent, '');
+  }
+  h.update(lineageRead(3,conversationThread())); assert.equal(note.hidden, false);
+  h.update(conversationRead(conversationThread())); assert.equal(note.hidden, true); assert.equal(note.textContent, '');
+  assert.equal(reports.children[0], first); assert.equal(h.reads.length, 1);
+});
+test('notice-only updates preserve conversation focus, expanded disclosures and message draft until explicit update', async () => {
+  const h = await conversationHarness(), reports = h.get('task-reports'), first = reports.children[0], note = h.get('task-lineage-note');
+  const disclosure = disclosuresIn(first)[0], control = disclosure.children[0]; disclosure.open = true; control.focus();
+  h.get('work-recipient').value = 'worker'; h.get('work-recipient').onchange(); h.get('work-body').value = 'Keep this draft'; h.get('work-body').emit('input');
+  control.focus(); h.update(lineageRead(4,conversationThread()));
+  assert.equal(note.hidden, true); assert.equal(h.get('task-conversation-update').hidden, false);
+  assert.equal(h.document.activeElement, control); assert.equal(reports.children[0], first); assert.equal(disclosure.open, true);
+  h.get('task-conversation-update').onclick(); assert.equal(note.hidden, false); assert.equal(reports.children[0], first);
+  assert.equal(disclosure.open, true); assert.equal(h.document.activeElement, reports);
+  assert.equal(h.get('work-recipient').value, 'worker'); assert.equal(h.get('work-body').value, 'Keep this draft');
+  assert.equal(h.sends.length + h.preparations.length + h.lookups.length, 0);
+});
+test('selected lineage text defers notice removal and conversation changes together', async () => {
+  const h = await conversationHarness(), reports = h.get('task-reports'), note = h.get('task-lineage-note');
+  h.update(lineageRead(1,conversationThread())); const original = reports.children[0];
+  const selection = selectionOver(note,note,note); h.document.selection = selection;
+  h.update(lineageRead(0,conversationThread('task-a',['first','reply'])));
+  assert.equal(note.hidden, false); assert.equal(reports.children[0], original);
+  assert.equal(h.document.selection, selection); assert.equal(h.get('task-conversation-update').hidden, false);
+  h.get('task-conversation-update').onclick(); assert.equal(note.hidden, true); assert.equal(note.textContent, '');
+  assert.equal(messagesIn(reports.children[0]).length, 2); assert.equal(h.document.activeElement, reports);
+  assert.equal(h.sends.length + h.preparations.length + h.lookups.length, 0);
+});
+test('room diagnostic changes do not re-render or interrupt when visible notice and conversation are unchanged', async () => {
+  const h = await conversationHarness(); h.update(lineageRead(1,conversationThread()));
+  const reports = h.get('task-reports'), first = reports.children[0], note = h.get('task-lineage-note'), copy = note.textContent;
+  const control = disclosuresIn(first)[0].children[0]; control.focus();
+  h.update(lineageRead(17,conversationThread()));
+  assert.equal(note.textContent, copy); assert.equal(h.get('task-conversation-update').hidden, true);
+  assert.equal(reports.children[0], first); assert.equal(h.document.activeElement, control);
+});
+test('source loss clears visible or deferred lineage notices and stale task/session/room handlers cannot restore them', async () => {
+  for (const change of ['source','room','session','task']) {
+    const h = await conversationHarness(), reports = h.get('task-reports'), note = h.get('task-lineage-note');
+    h.update(lineageRead(1,conversationThread())); h.document.selection = selectionOver(note,note,note);
+    h.update(lineageRead(0,conversationThread())); const stale = h.get('task-conversation-update');
+    assert.equal(stale.hidden, false); assert.equal(note.hidden, false);
+    if (change === 'source') {
+      h.loop.updateChannel({state:'unreadable',remediation:'Source access unavailable',data:{lineage:{unresolved_threads:99}}});
+      assert.equal(note.hidden, true); assert.equal(note.textContent, ''); assert.equal(stale.hidden, true);
+      assert.match(reports.innerHTML, /Source access unavailable/); stale.onclick(); assert.equal(note.hidden, true);
+    } else {
+      if (change === 'room') h.loop.setRoom('other'); else if (change === 'session') h.loop.pause();
+      else { h.document.selection = null; h.update(conversationRead(conversationThread('task-b'))); h.open('task-b'); }
+      await settle(); stale.onclick();
+      if (change === 'task') assert.equal(h.get('task-lineage-note').hidden, true);
+      else assert.equal(h.get('task-detail-content').innerHTML, '');
+    }
+    assert.equal(h.sends.length + h.preparations.length + h.lookups.length, 0);
+  }
+});
+
+test('the all-teams channel notice does not attribute room diagnostics to the selected task team', async () => {
+  const h = await conversationHarness(); h.loop.setRoom(null); await settle();
+  h.update(lineageRead(1,conversationThread())); h.open(); await settle();
+  assert.match(h.get('task-lineage-note').textContent, /recent replies across teams/);
+  assert.doesNotMatch(h.get('task-lineage-note').textContent, /in this team|task-a|web|channel window/);
+  assert.equal(h.sends.length + h.preparations.length + h.lookups.length, 0);
+});
