@@ -39,7 +39,9 @@ def test_default_plane_transport_has_no_owner_capability(browser):
     client = TestClient(create_app(app.access.root, package=source_package()))
     transport = client.get('/api-client.js')
     assert transport.status_code == 200
-    assert 'mountSessionControls' not in transport.text and '/api/owner/' not in transport.text
+    # Namespace capabilities are now conditionally undefined; the executable
+    # no-marker/zero-owner-probe contract is covered by the workspace Node suite.
+    assert '/api/owner/' not in transport.text
     page = client.get('/')
     assert 'id="owner-session"' in page.text and 'aria-label="Owner session" hidden' in page.text
 

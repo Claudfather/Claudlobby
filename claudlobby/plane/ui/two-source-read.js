@@ -1,15 +1,20 @@
-// Two trusted core-issued read handles. Carrier/session provisioning is external.
-import { isOwnerReadHandle } from "/owner-api-client.js";
+// One or two trusted core-issued read handles. Carrier/session provisioning is external.
+import { isOwnerReadHandle } from "./owner-api-client.js";
 
 const slug = /^[a-z][a-z0-9-]{0,31}$/;
 const taskID = /^wi_[0-9a-f]{32}$/;
-const failed = (state = 'unavailable', remediation = 'This read is unavailable in the two-source view.') =>
+const failed = (state = 'unavailable', remediation = 'This read is unavailable in the workspace view.') =>
   ({ state: state === 'ok' ? 'unavailable' : state, provenance: null, remediation });
 const sum = (rows, key) => rows.every(r => Number.isSafeInteger(r[key]) && r[key] >= 0)
   ? rows.reduce((n, r) => n + r[key], 0) : null;
 
 export function createTwoSourceReadTransport({ sources }) {
   if (!Array.isArray(sources) || sources.length !== 2) throw new Error('Exactly two core read handles are required.');
+  return createWorkspaceReadTransport({ sources });
+}
+
+export function createWorkspaceReadTransport({ sources }) {
+  if (!Array.isArray(sources) || ![1, 2].includes(sources.length)) throw new Error('One or two core read handles are required.');
   const rooms = new Map(), streams = new Set();
   let disposed = false;
   const entries = sources.map(({ key, label, reader }) => {
@@ -17,11 +22,11 @@ export function createTwoSourceReadTransport({ sources }) {
         !isOwnerReadHandle(reader)) throw new Error('A named core read handle is required.');
     return { key, label, reader, epoch: 0, readerEpoch: null, host: null, state: 'checking', fleets: [], rosterRequest: 0, routingRevision: 0, unsubscribe: null };
   });
-  if (new Set(entries.map(e => e.key)).size !== 2 || entries[0].reader === entries[1].reader)
+  if (new Set(entries.map(e => e.key)).size !== entries.length || new Set(entries.map(e => e.reader)).size !== entries.length)
     throw new Error('Sources must be distinct.');
   const admittedHosts = entries.map(e => e.reader.snapshot().read_profile?.host_uid).filter(Boolean);
   if (new Set(admittedHosts).size !== admittedHosts.length)
-    throw new Error('Two independently admitted hosts are required.');
+    throw new Error('Distinct independently admitted hosts are required.');
   function notify() { for (const stream of streams) stream.refresh(); }
   function adopt(e, snapshot) {
     const host = snapshot.read_profile?.host_uid;
@@ -115,7 +120,7 @@ export function createTwoSourceReadTransport({ sources }) {
   }
   function coverage(values) {
     const reachable = values.filter(v => v.state === 'ok').length;
-    return { total: 2, reachable, partial: reachable !== 2 };
+    return { total: entries.length, reachable, partial: reachable !== entries.length };
   }
   function sourceFacts(values, path) {
     return entries.map((e, i) => ({ key: e.key, label: e.label, host_uid: qualified(e, e.host), state: values[i].state,
@@ -192,7 +197,7 @@ export function createTwoSourceReadTransport({ sources }) {
     }
     // Partial ok is deliberate and disclosed. With no readable source, do not show an empty board.
     return { state: good.length || path === '/api/fleets' ? 'ok' : 'unavailable', provenance: null, data,
-      ...(!good.length ? { remediation: 'Neither source is currently readable.' } : {}) };
+      ...(!good.length ? { remediation: 'No source is currently readable.' } : {}) };
   }
     catch { return failed('unavailable', 'This source returned an unsupported read projection.'); }
   }
@@ -226,5 +231,9 @@ export function createTwoSourceReadTransport({ sources }) {
     streams.add(facade); return facade;
   }
   function dispose() { disposed = true; for (const s of [...streams]) s.close(); for (const e of entries) e.unsubscribe(); }
-  return Object.freeze({ jget, createEventSource, dispose });
+  return Object.freeze({ jget, createEventSource, dispose,
+    routeRoom(selected) {
+      const value = !disposed && rooms.get(selected);
+      return value && admitted(value.e) ? Object.freeze({key:value.e.key,fleet:value.raw.alias}) : null;
+    } });
 }

@@ -127,3 +127,157 @@ bytes. Stream HEAD stops the canonical producer after its first admitted chunk, 
 rewriting query parameters or leaving an idle SSE reader alive. The explicit connected route/query allowlist remains
 a deliberate ceiling; focused contract checks detect drift in its selected
 canonical query parameters without automatically exposing new routes.
+
+## Connected browser carrier
+
+The canonical `connected-read-client.js` module exports
+`createConnectedReadClient` with a selected reference
+`{reference_id,endpoint_origin,revision}`, trusted `documentContext`
+`{issuer,operational_origin,subject,workspace_id,context_generation}`, a
+`currentContext()` callback and `obtainSessionAssertion(input,{signal})` callback.
+The current callback supplies the actual authenticated v2 website DTO:
+`{version:2,user:{id},workspace:{id,name},context_generation,references}`.
+Reference objects have exactly the three keys above. The operational Origin
+must match the current document Origin; trusted issuer/document configuration
+is separate from website metadata. Parent messages and object shapes establish
+no authority. The entry supplies verified document configuration and fresh child
+metadata, and disposes the controller on observed identity/reference loss.
+
+`connect()` explicitly performs challenge, maintained website signer callback,
+and issue. The callback receives the original eight-field website request,
+including reference_id and expected_context_generation. Host UID comes only
+from the exact-origin challenge; issue/status/renew must match its pinned host
+and binding tuple. Genuine host responses go through the existing single owner
+profile checker before installing a credential or admitting a core read handle.
+Missing/unsupported capabilities or changed authenticated context fail closed.
+`start()` and `check()` only inspect an existing session; they never sign in.
+`renew()` and `logout()` are explicit serialized controls; an unknown mutation
+reply is never replayed. Successful logout retains local pairing and binding.
+
+Only `readHandle`, lifecycle controls, `snapshot()` and `subscribe()` are public.
+The handle is core minted and works with the finite two-source reader; it has no
+action export or global sign-in redirect. Session token, nonce and assertion
+are held only in private memory/body/header ownership, never returned by the
+controller, stored, logged or placed in URLs. Disposal through either controller
+or handle aborts reads, closes streams and removes credential references.
+Reload requires fresh sign-in. Relative lifetime uses a finite nondecreasing
+monotonic clock; expiry or clock failure stops private reads.
+
+The direct fetch carrier uses credentials:omit, no-store and redirect:error for
+the finite connected read/lifecycle roster. Its fetch SSE parser handles split
+UTF8 and CRLF, numeric source-local id/cursor, default data, named source,
+retry hints and comments. Frames/body/header deadlines and size bounds refuse
+malformed or oversized streams. It delegates reconnection and quiet-stream
+budgets to the existing owner controller and introduces no parallel retry loop.
+Successful HTTP reads never rearm persistent stream failures. Token rotation,
+source loss and disposal fence old requests/chunks without mutation replay.
+
+This library does not fetch account metadata, mount a central operational entry,
+choose CSP/private-network permissions or prove a real device/carrier. Those
+remain separate reviewed integration and browser gates. Unchanged trusted
+account context can support host-local renewal through provider outage under
+the documented non-lease policy; unknown metadata is unavailable, and observed
+account/workspace/reference changes require a new authenticated entry.
+
+## Canonical connected workspace entry
+
+The canonical index has an inert `<!--CONNECTED_CONTEXT-->` replacement marker.
+Only the reviewed operational publisher supplies a nonexecutable
+`workspace-document-context` JSON element after verifying its document ticket.
+The static `api-client.js` imports the complete canonical module graph. Without
+a context element it retains the original same-origin read behavior and exports
+no session controls; it makes no owner/session probes. An invalid context element
+refuses connected reads and never falls back to direct-host access. Direct owner
+browser mounting still selects its existing cookie transport independently.
+
+`connected-workspace.js` accepts the publisher's version1 document context:
+`{version,user_id,workspace_id,context_generation,shell_origin,operational_origin,
+references,expires_at}`. Before creating a host controller it reads the actual
+credentialed website v2 context and matches the account, selected workspace,
+generation and complete exact saved-reference set. The publisher owns ticket
+validity and dynamic CSP; merely injecting a JSON shape provides no host access.
+The entry uses the carrier's canonical host challenge, website assertion callback
+and genuine read handles; account metadata alone never admits private reads.
+
+Zero saved computers has an explicit empty state. One or two saved computers
+start with read-only session checks, leaving explicit Connect available; no
+automatic sign-in, session mutation retry or host initialization occurs. Per-host
+Connect, Check connection, Keep connected and Disconnect operate independently.
+Disconnect ends only that connected session; closing the document disposes its
+streams/credentials without sending logout. Stable controls preserve keyboard
+focus while labels and enabled states change. Canonical Activity, team choices,
+tasks and exact linked task detail use the existing aggregate reader/renderer.
+All agents, Team details, Recorder, search and bot equipment inspection are
+explicitly disabled because the bounded aggregate does not supply those reads.
+
+Website metadata reads have one eight-second total header/body deadline and a
+16KiB body bound. The visible document rechecks on visibility and every 30 seconds.
+A provider outage cannot create an admitted account context; a previously verified
+unchanged context may retain existing host sessions with an unavailable account
+check note under the documented non-lease policy. Observed 401/403/409, changed
+account/workspace/generation/reference set or disposal retires all controllers,
+aborts owned work, clears private regions and fences held reads/stream callbacks.
+This document never revives after observed loss; reopen through the authenticated
+website. Same-site cookie/CORS/private-network/device validation and actual
+operational publisher integration remain separate empirical gates.
+
+
+Account checks resume the renderer only when leaving its initial paused state;
+steady-state checks do not create a second board refresh loop. Periodic checks
+run only while the mounted document is visible; hiding cancels the timer and
+becoming visible performs one fresh check. Explicit checks remain available.
+Temporary checking uses aria-disabled with an activation guard so keyboard focus
+stays on the same control. Account retirement disables all navigation/debug
+controls after clearing private content, including focus-title text and datasets.
+Partial carrier/transport admission disposes locally constructed resources before
+an explicit retry. Disconnect stays available for an admitted but unavailable host.
+The website's actual v2 context route returns 401 for missing/expired sessions,
+403 for missing/lost workspace ownership, and context mismatches retire here;
+it does not invent 404/410 deleted-workspace states. Document expires_at is a
+shape-checked publisher lifetime bound; fresh website membership/session checks
+and canonical host session admission determine current access, not client clock
+interpretation of that field. The connected-context marker is supplied by the separately verified publisher;
+this core entry does not mint or verify its document ticket.
+
+## First-use workspace approval in the connected document
+
+An explicit “Approve workspace on this computer” control consumes the existing workspace challenge, maintained website host assertion, and host stage protocol. It never confirms a binding, initializes the host, grants fleet actions, or connects automatically. Disconnect a currently ready read session before starting enrollment. A successful staged proposal displays its short-lived code only in that computer’s panel, beside the intended workspace, issuer and hostname.
+
+On that computer use `claudlobby --root DATA_ROOT host owner confirm-workspace`, replacing DATA_ROOT with the existing installation’s data root. Paste the code at the hidden prompt, inspect the local issuer/account/workspace and prior-binding preview, then approve locally. Later choose Connect explicitly. These are existing-host approval instructions, not installation or native principal provisioning. An existing active binding must be inspected/managed through the local owner CLI; this consumer never revokes or replaces it.
+
+Stage refusal, malformed reply, network loss or timeout is uncertain: the proposal may already exist. The original code remains briefly available for local inspection; the consumer does not replay stage. “Forget approval code” clears and aborts browser state only, without cancelling or revoking server state. Expiry, account/reference retirement, document disposal or successful explicit Connect clears the code. Nonces/assertions are private in-memory request data, never URL arguments, storage, logs, postMessage or command arguments. The panel’s display is the explicit exception for the approval code; public snapshots contain only phase/expiry/busy metadata.
+
+This core module is part of the finite static graph. It reuses the document’s authenticated metadata check and account-refusal owner; no second account timer, renderer, setup authority or website orchestration is added. Synthetic transport/controller tests do not prove browser cross-site cookies, private-network permissions or a real host approval.
+
+Enrollment controllers participate in the same local admission transaction as read carriers, subscriptions and aggregate streams. Any construction failure disposes all partial resources before an explicit fresh account check; rollback never publishes a partially constructed computer as readable. Corrected visibility, paused-only resume, keyboard focus and unavailable Disconnect behavior remain shared with the read entry.
+
+Local retention bounds allow five seconds of browser clock skew; the host remains the authority on assertion and proposal expiry. Enrollment assertions share the host's 8192-character limit. Updated account metadata refreshes the displayed workspace name, and retirement clears it alongside the approval code. Forgetting a code returns focus to that computer's approval control, or its group while the pending request settles.
+
+### Connected action interface
+
+The canonical connected entry can expose ordinary messages, task nudges and task
+feedback through a separate source-bound action interface. Its bearer remains
+private to the carrier; a core read handle still exports no actions. Every host
+operation requires the current native owner, workspace binding and the existing
+independent local message/nudge/feedback grant. A read profile, website membership
+or coverage count is never an action grant. These local grants are not
+workspace-specific; the approved binding and the local grant are checked together.
+
+The entry routes an exact team from the admitted source roster. One transport
+boundary projects canonical raw host/actor/task/assignment IDs into the selected
+source's qualified UI IDs and team name, and reverses only that exact qualifier
+before the fixed connected action POST. Mixed sources, another host, changed
+scope or undeclared recipients refuse without a send. HTTP v1 message and v2 task
+metadata remain canonical and raw; the shared ActionState saves the corresponding
+qualified metadata, original UUID and digest, never the body. Direct-owner and
+browser-local contracts remain unchanged.
+
+Context/prepare/receipt have15-second deadlines; send has45seconds. Renewal,
+logout, account/reference change and observed source loss fence late replies.
+A missing action grant performs at most one pure status probe and does not end a
+healthy read session. Independent capability refusal keeps other drafts and task
+reads. A source lifecycle refresh preserves settled task details and message
+recipient/draft selection, while acquiring fresh capabilities. Preparation never
+sends; uncertain send retains the original saved UUID. Receipt lookup never
+resends. Recorded means delivery unconfirmed, delivered requires the canonical
+receiver evidence, and neither means that task work or approval occurred.

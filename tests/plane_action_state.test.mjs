@@ -267,3 +267,14 @@ test('feedback immutable proof binds kind/assignment/release/digest and logical 
  const another=new ActionState(storage());assert.throws(()=>another.beginPrepared(nudgeContext,request,prepared(request)),/did not match/);assert.equal(another.pending.length,0);
  for(const body of ['Bad \uD800','Bad\u0000','x'.repeat(2001)])assert.throws(()=>another.prepare(feedbackContext,nudgeTarget,body,nudgeId),/comment/);
 });
+
+
+test('consistently source-qualified task intent persists without body; mixed-source and omitted assignment refuse',()=>{
+ const qualify=v=>'computer-1::'+v,room='computer-1 / '+nudgeContext.room;
+ const context={...nudgeContext,room,scope:{...nudgeContext.scope,fleet:room},recipients:nudgeContext.recipients.map(r=>({...r,id:qualify(r.id)}))};
+ const target={...nudgeTarget,recipient:qualify(nudgeTarget.recipient),task_id:qualify(nudgeTarget.task_id),assignment_id:nudgeTarget.assignment_id===null?null:qualify(nudgeTarget.assignment_id)};
+ const saved=storage(),state=new ActionState(saved),request=state.prepare(context,target,'Private reason',nudgeId);
+ state.beginPrepared(context,request,prepared(request));const restored=new ActionState(saved);
+ assert.equal(restored.storageError,false);assert.deepEqual(restored.pending[0].target,target);assert.equal(restored.pending[0].body,undefined);
+ for(const altered of [{...target,recipient:'computer-2::'+nudgeTarget.recipient},{...target,task_id:nudgeTarget.task_id},{...target,assignment_id:'computer-2::asg_'+'a'.repeat(32)}])assert.throws(()=>new ActionState(storage()).prepare(context,altered,'Reason',nudgeId),/unavailable/);
+});

@@ -663,17 +663,61 @@ def test_app_js_import_is_cache_busted(tmp_path):
     r = client.get("/app.js")
     assert r.status_code == 200
     assert r.headers.get("cache-control") == "no-store"
-    assert "/panel-state.js?v=" in r.text  # intra-module import busts too
-    assert "/api-client.js?v=" in r.text
-    assert "/work-loop.js?v=" in r.text
+    assert 'from "./panel-state.js?v=' in r.text  # intra-module import busts too
+    assert 'from "./api-client.js?v=' in r.text
+    assert 'from "./work-loop.js?v=' in r.text
     work_loop = client.get("/work-loop.js")
     assert work_loop.status_code == 200
     assert work_loop.headers.get("cache-control") == "no-store"
-    assert "/action-state.js?v=" in work_loop.text
-    assert "/panel-state.js?v=" in work_loop.text
+    assert 'from "./action-state.js?v=' in work_loop.text
+    assert 'from "./panel-state.js?v=' in work_loop.text
     transport = client.get("/api-client.js")
     assert transport.status_code == 200
     assert transport.headers.get("cache-control") == "no-store"
+
+
+def test_connected_reader_asset_uses_same_versioned_owner_graph(tmp_path, monkeypatch):
+    import os
+    import shutil
+    from claudlobby.plane import view
+    ui = tmp_path / "ui"
+    shutil.copytree(view.UI_DIR, ui)
+    monkeypatch.setattr(view, "UI_DIR", ui)
+    client = TestClient(create_app(tmp_path, package=source_package()))
+    before = client.get("/connected-read-client.js")
+    assert before.status_code == 200
+    assert before.headers["cache-control"] == "no-store"
+    assert 'from "./owner-api-client.js?v=' in before.text
+    assert 'from "./connected-actions.js?v=' in before.text
+    actions = client.get("/connected-actions.js")
+    assert actions.status_code == 200 and actions.headers["cache-control"] == "no-store"
+    assert 'from "./action-state.js?v=' in actions.text
+    module = ui / "connected-read-client.js"
+    info = module.stat()
+    os.utime(module, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000))
+    after = client.get("/connected-read-client.js")
+    assert before.text != after.text
+
+
+def test_connected_workspace_entry_has_complete_versioned_static_graph(tmp_path):
+    client = TestClient(create_app(tmp_path, package=source_package()))
+    api = client.get("/api-client.js")
+    assert api.status_code == 200 and api.headers["cache-control"] == "no-store"
+    assert 'from "./connected-workspace.js?v=' in api.text
+    head = client.head("/api-client.js")
+    assert head.status_code == 200 and head.content == b""
+    assert head.headers["content-length"] == api.headers["content-length"]
+    assert head.headers["cache-control"] == "no-store"
+    workspace = client.get("/connected-workspace.js")
+    assert workspace.status_code == 200
+    assert 'from "./workspace-enrollment.js?v=' in workspace.text
+    assert workspace.headers["cache-control"] == "no-store"
+    enrollment = client.get("/workspace-enrollment.js")
+    assert enrollment.status_code == 200 and enrollment.headers["cache-control"] == "no-store"
+    assert 'from "./connected-read-client.js?v=' in workspace.text
+    assert 'from "./two-source-read.js?v=' in workspace.text
+    assert "import(" not in workspace.text
+    assert "<!--CONNECTED_CONTEXT-->" in client.get("/").text
 
 
 def test_stream_defaults_to_head_never_replays(tmp_path):

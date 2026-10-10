@@ -2096,7 +2096,7 @@ def create_app(
     # pinned in a browser's module map across a redeploy (a stale app.js
     # survived two hard refreshes); a new asset URL forces a fresh fetch
     # unconditionally, stamped onto every asset reference INCLUDING app.js's
-    # internal `import "/panel-state.js"` so the module graph busts together.
+    # internal `import "./panel-state.js"` so the module graph busts together.
     # Derived per request from the files' mtimes, never once per process:
     # this estate updates source under running daemons by design
     # (update-siblings pulls weekly; weekly-worker-restart restarts BOTS,
@@ -2104,7 +2104,7 @@ def create_app(
     # the redeploy window it was built for (gauntlet round 2). Ten stats
     # per page load — index() already reads the file per request.
     _UI_FILES = ("index.html", "app.js", "panel-state.js", "api-client.js",
-                 "work-loop.js", "action-state.js", "owner-api-client.js", "two-source-read.js",
+                 "work-loop.js", "action-state.js", "owner-api-client.js", "two-source-read.js", "connected-read-client.js", "connected-actions.js", "connected-workspace.js", "workspace-enrollment.js",
                  "style.css", "workspace.css")
 
     def asset_token() -> str:
@@ -2142,7 +2142,10 @@ def create_app(
         # dependencies from its module map.
         token = asset_token()
         for module in modules:
-            js = js.replace(f'"/{module}"', f'"/{module}?v={token}"')
+            # Relative module edges keep a published release inside its own
+            # directory. Also tolerate prior absolute assets during an update.
+            for prefix in ("./", "/"):
+                js = js.replace(f'"{prefix}{module}"', f'"{prefix}{module}?v={token}"')
         return _no_store(Response(js, media_type="text/javascript"))
 
     @app.get("/app.js")
@@ -2156,6 +2159,33 @@ def create_app(
     @app.get("/two-source-read.js")
     def two_source_read_js():
         return _busted_js("two-source-read.js", ("owner-api-client.js",))
+
+    @app.get("/connected-read-client.js")
+    def connected_read_client_js():
+        return _busted_js("connected-read-client.js", ("owner-api-client.js", "connected-actions.js"))
+
+    @app.get("/connected-actions.js")
+    def connected_actions_js():
+        return _busted_js("connected-actions.js", ("action-state.js",))
+
+    @app.get("/api-client.js")
+    def api_client_js():
+        return _busted_js("api-client.js", ("connected-workspace.js",))
+
+    @app.head("/api-client.js")
+    def api_client_head():
+        # Preserve the former static asset HEAD door and its GET headers.
+        response = _busted_js("api-client.js", ("connected-workspace.js",))
+        response.body = b""
+        return response
+
+    @app.get("/workspace-enrollment.js")
+    def workspace_enrollment_js():
+        return _busted_js("workspace-enrollment.js", ())
+
+    @app.get("/connected-workspace.js")
+    def connected_workspace_js():
+        return _busted_js("connected-workspace.js", ("connected-read-client.js", "two-source-read.js", "workspace-enrollment.js"))
 
     class _NoStoreStatic(StaticFiles):
         async def get_response(self, path, scope):  # pragma: no cover - thin

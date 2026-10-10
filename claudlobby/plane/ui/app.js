@@ -10,10 +10,10 @@
 // only presentation labels. The first version's copied vocabularies already
 // disagreed live with the SQL reducer.
 
-import { esc, ago, renderState, stateBlock } from "/panel-state.js";
-import { jget, createEventSource } from "/api-client.js";
-import * as interactionApi from "/api-client.js";
-import { mountWorkLoop, conversationTaskLink } from "/work-loop.js";
+import { esc, ago, renderState, stateBlock } from "./panel-state.js";
+import { jget, createEventSource } from "./api-client.js";
+import * as interactionApi from "./api-client.js";
+import { mountWorkLoop, conversationTaskLink } from "./work-loop.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -1494,6 +1494,7 @@ const ownerSession = typeof interactionApi.mountSessionControls === "function"
       },
       onResume: resumeOwnerReads,
       onActionPause(scope, kind, recipient) { workLoop.invalidate(undefined, scope, kind, recipient); },
+      onActionSourceChange(source) { workLoop.refreshActions(source); },
     }) : null;
 
 // Injected multi-source transports own their streams; disposal never signs out a host.

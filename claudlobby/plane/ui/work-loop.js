@@ -1,5 +1,5 @@
-import { ActionState, rowKey, scopeKey, validContext, validTaskActionContext, validTaskActionTarget } from "/action-state.js";
-import { esc, ago, stateBlock } from "/panel-state.js";
+import { ActionState, rowKey, scopeKey, validContext, validTaskActionContext, validTaskActionTarget } from "./action-state.js";
+import { esc, ago, stateBlock } from "./panel-state.js";
 
 // One presentation for direct and embedded Plane. No transport is constructed
 // here: the default read-only client never supplies a write capability.
@@ -203,14 +203,15 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     readsPaused = true;
     invalidate("Session access is paused. Actions are disabled until your session is checked again; your draft is kept.");
   }
-  function setRoom(fleet) {
+  function setRoom(fleet, {keepDetail = false} = {}) {
     saveDraft();
     if (context?.actions.includes("message") && kind === "message" && target?.task_id === null)
       messageRecipients.set(scopeKey(context.scope), target.recipient);
     const token = ++epoch, selectedRoom = fleet || "all";
     ++compositionEpoch; room = selectedRoom; readsPaused = false;
-    contextsByKind.clear(); context = null; target = null; targetTitle = null; kind = "message"; board = null; channel = null;
-    closeDetail(); $("work-body").value = ""; $("work-recipient").innerHTML = ""; $("work-recipient").value = "";
+    contextsByKind.clear(); context = null; target = null; targetTitle = null; kind = "message";
+    if (!keepDetail) { board = null; channel = null; closeDetail(); }
+    else if (pendingDetail) { ++detailEpoch; pendingDetail = null; detailSnapshot = null; conversation = null; showDetailUnavailable(null); } $("work-body").value = ""; $("work-recipient").innerHTML = ""; $("work-recipient").value = "";
     notice = "Checking available actions…"; paint();
     function accept(value, taskKind) {
       if (token !== epoch) return;
@@ -231,7 +232,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
         notice = value.simulation ? "Example actions are recorded only by the test service. No real agents receive them." : "";
       } else if (!contextsByKind.size) notice = selectedRoom === "all" ? "Choose a team to see its available actions."
         : "Browser action access is unavailable for this team. Task and activity records remain readable.";
-      if (selected) $("task-detail-refresh").hidden = false;
+      if (selected) { $("task-detail-refresh").hidden = false; updateDetailActions(); }
       paint(); // An unrelated context result must not replace an authored draft.
     }
     Promise.resolve().then(() => token === epoch ? api.interactionContext?.(selectedRoom) : null)
@@ -634,5 +635,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     } finally { checkingReceipts.delete(request.request_id); if (token === epoch) paint({ restoreDraft: selection === selectionKey() }); }
   };
   paint();
-  return { setRoom, update, updateChannel, invalidate, pause, canSelectMessageRecipient, selectMessageRecipient };
+  return { setRoom,
+    refreshActions(source) { if (room.startsWith(source + " / ")) setRoom(room,{keepDetail:true}); },
+    update, updateChannel, invalidate, pause, canSelectMessageRecipient, selectMessageRecipient };
 }

@@ -54,10 +54,19 @@ test('default and synthetic transports do not mount session controls or probe ow
   const oldFetch = globalThis.fetch, oldDocument = globalThis.document, oldLocation = globalThis.location;
   const calls = [];
   globalThis.fetch = async url => { calls.push(url); return { json: async () => [] }; };
-  globalThis.document = { createElement: () => ({ style: {} }), body: { prepend() {} } };
+  globalThis.document = { getElementById: () => null, createElement: () => ({ style: {} }), body: { prepend() {} } };
   globalThis.location = { origin: 'http://fixture.example.test', search: '' };
   try {
-    const normal = await load(await readFile(new URL('../claudlobby/plane/ui/api-client.js', import.meta.url), 'utf8'));
+    const moduleURL = text => `data:text/javascript;base64,${Buffer.from(text).toString('base64')}`;
+    const ownerURL = moduleURL(source);
+    const readUI = name => readFile(new URL('../claudlobby/plane/ui/' + name, import.meta.url), 'utf8');
+    const actionsURL = moduleURL((await readUI('connected-actions.js')).replace('"./action-state.js"',JSON.stringify(new URL('../claudlobby/plane/ui/action-state.js',import.meta.url).href)));
+    const carrierURL = moduleURL((await readUI('connected-read-client.js')).replace('"./owner-api-client.js"', JSON.stringify(ownerURL)).replace('"./connected-actions.js"',JSON.stringify(actionsURL)));
+    const adapterURL = moduleURL((await readUI('two-source-read.js')).replace('"./owner-api-client.js"', JSON.stringify(ownerURL)));
+    const enrollmentURL = moduleURL(await readUI('workspace-enrollment.js'));
+    const workspaceURL = moduleURL((await readUI('connected-workspace.js'))
+      .replace('"./workspace-enrollment.js"', JSON.stringify(enrollmentURL)).replace('"./connected-read-client.js"', JSON.stringify(carrierURL)).replace('"./two-source-read.js"', JSON.stringify(adapterURL)));
+    const normal = await load((await readUI('api-client.js')).replace('"./connected-workspace.js"', JSON.stringify(workspaceURL)));
     assert.equal(normal.mountSessionControls, undefined);assert.equal(normal.nudgeContext,undefined);assert.equal(normal.feedbackContext,undefined);assert.equal(normal.prepareAction,undefined);
     await normal.jget('/api/tasks');
     const synthetic = await load(await readFile(new URL('./fixtures/plane_work_loop/api-client.js', import.meta.url), 'utf8'));
@@ -424,8 +433,8 @@ test(`app renewal restores worker selection and draft only with fresh matching a
   const pause = app.match(/onPause\(\) \{([\s\S]*?)\n\s*\},\n\s*onResume/)[1];
   const sync = app.slice(app.indexOf('function syncWorkRoom()'), app.indexOf('const ownerSession ='));
   const controller = (await readFile(new URL('../claudlobby/plane/ui/work-loop.js', import.meta.url), 'utf8'))
-    .replaceAll('from "/action-state.js"', `from "${new URL('../claudlobby/plane/ui/action-state.js', import.meta.url)}"`)
-    .replaceAll('from "/panel-state.js"', `from "${new URL('../claudlobby/plane/ui/panel-state.js', import.meta.url)}"`);
+    .replaceAll('from "./action-state.js"', `from "${new URL('../claudlobby/plane/ui/action-state.js', import.meta.url)}"`)
+    .replaceAll('from "./panel-state.js"', `from "${new URL('../claudlobby/plane/ui/panel-state.js', import.meta.url)}"`);
   const { mountWorkLoop } = await load(controller);
   const { ActionState } = await load(await readFile(new URL('../claudlobby/plane/ui/action-state.js', import.meta.url), 'utf8'));
   const elements = new Map(), values = new Map();
@@ -726,8 +735,8 @@ test('a quiet stable stream checks expired current cookie and redirects without 
 for (const change of ['other room', 'new grant scope', 'current scope'])
 test(`late action403 invalidates only its originating composer: ${change}`, async () => {
   const text = (await readFile(new URL('../claudlobby/plane/ui/work-loop.js', import.meta.url), 'utf8'))
-    .replaceAll('from "/action-state.js"', `from "${new URL('../claudlobby/plane/ui/action-state.js', import.meta.url)}"`)
-    .replaceAll('from "/panel-state.js"', `from "${new URL('../claudlobby/plane/ui/panel-state.js', import.meta.url)}"`);
+    .replaceAll('from "./action-state.js"', `from "${new URL('../claudlobby/plane/ui/action-state.js', import.meta.url)}"`)
+    .replaceAll('from "./panel-state.js"', `from "${new URL('../claudlobby/plane/ui/panel-state.js', import.meta.url)}"`);
   const { mountWorkLoop } = await load(text);
   const elements = new Map(), values = new Map();
   const document = { getElementById(id) {
