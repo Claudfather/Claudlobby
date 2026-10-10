@@ -13,15 +13,19 @@ from claudlobby.plane.ids import ensure_host_uid
 from claudlobby.plane.owner_access import AccessDenied, OwnerAccess, PrincipalRef
 from tests.conftest import constructed_env
 
+# The activation fixture temporarily replaces sys.executable with a native stub.
+_PYTHON = sys.executable
 
-def _command(root, action, dialogue):
+
+def _command(root, action, dialogue, *, args=(), bootstrap=None, on_prompt=None):
     import pty
 
-    argv = [sys.executable, "-m", "claudlobby", "--root", str(root), "host", "owner", action]
+    tail = ["--root", str(root), "host", "owner", action, *args]
+    argv = [_PYTHON, "-c", bootstrap, *tail] if bootstrap else [_PYTHON, "-m", "claudlobby", *tail]
     env = constructed_env()
     pid, fd = pty.fork()
     if pid == 0:
-        os.execve(sys.executable, argv, env)
+        os.execve(_PYTHON, argv, env)
     output = bytearray()
     pending = list(dialogue)
     status = None
@@ -39,7 +43,9 @@ def _command(root, action, dialogue):
                     break
                 output.extend(chunk)
                 if pending and pending[0][0].encode() in output:
-                    _, answer = pending.pop(0)
+                    prompt, answer = pending.pop(0)
+                    if on_prompt is not None:
+                        on_prompt(prompt)
                     os.write(fd, (answer + "\n").encode())
             done, status_value = os.waitpid(pid, os.WNOHANG)
             if done:
@@ -96,3 +102,88 @@ def test_attest_existing_source_through_actual_cli_terminal(tmp_path):
     assert code == 0, output
     assert "including imported records" in output
     inspect_source(tmp_path)
+
+
+# Only release/native-manager identity is a fixture; terminal approval, CLI
+# dispatch, active config, mutation admission, Plane registration and authority
+# writes are real. This is not a sealed installed CLI or live bot canary.
+from tests.test_activation import cold, tmp_path  # noqa: F401
+from tests.test_releases import installed  # noqa: F401
+from tests.test_task_read_cli import active  # noqa: F401
+
+_RUNTIME_FIXTURE = """
+import sys
+from pathlib import Path
+from dataclasses import replace
+from claudlobby import context
+from claudlobby.activation_state import read_selection
+from claudlobby.releases import read_release
+from claudlobby.runtime_admission import RuntimeIdentity
+from tests.package_fixtures import source_package
+root = Path(sys.argv[sys.argv.index('--root') + 1])
+release = read_release(root, read_selection(root)['release_id'], verify_files=False)
+package = replace(source_package(), native=release.native_path, artifact_id=release.inputs.artifact_id)
+context.get_resources = lambda: package
+RuntimeIdentity.current = classmethod(lambda cls: RuntimeIdentity(release.cli_path, release.native_path, release.inputs.artifact_id))
+from claudlobby.__main__ import main
+raise SystemExit(main(sys.argv[1:]))
+"""
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires a controlling terminal")
+def test_ordinary_message_registration_grant_revoke_through_actual_terminal(active):
+    import sqlite3
+    from claudlobby.plane.db import db_file
+    root, host = active
+    store = OwnerAccess.initialize(root)
+    principal = PrincipalRef("test-verifier", "human-001")
+    challenge = store.begin_pairing(principal)
+    owner = store.confirm_pairing(challenge.token, expected_principal=principal)
+    observed = []
+    def inspect(prompt):
+        with sqlite3.connect(db_file(root)) as conn:
+            row = conn.execute("SELECT uid FROM identity_registry WHERE kind='actor' AND alias='human:terminal-owner'").fetchone()
+        if prompt == "Type REGISTER":
+            assert row is None
+        else:
+            assert row is not None
+            observed.append(row[0])
+    code, output = _command(root, "allow-messages", [("Type REGISTER", "REGISTER"), ("Type ALLOW", "ALLOW")],
+        args=("--target-fleet", "example", "--actor", "human:terminal-owner", "--register-actor"),
+        bootstrap=_RUNTIME_FIXTURE, on_prompt=inspect)
+    assert code == 0, output
+    assert "ordinary messages only" in output and observed[0] in output
+    from claudlobby.activation_identity import read_selected_identity_bindings
+    fleet = read_selected_identity_bindings(root, "example", package=host.package)["fleet_uid"]
+    grant = store.current_message_grant(expected_owner=owner, fleet_uid=fleet)
+    assert grant.actor_uid == observed[0]
+    (root / "state/selected-release.json").unlink()
+    code, output = _command(root, "revoke-messages", [("Type REVOKE-MESSAGES", "REVOKE-MESSAGES")], args=("--fleet-uid", fleet))
+    assert code == 0, output
+    assert fleet in output and observed[0] in output
+    assert store.current_grant() == owner
+    with pytest.raises(AccessDenied):
+        store.current_message_grant(expected_owner=owner, fleet_uid=fleet)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires a controlling terminal")
+def test_terminal_owner_revision_change_before_allow_refuses(active):
+    import sqlite3
+    from claudlobby.plane.db import db_file
+    root, _ = active
+    store = OwnerAccess.initialize(root)
+    principal = PrincipalRef("test-verifier", "human-001")
+    challenge = store.begin_pairing(principal)
+    owner = store.confirm_pairing(challenge.token, expected_principal=principal)
+    def race(prompt):
+        if prompt == "Type ALLOW":
+            store.revoke_owner(expected_revision=owner.revision)
+            fresh = store.begin_pairing(principal)
+            store.confirm_pairing(fresh.token, expected_principal=principal)
+    code, output = _command(root, "allow-messages", [("Type REGISTER", "REGISTER"), ("Type ALLOW", "ALLOW")],
+        args=("--target-fleet", "example", "--actor", "human:terminal-race", "--register-actor"),
+        bootstrap=_RUNTIME_FIXTURE, on_prompt=race)
+    assert code == 4, output
+    with sqlite3.connect(store.path) as conn:
+        assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='message_grants'").fetchone()
+    assert store.current_grant().revision != owner.revision
