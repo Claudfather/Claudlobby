@@ -438,7 +438,7 @@ class OwnerAccess:
         """
         fleet_uid = _canonical_uid(fleet_uid, "fleet")
         with self._connection() as conn:
-            owner = self._admit(conn, token, principal)
+            owner = self._admit(conn, _digest(token), principal)
             if owner.host_uid != host_uid:
                 raise AccessDenied("wrong_deployment")
             return self._message_grant(conn, owner, fleet_uid)
