@@ -79,7 +79,8 @@ def test_private_bash_wrapper_passes_hostile_text_as_data_once(destination, tmp_
     assert not forbidden.exists()
 
 
-def test_real_native_send_uses_exact_session_and_pane_target():
+@pytest.mark.parametrize("startup_delay", [0, 0.5])
+def test_real_native_send_uses_exact_session_and_pane_target(startup_delay):
     tmux = shutil.which("tmux")
     assert tmux, "native transport requires tmux"
     # A short, private socket path stays under macOS's Unix-socket path limit.
@@ -92,26 +93,65 @@ def test_real_native_send_uses_exact_session_and_pane_target():
         env = {"PATH": "/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin",
                "HOME": str(home), "TMUX_TMPDIR": str(sockets), "TMPDIR": str(sockets)}
         socket = "private-worker"
-        subprocess.run([tmux, "-L", socket, "-f", "/dev/null", "new-session",
-                        "-d", "-s", "worker-extra", "cat"], env=env, check=True)
+        def native(*args):
+            return subprocess.run([tmux, "-L", socket, "-f", "/dev/null", *args],
+                                  env=env, capture_output=True, text=True,
+                                  timeout=5, check=True)
+        native("new-session", "-d", "-s", "worker-extra", "cat")
         try:
             # The worker draws an input box that shows what is typed: the send
             # presses Enter only once the box shows the payload (#1236), so a
             # bare `cat` pane would correctly never be submitted to.
             box = Path(__file__).resolve().parent / "fixtures" / "input-box-stub.py"
-            subprocess.run([tmux, "-L", socket, "new-session", "-d", "-s", "worker",
-                            f"python3 {shlex.quote(str(box))}"], env=env, check=True)
+            log = root / "submissions"
+            native("new-session", "-d", "-s", "worker",
+                   f"sleep {startup_delay}; exec python3 {shlex.quote(str(box))}"
+                   f" --log {shlex.quote(str(log))}")
+            # new-session returns before the child draws or sets raw mode.
+            # Admit the fixture first; its cold start is not transport latency.
+            deadline = time.monotonic() + 10
+            while True:
+                pane = native("capture-pane", "-t", "worker", "-p").stdout
+                if any(line.strip() == ">" for line in pane.splitlines()):
+                    break
+                assert time.monotonic() < deadline, ("fixture did not draw", pane)
+                time.sleep(0.02)
             destination = transport.TransportDestination(root, "fleet", socket, "worker", sockets)
             package = replace(source_package(), native=Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts")
             body = "X" * 1450 + "END_OF_PRIVATE_MESSAGE"
-            result = transport.send(package, destination, message_id=MSG, body=body, timeout=10)
-            assert result.status == "submitted" and result.native_returncode == 0, result
+            calls = []
+            def runner(command, **kwargs):
+                # Both the normal and delayed child must be ready BEFORE the
+                # one native call, with no previous input submitted to it.
+                ready = native("capture-pane", "-t", "worker", "-p").stdout
+                assert any(line.strip() == ">" for line in ready.splitlines()), ready
+                assert not log.exists()
+                calls.append(command)
+                return transport._run(command, **kwargs)
+            # The shipped payload observation alone can wait 10 seconds. Keep
+            # a bounded outer budget that also covers chunks and shell work.
+            result = transport.send(package, destination, message_id=MSG, body=body,
+                                    timeout=30, runner=runner)
+            worker = native("capture-pane", "-t", "worker", "-p", "-S", "-").stdout
+            other = native("capture-pane", "-t", "worker-extra", "-p", "-S", "-").stdout
+            # Enter submission returns before the receiver necessarily appends
+            # its log. Observe a complete line without sending any more input.
+            deadline = time.monotonic() + 5
+            while True:
+                received = log.read_bytes() if log.exists() else b""
+                if received.endswith(b"\n"):
+                    break
+                assert time.monotonic() < deadline, (
+                    "receiver log did not complete", result, received, worker, other)
+                time.sleep(0.02)
+            evidence = (result, received, worker, other)
+            assert len(calls) == 1, evidence
+            assert result.status == "submitted" and result.native_returncode == 0, evidence
             assert result.wire_sha256 and result.wire_bytes == len(body)
-            worker = subprocess.run([tmux, "-L", socket, "capture-pane", "-t", "worker",
-                                     "-p", "-S", "-"], env=env, capture_output=True, text=True, check=True)
-            other = subprocess.run([tmux, "-L", socket, "capture-pane", "-t", "worker-extra",
-                                    "-p", "-S", "-"], env=env, capture_output=True, text=True, check=True)
-            assert "XXXX" in worker.stdout and "XXXX" not in other.stdout
+            # The stub normalizes the trailer's LF to a space in its log; one
+            # complete line proves one submission of the exact native payload.
+            assert received == f"{body} ⟦plane:{MSG}⟧\n".encode(), evidence
+            assert "XXXX" in worker and "XXXX" not in other, evidence
         finally:
             subprocess.run([tmux, "-L", socket, "kill-server"], env=env,
                            capture_output=True, timeout=5)

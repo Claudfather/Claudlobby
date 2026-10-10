@@ -800,3 +800,124 @@ def test_a_stop_that_did_not_happen_reads_unverified_without_waiting(cold, monke
     assert failed["error"]["message"] == "bot lifecycle effect is unverified; inspect native state"
     assert failed["data"]["native_outcome"] == "unknown"
     assert worker.native.actions == ["stop"] and waits == []
+
+
+def _plane_rows(monkeypatch, *, refuse=False):
+    """The rows the lifecycle door hands the plane, or a plane that refuses them."""
+    rows = []
+
+    def emit(_root, events, require_commit=False):
+        if refuse:
+            raise OSError("the plane is unavailable")
+        rows.extend(events)
+        return [SimpleNamespace(status="committed") for _ in events]
+    monkeypatch.setattr(bot_operations, "emit_batch", emit, raising=False)
+    return rows
+
+
+def test_bot_stop_records_the_stop_locally_and_on_the_plane_and_start_clears_it(cold, monkeypatch, capsys):  # noqa: F811
+    """#2243: the stop door always leaves its local record, the fact fleet-pulse reads to keep a
+    stopped bot silent, and a bot_stopped row naming the caller; bot start removes the record and
+    writes bot_started. Stopping a bot that is already stopped records it too (the rollout path
+    for a bot stopped before the record existed)."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    rows = _plane_rows(monkeypatch)
+    record = worker.root / "runtime/bots/worker/data/.stopped"
+
+    stopped = worker.call("bot", "stop", "worker", "--reason", "parked until the review lands")["data"]
+    assert stopped["state"] == "stopped" and stopped["changed"] is True
+    assert stopped["recording"] == "committed" and worker.native.actions == ["stop"]
+    saved = json.loads(record.read_text())
+    assert saved["by"] == "operator" and saved["reason"] == "parked until the review lands"
+    assert abs(saved["stopped_epoch"] - time.time()) < 300 and saved["stopped_at"].endswith("Z")
+    (row,) = rows
+    assert row["payload"]["event"] == "bot_stopped"
+    assert row["payload"]["subject"] == f"bot:{stopped['fleet']}/worker"
+    data = row["payload"]["data"]["data"]
+    assert (data["by"], data["reason"], data["changed"]) == ("operator", "parked until the review lands", True)
+    assert data["request_id"] == saved["request_id"]
+
+    rows.clear()
+    again = worker.call("bot", "stop", "worker")["data"]
+    assert again["state"] == "stopped" and again["changed"] is False
+    assert json.loads(record.read_text())["reason"] is None
+    (row,) = rows
+    assert row["payload"]["event"] == "bot_stopped" and row["payload"]["data"]["data"]["changed"] is False
+
+    rows.clear()
+    started = worker.call("bot", "start", "worker")["data"]
+    assert started["state"] == "running" and started["recording"] == "committed"
+    assert not record.exists()
+    (row,) = rows
+    assert row["payload"]["event"] == "bot_started" and row["payload"]["data"]["data"]["by"] == "operator"
+
+
+def test_a_plane_that_refuses_the_row_neither_blocks_the_stop_nor_its_record(cold, monkeypatch, capsys):  # noqa: F811
+    """#2243 F3: a stop must not depend on the plane. The record the sweep reads is local and
+    written first; the refused row is reported as recording degraded."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    _plane_rows(monkeypatch, refuse=True)
+    stopped = worker.call("bot", "stop", "worker")["data"]
+    assert stopped["state"] == "stopped" and stopped["recording"] == "degraded"
+    assert worker.native.actions == ["stop"]
+    saved = json.loads((worker.root / "runtime/bots/worker/data/.stopped").read_text())
+    assert saved["by"] == "operator"
+
+
+def test_a_stop_reason_is_one_printable_line(cold, monkeypatch, capsys):  # noqa: F811
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    _plane_rows(monkeypatch)
+    refused = worker.call("bot", "stop", "worker", "--reason", "two\nlines", expected=2)
+    assert refused["error"]["code"] == "invalid_argument"
+    assert worker.native.actions == []
+    assert not (worker.root / "runtime/bots/worker/data/.stopped").exists()
+
+
+def test_a_stop_refused_before_any_effect_leaves_no_record(cold, monkeypatch, capsys):  # noqa: F811
+    """#2243: the stop door writes its record first. A stop refused before any native effect
+    stopped nothing, so its record goes again: the bot was never stopped on purpose."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    _plane_rows(monkeypatch)
+    record = worker.root / "runtime/bots/worker/data/.stopped"
+    real_call = worker.native.call
+    seen = []
+
+    def refuses(function, *args, timeout=30):
+        if function == "svc_bot_disenroll_exact":  # refused, and no effect-attempted marker
+            seen.append(record.exists())
+            return subprocess.CompletedProcess([function], 3, "", "")
+        return real_call(function, *args, timeout=timeout)
+    monkeypatch.setattr(worker.native, "call", refuses)
+    refused = worker.call("bot", "stop", "worker", expected=6)
+    assert refused["error"]["code"] == "unavailable"
+    assert refused["data"]["native_outcome"] == "unattempted"
+    assert seen == [True]  # the record was written before the native call
+    assert not record.exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root removes a file whatever its directory's mode")
+def test_a_start_that_cannot_remove_the_stop_record_says_so(cold, monkeypatch, capsys):  # noqa: F811
+    """#2243: a stop record left behind keeps a later loss of the bot's unit silent, so a start
+    that cannot remove it says so, as `stop_record_kept` in the JSON and a line in the text. The
+    start itself stands, and its plane row is recorded."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    rows = _plane_rows(monkeypatch)
+    data = worker.root / "runtime/bots/worker/data"
+    worker.call("bot", "stop", "worker")
+    rows.clear()
+    data.chmod(0o500)
+    try:
+        started = worker.call("bot", "start", "worker")["data"]
+        assert started["state"] == "running" and started["changed"] is True
+        assert started["stop_record_kept"] is True and started["recording"] == "committed"
+        (row,) = rows
+        assert row["payload"]["event"] == "bot_started"
+        assert (data / ".stopped").exists()
+        # a start that finds the bot running retries the removal, and its text says so too
+        assert main(["--root", str(worker.root), "bot", "start", "worker"]) == 0
+        out = capsys.readouterr().out
+        assert "could not remove this bot's stop record" in out, out
+    finally:
+        data.chmod(0o700)
+    again = worker.call("bot", "start", "worker")["data"]
+    assert "stop_record_kept" not in again and not (data / ".stopped").exists()

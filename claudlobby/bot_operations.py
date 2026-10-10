@@ -32,7 +32,10 @@ from .config_plan import path_state, read_plan
 from .config_units import current_declarations, planned_units
 from .loader import parse_frontmatter
 from .operation_context import resolve_operation_scope
+from .plane.emit_api import emit_batch
+from .plane.fleet_events import fleet_event_request
 from .runtime_admission import RuntimeIdentity, mutation_admission, validate_unit_admission
+from .stop_record import StopRecordError, check_reason, clear_stop, write_stop
 from .supervision import build_supervision_spec
 from .supervision_inventory import Adapter, InventoryError, _catalog, collect_enrollment
 
@@ -74,6 +77,13 @@ class BotLifecycleResult:
     request_id: str | None = None
     log_path: str | None = None
     reason: str | None = None
+    # A stop: whether its local record and its plane row landed; a start: whether its
+    # plane row landed (#2243).
+    recording: str | None = None
+    # A start that could not remove the stop record (#2243): while it stays, a later
+    # loss of the bot's unit reads as a deliberate stop. None when it was removed or
+    # there was none.
+    stop_record_kept: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -501,6 +511,37 @@ def control_bot(*, root: Path, fleet: str | None, bot: str, control: str,
                                     entry["target"], control, "submitted")
 
 
+def _record_lifecycle(root: Path, fleet: str, bot: str, event: str, *, by: str,
+                      reason: str | None, request_id: str, changed: bool) -> str:
+    """The plane's audit row for a stop or a start (#2243): "committed", or "degraded"
+    when the plane did not take it. Never raises: a stop must not depend on the plane,
+    and the sweep reads the local stop record, not this row."""
+    raw = fleet_event_request(event, fleet=fleet, subject_kind="actor", subject=f"bot:{fleet}/{bot}",
+                              source="lifecycle", key=request_id,
+                              data={"by": by, "reason": reason, "request_id": request_id,
+                                    "changed": changed})
+    try:
+        recorded = emit_batch(root, [raw], require_commit=True)[0]
+    except Exception:
+        return "degraded"
+    return "committed" if recorded.status in {"committed", "duplicate"} else "degraded"
+
+
+def _started(root: Path, fleet: str, bot: str, bot_dir: Path, by: str, request_id: str, *,
+             changed: bool) -> tuple[str | None, bool | None]:
+    """A start that left the bot running: the unit is back, so the stop record goes,
+    and a start that changed something or cleared a record leaves a bot_started row.
+    Returns the row's recording, and True when the record could not be removed."""
+    try:
+        cleared, kept = clear_stop(bot_dir), None
+    except OSError:
+        cleared, kept = False, True
+    if not (changed or cleared):
+        return None, kept
+    return _record_lifecycle(root, fleet, bot, "bot_started", by=by, reason=None,
+                             request_id=request_id, changed=changed), kept
+
+
 def _confirm_stopped(adapter, installed, target, socket_path, *, effect_attempted=False,
                      settle_s=0):
     state = _native(adapter, "svc_inventory_state", installed, target)
@@ -529,10 +570,16 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                     restart: bool = False, ceiling: int | None = None,
                     identity: RuntimeIdentity | None = None,
                     adapter: Adapter | None = None, _self_child: bool = False,
-                    _on_lock=None) -> BotLifecycleResult:
+                    _on_lock=None, reason: str | None = None) -> BotLifecycleResult:
     """Start, stop or restart one exact selected bot; prove native effects."""
     if restart and not running:
         raise BotLifecycleError("restart requires a running target")
+    if reason is not None and running:
+        raise BotLifecycleError("a reason is recorded only for a stop")
+    try:
+        reason = check_reason(reason)
+    except StopRecordError as exc:
+        raise BotLifecycleError(str(exc)) from exc
     if ceiling is not None and (not restart or isinstance(ceiling, bool)
                                 or not isinstance(ceiling, int) or ceiling <= 0):
         raise BotLifecycleError("restart ceiling must be a positive integer")
@@ -583,7 +630,20 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
             installed = Path(entry["installed"])
             socket = Path(spec.environment["TMUX_TMPDIR"]) / f"tmux-{os.getuid()}" / spec.label
             unit = _observed(root, declarations, adapter, entry["target"], installed)
+            by = (f"bot:{origin.fleet.name}/{origin.bot_id}" if origin is not None
+                  else "operator")
+            request_id = str(uuid4())
             if not running:
+                # #2243: the stop door always records that the stop was meant, and
+                # first, so no sweep sees the unit file gone without the record.
+                # fleet-pulse reads this record, never the plane row below, so a
+                # stop made while the plane is down stays quiet. A record that
+                # cannot be written does not hold the stop up.
+                try:
+                    write_stop(spec.bot_dir, by=by, reason=reason, request_id=request_id)
+                    recorded = True
+                except (StopRecordError, OSError):
+                    recorded = False
                 if unit.installed:
                     effect_begun = False
                     try:
@@ -599,6 +659,12 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                     except (BotLifecycleError, ActivationError, InventoryError, OSError) as exc:
                         attempted = effect_begun or (isinstance(exc, BotLifecycleError)
                                                      and exc.effect_attempted)
+                        if not attempted:
+                            # refused before any effect: nothing was stopped
+                            try:
+                                clear_stop(spec.bot_dir)
+                            except OSError:
+                                pass
                         stage = str(exc) if isinstance(exc, BotLifecycleError) else type(exc).__name__
                         raise BotLifecycleError(f"bot stop refused or proof is incomplete: {stage}",
                                                 effect_attempted=attempted,
@@ -608,8 +674,12 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                 else:
                     _confirm_stopped(adapter, installed, entry["target"], socket,
                                      settle_s=_STOP_SETTLE_S)
+                row = _record_lifecycle(root, destination.fleet.name, bot, "bot_stopped", by=by,
+                                        reason=reason, request_id=request_id,
+                                        changed=bool(unit.installed))
                 return BotLifecycleResult(destination.fleet.name, bot, release.release_id,
-                                          entry["target"], "stopped", bool(unit.installed), "not_running")
+                                          entry["target"], "stopped", bool(unit.installed), "not_running",
+                                          recording=row if recorded else "degraded")
             bot_conf = spec.bot_dir / "bot.conf"
             changes = [change for change in plan.changes if change.target == str(bot_conf)]
             if len(changes) != 1 or changes[0].after.get("kind") != "file" or path_state(bot_conf)["node"] != changes[0].after:
@@ -662,9 +732,12 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                     if session == "ready":
                         _confirm_running(adapter, installed, entry["target"], manager,
                                          session_ready=True)
+                        recording, kept = _started(root, destination.fleet.name, bot, spec.bot_dir,
+                                                   by, request_id, changed=False)
                         return BotLifecycleResult(destination.fleet.name, bot, release.release_id,
                                                   entry["target"], "running", False,
-                                                  "current_session_ready")
+                                                  "current_session_ready",
+                                                  recording=recording, stop_record_kept=kept)
                     if session != "absent":
                         raise BotLifecycleError("current bot session readiness is indeterminate; "
                                                 "inspect the session or explicitly restart",
@@ -716,6 +789,9 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                                         effect_attempted=True,
                                         release_id=release.release_id,
                                         target=entry["target"]) from exc
+            recording, kept = (None, None) if restart else _started(
+                root, destination.fleet.name, bot, spec.bot_dir, by, request_id, changed=True)
             return BotLifecycleResult(destination.fleet.name, bot, release.release_id,
                                       entry["target"], "running", True,
-                                      readiness.replace("-", "_"), handoff)
+                                      readiness.replace("-", "_"), handoff,
+                                      recording=recording, stop_record_kept=kept)
