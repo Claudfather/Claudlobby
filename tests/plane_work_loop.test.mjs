@@ -22,11 +22,12 @@ const receipt = (request, status = 'delivered') => { const {body,...metadata}=re
 function store() { const values = new Map(); return { getItem: k => values.get(k) || null, setItem: (k, v) => values.set(k, v) }; }
 function dom() {
   const elements = new Map();
-  const document = { activeElement: null, getElementById: id => elements.get(id) };
+  const document = { activeElement: null, selection: null, getSelection() { return this.selection; }, getElementById: id => elements.get(id) };
   class Element {
     constructor(id = '', dataset = {}) {
       this.id = id; this.dataset = dataset; this.isConnected = true;
       this.hidden = false; this.disabled = false; this.value = ''; this.children = []; this.listeners = new Map();
+      this.className = ''; this.tagName = ''; this.open = false;
       if (id) elements.set(id, this);
     }
     set innerHTML(html) {
@@ -44,8 +45,13 @@ function dom() {
     get innerHTML() { return this.html || ''; }
     querySelectorAll(selector) {
       const key = selector.match(/^\[data-([\w-]+)\]$/)?.[1]?.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
-      return this.children.filter(child => child.isConnected && key in child.dataset);
+      const matches = child => key ? key in child.dataset : selector === 'details' ? child.tagName === 'DETAILS'
+        : selector === '.msg[data-msg-id]' ? child.className === 'msg' && 'msgId' in child.dataset : false;
+      const descendants = children => children.flatMap(child => [child, ...descendants(child.children)]);
+      return descendants(this.children).filter(child => child.isConnected && matches(child));
     }
+    contains(element) { return !!element && (element === this || this.children.some(child => child.contains(element))); }
+    replaceChildren(...children) { this.html = ''; this.children = children; }
     closest(selector) {
       if (selector === '#attention, #tasks') return this.panel || null;
       return this.querySelectorAll.call({ children: [this] }, selector)[0] || null;
@@ -78,9 +84,9 @@ function harness(options = {}) {
     actionReceipt: request => { lookups.push(request); return options.actionReceipt ? options.actionReceipt(request) : receipt(request); },
   };
   if (options.transport) Object.assign(api, options.transport);
-  const loop = mountWorkLoop({ api, renderThread: () => new ui.Element(), refresh: () => {} });
+  const loop = mountWorkLoop({ api, renderThread: options.renderThread ? thread => options.renderThread(thread, ui) : () => new ui.Element(), refresh: () => {} });
   const board = { state: 'ok', data: { tasks: ['task-a', 'task-b'].map(task_id => ({ task_id, fleet: 'web', title: task_id })) } };
-  const update = () => loop.update(board, { state: 'ok', data: { threads: [] } });
+  const update = (messages = { state: 'ok', data: { threads: [] } }, tasks = board) => loop.update(tasks, messages);
   const open = (id = 'task-a', fleet = 'web', panel = 'tasks') => {
     const button = new ui.Element('', { taskOpen: id, taskFleet: fleet });
     button.panel = ui.get(panel); button.panel.children = [button];
@@ -970,4 +976,112 @@ test('late delivery for the prior recipient keeps the newly selected bot draft',
   assert.equal(h.get('work-recipient').value, inspectedWorker.uid);
   assert.equal(h.get('work-body').value, 'New worker draft');
   assert.equal(h.sends.length, 1); assert.deepEqual(h.lookups, []);
+});
+
+// Channel reads use the production thread renderer contract: message IDs and
+// nested disclosures. They never ask the action transport to prepare or send.
+const conversationRead = (...threads) => ({ state: 'ok', data: { threads } });
+const conversationThread = (id = 'task-a', messages = ['first'], extra = {}) => ({
+  key: id, work_item_id: id, latest_seq: messages.length,
+  messages: messages.map(msg_id => ({msg_id, body: msg_id})), ...extra,
+});
+function conversationRenderer(thread, ui) {
+  const article = new ui.Element(); article.dataset.key = thread.key;
+  for (const row of thread.messages) {
+    const message = new ui.Element('', {msgId:row.msg_id}); message.className = 'msg';
+    const disclosure = new ui.Element(); disclosure.tagName = 'DETAILS';
+    const control = new ui.Element(); disclosure.append(control); message.append(disclosure); article.append(message);
+  }
+  return article;
+}
+async function conversationHarness(options = {}) {
+  const reads = [];
+  const h = harness({renderThread:conversationRenderer, jget(url) { reads.push(url); return canonicalDetail(url.includes('task-b') ? 'task-b' : 'task-a'); }, ...options});
+  h.loop.setRoom('web'); await settle(); h.update(conversationRead(conversationThread())); h.open(); await settle();
+  return {...h, reads};
+}
+test('same-task recent replies update only conversation, retaining disclosures and frozen action selection', async () => {
+  const h = await conversationHarness(), content = h.get('task-detail-content'), snapshot = content.innerHTML;
+  const first = h.get('task-reports').children[0]; first.children[0].children[0].open = true;
+  h.get('work-recipient').value = 'worker'; h.get('work-recipient').onchange();
+  h.get('work-body').value = 'Unsent worker draft'; h.get('work-body').emit('input');
+  h.update(conversationRead(conversationThread('task-a', ['first', 'reply']), conversationThread('task-b', ['foreign'])),
+    {state:'ok',data:{tasks:[{task_id:'task-a',fleet:'web',state:'active',current_assignment:{assignment_id:'new'}}]}});
+  const article = h.get('task-reports').children[0];
+  assert.equal(article.children.length, 2); assert.equal(article.children[0].children[0].open, true);
+  assert.equal(content.innerHTML, snapshot); assert.equal(h.reads.length, 1);
+  assert.equal(h.get('work-recipient').value, 'worker'); assert.equal(h.get('work-body').value, 'Unsent worker draft');
+  content.querySelectorAll('[data-kind]')[0].onclick();
+  h.get('work-body').value = 'Task comment'; await h.get('work-form').onsubmit({preventDefault(){}});
+  assert.equal(h.sends[0].target.task_id, 'task-a'); assert.equal(h.sends[0].kind, 'feedback');
+  assert.equal(h.preparations.length, 0); assert.equal(h.lookups.length, 0);
+});
+test('unchanged conversation nodes remain and receipt-only evidence updates without a new read', async () => {
+  const h = await conversationHarness(), first = h.get('task-reports').children[0];
+  h.update(conversationRead(conversationThread())); assert.equal(h.get('task-reports').children[0], first);
+  h.update(conversationRead(conversationThread('task-a', ['first'], {delivery:'received'})));
+  assert.notEqual(h.get('task-reports').children[0], first); assert.equal(h.reads.length, 1);
+  assert.equal(h.sends.length + h.preparations.length + h.lookups.length, 0);
+});
+test('conversation focus or text selection defers updates until explicit opt-in without replacing the task', async () => {
+  for (const interaction of ['focus', 'selection']) {
+    const h = await conversationHarness(), reports = h.get('task-reports'), first = reports.children[0];
+    const control = first.children[0].children[0].children[0];
+    if (interaction === 'focus') control.focus();
+    else h.document.selection = {isCollapsed:false,anchorNode:control,focusNode:control};
+    h.update(conversationRead(conversationThread('task-a', ['first', 'reply'])));
+    assert.equal(reports.children[0], first); assert.equal(h.get('task-conversation-update').hidden, false);
+    if (interaction === 'focus') assert.equal(h.document.activeElement, control);
+    else assert.equal(h.document.selection.anchorNode, control);
+    h.get('task-conversation-update').onclick();
+    assert.equal(reports.children[0].children.length, 2); assert.equal(h.get('task-conversation-update').hidden, true);
+    assert.equal(h.document.activeElement, reports); assert.equal(h.reads.length, 1);
+    assert.equal(h.sends.length + h.preparations.length + h.lookups.length, 0);
+  }
+});
+test('conversation does not disturb focus or selection in the frozen lifecycle region', async () => {
+  const h = await conversationHarness(), content = h.get('task-detail-content');
+  h.get('task-detail-close').focus(); h.document.selection = {isCollapsed:false,anchorNode:content,focusNode:content};
+  h.update(conversationRead(conversationThread('task-a', ['first', 'reply'])));
+  assert.equal(h.get('task-reports').children[0].children.length, 2);
+  assert.equal(h.document.activeElement, h.get('task-detail-close')); assert.equal(h.document.selection.anchorNode, content);
+});
+test('source loss clears conversation immediately and a retained update button cannot revive old room or session text', async () => {
+  for (const change of ['room', 'session', 'close']) {
+    const h = await conversationHarness(), reports = h.get('task-reports');
+    reports.children[0].children[0].children[0].children[0].focus();
+    h.update(conversationRead(conversationThread('task-a', ['first', 'reply'])));
+    const staleButton = h.get('task-conversation-update'); assert.equal(staleButton.hidden, false);
+    h.update({state:'denied',remediation:'Source access unavailable'});
+    assert.equal(reports.children.length, 0); assert.match(reports.innerHTML, /Source access unavailable/);
+    assert.equal(staleButton.hidden, true);
+    if (change === 'room') h.loop.setRoom('other');
+    else if (change === 'session') h.loop.pause(); else h.get('task-detail-close').onclick();
+    staleButton.onclick(); await settle();
+    assert.equal(h.get('task-detail-content').innerHTML, '');
+    assert.equal(h.sends.length + h.preparations.length + h.lookups.length, 0);
+  }
+});
+test('a superseded task update button cannot update a newly selected opaque task', async () => {
+  const h = await conversationHarness(), reports = h.get('task-reports'); reports.children[0].focus();
+  h.update(conversationRead(conversationThread('task-a', ['first','reply']), conversationThread('task-b', ['other'])));
+  const staleButton = h.get('task-conversation-update'); h.open('task-b'); await settle();
+  assert.equal(h.get('task-reports').children[0].dataset.key, 'task-b');
+  staleButton.onclick(); assert.equal(h.get('task-reports').children[0].dataset.key, 'task-b');
+  assert.equal(h.sends.length + h.preparations.length + h.lookups.length, 0);
+});
+test('recent conversation updates cannot advance the prepared feedback assignment or release', async () => {
+  const assignment = {assignment_id:nudgeAssignment,task_id:nudgeTaskId,state:'active',terminal_event:null};
+  let detailReads = 0;
+  const h = harness(feedbackOptions({renderThread:conversationRenderer,jget(){detailReads++;return ownerDetail(assignment);}}));
+  h.loop.setRoom('web'); await settle(); h.update(conversationRead(conversationThread(nudgeTaskId))); h.open(nudgeTaskId); await settle();
+  const changed = ownerDetail({...assignment,assignment_id:'asg_'+'f'.repeat(32)}).data.task;
+  h.update(conversationRead(conversationThread(nudgeTaskId,['first','reply'])),{state:'ok',data:{tasks:[changed]}});
+  assert.equal(h.sends.length + h.preparations.length + h.lookups.length, 0);
+  h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='feedback').onclick(); await settle();
+  await h.submit();
+  assert.equal(detailReads, 1); assert.equal(h.preparations.length, 1);
+  assert.equal(h.preparations[0].target.assignment_id, nudgeAssignment);
+  assert.equal(h.preparations[0].target.release_id, ownerFeedback.release_id);
+  assert.equal(h.sends[0].target.assignment_id, nudgeAssignment);
 });

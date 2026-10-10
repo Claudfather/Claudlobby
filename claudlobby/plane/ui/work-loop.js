@@ -17,6 +17,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   const messageRecipients = new Map(); // Tab memory only, bound to the full authorized scope.
   let context = null, room = null, epoch = 0, board = null, channel = null;
   let detailEpoch = 0, compositionEpoch = 0, detailSnapshot = null, targetTitle = null;
+  let conversation = null;
   let selected = null, target = null, kind = "message", sending = false, inFlightRequest = null, opener = null, openerIdentity = null;
   let notice = "Choose a team to see its available actions.";
   root.innerHTML = `<div class="work-loop-head"><div><h2>Talk to your team</h2>
@@ -118,7 +119,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     onActionsChange();
   }
   function closeDetail() {
-    ++detailEpoch; detailSnapshot = null;
+    ++detailEpoch; detailSnapshot = null; conversation = null;
     $("task-detail-content").innerHTML = "";
     if (dialog.open) dialog.close();
     selected = null;
@@ -228,7 +229,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   }
   function detail() {
     if (!selected) return;
-    const token = ++detailEpoch, selection = selected; detailSnapshot = null;
+    const token = ++detailEpoch, selection = selected; detailSnapshot = null; conversation = null;
     const content = $("task-detail-content");
     // Read at call time: a late reply must see the board as it is then.
     const boardTask = () => board?.state === "ok" ? board.data.tasks.find(t => t.task_id === selection.id && (t.fleet || "") === selection.fleet) : null;
@@ -323,21 +324,61 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       <h3>Task history</h3>${historyWindow("Task history", task.history_window)}<ol class="task-history">${events(task.history)}</ol>
       ${(task.issues || []).length ? `<h3>History issues</h3><ul>${task.issues.map(i => `<li>${esc(i.code)}${i.blocking ? " · unresolved" : " · historical"}</li>`).join("")}</ul>` : ""}
       ${task.issues_window?.truncated ? '<p class="note">Additional history issues are omitted from this bounded view.</p>' : ""}`}
+      <p class="note">Task state, history and action selection are a snapshot. Use Refresh to read them again.</p>
       <h3>Recent conversation &amp; reports</h3><p class="note">This is the recent channel window, not a complete task history. Completion alone does not mean a result was reviewed.</p>
+      <button id="task-conversation-update" class="pill ghost" type="button" hidden>New conversation available</button>
       <div id="task-reports"></div>
       <div class="task-detail-actions"><button class="pill" type="button" data-kind="feedback">Give feedback</button>
       <button class="pill ghost" type="button" data-kind="nudge">Nudge task</button></div>
       <p class="note" id="task-action-note"></p>`;
-    const reports = $("task-reports");
-    if (channel?.state !== "ok") reports.innerHTML = stateBlock(channel?.state || "disconnected", channel?.provenance, channel?.remediation);
-    else {
-      const threads = channel.data.threads.filter(t => t.work_item_id === task.task_id);
-      if (threads.length) for (const thread of threads) reports.append(renderThread(thread));
-      else reports.innerHTML = '<p class="detail-empty">No linked conversation or result is available in the recent channel window.</p>';
-    }
     detailSnapshot = { task: Object.freeze({ ...task, ...(Object.hasOwn(task, "current_assignment")
       ? { current_assignment: task.current_assignment && Object.freeze({ ...task.current_assignment }) } : {}) }), boardOnly };
+    const selection = selected, token = detailEpoch;
+    $("task-conversation-update").onclick = () => {
+      if (selected !== selection || token !== detailEpoch) return;
+      updateConversation(true);
+    };
+    updateConversation();
     updateDetailActions();
+  }
+  function updateConversation(explicit = false) {
+    if (!selected || !detailSnapshot || detailSnapshot.task.task_id !== selected.id
+        || (detailSnapshot.task.fleet || "") !== selected.fleet) return;
+    const reports = $("task-reports"), button = $("task-conversation-update");
+    // The channel is the admitted current-room read. Task IDs are opaque,
+    // shared across that room's cross-fleet threads; never infer from aliases.
+    const threads = channel?.state === "ok" ? channel.data.threads.filter(t => t.work_item_id === selected.id) : [];
+    const signature = JSON.stringify(channel?.state === "ok" ? threads : [channel?.state, channel?.provenance, channel?.remediation]);
+    if (conversation?.signature === signature) { button.hidden = true; return; }
+    const selection = document.getSelection();
+    const reading = reports.contains(document.activeElement) || (selection && !selection.isCollapsed
+      && (reports.contains(selection.anchorNode) || reports.contains(selection.focusNode)));
+    // Source loss clears stale text even during interaction. Healthy updates
+    // wait for explicit consent when focus or a text selection would be lost.
+    if (!explicit && channel?.state === "ok" && reading) { button.hidden = false; return; }
+    const previous = conversation?.threads || new Map(), next = new Map();
+    if (channel?.state !== "ok") reports.innerHTML = stateBlock(channel?.state || "disconnected", channel?.provenance, channel?.remediation);
+    else if (!threads.length) reports.innerHTML = '<p class="detail-empty">No linked conversation or result is available in the recent channel window.</p>';
+    else {
+      const articles = threads.map(thread => {
+        const stamp = JSON.stringify(thread), old = previous.get(thread.key);
+        const article = old?.stamp === stamp ? old.article : renderThread(thread);
+        if (old && article !== old.article) {
+          const expanded = new Map([...old.article.querySelectorAll(".msg[data-msg-id]")].map(message =>
+            [message.dataset.msgId, [...message.querySelectorAll("details")].map(detail => detail.open)]));
+          for (const message of article.querySelectorAll(".msg[data-msg-id]")) {
+            const open = expanded.get(message.dataset.msgId);
+            if (open) [...message.querySelectorAll("details")].forEach((detail, index) => { detail.open = !!open[index]; });
+          }
+        }
+        next.set(thread.key, { stamp, article });
+        return article;
+      });
+      reports.replaceChildren(...articles);
+    }
+    conversation = { signature, threads: next };
+    button.hidden = true;
+    if (explicit) { reports.tabIndex = -1; reports.focus(); }
   }
   function frozenTaskTarget(task, value, boardOnly, action) {
     if (boardOnly || task.resolved !== true || !Object.hasOwn(task, "body")
@@ -385,9 +426,9 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   }
   function update(tasks, messages) {
     board = tasks; channel = messages;
-    // Detail is an explicit snapshot. Never replace its DOM while someone is
-    // reading, selecting text or using an action; offer a refresh instead.
-    if (selected) $("task-detail-refresh").hidden = false;
+    // Lifecycle and action preconditions stay frozen until explicit Refresh.
+    // Only the admitted recent conversation read may update in place.
+    if (selected) { $("task-detail-refresh").hidden = false; updateConversation(); }
   }
   document.getElementById("rail-right").addEventListener("click", event => {
     const button = event.target.closest("[data-task-open]");
@@ -402,7 +443,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   dialog.addEventListener("close", () => {
     ++detailEpoch;
     $("task-detail-content").innerHTML = "";
-    selected = null; detailSnapshot = null;
+    selected = null; detailSnapshot = null; conversation = null;
     if (!openerIdentity) return;
     const rail = $("rail-right"), buttons = [...rail.querySelectorAll("[data-task-open]")];
     const matches = button => button.dataset.taskOpen === openerIdentity.id

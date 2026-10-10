@@ -832,6 +832,7 @@ function openStream() {
       renderHeader(null);
       renderHostFacts(null);
       renderState($("channel"), env);
+      workLoop.update(null, env);
     } catch { /* next refresh corrects */ }
   });
   es.onerror = () => {
