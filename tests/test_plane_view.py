@@ -695,6 +695,23 @@ def test_connected_reader_asset_uses_same_versioned_owner_graph(tmp_path, monkey
     assert before.text != after.text
 
 
+def test_connected_workspace_entry_has_complete_versioned_static_graph(tmp_path):
+    client = TestClient(create_app(tmp_path, package=source_package()))
+    api = client.get("/api-client.js")
+    assert api.status_code == 200 and api.headers["cache-control"] == "no-store"
+    assert 'from "./connected-workspace.js?v=' in api.text
+    head = client.head("/api-client.js")
+    assert head.status_code == 200 and head.content == b""
+    assert head.headers["content-length"] == api.headers["content-length"]
+    assert head.headers["cache-control"] == "no-store"
+    workspace = client.get("/connected-workspace.js")
+    assert workspace.status_code == 200 and workspace.headers["cache-control"] == "no-store"
+    assert 'from "./connected-read-client.js?v=' in workspace.text
+    assert 'from "./two-source-read.js?v=' in workspace.text
+    assert "import(" not in workspace.text
+    assert "<!--CONNECTED_CONTEXT-->" in client.get("/").text
+
+
 def test_stream_defaults_to_head_never_replays(tmp_path):
     """Gauntlet consensus (3 reviewers, measured): a cursor-less connect used
     to replay the ENTIRE ledger per viewer per reconnect."""

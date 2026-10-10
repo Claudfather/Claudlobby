@@ -178,3 +178,63 @@ remain separate reviewed integration and browser gates. Unchanged trusted
 account context can support host-local renewal through provider outage under
 the documented non-lease policy; unknown metadata is unavailable, and observed
 account/workspace/reference changes require a new authenticated entry.
+
+## Canonical connected workspace entry
+
+The canonical index has an inert `<!--CONNECTED_CONTEXT-->` replacement marker.
+Only the reviewed operational publisher supplies a nonexecutable
+`workspace-document-context` JSON element after verifying its document ticket.
+The static `api-client.js` imports the complete canonical module graph. Without
+a context element it retains the original same-origin read behavior and exports
+no session controls; it makes no owner/session probes. An invalid context element
+refuses connected reads and never falls back to direct-host access. Direct owner
+browser mounting still selects its existing cookie transport independently.
+
+`connected-workspace.js` accepts the publisher's version1 document context:
+`{version,user_id,workspace_id,context_generation,shell_origin,operational_origin,
+references,expires_at}`. Before creating a host controller it reads the actual
+credentialed website v2 context and matches the account, selected workspace,
+generation and complete exact saved-reference set. The publisher owns ticket
+validity and dynamic CSP; merely injecting a JSON shape provides no host access.
+The entry uses the carrier's canonical host challenge, website assertion callback
+and genuine read handles; account metadata alone never admits private reads.
+
+Zero saved computers has an explicit empty state. One or two saved computers
+start with read-only session checks, leaving explicit Connect available; no
+automatic sign-in, session mutation retry or host initialization occurs. Per-host
+Connect, Check connection, Keep connected and Disconnect operate independently.
+Disconnect ends only that connected session; closing the document disposes its
+streams/credentials without sending logout. Stable controls preserve keyboard
+focus while labels and enabled states change. Canonical Activity, team choices,
+tasks and exact linked task detail use the existing aggregate reader/renderer.
+All agents, Team details, Recorder, search and bot equipment inspection are
+explicitly disabled because the bounded aggregate does not supply those reads.
+
+Website metadata reads have one eight-second total header/body deadline and a
+16KiB body bound. The visible document rechecks on visibility and every 30 seconds.
+A provider outage cannot create an admitted account context; a previously verified
+unchanged context may retain existing host sessions with an unavailable account
+check note under the documented non-lease policy. Observed 401/403/409, changed
+account/workspace/generation/reference set or disposal retires all controllers,
+aborts owned work, clears private regions and fences held reads/stream callbacks.
+This document never revives after observed loss; reopen through the authenticated
+website. Same-site cookie/CORS/private-network/device validation and actual
+operational publisher integration remain separate empirical gates.
+
+
+Account checks resume the renderer only when leaving its initial paused state;
+steady-state checks do not create a second board refresh loop. Periodic checks
+run only while the mounted document is visible; hiding cancels the timer and
+becoming visible performs one fresh check. Explicit checks remain available.
+Temporary checking uses aria-disabled with an activation guard so keyboard focus
+stays on the same control. Account retirement disables all navigation/debug
+controls after clearing private content, including focus-title text and datasets.
+Partial carrier/transport admission disposes locally constructed resources before
+an explicit retry. Disconnect stays available for an admitted but unavailable host.
+The website's actual v2 context route returns 401 for missing/expired sessions,
+403 for missing/lost workspace ownership, and context mismatches retire here;
+it does not invent 404/410 deleted-workspace states. Document expires_at is a
+shape-checked publisher lifetime bound; fresh website membership/session checks
+and canonical host session admission determine current access, not client clock
+interpretation of that field. The connected-context marker is supplied by the separately verified publisher;
+this core entry does not mint or verify its document ticket.

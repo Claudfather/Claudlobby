@@ -2104,7 +2104,7 @@ def create_app(
     # the redeploy window it was built for (gauntlet round 2). Ten stats
     # per page load — index() already reads the file per request.
     _UI_FILES = ("index.html", "app.js", "panel-state.js", "api-client.js",
-                 "work-loop.js", "action-state.js", "owner-api-client.js", "two-source-read.js", "connected-read-client.js",
+                 "work-loop.js", "action-state.js", "owner-api-client.js", "two-source-read.js", "connected-read-client.js", "connected-workspace.js",
                  "style.css", "workspace.css")
 
     def asset_token() -> str:
@@ -2163,6 +2163,21 @@ def create_app(
     @app.get("/connected-read-client.js")
     def connected_read_client_js():
         return _busted_js("connected-read-client.js", ("owner-api-client.js",))
+
+    @app.get("/api-client.js")
+    def api_client_js():
+        return _busted_js("api-client.js", ("connected-workspace.js",))
+
+    @app.head("/api-client.js")
+    def api_client_head():
+        # Preserve the former static asset HEAD door and its GET headers.
+        response = _busted_js("api-client.js", ("connected-workspace.js",))
+        response.body = b""
+        return response
+
+    @app.get("/connected-workspace.js")
+    def connected_workspace_js():
+        return _busted_js("connected-workspace.js", ("connected-read-client.js", "two-source-read.js"))
 
     class _NoStoreStatic(StaticFiles):
         async def get_response(self, path, scope):  # pragma: no cover - thin
