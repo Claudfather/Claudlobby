@@ -59,12 +59,12 @@ def _approve(terminal, word):
         raise CommandFailure("conflict", "owner change cancelled")
 
 
-def _challenge(terminal):
+def _challenge(terminal, *, label="browser pairing"):
     # getpass must never fall back to echoing a challenge into redirected input.
     with warnings.catch_warnings():
         warnings.simplefilter("error", getpass.GetPassWarning)
         try:
-            return getpass.getpass("Paste the browser pairing code (hidden): ", stream=terminal)
+            return getpass.getpass(f"Paste the {label} code (hidden): ", stream=terminal)
         except getpass.GetPassWarning as exc:
             raise CommandFailure("conflict", "a terminal with hidden input is required") from exc
 
@@ -252,8 +252,8 @@ def dispatch(args):
         raise CommandFailure("conflict", "owner commands require an operator shell without bot or fleet selectors")
     if args.root is None or args.fleet or args.seed:
         raise CommandFailure("invalid_argument", "owner commands require explicit --root and no fleet or seed")
-    if args.owner_action != "status" and args.json:
-        raise CommandFailure("invalid_argument", "--json is supported for owner status only")
+    if args.owner_action not in {"status", "workspace-status"} and args.json:
+        raise CommandFailure("invalid_argument", "--json is supported for owner status and workspace-status only")
     try:
         paths = resolve_paths(root=args.root)
         store = OwnerAccess(paths.root)
@@ -273,6 +273,11 @@ def dispatch(args):
             except OSError as exc:
                 raise CommandFailure("unavailable", "owner server failed; inspect local logs and configured resources") from exc
             return CommandOutput({"state": "stopped"}, lines=("Owner server stopped.",))
+        if args.owner_action == "workspace-status":
+            state, binding = store.workspace().status()
+            return CommandOutput({"state": state, "effective_active": state == "active",
+                                  "binding": asdict(binding) if binding else None},
+                                 lines=(f"Local workspace binding: {state}. No connected session is issued.",))
         if args.owner_action == "status":
             status = store.local_action_status()
             grant, messages, nudges, feedbacks = (status.owner, status.message_grants,
@@ -299,6 +304,43 @@ def dispatch(args):
                     if args.owner_action.startswith("allow-"):
                         return _allow_action(args, paths, store, terminal, action)
                     return _revoke_action(args, store, terminal, action)
+            if args.owner_action in {"initialize-workspace", "confirm-workspace", "revoke-workspace"}:
+                workspace = store.workspace()
+                owner = _active_owner(store)
+                _describe(terminal, owner)
+                if args.owner_action == "initialize-workspace":
+                    terminal.write("Prepare optional local workspace authority. No workspace or session is approved.\n")
+                    _approve(terminal, "INITIALIZE-WORKSPACE")
+                    workspace.initialize(expected_owner=owner)
+                    return CommandOutput({"state": "initialized"}, lines=("Local workspace authority initialized.",))
+                if args.owner_action == "confirm-workspace":
+                    proposal = workspace.inspect(_challenge(terminal, label="workspace approval"))
+                    if proposal.owner != owner:
+                        raise CommandFailure("conflict", "owner changed; inspect and retry")
+                    a = proposal.attestation
+                    terminal.write("Previous workspace binding: " + json.dumps({
+                        "state": proposal.previous_state,
+                        "binding": asdict(proposal.previous_binding) if proposal.previous_binding else None},
+                        ensure_ascii=True) + "\n")
+                    terminal.write("Verified proposal metadata (compare with your intended workspace):\n")
+                    terminal.write(json.dumps({"issuer": a.issuer, "app_user_id": a.subject,
+                        "workspace_id": a.workspace_id, "operational_origin": a.operational_origin},
+                        ensure_ascii=True) + "\n")
+                    terminal.write("Expires: " + datetime.fromtimestamp(proposal.expires_at, timezone.utc).isoformat() + "\n")
+                    terminal.write("This binds one workspace locally; it issues no session or fleet action grant.\n")
+                    _approve(terminal, "BIND-WORKSPACE")
+                    binding = workspace.confirm(expected_proposal=proposal)
+                    return CommandOutput({"state": "active", "binding": asdict(binding)},
+                                         lines=("Local workspace bound. No connected session was issued.",))
+                _, binding = workspace.status()
+                if binding is None or not binding.active:
+                    raise CommandFailure("conflict", "no retained active workspace binding to revoke")
+                terminal.write(json.dumps(asdict(binding), ensure_ascii=True) + "\n")
+                terminal.write("Revoke only this workspace binding. Direct owner access and fleet grants remain.\n")
+                _approve(terminal, "REVOKE-WORKSPACE")
+                revoked = workspace.revoke(expected_binding=binding, expected_owner=owner)
+                return CommandOutput({"state": "revoked", "binding": asdict(revoked)},
+                                     lines=("Local workspace binding revoked. Direct owner access remains.",))
             if args.owner_action == "bind-source":
                 from ..plane.owner_source import bind_source
 
@@ -351,6 +393,13 @@ def dispatch(args):
         raise CommandFailure("unavailable", "Plane source cannot be verified; inspect the selected installation's "
             "database and schema locally. Pairing again cannot repair source state.") from exc
     except AccessDenied as exc:
+        if "workspace" in args.owner_action:
+            raise CommandFailure("conflict", "workspace request or binding is no longer valid; inspect host owner "
+                                 "workspace-status and obtain a fresh verified proposal if needed") from exc
         raise CommandFailure("conflict", "owner request is no longer valid; inspect status and request pairing again") from exc
     except (AccessUnavailable, ValueError) as exc:
+        if "workspace" in args.owner_action:
+            raise CommandFailure("unavailable", "local workspace authority is unavailable; inspect the selected root, "
+                                 "owner status and optional schema; use host owner initialize-workspace only "
+                                 "when the optional schema has not been initialized") from exc
         raise CommandFailure("unavailable", "owner authority is unavailable; verify the selected installation") from exc

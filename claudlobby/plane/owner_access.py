@@ -198,7 +198,8 @@ class OwnerAccess:
     explicit local grant and ``authorize_message`` admission. Task nudges need
     their distinct grant and ``authorize_nudge``; task comments require a feedback
     grant and ``authorize_feedback``. This class grants no other
-    actions, website membership or workspace authority and performs no delivery.
+    actions or website membership and performs no delivery. The optional
+    ``workspace()`` door binds local workspace metadata but issues no session.
     Same-UID processes/root can alter its files and are outside this boundary.
     """
 
@@ -293,6 +294,11 @@ class OwnerAccess:
         finally:
             if conn is not None:
                 conn.close()  # uncommitted changes roll back, including policy refusals
+
+    def workspace(self):
+        """Optional local workspace authority, sharing this store's transactions."""
+        from .owner_workspace import OwnerWorkspace
+        return OwnerWorkspace(self)
 
     def _now(self) -> float:
         value = self._clock()
