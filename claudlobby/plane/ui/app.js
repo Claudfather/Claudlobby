@@ -10,10 +10,10 @@
 // only presentation labels. The first version's copied vocabularies already
 // disagreed live with the SQL reducer.
 
-import { esc, ago, renderState, stateBlock } from "/panel-state.js";
-import { jget, createEventSource } from "/api-client.js";
-import * as interactionApi from "/api-client.js";
-import { mountWorkLoop, conversationTaskLink } from "/work-loop.js";
+import { esc, ago, renderState, stateBlock } from "./panel-state.js";
+import { jget, createEventSource } from "./api-client.js";
+import * as interactionApi from "./api-client.js";
+import { mountWorkLoop, conversationTaskLink } from "./work-loop.js";
 
 const $ = (id) => document.getElementById(id);
 

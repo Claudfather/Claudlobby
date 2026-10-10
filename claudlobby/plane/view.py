@@ -2096,7 +2096,7 @@ def create_app(
     # pinned in a browser's module map across a redeploy (a stale app.js
     # survived two hard refreshes); a new asset URL forces a fresh fetch
     # unconditionally, stamped onto every asset reference INCLUDING app.js's
-    # internal `import "/panel-state.js"` so the module graph busts together.
+    # internal `import "./panel-state.js"` so the module graph busts together.
     # Derived per request from the files' mtimes, never once per process:
     # this estate updates source under running daemons by design
     # (update-siblings pulls weekly; weekly-worker-restart restarts BOTS,
@@ -2142,7 +2142,10 @@ def create_app(
         # dependencies from its module map.
         token = asset_token()
         for module in modules:
-            js = js.replace(f'"/{module}"', f'"/{module}?v={token}"')
+            # Relative module edges keep a published release inside its own
+            # directory. Also tolerate prior absolute assets during an update.
+            for prefix in ("./", "/"):
+                js = js.replace(f'"{prefix}{module}"', f'"{prefix}{module}?v={token}"')
         return _no_store(Response(js, media_type="text/javascript"))
 
     @app.get("/app.js")
