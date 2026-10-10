@@ -195,11 +195,16 @@ class _OwnerBrowser:
         self._inflight = set()
         self._action_workers = 0
         self.workspace_bootstrap = None
+        self.connected_reads = None
         if workspace_bootstrap is not None:
             from .owner_workspace_http import WorkspaceBootstrapHTTP
             self.workspace_bootstrap = WorkspaceBootstrapHTTP(self.access,
                 config=workspace_bootstrap, authority=self.authority,
                 verify_principal=self.verify_principal)
+            from .owner_connected_http import ConnectedReadHTTP
+            self.connected_reads = ConnectedReadHTTP(self.access, config=workspace_bootstrap,
+                authority=self.authority, verify_principal=self.verify_principal, read_app=self.read_app)
+            self.connected_reads.keys = self.workspace_bootstrap.keys
 
     async def _principal(self, scope: Scope) -> PrincipalRef:
         principal = await self.verify_principal(scope)
@@ -313,6 +318,10 @@ class _OwnerBrowser:
         return response
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if (scope["type"] == "http" and self.connected_reads is not None
+                and scope["path"].startswith("/api/owner/connected/")):
+            await self.connected_reads(scope, receive, send)
+            return
         if scope["type"] != "http":
             await self.read_app(scope, receive, send)
             return

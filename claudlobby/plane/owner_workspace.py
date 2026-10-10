@@ -136,6 +136,20 @@ class OwnerWorkspace:
             state = self._state(binding, owner)
             return state, binding
 
+    def _active_binding(self, conn, principal):
+        """Current native owner and effective binding in the caller's transaction."""
+        self._schema(conn)
+        owner = self._owner(conn, principal)
+        binding = self._binding(conn)
+        if binding is None or self._state(binding, owner) != "active":
+            raise AccessDenied("workspace_binding_required")
+        return binding
+
+    def active_binding(self, principal):
+        """Fresh native owner admission, not retained status flags."""
+        with self.access._connection() as conn:
+            return self._active_binding(conn, principal)
+
     def begin(self, principal: PrincipalRef, *, issuer: str, operational_origin: str):
         if not _origin(issuer, False) or not _origin(operational_origin, False):
             raise AccessDenied("invalid_workspace_configuration")

@@ -19,6 +19,7 @@ def register_host_owner(hosts):
         ("status", "Inspect this host's owner pairing without changing it"),
         ("workspace-status", "Inspect retained local workspace binding metadata"),
         ("initialize-workspace", "Prepare optional workspace authority (interactive)"),
+        ("initialize-connected", "Prepare optional connected read-session storage (interactive)"),
         ("confirm-workspace", "Bind a verified workspace proposal at this terminal (interactive)"),
         ("revoke-workspace", "Revoke this host's workspace binding only (interactive)"),
         ("initialize", "Prepare owner authority on an existing installation (interactive)"),

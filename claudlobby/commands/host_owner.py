@@ -299,6 +299,14 @@ def dispatch(args):
                                   "feedback_grants": [asdict(feedback) for feedback in feedbacks]},
                                  lines=tuple(lines))
         with _terminal() as terminal:
+            if args.owner_action == "initialize-connected":
+                owner = _active_owner(store)
+                _describe(terminal, owner)
+                terminal.write("Prepare optional connected read-session storage in this authority database.\n"
+                               "Workspace authority must already be initialized. No binding, session or action grant is issued.\n")
+                _approve(terminal, "INITIALIZE-CONNECTED")
+                store.connected().initialize(expected_owner=owner)
+                return CommandOutput({"state": "initialized"}, lines=("Connected read-session storage initialized.",))
             if args.owner_action in {"allow-messages", "revoke-messages", "allow-nudges", "revoke-nudges",
                                      "allow-feedback", "revoke-feedback"}:
                 action = {"messages": "message", "nudges": "nudge", "feedback": "feedback"}[
@@ -396,11 +404,16 @@ def dispatch(args):
         raise CommandFailure("unavailable", "Plane source cannot be verified; inspect the selected installation's "
             "database and schema locally. Pairing again cannot repair source state.") from exc
     except AccessDenied as exc:
+        if args.owner_action == "initialize-connected":
+            raise CommandFailure("conflict", "connected initialization requires the current native paired owner; inspect host owner status") from exc
         if "workspace" in args.owner_action:
             raise CommandFailure("conflict", "workspace request or binding is no longer valid; inspect host owner "
                                  "workspace-status and obtain a fresh verified proposal if needed") from exc
         raise CommandFailure("conflict", "owner request is no longer valid; inspect status and request pairing again") from exc
     except (AccessUnavailable, ValueError) as exc:
+        if args.owner_action == "initialize-connected":
+            raise CommandFailure("unavailable", "connected storage or workspace authority is unavailable; inspect local schemas "
+                                 "and initialize workspace authority first; partial schemas are never repaired") from exc
         if "workspace" in args.owner_action:
             raise CommandFailure("unavailable", "local workspace authority is unavailable; inspect the selected root, "
                                  "owner status and optional schema; use host owner initialize-workspace only "

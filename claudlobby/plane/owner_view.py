@@ -57,11 +57,23 @@ def _refusal(exc: Exception) -> JSONResponse:
 
 
 class _OwnerReadGate:
-    def __init__(self, app: ASGIApp, root: Path, verify_reader: ReaderVerifier):
+    def __init__(self, app: ASGIApp, root: Path, verify_reader: ReaderVerifier, admit_reader=None):
         self.app = app
         self.state = app.state  # preserve begin_shutdown's existing lifecycle
         self.access = OwnerAccess(root)  # never initialize or repair on a read
         self.verify_reader = verify_reader
+        self.admit_reader = admit_reader
+
+    def with_admission(self, verify_reader, admit_reader):
+        """Another credential gate over the same canonical app/lifecycle."""
+        return _OwnerReadGate(self.app, self.access.root, verify_reader, admit_reader)
+
+    async def _admission(self, scope, reader):
+        if self.admit_reader is None:
+            await run_in_threadpool(self._admit, reader)
+        else:
+            host_uid = await run_in_threadpool(source_host_uid, self.access.root)
+            await self.admit_reader(scope, reader, host_uid)
 
     def _admit(self, reader: VerifiedReader) -> None:
         host_uid = source_host_uid(self.access.root)
@@ -80,7 +92,7 @@ class _OwnerReadGate:
             reader = await self.verify_reader(scope)
             if not isinstance(reader, VerifiedReader):
                 raise AccessDenied("unverified_reader")
-            await run_in_threadpool(self._admit, reader)
+            await self._admission(scope, reader)
         except (AccessDenied, AccessUnavailable) as exc:
             await _refusal(exc)(scope, receive, send)
             return
@@ -123,7 +135,7 @@ class _OwnerReadGate:
             if message["type"] != "http.response.body":
                 raise RuntimeError("unsupported protected response message")
             try:
-                await run_in_threadpool(self._admit, reader)
+                await self._admission(scope, reader)
             except (AccessDenied, AccessUnavailable) as exc:
                 stopped = True
                 await end_refused(exc)
@@ -150,7 +162,7 @@ class _OwnerReadGate:
 
 
 def create_owner_app(root: Path, *, verify_reader: ReaderVerifier,
-                     sampler=None, package=None):
+                     sampler=None, package=None, admit_reader=None):
     """Guard the canonical view, including static/health/error/stream paths.
 
     No default verifier and no public login/session route. Runtime callers
@@ -176,4 +188,6 @@ def create_owner_app(root: Path, *, verify_reader: ReaderVerifier,
 
     view.add_exception_handler(AccessDenied, source_refused)
     view.add_exception_handler(AccessUnavailable, source_refused)
-    return _OwnerReadGate(view, paths.root, verify_reader)
+    if admit_reader is not None and not callable(admit_reader):
+        raise ValueError("an explicit trusted admission callback is required")
+    return _OwnerReadGate(view, paths.root, verify_reader, admit_reader)
