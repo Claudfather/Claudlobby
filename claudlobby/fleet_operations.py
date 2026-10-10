@@ -7,9 +7,11 @@ release, proves native effects, and makes a stopped bot stay de-enrolled.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 
 from .activation_enrollment import selected_bot_entry
+from .activation_runtime import assert_quiescent
 from .activation_state import ActivationError, read_selection
 from .bot_operations import BotLifecycleError, BotLifecycleResult, _selected_adapter, set_bot_running
 from .config_plan import read_plan
@@ -163,6 +165,19 @@ def reconcile_fleet(*, root: Path, fleet: str | None, bot: str | None = None,
             if observation.returncode or observation.stdout.strip() not in {"ready", "absent", "unknown"}:
                 raise InventoryError("private bot session observation is unavailable")
             session = observation.stdout.strip()
+            if session == "unknown":
+                # A clean stop leaves tmux's socket file (bot stop keeps it), and the
+                # observer reads that as unknown. As bot move does, only the kernel
+                # proof (inactive exact unit, empty cgroup where witnessed, socket
+                # refusing connections) reads it as absent; nothing is removed (#2227).
+                socket = (Path(spec.environment["TMUX_TMPDIR"]) / f"tmux-{os.getuid()}"
+                          / spec.label)
+                try:
+                    assert_quiescent(adapter, installed_file=Path(entry["installed"]),
+                                     target=entry["target"], socket_path=socket)
+                    session = "absent"
+                except (RuntimeError, OSError):
+                    pass
             enrolled = bool(unit.installed)
             active = dict(unit.properties).get("ActiveState", "unknown")
             if active not in {"active", "inactive", "unknown"}:
