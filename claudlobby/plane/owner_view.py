@@ -21,7 +21,7 @@ ReaderVerifier = Callable[[Scope], Awaitable[VerifiedReader]]
 
 
 class _ReadStopped(Exception):
-    """Unwind the response producer after access ends, including held streams."""
+    """Unwind a protected response producer on access loss or completed HEAD."""
 
 
 def _source_refusal(exc: BaseException) -> Exception | None:
@@ -162,7 +162,7 @@ class _OwnerReadGate:
 
 
 def create_owner_app(root: Path, *, verify_reader: ReaderVerifier,
-                     sampler=None, package=None, admit_reader=None):
+                     sampler=None, package=None):
     """Guard the canonical view, including static/health/error/stream paths.
 
     No default verifier and no public login/session route. Runtime callers
@@ -188,6 +188,4 @@ def create_owner_app(root: Path, *, verify_reader: ReaderVerifier,
 
     view.add_exception_handler(AccessDenied, source_refused)
     view.add_exception_handler(AccessUnavailable, source_refused)
-    if admit_reader is not None and not callable(admit_reader):
-        raise ValueError("an explicit trusted admission callback is required")
-    return _OwnerReadGate(view, paths.root, verify_reader, admit_reader)
+    return _OwnerReadGate(view, paths.root, verify_reader)
