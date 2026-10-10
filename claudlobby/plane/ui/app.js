@@ -74,10 +74,12 @@ function deliveryLine(msg, nudge = false) {
   if (nudge) {
     // A submitted prompt is not receiver proof, and says nothing about work.
     const delivered = msg.delivery === "delivered";
+    const failed = !delivered && latestTx(msg)?.event === "failed";
     const warning = msg.delivery === "altered" ? "The request arrived altered. "
       : msg.delivery === "truncated" ? "The request arrived short. " : "";
-    return `<div class="delivery ${delivered ? "ok" : warning ? "bad" : "pend"}">`
+    return `<div class="delivery ${delivered ? "ok" : failed || warning ? "bad" : "pend"}">`
       + esc(delivered ? "The lead received this update request."
+        : failed ? "The update request failed to reach the lead."
         : `${warning}Delivery to the lead is unconfirmed.`) + `</div>`;
   }
   // chunk P fold F4: prefer the SERVER's receiver-proven verdict. delivery_state
@@ -122,21 +124,21 @@ function nudgeReason(m, thread) {
       || !(m.assignment_id === null || id(m.assignment_id, "asg"))
       || !Number.isSafeInteger(m.ingest_seq) || m.ingest_seq < 2
       || (m.truncated !== 0 && m.truncated !== false)
-      || typeof m.body !== "string" || m.body.length > 65536) return null;
+      || typeof m.body !== "string" || m.body.length > 102400) return null;
   try {
     const body = JSON.parse(m.body);
     if (!body || Array.isArray(body) || Object.keys(body).sort().join() !== "assignment_id,by,kind,reason,task_id"
         || body.kind !== "task_nudge" || body.task_id !== m.work_item_id
         || body.assignment_id !== m.assignment_id || typeof body.by !== "string" || !body.by.trim() || body.by.length > 240
         || typeof body.reason !== "string" || !body.reason.trim() || body.reason.length > 16384
-        || /\u0000|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(body.by + body.reason)) return null;
+        || [body.by, body.reason].some(text => /\u0000|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(text))) return null;
     // Match nudge_body's sorted, ASCII JSON, including exact authored text.
     // This also refuses duplicate JSON keys and malformed Unicode evidence.
     const canonical = JSON.stringify({ assignment_id: body.assignment_id, by: body.by,
       kind: body.kind, reason: body.reason, task_id: body.task_id })
       .replace(/[\u007f-\uffff]/g, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
     if (canonical !== m.body) return null;
-    const matches = (thread.task_events || []).filter(event => {
+    const matches = thread.task_events.filter(event => {
       if (event.event !== "nudged" || event.work_item_id !== body.task_id
           || event.assignment_id !== body.assignment_id || event.ingest_seq !== m.ingest_seq - 1
           || typeof event.detail !== "string") return false;
@@ -184,15 +186,16 @@ function machineryBlock(m, prose = null) {
 }
 
 // The task ribbon renders SERVER facts: thread.delivered / thread.terminal.
-function ladder(thread) {
+function ladder(thread, nudged) {
   if (!thread.work_item_id) return "";
-  if (thread.messages.some(m => nudgeReason(m, thread) !== null)) {
+  if (nudged) {
     // Thread delivery includes the lead's nudge prompt. It cannot establish
     // assignment delivery or imply that the worker has started the task.
     const history = thread.task_events.filter(e => e.event === "accepted" || e.event === "progress"
       || Object.hasOwn(THREAD_TERMINAL_STATUS, e.event));
-    return history.length ? `<div class="t-ladder">Task history: ` + history.map(e =>
-      `<span class="step done">${esc(THREAD_TERMINAL_STATUS[e.event] || e.event)}</span>`).join("") + `</div>` : "";
+    const labels = [...new Set(history.map(e => THREAD_TERMINAL_STATUS[e.event] || e.event))];
+    return labels.length ? `<div class="t-ladder">Task history: ` + labels.map(label =>
+      `<span class="step done">${esc(label)}</span>`).join("") + `</div>` : "";
   }
   const events = thread.task_events.map((e) => e.event);
   const steps = [{ label: "dispatched", on: true }];
@@ -212,16 +215,20 @@ function ladder(thread) {
     + `${esc(s.label)}</span>`).join("") + `</div>`;
 }
 
-function threadTitle(t) {
+function threadTitle(t, reason) {
   if (t.title) return clip(t.title, 100);
   const first = t.messages[0];
-  const reason = first && nudgeReason(first, t);
-  if (reason !== null && reason !== undefined) return clip(reason.split("\n")[0], 100);
+  if (reason != null) return clip(reason.split("\n")[0], 100);
   if (first && (first.body_words || first.body)) {
     return clip((first.body_words || first.body).split("\n")[0], 100);
   }
   const cls = first ? first.message_class.replace("_", " ") : "conversation";
   return `${cls}${first ? ` from ${first.sender_short}` : ""}`;
+}
+
+function channelReceiptKey(t) {
+  // Receipt and transmission facts can change without another message/task event.
+  return JSON.stringify(t.messages.map(m => [m.msg_id, m.delivery, m.delivery_state, m.tx]));
 }
 
 function threadArticle(t) {
@@ -230,7 +237,9 @@ function threadArticle(t) {
     ? `${first.sender_short} → ${first.recipient_short || "—"}`
       + ` · ${ago(first.occurred_at)}`
     : "";
-  const nudgeOnly = t.messages.length > 0 && t.messages.every(m => nudgeReason(m, t) !== null);
+  // One recognition per message; the kicker, title, ribbon and rows share it.
+  const reasons = t.messages.map((m) => nudgeReason(m, t));
+  const nudgeOnly = reasons.length > 0 && reasons.every((r) => r !== null);
   const kicker = nudgeOnly ? "task update request" : t.work_item_id
     ? `work item${t.repo ? ` · ${esc(t.repo)}` : ""}` : "conversation";
   // U2: a cross-fleet thread carries a visible mark; its names arrive
@@ -239,8 +248,8 @@ function threadArticle(t) {
   const xfleet = t.cross_fleet
     ? `<span class="tag xfleet" title="sender and recipient are on`
       + ` different fleets">cross-fleet</span>` : "";
-  const msgs = t.messages.map((m) => {
-    const reason = nudgeReason(m, t);
+  const msgs = t.messages.map((m, i) => {
+    const reason = reasons[i];
     return `
     <div class="msg" data-msg-id="${esc(m.msg_id)}">
       <div class="who"><b>${esc(m.sender_short)}</b>
@@ -258,12 +267,13 @@ function threadArticle(t) {
   el.className = "thread";
   el.dataset.key = t.key;
   el.dataset.seq = String(t.latest_seq);
+  el.dataset.receipts = channelReceiptKey(t);
   el.dataset.room = currentFleet || "all";   // the room this card's names were rendered for
   el.innerHTML = `
     <div class="t-kicker">${kicker}</div>
-    <div class="t-head"><span class="t-title">${esc(threadTitle(t))}</span>
+    <div class="t-head"><span class="t-title">${esc(threadTitle(t, reasons[0]))}</span>
       ${xfleet}<span class="t-meta">${esc(attribution)}</span></div>
-    ${ladder(t)}
+    ${ladder(t, reasons.some((r) => r !== null))}
     ${msgs}`;
   return el;
 }
@@ -286,6 +296,7 @@ function renderChannel(env) {
     const prev = existing.get(t.key);
     frag.appendChild(prev && prev.dataset.seq === String(t.latest_seq)
                      && prev.dataset.room === room
+                     && prev.dataset.receipts === channelReceiptKey(t)
       ? prev : threadArticle(t));
   }
   el.replaceChildren(frag);

@@ -117,6 +117,7 @@ h2 .hint { text-transform: none; letter-spacing: 0; }
 .msg summary { font-size: 11px; color: var(--dim); cursor: pointer; }
 .msg .machinery { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
                   color: var(--dim); padding: 4px 0 0; }
+.msg .machinery.raw { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* tasks + attention */
 .card {

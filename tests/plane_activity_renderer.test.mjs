@@ -6,12 +6,16 @@ import { runInNewContext } from 'node:vm';
 const source = await readFile(new URL('../claudlobby/plane/ui/app.js', import.meta.url), 'utf8');
 const panel = await import(`data:text/javascript;base64,${Buffer.from(await readFile(new URL('../claudlobby/plane/ui/panel-state.js', import.meta.url), 'utf8')).toString('base64')}`);
 // Execute the real channel renderer, stopping before unrelated page mounting.
-const rendering = source.slice(0, source.indexOf('// Keyed render:')).replace(/^import .*;\n/gm, '');
+const rendering = source.slice(0, source.indexOf('// WHY a card needs you')).replace(/^import .*;\n/gm, '');
 assert.ok(rendering.includes('function threadArticle('));
-const api = runInNewContext(`${rendering}\n({threadArticle, nudgeReason})`, {
-  ...panel, currentFleet: 'example', document: {
+const channel = { children: [], querySelectorAll() { return this.children; },
+  replaceChildren(fragment) { this.children = fragment.children; } };
+const api = runInNewContext(`${rendering}\n({threadArticle, nudgeReason, renderChannel})`, {
+  ...panel, renderState() { return false; }, currentFleet: 'example', document: {
     documentElement: { style: { setProperty() {} } },
     createElement() { return { dataset: {}, innerHTML: '' }; },
+    getElementById() { return channel; },
+    createDocumentFragment() { return { children: [], appendChild(node) { this.children.push(node); } }; },
   },
 });
 const wi = `wi_${'1'.repeat(32)}`, msg = `msg_${'2'.repeat(32)}`;
@@ -62,6 +66,45 @@ test('only receiver delivery verdict confirms receipt; submission remains unconf
   assert.match(html(t), /receipt confirmed by the receiver/);
 });
 
+test('failed transmission remains a visible failure and receiver proof takes precedence', () => {
+  const t = thread(); t.messages[0].tx[0].event = 'failed';
+  assert.match(visible(html(t)), /delivery bad.*failed to reach the lead/);
+  t.messages[0].delivery = 'delivered';
+  assert.match(visible(html(t)), /delivery ok.*The lead received/);
+});
+
+test('receipt-only refresh updates the card, then reuses it when evidence is unchanged', () => {
+  const t = thread();
+  api.renderChannel({ data: { threads: [t] } });
+  const first = channel.children[0];
+  assert.match(first.innerHTML, /Delivery to the lead is unconfirmed/);
+  api.renderChannel({ data: { threads: [t] } });
+  assert.equal(channel.children[0], first);
+  t.messages[0].delivery = 'delivered';
+  t.messages[0].delivery_state = 'confirmed by receiver';
+  api.renderChannel({ data: { threads: [t] } });
+  const confirmed = channel.children[0];
+  assert.notEqual(confirmed, first);
+  assert.equal(confirmed.dataset.seq, first.dataset.seq);
+  assert.match(confirmed.innerHTML, /The lead received this update request/);
+  api.renderChannel({ data: { threads: [t] } });
+  assert.equal(channel.children[0], confirmed);
+  t.messages[0].delivery = null; t.messages[0].delivery_state = null;
+  t.messages[0].tx[0].event = 'failed';
+  api.renderChannel({ data: { threads: [t] } });
+  assert.match(channel.children[0].innerHTML, /failed to reach the lead/);
+});
+
+test('maximum bounded escaped reason stays readable, malformed string boundaries stay literal', () => {
+  const t = thread('漢'.repeat(16384));
+  assert.equal(api.nudgeReason(t.messages[0], t), '漢'.repeat(16384));
+  const bad = thread('\udc00');
+  const body = JSON.parse(bad.messages[0].body); body.by = 'human:\ud800';
+  bad.messages[0].body = wire(body);
+  bad.task_events[0].detail = JSON.stringify({ by: body.by, reason: body.reason });
+  assert.equal(api.nudgeReason(bad.messages[0], bad), null);
+});
+
 test('ordinary JSON text cannot masquerade as a task nudge even with a matching event', () => {
   for (const change of [{ message_class: 'chat' }, { command_type: 'task' }, { emitter: 'other' }]) {
     const t = thread(); Object.assign(t.messages[0], change);
@@ -96,10 +139,11 @@ test('unsafe authored text is escaped in prose, title fallback and raw evidence'
 });
 
 test('mixed task history shows recorded acts without deriving work from nudge delivery', () => {
-  const t = thread(); t.task_events.unshift({ event: 'accepted' }, { event: 'progress' });
+  const t = thread(); t.task_events.unshift({ event: 'accepted' }, { event: 'progress' }, { event: 'progress' });
   t.task_events.push({ event: 'completed' }); t.terminal = 'completed';
   assert.match(visible(html(t)), /Task history:.*accepted.*progress.*completed/);
   assert.doesNotMatch(visible(html(t)), /dispatched|working…|>delivered</);
+  assert.equal((visible(html(t)).match(/>progress</g) || []).length, 1);
 });
 
 test('ordinary message body, delivery line and assignment ribbon retain their presentation', () => {
