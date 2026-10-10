@@ -22,6 +22,7 @@ from types import MappingProxyType
 from typing import Literal, Mapping, TYPE_CHECKING
 
 from .plane.db import connect_ro, db_file
+from .message_payload import MessageBody
 from .plane.ids import ID_PATTERNS, mint_assignment_id, mint_event_id, mint_msg_id, mint_work_item_id
 from .plane.queries import checkin_event_scope_sql, fleet_alias_range, fleet_range_params
 from .plane.schema_state import PendingMigrationError, require_current_schema
@@ -711,6 +712,70 @@ def nudge(ctx: TaskOperationContext, request_id: str, task_id: str, *, reason: s
                                        message_id=message_id, notification=True,
                                        route=previous.intent.route if previous else route)
                 return _commit(store, ctx, conn, receipt, raws, check, admit_read=admit_read)
+
+
+def feedback_semantic_digest(task_id: str, *, body: MessageBody,
+                             expected_assignment_id: str | None) -> str:
+    """A task comment pins authored bytes and an explicit assignment or null."""
+    if not isinstance(task_id, str) or not re.fullmatch(ID_PATTERNS["work_item"], task_id):
+        raise TaskQueryError("feedback requires a canonical task ID")
+    if not isinstance(body, MessageBody):
+        raise TaskQueryError("feedback requires a validated message body")
+    if expected_assignment_id is not None and (not isinstance(expected_assignment_id, str)
+            or not re.fullmatch(ID_PATTERNS["assignment"], expected_assignment_id)):
+        raise TaskQueryError("expected assignment must be a canonical assignment ID or null")
+    return semantic_digest(dict(task_id=task_id, body=body.text,
+                                expected_assignment_id=expected_assignment_id, kind="task_feedback"))
+
+
+def feedback(ctx: TaskOperationContext, request_id: str, task_id: str, *, body: MessageBody,
+             expected_assignment_id: str | None, route: MessageRouteBinding,
+             admit_read=None) -> TaskOperationResult:
+    """Record one human comment on resolved work, including terminal work.
+
+    Existing requests are reconciliation-only. They cannot repeat recording or
+    become a notification retry, even when no original fact can be proved.
+    """
+    if ctx.caller_fleet_uid is not None or not re.fullmatch(r"human:[^\s:/]+", ctx.caller.alias):
+        raise TaskConflictError("task feedback requires an existing local human actor")
+    manager = _worker(ctx, ctx.context.fleet.manager)
+    if (not isinstance(route, MessageRouteBinding) or route.caller_alias != ctx.caller.alias
+            or route.caller_fleet_uid is not None or route.peer_fleet_uid != ctx.fleet_uid
+            or route.recipient_alias != manager.alias or route.manager_alias != manager.alias
+            or route.manager_uid != manager.uid):
+        raise ReceiptConflict("feedback route differs from the frozen human or fleet manager")
+    semantic = feedback_semantic_digest(task_id, body=body,
+                                        expected_assignment_id=expected_assignment_id)
+    with locked_request(ctx.root, ctx.fleet_uid, request_id) as store:
+        previous = _existing(store, ctx, "task.feedback", semantic, manager.uid,
+                             notification=True, route=route)
+        with _reader(ctx) as conn:
+            with _read_snapshot(conn, admit_read):
+                first = show_task(conn, task_id, fleet_uid=ctx.fleet_uid)
+            with _locked_task(store, first.task_id) as check:
+                with _read_snapshot(conn, admit_read):
+                    if _replayed(store, previous, conn):
+                        return _result(ctx, conn, previous, True)
+                    if previous is not None:
+                        raise TaskRecordingError(request_id,
+                            "retained feedback is inspection-only; recording cannot be repeated",
+                            task_id=previous.intent.task_id, assignment_id=previous.intent.assignment_id,
+                            message_id=previous.intent.message_id, recipient_uid=manager.uid,
+                            request_persisted=True)
+                    task = show_task(conn, task_id, fleet_uid=ctx.fleet_uid).require_resolved()
+                    assignment_id = task.current_assignment.assignment_id if task.current_assignment else None
+                    if expected_assignment_id != assignment_id:
+                        raise TaskConflictError("task assignment changed since feedback was selected")
+                    _identities(ctx, conn, (ctx.caller, manager))
+                    message_id = mint_msg_id()
+                    raw = _raw(ctx, request_id, "communication", dict(
+                        msg_id=message_id, sender=ctx.caller.alias, recipient=manager.alias,
+                        recipient_raw=ctx.context.fleet.manager, message_class="chat",
+                        work_item_id=task_id, assignment_id=assignment_id, body=body.text), None)
+                    receipt = _prepare(store, ctx, "task.feedback", semantic, (raw,), task_id,
+                        assignment_id, manager.uid, (manager,), message_id=message_id,
+                        notification=True, route=route)
+                return _commit(store, ctx, conn, receipt, (raw,), check, admit_read=admit_read)
 
 
 def reassign(ctx: TaskOperationContext, request_id: str, task_id: str, *, bot_id: str,

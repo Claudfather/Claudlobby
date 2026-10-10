@@ -25,7 +25,8 @@ def register_host_owner(hosts):
         route = actions.add_parser(action, help=help_text)
         route.add_argument("--json", action="store_true", help="Structured result (status only)")
         route.set_defaults(func=_dispatch, public_command=f"host.owner.{action}")
-    for capability, label in (("messages", "ordinary messages"), ("nudges", "selected-task nudges")):
+    for capability, label in (("messages", "ordinary messages"), ("nudges", "selected-task nudges"),
+                              ("feedback", "task-linked comments")):
         allow = actions.add_parser("allow-" + capability,
             help=f"Allow {label} as a local human in one active fleet (interactive)")
         allow.add_argument("--target-fleet", required=True, help="Explicit active fleet name")

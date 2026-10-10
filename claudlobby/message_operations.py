@@ -11,6 +11,7 @@ from __future__ import annotations
 from contextlib import closing, contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 import re
 import sqlite3
@@ -327,9 +328,11 @@ def send_committed_native_attempt(route: MessageRoute, package: PackageResources
     """
     if (not isinstance(store, RequestStore) or not isinstance(receipt, RequestReceipt)
             or receipt.request_id != request_id or receipt.intent.operation not in {
-                "task.nudge", "task.recheck", "assignment.deliver", "assignment.progress", "assignment.block",
+                "task.nudge", "task.recheck", "task.feedback", "assignment.deliver", "assignment.progress", "assignment.block",
                 "assignment.return", "assignment.complete", "assignment.fail"}):
         raise MessageConflict("strict native attempt requires a frozen task or linked report request")
+    if receipt.intent.operation == "task.feedback" and retry_uncertain:
+        raise MessageConflict("feedback notification cannot retry an uncertain attempt")
     if (not isinstance(envelope, RenderedNativeEnvelope) or
             not isinstance(envelope.body, str)):
         raise MessageConflict("typed rendered native envelope required")
@@ -358,6 +361,11 @@ def send_committed_native_attempt(route: MessageRoute, package: PackageResources
                                          persistence=persistence, strict=True)
     at = datetime.now(timezone.utc)
     parties = {route.caller.alias: route.caller.uid, route.peer.alias: route.peer.uid}
+    if intent.operation == "task.feedback":
+        # JSON quoting can expand the accepted 16 KiB comment to about 96 KiB.
+        # Allow the native lock/chunk/display budgets without changing pacing,
+        # replay policy or the shorter deadline used by other operations.
+        transport = partial(transport, timeout=120)
     return transmit_native_attempt(route, package, intent, request_id=request_id,
                                    reservation=reservation, envelope=envelope, modes=modes,
                                    parties=parties, persistence=persistence, store=store, at=at,

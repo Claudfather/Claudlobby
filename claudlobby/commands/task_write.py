@@ -79,6 +79,22 @@ def _deadline(value: str | None) -> str | None:
 
 def _inputs(args) -> dict:
     _request_id(args.request_id)
+    if args.public_command == "task.feedback":
+        from ..message_payload import MessageBody, MessagePayloadError
+        from ..plane.ids import ID_PATTERNS
+
+        try:
+            body = MessageBody.from_input(args.text)
+        except MessagePayloadError as exc:
+            raise CommandFailure("invalid_argument", str(exc)) from exc
+        if not isinstance(args.actor, str) or not re.fullmatch(r"human:[^\s:/]+", args.actor):
+            raise CommandFailure("invalid_argument", "--actor requires an existing local human: alias")
+        expected = args.expected_assignment
+        if expected != "none" and (not isinstance(expected, str)
+                or not re.fullmatch(ID_PATTERNS["assignment"], expected)):
+            raise CommandFailure("invalid_argument", "--expected-assignment requires a canonical assignment or none")
+        return {"task_id": _reference(args.task_id, "TASK_ID"), "body": body,
+                "expected_assignment_id": None if expected == "none" else expected}
     if args.public_command == "task.admit":
         return {"title": _text(args.title, "--title"), "body": _body(args.body_file),
                 "repo": _optional(args.repo, "--repo", r"[^/\s]+/[^/\s]+"),
@@ -151,7 +167,8 @@ def _nudge_envelope(result, route, by, reason):
             "Nudge: " + nudge_body(result.task_id, result.assignment_id, by, reason))
 
 
-def _committed_notification(ctx, route, package, result, envelope, *, send_on_replay=True):
+def _committed_notification(ctx, route, package, result, envelope, *, send_on_replay=True,
+                            allow_enter_repair=True):
     from ..message_operations import (RenderedNativeEnvelope, read_recipient_box,
                                       repair_held_delivery, send_committed_native_attempt)
     from ..message_queries import receipt as observe_receipt
@@ -189,7 +206,8 @@ def _committed_notification(ctx, route, package, result, envelope, *, send_on_re
                             request_persisted=True)
             else:
                 # The box just before the send, for the chip repair (#2105).
-                box_before = read_recipient_box(route, package)
+                if allow_enter_repair:
+                    box_before = read_recipient_box(route, package)
                 attempt = send_committed_native_attempt(
                     route, package, store, frozen,
                     RenderedNativeEnvelope(result.message_id, envelope),
@@ -208,7 +226,7 @@ def _committed_notification(ctx, route, package, result, envelope, *, send_on_re
                  and (not result.replayed or send_on_replay))
         observed = observe_receipt(ctx, result.message_id, destination=route.peer.alias,
                                    wait=10 if waits else 0)
-        if waits:
+        if waits and allow_enter_repair:
             repair, observed = repair_held_delivery(
                 route, package, result.message_id, first=observed, box_before=box_before,
                 observe=lambda wait: observe_receipt(ctx, result.message_id,
@@ -307,13 +325,63 @@ def nudge_bound_task(ctx, route, package, *, request_id, task_id, reason, by=Non
                         release_id=route.release_id, notification_data=notification)
 
 
+def feedback_bound_task(ctx, route, package, *, request_id, task_id, body,
+                        expected_assignment_id, admit_read=None):
+    """One linked comment and strict first notification; never a repair/retry."""
+    import json
+    from ..task_operations import TaskRecordingError, feedback
+
+    _request_id(request_id)
+    if (route.host_uid != ctx.host_uid or route.selected_fleet_uid != ctx.fleet_uid
+            or route.peer_fleet_uid != ctx.fleet_uid or route.caller != ctx.caller
+            or route.caller_fleet_uid is not None or ctx.caller_fleet_uid is not None
+            or route.peer != ctx.bots[ctx.context.fleet.manager] or route.manager != route.peer
+            or route.selected.paths.root != ctx.root or package != route.selected.paths.package):
+        raise CommandFailure("conflict", "feedback route differs from active task identities",
+                             release_id=route.release_id)
+    try:
+        result = feedback(ctx, request_id, task_id, body=body,
+            expected_assignment_id=expected_assignment_id, route=route.receipt_binding(), admit_read=admit_read)
+    except TaskRecordingError as exc:
+        committed = exc.recording == "committed"
+        data = {"request_id": request_id, "fleet": ctx.context.fleet.name, "task_id": exc.task_id,
+                "assignment_id": exc.assignment_id, "message_id": exc.message_id,
+                "recipient_uid": exc.recipient_uid, "recording": exc.recording,
+                "outcome": "committed" if committed else "unknown",
+                "request_persisted": exc.request_persisted, "notification": "not_attempted"}
+        raise CommandFailure("notification_failed" if committed else "unavailable",
+            "feedback recording " + ("committed" if committed else "is unconfirmed")
+            + "; notification was not attempted; inspect the original request",
+            data=data, release_id=route.release_id) from exc
+    # Native input collapses spaces. Escape them inside the JSON string so
+    # decoding the received comment preserves every authored byte.
+    comment = json.dumps(body.text, ensure_ascii=True).replace(" ", "\\u0020")
+    # The quoted body is comment content, not a control instruction or a reply parent.
+    envelope = ("[Claudlobby task feedback]\n"
+                f"Message: {result.message_id}\nFrom: {route.caller.alias}\nTo: {route.peer.alias}\n"
+                f"Task: {result.task_id}\nAssignment: {result.assignment_id or '-'}\n"
+                "Comment: " + comment)
+    notification = _committed_notification(ctx, route, package, result, envelope,
+                                           send_on_replay=False, allow_enter_repair=False)
+    data = {"request_id": request_id, "fleet": ctx.context.fleet.name, "task_id": result.task_id,
+            "assignment_id": result.assignment_id, "current_task_state": result.task.state,
+            "recording": result.recording, "outcome": "unchanged" if result.replayed else "committed",
+            "replayed": result.replayed, **notification}
+    if data["notification"] != "received" or data["request_persisted"] is not True:
+        raise CommandFailure("notification_failed",
+            "feedback recording committed; lead notification is unverified; inspect the original request",
+            data=data, release_id=route.release_id)
+    return CommandOutput(data, release_id=route.release_id,
+        lines=(f"{result.task_id}\t{result.message_id}\trecording=committed\tnotification=received",))
+
+
 def dispatch(args) -> CommandOutput:
     from ..activation_state import ActivationError
     from ..config_plan import PlanError
     from ..context import BotNotFoundError
     from ..message_context import MessageContextError, resolve_message_route
     from ..operation_context import (OperationContextError, OperationContextUnavailableError,
-                                     resolve_operation_scope, resolve_task_mutation_context)
+                                     bind_task_context, resolve_operation_scope, resolve_task_mutation_context)
     from ..paths import InvalidPathSelector
     from ..plane.migrations import DowngradeError
     from ..plane.schema_state import PendingMigrationError
@@ -334,6 +402,13 @@ def dispatch(args) -> CommandOutput:
             raise CommandFailure("conflict", "seed configuration has no task mutations")
         values = _inputs(args)
         selected, origin = resolve_operation_scope(root=args.root, fleet=args.fleet)
+        if args.public_command == "task.feedback" and (origin is not None or any(
+                key in os.environ for key in ("FLEET_ROOT", "CLAUDLOBBY_TIMER_CONTEXT", "BOT_SERVICE",
+                                               "CLAUDLOBBY_RELEASE_ID"))):
+            # Fleet timers and host update children can have no bot origin.
+            # Their fleet/service/release carriers cannot borrow a human; the
+            # timer marker is also refused defensively, even when empty.
+            raise CommandFailure("conflict", "task feedback requires an explicit local human caller")
         fleet_name = selected.fleet.name
         if selected.paths.seed:
             raise CommandFailure("conflict", "seed configuration has no task mutations")
@@ -346,9 +421,11 @@ def dispatch(args) -> CommandOutput:
         with mutation_admission(root, identity=RuntimeIdentity.current(),
                                 expected_release=bound_release) as release:
             release_id = release.release_id
-            ctx = resolve_task_mutation_context(root=root, fleet=selected.fleet.name,
-                                                package=selected.paths.package)
-            if args.public_command in _REPORTS or args.public_command == "task.nudge":
+            ctx = (bind_task_context(selected, operator_alias=args.actor)
+                   if args.public_command == "task.feedback" else
+                   resolve_task_mutation_context(root=root, fleet=selected.fleet.name,
+                                                 package=selected.paths.package))
+            if args.public_command in _REPORTS or args.public_command in {"task.nudge", "task.feedback"}:
                 if args.public_command in _REPORTS and (origin is None or origin.bot_id is None):
                     raise CommandFailure("conflict", "linked assignment reports require a generated bot caller",
                                          release_id=release_id)
@@ -373,6 +450,9 @@ def dispatch(args) -> CommandOutput:
                 notification_data = _committed_notification(
                     ctx, route, selected.paths.package, result,
                     _report_envelope(result, route, values["report"]))
+            elif args.public_command == "task.feedback":
+                return feedback_bound_task(ctx, route, selected.paths.package,
+                                           request_id=args.request_id, **values)
             elif args.public_command == "task.nudge":
                 return nudge_bound_task(ctx, route, selected.paths.package,
                     request_id=args.request_id, task_id=values["task_id"],
@@ -403,7 +483,7 @@ def dispatch(args) -> CommandOutput:
     except (OperationContextUnavailableError, PendingMigrationError, DowngradeError,
             sqlite3.Error, OSError) as exc:
         raise CommandFailure("unavailable", "task identity or storage is unavailable",
-                             retryable=True, release_id=release_id) from exc
+                             retryable=args.public_command != "task.feedback", release_id=release_id) from exc
     except (ReceiptConflict, ReceiptBusy) as exc:
         raise CommandFailure("conflict", "task request conflicts with recorded history or another caller",
                              release_id=release_id) from exc
@@ -412,7 +492,8 @@ def dispatch(args) -> CommandOutput:
                              release_id=release_id) from exc
     except TaskQueryError as exc:
         raise CommandFailure(exc.code, str(exc), hint=exc.hint,
-                             retryable=exc.retryable, release_id=release_id) from exc
+                             retryable=exc.retryable and args.public_command != "task.feedback",
+                             release_id=release_id) from exc
     except (ActivationError, PlanError, OperationContextError, MessageContextError, BotNotFoundError,
             TaskStateError) as exc:
         raise CommandFailure("conflict", "active task scope or state is incomplete",
