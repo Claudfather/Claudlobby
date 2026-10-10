@@ -1,4 +1,4 @@
-import { ActionState, scopeKey, targetKey, validContext } from "/action-state.js";
+import { ActionState, rowKey, scopeKey, validContext } from "/action-state.js";
 import { esc, ago, stateBlock } from "/panel-state.js";
 
 // One presentation for direct and embedded Plane. No transport is constructed
@@ -10,7 +10,7 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
   try { storage = sessionStorage; } catch { storage = null; }
   const state = new ActionState(storage);
   let context = null, room = null, epoch = 0, board = null, channel = null;
-  let selected = null, target = null, kind = "message", sending = false, opener = null;
+  let selected = null, target = null, kind = "message", sending = false, inFlightRequest = null, opener = null, openerIdentity = null;
   let notice = "Choose a team to see its available actions.";
   root.innerHTML = `<div class="work-loop-head"><div><h2>Talk to your team</h2>
     <p id="work-scope"></p></div><span id="work-mode" class="tag"></span></div>
@@ -25,10 +25,13 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
         <button id="work-send" type="submit" class="pill">Send message</button></div>
     </form>
     <p id="work-notice" role="status" aria-live="polite"></p>
-    <div id="work-pending"></div>`;
+    <div id="work-pending"></div>
+    <div id="work-recoverable"></div>
+    <button id="work-clear-saved" class="pill ghost" type="button" hidden>Clear unreadable saved requests</button>`;
   const $ = id => document.getElementById(id);
   const row = () => context && target ? { scope: context.scope, kind, target } : null;
-  const selectionKey = () => row() ? JSON.stringify([scopeKey(context.scope), kind, targetKey(target)]) : "";
+  const selectionKey = () => row() ? rowKey(row()) : "";
+  const leadId = c => (c.recipients.find(r => r.lead) || c.recipients[0]).id;
   const readDraft = () => row() ? state.draft(row()) : "";
   function saveDraft() {
     if (!row()) return;
@@ -40,7 +43,10 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
     $("work-pending").innerHTML = rows.map(p => `<div class="pending-action">
       <div><b>Awaiting confirmation</b><p>${esc(p.kind)} · ${esc(p.target.recipient)}${p.target.task_id ? ` · task ${esc(p.target.task_id)}` : ""}</p>
       <small>Submitted ${esc(ago(p.submitted_at))} · ${esc(p.request_id)}</small></div>
-      <button class="pill ghost" type="button" data-request="${esc(p.request_id)}">Check receipt</button></div>`).join("");
+      <button class="pill ghost" type="button" data-request="${esc(p.request_id)}">Check receipt</button>
+      <button class="pill ghost" type="button" data-discard="${esc(p.request_id)}"${p.request_id === inFlightRequest ? " disabled" : ""}>Discard saved request</button></div>`).join("")
+      + [...state.discarded.values()].filter(p => context && scopeKey(p.scope) === scopeKey(context.scope))
+        .map(p => `<p class="note">Discarded locally · ${esc(p.kind)} to ${esc(p.target.recipient)}${p.target.task_id ? ` · task ${esc(p.target.task_id)}` : ""} · ${esc(p.request_id)}. Outcome unknown; this ID is retained only until this tab reloads.</p>`).join("");
   }
   function paint({ restoreDraft = false } = {}) {
     const usable = !!context && !!target;
@@ -63,6 +69,11 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
     $("work-notice").textContent = usable && state.storageError
       ? "This tab cannot safely save or read pending receipts. Sending is disabled; existing requests were not resent."
       : notice;
+    $("work-recoverable").innerHTML = state.corruptStorage && state.recoverable.length
+      ? '<p class="note">Readable saved request IDs from this tab. Copy any needed IDs before clearing the damaged records.</p>'
+        + state.recoverable.map(p => `<p class="note">${esc(p.scope.fleet)} · ${esc(p.kind)} to ${esc(p.target.recipient)}${p.target.task_id ? ` · task ${esc(p.target.task_id)}` : ""} · ${esc(p.request_id)}</p>`).join("")
+      : "";
+    $("work-clear-saved").hidden = !state.corruptStorage;
     pendingRows();
   }
   function closeDetail() {
@@ -85,14 +96,16 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
       if (room !== "all" && validContext(value) && value.room === room && value.scope.fleet === room
           && typeof api.sendAction === "function" && typeof api.actionReceipt === "function") {
         context = value;
-        target = { recipient: (value.recipients.find(r => r.lead) || value.recipients[0]).id, task_id: null };
+        target = { recipient: leadId(value), task_id: null };
         kind = "message";
         notice = value.simulation ? "Example actions are recorded only by the test service. No real agents receive them." : "";
       } else notice = "This host has not enabled an authorized browser action service.";
+      if (selected) $("task-detail-refresh").hidden = false;
       paint({ restoreDraft: true });
     }).catch(() => {
       if (token !== epoch) return;
       notice = "Could not check action access. Your draft is kept in this tab.";
+      if (selected) $("task-detail-refresh").hidden = false;
       paint();
     });
   }
@@ -131,8 +144,8 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
       button.onclick = () => {
         saveDraft();
         kind = button.dataset.kind;
-        target = { recipient: (context.recipients.find(r => r.lead) || context.recipients[0]).id, task_id: task.task_id };
-        opener = null;
+        target = { recipient: leadId(context), task_id: task.task_id };
+        opener = null; openerIdentity = null;
         closeDetail(); notice = context.simulation ? "Example task action. No real bot delivery." : "";
         paint({ restoreDraft: true }); $("work-body").focus();
       };
@@ -149,13 +162,25 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
     const button = event.target.closest("[data-task-open]");
     if (!button) return;
     selected = { id: button.dataset.taskOpen, fleet: button.dataset.taskFleet || "" };
-    opener = button;
+    opener = button; openerIdentity = { ...selected, panel: button.closest("#attention, #tasks")?.id };
     detail(); $("task-detail-refresh").hidden = true;
     dialog.showModal(); $("task-detail-close").focus();
   });
   $("task-detail-close").onclick = closeDetail;
   $("task-detail-refresh").onclick = () => { detail(); $("task-detail-refresh").hidden = true; };
-  dialog.addEventListener("close", () => { selected = null; if (opener?.isConnected) opener.focus(); });
+  dialog.addEventListener("close", () => {
+    selected = null;
+    if (!openerIdentity) return;
+    const rail = $("rail-right"), buttons = [...rail.querySelectorAll("[data-task-open]")];
+    const matches = button => button.dataset.taskOpen === openerIdentity.id
+      && (button.dataset.taskFleet || "") === openerIdentity.fleet;
+    const panelButtons = openerIdentity.panel
+      ? [...($(openerIdentity.panel)?.querySelectorAll("[data-task-open]") || [])] : [];
+    const replacement = panelButtons.find(matches) || buttons.find(matches);
+    const focusTarget = opener?.isConnected ? opener : replacement || buttons[0] || rail;
+    if (focusTarget === rail) rail.tabIndex = -1;
+    focusTarget.focus(); opener = null; openerIdentity = null;
+  });
   $("work-body").addEventListener("input", saveDraft);
   $("work-recipient").onchange = () => {
     saveDraft(); target = { ...target, recipient: $("work-recipient").value };
@@ -165,6 +190,7 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
     saveDraft(); target = { ...target, task_id: null }; kind = "message";
     notice = ""; paint({ restoreDraft: true }); $("work-body").focus();
   };
+  const requestLabel = request => `${request.kind} to ${request.target.recipient}${request.target.task_id ? ` · task ${request.target.task_id}` : ""}`;
   function receiptNotice(status, simulation) {
     const prefix = simulation ? "Example receipt: " : "";
     return prefix + ({ delivered: simulation ? "simulated delivery confirmed. No real bot received this." : "delivery confirmed by the host.",
@@ -175,40 +201,60 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
     event.preventDefault();
     if (!context || !target || sending) return;
     saveDraft(); const originContext = context, token = epoch, selection = selectionKey();
-    let request;
+    let request, restoreDraft = false;
     try {
-      request = state.begin(context, kind, target, $("work-body").value, crypto.randomUUID());
-      sending = true; notice = "Sending…"; paint();
+      if (typeof globalThis.crypto?.randomUUID !== "function")
+        throw new Error("A safe request ID is unavailable. Nothing was sent.");
+      let requestId;
+      try { requestId = globalThis.crypto.randomUUID(); }
+      catch { throw new Error("A safe request ID is unavailable. Nothing was sent."); }
+      request = state.begin(context, kind, target, $("work-body").value, requestId);
+      sending = true; inFlightRequest = request.request_id; notice = "Sending…"; paint();
       const receipt = await api.sendAction(request);
       const status = state.accept(request, receipt);
-      if (token === epoch && selection === selectionKey()) {
-        notice = receiptNotice(status, originContext.simulation);
-        paint({ restoreDraft: status === "delivered" });
+      if (token === epoch) {
+        notice = `${requestLabel(request)}: ${receiptNotice(status, originContext.simulation)}`;
+        restoreDraft = status === "delivered" && selection === selectionKey();
       }
       refresh();
     } catch (error) {
-      if (token === epoch && selection === selectionKey()) notice = request
-        ? "Outcome unknown. Your draft is kept. Check the original receipt before sending again."
+      if (token === epoch) notice = request
+        ? `${requestLabel(request)}: Outcome unknown. Your draft is kept. Check the original receipt before sending again.`
         : error.message;
     } finally {
-      sending = false;
-      paint();
+      sending = false; inFlightRequest = null;
+      paint({ restoreDraft });
     }
   };
+  $("work-clear-saved").onclick = () => {
+    if (!state.corruptStorage || !globalThis.confirm("Saved request records cannot be read. They may include requests already delivered or still awaiting delivery. Copy any readable IDs shown above first. Clearing them removes their saved receipt IDs and allows new requests; it does not cancel or resend anything. Clear these unreadable records?")) return;
+    try { state.clearCorruptStorage(); notice = "Unreadable saved requests cleared. Nothing was sent or cancelled."; }
+    catch (error) { notice = error.message; }
+    paint();
+  };
   $("work-pending").onclick = async event => {
-    const button = event.target.closest("[data-request]");
+    const discardButton = event.target.closest("[data-discard]");
+    const button = discardButton || event.target.closest("[data-request]");
     if (!button || !context) return;
-    const request = state.pending.find(p => p.request_id === button.dataset.request && scopeKey(p.scope) === scopeKey(context.scope));
+    const request = state.pending.find(p => p.request_id === (discardButton ? button.dataset.discard : button.dataset.request) && scopeKey(p.scope) === scopeKey(context.scope));
     if (!request) return;
-    const token = epoch, simulation = context.simulation;
+    if (discardButton) {
+      if (request.request_id === inFlightRequest) return;
+      if (!globalThis.confirm(`Request ${request.request_id} may already have been delivered or may still be delivered. Copy this ID before discarding: it is retained only until this tab reloads. Discarding stops saving its receipt and lets you send a new request, which could duplicate the original. Nothing will be cancelled or resent. Discard this saved request?`)) return;
+      try { state.discard(request); notice = `Discarded saved request ${request.request_id}. Its outcome remains unknown; nothing was cancelled or resent.`; }
+      catch (error) { notice = error.message; }
+      paint(); return;
+    }
+    const token = epoch, simulation = context.simulation, selection = selectionKey();
+    const label = requestLabel(request);
     button.disabled = true;
     try {
       const status = state.accept(request, await api.actionReceipt(request));
-      if (token === epoch) notice = receiptNotice(status, simulation);
+      if (token === epoch) notice = `${label}: ${receiptNotice(status, simulation)}`;
       refresh();
     } catch {
-      if (token === epoch) notice = "Receipt unavailable or mismatched. Outcome remains unknown; nothing was resent.";
-    } finally { if (token === epoch) paint({ restoreDraft: true }); }
+      if (token === epoch) notice = `${label}: Receipt unavailable or mismatched. Outcome remains unknown; nothing was resent.`;
+    } finally { if (token === epoch) paint({ restoreDraft: selection === selectionKey() }); }
   };
   paint();
   return { setRoom, update };

@@ -1257,8 +1257,11 @@ $("search").addEventListener("input", () => {
 // has initialized. Placed mid-file it read those bindings in their temporal
 // dead zone and threw on first load, freezing the page at its loading markup.
 $("focus-overlay").hidden = true;   // a restored-open modal never survives a load
-["channel", "tasks", "attention", "fleet"].forEach((id) =>
-  renderState($(id), { state: "loading" }));
+function showLoading() {
+  ["channel", "tasks", "attention", "fleet"].forEach((id) =>
+    renderState($(id), { state: "loading" }));
+}
+showLoading();
 const workLoop = mountWorkLoop({ api: interactionApi, renderThread: threadArticle, refresh: scheduleRefresh });
 let workRoom;
 function syncWorkRoom() {
@@ -1266,8 +1269,7 @@ function syncWorkRoom() {
   if (workRoom === room) return false;
   workRoom = room;
   workLoop.setRoom(room);
-  for (const id of ["channel", "tasks", "attention", "fleet"])
-    renderState($(id), { state: "loading" });
+  showLoading();
   return true;
 }
 refreshBoards();

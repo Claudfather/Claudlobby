@@ -29,7 +29,7 @@ function tasks(room) {
     {task_id:id+'-checklist',title:'Adding a clearer first-run checklist',state:'active',attention:false,last_event:{event:'progress',occurred_at:now()}},
   ].map(t=>({...t,fleet:room,created_at:now(),resolved:true,issues:[],assignment_count:1,assignment_history:[],current_assignment:{assignee_short:'Engineer',assignee_alias:'engineer',dispatch_message_id:id+'-dispatch'},delivery:{integrity:'synthetic receipt'}}));
 }
-function thread(room, task) {
+function thread(task) {
   return {key:task.task_id,work_item_id:task.task_id,title:task.title,latest_seq:1,task_events:[],delivered:true,terminal:task.state==='completed'?'completed':null,messages:[{msg_id:task.task_id+'-report',message_class:'report',sender_short:'Engineer',recipient_short:'Team lead',occurred_at:now(),privacy:'full',body:task.state==='completed'?'I shortened signup to three steps and wrote the remaining questions in the review note. This example result still needs your review.':'The first draft is ready. I need a decision on the audience before choosing the next examples.',body_words:null,delivery_state:'delivered'}]};
 }
 export async function jget(url) {
@@ -41,7 +41,7 @@ export async function jget(url) {
   if(u.pathname==='/api/tasks') return env({tasks:active.flatMap(tasks),issue_count:0,truncated:false});
   if(u.pathname==='/api/channel') {
     const saved=await fetch('/fixture/records').then(r=>r.json());
-    return env({threads:[...saved.filter(r=>active.includes(r.scope.fleet)&&r.status!=='rejected').map((r,i)=>({key:r.request_id,work_item_id:r.target.task_id,title:r.kind+' to '+r.target.recipient,latest_seq:10+i,task_events:[],delivered:r.status==='delivered',messages:[{msg_id:r.request_id,message_class:'message',sender_short:'You',recipient_short:r.target.recipient,occurred_at:r.submitted_at,privacy:'full',body:r.body,delivery_state:r.status}]})),...active.flatMap(room=>tasks(room).slice(0,2).map(t=>thread(room,t)))]});
+    return env({threads:[...saved.filter(r=>active.includes(r.scope.fleet)&&r.status!=='rejected').map((r,i)=>({key:r.request_id,work_item_id:r.target.task_id,title:r.kind+' to '+r.target.recipient,latest_seq:10+i,task_events:[],delivered:r.status==='delivered',messages:[{msg_id:r.request_id,message_class:'message',sender_short:'You',recipient_short:r.target.recipient,occurred_at:r.submitted_at,privacy:'full',body:r.body,delivery_state:r.status}]})),...active.flatMap(room=>tasks(room).slice(0,2).map(t=>thread(t)))]});
   }
   if(u.pathname==='/api/identities') return env({identities:active.flatMap(room=>recipients.map(r=>({alias:r.id,short:r.label,kind:'actor',fleet:room,last_seen:now()})))});
   if(u.pathname==='/api/presence') return env({bots:[],counts:{}});

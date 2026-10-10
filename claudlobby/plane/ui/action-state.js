@@ -4,13 +4,14 @@ const VERBS = new Set(["message", "feedback", "nudge"]);
 const FIELDS = ["workspace", "host", "fleet", "viewer"];
 const bounded = value => typeof value === "string" && value.length > 0 && value.length <= 240;
 export const scopeKey = scope => JSON.stringify(FIELDS.map(key => scope?.[key]));
-export const targetKey = target => JSON.stringify([target?.recipient, target?.task_id || ""]);
-const rowKey = row => JSON.stringify([scopeKey(row.scope), row.kind, targetKey(row.target)]);
+const targetKey = target => JSON.stringify([target?.recipient, target?.task_id || ""]);
+export const rowKey = row => JSON.stringify([scopeKey(row.scope), row.kind, targetKey(row.target)]);
 const validScope = scope => scope && FIELDS.every(key => bounded(scope[key]));
 const validTarget = target => target && bounded(target.recipient)
   && (target.task_id === null || bounded(target.task_id));
 const validRow = row => row && bounded(row.request_id) && validScope(row.scope)
-  && VERBS.has(row.kind) && validTarget(row.target) && Number.isFinite(Date.parse(row.submitted_at));
+  && VERBS.has(row.kind) && validTarget(row.target) && bounded(row.submitted_at)
+  && Number.isFinite(Date.parse(row.submitted_at));
 
 export function validContext(context) {
   return context?.version === 1 && validScope(context.scope)
@@ -37,15 +38,24 @@ export class ActionState {
     this.drafts = new Map();
     this.sentBodies = new Map();
     this.pending = [];
+    this.recoverable = [];
     this.storageError = false;
+    this.corruptStorage = false;
+    this.discarded = new Map();
+    let read = false;
     try {
       const raw = storage.getItem(key);
-      if (raw && raw.length > 50000) throw new Error("Pending data too large");
+      read = true;
       const rows = raw ? JSON.parse(raw) : [];
-      if (!Array.isArray(rows) || rows.length > 20 || !rows.every(validRow))
+      // Preserve every readable ID before refusing a mixed/oversized store.
+      // These rows are view/copy only: receipt/discard writes must not overwrite
+      // the invalid records before the explicit recovery confirmation.
+      if (Array.isArray(rows)) this.recoverable = rows.filter(validRow).map(row => this.metadata(row));
+      if ((raw && raw.length > 50000) || !Array.isArray(rows) || rows.length > 20 || !rows.every(validRow))
         throw new Error("Pending data cannot be read");
-      this.pending = rows.map(row => this.metadata(row));
-    } catch { this.storageError = true; }
+      this.pending = this.recoverable;
+      this.recoverable = [];
+    } catch { this.storageError = true; this.corruptStorage = read; }
   }
 
   metadata(row) {
@@ -80,10 +90,35 @@ export class ActionState {
       throw new Error("Pending requests cannot be saved. Nothing was sent.");
     const rows = [...this.pending, this.metadata(request)];
     // Must succeed BEFORE the adapter can send. Never lose an uncertain ID.
-    this.storage.setItem(this.key, JSON.stringify(rows));
+    try { this.storage.setItem(this.key, JSON.stringify(rows)); }
+    catch { throw new Error("Pending requests cannot be saved. Nothing was sent."); }
     this.pending = rows;
     this.sentBodies.set(requestId, body);
     return { ...this.metadata(request), body };
+  }
+
+  // Only the explicit, confirmed UI recovery action calls this. Never clear
+  // unreadable records during startup or send, since they may hold uncertain IDs.
+  clearCorruptStorage() {
+    if (!this.corruptStorage) return;
+    try { this.storage.setItem(this.key, "[]"); }
+    catch { throw new Error("Saved requests could not be cleared. Sending remains disabled."); }
+    this.pending = [];
+    this.recoverable = [];
+    this.storageError = false;
+    this.corruptStorage = false;
+  }
+
+  discard(request) {
+    const rows = this.pending.filter(p => p.request_id !== request.request_id
+      || rowKey(p) !== rowKey(request));
+    if (rows.length === this.pending.length) return;
+    try { this.storage.setItem(this.key, JSON.stringify(rows)); }
+    catch { throw new Error("Saved request could not be discarded. Its receipt is still pending."); }
+    this.pending = rows;
+    // Retain IDs and context for this tab, even after releasing its send block.
+    this.discarded.set(request.request_id, this.metadata(request));
+    this.sentBodies.delete(request.request_id);
   }
 
   accept(request, receipt) {
@@ -93,6 +128,9 @@ export class ActionState {
         || rowKey(p) !== rowKey(request));
       this.storage.setItem(this.key, JSON.stringify(rows));
       this.pending = rows;
+      const discarded = this.discarded.get(request.request_id);
+      if (discarded && rowKey(discarded) === rowKey(request))
+        this.discarded.delete(request.request_id);
     }
     // A new draft typed while an old request was pending must not be cleared.
     const body = request.body ?? this.sentBodies.get(request.request_id);
