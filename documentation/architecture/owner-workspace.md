@@ -119,3 +119,29 @@ and stage it directly at the pinned host. Current different-site deployment
 aliases, actual browser local-network consent, real native ingress and connected
 read carrier require separate proof. No browser or real host connection is
 claimed by synthetic ingress/HTTPX mock tests.
+
+## Before the first team
+
+An assembled sealed release can explicitly prepare identity and owner authority
+with `claudlobby --root DATA_ROOT host owner initialize --before-first-fleet`.
+The terminal confirms this preparation; the default `initialize` behavior is
+unchanged. The optional preparation marker is recorded in the same owner
+authority transaction; absence of a recorder alone never enables setup fallback.
+No release selection, begun activation, runtime, recorder, queues, or
+unknown Plane files are accepted as a fresh host. Pairing and workspace approval
+grant neither activation nor fleet actions. Private reads remain recorder-bound.
+
+For this pre-activation state the owner server defaults to the private
+`state/owner/owner.sock`, outside recorder storage. An explicit socket must also
+be outside `state/plane`; existing hosts retain their original socket default.
+After first activation, continue using the explicit original socket if Serve is
+configured for that path; no socket is moved automatically.
+
+First activation preserves only validated private owner authority files. It
+attests its newly initialized recorder with the existing source-binding owner
+before ingest or bots start, then permanently retires the preparation marker.
+Bootstrap resume can retire it again but cannot rearm it; loss of external
+recorder/selection/runtime files never makes a used installation fresh again.
+Imported/existing recorder data still requires
+explicit source binding and the established activation/recovery path. Browser
+team launch authority and actual cold-host acceptance are separate work.

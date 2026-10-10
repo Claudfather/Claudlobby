@@ -7,6 +7,8 @@ query checks retained host facts and the marker in its own SQLite snapshot.
 from __future__ import annotations
 
 import sqlite3
+import os
+import stat
 import time
 from pathlib import Path
 
@@ -185,3 +187,66 @@ def bind_source(root: Path, *, expected_host_uid: str | None = None) -> str:
     finally:
         if conn is not None:
             conn.close()  # rolls back every refused binding
+
+
+def authority_only_plane(root: Path, *, allow_absent: bool = False) -> None:
+    """Validate only existing owner storage, never recorder/queue/socket content.
+
+    Bootstrap may call this after its journal begins. It is not setup admission
+    and deliberately does not treat a missing recorder on an old host as fresh.
+    """
+    from .owner_access import OwnerAccess
+
+    root = Path(root).absolute()
+    directory = db_file(root).parent
+    try:
+        if root.resolve() != root or (root / "state").resolve() != root / "state":
+            raise SourceUnavailable("fresh owner storage unavailable")
+        if not directory.exists() and not directory.is_symlink():
+            if allow_absent:
+                return
+            raise SourceUnavailable("fresh owner storage unavailable")
+        info = directory.lstat()
+        if not stat.S_ISDIR(info.st_mode):
+            raise SourceUnavailable("fresh owner storage unavailable")
+        entries = list(directory.iterdir())
+        if not entries and allow_absent:
+            return
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise SourceUnavailable("fresh owner storage unavailable")
+        names = {path.name for path in entries}
+        if ("owner-access.db" not in names or names - {
+                "owner-access.db", "owner-access.db-wal", "owner-access.db-shm", "owner-access.db-journal"}):
+            raise SourceUnavailable("fresh owner storage unavailable")
+        for path in entries:
+            info = path.lstat()
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) != 0o600):
+                raise SourceUnavailable("fresh owner storage unavailable")
+        OwnerAccess(root).validate_storage()
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        raise SourceUnavailable("fresh owner storage unavailable") from exc
+
+
+def fresh_owner_setup(root: Path, *, allow_absent: bool = False) -> None:
+    """No selection, activation or runtime; owner preparation grants no launch."""
+    from ..activation_state import ActivationError, read_selection
+
+    root = Path(root).absolute()
+    try:
+        if not root.is_dir() or read_selection(root) is not None:
+            raise SourceUnavailable("fresh owner setup unavailable")
+        for path in (root / "runtime", root / "state/activations"):
+            if path.is_symlink() or path.exists() and (not path.is_dir() or next(path.iterdir(), None) is not None):
+                raise SourceUnavailable("fresh owner setup unavailable")
+        authority_only_plane(root, allow_absent=allow_absent)
+    except (OSError, ValueError, ActivationError) as exc:
+        raise SourceUnavailable("fresh owner setup unavailable") from exc
+
+
+def inspect_owner_setup(root: Path) -> str:
+    """Setup-only admission; private reads/actions always use inspect_source."""
+    if os.path.lexists(db_file(root)):
+        return inspect_source(root)  # Existing/unbound/foreign recorder never falls back.
+    fresh_owner_setup(root)
+    return source_host_uid(root)

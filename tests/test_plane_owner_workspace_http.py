@@ -406,3 +406,41 @@ def test_shutdown_cancels_owned_identity_wait_before_read_lifespan_completion(ht
         assert cancelled.is_set() and not consumer._workers and not consumer._operations
         assert responses[0]["status"] == 503
     asyncio.run(scenario())
+
+
+def test_fresh_owner_workspace_pairing_uses_no_recorder_or_read_session(tmp_path, profile):
+    from claudlobby.plane.ids import ensure_host_uid
+    from claudlobby.plane.db import db_file
+    ensure_host_uid(tmp_path / "state")
+    clock = [1800000000.0]
+    store = OwnerAccess.initialize(tmp_path, clock=lambda: clock[0])
+    store.prepare_first_fleet()
+    pair = store.begin_pairing(OWNER)
+    owner = store.confirm_pairing(pair.token, expected_principal=OWNER)
+    store.workspace().initialize(expected_owner=owner)
+    async def verify(scope):
+        return OWNER
+    app = create_owner_browser_app(tmp_path, verify_principal=verify,
+        expected_origin=HOST, sampler=_Sampler({}), workspace_bootstrap=WorkspaceBootstrapConfig(ISSUER, PLANE))
+    app.access._clock = lambda: clock[0]
+    async def keys(_):
+        return json.dumps({"keys": [profile[1]]}).encode()
+    app.workspace_bootstrap.keys.get = keys
+    fixture = (app, store, [OWNER], clock, profile)
+    with TestClient(app, base_url=HOST) as client:
+        challenge = post(client, "challenge")
+        assert challenge.status_code == 202
+        response = post(client, "stage", {"nonce": challenge.json()["nonce"],
+                                          "assertion": token(fixture, challenge.json())})
+        assert response.status_code == 202
+        proposal = store.workspace().inspect(challenge.json()["nonce"])
+        store.workspace().confirm(expected_proposal=proposal)
+        assert client.post("/api/owner/login", json={}, headers={"Origin": HOST,
+            "X-Claudlobby-Owner": "1", "Sec-Fetch-Site": "same-origin"}).status_code == 503
+        assert client.get("/api/overview").status_code == 403
+        connected = client.post("/api/owner/connected/challenge", json={}, headers={
+            "Origin": PLANE, "X-Claudlobby-Owner": "1", "Sec-Fetch-Site": "cross-site"})
+        assert connected.status_code == 503 and connected.json()["state"] == "unavailable"
+    assert not db_file(tmp_path).exists()
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute("SELECT count(*) FROM sessions").fetchone()[0] == 0

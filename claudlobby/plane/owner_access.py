@@ -295,6 +295,50 @@ class OwnerAccess:
             if conn is not None:
                 conn.close()  # uncommitted changes roll back, including policy refusals
 
+    def prepare_first_fleet(self) -> None:
+        """Explicit local preparation only, after sealed-release/fresh-host checks."""
+        with self._connection(write=True) as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS first_fleet_preparation ("
+                         "singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL, "
+                         "host_uid TEXT NOT NULL, active INTEGER NOT NULL CHECK(active IN(0,1)))")
+            conn.execute("INSERT OR IGNORE INTO first_fleet_preparation VALUES (1,1,?,1)",
+                         (read_host_uid(self.root / "state"),))
+            self._first_fleet_preparation(conn)
+
+    def _first_fleet_preparation(self, conn, *, allow_retired=False):
+        rows = conn.execute("SELECT singleton,version,host_uid,active FROM first_fleet_preparation").fetchall()
+        if (len(rows) != 1 or tuple(rows[0])[:3] != (1, 1, read_host_uid(self.root / "state"))
+                or rows[0]["active"] not in (0, 1) or not allow_retired and rows[0]["active"] != 1):
+            raise AccessUnavailable("fresh owner preparation is unavailable")
+
+    def first_fleet_pending(self) -> bool:
+        with self._connection() as conn:
+            self._first_fleet_preparation(conn, allow_retired=True)
+            return bool(conn.execute("SELECT active FROM first_fleet_preparation").fetchone()[0])
+
+    def retire_first_fleet(self) -> None:
+        """After bootstrap binds its new recorder; idempotent on resumed bootstrap."""
+        with self._connection(write=True) as conn:
+            self._first_fleet_preparation(conn, allow_retired=True)
+            conn.execute("UPDATE first_fleet_preparation SET active=0 WHERE singleton=1")
+
+    def validate_storage(self) -> None:
+        """Read-only validation for preserving authority during first activation."""
+        with self._connection() as conn:
+            if conn.execute("PRAGMA quick_check").fetchall()[0][0] != "ok":
+                raise AccessUnavailable("owner authority is unavailable")
+            conn.execute("SELECT revision,namespace,subject,active,changed_at FROM grants LIMIT 0")
+            conn.execute("SELECT digest,namespace,subject,revision,created_at,expires_at FROM challenges LIMIT 0")
+            conn.execute("SELECT digest,revision,created_at,expires_at FROM sessions LIMIT 0")
+            self._grant(conn)
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if tables & {"workspace_metadata", "workspace_challenges", "workspace_bindings"}:
+                self.workspace()._schema(conn)
+                self.workspace()._binding(conn)
+            if tables & {"connected_metadata", "connected_challenges", "connected_sessions"}:
+                self.connected()._schema(conn)
+            self._first_fleet_preparation(conn)
+
     def workspace(self):
         """Optional local workspace authority, sharing this store's transactions."""
         from .owner_workspace import OwnerWorkspace

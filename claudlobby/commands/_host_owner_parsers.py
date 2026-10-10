@@ -29,6 +29,9 @@ def register_host_owner(hosts):
     ):
         route = actions.add_parser(action, help=help_text)
         route.add_argument("--json", action="store_true", help="Structured result (status only)")
+        if action == "initialize":
+            route.add_argument("--before-first-fleet", action="store_true",
+                help="Explicitly prepare host identity and owner authority before first activation")
         route.set_defaults(func=_dispatch, public_command=f"host.owner.{action}")
     for capability, label in (("messages", "ordinary messages"), ("nudges", "selected-task nudges"),
                               ("feedback", "task-linked comments")):

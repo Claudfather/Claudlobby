@@ -366,6 +366,23 @@ def dispatch(args):
                 bind_source(paths.root, expected_host_uid=host_uid)
                 return CommandOutput({"state": "bound"}, lines=("Plane source bound to this installation.",))
             if args.owner_action == "initialize":
+                before_first = getattr(args, "before_first_fleet", False)
+                if before_first:
+                    from .releases import _executing_release, _release
+                    from ..plane.owner_source import fresh_owner_setup
+                    release_id = _executing_release(paths.root)
+                    if release_id is None:
+                        raise CommandFailure("release_mismatch", "fresh owner preparation requires the sealed assembled release CLI")
+                    _release(paths.root, release_id)
+                    fresh_owner_setup(paths.root, allow_absent=True)
+                    terminal.write("Prepare a new host identity and owner authority before its first team.\n"
+                                   "This grants no activation, private reads or fleet actions.\n")
+                    _approve(terminal, "INITIALIZE")
+                    fresh_owner_setup(paths.root, allow_absent=True)
+                    from ..plane.ids import ensure_host_uid
+                    ensure_host_uid(paths.root / "state")
+                    OwnerAccess.initialize(paths.root).prepare_first_fleet()
+                    return CommandOutput({"state": "initialized"}, lines=("Pre-activation owner authority is initialized.",))
                 host_uid = read_host_uid(paths.root / "state")
                 terminal.write("Prepare owner access for host " + json.dumps(host_uid) + ".\n"
                                "This does not pair anyone or expose a network service.\n")
