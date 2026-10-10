@@ -5,7 +5,9 @@ No installed CLI, browser authentication, real bot or native delivery is claimed
 from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
+import json
 import sqlite3
+import subprocess
 from uuid import uuid4
 
 import pytest
@@ -29,6 +31,7 @@ from tests.test_activation import cold, tmp_path  # noqa: F401
 from tests.test_releases import installed  # noqa: F401
 from tests.test_task_read_cli import active  # noqa: F401
 from tests.test_message_write_cli import _human
+from tests.conftest import constructed_env
 
 
 @pytest.fixture
@@ -118,6 +121,19 @@ def test_feedback_records_human_then_proves_manager_receipt_and_replay_has_no_ef
         assert conn.execute("SELECT sender_uid, recipient_uid FROM communications").fetchall() == [(ctx.caller.uid, options["manager_uid"])]
     receipt_file = adapter.root / "state/requests" / ctx.fleet_uid / (options["request_id"] + ".json")
     assert b"Check the selected work" not in receipt_file.read_bytes()
+
+
+def test_feedback_comment_survives_native_whitespace_normalization(gateway, monkeypatch):
+    calls, _ = receiver(monkeypatch)
+    authored = '  Unicode 雪 🦉 <literal> & "quotes" stay  text.\n\tNext line  '
+    invoke(gateway, text=authored)
+    # Run the shipped sanitizer, not a Python model of its normalization.
+    result = subprocess.run(['/bin/bash', '-c',
+        'source "$1"; sanitize_tmux_input "$2"', 'feedback-sanitizer',
+        str(source_package().native / 'lib-common.sh'), calls[0][1]],
+        env=constructed_env(), capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout.split(' Comment: ', 1)[1]) == authored
 
 
 @pytest.mark.parametrize("received,altered", [(False, False), (True, True)])
