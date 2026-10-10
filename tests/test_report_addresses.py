@@ -45,7 +45,7 @@ KEEP = {
     "expertise/code-review.md": (1, "what a bot may write in its own directory"),
     "skills/gws-reauth/SKILL.md": (2, "the bot's own scratch file for a callback URL"),
     "tools/README.md": (2, "where a tool's runtime output goes"),
-    "protocols/fleet-observability.md": (4, "framework marker files scripts read, and the retired event files"),
+    "protocols/fleet-observability.md": (5, "framework marker files scripts read (the idle marker, the stop record), and the retired event files"),
     "skills/adversarial-review/SKILL.md": (1, "users/data/systems, not a directory"),
     "lessons/review/empirical-verification.md": (1, "evidence the author quotes; no reader is sent to the path"),
 }

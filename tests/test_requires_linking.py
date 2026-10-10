@@ -413,6 +413,7 @@ class TestGrantUnion:
                     "Bash(claudlobby --json bot start worker-1)",
                     "Bash(claudlobby --json bot stop worker-1)",
                     "Bash(claudlobby --json bot restart worker-1)",
+                    "Bash(claudlobby --json bot stop worker-1 --reason *)",
                     "Bash(claudlobby --json bot restart worker-1 --ceiling *)",
                 }
             else:
@@ -812,6 +813,7 @@ def test_a_fleet_with_no_requires_composes_exactly_the_declared_grants(fleet_dir
         "Bash(claudlobby --json bot start worker-1)",
         "Bash(claudlobby --json bot stop worker-1)",
         "Bash(claudlobby --json bot restart worker-1)",
+        "Bash(claudlobby --json bot stop worker-1 --reason *)",
         "Bash(claudlobby --json bot restart worker-1 --ceiling *)",
         "Bash(claudlobby --json bot session lead)",
         "Bash(claudlobby --json bot logs lead)",

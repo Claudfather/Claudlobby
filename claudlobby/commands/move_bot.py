@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from ..command_result import CommandFailure, CommandOutput
 from ..context import declared_paths
+from ..stop_record import clear_stop
 
 
 _RETAINED = (".env", "memory", "data", "projects", ".claude/session.md")
@@ -383,6 +384,11 @@ def copy_retained(move):
             if name == ".env":
                 destination.chmod(0o600)
         copied.append(str(destination))
+    # The move stopped the source through the stop door, which recorded that
+    # stop in data/. The moved bot is started by the move's activation, so a
+    # copied record would only be stale, and one left beside a unit that is
+    # later lost would keep that loss silent (#2243).
+    clear_stop(move.target_dir)
     return copied
 
 

@@ -176,6 +176,7 @@ class TestEmissionIntoTheUnit:
                 escalation_state_dir: "/escalation/sender"
                 renotify_after_s: 3
                 rearm_window_s: 4
+                stopped_remind_days: 5
             """
         )
         svc = (_compose(tmp_path, body) / "com.test.fleet-pulse.service").read_text()
