@@ -143,7 +143,7 @@ class OwnerFeedback:
         """
         self._authorize(reader, fleet_uid, expected_grant)
         try:
-            grant, ctx = self._bind(reader, fleet, fleet_uid, expected_grant)
+            _, ctx = self._bind(reader, fleet, fleet_uid, expected_grant)
             manager = self._target(ctx, task_id, manager_uid)
             retained = read_request(self.root, fleet_uid, request_id)
             if (retained.operation != "task.feedback" or retained.host_uid != self.host_uid

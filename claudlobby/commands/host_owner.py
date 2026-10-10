@@ -18,7 +18,7 @@ import sys
 import warnings
 
 from ..command_result import CommandFailure, CommandOutput
-from ..plane.owner_access import AccessDenied, AccessUnavailable, OwnerAccess
+from ..plane.owner_access import ACTION_DENIALS, AccessDenied, AccessUnavailable, OwnerAccess
 from ..plane.owner_source import SourceDenied, SourceNeedsBinding, SourceUnavailable
 
 _GENERATED = ("BOT_ID", "BOT_NAME", "BOT_DIR", "BOT_SERVICE", "FLEET_ROOT",
@@ -230,7 +230,7 @@ def _grant_errors(action):
     except AccessDenied as exc:
         if exc.code == f"invalid_{action}_binding":
             raise CommandFailure("invalid_argument", f"{action} grants require canonical fleet and human actor bindings") from exc
-        if exc.code == ("feedback_not_allowed" if action == "feedback" else f"{action}s_not_allowed"):
+        if exc.code == ACTION_DENIALS[action]:
             raise CommandFailure("conflict", f"no retained {action} grant for this fleet; inspect host owner status") from exc
         if exc.code == f"{action}_binding_changed":
             raise CommandFailure("conflict", f"{action} grant changed or already belongs to another actor; inspect host owner status "
@@ -275,19 +275,20 @@ def dispatch(args):
             return CommandOutput({"state": "stopped"}, lines=("Owner server stopped.",))
         if args.owner_action == "status":
             status = store.local_action_status()
-            grant, messages, nudges = status.owner, status.message_grants, status.nudge_grants
+            grant, messages, nudges, feedbacks = (status.owner, status.message_grants,
+                                                  status.nudge_grants, status.feedback_grants)
             state = "unpaired" if grant is None else "paired" if grant.active else "revoked"
             lines = [f"Owner access: {state}."]
             for message in messages:
                 lines.append("Message grant: " + json.dumps(asdict(message), ensure_ascii=True))
             for nudge in nudges:
                 lines.append("Nudge grant: " + json.dumps(asdict(nudge), ensure_ascii=True))
-            for feedback in status.feedback_grants:
+            for feedback in feedbacks:
                 lines.append("Feedback grant: " + json.dumps(asdict(feedback), ensure_ascii=True))
             return CommandOutput({"state": state, "owner": asdict(grant) if grant else None,
                                   "message_grants": [asdict(message) for message in messages],
                                   "nudge_grants": [asdict(nudge) for nudge in nudges],
-                                  "feedback_grants": [asdict(item) for item in status.feedback_grants]},
+                                  "feedback_grants": [asdict(feedback) for feedback in feedbacks]},
                                  lines=tuple(lines))
         with _terminal() as terminal:
             if args.owner_action in {"allow-messages", "revoke-messages", "allow-nudges", "revoke-nudges",

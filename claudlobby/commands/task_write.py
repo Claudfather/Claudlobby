@@ -343,13 +343,14 @@ def feedback_bound_task(ctx, route, package, *, request_id, task_id, body,
         result = feedback(ctx, request_id, task_id, body=body,
             expected_assignment_id=expected_assignment_id, route=route.receipt_binding(), admit_read=admit_read)
     except TaskRecordingError as exc:
+        committed = exc.recording == "committed"
         data = {"request_id": request_id, "fleet": ctx.context.fleet.name, "task_id": exc.task_id,
                 "assignment_id": exc.assignment_id, "message_id": exc.message_id,
                 "recipient_uid": exc.recipient_uid, "recording": exc.recording,
-                "outcome": "committed" if exc.recording == "committed" else "unknown",
+                "outcome": "committed" if committed else "unknown",
                 "request_persisted": exc.request_persisted, "notification": "not_attempted"}
-        raise CommandFailure("notification_failed" if exc.recording == "committed" else "unavailable",
-            "feedback recording " + ("committed" if exc.recording == "committed" else "is unconfirmed")
+        raise CommandFailure("notification_failed" if committed else "unavailable",
+            "feedback recording " + ("committed" if committed else "is unconfirmed")
             + "; notification was not attempted; inspect the original request",
             data=data, release_id=route.release_id) from exc
     # The quoted body is comment content, not a control instruction or a reply parent.

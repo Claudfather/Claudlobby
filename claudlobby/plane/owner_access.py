@@ -153,6 +153,8 @@ class OwnerFeedbackGrant:
 _ACTION_GRANTS = {"message": ("message_grants", OwnerMessageGrant),
                   "nudge": ("nudge_grants", OwnerNudgeGrant),
                   "feedback": ("feedback_grants", OwnerFeedbackGrant)}
+ACTION_DENIALS = {"message": "messages_not_allowed", "nudge": "nudges_not_allowed",
+                  "feedback": "feedback_not_allowed"}
 
 
 @dataclass(frozen=True)
@@ -367,11 +369,11 @@ class OwnerAccess:
                       fleet_uid: str, action: str):
         table, grant_type = _ACTION_GRANTS[action]
         if not OwnerAccess._has_grants(conn, action):
-            raise AccessDenied("feedback_not_allowed" if action == "feedback" else f"{action}s_not_allowed")
+            raise AccessDenied(ACTION_DENIALS[action])
         row = conn.execute(f"SELECT * FROM {table} WHERE owner_revision = ? AND fleet_uid = ?",
                            (owner.revision, fleet_uid)).fetchone()
         if row is None:
-            raise AccessDenied("feedback_not_allowed" if action == "feedback" else f"{action}s_not_allowed")
+            raise AccessDenied(ACTION_DENIALS[action])
         try:
             _canonical_uid(fleet_uid, "fleet", action=action)
             actor_uid = _canonical_uid(row["actor_uid"], "actor", action=action)
