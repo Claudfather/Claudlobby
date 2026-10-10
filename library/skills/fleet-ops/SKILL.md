@@ -210,7 +210,9 @@ session, so keepalive cannot revive it; a later `start` is explicit re-enrollmen
 `stop` also records the stop, with an optional `--reason`, so fleet-pulse raises
 no alert for the bot and shows it as stopped; `start` removes that record.
 Read `data.recording`: `degraded` means the record or its plane row did not
-land, and running the same stop again records it.
+land, and running the same stop again records it. A start that returns
+`data.stop_record_kept: true` could not remove that record: until it is
+removed, a loss of the bot's unit reads as a deliberate stop.
 For a slow bridge, `bot restart WORKER --ceiling SECONDS` overrides the
 per-bot readiness budget with a positive number. Read `data.changed`,
 `data.readiness`, and `data.native_outcome` in the JSON result before claiming

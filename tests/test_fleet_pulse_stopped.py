@@ -395,3 +395,76 @@ def test_two_causes_over_threshold_in_one_sweep_are_one_message(
         f"{ALERT} service_down on 2 bots (d1 d2); unit_missing on 2 bots (u1 u2). "
         "Check f fleet health immediately."
     ], f.pages()
+
+
+# --- a stop record left over from a stop that is over ---------------------------------------
+
+
+def _lose_the_unit(f, name):
+    """The unit file goes WITHOUT `bot stop`: a botched disenroll, a deleted unit directory."""
+    (f.home / ".config/systemd/user" / f"com.t.{name}.service").unlink()
+    (f.units / f"com.t.{name}").unlink()
+
+
+def test_a_record_left_beside_an_installed_unit_is_removed_so_a_later_loss_pages(
+    tmp_path, *, scratch_plane_env
+):
+    """A stop record outlives its stop when the unit comes back through a door that does not
+    clear it (spin-up-bot.sh, reconcile --enroll, a hand install), when a start fails after
+    installing the unit, or when bot start cannot remove it. Left there, it would keep a later
+    loss of the unit silent, so a sweep removes a record that has sat beside an installed unit
+    longer than a stop takes, and the loss is unit_missing."""
+    f = Fleet(tmp_path)
+    left = f.bot("l", unit="active", record=3600)
+    f.sweep(scratch_plane_env)
+    assert not (left / "data/.stopped").exists(), "the left record is still there"
+    _lose_the_unit(f, "l")
+    f.sweep(scratch_plane_env)
+    rows = f.rows("l", "unit_missing", at_least=1)
+    assert len(rows) == 1, rows
+    assert f.markers("l") == ["unit_alerted"], f.markers("l")
+    assert f.summary_line("l").split()[2] == "unit-missing", f.summary_line("l")
+
+
+def test_a_record_younger_than_a_stop_takes_stays_and_its_stop_is_silent(
+    tmp_path, *, scratch_plane_env
+):
+    """The stop door writes its record just before it removes the unit file, so a sweep can
+    land between the two. That record is a stop in progress: it stays, and once the unit file
+    goes the bot reads as stopped, silent."""
+    f = Fleet(tmp_path)
+    going = f.bot("g", unit="active", record=60)
+    f.bot("c", service=False)  # the control: one row a sweep, so the plane was read
+    f.sweep(scratch_plane_env)
+    assert (going / "data/.stopped").exists(), "a stop in progress lost its record"
+    _lose_the_unit(f, "g")  # the stop door removes the unit file
+    f.sweep(scratch_plane_env)
+    assert len(f.rows("c", "session_missing", at_least=2)) == 2, (
+        "control: the second sweep's row did not reach the plane"
+    )
+    assert f.rows("g", "unit_missing") == [], f.rows("g", "unit_missing")
+    assert f.markers("g") == [], f.markers("g")
+    line = f.summary_line("g")
+    assert line.split()[1:3] == ["stopped", "stopped"], line
+
+
+@pytest.mark.skipif(
+    os.geteuid() == 0, reason="root removes a file whatever its directory's mode"
+)
+def test_a_left_record_the_sweep_cannot_remove_is_pushed_until_it_is_gone(
+    tmp_path, *, scratch_plane_env
+):
+    """A record the sweep cannot remove (and bot start could not either) would keep a later
+    loss of the unit silent, so the manager is told, once an episode, until it is gone."""
+    f = Fleet(tmp_path)
+    stuck = f.bot("k", unit="active", record=3600)
+    (stuck / "data").chmod(0o500)
+    try:
+        f.sweep(scratch_plane_env)
+        assert (stuck / "data/.stopped").exists()
+        assert "stop_record_alerted" in f.markers("k"), f.markers("k")
+    finally:
+        (stuck / "data").chmod(0o700)
+    f.sweep(scratch_plane_env)
+    assert not (stuck / "data/.stopped").exists()
+    assert "stop_record_alerted" not in f.markers("k"), f.markers("k")

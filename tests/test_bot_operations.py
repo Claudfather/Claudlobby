@@ -871,3 +871,53 @@ def test_a_stop_reason_is_one_printable_line(cold, monkeypatch, capsys):  # noqa
     assert refused["error"]["code"] == "invalid_argument"
     assert worker.native.actions == []
     assert not (worker.root / "runtime/bots/worker/data/.stopped").exists()
+
+
+def test_a_stop_refused_before_any_effect_leaves_no_record(cold, monkeypatch, capsys):  # noqa: F811
+    """#2243: the stop door writes its record first. A stop refused before any native effect
+    stopped nothing, so its record goes again: the bot was never stopped on purpose."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    _plane_rows(monkeypatch)
+    record = worker.root / "runtime/bots/worker/data/.stopped"
+    real_call = worker.native.call
+    seen = []
+
+    def refuses(function, *args, timeout=30):
+        if function == "svc_bot_disenroll_exact":  # refused, and no effect-attempted marker
+            seen.append(record.exists())
+            return subprocess.CompletedProcess([function], 3, "", "")
+        return real_call(function, *args, timeout=timeout)
+    monkeypatch.setattr(worker.native, "call", refuses)
+    refused = worker.call("bot", "stop", "worker", expected=6)
+    assert refused["error"]["code"] == "unavailable"
+    assert refused["data"]["native_outcome"] == "unattempted"
+    assert seen == [True]  # the record was written before the native call
+    assert not record.exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root removes a file whatever its directory's mode")
+def test_a_start_that_cannot_remove_the_stop_record_says_so(cold, monkeypatch, capsys):  # noqa: F811
+    """#2243: a stop record left behind keeps a later loss of the bot's unit silent, so a start
+    that cannot remove it says so, as `stop_record_kept` in the JSON and a line in the text. The
+    start itself stands, and its plane row is recorded."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    rows = _plane_rows(monkeypatch)
+    data = worker.root / "runtime/bots/worker/data"
+    worker.call("bot", "stop", "worker")
+    rows.clear()
+    data.chmod(0o500)
+    try:
+        started = worker.call("bot", "start", "worker")["data"]
+        assert started["state"] == "running" and started["changed"] is True
+        assert started["stop_record_kept"] is True and started["recording"] == "committed"
+        (row,) = rows
+        assert row["payload"]["event"] == "bot_started"
+        assert (data / ".stopped").exists()
+        # a start that finds the bot running retries the removal, and its text says so too
+        assert main(["--root", str(worker.root), "bot", "start", "worker"]) == 0
+        out = capsys.readouterr().out
+        assert "could not remove this bot's stop record" in out, out
+    finally:
+        data.chmod(0o700)
+    again = worker.call("bot", "start", "worker")["data"]
+    assert "stop_record_kept" not in again and not (data / ".stopped").exists()

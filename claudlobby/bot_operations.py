@@ -77,8 +77,13 @@ class BotLifecycleResult:
     request_id: str | None = None
     log_path: str | None = None
     reason: str | None = None
-    # A stop or a start: whether its local record and its plane row landed (#2243).
+    # A stop: whether its local record and its plane row landed; a start: whether its
+    # plane row landed (#2243).
     recording: str | None = None
+    # A start that could not remove the stop record (#2243): while it stays, a later
+    # loss of the bot's unit reads as a deliberate stop. None when it was removed or
+    # there was none.
+    stop_record_kept: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -523,17 +528,18 @@ def _record_lifecycle(root: Path, fleet: str, bot: str, event: str, *, by: str,
 
 
 def _started(root: Path, fleet: str, bot: str, bot_dir: Path, by: str, request_id: str, *,
-             changed: bool) -> str | None:
+             changed: bool) -> tuple[str | None, bool | None]:
     """A start that left the bot running: the unit is back, so the stop record goes,
-    and a start that changed something or cleared a record leaves a bot_started row."""
+    and a start that changed something or cleared a record leaves a bot_started row.
+    Returns the row's recording, and True when the record could not be removed."""
     try:
-        cleared = clear_stop(bot_dir)
+        cleared, kept = clear_stop(bot_dir), None
     except OSError:
-        return "degraded"
+        cleared, kept = False, True
     if not (changed or cleared):
-        return None
+        return None, kept
     return _record_lifecycle(root, fleet, bot, "bot_started", by=by, reason=None,
-                             request_id=request_id, changed=changed)
+                             request_id=request_id, changed=changed), kept
 
 
 def _confirm_stopped(adapter, installed, target, socket_path, *, effect_attempted=False,
@@ -726,12 +732,12 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                     if session == "ready":
                         _confirm_running(adapter, installed, entry["target"], manager,
                                          session_ready=True)
+                        recording, kept = _started(root, destination.fleet.name, bot, spec.bot_dir,
+                                                   by, request_id, changed=False)
                         return BotLifecycleResult(destination.fleet.name, bot, release.release_id,
                                                   entry["target"], "running", False,
                                                   "current_session_ready",
-                                                  recording=_started(root, destination.fleet.name,
-                                                                     bot, spec.bot_dir, by, request_id,
-                                                                     changed=False))
+                                                  recording=recording, stop_record_kept=kept)
                     if session != "absent":
                         raise BotLifecycleError("current bot session readiness is indeterminate; "
                                                 "inspect the session or explicitly restart",
@@ -783,9 +789,9 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                                         effect_attempted=True,
                                         release_id=release.release_id,
                                         target=entry["target"]) from exc
+            recording, kept = (None, None) if restart else _started(
+                root, destination.fleet.name, bot, spec.bot_dir, by, request_id, changed=True)
             return BotLifecycleResult(destination.fleet.name, bot, release.release_id,
                                       entry["target"], "running", True,
                                       readiness.replace("-", "_"), handoff,
-                                      recording=None if restart else _started(
-                                          root, destination.fleet.name, bot, spec.bot_dir, by,
-                                          request_id, changed=True))
+                                      recording=recording, stop_record_kept=kept)

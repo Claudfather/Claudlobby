@@ -415,3 +415,22 @@ def test_move_refuses_unrelated_semantic_edits_in_its_own_manifests(tmp_path, mo
     with pytest.raises(CommandFailure, match=changed) as refused:
         move_bot.dispatch(args)
     assert "host activate" in refused.value.error.hint
+
+
+def test_retained_copy_leaves_the_stop_record_behind(tmp_path):
+    """#2243: the move stops the source through the stop door, which records that stop in data/.
+    The moved bot is started by the move's activation, so a copied record would only be stale,
+    and one left beside a unit that is later lost would keep that loss silent."""
+    move = _move(tmp_path)
+    (move.source_dir / "data").mkdir()
+    (move.source_dir / "data" / "record.json").write_text('{"kept":true}')
+    (move.source_dir / "data" / ".stopped").write_text(
+        '{"by": "operator", "reason": null, "request_id": "r", '
+        '"stopped_at": "2026-10-10T07:00:00Z", "stopped_epoch": 1791615600}\n')
+
+    move_bot.check_copy_destinations(move.source_dir, move.target_dir)
+    move_bot.copy_retained(move)
+
+    assert (move.target_dir / "data" / "record.json").read_text() == '{"kept":true}'  # data/ was copied
+    assert not (move.target_dir / "data" / ".stopped").exists()
+    assert (move.source_dir / "data" / ".stopped").exists()  # the source keeps its own

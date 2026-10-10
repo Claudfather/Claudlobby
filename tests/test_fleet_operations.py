@@ -351,3 +351,27 @@ def test_reconcile_reads_a_recorded_stop_as_stopped(tmp_path, monkeypatch):
         ("worker-a", False, "absent", "stopped"),
         ("worker-b", False, "unknown", "stopped"),
         ("manager", False, "absent", "unsupervised_down")]
+
+
+def test_fleet_lifecycle_lines_carry_what_each_bot_start_says(tmp_path, monkeypatch):
+    """#2243: `fleet start --workers` prints, under each bot, what `bot start` prints: a stop
+    record the start could not remove keeps a later loss of that bot's unit silent."""
+    from argparse import Namespace
+
+    from claudlobby import context
+    from claudlobby.commands import fleet_runtime
+
+    monkeypatch.setattr(context, "resolve_paths", lambda root=None: SimpleNamespace(root=tmp_path))
+    kept = BotLifecycleResult("example", "worker-a", "selected-release", "worker-a-unit",
+                              "running", True, "bridge_ready", recording="committed",
+                              stop_record_kept=True)
+    clean = BotLifecycleResult("example", "worker-b", "selected-release", "worker-b-unit",
+                               "running", True, "bridge_ready", recording="committed")
+    monkeypatch.setattr(fleet, "set_fleet_running", lambda **_k: fleet.FleetLifecycleResult(
+        "example", "selected-release", "start", True, (kept, clean)))
+    out = fleet_runtime.dispatch(Namespace(public_command="fleet.start", seed=False,
+                                           fleet="example", workers=True, root=str(tmp_path)))
+    first, note, last = out.lines
+    assert first == "example/worker-a: running; readiness=bridge_ready"
+    assert note.startswith("example/worker-a: ") and "could not remove this bot's stop record" in note
+    assert last == "example/worker-b: running; readiness=bridge_ready"

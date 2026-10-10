@@ -87,7 +87,12 @@ stays silent: no row, no push, no escalation. `fleet status`, `fleet reconcile`
 and the pulse summary show the bot as `stopped`, with who and since. Once it
 has been stopped `fleet_pulse.stopped_remind_days` days (default 3, `0` off),
 the manager gets one reminder push, then one every as many days: never a page.
-`bot start` removes the record. The plane's `bot_stopped` and `bot_started`
+`bot start` removes the record. A record left beside an installed unit (the
+unit came back through another door, such as `spin-up-bot.sh` or a hand
+install, or a start or a stop failed partway) is from a stop that is over: the
+sweep removes it once it is 15 minutes old, so a later loss of that unit pages
+`unit_missing`, and one the sweep cannot remove is pushed to the manager as
+`stop_record_kept` until it is gone. The plane's `bot_stopped` and `bot_started`
 rows are the audit trail; the sweep never reads them, so a stop made while the
 plane is down stays quiet.
 

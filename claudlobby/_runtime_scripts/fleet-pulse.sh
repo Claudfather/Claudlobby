@@ -72,6 +72,15 @@ _HELD_FRESH_S=300
 # days again. 0 turns the reminder off.
 _STOPPED_REMIND_DAYS="${FLEET_PULSE_STOPPED_REMIND_DAYS:-3}"
 case "$_STOPPED_REMIND_DAYS" in ''|*[!0-9]*) _STOPPED_REMIND_DAYS=3 ;; esac
+# A stop record beside an installed unit is left from a stop that is over
+# (#2243): the unit came back through a door that does not clear the record
+# (spin-up-bot.sh, reconcile-fleet.sh --enroll, a hand install), a start or a
+# stop failed partway, or bot start could not remove it. Left there, it would
+# keep a later loss of the unit silent, so a sweep removes a record that has
+# sat beside an installed unit this long. The stop door writes its record just
+# before it removes the unit file, which takes seconds (the unit's stop
+# timeout bounds it), so no stop in progress is this old.
+_STOP_RECORD_STALE_S=900
 
 # _stop_record_read <bot_dir>: the stop door's record of a deliberate stop
 # (#2243), into _STOP_EPOCH and _STOP_BY; rc 1 when there is none. `bot stop`
@@ -493,14 +502,27 @@ for bot_dir in "$BOTS_DIR"/*/; do
     # A bot with no service configured has no unit to lose; Check 1 keeps it.
     # Only where the adapter knows the unit file (svc_is_registered answers 1 on
     # any other OS, which would read every bot as missing its unit).
+    # A record beside an installed unit is from a stop that is over once it is
+    # older than any stop takes (_STOP_RECORD_STALE_S): it is removed, so the
+    # only record the branch above ever reads is one made since the unit went.
+    # One the sweep cannot remove is pushed until it is gone.
     _stopped=0
     _unit_missing=0
-    if [ -n "$BOT_SERVICE" ] && { [ "$_OS" = Linux ] || [ "$_OS" = Darwin ]; } \
-        && ! svc_is_registered "$bot_dir" "$BOT_SERVICE"; then
-        if _stop_record_read "$bot_dir"; then
-            _stopped=1
-        else
-            _unit_missing=1
+    _record_kept=0
+    if [ -n "$BOT_SERVICE" ] && { [ "$_OS" = Linux ] || [ "$_OS" = Darwin ]; }; then
+        if ! svc_is_registered "$bot_dir" "$BOT_SERVICE"; then
+            if _stop_record_read "$bot_dir"; then
+                _stopped=1
+            else
+                _unit_missing=1
+            fi
+        elif _stop_record_read "$bot_dir" \
+            && [ $(( $(date +%s) - _STOP_EPOCH )) -ge "$_STOP_RECORD_STALE_S" ]; then
+            if rm -f -- "$bot_dir/data/.stopped" 2>/dev/null; then
+                echo "fleet-pulse: $bot_id: removed the stop record of $(epoch_to_iso_utc "$_STOP_EPOCH" || true) by $_STOP_BY: its unit is installed again" >&2
+            else
+                _record_kept=1
+            fi
         fi
     fi
     # Checks 0 to 2 judge an installed unit, so neither case reaches them.
@@ -542,6 +564,12 @@ for bot_dir in "$BOTS_DIR"/*/; do
             "$bot_id unit_missing — unit '$BOT_SERVICE' is not installed and no stop was recorded (session $_um_session). If it should run, the manager runs claudlobby --json bot start $bot_id; if it was stopped on purpose, claudlobby --json bot stop $bot_id records that." "$_mgr_token" "$_RENOTIFY_AFTER_S"
     else
         debounce_clear "$state_dir" "$bot_id" "unit_alerted"
+    fi
+    if [ "$_record_kept" -eq 1 ]; then
+        debounce_notify "$state_dir" "$bot_id" "stop_record_alerted" _notify_current_bot \
+            "$bot_id stop_record_kept — unit '$BOT_SERVICE' is installed again, but the record of its stop at $(epoch_to_iso_utc "$_STOP_EPOCH" || true) by $_STOP_BY could not be removed: $bot_dir/data/.stopped. Remove it: while it stays, a loss of this unit reads as a deliberate stop and pages no one." "$_mgr_token" "$_RENOTIFY_AFTER_S"
+    else
+        debounce_clear "$state_dir" "$bot_id" "stop_record_alerted"
     fi
 
     # --- Boot gate: is this bot's supervised start still in flight? ---

@@ -6,6 +6,18 @@ from pathlib import Path
 from ..command_result import CommandFailure, CommandOutput
 
 
+def lifecycle_notes(result) -> tuple[str, ...]:
+    """What a stop or a start owes its caller when its record did not land (#2243)."""
+    if result.stop_record_kept:
+        return ("The start could not remove this bot's stop record (data/.stopped in its "
+                "directory); until it is removed, a loss of the bot's unit reads as a "
+                "deliberate stop and pages no one.",)
+    if result.state == "stopped" and result.recording == "degraded":
+        return ("The stop's local record or its plane row did not land; "
+                "run bot stop again to record it.",)
+    return ()
+
+
 def dispatch(args) -> CommandOutput:
     from ..activation_state import ActivationError
     from ..bot_operations import BotLifecycleError, control_bot, handoff_bot, set_bot_running
@@ -102,9 +114,6 @@ def dispatch(args) -> CommandOutput:
     if result.state == "stopped":
         lines = (f"{result.fleet}/{result.bot}: de-enrolled and stopped; "
                  "the declared bot and retained identity remain selected.",)
-        if result.recording == "degraded":
-            lines += ("The stop's local record or its plane row did not land; "
-                      "run bot stop again to record it.",)
     elif result.state == "requested":
         lines = (f"{result.fleet}/{result.bot}: self restart requested; "
                  f"request={result.request_id}; final outcome in {result.log_path}.",)
@@ -114,4 +123,4 @@ def dispatch(args) -> CommandOutput:
     else:
         lines = (f"{result.fleet}/{result.bot}: supervised running; "
                  f"readiness={result.readiness}.",)
-    return CommandOutput(data, release_id=result.release_id, lines=lines)
+    return CommandOutput(data, release_id=result.release_id, lines=lines + lifecycle_notes(result))

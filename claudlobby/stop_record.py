@@ -9,6 +9,10 @@ goes and whatever the plane does, and `bot start` removes it once the unit is
 back. fleet-pulse reads only this record to keep a stopped bot silent, so a stop
 made while the plane is down stays quiet; the plane's `bot_stopped` row is the
 audit trail. A bot with no unit file and no record is a fault (`unit_missing`).
+A record that outlives its stop would keep a later loss of the unit silent, so
+fleet-pulse removes one it finds beside an installed unit once it is older than
+any stop takes (a unit back through another door, or a start or stop that
+failed partway), and a start that cannot remove it says so (`stop_record_kept`).
 
 One JSON line in `<bot_dir>/data/.stopped`, keys sorted. fleet-pulse.sh reads
 `stopped_epoch` and `by` from it with sed, so `by` is held to a plain alias and
