@@ -349,3 +349,22 @@ def test_workspace_errors_offer_local_remedies_not_repairing(local, monkeypatch,
     assert call(access, "workspace-status", "--json") == 6
     error = json.loads(capsys.readouterr().out)["error"]["message"]
     assert "initialize-workspace" in error and "optional schema" in error
+
+
+def test_final_write_time_cannot_precede_delayed_assertion_issue(local, monkeypatch):
+    access, workspace, owner, clock = local
+    created = clock[0]
+    challenge = workspace.begin(OWNER, issuer=ISSUER, operational_origin=ORIGIN)
+    clock[0] += 5
+    attestation = WorkspaceAttestation(ISSUER, USER, WORKSPACE, owner.host_uid,
+        challenge.nonce, ORIGIN, int(clock[0]), int(clock[0]) + 120, JTI)
+    p = workspace.stage(attestation, OWNER)
+    clock[0] += 1
+    final = created + 2  # after challenge creation, before signed statement validity
+    ticks = iter([clock[0], clock[0], final])
+    monkeypatch.setattr(access, "_now", lambda: next(ticks, final))
+    with pytest.raises(AccessDenied, match="workspace_request_expired"):
+        workspace.confirm(expected_proposal=p)
+    monkeypatch.setattr(access, "_now", lambda: clock[0])
+    assert workspace.status() == ("absent", None)
+    assert workspace.inspect(p.nonce) == p

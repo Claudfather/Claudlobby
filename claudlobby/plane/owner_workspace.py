@@ -270,7 +270,7 @@ class OwnerWorkspace:
             revision = previous.revision + 1 if previous else 1
             generation = str(uuid4())
             now = self.access._now()
-            if not proposal.created_at <= now < proposal.expires_at:
+            if not max(proposal.created_at, a.issued_at) <= now < proposal.expires_at:
                 raise AccessDenied("workspace_request_expired")
             conn.execute("INSERT INTO workspace_bindings VALUES(?,?,?,?,?,?,?,1,?)",
                          (revision, proposal.owner.revision, generation, a.issuer, a.subject,
