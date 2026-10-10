@@ -100,7 +100,7 @@ The original implementation's prepared, isolated Python 3.12 before/after
 exports reported baseline 94 passed and candidate 97 passed, both exit 0 in the
 affected Plane view/grid/shutdown battery plus the candidate's Node contract
 wrapper. Those results precede the review fixes and do not verify the final
-candidate. The review fixes pass 28 pure Node cases (14 request-state and 14
+candidate. The review fixes pass 29 pure Node cases (14 request-state and 15
 controller cases), exit 0 with no skips: receipt binding, pending reload, draft
 isolation, refusal, explicit discard and damaged-storage recovery, in-flight
 protection, UUID/storage errors, late context/send/receipt responses and modal

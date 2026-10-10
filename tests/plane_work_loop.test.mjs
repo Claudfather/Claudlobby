@@ -256,3 +256,25 @@ test('late refusal from send and receipt lookup remains visible against its orig
     assert.equal(new ActionState(storage).pending.length, 0);
   }
 });
+
+test('receipt checks wait for their in-flight send; failed sends retain the original ID for recovery', async () => {
+  const transport = deferred(), h = harness({sendAction:()=>transport.promise});
+  h.loop.setRoom('web'); await settle();
+  const sending = h.submit(); await settle();
+  const request = h.sends[0];
+  const receiptButton = () => h.get('work-pending').querySelectorAll('[data-request]')[0];
+  assert.equal(receiptButton().disabled, true);
+  await h.pendingClick(request.request_id);
+  assert.equal(h.lookups.length, 0);
+  assert.equal(new ActionState(h.storage).pending[0].request_id, request.request_id);
+  transport.reject(Error('lost send response')); await sending;
+  assert.equal(receiptButton().disabled, false);
+  assert.match(h.get('work-notice').textContent, /Outcome unknown/);
+  assert.equal(new ActionState(h.storage).pending[0].request_id, request.request_id);
+  await h.pendingClick(request.request_id);
+  assert.equal(h.lookups.length, 1);
+  assert.equal(h.lookups[0].request_id, request.request_id);
+  assert.match(h.get('work-notice').textContent, /message to lead:.*delivery confirmed/);
+  assert.equal(new ActionState(h.storage).pending.length, 0);
+  assert.equal(h.sends.length, 1);
+});

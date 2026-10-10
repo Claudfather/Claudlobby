@@ -43,7 +43,7 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
     $("work-pending").innerHTML = rows.map(p => `<div class="pending-action">
       <div><b>Awaiting confirmation</b><p>${esc(p.kind)} · ${esc(p.target.recipient)}${p.target.task_id ? ` · task ${esc(p.target.task_id)}` : ""}</p>
       <small>Submitted ${esc(ago(p.submitted_at))} · ${esc(p.request_id)}</small></div>
-      <button class="pill ghost" type="button" data-request="${esc(p.request_id)}">Check receipt</button>
+      <button class="pill ghost" type="button" data-request="${esc(p.request_id)}"${p.request_id === inFlightRequest ? " disabled" : ""}>Check receipt</button>
       <button class="pill ghost" type="button" data-discard="${esc(p.request_id)}"${p.request_id === inFlightRequest ? " disabled" : ""}>Discard saved request</button></div>`).join("")
       + [...state.discarded.values()].filter(p => context && scopeKey(p.scope) === scopeKey(context.scope))
         .map(p => `<p class="note">Discarded locally · ${esc(p.kind)} to ${esc(p.target.recipient)}${p.target.task_id ? ` · task ${esc(p.target.task_id)}` : ""} · ${esc(p.request_id)}. Outcome unknown; this ID is retained only until this tab reloads.</p>`).join("");
@@ -237,9 +237,8 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
     const button = discardButton || event.target.closest("[data-request]");
     if (!button || !context) return;
     const request = state.pending.find(p => p.request_id === (discardButton ? button.dataset.discard : button.dataset.request) && scopeKey(p.scope) === scopeKey(context.scope));
-    if (!request) return;
+    if (!request || request.request_id === inFlightRequest) return;
     if (discardButton) {
-      if (request.request_id === inFlightRequest) return;
       if (!globalThis.confirm(`Request ${request.request_id} may already have been delivered or may still be delivered. Copy this ID before discarding: it is retained only until this tab reloads. Discarding stops saving its receipt and lets you send a new request, which could duplicate the original. Nothing will be cancelled or resent. Discard this saved request?`)) return;
       try { state.discard(request); notice = `Discarded saved request ${request.request_id}. Its outcome remains unknown; nothing was cancelled or resent.`; }
       catch (error) { notice = error.message; }
