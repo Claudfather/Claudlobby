@@ -94,6 +94,8 @@ def register_release_subparsers(sub):
     register_host_setup(hosts)
     from ._host_repos_parsers import register_host_repos
     register_host_repos(hosts)
+    from ._host_owner_parsers import register_host_owner
+    register_host_owner(hosts)
     supervision = hosts.add_parser("supervision", help="Inspect selected-fleet supervision cleanup")
     supervision_actions = supervision.add_subparsers(dest="supervision_command", required=True)
     reap = supervision_actions.add_parser("reap-orphans", help="Reap stale units in declared bot directories")

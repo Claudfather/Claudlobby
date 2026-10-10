@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — local owner approval and direct-host sign-in page
+
+`host owner initialize|confirm|revoke` require an explicit installation root
+and interactive operator terminal; pairing codes are read with hidden input,
+never as command arguments. The terminal shows the exact principal before
+approval, and stale revocation cannot remove a replacement pairing.
+`host owner status --json` inspects authority without creating it. The internal
+browser factory serves a self-contained `/owner` page for pairing, sign-in and
+sign-out, with no website dependency or persistent browser credential storage.
+Existing private reads remain gated. Trusted Tailscale ingress and network
+activation remain separate; the default Plane service keeps its existing
+read-only behavior and serves the new inert static assets without owner APIs.
+
 ### Fixed — `bot stop` waits for the stopped session to exit before proving it quiet, and `bot session` reads a cleanly stopped bot as absent (#2227)
 
 A bot unit runs with `KillMode=process`, so systemd marks it stopped as soon as its `ExecStop` (`tmux kill-server`) returns, while the session it started (the tmux server, `claude`, its MCP servers) is still exiting. `bot stop` read the unit's cgroup once, right then, so it refused and reported a stop that had worked as "bot lifecycle effect is unverified". Two stops on another fleet read that way on 2026-10-07, and each session had left the cgroup within about 2 s.

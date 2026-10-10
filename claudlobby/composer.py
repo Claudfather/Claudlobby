@@ -2879,6 +2879,7 @@ def compose_settings_local(
         "Bash(claudlobby host job run *)", "Bash(claudlobby * host job run *)",
         "Bash(claudlobby host repos pull *)", "Bash(claudlobby * host repos pull *)",
         "Bash(claudlobby host channels approve*)", "Bash(claudlobby * host channels approve*)",
+        "Bash(claudlobby host owner *)", "Bash(claudlobby * host owner *)",
     ))
 
     # Layer 0: Sibling isolation — deny reading OR mutating another bot's runtime

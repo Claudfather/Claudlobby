@@ -1,10 +1,10 @@
-"""Host-owned direct-reader pairing and sessions; no runtime entry point yet.
+"""Host-owned direct-reader pairing and sessions.
 
 This is a policy/state primitive, NOT an identity verifier. A future trusted
-ingress must establish a human PrincipalRef; a separate local confirmation
-door must authorize pairing/revocation. Neither is supplied by this module.
+ingress must establish a human PrincipalRef; the host owner CLI separately
+authorizes local pairing/revocation. Neither is supplied by this module.
 The internal owner_view factory exercises this policy with an explicitly
-injected verifier. No CLI, env flag, or runtime service enables it. See the owner
+injected verifier. No runtime service enables the network factory. See the owner
 access foundation section of documentation/architecture/observable-plane.md.
 """
 
@@ -349,6 +349,24 @@ class OwnerAccess:
                          (revision + 1, expected_principal.namespace, expected_principal.subject, now))
             conn.execute("DELETE FROM challenges")
             return self._owner(conn, expected_principal)
+
+    def inspect_pairing(self, token: str) -> PairingChallenge:
+        """Local console preview only; never expose this lookup remotely.
+
+        The subsequent confirmation rechecks expiry, revision and principal in
+        its write transaction. Previewing a request does not consume or grant it.
+        """
+        digest = _digest(token)
+        with self._connection() as conn:
+            now = self._now()
+            row = conn.execute("SELECT * FROM challenges WHERE digest = ?", (digest,)).fetchone()
+            grant = self._grant(conn)
+            revision = grant.revision if grant else 0
+            if (row is None or not row["created_at"] <= now < row["expires_at"]
+                    or row["revision"] != revision or (grant is not None and grant.active)):
+                raise AccessDenied("pairing_unavailable")
+            return PairingChallenge(token, PrincipalRef(row["namespace"], row["subject"]),
+                                    row["expires_at"])
 
     @staticmethod
     def _issue(conn: sqlite3.Connection, grant: OwnerGrant, now: float) -> ReaderSession:

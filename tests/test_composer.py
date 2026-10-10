@@ -614,6 +614,8 @@ class TestComposeSettingsLocal:
         assert "Bash(claudlobby host job run *)" in deny
         assert "Bash(claudlobby host repos pull *)" in deny
         assert "Bash(claudlobby host channels approve*)" in deny
+        assert "Bash(claudlobby host owner *)" in deny
+        assert "Bash(claudlobby * host owner *)" in deny
 
     def test_tool_allow_generates_patterns(self, tmp_path):
         paths = self._make_paths_with_runtime(tmp_path)
