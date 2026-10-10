@@ -288,6 +288,51 @@ def test_chunked_response_cannot_send_a_second_private_chunk_after_revoke(protec
     assert b"".join(item.get("body", b"") for item in messages) == b"first"
 
 
+@pytest.mark.parametrize("started", [False, True])
+@pytest.mark.parametrize("content_type", ["text/event-stream", "application/octet-stream"])
+def test_refusal_is_latched_when_a_producer_swallows_it(protected, monkeypatch,
+                                                        started, content_type):
+    from claudlobby.plane.owner_view import _ReadStopped
+
+    app, *_ = protected
+    admit = app._admit
+    calls = []
+    refusal_call = 3 if started else 2
+
+    def transient_failure(reader):
+        calls.append(True)
+        if len(calls) == refusal_call:
+            raise AccessUnavailable("transient outage")
+        admit(reader)
+
+    monkeypatch.setattr(app, "_admit", transient_failure)
+
+    async def producer(scope, receive, send):
+        headers = {"type": "http.response.start", "status": 200,
+                   "headers": [(b"content-type", content_type.encode())]}
+        await send(headers)
+        if started:
+            await send({"type": "http.response.body", "body": b"first", "more_body": True})
+        with pytest.raises(_ReadStopped):
+            await send({"type": "http.response.body", "body": b"private", "more_body": True})
+        # Even a recovered authority cannot reopen this refused response.
+        for message in (headers, {"type": "http.response.body", "body": b"resumed"}):
+            with pytest.raises(_ReadStopped):
+                await send(message)
+
+    async def ignore(_body):
+        pass
+
+    app.app = producer
+    messages = asyncio.run(_drive(app, "/swallowed", ignore))
+    assert len(calls) == refusal_call
+    assert messages[0]["status"] == (200 if started else 503)
+    assert not any(b"private" in m.get("body", b"") or b"resumed" in m.get("body", b"")
+                   for m in messages)
+    if started:
+        assert messages[-1].get("more_body") is (False if content_type == "text/event-stream" else True)
+
+
 def test_lifespan_and_existing_shutdown_signal_pass_through(protected):
     app, *_ = protected
 
@@ -315,7 +360,8 @@ def test_reader_repr_does_not_expose_session(protected):
     assert identity[0].token not in repr(identity[0])
 
 
-def test_real_http_process_honors_out_of_process_revocation(tmp_path):
+@pytest.mark.parametrize("response_kind", ["sse", "fixed", "chunked"])
+def test_real_http_process_honors_out_of_process_revocation(tmp_path, response_kind):
     """Loopback sample with an explicitly synthetic verifier, no host ingress.
 
     A test-only bearer adapter lets the client select its preverified fixture
@@ -331,9 +377,10 @@ def test_real_http_process_honors_out_of_process_revocation(tmp_path):
     credential.write_text(session.token)
     credential.chmod(0o600)
     program = '''
-import socket, sys
+import asyncio, socket, sys
 from pathlib import Path
 import uvicorn
+from fastapi.responses import StreamingResponse
 from claudlobby.plane.owner_access import AccessDenied, PrincipalRef
 from claudlobby.plane.owner_view import VerifiedReader, create_owner_app
 from tests.package_fixtures import source_package
@@ -347,6 +394,20 @@ async def synthetic_verifier(scope):
     return VerifiedReader(PrincipalRef("test-verifier", "human-001"), token)
 app = create_owner_app(root, verify_reader=synthetic_verifier,
                        sampler=_Sampler([]), package=source_package())
+async def private_chunks():
+    yield b"first"
+    for _ in range(500):
+        if (root / "continue-response").exists():
+            break
+        await asyncio.sleep(.01)
+    else:
+        raise RuntimeError("test response was not released")
+    yield b"private later chunk"
+async def chunks(fixed: bool = False):
+    headers = {"Content-Length": "24"} if fixed else {}
+    return StreamingResponse(private_chunks(), media_type="application/octet-stream", headers=headers)
+app.app.add_api_route("/private-chunks", chunks)
+app.app.router.routes.insert(0, app.app.router.routes.pop())
 server = uvicorn.Server(uvicorn.Config(app, log_level="warning", access_log=False))
 server.run(sockets=[socket.socket(fileno=int(sys.argv[2]))])
 '''
@@ -386,20 +447,33 @@ server.run(sockets=[socket.socket(fileno=int(sys.argv[2]))])
             assert result.status == 200
             assert len(json.loads(result.read())["data"]["tasks"]) == 2
         held = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
-        held.request("GET", "/api/stream?cursor=0", headers=headers)
+        path = ("/api/stream?cursor=0" if response_kind == "sse"
+                else "/private-chunks?fixed=" + ("true" if response_kind == "fixed" else "false"))
+        held.request("GET", path, headers=headers)
         response = held.getresponse()
         assert response.status == 200
-        # Consume the first complete data frame before changing durable authority.
-        for _ in range(10):
-            line = response.readline()
-            assert line, "stream ended before its first data frame"
-            if line.startswith(b"data:"):
-                break
+        if response_kind == "sse":
+            # Consume a complete frame before changing durable authority.
+            for _ in range(10):
+                line = response.readline()
+                assert line, "stream ended before its first data frame"
+                if line.startswith(b"data:"):
+                    break
+            else:
+                pytest.fail("stream did not deliver its initial data frame")
+            assert response.readline() == b"\n"
         else:
-            pytest.fail("stream did not deliver its initial data frame")
-        assert response.readline() == b"\n"
+            assert response.read(5) == b"first"
+            if response_kind == "fixed":
+                assert response.getheader("Content-Length") == "24"
         store.revoke_owner(expected_revision=grant.revision)
-        assert response.read() == b""
+        if response_kind == "sse":
+            assert response.read() == b""
+        else:
+            (tmp_path / "continue-response").write_text("ready")
+            with pytest.raises(http.client.IncompleteRead) as caught:
+                response.read()
+            assert caught.value.partial == b""
         with closing(http.client.HTTPConnection("127.0.0.1", port, timeout=3)) as client:
             client.request("GET", "/api/tasks", headers=headers)
             result = client.getresponse()

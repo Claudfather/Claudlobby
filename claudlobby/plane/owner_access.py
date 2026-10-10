@@ -179,7 +179,7 @@ class OwnerAccess:
             store.path.parent.mkdir(mode=0o700, exist_ok=True)
             if stat.S_IMODE(store.path.parent.stat().st_mode) != 0o700:
                 raise ValueError("authority directory must be private")
-            if not store.path.exists() and not store.path.is_symlink():
+            if not os.path.lexists(store.path):
                 fd, name = tempfile.mkstemp(prefix=".owner-access-", dir=store.path.parent)
                 os.close(fd)
                 temporary = Path(name)
@@ -203,11 +203,14 @@ class OwnerAccess:
                     temporary.unlink()
             with store._connection():
                 pass
-            directory = os.open(store.path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
+            # The plane directory's entry lives in state. Sync it even when
+            # another initializer created it, before acknowledging the store.
+            for path in (store.path.parent.parent, store.path.parent):
+                directory = os.open(path, os.O_RDONLY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
         except (OSError, ValueError, sqlite3.Error) as exc:
             raise AccessUnavailable("owner authority could not be initialized") from exc
         return store
@@ -227,8 +230,8 @@ class OwnerAccess:
             conn = sqlite3.connect(f"{self.path.as_uri()}?mode={mode}", uri=True,
                                    isolation_level=None, timeout=5)
             conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA foreign_keys = ON")
             if write:
+                conn.execute("PRAGMA foreign_keys = ON")
                 conn.execute("PRAGMA synchronous = FULL")
             else:
                 conn.execute("PRAGMA query_only = ON")
@@ -363,8 +366,8 @@ class OwnerAccess:
         with self._connection(write=True) as conn:
             return self._issue(conn, self._owner(conn, principal), self._now())
 
-    def _admit(self, conn: sqlite3.Connection, token: str, principal: PrincipalRef) -> OwnerGrant:
-        row = conn.execute("SELECT * FROM sessions WHERE digest = ?", (_digest(token),)).fetchone()
+    def _admit(self, conn: sqlite3.Connection, digest: str, principal: PrincipalRef) -> OwnerGrant:
+        row = conn.execute("SELECT * FROM sessions WHERE digest = ?", (digest,)).fetchone()
         now = self._now()
         if row is None or not row["created_at"] <= now < row["expires_at"]:
             raise AccessDenied("session_unavailable")
@@ -380,7 +383,7 @@ class OwnerAccess:
         from a browser-supplied resource claim.
         """
         with self._connection() as conn:
-            grant = self._admit(conn, token, principal)
+            grant = self._admit(conn, _digest(token), principal)
             if grant.host_uid != host_uid:
                 raise AccessDenied("wrong_deployment")
             return grant
@@ -443,15 +446,17 @@ class OwnerAccess:
     def renew_session(self, token: str, principal: PrincipalRef) -> ReaderSession:
         """Atomically rotate a still-valid session; old token cannot be replayed."""
         with self._connection(write=True) as conn:
-            grant = self._admit(conn, token, principal)
-            conn.execute("DELETE FROM sessions WHERE digest = ?", (_digest(token),))
+            digest = _digest(token)
+            grant = self._admit(conn, digest, principal)
+            conn.execute("DELETE FROM sessions WHERE digest = ?", (digest,))
             return self._issue(conn, grant, self._now())
 
     def end_session(self, token: str, principal: PrincipalRef) -> None:
         """End this session; a current pairing still permits fresh direct login."""
         with self._connection(write=True) as conn:
-            self._admit(conn, token, principal)
-            conn.execute("DELETE FROM sessions WHERE digest = ?", (_digest(token),))
+            digest = _digest(token)
+            self._admit(conn, digest, principal)
+            conn.execute("DELETE FROM sessions WHERE digest = ?", (digest,))
 
     def revoke_owner(self, *, expected_revision: int) -> OwnerGrant:
         """Local removal, guarded against a stale approval revoking a new pairing."""

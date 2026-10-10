@@ -52,7 +52,7 @@ def _host_uid(root: Path) -> str:
     try:
         return read_host_uid(root / "state")
     except ValueError as exc:
-        raise OperationContextError(str(exc)) from exc
+        raise OperationContextError("existing host identity is unavailable or invalid") from exc
 
 
 def _identity(conn, kind, alias, *, parent=None, human=False):
