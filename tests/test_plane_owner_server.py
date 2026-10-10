@@ -277,3 +277,24 @@ def test_server_run_returning_without_startup_is_not_a_clean_stop(tmp_path, sock
     output = capsys.readouterr()
     assert "startup failed" in output.err and "Owner server stopped" not in output.out
     assert not socket_path.exists()
+
+
+def test_fresh_server_socket_stays_outside_activation_storage(socket_path, monkeypatch):
+    import uvicorn
+    from claudlobby.plane.ids import ensure_host_uid
+    from claudlobby.plane import owner_server
+    root = socket_path.parent
+    ensure_host_uid(root / "state")
+    OwnerAccess.initialize(root).prepare_first_fleet()
+    seen = []
+    def stopped(server, *, sockets):
+        server.started = True
+        seen.append(Path(sockets[0].getsockname()))
+    monkeypatch.setattr(uvicorn.Server, "run", stopped)
+    owner_server.serve(root, origin="https://plane.example.test", tailscale_binary=Path(sys.executable))
+    assert seen == [root / "state/owner/owner.sock"]
+    assert not seen[0].exists()
+    assert {p.name for p in (root / "state/plane").iterdir()} == {"owner-access.db"}
+    with pytest.raises(OwnerServerConfigurationError, match="outside Plane"):
+        owner_server.serve(root, origin="https://plane.example.test", tailscale_binary=Path(sys.executable),
+                           socket_path=root / "state/plane/owner.sock")

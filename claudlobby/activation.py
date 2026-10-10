@@ -67,17 +67,14 @@ def _prepare_no_effect_journals(store, activation_id, plan, inventory, phases, a
 
 
 def _empty_plane(root: Path) -> None:
-    # Bootstrap intentionally accepts less than upgrade: any existing Plane
-    # content (DB, sidecar, socket/lock, spool, raw stage or unknown file) needs
-    # the recovery/upgrade owner. db_file is the canonical noncreating path.
-    directory = db_file(root).parent
-    if directory.resolve() != directory:
-        raise ActivationError("bootstrap refuses redirected Plane state")
+    # Owner authority is separate from recorder data. Preserve only its exact,
+    # private validated files; recorder, queues, sockets and unknown files refuse.
+    from .plane.owner_source import authority_only_plane
+    from .plane.owner_access import AccessUnavailable
     try:
-        if directory.exists() and (not directory.is_dir() or next(directory.iterdir(), None) is not None):
-            raise ActivationError("bootstrap requires absent Plane data and queues; use explicit recovery/upgrade")
-    except OSError as exc:
-        raise ActivationError("bootstrap cannot prove Plane state empty") from exc
+        authority_only_plane(root, allow_absent=True)
+    except (AccessUnavailable, ValueError, OSError) as exc:
+        raise ActivationError("bootstrap requires absent Plane data or validated owner authority; use explicit recovery/upgrade") from exc
 
 
 def _probe(root: Path):
@@ -330,6 +327,24 @@ def _finish_bootstrap_activation(root, store, activation_id, plan, release,
         applied = config_install.apply_config(root, activation_id)
         store.complete(activation_id, "configuration_applied", evidence_digest=_digest({
             "plan_id": applied.plan_id, "status": applied.status, "progress": applied.progress}))
+    from .plane.owner_access import AccessUnavailable, OwnerAccess
+    access = OwnerAccess(root)
+    if access.path.exists():
+        # Only this explicit empty-recorder bootstrap may attest automatically.
+        # Migration is completed; no ingest writer or bot has started yet.
+        from .plane.owner_source import bind_source, inspect_source
+        try:
+            if access.first_fleet_pending():
+                if "ingest_started" in completed:
+                    raise ActivationError("owner preparation was not retired before ingest; explicit recovery required")
+                bind_source(root)
+                access.retire_first_fleet()
+            else:
+                inspect_source(root)  # Resume observes prior binding; never re-attests running data.
+        except (AccessUnavailable, ValueError, OSError) as exc:
+            raise ActivationError("owner authority or source unavailable; explicit recovery required; "
+                                  "if the recorder is unbound, inspect its identity and use "
+                                  "host owner bind-source before resuming") from exc
     return _candidate_startup(root, store, activation_id, plan, release, declarations,
         starts, rank, install_directory, adapter, package, bootstrap=True)
 

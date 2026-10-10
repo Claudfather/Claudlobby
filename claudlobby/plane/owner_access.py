@@ -209,7 +209,8 @@ class OwnerAccess:
         self._clock = clock
 
     @classmethod
-    def initialize(cls, root: Path, *, clock: Callable[[], float] = time.time) -> OwnerAccess:
+    def initialize(cls, root: Path, *, clock: Callable[[], float] = time.time,
+                   before_first_fleet: bool = False) -> OwnerAccess:
         """Explicit preparation only; never invoked by a read or runtime startup.
 
         Requires the existing installation identity. Existing authority is
@@ -233,6 +234,8 @@ class OwnerAccess:
                         conn.execute("PRAGMA synchronous = FULL")
                         conn.executescript(_SCHEMA)
                         conn.execute("INSERT INTO metadata VALUES (1, 1, ?)", (host_uid,))
+                        if before_first_fleet:
+                            store._prepare_first_fleet(conn, host_uid)
                         conn.commit()
                     finally:
                         conn.close()
@@ -245,8 +248,9 @@ class OwnerAccess:
                         pass
                 finally:
                     temporary.unlink()
-            with store._connection():
-                pass
+            with store._connection() as conn:
+                if before_first_fleet:
+                    store._first_fleet_preparation(conn)
             # The plane directory's entry lives in state. Sync it even when
             # another initializer created it, before acknowledging the store.
             for path in (store.path.parent.parent, store.path.parent):
@@ -294,6 +298,55 @@ class OwnerAccess:
         finally:
             if conn is not None:
                 conn.close()  # uncommitted changes roll back, including policy refusals
+
+    def prepare_first_fleet(self) -> None:
+        """Explicit local preparation only, after sealed-release/fresh-host checks."""
+        with self._connection(write=True) as conn:
+            self._prepare_first_fleet(conn, read_host_uid(self.root / "state"))
+            self._first_fleet_preparation(conn)
+
+    @staticmethod
+    def _prepare_first_fleet(conn, host_uid):
+        conn.execute("CREATE TABLE IF NOT EXISTS first_fleet_preparation ("
+                     "singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL, "
+                     "host_uid TEXT NOT NULL, active INTEGER NOT NULL CHECK(active IN(0,1)))")
+        conn.execute("INSERT OR IGNORE INTO first_fleet_preparation VALUES (1,1,?,1)", (host_uid,))
+
+    def _first_fleet_preparation(self, conn, *, allow_retired=False):
+        rows = conn.execute("SELECT singleton,version,host_uid,active FROM first_fleet_preparation").fetchall()
+        if (len(rows) != 1 or tuple(rows[0])[:3] != (1, 1, read_host_uid(self.root / "state"))
+                or rows[0]["active"] not in (0, 1) or not allow_retired and rows[0]["active"] != 1):
+            raise AccessUnavailable("fresh owner preparation is unavailable")
+
+    def first_fleet_pending(self) -> bool:
+        with self._connection() as conn:
+            if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='first_fleet_preparation'").fetchone():
+                return False  # Ordinary authority never requested optional preparation.
+            self._first_fleet_preparation(conn, allow_retired=True)
+            return bool(conn.execute("SELECT active FROM first_fleet_preparation").fetchone()[0])
+
+    def retire_first_fleet(self) -> None:
+        """After bootstrap binds its new recorder; idempotent on resumed bootstrap."""
+        with self._connection(write=True) as conn:
+            self._first_fleet_preparation(conn, allow_retired=True)
+            conn.execute("UPDATE first_fleet_preparation SET active=0 WHERE singleton=1")
+
+    def validate_storage(self) -> None:
+        """Read-only validation for preserving authority during first activation."""
+        with self._connection() as conn:
+            if conn.execute("PRAGMA quick_check").fetchall()[0][0] != "ok":
+                raise AccessUnavailable("owner authority is unavailable")
+            conn.execute("SELECT revision,namespace,subject,active,changed_at FROM grants LIMIT 0")
+            conn.execute("SELECT digest,namespace,subject,revision,created_at,expires_at FROM challenges LIMIT 0")
+            conn.execute("SELECT digest,revision,created_at,expires_at FROM sessions LIMIT 0")
+            self._grant(conn)
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if tables & {"workspace_metadata", "workspace_challenges", "workspace_bindings"}:
+                self.workspace()._schema(conn)
+                self.workspace()._binding(conn)
+            if tables & {"connected_metadata", "connected_challenges", "connected_sessions"}:
+                self.connected()._schema(conn)
+            self._first_fleet_preparation(conn)
 
     def workspace(self):
         """Optional local workspace authority, sharing this store's transactions."""
