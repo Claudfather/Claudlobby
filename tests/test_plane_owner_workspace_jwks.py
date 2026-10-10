@@ -54,3 +54,42 @@ def test_singleflight_cache_and_unknown_hint_cooldown(profile, monkeypatch):
         with pytest.raises(AssertionUnavailable):
             await cache.get("invalid")
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("header", [None, {"alg": "EdDSA"}, {"alg": "HS256", "kid": "new"},
+    {"alg": "EdDSA", "kid": "x" * 129}, {"alg": "EdDSA", "kid": "new", "jku": "https://foreign.example"},
+    {"alg": "EdDSA", "kid": "new", "typ": "OTHER"}, "deep"], ids=['malformed','missing','wrong-alg','oversize','extra','wrong-typ','deep-json'])
+def test_invalid_header_does_not_consume_warm_rotation_cooldown(profile, monkeypatch, header):
+    from tests.test_plane_workspace_assertion import b64
+    def assertion(value):
+        return b64(json.dumps(value).encode()) + '.e30.AA'
+    async def scenario():
+        cache = WorkspaceKeyset("https://accounts.example")
+        calls = []
+        async def fetch():
+            calls.append(1)
+            cache._raw = json.dumps({"keys": [profile[1]]}).encode()
+            cache._kids = frozenset({profile[1]["kid"]})
+            cache._fetched = (__import__('time').monotonic(), __import__('time').time())
+        monkeypatch.setattr(cache, "_fetch", fetch)
+        await cache.get("malformed")
+        cache._attempt -= 31
+        attempt = cache._attempt
+        value = (b64(('{"extra":' + '[' * 1100 + '0' + ']' * 1100 + '}').encode()) + '.e30.AA'
+                 if header == "deep" else "invalid" if header is None else assertion(header))
+        assert await cache.get(value) == cache._raw
+        assert len(calls) == 1 and cache._attempt == attempt
+        await cache.get(assertion({"alg": "EdDSA", "kid": "new"}))
+        assert len(calls) == 2
+    asyncio.run(scenario())
+
+
+def test_total_timeout_is_typed_unavailable_on_python310(monkeypatch):
+    async def timeout(operation, **kwargs):
+        operation.close()
+        raise asyncio.TimeoutError
+    monkeypatch.setattr(asyncio, "wait_for", timeout)
+    async def scenario():
+        with pytest.raises(AssertionUnavailable):
+            await WorkspaceKeyset("https://accounts.example").get("invalid")
+    asyncio.run(scenario())

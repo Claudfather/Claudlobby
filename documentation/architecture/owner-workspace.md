@@ -90,9 +90,12 @@ Challenges accept only `{}` (1024 bytes), stages only `{nonce,assertion}`
 (16384 bytes; assertion8192 ASCII characters), with duplicate/unknown fields
 refused. Eight owned workers include body/identity/key/DB work and survive caller
 response cancellation; body has a five-second total bound and bootstrap a
-35-second phase deadline. SQLite locks remain bounded by the existing five-
-second timeout; an already running DB thread is retained until completion and
-may finish after the phase deadline. Lost/denied response may leave a staged
+35-second response deadline including threadpool wait. Every queued local call
+checks the deadline again before starting; no new begin/stage starts after it.
+SQLite locks remain bounded by the existing five-second timeout; already started
+local work stays owned/counting until completion and can finish with an unknown
+response outcome. App shutdown stops admission, cancels owned async work once
+and drains started local calls before completing the read app lifespan. Lost/denied response may leave a staged
 proposal: inspect locally rather than automatically replaying. Closing admission
 uses fresh native identity and exact challenge/proposal in one read transaction,
 including expiry/owner/binding/installation; it never confirms or renews.
@@ -103,7 +106,9 @@ TOTAL bounds including lock wait/body/key validation. Raw identity-encoded JSON
 is limited to64KiB/eight public Ed25519 keys. Whole-set cache lives only in memory
 for300 seconds under wall and monotonic clocks; rollback expires it. Refresh
 attempts have a30-second cooldown, including failures. Unknown kid is only a
-hint; signature/claims still pass the maintained pure verifier. No stale-cache
+bounded, finite-header refresh hint only; malformed/unsupported warm-cache
+headers use existing fresh bytes for local refusal without consuming cooldown.
+Signature/claims still pass the maintained pure verifier. No stale-cache
 fallback or generic discovery. Removed keys may remain trusted until expiry;
 local owner/workspace revocation supplies immediate host enforcement.
 
