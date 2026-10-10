@@ -8,6 +8,8 @@ already executing under admission. Inspection never records, retries or repairs.
 
 from __future__ import annotations
 
+from .owner_action_authorization import action_authorization
+
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -44,13 +46,13 @@ class OwnerFeedbackObservation:
 
 
 class OwnerFeedback:
-    def __init__(self, root: Path, *, package: PackageResources):
+    def __init__(self, root: Path, *, package: PackageResources, authorization=None):
         self.root = Path(root)
         if not self.root.is_absolute() or self.root.resolve(strict=True) != self.root:
             raise ValueError("owner feedback requires an explicit unredirected root")
         self.host_uid = read_host_uid(self.root / "state")
         self.package = package
-        self.access = OwnerAccess(self.root)
+        self.access = action_authorization(self.root, authorization)
 
     def _authorize(self, reader, fleet_uid, expected_grant):
         if type(reader) is not VerifiedReader:
