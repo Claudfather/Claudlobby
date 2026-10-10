@@ -81,3 +81,24 @@ Tailscale ingress with a protected backend, local confirmation interface,
 browser UI, real HTTPS/browser validation, and independent real-bot canary
 remain required before runtime/browser action activation. Google setup does
 not gate this local transport work.
+
+
+### Admission and capacity gates before activation
+
+The trusted verifier must admit only the explicitly intended pairing population;
+verifying arbitrary tailnet membership is insufficient. Pairing is currently
+bounded to 32 outstanding challenges for five minutes across the installation.
+Before exposing this factory, limit outstanding challenges per verified principal
+and exercise denial-of-service behavior from another admitted principal.
+
+A current owner may hold at most 32 sessions, each lasting fifteen minutes.
+Repeated cookie-less sign-ins can exhaust this capacity until those sessions
+expire. The browser must serialize explicit sign-in, retain the returned cookie,
+and avoid automatic sign-in retries; define and test an explicit local session
+recovery or eviction policy before runtime activation. No live session is silently
+evicted by this internal experiment. Renewal intentionally ends older SSE streams;
+the client must reconnect using the new cookie.
+
+Split HTTP/2 Cookie fields are recombined using semicolon separators; duplicate
+session-cookie names remain refused. Missing cookies on renew/logout return
+`sign_in_required` without deleting a potentially newer cookie.

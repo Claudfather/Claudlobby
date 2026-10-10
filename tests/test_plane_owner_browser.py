@@ -21,6 +21,7 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
 from claudlobby.plane import owner_browser
+from claudlobby.plane.ids import ensure_host_uid
 from claudlobby.plane.owner_access import (
     AccessDenied, OwnerAccess, PrincipalRef, SESSION_SECONDS,
 )
@@ -175,7 +176,7 @@ def test_pairing_requires_separate_local_approval_then_cookie_login(browser):
 def test_pairing_post_rejects_bad_browser_context_without_mutation(browser, case):
     _, client, store, _, _ = browser
     before = store.path.read_bytes()
-    headers, body, path = {}, b"{}", "/api/owner/pair"
+    headers, body, action = {}, b"{}", "pair"
     drop = ()
     if case == "wrong_host":
         headers["Host"] = "elsewhere.example.test"
@@ -198,15 +199,10 @@ def test_pairing_post_rejects_bad_browser_context_without_mutation(browser, case
     elif case == "large_body":
         body = b" " * 1025
     elif case == "query":
-        path += "?principal=human-001"
+        action += "?principal=human-001"
     else:
         headers["Cookie"] = f"{COOKIE_NAME}={'a' * 43}; {COOKIE_NAME}={'b' * 43}"
-    request_headers = {"Origin": ORIGIN, "X-Claudlobby-Owner": "1",
-                       "Content-Type": "application/json", "Sec-Fetch-Site": "same-origin"}
-    for name in drop:
-        request_headers.pop(name)
-    request_headers.update(headers)
-    response = client.post(path, content=body, headers=request_headers)
+    response = _post(client, action, headers=headers, body=body, drop=drop)
     assert response.status_code == 403, (case, response.text)
     assert response.json() == {"state": "sign_in_required" if case == "duplicate_cookie" else "denied"}
     assert response.headers["cache-control"] == "no-store"
@@ -308,8 +304,8 @@ def test_forged_identity_headers_cannot_replace_injected_verifier(browser):
     assert store.current_grant() is None
     identity[0] = OWNER
     _pair_locally(client, store)
-    token = _session_cookie(client) if client.cookies.get(COOKIE_NAME) else None
-    assert token is None  # local confirmation does not silently create a session
+    # local confirmation does not silently create a session
+    assert not client.cookies.get(COOKIE_NAME)
     identity[0] = OTHER
     assert _post(client, "login", headers=forged).status_code == 403
 
@@ -361,22 +357,19 @@ def test_delayed_stale_status_and_failed_renew_cannot_delete_new_cookie(browser)
         status_started, status_release = asyncio.Event(), asyncio.Event()
         renew_started, renew_release = asyncio.Event(), asyncio.Event()
 
-        async def hold_status(message):
-            if message["type"] == "http.response.start":
-                status_started.set()
-                await status_release.wait()
-
-        async def hold_failed_renew(message):
-            if message["type"] == "http.response.start":
-                renew_started.set()
-                await renew_release.wait()
+        def hold(started, release):
+            async def before_send(message):
+                if message["type"] == "http.response.start":
+                    started.set()
+                    await release.wait()
+            return before_send
 
         status_task = asyncio.create_task(_raw_http(app, "/api/owner/status", method="GET",
-            headers=[old_cookie], before_send=hold_status))
+            headers=[old_cookie], before_send=hold(status_started, status_release)))
         await asyncio.wait_for(status_started.wait(), timeout=5)
 
         failed_task = asyncio.create_task(_raw_http(app, "/api/owner/renew",
-            headers=[old_cookie], before_send=hold_failed_renew))
+            headers=[old_cookie], before_send=hold(renew_started, renew_release)))
         await asyncio.wait_for(renew_started.wait(), timeout=5)
         status_release.set()
         renew_release.set()
@@ -455,7 +448,6 @@ def test_other_deployment_cookie_and_wrong_principal_are_denied(browser, tmp_pat
     assert client.get("/api/owner/status").status_code == 403
     identity[0] = OWNER
     other = tmp_path / "other-deployment"
-    from claudlobby.plane.ids import ensure_host_uid
     ensure_host_uid(other / "state")
     other_store = OwnerAccess.initialize(other)
     challenge = other_store.begin_pairing(OWNER)
@@ -605,3 +597,29 @@ server.run(sockets=[socket.socket(fileno=int(sys.argv[2]))])
     finally:
         proc.terminate()
         proc.communicate(timeout=5)
+
+
+@pytest.mark.parametrize("action", ["renew", "logout"])
+def test_missing_cookie_requests_explicit_sign_in_without_deleting_cookie(browser, action):
+    _, client, store, _, _ = browser
+    _pair_locally(client, store)
+    response = _post(client, action)
+    assert response.status_code == 403
+    assert response.json() == {"state": "sign_in_required"}
+    assert "set-cookie" not in response.headers
+
+
+@pytest.mark.parametrize("duplicate_session", [False, True])
+def test_split_cookie_fields_accept_one_session_but_refuse_duplicates(browser, duplicate_session):
+    app, client, store, _, _ = browser
+    _pair_locally(client, store)
+    assert _post(client, "login").status_code == 200
+    token = _session_cookie(client)
+    session = (COOKIE_NAME + "=" + token).encode()
+    messages = asyncio.run(_raw_http(app, "/api/owner/status", method="GET", headers=[
+        (b"cookie", session), (b"cookie", session if duplicate_session else b"display=compact"),
+    ]))
+    assert _raw_start(messages)["status"] == (403 if duplicate_session else 200)
+    body = b"".join(m.get("body", b"") for m in messages)
+    assert json.loads(body) == {"state": "sign_in_required" if duplicate_session else "ready"}
+    assert b"set-cookie" not in _raw_headers(messages)

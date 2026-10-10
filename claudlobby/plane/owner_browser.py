@@ -66,12 +66,18 @@ def _header(scope: Scope, name: bytes) -> str | None:
 
 
 def _cookie(scope: Scope, *, required: bool = True) -> str | None:
-    raw = _header(scope, b"cookie") or ""
+    # HTTP/2 may split the Cookie field. Recombine only that field; duplicate
+    # session names still fail below, and other security headers stay singular.
+    try:
+        raw = "; ".join(value.decode("ascii") for key, value in scope.get("headers", [])
+                        if key.lower() == b"cookie")
+    except UnicodeError as exc:
+        raise AccessDenied("invalid_browser_header") from exc
     values = []
     for item in raw.split(";"):
-        name, separator, value = item.strip().partition("=")
+        name, _, value = item.strip().partition("=")
         if name == COOKIE_NAME:
-            values.append(value if separator else "")
+            values.append(value)
     if not values and not required:
         return None
     if len(values) != 1 or not _COOKIE_TOKEN.fullmatch(values[0]):
@@ -102,7 +108,7 @@ async def _empty_json(receive: Receive) -> None:
     try:
         if json.loads(body) != {}:
             raise ValueError
-    except (ValueError, UnicodeError, RecursionError) as exc:
+    except (ValueError, RecursionError) as exc:
         raise AccessDenied("invalid_browser_body") from exc
 
 
@@ -157,12 +163,12 @@ class _OwnerBrowser:
                 "expires_at": challenge.expires_at}, 202)
         if action == "logout":
             if token is None:
-                raise AccessDenied("invalid_session_cookie")
+                raise AccessDenied("sign_in_required")
             self.access.end_session(token, principal)
             return _response({"state": "signed_out"}, clear_cookie=True)
         if action == "renew":
             if token is None:
-                raise AccessDenied("invalid_session_cookie")
+                raise AccessDenied("sign_in_required")
             session = self.access.renew_session(token, principal)
         elif token is not None:
             try:
