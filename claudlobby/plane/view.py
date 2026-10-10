@@ -2104,7 +2104,7 @@ def create_app(
     # the redeploy window it was built for (gauntlet round 2). Ten stats
     # per page load — index() already reads the file per request.
     _UI_FILES = ("index.html", "app.js", "panel-state.js", "api-client.js",
-                 "work-loop.js", "action-state.js", "owner-api-client.js", "two-source-read.js", "connected-read-client.js", "connected-workspace.js", "workspace-enrollment.js",
+                 "work-loop.js", "action-state.js", "owner-api-client.js", "two-source-read.js", "connected-read-client.js", "connected-actions.js", "connected-workspace.js", "workspace-enrollment.js",
                  "style.css", "workspace.css")
 
     def asset_token() -> str:
@@ -2162,7 +2162,11 @@ def create_app(
 
     @app.get("/connected-read-client.js")
     def connected_read_client_js():
-        return _busted_js("connected-read-client.js", ("owner-api-client.js",))
+        return _busted_js("connected-read-client.js", ("owner-api-client.js", "connected-actions.js"))
+
+    @app.get("/connected-actions.js")
+    def connected_actions_js():
+        return _busted_js("connected-actions.js", ("action-state.js",))
 
     @app.get("/api-client.js")
     def api_client_js():

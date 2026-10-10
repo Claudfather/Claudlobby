@@ -67,6 +67,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   const selectionKey = () => row() ? rowKey(row()) : "";
   const leadId = c => (c.recipients.find(r => r.lead) || c.recipients[0]).id;
   const readDraft = () => row() ? state.draft(row()) : "";
+  const roomLabel = value => api.roomLabel?.(value) || value;
   const recipientLabel = request => requestContext(request)?.recipients.find(r => r.id === request.target.recipient)?.label || request.target.recipient;
   function saveDraft() {
     if (!row()) return;
@@ -109,7 +110,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     const usable = !!context && !!target;
     $("work-form").hidden = !usable;
     $("work-mode").textContent = context?.simulation ? "EXAMPLE · NO REAL BOT DELIVERY" : "";
-    $("work-scope").textContent = context ? context.scope.fleet : (room || "All teams");
+    $("work-scope").textContent = roomLabel(context ? context.scope.fleet : (room || "All teams"));
     $("work-unavailable").textContent = usable ? "" : contextsByKind.has("feedback")
       ? "Open a task to give feedback to the lead. This does not approve or change the task."
       : contextsByKind.has("nudge") ? "Open a task to ask its team lead about it. This does not approve or complete work."
@@ -131,7 +132,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       : notice;
     $("work-recoverable").innerHTML = state.corruptStorage && state.recoverable.length
       ? '<p class="note">Readable saved request IDs from this tab. Copy any needed IDs before clearing the damaged records.</p>'
-        + state.recoverable.map(p => `<p class="note">${esc(p.scope.fleet)} · ${esc(p.kind)} to ${esc(recipientLabel(p))}${p.target.task_id ? ` · task ${esc(p.target.task_id)}` : ""} · ${esc(p.request_id)}</p>`).join("")
+        + state.recoverable.map(p => `<p class="note">${esc(roomLabel(p.scope.fleet))} · ${esc(p.kind)} to ${esc(recipientLabel(p))}${p.target.task_id ? ` · task ${esc(p.target.task_id)}` : ""} · ${esc(p.request_id)}</p>`).join("")
       : "";
     $("work-clear-saved").hidden = !state.corruptStorage;
     pendingRows();
@@ -203,14 +204,15 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     readsPaused = true;
     invalidate("Session access is paused. Actions are disabled until your session is checked again; your draft is kept.");
   }
-  function setRoom(fleet) {
+  function setRoom(fleet, {keepDetail = false} = {}) {
     saveDraft();
     if (context?.actions.includes("message") && kind === "message" && target?.task_id === null)
       messageRecipients.set(scopeKey(context.scope), target.recipient);
     const token = ++epoch, selectedRoom = fleet || "all";
     ++compositionEpoch; room = selectedRoom; readsPaused = false;
-    contextsByKind.clear(); context = null; target = null; targetTitle = null; kind = "message"; board = null; channel = null;
-    closeDetail(); $("work-body").value = ""; $("work-recipient").innerHTML = ""; $("work-recipient").value = "";
+    contextsByKind.clear(); context = null; target = null; targetTitle = null; kind = "message";
+    if (!keepDetail) { board = null; channel = null; closeDetail(); }
+    else if (pendingDetail) { ++detailEpoch; pendingDetail = null; detailSnapshot = null; conversation = null; showDetailUnavailable(null); } $("work-body").value = ""; $("work-recipient").innerHTML = ""; $("work-recipient").value = "";
     notice = "Checking available actions…"; paint();
     function accept(value, taskKind) {
       if (token !== epoch) return;
@@ -231,7 +233,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
         notice = value.simulation ? "Example actions are recorded only by the test service. No real agents receive them." : "";
       } else if (!contextsByKind.size) notice = selectedRoom === "all" ? "Choose a team to see its available actions."
         : "Browser action access is unavailable for this team. Task and activity records remain readable.";
-      if (selected) $("task-detail-refresh").hidden = false;
+      if (selected) { $("task-detail-refresh").hidden = false; updateDetailActions(); }
       paint(); // An unrelated context result must not replace an authored draft.
     }
     Promise.resolve().then(() => token === epoch ? api.interactionContext?.(selectedRoom) : null)
@@ -330,7 +332,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     const content = $("task-detail-content");
     const lastEvent = task.last_event || task.history?.at(-1);
     const assignment = task.current_assignment;
-    content.innerHTML = `<p class="eyebrow">${esc(task.fleet || "Team not recorded")} · TASK</p>
+    content.innerHTML = `<p class="eyebrow">${esc(roomLabel(task.fleet || "Team not recorded"))} · TASK</p>
       <h2 id="task-detail-title">${esc(task.title || "Recorded task")}</h2>
       <p class="task-state"><b>${esc(task.state || "State unknown")}</b></p>
       ${recordIds([["Task", task.task_id], ["Team", task.fleet_uid], ["Created by", task.created_by_alias || task.created_by_uid]])}
@@ -634,5 +636,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     } finally { checkingReceipts.delete(request.request_id); if (token === epoch) paint({ restoreDraft: selection === selectionKey() }); }
   };
   paint();
-  return { setRoom, update, updateChannel, invalidate, pause, canSelectMessageRecipient, selectMessageRecipient };
+  return { setRoom,
+    refreshActions(source) { if (room.startsWith(source + " / ")) setRoom(room,{keepDetail:true}); },
+    update, updateChannel, invalidate, pause, canSelectMessageRecipient, selectMessageRecipient };
 }

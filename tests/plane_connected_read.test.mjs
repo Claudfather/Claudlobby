@@ -5,8 +5,9 @@ const load = text => import(`data:text/javascript;base64,${Buffer.from(text).toS
 const ownerText = await readFile(new URL('../claudlobby/plane/ui/owner-api-client.js', import.meta.url), 'utf8');
 const ownerURL = `data:text/javascript;base64,${Buffer.from(ownerText).toString('base64')}`;
 const { isOwnerReadHandle } = await import(ownerURL);
+const actionsURL = `data:text/javascript;base64,${Buffer.from((await readFile(new URL('../claudlobby/plane/ui/connected-actions.js', import.meta.url), 'utf8')).replace('"./action-state.js"', JSON.stringify(new URL('../claudlobby/plane/ui/action-state.js',import.meta.url).href))).toString('base64')}`;
 const clientText = await readFile(new URL('../claudlobby/plane/ui/connected-read-client.js', import.meta.url), 'utf8');
-const { createConnectedReadClient } = await load(clientText.replace('"./owner-api-client.js"', JSON.stringify(ownerURL)));
+const { createConnectedReadClient } = await load(clientText.replace('"./owner-api-client.js"', JSON.stringify(ownerURL)).replace('"./connected-actions.js"',JSON.stringify(actionsURL)));
 const uuid = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const HOST = 'host_' + 'a'.repeat(32), NONCE = 'A'.repeat(43), TOKEN = 'B'.repeat(42) + 'A', ROTATED = 'C'.repeat(42) + 'A';
 const ref = { reference_id: uuid(4), endpoint_origin: 'https://host.example.test', revision: 1 };
@@ -352,4 +353,26 @@ test('a current SSE header timeout still reports loss through the existing read-
   assert.equal(h.calls.filter(c => c.url.endsWith('/issue')).length, 1);
   assert.equal(h.calls.filter(c => c.url.endsWith('/renew')).length, 0);
   h.api.dispose();
+});
+
+test('an admitted source-loss frame fences a held action without replay or ending the read session',async()=>{
+  const h=harness(),pending=deferred(),recipient='actor_'+'c'.repeat(32);
+  const scope={workspace:'connected-test',host:HOST,fleet:'team',viewer:'message-grant1'};
+  h.overrides.set('actions/context',()=>reply(200,{version:1,room:'team',scope,simulation:false,actions:['message'],recipients:[{id:recipient,label:'Lead'}]}));
+  h.overrides.set('actions/send',()=>pending.promise);
+  let losses=0;
+  const actions=h.api.createActions({key:'computer-1',onSourceChange:()=>losses++});
+  await h.api.connect();
+  const context=await actions.interactionContext('team');
+  const request={kind:'message',scope:context.scope,target:{recipient:context.recipients[0].id,task_id:null},request_id:uuid(99),submitted_at:'2026-10-10T00:00:00Z',body:'Keep this original request'};
+  const sending=actions.sendAction(request);
+  const refusal=assert.rejects(sending,/unknown/);
+  const stream=h.api.readHandle.createEventSource('/api/stream');await flush();
+  h.push('event: source\ndata: {"state":"unreadable"}\n\n');await flush();
+  pending.resolve(reply(200,{version:1,status:'delivered',...request,scope,target:{recipient,task_id:null},body:undefined}));
+  await refusal;
+  assert.equal(losses,1);assert.equal(h.api.snapshot().state,'ready');
+  assert.equal(h.calls.filter(c=>new URL(c.url).pathname.endsWith('/actions/send')).length,1);
+  assert.equal(h.calls.filter(c=>new URL(c.url).pathname.endsWith('/status')).length,0);
+  stream.close();h.api.dispose();assert.throws(()=>h.api.createActions({key:'computer-2'}),/unavailable/);
 });

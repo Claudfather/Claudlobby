@@ -38,7 +38,7 @@ test('only core admitted read handles; distinct hosts; no action or mutation cap
   const a = await source('a','a'), b = await source('b','a');
   assert.throws(() => createTwoSourceReadTransport({ sources: [a,b] }), /independently/);
   const { api, a: x } = await pair();
-  assert.deepEqual(Object.keys(api).sort(), ['createEventSource','dispose','jget']);
+  assert.deepEqual(Object.keys(api).sort(), ['createEventSource','dispose','jget','roomLabel','routeRoom']);
   for (const path of ['/api/owner/actions/send','/api/tasks?fleet=unregistered','/api/channel?limit=999','/api/tasks?fleet=a%20%2F%20team&fleet=b','https://wrong/api/tasks','/api/inventory']) assert.notEqual((await api.jget(path)).state, 'ok');
   assert.ok(x.calls.every(c => !c.opts.method || c.opts.method === 'GET'));
 });
@@ -344,7 +344,7 @@ test('workspace transport accepts only one or two distinct core-issued handles; 
     assert.throws(()=>createWorkspaceReadTransport({sources}));
   assert.throws(()=>createTwoSourceReadTransport({sources:[a]}),/Exactly two/);
   const api=createWorkspaceReadTransport({sources:[a]});
-  assert.deepEqual(Object.keys(api).sort(),['createEventSource','dispose','jget']);
+  assert.deepEqual(Object.keys(api).sort(),['createEventSource','dispose','jget','roomLabel','routeRoom']);
   assert.notEqual((await api.jget('/api/owner/actions/context')).state,'ok');
   assert.notEqual((await api.jget('/api/owner/actions/send')).state,'ok');
   assert.ok(a.calls.every(c=>!c.opts.method||c.opts.method==='GET'));
@@ -444,7 +444,7 @@ test('held old one-source detail cannot paint private bytes after disposal or co
 // public demo's root adapter, or create a second owner-handle module instance.
 test('canonical module graph stays inside its release directory', async () => {
   const files = ['app.js', 'panel-state.js', 'api-client.js', 'work-loop.js',
-    'action-state.js', 'owner-api-client.js', 'two-source-read.js', 'connected-read-client.js', 'connected-workspace.js', 'workspace-enrollment.js'];
+    'action-state.js', 'connected-actions.js', 'owner-api-client.js', 'two-source-read.js', 'connected-read-client.js', 'connected-workspace.js', 'workspace-enrollment.js'];
   for (const prefix of ['https://plane.example.test/', 'https://plane.example.test/connected-assets/release/']) {
     for (const name of files) {
       const source = await readFile(new URL('../claudlobby/plane/ui/' + name, import.meta.url), 'utf8');
@@ -455,5 +455,18 @@ test('canonical module graph stays inside its release directory', async () => {
         assert.ok(specifier.startsWith('./'));
       }
     }
+  }
+});
+
+test('overview and team tabs display escaped labels while clicks retain exact stable routing identity',async()=>{
+  const {runInNewContext}=await import('node:vm'),app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
+  const key='c-abcdefghijklmnopqrstuvwxy / team',nodes=new Map(['overview','fleet-tabs'].map(k=>[k,{innerHTML:'',querySelectorAll:()=>[]}]));
+  const fleet={alias:key,display_label:'Computer 1 / <team>',bots:1,presence:{counts:{},live_poll:'ok'}},context={$:id=>nodes.get(id),fleets:[fleet,{alias:'other'}],currentFleet:key,interactionApi:{dispose(){}},esc:v=>String(v??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'),ago:()=>'',stateBlock:()=>''};
+  runInNewContext(app.slice(app.indexOf('function renderHeader('),app.indexOf('function toggleMessageBody(')),context);
+  context.renderOverview(ok({fleets:[fleet],sources:[]}));
+  runInNewContext(app.slice(app.indexOf('function renderFleetTabs()'),app.indexOf('// ONE pick path')),context);context.renderFleetTabs();
+  for(const node of nodes.values()){
+    assert.match(node.innerHTML,/Computer 1 \/ &lt;team&gt;/);assert.ok(node.innerHTML.includes(`data-fleet="${key}"`));
+    assert.ok(!node.innerHTML.includes('>'+key));assert.doesNotMatch(node.innerHTML,/<team>/);
   }
 });

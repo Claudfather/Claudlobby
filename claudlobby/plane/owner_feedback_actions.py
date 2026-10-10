@@ -15,7 +15,8 @@ from ..task_operations import feedback_semantic_digest
 from ..task_queries import show_task, TaskQueryError
 from ..task_state import TaskStateError
 from .db import connect_ro, db_file
-from .owner_access import AccessDenied, AccessUnavailable, OwnerAccess
+from .owner_action_authorization import action_authorization, scope_binding, scope_inputs
+from .owner_access import AccessDenied, AccessUnavailable
 from .owner_actions import ActionNotStarted, _exact, _opaque, _text
 from .owner_feedback import OwnerFeedback
 from .owner_task_action_protocol import metadata
@@ -23,13 +24,14 @@ from .owner_source import admit_source, inspect_source, source_host_uid
 
 
 class OwnerFeedbackActions:
-    def __init__(self, root: Path, *, package):
+    def __init__(self, root: Path, *, package, authorization=None):
         self.root, self.package = root, package
+        self.authorization = action_authorization(self.root, authorization)
 
     def _context(self, reader, room):
         _text(room)
         host = inspect_source(self.root)
-        access = OwnerAccess(self.root)
+        access = self.authorization
         access.authorize_read(reader.token, reader.principal, host_uid=host)
         bindings = read_selected_identity_bindings(self.root, room, package=self.package)
         grant = access.authorize_feedback(reader.token, reader.principal,
@@ -50,10 +52,11 @@ class OwnerFeedbackActions:
                 or route.peer_fleet_uid != ctx.fleet_uid or route.caller != ctx.caller
                 or route.peer != manager or route.manager != manager):
             raise AccessDenied("feedback_binding_changed")
-        scope = {"workspace": _opaque([str(self.root), host]), "host": host, "fleet": room,
-            "viewer": _opaque(["task.feedback", grant.fleet_uid, reader.principal.namespace,
+        binding = scope_binding(access, reader, host)
+        scope = {"workspace": _opaque(scope_inputs([str(self.root), host], binding)), "host": host, "fleet": room,
+            "viewer": _opaque(scope_inputs(["task.feedback", grant.fleet_uid, reader.principal.namespace,
                 reader.principal.subject, grant.owner.revision, grant.generation,
-                grant.actor_uid, grant.actor_alias])}
+                grant.actor_uid, grant.actor_alias], binding))}
         return {"version": 2, "room": room, "scope": scope, "simulation": False,
             "recipients": [{"id": manager.uid, "label": manager_name, "lead": True}],
             "actions": ["feedback"], "release_id": route.release_id}, grant
@@ -137,7 +140,7 @@ class OwnerFeedbackActions:
                 if self._intent_digest(payload) != payload["semantic_sha256"]:
                     raise AccessDenied("feedback_intent_changed")
             self._recheck(reader, context, grant, preview=action == "send")
-            adapter = OwnerFeedback(self.root, package=self.package)
+            adapter = OwnerFeedback(self.root, package=self.package, authorization=self.authorization)
             options = dict(fleet=context["room"], fleet_uid=grant.fleet_uid,
                 task_id=payload["target"]["task_id"], manager_uid=payload["target"]["recipient"],
                 request_id=payload["request_id"], expected_grant=grant)

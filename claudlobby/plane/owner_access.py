@@ -301,7 +301,7 @@ class OwnerAccess:
         return OwnerWorkspace(self)
 
     def connected(self):
-        """Optional connected read credentials; never initialize on access."""
+        """Optional connected credentials and explicit-grant admission; never initialize on access."""
         from .owner_connected import OwnerConnected
         return OwnerConnected(self)
 

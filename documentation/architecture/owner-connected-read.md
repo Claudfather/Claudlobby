@@ -2,9 +2,10 @@
 
 Core's opt-in connected read backend lets an isolated Plane read an approved
 host directly with an opaque credential held in browser memory. It does not
-proxy private data through the website, grant fleet actions or provide the
-connected browser UI. Actual issuer integration and device/Serve/browser
-acceptance remain separate gates. Direct-host Strict cookie access is unchanged.
+proxy private data through the website or grant fleet actions. The canonical
+browser carrier, workspace entry and independently granted action interface
+are implemented below; actual device/Serve/browser acceptance remains a
+separate gate. Direct-host Strict cookie access is unchanged.
 
 The host requires an existing native paired owner, effective active local
 workspace binding, matching canonical recorder source and fixed HTTPS issuer/
@@ -66,15 +67,16 @@ SHA256 digest plus that snapshot. Token is32 random bytes/canonical43char
 base64url, returned only on successful issue/renew, never persisted cleartext.
 Both pending challenges and sessions cap32; stale/expired connected rows can
 be cleaned at issuance. Direct cookie tables remain purpose-separated, so
-neither token can authorize the other's door or a fleet action.
+neither token can authorize the other's credential door. A connected read
+session grants no fleet action by itself; separate action doors require the
+existing explicit local grants.
 
 Ready JSON contains version1,state:ready,relative expires_in, exact existing
 read_profile `{version:1,profile:"direct-owner-read-v1",host_uid}` and
 session_context with exactly issuer,subject,workspace_id,binding_revision,
 binding_generation,operational_origin. The profile names the canonical
-direct-to-host read protocol, not cookie authentication. The future client must
-compare authenticated context before admitting profile and pin the canonical
-host, using the existing core checker. Construction of a profile/reader is not
+direct-to-host read protocol, not cookie authentication. The canonical connected client compares authenticated context before admitting
+profile and pins the canonical host using the existing core checker. Construction of a profile/reader is not
 authentication.
 
 ## Canonical reads and loss
@@ -96,8 +98,9 @@ host-UID file/session/binding, not a fresh ledger-marker query for every byte.
 
 SSE preserves canonical Last-Event-ID > cursor query > HEAD precedence, source-
 local numeric cursors, named source frames, retry and ping comments. Credentials
-are header-only; a future fetch-SSE client is required because EventSource cannot
-set Authorization. No connected JS/action exports are supplied by this backend.
+are header-only; the canonical fetch-SSE client carries Authorization because EventSource cannot
+set it. The backend supplies read doors; the browser interface and separate
+grant-bound action doors are described below.
 Finite reads and first stream headers have15second bounds; healthy admitted
 streams have no idle timeout. Held denial prevents headers/private data; a
 denied started stream ends, while other partial responses remain incomplete.
@@ -154,7 +157,8 @@ Missing/unsupported capabilities or changed authenticated context fail closed.
 `renew()` and `logout()` are explicit serialized controls; an unknown mutation
 reply is never replayed. Successful logout retains local pairing and binding.
 
-Only `readHandle`, lifecycle controls, `snapshot()` and `subscribe()` are public.
+`readHandle`, lifecycle controls, `snapshot()`, `subscribe()` and the entry-owned
+`createActions()` factory are public; no credential-returning API exists.
 The handle is core minted and works with the finite two-source reader; it has no
 action export or global sign-in redirect. Session token, nonce and assertion
 are held only in private memory/body/header ownership, never returned by the
@@ -252,3 +256,46 @@ This core module is part of the finite static graph. It reuses the document’s 
 Enrollment controllers participate in the same local admission transaction as read carriers, subscriptions and aggregate streams. Any construction failure disposes all partial resources before an explicit fresh account check; rollback never publishes a partially constructed computer as readable. Corrected visibility, paused-only resume, keyboard focus and unavailable Disconnect behavior remain shared with the read entry.
 
 Local retention bounds allow five seconds of browser clock skew; the host remains the authority on assertion and proposal expiry. Enrollment assertions share the host's 8192-character limit. Updated account metadata refreshes the displayed workspace name, and retirement clears it alongside the approval code. Forgetting a code returns focus to that computer's approval control, or its group while the pending request settles.
+
+### Connected action interface
+
+The canonical connected entry can expose ordinary messages, task nudges and task
+feedback through a separate source-bound action interface. Its bearer remains
+private to the carrier; a core read handle still exports no actions. Every host
+operation requires the current native owner, workspace binding and the existing
+independent local message/nudge/feedback grant. A read profile, website membership
+or coverage count is never an action grant. These local grants are not
+workspace-specific; the approved binding and the local grant are checked together.
+
+The entry routes an exact team from the admitted source roster. One transport
+boundary projects canonical raw host/actor/task/assignment IDs into the selected
+source's qualified UI IDs and team name, and reverses only that exact qualifier
+before the fixed connected action POST. Mixed sources, another host, changed
+scope or undeclared recipients refuse without a send. HTTP v1 message and v2 task
+metadata remain canonical and raw; the shared ActionState saves the corresponding
+qualified metadata, original UUID and digest, never the body. Source qualifiers
+are `c-` plus the complete reference UUID interpreted as a base36 integer,
+without truncation. Display labels remain ordinal; removing/reordering another
+reference cannot change a retained reference’s pending receipt identity. Direct-owner and
+browser-local contracts remain unchanged.
+
+Context/prepare/receipt have15-second deadlines; send has45seconds. Renewal,
+logout, account/reference change and observed source loss fence late replies.
+A missing action grant performs at most one pure status probe and does not end a
+healthy read session. Independent capability refusal keeps other drafts and task
+reads. A source lifecycle refresh preserves settled task details and message
+recipient/draft selection, while acquiring fresh capabilities. Preparation never
+sends; uncertain send retains the original saved UUID. Receipt lookup never
+resends. Recorded means delivery unconfirmed, delivered requires the canonical
+receiver evidence, and neither means that task work or approval occurred.
+
+Context admission keeps only the latest request per kind, including same-team
+refreshes. A late previous-team response cannot replace the current capability.
+Quiet recorder recovery refreshes action contexts once when the existing board
+overview observes that source healthy again; no new poller or send retry is added.
+
+Stable routing qualifiers remain in data attributes and saved metadata. Team
+cards, tabs, composer scope and task detail headings show the source display
+label and raw team alias (for example Computer 1 / engineering). Recovery
+consumes its loss ticket only on an overview started after that loss; a stale
+healthy result cannot exhaust the later recovery refresh.

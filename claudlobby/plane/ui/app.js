@@ -702,8 +702,8 @@ function renderOverview(env) {
     <div class="ov-card ${dimension ? "pick" : ""} ${
         dimension && f.alias === currentFleet ? "on" : ""}"
          data-fleet="${esc(f.alias)}" ${dimension ? 'role="button" tabindex="0"' : ""}
-         title="${esc(f.alias)}${dimension ? " — open this room" : ""}">
-      <div class="ov-head"><b>${esc(f.alias)}</b>
+         title="${esc(f.display_label || f.alias)}${dimension ? " — open this room" : ""}">
+      <div class="ov-head"><b>${esc(f.display_label || f.alias)}</b>
         <span>${f.bots} bot${f.bots === 1 ? "" : "s"}${
           f.provisional ? ` <small title="actors no registry scan has confirmed yet — a mistyped dispatch target mints one">(${f.provisional} unconfirmed)</small>` : ""}</span>
         <small>${esc(f.capture)} capture</small></div>
@@ -1011,7 +1011,7 @@ function renderFleetTabs() {
     const n = meta ? `<small>${esc(meta.source_state && meta.source_state !== "ok" ? meta.source_state : meta.bots)}</small>`
       : `<small>${typeof interactionApi.dispose === "function" ? "sources" : "host"}</small>`;
     return `<button class="pill ghost ${f === currentFleet ? "on" : ""}"`
-      + ` data-fleet="${esc(f)}" type="button">${esc(f)} ${n}</button>`;
+      + ` data-fleet="${esc(f)}" type="button">${esc(meta?.display_label || f)} ${n}</button>`;
   }).join("");
   el.querySelectorAll("button").forEach((b) =>
     b.addEventListener("click", () => pickFleet(b.dataset.fleet)));
@@ -1494,6 +1494,7 @@ const ownerSession = typeof interactionApi.mountSessionControls === "function"
       },
       onResume: resumeOwnerReads,
       onActionPause(scope, kind, recipient) { workLoop.invalidate(undefined, scope, kind, recipient); },
+      onActionSourceChange(source) { workLoop.refreshActions(source); },
     }) : null;
 
 // Injected multi-source transports own their streams; disposal never signs out a host.

@@ -25,7 +25,8 @@ from ..request_queries import RequestView, read_request
 from ..resources import PackageResources
 from ..runtime_admission import RuntimeIdentity, mutation_admission
 from .ids import ID_PATTERNS, read_host_uid
-from .owner_access import AccessDenied, OwnerAccess, OwnerFeedbackGrant, VerifiedReader
+from .owner_action_authorization import action_authorization
+from .owner_access import AccessDenied, OwnerFeedbackGrant, VerifiedReader
 from .owner_messages import _GENERATED_ENV
 from .owner_source import admit_source, inspect_source
 
@@ -44,13 +45,13 @@ class OwnerFeedbackObservation:
 
 
 class OwnerFeedback:
-    def __init__(self, root: Path, *, package: PackageResources):
+    def __init__(self, root: Path, *, package: PackageResources, authorization=None):
         self.root = Path(root)
         if not self.root.is_absolute() or self.root.resolve(strict=True) != self.root:
             raise ValueError("owner feedback requires an explicit unredirected root")
         self.host_uid = read_host_uid(self.root / "state")
         self.package = package
-        self.access = OwnerAccess(self.root)
+        self.access = action_authorization(self.root, authorization)
 
     def _authorize(self, reader, fleet_uid, expected_grant):
         if type(reader) is not VerifiedReader:
