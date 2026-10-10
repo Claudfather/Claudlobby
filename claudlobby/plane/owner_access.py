@@ -435,11 +435,26 @@ class OwnerAccess:
                 )
             return OwnerMessageGrant(owner, fleet_uid, actor_uid, actor_alias)
 
-    def revoke_messages(self, *, expected_owner: OwnerGrant, fleet_uid: str) -> None:
-        """Locally remove one current owner/fleet ordinary-message grant."""
+    def current_message_grant(self, *, expected_owner: OwnerGrant,
+                              fleet_uid: str) -> OwnerMessageGrant:
+        """Local read-only inspection of one retained grant, no browser session.
+
+        Requiring the exact current owner fences a stale local preview. Missing
+        grants refuse without provisioning a table or repairing stored data.
+        """
+        fleet_uid = _canonical_uid(fleet_uid, "fleet")
+        with self._connection() as conn:
+            owner = self._expected_owner(conn, expected_owner)
+            return self._message_grant(conn, owner, fleet_uid)
+
+    def revoke_messages(self, *, expected_owner: OwnerGrant, fleet_uid: str,
+                        expected_grant: OwnerMessageGrant | None = None) -> None:
+        """Locally remove a grant; an optional exact preview fences replacement."""
         fleet_uid = _canonical_uid(fleet_uid, "fleet")
         with self._connection(write=True) as conn:
             owner = self._expected_owner(conn, expected_owner)
+            if expected_grant is not None and self._message_grant(conn, owner, fleet_uid) != expected_grant:
+                raise AccessDenied("message_binding_changed")
             if self._has_message_grants(conn):
                 conn.execute(
                     "DELETE FROM message_grants WHERE owner_revision = ? AND fleet_uid = ?",

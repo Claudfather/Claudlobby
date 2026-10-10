@@ -367,6 +367,7 @@ def send_committed_native_attempt(route: MessageRoute, package: PackageResources
 def send_message(route: MessageRoute, package: PackageResources, body: MessageBody, *,
                  request_id: str, kind: str = "chat", retry_uncertain: bool = False,
                  parent_message_id: str | None = None,
+                 require_durable_request: bool = False,
                  trusted_tiers: Mapping[str, str],
                  transport: Callable = native_send,
                  notify: Callable = notify_recording_degraded,
@@ -377,6 +378,9 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
     ReceiptBusy/ReceiptError/MessageConflict and capture-policy failures are
     refusals. Recording outages alone permit the ordinary native attempt (O1).
     IDs and route are frozen before any effect. No request body enters a receipt.
+    ``require_durable_request`` refuses before transport unless preparation and
+    the native reservation were durably retained. Later recording failures still
+    leave an uncertain outcome to inspect, never permission to send again.
     """
     if not isinstance(route, MessageRoute) or not isinstance(body, MessageBody):
         raise MessageConflict("frozen route and validated body required")
@@ -498,7 +502,9 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
         elif store is not None:
             try:
                 receipt = store.prepare(intent)
-            except OSError:
+            except OSError as exc:
+                if require_durable_request:
+                    raise ReceiptConflict("durable request preparation failed; inspect the request") from exc
                 persistence[0] = False
                 # A failure after rename may still have left the prepare
                 # visible. Inspect under the held lock; never assume absence.
@@ -508,9 +514,15 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
         else:
             receipt = None
 
-        reservation = reserve_native_attempt(store, route, receipt,
-                                             retry_uncertain=retry_uncertain,
-                                             persistence=persistence)
+        try:
+            reservation = reserve_native_attempt(store, route, receipt,
+                                                 retry_uncertain=retry_uncertain,
+                                                 persistence=persistence,
+                                                 strict=require_durable_request)
+        except OSError as exc:
+            if not require_durable_request:
+                raise
+            raise ReceiptConflict("durable native reservation failed; inspect the request") from exc
 
         comm_status = _record(root, route, raw, facts, store=store, stage=0,
                               attempt_no=None, persistence=persistence)
@@ -573,7 +585,9 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
     try:
         lock = locked_request(root, route.selected_fleet_uid, request_id)
         store = lock.__enter__()
-    except OSError:
+    except OSError as exc:
+        if require_durable_request:
+            raise ReceiptConflict("durable request history cannot be locked") from exc
         path = root / "state/requests" / route.selected_fleet_uid / (request_id + ".json")
         try:
             path.lstat()

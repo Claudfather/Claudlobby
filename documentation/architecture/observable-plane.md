@@ -225,7 +225,8 @@ the synthetic policy tests.
 
 The supported local authority door is `claudlobby --root DATA_ROOT host owner`.
 `DATA_ROOT` names the existing installation; these commands never create an
-installation identity, select a fleet, start a service or change Tailscale.
+installation identity, start a service or change Tailscale. Message allowance
+selects only its explicitly named target fleet; other owner doors are host-local.
 Run them in the operator terminal on that host:
 
 ```sh
@@ -248,6 +249,39 @@ or printed by the command. `revoke` shows the current grant and requires typing
 
 Changes refuse redirected input, JSON mode and generated bot/fleet selectors.
 Composed bot permissions deny these operator-only command forms as well.
+
+Ordinary-message authority is separately approved at the local terminal:
+
+```sh
+claudlobby --root DATA_ROOT host owner allow-messages --target-fleet example --actor human:local-owner
+# If absent, explicitly approve REGISTER, then approve the allocated UID with ALLOW:
+claudlobby --root DATA_ROOT host owner allow-messages --target-fleet example --actor human:local-owner --register-actor
+claudlobby --root DATA_ROOT host owner revoke-messages --fleet-uid fleet_11111111111111111111111111111111
+```
+
+Allowance requires an active sealed runtime and a confirmed active fleet. It
+shows the current owner principal/revision, host, fleet UID and exact local
+human actor binding before typing `ALLOW`. An absent human requires the explicit
+`--register-actor` flag and a separate `REGISTER` approval: canonical Plane ingest
+records `operator_first_seen` under mutation admission, then the command shows
+the allocated actor UID for the second approval. Cancelling the second approval
+leaves that explicitly approved first-contact record, with no message grant.
+The operator attests the local human label; it is not derived from a browser
+claim or granted by a remote caller. No registration occurs during preview.
+
+After confirmation, the CLI rebinds the displayed identities and owner revision
+under runtime admission; any changed binding refuses. The store atomically
+rechecks the owner revision before granting. Only ordinary messages are covered;
+this grants no task mutation, reply, permission decision or website membership.
+
+Revocation displays one retained grant and requires `REVOKE-MESSAGES`. Its exact
+fleet UID names the retained authority even if active configuration or Plane
+storage is unavailable. The existing authority transaction compares both owner
+revision and displayed actor binding, refusing a replacement grant. Revocation
+keeps owner read access and other fleets' message grants. These doors accept no
+credential arguments, generated bot/fleet context, ambient fleet selection,
+redirected confirmation or JSON mutation mode.
+
 These checks prevent accidental invocation in a bot context; they do not
 isolate a malicious process with the same OS privileges. Revocation invalidates
 the pairing and its sessions without stopping fleets or deleting their history.

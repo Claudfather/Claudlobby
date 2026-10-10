@@ -628,3 +628,35 @@ def test_read_host_uid_never_mints_or_repairs(tmp_path, damage):
         assert not path.exists()
     if damage == "loose":
         assert stat.S_IMODE(path.stat().st_mode) == 0o644
+
+
+
+def test_local_message_inspection_is_read_only_without_session_or_repair(access):
+    store, _ = access
+    owner = pair(store)
+    before = store.path.read_bytes()
+    with pytest.raises(AccessDenied, match="messages_not_allowed"):
+        store.current_message_grant(expected_owner=owner, fleet_uid=FLEET)
+    assert store.path.read_bytes() == before
+    grant = allow_messages(store, owner)
+    before = store.path.read_bytes()
+    assert store.current_message_grant(expected_owner=owner, fleet_uid=FLEET) == grant
+    assert store.path.read_bytes() == before
+    store.revoke_owner(expected_revision=owner.revision)
+    with pytest.raises(AccessDenied):
+        store.current_message_grant(expected_owner=owner, fleet_uid=FLEET)
+
+
+def test_expected_message_grant_atomically_refuses_replacement(access):
+    store, _ = access
+    owner = pair(store)
+    original = allow_messages(store, owner)
+    store.revoke_messages(expected_owner=owner, fleet_uid=FLEET)
+    replacement = store.allow_messages(expected_owner=owner, fleet_uid=FLEET,
+                                       actor_uid=OTHER_ACTOR, actor_alias="human:replacement")
+    with pytest.raises(AccessDenied, match="message_binding_changed"):
+        store.revoke_messages(expected_owner=owner, fleet_uid=FLEET, expected_grant=original)
+    assert store.current_message_grant(expected_owner=owner, fleet_uid=FLEET) == replacement
+    store.revoke_messages(expected_owner=owner, fleet_uid=FLEET, expected_grant=replacement)
+    with pytest.raises(AccessDenied):
+        store.current_message_grant(expected_owner=owner, fleet_uid=FLEET)

@@ -133,7 +133,8 @@ def _answer_human(selected, origin, parent, body, *, request_id, release_id) -> 
 
 def deliver_bound_message(route, *, body=None, report=None, request_id,
                           kind="chat", parent_message_id=None,
-                          retry_uncertain=False, caller_context=None) -> CommandOutput:
+                          retry_uncertain=False, caller_context=None,
+                          require_durable_request=False) -> CommandOutput:
     """Send and observe an authorized, frozen route under the caller's runtime admission.
 
     The caller must already hold runtime mutation admission and authorize the
@@ -141,6 +142,8 @@ def deliver_bound_message(route, *, body=None, report=None, request_id,
     authorize an actor; a browser gateway must do that before calling it.
     ``caller_context`` is a prebound TaskOperationContext for a human caller;
     generated callers are bound from the route's origin for receipt lookup.
+    Owner sends require a durable request and native reservation before effects;
+    ordinary CLI callers retain the default best-effort recording behavior.
     """
     from ..message_operations import (read_recipient_box, repair_held_delivery,
                                       send_message, send_unlinked_report)
@@ -155,6 +158,9 @@ def deliver_bound_message(route, *, body=None, report=None, request_id,
     if ((caller_context is None) != (route.origin is not None)
             or caller_context is not None and caller_context.caller != route.caller):
         raise CommandFailure("conflict", "message caller context differs from the frozen route",
+                             release_id=release_id)
+    if report is not None and require_durable_request:
+        raise CommandFailure("conflict", "durable message admission does not accept a report",
                              release_id=release_id)
 
     trusted_tiers, tiers_available = _alert_tiers(route)
@@ -171,6 +177,7 @@ def deliver_bound_message(route, *, body=None, report=None, request_id,
                                kind="answer" if parent_message_id is not None else kind,
                                parent_message_id=parent_message_id,
                                retry_uncertain=retry_uncertain,
+                               require_durable_request=require_durable_request,
                                trusted_tiers=trusted_tiers)
     data = _data(route, outcome, parent_message_id=parent_message_id)
     if report is not None:
