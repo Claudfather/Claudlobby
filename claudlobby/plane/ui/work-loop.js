@@ -3,6 +3,18 @@ import { esc, ago, stateBlock } from "/panel-state.js";
 
 // One presentation for direct and embedded Plane. No transport is constructed
 // here: the default read-only client never supplies a write capability.
+// Additive channel navigation metadata, not action authority or an actor alias.
+export function conversationTaskLink(thread) {
+  const link = thread?.task_link;
+  const id = (value, prefix) => typeof value === "string" && new RegExp(`^(?:[a-z][a-z0-9-]*::)?${prefix}_[0-9a-f]{32}$`).test(value);
+  const qualifier = value => value.includes("::") ? value.split("::")[0] : "";
+  return link && typeof thread.key === "string" && !!thread.key && thread.key.length <= 240
+    && id(link.task_id, "wi") && link.task_id === thread.work_item_id
+    && id(link.host_uid, "host") && id(link.fleet_uid, "fleet")
+    && new Set([link.task_id, link.host_uid, link.fleet_uid].map(qualifier)).size === 1
+    && typeof link.fleet === "string" && !!link.fleet && link.fleet !== "all" && link.fleet.length <= 240 ? link : null;
+}
+
 export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = () => {} }) {
   const root = document.getElementById("work-loop");
   const dialog = document.getElementById("task-detail");
@@ -18,7 +30,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   let context = null, room = null, epoch = 0, board = null, channel = null;
   let detailEpoch = 0, compositionEpoch = 0, detailSnapshot = null, targetTitle = null;
   let conversation = null;
-  let selected = null, target = null, kind = "message", sending = false, inFlightRequest = null, opener = null, openerIdentity = null;
+  let selected = null, target = null, kind = "message", sending = false, inFlightRequest = null, opener = null, openerIdentity = null, readsPaused = false;
   let notice = "Choose a team to see its available actions.";
   root.innerHTML = `<div class="work-loop-head"><div><h2>Talk to your team</h2>
     <p id="work-scope"></p></div><span id="work-mode" class="tag"></span></div>
@@ -172,7 +184,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     saveDraft();
     if (context?.actions.includes("message") && kind === "message" && target?.task_id === null)
       messageRecipients.set(scopeKey(context.scope), target.recipient);
-    ++epoch;
+    ++epoch; readsPaused = true;
     contextsByKind.clear(); ++compositionEpoch;
     context = null; target = null; targetTitle = null;
     closeDetail();
@@ -188,7 +200,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     if (context?.actions.includes("message") && kind === "message" && target?.task_id === null)
       messageRecipients.set(scopeKey(context.scope), target.recipient);
     const token = ++epoch, selectedRoom = fleet || "all";
-    ++compositionEpoch; room = selectedRoom;
+    ++compositionEpoch; room = selectedRoom; readsPaused = false;
     contextsByKind.clear(); context = null; target = null; targetTitle = null; kind = "message"; board = null; channel = null;
     closeDetail(); $("work-body").value = ""; $("work-recipient").innerHTML = ""; $("work-recipient").value = "";
     notice = "Checking available actions…"; paint();
@@ -244,20 +256,21 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       // Older injected transports can show their board snapshot, explicitly
       // labelled. Never fall back after a real detail request was refused.
       const task = boardTask();
-      if (task) renderDetail(task, true);
+      if (task && !selection.fleetUid) renderDetail(task, true);
       else showUnavailable("unavailable");
       return;
     }
     content.innerHTML = '<h2 id="task-detail-title">Task details</h2>' + stateBlock("loading");
     const url = `/api/tasks/${encodeURIComponent(selection.id)}?fleet=${encodeURIComponent(selection.fleet)}`;
-    Promise.resolve().then(() => api.jget(url)).then(envelope => {
+    Promise.resolve().then(() => token === detailEpoch && selected === selection ? api.jget(url) : null).then(envelope => {
       if (token !== detailEpoch || selected !== selection) return;
       const task = envelope?.state === "ok" ? envelope.data?.task : null;
-      if (!task || task.task_id !== selection.id || task.fleet !== selection.fleet) {
+      if (!task || task.task_id !== selection.id || task.fleet !== selection.fleet
+          || (selection.fleetUid && task.fleet_uid !== selection.fleetUid)) {
         const previous = boardTask();
         // Legacy/synthetic read transports may not implement this route yet.
         // A protected transport refusal must never redisplay stale private data.
-        const fallback = !task && previous && typeof api.mountSessionControls !== "function"
+        const fallback = !selection.fleetUid && !task && previous && typeof api.mountSessionControls !== "function"
           && !["denied", "not_found", "invalid", "unknown"].includes(envelope?.state);
         if (fallback) renderDetail(previous, true, envelope || {state:"disconnected"});
         else showUnavailable(task ? "unknown" : envelope?.state || "disconnected",
@@ -457,18 +470,37 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   // A channel-only read (stream source loss) leaves the board snapshot as read.
   function updateChannel(messages) {
     channel = messages;
+    // Source loss also retires an unfinished detail read. Keep an already
+    // displayed lifecycle snapshot, but never admit a held old response.
+    if (selected && !detailSnapshot && channel?.state !== "ok") {
+      ++detailEpoch;
+      $("task-detail-content").innerHTML = '<h2 id="task-detail-title">Task details are unavailable</h2>'
+        + stateBlock(channel?.state || "disconnected", channel?.provenance, channel?.remediation);
+    }
     // Lifecycle and action preconditions stay frozen until explicit Refresh.
     // Only the admitted recent conversation read may update in place.
     if (selected) { $("task-detail-refresh").hidden = false; updateConversation(); }
   }
-  document.getElementById("rail-right").addEventListener("click", event => {
+  function openTask(event, mainChannel = false) {
     const button = event.target.closest("[data-task-open]");
     if (!button) return;
-    ++compositionEpoch; selected = { id: button.dataset.taskOpen, fleet: button.dataset.taskFleet || "" };
-    opener = button; openerIdentity = { ...selected, panel: button.closest("#attention, #tasks")?.id };
+    let link = null;
+    if (mainChannel) {
+      if (readsPaused || channel?.state !== "ok") return;
+      const thread = channel.data.threads.find(t => t.key === button.dataset.taskThread);
+      link = conversationTaskLink(thread);
+      if (!link || link.task_id !== button.dataset.taskOpen || link.fleet !== button.dataset.taskFleet
+          || link.host_uid !== button.dataset.taskHost || link.fleet_uid !== button.dataset.taskFleetUid) return;
+    }
+    ++compositionEpoch; selected = { id: button.dataset.taskOpen, fleet: button.dataset.taskFleet || "",
+      ...(link ? {fleetUid:link.fleet_uid,hostUid:link.host_uid} : {}) };
+    opener = button; openerIdentity = { ...selected, panel: mainChannel ? "channel" : button.closest("#attention, #tasks")?.id,
+      ...(mainChannel ? {thread:button.dataset.taskThread} : {}) };
     detail(); $("task-detail-refresh").hidden = true;
     dialog.showModal(); $("task-detail-close").focus();
-  });
+  }
+  document.getElementById("rail-right").addEventListener("click", event => openTask(event));
+  $("channel").addEventListener("click", event => openTask(event, true));
   $("task-detail-close").onclick = closeDetail;
   $("task-detail-refresh").onclick = () => { ++compositionEpoch; detail(); $("task-detail-refresh").hidden = true; };
   dialog.addEventListener("close", () => {
@@ -478,12 +510,15 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     if (!openerIdentity) return;
     const rail = $("rail-right"), buttons = [...rail.querySelectorAll("[data-task-open]")];
     const matches = button => button.dataset.taskOpen === openerIdentity.id
-      && (button.dataset.taskFleet || "") === openerIdentity.fleet;
+      && (button.dataset.taskFleet || "") === openerIdentity.fleet
+      && (!openerIdentity.thread || button.dataset.taskThread === openerIdentity.thread
+        && button.dataset.taskHost === openerIdentity.hostUid && button.dataset.taskFleetUid === openerIdentity.fleetUid);
     const panelButtons = openerIdentity.panel
       ? [...($(openerIdentity.panel)?.querySelectorAll("[data-task-open]") || [])] : [];
     const replacement = panelButtons.find(matches) || buttons.find(matches);
-    const focusTarget = opener?.isConnected ? opener : replacement || buttons[0] || rail;
-    if (focusTarget === rail) rail.tabIndex = -1;
+    const fallback = openerIdentity.panel === "channel" ? $("channel") : buttons[0] || rail;
+    const focusTarget = opener?.isConnected ? opener : replacement || fallback;
+    if (focusTarget === rail || focusTarget === $("channel")) focusTarget.tabIndex = -1;
     focusTarget.focus(); opener = null; openerIdentity = null;
   });
   $("work-body").addEventListener("input", () => { ++compositionEpoch; saveDraft(); });

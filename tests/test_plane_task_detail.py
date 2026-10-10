@@ -45,6 +45,44 @@ def test_selected_detail_retains_full_body_and_history_outside_board_cap(tmp_pat
     assert hashlib.sha256(db_file(tmp_path).read_bytes()).hexdigest() == before
 
 
+def test_channel_links_old_cross_fleet_task_to_recorded_owner_not_emitter_or_room(tmp_path):
+    _seed(tmp_path)
+    emit_batch(tmp_path, [{"event_type": "work_item", "emitter": "t", "fleet": "engineering",
+        "payload": {"work_item_id": "wi_" + f"{i:032x}", "title": f"newer {i}",
+                    "created_by": "bot:engineering/mgr"}} for i in range(205)])
+    emit_batch(tmp_path, [{"event_type": "communication", "emitter": "t", "fleet": "data",
+        "payload": {"msg_id": "msg_" + "c" * 32, "sender": "bot:data/one",
+                    "recipient": "bot:engineering/one", "message_class": "answer",
+                    "reply_to_msg_id": "msg_" + "a" * 32, "work_item_id": TASK,
+                    "body": "Recent cross-team reply to older work"}}])
+    c = client(tmp_path)
+    assert TASK not in {t["task_id"] for t in c.get("/api/tasks?fleet=engineering").json()["data"]["tasks"]}
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        owner = conn.execute("SELECT fleet_uid,host_uid FROM work_items WHERE work_item_id=?", (TASK,)).fetchone()
+    before = hashlib.sha256(db_file(tmp_path).read_bytes()).hexdigest()
+    for room in ("engineering", "data", "all"):
+        channel = c.get("/api/channel?fleet=" + room).json()["data"]
+        linked = next(t for t in channel["threads"] if t["work_item_id"] == TASK)
+        assert linked["task_link"] == {"task_id": TASK, "fleet": "engineering",
+                                      "fleet_uid": owner[0], "host_uid": owner[1]}
+        assert any(m["sender_short"] == "data/one" for m in linked["messages"])
+        assert c.get("/api/tasks/" + linked["task_link"]["task_id"] + "?fleet=" + linked["task_link"]["fleet"]).json()["data"]["task"]["task_id"] == TASK
+    assert c.get("/api/tasks/" + TASK + "?fleet=data").json()["state"] == "not_found"
+    assert hashlib.sha256(db_file(tmp_path).read_bytes()).hexdigest() == before
+
+
+def test_channel_does_not_offer_a_task_link_when_canonical_host_ownership_is_invalid(tmp_path):
+    _seed(tmp_path)
+    emit_batch(tmp_path, [{"event_type": "communication", "emitter": "t", "fleet": "engineering",
+        "payload": {"msg_id": "msg_" + "c" * 32, "sender": "bot:engineering/mgr",
+                    "recipient": "bot:engineering/one", "message_class": "chat",
+                    "work_item_id": TASK, "body": "task ID in text is not authority"}}])
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        conn.execute("UPDATE work_items SET host_uid=? WHERE work_item_id=?", ("host_" + "f" * 32, TASK))
+    threads = client(tmp_path).get("/api/channel?fleet=engineering").json()["data"]["threads"]
+    assert all(t["task_link"] is None for t in threads)
+
+
 @pytest.mark.parametrize("path,state", [
     ("/api/tasks/historical-name?fleet=engineering", "invalid"),
     ("/api/tasks/" + TASK, "unknown"),

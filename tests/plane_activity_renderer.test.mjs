@@ -10,8 +10,11 @@ const rendering = source.slice(0, source.indexOf('// WHY a card needs you')).rep
 assert.ok(rendering.includes('function threadArticle('));
 const channel = { children: [], querySelectorAll() { return this.children; },
   replaceChildren(fragment) { this.children = fragment.children; } };
+const workLoop = await readFile(new URL('../claudlobby/plane/ui/work-loop.js', import.meta.url), 'utf8');
+const conversationTaskLink = runInNewContext(workLoop.slice(workLoop.indexOf('export function conversationTaskLink('),
+  workLoop.indexOf('export function mountWorkLoop(')).replace('export ', '') + '\nconversationTaskLink;');
 const api = runInNewContext(`${rendering}\n({threadArticle, nudgeReason, renderChannel})`, {
-  ...panel, renderState() { return false; }, currentFleet: 'example', document: {
+  ...panel, conversationTaskLink, renderState() { return false; }, currentFleet: 'example', document: {
     documentElement: { style: { setProperty() {} } },
     createElement() { return { dataset: {}, messages: [],
       set innerHTML(value) {
@@ -43,6 +46,31 @@ function thread(reason = 'Any update?') {
 }
 const html = t => api.threadArticle(t).innerHTML;
 const visible = text => text.replace(/<details>[\s\S]*?<\/details>/g, '');
+
+test('only validated task owner metadata enables a main-channel opener, never the dialog copy', () => {
+  const t=thread();t.task_link={task_id:wi,fleet:'owner-team',fleet_uid:'fleet_'+'4'.repeat(32),host_uid:'host_'+'5'.repeat(32)};
+  const rendered=html(t);
+  assert.match(rendered,/View task<\/button>/);assert.ok(rendered.includes(`data-task-open="${wi}"`));
+  assert.match(rendered,/data-task-fleet="owner-team"/);assert.match(rendered,/data-task-thread=/);
+  assert.doesNotMatch(api.threadArticle(t,false).innerHTML,/data-task-open|View task<\/button>/);
+  for(const link of [null,{...t.task_link,task_id:'wi_'+'9'.repeat(32)}, {...t.task_link,fleet:'all'},
+    {...t.task_link,host_uid:'unverified host'}, {...t.task_link,fleet_uid:''}, {...t.task_link,host_uid:'elsewhere::'+t.task_link.host_uid}]) {
+    assert.doesNotMatch(html({...t,task_link:link}),/data-task-open|View task<\/button>/);
+  }
+  const qualified={...t,work_item_id:'example::'+wi,task_link:{...t.task_link,
+    task_id:'example::'+wi,host_uid:'example::'+t.task_link.host_uid,fleet_uid:'example::'+t.task_link.fleet_uid}};
+  assert.match(html(qualified),/data-task-open="example::wi_/);
+});
+
+test('a task-owner metadata change replaces a keyed main-channel card even without newer messages', () => {
+  const t=thread();api.renderChannel({data:{threads:[t]}});const original=channel.children[0];
+  assert.doesNotMatch(original.innerHTML,/data-task-open/);
+  t.task_link={task_id:wi,fleet:'owner-team',fleet_uid:'fleet_'+'4'.repeat(32),host_uid:'host_'+'5'.repeat(32)};
+  api.renderChannel({data:{threads:[t]}});const linked=channel.children[0];
+  assert.notEqual(linked,original);assert.match(linked.innerHTML,/data-task-fleet="owner-team"/);
+  api.renderChannel({data:{threads:[t]}});assert.equal(channel.children[0],linked);
+  t.task_link=null;api.renderChannel({data:{threads:[t]}});assert.doesNotMatch(channel.children[0].innerHTML,/data-task-open/);
+});
 
 test('genuine paired nudge renders authored reason, accurate purpose and full raw machinery', () => {
   const t = thread('  Please check\nthis task — thanks.  '), rendered = html(t);

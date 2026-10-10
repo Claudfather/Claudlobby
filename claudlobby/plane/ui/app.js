@@ -13,7 +13,7 @@
 import { esc, ago, renderState, stateBlock } from "/panel-state.js";
 import { jget, createEventSource } from "/api-client.js";
 import * as interactionApi from "/api-client.js";
-import { mountWorkLoop } from "/work-loop.js";
+import { mountWorkLoop, conversationTaskLink } from "/work-loop.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -232,10 +232,10 @@ function threadTitle(t, reason) {
 
 function channelReceiptKey(t) {
   // Receipt and transmission facts can change without another message/task event.
-  return JSON.stringify(t.messages.map(m => [m.msg_id, m.delivery, m.delivery_state, m.tx]));
+  return JSON.stringify([t.messages.map(m => [m.msg_id, m.delivery, m.delivery_state, m.tx]), t.task_link || null]);
 }
 
-function threadArticle(t) {
+function threadArticle(t, taskOpener = true) {
   const first = t.messages[0];
   const attribution = first
     ? `${first.sender_short} → ${first.recipient_short || "—"}`
@@ -256,6 +256,11 @@ function threadArticle(t) {
   const xfleet = t.cross_fleet
     ? `<span class="tag xfleet" title="sender and recipient are on`
       + ` different fleets">cross-fleet</span>` : "";
+  const taskLink = taskOpener ? conversationTaskLink(t) : null;
+  const taskButton = taskLink ? `<button class="pill ghost" type="button" data-task-open="${esc(taskLink.task_id)}"
+    data-task-fleet="${esc(taskLink.fleet)}" data-task-host="${esc(taskLink.host_uid)}"
+    data-task-fleet-uid="${esc(taskLink.fleet_uid)}" data-task-thread="${esc(t.key)}"
+    aria-label="View task: ${esc(threadTitle(t, reasons[0]))}">View task</button>` : "";
   const msgs = t.messages.map((m, i) => {
     const reason = reasons[i];
     return `
@@ -280,7 +285,7 @@ function threadArticle(t) {
   el.innerHTML = `
     <div class="t-kicker">${kicker}</div>
     <div class="t-head"><span class="t-title">${esc(threadTitle(t, reasons[0]))}</span>
-      ${xfleet}<span class="t-meta">${esc(attribution)}</span></div>
+      ${taskButton}${xfleet}<span class="t-meta">${esc(attribution)}</span></div>
     ${ladder(t, conversation)}
     ${msgs}`;
   return el;
@@ -1413,7 +1418,7 @@ function showLoading() {
 }
 showLoading();
 let workLoop = null;
-workLoop = mountWorkLoop({ api: interactionApi, renderThread: threadArticle, refresh: scheduleRefresh, onActionsChange: refreshEquipmentAction });
+workLoop = mountWorkLoop({ api: interactionApi, renderThread: thread => threadArticle(thread, false), refresh: scheduleRefresh, onActionsChange: refreshEquipmentAction });
 let workRoom;
 function syncWorkRoom() {
   const room = activeRoom();

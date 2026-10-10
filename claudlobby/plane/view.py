@@ -598,8 +598,9 @@ def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
     if wi_ids:
         ph = ",".join("?" * len(wi_ids))
         titles = {r["work_item_id"]: dict(r) for r in conn.execute(
-            f"SELECT work_item_id, title, repo FROM work_items"
-            f" WHERE work_item_id IN ({ph})", wi_ids).fetchall()}
+            "SELECT w.work_item_id,w.title,w.repo,w.fleet_uid,w.host_uid,f.alias AS fleet"
+            " FROM work_items w JOIN identity_registry f ON f.uid=w.fleet_uid AND f.kind='fleet'"
+            f" WHERE w.work_item_id IN ({ph}) AND f.parent_uid=w.host_uid", wi_ids).fetchall()}
         for r in conn.execute(
             f"SELECT work_item_id, assignment_id, event, occurred_at,"
             f" ingest_seq, detail FROM events WHERE kind='task'"
@@ -612,6 +613,11 @@ def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
         wi = titles.get(t["work_item_id"]) if t["work_item_id"] else None
         t["title"] = body_words((wi or {}).get("title"))
         t["repo"] = (wi or {}).get("repo")
+        # Lineage already admitted this task against its host and participant
+        # fleets. Its owner is the recorded task fleet, never the emitter/room.
+        t["task_link"] = ({"task_id": wi["work_item_id"], "fleet": wi["fleet"],
+                           "fleet_uid": wi["fleet_uid"], "host_uid": wi["host_uid"]}
+                          if wi else None)
         t["task_events"] = task_events_by_wi.get(t["work_item_id"], [])
         # SEMANTIC stamps from the one-definition constants (queries.py):
         # terminal = FIRST terminal event by ledger order (the monotone

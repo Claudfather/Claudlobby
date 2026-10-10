@@ -1177,6 +1177,16 @@ Source admission, reduction and envelope provenance share the connection and
 read transaction; the existing protected view also admits the response before
 releasing private bytes. No read initializes, repairs or mutates the source.
 
+Main-channel conversations with validated task ownership expose `task_link`
+(`task_id`, recorded `fleet`, `fleet_uid`, `host_uid`) and a **View task** button.
+This opens the same exact protected detail dialog even outside the board cap.
+Missing or contradictory ownership shows no opener. A cross-team conversation
+uses the task's recorded owner rather than its sender or the current room;
+opening it never switches rooms or acquires another team's action context.
+The dialog's conversation has no recursive opener. Closing restores focus to
+the same task/owner/thread button after a keyed refresh, or the channel region
+if that button has gone. Session/source loss fences unfinished detail replies.
+
 The response includes the full stored task title/body, canonical lifecycle,
 current assignment, assignments, task/assignment history and unresolved issues.
 Task, assignment and event fields use explicit public allowlists; recorder Fact
