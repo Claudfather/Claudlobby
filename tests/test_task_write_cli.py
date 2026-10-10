@@ -522,12 +522,13 @@ def test_feedback_cli_invalid_input_has_no_recording(active, monkeypatch, capsys
     assert result['error']['code'] == 'invalid_argument' and _counts(root) == before
 
 
-@pytest.mark.parametrize('carrier', ['fleet-name', 'fleet-selector', 'timer', 'empty-timer', 'service'])
+@pytest.mark.parametrize('carrier', ['fleet-name', 'fleet-selector', 'timer', 'empty-timer',
+                                     'service', 'empty-service', 'release', 'empty-release', 'host-update'])
 def test_feedback_cli_refuses_generated_carrier_with_existing_human(active, monkeypatch, capsys, carrier):
     from tests.test_plane_owner_feedback import receiver
     from claudlobby.active_config import resolve_active_context
 
-    root, _ = active
+    root, release = active
     monkeypatch.setattr(operation_context, '_local_operator_alias', lambda: 'human:reviewer')
     task_id = _call(capsys, root, 'task', 'admit', '--title', 'Existing human selected task',
                     '--request-id', str(uuid4()))['data']['task_id']
@@ -539,8 +540,17 @@ def test_feedback_cli_refuses_generated_carrier_with_existing_human(active, monk
         monkeypatch.setenv('FLEET_NAME' if carrier == 'fleet-name' else 'CLAUDLOBBY_FLEET', 'example')
     elif carrier in {'timer', 'empty-timer'}:
         monkeypatch.setenv('CLAUDLOBBY_TIMER_CONTEXT', 'fleet' if carrier == 'timer' else '')
+    elif carrier in {'service', 'empty-service'}:
+        monkeypatch.setenv('BOT_SERVICE', 'fixture-worker' if carrier == 'service' else '')
+    elif carrier in {'release', 'empty-release'}:
+        monkeypatch.setenv('CLAUDLOBBY_RELEASE_ID', release.release_id if carrier == 'release' else '')
     else:
-        monkeypatch.setenv('BOT_SERVICE', 'fixture-worker')
+        # Actual host_update_operations child shape: no BOT_* or FLEET_ROOT,
+        # but explicit root/native/CLI and the selected generated release.
+        monkeypatch.setenv('CLAUDLOBBY_ROOT', str(root))
+        monkeypatch.setenv('CLAUDLOBBY_RELEASE_ID', release.release_id)
+        monkeypatch.setenv('CLAUDLOBBY_NATIVE_DIR', str(release.native_path))
+        monkeypatch.setenv('CLAUDLOBBY_CLI', str(release.cli_path))
     before = _counts(root)
     result = _call(capsys, root, 'task', 'feedback', task_id, '--actor', 'human:reviewer',
                    '--expected-assignment', 'none', '--text', 'A timer must not impersonate this human',

@@ -186,6 +186,29 @@ def test_invalid_authority_and_scope_refuse_before_task_or_native_effect(gateway
         assert conn.execute("SELECT count(*) FROM communications").fetchone()[0] == 0
 
 
+@pytest.mark.parametrize("carrier", ["BOT_SERVICE", "CLAUDLOBBY_TIMER_CONTEXT", "CLAUDLOBBY_RELEASE_ID"])
+@pytest.mark.parametrize("empty", [False, True])
+@pytest.mark.parametrize("operation", ["submit", "inspect"])
+def test_generated_carriers_refuse_submit_and_retained_inspection(gateway, monkeypatch, carrier, empty, operation):
+    adapter, reader, _, options, selection = gateway
+    calls, repairs = receiver(monkeypatch)
+    if operation == "inspect":
+        invoke(gateway)  # Valid original evidence exists before the carrier arrives.
+        assert len(calls) == 1
+    with sqlite3.connect(db_file(adapter.root)) as conn:
+        before = conn.execute("SELECT count(*) FROM communications").fetchone()[0]
+    value = selection["expected_release_id"] if carrier == "CLAUDLOBBY_RELEASE_ID" else "synthetic-carrier"
+    monkeypatch.setenv(carrier, "" if empty else value)
+    with pytest.raises(AccessDenied, match="generated_context_refused"):
+        if operation == "submit":
+            adapter.submit(reader, **options, **selection, text="No generated feedback")
+        else:
+            adapter.inspect(reader, **options)
+    assert len(calls) == (1 if operation == "inspect" else 0) and repairs == []
+    with sqlite3.connect(db_file(adapter.root)) as conn:
+        assert conn.execute("SELECT count(*) FROM communications").fetchone()[0] == before
+
+
 @pytest.mark.parametrize("problem", ["assignment", "wrong_fleet", "unresolved"])
 def test_task_policy_refusals_cannot_notify(gateway, monkeypatch, problem):
     adapter, _, ctx, options, _ = gateway

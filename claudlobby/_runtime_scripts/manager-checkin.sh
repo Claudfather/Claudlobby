@@ -88,7 +88,7 @@ ROSTER="$(safe_mktemp)"; BAD="$(safe_mktemp)"; HITS="$(safe_mktemp)"
 # Form D, both calls: rc 1 here means SOME manifest was bad, and the good rows
 # still printed -- a disclosure, never a reason to stop. A substitution would
 # fire the ERR trap and record a critical row for a normal outcome.
-if declared_bots_strict "$BAD" > "$ROSTER"; then :; else
+if declared_bots_strict --bad-out "$BAD" > "$ROSTER"; then :; else
     roster_rc=$?
     if [ -s "$BAD" ]; then
         sed 's/^/manager-checkin: roster: /' "$BAD" >&2 || true

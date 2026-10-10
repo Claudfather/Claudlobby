@@ -30,6 +30,11 @@ from .owner_messages import _GENERATED_ENV
 from .owner_source import admit_source, inspect_source
 
 
+# Feedback additionally refuses explicit service/timer carriers by presence.
+# Keep sibling adapter contracts unchanged; empty markers are still carriers.
+_FEEDBACK_GENERATED_ENV = (*_GENERATED_ENV, "BOT_SERVICE", "CLAUDLOBBY_TIMER_CONTEXT")
+
+
 @dataclass(frozen=True)
 class OwnerFeedbackObservation:
     """Retained recording/transport and independent receiver proof, no resend."""
@@ -50,7 +55,7 @@ class OwnerFeedback:
     def _authorize(self, reader, fleet_uid, expected_grant):
         if type(reader) is not VerifiedReader:
             raise AccessDenied("verified_reader_required")
-        if any(key in os.environ for key in _GENERATED_ENV):
+        if any(key in os.environ for key in _FEEDBACK_GENERATED_ENV):
             raise AccessDenied("generated_context_refused")
         if read_host_uid(self.root / "state") != self.host_uid:
             raise AccessDenied("wrong_deployment")
