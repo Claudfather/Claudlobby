@@ -6,7 +6,11 @@ const uuid = value => typeof value === 'string' && value.length === 36 && /^[0-9
 const keys = (value, fields) => value && typeof value === 'object' && !Array.isArray(value)
   && Object.keys(value).sort().join() === [...fields].sort().join();
 function origin(value) {
-  try { return typeof value === 'string' && value.length <= 2048 && new URL(value).protocol === 'https:' && new URL(value).origin === value && !new URL(value).hostname.includes('*'); }
+  try {
+    if (typeof value !== 'string' || value.length > 2048) return false;
+    const url = new URL(value);
+    return url.protocol === 'https:' && url.origin === value && !url.hostname.includes('*');
+  }
   catch { return false; }
 }
 function references(value) {
@@ -31,7 +35,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
   const doc = validDocument ? JSON.parse(JSON.stringify(documentContext)) : null;
   let current = null, transport = null, clients = [], unsubscribes = [], mount = null;
   let phase = doc ? 'checking' : 'denied', accountUnavailable = false, disposed = false;
-  let sequence = 0, loading = null, refreshTimer = null;
+  let sequence = 0, loading = null, refreshTimer = null, paused = true;
   const requests = new Set(), streams = new Set(), listeners = new Set(), pending = new Set();
   const snapshot = () => Object.freeze({phase, accountUnavailable,
     computers: clients.map(({reference, client}) => ({reference_id:reference.reference_id,
@@ -49,12 +53,17 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     for (const {client} of clients) client.dispose();
     transport?.dispose(); transport = null;
     for (const stream of streams) stream.detach();
-    invoke(mount?.onPause);
+    paused = true; invoke(mount?.onPause);
     if (mount) {
       // A changed account cannot leave private records in a paused old document.
       mount.document.querySelector('main')?.replaceChildren();
-      for (const id of ['fleet-totals', 'presence-strip', 'task-detail-content', 'focus-pane'])
+      for (const id of ['fleet-totals', 'presence-strip', 'task-detail-content', 'focus-pane', 'focus-title'])
         mount.document.getElementById(id)?.replaceChildren();
+      const title = mount.document.getElementById('focus-title');
+      if (title) for (const key of Object.keys(title.dataset)) delete title.dataset[key];
+      for (const button of mount.document.querySelectorAll('#view-nav button, #debug-toggle, [data-bot-inspect]')) {
+        button.disabled = true; button.title = 'Close this view and open your workspace again.';
+      }
       mount.document.getElementById('task-detail')?.close();
       const overlay = mount.document.getElementById('focus-overlay'); if (overlay) overlay.hidden = true;
     }
@@ -114,20 +123,31 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     return result.data; // The host carrier owns the finite assertion DTO; never expose it through UI.
   }
   function admit(data) {
-    current = Object.freeze({...data, user:Object.freeze({...data.user}), workspace:Object.freeze({...data.workspace}),
+    const context = Object.freeze({...data, user:Object.freeze({...data.user}), workspace:Object.freeze({...data.workspace}),
       references:Object.freeze(data.references.map(ref => Object.freeze({...ref})))});
-    if (clients.length || !doc.references.length) return false;
-    clients = doc.references.map(reference => ({reference, client:createClient({reference,
-      documentContext:{issuer:doc.shell_origin, operational_origin:doc.operational_origin, subject:doc.user_id,
-        workspace_id:doc.workspace_id, context_generation:doc.context_generation},
-      currentContext:() => current, obtainSessionAssertion:assertion, documentOrigin, fetch, setTimeout, clearTimeout})}));
-    transport = createTransport({sources:clients.map(({client}, index) => ({key:`computer-${index + 1}`,
-      label:`Computer ${index + 1}`, reader:client.readHandle}))});
-    // The canonical aggregate already publishes source coverage transitions
-    // through the stable stream facade; do not launch a second refresh loop.
-    unsubscribes = clients.map(({client}) => client.subscribe(changed));
-    for (const stream of streams) stream.attach();
-    return true;
+    if (clients.length || !doc.references.length) { current = context; return false; }
+    const nextClients = [], nextSubscriptions = [];
+    let nextTransport = null;
+    try {
+      for (const reference of doc.references) nextClients.push({reference, client:createClient({reference,
+        documentContext:{issuer:doc.shell_origin, operational_origin:doc.operational_origin, subject:doc.user_id,
+          workspace_id:doc.workspace_id, context_generation:doc.context_generation},
+        currentContext:() => current, obtainSessionAssertion:assertion, documentOrigin, fetch, setTimeout, clearTimeout})});
+      nextTransport = createTransport({sources:nextClients.map(({client}, index) => ({key:`computer-${index + 1}`,
+        label:`Computer ${index + 1}`, reader:client.readHandle}))});
+      for (const {client} of nextClients) nextSubscriptions.push(client.subscribe(changed));
+      current = context; clients = nextClients; transport = nextTransport; unsubscribes = nextSubscriptions;
+      // Source coverage owns board refreshes; account checks only resume a pause.
+      for (const stream of streams) stream.attach();
+      return true;
+    } catch (error) {
+      for (const stream of streams) stream.detach();
+      for (const stop of nextSubscriptions) invoke(stop);
+      invoke(() => nextTransport?.dispose());
+      for (const {client} of nextClients) invoke(() => client.dispose());
+      current = null; clients = []; transport = null; unsubscribes = [];
+      throw error;
+    }
   }
   async function checkAccount() {
     if (disposed || !doc || phase === 'denied') return false;
@@ -141,7 +161,9 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         if (result.status !== 200) throw new Error();
         const created = admit(result.data); accountUnavailable = false; phase = clients.length ? 'ready' : 'empty';
         if (created) for (const {client} of clients) void client.start();
-        changed(); invoke(mount?.onResume); return true;
+        changed();
+        if (paused && mount) { paused = false; invoke(mount.onResume); }
+        return true;
       } catch {
         if (disposed || ticket !== sequence) return false;
         accountUnavailable = true;
@@ -150,8 +172,12 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       } finally {
         loading = null;
         if (!disposed) changed();
-        if (!disposed && doc && phase !== 'denied') {
-          clearTimeout(refreshTimer); refreshTimer = setTimeout(() => { void checkAccount(); }, 30000);
+        clearTimeout(refreshTimer); refreshTimer = null;
+        if (!disposed && doc && phase !== 'denied' && (!mount || mount.document.visibilityState !== 'hidden')) {
+          refreshTimer = setTimeout(() => {
+            refreshTimer = null;
+            if (!mount || mount.document.visibilityState !== 'hidden') void checkAccount();
+          }, 30000);
         }
       }
     })();
@@ -213,7 +239,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       const note = document.createElement('span'); note.setAttribute('role','status');
       note.setAttribute('aria-live','polite'); element.append(note);
       const check = document.createElement('button'); check.type = 'button'; check.className = 'pill ghost';
-      check.textContent = 'Check account'; check.addEventListener('click', () => { if (!check.disabled) void checkAccount(); }); element.append(check);
+      check.textContent = 'Check account'; check.addEventListener('click', () => { if (!check.disabled && !loading) void checkAccount(); }); element.append(check);
       mount.controls = {note, check, rows:[]};
     }
     const controls = mount.controls;
@@ -225,7 +251,8 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       : accountUnavailable ? 'Account check unavailable. Existing computer sessions remain independent.'
       : 'Connect each computer to view its teams.';
     controls.check.hidden = ['denied','disposed'].includes(phase);
-    controls.check.disabled = !!loading || controls.check.hidden;
+    controls.check.disabled = controls.check.hidden;
+    controls.check.setAttribute('aria-disabled', String(!!loading || controls.check.hidden));
     if (phase === 'ready' && !controls.rows.length) clients.forEach(({reference}, index) => {
       const row = document.createElement('span'); row.setAttribute('role','group');
       row.setAttribute('aria-label', new URL(reference.endpoint_origin).hostname);
@@ -247,15 +274,16 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       for (const {button,operation} of buttons) button.disabled = row.hidden || pending.has(index)
         || ['checking','renewing','logout'].includes(status.state)
         || operation === 'connect' && status.state === 'ready'
-        || ['renew','logout'].includes(operation) && status.state !== 'ready';
+        || operation === 'renew' && status.state !== 'ready'
+        || operation === 'logout' && !['ready','unavailable'].includes(status.state);
     });
   }
   function mountSessionControls({document, element, onPause = () => {}, onResume = () => {}}) {
-    mount = {document,element,onPause,onResume}; invoke(onPause); changed();
+    mount = {document,element,onPause,onResume}; paused = true; invoke(onPause); changed();
     const unavailable = 'Unavailable in this connected read view. Activity and task records remain available.';
     const disable = () => {
       for (const button of document.querySelectorAll('#view-nav button, [data-bot-inspect]')) {
-        if (button.dataset.view === 'channel') continue;
+        if (button.dataset.view === 'channel' && !['denied','disposed'].includes(phase)) continue;
         button.disabled = true; button.title = unavailable;
       }
       const search = document.getElementById('search'); if (search) { search.disabled = true; search.title = unavailable; search.value = ''; }
@@ -263,10 +291,12 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     disable();
     const observer = MutationObserver ? new MutationObserver(disable) : null;
     const roster = document.getElementById('fleet'); if (roster) observer?.observe(roster, {childList:true,subtree:true});
-    const active = () => { if (document.visibilityState !== 'hidden') void checkAccount(); };
+    const active = () => {
+      clearTimeout(refreshTimer); refreshTimer = null;
+      if (document.visibilityState !== 'hidden') void checkAccount();
+    };
     document.addEventListener('visibilitychange',active);
-    const priorDispose = () => document.removeEventListener('visibilitychange',active);
-    mount.cleanup = () => { priorDispose(); observer?.disconnect(); }; void checkAccount();
+    mount.cleanup = () => { document.removeEventListener('visibilitychange',active); observer?.disconnect(); }; void checkAccount();
     return {dispose};
   }
   function dispose() {

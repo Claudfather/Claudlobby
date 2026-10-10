@@ -220,3 +220,21 @@ aborts owned work, clears private regions and fences held reads/stream callbacks
 This document never revives after observed loss; reopen through the authenticated
 website. Same-site cookie/CORS/private-network/device validation and actual
 operational publisher integration remain separate empirical gates.
+
+
+Account checks resume the renderer only when leaving its initial paused state;
+steady-state checks do not create a second board refresh loop. Periodic checks
+run only while the mounted document is visible; hiding cancels the timer and
+becoming visible performs one fresh check. Explicit checks remain available.
+Temporary checking uses aria-disabled with an activation guard so keyboard focus
+stays on the same control. Account retirement disables all navigation/debug
+controls after clearing private content, including focus-title text and datasets.
+Partial carrier/transport admission disposes locally constructed resources before
+an explicit retry. Disconnect stays available for an admitted but unavailable host.
+The website's actual v2 context route returns 401 for missing/expired sessions,
+403 for missing/lost workspace ownership, and context mismatches retire here;
+it does not invent 404/410 deleted-workspace states. Document expires_at is a
+shape-checked publisher lifetime bound; fresh website membership/session checks
+and canonical host session admission determine current access, not client clock
+interpretation of that field. The connected-context marker is supplied by the separately verified publisher;
+this core entry does not mint or verify its document ticket.
