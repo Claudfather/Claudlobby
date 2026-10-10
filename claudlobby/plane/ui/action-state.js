@@ -103,13 +103,24 @@ export class ActionState {
   }
 
   draft(row, value) {
-    const key = rowKey(row);
+    // A task reason follows its logical task; pending wire metadata stays frozen.
+    const key = logicalKey(row);
     if (value === undefined) return this.drafts.get(key) || "";
     if (value) this.drafts.set(key, value.slice(0, 2000));
     else this.drafts.delete(key);
   }
 
   unresolved(row) { return this.pending.find(p => logicalKey(p) === logicalKey(row)); }
+
+  // Must succeed BEFORE the adapter can send. Never lose an uncertain ID.
+  persist(rows) {
+    try {
+      const serialized = JSON.stringify(rows);
+      if (serialized.length > 50000) throw new Error();
+      this.storage.setItem(this.key, serialized);
+    } catch { throw new Error("Pending requests cannot be saved. Nothing was sent."); }
+    this.pending = rows;
+  }
 
   begin(context, kind, target, body, requestId) {
     if (!validContext(context) || !context.actions.includes(kind)
@@ -125,14 +136,7 @@ export class ActionState {
     if (this.unresolved(request)) throw new Error("Check the original receipt before sending again.");
     if (this.storageError || this.pending.length >= 20)
       throw new Error("Pending requests cannot be saved. Nothing was sent.");
-    const rows = [...this.pending, this.metadata(request)];
-    // Must succeed BEFORE the adapter can send. Never lose an uncertain ID.
-    try {
-      const serialized = JSON.stringify(rows);
-      if (serialized.length > 50000) throw new Error();
-      this.storage.setItem(this.key, serialized);
-    } catch { throw new Error("Pending requests cannot be saved. Nothing was sent."); }
-    this.pending = rows;
+    this.persist([...this.pending, this.metadata(request)]);
     this.sentBodies.set(requestId, body);
     return { ...this.metadata(request), body };
   }
@@ -158,13 +162,8 @@ export class ActionState {
     if (!samePreparation(request, prepared)) throw new Error("Task nudge preparation did not match. Nothing was sent.");
     // Recheck the capability and logical pending block after the async prepare.
     this.prepare(context, request.target, request.body, request.request_id);
-    const row = this.metadata(prepared), rows = [...this.pending, row];
-    try {
-      const serialized = JSON.stringify(rows);
-      if (serialized.length > 50000) throw new Error();
-      this.storage.setItem(this.key, serialized);
-    } catch { throw new Error("Pending requests cannot be saved. Nothing was sent."); }
-    this.pending = rows;
+    const row = this.metadata(prepared);
+    this.persist([...this.pending, row]);
     this.sentBodies.set(row.request_id, request.body);
     return { ...row, body: request.body };
   }

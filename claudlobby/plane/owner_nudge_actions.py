@@ -18,7 +18,7 @@ from ..task_state import TaskStateError
 from .db import connect_ro, db_file
 from .ids import ID_PATTERNS
 from .owner_access import AccessDenied, AccessUnavailable, OwnerAccess
-from .owner_actions import ActionNotStarted, _exact, _opaque, _text
+from .owner_actions import ActionNotStarted, _body, _exact, _opaque, _text
 from .owner_nudges import OwnerNudges
 from .owner_source import admit_source, inspect_source, source_host_uid
 
@@ -36,15 +36,6 @@ def _digest(value):
         raise AccessDenied("invalid_action_body")
 
 
-def _reason(value):
-    if not isinstance(value, str) or not value.strip() or len(value) > 2000:
-        raise AccessDenied("invalid_action_body")
-    try:
-        value.encode("utf-8")
-    except UnicodeError as exc:
-        raise AccessDenied("invalid_action_body") from exc
-
-
 class OwnerNudgeActions:
     def __init__(self, root: Path, *, package):
         self.root, self.package = root, package
@@ -59,7 +50,7 @@ class OwnerNudgeActions:
                                       host_uid=host, fleet_uid=bindings["fleet_uid"])
         selected = resolve_active_context(root=self.root, fleet=room, package=self.package)
         ctx = bind_task_context(selected, operator_alias=grant.actor_alias)
-        if (ctx.host_uid != host or ctx.fleet_uid != grant.fleet_uid
+        if (ctx.context.fleet.name != room or ctx.host_uid != host or ctx.fleet_uid != grant.fleet_uid
                 or bindings["host_uid"] != host or bindings["fleet_uid"] != grant.fleet_uid
                 or ctx.caller.uid != grant.actor_uid or ctx.caller.alias != grant.actor_alias
                 or ctx.caller_fleet_uid is not None
@@ -125,7 +116,7 @@ class OwnerNudgeActions:
         if action != "prepare":
             _digest(payload["semantic_sha256"])
         if action in {"prepare", "send"}:
-            _reason(payload["body"])
+            _body(payload["body"])
         return fields
 
     def _bind(self, reader, payload, *, preview=False):
@@ -137,28 +128,32 @@ class OwnerNudgeActions:
         return context, grant
 
     def _selected_task(self, payload, grant):
-        host = source_host_uid(self.root)
-        with closing(connect_ro(db_file(self.root))) as conn:
-            conn.execute("BEGIN")
-            admit_source(conn, host)
-            if host != grant.owner.host_uid:
+        try:
+            host = source_host_uid(self.root)
+            with closing(connect_ro(db_file(self.root))) as conn:
+                conn.execute("BEGIN")
+                admit_source(conn, host)
+                if host != grant.owner.host_uid:
+                    raise AccessDenied("nudge_binding_changed")
+                task = show_task(conn, payload["target"]["task_id"], fleet_uid=grant.fleet_uid).require_resolved()
+                assignment = task.current_assignment.assignment_id if task.current_assignment else None
+                if not task.open or assignment != payload["target"]["assignment_id"]:
+                    raise AccessDenied("nudge_selection_changed")
+            if source_host_uid(self.root) != host:
                 raise AccessDenied("nudge_binding_changed")
-            task = show_task(conn, payload["target"]["task_id"], fleet_uid=grant.fleet_uid).require_resolved()
-            assignment = task.current_assignment.assignment_id if task.current_assignment else None
-            if not task.open or assignment != payload["target"]["assignment_id"]:
-                raise AccessDenied("nudge_selection_changed")
-        if source_host_uid(self.root) != host:
-            raise AccessDenied("nudge_binding_changed")
+        except (TaskQueryError, TaskStateError) as exc:
+            raise AccessDenied("nudge_selection_changed") from exc
+
+    @staticmethod
+    def _intent_digest(payload, grant):
+        return nudge_semantic_digest(payload["target"]["task_id"], reason=payload["body"],
+            by=grant.actor_alias, expected_assignment_id=payload["target"]["assignment_id"])
 
     def prepare(self, reader, payload):
         fields = self._metadata("prepare", payload)
         context, grant = self._bind(reader, payload, preview=True)
-        try:
-            self._selected_task(payload, grant)
-        except (TaskQueryError, TaskStateError) as exc:
-            raise AccessDenied("nudge_selection_changed") from exc
-        digest = nudge_semantic_digest(payload["target"]["task_id"], reason=payload["body"],
-            by=grant.actor_alias, expected_assignment_id=payload["target"]["assignment_id"])
+        self._selected_task(payload, grant)
+        digest = self._intent_digest(payload, grant)
         self._recheck(reader, context, grant, preview=True)
         return {key: payload[key] for key in fields} | {"semantic_sha256": digest}
 
@@ -174,19 +169,14 @@ class OwnerNudgeActions:
         if action == "prepare":
             if result["target"]["release_id"] != context["release_id"]:
                 raise AccessDenied("nudge_selection_changed")
-            try:
-                self._selected_task(result, grant)
-            except (TaskQueryError, TaskStateError) as exc:
-                raise AccessDenied("nudge_selection_changed") from exc
+            self._selected_task(result, grant)
 
     def operation(self, action, reader, payload):
         try:
             fields = self._metadata(action, payload)
             context, grant = self._bind(reader, payload, preview=action == "send")
             if action == "send":
-                expected = nudge_semantic_digest(payload["target"]["task_id"], reason=payload["body"],
-                    by=grant.actor_alias, expected_assignment_id=payload["target"]["assignment_id"])
-                if expected != payload["semantic_sha256"]:
+                if self._intent_digest(payload, grant) != payload["semantic_sha256"]:
                     raise AccessDenied("nudge_intent_changed")
             self._recheck(reader, context, grant, preview=action == "send")
             adapter = OwnerNudges(self.root, package=self.package)

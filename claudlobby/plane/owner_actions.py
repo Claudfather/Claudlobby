@@ -29,6 +29,15 @@ def _text(value, limit=240):
         raise AccessDenied("invalid_action_body")
 
 
+def _body(value):
+    if not isinstance(value, str) or not value.strip() or len(value) > 2000:
+        raise AccessDenied("invalid_action_body")
+    try:
+        value.encode("utf-8")
+    except UnicodeError as exc:
+        raise AccessDenied("invalid_action_body") from exc
+
+
 def _opaque(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False,
         separators=(",", ":")).encode()).hexdigest()
@@ -124,13 +133,7 @@ class OwnerActions:
         if payload["kind"] != "message" or payload["target"]["task_id"] is not None:
             raise AccessDenied("unsupported_owner_action")
         if action == "send":
-            if (not isinstance(payload["body"], str)
-                    or not payload["body"].strip() or len(payload["body"]) > 2000):
-                raise AccessDenied("invalid_action_body")
-            try:
-                payload["body"].encode("utf-8")
-            except UnicodeError as exc:
-                raise AccessDenied("invalid_action_body") from exc
+            _body(payload["body"])
         room = payload["scope"]["fleet"]
         context, grant = self._context(reader, room)
         if (payload["scope"] != context["scope"] or payload["target"]["recipient"]

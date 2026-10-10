@@ -12,7 +12,7 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
   const contextsByKind = new Map(), checkingReceipts = new Set();
   const messageRecipients = new Map(); // Tab memory only, bound to the full authorized scope.
   let context = null, room = null, epoch = 0, board = null, channel = null;
-  let detailEpoch = 0, compositionEpoch = 0, detailSnapshot = null, targetTitle = null;
+  let detailEpoch = 0, compositionEpoch = 0, nudgeRefreshEpoch = 0, detailSnapshot = null, targetTitle = null;
   let selected = null, target = null, kind = "message", sending = false, inFlightRequest = null, opener = null, openerIdentity = null;
   let notice = "Choose a team to see its available actions.";
   root.innerHTML = `<div class="work-loop-head"><div><h2>Talk to your team</h2>
@@ -102,10 +102,38 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
         saveDraft(); ++compositionEpoch;
         if (kind === "message" && target?.task_id === null) messageRecipients.set(scopeKey(affected.scope), target.recipient);
         context = null; target = null; targetTitle = null; $("work-body").value = "";
+        // Restore the independent ordinary-message draft, never retarget a nudge.
+        if (affectedKind === "nudge") {
+          kind = "message";
+          const messageContext = contextsByKind.get("message");
+          if (messageContext) {
+            context = messageContext;
+            const remembered = messageRecipients.get(scopeKey(context.scope));
+            target = { recipient: context.recipients.some(r => r.id === remembered) ? remembered : leadId(context), task_id: null };
+            $("work-body").value = readDraft();
+          }
+        }
       }
       contextsByKind.delete(affectedKind);
-      notice = affectedKind === "nudge" ? "Task nudge access is unavailable. Your reason is kept; task records remain readable." : message || `${affectedKind === "nudge" ? "Task nudge" : "Message"} access is unavailable. Your draft is kept; task records remain readable.`;
-      updateDetailActions(); paint(); return;
+      notice = affectedKind === "nudge" ? "Task nudge access is unavailable. Your reason is kept; task records remain readable." : message || "Message access is unavailable. Your draft is kept; task records remain readable.";
+      updateDetailActions(); paint();
+      if (affectedKind === "nudge" && typeof api.nudgeContext === "function") {
+        const token = epoch, retry = ++nudgeRefreshEpoch, selectedRoom = room;
+        // One read-only recovery per scoped refusal. Context refusals do not
+        // call invalidate, and this result never restores a task target or sends.
+        Promise.resolve().then(() => token === epoch && retry === nudgeRefreshEpoch
+          ? api.nudgeContext(selectedRoom) : null).then(value => {
+          if (token !== epoch || retry !== nudgeRefreshEpoch || contextsByKind.has("nudge")) return;
+          if (!validNudgeContext(value) || value.room !== selectedRoom || value.scope.fleet !== selectedRoom
+              || typeof api.prepareAction !== "function" || typeof api.sendAction !== "function"
+              || typeof api.actionReceipt !== "function") return;
+          contextsByKind.set("nudge", value);
+          updateDetailActions();
+          if (selected) $("task-detail-refresh").hidden = false;
+          paint(); // Do not overwrite a message composed while recovery was pending.
+        }).catch(() => {});
+      }
+      return;
     }
     if (expectedScope && (!context || scopeKey(expectedScope) !== scopeKey(context.scope))) return;
     saveDraft();

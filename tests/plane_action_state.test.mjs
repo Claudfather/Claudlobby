@@ -233,3 +233,18 @@ test('combined pending capacity and serialized write ceiling fail before either 
   const broken=storage();broken.setItem=()=>{throw Error('quota');};const blocked=new ActionState(broken),pre=blocked.prepare(nudgeContext,nudgeTarget,'Reason',nudgeId);
   assert.throws(()=>blocked.beginPrepared(nudgeContext,pre,prepared(pre)),/Nothing was sent/);assert.equal(blocked.pending.length,0);
 });
+
+
+test('v2 reason uses logical task identity across assignment/release while pending wire binding stays frozen',()=>{
+  const state=new ActionState(storage()),row={version:2,kind:'nudge',scope:nudgeContext.scope,target:nudgeTarget};
+  state.draft(row,'Kept task reason');
+  const moved={...row,target:{...nudgeTarget,assignment_id:'asg_'+'f'.repeat(32),release_id:'r-'+'f'.repeat(64)}};
+  assert.equal(state.draft(moved),'Kept task reason');
+  for(const changed of [{...moved,scope:{...moved.scope,viewer:'new-grant'}},
+    {...moved,target:{...moved.target,recipient:'actor_'+'f'.repeat(32)}},
+    {...moved,target:{...moved.target,task_id:'wi_'+'f'.repeat(32)}}])assert.equal(state.draft(changed),'');
+  const original=state.prepare(nudgeContext,nudgeTarget,'Kept task reason',nudgeId);
+  state.beginPrepared(nudgeContext,original,prepared(original));
+  assert.deepEqual(state.pending[0].target,nudgeTarget);assert.equal(state.pending[0].semantic_sha256,'d'.repeat(64));
+  assert.ok(!state.storage.getItem(state.key).includes('Kept task reason'));
+});
