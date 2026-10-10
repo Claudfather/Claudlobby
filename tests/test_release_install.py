@@ -235,10 +235,11 @@ def bootstrap_bundle(tmp_path, monkeypatch):
     return bootstrap, script, wheel, sums
 
 
-def test_bootstrap_validates_finite_identity_and_uses_original_interpreter(bootstrap_bundle, tmp_path, monkeypatch):
+@pytest.mark.parametrize('interrupted', [False, True])
+def test_bootstrap_validates_finite_identity_and_uses_original_interpreter(bootstrap_bundle, tmp_path, monkeypatch, interrupted):
     bootstrap, script, wheel, _ = bootstrap_bundle
     calls = []
-    monkeypatch.setattr(bootstrap, '_run', lambda argv, env: calls.append((argv, env)))
+    monkeypatch.setattr(bootstrap, '_run', lambda argv, env, **_: calls.append((argv, env)))
     observed = {}
     class Setup:
         def __init__(self, argv, env, start_new_session):
@@ -246,13 +247,23 @@ def test_bootstrap_validates_finite_identity_and_uses_original_interpreter(boots
             assert Path(argv[argv.index('--wheel') + 1]).read_bytes() == wheel.read_bytes()
             assert argv[argv.index('--interpreter') + 1] == str(Path(sys.executable).resolve())
             assert observed['work'] not in Path(argv[-2]).parents
-        def wait(self): return 3
+        waits = 0
+        def wait(self):
+            self.waits += 1
+            assert observed['work'].is_dir(), 'setup inputs were deleted before child exit'
+            if interrupted and self.waits <= 2:
+                raise KeyboardInterrupt
+            return 3
         def poll(self): return 3
     monkeypatch.setattr(bootstrap.subprocess, 'Popen', Setup)
     monkeypatch.setenv('SECRET_TOKEN', 'not-forwarded')
     monkeypatch.setenv('PYTHONPATH', '/not-forwarded')
     root = (tmp_path / 'new-data').resolve()
-    assert bootstrap.bootstrap(script, root, json_output=True) == 3
+    if interrupted:
+        with pytest.raises(KeyboardInterrupt):
+            bootstrap.bootstrap(script, root, json_output=True)
+    else:
+        assert bootstrap.bootstrap(script, root, json_output=True) == 3
     assert not root.exists() and not observed['work'].exists()
     assert 'SECRET_TOKEN' not in observed['env'] and 'PYTHONPATH' not in observed['env']
     assert observed['owned'] and observed['argv'][-1] == '--json'
@@ -294,6 +305,7 @@ def test_bootstrap_carrier_refusals_precede_installation(bootstrap_bundle, tmp_p
 
 @pytest.mark.parametrize('target,machine,platform_tag,accepted', [
     ('linux', 'aarch64', 'linux-aarch64', True), ('darwin', 'arm64', 'macosx-15.0-arm64', True),
+    ('darwin', 'arm64', 'macosx-10.9-universal2', True), ('darwin', 'x86_64', 'macosx-10.9-universal2', False),
     ('darwin', 'x86_64', 'macosx-15.0-x86_64', False), ('linux', 'aarch64', 'macosx-15.0-arm64', False),
     ('linux', 'armv7l', 'linux-armv7l', False)])
 def test_bootstrap_platform_contract(target, machine, platform_tag, accepted, monkeypatch):
@@ -305,3 +317,17 @@ def test_bootstrap_platform_contract(target, machine, platform_tag, accepted, mo
     if accepted: bootstrap._platform(text)
     else:
         with pytest.raises(bootstrap.BundleError): bootstrap._platform(text)
+
+
+def test_bootstrap_install_failure_identifies_step_without_echoing_output(monkeypatch):
+    from claudlobby import bootstrap
+
+    class FailedInstall:
+        returncode = 1
+        def communicate(self, timeout):
+            return b'private stdout', b'private stderr'
+
+    monkeypatch.setattr(bootstrap.subprocess, 'Popen', lambda *args, **kwargs: FailedInstall())
+    with pytest.raises(bootstrap.BundleError, match='failed at dependency installation') as exc:
+        bootstrap._run(['unused'], {}, step='dependency installation')
+    assert 'private' not in str(exc.value)

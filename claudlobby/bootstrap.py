@@ -74,7 +74,7 @@ def _platform(built_on: str) -> None:
     if (sys.implementation.name != "cpython" or sys.version_info[:2] != (3, 11)
             or not lines.get("python", "").startswith("3.11.")
             or target is None or (target == "linux-aarch64" and recorded != "linux-aarch64")
-            or (target == "macos-arm64" and not re.fullmatch(r"macosx-[0-9.]+-arm64", recorded))):
+            or (target == "macos-arm64" and not re.fullmatch(r"macosx-[0-9.]+-(?:arm64|universal2)", recorded))):
         raise BundleError("bundle requires matching Linux aarch64 or macOS arm64 CPython 3.11; wheel/libc compatibility remains host-specific")
 
 
@@ -83,19 +83,19 @@ def _bundle(script: Path) -> tuple[Path, Path, dict[str, str]]:
         raise BundleError("run the real bootstrap.py from an absolute, unredirected bundle path")
     directory = script.parent
     entries = list(directory.iterdir())
-    if len(entries) > 8:
-        raise BundleError("unexpected bundle inventory")
     wheelhouse = directory / "wheelhouse"
     if wheelhouse.is_symlink() or not wheelhouse.is_dir():
         raise BundleError("bundle needs an unredirected wheelhouse directory")
     wheels = list(wheelhouse.iterdir())
-    if not wheels or len(wheels) > _MAX_FILES - 5:
+    if not wheels:
         raise BundleError("bundle wheelhouse is empty or oversized")
     root_wheels = [path for path in entries if path.suffix == ".whl"]
     if len(root_wheels) != 1 or {p.name for p in entries} != _FIXED | {"SHA256SUMS", "wheelhouse", root_wheels[0].name}:
         raise BundleError("bundle needs one candidate wheel and the exact supported inventory")
     paths = [p for p in entries if p != wheelhouse] + wheels
-    if any(p.parent == wheelhouse and p.suffix != ".whl" for p in paths):
+    if len(paths) > _MAX_FILES:
+        raise BundleError("bundle inventory is oversized")
+    if any(p.suffix != ".whl" for p in wheels):
         raise BundleError("wheelhouse may contain only regular local wheels")
     if sum(_regular(p) for p in paths) > _MAX_TOTAL:
         raise BundleError("bundle is oversized")
@@ -138,20 +138,22 @@ def _bundle(script: Path) -> tuple[Path, Path, dict[str, str]]:
     return directory, wheel, checksums
 
 
-def _run(command: list[str], env: dict[str, str], *, timeout: int = 300) -> None:
+def _run(command: list[str], env: dict[str, str], *, step: str, timeout: int = 300) -> None:
     process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                start_new_session=True)
     try:
         process.communicate(timeout=timeout)
-    except BaseException:
+    except BaseException as exc:
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
         process.communicate()
+        if isinstance(exc, subprocess.TimeoutExpired):
+            raise BundleError(f"offline bootstrap timed out at {step}; inspect host Python and local wheel compatibility") from None
         raise
     if process.returncode:
-        raise BundleError("offline bootstrap installation failed; check host Python/venv and bundle wheel compatibility")
+        raise BundleError(f"offline bootstrap failed at {step}; check host Python/venv and bundle wheel compatibility")
 
 
 def bootstrap(script: Path, root: Path, *, json_output: bool = False) -> int:
@@ -180,14 +182,14 @@ def bootstrap(script: Path, root: Path, *, json_output: bool = False) -> int:
             p.mkdir()
             env[key] = str(p)
         venv = work / "venv"
-        _run([str(interpreter), "-I", "-B", "-m", "venv", str(venv)], env)
+        _run([str(interpreter), "-I", "-B", "-m", "venv", str(venv)], env, step="temporary environment creation")
         python = venv / "bin/python"
         pip = [str(python), "-I", "-B", "-m", "pip", "--isolated", "--disable-pip-version-check",
                "--no-input", "--no-cache-dir", "install", "--no-compile", "--no-index", "--only-binary=:all:"]
         _run(pip + ["--require-hashes", "--no-deps", "--find-links", str(inputs / "wheelhouse"),
-                    "-r", str(inputs / "dependency.lock")], env)
-        _run(pip + ["--no-deps", str(inputs / wheel.name)], env)
-        _run([str(python), "-I", "-B", "-m", "pip", "--isolated", "check"], env)
+                    "-r", str(inputs / "dependency.lock")], env, step="dependency installation")
+        _run(pip + ["--no-deps", str(inputs / wheel.name)], env, step="candidate installation")
+        _run([str(python), "-I", "-B", "-m", "pip", "--isolated", "check"], env, step="dependency consistency check")
         # Preserve native user-domain inputs, never ambient Python/pip injection
         # or credential variables. Canonical setup owns its subprocess budgets.
         host_env = {key: value for key, value in os.environ.items() if key in {
@@ -204,8 +206,12 @@ def bootstrap(script: Path, root: Path, *, json_output: bool = False) -> int:
         finally:
             # The canonical assembler owns already-started local work. Keep
             # its input snapshot alive through a caller interrupt, too.
-            if process.poll() is None:
-                process.wait()
+            while True:
+                try:
+                    process.wait()
+                    break
+                except KeyboardInterrupt:
+                    continue
 
 
 def main(argv: list[str] | None = None) -> int:
