@@ -34,33 +34,25 @@ def directory_state(path):
     return "directory" if stat.S_ISDIR(mode) else "invalid"
 
 
-def status_root(value):
-    """Inspect only a root the existing owner reported absent; never create it."""
-    try:
-        supplied = Path(value).expanduser()
-        if not supplied.is_absolute():
-            raise ObservationError("argument", "invalid")
-        supplied_state = directory_state(supplied)
-        if supplied_state == "invalid":
-            return supplied.resolve(), "invalid"
-        if supplied_state == "redirected":
-            raise ObservationError("root", "redirected")
-        # Match the established owner's normalization, including /tmp on macOS.
-        absolute = supplied.resolve()
-        for parent in reversed((absolute, *absolute.parents)):
-            state = directory_state(parent)
-            if state not in {"absent", "directory"}:
-                raise ObservationError("root", state)
-            if state == "absent":
-                return absolute, "absent"
-        state = directory_state(absolute / "state")
-        if state not in {"absent", "directory"}:
-            raise ObservationError("state", state)
-        return absolute, "directory"
-    except (ValueError, RuntimeError) as exc:
-        if isinstance(exc, ObservationError):
-            raise
-        raise ObservationError("argument", "invalid") from exc
+def absent_status_root(value):
+    """Return an absolute logical absent target, or retain a non-directory refusal.
+
+    Called only after the established owner resolved this spelling and refused
+    it as not_found. Leaf and ancestor aliases share that owner's normalization.
+    """
+    supplied = Path(value).expanduser()
+    if not supplied.is_absolute():
+        raise ObservationError("argument", "invalid")
+    absolute = supplied.resolve()
+    for parent in reversed((absolute, *absolute.parents)):
+        state = directory_state(parent)
+        if state == "unavailable":
+            raise ObservationError("root", state)
+        if state in {"invalid", "redirected"}:
+            return None
+        if state == "absent":
+            return absolute
+    return None
 
 
 def _plane_storage(root):
@@ -76,7 +68,7 @@ def _plane_storage(root):
         return "unavailable"
 
 
-def observe(root, root_state):
+def observe(root):
     """Sequential local observations, not a snapshot or activation authority."""
     try:
         package = resources.get_resources()
@@ -103,7 +95,15 @@ def observe(root, root_state):
                      "python": platform.python_version()},
         "limitations": [] if sys.platform in {"linux", "darwin"} else ["platform_unsupported"],
         "package": package_data, "executables": executables,
-        "root": root_state, "plane_storage": _plane_storage(root),
+        "root": directory_state(root), "plane_storage": _plane_storage(root),
         "not_checked": ["native_manager_session", "provider_login", "repository_access",
                         "browser_pairing", "runtime_readiness", "bootstrap_eligibility"],
     }
+
+
+def text_lines(observation):
+    """Display only fixed-vocabulary states, never local identities or paths."""
+    tools = ", ".join(f"{name}={observation['executables'][name]}" for name in RUNTIME_EXECUTABLES)
+    return (f"Passive observations: package={observation['package']['state']}; {tools}; "
+            f"root={observation['root']}; Plane={observation['plane_storage']}.",
+            "Login, native manager, repository access and bootstrap eligibility were not checked.")
