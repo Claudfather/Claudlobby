@@ -300,6 +300,11 @@ class OwnerAccess:
         from .owner_workspace import OwnerWorkspace
         return OwnerWorkspace(self)
 
+    def connected(self):
+        """Optional connected read credentials; never initialize on access."""
+        from .owner_connected import OwnerConnected
+        return OwnerConnected(self)
+
     def _now(self) -> float:
         value = self._clock()
         if not math.isfinite(value):

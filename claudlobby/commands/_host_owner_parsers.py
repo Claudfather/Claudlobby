@@ -19,6 +19,7 @@ def register_host_owner(hosts):
         ("status", "Inspect this host's owner pairing without changing it"),
         ("workspace-status", "Inspect retained local workspace binding metadata"),
         ("initialize-workspace", "Prepare optional workspace authority (interactive)"),
+        ("initialize-connected", "Prepare optional connected read-session storage (interactive)"),
         ("confirm-workspace", "Bind a verified workspace proposal at this terminal (interactive)"),
         ("revoke-workspace", "Revoke this host's workspace binding only (interactive)"),
         ("initialize", "Prepare owner authority on an existing installation (interactive)"),
@@ -49,5 +50,5 @@ def register_host_owner(hosts):
     serve.add_argument("--tailscale", type=Path, required=True, help="Absolute path to the native Tailscale executable")
     serve.add_argument("--socket", type=Path, help="Private Unix socket path; default DATA_ROOT/state/plane/owner.sock")
     serve.add_argument("--workspace-issuer", help="Explicit fixed HTTPS website issuer; requires --workspace-origin")
-    serve.add_argument("--workspace-origin", help="Explicit fixed HTTPS operational Origin for bootstrap only; requires --workspace-issuer")
+    serve.add_argument("--workspace-origin", help="Explicit fixed HTTPS operational Origin for bootstrap and connected reads; requires --workspace-issuer")
     serve.set_defaults(func=_dispatch, public_command="host.owner.serve")
