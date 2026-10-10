@@ -1293,3 +1293,18 @@ exported, and reconnection never replays a mutation. Synthetic injected proof do
 not establish OAuth, website bootstrap, private-device reachability or a real
 cross-origin connection. A future publisher must explicitly lock any new shared
 module instead of forking its renderer or deciding production host authority.
+
+Fleet and overview replies share one source-local routing roster. Later owner
+admission and registry changes are learned through the renderer's existing overview
+refresh. A newer roster request fences an older reply; changed alias/UID mappings
+fence unfinished focused reads. `fleet_choices` retains last-admitted teams with
+the current read state, separately from readable overview cards and totals. A
+missing endpoint or malformed projection degrades that read only; authenticated
+owner lifecycle and stream source facts control source epochs. The summary keeps
+each recorder's daemon state and ingest freshness, including down, unknown and
+quiet states.
+
+Qualification changes structural references, including assignment history and the
+last task event, but leaves canonical wire bodies and event detail literal. Nudge
+prose requires a consistent source qualifier on the projected pair; the unchanged
+wire body must match its corresponding bare task and assignment identities.

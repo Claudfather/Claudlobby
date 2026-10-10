@@ -117,7 +117,15 @@ const openBodies = new Set();
 // Interpret only the canonical task/communication pair, never ordinary JSON
 // prose. The channel projects both facts; ambiguous or partial capture stays raw.
 function nudgeReason(m, thread) {
-  const id = (value, prefix) => typeof value === "string" && new RegExp(`^${prefix}_[0-9a-f]{32}$`).test(value);
+  const qualifier = typeof m.work_item_id === 'string' && m.work_item_id.includes('::')
+    ? m.work_item_id.split('::')[0] : null;
+  if (qualifier !== null && (!/^[a-z][a-z0-9-]{0,31}$/.test(qualifier) || qualifier.trim() !== qualifier)) return null;
+  const bare = (value, prefix) => {
+    if (typeof value !== 'string') return undefined;
+    const raw = qualifier === null ? value : value.startsWith(qualifier + '::') ? value.slice(qualifier.length + 2) : '';
+    return raw.length === prefix.length + 33 && new RegExp(`^${prefix}_[0-9a-f]{32}$`).test(raw) ? raw : undefined;
+  };
+  const id = (value, prefix) => bare(value, prefix) !== undefined;
   if (m.emitter !== "claudlobby.tasks.v1" || m.message_class !== "task_request"
       || m.command_type !== "query" || !id(m.msg_id, "msg")
       || !id(m.work_item_id, "wi") || m.work_item_id !== thread.work_item_id
@@ -128,8 +136,8 @@ function nudgeReason(m, thread) {
   try {
     const body = JSON.parse(m.body);
     if (!body || Array.isArray(body) || Object.keys(body).sort().join() !== "assignment_id,by,kind,reason,task_id"
-        || body.kind !== "task_nudge" || body.task_id !== m.work_item_id
-        || body.assignment_id !== m.assignment_id || typeof body.by !== "string" || !body.by.trim() || body.by.length > 240
+        || body.kind !== "task_nudge" || body.task_id !== bare(m.work_item_id, "wi")
+        || body.assignment_id !== (m.assignment_id === null ? null : bare(m.assignment_id, "asg")) || typeof body.by !== "string" || !body.by.trim() || body.by.length > 240
         || typeof body.reason !== "string" || !body.reason.trim() || body.reason.length > 16384
         || [body.by, body.reason].some(text => /\u0000|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(text))) return null;
     // Match nudge_body's sorted, ASCII JSON, including exact authored text.
@@ -139,8 +147,8 @@ function nudgeReason(m, thread) {
       .replace(/[\u007f-\uffff]/g, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
     if (canonical !== m.body) return null;
     const matches = thread.task_events.filter(event => {
-      if (event.event !== "nudged" || event.work_item_id !== body.task_id
-          || event.assignment_id !== body.assignment_id || event.ingest_seq !== m.ingest_seq - 1
+      if (event.event !== "nudged" || event.work_item_id !== m.work_item_id
+          || event.assignment_id !== m.assignment_id || event.ingest_seq !== m.ingest_seq - 1
           || typeof event.detail !== "string") return false;
       const detail = JSON.parse(event.detail);
       return detail && Object.keys(detail).sort().join() === "by,reason"
@@ -583,7 +591,7 @@ function renderHeader(env) {
   const coverage = env.data.coverage;
   const coverageCopy = coverage?.partial ? ` · <small class="warn">${coverage.reachable}/${coverage.total} sources readable; totals cover readable sources</small>` : '';
   if (!t.fleets) {
-    el.innerHTML = `<span class="dim">no fleet recorded in readable sources</span>` + coverageCopy;
+    el.innerHTML = `<span class="dim">${coverage ? "no fleet recorded in readable sources" : "no fleet recorded"}</span>` + coverageCopy;
     return;
   }
   el.innerHTML = `<b>${t.bots}</b> bots`
@@ -631,9 +639,16 @@ function renderSummary(env) {
   const beat = $("beat"), label = $("beat-label");
   if (env?.data?.sources) {
     const c = env.data.coverage;
-    beat.className = `dot ${c.partial ? 'warn' : 'ok'}`;
+    const health = s => {
+      if (s.state !== 'ok') return s.state;
+      if (s.summary?.daemon_serving === false) return 'recorder DOWN';
+      if (s.summary?.daemon_serving !== true) return 'recorder unknown';
+      const at = Date.parse(s.provenance?.last_ingest_at);
+      return Number.isFinite(at) && Date.now() - at < 12e4 ? 'recording' : 'recorder up, quiet';
+    };
+    beat.className = `dot ${!c.partial && env.data.sources.every(s => health(s) === 'recording') ? 'ok' : 'warn'}`;
     label.textContent = `${c.reachable}/${c.total} sources readable · `
-      + env.data.sources.map(s => `${s.label}: ${s.state}`).join(' · ');
+      + env.data.sources.map(s => `${s.label}: ${health(s)}`).join(' · ');
     return;
   }
   if (!env || env.state !== "ok") {
@@ -966,9 +981,9 @@ function savePick(f) {
 // else the server's default (the room that moved most recently), else the
 // first fleet. One fleet = no dimension at all (null, no tabs).
 function adoptFleets(env) {
-  if (!env || env.state !== "ok" || !env.data) return;
+  if (!env || !env.data || (env.state !== "ok" && !Array.isArray(env.data.fleet_choices))) return;
   fleetsSeen = true;
-  fleets = env.data.fleets;   // the server's order (ORDER BY alias) is the tab order
+  fleets = env.data.fleet_choices || env.data.fleets;   // the server's order (ORDER BY alias) is the tab order
   const names = fleets.map((f) => f.alias);
   if (names.length < 2) { currentFleet = null; return; }
   if (currentFleet && (currentFleet === "all" || names.includes(currentFleet))) return;

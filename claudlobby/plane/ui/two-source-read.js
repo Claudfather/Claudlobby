@@ -10,12 +10,12 @@ const sum = (rows, key) => rows.every(r => Number.isSafeInteger(r[key]) && r[key
 
 export function createTwoSourceReadTransport({ sources }) {
   if (!Array.isArray(sources) || sources.length !== 2) throw new Error('Exactly two core read handles are required.');
-  const rooms = new Map(), streams = new Set(), admittedResults = new WeakMap();
+  const rooms = new Map(), streams = new Set();
   let disposed = false;
   const entries = sources.map(({ key, label, reader }) => {
     if (typeof key !== 'string' || !slug.test(key) || key.trim() !== key || typeof label !== 'string' || !label || label.length > 80 ||
         !isOwnerReadHandle(reader)) throw new Error('A named core read handle is required.');
-    return { key, label, reader, epoch: 0, readerEpoch: null, host: null, state: 'checking', fleets: [], unsubscribe: null };
+    return { key, label, reader, epoch: 0, readerEpoch: null, host: null, state: 'checking', fleets: [], rosterRequest: 0, routingRevision: 0, unsubscribe: null };
   });
   if (new Set(entries.map(e => e.key)).size !== 2 || entries[0].reader === entries[1].reader)
     throw new Error('Sources must be distinct.');
@@ -35,12 +35,11 @@ export function createTwoSourceReadTransport({ sources }) {
   for (const e of entries) { adopt(e, e.reader.snapshot()); e.unsubscribe = e.reader.subscribe(s => adopt(e, s)); }
   const qualified = (e, value) => value == null ? value : `${e.key}::${value}`;
   const room = (e, value) => value == null ? value : `${e.key} / ${value}`;
-  const alias = qualified;
   function fields(e, value, ids = [], aliases = [], fleetFields = []) {
     if (!value) return value;
     const out = { ...value };
     for (const k of ids) if (Object.hasOwn(out, k)) out[k] = qualified(e, out[k]);
-    for (const k of aliases) if (Object.hasOwn(out, k)) out[k] = alias(e, out[k]);
+    for (const k of aliases) if (Object.hasOwn(out, k)) out[k] = qualified(e, out[k]);
     for (const k of fleetFields) if (Object.hasOwn(out, k)) out[k] = room(e, out[k]);
     for (const k of ['short', 'actor_short', 'assignee_short', 'assigned_by_short', 'sender_short', 'recipient_short']) {
       if (typeof out[k] === 'string') out[k] = /^(actor|fleet|host)_[0-9a-f]{32}$/.test(out[k])
@@ -57,6 +56,8 @@ export function createTwoSourceReadTransport({ sources }) {
   function task(e, v) {
     return { ...fields(e, v, ['task_id', 'fleet_uid', 'created_by_uid'], ['created_by_alias', 'attention_by', 'nudged_by'], ['fleet']),
       current_assignment: assignment(e, v.current_assignment),
+      ...(v.assignment_history ? { assignment_history: v.assignment_history.map(x => assignment(e, x)) } : {}),
+      ...(v.last_event ? { last_event: event(e, v.last_event) } : {}),
       ...(v.assignments ? { assignments: v.assignments.map(x => assignment(e, x)) } : {}),
       ...(v.history ? { history: v.history.map(x => event(e, x)) } : {}), terminal_event: event(e, v.terminal_event),
       ...(v.issues ? { issues: v.issues.map(x => event(e, x)) } : {}),
@@ -75,25 +76,49 @@ export function createTwoSourceReadTransport({ sources }) {
       messages: t.messages.map(m => ({ ...fields(e, m, ['msg_id', 'work_item_id', 'assignment_id', 'reply_to_msg_id'], ['sender_alias', 'recipient_alias'], ['sender_fleet', 'recipient_fleet']),
         tx: (m.tx || []).map(x => fields(e, x, ['msg_id'])) })) };
   }
+  function admitted(e) {
+    const snapshot = e.reader.snapshot();
+    return !disposed && snapshot.state === 'ready' && e.host &&
+      snapshot.read_profile.host_uid === e.host && !entries.some(other => other !== e && other.host === e.host);
+  }
   async function read(e, url) {
-    if (disposed || e.reader.snapshot().state !== 'ready' || !e.host || e.reader.snapshot().read_profile.host_uid !== e.host || entries.some(other => other !== e && other.host === e.host)) return failed(e.state, e.reader.snapshot().remediation || 'This source is not currently readable. Check its owner session.');
+    if (!admitted(e)) return failed(e.state, e.reader.snapshot().remediation || 'This source is not currently readable. Check its owner session.');
     const epoch = e.epoch;
     let value;
     try { value = await e.reader.jget(url); } catch { value = null; }
-    if (disposed || epoch !== e.epoch || e.reader.snapshot().state !== 'ready') return failed(e.state);
-    if (!value || typeof value.state !== 'string' || value.state === 'ok' && (!value.data || typeof value.data !== 'object')) value = failed();
-    if (['denied', 'absent', 'unreadable', 'unavailable', 'disconnected'].includes(value.state) && e.state !== value.state) { e.epoch++; e.state = value.state; notify(); }
-    else if (value.state === 'ok') { e.state = 'ok'; admittedResults.set(value, { entry: e, epoch }); }
+    if (epoch !== e.epoch || !admitted(e)) return failed(e.state);
+    if (!value || typeof value.state !== 'string' || value.state === 'ok' && (!value.data || typeof value.data !== 'object')) return failed();
+    // An endpoint refusal is local. Only authenticated lifecycle/stream facts
+    // change source epochs or schedule a coverage refresh.
     return value;
+  }
+  function publishFleets(e, data, path, ticket) {
+    if (ticket !== e.rosterRequest) throw new Error('A newer roster read superseded this snapshot.');
+    const rows = data.fleets;
+    if (!Array.isArray(rows) || rows.some(f => !f || typeof f.alias !== 'string' || !f.alias || f.alias.length > 240 ||
+        typeof f.uid !== 'string' || f.uid.length !== 38 || !/^fleet_[0-9a-f]{32}$/.test(f.uid)) ||
+        new Set(rows.map(f => f.alias)).size !== rows.length || new Set(rows.map(f => f.uid)).size !== rows.length ||
+        path === '/api/overview' && (!data.host || !data.totals)) throw new Error('Invalid source fleet projection.');
+    const next = rows.map(({alias, uid, bots, provisional}) => ({alias, uid, bots, provisional}));
+    const identity = rows => JSON.stringify(rows.map(f => [f.alias, f.uid]).sort((a,b) => a[0].localeCompare(b[0])));
+    if (identity(next) !== identity(e.fleets)) ++e.routingRevision;
+    e.fleets = next;
+    rooms.clear();
+    for (const entry of entries) for (const f of entry.fleets) rooms.set(room(entry, f.alias), { e: entry, raw: f });
+  }
+  function fleetChoices(values) {
+    return entries.flatMap((e, i) => e.fleets.map(f => ({ ...f, alias: room(e, f.alias),
+      uid: qualified(e, f.uid), source_state: values[i].state })));
   }
   function coverage(values) {
     const reachable = values.filter(v => v.state === 'ok').length;
     return { total: 2, reachable, partial: reachable !== 2 };
   }
-  function sourceFacts(values, host = false) {
+  function sourceFacts(values, path) {
     return entries.map((e, i) => ({ key: e.key, label: e.label, host_uid: qualified(e, e.host), state: values[i].state,
       provenance: values[i].provenance, remediation: values[i].remediation,
-      ...(host ? { host: values[i].state === 'ok' ? values[i].data.host : null } : {}) }));
+      ...(path === '/api/overview' ? { host: values[i].state === 'ok' ? values[i].data.host : null } : {}),
+      ...(path === '/api/summary' ? { summary: values[i].state === 'ok' ? { daemon_serving: values[i].data.daemon_serving ?? null } : null } : {}) }));
   }
   async function jget(input) {
     try {
@@ -113,19 +138,23 @@ export function createTwoSourceReadTransport({ sources }) {
       let id;
       try { id = decodeURIComponent(detail[1]); } catch { return failed('invalid'); }
       if (!owning || id !== `${owning.e.key}::${id.split('::')[1]}` || (id.split('::')[1]?.length !== 35 || !taskID.test(id.split('::')[1]))) return failed('invalid');
-      const raw = id.split('::')[1], result = await read(owning.e, `/api/tasks/${raw}?fleet=${encodeURIComponent(owning.raw.alias)}`);
+      const raw = id.split('::')[1], revision = owning.e.routingRevision, result = await read(owning.e, `/api/tasks/${raw}?fleet=${encodeURIComponent(owning.raw.alias)}`);
       if (result.state !== 'ok') return result;
+      if (revision !== owning.e.routingRevision) return failed('unavailable', 'The source team mapping changed; refresh this task.');
       const t = result.data.task;
       if (!t || t.task_id !== raw || t.fleet !== owning.raw.alias || t.fleet_uid !== owning.raw.uid) return failed('denied', 'Task ownership did not match the selected source team.');
       return { ...result, data: { ...result.data, task: task(owning.e, t) } };
     }
     const chosen = owning ? [owning.e] : entries;
     const suffix = path === '/api/channel' ? '?limit=120' : '';
+    const epochs = chosen.map(e => e.epoch), revisions = chosen.map(e => e.routingRevision);
+    const rosterRead = path === '/api/fleets' || path === '/api/overview';
+    const tickets = chosen.map(e => rosterRead ? ++e.rosterRequest : null);
     const values = await Promise.all(chosen.map(e => read(e, path + suffix + (owning ? `${suffix ? '&' : '?'}fleet=${encodeURIComponent(owning.raw.alias)}` : ''))));
     // One host may finish before its loss while the other host is still reading.
     // Recheck admission at combination, not only when each request completed.
     chosen.forEach((e, i) => {
-      if (values[i].state === 'ok' && (admittedResults.get(values[i])?.entry !== e || admittedResults.get(values[i])?.epoch !== e.epoch || e.reader.snapshot().state !== 'ready'))
+      if (values[i].state === 'ok' && (epochs[i] !== e.epoch || !admitted(e) || owning && revisions[i] !== e.routingRevision))
         values[i] = failed(e.state);
     });
     if (owning) {
@@ -133,29 +162,21 @@ export function createTwoSourceReadTransport({ sources }) {
       if (v.state !== 'ok') return v;
       return project(owning.e, path, v);
     }
-    if (path === '/api/fleets') {
-      entries.forEach((e, i) => {
-        if (values[i].state === 'ok') {
-          const fleets = values[i].data.fleets;
-          if (!Array.isArray(fleets) || fleets.some(f => typeof f.alias !== 'string' || (typeof f.uid !== 'string' || f.uid.length !== 38 || !/^fleet_[0-9a-f]{32}$/.test(f.uid))) || new Set(fleets.map(f => f.alias)).size !== fleets.length) { values[i] = failed('unavailable', 'Invalid source fleet projection.'); e.epoch++; e.state = 'unavailable'; return; }
-          e.fleets = fleets;
-        }
-      });
-      rooms.clear();
-      for (const e of entries) for (const f of e.fleets) rooms.set(room(e, f.alias), { e, raw: f });
-    }
     const good = entries.flatMap((e, i) => {
       if (values[i].state !== 'ok') return [];
-      try { return [{ e, v: project(e, path, values[i]) }]; }
-      catch {
-        values[i] = failed('unavailable', 'This source returned an unsupported read projection.');
-        if (e.state !== 'unavailable') { e.state = 'unavailable'; e.epoch++; notify(); }
+      try {
+        const projected = project(e, path, values[i]);
+        if (rosterRead) publishFleets(e, values[i].data, path, tickets[i]);
+        return [{ e, v: projected }];
+      } catch {
+        values[i] = failed('unavailable', 'This source returned an unsupported or superseded read projection.');
         return [];
       }
     });
-    const data = { sources: sourceFacts(values, path === '/api/overview'), coverage: coverage(values),
+    const data = { sources: sourceFacts(values, path), coverage: coverage(values),
       windows: entries.map((e, i) => ({ source: e.key, state: values[i].state, limit: values[i].data?.limit, truncated: values[i].data?.truncated, lineage: values[i].data?.lineage })) };
-    if (path === '/api/fleets') Object.assign(data, { fleets: entries.flatMap((e, i) => e.fleets.map(f => ({ ...f, alias: room(e, f.alias), uid: qualified(e, f.uid), source_state: values[i].state }))), default: null });
+    if (rosterRead) Object.assign(data, { fleet_choices: fleetChoices(values), default: null });
+    if (path === '/api/fleets') data.fleets = data.fleet_choices;
     if (path === '/api/channel') Object.assign(data, { threads: good.flatMap(x => x.v.data.threads), lineage: { unresolved_threads: sum(good.map(x => ({ unresolved_threads: x.v.data.lineage?.unresolved_threads || 0 })), 'unresolved_threads') } });
     if (path === '/api/identities') data.identities = good.flatMap(x => x.v.data.identities);
     if (path === '/api/tasks') Object.assign(data, { tasks: good.flatMap(x => x.v.data.tasks), issues: good.flatMap(x => x.v.data.issues || []), issue_count: sum(good.map(x => x.v.data), 'issue_count'), truncated: good.some(x => x.v.data.truncated), issues_truncated: good.some(x => x.v.data.issues_truncated), limit: 200, attention_count: sum(good.map(x => x.v.data), 'attention_count') });
@@ -187,13 +208,12 @@ export function createTwoSourceReadTransport({ sources }) {
     const facade = { onmessage: null, onopen: null, onerror: null,
       addEventListener(name, cb) { if (!listeners.has(name)) listeners.set(name, new Set()); listeners.get(name).add(cb); },
       removeEventListener(name, cb) { listeners.get(name)?.delete(cb); },
-      refresh() { facade.onmessage?.({ data: JSON.stringify({ rows: [], coverage_changed: true }) }); for (const cb of listeners.get('coverage') || []) cb({}); },
+      refresh() { facade.onmessage?.({ data: JSON.stringify({ rows: [], coverage_changed: true }) }); },
       close() { children.forEach(s => s.close()); streams.delete(facade); } };
     for (const e of entries) {
       const child = e.reader.createEventSource(url); children.push(child);
       child.onmessage = ev => {
-        if (disposed || e.reader.snapshot().state !== 'ready' || !e.host ||
-            e.reader.snapshot().read_profile.host_uid !== e.host || entries.some(other => other !== e && other.host === e.host)) return;
+        if (!admitted(e)) return;
         try { const payload = JSON.parse(ev.data); facade.onmessage?.({ data: JSON.stringify({ ...payload, source: e.key, rows: payload.rows.map(r => ({ ...r, source: e.key })) }) }); } catch { /* next read refresh corrects malformed push */ }
       };
       child.onopen = ev => { facade.onopen?.(ev); facade.refresh(); };

@@ -12,13 +12,13 @@ const ok = data => ({ state: 'ok', provenance: { last_ingest_at: '2026-01-01' },
 function deferred() { let resolve; const promise = new Promise(r => resolve = r); return { promise, resolve }; }
 async function source(key, n) {
   const host = 'host_' + n.repeat(32), calls = [], streams = [], routes = new Map();
-  routes.set('/api/fleets', ok({ fleets: [{ alias: 'team', uid: fleet }], default: 'team' }));
+  routes.set('/api/fleets', ok({ fleets: [{ alias: 'team', uid: fleet, bots: 1, provisional: 0 }], default: 'team' }));
   const thread = { key: wi, work_item_id: wi, task_link: { task_id: wi, fleet: 'team', fleet_uid: fleet, host_uid: host }, task_events: [], messages: [{ msg_id: 'msg_' + '4'.repeat(32), sender_alias: 'team/lead', recipient_alias: null, sender_short: 'lead', body: '<literal>', work_item_id: wi, tx: [] }] };
   routes.set('/api/channel?limit=120', ok({ threads: [thread], lineage: { unresolved_threads: 1 } }));
   routes.set('/api/channel?limit=120&fleet=team', routes.get('/api/channel?limit=120'));
   routes.set('/api/tasks', ok({ tasks: [], issues: [], issue_count: 0, attention_count: 0, truncated: false, limit: 200 }));
   routes.set(`/api/tasks/${wi}?fleet=team`, ok({ task: { task_id: wi, fleet: 'team', fleet_uid: fleet, title: 'outside board', body: 'literal', current_assignment: null, history: [] } }));
-  routes.set('/api/overview', ok({ fleets: [], host: { rows: 12, daemon_serving: true, spool_files: 0 }, totals: { fleets: 1, bots: 1, provisional: 0, working: 0, attention: 0, overdue: 0, live_poll: 'ok', recorder_gaps: [] } }));
+  routes.set('/api/overview', ok({ fleets: [{alias:'team',uid:fleet,bots:1,provisional:0}], host: { rows: 12, daemon_serving: true, spool_files: 0 }, totals: { fleets: 1, bots: 1, provisional: 0, working: 0, attention: 0, overdue: 0, live_poll: 'ok', recorder_gaps: [] } }));
   routes.set('/api/summary', ok({ daemon_serving: true }));
   class Stream { constructor(url) { this.url = url; this.listeners = {}; streams.push(this); } addEventListener(k, cb) { this.listeners[k] = cb; } close() { this.closed = true; } }
   let status = 'ready';
@@ -165,7 +165,7 @@ test('repeated unavailable source reads do not create an automatic refresh loop'
   facade.onmessage = ev => { if (JSON.parse(ev.data).coverage_changed) refreshes++; };
   a.routes.set('/api/overview', {state:'unreadable',provenance:null});
   await api.jget('/api/overview'); await api.jget('/api/overview');
-  assert.equal(refreshes,1); facade.close();
+  assert.equal(refreshes,0); facade.close();
 });
 
 test('malformed projection is scoped to its source and cannot hide the other host', async () => {
@@ -186,4 +186,114 @@ test('a source lost after its read completes cannot paint while the other host r
   assert.equal(result.state,'ok'); assert.equal(result.data.coverage.reachable,1);
   assert.equal(result.data.threads.length,0);
   assert.equal(result.data.sources[0].state,'denied');
+});
+
+
+function roster(alias, uid = fleet) {
+  return ok({fleets:[{alias,uid,bots:1,provisional:0}],host:{rows:1,daemon_serving:true},totals:{fleets:1,bots:1,provisional:0,working:0,attention:0,overdue:0,live_poll:'ok',recorder_gaps:[]}});
+}
+async function appHarness(api) {
+  const {runInNewContext}=await import('node:vm');
+  const app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
+  const paints=[], timers=[];
+  const c={fleets:[],fleetsSeen:false,currentFleet:null,loadPick:()=> 'all',jget:api.jget,
+    syncWorkRoom:()=>false,workLoop:{update(){}},setTimeout:(cb,ms)=>{timers.push(ms);return timers.length;},clearTimeout(){},
+    renderChannel:v=>paints.push(v),renderTasks:v=>paints.push(v),renderFleet(){},renderSummary(){},renderHeader(){},renderHostFacts(){},renderFleetTabs(){},renderOverview(){}};
+  runInNewContext(app.slice(app.indexOf('function adoptFleets('),app.indexOf('function renderFleetTabs()')),c);
+  runInNewContext(app.slice(app.indexOf('let refreshTimer = null;'),app.indexOf('function openStream()')),c);
+  return {c,paints,timers};
+}
+test('real app overview-only refresh admits new teams, retains unavailable selection, and routes renamed teams',async()=>{
+  const a=await source('a','a'), b=await source('b','b');
+  a.setStatus('sign_in_required');await a.reader.start();
+  const api=createTwoSourceReadTransport({sources:[a,b]}),h=await appHarness(api);
+  await h.c.refreshBoards();
+  a.setStatus('ready');await a.reader.start();
+  await h.c.refreshBoards();
+  assert.deepEqual(Array.from(h.c.fleets,f=>f.alias),['a / team','b / team']);
+  h.c.currentFleet='a / team';await h.c.refreshBoards();
+  assert.equal(h.paints.at(-2).state,'ok');
+  assert.equal(a.calls.filter(c=>c.url==='/api/fleets').length,0);
+  assert.equal(b.calls.filter(c=>c.url==='/api/fleets').length,1);
+  a.setStatus('sign_in_required');await a.reader.start();
+  await h.c.refreshBoards();
+  assert.equal(h.c.currentFleet,'a / team');
+  assert.equal(h.c.fleets[0].source_state,'denied');
+  const partial=await api.jget('/api/overview');
+  assert.equal(partial.data.fleets.length,1);assert.equal(partial.data.totals.bots,1);
+  a.setStatus('ready');await a.reader.start();
+  a.routes.set('/api/overview',roster('renamed'));
+  a.routes.set('/api/channel?limit=120&fleet=renamed',a.routes.get('/api/channel?limit=120'));
+  await h.c.refreshBoards();
+  assert.equal((await api.jget('/api/channel?limit=120&fleet=a%20%2F%20renamed')).state,'ok');
+  assert.equal((await api.jget('/api/channel?limit=120&fleet=a%20%2F%20team')).state,'unknown');
+  api.dispose();
+});
+test('newer overview roster fences old roster publication and held detail ownership',async()=>{
+  const {api,a}=await pair(),old=deferred(),detail=deferred();
+  a.routes.set('/api/fleets',old.promise);
+  const pending=api.jget('/api/fleets');
+  a.routes.set(`/api/tasks/${wi}?fleet=team`,detail.promise);
+  const reading=api.jget(`/api/tasks/${encodeURIComponent('a::'+wi)}?fleet=a%20%2F%20team`);
+  await new Promise(r=>setImmediate(r));
+  a.routes.set('/api/overview',roster('renamed'));await api.jget('/api/overview');
+  old.resolve(ok({fleets:[{alias:'team',uid:fleet}],default:'team'}));await pending;
+  detail.resolve(ok({task:{task_id:wi,fleet:'team',fleet_uid:fleet,body:'old'}}));
+  assert.notEqual((await reading).state,'ok');
+  assert.equal((await api.jget('/api/tasks?fleet=a%20%2F%20team')).state,'unknown');
+  api.dispose();
+});
+test('interleaved endpoint failures stay local while app paints healthy peer without coverage refresh loops',async()=>{
+  const {api,a}=await pair(),facade=api.createEventSource('/api/stream');let refreshes=0;
+  facade.onmessage=()=>refreshes++;
+  a.routes.set('/api/tasks',{state:'unreadable',provenance:null});
+  const h=await appHarness(api);h.c.fleetsSeen=true;h.c.currentFleet='all';
+  for(let i=0;i<3;i++)await h.c.refreshBoards();
+  assert.equal(refreshes,0);
+  assert.equal(h.paints.length,6);
+  assert.ok(h.paints.every(v=>v.state==='ok'));
+  assert.equal(h.paints.at(-1).data.coverage.reachable,1);
+  assert.equal((await api.jget('/api/channel?limit=120')).data.coverage.reachable,2);
+  facade.close();api.dispose();
+});
+test('board assignment history and last event use the same qualified references as current assignment',async()=>{
+  const {api,a}=await pair(),asg='asg_'+'5'.repeat(32),ev='evt_'+'6'.repeat(32);
+  a.routes.set('/api/tasks',ok({tasks:[{task_id:wi,fleet:'team',fleet_uid:fleet,current_assignment:{assignment_id:asg},assignment_history:[{assignment_id:asg,assignee_uid:actor,dispatch_message_id:'msg_'+'7'.repeat(32),terminal_event:{event_id:ev,assignment_id:asg,actor_uid:actor}}],last_event:{event_id:ev,assignment_id:asg,actor_uid:actor}}],issues:[],issue_count:0,attention_count:0}));
+  const t=(await api.jget('/api/tasks')).data.tasks[0];
+  assert.equal(t.assignment_history[0].assignment_id,t.current_assignment.assignment_id);
+  assert.equal(t.assignment_history[0].assignee_uid,'a::'+actor);
+  assert.equal(t.assignment_history[0].terminal_event.event_id,t.last_event.event_id);
+  assert.equal(t.last_event.assignment_id,'a::'+asg);
+});
+test('canonical paired nudge keeps exact wire body and plain reason after source qualification',async()=>{
+  const {api,a}=await pair(),app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
+  const {runInNewContext}=await import('node:vm');const c={};
+  runInNewContext(app.slice(app.indexOf('function nudgeReason('),app.indexOf('function bodyBlock(')),c);
+  const reason='Please check <literal>',by='human',asg='asg_'+'5'.repeat(32);
+  const body=JSON.stringify({assignment_id:asg,by,kind:'task_nudge',reason,task_id:wi});
+  const t={work_item_id:wi,key:wi,task_events:[{event:'nudged',work_item_id:wi,assignment_id:asg,ingest_seq:3,detail:JSON.stringify({by,reason})}],messages:[{msg_id:'msg_'+'4'.repeat(32),work_item_id:wi,assignment_id:asg,emitter:'claudlobby.tasks.v1',message_class:'task_request',command_type:'query',ingest_seq:4,truncated:false,body,tx:[]}]};
+  a.routes.set('/api/channel?limit=120',ok({threads:[t]}));
+  const projected=(await api.jget('/api/channel?limit=120')).data.threads[0];
+  assert.equal(projected.messages[0].body,body);assert.equal(c.nudgeReason(projected.messages[0],projected),reason);
+  projected.messages[0].assignment_id='b::'+asg;assert.equal(c.nudgeReason(projected.messages[0],projected),null);
+  projected.messages[0].assignment_id='a::'+asg;projected.messages[0].message_class='chat';assert.equal(c.nudgeReason(projected.messages[0],projected),null);
+});
+test('summary preserves actual per-source recorder down, unknown and quiet evidence',async()=>{
+  const {runInNewContext}=await import('node:vm'),app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
+  const nodes=new Map(['fleet-totals','beat','beat-label'].map(k=>[k,{innerHTML:'',className:'',textContent:''}]));
+  const c={$:id=>nodes.get(id),esc:String,ago:()=> 'now',interactionApi:{dispose(){}},stateBlock:()=>''};
+  runInNewContext(app.slice(app.indexOf('function renderHeader('),app.indexOf('function toggleMessageBody(')),c);
+  const {api,a,b}=await pair();
+  for(const source of [a,b])source.routes.set('/api/summary',{...ok({daemon_serving:source===b}),provenance:{last_ingest_at:new Date().toISOString()}});
+  const env=await api.jget('/api/summary');
+  c.renderSummary(env);assert.match(nodes.get('beat-label').textContent,/recorder DOWN/);assert.equal(nodes.get('beat').className,'dot warn');
+  env.data.sources[0].summary.daemon_serving=null;c.renderSummary(env);assert.match(nodes.get('beat-label').textContent,/recorder unknown/);
+  env.data.sources[0].summary.daemon_serving=true;env.data.sources[0].provenance.last_ingest_at='2020-01-01';c.renderSummary(env);assert.match(nodes.get('beat-label').textContent,/quiet/);assert.equal(nodes.get('beat').className,'dot warn');
+  api.dispose();
+});
+test('direct-host empty-header wording remains unchanged',async()=>{
+  const {runInNewContext}=await import('node:vm'),app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
+  const node={innerHTML:''},c={$:()=>node,esc:String};
+  runInNewContext(app.slice(app.indexOf('function renderHeader('),app.indexOf('function renderHostFacts(')),c);
+  c.renderHeader(ok({fleets:[],totals:{fleets:0}}));assert.equal(node.innerHTML,'<span class="dim">no fleet recorded</span>');
 });
