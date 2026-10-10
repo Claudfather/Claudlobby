@@ -35,7 +35,7 @@ _MAX_ACTION_BODY = 32768
 _BODY_SECONDS = 5
 _MAX_ACTION_WORKERS = 8
 _PREFIX = "/api/owner/"
-_METHODS = {"actions/context": "POST", "actions/send": "POST", "actions/receipt": "POST", "status": "GET", "pair": "POST", "login": "POST",
+_METHODS = {"actions/context": "POST", "actions/prepare": "POST", "actions/send": "POST", "actions/receipt": "POST", "status": "GET", "pair": "POST", "login": "POST",
             "renew": "POST", "logout": "POST"}
 PrincipalVerifier = Callable[[Scope], Awaitable[PrincipalRef]]
 _ENTRY_ASSETS = {
@@ -328,8 +328,9 @@ class _OwnerBrowser:
                         raise AccessDenied("sign_in_required")
                     reader = VerifiedReader(principal, token)
                     operation = action.split("/", 1)[1]
-                    fn = self.actions.context if operation == "context" else self.actions.operation
-                    args = (reader, payload) if operation == "context" else (operation, reader, payload)
+                    fn = (self.actions.context if operation == "context" else
+                          self.actions.prepare if operation == "prepare" else self.actions.operation)
+                    args = (reader, payload) if operation in {"context", "prepare"} else (operation, reader, payload)
                     # Shield the worker lifetime: disconnect/cancellation does not
                     # erase a committed or native effect. UUID inspection recovers it.
                     if self._action_workers >= _MAX_ACTION_WORKERS:

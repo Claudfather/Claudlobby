@@ -972,6 +972,78 @@ investigation, not pairing again. Browser refusals remain generic. A foreground
 owner server whose lifespan startup fails returns an unavailable exit rather
 than reporting a clean stop; its owned socket is still cleaned up.
 
+### Independently granted owner browser task nudges
+
+The owner transport also supports a separate version-2 nudge capability through
+`POST /api/owner/actions/context` with exactly `{room, kind: "nudge"}`. It reads
+only the explicit local nudge grant, advertises one configured manager recipient
+with `lead: true`, `actions: ["nudge"]`, and the validated current `release_id`.
+Its viewer hash has a fixed `task.nudge` namespace and binds the principal,
+owner revision, fleet, registered human actor and nudge-grant generation.
+Ordinary-message version-1 requests, responses and viewer-hash inputs are
+unchanged. Revoking either action grant does not change the other capability.
+A read session alone grants neither action; no HTTP path registers an actor or
+authors a grant. Replies, feedback and permission decisions remain unsupported.
+
+Nudge metadata has exactly `version: 2`, `kind: "nudge"`, canonical
+`request_id`, `scope`, `submitted_at`, `semantic_sha256`, and `target` containing
+`recipient`, `task_id`, **present** `assignment_id` (canonical ID or explicit
+null), and `release_id`. Null selects queued work; an absent or empty assignment
+is refused. The recipient is always the selected manager UID. The timestamp
+requires an offset and remains browser display metadata, not acceptance time.
+The reason is nonempty UTF-8 text of at most 2,000 characters.
+
+The additive `POST /api/owner/actions/prepare` accepts that metadata without
+`semantic_sha256`, plus `body`. It validates the exact grant-bound scope and
+selected release/manager, and reads the resolved open task and assignment
+through the canonical task reducer. Source admission and task reading share one
+read-only SQLite transaction. It refuses changed selection rather than
+substituting current identities. It returns only exact metadata plus the
+canonical digest from `task_operations.nudge_semantic_digest`; no body or status
+is returned, no request is reserved and no fact or native notification is
+written. Private response release rechecks the capability and selected task.
+
+`send` accepts prepared metadata plus the unchanged reason. It recomputes the
+canonical semantic digest before adapter entry, then invokes `OwnerNudges.nudge`
+once with the exact assignment, release, manager and expected typed grant.
+The canonical task lock still checks races after preparation. All failures
+from adapter entry onward may follow a committed or native effect: only the
+original UUID is inspected, and an exception is never promoted to definite
+rejection. A proven pre-adapter refusal can mark only this submission
+`effect: "not_started"`; it does not reject any earlier use of its UUID.
+
+`receipt` accepts metadata without body and calls only pure nudge inspection.
+It compares the original request's operation, host/fleet/actor, task, manager,
+assignment including null, retained route release and semantic digest with the
+saved metadata. Current task assignment/state and current capability release
+do not replace those retained values. Current package/config, source, session,
+grant generation and manager admission still apply. Mismatches and absent or
+unavailable proof return `unknown`, without sending or authorizing a retry.
+`recorded` requires the exact committed pair of task and communication facts;
+`delivered` additionally requires received byte-integrity proof for the exact
+human sender and manager destination. Delivery means the nudge was received,
+not that the manager acted or the task completed.
+
+Context, prepare, send and receipt share the existing ceiling of eight active
+plus queued action workers, bounded strict JSON/body reads, same-origin browser
+intent and trusted principal/session boundaries. Workers survive HTTP waiter
+cancellation and keep their slot until they actually finish. Metadata responses
+are private and no-store. Final response admission uses the independent nudge
+namespace; send/receipt retain original assignment/release rather than gating
+on moving task state. No automatic retry, recipient override, Enter repair on
+replay, HTTP grant authoring or new task system is introduced. Prepared-export
+HTTP tests use synthetic identity/activation and receiver fixtures; actual
+native receiver, browser, trusted ingress and rollout require their separate
+canary evidence.
+
+The browser keeps message and nudge capabilities independently. A nudge refusal
+allows one fenced read-only capability recheck; it never repeats preparation or
+sending. If ordinary messaging remains granted, its composer and selected
+recipient remain available. An unsent reason belongs to the logical task and
+manager within the authorized scope, so selecting a changed assignment or
+release preserves that draft. Submitted pending metadata retains its original
+assignment, release, digest and UUID; a new selection cannot bypass its pending
+receipt guard. Session loss still pauses all action kinds.
 
 ### Selected task detail
 

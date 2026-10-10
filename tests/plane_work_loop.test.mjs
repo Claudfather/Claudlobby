@@ -10,13 +10,15 @@ const source = await readFile(new URL('../claudlobby/plane/ui/work-loop.js', imp
 const controller = source.replaceAll('from "/action-state.js"', `from "${new URL('../claudlobby/plane/ui/action-state.js', import.meta.url)}"`)
   .replaceAll('from "/panel-state.js"', `from "${new URL('../claudlobby/plane/ui/panel-state.js', import.meta.url)}"`);
 const { mountWorkLoop } = await import(`data:text/javascript;base64,${Buffer.from(controller).toString('base64')}`);
+const transportSource = await readFile(new URL('../claudlobby/plane/ui/owner-api-client.js', import.meta.url), 'utf8');
+const { createOwnerTransport } = await import(`data:text/javascript;base64,${Buffer.from(transportSource).toString('base64')}`);
 const context = { version: 1, room: 'web', simulation: true,
   scope: { workspace: 'example', host: 'workshop', fleet: 'web', viewer: 'owner' },
   recipients: [{ id: 'lead', label: 'Lead', lead: true }, { id: 'worker', label: 'Worker' }],
   actions: ['message', 'feedback', 'nudge'] };
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const settle = async () => { for (let i = 0; i < 6; i++) await Promise.resolve(); };
-const receipt = (request, status = 'delivered') => ({ ...request, version: 1, status });
+const receipt = (request, status = 'delivered') => { const {body,...metadata}=request; return request.version === 2 ? {...metadata,status} : {...request,version:1,status}; };
 function store() { const values = new Map(); return { getItem: k => values.get(k) || null, setItem: (k, v) => values.set(k, v) }; }
 function dom() {
   const elements = new Map();
@@ -65,14 +67,16 @@ function harness(options = {}) {
   Object.defineProperty(globalThis, 'crypto', { configurable: true, value: options.crypto === undefined ? { randomUUID: () => 'new-request' } : options.crypto });
   const confirmations = [];
   globalThis.confirm = text => { confirmations.push(text); return options.confirm !== false; };
-  const sends = [], lookups = [];
+  const sends = [], lookups = [], preparations = [];
   const api = {
     interactionContext: options.interactionContext || (() => context),
+    ...(options.nudgeContext ? {nudgeContext:options.nudgeContext,prepareAction:request=>{preparations.push(request);if(options.prepareAction)return options.prepareAction(request);const {body,...metadata}=request;return {...metadata,semantic_sha256:'d'.repeat(64)};}} : {}),
     ...(options.jget ? {jget:options.jget} : {}),
     ...(options.protected ? {mountSessionControls(){}} : {}),
     sendAction: request => { sends.push(request); return options.sendAction ? options.sendAction(request) : receipt(request); },
     actionReceipt: request => { lookups.push(request); return options.actionReceipt ? options.actionReceipt(request) : receipt(request); },
   };
+  if (options.transport) Object.assign(api, options.transport);
   const loop = mountWorkLoop({ api, renderThread: () => new ui.Element(), refresh: () => {} });
   const board = { state: 'ok', data: { tasks: ['task-a', 'task-b'].map(task_id => ({ task_id, fleet: 'web', title: task_id })) } };
   const update = () => loop.update(board, { state: 'ok', data: { threads: [] } });
@@ -84,7 +88,7 @@ function harness(options = {}) {
   };
   const pendingClick = (id, discard = false) => ui.get('work-pending').onclick({ target: new ui.Element('', { [discard ? 'discard' : 'request']: id }) });
   const submit = () => { ui.get('work-body').value = 'Hello'; ui.get('work-body').emit('input'); return ui.get('work-form').onsubmit({ preventDefault() {} }); };
-  return { ...ui, loop, storage, sends, lookups, confirmations, update, open, pendingClick, submit };
+  return { ...ui, loop, api, storage, sends, lookups, preparations, confirmations, update, open, pendingClick, submit };
 }
 function saved(storage, task = null) {
   return new ActionState(storage).begin(context, 'message', { recipient: 'lead', task_id: task }, 'Private old message', 'saved-request');
@@ -331,12 +335,12 @@ test('unsupported synthetic detail retains labelled limited board snapshot; prot
   }
 });
 
-test('scoped action refusal preserves another scope detail; current refusal fences its delayed read', async () => {
+test('production scoped action refusal preserves readable details and disables only its capability', async () => {
   for (const field of ['workspace', 'host', 'fleet', 'viewer']) {
     const result = deferred();
     const h = harness({ jget() { return result.promise; } });
     h.loop.setRoom('web'); await settle(); h.open(); await settle();
-    h.loop.invalidate(undefined, { ...context.scope, [field]: 'previous-scope' });
+    h.loop.invalidate(undefined, { ...context.scope, [field]: 'previous-scope' }, 'message', context.recipients[0].id);
     await settle();
     assert.equal(h.get('task-detail').open, true);
     assert.equal(h.get('work-form').hidden, false);
@@ -346,11 +350,11 @@ test('scoped action refusal preserves another scope detail; current refusal fenc
   const result = deferred();
   const h = harness({ jget() { return result.promise; } });
   h.loop.setRoom('web'); await settle(); h.open(); await settle();
-  h.loop.invalidate(undefined, context.scope); await settle();
-  assert.equal(h.get('task-detail').open, false);
+  h.loop.invalidate(undefined, context.scope, 'message', context.recipients[0].id); await settle();
+  assert.equal(h.get('task-detail').open, true);
   assert.equal(h.get('work-form').hidden, true);
   result.resolve(canonicalDetail('task-a')); await settle();
-  assert.doesNotMatch(h.get('task-detail-content').innerHTML, /Full selected task/);
+  assert.match(h.get('task-detail-content').innerHTML, /Full selected task/);
 });
 
 test('fresh submission refusal removes only owned pending row and keeps draft', async () => {
@@ -458,14 +462,14 @@ test(`malformed or non-object recorded detail stays raw without inferred prose: 
   assert.doesNotMatch(html,/<p class="note">(?:Summary|Reason|Question)<\/p>|<json>|<array>|<string>/);
 });
 
-for (const close of ['button','escape','pause','invalidate'])
+for (const close of ['button','escape','pause','source-loss'])
 test(`closing private task detail erases its body/history and preserves refocus: ${close}`, async () => {
   const h = harness({jget(){return canonicalDetail('task-a');}}); h.loop.setRoom('web'); await settle();
   const opener = h.open(); await settle(); assert.match(h.get('task-detail-content').innerHTML,/Full description/);
   if(close === 'button') h.get('task-detail-close').onclick();
   else if(close === 'escape') h.get('task-detail').close();
   else if(close === 'pause') h.loop.pause();
-  else h.loop.invalidate(undefined,context.scope);
+  else h.loop.invalidate();
   await settle(); assert.equal(h.get('task-detail-content').innerHTML,'');
   assert.equal(h.document.activeElement,opener); assert.equal(h.get('task-detail').open,false);
 });
@@ -494,4 +498,245 @@ test(`task action note describes actual capabilities only: ${actions.join(',') |
   if(actions.includes('feedback') && !actions.includes('nudge')) assert.match(note,/feedback goes.*Nudges are unavailable/);
   if(actions.includes('nudge') && !actions.includes('feedback')) assert.match(note,/nudges go.*Feedback is unavailable/);
   if(actions.includes('feedback') && actions.includes('nudge')) assert.match(note,/feedback and nudges go/);
+});
+
+
+const ownerNudge = {version:2,room:'web',simulation:false,scope:{...context.scope,viewer:'nudge-only-generation'},
+  recipients:[{id:'actor_'+ 'a'.repeat(32),label:'Manager',lead:true}],actions:['nudge'],release_id:'r-'+ 'b'.repeat(64)};
+const nudgeTaskId='wi_'+ 'c'.repeat(32), nudgeAssignment='asg_'+ 'e'.repeat(32);
+const ownerDetail = (assignment=null) => ({state:'ok',data:{task:{task_id:nudgeTaskId,fleet:'web',title:'Review the selected task',
+  body:'Complete canonical body',resolved:true,state:assignment===null?'queued':'active',current_assignment:assignment,
+  assignments:[],history:[],issues:[]}}});
+const nudgeOptions = extra => ({interactionContext:()=>null,nudgeContext:()=>ownerNudge,protected:true,jget:()=>ownerDetail(),
+  crypto:{randomUUID:()=> '11111111-1111-4111-8111-111111111111'},...extra});
+async function chooseNudge(h) {
+  h.loop.setRoom('web');await settle();h.open(nudgeTaskId);await settle();
+  const button=h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='nudge');
+  assert.equal(button.disabled,false);button.onclick();await settle();
+}
+for(const assignment of [null,{assignment_id:nudgeAssignment,task_id:nudgeTaskId,state:'active',terminal_event:null}])
+test(`real nudge-only access freezes canonical ${assignment===null?'queued-null':'assigned'} detail, prepares then saves metadata before send`,async()=>{
+  const preparation=deferred(), sent=deferred();
+  const h=harness(nudgeOptions({jget:()=>ownerDetail(assignment),prepareAction:()=>preparation.promise,sendAction:request=>{
+    assert.equal(new ActionState(h.storage).pending[0].semantic_sha256,request.semantic_sha256);return sent.promise;
+  }}));
+  await chooseNudge(h);assert.equal(h.get('work-form').hidden,false);assert.match(h.get('work-label').textContent,/team lead.*not approval/);
+  assert.match(h.get('work-task').textContent,/Review the selected task/);assert.equal(h.get('work-reset').hidden,true);
+  const submitting=h.submit();await settle();
+  assert.equal(h.preparations.length,1);assert.equal(h.sends.length,0);assert.equal(new ActionState(h.storage).pending.length,0);
+  assert.deepEqual(h.preparations[0].target,{recipient:ownerNudge.recipients[0].id,task_id:nudgeTaskId,assignment_id:assignment?.assignment_id ?? null,release_id:ownerNudge.release_id});
+  assert.equal(h.preparations[0].semantic_sha256,undefined);assert.equal(h.preparations[0].body,'Hello');
+  await h.get('work-form').onsubmit({preventDefault(){}});assert.equal(h.preparations.length,1);
+  const {body,...metadata}=h.preparations[0];preparation.resolve({...metadata,semantic_sha256:'d'.repeat(64)});await settle();
+  assert.equal(h.sends.length,1);assert.ok(!h.storage.getItem('plane.pending-actions.v1').includes('Hello'));
+  sent.resolve(receipt(h.sends[0]));await submitting;assert.equal(new ActionState(h.storage).pending.length,0);
+});
+for(const change of ['body','body-reverted','room','pause','different-task','grant'])
+test(`late nudge preparation cannot send after ${change} changes`,async()=>{
+  const prepare=deferred(),h=harness(nudgeOptions({prepareAction:()=>prepare.promise}));await chooseNudge(h);
+  const submitting=h.submit();await settle();
+  if(change.startsWith('body')) {h.get('work-body').value='Edited reason';h.get('work-body').emit('input');if(change==='body-reverted'){h.get('work-body').value='Hello';h.get('work-body').emit('input');}}
+  if(change==='room')h.loop.setRoom('other');if(change==='pause')h.loop.pause();
+  if(change==='different-task')h.open('wi_'+ 'f'.repeat(32));
+  if(change==='grant')h.loop.invalidate(undefined,ownerNudge.scope,'nudge');
+  const {body,...metadata}=h.preparations[0];prepare.resolve({...metadata,semantic_sha256:'d'.repeat(64)});await submitting;
+  assert.equal(h.sends.length,0);assert.equal(new ActionState(h.storage).pending.length,0);
+});
+for(const [label,mutate] of [['missing assignment',task=>delete task.current_assignment],['undefined assignment',task=>{task.current_assignment=undefined;}],['terminal task',task=>{task.state='completed';}],
+  ['unresolved task',task=>{task.resolved=false;}],['wrong assignment task',task=>{task.current_assignment={assignment_id:nudgeAssignment,task_id:'wi_'+ 'f'.repeat(32),state:'active',terminal_event:null};}],
+  ['active without assignment',task=>{task.state='active';}],['malformed assignment',task=>{task.current_assignment={assignment_id:'invalid',task_id:nudgeTaskId,state:'active',terminal_event:null};}]])
+test(`real nudge stays disabled for ${label}`,async()=>{
+  const detail=ownerDetail();mutate(detail.data.task);const h=harness(nudgeOptions({jget:()=>detail}));
+  h.loop.setRoom('web');await settle();h.open(nudgeTaskId);await settle();
+  const button=h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='nudge');
+  assert.equal(button.disabled,true);button.onclick();assert.equal(h.get('work-form').hidden,true);assert.equal(h.preparations.length,0);
+});
+test('real nudge never selects from a legacy board snapshot',async()=>{
+  const h=harness(nudgeOptions({jget:()=>null,protected:false}));h.loop.setRoom('web');await settle();
+  h.loop.update({state:'ok',data:{tasks:[ownerDetail().data.task]}},null);h.open(nudgeTaskId);await settle();
+  assert.match(h.get('task-detail-content').innerHTML,/limited board snapshot/);
+  assert.equal(h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='nudge').disabled,true);
+});
+test('message draft and receipt remain usable while composing nudge and after only nudge grant refusal',async()=>{
+  const storage=store(),original=saved(storage),h=harness(nudgeOptions({storage,interactionContext:()=>context}));
+  h.loop.setRoom('web');await settle();h.get('work-recipient').value='worker';h.get('work-recipient').onchange();
+  h.get('work-body').value='Unsent worker message';h.get('work-body').emit('input');
+  h.open(nudgeTaskId);await settle();h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='nudge').onclick();await settle();
+  h.get('work-body').value='Unsent nudge reason';h.get('work-body').emit('input');
+  assert.match(h.get('work-pending').innerHTML,/saved-request/);await h.pendingClick(original.request_id);
+  assert.equal(h.lookups.length,1);assert.equal(h.get('work-body').value,'Unsent nudge reason');
+  h.open(nudgeTaskId);await settle();h.loop.invalidate(undefined,ownerNudge.scope,'nudge');
+  assert.equal(h.get('task-detail').open,true);assert.match(h.get('task-detail-content').innerHTML,/Complete canonical body/);
+  const buttons=h.get('task-detail-content').querySelectorAll('[data-kind]');assert.equal(buttons.find(b=>b.dataset.kind==='nudge').disabled,true);
+  h.get('task-detail-close').onclick();await settle();
+  // Resume with unchanged message authority restores its original recipient/body.
+  h.loop.setRoom('web');await settle();assert.equal(h.get('work-recipient').value,'worker');assert.equal(h.get('work-body').value,'Unsent worker message');
+});
+test('message capability refusal preserves selected nudge reason and late old nudge scope cannot disable a new generation',async()=>{
+  const h=harness(nudgeOptions({interactionContext:()=>context}));await chooseNudge(h);
+  h.get('work-body').value='Keep nudge reason';h.get('work-body').emit('input');h.loop.invalidate(undefined,context.scope,'message');
+  assert.equal(h.get('work-form').hidden,false);assert.equal(h.get('work-body').value,'Keep nudge reason');
+  h.loop.invalidate(undefined,{...ownerNudge.scope,viewer:'old-generation'},'nudge');
+  assert.equal(h.get('work-form').hidden,false);assert.equal(h.get('work-body').value,'Keep nudge reason');
+});
+test('lost nudge send reply reloads original metadata and receipt lookup ignores newer release/task state',async()=>{
+  const storage=store(),h=harness(nudgeOptions({storage,sendAction:()=>Promise.reject(Error('lost reply'))}));await chooseNudge(h);await h.submit();
+  const saved=new ActionState(storage).pending[0];assert.equal(saved.version,2);assert.equal(saved.target.assignment_id,null);
+  assert.equal(h.sends.length,1);assert.match(h.get('work-notice').textContent,/Outcome unknown/);
+  const newer={...ownerNudge,release_id:'r-'+ 'f'.repeat(64)},restored=harness(nudgeOptions({storage,nudgeContext:()=>newer,jget:()=>{throw Error('receipt must not read task');}}));
+  restored.loop.setRoom('web');await settle();await restored.pendingClick(saved.request_id);
+  assert.deepEqual(restored.lookups,[saved]);assert.equal(restored.preparations.length,0);assert.equal(restored.sends.length,0);
+  assert.equal(new ActionState(storage).pending.length,0);
+});
+test('saved nudge logical task blocks a new send after assignment/release changes without retargeting recovery',async()=>{
+  const storage=store(),h=harness(nudgeOptions({storage,sendAction:()=>Promise.reject(Error('lost'))}));await chooseNudge(h);await h.submit();
+  const next={...ownerNudge,release_id:'r-'+ 'f'.repeat(64)},assignment={assignment_id:nudgeAssignment,task_id:nudgeTaskId,state:'active',terminal_event:null};
+  const restored=harness(nudgeOptions({storage,nudgeContext:()=>next,jget:()=>ownerDetail(assignment)}));await chooseNudge(restored);
+  assert.equal(restored.get('work-send').disabled,true);await restored.submit();assert.equal(restored.preparations.length,0);assert.equal(restored.sends.length,0);
+  assert.equal(new ActionState(storage).pending.length,1);
+});
+
+
+test('recorded nudge retains original UUID, says delivery unconfirmed and checks receipt without prepare/send replay',async()=>{
+  const h=harness(nudgeOptions({sendAction:request=>receipt(request,'recorded')}));await chooseNudge(h);await h.submit();
+  const original=new ActionState(h.storage).pending[0];assert.ok(original);assert.equal(h.sends.length,1);assert.equal(h.preparations.length,1);
+  assert.match(h.get('work-notice').textContent,/task nudge recorded.*delivery to the lead is unconfirmed.*original receipt/);
+  assert.equal(h.get('work-send').disabled,true);await h.pendingClick(original.request_id);
+  assert.equal(h.lookups.length,1);assert.deepEqual(h.lookups[0],original);assert.equal(h.sends.length,1);assert.equal(h.preparations.length,1);
+  assert.equal(new ActionState(h.storage).pending.length,0);assert.match(h.get('work-notice').textContent,/nudge received.*no task result or approval/);
+});
+for(const effect of ['not_started','unknown'])
+test(`nudge ${effect} send result resolves only proven fresh refusal and preserves reason`,async()=>{
+  const failure=Error('unavailable');if(effect==='not_started')failure.effect='not_started';
+  const h=harness(nudgeOptions({sendAction:()=>Promise.reject(failure)}));await chooseNudge(h);await h.submit();
+  assert.equal(h.sends.length,1);assert.equal(h.get('work-body').value,'Hello');
+  assert.equal(new ActionState(h.storage).pending.length,effect==='unknown'?1:0);
+  assert.match(h.get('work-notice').textContent,effect==='unknown'?/Outcome unknown/:/refused before delivery/);
+});
+for(const [messages,nudges] of [[false,false],[true,false],[false,true],[true,true]])
+test(`independent owner capabilities enable message=${messages} and nudge=${nudges} only`,async()=>{
+  const h=harness(nudgeOptions({interactionContext:()=>messages?{...context,simulation:false,actions:['message']}:null,nudgeContext:()=>nudges?ownerNudge:null}));
+  h.loop.setRoom('web');await settle();assert.equal(h.get('work-form').hidden,!messages);
+  h.open(nudgeTaskId);await settle();const buttons=h.get('task-detail-content').querySelectorAll('[data-kind]');
+  assert.equal(buttons.find(b=>b.dataset.kind==='nudge').disabled,!nudges);assert.equal(buttons.find(b=>b.dataset.kind==='feedback').disabled,true);
+  assert.equal(h.get('task-detail').open,true);
+});
+
+
+test('late old-manager denial preserves refreshed nudge context with unchanged scope',async()=>{
+  let current=ownerNudge, contextReads=0;
+  const late=deferred();
+  const h=harness(nudgeOptions({nudgeContext:()=>{contextReads++;return current;},sendAction:()=>late.promise}));
+  await chooseNudge(h);
+  const submitting=h.submit();await settle();
+  assert.equal(h.sends.length,1);
+  const original=h.sends[0];
+  current={...ownerNudge,recipients:[{id:'actor_'+ 'f'.repeat(32),label:'New lead',lead:true}]};
+  await chooseNudge(h);h.get('work-body').value='New lead reason';h.get('work-body').emit('input');
+  // The transport reports the originating recipient for every mutation refusal.
+  h.loop.invalidate(undefined,original.scope,'nudge',original.target.recipient);await settle();
+  assert.equal(contextReads,2); // The old manager cannot start recovery for the new capability.
+  assert.equal(h.get('work-form').hidden,false);assert.equal(h.get('work-body').value,'New lead reason');
+  assert.equal(h.get('work-recipient').value,current.recipients[0].id);
+  late.resolve({...original,status:'unknown'});await submitting;
+  assert.equal(new ActionState(h.storage).pending.length,1);assert.equal(h.sends.length,1);
+  h.loop.invalidate(undefined,current.scope,'nudge',current.recipients[0].id);
+  assert.equal(h.get('work-form').hidden,true);assert.equal(h.get('work-send').disabled,true);
+});
+
+
+async function ownerRecoveryHarness({ messages = false, recovery = 200, heldRecovery } = {}) {
+  let session = 'ready', nudgeReads = 0, detailReads = 0, prepareCount = 0;
+  const calls = [], redirects = [], timers = new Set();
+  const newer = { ...ownerNudge, release_id: 'r-' + 'f'.repeat(64) };
+  const transport = createOwnerTransport({
+    EventSource: class { close() {} }, location: {replace(path) { redirects.push(path); }},
+    setTimeout(fn) { timers.add(fn); return fn; }, clearTimeout(fn) { timers.delete(fn); },
+    async fetch(url, options) {
+      const body = options.body ? JSON.parse(options.body) : null; calls.push({url,body});
+      let status = 200, data;
+      if (url === '/api/owner/status') { status = session === 'ready' ? 200 : 503; data = {state:session}; }
+      else if (url === '/api/owner/logout') data = {state:'signed_out'};
+      else if (url === '/api/tasks?source-loss') { session='unavailable';status=503;data={state:'unavailable'}; }
+      else if (url.startsWith('/api/tasks/')) {
+        const assignment = ++detailReads > 1 ? {assignment_id:nudgeAssignment,task_id:nudgeTaskId,state:'active',terminal_event:null} : null;
+        data = ownerDetail(assignment);
+      } else if (url.endsWith('/context')) {
+        if (body.kind === 'nudge') {
+          if (body.room === 'web' && ++nudgeReads === 2) {
+            if (heldRecovery) await heldRecovery.promise;
+            status = recovery; data = recovery === 200 ? newer : {state:'denied'};
+          } else data = body.room === 'web' ? ownerNudge : {...newer,room:body.room,scope:{...newer.scope,fleet:body.room}};
+        } else { status=messages?200:403;data=messages?{...context,simulation:false,actions:['message']}:{state:'denied'}; }
+      } else if (url.endsWith('/prepare')) {
+        if (++prepareCount === 1) { status=403;data={state:'denied'}; }
+        else { const {body:reason,...metadata}=body;data={...metadata,semantic_sha256:'d'.repeat(64)}; }
+      } else if (url.endsWith('/send')) { const {body:reason,...metadata}=body;data={...metadata,status:'delivered'}; }
+      else throw Error('unexpected '+url);
+      return {status,async json(){return data;}};
+    },
+  });
+  const h = harness(nudgeOptions({transport}));
+  for (const id of ['owner-session','owner-session-status','owner-session-renew','owner-session-logout','owner-session-check']) new h.Element(id);
+  const controls = transport.mountSessionControls({document:h.document,element:h.get('owner-session'),
+    onPause(){h.loop.pause();},onActionPause(scope,kind,recipient){h.loop.invalidate(undefined,scope,kind,recipient);}});
+  await controls.ready;
+  return {...h,calls,redirects,controls,get nudgeReads(){return nudgeReads;}};
+}
+const flushRecovery = async () => { for(let i=0;i<5;i++) await new Promise(resolve=>setImmediate(resolve)); };
+for (const messages of [false,true]) for (const recovery of [200,403])
+test(`real prepare403 performs one capability read without mutation replay: messages=${messages}, context=${recovery}`,async()=>{
+  const h=await ownerRecoveryHarness({messages,recovery});
+  try {
+    h.loop.setRoom('web');await flushRecovery();
+    if(messages) {
+      h.get('work-recipient').value='worker';h.get('work-recipient').onchange();
+      h.get('work-body').value='Ordinary worker draft';h.get('work-body').emit('input');
+    }
+    h.open(nudgeTaskId);await flushRecovery();
+    h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='nudge').onclick();await settle();
+    h.get('work-body').value='Keep logical task reason';h.get('work-body').emit('input');
+    await h.get('work-form').onsubmit({preventDefault(){}});await flushRecovery();
+    assert.equal(h.nudgeReads,2);assert.equal(h.calls.filter(c=>c.url.endsWith('/prepare')).length,1);
+    assert.equal(h.calls.filter(c=>c.url.endsWith('/send')).length,0);assert.equal(new ActionState(h.storage).pending.length,0);
+    assert.equal(h.get('work-form').hidden,!messages);assert.deepEqual(h.redirects,[]);
+    if(messages) {assert.equal(h.get('work-recipient').value,'worker');assert.equal(h.get('work-body').value,'Ordinary worker draft');}
+    h.open(nudgeTaskId);await flushRecovery();
+    const button=h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='nudge');
+    assert.equal(button.disabled,recovery!==200);assert.match(h.get('task-detail-content').innerHTML,/Complete canonical body/);
+    if(recovery===200) {
+      button.onclick();await settle();assert.equal(h.get('work-body').value,'Keep logical task reason');
+      await h.get('work-form').onsubmit({preventDefault(){}});await flushRecovery();
+      const sent=h.calls.filter(c=>c.url.endsWith('/send'));assert.equal(sent.length,1);
+      assert.equal(sent[0].body.target.assignment_id,nudgeAssignment);assert.equal(sent[0].body.target.release_id,'r-'+'f'.repeat(64));
+      assert.equal(sent[0].body.body,'Keep logical task reason');assert.equal(h.nudgeReads,2);
+    }
+  } finally {h.controls.dispose();}
+});
+for (const loss of ['room','session','source'])
+test(`late capability refresh cannot restore nudge after ${loss} loss`,async()=>{
+  const held=deferred(),h=await ownerRecoveryHarness({heldRecovery:held});
+  try {
+    await chooseNudge(h);await flushRecovery();
+    const submitting=h.submit();await flushRecovery();assert.equal(h.nudgeReads,2);
+    if(loss==='room')h.loop.setRoom('all');
+    if(loss==='session')h.get('owner-session-logout').emit('click');
+    if(loss==='source')await h.api.jget('/api/tasks?source-loss');
+    await flushRecovery();held.resolve();await submitting;await flushRecovery();
+    assert.equal(h.get('work-form').hidden,true);assert.equal(h.calls.filter(c=>c.url.endsWith('/send')).length,0);
+    assert.equal(new ActionState(h.storage).pending.length,0);
+    if(loss==='room')assert.equal(h.get('work-scope').textContent,'all');
+    else {h.open(nudgeTaskId);await flushRecovery();assert.equal(h.get('task-detail-content').querySelectorAll('[data-kind]').some(b=>!b.disabled),false);}
+  } finally {h.controls.dispose();}
+});
+test('capability recovery does not overwrite a message edited while its nudge context read is pending',async()=>{
+  const held=deferred(),h=await ownerRecoveryHarness({messages:true,heldRecovery:held});
+  try {
+    await chooseNudge(h);await flushRecovery();const submitting=h.submit();await flushRecovery();
+    assert.equal(h.get('work-form').hidden,false);h.get('work-recipient').value='worker';h.get('work-recipient').onchange();
+    h.get('work-body').value='Message edited during recovery';h.get('work-body').emit('input');
+    held.resolve();await submitting;await flushRecovery();
+    assert.equal(h.get('work-body').value,'Message edited during recovery');assert.equal(h.get('work-recipient').value,'worker');
+    assert.equal(h.nudgeReads,2);assert.equal(h.calls.filter(c=>c.url.endsWith('/send')).length,0);
+  } finally {h.controls.dispose();}
 });

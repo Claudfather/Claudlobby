@@ -1,4 +1,4 @@
-import { ActionState, rowKey, scopeKey, validContext } from "/action-state.js";
+import { ActionState, rowKey, scopeKey, validContext, validNudgeContext, validNudgeTarget } from "/action-state.js";
 import { esc, ago, stateBlock } from "/panel-state.js";
 
 // One presentation for direct and embedded Plane. No transport is constructed
@@ -9,9 +9,10 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
   let storage;
   try { storage = sessionStorage; } catch { storage = null; }
   const state = new ActionState(storage);
+  const contextsByKind = new Map(), checkingReceipts = new Set();
   const messageRecipients = new Map(); // Tab memory only, bound to the full authorized scope.
   let context = null, room = null, epoch = 0, board = null, channel = null;
-  let detailEpoch = 0;
+  let detailEpoch = 0, compositionEpoch = 0, nudgeRefreshEpoch = 0, detailSnapshot = null, targetTitle = null;
   let selected = null, target = null, kind = "message", sending = false, inFlightRequest = null, opener = null, openerIdentity = null;
   let notice = "Choose a team to see its available actions.";
   root.innerHTML = `<div class="work-loop-head"><div><h2>Talk to your team</h2>
@@ -31,25 +32,29 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
     <div id="work-recoverable"></div>
     <button id="work-clear-saved" class="pill ghost" type="button" hidden>Clear unreadable saved requests</button>`;
   const $ = id => document.getElementById(id);
-  const row = () => context && target ? { scope: context.scope, kind, target } : null;
+  const row = () => context && target ? { ...(context.version === 2 ? { version: 2 } : {}), scope: context.scope, kind, target } : null;
+  const requestContext = request => {
+    const value = contextsByKind.get(request.kind);
+    return value && (request.version === 2 ? value.version === 2 : value.version === 1)
+      && scopeKey(value.scope) === scopeKey(request.scope) ? value : null;
+  };
   const selectionKey = () => row() ? rowKey(row()) : "";
   const leadId = c => (c.recipients.find(r => r.lead) || c.recipients[0]).id;
   const readDraft = () => row() ? state.draft(row()) : "";
-  const recipientLabel = request => (context && scopeKey(request.scope) === scopeKey(context.scope)
-    ? context.recipients.find(r => r.id === request.target.recipient)?.label : null) || request.target.recipient;
+  const recipientLabel = request => requestContext(request)?.recipients.find(r => r.id === request.target.recipient)?.label || request.target.recipient;
   function saveDraft() {
     if (!row()) return;
     try { state.draft(row(), $("work-body").value); }
     catch (error) { notice = error.message; }
   }
   function pendingRows() {
-    const rows = context ? state.pending.filter(p => scopeKey(p.scope) === scopeKey(context.scope)) : [];
+    const rows = state.pending.filter(p => requestContext(p));
     $("work-pending").innerHTML = rows.map(p => `<div class="pending-action">
       <div><b>Awaiting confirmation</b><p>${esc(p.kind)} · ${esc(recipientLabel(p))}${p.target.task_id ? ` · task ${esc(p.target.task_id)}` : ""}</p>
       <small>Submitted ${esc(ago(p.submitted_at))} · ${esc(p.request_id)}</small></div>
-      <button class="pill ghost" type="button" data-request="${esc(p.request_id)}"${p.request_id === inFlightRequest ? " disabled" : ""}>Check receipt</button>
-      <button class="pill ghost" type="button" data-discard="${esc(p.request_id)}"${p.request_id === inFlightRequest ? " disabled" : ""}>Discard saved request</button></div>`).join("")
-      + [...state.discarded.values()].filter(p => context && scopeKey(p.scope) === scopeKey(context.scope))
+      <button class="pill ghost" type="button" data-request="${esc(p.request_id)}"${p.request_id === inFlightRequest || checkingReceipts.has(p.request_id) ? " disabled" : ""}>Check receipt</button>
+      <button class="pill ghost" type="button" data-discard="${esc(p.request_id)}"${p.request_id === inFlightRequest || checkingReceipts.has(p.request_id) ? " disabled" : ""}>Discard saved request</button></div>`).join("")
+      + [...state.discarded.values()].filter(p => requestContext(p))
         .map(p => `<p class="note">Discarded locally · ${esc(p.kind)} to ${esc(recipientLabel(p))}${p.target.task_id ? ` · task ${esc(p.target.task_id)}` : ""} · ${esc(p.request_id)}. Outcome unknown; this ID is retained only until this tab reloads.</p>`).join("");
   }
   function paint({ restoreDraft = false } = {}) {
@@ -57,16 +62,18 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
     $("work-form").hidden = !usable;
     $("work-mode").textContent = context?.simulation ? "EXAMPLE · NO REAL BOT DELIVERY" : "";
     $("work-scope").textContent = context ? context.scope.fleet : (room || "All teams");
-    $("work-unavailable").textContent = usable ? "" : "Browser actions are unavailable for this view. Its task and activity records remain readable.";
+    $("work-unavailable").textContent = usable ? "" : contextsByKind.has("nudge")
+      ? "Open a task to ask its team lead about it. This does not approve or complete work."
+      : "Browser actions are unavailable for this view. Its task and activity records remain readable.";
     if (usable) {
       const options = context.recipients.map(r => `<option value="${esc(r.id)}">${esc(r.label)}${r.lead ? " · lead" : ""}</option>`).join("");
       if ($("work-recipient").innerHTML !== options) $("work-recipient").innerHTML = options;
       $("work-recipient").value = target.recipient;
       $("work-recipient").disabled = kind !== "message";
-      $("work-task").textContent = target.task_id ? `Task: ${target.task_id}` : "";
-      $("work-reset").hidden = !target.task_id;
-      $("work-label").textContent = kind === "feedback" ? "Feedback on this task" : kind === "nudge" ? "Why does this task need attention?" : "Message";
-      $("work-send").textContent = sending ? "Sending…" : kind === "nudge" ? "Nudge task" : kind === "feedback" ? "Send feedback" : "Send message";
+      $("work-task").textContent = target.task_id ? `Task: ${targetTitle || target.task_id}` : "";
+      $("work-reset").hidden = !target.task_id || !contextsByKind.has("message");
+      $("work-label").textContent = kind === "feedback" ? "Feedback on this task" : kind === "nudge" ? "Ask the team lead about this task (not approval)" : "Message";
+      $("work-send").textContent = sending ? "Sending…" : kind === "nudge" ? "Ask team lead" : kind === "feedback" ? "Send feedback" : "Send message";
       $("work-send").disabled = sending || !context.actions.includes(kind) || !!state.unresolved(row()) || state.storageError;
       if (restoreDraft) $("work-body").value = readDraft();
     } else $("work-send").disabled = true;
@@ -81,18 +88,60 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
     pendingRows();
   }
   function closeDetail() {
-    ++detailEpoch;
+    ++detailEpoch; detailSnapshot = null;
     $("task-detail-content").innerHTML = "";
     if (dialog.open) dialog.close();
     selected = null;
   }
-  function invalidate(message = "Message access is unavailable. Your draft is kept; task and activity records remain readable.", expectedScope) {
+  function invalidate(message = "Message access is unavailable. Your draft is kept; task and activity records remain readable.", expectedScope, affectedKind, expectedRecipient) {
+    if (affectedKind) {
+      const affected = contextsByKind.get(affectedKind);
+      if (!affected || (expectedScope && scopeKey(expectedScope) !== scopeKey(affected.scope))
+        || (expectedRecipient && !affected.recipients.some(recipient => recipient.id === expectedRecipient))) return;
+      if (kind === affectedKind) {
+        saveDraft(); ++compositionEpoch;
+        if (kind === "message" && target?.task_id === null) messageRecipients.set(scopeKey(affected.scope), target.recipient);
+        context = null; target = null; targetTitle = null; $("work-body").value = "";
+        // Restore the independent ordinary-message draft, never retarget a nudge.
+        if (affectedKind === "nudge") {
+          kind = "message";
+          const messageContext = contextsByKind.get("message");
+          if (messageContext) {
+            context = messageContext;
+            const remembered = messageRecipients.get(scopeKey(context.scope));
+            target = { recipient: context.recipients.some(r => r.id === remembered) ? remembered : leadId(context), task_id: null };
+            $("work-body").value = readDraft();
+          }
+        }
+      }
+      contextsByKind.delete(affectedKind);
+      notice = affectedKind === "nudge" ? "Task nudge access is unavailable. Your reason is kept; task records remain readable." : message || "Message access is unavailable. Your draft is kept; task records remain readable.";
+      updateDetailActions(); paint();
+      if (affectedKind === "nudge" && typeof api.nudgeContext === "function") {
+        const token = epoch, retry = ++nudgeRefreshEpoch, selectedRoom = room;
+        // One read-only recovery per scoped refusal. Context refusals do not
+        // call invalidate, and this result never restores a task target or sends.
+        Promise.resolve().then(() => token === epoch && retry === nudgeRefreshEpoch
+          ? api.nudgeContext(selectedRoom) : null).then(value => {
+          if (token !== epoch || retry !== nudgeRefreshEpoch || contextsByKind.has("nudge")) return;
+          if (!validNudgeContext(value) || value.room !== selectedRoom || value.scope.fleet !== selectedRoom
+              || typeof api.prepareAction !== "function" || typeof api.sendAction !== "function"
+              || typeof api.actionReceipt !== "function") return;
+          contextsByKind.set("nudge", value);
+          updateDetailActions();
+          if (selected) $("task-detail-refresh").hidden = false;
+          paint(); // Do not overwrite a message composed while recovery was pending.
+        }).catch(() => {});
+      }
+      return;
+    }
     if (expectedScope && (!context || scopeKey(expectedScope) !== scopeKey(context.scope))) return;
     saveDraft();
     if (context?.actions.includes("message") && kind === "message" && target?.task_id === null)
       messageRecipients.set(scopeKey(context.scope), target.recipient);
     ++epoch;
-    context = null; target = null;
+    contextsByKind.clear(); ++compositionEpoch;
+    context = null; target = null; targetTitle = null;
     closeDetail();
     $("work-body").value = "";
     notice = message;
@@ -105,38 +154,39 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
     saveDraft();
     if (context?.actions.includes("message") && kind === "message" && target?.task_id === null)
       messageRecipients.set(scopeKey(context.scope), target.recipient);
-    const token = ++epoch;
-    room = fleet || "all";
-    context = null; target = null; board = null; channel = null;
-    closeDetail();
-    // Do not leave private text or rows behind a newly selected team label.
-    $("work-body").value = "";
-    notice = "Checking available actions…";
-    paint();
-    Promise.resolve().then(() => api.interactionContext?.(room)).then(value => {
+    const token = ++epoch, selectedRoom = fleet || "all";
+    ++compositionEpoch; room = selectedRoom;
+    contextsByKind.clear(); context = null; target = null; targetTitle = null; kind = "message"; board = null; channel = null;
+    closeDetail(); $("work-body").value = ""; $("work-recipient").innerHTML = ""; $("work-recipient").value = "";
+    notice = "Checking available actions…"; paint();
+    function accept(value, nudgeOnly) {
       if (token !== epoch) return;
-      // The adapter must resolve the exact selected room, never a previous one.
-      if (room !== "all" && validContext(value) && value.room === room && value.scope.fleet === room
-          && typeof api.sendAction === "function" && typeof api.actionReceipt === "function") {
-        context = value;
-        const remembered = value.actions.includes("message") ? messageRecipients.get(scopeKey(value.scope)) : null;
-        target = { recipient: value.recipients.some(r => r.id === remembered) ? remembered : leadId(value), task_id: null };
-        kind = "message";
+      const valid = selectedRoom !== "all" && (nudgeOnly ? validNudgeContext(value) : validContext(value))
+        && value.room === selectedRoom && value.scope.fleet === selectedRoom
+        && typeof api.sendAction === "function" && typeof api.actionReceipt === "function"
+        && (!nudgeOnly || typeof api.prepareAction === "function");
+      if (valid) {
+        for (const action of value.actions) if (nudgeOnly || value.simulation || action === "message") contextsByKind.set(action, value);
+        if (!nudgeOnly && kind === "message" && !target && !contextsByKind.has("message")) $("work-recipient").value = leadId(value);
+        if (kind === "message" && contextsByKind.has("message") && !target) {
+          context = contextsByKind.get("message");
+          const remembered = messageRecipients.get(scopeKey(context.scope));
+          target = {recipient:context.recipients.some(r => r.id === remembered) ? remembered : leadId(context),task_id:null};
+          paint({ restoreDraft: true });
+        }
         notice = value.simulation ? "Example actions are recorded only by the test service. No real agents receive them." : "";
-      } else notice = room === "all" ? "Choose a team to see its available actions."
+      } else if (!contextsByKind.size) notice = selectedRoom === "all" ? "Choose a team to see its available actions."
         : "Browser action access is unavailable for this team. Task and activity records remain readable.";
       if (selected) $("task-detail-refresh").hidden = false;
-      paint({ restoreDraft: true });
-    }).catch(() => {
-      if (token !== epoch) return;
-      notice = "Could not check action access. Your draft is kept in this tab.";
-      if (selected) $("task-detail-refresh").hidden = false;
-      paint();
-    });
+      paint(); // An unrelated context result must not replace an authored draft.
+    }
+    Promise.resolve().then(() => api.interactionContext?.(selectedRoom)).then(value => accept(value, false)).catch(() => accept(null, false));
+    if (typeof api.nudgeContext === "function")
+      Promise.resolve().then(() => api.nudgeContext(selectedRoom)).then(value => accept(value, true)).catch(() => accept(null, true));
   }
   function detail() {
     if (!selected) return;
-    const token = ++detailEpoch, selection = selected;
+    const token = ++detailEpoch, selection = selected; detailSnapshot = null;
     const content = $("task-detail-content");
     // Read at call time: a late reply must see the board as it is then.
     const boardTask = () => board?.state === "ok" ? board.data.tasks.find(t => t.task_id === selection.id && (t.fleet || "") === selection.fleet) : null;
@@ -243,25 +293,50 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
       if (threads.length) for (const thread of threads) reports.append(renderThread(thread));
       else reports.innerHTML = '<p class="detail-empty">No linked conversation or result is available in the recent channel window.</p>';
     }
-    const sameFleet = context && context.scope.fleet === task.fleet;
+    detailSnapshot = { task, boardOnly };
+    updateDetailActions();
+  }
+  function frozenNudgeTarget(task, value, boardOnly) {
+    if (boardOnly || task.resolved !== true || !Object.hasOwn(task, "body")
+        || !["queued", "assigned", "active", "blocked"].includes(task.state) || !Object.hasOwn(task, "current_assignment")) return null;
+    const assignment = task.current_assignment;
+    if (assignment === null ? task.state !== "queued" : !assignment || assignment.task_id !== task.task_id
+        || !["assigned", "active", "blocked"].includes(assignment.state) || assignment.terminal_event !== null) return null;
+    const result = { recipient: leadId(value), task_id: task.task_id,
+      assignment_id: assignment === null ? null : assignment.assignment_id, release_id: value.release_id };
+    return validNudgeTarget(result) ? result : null;
+  }
+  function updateDetailActions() {
+    if (!detailSnapshot) return;
+    const { task, boardOnly } = detailSnapshot, content = $("task-detail-content");
+    const capability = action => {
+      const value = contextsByKind.get(action);
+      if (!value || value.scope.fleet !== task.fleet) return null;
+      if (action === "nudge" && value.version === 2 && !frozenNudgeTarget(task, value, boardOnly)) return null;
+      return value;
+    };
     for (const button of content.querySelectorAll("[data-kind]")) {
-      button.disabled = !sameFleet || !context.actions.includes(button.dataset.kind);
+      button.disabled = !capability(button.dataset.kind);
       button.onclick = () => {
-        saveDraft();
-        kind = button.dataset.kind;
-        target = { recipient: leadId(context), task_id: task.task_id };
+        const nextKind = button.dataset.kind, nextContext = capability(nextKind);
+        if (!nextContext) return;
+        saveDraft(); ++compositionEpoch;
+        if (kind === "message" && target?.task_id === null) messageRecipients.set(scopeKey(context.scope), target.recipient);
+        kind = nextKind; context = nextContext; targetTitle = task.title;
+        target = context.version === 2 ? frozenNudgeTarget(task, context, boardOnly) : { recipient: leadId(context), task_id: task.task_id };
         opener = null; openerIdentity = null;
-        closeDetail(); notice = context.simulation ? "Example task action. No real bot delivery." : "";
+        closeDetail(); notice = context.simulation ? "Example task action. No real bot delivery."
+          : "This asks the team lead about the selected task. It does not approve or complete work. Refresh and select again if its assignment or release changes.";
         paint({ restoreDraft: true }); $("work-body").focus();
       };
     }
-    const feedback = sameFleet && context.actions.includes("feedback"), nudge = sameFleet && context.actions.includes("nudge");
+    const feedback = capability("feedback"), nudge = capability("nudge");
     const taskActions = feedback && nudge ? "Task feedback and nudges go to this team’s lead."
       : feedback ? "Task feedback goes to this team’s lead. Nudges are unavailable with this connection."
       : nudge ? "Task nudges go to this team’s lead. Feedback is unavailable with this connection."
       : "Task feedback and nudges are unavailable with this connection.";
-    $("task-action-note").textContent = taskActions + (sameFleet && context.actions.includes("message")
-      ? " Close this task and use Talk to your team to send an ordinary message." : "");
+    $("task-action-note").textContent = taskActions + (nudge?.version === 2 ? " A nudge asks about this task; it is not approval." : "")
+      + (capability("message") ? " Close this task and use Talk to your team to send an ordinary message." : "");
   }
   function update(tasks, messages) {
     board = tasks; channel = messages;
@@ -272,17 +347,17 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
   document.getElementById("rail-right").addEventListener("click", event => {
     const button = event.target.closest("[data-task-open]");
     if (!button) return;
-    selected = { id: button.dataset.taskOpen, fleet: button.dataset.taskFleet || "" };
+    ++compositionEpoch; selected = { id: button.dataset.taskOpen, fleet: button.dataset.taskFleet || "" };
     opener = button; openerIdentity = { ...selected, panel: button.closest("#attention, #tasks")?.id };
     detail(); $("task-detail-refresh").hidden = true;
     dialog.showModal(); $("task-detail-close").focus();
   });
   $("task-detail-close").onclick = closeDetail;
-  $("task-detail-refresh").onclick = () => { detail(); $("task-detail-refresh").hidden = true; };
+  $("task-detail-refresh").onclick = () => { ++compositionEpoch; detail(); $("task-detail-refresh").hidden = true; };
   dialog.addEventListener("close", () => {
     ++detailEpoch;
     $("task-detail-content").innerHTML = "";
-    selected = null;
+    selected = null; detailSnapshot = null;
     if (!openerIdentity) return;
     const rail = $("rail-right"), buttons = [...rail.querySelectorAll("[data-task-open]")];
     const matches = button => button.dataset.taskOpen === openerIdentity.id
@@ -294,26 +369,30 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
     if (focusTarget === rail) rail.tabIndex = -1;
     focusTarget.focus(); opener = null; openerIdentity = null;
   });
-  $("work-body").addEventListener("input", saveDraft);
+  $("work-body").addEventListener("input", () => { ++compositionEpoch; saveDraft(); });
   $("work-recipient").onchange = () => {
-    saveDraft(); target = { ...target, recipient: $("work-recipient").value };
+    saveDraft(); ++compositionEpoch; target = { ...target, recipient: $("work-recipient").value };
     notice = ""; paint({ restoreDraft: true });
   };
   $("work-reset").onclick = () => {
-    saveDraft(); target = { ...target, task_id: null }; kind = "message";
+    const message = contextsByKind.get("message"); if (!message) return;
+    saveDraft(); ++compositionEpoch; context = message; kind = "message"; targetTitle = null;
+    const remembered = messageRecipients.get(scopeKey(context.scope));
+    target = {recipient:context.recipients.some(r => r.id === remembered) ? remembered : leadId(context),task_id:null};
     notice = ""; paint({ restoreDraft: true }); $("work-body").focus();
   };
   const requestLabel = request => `${request.kind} to ${recipientLabel(request)}${request.target.task_id ? ` · task ${request.target.task_id}` : ""}`;
-  function receiptNotice(status, simulation) {
+  function receiptNotice(status, simulation, actionKind) {
     const prefix = simulation ? "Example receipt: " : "";
-    return prefix + ({ delivered: simulation ? "simulated delivery confirmed. No real bot received this." : "delivery confirmed by the host.",
-      recorded: "recorded; delivery is not yet confirmed. Check this receipt again.",
+    return prefix + ({ delivered: simulation ? "simulated delivery confirmed. No real bot received this." : actionKind === "nudge" ? "nudge received by the team lead; no task result or approval is implied." : "delivery confirmed by the host.",
+      recorded: actionKind === "nudge" && !simulation ? "task nudge recorded; delivery to the lead is unconfirmed. Check this original receipt again."
+        : "recorded; delivery is not yet confirmed. Check this receipt again.",
       rejected: "request refused. Nothing was delivered. You may edit a new request." })[status];
   }
   $("work-form").onsubmit = async event => {
     event.preventDefault();
     if (!context || !target || sending) return;
-    saveDraft(); const originContext = context, token = epoch, selection = selectionKey();
+    saveDraft(); const originContext = context, token = epoch, composition = compositionEpoch, selection = selectionKey(), body = $("work-body").value;
     let request, restoreDraft = false;
     try {
       if (typeof globalThis.crypto?.randomUUID !== "function")
@@ -323,12 +402,20 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
       catch { throw new Error("A safe request ID is unavailable. Nothing was sent."); }
       if (state.pending.some(p => p.request_id === requestId) || state.discarded.has(requestId))
         throw new Error("This request ID was already used. Nothing was sent; check its original receipt.");
-      request = state.begin(context, kind, target, $("work-body").value, requestId);
-      sending = true; inFlightRequest = request.request_id; notice = "Sending…"; paint();
+      sending = true; inFlightRequest = requestId;
+      if (originContext.version === 2) {
+        const preparation = state.prepare(originContext, target, body, requestId);
+        notice = "Checking the selected task nudge…"; paint();
+        const prepared = await api.prepareAction(preparation);
+        if (token !== epoch || composition !== compositionEpoch || selection !== selectionKey() || $("work-body").value !== body
+            || requestContext(preparation) !== originContext) throw new Error("Task nudge selection changed. Nothing was sent; select it again.");
+        request = state.beginPrepared(originContext, preparation, prepared);
+      } else request = state.begin(originContext, kind, target, body, requestId);
+      notice = "Sending…"; paint();
       const receipt = await api.sendAction(request);
       const status = state.accept(request, receipt);
       if (token === epoch) {
-        notice = `${requestLabel(request)}: ${receiptNotice(status, originContext.simulation)}`;
+        notice = `${requestLabel(request)}: ${receiptNotice(status, originContext.simulation, request.kind)}`;
         restoreDraft = status === "delivered" && selection === selectionKey();
       }
       refresh();
@@ -337,7 +424,7 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
         // Only this fresh, owned send row is resolved. Receipt lookups never
         // clear older IDs merely because a new invocation did not start.
         try {
-          state.accept(request, { ...state.metadata(request), version: 1, status: "rejected" });
+          state.accept(request, { ...state.metadata(request), version: request.version || 1, status: "rejected" });
           if (room === originContext.room)
             notice = "This submission was refused before delivery; your draft is kept.";
         } catch {
@@ -346,7 +433,7 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
         }
       } else if (token === epoch) notice = request
         ? `${requestLabel(request)}: Outcome unknown. Your draft is kept. Check the original receipt before sending again.`
-        : error.message;
+        : originContext.version === 2 ? "Task nudge was not sent. Your reason is kept; refresh the task and select its nudge again." : error.message;
     } finally {
       sending = false; inFlightRequest = null;
       paint({ restoreDraft });
@@ -361,25 +448,25 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
   $("work-pending").onclick = async event => {
     const discardButton = event.target.closest("[data-discard]");
     const button = discardButton || event.target.closest("[data-request]");
-    if (!button || !context) return;
-    const request = state.pending.find(p => p.request_id === (discardButton ? button.dataset.discard : button.dataset.request) && scopeKey(p.scope) === scopeKey(context.scope));
-    if (!request || request.request_id === inFlightRequest) return;
+    if (!button) return;
+    const request = state.pending.find(p => p.request_id === (discardButton ? button.dataset.discard : button.dataset.request) && requestContext(p));
+    if (!request || request.request_id === inFlightRequest || checkingReceipts.has(request.request_id)) return;
     if (discardButton) {
       if (!globalThis.confirm(`Request ${request.request_id} may already have been delivered or may still be delivered. Copy this ID before discarding: it is retained only until this tab reloads. Discarding stops saving its receipt and lets you send a new request, which could duplicate the original. Nothing will be cancelled or resent. Discard this saved request?`)) return;
       try { state.discard(request); notice = `Discarded saved request ${request.request_id}. Its outcome remains unknown; nothing was cancelled or resent.`; }
       catch (error) { notice = error.message; }
       paint(); return;
     }
-    const token = epoch, simulation = context.simulation, selection = selectionKey();
+    const token = epoch, simulation = requestContext(request).simulation, selection = selectionKey();
     const label = requestLabel(request);
-    button.disabled = true;
+    checkingReceipts.add(request.request_id); button.disabled = true;
     try {
       const status = state.accept(request, await api.actionReceipt(request));
-      if (token === epoch) notice = `${label}: ${receiptNotice(status, simulation)}`;
+      if (token === epoch) notice = `${label}: ${receiptNotice(status, simulation, request.kind)}`;
       refresh();
     } catch {
       if (token === epoch) notice = `${label}: Receipt unavailable or mismatched. Outcome remains unknown; nothing was resent.`;
-    } finally { if (token === epoch) paint({ restoreDraft: selection === selectionKey() }); }
+    } finally { checkingReceipts.delete(request.request_id); if (token === epoch) paint({ restoreDraft: selection === selectionKey() }); }
   };
   paint();
   return { setRoom, update, invalidate, pause };

@@ -29,6 +29,15 @@ def _text(value, limit=240):
         raise AccessDenied("invalid_action_body")
 
 
+def _body(value):
+    if not isinstance(value, str) or not value.strip() or len(value) > 2000:
+        raise AccessDenied("invalid_action_body")
+    try:
+        value.encode("utf-8")
+    except UnicodeError as exc:
+        raise AccessDenied("invalid_action_body") from exc
+
+
 def _opaque(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False,
         separators=(",", ":")).encode()).hexdigest()
@@ -48,6 +57,8 @@ class OwnerActions:
     def __init__(self, root: Path, *, package=None):
         paths = resolve_paths(root=root, package=package)
         self.root, self.package = paths.root, paths.package
+        from .owner_nudge_actions import OwnerNudgeActions
+        self.nudges = OwnerNudgeActions(self.root, package=self.package)
 
     def _context(self, reader: VerifiedReader, room: str):
         _text(room)
@@ -77,6 +88,8 @@ class OwnerActions:
                 "recipients": recipients, "actions": ["message"]}, grant
 
     def context(self, reader, payload):
+        if type(payload) is dict and payload.get("kind") == "nudge":
+            return self.nudges.context(reader, payload)
         _exact(payload, {"room"})
         context, grant = self._context(reader, payload["room"])
         self._recheck(reader, context, grant)
@@ -87,7 +100,12 @@ class OwnerActions:
         if fresh != context or current != grant:
             raise AccessDenied("message_binding_changed")
 
+    def prepare(self, reader, payload):
+        return self.nudges.prepare(reader, payload)
+
     def admit_response(self, action, reader, result):
+        if result.get("version") == 2:
+            return self.nudges.admit_response(action, reader, result)
         room = result["room"] if action == "context" else result["scope"]["fleet"]
         current, _ = self._context(reader, room)
         if action == "context":
@@ -115,13 +133,7 @@ class OwnerActions:
         if payload["kind"] != "message" or payload["target"]["task_id"] is not None:
             raise AccessDenied("unsupported_owner_action")
         if action == "send":
-            if (not isinstance(payload["body"], str)
-                    or not payload["body"].strip() or len(payload["body"]) > 2000):
-                raise AccessDenied("invalid_action_body")
-            try:
-                payload["body"].encode("utf-8")
-            except UnicodeError as exc:
-                raise AccessDenied("invalid_action_body") from exc
+            _body(payload["body"])
         room = payload["scope"]["fleet"]
         context, grant = self._context(reader, room)
         if (payload["scope"] != context["scope"] or payload["target"]["recipient"]
@@ -136,6 +148,8 @@ class OwnerActions:
         return fields, context, grant, adapter, options
 
     def operation(self, action, reader, payload):
+        if type(payload) is dict and payload.get("kind") == "nudge":
+            return self.nudges.operation(action, reader, payload)
         try:
             fields, context, grant, adapter, options = self._prepare_operation(action, reader, payload)
         except (AccessDenied, AccessUnavailable, OperationContextError) as exc:
