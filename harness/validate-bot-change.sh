@@ -1742,21 +1742,16 @@ val_scenario "validate-bot-change: session-scoped readiness (#1530)"
 _scope_fail_before=$fail
 _SC_BIN="$RB_ROOT/scopebin"
 mkdir -p "$_SC_BIN"
-# Reuse the native stand-in from test_bridge_state: framework Python re-execs
-# as Python on macOS, so a symlink named bun cannot satisfy the real classifier.
-# Node retains the copied executable's name and exposes its launch environment.
-# Preserve Homebrew's executable-relative libnode dependency when present.
-"$VAL_PY" -I -B - "$(command -v node)" "$_SC_BIN" <<'BINS'
-import os
-from pathlib import Path
-import shutil
+# The tests' native stand-ins (tests/stand_in_fixtures.py) are node: framework
+# Python re-execs as Python on macOS, so not even a symlink named bun passes
+# the real classifier there, while node keeps its stand-in's name and exposes
+# its launch environment. On Linux each stand-in is a link to node.
+"$VAL_PY" -I -B - "$VAL_REPO" "$(command -v node)" "$_SC_BIN" <<'BINS'
 import sys
-source, target = Path(sys.argv[1]).resolve(), Path(sys.argv[2])
-for name in ("bun", "claude"):
-    shutil.copy(source, target / name)
-    os.chmod(target / name, 0o755)
-for library in (source.parent.parent / "lib").glob("libnode*.dylib"):
-    (target / library.name).symlink_to(library)
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from tests.stand_in_fixtures import make_stand_ins
+make_stand_ins(Path(sys.argv[3]), sys.argv[2])
 BINS
 cat > "$_SC_BIN/leaf.js" <<'LEAF'
 require('fs').writeFileSync(require('path').join(process.env.TELEGRAM_STATE_DIR, 'bot.pid'), String(process.pid));

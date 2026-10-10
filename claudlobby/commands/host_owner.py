@@ -2,16 +2,18 @@
 
 An operator terminal is a usability/accident boundary, not same-UID isolation.
 Processes with the operator's privileges can edit the same authority files.
-These doors never grant website membership or permission to send bot messages.
+These doors never grant website membership. Ordinary messages require an
+explicit local actor/fleet approval separate from read pairing.
 """
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
 import getpass
 import io
 import json
 import os
+import sqlite3
 import sys
 import warnings
 
@@ -40,9 +42,15 @@ def _terminal():
 
 
 def _approve(terminal, word):
-    terminal.write(f"Type {word} to continue: ")
-    terminal.flush()
-    if terminal.readline(32).strip() != word:
+    try:
+        terminal.write(f"Type {word} to continue: ")
+        terminal.flush()
+        answer = terminal.readline(32).strip()
+    except OSError as exc:
+        # Preserve the confirmation failure before the grant storage handler
+        # sees it; a hung-up terminal is not an authority persistence outage.
+        raise CommandFailure("conflict", "owner confirmation did not complete; inspect owner status") from exc
+    if answer != word:
         raise CommandFailure("conflict", "owner change cancelled")
 
 
@@ -61,6 +69,164 @@ def _describe(terminal, grant):
     terminal.write("Host: " + json.dumps(grant.host_uid) + "\n")
     terminal.write("Principal: " + json.dumps(asdict(grant.principal), ensure_ascii=True) + "\n")
     terminal.write(f"Owner revision: {grant.revision}\n")
+
+
+def _active_owner(store):
+    owner = store.current_grant()
+    if owner is None or not owner.active:
+        raise CommandFailure("conflict", "an active owner pairing is required")
+    return owner
+
+
+def _grant_preview(paths, store, fleet, actor_alias, release):
+    """Read current frozen/recorded identities; never register at preview."""
+    from ..activation_identity import read_selected_identity_bindings
+    from ..operation_context import _MissingHumanIdentity, bind_task_context, resolve_operation_scope
+
+    owner = _active_owner(store)
+    selected, origin = resolve_operation_scope(root=paths.root, fleet=fleet, package=paths.package)
+    if origin is not None:
+        raise CommandFailure("conflict", "owner grants require a local operator")
+    bindings = read_selected_identity_bindings(paths.root, selected.fleet.name, package=paths.package)
+    ctx = None
+    try:
+        ctx = bind_task_context(selected, operator_alias=actor_alias)
+    except _MissingHumanIdentity:
+        # The binder checked host/fleet/bots before this sole absence. Compare
+        # recorded IDs to activation too before approving any registration.
+        from ..plane.db import connect_ro, db_file
+        from ..plane.identity import lookup
+        from ..plane.schema_state import require_current_schema
+        with closing(connect_ro(db_file(paths.root))) as conn:
+            conn.execute("BEGIN")
+            require_current_schema(conn)
+            if (lookup(conn, "fleet", selected.fleet.name) != bindings["fleet_uid"]
+                    or any(lookup(conn, "actor", f"bot:{selected.fleet.name}/{name}") != uid
+                           for name, uid in bindings["bots"].items())):
+                raise CommandFailure("conflict", "active and recorded owner identities differ")
+    if (owner.host_uid != bindings["host_uid"] or ctx is not None and (
+            ctx.host_uid != bindings["host_uid"] or ctx.fleet_uid != bindings["fleet_uid"]
+            or {name: bot.uid for name, bot in ctx.bots.items()} != bindings["bots"])):
+        raise CommandFailure("conflict", "active and recorded owner identities differ")
+    return {"owner": owner, "release": release.release_id, "fleet": selected.fleet.name,
+            "bindings": bindings, "actor_alias": actor_alias,
+            "actor_uid": ctx.caller.uid if ctx is not None else None}
+
+
+def _describe_binding(terminal, fleet_uid, actor_alias, actor_uid):
+    terminal.write("Fleet UID: " + json.dumps(fleet_uid) + "\n")
+    terminal.write("Actor: " + json.dumps(actor_alias, ensure_ascii=True) + "\n")
+    terminal.write("Actor UID: " + json.dumps(actor_uid) + "\n")
+
+
+def _describe_action(terminal, preview):
+    _describe(terminal, preview["owner"])
+    terminal.write("Fleet: " + json.dumps(preview["fleet"]) + "\n")
+    _describe_binding(terminal, preview["bindings"]["fleet_uid"], preview["actor_alias"], preview["actor_uid"])
+
+
+def _unchanged(before, after):
+    if before != after:
+        raise CommandFailure("conflict", "displayed owner or actor identities changed; inspect and retry")
+
+
+def _allow_action(args, paths, store, terminal, action):
+    from ..operation_context import _valid_human_alias, resolve_task_context, resolve_task_mutation_context
+    from ..runtime_admission import RuntimeIdentity, mutation_admission
+
+    if not _valid_human_alias(args.actor):
+        raise CommandFailure("invalid_argument", "--actor must be a canonical local human: alias")
+    with mutation_admission(paths.root, identity=RuntimeIdentity.current()) as release:
+        preview = _grant_preview(paths, store, args.target_fleet, args.actor, release)
+    if preview["actor_uid"] is None:
+        if not args.register_actor:
+            raise CommandFailure("conflict", "human actor is not registered; explicitly use --register-actor")
+        _describe_action(terminal, preview)
+        terminal.write("Register this local actor's first contact. Its UID is allocated only after approval.\n"
+                       "Registration alone does not grant owner actions.\n")
+        _approve(terminal, "REGISTER")
+        with mutation_admission(paths.root, identity=RuntimeIdentity.current(),
+                                expected_release=preview["release"]) as release:
+            _unchanged(preview, _grant_preview(paths, store, args.target_fleet, args.actor, release))
+            resolve_task_mutation_context(root=paths.root, fleet=preview["fleet"],
+                                          operator_alias=args.actor, package=paths.package)
+            registered = _grant_preview(paths, store, args.target_fleet, args.actor, release)
+            if registered["actor_uid"] is None:
+                raise CommandFailure("conflict", "approved actor registration is unavailable")
+            _unchanged(preview, {**registered, "actor_uid": None})
+            preview = registered
+    _describe_action(terminal, preview)
+    if action == "message":
+        terminal.write("Allow ordinary messages only as this actor in this fleet.\n"
+                       "This grants no task mutations, replies or permission decisions.\n")
+    else:
+        terminal.write("Allow selected-task nudges only as this actor in this fleet.\n"
+                       "Nudges record a task event and ask its fleet manager to act.\n"
+                       "This grants no ordinary messages, other task mutations or permission decisions.\n")
+    _approve(terminal, "ALLOW" if action == "message" else "ALLOW-NUDGES")
+    with mutation_admission(paths.root, identity=RuntimeIdentity.current(),
+                            expected_release=preview["release"]) as release:
+        _unchanged(preview, _grant_preview(paths, store, args.target_fleet, args.actor, release))
+        ctx = resolve_task_context(root=paths.root, fleet=preview["fleet"],
+                                   operator_alias=args.actor, package=paths.package)
+        if (ctx.host_uid != preview["owner"].host_uid or ctx.fleet_uid != preview["bindings"]["fleet_uid"]
+                or ctx.caller.uid != preview["actor_uid"] or ctx.caller.alias != preview["actor_alias"]):
+            raise CommandFailure("conflict", "approved actor identities changed")
+        allow = store.allow_messages if action == "message" else store.allow_nudges
+        grant = allow(expected_owner=preview["owner"], fleet_uid=ctx.fleet_uid,
+                                    actor_uid=ctx.caller.uid, actor_alias=ctx.caller.alias)
+    return CommandOutput({"state": "allowed", "grant": asdict(grant)},
+                         lines=("Owner " + ("ordinary messages" if action == "message" else "task nudges") + " allowed for this actor and fleet.",))
+
+
+def _revoke_action(args, store, terminal, action):
+    owner = _active_owner(store)
+    current = store.current_message_grant if action == "message" else store.current_nudge_grant
+    revoke = store.revoke_messages if action == "message" else store.revoke_nudges
+    grant = current(expected_owner=owner, fleet_uid=args.fleet_uid)
+    _describe(terminal, owner)
+    _describe_binding(terminal, grant.fleet_uid, grant.actor_alias, grant.actor_uid)
+    label = "ordinary-message" if action == "message" else "task-nudge"
+    terminal.write(f"Revoke only this retained {label} grant. Owner read access remains.\n")
+    _approve(terminal, "REVOKE-MESSAGES" if action == "message" else "REVOKE-NUDGES")
+    if current(expected_owner=owner, fleet_uid=args.fleet_uid) != grant:
+        raise CommandFailure("conflict", f"displayed {action} grant changed; inspect and retry")
+    revoke(expected_owner=owner, fleet_uid=grant.fleet_uid, expected_grant=grant)
+    return CommandOutput({"state": "revoked", "fleet_uid": grant.fleet_uid},
+                         lines=(f"Owner {label} grant revoked. Read access remains.",))
+
+
+@contextmanager
+def _grant_errors(action):
+    """Translate grant-authoring failures before they leave the terminal body."""
+    from ..activation_state import ActivationError
+    from ..operation_context import OperationContextError
+    from ..runtime_admission import ReleaseMismatch
+    from ..plane.schema_state import PendingMigrationError
+    from ..plane.migrations import DowngradeError
+
+    try:
+        yield
+    except ReleaseMismatch as exc:
+        raise CommandFailure("release_mismatch", "owner grant requires this installation's active sealed runtime") from exc
+    except OperationContextError as exc:
+        raise CommandFailure(exc.code, f"owner {action} identities could not be bound; verify the active fleet and actor") from exc
+    except ActivationError as exc:
+        raise CommandFailure("conflict", "active configuration is unavailable; verify the selected installation") from exc
+    except AccessDenied as exc:
+        if exc.code == f"invalid_{action}_binding":
+            raise CommandFailure("invalid_argument", f"{action} grants require canonical fleet and human actor bindings") from exc
+        if exc.code == f"{action}s_not_allowed":
+            raise CommandFailure("conflict", f"no retained {action} grant for this fleet; inspect host owner status") from exc
+        if exc.code == f"{action}_binding_changed":
+            raise CommandFailure("conflict", f"{action} grant changed or already belongs to another actor; inspect host owner status "
+                                 "and revoke the retained grant before approving a replacement") from exc
+        if exc.code == "grant_changed":
+            raise CommandFailure("conflict", "owner pairing changed; inspect host owner status before retrying") from exc
+        raise
+    except (PendingMigrationError, DowngradeError, sqlite3.Error, OSError) as exc:
+        raise CommandFailure("unavailable", f"{action} grant could not be bound or persisted; inspect local authority, "
+                             "active configuration and Plane storage") from exc
 
 
 def dispatch(args):
@@ -94,11 +260,25 @@ def dispatch(args):
                 raise CommandFailure("unavailable", "owner server failed; inspect local logs and configured resources") from exc
             return CommandOutput({"state": "stopped"}, lines=("Owner server stopped.",))
         if args.owner_action == "status":
-            grant = store.current_grant()
+            status = store.local_action_status()
+            grant, messages, nudges = status.owner, status.message_grants, status.nudge_grants
             state = "unpaired" if grant is None else "paired" if grant.active else "revoked"
-            return CommandOutput({"state": state, "owner": asdict(grant) if grant else None},
-                                 lines=(f"Owner access: {state}.",))
+            lines = [f"Owner access: {state}."]
+            for message in messages:
+                lines.append("Message grant: " + json.dumps(asdict(message), ensure_ascii=True))
+            for nudge in nudges:
+                lines.append("Nudge grant: " + json.dumps(asdict(nudge), ensure_ascii=True))
+            return CommandOutput({"state": state, "owner": asdict(grant) if grant else None,
+                                  "message_grants": [asdict(message) for message in messages],
+                                  "nudge_grants": [asdict(nudge) for nudge in nudges]},
+                                 lines=tuple(lines))
         with _terminal() as terminal:
+            if args.owner_action in {"allow-messages", "revoke-messages", "allow-nudges", "revoke-nudges"}:
+                action = "message" if args.owner_action.endswith("messages") else "nudge"
+                with _grant_errors(action):
+                    if args.owner_action.startswith("allow-"):
+                        return _allow_action(args, paths, store, terminal, action)
+                    return _revoke_action(args, store, terminal, action)
             if args.owner_action == "bind-source":
                 from ..plane.owner_source import bind_source
 

@@ -24,7 +24,7 @@ from claudlobby.plane.emit_api import emit_batch
 from claudlobby.plane.owner_access import AccessDenied, OwnerAccess, PrincipalRef, VerifiedReader
 from claudlobby.plane.owner_messages import OwnerMessages, _GENERATED_ENV
 from claudlobby.request_queries import RequestNotFoundError
-from claudlobby.request_receipts import ReceiptConflict
+from claudlobby.request_receipts import ReceiptConflict, RequestStore
 from claudlobby.recording_alerts import ChannelOutcome, RecordingAlertOutcome
 from tests.package_fixtures import source_package
 from tests.test_activation import cold, tmp_path  # noqa: F401
@@ -50,8 +50,9 @@ def gateway(active, monkeypatch):  # noqa: F811
     adapter = OwnerMessages(root, package=package)
     options = dict(fleet="example", fleet_uid=ctx.fleet_uid,
                    recipient_uid=ctx.bots["worker"].uid, request_id=str(uuid4()))
-    access.allow_messages(expected_owner=owner, fleet_uid=ctx.fleet_uid,
-                          actor_uid=ctx.caller.uid, actor_alias=ctx.caller.alias)
+    options["expected_grant"] = access.allow_messages(
+        expected_owner=owner, fleet_uid=ctx.fleet_uid,
+        actor_uid=ctx.caller.uid, actor_alias=ctx.caller.alias)
     # A future regression to OS attribution must fail before a send.
     monkeypatch.setattr(operation_context, "_local_operator_alias",
                         lambda: pytest.fail("gateway must not use the server OS account"))
@@ -210,10 +211,169 @@ def test_rebound_human_cannot_read_previous_actors_request(gateway, monkeypatch)
     other = operation_context.resolve_task_mutation_context(root=adapter.root, fleet="example",
                 operator_alias="human:other-actor", package=adapter.package)
     adapter.access.revoke_messages(expected_owner=owner, fleet_uid=ctx.fleet_uid)
-    adapter.access.allow_messages(expected_owner=owner, fleet_uid=ctx.fleet_uid,
-                                  actor_uid=other.caller.uid, actor_alias=other.caller.alias)
+    options["expected_grant"] = adapter.access.allow_messages(
+        expected_owner=owner, fleet_uid=ctx.fleet_uid,
+        actor_uid=other.caller.uid, actor_alias=other.caller.alias)
     with pytest.raises(AccessDenied, match="request_scope_mismatch"):
         adapter.inspect(reader, **options)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("boundary", ["before_bind", "route", "inspect", "send_return"])
+@pytest.mark.parametrize("same_actor", [False, True])
+def test_expected_grant_cannot_change_during_owner_operation(gateway, monkeypatch, boundary, same_actor):
+    from claudlobby.plane import owner_messages
+    adapter, reader, owner, ctx, options = gateway
+    calls = native_receiver(monkeypatch)
+    other = operation_context.resolve_task_mutation_context(
+        root=adapter.root, fleet="example", operator_alias="human:replacement", package=adapter.package)
+
+    def regrant():
+        adapter.access.revoke_messages(expected_owner=owner, fleet_uid=ctx.fleet_uid)
+        adapter.access.allow_messages(expected_owner=owner, fleet_uid=ctx.fleet_uid,
+                                      actor_uid=ctx.caller.uid if same_actor else other.caller.uid,
+                                      actor_alias=ctx.caller.alias if same_actor else other.caller.alias)
+
+    if boundary == "inspect":
+        adapter.send(reader, **options, text="Original message")
+        original = owner_messages.receipt
+
+        def read(*a, **k):
+            result = original(*a, **k)
+            regrant()
+            return result
+
+        monkeypatch.setattr(owner_messages, "receipt", read)
+    elif boundary == "before_bind":
+        original = adapter._bind
+
+        def bind(*a, **k):
+            regrant()
+            return original(*a, **k)
+
+        monkeypatch.setattr(adapter, "_bind", bind)
+    else:
+        name = "resolve_message_route" if boundary == "route" else "deliver_bound_message"
+        original = getattr(owner_messages, name)
+
+        def resolve_or_send(*a, **k):
+            result = original(*a, **k)
+            regrant()
+            return result
+
+        monkeypatch.setattr(owner_messages, name, resolve_or_send)
+    with pytest.raises(AccessDenied, match="message_binding_changed"):
+        if boundary == "inspect":
+            adapter.inspect(reader, **options)
+        else:
+            adapter.send(reader, **options, text="Original message")
+    assert len(calls) == (1 if boundary in {"inspect", "send_return"} else 0)
+    if not calls:
+        assert not list((adapter.root / "state/requests").glob("*/*.json"))
+
+
+@pytest.mark.parametrize("code", ["recording_degraded", "delivery_failed", "delivery_unknown"])
+@pytest.mark.parametrize("change", ["unchanged", "revoke", "expire", "reallow"])
+def test_failure_outcome_is_withheld_when_authority_changes(gateway, monkeypatch, code, change):
+    from claudlobby.plane import owner_messages
+    adapter, reader, owner, ctx, options = gateway
+    outcome = CommandFailure(code, "Synthetic retained outcome", data={"message_id": "sensitive-outcome"})
+
+    def deliver(*a, **k):
+        if change in {"revoke", "reallow"}:
+            adapter.access.revoke_messages(expected_owner=owner, fleet_uid=ctx.fleet_uid)
+            if change == "reallow":
+                adapter.access.allow_messages(expected_owner=owner, fleet_uid=ctx.fleet_uid,
+                                              actor_uid=ctx.caller.uid, actor_alias=ctx.caller.alias)
+        elif change == "expire":
+            adapter.access._clock = lambda: 10**12
+        raise outcome
+
+    monkeypatch.setattr(owner_messages, "deliver_bound_message", deliver)
+    with pytest.raises(CommandFailure if change == "unchanged" else AccessDenied) as error:
+        adapter.send(reader, **options, text="Synthetic message")
+    if change == "unchanged":
+        assert error.value is outcome
+    else:
+        assert not hasattr(error.value, "data")
+
+
+def test_owner_replay_never_repeats_held_enter_repair(gateway, monkeypatch):
+    from claudlobby import message_queries
+    from claudlobby.message_queries import MessageIdentity, ReceiptObservation
+    adapter, reader, _, ctx, options = gateway
+    calls = native_receiver(monkeypatch, received=False)
+    repairs = []
+
+    def receipt(_ctx, message_id, **kwargs):
+        return ReceiptObservation(message_id=message_id, root=str(adapter.root),
+            sender=MessageIdentity(ctx.caller.uid, ctx.caller.alias, ctx.caller_fleet_uid),
+            destination=MessageIdentity(ctx.bots["worker"].uid, ctx.bots["worker"].alias, ctx.fleet_uid),
+            receipt_observation="missing", integrity_verdict="unknown", exit_code=5,
+            code="delivery_unknown", reason="Synthetic held input")
+
+    def repair(*a, first, **k):
+        repairs.append(a[2])
+        return None, first
+
+    monkeypatch.setattr(message_queries, "receipt", receipt)
+    monkeypatch.setattr(message_operations, "repair_held_delivery", repair)
+    for _ in range(2):
+        with pytest.raises(CommandFailure) as error:
+            adapter.send(reader, **options, text="Held input")
+        assert error.value.error.code == "delivery_unknown"
+    assert len(calls) == 1
+    assert len(repairs) == 1, "a strict replay must not enter the native Enter-repair owner"
+
+
+@pytest.mark.parametrize("operation", ["send", "inspect"])
+def test_owner_operation_requires_exact_expected_grant(gateway, monkeypatch, operation):
+    adapter, reader, _, _, options = gateway
+    calls = native_receiver(monkeypatch)
+    options["expected_grant"] = replace(options["expected_grant"],
+        owner=replace(options["expected_grant"].owner, revision=999))
+    with pytest.raises(AccessDenied, match="message_binding_changed"):
+        getattr(adapter, operation)(reader, **options, **({"text": "Must not send"} if operation == "send" else {}))
+    assert calls == []
+
+
+@pytest.mark.parametrize("failure", ["lock", "prepare", "reserve"])
+def test_owner_send_requires_durable_preparation_and_reservation(gateway, monkeypatch, failure):
+    adapter, reader, _, _, options = gateway
+    calls = native_receiver(monkeypatch)
+
+    def unavailable(*a, **k):
+        raise OSError("synthetic request persistence failure")
+
+    if failure == "lock":
+        monkeypatch.setattr(message_operations, "locked_request", unavailable)
+    else:
+        monkeypatch.setattr(RequestStore, "prepare" if failure == "prepare" else "begin_native_attempt", unavailable)
+    with pytest.raises(ReceiptConflict, match="durable"):
+        adapter.send(reader, **options, text="Must not send without retained reservation")
+    assert calls == []
+
+
+def test_owner_outcome_persistence_failure_stays_unknown_and_never_resends(gateway, monkeypatch):
+    adapter, reader, _, _, options = gateway
+    calls = native_receiver(monkeypatch, received=False, allow_degraded=True)
+    original = RequestStore._save
+
+    def fail_observation(self, retained):
+        if retained.message_attempts and retained.message_attempts[-1].observation is not None:
+            raise OSError("synthetic outcome persistence failure")
+        return original(self, retained)
+
+    monkeypatch.setattr(RequestStore, "_save", fail_observation)
+    with pytest.raises(CommandFailure) as failure:
+        adapter.send(reader, **options, text="Retain the original UUID")
+    assert failure.value.error.code == "recording_degraded"
+    observed = adapter.inspect(reader, **options)
+    assert observed.request.transmissions[0].transport is None
+    assert observed.receiver.integrity_verdict in {"unknown", "unconfirmed"}
+    with pytest.raises(CommandFailure) as replay:
+        adapter.send(reader, **options, text="Retain the original UUID")
+    assert replay.value.error.code == "delivery_unknown"
     assert len(calls) == 1
 
 

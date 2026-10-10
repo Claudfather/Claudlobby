@@ -14,7 +14,7 @@ from pathlib import Path
 from uuid import UUID
 
 from ..active_config import resolve_active_context
-from ..command_result import CommandOutput
+from ..command_result import CommandFailure, CommandOutput
 from ..commands.message_write import deliver_bound_message
 from ..message_context import resolve_message_route
 from ..message_payload import MessageBody
@@ -64,18 +64,25 @@ class OwnerMessages:
         self.package = package
         self.access = OwnerAccess(self.root)
 
-    def _authorize(self, reader: VerifiedReader, fleet_uid: str) -> OwnerMessageGrant:
+    def _authorize(self, reader: VerifiedReader, fleet_uid: str,
+                   expected_grant: OwnerMessageGrant) -> OwnerMessageGrant:
         if type(reader) is not VerifiedReader:
             raise AccessDenied("verified_reader_required")
         if any(key in os.environ for key in _GENERATED_ENV):
             raise AccessDenied("generated_context_refused")
         if read_host_uid(self.root / "state") != self.host_uid:
             raise AccessDenied("wrong_deployment")
-        return self.access.authorize_message(reader.token, reader.principal,
-                                             host_uid=self.host_uid, fleet_uid=fleet_uid)
+        if type(expected_grant) is not OwnerMessageGrant:
+            raise AccessDenied("expected_message_grant_required")
+        grant = self.access.authorize_message(reader.token, reader.principal,
+                                              host_uid=self.host_uid, fleet_uid=fleet_uid)
+        if grant != expected_grant:
+            raise AccessDenied("message_binding_changed")
+        return grant
 
-    def _bind(self, reader: VerifiedReader, fleet: str, fleet_uid: str):
-        grant = self._authorize(reader, fleet_uid)
+    def _bind(self, reader: VerifiedReader, fleet: str, fleet_uid: str,
+              expected_grant: OwnerMessageGrant):
+        grant = self._authorize(reader, fleet_uid, expected_grant)
         # Explicit fleet names only: None must not select an ambient/default fleet.
         if not isinstance(fleet, str) or not fleet:
             raise AccessDenied("fleet_required")
@@ -95,14 +102,17 @@ class OwnerMessages:
         return matches[0]
 
     def send(self, reader: VerifiedReader, *, fleet: str, fleet_uid: str,
-             recipient_uid: str, request_id: str, text: str) -> CommandOutput:
+             recipient_uid: str, request_id: str, text: str,
+             expected_grant: OwnerMessageGrant) -> CommandOutput:
         """Authorize one ordinary send; reuse canonical idempotency and proof.
 
         Exceptions may follow a committed/native effect. Keep the original
         request UUID and inspect it; never retry automatically with a new UUID.
         The shared workflow only returns success after receiver integrity proof.
+        The caller supplies the grant bound to its action context. A later grant
+        must not silently replace that expected principal/revision/actor binding.
         """
-        self._authorize(reader, fleet_uid)
+        self._authorize(reader, fleet_uid, expected_grant)
         if not isinstance(request_id, str) or str(UUID(request_id)) != request_id:
             raise ValueError("canonical request UUID required")
         if not isinstance(text, str) or len(text) > 2000:
@@ -111,7 +121,7 @@ class OwnerMessages:
         identity = RuntimeIdentity(RuntimeIdentity.current().cli, self.package.native,
                                    self.package.artifact_id)
         with mutation_admission(self.root, identity=identity) as release:
-            grant, ctx = self._bind(reader, fleet, fleet_uid)
+            grant, ctx = self._bind(reader, fleet, fleet_uid, expected_grant)
             target = self._target(ctx, recipient_uid)
             route = resolve_message_route(target, root=self.root, fleet=ctx.context.fleet.name,
                                           package=self.package, caller_context=ctx)
@@ -121,15 +131,23 @@ class OwnerMessages:
                 raise AccessDenied("message_route_changed")
             # Route lookup can take time. Admit again at the dispatch boundary;
             # the action thereafter may complete even if access is revoked.
-            if self._authorize(reader, fleet_uid) != grant:
-                raise AccessDenied("message_binding_changed")
-            return deliver_bound_message(route, body=body, request_id=request_id,
-                                         caller_context=ctx)
+            self._authorize(reader, fleet_uid, grant)
+            try:
+                result = deliver_bound_message(route, body=body, request_id=request_id,
+                                                caller_context=ctx, require_durable_request=True)
+            except CommandFailure:
+                # An error can carry recorded outcome data after a native effect.
+                # Withhold it too when the session or exact grant changed.
+                self._authorize(reader, fleet_uid, grant)
+                raise
+            self._authorize(reader, fleet_uid, grant)
+            return result
 
     def inspect(self, reader: VerifiedReader, *, fleet: str, fleet_uid: str,
-                recipient_uid: str, request_id: str) -> OwnerMessageObservation:
+                recipient_uid: str, request_id: str,
+                expected_grant: OwnerMessageGrant) -> OwnerMessageObservation:
         """Read the original request and receiver proof, with no native effect."""
-        grant, ctx = self._bind(reader, fleet, fleet_uid)
+        grant, ctx = self._bind(reader, fleet, fleet_uid, expected_grant)
         recipient_alias = ctx.bots[self._target(ctx, recipient_uid)].alias
         retained = read_request(self.root, fleet_uid, request_id)
         if (retained.operation != "message.send" or retained.host_uid != self.host_uid
@@ -153,6 +171,5 @@ class OwnerMessages:
         if (observed.sender is not None and observed.sender.uid != ctx.caller.uid
                 or observed.destination is not None and observed.destination.uid != recipient_uid):
             raise AccessDenied("request_scope_mismatch")
-        if self._authorize(reader, fleet_uid) != grant:
-            raise AccessDenied("message_binding_changed")
+        self._authorize(reader, fleet_uid, grant)
         return OwnerMessageObservation(retained, observed)

@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 import json
+import os
 import shutil
 import sqlite3
 from uuid import uuid4
@@ -28,6 +29,7 @@ from claudlobby import task_operations as tasks
 from tests.ingest_listener import listening_socket, short_socket_dir
 from tests.package_fixtures import source_package
 from tests.plane_setup import initialize_plane
+from tests.test_recording_alerts import private_alert  # noqa: F401
 
 
 @pytest.fixture
@@ -76,18 +78,19 @@ def _receipt(route, request_id):
         return store.load()
 
 
-def test_submitted_send_replay_has_one_native_effect_and_exact_facts(estate):
+@pytest.mark.parametrize("durable", [False, True])
+def test_submitted_send_replay_has_one_native_effect_and_exact_facts(estate, durable):
     route, package, conn = estate
     request_id = str(uuid4())
     calls = []
     def transport(*args, **kwargs):
         calls.append(kwargs["body"])
         return TransportOutcome("submitted", "sha256:" + "a" * 64, 99, 0)
-    first = _call(route, package, request_id, transport=transport)
+    first = _call(route, package, request_id, transport=transport, require_durable_request=durable)
     assert (first.delivery, first.recording, first.request_persisted, first.exit_code) == (
         "submitted", "committed", True, 0)
     assert _counts(conn) == (1, 1)
-    second = _call(route, package, request_id, transport=transport)
+    second = _call(route, package, request_id, transport=transport, require_durable_request=durable)
     assert second.replayed and second.message_id == first.message_id
     assert _counts(conn) == (1, 1) and len(calls) == 1
     assert b"SECRET" not in _receipt(route, request_id).intent.semantic_sha256.encode()
@@ -113,7 +116,73 @@ def test_recorder_outage_continues_one_disclosed_native_send(estate, monkeypatch
     assert "Recording degraded" in calls[0]
 
 
-def test_receipt_write_outage_reports_plane_truth_without_second_send(estate, monkeypatch):
+@pytest.mark.parametrize("durable", [False, True])
+@pytest.mark.parametrize("debounce", ["missing", "expired", "unavailable"])
+def test_strict_degraded_replay_never_dispatches_alerts(estate, private_alert, monkeypatch, durable, debounce):
+    """Real native debounce and private carrier stubs, never external pages."""
+    from claudlobby.recording_alerts import notify_recording_degraded
+
+    route, _, _ = estate
+    _, package, _, tier = private_alert
+    root = route.selected.paths.root
+    selected = replace(route.selected, paths=Paths(root=root, package=package),
+                       fleet=replace(route.selected.fleet, service_prefix="svc"))
+    route = replace(route, origin=selected, selected=selected, peer_context=selected,
+                    manager_destination=replace(route.manager_destination, socket="svc.manager"))
+    original_emit = messages.emit_batch
+
+    def outage(root, raw, **kwargs):
+        if raw[0]["event_type"] == "communication":
+            raise sqlite3.OperationalError("synthetic persistent recorder outage")
+        return original_emit(root, raw, **kwargs)
+
+    monkeypatch.setattr(messages, "emit_batch", outage)
+    transport_calls, notify_calls = [], []
+
+    def transport(*args, **kwargs):
+        transport_calls.append(kwargs["message_id"])
+        return TransportOutcome("submitted", native_returncode=0)
+
+    def notify(*args, **kwargs):
+        notify_calls.append(kwargs["request_id"])
+        return notify_recording_degraded(*args, **kwargs)
+
+    request_id = str(uuid4())
+    options = dict(request_id=request_id, require_durable_request=durable,
+                   trusted_tiers=tier, transport=transport, notify=notify,
+                   clear=lambda *a, **k: pytest.fail("degraded recording must not clear alerts"))
+    body = MessageBody("Synthetic degraded send")
+    first = messages.send_message(route, package, body, **options)
+    assert first.code == "recording_degraded" and first.exit_code == 11
+    assert first.alert.manager.status == "submitted"
+    assert first.alert.telegram.status == "carrier_accepted"
+    assert len(notify_calls) == len(transport_calls) == 1
+    state = root / "state/recording-alerts"
+    if debounce == "expired":
+        for channel in ("manager", "telegram"):
+            os.utime(state / f"example.recording_degraded_{channel}", (1, 1))
+    else:
+        shutil.rmtree(state)
+        if debounce == "unavailable":
+            state.write_text("not a directory")
+    replay = messages.send_message(route, package, body, **options)
+    assert replay.replayed and replay.message_id == first.message_id
+    assert replay.code == "recording_degraded" and replay.exit_code == 11
+    assert not replay.ok and replay.recording == first.recording
+    assert len(transport_calls) == 1
+    expected_alerts = 1 if durable else 2
+    assert len(notify_calls) == expected_alerts
+    for channel in ("manager", "telegram"):
+        assert len((root / f"{channel}-capture").read_text().splitlines()) == expected_alerts
+    if durable:
+        assert replay.alert is None
+    else:
+        assert replay.alert.manager.status == "submitted"
+        assert replay.alert.telegram.status == "carrier_accepted"
+
+
+@pytest.mark.parametrize("durable", [False, True])
+def test_receipt_write_outage_reports_plane_truth_without_second_send(estate, monkeypatch, durable):
     route, package, conn = estate
     request_id = str(uuid4())
     import claudlobby.request_receipts as receipts
@@ -124,16 +193,55 @@ def test_receipt_write_outage_reports_plane_truth_without_second_send(estate, mo
         return original(self, receipt)
     monkeypatch.setattr(receipts.RequestStore, "_save", fail_observation)
     calls = []
-    result = _call(route, package, request_id, transport=lambda *a, **k: (
+    result = _call(route, package, request_id, require_durable_request=durable, transport=lambda *a, **k: (
         calls.append(k["body"]) or TransportOutcome("submitted", native_returncode=0)))
     assert len(calls) == 1 and _counts(conn) == (1, 1)
     assert result.recording == "committed" and not result.request_persisted
     assert result.exit_code == 11 and result.alert == "alerted"
     assert _receipt(route, request_id).message_attempts[0].observation is None
     with pytest.raises(ReceiptConflict, match="recorded submission"):
-        _call(route, package, request_id, retry_uncertain=True,
+        _call(route, package, request_id, retry_uncertain=True, require_durable_request=durable,
               transport=lambda *a, **k: pytest.fail("unobserved recorded attempt must not resend"))
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("failure", ["lock", "prepare", "prepare_saved", "reserve", "reserve_saved"])
+def test_durable_admission_refuses_persistence_failure_before_any_native_effect(estate, monkeypatch, failure):
+    route, package, conn = estate
+    request_id = str(uuid4())
+    calls = []
+
+    def transport(*a, **k):
+        calls.append(k["body"])
+        return TransportOutcome("submitted", native_returncode=0)
+
+    with monkeypatch.context() as patch:
+        if failure == "lock":
+            def unavailable(*a, **k):
+                raise OSError("synthetic lock failure")
+            patch.setattr(messages, "locked_request", unavailable)
+        else:
+            method = "prepare" if failure.startswith("prepare") else "begin_native_attempt"
+            original = getattr(RequestStore, method)
+
+            def unavailable(self, *a, **k):
+                if failure.endswith("_saved"):
+                    original(self, *a, **k)
+                raise OSError("synthetic persistence failure")
+
+            patch.setattr(RequestStore, method, unavailable)
+        with pytest.raises(ReceiptConflict, match="durable"):
+            _call(route, package, request_id, transport=transport, require_durable_request=True)
+    assert calls == [] and _counts(conn) == (0, 0)
+    if failure == "reserve_saved":
+        # The retained reservation is uncertain, even though this process knows
+        # its synthetic failure preceded transport. A fresh invocation cannot.
+        replay = _call(route, package, request_id, transport=transport, require_durable_request=True)
+        assert replay.replayed and replay.delivery == "unknown"
+    elif failure in {"prepare_saved", "reserve"}:
+        with pytest.raises(ReceiptConflict, match="prepared message"):
+            _call(route, package, request_id, transport=transport, require_durable_request=True)
+    assert calls == []
 
 
 def test_existing_submitted_send_reconciles_prepared_recording_without_resend(estate, monkeypatch):
@@ -269,21 +377,23 @@ def test_interrupted_send_replay_is_delivery_unknown_without_false_outage(estate
     assert _counts(conn) == (1, 0)
 
 
-def test_same_uuid_refuses_changed_route_and_semantics_before_native_effect(estate):
+@pytest.mark.parametrize("durable", [False, True])
+def test_same_uuid_refuses_changed_route_and_semantics_before_native_effect(estate, durable):
     route, package, _ = estate
     request_id = str(uuid4())
-    _call(route, package, request_id)
+    _call(route, package, request_id, require_durable_request=durable)
     def forbidden(*args, **kwargs):
         raise AssertionError("must not send")
     with pytest.raises(ReceiptConflict):
-        _call(route, package, request_id, body="Changed private body", transport=forbidden)
+        _call(route, package, request_id, body="Changed private body", transport=forbidden,
+              require_durable_request=durable)
     for changed in (replace(route, manager=route.peer),
                     replace(route, peer_destination=replace(route.peer_destination, socket="other-socket"))):
         with pytest.raises(ReceiptConflict):
-            _call(changed, package, request_id, transport=forbidden)
+            _call(changed, package, request_id, transport=forbidden, require_durable_request=durable)
     with pytest.raises(messages.MessageConflict):
         _call(replace(route, peer_destination=replace(route.peer_destination, fleet="other")),
-              package, request_id, transport=forbidden)
+              package, request_id, transport=forbidden, require_durable_request=durable)
 
 
 def test_selected_release_change_preserves_receipt_and_requires_explicit_retry(estate):
