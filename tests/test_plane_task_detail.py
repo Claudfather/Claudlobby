@@ -202,10 +202,20 @@ def test_assignment_history_actor_aliases_use_bounded_lookup_batches(tmp_path, m
     monkeypatch.setattr(view, "_TASK_DETAIL_HISTORY", 1)
     monkeypatch.setattr(view, "_TASK_DETAIL_ASSIGNMENT_HISTORY", 500)
     conn = view._ro_conn(db_file(tmp_path))
+    class BoundedReader:
+        def execute(self, query, parameters=()):
+            # Python 3.10 lacks Connection.setlimit; enforce the same bound
+            # around the real SQL query on every supported interpreter.
+            assert len(parameters) <= 400, "query exceeds the parameter limit"
+            return conn.execute(query, parameters)
+
+        def __getattr__(self, name):
+            return getattr(conn, name)
     try:
-        conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 400)
+        if hasattr(conn, "setlimit"):
+            conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 400)
         conn.execute("BEGIN")
-        task = view._fetch_task_detail(conn, TASK, "engineering")["task"]
+        task = view._fetch_task_detail(BoundedReader(), TASK, "engineering")["task"]
     finally:
         conn.close()
     history = task["assignments"][0]["history"]
