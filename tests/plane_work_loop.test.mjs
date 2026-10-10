@@ -331,6 +331,28 @@ test('unsupported synthetic detail retains labelled limited board snapshot; prot
   }
 });
 
+test('scoped action refusal preserves another scope detail; current refusal fences its delayed read', async () => {
+  for (const field of ['workspace', 'host', 'fleet', 'viewer']) {
+    const result = deferred();
+    const h = harness({ jget() { return result.promise; } });
+    h.loop.setRoom('web'); await settle(); h.open(); await settle();
+    h.loop.invalidate(undefined, { ...context.scope, [field]: 'previous-scope' });
+    await settle();
+    assert.equal(h.get('task-detail').open, true);
+    assert.equal(h.get('work-form').hidden, false);
+    result.resolve(canonicalDetail('task-a')); await settle();
+    assert.match(h.get('task-detail-content').innerHTML, /Full selected task/);
+  }
+  const result = deferred();
+  const h = harness({ jget() { return result.promise; } });
+  h.loop.setRoom('web'); await settle(); h.open(); await settle();
+  h.loop.invalidate(undefined, context.scope); await settle();
+  assert.equal(h.get('task-detail').open, false);
+  assert.equal(h.get('work-form').hidden, true);
+  result.resolve(canonicalDetail('task-a')); await settle();
+  assert.doesNotMatch(h.get('task-detail-content').innerHTML, /Full selected task/);
+});
+
 test('fresh submission refusal removes only owned pending row and keeps draft', async () => {
   const storage=store(); saved(storage);
   const refusal=Object.assign(Error('Refused'),{effect:'not_started'});
