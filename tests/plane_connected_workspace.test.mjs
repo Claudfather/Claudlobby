@@ -11,7 +11,7 @@ const adapterURL = uri((await read('two-source-read.js')).replace('"./owner-api-
 const {createWorkspaceReadTransport}=await import(adapterURL);
 const enrollmentURL = uri(await read('workspace-enrollment.js'));
 const workspaceText = await read('connected-workspace.js');
-const workspaceURL = uri(workspaceText.replace('"./workspace-enrollment.js"',JSON.stringify(enrollmentURL)).replace('"./connected-read-client.js"',JSON.stringify(carrierURL)).replace('"./two-source-read.js"',JSON.stringify(adapterURL)));
+const workspaceURL = uri(workspaceText.replace('"./guided-setup.js"',JSON.stringify(new URL('../claudlobby/plane/ui/guided-setup.js',import.meta.url).href)).replace('"./workspace-enrollment.js"',JSON.stringify(enrollmentURL)).replace('"./connected-read-client.js"',JSON.stringify(carrierURL)).replace('"./two-source-read.js"',JSON.stringify(adapterURL)));
 const {createConnectedWorkspace} = await import(workspaceURL);
 const id = n => `00000000-0000-4000-8000-${String(n).padStart(12,'0')}`;
 const wi = 'wi_'+'1'.repeat(32), fleetUID='fleet_'+'2'.repeat(32);

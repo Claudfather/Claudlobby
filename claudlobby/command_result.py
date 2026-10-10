@@ -210,3 +210,6 @@ class ResultArgumentParser(argparse.ArgumentParser):
             hint=f"inspect claudlobby {command.replace('.', ' ')} --help"))
         emit(result, json_output=json_output)
         self.exit(2)
+
+_PUBLIC.update({("host", "owner", action): "host.owner." + action
+                for action in ("allow-setup", "setup-status", "revoke-setup")})

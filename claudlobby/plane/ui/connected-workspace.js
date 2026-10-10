@@ -1,6 +1,7 @@
 // Account metadata selects navigation; only host-issued core handles admit reads.
 import { createConnectedReadClient } from "./connected-read-client.js";
 import { createWorkspaceEnrollment } from "./workspace-enrollment.js";
+import { createGuidedSetup } from "./guided-setup.js";
 import { createWorkspaceReadTransport } from "./two-source-read.js";
 
 const uuid = value => typeof value === 'string' && value.length === 36 && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
@@ -51,7 +52,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     clearTimeout(refreshTimer); refreshTimer = null;
     for (const request of requests) request.abort();
     for (const stop of unsubscribes) stop(); unsubscribes = [];
-    for (const {client,enrollment} of clients) { enrollment.dispose(); client.dispose(); }
+    for (const {client,enrollment,setup} of clients) { setup?.dispose(); enrollment.dispose(); client.dispose(); }
     transport?.dispose(); transport = null;
     for (const stream of streams) stream.detach();
     paused = true; invoke(mount?.onPause);
@@ -136,6 +137,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
           workspace_id:doc.workspace_id, context_generation:doc.context_generation},
         currentContext:() => current, obtainSessionAssertion:(input,options) => accountAssertion('/api/plane/session-assertion',input,options), documentOrigin, fetch, setTimeout, clearTimeout})};
         nextClients.push(row);
+        row.setup = createGuidedSetup({client:row.client,storageKey:`claudlobby:first-team:${doc.user_id}:${doc.workspace_id}:${doc.context_generation}:${reference.reference_id}:${reference.revision}`});
         row.actions = row.client.createActions({key:row.key,
           onPause:(...args) => invoke(mount?.onActionPause,...args),
           onSourceChange:() => { row.actionRecoveryPending = {}; invoke(mount?.onActionSourceChange,row.key); }});
@@ -162,7 +164,8 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       for (const stream of streams) stream.detach();
       for (const stop of nextSubscriptions) invoke(stop);
       invoke(() => nextTransport?.dispose());
-      for (const {client,enrollment} of nextClients) {
+      for (const {client,enrollment,setup} of nextClients) {
+        invoke(() => setup?.dispose());
         invoke(() => enrollment?.dispose()); invoke(() => client.dispose());
       }
       current = null; clients = []; transport = null; unsubscribes = [];
@@ -277,7 +280,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     pending.add(index); changed();
     try {
       if (operation === 'enroll') {
-        if (row.client.snapshot().state === 'ready' || !await checkAccount()) return false;
+        if (['ready','setup_only'].includes(row.client.snapshot().state) || !await checkAccount()) return false;
         return await row.enrollment.start();
       }
       const result = await row.client[operation]();
@@ -323,6 +326,8 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       const detail = document.createElement('small'); row.append(detail);
       const proposal = document.createElement('span'); proposal.setAttribute('role','group');
       proposal.setAttribute('aria-label','Local workspace approval ' + new URL(reference.endpoint_origin).hostname);
+      const setupPanel = document.createElement("div"); setupPanel.setAttribute("role","group"); setupPanel.setAttribute("aria-label","First-team setup " + new URL(reference.endpoint_origin).hostname); row.append(setupPanel);
+      clients[index].setup.mountPanel({document,element:setupPanel});
       row.append(proposal); clients[index].enrollment.mountPanel({document,element:proposal,
         onForget:() => { if (phase === 'ready') {
           const button = buttons.find(({operation}) => operation === 'enroll').button;
@@ -338,10 +343,10 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       for (const {button,operation} of buttons) button.disabled = row.hidden || pending.has(index)
         || ['checking','renewing','logout'].includes(status.state)
         || approval.busy
-        || ['connect','enroll'].includes(operation) && status.state === 'ready'
+        || ['connect','enroll'].includes(operation) && ['ready','setup_only'].includes(status.state)
         || operation === 'enroll' && ['awaiting_local_approval','unknown'].includes(approval.state)
-        || operation === 'renew' && status.state !== 'ready'
-        || operation === 'logout' && !['ready','unavailable'].includes(status.state);
+        || operation === 'renew' && !['ready','setup_only'].includes(status.state)
+        || operation === 'logout' && !['ready','setup_only','unavailable'].includes(status.state);
     });
   }
   function mountSessionControls({document, element, onPause = () => {}, onResume = () => {}, onActionPause = () => {}, onActionSourceChange = () => {}}) {
