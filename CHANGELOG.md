@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — private-socket owner ingress and recorder-source binding
+
+`host owner serve` runs the protected canonical Plane behind an explicitly
+configured Tailscale Serve Unix socket, with native numeric human identity,
+bounded CLI lookups and no TCP fallback. `host owner bind-source` requires local
+terminal attestation before the recorder can be served; protected queries refuse
+foreign or mixed-host storage in the same SQLite snapshot they read. Socket
+permissions, restart cleanup and revocation are exercised on disposable data.
+This adds an opt-in foreground door; it does not change the default Plane
+service, configure Tailscale, activate a fleet, or grant bot messaging. Actual
+Serve/HTTPS and Mini/Pi acceptance remain deployment work.
+
 ### Added — local owner approval and direct-host sign-in page
 
 `host owner initialize|confirm|revoke` require an explicit installation root
