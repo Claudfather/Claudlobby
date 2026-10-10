@@ -175,7 +175,7 @@ async def _action_json(receive: Receive) -> dict:
 
 class _OwnerBrowser:
     def __init__(self, root: Path, verify_principal: PrincipalVerifier, expected_origin: str,
-                 *, sampler=None, package=None):
+                 *, sampler=None, package=None, workspace_bootstrap=None):
         self.origin, self.authority = _origin(expected_origin)
         if not callable(verify_principal):
             raise ValueError("an explicit trusted principal verifier is required")
@@ -194,6 +194,12 @@ class _OwnerBrowser:
         self.actions = OwnerActions(root, package=package)
         self._inflight = set()
         self._action_workers = 0
+        self.workspace_bootstrap = None
+        if workspace_bootstrap is not None:
+            from .owner_workspace_http import WorkspaceBootstrapHTTP
+            self.workspace_bootstrap = WorkspaceBootstrapHTTP(self.access,
+                config=workspace_bootstrap, authority=self.authority,
+                verify_principal=self.verify_principal)
 
     async def _principal(self, scope: Scope) -> PrincipalRef:
         principal = await self.verify_principal(scope)
@@ -308,7 +314,18 @@ class _OwnerBrowser:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
+            if scope["type"] == "lifespan" and self.workspace_bootstrap is not None:
+                original_receive = receive
+                async def receive():
+                    message = await original_receive()
+                    if message["type"] == "lifespan.shutdown":
+                        await self.workspace_bootstrap.shutdown()
+                    return message
             await self.read_app(scope, receive, send)
+            return
+        if (self.workspace_bootstrap is not None
+                and scope["path"] in self.workspace_bootstrap.paths):
+            await self.workspace_bootstrap(scope, receive, send)
             return
         try:
             self._boundary(scope)
@@ -471,7 +488,7 @@ class _OwnerBrowser:
 
 
 def create_owner_browser_app(root: Path, *, verify_principal: PrincipalVerifier,
-                             expected_origin: str, sampler=None, package=None):
+                             expected_origin: str, sampler=None, package=None, workspace_bootstrap=None):
     """Internal same-origin lifecycle plus protected canonical reads.
 
     Never initializes authority or exposes local pairing confirmation, grants,
@@ -480,4 +497,5 @@ def create_owner_browser_app(root: Path, *, verify_principal: PrincipalVerifier,
     trusted ingress, not cookie/query/header claims accepted here. The external
     HTTPS origin is explicit even when the trusted proxy forwards local HTTP.
     """
-    return _OwnerBrowser(root, verify_principal, expected_origin, sampler=sampler, package=package)
+    return _OwnerBrowser(root, verify_principal, expected_origin, sampler=sampler,
+                         package=package, workspace_bootstrap=workspace_bootstrap)

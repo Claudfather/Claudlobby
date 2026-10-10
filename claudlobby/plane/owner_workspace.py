@@ -216,8 +216,27 @@ class OwnerWorkspace:
                                      min(row["expires_at"], attestation.expires_at),
                                      row["created_at"], self._state(binding, owner), binding)
 
-    def _proposal(self, conn, nonce):
-        row, owner = self._challenge(conn, nonce)
+    def admit_challenge(self, expected_challenge: WorkspaceChallenge, principal: PrincipalRef):
+        """Readonly exact issued-state closing admission with fresh native identity."""
+        if not isinstance(expected_challenge, WorkspaceChallenge):
+            raise AccessDenied("workspace_request_changed")
+        with self.access._connection() as conn:
+            row, owner = self._challenge(conn, expected_challenge.nonce, principal)
+            current = WorkspaceChallenge(expected_challenge.nonce, owner, row["issuer"],
+                                         row["operational_origin"], row["expires_at"])
+            if current != expected_challenge or row["proposal"] is not None:
+                raise AccessDenied("workspace_request_changed")
+
+    def admit_proposal(self, expected_proposal: WorkspaceProposal, principal: PrincipalRef):
+        """Readonly full retained-proposal closing admission, never confirmation."""
+        if not isinstance(expected_proposal, WorkspaceProposal):
+            raise AccessDenied("workspace_proposal_changed")
+        with self.access._connection() as conn:
+            if self._proposal(conn, expected_proposal.nonce, principal) != expected_proposal:
+                raise AccessDenied("workspace_proposal_changed")
+
+    def _proposal(self, conn, nonce, principal=None):
+        row, owner = self._challenge(conn, nonce, principal)
         if row["proposal"] is None:
             raise AccessDenied("workspace_proposal_missing")
         try:
