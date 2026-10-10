@@ -9,7 +9,7 @@ const flush = async () => { await new Promise(resolve => setImmediate(resolve));
 const ready = { status: 200, data: { state: 'ready' } };
 const denied = { status: 403, data: { state: 'denied' } };
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
-function harness(replies = [ready]) {
+function harness(replies = [ready], { monotonicNow = () => 0 } = {}) {
   const calls = [], natives = [], replacements = [], timers = new Set(), nodes = new Map();
   let paused = 0, resumed = 0;
   const document = { getElementById(id) {
@@ -23,6 +23,7 @@ function harness(replies = [ready]) {
     addEventListener(name, callback) { this.listeners[name] = callback; }
   }
   const api = createOwnerTransport({
+    monotonicNow,
     EventSource: NativeStream, location: { replace(path) { replacements.push(path); } },
     setTimeout(callback) { timers.add(callback); return callback; }, clearTimeout(callback) { timers.delete(callback); },
     async fetch(url, options) {
@@ -280,33 +281,141 @@ test('refused logout with a still-ready cookie explicitly reports incomplete sig
   h.controls.dispose();
 });
 
-test('app resume restarts current fleet, equipment and search; later pause fences equipment reopening', async () => {
+test('app resume restarts current fleet and search immediately', async () => {
   const app = await readFile(new URL('../claudlobby/plane/ui/app.js', import.meta.url), 'utf8');
   const helper = app.slice(app.indexOf('function resumeOwnerReads()'), app.indexOf('// Bootstrap LAST'));
-  for (const stale of [false, true]) {
-    const inventory = deferred(), calls = [];
-    const search = { value: ' active query ', dispatchEvent(event) { calls.push(['search', event.type]); } };
-    const state = { sessionPaused: true, sessionEpoch: 2, currentView: 'fleet', equipmentAlias: 'synthetic-worker',
-      refreshBoards() { calls.push(['boards']); }, pollFleet() { calls.push(['fleet']); return inventory.promise; },
-      openEquipment(alias) { calls.push(['equipment', alias]); },
-      $: id => id === 'equip-detail' ? { hidden: false } : search, Event: class { constructor(type) { this.type = type; } } };
-    runInNewContext(`${helper}\nresumeOwnerReads()`, state);
-    assert.equal(state.sessionPaused, false);
-    assert.deepEqual(calls, [['boards'], ['fleet'], ['search', 'input']]);
-    if (stale) { state.sessionPaused = true; state.sessionEpoch++; }
-    inventory.resolve(); await flush();
-    assert.equal(calls.filter(c => c[0] === 'equipment').length, stale ? 0 : 1);
-  }
+  const calls = [], search = { value: ' active query ', dispatchEvent(event) { calls.push(['search', event.type]); } };
+  const state = { sessionPaused: true, currentView: 'fleet',
+    refreshBoards() { calls.push(['boards']); }, pollFleet() { calls.push(['fleet']); },
+    $: () => search, Event: class { constructor(type) { this.type = type; } } };
+  runInNewContext(`${helper}\nresumeOwnerReads()`, state);
+  assert.equal(state.sessionPaused, false);
+  assert.deepEqual(calls, [['boards'], ['fleet'], ['search', 'input']]);
 });
 
 test('aborted inventory from an earlier session cannot overwrite the resumed panel', async () => {
   const app = await readFile(new URL('../claudlobby/plane/ui/app.js', import.meta.url), 'utf8');
   const poll = app.slice(app.indexOf('async function pollFleet()'), app.indexOf('function orgNode('));
   const inventory = deferred(), rendered = [];
-  const state = { sessionPaused: false, sessionEpoch: 1, currentFleet: 'synthetic', currentView: 'fleet',
+  const state = { sessionPaused: false, sessionEpoch: 1, inventoryGeneration: 0, currentFleet: 'synthetic', currentView: 'fleet',
     fleetQuery: () => '?fleet=synthetic', $: () => ({}), renderState() {}, renderInventory(value) { rendered.push(value); },
     jget: () => inventory.promise };
   const pending = runInNewContext(`${poll}\npollFleet()`, state);
   state.sessionEpoch++; inventory.resolve(null); await pending;
   assert.deepEqual(rendered, []);
+});
+
+test('successful board reads and open/error cycles cannot rearm failed-stream recovery', async () => {
+  const board = { state: 'ok', data: ['current board'] };
+  const h = harness([ready, ready, { status: 200, data: board }]); await h.controls.ready;
+  h.api.createEventSource('/api/stream');
+  h.natives[0].onerror({}); await flush();
+  assert.deepEqual(await h.api.jget('/api/tasks'), board);
+  h.natives[1].onopen({}); // A proxy can open then immediately fail repeatedly.
+  h.natives[1].onerror({}); await flush();
+  assert.equal(h.calls.filter(c => c.url === '/api/owner/status').length, 2);
+  assert.equal(h.natives.length, 2); assert.equal(h.natives[1].closed, true);
+  assert.match(h.node('status').textContent, /unknown/);
+  h.controls.dispose();
+});
+
+test('admitted stream messages rearm stream recovery without replaying session mutations', async () => {
+  const h = harness([ready, ready, ready]); await h.controls.ready;
+  h.api.createEventSource('/api/stream');
+  h.natives[0].onerror({}); await flush();
+  h.natives[1].onmessage({ data: '{"rows":[]}' });
+  h.natives[1].onerror({}); await flush();
+  assert.equal(h.calls.filter(c => c.url === '/api/owner/status').length, 3);
+  assert.equal(h.calls.every(c => c.options.method === 'GET'), true);
+  h.controls.dispose();
+});
+
+test('both resume callbacks preserve equipment through loading DOM replacement and out-of-order inventory', async () => {
+  const app = await readFile(new URL('../claudlobby/plane/ui/app.js', import.meta.url), 'utf8');
+  const helper = app.slice(app.indexOf('function resumeOwnerReads()'), app.indexOf('// Bootstrap LAST'));
+  const poll = app.slice(app.indexOf('async function pollFleet()'), app.indexOf('function orgNode('));
+  for (const order of [[0, 1], [1, 0]]) {
+    const requests = [deferred(), deferred()], rendered = [], opened = [], room = {};
+    let detail = { hidden: false, alias: 'synthetic-worker' }, index = 0;
+    const state = { sessionPaused: true, sessionEpoch: 4, inventoryGeneration: 0,
+      currentView: 'fleet', currentFleet: 'synthetic', equipmentAlias: 'synthetic-worker',
+      fleetQuery: () => '?fleet=synthetic', refreshBoards() {},
+      $: id => id === 'fleet-room' ? room : id === 'equip-detail' ? detail : { value: '' },
+      renderState() { detail = null; }, // Actual loading behavior removes the detail node.
+      renderInventory(inv) { rendered.push(inv.data.version); detail = { hidden: true }; },
+      openEquipment(alias) { opened.push(alias); detail.hidden = false; detail.alias = alias; },
+      jget(url) { return url.startsWith('/api/inventory') ? requests[index++].promise : Promise.resolve(null); },
+    };
+    runInNewContext(`${poll}\n${helper}\nresumeOwnerReads(); resumeOwnerReads();`, state);
+    assert.equal(detail, null); assert.equal(index, 2);
+    for (const i of order) { requests[i].resolve({ state: 'ok', data: { version: i } }); await flush(); }
+    assert.deepEqual(rendered, [1]); assert.deepEqual(opened, ['synthetic-worker']);
+    assert.equal(detail.hidden, false); assert.equal(detail.alias, 'synthetic-worker');
+  }
+});
+
+test('grid half-completed reads never paint across pause, and paused polls issue no requests', async () => {
+  const app = await readFile(new URL('../claudlobby/plane/ui/app.js', import.meta.url), 'utf8');
+  const poll = app.slice(app.indexOf('async function pollGrid()'), app.indexOf('const PRESENCE_ORDER'));
+  for (const first of ['grid', 'presence']) {
+    const grid = deferred(), presence = deferred(), rendered = [], calls = [];
+    const state = { sessionPaused: false, sessionEpoch: 1, currentView: 'grid', currentFleet: 'synthetic',
+      fleetQuery: () => '?fleet=synthetic', renderGrid: value => rendered.push(value),
+      renderPresenceStrip: value => rendered.push(value),
+      jget(url) { calls.push(url); return url.startsWith('/api/grid') ? grid.promise : presence.promise; },
+    };
+    const pending = runInNewContext(`${poll}\npollGrid()`, state);
+    (first === 'grid' ? grid : presence).resolve({ state: 'ok', data: first === 'grid'
+      ? { panes: [{ fleet: 'synthetic', bot: 'worker', lines: ['old private frame'] }] }
+      : { bots: [], counts: { working: 1 } } });
+    await flush(); state.sessionPaused = true; state.sessionEpoch++;
+    (first === 'grid' ? presence : grid).resolve(null); await pending;
+    assert.deepEqual(rendered, []);
+    await runInNewContext(`${poll}\npollGrid()`, state);
+    assert.equal(calls.length, 2);
+  }
+});
+
+test('quiet stream recovery respects the 30 second monotonic boundary and never rearms from board reads', async () => {
+  for (const duration of [29999, 30000]) {
+    let clock = 0;
+    const h = harness([ready, ready, { status: 200, data: ['healthy board'] }, ready], { monotonicNow: () => clock });
+    await h.controls.ready; h.api.createEventSource('/api/stream');
+    h.natives[0].onerror({}); await flush();
+    h.natives[1].onopen({}); // Timestamp0 must count as an actual open.
+    assert.deepEqual(await h.api.jget('/api/tasks'), ['healthy board']);
+    clock = duration; h.natives[1].onerror({}); await flush();
+    assert.equal(h.calls.filter(c => c.url === '/api/owner/status').length, duration < 30000 ? 2 : 3);
+    if (duration >= 30000) {
+      assert.equal(h.node('renew').disabled, false);
+      h.natives[2].onopen({}); h.natives[2].onerror({}); await flush();
+      assert.equal(h.calls.filter(c => c.url === '/api/owner/status').length, 3);
+    }
+    assert.match(h.node('status').textContent, /unknown/);
+    assert.equal(h.calls.every(c => c.options.method === 'GET'), true);
+    h.controls.dispose();
+  }
+});
+
+test('a stream that never opened cannot earn recovery by elapsed wall time', async () => {
+  let clock = 0;
+  const h = harness([ready, ready], { monotonicNow: () => clock }); await h.controls.ready;
+  h.api.createEventSource('/api/stream'); h.natives[0].onerror({}); await flush();
+  clock = 60000; h.natives[1].onerror({}); await flush();
+  assert.equal(h.calls.filter(c => c.url === '/api/owner/status').length, 2);
+  assert.match(h.node('status').textContent, /unknown/);
+  h.controls.dispose();
+});
+
+test('a quiet stable stream checks expired current cookie and redirects without any mutation replay', async () => {
+  let clock = 0;
+  const h = harness([ready, ready, { status: 200, data: { state: 'sign_in_required' } }], { monotonicNow: () => clock });
+  await h.controls.ready; h.api.createEventSource('/api/stream');
+  h.natives[0].onerror({}); await flush(); h.natives[1].onopen({});
+  clock = 30000; h.natives[1].onerror({}); await flush();
+  assert.equal(h.calls.filter(c => c.url === '/api/owner/status').length, 3);
+  assert.deepEqual(h.replacements, ['/owner']);
+  assert.equal(h.natives[1].closed, true);
+  assert.equal(h.calls.every(c => c.options.method === 'GET'), true);
+  h.controls.dispose();
 });

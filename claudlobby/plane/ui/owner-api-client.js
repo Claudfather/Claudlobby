@@ -2,9 +2,10 @@
 // Explicit renewal avoids assuming when a restored page's session began.
 export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis),
   EventSource = globalThis.EventSource, location = globalThis.location,
-  setTimeout = globalThis.setTimeout, clearTimeout = globalThis.clearTimeout } = {}) {
+  setTimeout = globalThis.setTimeout, clearTimeout = globalThis.clearTimeout,
+  monotonicNow = () => globalThis.performance.now() } = {}) {
   let generation = 0, mode = 'checking', busy = false, disposed = false;
-  let recoveryUsed = false, readRecoveryUsed = false, readRecoveryTimer = null;
+  let recoveryUsed = false, readRecoveryUsed = false, streamRecoveryUsed = false, readRecoveryTimer = null;
   let mount = null, statusNote = null;
   const reads = new Set(), streams = new Set();
   const labels = {
@@ -94,7 +95,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
       if (disposed || gen !== generation) return;
       if (result.status === 200 && result.data?.state === (action === 'renew' ? 'ready' : 'signed_out')) {
         if (action === 'logout') leave('signed_out');
-        else { recoveryUsed = false; readRecoveryUsed = false; resume('Session renewed. Your browser session stays signed in.'); }
+        else { recoveryUsed = false; readRecoveryUsed = false; streamRecoveryUsed = false; resume('Session renewed. Your browser session stays signed in.'); }
       } else if (result.status === 403) {
         refusal = true;
       } else pause('unavailable'); // A lost logout reply is not success.
@@ -145,7 +146,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
   }
   function createEventSource(url) {
     const listeners = new Map();
-    let native = null, closed = false;
+    let native = null, closed = false, openedAt = null;
     const stream = {
       onmessage: null, onerror: null, onopen: null,
       removeEventListener(name, callback) { listeners.get(name)?.delete(callback); },
@@ -154,7 +155,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
         listeners.get(name).add(callback);
         if (native) attach(name, native, generation);
       },
-      pause() { native?.close(); native = null; },
+      pause() { native?.close(); native = null; openedAt = null; },
       close() { closed = true; stream.pause(); streams.delete(stream); },
       open() {
         if (closed || disposed || mode !== 'ready' || native) return;
@@ -163,6 +164,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
         const source = native;
         source.onopen = event => {
           if (source !== native || gen !== generation || mode !== 'ready') return;
+          openedAt = monotonicNow();
           stream.onopen?.(event);
           // Refresh after the new stream reaches HEAD, closing the gap
           // between the previous board snapshot and reconnection.
@@ -172,12 +174,21 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
           if (source !== native || gen !== generation || mode !== 'ready') return;
           recoveryUsed = false;
           readRecoveryUsed = false;
+          streamRecoveryUsed = false;
           stream.onmessage?.(event);
         };
         source.onerror = event => {
           if (source !== native || gen !== generation || mode !== 'ready') return;
           stream.onerror?.(event);
-          void checkSession(true);
+          // Quiet fleets send comment pings, not message events. A connection
+          // that really stayed open for 30 seconds earns one more probe; a fast
+          // open/error cycle and successful HTTP reads never rearm the budget.
+          const elapsed = openedAt === null ? 0 : monotonicNow() - openedAt;
+          if (streamRecoveryUsed && !(Number.isFinite(elapsed) && elapsed >= 30000)) {
+            pause('unavailable'); return;
+          }
+          streamRecoveryUsed = true;
+          void checkSession();
         };
         for (const name of listeners.keys()) attach(name, source, gen);
       },
@@ -204,7 +215,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
     element.hidden = false;
     mount.renew.addEventListener('click', () => { void mutate('renew'); });
     mount.logout.addEventListener('click', () => { void mutate('logout'); });
-    mount.check.addEventListener('click', () => { recoveryUsed = false; readRecoveryUsed = false; void checkSession(); });
+    mount.check.addEventListener('click', () => { recoveryUsed = false; readRecoveryUsed = false; streamRecoveryUsed = false; void checkSession(); });
     render();
     const ready = checkSession();
     return { ready, dispose };
