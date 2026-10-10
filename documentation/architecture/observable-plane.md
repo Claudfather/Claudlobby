@@ -1194,7 +1194,7 @@ uses the task's recorded owner rather than its sender or the current room;
 opening it never switches rooms or acquires another team's action context.
 The dialog's conversation has no recursive opener. Closing restores focus to
 the same task/owner/thread button after a keyed refresh, or the channel region
-if that button has gone. Session/source loss fences unfinished detail replies;
+if that button has gone. Once the browser observes session/source loss, it fences unfinished detail replies;
 settled detail refusals retain their specific remediation. Action access
 invalidation does not pause readable task navigation.
 
@@ -1227,3 +1227,33 @@ detail is unavailable. A task without a recorded team may show its unresolved
 board snapshot only on an unprotected read-only transport, without requesting
 a guessed team. Protected refusals and mismatched IDs never fall back to stale
 private detail. No task actions or grants are enabled by this read slice.
+
+
+### Authenticated direct-owner read profile
+
+The core-owned direct-host browser and server must match. An authenticated
+`GET /api/owner/status` and successful explicit `login`/`renew` return
+`read_profile: {version: 1, profile: "direct-owner-read-v1", host_uid: "host_<32 lowercase hex>"}`.
+Only these three fields are admitted. The profile promises the existing
+same-origin Plane read envelopes and SSE with current direct-owner sessions;
+it grants no message, nudge or feedback action. It makes no website workspace,
+setup, cross-origin, multi-host or browser-permission claim. Before authentication,
+status remains lifecycle-only (`needs_pairing` or `sign_in_required`).
+
+Login/renew first admit the paired principal, existing session when required,
+and canonical source before creating or rotating a session. A pre-existing source
+outage preserves the old cookie and creates no hidden replacement session.
+The server admits the current session and canonical local source before creating
+this metadata and again before response publication, including any new cookie.
+An unavailable source yields 503; denied source/session yields 403 without the
+profile or new cookie. This contract does not change admission of existing task
+snapshots. A read-only owner needs no action grant to obtain the read profile.
+
+The canonical owner transport uses one profile validator for status, renewal and
+action-refusal status recovery. It pins the first admitted host UID for its entire
+lifetime. Missing, malformed, extra-field or unsupported profiles stop reads,
+streams and actions with an update-and-reload remedy; a different host requires
+reopening Plane on the intended host. There is no automatic login or mutation
+replay. A lifecycle-only older server is deliberately incompatible with this
+new client, rather than silently treated as the same read contract. The default
+read-only transport and injected synthetic transports are unchanged.

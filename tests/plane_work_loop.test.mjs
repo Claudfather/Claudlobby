@@ -790,7 +790,7 @@ async function ownerRecoveryHarness({ messages = false, recovery = 200, heldReco
     async fetch(url, options) {
       const body = options.body ? JSON.parse(options.body) : null; calls.push({url,body});
       let status = 200, data;
-      if (url === '/api/owner/status') { status = session === 'ready' ? 200 : 503; data = {state:session}; }
+      if (url === '/api/owner/status') { status = session === 'ready' ? 200 : 503; data = {state:session, ...(session === 'ready' ? {read_profile:{version:1,profile:'direct-owner-read-v1',host_uid:'host_'+'1'.repeat(32)}} : {})}; }
       else if (url === '/api/owner/logout') data = {state:'signed_out'};
       else if (url === '/api/tasks?source-loss') { session='unavailable';status=503;data={state:'unavailable'}; }
       else if (url.startsWith('/api/tasks/')) {
