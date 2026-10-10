@@ -886,7 +886,7 @@ function ansiToHtml(text) {
 
 let currentView = "channel";
 let equipmentAlias = null;
-let equipmentGeneration = 0, equipmentSelection = null, inventoryAliases = new Set();
+let equipmentGeneration = 0, equipmentSelection = null, equipmentFocus = null, inventoryAliases = new Set();
 let rosterGeneration = 0, rosterIdentities = new Map();
 let inventoryGeneration = 0;
 let currentFleet = null;   // null = auto (single fleet, or no pick yet)
@@ -1550,6 +1550,7 @@ function renderInventory(env, orgEnv) {
     const open = () => {
       if (!c.isConnected || sessionPaused || currentView !== "fleet" || epoch !== sessionEpoch || version !== inventoryGeneration || fleet !== currentFleet) return;
       equipmentSelection = [...rosterIdentities.values()].find(identity => identity.alias === alias) || null;
+      equipmentFocus = { alias, selection: equipmentSelection, epoch: sessionEpoch };
       void openEquipment(alias);
     };
     c.addEventListener("click", open);
@@ -1560,7 +1561,7 @@ function renderInventory(env, orgEnv) {
 }
 
 function closeEquipment() {
-  ++equipmentGeneration; equipmentAlias = null; equipmentSelection = null;
+  ++equipmentGeneration; equipmentAlias = null; equipmentSelection = null; equipmentFocus = null;
   const box = $("equip-detail"); if (box) box.hidden = true;
 }
 function inspectBot(identity) {
@@ -1568,6 +1569,7 @@ function inspectBot(identity) {
   const roomChanged = activeRoom() !== identity.fleet, teamOpen = currentView === "fleet";
   if (roomChanged) pickFleet(identity.fleet);
   equipmentSelection = identity; equipmentAlias = identity.alias;
+  equipmentFocus = { alias: identity.alias, selection: identity, epoch: sessionEpoch };
   // pickFleet already started the Team inventory read in this case.
   if (roomChanged && teamOpen) return;
   setView("fleet"); // Existing inventory/equipment renderer; never a write path.
@@ -1581,8 +1583,15 @@ function equipmentRecipient() {
   return { ...identity, current: true };
 }
 function refreshEquipmentAction() {
-  const button = $("equip-detail")?.querySelector(".ed-message");
-  if (button) button.disabled = !workLoop?.canSelectMessageRecipient(equipmentRecipient());
+  const box = $("equip-detail"), button = box?.querySelector(".ed-message");
+  if (!button) return;
+  const identity = equipmentRecipient();
+  button.disabled = !workLoop?.canSelectMessageRecipient(identity);
+  const explanation = box.querySelector(".ed-message-note");
+  if (explanation) explanation.textContent = !button.disabled ? ""
+    : !identity ? "Roster identity changed or is unavailable. Inspect this bot again after the roster refreshes."
+    : identity.provisional ? "This bot is unconfirmed. Inspect it again after its identity is confirmed."
+    : "Messaging is unavailable with your current access to this team.";
 }
 async function openEquipment(alias) {
   if (sessionPaused) return;
@@ -1598,15 +1607,16 @@ async function openEquipment(alias) {
   if (sessionPaused || epoch !== sessionEpoch || request !== equipmentGeneration || fleet !== currentFleet
       || currentView !== "fleet" || inventory !== inventoryGeneration || roster !== rosterGeneration
       || equipmentSelection !== selection || equipmentAlias !== alias || box !== $("equip-detail")) return;
+  const closeControl = '<button class="pill ghost ed-close" type="button">Close bot inspection</button>';
   if (!env || env.state !== "ok") {
-    box.innerHTML = stateBlock(env ? env.state : "disconnected",
+    box.innerHTML = closeControl + stateBlock(env ? env.state : "disconnected",
                                env && env.provenance, env && env.remediation);
-    return;
+    finishInspection(); return;
   }
   const b = env.data;
   if (!b || b.alias !== alias) {
-    box.innerHTML = stateBlock("unknown", null, "Equipment did not match the selected bot. Inspect it again.");
-    return;
+    box.innerHTML = closeControl + stateBlock("unknown", null, "Equipment did not match the selected bot. Inspect it again.");
+    finishInspection(); return;
   }
   const chips = (arr) => (arr || []).map((x) => `<span class="chip">${esc(String(x))}</span>`).join("");
   const eq = EQUIP_ORDER.filter((k) => b.equipment[k] && (Array.isArray(b.equipment[k])
@@ -1622,8 +1632,9 @@ async function openEquipment(alias) {
   box.innerHTML = `
     <div class="ed-head"><b>${esc(b.short)}</b>
       <small>${esc(b.model || "")}${b.account ? ` · ${esc(b.account)}` : ""}</small>
-      <button class="pill ghost ed-close" type="button">close</button></div>
+      <button class="pill ghost ed-close" type="button" aria-label="Close inspection of ${esc(b.short)}">close</button></div>
     <button class="pill ghost ed-message" type="button" disabled>Message this bot</button>
+    <p class="note ed-message-note" role="status"></p>
     ${b.org && b.org.mission ? `<div class="ed-mission">${esc(b.org.mission)}</div>` : ""}
     <div class="ed-cols">
       <div><h4>equipment</h4>${eq}</div>
@@ -1644,21 +1655,30 @@ async function openEquipment(alias) {
         </details>
       </div>
     </div>`;
-  box.querySelector(".ed-close").addEventListener("click", () => {
-    if (sessionPaused || box !== $("equip-detail") || request !== equipmentGeneration
-        || inventory !== inventoryGeneration || roster !== rosterGeneration || epoch !== sessionEpoch) return;
-    closeEquipment();
-    // The hidden panel held focus: hand it back to this exact bot's card.
-    [...$("fleet-room").querySelectorAll(".bot-card")].find(card => card.dataset.alias === alias)?.focus();
-  });
-  const message = box.querySelector(".ed-message");
-  message.addEventListener("click", () => {
-    if (!message.isConnected || box !== $("equip-detail") || request !== equipmentGeneration
-        || inventory !== inventoryGeneration || roster !== rosterGeneration || epoch !== sessionEpoch) return;
-    if (workLoop.selectMessageRecipient(equipmentRecipient())) {
-      closeEquipment(); $("work-loop").scrollIntoView({ block: "nearest" });
-    } else refreshEquipmentAction();
-  });
-  refreshEquipmentAction();
-  box.scrollIntoView({ block: "nearest" });
+  finishInspection();
+  function finishInspection() {
+    const close = box.querySelector(".ed-close");
+    close.addEventListener("click", () => {
+      // Closing the current visible panel needs no authority. Detached controls
+      // cannot close a replacement, and only a current snapshot returns focus.
+      if (!close.isConnected || box !== $("equip-detail") || box.querySelector(".ed-close") !== close) return;
+      const returnFocus = !sessionPaused && epoch === sessionEpoch && request === equipmentGeneration
+        && inventory === inventoryGeneration && roster === rosterGeneration && fleet === currentFleet && currentView === "fleet";
+      closeEquipment();
+      if (returnFocus) [...$("fleet-room").querySelectorAll(".bot-card")].find(card => card.dataset.alias === alias)?.focus();
+    });
+    const message = box.querySelector(".ed-message");
+    if (message) message.addEventListener("click", () => {
+      if (!message.isConnected || box !== $("equip-detail") || request !== equipmentGeneration
+          || inventory !== inventoryGeneration || roster !== rosterGeneration || epoch !== sessionEpoch) return;
+      if (workLoop.selectMessageRecipient(equipmentRecipient())) {
+        closeEquipment(); $("work-loop").scrollIntoView({ block: "nearest" });
+      } else refreshEquipmentAction();
+    });
+    refreshEquipmentAction();
+    if (equipmentFocus?.alias === alias && equipmentFocus.selection === selection && equipmentFocus.epoch === epoch) {
+      equipmentFocus = null; close.focus();
+    }
+    box.scrollIntoView({ block: "nearest" });
+  }
 }

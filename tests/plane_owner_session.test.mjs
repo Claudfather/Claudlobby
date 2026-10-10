@@ -868,8 +868,9 @@ function inspectionHarness() {
       set innerHTML(value) {
         for (const button of buttons.values()) button.isConnected = false;
         buttons.clear(); this.content = value;
-        for (const name of ['ed-close', 'ed-message']) if (value.includes(name)) {
-          buttons.set('.' + name, { isConnected: true, disabled: true,
+        for (const name of ['ed-close', 'ed-message', 'ed-message-note']) if (value.includes(name)) {
+          buttons.set('.' + name, { isConnected: true, disabled: true, textContent: '', focusCalls: 0,
+            focus() { this.focusCalls++; document.activeElement = this; },
             addEventListener(event, listener) { this[event] = listener; } });
         }
       }, get innerHTML() { return this.content; },
@@ -878,7 +879,7 @@ function inspectionHarness() {
   }
   box = detail();
   const state = { sessionPaused: false, sessionEpoch: 1, currentFleet: botIdentity.fleet, currentView: 'fleet',
-    inventoryGeneration: 1, rosterGeneration: 1, equipmentGeneration: 0, equipmentAlias: null, equipmentSelection: botIdentity,
+    inventoryGeneration: 1, rosterGeneration: 1, equipmentGeneration: 0, equipmentAlias: null, equipmentSelection: botIdentity, equipmentFocus: null,
     fleets: [{ alias: botIdentity.fleet, uid: botIdentity.fleet_uid }],
     inventoryAliases: new Set([botIdentity.alias]), rosterIdentities: new Map([[botIdentity.uid, botIdentity]]),
     EQUIP_ORDER: ['skills'], esc: value => String(value), ago: () => '',
@@ -1007,12 +1008,12 @@ test('closing equipment restores focus to its exact bot card, never a same-name 
   h.document.activeElement = twin; close.click(); assert.equal(h.document.activeElement, twin);
 });
 
-test('stale session close cannot transfer focus into resumed inventory', async () => {
+test('visible close works during a paused session without moving focus into resumed inventory', async () => {
   const h = inspectionHarness(), current = { dataset: { alias: botIdentity.alias }, focus() { h.document.activeElement = this; } };
   h.cards.push(current);
   const pending = h.state.openEquipment(botIdentity.alias); h.reads[0].resolve(equipmentEnvelope(botIdentity.alias)); await pending;
-  h.state.sessionEpoch++; h.buttons.get('.ed-close').click();
-  assert.equal(h.document.activeElement, null); assert.equal(h.box.hidden, false);
+  h.state.sessionPaused = true; h.state.sessionEpoch++; h.buttons.get('.ed-close').click();
+  assert.equal(h.document.activeElement, null); assert.equal(h.box.hidden, true);
 });
 
 test('inspect switching fleets from the Team view uses its one existing inventory poll', () => {
@@ -1043,4 +1044,83 @@ test('human actors remain readable without a bot-inspection button, even with sl
   runInNewContext(rosterHelpers, state);
   const html = state.railRow({ kind: 'actor', uid: 'actor_' + '8'.repeat(32), alias: 'human:team/with/slash', short: 'Human', fleet: null });
   assert.match(html, /Human/); assert.doesNotMatch(html, /data-bot-inspect|<button/);
+});
+
+test('explicit inspection focuses the completed panel once; background equipment refresh never steals focus', async () => {
+  const h = inspectionHarness();
+  h.state.equipmentFocus = { alias: botIdentity.alias, selection: botIdentity, epoch: h.state.sessionEpoch };
+  const explicit = h.state.openEquipment(botIdentity.alias);
+  assert.equal(h.document.activeElement, null);
+  h.reads[0].resolve(equipmentEnvelope(botIdentity.alias)); await explicit;
+  assert.equal(h.document.activeElement, h.buttons.get('.ed-close'));
+  assert.equal(h.buttons.get('.ed-close').focusCalls, 1); assert.equal(h.state.equipmentFocus, null);
+  const otherControl = {}; h.document.activeElement = otherControl;
+  const refresh = h.state.openEquipment(botIdentity.alias); h.reads[1].resolve(equipmentEnvelope(botIdentity.alias)); await refresh;
+  assert.equal(h.document.activeElement, otherControl); assert.equal(h.buttons.get('.ed-close').focusCalls, 0);
+});
+
+test('cross-fleet roster inspection retains its explicit focus request through room loading and one inventory poll', async () => {
+  const h = inspectionHarness(), pick = inspectionApp.slice(inspectionApp.indexOf('function pickFleet('), inspectionApp.indexOf('const STATUS_DOT'));
+  const room = inspectionApp.slice(inspectionApp.indexOf('function activeRoom()'), inspectionApp.indexOf('const ownerSession ='));
+  const poll = inspectionApp.slice(inspectionApp.indexOf('async function pollFleet()'), inspectionApp.indexOf('function orgNode('));
+  h.state.currentFleet = 'all'; h.state.currentView = 'fleet';
+  h.document.activeElement = { dataset: { botInspect: botIdentity.uid } };
+  h.state.syncWorkRoom = () => { h.document.activeElement = null; };
+  h.state.savePick = () => {}; h.state.renderFleetTabs = () => {}; h.state.refreshBoards = () => {};
+  h.state.fleetQuery = () => '?fleet=' + encodeURIComponent(h.state.currentFleet);
+  h.state.renderInventory = () => {};
+  h.state.setView = () => { throw Error('Team is already visible; a second poll is unnecessary'); };
+  const get = h.state.$; h.state.$ = id => id === 'search-results' ? { hidden: true } : get(id);
+  runInNewContext(`${pick}\n${room}\n${poll}`, h.state);
+  const originalPoll = h.state.pollFleet; let pendingPoll;
+  h.state.pollFleet = () => { pendingPoll = originalPoll(); return pendingPoll; };
+  h.state.inspectBot(botIdentity);
+  assert.equal(h.document.activeElement, null); assert.equal(h.reads.length, 3);
+  h.reads[0].resolve({ state: 'ok', data: { bots: [{ alias: botIdentity.alias }] } });
+  h.reads[1].resolve(null); h.reads[2].resolve(null); await pendingPoll;
+  assert.equal(h.reads.length, 4); assert.match(h.reads[3].url, /^\/api\/equipment/);
+  h.reads[3].resolve(equipmentEnvelope(botIdentity.alias)); await flush();
+  assert.equal(h.document.activeElement, h.buttons.get('.ed-close'));
+  assert.equal(h.state.equipmentFocus, null);
+});
+
+test('visible close remains usable during an inventory generation change without stale focus hand-back', async () => {
+  const h = inspectionHarness(), current = { dataset: { alias: botIdentity.alias }, focus() { h.document.activeElement = this; } };
+  h.cards.push(current);
+  const pending = h.state.openEquipment(botIdentity.alias); h.reads[0].resolve(equipmentEnvelope(botIdentity.alias)); await pending;
+  h.state.inventoryGeneration++; h.state.equipmentGeneration++;
+  h.buttons.get('.ed-close').click();
+  assert.equal(h.box.hidden, true); assert.equal(h.state.equipmentAlias, null); assert.equal(h.document.activeElement, null);
+});
+
+test('detached close from a prior equipment render cannot close its replacement', async () => {
+  const h = inspectionHarness(), first = h.state.openEquipment(botIdentity.alias);
+  h.reads[0].resolve(equipmentEnvelope(botIdentity.alias)); await first;
+  const oldClose = h.buttons.get('.ed-close');
+  const next = h.state.openEquipment(botIdentity.alias); h.reads[1].resolve(equipmentEnvelope(botIdentity.alias)); await next;
+  oldClose.click();
+  assert.equal(h.box.hidden, false); assert.equal(h.state.equipmentAlias, botIdentity.alias);
+  assert.equal(oldClose.isConnected, false);
+});
+
+test('changed or unavailable roster identity explains disabled messaging until explicit reinspection', async () => {
+  const h = inspectionHarness(), pending = h.state.openEquipment(botIdentity.alias);
+  h.reads[0].resolve(equipmentEnvelope(botIdentity.alias)); await pending;
+  h.state.rosterIdentities.set(botIdentity.uid, { ...botIdentity, provisional: true });
+  h.state.refreshEquipmentAction();
+  assert.equal(h.buttons.get('.ed-message').disabled, true);
+  assert.match(h.buttons.get('.ed-message-note').textContent, /Inspect this bot again after the roster refreshes/);
+  assert.equal(h.state.equipmentSelection, botIdentity); assert.deepEqual(h.selections, []);
+  h.state.equipmentSelection = h.state.rosterIdentities.get(botIdentity.uid);
+  h.state.refreshEquipmentAction();
+  assert.match(h.buttons.get('.ed-message-note').textContent, /unconfirmed.*Inspect it again/);
+});
+
+test('explicit inspection of unavailable historical equipment still focuses a visible close control', async () => {
+  const h = inspectionHarness();
+  h.state.equipmentFocus = { alias: botIdentity.alias, selection: botIdentity, epoch: h.state.sessionEpoch };
+  const pending = h.state.openEquipment(botIdentity.alias);
+  h.reads[0].resolve({ state: 'idle' }); await pending;
+  assert.equal(h.document.activeElement, h.buttons.get('.ed-close')); assert.equal(h.buttons.has('.ed-message'), false);
+  h.buttons.get('.ed-close').click(); assert.equal(h.box.hidden, true);
 });

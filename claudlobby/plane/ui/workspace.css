@@ -632,3 +632,5 @@ button:focus-visible,textarea:focus-visible,select:focus-visible { outline:3px s
 .bot-inspect { border:0; padding:0; background:transparent; color:var(--ink); text-align:left; overflow-wrap:anywhere }
 .bot-inspect:hover { text-decoration:underline }
 .ed-message { margin:12px 0; }
+
+.ed-message-note:empty { display:none; }
