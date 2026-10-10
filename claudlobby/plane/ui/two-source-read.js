@@ -101,10 +101,13 @@ export function createTwoSourceReadTransport({ sources }) {
         path === '/api/overview' && (!data.host || !data.totals)) throw new Error('Invalid source fleet projection.');
     const next = rows.map(({alias, uid, bots, provisional}) => ({alias, uid, bots, provisional}));
     const identity = rows => JSON.stringify(rows.map(f => [f.alias, f.uid]).sort((a,b) => a[0].localeCompare(b[0])));
-    if (identity(next) !== identity(e.fleets)) ++e.routingRevision;
+    const changed = identity(next) !== identity(e.fleets);
+    if (changed) ++e.routingRevision;
     e.fleets = next;
     rooms.clear();
     for (const entry of entries) for (const f of entry.fleets) rooms.set(room(entry, f.alias), { e: entry, raw: f });
+    // A channel leg may have combined before this newly learned ownership.
+    if (changed) notify();
   }
   function fleetChoices(values) {
     return entries.flatMap((e, i) => e.fleets.map(f => ({ ...f, alias: room(e, f.alias),
@@ -218,7 +221,7 @@ export function createTwoSourceReadTransport({ sources }) {
       };
       child.onopen = ev => { facade.onopen?.(ev); facade.refresh(); };
       child.onerror = ev => facade.onerror?.(ev);
-      child.addEventListener('source', ev => { try { const state = JSON.parse(ev.data).state; if (state !== e.state) { e.state = state; e.epoch++; facade.refresh(); } } catch { /* do not infer recovery */ } });
+      child.addEventListener('source', ev => { try { const state = JSON.parse(ev.data).state; if (['absent', 'unreadable'].includes(state)) { e.state = state; e.epoch++; notify(); } } catch { /* do not infer recovery */ } });
     }
     streams.add(facade); return facade;
   }

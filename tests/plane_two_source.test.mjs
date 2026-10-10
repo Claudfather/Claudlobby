@@ -195,13 +195,14 @@ function roster(alias, uid = fleet) {
 async function appHarness(api) {
   const {runInNewContext}=await import('node:vm');
   const app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
-  const paints=[], timers=[];
+  const paints=[], timers=[], callbacks=[];
   const c={fleets:[],fleetsSeen:false,currentFleet:null,loadPick:()=> 'all',jget:api.jget,
-    syncWorkRoom:()=>false,workLoop:{update(){}},setTimeout:(cb,ms)=>{timers.push(ms);return timers.length;},clearTimeout(){},
+    syncWorkRoom:()=>false,workLoop:{update(){}},setTimeout:(cb,ms)=>{timers.push(ms);callbacks.push({cb,ms});return timers.length;},clearTimeout(){},
     renderChannel:v=>paints.push(v),renderTasks:v=>paints.push(v),renderFleet(){},renderSummary(){},renderHeader(){},renderHostFacts(){},renderFleetTabs(){},renderOverview(){}};
   runInNewContext(app.slice(app.indexOf('function adoptFleets('),app.indexOf('function renderFleetTabs()')),c);
-  runInNewContext(app.slice(app.indexOf('let refreshTimer = null;'),app.indexOf('function openStream()')),c);
-  return {c,paints,timers};
+  Object.assign(c,{createEventSource:api.createEventSource,pushDebugRow(){}});
+  runInNewContext(app.slice(app.indexOf('let refreshTimer = null;'),app.indexOf('$("debug-toggle")')),c);
+  return {c,paints,timers,callbacks};
 }
 test('real app overview-only refresh admits new teams, retains unavailable selection, and routes renamed teams',async()=>{
   const a=await source('a','a'), b=await source('b','b');
@@ -296,4 +297,42 @@ test('direct-host empty-header wording remains unchanged',async()=>{
   const node={innerHTML:''},c={$:()=>node,esc:String};
   runInNewContext(app.slice(app.indexOf('function renderHeader('),app.indexOf('function renderHostFacts(')),c);
   c.renderHeader(ok({fleets:[],totals:{fleets:0}}));assert.equal(node.innerHTML,'<span class="dim">no fleet recorded</span>');
+});
+
+
+test('same stream loss after quiet recovery fences a completed leg while its peer is held',async()=>{
+  const {api,a,b}=await pair(),stream=api.createEventSource('/api/stream');let refreshes=0;
+  stream.onmessage=e=>{if(JSON.parse(e.data).coverage_changed)refreshes++;};
+  const loss=()=>a.streams[0].listeners.source({data:JSON.stringify({state:'absent'})});
+  loss();assert.equal(refreshes,1);
+  // Canonical quiet recovery sends comment pings, not a source:ok event.
+  assert.equal((await api.jget('/api/channel?limit=120')).data.coverage.reachable,2);
+  const held=deferred();b.routes.set('/api/channel?limit=120',held.promise);
+  const read=api.jget('/api/channel?limit=120');await new Promise(r=>setImmediate(r));
+  loss();held.resolve(ok({threads:[],lineage:{unresolved_threads:0}}));
+  const result=await read;
+  assert.equal(result.data.coverage.reachable,1);assert.equal(result.data.threads.length,0);
+  assert.equal(refreshes,2);
+  assert.equal(result.data.sources[0].state,'absent');
+  a.streams[0].listeners.source({data:JSON.stringify({state:'ok'})});
+  assert.equal(refreshes,2); // Recovery is not inferred from a fabricated source frame.
+  stream.close();api.dispose();
+});
+test('real renderer refreshes later-admission task links when channel combines before overview ownership',async()=>{
+  const a=await source('a','a'),b=await source('b','b');a.setStatus('sign_in_required');await a.reader.start();
+  const api=createTwoSourceReadTransport({sources:[a,b]}),h=await appHarness(api);
+  await h.c.refreshBoards();h.c.openStream();h.paints.length=0;
+  a.setStatus('ready');await a.reader.start();
+  const held=deferred();a.routes.set('/api/overview',held.promise);
+  // The actual 400ms coalesced callback starts the five-read app batch.
+  h.callbacks.find(x=>x.ms===400).cb();await new Promise(r=>setImmediate(r));
+  held.resolve(roster('team'));await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
+  assert.equal(h.paints.length,0); // Roster notification retires the null-link paint.
+  const refreshes=h.callbacks.filter(x=>x.ms===400);assert.equal(refreshes.length,2);
+  refreshes[1].cb();await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
+  const channel=h.paints.find(v=>v.data?.threads);
+  assert.equal(channel.data.threads.find(t=>t.work_item_id==='a::'+wi).task_link.task_id,'a::'+wi);
+  assert.equal(a.calls.filter(c=>c.url==='/api/fleets').length,0);
+  assert.equal(h.callbacks.filter(x=>x.ms===400).length,2); // Stable roster does not loop.
+  api.dispose();
 });

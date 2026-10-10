@@ -1308,3 +1308,11 @@ Qualification changes structural references, including assignment history and th
 last task event, but leaves canonical wire bodies and event detail literal. Nudge
 prose requires a consistent source qualifier on the projected pair; the unchanged
 wire body must match its corresponding bare task and assignment identities.
+
+Each authenticated absent/unreadable stream frame advances the source epoch,
+including a repeated loss after quiet recovery on the same connection. The
+canonical stream producer already deduplicates loss frames; endpoint successes
+do not infer stream recovery or rearm failure notifications. A changed routing
+identity triggers one coalesced refresh after publication so a channel response
+that arrived before later-admitted ownership cannot leave task links missing.
+Stable routing identities and endpoint errors never trigger that refresh.
