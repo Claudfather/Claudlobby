@@ -11,6 +11,7 @@ import tempfile
 from types import SimpleNamespace
 
 from ..command_result import CommandFailure, CommandOutput
+from ..setup_observations import RUNTIME_EXECUTABLES
 
 
 def _root(args, *, create: bool = False) -> Path:
@@ -83,7 +84,7 @@ def _host_setup(args) -> CommandOutput:
     except (RuntimeError, InventoryError, OSError) as exc:
         raise CommandFailure("unavailable", "unavailable: installed package or native user manager") from exc
     # Bot startup silently skips consent pre-acceptance and trust seeding without jq.
-    missing = [binary for binary in ("tmux", "claude", "jq") if shutil.which(binary) is None]
+    missing = [binary for binary in RUNTIME_EXECUTABLES if shutil.which(binary) is None]
     if missing:
         raise CommandFailure("unavailable", "unavailable: required bot runtime executable: " + ", ".join(missing))
     root = _root(args, create=True)
