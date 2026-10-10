@@ -17,6 +17,7 @@ import warnings
 
 from ..command_result import CommandFailure, CommandOutput
 from ..plane.owner_access import AccessDenied, AccessUnavailable, OwnerAccess
+from ..plane.owner_source import SourceDenied, SourceNeedsBinding, SourceUnavailable
 
 _GENERATED = ("BOT_ID", "BOT_NAME", "BOT_DIR", "BOT_SERVICE", "FLEET_ROOT",
               "FLEET_NAME", "CLAUDLOBBY_FLEET", "CLAUDLOBBY_TIMER_CONTEXT")
@@ -72,16 +73,43 @@ def dispatch(args):
     if args.root is None or args.fleet or args.seed:
         raise CommandFailure("invalid_argument", "owner commands require explicit --root and no fleet or seed")
     if args.owner_action != "status" and args.json:
-        raise CommandFailure("invalid_argument", "owner changes are interactive; --json is supported for status only")
+        raise CommandFailure("invalid_argument", "--json is supported for owner status only")
     try:
         paths = resolve_paths(root=args.root)
         store = OwnerAccess(paths.root)
+        if args.owner_action == "serve":
+            from ..plane.owner_server import OwnerServerConfigurationError, OwnerServerStartupError, serve
+
+            try:
+                serve(paths.root, origin=args.origin, tailscale_binary=args.tailscale,
+                      socket_path=args.socket,
+                      package=paths.package)
+            except OwnerServerStartupError as exc:
+                raise CommandFailure("unavailable", "owner server startup failed; inspect local server logs") from exc
+            except OwnerServerConfigurationError as exc:
+                raise CommandFailure("unavailable", str(exc)) from exc
+            except ImportError as exc:
+                raise CommandFailure("unavailable", "owner serving requires the optional [plane-ui] dependencies") from exc
+            except OSError as exc:
+                raise CommandFailure("unavailable", "owner server failed; inspect local logs and configured resources") from exc
+            return CommandOutput({"state": "stopped"}, lines=("Owner server stopped.",))
         if args.owner_action == "status":
             grant = store.current_grant()
             state = "unpaired" if grant is None else "paired" if grant.active else "revoked"
             return CommandOutput({"state": state, "owner": asdict(grant) if grant else None},
                                  lines=(f"Owner access: {state}.",))
         with _terminal() as terminal:
+            if args.owner_action == "bind-source":
+                from ..plane.owner_source import bind_source
+
+                store.current_grant()  # require initialized local authority
+                host_uid = read_host_uid(paths.root / "state")
+                terminal.write("Bind the existing Plane database to host " + json.dumps(host_uid) + ".\n"
+                               "Confirm that all its history, including imported records, belongs to this installation.\n"
+                               "This writes ownership metadata and indexes; it does not copy, migrate or remove records.\n")
+                _approve(terminal, "BIND")
+                bind_source(paths.root, expected_host_uid=host_uid)
+                return CommandOutput({"state": "bound"}, lines=("Plane source bound to this installation.",))
             if args.owner_action == "initialize":
                 host_uid = read_host_uid(paths.root / "state")
                 terminal.write("Prepare owner access for host " + json.dumps(host_uid) + ".\n"
@@ -113,6 +141,15 @@ def dispatch(args):
             raise CommandFailure("invalid_argument", "unsupported owner command")
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid host root selector") from exc
+    except SourceNeedsBinding as exc:
+        raise CommandFailure("unavailable", "Plane source lacks required binding or indexes; verify the selected installation "
+            "and re-run host owner bind-source. Binding refuses foreign or mixed-host history.") from exc
+    except SourceDenied as exc:
+        raise CommandFailure("conflict", "Plane source is foreign or mixed-host; select the correct installation "
+            "or investigate its history. Do not rebind this source.") from exc
+    except SourceUnavailable as exc:
+        raise CommandFailure("unavailable", "Plane source cannot be verified; inspect the selected installation's "
+            "database and schema locally. Pairing again cannot repair source state.") from exc
     except AccessDenied as exc:
         raise CommandFailure("conflict", "owner request is no longer valid; inspect status and request pairing again") from exc
     except (AccessUnavailable, ValueError) as exc:

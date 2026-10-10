@@ -39,6 +39,8 @@ OTHER = PrincipalRef("test-verifier", "human-002")
 @pytest.fixture
 def browser(tmp_path):
     _seed(tmp_path)
+    from claudlobby.plane.owner_source import bind_source
+    bind_source(tmp_path)
     clock = [1_800_000_000.0]
     store = OwnerAccess.initialize(tmp_path, clock=lambda: clock[0])
     identity = [OWNER]
@@ -534,6 +536,8 @@ def test_loopback_http_synthetic_principal_and_cookie_revocation(tmp_path):
     """HTTP mechanics behind a synthetic proxy; not browser HTTPS or Tailscale proof."""
     pytest.importorskip("uvicorn")
     _seed(tmp_path)
+    from claudlobby.plane.owner_source import bind_source
+    bind_source(tmp_path)
     store = OwnerAccess.initialize(tmp_path)
     challenge = store.begin_pairing(OWNER)
     grant = store.confirm_pairing(challenge.token, expected_principal=OWNER)

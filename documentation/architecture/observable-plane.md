@@ -206,14 +206,13 @@ The protected factory preserves the existing lifespan and `begin_shutdown`
 signal. The normal `plane view` command continues to call the original factory.
 This experiment establishes response enforcement, not deployed protection,
 browser login, a credential transport choice or website workspace admission.
-Source binding is to the installation's local data root. It does not establish
-row provenance for an operator-copied or mixed-host database: a database-host
-ownership invariant/refusal is still required before protected activation.
+Protected SQL reads require an explicit local source binding, described below.
+The ownership marker, retained host facts, query and response provenance share
+one SQLite read transaction. Each SSE batch repeats that check; a copied or
+mixed-host source is refused without disclosing its contents.
 
-Before enabling protected endpoints, implement and validate the trusted
-Tailscale human identifier/ingress, local confirmation boundary, browser
-credential carrier, database ownership and end-to-end enforcement on the
-supported hosts and browsers. Tailscale Serve
+Before a deployment opens real fleet reads, validate the configured Tailscale
+Serve boundary and end-to-end enforcement on its supported host and browsers. Tailscale Serve
 [documents user headers and their trust limits](https://tailscale.com/docs/features/tailscale-serve#identity-headers):
 they must not be accepted from an arbitrary directly reachable backend.
 Website-connected sessions additionally require independently verified website
@@ -255,14 +254,15 @@ the pairing and its sessions without stopping fleets or deleting their history.
 Local confirmation grants private reads only: website membership and ordinary
 message permissions remain separate.
 
-### Direct-host browser transport (internal experiment)
+### Direct-host browser transport
 
 `plane/owner_browser.py:create_owner_browser_app` wraps the protected read
 factory and exposes exactly five lifecycle routes. It requires an asynchronous
 trusted `PrincipalRef` verifier and one configured canonical external HTTPS
 origin. There is no default identity verifier: cookies, query parameters and
-Tailscale/forwarded identity headers do not establish identity here. No CLI,
-environment flag or startup service enables this transport.
+Tailscale/forwarded identity headers do not establish identity in this factory.
+The explicit private-socket server below supplies the production adapter; the
+normal Plane service still uses its original read-only factory.
 
 | Route | Method | Effect |
 | --- | --- | --- |
@@ -307,10 +307,77 @@ the operational renderer's static files and each SSE body delivery. Logout or lo
 therefore blocks the next private delivery. Tests exercise this with disposable
 state and an injected synthetic principal, plus a loopback HTTP subprocess
 simulating a proxy. They do not prove actual HTTPS browser cookie behavior or
-Tailscale identity. Trusted ingress, database ownership,
-real browser validation and an independent bot canary remain activation gates.
+Tailscale identity. The private-socket adapter has separate native CLI evidence;
+actual Serve forwarding, socket connectivity and HTTPS browser acceptance remain
+deployment gates. Bot actions need their own independent canary.
 This is a same-origin direct-host protocol, not website OAuth, cross-origin
 embedding or workspace membership.
+
+### Private-socket owner server and source binding
+
+`host owner serve` is an explicit foreground server for Tailscale Serve's Unix
+socket backend. It requires an initialized owner authority, a locally bound
+recorder database, an absolute native Tailscale executable and the exact external
+HTTPS origin. It neither enrolls a service nor configures Serve. The existing
+`plane view` service continues to use its original factory.
+
+Before starting it, the operator uses `host owner bind-source` in a terminal.
+The command requires an explicit installation root, initialized authority and
+confirmation by typing `BIND`. That is an attestation that all the existing
+history, including imported or unattributed history, belongs to this installation.
+It adds source metadata and covering indexes for host admission; it does not
+migrate the recorder schema or alter records.
+Reads never bind or repair a database. A source already marked for another host
+cannot be rebound by this door. The marker travels with a database backup, so
+copying even a fully pruned database under another host's grant is refused.
+
+```sh
+claudlobby --root /path/to/data host owner bind-source
+claudlobby --root /path/to/data host owner serve --origin https://plane.example.ts.net --tailscale /path/to/tailscale
+```
+
+The default socket is `DATA_ROOT/state/plane/owner.sock`. An explicit `--socket`
+can select a shorter absolute path when the host's Unix-socket path limit requires
+it. The containing directory must already be owned by the process user with mode
+0700; the socket is 0600. Existing socket paths are never deleted on startup.
+Graceful shutdown removes only the socket this invocation created. After an
+unclean exit, the operator must inspect a retained socket before removing it.
+There is no TCP fallback. A daemon unable to reach this socket leaves access
+unavailable; it is not a reason to expose an unprotected loopback backend.
+
+The server disables Uvicorn's proxy-header rewriting. The ingress adapter accepts
+only a Unix-socket request with exactly one source IP in `X-Forwarded-For`, which
+Serve must replace from its authenticated connection. It rejects the Funnel
+marker, chains and malformed/ambiguous headers. Each admission calls the explicitly
+configured CLI to check the official control realm, perform WhoIs, and recheck
+the realm. A positive numeric `UserProfile.ID` must equal `Node.User`; tagged,
+expired or address-mismatched nodes are refused. Login names and email addresses
+are never authorization keys. Unsupported control servers are refused rather than
+sharing the official principal namespace.
+
+CLI subprocesses have bounded output, time and concurrency, a fixed minimal
+environment and cancellation cleanup. `TERM=dumb` keeps the bundled macOS CLI in
+command-line mode without inheriting caller settings. Diagnostic stdout/stderr
+are not returned to browsers. A real native WhoIs capture grounds the anonymized
+fixture shape; a read-only native adapter probe established numeric identity and
+realm agreement on the installed client. Neither observation proves Serve's
+forwarding or its access to this filesystem socket.
+
+Source admission checks every retained family, including legacy, tombstone and
+host-global records, plus explicit fleet-parent ownership. Separate indexed
+minimum/maximum reads check the full host range without scanning healthy tables.
+A bounded fallback refuses unavailable sources rather than holding an unbounded
+read transaction; indexes are created only by the explicit binding command. It grants all fleets
+within this installation; a shared human identity is not treated as one fleet's
+private property. The local operator's source attestation covers unattributed
+history, and a malicious process with the same OS privileges remains outside this
+boundary. No website membership or bot-message grant is implied.
+
+Disposable subprocess tests exercise pairing, protected reads, process restart,
+revocation and socket cleanup through the actual foreground CLI with a synthetic
+Tailscale executable. Actual Serve-to-socket connectivity, external HTTPS cookies,
+remote laptop/mobile browsers and Mini/Pi deployment remain unverified. No live
+fleet or Tailscale setting is changed by these tests.
 
 ## The write spine
 
@@ -708,3 +775,17 @@ unopenable db, a fleet the plane has never seen, or a plane that holds no bot
 of the fleet is REFUSED with a reason on stderr and a nonzero rc; an existing
 source with zero rows is an answer. The refusal never rides stdout, because
 `report-back.sh` and `fleet-pulse.sh` parse it.
+
+Owner source admission also requires the operator-created covering indexes. A
+table-rebuild migration may drop them even when the ownership marker survives;
+protected reads and owner-server startup refuse immediately when a required
+index is absent, without scanning payload tables or repairing schema on reads.
+After completing a supported migration, verify the selected installation and
+re-run `host owner bind-source` locally to explicitly attest the existing source
+and restore missing indexes. The command validates retained host invariants
+before committing. Foreign markers or mixed-host records cannot be rebound;
+select the correct installation or investigate their provenance instead. Corrupt
+sources and incompatible index definitions require local database/schema
+investigation, not pairing again. Browser refusals remain generic. A foreground
+owner server whose lifespan startup fails returns an unavailable exit rather
+than reporting a clean stop; its owned socket is still cleaned up.
