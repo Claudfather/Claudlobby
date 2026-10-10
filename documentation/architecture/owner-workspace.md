@@ -125,8 +125,10 @@ claimed by synthetic ingress/HTTPX mock tests.
 An assembled sealed release can explicitly prepare identity and owner authority
 with `claudlobby --root DATA_ROOT host owner initialize --before-first-fleet`.
 The terminal confirms this preparation; the default `initialize` behavior is
-unchanged. The optional preparation marker is recorded in the same owner
-authority transaction; absence of a recorder alone never enables setup fallback.
+unchanged. The optional preparation marker is recorded in the unpublished
+initialization transaction, before complete authority bytes are published;
+absence of a recorder alone never enables setup fallback. Ordinary authority
+without this optional marker never triggers automatic source binding on resume.
 No release selection, begun activation, runtime, recorder, queues, or
 unknown Plane files are accepted as a fresh host. Pairing and workspace approval
 grant neither activation nor fleet actions. Private reads remain recorder-bound.

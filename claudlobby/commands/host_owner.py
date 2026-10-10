@@ -423,7 +423,7 @@ def dispatch(args):
                     fresh_owner_setup(paths.root, allow_absent=True)
                     from ..plane.ids import ensure_host_uid
                     ensure_host_uid(paths.root / "state")
-                    OwnerAccess.initialize(paths.root).prepare_first_fleet()
+                    OwnerAccess.initialize(paths.root, before_first_fleet=True)
                     return CommandOutput({"state": "initialized"}, lines=("Pre-activation owner authority is initialized.",))
                 host_uid = read_host_uid(paths.root / "state")
                 terminal.write("Prepare owner access for host " + json.dumps(host_uid) + ".\n"

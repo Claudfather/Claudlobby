@@ -96,6 +96,48 @@ def test_initialization_failure_cannot_publish_partial_authority(tmp_path, monke
     assert OwnerAccess.initialize(tmp_path).current_grant() is None
 
 
+def test_first_fleet_initialization_publishes_marker_atomically_and_retries(tmp_path, monkeypatch):
+    ensure_host_uid(tmp_path / "state")
+    connect, link = sqlite3.connect, os.link
+
+    class Busy(sqlite3.Connection):
+        def execute(self, sql, *args):
+            if sql.startswith("INSERT OR IGNORE INTO first_fleet_preparation"):
+                raise sqlite3.OperationalError("simulated busy before publication")
+            return super().execute(sql, *args)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sqlite3, "connect", lambda *a, **kw: connect(*a, **kw, factory=Busy))
+        with pytest.raises(AccessUnavailable):
+            OwnerAccess.initialize(tmp_path, before_first_fleet=True)
+    assert not (tmp_path / "state/plane/owner-access.db").exists()
+
+    def publish(source, target):
+        with connect(source) as conn:
+            assert conn.execute("SELECT host_uid,active FROM first_fleet_preparation").fetchone() == (
+                read_host_uid(tmp_path / "state"), 1)
+        link(source, target)
+
+    monkeypatch.setattr(os, "link", publish)
+    store = OwnerAccess.initialize(tmp_path, before_first_fleet=True)
+    assert store.first_fleet_pending()
+    assert OwnerAccess.initialize(tmp_path, before_first_fleet=True).first_fleet_pending()
+    store.retire_first_fleet()
+    assert not OwnerAccess.initialize(tmp_path).first_fleet_pending()
+    with pytest.raises(AccessUnavailable):
+        OwnerAccess.initialize(tmp_path, before_first_fleet=True)
+    assert not store.first_fleet_pending()
+
+
+def test_ordinary_authority_marker_absence_is_not_corruption_recovery(access):
+    store, _ = access
+    assert not store.first_fleet_pending()
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("CREATE TABLE first_fleet_preparation(singleton, version, host_uid, active)")
+    with pytest.raises(AccessUnavailable):
+        store.first_fleet_pending()
+
+
 @pytest.mark.parametrize("directory_exists", [False, True])
 def test_initialization_syncs_authority_directory_and_its_parent(tmp_path, monkeypatch,
                                                                directory_exists):

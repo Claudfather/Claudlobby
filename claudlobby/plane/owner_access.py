@@ -209,7 +209,8 @@ class OwnerAccess:
         self._clock = clock
 
     @classmethod
-    def initialize(cls, root: Path, *, clock: Callable[[], float] = time.time) -> OwnerAccess:
+    def initialize(cls, root: Path, *, clock: Callable[[], float] = time.time,
+                   before_first_fleet: bool = False) -> OwnerAccess:
         """Explicit preparation only; never invoked by a read or runtime startup.
 
         Requires the existing installation identity. Existing authority is
@@ -233,6 +234,8 @@ class OwnerAccess:
                         conn.execute("PRAGMA synchronous = FULL")
                         conn.executescript(_SCHEMA)
                         conn.execute("INSERT INTO metadata VALUES (1, 1, ?)", (host_uid,))
+                        if before_first_fleet:
+                            store._prepare_first_fleet(conn, host_uid)
                         conn.commit()
                     finally:
                         conn.close()
@@ -245,8 +248,9 @@ class OwnerAccess:
                         pass
                 finally:
                     temporary.unlink()
-            with store._connection():
-                pass
+            with store._connection() as conn:
+                if before_first_fleet:
+                    store._first_fleet_preparation(conn)
             # The plane directory's entry lives in state. Sync it even when
             # another initializer created it, before acknowledging the store.
             for path in (store.path.parent.parent, store.path.parent):
@@ -298,12 +302,15 @@ class OwnerAccess:
     def prepare_first_fleet(self) -> None:
         """Explicit local preparation only, after sealed-release/fresh-host checks."""
         with self._connection(write=True) as conn:
-            conn.execute("CREATE TABLE IF NOT EXISTS first_fleet_preparation ("
-                         "singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL, "
-                         "host_uid TEXT NOT NULL, active INTEGER NOT NULL CHECK(active IN(0,1)))")
-            conn.execute("INSERT OR IGNORE INTO first_fleet_preparation VALUES (1,1,?,1)",
-                         (read_host_uid(self.root / "state"),))
+            self._prepare_first_fleet(conn, read_host_uid(self.root / "state"))
             self._first_fleet_preparation(conn)
+
+    @staticmethod
+    def _prepare_first_fleet(conn, host_uid):
+        conn.execute("CREATE TABLE IF NOT EXISTS first_fleet_preparation ("
+                     "singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL, "
+                     "host_uid TEXT NOT NULL, active INTEGER NOT NULL CHECK(active IN(0,1)))")
+        conn.execute("INSERT OR IGNORE INTO first_fleet_preparation VALUES (1,1,?,1)", (host_uid,))
 
     def _first_fleet_preparation(self, conn, *, allow_retired=False):
         rows = conn.execute("SELECT singleton,version,host_uid,active FROM first_fleet_preparation").fetchall()
@@ -313,6 +320,8 @@ class OwnerAccess:
 
     def first_fleet_pending(self) -> bool:
         with self._connection() as conn:
+            if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='first_fleet_preparation'").fetchone():
+                return False  # Ordinary authority never requested optional preparation.
             self._first_fleet_preparation(conn, allow_retired=True)
             return bool(conn.execute("SELECT active FROM first_fleet_preparation").fetchone()[0])
 

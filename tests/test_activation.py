@@ -1235,3 +1235,38 @@ def test_first_activation_preserves_paired_owner_and_attests_only_new_recorder(c
     assert inspect_source(root) == owner.host_uid
     store.retire_first_fleet()  # Explicit bootstrap resume does not rearm preparation.
     assert store.current_grant() == owner
+
+
+def test_ordinary_owner_initialized_after_ingest_requires_explicit_binding_on_resume(cold, monkeypatch):
+    from claudlobby.plane.owner_access import OwnerAccess
+    from claudlobby.plane import owner_source
+    root, _, plan, host = cold
+    _failed_worker_start(cold)
+    store = OwnerAccess.initialize(root)
+    assert not store.first_fleet_pending()
+    starts = host.starts[:]
+    with pytest.raises(state.ActivationError, match="explicit recovery"):
+        activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    assert host.starts == starts
+    owner_source.bind_source(root)
+    host.fail_bot = None
+    monkeypatch.setattr(owner_source, "bind_source", lambda root: pytest.fail("ordinary authority must not auto-bind"))
+    assert activation.resume_activation(root, "cold", plan.plan_id, host.directory, adapter=host).status == "active"
+    assert host.starts == starts + ["claudlobby-keepalive.timer"]
+
+
+@pytest.mark.parametrize("operation", ["bind_source", "retire_first_fleet"])
+def test_first_activation_owner_hook_errors_keep_activation_contract(cold, monkeypatch, operation):
+    from claudlobby.plane.owner_access import AccessUnavailable, OwnerAccess
+    from claudlobby.plane import owner_source
+    root, _, plan, host = cold
+    ensure_host_uid(root / "state")
+    OwnerAccess.initialize(root, before_first_fleet=True)
+
+    def unavailable(*args):
+        raise AccessUnavailable("synthetic authority interruption")
+
+    monkeypatch.setattr(owner_source if operation == "bind_source" else OwnerAccess, operation, unavailable)
+    with pytest.raises(state.ActivationError, match="explicit recovery"):
+        activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
+    assert not host.starts

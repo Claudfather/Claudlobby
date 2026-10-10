@@ -327,19 +327,22 @@ def _finish_bootstrap_activation(root, store, activation_id, plan, release,
         applied = config_install.apply_config(root, activation_id)
         store.complete(activation_id, "configuration_applied", evidence_digest=_digest({
             "plan_id": applied.plan_id, "status": applied.status, "progress": applied.progress}))
-    if (root / "state/plane/owner-access.db").exists():
+    from .plane.owner_access import AccessUnavailable, OwnerAccess
+    access = OwnerAccess(root)
+    if access.path.exists():
         # Only this explicit empty-recorder bootstrap may attest automatically.
         # Migration is completed; no ingest writer or bot has started yet.
         from .plane.owner_source import bind_source, inspect_source
-        from .plane.owner_access import OwnerAccess
-        access = OwnerAccess(root)
-        if access.first_fleet_pending():
-            if "ingest_started" in completed:
-                raise ActivationError("owner preparation was not retired before ingest; explicit recovery required")
-            bind_source(root)
-            access.retire_first_fleet()
-        else:
-            inspect_source(root)  # Resume observes prior binding; never re-attests running data.
+        try:
+            if access.first_fleet_pending():
+                if "ingest_started" in completed:
+                    raise ActivationError("owner preparation was not retired before ingest; explicit recovery required")
+                bind_source(root)
+                access.retire_first_fleet()
+            else:
+                inspect_source(root)  # Resume observes prior binding; never re-attests running data.
+        except (AccessUnavailable, ValueError, OSError) as exc:
+            raise ActivationError("owner authority or source unavailable; explicit recovery required") from exc
     return _candidate_startup(root, store, activation_id, plan, release, declarations,
         starts, rank, install_directory, adapter, package, bootstrap=True)
 
