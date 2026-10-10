@@ -11,6 +11,7 @@
 // disagreed live with the SQL reducer.
 
 import { esc, ago, renderState, stateBlock } from "/panel-state.js";
+import { jget, createEventSource } from "/api-client.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -32,7 +33,7 @@ const TASK_STATUS = {
   assigned: { label: "assigned", cls: "s-open" },
   active: { label: "active", cls: "s-open" },
   blocked: { label: "blocked", cls: "s-pend" },
-  completed: { label: "completed", cls: "s-done" },
+  completed: { label: "completed", cls: "s-done s-completed" },
   failed: { label: "failed", cls: "s-bad" },
   cancelled: { label: "cancelled", cls: "s-done" },
 };
@@ -48,15 +49,6 @@ const THREAD_TERMINAL_STATUS = {
 const CLASS_TAGS = new Set(["task_request", "report", "question", "answer",
   "alert", "notice", "briefing", "nudge", "acknowledgement", "chat",
   "config_change", "raw_control"]);
-
-async function jget(url) {
-  try {
-    const r = await fetch(url);
-    return await r.json();
-  } catch {
-    return null; // renderState(null) => disconnected
-  }
-}
 
 // Signed deadline label (gauntlet, 3 reviewers: the old ago()+replace made
 // every NOT-yet-due task read "due 0s past").
@@ -696,7 +688,7 @@ function restartSafety() {  // relative times re-render; missed pushes heal
 }
 
 function openStream() {
-  const es = new EventSource("/api/stream");  // server starts at HEAD;
+  const es = createEventSource("/api/stream");  // server starts at HEAD;
   es.onmessage = (ev) => {                    // reconnects ride Last-Event-ID
     try {
       const payload = JSON.parse(ev.data);

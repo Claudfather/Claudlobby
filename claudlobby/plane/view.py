@@ -1807,9 +1807,10 @@ def create_app(
     # this estate updates source under running daemons by design
     # (update-siblings pulls weekly; weekly-worker-restart restarts BOTS,
     # not host services), so a process-lifetime token went stale in exactly
-    # the redeploy window it was built for (gauntlet round 2). Four stats
+    # the redeploy window it was built for (gauntlet round 2). Six stats
     # per page load — index() already reads the file per request.
-    _UI_FILES = ("index.html", "app.js", "panel-state.js", "style.css")
+    _UI_FILES = ("index.html", "app.js", "panel-state.js", "api-client.js",
+                 "style.css", "workspace.css")
 
     def asset_token() -> str:
         stamp = ":".join(
@@ -1826,8 +1827,8 @@ def create_app(
     def _rewritten_index() -> "HTMLResponse":
         tok = asset_token()
         html = (UI_DIR / "index.html").read_text()
-        html = (html.replace("/app.js", f"/app.js?v={tok}")
-                    .replace("/style.css", f"/style.css?v={tok}"))
+        for asset in ("app.js", "style.css", "workspace.css"):
+            html = html.replace(f"/{asset}", f"/{asset}?v={tok}")
         return _no_store(HTMLResponse(html))
 
     @app.get("/", response_class=HTMLResponse)
@@ -1843,10 +1844,11 @@ def create_app(
     @app.get("/app.js")
     def app_js():
         js = (UI_DIR / "app.js").read_text()
-        # bust the intra-module import too, or the browser reuses a pinned
-        # panel-state.js from its module map.
-        js = js.replace('"/panel-state.js"',
-                        f'"/panel-state.js?v={asset_token()}"')
+        # bust the intra-module imports too, or the browser reuses pinned
+        # dependencies from its module map.
+        token = asset_token()
+        for module in ("panel-state.js", "api-client.js"):
+            js = js.replace(f'"/{module}"', f'"/{module}?v={token}"')
         return _no_store(Response(js, media_type="text/javascript"))
 
     class _NoStoreStatic(StaticFiles):
