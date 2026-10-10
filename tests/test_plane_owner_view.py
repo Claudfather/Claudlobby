@@ -26,6 +26,7 @@ from claudlobby.plane.ids import ensure_host_uid
 from claudlobby.plane.owner_access import (
     AccessDenied, AccessUnavailable, OwnerAccess, PrincipalRef, SESSION_SECONDS,
 )
+from claudlobby.plane.owner_source import bind_source
 from claudlobby.plane.owner_view import VerifiedReader, create_owner_app
 from claudlobby.plane.view import begin_shutdown, create_app
 from tests.package_fixtures import source_package
@@ -46,6 +47,7 @@ def _add_route(app, path, endpoint, **kwargs):
 @pytest.fixture
 def protected(tmp_path):
     _seed(tmp_path)
+    bind_source(tmp_path)
     clock = [1_800_000_000.0]
     store = OwnerAccess.initialize(tmp_path, clock=lambda: clock[0])
     challenge = store.begin_pairing(OWNER)
@@ -369,6 +371,7 @@ def test_real_http_process_honors_out_of_process_revocation(tmp_path, response_k
     """
     pytest.importorskip("uvicorn")
     _seed(tmp_path)
+    bind_source(tmp_path)
     store = OwnerAccess.initialize(tmp_path)
     challenge = store.begin_pairing(OWNER)
     grant = store.confirm_pairing(challenge.token, expected_principal=OWNER)
@@ -493,3 +496,50 @@ server.run(sockets=[socket.socket(fileno=int(sys.argv[2]))])
     assert proc.returncode in {0, -signal.SIGTERM}, log.read_text()
     assert "Traceback" not in log.read_text()
     assert session.token not in log.read_text()
+
+
+@pytest.mark.parametrize("path", ["/api/tasks", "/api/channel", "/api/identities",
+    "/api/fleets", "/api/summary", "/api/grid", "/api/presence", "/api/overview",
+    "/api/inventory", "/api/equipment?alias=foreign", "/api/org", "/api/utilization",
+    "/api/search?q=foreign", "/api/trust", "/healthz", "/api/stream?once=1&cursor=0"])
+def test_foreign_source_is_generic_before_any_private_response(protected, tmp_path, path):
+    import sqlite3
+    from claudlobby.plane.db import db_file
+    _, client, *_ = protected
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        conn.execute("UPDATE work_items SET host_uid='foreign-host', title='foreign secret'")
+    response = client.get(path)
+    assert response.status_code == 403
+    assert response.json()["state"] == "denied"
+    assert "foreign" not in response.text and "plane.db" not in response.text
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_unbound_source_is_generic_unavailable_without_read_repair(protected, tmp_path):
+    import sqlite3
+    from claudlobby.plane.db import db_file
+    _, client, *_ = protected
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        conn.execute("DROP TABLE owner_source_binding")
+    response = client.get("/api/tasks")
+    assert response.status_code == 503
+    assert "plane.db" not in response.text
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='owner_source_binding'").fetchone()
+
+
+def test_held_stream_rechecks_source_snapshot_and_stops_without_foreign_details(protected, tmp_path):
+    import sqlite3
+    from claudlobby.plane.db import db_file
+    app, *_ = protected
+
+    async def on_body(body):
+        if b"retry:" in body:
+            with sqlite3.connect(db_file(tmp_path)) as conn:
+                conn.execute("UPDATE work_items SET host_uid='foreign-host', title='foreign secret'")
+
+    messages = asyncio.run(_drive(app, "/api/stream", on_body, query=b"cursor=0"))
+    assert messages[0]["status"] == 200
+    assert messages[-1] == {"type": "http.response.body", "body": b"", "more_body": False}
+    assert b"data:" not in b"".join(m.get("body", b"") for m in messages)
+    assert b"foreign" not in b"".join(m.get("body", b"") for m in messages)

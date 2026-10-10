@@ -83,3 +83,16 @@ def test_initialize_pair_revoke_through_actual_cli_terminal(tmp_path):
     assert not store.current_grant().active
     with pytest.raises(AccessDenied):
         store.authorize_read(session.token, principal, host_uid=session.grant.host_uid)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="owner local console requires a POSIX terminal")
+def test_attest_existing_source_through_actual_cli_terminal(tmp_path):
+    from claudlobby.plane.owner_source import inspect_source
+    from tests.test_plane_two_fleets import _seed
+
+    _seed(tmp_path)
+    OwnerAccess.initialize(tmp_path)
+    code, output = _command(tmp_path, "bind-source", [("Type BIND", "BIND")])
+    assert code == 0, output
+    assert "including imported records" in output
+    inspect_source(tmp_path)

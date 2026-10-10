@@ -24,6 +24,19 @@ class _ReadStopped(Exception):
     """Unwind the response producer after access ends, including held streams."""
 
 
+def _source_refusal(exc: BaseException) -> Exception | None:
+    if isinstance(exc, (AccessDenied, AccessUnavailable)):
+        return exc
+    children = getattr(exc, "exceptions", ())
+    if children:
+        failures = [_source_refusal(child) for child in children]
+        if all(failures):
+            return next((f for f in failures if isinstance(f, AccessUnavailable)), failures[0])
+    # Starlette wraps a handled stream error once headers were sent.
+    cause = getattr(exc, "__cause__", None)
+    return _source_refusal(cause) if cause is not None else None
+
+
 def _is_read_stop(exc: BaseException) -> bool:
     # Older Starlette/AnyIO wraps exceptions from streaming task groups.
     if isinstance(exc, _ReadStopped):
@@ -130,8 +143,15 @@ class _OwnerReadGate:
         try:
             await self.app(inner_scope, receive, guarded_send)
         except Exception as exc:
-            if not _is_read_stop(exc):
+            if _is_read_stop(exc):
+                return
+            refusal = _source_refusal(exc)
+            if refusal is None:
                 raise
+            if not started:
+                await _refusal(refusal)(scope, receive, send)
+            elif event_stream:
+                await send({"type": "http.response.body", "body": b"", "more_body": False})
 
 
 def create_owner_app(root: Path, *, verify_reader: ReaderVerifier,
@@ -147,5 +167,24 @@ def create_owner_app(root: Path, *, verify_reader: ReaderVerifier,
     from .view import create_app
 
     paths = resolve_paths(root=root, package=package)
-    view = create_app(paths.root, sampler=sampler, package=paths.package)
+    from .owner_source import admit_source
+
+    def admit_connection(conn):
+        try:
+            host_uid = read_host_uid(paths.root / "state")
+        except (ValueError, OSError) as exc:
+            raise AccessUnavailable("owner source unavailable") from exc
+        admit_source(conn, host_uid)
+
+    view = create_app(paths.root, sampler=sampler, package=paths.package,
+                      admit_connection=admit_connection)
+
+    # Prevent FastAPI's default error middleware from emitting a 500 body
+    # before the outer gate receives an admission exception. All ordinary
+    # refusals use the gate's generic response; stream failures unwind there.
+    async def source_refused(request, exc):
+        return _refusal(exc)
+
+    view.add_exception_handler(AccessDenied, source_refused)
+    view.add_exception_handler(AccessUnavailable, source_refused)
     return _OwnerReadGate(view, paths.root, verify_reader)

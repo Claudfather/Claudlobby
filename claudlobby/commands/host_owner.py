@@ -72,16 +72,39 @@ def dispatch(args):
     if args.root is None or args.fleet or args.seed:
         raise CommandFailure("invalid_argument", "owner commands require explicit --root and no fleet or seed")
     if args.owner_action != "status" and args.json:
-        raise CommandFailure("invalid_argument", "owner changes are interactive; --json is supported for status only")
+        raise CommandFailure("invalid_argument", "--json is supported for owner status only")
     try:
         paths = resolve_paths(root=args.root)
         store = OwnerAccess(paths.root)
+        if args.owner_action == "serve":
+            from ..plane.owner_server import serve
+
+            try:
+                serve(paths.root, origin=args.origin, tailscale_binary=args.tailscale,
+                      socket_path=args.socket or paths.root / "state/plane/owner.sock",
+                      package=paths.package)
+            except ImportError as exc:
+                raise CommandFailure("unavailable", "owner serving requires the optional [plane-ui] dependencies") from exc
+            except OSError as exc:
+                raise CommandFailure("unavailable", "owner server could not open its configured private socket") from exc
+            return CommandOutput({"state": "stopped"}, lines=("Owner server stopped.",))
         if args.owner_action == "status":
             grant = store.current_grant()
             state = "unpaired" if grant is None else "paired" if grant.active else "revoked"
             return CommandOutput({"state": state, "owner": asdict(grant) if grant else None},
                                  lines=(f"Owner access: {state}.",))
         with _terminal() as terminal:
+            if args.owner_action == "bind-source":
+                from ..plane.owner_source import bind_source
+
+                store.current_grant()  # require initialized local authority
+                host_uid = read_host_uid(paths.root / "state")
+                terminal.write("Bind the existing Plane database to host " + json.dumps(host_uid) + ".\n"
+                               "Confirm that all its history, including imported records, belongs to this installation.\n"
+                               "This writes ownership metadata and indexes; it does not copy, migrate or remove records.\n")
+                _approve(terminal, "BIND")
+                bind_source(paths.root, expected_host_uid=host_uid)
+                return CommandOutput({"state": "bound"}, lines=("Plane source bound to this installation.",))
             if args.owner_action == "initialize":
                 host_uid = read_host_uid(paths.root / "state")
                 terminal.write("Prepare owner access for host " + json.dumps(host_uid) + ".\n"

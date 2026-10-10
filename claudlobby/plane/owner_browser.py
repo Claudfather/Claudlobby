@@ -1,4 +1,4 @@
-"""Internal direct-host browser session transport; no runtime entry point.
+"""Direct-host browser session transport with an explicit trusted verifier.
 
 Requires a trusted identity verifier and configured external HTTPS origin.
 Neither this factory nor its cookies authenticate Tailscale identity. The

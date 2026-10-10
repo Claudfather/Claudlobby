@@ -238,7 +238,7 @@ def _provenance(root: Path, conn: sqlite3.Connection | None) -> dict:
     return prov
 
 
-def _envelope(root: Path, fn):
+def _envelope(root: Path, fn, *, admit_connection=None):
     """Run `fn(conn)` -> data under the panel-state contract. Classification
     of the pre-connect shape comes from source_state.probe_source — the
     decided-once rule — then sqlite/OS errors classify UNREADABLE. EMPTY
@@ -252,6 +252,9 @@ def _envelope(root: Path, fn):
                 "remediation": remediation}
 
     probe = probe_source(db)
+    if admit_connection is not None and probe.state != SOURCE_OK:
+        from .owner_access import AccessUnavailable
+        raise AccessUnavailable("owner source unavailable")
     if probe.state == SOURCE_ABSENT:
         return fail(SOURCE_ABSENT,
                     "no plane db yet — it appears on the first armed emission"
@@ -263,10 +266,17 @@ def _envelope(root: Path, fn):
                     " `claudlobby plane doctor`")
     try:
         conn = _ro_conn(db)
-    except sqlite3.Error as exc:
+    except (sqlite3.Error, OSError) as exc:
+        if admit_connection is not None:
+            from .owner_access import AccessUnavailable
+            raise AccessUnavailable("owner source unavailable") from exc
         return fail(SOURCE_UNREADABLE,
                     f"db cannot be opened: {exc} — `claudlobby plane doctor`")
     try:
+        # Admission, query and provenance share one explicit read snapshot.
+        if admit_connection is not None:
+            conn.execute("BEGIN")
+            admit_connection(conn)
         data = fn(conn)
         return {"state": SOURCE_OK, "provenance": _provenance(root, conn),
                 "data": data}
@@ -274,6 +284,9 @@ def _envelope(root: Path, fn):
         return {"state": "unknown", "provenance": _provenance(root, conn),
                 "remediation": str(exc)}
     except (sqlite3.Error, OSError, TaskStateError) as exc:
+        if admit_connection is not None:
+            from .owner_access import AccessUnavailable
+            raise AccessUnavailable("owner source unavailable") from exc
         return fail(SOURCE_UNREADABLE,
                     f"query failed: {exc} — schema drift? run"
                     " `claudlobby plane doctor`")
@@ -1475,6 +1488,7 @@ async def _idle_tick(app, seconds: float) -> bool:
 def create_app(
     root: Path, sampler: PaneSampler | None = None, *,
     package: PackageResources | None = None,
+    admit_connection=None,
 ):
     if FastAPI is None:  # pragma: no cover
         raise RuntimeError(
@@ -1508,33 +1522,36 @@ def create_app(
                   openapi_url=None, lifespan=_lifespan)
     started_at = _now_iso()
 
+    def envelope(root, fn):
+        return _envelope(root, fn, admit_connection=admit_connection)
+
     @app.get("/api/summary")
     def summary():
-        return JSONResponse(_envelope(root, lambda c: _fetch_summary(c, root)))
+        return JSONResponse(envelope(root, lambda c: _fetch_summary(c, root)))
 
     @app.get("/api/channel")
     def channel(limit: int = 120, fleet: str | None = None):
         limit = max(1, min(int(limit), _CHANNEL_LIMIT_MAX))
         names = _channel_names(root)
         return JSONResponse(
-            _envelope(root,
+            envelope(root,
                       lambda c: _fetch_channel(c, names, limit, fleet)))
 
     @app.get("/api/tasks")
     def tasks(fleet: str | None = None):
-        return JSONResponse(_envelope(root, lambda c: _fetch_tasks(c, fleet)))
+        return JSONResponse(envelope(root, lambda c: _fetch_tasks(c, fleet)))
 
     @app.get("/api/identities")
     def identities(fleet: str | None = None):
         return JSONResponse(
-            _envelope(root, lambda c: _fetch_identities(c, fleet)))
+            envelope(root, lambda c: _fetch_identities(c, fleet)))
 
     @app.get("/api/fleets")
     def fleets():
         """The fleet dimension (U1): every fleet the host records, with the
         tab a first visit should open. Read from the registry's fleet
         identities, never the rail's bounded window."""
-        return JSONResponse(_envelope(root, _fetch_fleets))
+        return JSONResponse(envelope(root, _fetch_fleets))
 
     @app.get("/api/grid")
     def grid(focus: str | None = None, fleet: str | None = None):
@@ -1543,6 +1560,8 @@ def create_app(
         raises that pane's cadence/height for a short TTL — view-internal
         lens state, touching neither fleet nor db; the read-only ruling is
         about the FLEET, and this endpoint stays observational."""
+        if admit_connection is not None:
+            envelope(root, lambda c: None)
         if not sampler.available:
             return JSONResponse({
                 "state": "unavailable",
@@ -1553,7 +1572,7 @@ def create_app(
             })
         fleet = fleet if fleet != "all" else None
         if fleet:
-            probe = _envelope(root, lambda c: _fleet_scope(c, fleet))
+            probe = envelope(root, lambda c: _fleet_scope(c, fleet))
             if probe.get("state") == "unknown" and fleet not in {
                     p.get("fleet") for p in sampler.snapshot().get("panes", [])}:
                 return JSONResponse(probe)
@@ -1600,11 +1619,11 @@ def create_app(
         live, sampler_degraded = _live_panes(sampler)
         fleet = fleet if fleet != "all" else None
         if fleet:
-            probe = _envelope(root, lambda c: _fleet_scope(c, fleet))
+            probe = envelope(root, lambda c: _fleet_scope(c, fleet))
             if probe.get("state") == "unknown" and fleet not in {
                     p.get("fleet") for p in live}:
                 return JSONResponse(probe)
-        env = _envelope(root, _heartbeat_rows)
+        env = envelope(root, _heartbeat_rows)
         recorded = env["data"] if env["state"] == SOURCE_OK else []
         if fleet:
             # the tab's verdicts and counts (U1) — both halves scoped to
@@ -1642,7 +1661,7 @@ def create_app(
         live, degraded = _live_panes(sampler)
         live_poll = ("unavailable" if not sampler.available
                      else "degraded" if degraded else "ok")
-        return JSONResponse(_envelope(
+        return JSONResponse(envelope(
             root, lambda c: _fetch_overview(c, paths, live, live_poll)))
 
     @app.get("/api/inventory")
@@ -1654,7 +1673,7 @@ def create_app(
         this host records."""
         from .inventory import fleet_inventory
         return JSONResponse(
-            _envelope(root, lambda c: fleet_inventory(c, _fleet_scope(c, fleet))))
+            envelope(root, lambda c: fleet_inventory(c, _fleet_scope(c, fleet))))
 
     @app.get("/api/equipment")
     def equipment(alias: str):
@@ -1663,7 +1682,7 @@ def create_app(
         absent ≠ empty, never a bare {} the UI would render as a blank
         card."""
         from .inventory import bot_equipment
-        env = _envelope(root, lambda c: bot_equipment(c, alias))
+        env = envelope(root, lambda c: bot_equipment(c, alias))
         if env.get("state") == SOURCE_OK and env.get("data") is None:
             return JSONResponse({
                 "state": "idle",
@@ -1681,7 +1700,7 @@ def create_app(
         """The reporting tree from the fleet keyframe (Phase 6): a pure
         read; no fleet keyframe yet is a typed idle state, never {}."""
         from .orgchart import org_tree
-        env = _envelope(root, lambda c: org_tree(c, _fleet_scope(c, fleet)))
+        env = envelope(root, lambda c: org_tree(c, _fleet_scope(c, fleet)))
         if env.get("state") == SOURCE_OK and env.get("data") is None:
             return JSONResponse({"state": "idle", "provenance": env.get("provenance", {}),
                                  "remediation": "no fleet keyframe yet — stage a config "
@@ -1694,19 +1713,19 @@ def create_app(
         """Busy/idle % per bot from the recorded heartbeat samples (Phase 6),
         the legacy rollup's math over the plane's series — one definition."""
         from .utilization import bot_utilization
-        return JSONResponse(_envelope(
+        return JSONResponse(envelope(
             root, lambda c: bot_utilization(c, fleet=_fleet_scope(c, fleet))))
 
     @app.get("/api/search")
     def search(q: str = "", fleet: str | None = None, limit: int = 50):
         limit = max(1, min(int(limit), 200))
         return JSONResponse(
-            _envelope(root, lambda c: _fetch_search(c, q, fleet, limit)))
+            envelope(root, lambda c: _fetch_search(c, q, fleet, limit)))
 
     @app.get("/api/trust")
     def trust():
         return JSONResponse(
-            _envelope(root, lambda c: _fetch_trust(c, root)))
+            envelope(root, lambda c: _fetch_trust(c, root)))
 
     @app.get("/healthz")
     def healthz():
@@ -1728,7 +1747,7 @@ def create_app(
             data.update(_fetch_summary(conn, root))
             return data
 
-        env = _envelope(root, probe)
+        env = envelope(root, probe)
         return JSONResponse(env, status_code=200 if env["state"] == SOURCE_OK
                             else 503)
 
@@ -1749,12 +1768,14 @@ def create_app(
         last_event_id = request.headers.get("last-event-id")
 
         async def gen():
+            if admit_connection is not None:
+                envelope(root, lambda c: None)
             if last_event_id and last_event_id.isdigit():
                 last = int(last_event_id)
             elif cursor is not None:
                 last = int(cursor)
             else:
-                head = _envelope(root, lambda c: c.execute(
+                head = envelope(root, lambda c: c.execute(
                     "SELECT ingest_seq FROM ingest_ledger"
                     " ORDER BY ingest_seq DESC LIMIT 1").fetchone())
                 last = (head.get("data") or {"ingest_seq": 0})["ingest_seq"] \
@@ -1768,7 +1789,7 @@ def create_app(
             while True:
                 if await request.is_disconnected() or _stopping(request.app):
                     return
-                env = _envelope(root, lambda c: [
+                env = envelope(root, lambda c: [
                     dict(r) for r in c.execute(
                         "SELECT ingest_seq, family, ingested_at"
                         " FROM ingest_ledger WHERE ingest_seq > ?"

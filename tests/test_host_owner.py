@@ -61,7 +61,7 @@ def test_status_reports_pairing_then_revocation_without_secret(owner, capsys):
     assert json.loads(capsys.readouterr().out)["data"]["state"] == "revoked"
 
 
-@pytest.mark.parametrize("action", ["initialize", "confirm", "revoke"])
+@pytest.mark.parametrize("action", ["initialize", "confirm", "revoke", "bind-source"])
 def test_changes_require_terminal_and_reject_json(owner, monkeypatch, action):
     monkeypatch.setattr(host_owner.sys.stdin, "isatty", lambda: False)
     assert call(owner, action) == 4
