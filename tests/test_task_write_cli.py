@@ -520,3 +520,49 @@ def test_feedback_cli_invalid_input_has_no_recording(active, monkeypatch, capsys
         '--expected-assignment', '' if change == 'selection' else 'none',
         '--text', 'x' * 16385 if change == 'body' else 'Comment', '--request-id', str(uuid4()), expected=2)
     assert result['error']['code'] == 'invalid_argument' and _counts(root) == before
+
+
+@pytest.mark.parametrize('carrier', ['fleet-name', 'fleet-selector', 'timer', 'empty-timer', 'service'])
+def test_feedback_cli_refuses_generated_carrier_with_existing_human(active, monkeypatch, capsys, carrier):
+    from tests.test_plane_owner_feedback import receiver
+    from claudlobby.active_config import resolve_active_context
+
+    root, _ = active
+    monkeypatch.setattr(operation_context, '_local_operator_alias', lambda: 'human:reviewer')
+    task_id = _call(capsys, root, 'task', 'admit', '--title', 'Existing human selected task',
+                    '--request-id', str(uuid4()))['data']['task_id']
+    selected = resolve_active_context(root=root, fleet='example', package=context.get_resources())
+    calls, repairs = receiver(monkeypatch)
+    if carrier in {'fleet-name', 'fleet-selector'}:
+        monkeypatch.setenv('CLAUDLOBBY_ROOT', str(root))
+        monkeypatch.setenv('FLEET_ROOT', str(selected.paths.fleet_config_dir))
+        monkeypatch.setenv('FLEET_NAME' if carrier == 'fleet-name' else 'CLAUDLOBBY_FLEET', 'example')
+    elif carrier in {'timer', 'empty-timer'}:
+        monkeypatch.setenv('CLAUDLOBBY_TIMER_CONTEXT', 'fleet' if carrier == 'timer' else '')
+    else:
+        monkeypatch.setenv('BOT_SERVICE', 'fixture-worker')
+    before = _counts(root)
+    result = _call(capsys, root, 'task', 'feedback', task_id, '--actor', 'human:reviewer',
+                   '--expected-assignment', 'none', '--text', 'A timer must not impersonate this human',
+                   '--request-id', str(uuid4()), expected=4)
+    assert result['error']['code'] == 'conflict'
+    assert result['error']['message'] == 'task feedback requires an explicit local human caller'
+    assert _counts(root) == before and calls == repairs == []
+
+
+@pytest.mark.parametrize('selector', ['FLEET_NAME', 'CLAUDLOBBY_FLEET'])
+def test_feedback_cli_allows_manual_root_and_fleet_selectors(active, monkeypatch, capsys, selector):
+    from tests.test_plane_owner_feedback import receiver
+
+    root, _ = active
+    monkeypatch.setattr(operation_context, '_local_operator_alias', lambda: 'human:reviewer')
+    task_id = _call(capsys, root, 'task', 'admit', '--title', 'Manual human selected task',
+                    '--request-id', str(uuid4()))['data']['task_id']
+    monkeypatch.setenv('CLAUDLOBBY_ROOT', str(root))
+    monkeypatch.setenv(selector, 'example')
+    calls, repairs = receiver(monkeypatch)
+    result = _call(capsys, root, 'task', 'feedback', task_id, '--actor', 'human:reviewer',
+                   '--expected-assignment', 'none', '--text', 'Explicit local operator comment',
+                   '--request-id', str(uuid4()))
+    assert result['data']['recording'] == 'committed' and result['data']['notification'] == 'received'
+    assert len(calls) == 1 and repairs == []

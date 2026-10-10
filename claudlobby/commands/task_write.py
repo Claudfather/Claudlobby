@@ -399,7 +399,10 @@ def dispatch(args) -> CommandOutput:
             raise CommandFailure("conflict", "seed configuration has no task mutations")
         values = _inputs(args)
         selected, origin = resolve_operation_scope(root=args.root, fleet=args.fleet)
-        if args.public_command == "task.feedback" and origin is not None:
+        if args.public_command == "task.feedback" and (origin is not None or any(
+                key in os.environ for key in ("FLEET_ROOT", "CLAUDLOBBY_TIMER_CONTEXT", "BOT_SERVICE"))):
+            # Fleet timers deliberately have no bot origin; their generated
+            # carrier still cannot borrow an explicitly named human identity.
             raise CommandFailure("conflict", "task feedback requires an explicit local human caller")
         fleet_name = selected.fleet.name
         if selected.paths.seed:
