@@ -1,8 +1,6 @@
 """Fixed owner HTTP action dispatch; no identity creation or retries."""
 from __future__ import annotations
 
-from .owner_action_authorization import action_authorization, scope_inputs
-
 from datetime import datetime
 import hashlib
 import json
@@ -16,7 +14,8 @@ from ..operation_context import (bind_task_context, OperationContextError,
                                  OperationContextUnavailableError)
 from ..message_payload import MessageBody
 from ..request_receipts import ReceiptConflict, semantic_digest
-from .owner_access import AccessDenied, AccessUnavailable, OwnerAccess, VerifiedReader
+from .owner_action_authorization import action_authorization, scope_binding, scope_inputs
+from .owner_access import AccessDenied, AccessUnavailable, VerifiedReader
 from .owner_messages import OwnerMessages
 from .owner_source import inspect_source
 
@@ -92,10 +91,11 @@ class OwnerActions:
         recipients = [{"id": actor.uid, "label": name} for name, actor in sorted(ctx.bots.items())]
         if not 1 <= len(recipients) <= 100:
             raise AccessUnavailable("owner actions unavailable")
-        scope = {"workspace": _opaque(scope_inputs([str(self.root), host], access, reader, host)), "host": host,
+        binding = scope_binding(access, reader, host)
+        scope = {"workspace": _opaque(scope_inputs([str(self.root), host], binding)), "host": host,
             "fleet": room, "viewer": _opaque(scope_inputs([grant.fleet_uid, reader.principal.namespace,
                 reader.principal.subject, grant.owner.revision, grant.generation,
-                grant.actor_uid, grant.actor_alias], access, reader, host))}
+                grant.actor_uid, grant.actor_alias], binding))}
         return {"version": 1, "room": room, "scope": scope, "simulation": False,
                 "recipients": recipients, "actions": ["message"]}, grant
 

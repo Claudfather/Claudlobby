@@ -61,8 +61,13 @@ def action_authorization(root, authorization=None):
     return authorization
 
 
-def scope_inputs(values, authorization, reader, host_uid):
-    # Direct contexts retain their exact pre-existing hashes and wire shape.
+def scope_binding(authorization, reader, host_uid):
+    """One fresh binding snapshot for both hashes in this context."""
     if type(authorization) is ConnectedActionAuthorization:
-        return [*values, authorization.scope_binding(reader, host_uid)]
-    return values
+        return authorization.scope_binding(reader, host_uid)
+    return None
+
+
+def scope_inputs(values, binding):
+    # Direct contexts retain their exact pre-existing hashes and wire shape.
+    return [*values, binding] if binding is not None else values

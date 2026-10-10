@@ -1,14 +1,12 @@
 """Fixed carrier/grant conjunction over synthetic local workspace evidence."""
-from contextlib import contextmanager
-from dataclasses import replace
 import sqlite3
 
 import pytest
 
 from claudlobby.plane.owner_access import AccessDenied, VerifiedReader
-from claudlobby.plane.owner_action_authorization import ConnectedActionAuthorization, action_authorization, scope_inputs
+from claudlobby.plane.owner_action_authorization import ConnectedActionAuthorization, action_authorization, scope_binding, scope_inputs
 from tests.test_plane_owner_connected import connected, evidence  # noqa: F401
-from tests.test_plane_owner_workspace import local, OWNER, OTHER, ORIGIN, ISSUER  # noqa: F401
+from tests.test_plane_owner_workspace import local, OWNER, ORIGIN, ISSUER  # noqa: F401
 
 FLEET = "fleet_" + "a" * 32
 ACTOR = "actor_" + "b" * 32
@@ -56,10 +54,10 @@ def test_carrier_purpose_and_full_binding_scope_are_pinned(connected):
     direct=access.open_session(OWNER)
     with pytest.raises(AccessDenied):policy.authorize_read(direct.token,OWNER,host_uid=binding.owner.host_uid)
     with pytest.raises(AccessDenied):access.authorize_read(token,OWNER,host_uid=binding.owner.host_uid)
-    first=scope_inputs(["example"],policy,reader,binding.owner.host_uid)
+    first=scope_inputs(["example"],scope_binding(policy,reader,binding.owner.host_uid))
     renewed=store.renew(token,OWNER,host_uid=binding.owner.host_uid,operational_origin=ORIGIN)
-    assert scope_inputs(["example"],policy,VerifiedReader(OWNER,renewed.token),binding.owner.host_uid)==first
-    assert scope_inputs(["example"],access,reader,binding.owner.host_uid)==["example"]
+    assert scope_inputs(["example"],scope_binding(policy,VerifiedReader(OWNER,renewed.token),binding.owner.host_uid))==first
+    assert scope_inputs(["example"],scope_binding(access,reader,binding.owner.host_uid))==["example"]
     with pytest.raises(ValueError):action_authorization(access.root,lambda:True)
     with pytest.raises(ValueError):action_authorization(access.root.parent,policy)
     for wrong in [ConnectedActionAuthorization(access,"https://wrong.example.test",ORIGIN),ConnectedActionAuthorization(access,ISSUER,"https://wrong.example.test")]:

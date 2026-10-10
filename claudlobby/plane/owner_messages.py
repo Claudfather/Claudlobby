@@ -8,8 +8,6 @@ to bots in one exact fleet are supported; no reply, task mutation or retry API.
 
 from __future__ import annotations
 
-from .owner_action_authorization import action_authorization
-
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -27,7 +25,8 @@ from ..request_queries import RequestView, read_request
 from ..resources import PackageResources
 from ..runtime_admission import RuntimeIdentity, mutation_admission
 from .ids import read_host_uid
-from .owner_access import AccessDenied, OwnerAccess, OwnerMessageGrant, VerifiedReader
+from .owner_action_authorization import action_authorization
+from .owner_access import AccessDenied, OwnerMessageGrant, VerifiedReader
 
 
 # These selectors can turn an otherwise explicit operation into a generated

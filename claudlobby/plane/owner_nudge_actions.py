@@ -1,8 +1,6 @@
 """Version-2 nudge HTTP semantics; authority and effects stay with OwnerNudges."""
 from __future__ import annotations
 
-from .owner_action_authorization import action_authorization, scope_inputs
-
 from contextlib import closing
 from pathlib import Path
 
@@ -15,7 +13,8 @@ from ..task_operations import nudge_semantic_digest
 from ..task_queries import show_task, TaskQueryError
 from ..task_state import TaskStateError
 from .db import connect_ro, db_file
-from .owner_access import AccessDenied, AccessUnavailable, OwnerAccess
+from .owner_action_authorization import action_authorization, scope_binding, scope_inputs
+from .owner_access import AccessDenied, AccessUnavailable
 from .owner_actions import ActionNotStarted, _exact, _opaque, _text
 from .owner_nudges import OwnerNudges
 from .owner_task_action_protocol import metadata
@@ -51,10 +50,11 @@ class OwnerNudgeActions:
                 or route.peer_fleet_uid != ctx.fleet_uid or route.caller != ctx.caller
                 or route.peer != manager or route.manager != manager):
             raise AccessDenied("nudge_binding_changed")
-        scope = {"workspace": _opaque(scope_inputs([str(self.root), host], access, reader, host)), "host": host, "fleet": room,
+        binding = scope_binding(access, reader, host)
+        scope = {"workspace": _opaque(scope_inputs([str(self.root), host], binding)), "host": host, "fleet": room,
             "viewer": _opaque(scope_inputs(["task.nudge", grant.fleet_uid, reader.principal.namespace,
                 reader.principal.subject, grant.owner.revision, grant.generation,
-                grant.actor_uid, grant.actor_alias], access, reader, host))}
+                grant.actor_uid, grant.actor_alias], binding))}
         return {"version": 2, "room": room, "scope": scope, "simulation": False,
             "recipients": [{"id": manager.uid, "label": manager_name, "lead": True}],
             "actions": ["nudge"], "release_id": route.release_id}, grant

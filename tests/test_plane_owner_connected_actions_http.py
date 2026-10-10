@@ -1,10 +1,8 @@
 """Real action engines over synthetic native principal/binding/receiver fixtures."""
 import asyncio
-from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
 import json
-import sqlite3
 import time
 from uuid import uuid4
 
@@ -14,7 +12,6 @@ from fastapi.testclient import TestClient
 from claudlobby import message_operations
 from claudlobby.message_transport import TransportOutcome
 from claudlobby.plane.emit_api import emit_batch
-from claudlobby.plane.owner_access import AccessDenied
 from claudlobby.plane.owner_browser import create_owner_browser_app
 from claudlobby.plane.owner_workspace_http import WorkspaceBootstrapConfig
 from claudlobby.plane.workspace_assertion import WorkspaceAttestation
@@ -199,3 +196,48 @@ def test_started_send_timeout_unknown_then_pure_receipt(connected_actions,monkey
             assert receipt.json()["status"]=="delivered" and len(calls)==1
     try:asyncio.run(run())
     finally:release.set()
+
+
+@pytest.mark.parametrize("kind", ["message", "nudge", "feedback"])
+def test_context_uses_one_binding_snapshot_for_both_hashes(connected_actions, monkeypatch, kind):
+    from claudlobby.plane.owner_access import VerifiedReader
+    from claudlobby.plane.owner_action_authorization import ConnectedActionAuthorization
+    f = connected_actions
+    allow(f, kind)
+    observed = []
+    original = ConnectedActionAuthorization.scope_binding
+    def binding_once(policy, reader, host):
+        binding = original(policy, reader, host)
+        observed.append(binding)
+        return binding
+    monkeypatch.setattr(ConnectedActionAuthorization, "scope_binding", binding_once)
+    actions = f[0].connected_actions.actions
+    engine = actions if kind == "message" else getattr(actions, "nudges" if kind == "nudge" else "feedback")
+    result, grant = engine._context(VerifiedReader(OWNER, f[8]), "example")
+    assert len(observed) == 1
+    base = [grant.fleet_uid, OWNER.namespace, OWNER.subject, grant.owner.revision,
+            grant.generation, grant.actor_uid, grant.actor_alias]
+    if kind != "message":
+        base.insert(0, "task." + kind)
+    def digest(value):
+        return hashlib.sha256(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+    assert result["scope"]["workspace"] == digest([str(f[2].root), grant.owner.host_uid, observed[0]])
+    assert result["scope"]["viewer"] == digest([*base, observed[0]])
+
+
+@pytest.mark.parametrize("timed_out", [False, True])
+def test_failed_preflight_never_reports_submission_effect(connected_actions, monkeypatch, timed_out):
+    f = connected_actions
+    handler = f[0].connected_actions
+    headers = {"Origin": ORIGIN, "Access-Control-Request-Method": "POST",
+               "Access-Control-Request-Headers": "Authorization, Content-Type, X-Claudlobby-Owner"}
+    if timed_out:
+        async def held_principal(scope):
+            await asyncio.sleep(10)
+        monkeypatch.setattr(handler, "verify_principal", held_principal)
+        monkeypatch.setattr(handler, "response_seconds", lambda scope: .02)
+    else:
+        headers["Access-Control-Request-Headers"] = "Content-Type"
+    response = f[1].options(PREFIX + "send", headers=headers)
+    assert response.status_code == (503 if timed_out else 403)
+    assert response.json() == {"state": "unavailable" if timed_out else "denied"}

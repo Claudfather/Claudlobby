@@ -85,7 +85,7 @@ class ConnectedActionsHTTP(WorkspaceBootstrapHTTP):
             # Cancellation is owned by this job's timer/shutdown. _blocking has
             # drained any started thread first; no claim that its effect stopped.
             body, status = {"state": "unavailable"}, 503
-        if operation == "send" and status in (403, 503) and not progress[0]:
+        if operation == "send" and scope["method"] == "POST" and status in (403, 503) and not progress[0]:
             body["effect"] = "not_started"
         if status == 204:
             await Response(status_code=204, headers={**headers,
@@ -152,7 +152,7 @@ class ConnectedActionsHTTP(WorkspaceBootstrapHTTP):
                 active = False
                 if not emitted:
                     body = {"state": "unavailable"}
-                    if operation == "send" and not progress[0]:
+                    if operation == "send" and scope["method"] == "POST" and not progress[0]:
                         body["effect"] = "not_started"
                     await JSONResponse(body, 503, headers=headers)(scope, receive, send)
         finally:

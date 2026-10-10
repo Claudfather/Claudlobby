@@ -1,15 +1,16 @@
 """Purpose-separated connected reads, sharing the canonical owner transaction.
 
 Only trusted callers supply fresh native principals and verified session
-attestations. These objects are not proofs by construction. No action grants,
-cookie sessions, network or automatic schema initialization live here.
+attestations. These objects are not proofs by construction. Action admission
+requires existing explicit local grants; no grants, cookie sessions, network
+or automatic schema initialization are created here.
 """
 from dataclasses import asdict, dataclass, field
 import json
 import math
 import secrets
 
-from .owner_access import AccessDenied, AccessUnavailable, OwnerGrant, SESSION_SECONDS, MAX_SESSIONS, MAX_PENDING, _digest
+from .owner_access import AccessDenied, AccessUnavailable, OwnerGrant, SESSION_SECONDS, MAX_SESSIONS, MAX_PENDING, _canonical_uid, _digest
 from .owner_workspace import WorkspaceBinding
 from .session_assertion import ExpectedSessionAssertion, SessionAttestation
 from .workspace_assertion import _canonical_32_bytes
@@ -201,7 +202,6 @@ class OwnerConnected:
         Fixed kinds only. This never grants, registers, or issues a direct session.
         Grants remain native-principal/fleet specific, not workspace specific.
         """
-        from .owner_access import _canonical_uid
         if kind not in ("message", "nudge", "feedback"):
             raise AccessDenied("unsupported_owner_action")
         fleet_uid = _canonical_uid(fleet_uid, "fleet", action=kind)

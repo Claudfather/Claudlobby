@@ -8,8 +8,6 @@ already executing under admission. Inspection never records, retries or repairs.
 
 from __future__ import annotations
 
-from .owner_action_authorization import action_authorization
-
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -27,7 +25,8 @@ from ..request_queries import RequestView, read_request
 from ..resources import PackageResources
 from ..runtime_admission import RuntimeIdentity, mutation_admission
 from .ids import ID_PATTERNS, read_host_uid
-from .owner_access import AccessDenied, OwnerAccess, OwnerFeedbackGrant, VerifiedReader
+from .owner_action_authorization import action_authorization
+from .owner_access import AccessDenied, OwnerFeedbackGrant, VerifiedReader
 from .owner_messages import _GENERATED_ENV
 from .owner_source import admit_source, inspect_source
 
