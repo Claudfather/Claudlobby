@@ -74,9 +74,9 @@ function deliveryLine(msg, nudge = false) {
   if (nudge) {
     // A submitted prompt is not receiver proof, and says nothing about work.
     const delivered = msg.delivery === "delivered";
-    const failed = !delivered && latestTx(msg)?.event === "failed";
     const warning = msg.delivery === "altered" ? "The request arrived altered. "
       : msg.delivery === "truncated" ? "The request arrived short. " : "";
+    const failed = !delivered && !warning && latestTx(msg)?.event === "failed";
     return `<div class="delivery ${delivered ? "ok" : failed || warning ? "bad" : "pend"}">`
       + esc(delivered ? "The lead received this update request."
         : failed ? "The update request failed to reach the lead."

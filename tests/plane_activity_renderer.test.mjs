@@ -71,6 +71,12 @@ test('failed transmission remains a visible failure and receiver proof takes pre
   assert.match(visible(html(t)), /delivery bad.*failed to reach the lead/);
   t.messages[0].delivery = 'delivered';
   assert.match(visible(html(t)), /delivery ok.*The lead received/);
+  for (const [delivery, warning] of [['altered', 'arrived altered'], ['truncated', 'arrived short']]) {
+    t.messages[0].delivery = delivery;
+    const rendered = visible(html(t));
+    assert.match(rendered, new RegExp(`delivery bad.*${warning}.*Delivery to the lead is unconfirmed`));
+    assert.doesNotMatch(rendered, /failed to reach|The lead received/);
+  }
 });
 
 test('receipt-only refresh updates the card, then reuses it when evidence is unchanged', () => {
