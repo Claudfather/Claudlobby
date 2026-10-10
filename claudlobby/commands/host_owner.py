@@ -275,7 +275,8 @@ def dispatch(args):
             return CommandOutput({"state": "stopped"}, lines=("Owner server stopped.",))
         if args.owner_action == "workspace-status":
             state, binding = store.workspace().status()
-            return CommandOutput({"state": state, "binding": asdict(binding) if binding else None},
+            return CommandOutput({"state": state, "effective_active": state == "active",
+                                  "binding": asdict(binding) if binding else None},
                                  lines=(f"Local workspace binding: {state}. No connected session is issued.",))
         if args.owner_action == "status":
             status = store.local_action_status()
@@ -317,6 +318,10 @@ def dispatch(args):
                     if proposal.owner != owner:
                         raise CommandFailure("conflict", "owner changed; inspect and retry")
                     a = proposal.attestation
+                    terminal.write("Previous workspace binding: " + json.dumps({
+                        "state": proposal.previous_state,
+                        "binding": asdict(proposal.previous_binding) if proposal.previous_binding else None},
+                        ensure_ascii=True) + "\n")
                     terminal.write("Verified proposal metadata (compare with your intended workspace):\n")
                     terminal.write(json.dumps({"issuer": a.issuer, "app_user_id": a.subject,
                         "workspace_id": a.workspace_id, "operational_origin": a.operational_origin},
@@ -327,7 +332,7 @@ def dispatch(args):
                     binding = workspace.confirm(expected_proposal=proposal)
                     return CommandOutput({"state": "active", "binding": asdict(binding)},
                                          lines=("Local workspace bound. No connected session was issued.",))
-                state, binding = workspace.status()
+                _, binding = workspace.status()
                 if binding is None or not binding.active:
                     raise CommandFailure("conflict", "no retained active workspace binding to revoke")
                 terminal.write(json.dumps(asdict(binding), ensure_ascii=True) + "\n")
@@ -388,6 +393,13 @@ def dispatch(args):
         raise CommandFailure("unavailable", "Plane source cannot be verified; inspect the selected installation's "
             "database and schema locally. Pairing again cannot repair source state.") from exc
     except AccessDenied as exc:
+        if "workspace" in args.owner_action:
+            raise CommandFailure("conflict", "workspace request or binding is no longer valid; inspect host owner "
+                                 "workspace-status and obtain a fresh verified proposal if needed") from exc
         raise CommandFailure("conflict", "owner request is no longer valid; inspect status and request pairing again") from exc
     except (AccessUnavailable, ValueError) as exc:
+        if "workspace" in args.owner_action:
+            raise CommandFailure("unavailable", "local workspace authority is unavailable; inspect the selected root, "
+                                 "owner status and optional schema; use host owner initialize-workspace only "
+                                 "when the optional schema has not been initialized") from exc
         raise CommandFailure("unavailable", "owner authority is unavailable; verify the selected installation") from exc

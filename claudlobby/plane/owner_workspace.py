@@ -4,6 +4,8 @@ Only trusted callers may stage a WorkspaceAttestation returned by the pure
 verifier and a freshly verified native principal. Dataclass shape is not proof.
 No method here issues a browser credential or a fleet action grant.
 """
+from __future__ import annotations
+
 from dataclasses import asdict, dataclass, field
 import json
 import math
@@ -15,6 +17,8 @@ from .workspace_assertion import (ExpectedWorkspaceAssertion, WorkspaceAttestati
                                   _canonical_uuid, _origin)
 
 _NATIVE = "tailscale:controlplane.tailscale.com"
+_CHALLENGE_SECONDS = 300
+_ASSERTION_SECONDS = 120
 _SCHEMA = (
     "CREATE TABLE workspace_metadata(singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL)",
     "INSERT INTO workspace_metadata VALUES(1,1)",
@@ -36,10 +40,6 @@ class WorkspaceChallenge:
     operational_origin: str
     expires_at: float
 
-    def expected(self):
-        return ExpectedWorkspaceAssertion(self.issuer, self.owner.host_uid,
-                                          self.nonce, self.operational_origin)
-
 
 @dataclass(frozen=True)
 class WorkspaceProposal:
@@ -47,6 +47,9 @@ class WorkspaceProposal:
     owner: OwnerGrant
     attestation: WorkspaceAttestation = field(repr=False)
     expires_at: float
+    created_at: float
+    previous_state: str
+    previous_binding: WorkspaceBinding | None
 
 
 @dataclass(frozen=True)
@@ -107,7 +110,7 @@ class OwnerWorkspace:
                 or not _canonical_uuid(row["subject"]) or not _canonical_uuid(row["workspace_id"])
                 or not _origin(row["issuer"], False) or not _origin(row["operational_origin"], False)
                 or not isinstance(row["changed_at"], (int, float))
-                or not 0 <= row["changed_at"] <= self.access._now()):
+                or not math.isfinite(row["changed_at"]) or row["changed_at"] < 0):
             raise AccessUnavailable()
         owner_row = conn.execute("SELECT * FROM grants WHERE revision=?", (row["owner_revision"],)).fetchone()
         if owner_row is None or owner_row["active"] != 1:
@@ -119,14 +122,18 @@ class OwnerWorkspace:
                                 row["subject"], row["workspace_id"], row["operational_origin"],
                                 bool(row["active"]), row["changed_at"])
 
+    @staticmethod
+    def _state(binding, owner):
+        return ("absent" if binding is None else "revoked" if not binding.active else
+                "active" if owner == binding.owner else "stale-owner")
+
     def status(self):
         """Local retained metadata only; a stale owner never becomes active again."""
         with self.access._connection() as conn:
             self._schema(conn)
             binding = self._binding(conn)
             owner = self.access._grant(conn)
-            state = ("absent" if binding is None else "revoked" if not binding.active else
-                     "active" if owner == binding.owner else "stale-owner")
+            state = self._state(binding, owner)
             return state, binding
 
     def begin(self, principal: PrincipalRef, *, issuer: str, operational_origin: str):
@@ -146,8 +153,8 @@ class OwnerWorkspace:
             nonce = secrets.token_urlsafe(32)
             conn.execute("INSERT INTO workspace_challenges VALUES(?,?,?,?,?,?,?,?,?,NULL)",
                          (_digest(nonce), owner.revision, principal.namespace, principal.subject,
-                          now, now + 300, issuer, operational_origin, binding.revision if binding else 0))
-            return WorkspaceChallenge(nonce, owner, issuer, operational_origin, now + 300)
+                          now, now + _CHALLENGE_SECONDS, issuer, operational_origin, binding.revision if binding else 0))
+            return WorkspaceChallenge(nonce, owner, issuer, operational_origin, now + _CHALLENGE_SECONDS)
 
     def _challenge(self, conn, nonce, principal=None):
         self._schema(conn)
@@ -155,7 +162,7 @@ class OwnerWorkspace:
         now = self.access._now()
         if row is not None and (not all(isinstance(row[name], (int, float)) and math.isfinite(row[name])
                 for name in ("created_at", "expires_at"))
-                or not 0 <= row["created_at"] < row["expires_at"] <= row["created_at"] + 300
+                or not 0 <= row["created_at"] < row["expires_at"] <= row["created_at"] + _CHALLENGE_SECONDS
                 or type(row["owner_revision"]) is not int or row["owner_revision"] <= 0
                 or type(row["binding_revision"]) is not int or row["binding_revision"] < 0):
             raise AccessUnavailable()
@@ -184,7 +191,7 @@ class OwnerWorkspace:
                 or not all(_canonical_uuid(getattr(value, name)) for name in ("subject", "workspace_id", "jti"))
                 or type(value.issued_at) is not int or type(value.expires_at) is not int
                 or not 0 < value.issued_at < value.expires_at <= 2**53 - 1
-                or value.expires_at - value.issued_at > 120):
+                or value.expires_at - value.issued_at > _ASSERTION_SECONDS):
             raise AccessDenied("invalid_workspace_attestation")
         metadata = asdict(value)
         del metadata["nonce"]  # retain only its digest in the challenge key
@@ -204,8 +211,10 @@ class OwnerWorkspace:
                 raise AccessDenied("workspace_proposal_changed")
             conn.execute("UPDATE workspace_challenges SET proposal=?,expires_at=? WHERE digest=?",
                          (proposal, min(row["expires_at"], attestation.expires_at), _digest(attestation.nonce)))
+            binding = self._binding(conn)
             return WorkspaceProposal(attestation.nonce, owner, attestation,
-                                     min(row["expires_at"], attestation.expires_at))
+                                     min(row["expires_at"], attestation.expires_at),
+                                     row["created_at"], self._state(binding, owner), binding)
 
     def _proposal(self, conn, nonce):
         row, owner = self._challenge(conn, nonce)
@@ -216,12 +225,14 @@ class OwnerWorkspace:
             encoded = self._attestation(value)
         except (TypeError, ValueError, AccessDenied):
             raise AccessUnavailable() from None
-        if (encoded != row["proposal"] or value.nonce != nonce or value.host_uid != owner.host_uid
+        if (encoded != row["proposal"] or value.host_uid != owner.host_uid
                 or value.issuer != row["issuer"] or value.operational_origin != row["operational_origin"]
                 or not int(row["created_at"]) <= value.issued_at <= self.access._now() < value.expires_at
                 or row["expires_at"] > value.expires_at):
             raise AccessUnavailable()
-        return WorkspaceProposal(nonce, owner, value, row["expires_at"])
+        binding = self._binding(conn)
+        return WorkspaceProposal(nonce, owner, value, row["expires_at"], row["created_at"],
+                                 self._state(binding, owner), binding)
 
     def inspect(self, nonce):
         with self.access._connection() as conn:
@@ -235,11 +246,13 @@ class OwnerWorkspace:
             proposal = self._proposal(conn, expected_proposal.nonce)
             if proposal != expected_proposal:
                 raise AccessDenied("workspace_proposal_changed")
-            previous = self._binding(conn)
+            previous = proposal.previous_binding
             a = proposal.attestation
             revision = previous.revision + 1 if previous else 1
             generation = str(uuid4())
             now = self.access._now()
+            if not proposal.created_at <= now < proposal.expires_at:
+                raise AccessDenied("workspace_request_expired")
             conn.execute("INSERT INTO workspace_bindings VALUES(?,?,?,?,?,?,?,1,?)",
                          (revision, proposal.owner.revision, generation, a.issuer, a.subject,
                           a.workspace_id, a.operational_origin, now))
