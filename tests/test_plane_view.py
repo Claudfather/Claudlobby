@@ -705,7 +705,11 @@ def test_connected_workspace_entry_has_complete_versioned_static_graph(tmp_path)
     assert head.headers["content-length"] == api.headers["content-length"]
     assert head.headers["cache-control"] == "no-store"
     workspace = client.get("/connected-workspace.js")
-    assert workspace.status_code == 200 and workspace.headers["cache-control"] == "no-store"
+    assert workspace.status_code == 200
+    assert 'from "./workspace-enrollment.js?v=' in workspace.text
+    assert workspace.headers["cache-control"] == "no-store"
+    enrollment = client.get("/workspace-enrollment.js")
+    assert enrollment.status_code == 200 and enrollment.headers["cache-control"] == "no-store"
     assert 'from "./connected-read-client.js?v=' in workspace.text
     assert 'from "./two-source-read.js?v=' in workspace.text
     assert "import(" not in workspace.text

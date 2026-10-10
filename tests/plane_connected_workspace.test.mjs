@@ -6,8 +6,9 @@ const uri = text => `data:text/javascript;base64,${Buffer.from(text).toString('b
 const ownerURL = uri(await read('owner-api-client.js'));
 const carrierURL = uri((await read('connected-read-client.js')).replace('"./owner-api-client.js"',JSON.stringify(ownerURL)));
 const adapterURL = uri((await read('two-source-read.js')).replace('"./owner-api-client.js"',JSON.stringify(ownerURL)));
+const enrollmentURL = uri(await read('workspace-enrollment.js'));
 const workspaceText = await read('connected-workspace.js');
-const workspaceURL = uri(workspaceText.replace('"./connected-read-client.js"',JSON.stringify(carrierURL)).replace('"./two-source-read.js"',JSON.stringify(adapterURL)));
+const workspaceURL = uri(workspaceText.replace('"./workspace-enrollment.js"',JSON.stringify(enrollmentURL)).replace('"./connected-read-client.js"',JSON.stringify(carrierURL)).replace('"./two-source-read.js"',JSON.stringify(adapterURL)));
 const {createConnectedWorkspace} = await import(workspaceURL);
 const id = n => `00000000-0000-4000-8000-${String(n).padStart(12,'0')}`;
 const wi = 'wi_'+'1'.repeat(32), fleetUID='fleet_'+'2'.repeat(32);
@@ -54,11 +55,14 @@ function harness(options={}) {
     if(overrides.has(url))return overrides.get(url)(init);
     if(u.origin===doc.shell_origin){
       if(path==='/api/plane/context')return reply(metadataStatus,metadata);
+      if(path==='/api/plane/host-assertion')return reply(200,{version:1,assertion:'e30.e30.AAAA',expires_at:1800000120});
       if(path==='/api/plane/session-assertion')return reply(200,{version:1,assertion:'e30.e30.AAAA',expires_at:1800000120});
       throw new Error('Unexpected website route');
     }
     const n=u.hostname[0],host='host_'+n.repeat(32),binding={binding_revision:1,binding_generation:id(n==='a'?6:7)};
     const ready=token=>({version:1,state:'ready',expires_in:900,read_profile:{version:1,profile:'direct-owner-read-v1',host_uid:host},session_context:{issuer:doc.shell_origin,subject:doc.user_id,workspace_id:doc.workspace_id,operational_origin:doc.operational_origin,...binding},...(token?{token}:{})});
+    if(path==='/api/owner/workspace/challenge')return reply(202,{version:1,state:'awaiting_assertion',issuer:doc.shell_origin,host_uid:host,nonce:'A'.repeat(43),operational_origin:doc.operational_origin,expires_at:1800000300});
+    if(path==='/api/owner/workspace/stage')return reply(202,{version:1,state:'awaiting_local_approval',expires_at:1800000120});
     if(path.endsWith('/challenge'))return reply(202,{version:1,state:'awaiting_session_assertion',nonce:'A'.repeat(43),issuer:doc.shell_origin,host_uid:host,operational_origin:doc.operational_origin,...binding,expires_at:1800000120});
     if(path.endsWith('/issue')){const token=n.toUpperCase().repeat(42)+'A';tokens.set(n,token);return reply(200,ready(token));}
     if(init.headers.Authorization!=='Bearer '+tokens.get(n))return reply(403,{state:'denied'});
@@ -81,7 +85,7 @@ function harness(options={}) {
     throw new Error('Unexpected host route');
   };
   const ui=dom();const dependencies={documentContext:doc,documentOrigin:doc.operational_origin,fetch,
-    setTimeout(fn,ms){const t={fn,ms,active:true};timers.push(t);return t;},clearTimeout(t){if(t)t.active=false;},MutationObserver:ui.MutationObserver,...options.dependencies};
+    now:()=>1800000000,setTimeout(fn,ms){const t={fn,ms,active:true};timers.push(t);return t;},clearTimeout(t){if(t)t.active=false;},MutationObserver:ui.MutationObserver,...options.dependencies};
   const api=createConnectedWorkspace(dependencies);
   return {api,doc,ui,calls,timers,streams,overrides,dependencies,
     get metadata(){return metadata;},set metadata(v){metadata=v;},set metadataStatus(v){metadataStatus=v;},
@@ -198,6 +202,40 @@ test('account recheck preserves the same focused control rather than replacing i
 });
 
 
+test('first-use approval uses enrollment purpose only, preserves peer reads and requires later explicit Connect',async()=>{
+ const h=harness();h.mount();await h.api.checkAccount();await flush();await h.api.act(1,'connect');
+ const before=h.calls.length;assert.equal(await h.api.act(0,'enroll'),true);
+ const calls=h.calls.slice(before);assert.deepEqual(calls.map(c=>new URL(c.url).pathname),['/api/plane/context','/api/owner/workspace/challenge','/api/plane/host-assertion','/api/owner/workspace/stage']);
+ const signer=calls.find(c=>c.url.endsWith('/host-assertion'));assert.equal(signer.init.credentials,'include');assert.deepEqual(Object.keys(JSON.parse(signer.init.body)).sort(),['host_uid','nonce','operational_origin','workspace_id']);
+ assert.notEqual(h.api.snapshot().computers[0].state,'ready');assert.equal(h.api.snapshot().computers[1].state,'ready');
+ const root=h.ui.get('owner-session'),first=root.children[2],proposal=first.children.at(-1);
+ assert.ok(proposal.children.some(c=>c.textContent.includes('Approval code:')));assert.equal((await h.api.jget('/api/overview')).data.coverage.reachable,1);
+ assert.equal(await h.api.act(0,'enroll'),false);assert.equal(h.calls.filter(c=>c.url.endsWith('/workspace/stage')).length,1);
+ // Synthetic host fixture now represents local approval; UI itself has no confirm door.
+ assert.equal(await h.api.act(0,'connect'),true);assert.ok(!proposal.children.some(c=>c.textContent.includes('Approval code:')));
+ const count=h.calls.length;assert.equal(await h.api.act(0,'enroll'),false);assert.equal(h.calls.length,count);h.api.dispose();
+});
+
+test('account loss during host staging erases approval code and fences late staged result',async()=>{
+ const h=harness();h.mount();await h.api.checkAccount();await flush();const held=deferred();h.overrides.set(refs[0].endpoint_origin+'/api/owner/workspace/stage',()=>held.promise);
+ const enroll=h.api.act(0,'enroll');await flush();h.metadataStatus=403;await h.api.checkAccount();held.resolve(reply(202,{version:1,state:'awaiting_local_approval',expires_at:1800000120}));
+ assert.equal(await enroll,false);assert.equal(h.api.snapshot().phase,'denied');const panel=h.ui.get('owner-session').children[2].children.at(-1);assert.ok(!panel.children.some(c=>c.textContent.includes('Approval code:')));
+ assert.equal(h.calls.filter(c=>c.url.endsWith('/issue')).length,0);h.api.dispose();
+});
+
+test('forgetting approval returns keyboard focus to that computer, including an in-flight request',async()=>{
+ for(const busy of [false,true]){
+  const h=harness();h.mount();await h.api.checkAccount();await flush();const held=deferred();
+  if(busy)h.overrides.set(refs[0].endpoint_origin+'/api/owner/workspace/stage',()=>held.promise);
+  const pending=h.api.act(0,'enroll');if(busy)await flush();else await pending;
+  const row=h.ui.get('owner-session').children[2],proposal=row.children.at(-1),cancel=proposal.children.at(-1);
+  cancel.focus();cancel.click();assert.ok([row,row.children[5]].includes(h.ui.document.activeElement));
+  assert.ok(!proposal.children.some(c=>c.textContent.includes('Approval code:')));
+  if(busy)held.resolve(reply(202,{version:1,state:'awaiting_local_approval',expires_at:1800000120}));await pending;
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/workspace/stage')).length,1);h.api.dispose();
+ }
+});
+
 test('temporary account loading is aria-disabled and activation guarded without blurring focus',async()=>{
   const h=harness();h.mount();await h.api.checkAccount();await flush();
   const check=h.ui.get('owner-session').children[1];check.focus();
@@ -267,4 +305,22 @@ test('unavailable admitted host exposes explicit Disconnect and uses existing ca
   assert.equal(buttons[3].disabled,true);assert.equal(buttons[4].disabled,false);
   buttons[4].click();await flush();assert.equal(h.calls.filter(c=>c.url.endsWith('/logout')).length,1);
   assert.equal(h.api.snapshot().computers[0].state,'signed_out');h.api.dispose();
+});
+
+test('enrollment resources join admission rollback, including partial streams, and a fresh retry disposes every resource',async()=>{
+  for (const failAt of ['enrollment','transport','subscription','stream']) {
+    let failing=true, clientsMade=0, clientsDisposed=0, enrollmentsMade=0, enrollmentsDisposed=0, subscriptions=0, stopped=0, opened=0, closed=0, transportsDisposed=0;
+    const h=harness({dependencies:{
+      createClient(){clientsMade++;return {readHandle:{},snapshot:()=>({state:'unavailable'}),start:async()=>{},dispose(){clientsDisposed++;},subscribe(){subscriptions++;if(failing&&failAt==='subscription'&&subscriptions===2)throw new Error('second subscription');return()=>stopped++;}};},
+      createEnrollment(){if(failing&&failAt==='enrollment'&&enrollmentsMade===1)throw new Error('second enrollment');enrollmentsMade++;return {snapshot:()=>({state:'idle',busy:false}),mountPanel(){},cancel(){},dispose(){enrollmentsDisposed++;}};},
+      createTransport(){if(failing&&failAt==='transport')throw new Error('transport');return {jget:async()=>ok({}),dispose(){transportsDisposed++;},createEventSource(){opened++;if(failing&&failAt==='stream'&&opened===2)throw new Error('second stream');return {addEventListener(){},close(){closed++;}};}};},
+    }});
+    if(failAt==='stream'){h.api.createEventSource('/api/stream');h.api.createEventSource('/api/stream');}
+    assert.equal(await h.api.checkAccount(),false);assert.equal(h.api.snapshot().phase,'unavailable');assert.equal(h.api.snapshot().computers.length,0);
+    assert.ok(enrollmentsMade>0);assert.equal(enrollmentsDisposed,enrollmentsMade);assert.equal(clientsDisposed,clientsMade);
+    assert.equal((await h.api.jget('/api/tasks')).state,'unavailable');
+    if(failAt==='stream'){assert.equal(closed,1);assert.equal(stopped,2);assert.equal(transportsDisposed,1);}
+    failing=false;assert.equal(await h.api.checkAccount(),true);await flush();assert.equal(h.api.snapshot().computers.length,2);
+    h.api.dispose();assert.equal(enrollmentsDisposed,enrollmentsMade);assert.equal(clientsDisposed,clientsMade);
+  }
 });
