@@ -372,10 +372,10 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     } finally { busy = false; }
   }
   async function lifecycle(action) {
-    if (!setupOnly) return action === 'status' ? handle.start() : action === 'renew' ? owner.sessionControls.renew() : owner.sessionControls.logout();
     if (busy || !valid(true)) return false;
     busy = true;
     try {
+      if (!setupOnly) return await (action === 'status' ? handle.start() : action === 'renew' ? owner.sessionControls.renew() : owner.sessionControls.logout());
       const result = await http(ref.endpoint_origin + '/api/owner/connected/' + action,
         {method:action === 'status' ? 'GET' : 'POST',...(action === 'status' ? {} : {body:{}})});
       if (result.status !== 200) { stop('Connection could not be confirmed. Check again explicitly.'); return false; }

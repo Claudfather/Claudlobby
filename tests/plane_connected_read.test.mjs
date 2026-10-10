@@ -396,3 +396,15 @@ test('setup-only identity never admits reads, supports original setup requests, 
   assert.deepEqual(await h.api.readHandle.jget('/api/tasks'),{state:'ok',data:{path:'read/tasks'}});
   h.api.dispose();
 });
+
+test('ordinary lifecycle cannot overlap held connect or use an invalid document context',async()=>{
+  const h=harness();await h.api.connect();
+  const held=deferred();h.overrides.set('issue',()=>held.promise);
+  const reconnect=h.api.connect();await flush();
+  assert.equal(await h.api.renew(),false);assert.equal(await h.api.logout(),false);
+  assert.equal(h.calls.filter(c=>/\/(renew|logout)$/.test(c.url)).length,0);
+  held.resolve(reply(200,ready(TOKEN)));await reconnect;
+  h.context={...h.context,context_generation:uuid(99)};
+  assert.equal(await h.api.renew(),false);assert.equal(await h.api.logout(),false);
+  assert.equal(h.calls.filter(c=>/\/(renew|logout)$/.test(c.url)).length,0);h.api.dispose();
+});

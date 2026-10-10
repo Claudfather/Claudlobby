@@ -6,11 +6,20 @@ const request = value => value && Object.keys(value).sort().join() === 'generati
 
 export function createGuidedSetup({client, storage, storageKey,
   newUUID = () => globalThis.crypto.randomUUID(), now = () => Date.now()/1000, onChange = () => {}}) {
-  let context = null, plan = null, pending = null, goal = '', planGoal = '', note = '', busy = false, disposed = false, epoch = 0, mount;
+  let context = null, plan = null, pending = null, conflicts = [], goal = '', planGoal = '', note = '', busy = false, disposed = false, epoch = 0, mount;
   let state = client.snapshot();
-  try { if (storage === undefined) storage = globalThis.localStorage; const text = storage?.getItem(storageKey); if (text && text.length < 512) { const value = JSON.parse(text); if (request(value)) pending = Object.freeze({...value}); } } catch {}
+  try { if (storage === undefined) storage = globalThis.localStorage; const text = storage?.getItem(storageKey); if (text && text.length < 8192) { const value = JSON.parse(text); if (request(value)) pending = Object.freeze({...value});
+    else if (value && Object.keys(value).sort().join() === 'conflicts,pending' && (value.pending === null || request(value.pending))
+        && Array.isArray(value.conflicts) && value.conflicts.length <= 16 && value.conflicts.every(request)) {
+      pending = value.pending && Object.freeze({...value.pending}); conflicts = value.conflicts.map(v => Object.freeze({...v}));
+    } } } catch {}
   const active = () => !disposed && ['ready','setup_only'].includes(client.snapshot().state);
-  function save(value) { try { if (!storage || typeof storage.setItem !== 'function') throw new Error(); storage.setItem(storageKey,JSON.stringify(value)); } catch { throw new Error('Save the original activation identifiers before launching.'); } }
+  function save(value) { try { if (!storage || typeof storage.setItem !== 'function') throw new Error(); storage.setItem(storageKey,JSON.stringify({pending:value,conflicts})); } catch { throw new Error('Save the original activation identifiers before launching.'); } }
+  function retainConflict(value) {
+    if (conflicts.some(v => ['generation','plan_id','request_id'].every(key => v[key] === value[key]))) return;
+    if (conflicts.length >= 16) throw new Error('Inspect retained conflicting identifiers locally.');
+    conflicts.push(Object.freeze({...value}));
+  }
   function changed() { render(); onChange(); }
   function connectionChanged(next) {
     if (next.epoch !== state.epoch || next.state !== state.state) { epoch++; context = null; plan = null; }
@@ -26,15 +35,17 @@ export function createGuidedSetup({client, storage, storageKey,
         if (!value || value.version !== 1 || value.template !== 'revenue-web-app' || !uuid(value.generation)
             || typeof value.fleet !== 'string' || typeof value.repository !== 'string' || !/^r-[0-9a-f]{64}$/.test(value.release_id)
             || !/^[0-9a-f]{64}$/.test(value.release_seal) || !Number.isFinite(value.expires_at) || value.expires_at <= now()
-            || value.request !== null && !request(value.request)) throw new Error();
+            || value.request !== null && (!request(value.request) || value.request.generation !== value.generation)) throw new Error();
         context = Object.freeze({...value}); plan = null;
-        if (value.request) {
-          if (pending && JSON.stringify(pending) !== JSON.stringify(value.request)) {
-            // Compare fields rather than relying on incoming property ordering.
-            if (!['generation','plan_id','request_id'].every(key => pending[key] === value.request[key])) throw new Error();
-          }
-          pending = Object.freeze({...value.request}); save(pending);
+        if (pending && (pending.generation !== value.generation || value.request
+            && !['generation','plan_id','request_id'].every(key => pending[key] === value.request[key]))) {
+          retainConflict(pending);
+          const canonical = value.request && Object.freeze({...value.request});
+          save(canonical); pending = canonical;
+        } else if (value.request) {
+          save(value.request); pending = Object.freeze({...value.request});
         }
+        // Same-generation null is not evidence of no queued/reserved work.
         note = pending ? 'Inspect the original activation. Launch is never repeated.' : 'Local approval found. Author a goal and preview its exact plan.';
       } else if (operation === 'preview') {
         if (!context || pending || !goal.trim() || context.expires_at <= now()) return false;
@@ -63,7 +74,7 @@ export function createGuidedSetup({client, storage, storageKey,
       } else return false;
       return true;
     } catch {
-      if (!disposed && ticket === epoch) note = pending ? 'Activation outcome unknown. Keep the original identifiers and check its receipt; do not launch again.' : 'Setup unavailable or refused. Check local approval explicitly; no team readiness is claimed.';
+      if (!disposed && ticket === epoch) note = pending ? 'Activation outcome unknown. Keep the original identifiers; check its receipt while approval is active, or inspect locally after expiry/revocation. Do not launch again.' : 'Setup unavailable or refused. Check local approval explicitly; no team readiness is claimed.';
       return false;
     } finally { busy = false; if (!disposed) changed(); }
   }
@@ -83,7 +94,7 @@ export function createGuidedSetup({client, storage, storageKey,
     status.textContent = note || (active() ? 'First-team setup requires an explicit local approval on this computer.' : 'Connect this computer before setup.');
     declaration.textContent = context ? `Team ${context.fleet} for ${context.repository}. Lead, engineer and reviewer; explicit human merge policy.` : '';
     summary.textContent = plan ? `Goal: ${planGoal}. Plan changes ${plan.changes?.length || 0} generated files; ${plan.effects?.restart_bots?.length || 0} bots require starting or restarting. Review the plan before launch.` : '';
-    details.textContent = plan ? JSON.stringify({plan_id:plan.plan_id,release_id:plan.release_id,release_seal:plan.release_seal,changes:plan.changes,effects:plan.effects,expires_at:plan.expires_at},null,2) : pending ? JSON.stringify(pending,null,2) : '';
+    details.textContent = plan ? JSON.stringify({conflicting_identifiers:conflicts,plan_id:plan.plan_id,release_id:plan.release_id,release_seal:plan.release_seal,changes:plan.changes,effects:plan.effects,expires_at:plan.expires_at},null,2) : pending || conflicts.length ? JSON.stringify({pending,conflicting_identifiers:conflicts},null,2) : '';
     for (const [operation,button] of Object.entries(controls)) button.disabled = !active() || busy
       || operation === 'preview' && (!context || !!pending || !goal.trim() || context.expires_at <= now())
       || operation === 'launch' && (!context || !plan || !!pending || goal !== planGoal || plan.expires_at <= now() || context.expires_at <= now())
@@ -105,7 +116,7 @@ export function createGuidedSetup({client, storage, storageKey,
     const status = document.createElement('p'); status.setAttribute('role','status'); status.setAttribute('aria-live','polite'); element.append(status);
     mount = {area,status,declaration,details,controls,summary}; render();
   }
-  return Object.freeze({mountPanel,run,connectionChanged,snapshot:() => ({busy,context,plan,pending,note,goal}),
+  return Object.freeze({mountPanel,run,connectionChanged,snapshot:() => ({busy,context,plan,pending,conflicts:[...conflicts],note,goal}),
     setGoal(value) { if (typeof value === 'string' && value.length <= 2000 && !pending) { goal = value; if (mount) mount.area.value = value; changed(); } },
     dispose() { disposed = true; epoch++; mount = null; }});
 }

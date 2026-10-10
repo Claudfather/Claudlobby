@@ -1,5 +1,6 @@
 """Finite first-team HTTP door; identity AND local setup approval, never read authority."""
 import asyncio
+import re
 from starlette.responses import JSONResponse
 from ..command_result import CommandFailure
 from .owner_access import AccessDenied, AccessUnavailable, VerifiedReader
@@ -43,8 +44,8 @@ class SetupHTTP(ConnectedActionsHTTP):
         expected={"context":set(),"preview":{"generation","goal"},"launch":{"generation","plan_id","request_id"},"receipt":{"generation","plan_id","request_id"}}[operation]
         if set(payload)!=expected: raise InvalidRequest
         if operation!="context" and (not _uuid(payload["generation"]) or payload["generation"]!=grant.generation): raise InvalidRequest
+        if operation=="preview" and (not isinstance(payload["goal"],str) or len(payload["goal"])>2000): raise InvalidRequest
         if operation in {"launch","receipt"}:
-            import re
             if (not isinstance(payload["plan_id"],str) or not re.fullmatch(r"p-[0-9a-f]{64}",payload["plan_id"]) or not _uuid(payload["request_id"])): raise InvalidRequest
         fn=getattr(self.engine,operation)
         progress[0]=True  # No refusal after engine entry implies no earlier effect.

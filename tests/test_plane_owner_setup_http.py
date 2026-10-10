@@ -111,3 +111,56 @@ def test_strict_unknown_duplicate_json_and_preflight_no_effect_claim(setup_http)
         preflight=client.options(PREFIX+'launch',headers={'Origin':ORIGIN,'Access-Control-Request-Method':'POST','Access-Control-Request-Headers':'Authorization,Content-Type,X-Claudlobby-Owner'})
         assert preflight.status_code==204 and not preflight.content
         assert not (access.root/'local').exists()
+
+
+@pytest.mark.parametrize('goal',[None,42,True,[],{},'x'*2001])
+def test_invalid_preview_goal_refuses_before_engine_entry(setup_http,monkeypatch,goal):
+    app,access,_,_,_,grant=setup_http
+    app.connected_setup.engine.store.allow(grant)
+    def forbidden(*_,**__):pytest.fail('preview engine entered')
+    monkeypatch.setattr(app.connected_setup.engine,'preview',forbidden)
+    with TestClient(app,base_url=HOST) as client:
+        s=session(client,setup_http)
+        result=post(client,'preview',s['token'],{'generation':grant.generation,'goal':goal})
+        assert result.status_code==403
+        assert not (access.root/'local').exists()
+
+
+def test_source_classification_and_foreign_recorder_never_recover(setup_http,monkeypatch):
+    from claudlobby.plane.owner_source import SourceDenied,SourceUnavailable
+    from claudlobby.plane.owner_access import AccessUnavailable
+    app,*_=setup_http
+    error=SourceDenied('foreign')
+    def denied():raise error
+    monkeypatch.setattr(app.connected_reads,'_setup_source',denied)
+    with pytest.raises(SourceDenied) as raised:app.connected_reads._session_source(OWNER)
+    assert raised.value is error
+    error=SourceUnavailable('unavailable')
+    with pytest.raises(SourceUnavailable) as raised:app.connected_reads._session_source(OWNER)
+    assert raised.value is error  # No optional tables must not mask recorder error.
+    error=AccessUnavailable()
+    with pytest.raises(AccessUnavailable) as raised:app.connected_reads._session_source(OWNER)
+    assert raised.value is error
+
+
+@pytest.mark.parametrize('failure,status', [('generic',503),('foreign',403),('transient',503)])
+def test_ready_never_labels_unadmitted_source_setup_only(setup_http,monkeypatch,failure,status):
+    from claudlobby.plane.owner_access import AccessUnavailable
+    from claudlobby.plane.owner_source import SourceDenied,SourceUnavailable
+    app,*_=setup_http
+    with TestClient(app,base_url=HOST) as client:
+        s=session(client,setup_http)
+        exception={'generic':AccessUnavailable(),'foreign':SourceDenied('foreign'),'transient':SourceUnavailable('transient')}[failure]
+        def refused():raise exception
+        monkeypatch.setattr(app.connected_reads,'_source',refused)
+        # Initial and closing session admission succeed; the recorder check in
+        # _ready is the actual fault point. Its fallback must prove setup-only,
+        # not label a late source error as a successful setup profile.
+        calls=[]
+        def setup_source():
+            calls.append(True)
+            if len(calls)<=3:return app.access.current_grant().host_uid
+            raise exception
+        monkeypatch.setattr(app.connected_reads,'_setup_source',setup_source)
+        response=client.get('/api/owner/connected/status',headers=headers(s['token']))
+        assert response.status_code==status and response.json()['state']!='setup_only'

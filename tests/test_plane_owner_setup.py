@@ -186,10 +186,86 @@ def test_local_cli_requires_exact_terminal_approval_and_retained_grant(setup_aut
         '--repository',grant.repository,'--release',grant.release_id,'--install-directory',grant.install_directory]
     terminal(monkeypatch,iter(['NO']))
     assert main(flags)!=0
-    with pytest.raises(AccessUnavailable):store.local()
+    assert store.local() is None
     terminal(monkeypatch,iter(['ALLOW-SETUP']))
     assert main(flags)==0
     retained=store.local(); assert retained.repository==grant.repository and retained.release_seal==grant.release_seal
     terminal(monkeypatch,iter(['REVOKE-SETUP']))
     assert main(['--root',str(access.root),'host','owner','revoke-setup'])==0
     assert store.local() is None
+
+
+@pytest.mark.parametrize('malformed',["CREATE TABLE setup_metadata(singleton INTEGER,version INTEGER)",
+    "CREATE VIEW setup_metadata AS SELECT 1 AS singleton,1 AS version",
+    "CREATE TABLE setup_metadata(wrong INTEGER)"])
+def test_optional_setup_absence_is_empty_but_partial_schema_refuses(setup_authority,malformed):
+    store,access,*_=setup_authority
+    before=access.path.read_bytes()
+    assert store.local() is None and access.path.read_bytes()==before
+    with access._connection(write=True) as conn:
+        conn.execute(malformed)
+    with pytest.raises(AccessUnavailable):store.local()
+
+
+def replacement(fixture, grant, **changes):
+    store,access,_,_,clock,_=fixture
+    store.revoke(grant)
+    newer=replace(grant,generation=str(uuid4()),created_at=clock[0],expires_at=clock[0]+86400,**changes)
+    store.allow(newer)
+    return newer
+
+
+def test_compatible_expired_reapproval_owns_prior_bytes_not_prior_plan(setup_authority):
+    engine,grant,reader=allow(setup_authority)
+    first=engine.preview(reader,grant.generation,'Improve checkout tests')
+    clock=setup_authority[4]; clock[0]=grant.expires_at
+    newer=replace(grant,generation=str(uuid4()),created_at=clock[0],expires_at=clock[0]+86400)
+    engine.store.allow(newer)
+    session=setup_authority[1].connected().issue(evidence(setup_authority[1].connected(),clock),OWNER)
+    reader=VerifiedReader(OWNER,session.token)
+    assert engine.store.owned_declaration(reader,newer)
+    with pytest.raises(AccessDenied):engine.store.reserve(reader,newer,first['plan_id'],str(uuid4()))
+    second=engine.preview(reader,newer.generation,'Improve signup tests')
+    assert second['generation']==newer.generation and second['plan_id']!=first['plan_id']
+
+
+@pytest.mark.parametrize('changes',[{'repository':'example-org/other'},{'release_id':'r-'+'c'*64},
+    {'release_seal':'d'*64},{'install_directory':'/different/units'},{'fleet':'other'},
+    {'template':'different'}])
+def test_reapproval_mismatch_does_not_own_prior_declaration(setup_authority,changes):
+    engine,grant,reader=allow(setup_authority)
+    engine.preview(reader,grant.generation,'Improve checkout tests')
+    newer=replacement(setup_authority,grant,**changes)
+    assert not engine.store.owned_declaration(reader,newer)
+
+
+def test_reapproval_never_overwrites_changed_authored_bytes(setup_authority):
+    from claudlobby.command_result import CommandFailure
+    engine,grant,reader=allow(setup_authority)
+    engine.preview(reader,grant.generation,'Improve checkout tests')
+    newer=replacement(setup_authority,grant)
+    path=engine.root/'local/shop/fleet.yaml'; path.write_bytes(path.read_bytes()+b'\n# operator-authored change\n')
+    before=path.read_bytes()
+    assert not engine.store.owned_declaration(reader,newer)
+    with pytest.raises(CommandFailure):engine.preview(reader,newer.generation,'Improve signup tests')
+    assert path.read_bytes()==before
+
+
+def test_browser_receipt_authority_expires_and_revokes_but_local_journal_survives(setup_authority,monkeypatch):
+    from claudlobby.commands import host
+    engine,grant,reader=allow(setup_authority)
+    plan=engine.preview(reader,grant.generation,'Improve checkout tests'); uid=str(uuid4())
+    engine.store.reserve(reader,grant,plan['plan_id'],uid)
+    journal={'verification':'verified','status':'activating','plan_id':plan['plan_id'],'release_id':grant.release_id}
+    monkeypatch.setattr(host,'_recorded',lambda *_:journal)
+    assert engine.receipt(reader,grant.generation,plan['plan_id'],uid)['state']=='activating'
+    engine.store.revoke(grant)
+    with pytest.raises(AccessDenied):engine.receipt(reader,grant.generation,plan['plan_id'],uid)
+    assert host._recorded(engine.root,uid)==journal
+    # Expiry is also bounded, even with a fresh connected session.
+    engine.store.allow(grant)
+    engine.store.reserve(reader,grant,plan['plan_id'],uid)
+    setup_authority[4][0]=grant.expires_at
+    with pytest.raises(AccessDenied):engine.receipt(reader,grant.generation,plan['plan_id'],uid)
+    with pytest.raises(AccessDenied):engine.store.recovery_host(OWNER)
+    assert host._recorded(engine.root,uid)==journal

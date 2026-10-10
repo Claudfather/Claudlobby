@@ -317,7 +317,15 @@ install directory, and pins the current owner/workspace binding. It lasts at mos
 canonical configuration plan, and explicitly launch that exact plan through the
 foreground owner server. Workspace approval alone grants none of this. Setup
 status and withdrawal use the local owner CLI. Expired/stale approvals require a
-new explicit approval; withdrawal never undoes already-started work.
+new explicit approval; withdrawal never undoes already-started work. Browser
+receipt/session recovery is bounded by the same grant's expiry/revocation and
+current owner/workspace binding; it is not permanent journal authority. On expiry
+keep the original request UUID and plan ID. Locally inspect `host status --json`
+and `config diff PLAN_ID`; the retained exact journal is
+`ROOT/state/activations/REQUEST_UUID/activation.json` (read only), decoded/verified
+by `claudlobby.activation_state.read_activation(ROOT, REQUEST_UUID)`. A new
+approval does not authorize the browser to inspect the previous generation's
+journal. No receipt should be inferred from a new empty grant.
 
 The finite connected setup routes are POST `context`, `preview`, `launch` and
 `receipt` under `/api/owner/connected/setup/`, with the existing exact Origin,
@@ -330,8 +338,13 @@ later than its approval. No browser field selects the install directory.
 
 The browser saves the original UUID before one launch request. The authority
 store reserves that UUID/plan before canonical activation begins. Lost responses
-and receipt reloads inspect only that original journal; they never replan, resume
-or resend activation. A reservation without a journal is **unknown**, requiring
+and receipt reloads inspect only that original journal. A canonical context
+request supersedes a conflicting saved tab request, retaining both identifiers
+for inspection. An explicit new generation clears stale blocking pending state;
+a same-generation null request never licenses retry. Compatible local reapproval
+retains content-checked ownership of its prior declaration, not authority to
+launch an expired preview; unrelated authored declarations cannot be overwritten.
+Receipts never replan, resume or resend activation. A reservation without a journal is **unknown**, requiring
 local operator investigation or a new explicit grant, not automatic gap filling.
 Current installation identity, private owner/workspace/session and the exact
 retained grant allow this receipt recovery even if partial activation left an

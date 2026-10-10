@@ -7,6 +7,7 @@ from urllib.parse import parse_qsl
 from starlette.responses import JSONResponse
 
 from .owner_access import AccessDenied, AccessUnavailable, VerifiedReader
+from .owner_source import SourceUnavailable
 from .owner_workspace_http import WorkspaceBootstrapHTTP, InvalidRequest, _header, _json, _DEADLINE
 from .owner_view import _ReadStopped
 from .session_assertion import verify_session_assertion
@@ -92,11 +93,15 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
     def _session_source(self,principal):
         from .owner_setup import OwnerSetup
         try: return self._setup_source()
-        except (AccessDenied,AccessUnavailable):
+        except SourceUnavailable:
             # A partially applied canonical activation may leave an unbound
             # recorder. Only the locally granted original activation is recoverable;
             # read/action routes continue to require their recorder admission.
-            return OwnerSetup(self.access).recovery_host(principal)
+            try:
+                return OwnerSetup(self.access).recovery_host(principal)
+            except (AccessDenied, AccessUnavailable):
+                pass
+            raise  # Preserve the original recorder classification.
 
     async def _admission(self, token, principal):
         # A fresh source preflight precedes any session mutation.
@@ -114,7 +119,10 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
         try:
             self._source()
             setup_only=False
-        except (AccessDenied,AccessUnavailable):
+        except SourceUnavailable:
+            # Setup-only is a positive admission, never a generic outage label.
+            if self._session_source(admission.owner.principal) != admission.owner.host_uid:
+                raise AccessDenied("connected_session_denied")
             setup_only=True
         return {"version": 1, "state": "setup_only" if setup_only else "ready", "expires_in": max(0, math.floor(admission.expires_at - now)),
             ("setup_profile" if setup_only else "read_profile"): {"version": 1, "profile": "first-team-setup-v1" if setup_only else "direct-owner-read-v1", "host_uid": admission.owner.host_uid},

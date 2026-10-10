@@ -43,6 +43,12 @@ def _snapshot(grant):
     return json.dumps(asdict(grant),sort_keys=True,separators=(",", ":"))
 
 
+def _declaration_scope(grant):
+    """Exact local approval inputs; generations/times do not own authored bytes."""
+    return {key:value for key,value in asdict(grant).items()
+        if key not in {"generation","created_at","expires_at"}}
+
+
 def _uuid(value):
     return isinstance(value,str) and re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",value) is not None
 
@@ -54,6 +60,8 @@ class OwnerSetup:
 
     @staticmethod
     def _schema(conn):
+        types=dict(conn.execute("SELECT name,type FROM sqlite_master WHERE name IN ('setup_metadata','setup_grant','setup_previews')"))
+        if types!={name:"table" for name in ("setup_metadata","setup_grant","setup_previews")}: raise AccessUnavailable()
         rows=conn.execute("SELECT singleton,version FROM setup_metadata").fetchall()
         if len(rows)!=1 or tuple(rows[0])!=(1,1): raise AccessUnavailable()
         conn.execute("SELECT singleton,snapshot,active,launch_id,launch_plan FROM setup_grant LIMIT 0")
@@ -81,22 +89,32 @@ class OwnerSetup:
             binding=self.access.workspace()._active_binding(conn,self.access._grant(conn).principal)
             if OwnerConnected._snapshot(binding)!=expected.binding_snapshot: raise AccessDenied("setup_denied")
             if not expected.created_at<=self.access._now()<expected.expires_at: raise AccessDenied("setup_denied")
-            names={row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            names={row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
             if not names & {"setup_metadata","setup_grant","setup_previews"}:
                 for statement in _SCHEMA: conn.execute(statement)
             self._schema(conn)
-            row=conn.execute("SELECT * FROM setup_grant WHERE active=1").fetchone()
+            row=conn.execute("SELECT * FROM setup_grant WHERE singleton=1").fetchone()
             if row:
                 retained=self._grant(row)
-                if (retained.binding_snapshot==OwnerConnected._snapshot(binding)
+                if (row["active"] == 1 and retained.binding_snapshot==OwnerConnected._snapshot(binding)
                         and retained.created_at<=self.access._now()<retained.expires_at):
                     raise AccessDenied("setup_already_allowed")
+                if _declaration_scope(retained) == _declaration_scope(expected):
+                    # Retain only proof of authored-byte ownership, not preview
+                    # authorization/expiry. No prior plan becomes launchable.
+                    for preview in conn.execute("SELECT plan_id,payload FROM setup_previews WHERE generation=?",(retained.generation,)).fetchall():
+                        payload=json.loads(preview["payload"])
+                        payload["_declaration_scope"]=_declaration_scope(retained)
+                        conn.execute("UPDATE setup_previews SET payload=? WHERE plan_id=?",(json.dumps(payload),preview["plan_id"]))
                 # A stale/expired approval has no authority. New terminal
                 # approval explicitly replaces it with a fresh generation.
             conn.execute("INSERT OR REPLACE INTO setup_grant VALUES(1,?,1,NULL,NULL)",(_snapshot(expected),))
 
     def local(self):
         with self.access._connection() as conn:
+            names={row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+            if not names & {"setup_metadata","setup_grant","setup_previews"}:
+                return None
             self._schema(conn)
             row=conn.execute("SELECT * FROM setup_grant WHERE singleton=1").fetchone()
             return self._grant(row) if row and row["active"]==1 else None
@@ -163,8 +181,11 @@ class OwnerSetup:
         destination=self.access.root / "local" / grant.fleet / "fleet.yaml"
         with self.access._connection() as conn:
             self._admit(conn,reader,expected=grant,effects=True)
-            rows=conn.execute("SELECT plan_id FROM setup_previews WHERE generation=? ORDER BY created_at DESC",(grant.generation,)).fetchall()
+            rows=conn.execute("SELECT plan_id,generation,payload FROM setup_previews ORDER BY created_at DESC").fetchall()
         for row in rows:
+            if (row["generation"] != grant.generation
+                    and json.loads(row["payload"]).get("_declaration_scope") != _declaration_scope(grant)):
+                continue
             plan=read_plan(self.access.root,row["plan_id"])
             recorded=plan.inputs.get(str(destination))
             if recorded and path_state(destination,source=recorded["follow_links"])==recorded["state"]:
@@ -185,10 +206,10 @@ class OwnerSetup:
                 retained=json.loads(row["payload"])
                 # Copy metadata may differ, but canonical plan identity must not.
                 if retained["release_id"]!=data["release_id"]: raise AccessDenied("setup_denied")
-                return retained
+                return {key:value for key,value in retained.items() if key!="_declaration_scope"}
             if conn.execute("SELECT count(*) FROM setup_previews").fetchone()[0]>=8: raise AccessUnavailable()
             payload={**data,"expires_at":min(now+PLAN_SECONDS,grant.expires_at),"generation":grant.generation}
-            conn.execute("INSERT INTO setup_previews VALUES(?,?,?,?,?)",(data["plan_id"],grant.generation,now,payload["expires_at"],json.dumps(payload)))
+            conn.execute("INSERT INTO setup_previews VALUES(?,?,?,?,?)",(data["plan_id"],grant.generation,now,payload["expires_at"],json.dumps({**payload,"_declaration_scope":_declaration_scope(grant)})))
             return payload
 
     def reserve(self, reader, grant, plan_id, request_id):

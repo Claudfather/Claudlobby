@@ -537,3 +537,38 @@ test('setup panel retains disclosure/focus and refuses launch without durable id
   h.storage.setItem=()=>{throw new Error('blocked');};assert.equal(await h.api.run('launch'),false);
   assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);h.api.dispose();
 });
+
+test('canonical reserved request wins two-tab storage conflict, preserving both IDs through reload',async()=>{
+  const h=setupHarness();await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');await h.api.run('launch');
+  const losing={...h.pending,request_id:id(11)};
+  h.saved.set('test',JSON.stringify(losing));
+  const restored=createGuidedSetup({client:h.client,storage:h.storage,storageKey:'test',now:()=>1800000000});
+  h.context.request={...h.pending};
+  assert.equal(await restored.run('context'),true);
+  assert.deepEqual(restored.snapshot().pending,h.pending);assert.deepEqual(restored.snapshot().conflicts,[losing]);
+  await restored.run('receipt');assert.deepEqual(h.calls.at(-1),['receipt',h.pending]);
+  assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);
+  const reloaded=createGuidedSetup({client:h.client,storage:h.storage,storageKey:'test',now:()=>1800000000});
+  assert.deepEqual(reloaded.snapshot().pending,h.pending);assert.deepEqual(reloaded.snapshot().conflicts,[losing]);
+  restored.dispose();reloaded.dispose();h.api.dispose();
+});
+
+test('only a new grant generation clears blocking pending; same-generation null never permits retry',async()=>{
+  const h=setupHarness();await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');await h.api.run('launch');
+  assert.equal(await h.api.run('context'),true);assert.deepEqual(h.api.snapshot().pending,h.pending);
+  assert.equal(await h.api.run('preview'),false);assert.equal(await h.api.run('launch'),false);
+  h.context.generation=id(12);
+  assert.equal(await h.api.run('context'),true);assert.equal(h.api.snapshot().pending,null);
+  assert.deepEqual(h.api.snapshot().conflicts,[h.pending]);
+  h.client.setupPreview=async input=>{h.calls.push(['preview',input]);return {...h.preview,generation:id(12)};};
+  assert.equal(await h.api.run('preview'),true);assert.equal(h.api.snapshot().goal,'Improve tests');
+  assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);h.api.dispose();
+});
+
+test('expired or revoked browser receipt retains original identifiers with local inspection guidance',async()=>{
+  const h=setupHarness();await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');await h.api.run('launch');
+  h.client.setupReceipt=async()=>{throw new Error('approval expired');};
+  assert.equal(await h.api.run('receipt'),false);assert.deepEqual(h.api.snapshot().pending,h.pending);
+  assert.match(h.api.snapshot().note,/locally after expiry\/revocation/);
+  assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);h.api.dispose();
+});

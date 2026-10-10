@@ -147,10 +147,10 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       }
       nextTransport = createTransport({sources:nextClients.map(({client,key}, index) => ({key,
         label:`Computer ${index + 1}`, reader:client.readHandle}))});
-      for (const {client,actions,key} of nextClients) {
+      for (const {client,actions,key,setup} of nextClients) {
         let previous = client.snapshot();
         nextSubscriptions.push(client.subscribe(state => {
-          nextClients.find(row => row.client === client).setup.connectionChanged(state);
+          setup.connectionChanged(state);
           if (state.epoch !== previous.epoch || state.state !== previous.state) {
             previous = state; actions.invalidate(); invoke(mount?.onActionSourceChange,key);
           }
