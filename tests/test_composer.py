@@ -53,6 +53,36 @@ def _make_paths(root: Path) -> Paths:
     return Paths(root=root, fleet_dir=root, package=source_package())
 
 
+class TestRevenueWebAppCandidate:
+    @pytest.mark.parametrize("bot_id", ["lead", "engineer", "reviewer"])
+    def test_shipped_roles_compose_scoped_policy_without_extra_connections(self, tmp_path, bot_id):
+        from claudlobby.composer import compose_claude_md
+
+        candidate = Path(__file__).resolve().parents[1] / "examples/teams/revenue-web-app/fleet.yaml"
+        fleet, _ = load_fleet(candidate)
+        paths = _make_paths(tmp_path)
+        bot = fleet.bots[bot_id]
+        instructions = compose_claude_md(bot, fleet, paths)
+        settings = compose_settings_local(bot, fleet, paths)
+        conf = compose_bot_conf(bot, fleet, paths)
+
+        assert "example-org/revenue-web-app" in instructions
+        assert fleet.mission in instructions
+        assert "The fleet does not auto-merge PRs" in instructions
+        assert "Without explicit human confirmation" in instructions
+        assert "Always create a feature branch" in instructions
+        assert bot.channels == []
+        assert bot.permission_mode == "default"
+        assert not bot.dangerously_skip_permissions
+        assert "--dangerously-skip-permissions" not in conf
+        assert not any("telegram" in name for name, enabled in settings["enabledPlugins"].items() if enabled)
+        assert set(compose_mcp_json(bot, paths)["mcpServers"]) == {"github"}
+        assert fleet.manager == "lead"
+        assert set(fleet.bots) == {"lead", "engineer", "reviewer"}
+        assert fleet.bots["lead"].manages == ["engineer", "reviewer"]
+        assert fleet.bots["engineer"].reports_to == fleet.bots["reviewer"].reports_to == "lead"
+
+
 class TestScaffoldEnvMerge:
     """scaffold_env_files preserves existing values and appends new stubs."""
 

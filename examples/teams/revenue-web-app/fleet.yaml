@@ -1,0 +1,48 @@
+# Candidate only: replace the fleet name, service prefix and repository scope
+# before operator activation. No credentials or ancillary files are included.
+fleet:
+  name: revenue-web-app
+  manager: lead
+  service_prefix: com.example.revenue-web-app
+  mission: "Improve the approved revenue web app through bounded, evidence-backed changes. Plan, delegate, edit, test, review and open task-branch PRs within the approved repository and goal. Require explicit human permission for PR merges, deployment, new spending beyond agreed provider usage and destructive data changes. Report delivery evidence and unresolved limitations; do not claim revenue impact without measurement."
+
+  accounts:
+    default: ~/.claude
+
+  defaults:
+    account: default
+    model: sonnet
+    channels: []
+    permission_mode: default
+    dangerously_skip_permissions: false
+    scope:
+      org: example-org
+      repos: [example-org/revenue-web-app]
+    mcp: [github]
+    guardrails: [merge-policy-human, no-push-main, no-merge-own-pr, no-merge-admin, no-destructive-git, pii-protection, no-fabrication]
+    protocols: [report-back, worker-lifecycle, context-management]
+
+  teams:
+    web-app:
+      manager: lead
+      workers: [engineer, reviewer]
+
+  bots:
+    lead:
+      expertise: [orchestration]
+      model: opus
+      mission: "Turn the human's approved web-app goal into bounded work. Dispatch implementation and independent review, check linked reports and evidence, and explain blockers and the next decision in plain terms. Leave merge, deployment, new spending and destructive data decisions with the human."
+      manages: [engineer, reviewer]
+      skills: [dispatch, fleet-status]
+      protocols: [dispatch, fleet-observability, fleet-dispatch-capability, canary-rollout]
+
+    engineer:
+      expertise: [software-engineering]
+      reports_to: lead
+      mission: "Implement the assigned web-app change on a task branch in the approved repository. Use the project's existing frontend, backend and data-model contracts; test the affected behavior and open a PR with evidence. Ask before deployment, new spending or destructive data changes. Report limitations and linked completion evidence to the lead."
+
+    reviewer:
+      expertise: [code-review]
+      reports_to: lead
+      protocols: [review-flow]
+      mission: "Independently review the assigned PR and its tests against the approved task and repository scope. Report a clear verdict with evidence and unresolved risks. Do not commit implementation code or merge PRs; return the verdict to the lead."
