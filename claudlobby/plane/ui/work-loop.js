@@ -10,6 +10,7 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
   try { storage = sessionStorage; } catch { storage = null; }
   const state = new ActionState(storage);
   let context = null, room = null, epoch = 0, board = null, channel = null;
+  let detailEpoch = 0;
   let selected = null, target = null, kind = "message", sending = false, inFlightRequest = null, opener = null, openerIdentity = null;
   let notice = "Choose a team to see its available actions.";
   root.innerHTML = `<div class="work-loop-head"><div><h2>Talk to your team</h2>
@@ -77,6 +78,7 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
     pendingRows();
   }
   function closeDetail() {
+    ++detailEpoch;
     if (dialog.open) dialog.close();
     selected = null;
   }
@@ -111,21 +113,69 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
   }
   function detail() {
     if (!selected) return;
-    const task = board?.state === "ok" ? board.data.tasks.find(t => t.task_id === selected.id && (t.fleet || "") === selected.fleet) : null;
+    const token = ++detailEpoch, selection = selected;
     const content = $("task-detail-content");
-    if (!task) {
-      content.innerHTML = '<h2 id="task-detail-title">Task details are unavailable</h2>' + stateBlock("unavailable", null, null, { label: "No current task record", detail: "The selected task is not in the latest board response. Refresh the team view to check again." });
+    if (typeof api.jget !== "function") {
+      // Older injected transports can show their board snapshot, explicitly
+      // labelled. Never fall back after a real detail request was refused.
+      const task = board?.state === "ok" ? board.data.tasks.find(t => t.task_id === selection.id && (t.fleet || "") === selection.fleet) : null;
+      if (task) renderDetail(task, true);
+      else content.innerHTML = '<h2 id="task-detail-title">Task details are unavailable</h2>' + stateBlock("unavailable");
       return;
     }
+    content.innerHTML = '<h2 id="task-detail-title">Task details</h2>' + stateBlock("loading");
+    const url = `/api/tasks/${encodeURIComponent(selection.id)}?fleet=${encodeURIComponent(selection.fleet)}`;
+    Promise.resolve().then(() => api.jget(url)).then(envelope => {
+      if (token !== detailEpoch || selected !== selection) return;
+      const task = envelope?.state === "ok" ? envelope.data?.task : null;
+      if (!task || task.task_id !== selection.id || task.fleet !== selection.fleet) {
+        const previous = board?.state === "ok" ? board.data.tasks.find(t => t.task_id === selection.id && (t.fleet || "") === selection.fleet) : null;
+        // Legacy/synthetic read transports may not implement this route yet.
+        // A protected transport refusal must never redisplay stale private data.
+        const fallback = !task && previous && typeof api.mountSessionControls !== "function"
+          && !["denied", "not_found", "invalid", "unknown"].includes(envelope?.state);
+        if (fallback) renderDetail(previous, true, envelope || {state:"disconnected"});
+        else content.innerHTML = '<h2 id="task-detail-title">Task details are unavailable</h2>'
+          + stateBlock(task ? "unknown" : envelope?.state || "disconnected",
+            envelope?.provenance, envelope?.remediation);
+        return;
+      }
+      renderDetail(task, false);
+    }).catch(() => {
+      if (token !== detailEpoch || selected !== selection) return;
+      content.innerHTML = '<h2 id="task-detail-title">Task details are unavailable</h2>' + stateBlock("disconnected");
+    });
+  }
+  function historyWindow(label, window) {
+    return window?.truncated ? `<p class="note">${esc(label)}: showing ${esc(window.shown)} most recent of ${esc(window.total)} recorded entries.</p>` : "";
+  }
+  function events(rows) {
+    return (rows || []).map(e => `<li><b>${esc(e.event)}</b> · ${esc(ago(e.occurred_at))}
+      ${e.actor_alias || e.actor_uid ? ` · ${esc(e.actor_alias || e.actor_uid)}` : ""}
+      ${e.detail ? `<pre class="task-record-body">${esc(e.detail)}</pre>` : ""}</li>`).join("");
+  }
+  function renderDetail(task, boardOnly, unavailable = null) {
+    const content = $("task-detail-content");
+    const lastEvent = task.last_event || task.history?.at(-1);
     const assignment = task.current_assignment;
     content.innerHTML = `<p class="eyebrow">${esc(task.fleet || room)} · TASK</p>
       <h2 id="task-detail-title">${esc(task.title || task.task_id)}</h2>
       <p class="task-state"><b>${esc(task.state || "State unknown")}</b> · ${esc(task.task_id)}</p>
+      ${unavailable ? stateBlock(unavailable.state || "unavailable", unavailable.provenance, unavailable.remediation) : ""}
       <dl class="task-facts"><dt>Assigned to</dt><dd>${esc(assignment?.assignee_short || assignment?.assignee_alias || "No current assignment")}</dd>
-      <dt>Last recorded action</dt><dd>${esc(task.last_event?.event || "No action recorded")} · ${esc(ago(task.last_event?.occurred_at))}</dd>
+      <dt>Last recorded action</dt><dd>${esc(lastEvent?.event || "No action recorded")} · ${esc(ago(lastEvent?.occurred_at))}</dd>
       <dt>Delivery evidence</dt><dd>${esc(task.delivery?.integrity || "No confirmed delivery evidence in this view")}</dd></dl>
       ${task.attention_question ? `<div class="task-question"><b>Needs your input</b><p>${esc(task.attention_question)}</p></div>` : ""}
       ${task.resolved === false ? '<p class="task-question">Task history has unresolved links. Its result cannot be treated as confirmed.</p>' : ""}
+      ${boardOnly ? '<p class="note">This transport provides a board snapshot only; full task detail is unavailable.</p>' : `
+      <h3>Task description</h3>${task.body === null || task.body === undefined ? '<p class="detail-empty">No task body was recorded.</p>' : `<pre class="task-record-body">${esc(task.body)}</pre>`}
+      <h3>Assignments</h3>${historyWindow("Assignments", task.assignments_window)}
+      ${(task.assignments || []).map(a => `<details class="task-assignment"><summary>${esc(a.assignee_alias || a.assignee_uid)} · ${esc(a.state)} · ${esc(a.assignment_id)}</summary>
+        <p class="note">Assigned by ${esc(a.assigned_by_alias || a.assigned_by_uid)} · expected by ${esc(a.expected_by || "not recorded")}</p>
+        ${historyWindow("Assignment history", a.history_window)}<ol class="task-history">${events(a.history)}</ol></details>`).join("") || '<p class="detail-empty">No assignment was recorded.</p>'}
+      <h3>Task history</h3>${historyWindow("Task history", task.history_window)}<ol class="task-history">${events(task.history)}</ol>
+      ${(task.issues || []).length ? `<h3>History issues</h3><ul>${task.issues.map(i => `<li>${esc(i.code)}${i.blocking ? " · unresolved" : " · historical"}</li>`).join("")}</ul>` : ""}
+      ${task.issues_window?.truncated ? '<p class="note">Additional history issues are omitted from this bounded view.</p>' : ""}`}
       <h3>Recent conversation &amp; reports</h3><p class="note">This is the recent channel window, not a complete task history. Completion alone does not mean a result was reviewed.</p>
       <div id="task-reports"></div>
       <div class="task-detail-actions"><button class="pill" type="button" data-kind="feedback">Give feedback</button>

@@ -68,6 +68,8 @@ function harness(options = {}) {
   const sends = [], lookups = [];
   const api = {
     interactionContext: options.interactionContext || (() => context),
+    ...(options.jget ? {jget:options.jget} : {}),
+    ...(options.protected ? {mountSessionControls(){}} : {}),
     sendAction: request => { sends.push(request); return options.sendAction ? options.sendAction(request) : receipt(request); },
     actionReceipt: request => { lookups.push(request); return options.actionReceipt ? options.actionReceipt(request) : receipt(request); },
   };
@@ -277,4 +279,54 @@ test('receipt checks wait for their in-flight send; failed sends retain the orig
   assert.match(h.get('work-notice').textContent, /message to lead:.*delivery confirmed/);
   assert.equal(new ActionState(h.storage).pending.length, 0);
   assert.equal(h.sends.length, 1);
+});
+
+
+const canonicalDetail = id => ({state:'ok',data:{task:{task_id:id,fleet:'web',title:'Full selected task',body:'<body>\nFull description',
+  state:'completed',resolved:true,current_assignment:null,assignments:[],history:[{event:'completed',occurred_at:'2026-10-10T00:00:00Z',detail:'<recorded detail>'}],
+  history_window:{shown:1,total:501,truncated:true},assignments_window:{shown:0,total:0,truncated:false},issues:[]}}});
+
+test('selected canonical detail loads independently of capped board and escapes full body/history', async () => {
+  const calls=[];
+  const h=harness({jget(url){calls.push(url);return canonicalDetail('task-off-board');}});
+  h.loop.setRoom('web');await settle();h.update();h.open('task-off-board');await settle();
+  assert.deepEqual(calls,['/api/tasks/task-off-board?fleet=web']);
+  assert.match(h.get('task-detail-content').innerHTML,/Full selected task/);
+  assert.match(h.get('task-detail-content').innerHTML,/&lt;body&gt;/);
+  assert.match(h.get('task-detail-content').innerHTML,/most recent of 501/);
+  assert.match(h.get('task-detail-content').innerHTML,/recent channel window/);
+  assert.doesNotMatch(h.get('task-detail-content').innerHTML,/<body>/);
+});
+
+test('late detail cannot replace another selected task or reopen a closed dialog', async () => {
+  const first=deferred();
+  const h=harness({jget(url){return url.includes('task-a')?first.promise:canonicalDetail('task-b');}});
+  h.loop.setRoom('web');await settle();h.update();h.open('task-a');await settle();h.open('task-b');await settle();
+  first.resolve(canonicalDetail('task-a'));await settle();
+  assert.match(h.get('task-detail-content').innerHTML,/task-b/);
+  assert.doesNotMatch(h.get('task-detail-content').innerHTML,/· task-a<\/p>/);
+  const late=deferred();const closed=harness({jget(){return late.promise;}});
+  closed.loop.setRoom('web');await settle();closed.open();await settle();closed.get('task-detail-close').onclick();await settle();
+  late.resolve(canonicalDetail('task-a'));await settle();
+  assert.equal(closed.get('task-detail').open,false);
+  assert.doesNotMatch(closed.get('task-detail-content').innerHTML,/Full selected task/);
+});
+
+test('detail remains explicit snapshot until refresh and rejects a mismatched task', async () => {
+  let calls=0;const h=harness({jget(){calls++;return canonicalDetail(calls===1?'task-a':'wrong-task');}});
+  h.loop.setRoom('web');await settle();h.open();await settle();h.update();
+  assert.equal(calls,1);assert.equal(h.get('task-detail-refresh').hidden,false);
+  h.get('task-detail-refresh').onclick();await settle();
+  assert.equal(calls,2);assert.match(h.get('task-detail-content').innerHTML,/unknown/);
+  assert.doesNotMatch(h.get('task-detail-content').innerHTML,/Full selected task/);
+});
+
+test('unsupported synthetic detail retains labelled limited board snapshot; protected refusals do not', async () => {
+  for(const guarded of [false,true]) {
+    const h=harness({protected:guarded,jget(){return {state:'unavailable',remediation:'Unsupported detail route'};}});
+    h.loop.setRoom('web');await settle();h.update();h.open();await settle();
+    assert.match(h.get('task-detail-content').innerHTML,/unavailable/);
+    if(guarded) assert.doesNotMatch(h.get('task-detail-content').innerHTML,/board snapshot/);
+    else assert.match(h.get('task-detail-content').innerHTML,/board snapshot only/);
+  }
 });

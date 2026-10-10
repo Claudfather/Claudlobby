@@ -38,6 +38,12 @@ export async function jget(url) {
   const fleets=rooms.map(alias=>({alias,bots:3,presence:{counts:{working:1,idle:2},live_poll:'ok'},capture:'example',open:2,attention:1,overdue:0,orphaned:0,last_activity_at:now(),newest_report_at:now(),reports_24h:3,unacked:null}));
   if(['/api/fleets','/api/overview'].includes(u.pathname)) return env({fleets,default:rooms[0],totals:{fleets:2,bots:6,working:2,attention:2,overdue:0,live_poll:'ok'},host:{daemon_serving:false,rows:'example',spool_files:null,ingest_lag_state:'none',samples:{}}});
   if(u.pathname==='/api/summary') return {state:'synthetic fixture'};
+  if(u.pathname.startsWith('/api/tasks/')) {
+    const id=decodeURIComponent(u.pathname.slice('/api/tasks/'.length));
+    const task=active.flatMap(tasks).find(t=>t.task_id===id);
+    return task?env({task:{...task,body:'Synthetic task description; no real fleet data.',assignments:[],history:[]}})
+      :{state:'not_found',remediation:'No synthetic task in this example team.'};
+  }
   if(u.pathname==='/api/tasks') return env({tasks:active.flatMap(tasks),issue_count:0,truncated:false});
   if(u.pathname==='/api/channel') {
     const saved=await fetch('/fixture/records').then(r=>r.json());
