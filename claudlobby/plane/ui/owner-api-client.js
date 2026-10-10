@@ -4,7 +4,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
   EventSource = globalThis.EventSource, location = globalThis.location,
   setTimeout = globalThis.setTimeout, clearTimeout = globalThis.clearTimeout } = {}) {
   let generation = 0, mode = 'checking', busy = false, disposed = false;
-  let recoveryUsed = false, readRecoveryUsed = false, readRecoveryTimer = null;
+  let recoveryUsed = false, readRecoveryUsed = false, streamRecoveryUsed = false, readRecoveryTimer = null;
   let mount = null, statusNote = null;
   const reads = new Set(), streams = new Set();
   const labels = {
@@ -94,7 +94,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
       if (disposed || gen !== generation) return;
       if (result.status === 200 && result.data?.state === (action === 'renew' ? 'ready' : 'signed_out')) {
         if (action === 'logout') leave('signed_out');
-        else { recoveryUsed = false; readRecoveryUsed = false; resume('Session renewed. Your browser session stays signed in.'); }
+        else { recoveryUsed = false; readRecoveryUsed = false; streamRecoveryUsed = false; resume('Session renewed. Your browser session stays signed in.'); }
       } else if (result.status === 403) {
         refusal = true;
       } else pause('unavailable'); // A lost logout reply is not success.
@@ -172,12 +172,17 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
           if (source !== native || gen !== generation || mode !== 'ready') return;
           recoveryUsed = false;
           readRecoveryUsed = false;
+          streamRecoveryUsed = false;
           stream.onmessage?.(event);
         };
         source.onerror = event => {
           if (source !== native || gen !== generation || mode !== 'ready') return;
           stream.onerror?.(event);
-          void checkSession(true);
+          // HTTP reads and even an open/error cycle cannot prove a working
+          // stream. Only an admitted message or explicit session action rearms it.
+          if (streamRecoveryUsed) { pause('unavailable'); return; }
+          streamRecoveryUsed = true;
+          void checkSession();
         };
         for (const name of listeners.keys()) attach(name, source, gen);
       },
@@ -204,7 +209,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
     element.hidden = false;
     mount.renew.addEventListener('click', () => { void mutate('renew'); });
     mount.logout.addEventListener('click', () => { void mutate('logout'); });
-    mount.check.addEventListener('click', () => { recoveryUsed = false; readRecoveryUsed = false; void checkSession(); });
+    mount.check.addEventListener('click', () => { recoveryUsed = false; readRecoveryUsed = false; streamRecoveryUsed = false; void checkSession(); });
     render();
     const ready = checkSession();
     return { ready, dispose };

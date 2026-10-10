@@ -310,6 +310,11 @@ that still has a valid session explicitly says it did not complete. Panel HTTP
 errors stay local; network failures or read-gate 503 pause private reads and
 permit one automatic status GET. Its recovery budget is rearmed by an admitted
 stream message or explicit interaction; renewal and logout are never replayed. An
+SSE failure has its own one-probe budget, unaffected by successful board reads
+or an open/error cycle. Only an admitted stream message, explicit Check or
+successful renewal rearms it. Inventory preserves the intended equipment
+selection in memory and only its latest request can restore that panel; grid
+reads also reject results spanning a session pause. An
 expired or absent session on GET/HEAD `/` redirects only to same-origin `/owner`.
 
 All other paths still cross the protected canonical read gate, including

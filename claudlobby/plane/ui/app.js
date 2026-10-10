@@ -776,6 +776,7 @@ function ansiToHtml(text) {
 
 let currentView = "channel";
 let equipmentAlias = null;
+let inventoryGeneration = 0;
 let currentFleet = null;   // null = auto (single fleet, or no pick yet)
 let gridTimer = null;
 let focusTimer = null;
@@ -837,6 +838,7 @@ function renderFleetTabs() {
 // ONE pick path — the tab row and the overview strip's cards (U3) both
 // land here, so a card click can never drift from a tab click.
 function pickFleet(f) {
+  if (currentFleet !== f) equipmentAlias = null;
   currentFleet = f;
   syncWorkRoom();
   savePick(currentFleet);
@@ -953,11 +955,13 @@ function renderGrid(env) {
 // the frames still render; the badges just go absent (the recorded half is
 // the degradable one).
 async function pollGrid() {
-  if (currentView !== "grid") return;
+  if (sessionPaused || currentView !== "grid") return;
+  const epoch = sessionEpoch, fleet = currentFleet;
   const q = fleetQuery();   // the tab's panes and verdicts (U4/U1)
   const [gridEnv, presEnv] = await Promise.all([
     jget("/api/grid" + q), jget("/api/presence" + q).catch(() => null),
   ]);
+  if (sessionPaused || epoch !== sessionEpoch || currentView !== "grid" || currentFleet !== fleet) return;
   const byAlias = {};
   if (presEnv && presEnv.data) {
     for (const b of presEnv.data.bots) byAlias[b.alias] = b;
@@ -1004,6 +1008,7 @@ function renderPresenceStrip(counts, recordedDown) {
 }
 
 function setView(view) {
+  if (view !== "fleet") equipmentAlias = null;
   currentView = view;
   $("channel").hidden = view !== "channel";
   $("search-results").hidden = true;   // any view switch closes results
@@ -1262,14 +1267,7 @@ $("search").addEventListener("input", () => {
 function resumeOwnerReads() {
   sessionPaused = false;
   refreshBoards();
-  if (currentView === "fleet") {
-    const detail = $("equip-detail");
-    const alias = detail && !detail.hidden ? equipmentAlias : null, epoch = sessionEpoch;
-    void pollFleet().then(() => {
-      if (!sessionPaused && epoch === sessionEpoch && currentView === "fleet" && alias && equipmentAlias === alias)
-        openEquipment(alias);
-    });
-  }
+  if (currentView === "fleet") void pollFleet();
   if ($("search").value.trim()) $("search").dispatchEvent(new Event("input"));
 }
 
@@ -1326,6 +1324,7 @@ const EQUIP_ORDER = ["expertise", "skills", "mcp", "integrations", "guardrails",
 async function pollFleet() {
   if (sessionPaused || currentView !== "fleet") return;
   const epoch = sessionEpoch, fleet = currentFleet;
+  const request = ++inventoryGeneration;
   renderState($("fleet-room"), { state: "loading" });
   // honor the fleet picker (the same fleet= the channel/search use); with
   // "all", every fleet the host records — cross-fleet twins come back
@@ -1340,13 +1339,14 @@ async function pollFleet() {
     jget("/api/org" + f).catch(() => null),
     jget("/api/utilization" + f).catch(() => null),
   ]);
-  if (sessionPaused || epoch !== sessionEpoch || currentView !== "fleet" || currentFleet !== fleet) return;
+  if (sessionPaused || epoch !== sessionEpoch || request !== inventoryGeneration || currentView !== "fleet" || currentFleet !== fleet) return;
   if (inv && inv.data && util && util.data) {
     const by = {};
     for (const u of util.data) by[u.alias] = u;
     for (const b of inv.data.bots) { const u = by[b.alias]; if (u) b.util = u; }
   }
   renderInventory(inv, org);
+  if (equipmentAlias) void openEquipment(equipmentAlias);
 }
 
 function orgNode(n) {
@@ -1440,7 +1440,7 @@ async function openEquipment(alias) {
   box.hidden = false;
   renderState(box, { state: "loading" });
   const env = await jget(`/api/equipment?alias=${encodeURIComponent(alias)}`);
-  if (sessionPaused || epoch !== sessionEpoch || equipmentAlias !== alias) return;
+  if (sessionPaused || epoch !== sessionEpoch || equipmentAlias !== alias || box !== $("equip-detail")) return;
   if (!env || env.state !== "ok") {
     box.innerHTML = stateBlock(env ? env.state : "disconnected",
                                env && env.provenance, env && env.remediation);
