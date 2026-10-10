@@ -5,29 +5,37 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>observable plane</title>
 <link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/workspace.css">
 </head>
-<body>
+<body class="plane-workspace">
+<section class="workspace-intro" aria-label="Your team workspace">
+  <div>
+    <p class="eyebrow">Your team, at work</p>
+    <h1>Good work keeps moving.</h1>
+    <p class="intro-copy">See what changed, follow the work, and help your teams take the next step.</p>
+  </div>
+</section>
 <header>
-  <h1>observable plane</h1>
+  <h1>Team activity</h1>
   <nav id="view-nav">
-    <button class="pill ghost on" data-view="channel" type="button">channel</button>
-    <button class="pill ghost" data-view="grid" type="button">grid</button>
-    <button class="pill ghost" data-view="fleet" type="button">fleet</button>
-    <button class="pill ghost" data-view="trust" type="button">trust</button>
+    <button class="pill ghost on" data-view="channel" type="button">Activity</button>
+    <button class="pill ghost" data-view="grid" type="button">All agents</button>
+    <button class="pill ghost" data-view="fleet" type="button">Team details</button>
+    <button class="pill ghost" data-view="trust" type="button">Recorder</button>
   </nav>
   <span class="pill"><span id="beat" class="dot"></span><span id="beat-label">connecting…</span></span>
   <span class="pill" id="fleet-totals" title="every fleet on this host — bots, working now, needing you, overdue (the overview's own figures)"><b>—</b> bots</span>
   <span class="pill presence-strip" id="presence-strip" hidden></span>
   <span class="spacer"></span>
-  <button id="debug-toggle" class="pill ghost" type="button" aria-pressed="false">machinery</button>
+  <button id="debug-toggle" class="pill ghost" type="button" aria-pressed="false">Technical detail</button>
 </header>
 <main>
   <section id="rail-fleet" aria-label="fleet">
-    <h2>fleet</h2>
+    <h2>People &amp; agents</h2>
     <div class="scroll" id="fleet"></div>
   </section>
   <section id="rail-channel" aria-label="channel">
-    <h2>channel <span id="fleet-tabs"></span>
+    <h2>Teams <span id="fleet-tabs"></span>
       <input id="search" type="search" placeholder="search the channel…"
              aria-label="search the channel" autocomplete="off"></h2>
     <div id="overview" class="overview" aria-label="fleets overview"></div>
@@ -39,11 +47,11 @@
   </section>
   <section id="rail-right">
     <div id="rail-attention" aria-label="attention">
-      <h2>attention <span id="attn-count" class="count" hidden></span></h2>
+      <h2>Needs your decision <span id="attn-count" class="count" hidden></span></h2>
       <div class="scroll" id="attention"></div>
     </div>
     <div id="rail-tasks" aria-label="tasks">
-      <h2>tasks</h2>
+      <h2>Work &amp; results</h2>
       <div class="scroll" id="tasks"></div>
     </div>
     <div id="rail-debug" aria-label="event machinery" hidden>
