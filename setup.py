@@ -30,7 +30,7 @@ RUNTIME_COMPATIBILITY = runpy.run_path(
 )["runtime_declaration"]()
 ASSET_DIRS = ("library", "voices", "templates")
 SEEDS = ("fleet.yaml.seed", "fleet.yaml.example", "projects.yaml.seed", ".env.seed.example",
-         "missions/fleet.md.seed")
+         "missions/fleet.md.seed", "examples/teams/revenue-web-app/fleet.yaml")
 # Private runtime scripts are authored inside the package and install at the
 # same package-relative path.
 NATIVE_DIR = "claudlobby/_runtime_scripts"

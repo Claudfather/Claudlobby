@@ -23,7 +23,12 @@ def register_host_setup(hosts):
 
 def register_fleet_setup(children):
     parser = children.add_parser("setup", help="Install an authored fleet and activate its sealed configuration")
-    parser.add_argument("--config", required=True, metavar="FILE")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--config", metavar="FILE")
+    source.add_argument("--template", choices=["revenue-web-app"],
+                        help="Use the candidate team shipped in the selected release")
+    parser.add_argument("--repository", metavar="OWNER/REPO", help="Explicit approved repository for --template")
+    parser.add_argument("--goal", metavar="TEXT", help="Explicit approved goal for --template")
     parser.add_argument("--install-directory", required=True, metavar="PATH")
     parser.add_argument("--replace-config", action="store_true")
     parser.add_argument("--json", action="store_true")

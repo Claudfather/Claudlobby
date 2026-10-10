@@ -128,6 +128,42 @@ def _authored_config(source: Path, fleet: str) -> bytes:
     return content
 
 
+def _template_config(template: str, fleet: str, repository: str | None, goal: str | None) -> bytes:
+    """Materialize the one package-owned candidate; never use a source checkout."""
+    import yaml
+
+    from ..config import ScopeConfig, load_fleet_snapshot
+    from ..resources import get_resources
+
+    if template != "revenue-web-app":
+        raise CommandFailure("invalid_argument", "invalid argument: unsupported team template")
+    parts = repository.split("/") if isinstance(repository, str) else []
+    if (len(parts) != 2
+            or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?", parts[0])
+            or not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", parts[1])
+            or parts[1] in (".", "..")):
+        raise CommandFailure("invalid_argument", "invalid argument: --template requires an explicit OWNER/REPO")
+    if (not isinstance(goal, str) or not goal.strip() or len(goal) > 2000
+            or goal != goal.strip() or any(ord(char) < 32 or ord(char) == 127 for char in goal)):
+        raise CommandFailure("invalid_argument", "invalid argument: --template requires a single-paragraph --goal of 1–2000 characters")
+    try:
+        source = get_resources().seeds / "examples/teams/revenue-web-app/fleet.yaml"
+        if source.is_symlink() or not source.is_file():
+            raise ValueError("missing template")
+        document = yaml.safe_load(source.read_bytes())
+        body = document["fleet"]
+        body["name"] = fleet
+        body["service_prefix"] = f"com.claudlobby.{fleet}"
+        body["mission"] = f"Approved goal: {goal}. {body['mission']}"
+        scope = ScopeConfig(org=parts[0], repos=[repository])
+        body["defaults"]["scope"] = {"org": scope.org, "repos": scope.repos}
+        content = yaml.safe_dump(document, sort_keys=False, allow_unicode=True).encode("utf-8")
+        load_fleet_snapshot(source, content, None)
+        return content
+    except (RuntimeError, OSError, ValueError, TypeError, KeyError, yaml.YAMLError) as exc:
+        raise CommandFailure("unavailable", "unavailable: installed team template; use a compatible sealed release") from exc
+
+
 def _flat_destination(root: Path, fleet: str) -> Path:
     """Refuse a system container or an existing nested fleet of the same name."""
     from ..paths import _find_fleet_dir
@@ -237,8 +273,17 @@ def _fleet_setup(args) -> CommandOutput:
     if executing is None:
         raise CommandFailure("release_mismatch", "release mismatch: fleet setup requires a sealed release CLI")
     _release(root, executing)
-    source = Path(args.config).expanduser().resolve(strict=True)
-    content = _authored_config(source, args.fleet)
+    template = getattr(args, "template", None)
+    if template is not None:
+        if args.config is not None:
+            raise CommandFailure("invalid_argument", "invalid argument: --config and --template are mutually exclusive")
+        content = _template_config(template, args.fleet, getattr(args, "repository", None), getattr(args, "goal", None))
+        source = "the selected installed template"
+    else:
+        if getattr(args, "repository", None) is not None or getattr(args, "goal", None) is not None:
+            raise CommandFailure("invalid_argument", "invalid argument: --repository and --goal require --template")
+        source = Path(args.config).expanduser().resolve(strict=True)
+        content = _authored_config(source, args.fleet)
     try:
         selected = read_selection(root)
         external = []
@@ -249,12 +294,30 @@ def _fleet_setup(args) -> CommandOutput:
     except (ActivationError, PlanError, KeyError, TypeError) as exc:
         raise CommandFailure("conflict", "conflict: selected fleet declarations cannot be verified") from exc
     destination = _flat_destination(root, args.fleet)
+    if template is not None:
+        projects = destination.parent / "projects.yaml"
+        try:
+            has_projects = projects.exists() or projects.is_symlink()
+        except OSError as exc:
+            raise CommandFailure("conflict", "conflict: template target project declaration cannot be inspected") from exc
+        if has_projects:
+            raise CommandFailure("conflict", "conflict: template target has an existing project declaration; use authored --config")
     changed, prior, created = _copy_config(content, destination, replace=args.replace_config)
     try:
         staged = _config_plan(SimpleNamespace(release=executing, fleet_path=external), root)
         if args.fleet not in staged.data["fleets"]:
             raise CommandFailure("conflict", "conflict: authored fleet name differs from --fleet; no activation performed",
                                  release_id=executing)
+        if template is not None:
+            # Pin absence in the same snapshot used by rendering. Activation's
+            # existing freshness gate then refuses a later project declaration.
+            try:
+                plan = read_plan(root, staged.data["plan_id"])
+                node = plan.inputs[str(projects)]["state"]["node"]
+            except (PlanError, KeyError, TypeError) as exc:
+                raise CommandFailure("conflict", "conflict: template project inputs cannot be verified") from exc
+            if node != {"kind": "absent"}:
+                raise CommandFailure("conflict", "conflict: template project declaration changed while staging; use authored --config")
     except BaseException as exc:
         # Staging refused before activation: put the declaration back so the
         # stray copy cannot block every later plan. Activation is never undone.
