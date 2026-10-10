@@ -1267,8 +1267,11 @@ is independent of DOM session controls and global redirects. `start`, `snapshot`
 object supplied by a caller cannot stand in for an admitted handle. Direct-host
 controls retain their existing login, renewal and sign-out behavior.
 
-`createTwoSourceReadTransport({sources})` accepts exactly two core-issued
-handles with immutable distinct source keys and labels. It does not provision
+`createWorkspaceReadTransport({sources})` accepts one or two core-issued
+handles with immutable distinct source keys and labels. A first computer needs
+no fake second source: coverage reports one readable source out of one, or zero
+out of one after loss. `createTwoSourceReadTransport({sources})` remains the
+exactly-two compatibility factory over the same implementation. Neither provisions
 sessions or choose a cross-origin carrier. An injected `/api-client.js` can expose
 the resulting read/stream/disposal methods to the one canonical renderer. The
 shipped default and direct-owner module selection remain unchanged. The injected

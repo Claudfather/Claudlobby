@@ -6,7 +6,7 @@ const ownerText = await readFile(new URL('../claudlobby/plane/ui/owner-api-clien
 const ownerURL = `data:text/javascript;base64,${Buffer.from(ownerText).toString('base64')}`;
 const { createOwnerReadHandle } = await import(ownerURL);
 const adapterText = await readFile(new URL('../claudlobby/plane/ui/two-source-read.js', import.meta.url), 'utf8');
-const { createTwoSourceReadTransport } = await load(adapterText.replace('"/owner-api-client.js"', JSON.stringify(ownerURL)));
+const { createTwoSourceReadTransport, createWorkspaceReadTransport } = await load(adapterText.replace('"/owner-api-client.js"', JSON.stringify(ownerURL)));
 const wi = 'wi_' + '1'.repeat(32), fleet = 'fleet_' + '2'.repeat(32), actor = 'actor_' + '3'.repeat(32);
 const ok = data => ({ state: 'ok', provenance: { last_ingest_at: '2026-01-01' }, data });
 function deferred() { let resolve; const promise = new Promise(r => resolve = r); return { promise, resolve }; }
@@ -335,4 +335,107 @@ test('real renderer refreshes later-admission task links when channel combines b
   assert.equal(a.calls.filter(c=>c.url==='/api/fleets').length,0);
   assert.equal(h.callbacks.filter(x=>x.ms===400).length,2); // Stable roster does not loop.
   api.dispose();
+});
+
+test('workspace transport accepts only one or two distinct core-issued handles; old factory stays exactly two',async()=>{
+  const a=await source('a','a'),b=await source('b','b'),c=await source('c','c');
+  for(const sources of [[],[a,b,c],[a,{...b,key:'a'}],[a,{...b,reader:a.reader}],
+    [{key:'forged',label:'forged',reader:{snapshot:()=>a.reader.snapshot()}}]])
+    assert.throws(()=>createWorkspaceReadTransport({sources}));
+  assert.throws(()=>createTwoSourceReadTransport({sources:[a]}),/Exactly two/);
+  const api=createWorkspaceReadTransport({sources:[a]});
+  assert.deepEqual(Object.keys(api).sort(),['createEventSource','dispose','jget']);
+  assert.notEqual((await api.jget('/api/owner/actions/context')).state,'ok');
+  assert.notEqual((await api.jget('/api/owner/actions/send')).state,'ok');
+  assert.ok(a.calls.every(c=>!c.opts.method||c.opts.method==='GET'));
+  api.dispose();
+});
+
+test('actual app supports one ready host, zero-of-one loss and recovery without an empty healthy board',async()=>{
+  const a=await source('a','a'),api=createWorkspaceReadTransport({sources:[a]}),h=await appHarness(api);
+  await h.c.refreshBoards();
+  let overview=await api.jget('/api/overview');
+  assert.deepEqual(overview.data.coverage,{total:1,reachable:1,partial:false});
+  assert.deepEqual(Array.from(h.c.fleets,f=>f.alias),['a / team']);
+  assert.ok(h.paints.some(v=>v.data?.threads?.[0]?.work_item_id==='a::'+wi));
+  a.setStatus('sign_in_required');await a.reader.start();
+  await h.c.refreshBoards();
+  overview=await api.jget('/api/overview');
+  assert.equal(overview.state,'unavailable');
+  assert.deepEqual(overview.data.coverage,{total:1,reachable:0,partial:true});
+  assert.match(overview.remediation,/No source/);
+  assert.equal(h.c.currentFleet,null); // Canonical single-fleet auto selection is unchanged.
+  assert.equal(h.c.fleets[0].source_state,'denied');
+  assert.ok(h.paints.slice(-2).every(v=>v.state!=='ok'));
+  a.setStatus('ready');await a.reader.start();await h.c.refreshBoards();
+  assert.equal((await api.jget('/api/overview')).data.coverage.reachable,1);
+  assert.ok(h.paints.slice(-2).every(v=>v.state==='ok'));
+  assert.equal(h.c.currentFleet,null); // Canonical single-fleet auto selection is unchanged.
+  api.dispose();
+});
+
+test('one initially unavailable computer is admitted later by its core controller through real app refresh',async()=>{
+  const a=await source('a','a');a.setStatus('sign_in_required');await a.reader.start();
+  const api=createWorkspaceReadTransport({sources:[a]}),h=await appHarness(api);
+  await h.c.refreshBoards();
+  const unavailable=await api.jget('/api/fleets');
+  assert.deepEqual(unavailable.data.coverage,{total:1,reachable:0,partial:true});
+  assert.equal(unavailable.data.sources[0].host_uid,null);
+  assert.equal(a.calls.filter(c=>c.url==='/api/overview').length,0);
+  h.c.openStream();h.paints.length=0;
+  a.setStatus('ready');await a.reader.start();
+  h.callbacks.find(x=>x.ms===400).cb();
+  await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
+  const refreshes=h.callbacks.filter(x=>x.ms===400);
+  assert.equal(refreshes.length,2); // Newly learned roster retires an unlinked paint.
+  refreshes[1].cb();
+  await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
+  assert.deepEqual(Array.from(h.c.fleets,f=>f.alias),['a / team']);
+  assert.equal((await api.jget('/api/fleets')).data.coverage.partial,false);
+  assert.ok(h.paints.some(v=>v.data?.threads?.[0]?.task_link?.host_uid==='a::'+a.host));
+  api.dispose();
+});
+
+test('one computer routes offboard task and channel with unchanged canonical qualification',async()=>{
+  const a=await source('mini','a'),api=createWorkspaceReadTransport({sources:[a]});
+  await api.jget('/api/fleets');
+  assert.equal((await api.jget('/api/tasks')).data.tasks.length,0);
+  const channel=await api.jget('/api/channel?limit=120&fleet=mini%20%2F%20team');
+  const link=channel.data.threads[0].task_link;
+  assert.equal(link.task_id,'mini::'+wi);assert.equal(link.fleet_uid,'mini::'+fleet);
+  const detail=await api.jget(`/api/tasks/${encodeURIComponent(link.task_id)}?fleet=${encodeURIComponent(link.fleet)}`);
+  assert.equal(detail.data.task.title,'outside board');assert.equal(detail.data.task.fleet,'mini / team');
+  assert.equal(a.calls.filter(c=>c.url.startsWith('/api/tasks/')).length,1);
+  assert.equal((await api.jget(`/api/tasks/${wi}?fleet=mini%20%2F%20team`)).state,'invalid');
+  api.dispose();
+});
+
+test('one computer owns one read stream and disposal stops its child and subscriptions',async()=>{
+  const a=await source('a','a'),api=createWorkspaceReadTransport({sources:[a]});
+  const stream=api.createEventSource('/api/stream'),events=[];
+  stream.onmessage=e=>events.push(JSON.parse(e.data));
+  assert.equal(a.streams.length,1);
+  a.streams[0].onmessage({data:JSON.stringify({cursor:7,rows:[{ingest_seq:7}]})});
+  assert.equal(events[0].source,'a');assert.equal(events[0].cursor,7);
+  api.dispose();assert.equal(a.streams[0].closed,true);
+  const count=events.length;
+  a.setStatus('sign_in_required');await a.reader.start();
+  a.streams[0].onmessage({data:JSON.stringify({cursor:8,rows:[{ingest_seq:8}]})});
+  assert.equal(events.length,count);
+  assert.equal((await api.jget('/api/overview')).state,'invalid');
+});
+
+test('held old one-source detail cannot paint private bytes after disposal or contaminate a new two-source app',async()=>{
+  const a=await source('a','a'),old=createWorkspaceReadTransport({sources:[a]});await old.jget('/api/fleets');
+  const hold=deferred();a.routes.set(`/api/tasks/${wi}?fleet=team`,hold.promise);
+  const pending=old.jget(`/api/tasks/${encodeURIComponent('a::'+wi)}?fleet=a%20%2F%20team`);
+  await new Promise(r=>setImmediate(r));old.dispose();
+  const b=await source('b','b'),fresh=createWorkspaceReadTransport({sources:[a,b]}),h=await appHarness(fresh);
+  await h.c.refreshBoards();
+  hold.resolve(ok({task:{task_id:wi,fleet:'team',fleet_uid:fleet,body:'stale private body'}}));
+  const result=await pending;
+  assert.notEqual(result.state,'ok');assert.equal(result.data,undefined);
+  assert.ok(h.paints.every(v=>!JSON.stringify(v).includes('stale private body')));
+  assert.equal((await fresh.jget('/api/overview')).data.coverage.total,2);
+  fresh.dispose();
 });
