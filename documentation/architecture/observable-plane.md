@@ -1240,6 +1240,9 @@ it grants no message, nudge or feedback action. It makes no website workspace,
 setup, cross-origin, multi-host or browser-permission claim. Before authentication,
 status remains lifecycle-only (`needs_pairing` or `sign_in_required`).
 
+Login/renew first admit the paired principal, existing session when required,
+and canonical source before creating or rotating a session. A pre-existing source
+outage preserves the old cookie and creates no hidden replacement session.
 The server admits the current session and canonical local source before creating
 this metadata and again before response publication, including any new cookie.
 An unavailable source yields 503; denied source/session yields 403 without the

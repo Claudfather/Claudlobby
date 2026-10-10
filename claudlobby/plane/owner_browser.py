@@ -218,8 +218,9 @@ class _OwnerBrowser:
 
     def _ready(self, principal: PrincipalRef, token: str, **data) -> JSONResponse:
         reader = VerifiedReader(principal, token)
-        response = _response({"state": "ready", **data, "read_profile": self._read_profile(reader)})
-        response._profile_reader = reader
+        profile = self._read_profile(reader)
+        response = _response({"state": "ready", **data, "read_profile": profile})
+        response._profile_admission = (reader, profile)
         return response
 
     def _status(self, principal: PrincipalRef, token: str | None) -> JSONResponse:
@@ -237,7 +238,7 @@ class _OwnerBrowser:
             return self._ready(principal, token)
         return _response({"state": "sign_in_required"})
 
-    async def _send_profile(self, response, reader, scope, receive, send):
+    async def _send_profile(self, response, reader, admitted_profile, scope, receive, send):
         # Admit again before publishing headers or metadata, including a new
         # session cookie. No held lifecycle response may disclose stale identity.
         pending_start = None
@@ -248,7 +249,7 @@ class _OwnerBrowser:
                 return
             try:
                 profile = await run_in_threadpool(self._read_profile, reader)
-                if profile != json.loads(response.body)["read_profile"]:
+                if profile != admitted_profile:
                     raise AccessDenied("owner_source_changed")
             except AccessDenied:
                 refusal = _response({"state": "denied"}, 403)
@@ -272,9 +273,22 @@ class _OwnerBrowser:
                 raise AccessDenied("sign_in_required")
             self.access.end_session(token, principal)
             return _response({"state": "signed_out"}, clear_cookie=True)
+        # Preserve authority refusal before checking the data source. A known
+        # source outage must not consume a valid session or mint a hidden one.
+        if action == "renew" and token is None:
+            raise AccessDenied("sign_in_required")
+        grant = self.access.current_grant()
+        if grant is None or not grant.active or grant.principal != principal:
+            raise AccessDenied("owner_not_paired")
+        if token is not None:
+            try:
+                self.access.authorize_read(token, principal, host_uid=grant.host_uid)
+            except AccessDenied as exc:
+                if action == "renew" or exc.code != "session_unavailable":
+                    raise
+        if inspect_source(self.access.root) != grant.host_uid:
+            raise AccessDenied("wrong_deployment")
         if action == "renew":
-            if token is None:
-                raise AccessDenied("sign_in_required")
             session = self.access.renew_session(token, principal)
         elif token is not None:
             try:
@@ -422,9 +436,9 @@ class _OwnerBrowser:
                 body = json.loads(response.body)
                 body["effect"] = "not_started"
                 response = _response(body, response.status_code)
-            reader = getattr(response, "_profile_reader", None)
-            if reader is not None:
-                await self._send_profile(response, reader, scope, receive, send)
+            admission = getattr(response, "_profile_admission", None)
+            if admission is not None:
+                await self._send_profile(response, *admission, scope, receive, send)
             else:
                 await response(scope, receive, send)
             return

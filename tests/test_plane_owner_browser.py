@@ -697,7 +697,7 @@ def test_owner_entry_controller_regressions():
 
 
 def test_read_profile_is_authenticated_finite_and_needs_no_action_grant(browser):
-    app, client, store, _, _ = browser
+    _, client, store, _, _ = browser
     assert client.get("/api/owner/status").json() == {"state": "needs_pairing"}
     _pair_locally(client, store)
     assert client.get("/api/owner/status").json() == {"state": "sign_in_required"}
@@ -752,3 +752,54 @@ def test_read_profile_missing_source_is_unavailable_not_ready(browser):
     assert response.status_code == 503
     assert response.json() == {"state": "unavailable"}
     assert "read_profile" not in response.text
+
+
+@pytest.mark.parametrize("action", ["login", "renew"])
+@pytest.mark.parametrize("source_state", ["unavailable", "denied"])
+def test_read_profile_preflight_preserves_valid_cookie_on_existing_source_failure(browser, action, source_state):
+    _, client, store, _, _ = browser
+    _pair_locally(client, store)
+    assert _post(client, "login").status_code == 200
+    token = _session_cookie(client)
+    with sqlite3.connect(store.path) as conn:
+        before = conn.execute("SELECT * FROM sessions ORDER BY digest").fetchall()
+    from claudlobby.plane.db import db_file
+    with sqlite3.connect(db_file(store.root)) as conn:
+        original = conn.execute("SELECT host_uid FROM owner_source_binding").fetchone()[0]
+        if source_state == "denied":
+            conn.execute("UPDATE owner_source_binding SET host_uid=?", ("host_" + "f" * 32,))
+        else:
+            table_sql = conn.execute("SELECT sql FROM sqlite_master WHERE name='owner_source_binding'").fetchone()[0]
+            conn.execute("DROP TABLE owner_source_binding")
+    response = _post(client, action)
+    assert response.status_code == (403 if source_state == "denied" else 503), response.text
+    assert "set-cookie" not in response.headers and "read_profile" not in response.text
+    assert _session_cookie(client) == token
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute("SELECT * FROM sessions ORDER BY digest").fetchall() == before
+    with sqlite3.connect(db_file(store.root)) as conn:
+        if source_state == "denied":
+            conn.execute("UPDATE owner_source_binding SET host_uid=?", (original,))
+        else:
+            conn.execute(table_sql)
+            conn.execute("INSERT INTO owner_source_binding VALUES (1, ?)", (original,))
+    assert client.get("/api/owner/status").json() == _ready_data(store)
+    assert client.get("/api/tasks").status_code == 200
+
+
+def test_read_profile_preflight_refused_login_mints_no_session_and_preserves_principal_refusal(browser):
+    _, client, store, identity, _ = browser
+    _pair_locally(client, store)
+    from claudlobby.plane.db import db_file
+    with sqlite3.connect(db_file(store.root)) as conn:
+        conn.execute("DROP TABLE owner_source_binding")
+    with sqlite3.connect(store.path) as conn:
+        before = conn.execute("SELECT * FROM sessions").fetchall()
+    response = _post(client, "login")
+    assert response.status_code == 503 and "set-cookie" not in response.headers
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute("SELECT * FROM sessions").fetchall() == before == []
+    identity[0] = OTHER
+    response = _post(client, "login")
+    assert response.status_code == 403  # Wrong owner does not become a source-availability refusal.
+    assert "set-cookie" not in response.headers and "read_profile" not in response.text
