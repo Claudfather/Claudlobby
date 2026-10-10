@@ -17,6 +17,10 @@ def register_host_owner(hosts):
     actions = owner.add_subparsers(dest="owner_action", required=True)
     for action, help_text in (
         ("status", "Inspect this host's owner pairing without changing it"),
+        ("workspace-status", "Inspect retained local workspace binding metadata"),
+        ("initialize-workspace", "Prepare optional workspace authority (interactive)"),
+        ("confirm-workspace", "Bind a verified workspace proposal at this terminal (interactive)"),
+        ("revoke-workspace", "Revoke this host's workspace binding only (interactive)"),
         ("initialize", "Prepare owner authority on an existing installation (interactive)"),
         ("bind-source", "Attest that this Plane database belongs to this installation (interactive)"),
         ("confirm", "Approve a browser's pairing request at this terminal (interactive)"),

@@ -294,6 +294,11 @@ class OwnerAccess:
             if conn is not None:
                 conn.close()  # uncommitted changes roll back, including policy refusals
 
+    def workspace(self):
+        """Optional local workspace authority, sharing this store's transactions."""
+        from .owner_workspace import OwnerWorkspace
+        return OwnerWorkspace(self)
+
     def _now(self) -> float:
         value = self._clock()
         if not math.isfinite(value):
