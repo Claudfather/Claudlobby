@@ -62,8 +62,9 @@ test('default and synthetic transports do not mount session controls or probe ow
     const readUI = name => readFile(new URL('../claudlobby/plane/ui/' + name, import.meta.url), 'utf8');
     const carrierURL = moduleURL((await readUI('connected-read-client.js')).replace('"./owner-api-client.js"', JSON.stringify(ownerURL)));
     const adapterURL = moduleURL((await readUI('two-source-read.js')).replace('"./owner-api-client.js"', JSON.stringify(ownerURL)));
+    const enrollmentURL = moduleURL(await readUI('workspace-enrollment.js'));
     const workspaceURL = moduleURL((await readUI('connected-workspace.js'))
-      .replace('"./connected-read-client.js"', JSON.stringify(carrierURL)).replace('"./two-source-read.js"', JSON.stringify(adapterURL)));
+      .replace('"./workspace-enrollment.js"', JSON.stringify(enrollmentURL)).replace('"./connected-read-client.js"', JSON.stringify(carrierURL)).replace('"./two-source-read.js"', JSON.stringify(adapterURL)));
     const normal = await load((await readUI('api-client.js')).replace('"./connected-workspace.js"', JSON.stringify(workspaceURL)));
     assert.equal(normal.mountSessionControls, undefined);assert.equal(normal.nudgeContext,undefined);assert.equal(normal.feedbackContext,undefined);assert.equal(normal.prepareAction,undefined);
     await normal.jget('/api/tasks');

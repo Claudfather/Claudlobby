@@ -220,3 +220,13 @@ aborts owned work, clears private regions and fences held reads/stream callbacks
 This document never revives after observed loss; reopen through the authenticated
 website. Same-site cookie/CORS/private-network/device validation and actual
 operational publisher integration remain separate empirical gates.
+
+## First-use workspace approval in the connected document
+
+An explicit “Approve workspace on this computer” control consumes the existing workspace challenge, maintained website host assertion, and host stage protocol. It never confirms a binding, initializes the host, grants fleet actions, or connects automatically. Disconnect a currently ready read session before starting enrollment. A successful staged proposal displays its short-lived code only in that computer’s panel, beside the intended workspace, issuer and hostname.
+
+On that computer use `claudlobby --root DATA_ROOT host owner confirm-workspace`, replacing DATA_ROOT with the existing installation’s data root. Paste the code at the hidden prompt, inspect the local issuer/account/workspace and prior-binding preview, then approve locally. Later choose Connect explicitly. These are existing-host approval instructions, not installation or native principal provisioning. An existing active binding must be inspected/managed through the local owner CLI; this consumer never revokes or replaces it.
+
+Stage refusal, malformed reply, network loss or timeout is uncertain: the proposal may already exist. The original code remains briefly available for local inspection; the consumer does not replay stage. “Forget approval code” clears and aborts browser state only, without cancelling or revoking server state. Expiry, account/reference retirement, document disposal or successful explicit Connect clears the code. Nonces/assertions are private in-memory request data, never URL arguments, storage, logs, postMessage or command arguments. The panel’s display is the explicit exception for the approval code; public snapshots contain only phase/expiry/busy metadata.
+
+This core module is part of the finite static graph. It reuses the document’s authenticated metadata check and account-refusal owner; no second account timer, renderer, setup authority or website orchestration is added. Synthetic transport/controller tests do not prove browser cross-site cookies, private-network permissions or a real host approval.

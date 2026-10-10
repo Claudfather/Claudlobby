@@ -1,5 +1,6 @@
 // Account metadata selects navigation; only host-issued core handles admit reads.
 import { createConnectedReadClient } from "./connected-read-client.js";
+import { createWorkspaceEnrollment } from "./workspace-enrollment.js";
 import { createWorkspaceReadTransport } from "./two-source-read.js";
 
 const uuid = value => typeof value === 'string' && value.length === 36 && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
@@ -21,7 +22,7 @@ const failure = (state = 'unavailable', remediation = 'Open this workspace again
 export function createConnectedWorkspace({ documentContext, documentOrigin = globalThis.location?.origin,
   fetch = globalThis.fetch.bind(globalThis), createClient = createConnectedReadClient,
   createTransport = createWorkspaceReadTransport, setTimeout = globalThis.setTimeout,
-  clearTimeout = globalThis.clearTimeout, MutationObserver = globalThis.MutationObserver } = {}) {
+  clearTimeout = globalThis.clearTimeout, now = () => Date.now() / 1000, MutationObserver = globalThis.MutationObserver } = {}) {
   const validDocument = keys(documentContext, ['version', 'user_id', 'workspace_id', 'context_generation', 'shell_origin', 'operational_origin', 'references', 'expires_at'])
     && documentContext.version === 1 && [documentContext.user_id, documentContext.workspace_id, documentContext.context_generation].every(uuid)
     && origin(documentContext.shell_origin) && origin(documentContext.operational_origin)
@@ -46,7 +47,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     clearTimeout(refreshTimer); refreshTimer = null;
     for (const request of requests) request.abort();
     for (const stop of unsubscribes) stop(); unsubscribes = [];
-    for (const {client} of clients) client.dispose();
+    for (const {client,enrollment} of clients) { enrollment.dispose(); client.dispose(); }
     transport?.dispose(); transport = null;
     for (const stream of streams) stream.detach();
     invoke(mount?.onPause);
@@ -103,10 +104,10 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       && data.context_generation === doc.context_generation && references(data.references)
       && referenceKey(data.references) === referenceKey(doc.references);
   }
-  async function assertion(input, {signal}) {
+  async function accountAssertion(path, input, {signal}) {
     if (!current || disposed || phase !== 'ready') throw new Error('Reopen this workspace.');
     const before = sequence;
-    const result = await jsonRequest(doc.shell_origin + '/api/plane/session-assertion', {method:'POST', signal,
+    const result = await jsonRequest(doc.shell_origin + path, {method:'POST', signal,
       headers:{'Content-Type':'application/json'}, body:JSON.stringify(input)});
     if (disposed || before !== sequence || !current) throw new Error('The workspace changed.');
     if ([401,403,409].includes(result.status)) retire('denied');
@@ -120,7 +121,11 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     clients = doc.references.map(reference => ({reference, client:createClient({reference,
       documentContext:{issuer:doc.shell_origin, operational_origin:doc.operational_origin, subject:doc.user_id,
         workspace_id:doc.workspace_id, context_generation:doc.context_generation},
-      currentContext:() => current, obtainSessionAssertion:assertion, documentOrigin, fetch, setTimeout, clearTimeout})}));
+      currentContext:() => current, obtainSessionAssertion:(input, options) => accountAssertion('/api/plane/session-assertion',input,options), documentOrigin, fetch, setTimeout, clearTimeout})}));
+    for (const row of clients) row.enrollment = createWorkspaceEnrollment({reference:row.reference,
+      issuer:doc.shell_origin, operationalOrigin:doc.operational_origin, currentContext:() => current,
+      obtainAssertion:(input,options) => accountAssertion('/api/plane/host-assertion',input,options),
+      fetch,now,setTimeout,clearTimeout,onChange:changed});
     transport = createTransport({sources:clients.map(({client}, index) => ({key:`computer-${index + 1}`,
       label:`Computer ${index + 1}`, reader:client.readHandle}))});
     // The canonical aggregate already publishes source coverage transitions
@@ -199,9 +204,17 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
   }
   async function act(index, operation) {
     if (disposed || phase !== 'ready' || !current) return false;
-    const row = clients[index]; if (!row || pending.has(index) || !['connect','check','renew','logout'].includes(operation)) return false;
+    const row = clients[index]; if (!row || pending.has(index) || !['connect','check','renew','logout','enroll'].includes(operation) || row.enrollment.snapshot().busy) return false;
     pending.add(index); changed();
-    try { return await row.client[operation](); }
+    try {
+      if (operation === 'enroll') {
+        if (row.client.snapshot().state === 'ready' || !await checkAccount()) return false;
+        return await row.enrollment.start();
+      }
+      const result = await row.client[operation]();
+      if (operation === 'connect' && result) row.enrollment.cancel();
+      return result;
+    }
     catch { return false; }
     finally { pending.delete(index); if (!disposed) changed(); }
   }
@@ -231,13 +244,16 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       row.setAttribute('aria-label', new URL(reference.endpoint_origin).hostname);
       const label = document.createElement('span'); row.append(label);
       const buttons = [];
-      for (const [operation, title] of [['connect','Connect'],['check','Check connection'],['renew','Keep connected'],['logout','Disconnect']]) {
+      for (const [operation, title] of [['connect','Connect'],['check','Check connection'],['renew','Keep connected'],['logout','Disconnect'],['enroll','Approve workspace on this computer']]) {
         const button = document.createElement('button'); button.type = 'button'; button.className = 'pill ghost'; button.textContent = title;
         button.setAttribute('aria-label', title + ' ' + new URL(reference.endpoint_origin).hostname);
         button.addEventListener('click', () => { if (button.isConnected && !button.disabled) void act(index,operation); });
         row.append(button); buttons.push({button,operation});
       }
-      const detail = document.createElement('small'); row.append(detail); element.append(row);
+      const detail = document.createElement('small'); row.append(detail);
+      const proposal = document.createElement('span'); proposal.setAttribute('role','group');
+      proposal.setAttribute('aria-label','Local workspace approval ' + new URL(reference.endpoint_origin).hostname);
+      row.append(proposal); clients[index].enrollment.mountPanel({document,element:proposal}); element.append(row);
       controls.rows.push({row,label,detail,buttons});
     });
     controls.rows.forEach(({row,label,detail,buttons},index) => {
@@ -246,7 +262,9 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       detail.textContent = status.remediation || '';
       for (const {button,operation} of buttons) button.disabled = row.hidden || pending.has(index)
         || ['checking','renewing','logout'].includes(status.state)
-        || operation === 'connect' && status.state === 'ready'
+        || clients[index].enrollment.snapshot().busy
+        || ['connect','enroll'].includes(operation) && status.state === 'ready'
+        || operation === 'enroll' && ['awaiting_local_approval','unknown'].includes(clients[index].enrollment.snapshot().state)
         || ['renew','logout'].includes(operation) && status.state !== 'ready';
     });
   }
