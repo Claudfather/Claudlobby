@@ -653,8 +653,11 @@ function renderDebugRail() {
 let refreshTimer = null;
 let safetyTimer = null;
 let generation = 0;
+let sessionPaused = false;
+let sessionEpoch = 0;
 
 async function refreshBoards() {
+  if (sessionPaused) return;
   const gen = ++generation;   // stale responses never paint over newer ones
   if (!fleetsSeen) {
     // The FIRST paint learns the fleet dimension before it fetches a board:
@@ -684,14 +687,14 @@ async function refreshBoards() {
 }
 
 function scheduleRefresh() { // coalesce bursts into one refetch
-  if (refreshTimer) return;
+  if (sessionPaused || refreshTimer) return;
   refreshTimer = setTimeout(() => { refreshTimer = null; refreshBoards(); },
                             400);
 }
 
 function restartSafety() {  // relative times re-render; missed pushes heal
   clearTimeout(safetyTimer);
-  safetyTimer = setTimeout(refreshBoards, 60000);
+  if (!sessionPaused) safetyTimer = setTimeout(refreshBoards, 60000);
 }
 
 function openStream() {
@@ -772,6 +775,8 @@ function ansiToHtml(text) {
 }
 
 let currentView = "channel";
+let equipmentAlias = null;
+let inventoryGeneration = 0;
 let currentFleet = null;   // null = auto (single fleet, or no pick yet)
 let gridTimer = null;
 let focusTimer = null;
@@ -833,6 +838,7 @@ function renderFleetTabs() {
 // ONE pick path — the tab row and the overview strip's cards (U3) both
 // land here, so a card click can never drift from a tab click.
 function pickFleet(f) {
+  if (currentFleet !== f) equipmentAlias = null;
   currentFleet = f;
   syncWorkRoom();
   savePick(currentFleet);
@@ -949,11 +955,13 @@ function renderGrid(env) {
 // the frames still render; the badges just go absent (the recorded half is
 // the degradable one).
 async function pollGrid() {
-  if (currentView !== "grid") return;
+  if (sessionPaused || currentView !== "grid") return;
+  const epoch = sessionEpoch, fleet = currentFleet;
   const q = fleetQuery();   // the tab's panes and verdicts (U4/U1)
   const [gridEnv, presEnv] = await Promise.all([
     jget("/api/grid" + q), jget("/api/presence" + q).catch(() => null),
   ]);
+  if (sessionPaused || epoch !== sessionEpoch || currentView !== "grid" || currentFleet !== fleet) return;
   const byAlias = {};
   if (presEnv && presEnv.data) {
     for (const b of presEnv.data.bots) byAlias[b.alias] = b;
@@ -1000,6 +1008,7 @@ function renderPresenceStrip(counts, recordedDown) {
 }
 
 function setView(view) {
+  if (view !== "fleet") equipmentAlias = null;
   currentView = view;
   $("channel").hidden = view !== "channel";
   $("search-results").hidden = true;   // any view switch closes results
@@ -1240,18 +1249,27 @@ $("search").addEventListener("input", () => {
     return;
   }
   searchTimer = setTimeout(async () => {
+    if (sessionPaused) return;
+    const epoch = sessionEpoch;
     const fleetAtFire = currentFleet;   // room captured at fetch time —
     const f = fleetAtFire && fleetAtFire !== "all"
       ? `&fleet=${encodeURIComponent(fleetAtFire)}` : "";
     const env = await jget(`/api/search?q=${encodeURIComponent(q)}${f}`);
     // stale if the QUERY or the ROOM moved on (two rapid tab clicks raced
     // the old room's hits under the new tab — round 2, probed)
-    if ($("search").value.trim() !== q || currentFleet !== fleetAtFire) return;
+    if (sessionPaused || epoch !== sessionEpoch || $("search").value.trim() !== q || currentFleet !== fleetAtFire) return;
     $("channel").hidden = true;
     $("search-results").hidden = false;
     renderSearch(env);
   }, 250);
 });
+
+function resumeOwnerReads() {
+  sessionPaused = false;
+  refreshBoards();
+  if (currentView === "fleet") void pollFleet();
+  if ($("search").value.trim()) $("search").dispatchEvent(new Event("input"));
+}
 
 // Bootstrap LAST — after every top-level `let` (currentFleet, currentView…)
 // has initialized. Placed mid-file it read those bindings in their temporal
@@ -1272,8 +1290,26 @@ function syncWorkRoom() {
   showLoading();
   return true;
 }
-refreshBoards();
+const ownerSession = typeof interactionApi.mountSessionControls === "function"
+  ? interactionApi.mountSessionControls({ document, element: $("owner-session"),
+      onPause() {
+        sessionPaused = true;
+        ++sessionEpoch;
+        ++generation; ++trustGen;
+        clearTimeout(refreshTimer); refreshTimer = null;
+        clearTimeout(safetyTimer);
+        clearTimeout(searchTimer);
+        $("beat").className = "dot";
+        $("beat-label").textContent = "session access paused";
+      },
+      onResume: resumeOwnerReads,
+    }) : null;
+if (!ownerSession) refreshBoards();
 openStream();
+if (ownerSession) {
+  window.addEventListener("pagehide", () => ownerSession.dispose(), { once: true });
+  window.addEventListener("pageshow", event => { if (event.persisted) location.reload(); });
+}
 
 
 // --- fleet inventory + per-bot equipment (#1405) ---------------------------
@@ -1286,7 +1322,9 @@ const EQUIP_ORDER = ["expertise", "skills", "mcp", "integrations", "guardrails",
   "plugins", "voice"];
 
 async function pollFleet() {
-  if (currentView !== "fleet") return;
+  if (sessionPaused || currentView !== "fleet") return;
+  const epoch = sessionEpoch, fleet = currentFleet;
+  const request = ++inventoryGeneration;
   renderState($("fleet-room"), { state: "loading" });
   // honor the fleet picker (the same fleet= the channel/search use); with
   // "all", every fleet the host records — cross-fleet twins come back
@@ -1301,12 +1339,14 @@ async function pollFleet() {
     jget("/api/org" + f).catch(() => null),
     jget("/api/utilization" + f).catch(() => null),
   ]);
+  if (sessionPaused || epoch !== sessionEpoch || request !== inventoryGeneration || currentView !== "fleet" || currentFleet !== fleet) return;
   if (inv && inv.data && util && util.data) {
     const by = {};
     for (const u of util.data) by[u.alias] = u;
     for (const b of inv.data.bots) { const u = by[b.alias]; if (u) b.util = u; }
   }
   renderInventory(inv, org);
+  if (equipmentAlias) void openEquipment(equipmentAlias);
 }
 
 function orgNode(n) {
@@ -1392,11 +1432,15 @@ function renderInventory(env, orgEnv) {
 }
 
 async function openEquipment(alias) {
+  if (sessionPaused) return;
+  const epoch = sessionEpoch;
   const box = $("equip-detail");
   if (!box) return;
+  equipmentAlias = alias;
   box.hidden = false;
   renderState(box, { state: "loading" });
   const env = await jget(`/api/equipment?alias=${encodeURIComponent(alias)}`);
+  if (sessionPaused || epoch !== sessionEpoch || equipmentAlias !== alias || box !== $("equip-detail")) return;
   if (!env || env.state !== "ok") {
     box.innerHTML = stateBlock(env ? env.state : "disconnected",
                                env && env.provenance, env && env.remediation);
@@ -1438,6 +1482,6 @@ async function openEquipment(alias) {
         </details>
       </div>
     </div>`;
-  box.querySelector(".ed-close").addEventListener("click", () => { box.hidden = true; });
+  box.querySelector(".ed-close").addEventListener("click", () => { equipmentAlias = null; box.hidden = true; });
   box.scrollIntoView({ block: "nearest" });
 }

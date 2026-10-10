@@ -669,7 +669,8 @@ def test_owner_entry_rejects_query_method_and_foreign_boundary(browser, path):
 
 def test_owner_entry_does_not_open_other_static_or_private_routes(browser):
     _, client, store, _, _ = browser
-    for path in ['/', '/style.css', '/api/tasks', '/owner-other.js', '/owner-entry.html']:
+    assert client.get('/', follow_redirects=False).status_code == 303
+    for path in ['/style.css', '/api/tasks', '/owner-other.js', '/owner-entry.html']:
         assert client.get(path).status_code == 403
     assert client.get('/owner').status_code == 200
     _pair_locally(client, store)
