@@ -167,3 +167,47 @@ def test_hidden_input_failure_is_not_allowed_to_echo(owner, monkeypatch):
     monkeypatch.setattr(host_owner.getpass, "getpass", insecure_input)
     assert call(owner, "confirm") == 4
     assert owner.current_grant() is None
+
+
+@pytest.mark.parametrize("problem,expected,code", [("unbound", "host owner bind-source", 6),
+    ("index", "host owner bind-source", 6), ("foreign", "Do not rebind", 4),
+    ("corrupt", "database and schema locally", 6)])
+def test_serve_source_failures_have_local_source_remediation(tmp_path, capsys, problem, expected, code):
+    import sqlite3
+    from claudlobby.plane.db import db_file
+    from claudlobby.plane.owner_source import bind_source
+    from tests.test_plane_two_fleets import _seed
+    _seed(tmp_path)
+    store = OwnerAccess.initialize(tmp_path)
+    if problem != "unbound": bind_source(tmp_path)
+    if problem == "index":
+        with sqlite3.connect(db_file(tmp_path)) as conn:
+            conn.execute("DROP INDEX owner_source_events_host")
+    if problem == "foreign":
+        with sqlite3.connect(db_file(tmp_path)) as conn:
+            conn.execute("UPDATE owner_source_binding SET host_uid='foreign-host'")
+    if problem == "corrupt": db_file(tmp_path).write_bytes(b"not SQLite")
+    assert call(store, "serve", "--origin", "https://plane.example.test", "--tailscale", "/unused/binary") == code
+    error = capsys.readouterr().err
+    assert expected in error and "request pairing again" not in error
+    assert str(tmp_path) not in error and "foreign-host" not in error
+    if problem in {"foreign", "corrupt"}:
+        assert "re-run host owner bind-source" not in error
+
+
+def test_bind_foreign_source_never_suggests_pairing_or_rebinding(tmp_path, monkeypatch, capsys):
+    import sqlite3
+    from claudlobby.plane.db import db_file
+    from claudlobby.plane.owner_source import bind_source
+    from tests.test_plane_two_fleets import _seed
+    _seed(tmp_path)
+    store = OwnerAccess.initialize(tmp_path)
+    bind_source(tmp_path)
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        conn.execute("UPDATE communications SET host_uid='foreign-host'")
+        conn.execute("UPDATE work_items SET host_uid='foreign-host'")
+    terminal(monkeypatch, iter(["BIND\n"]))
+    assert call(store, "bind-source") == 4
+    error = capsys.readouterr().err
+    assert "Do not rebind" in error and "request pairing again" not in error
+    assert "re-run host owner bind-source" not in error and "foreign-host" not in error

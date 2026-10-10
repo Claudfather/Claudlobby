@@ -236,3 +236,44 @@ def test_cli_runtime_oserror_is_not_mislabeled_as_socket_open(tmp_path, monkeypa
     error = capsys.readouterr().err
     assert "owner server failed" in error
     assert "open its configured private socket" not in error and "private runtime diagnostic" not in error
+
+
+def test_actual_uvicorn_lifespan_failure_exits_unavailable_and_cleans_owned_socket(tmp_path, socket_path):
+    """Real uvicorn failure; synthetic app startup, no Tailscale command or ingress."""
+    _seed(tmp_path)
+    bind_source(tmp_path)
+    OwnerAccess.initialize(tmp_path)
+    program = r"""
+from contextlib import asynccontextmanager
+from pathlib import Path
+import sys
+from starlette.applications import Starlette
+from claudlobby.plane import owner_browser
+from claudlobby.__main__ import main
+@asynccontextmanager
+async def failed_startup(app):
+    raise RuntimeError("synthetic sampler startup failure")
+    yield
+owner_browser.create_owner_browser_app = lambda *a, **k: Starlette(lifespan=failed_startup)
+raise SystemExit(main(["--root", sys.argv[1], "host", "owner", "serve", "--socket", sys.argv[2],
+    "--origin", "https://plane.example.test", "--tailscale", sys.executable]))
+"""
+    result = subprocess.run([sys.executable, "-c", program, str(tmp_path), str(socket_path)],
+        env=constructed_env(), capture_output=True, text=True, timeout=15)
+    assert result.returncode == 6, result.stdout + result.stderr
+    assert "owner server startup failed" in result.stderr
+    assert "Owner server stopped" not in result.stdout + result.stderr
+    assert not socket_path.exists()
+
+
+def test_server_run_returning_without_startup_is_not_a_clean_stop(tmp_path, socket_path, monkeypatch, capsys):
+    import uvicorn
+    _seed(tmp_path)
+    bind_source(tmp_path)
+    OwnerAccess.initialize(tmp_path)
+    monkeypatch.setattr(uvicorn.Server, "run", lambda *a, **k: None)
+    assert main(["--root", str(tmp_path), "host", "owner", "serve", "--socket", str(socket_path),
+        "--origin", "https://plane.example.test", "--tailscale", sys.executable]) == 6
+    output = capsys.readouterr()
+    assert "startup failed" in output.err and "Owner server stopped" not in output.out
+    assert not socket_path.exists()

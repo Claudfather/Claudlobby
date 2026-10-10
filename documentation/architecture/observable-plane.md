@@ -775,3 +775,17 @@ unopenable db, a fleet the plane has never seen, or a plane that holds no bot
 of the fleet is REFUSED with a reason on stderr and a nonzero rc; an existing
 source with zero rows is an answer. The refusal never rides stdout, because
 `report-back.sh` and `fleet-pulse.sh` parse it.
+
+Owner source admission also requires the operator-created covering indexes. A
+table-rebuild migration may drop them even when the ownership marker survives;
+protected reads and owner-server startup refuse immediately when a required
+index is absent, without scanning payload tables or repairing schema on reads.
+After completing a supported migration, verify the selected installation and
+re-run `host owner bind-source` locally to explicitly attest the existing source
+and restore missing indexes. The command validates retained host invariants
+before committing. Foreign markers or mixed-host records cannot be rebound;
+select the correct installation or investigate their provenance instead. Corrupt
+sources and incompatible index definitions require local database/schema
+investigation, not pairing again. Browser refusals remain generic. A foreground
+owner server whose lifespan startup fails returns an unavailable exit rather
+than reporting a clean stop; its owned socket is still cleaned up.

@@ -19,6 +19,10 @@ class OwnerServerConfigurationError(ValueError):
     """Actionable local configuration refusal, never a browser response."""
 
 
+class OwnerServerStartupError(RuntimeError):
+    """The server run ended before completing startup."""
+
+
 def _private_directory(path: Path):
     try:
         info = path.lstat()
@@ -109,4 +113,14 @@ def serve(root: Path, *, origin: str, tailscale_binary: Path, socket_path: Path 
         # into scope.client or alter which headers the identity verifier sees.
         config = uvicorn.Config(app, log_level="warning", access_log=False,
                                 proxy_headers=False, timeout_graceful_shutdown=5)
-        OwnerServer(config).run(sockets=[listener])
+        server = OwnerServer(config)
+        try:
+            server.run(sockets=[listener])
+        except SystemExit as exc:
+            # Recent uvicorn exits during failed startup; older versions return.
+            # Both paths must produce the same actionable local CLI failure.
+            if not server.started:
+                raise OwnerServerStartupError("owner server startup failed; inspect local server logs") from exc
+            raise
+        if not server.started:
+            raise OwnerServerStartupError("owner server startup failed; inspect local server logs")
