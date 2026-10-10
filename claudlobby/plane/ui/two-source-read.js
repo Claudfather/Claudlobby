@@ -1,5 +1,5 @@
 // One or two trusted core-issued read handles. Carrier/session provisioning is external.
-import { isOwnerReadHandle } from "/owner-api-client.js";
+import { isOwnerReadHandle } from "./owner-api-client.js";
 
 const slug = /^[a-z][a-z0-9-]{0,31}$/;
 const taskID = /^wi_[0-9a-f]{32}$/;
