@@ -7,6 +7,9 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
   EventSource = globalThis.EventSource, location = globalThis.location,
   setTimeout = globalThis.setTimeout, clearTimeout = globalThis.clearTimeout,
   monotonicNow = () => globalThis.performance.now(),
+  requestTimeout = 8000,
+  onReadAdmitted = () => {},
+  onDispose = () => {},
   onAccessEnded = () => location.replace('/owner') } = {}) {
   let generation = 0, mode = 'checking', busy = false, disposed = false;
   let actionChecking = null, recoveryUsed = false, readRecoveryUsed = false, streamRecoveryUsed = false, readRecoveryTimer = null;
@@ -59,6 +62,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
       return false;
     }
     readHost = profile.host_uid; // Pinned for this transport lifetime, including renewal/recovery.
+    onReadAdmitted(); // Trusted carrier installs only after this single checker.
     return true;
   }
   function resume(note) {
@@ -71,7 +75,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
     pause(next);
     onAccessEnded(next); // Direct-host default redirects; read handles report only their source.
   }
-  async function request(url, action = false, body = {}, timeout = 8000) {
+  async function request(url, action = false, body = {}, timeout = requestTimeout) {
     const controller = new AbortController();
     reads.add(controller);
     const timer = setTimeout(() => controller.abort(), timeout);
@@ -359,7 +363,9 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
     return { ready, dispose };
   }
   function dispose() {
+    if (disposed) return;
     disposed = true;
+    onDispose();
     pause('unavailable');
     for (const stream of [...streams]) stream.close();
   }
@@ -376,7 +382,11 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
     readHandles.add(handle);
     return handle;
   }
-  return { jget, createEventSource, mountSessionControls, interactionContext, nudgeContext, feedbackContext, prepareAction, sendAction, actionReceipt, readHandle };
+  const sessionControls = Object.freeze({
+    suspend(note) { pause('unavailable'); if (note) render(note); },
+    renew: () => mutate('renew'), logout: () => mutate('logout'),
+  });
+  return { jget, createEventSource, mountSessionControls, interactionContext, nudgeContext, feedbackContext, prepareAction, sendAction, actionReceipt, readHandle, sessionControls };
 }
 
 const owner = createOwnerTransport();

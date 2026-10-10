@@ -1,0 +1,357 @@
+import { createOwnerTransport } from "./owner-api-client.js";
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const HOST = /^host_[0-9a-f]{32}$/;
+const SECRET = /^[A-Za-z0-9_-]{43}$/;
+const READS = { summary: [], overview: [], fleets: [], trust: [],
+  channel: ['fleet', 'limit'], tasks: ['fleet'], identities: ['fleet'],
+  inventory: ['fleet'], org: ['fleet'], utilization: ['fleet'], presence: ['fleet'],
+  equipment: ['alias'], search: ['q', 'fleet', 'limit'], grid: ['fleet', 'focus'],
+  stream: ['cursor', 'once'] };
+const keys = (v, fields) => v !== null && typeof v === 'object' && !Array.isArray(v)
+  && Object.keys(v).sort().join() === [...fields].sort().join();
+const uuid = v => typeof v === 'string' && v.length === 36 && UUID.test(v);
+const host = v => typeof v === 'string' && v.length === 37 && HOST.test(v);
+const positive = v => Number.isSafeInteger(v) && v > 0;
+function origin(v) {
+  if (typeof v !== 'string' || v.length > 2048) return false;
+  try { const u = new URL(v); return u.protocol === 'https:' && u.origin === v && !u.hostname.includes('*') && !u.username && !u.password; }
+  catch { return false; }
+}
+function secret(v) {
+  // Canonical32-byte base64url: the final character's unused two bits are zero.
+  return typeof v === 'string' && v.length === 43 && SECRET.test(v)
+    && 'AEIMQUYcgkosw048'.includes(v.at(-1));
+}
+const cursor = v => typeof v === 'string' && /^(0|[1-9][0-9]*)$/.test(v)
+  && Number.isSafeInteger(Number(v));
+
+/** Trusted document/account boundary in; only a real host handshake admits reads.
+ * No credentials, assertion data, global controls or actions are exported.
+ */
+export function createConnectedReadClient({ reference, documentContext, currentContext,
+  obtainSessionAssertion, fetch = globalThis.fetch.bind(globalThis),
+  documentOrigin = globalThis.location?.origin,
+  monotonicNow = () => globalThis.performance.now(),
+  setTimeout = globalThis.setTimeout, clearTimeout = globalThis.clearTimeout } = {}) {
+  if (!keys(reference, ['reference_id', 'endpoint_origin', 'revision']) || !uuid(reference.reference_id)
+      || !origin(reference.endpoint_origin) || !positive(reference.revision)
+      || !keys(documentContext, ['issuer', 'operational_origin', 'subject', 'workspace_id', 'context_generation'])
+      || !origin(documentContext.issuer) || !origin(documentContext.operational_origin)
+      || documentOrigin !== documentContext.operational_origin
+      || ![documentContext.subject, documentContext.workspace_id, documentContext.context_generation].every(uuid)
+      || typeof currentContext !== 'function' || typeof obtainSessionAssertion !== 'function')
+    throw new Error('A current authenticated Plane document and exact saved reference are required.');
+  const ref = Object.freeze({ ...reference }), doc = Object.freeze({ ...documentContext });
+  let token = null, pending = null, binding = null, hostUID = null, expires = 0;
+  let epoch = 0, disposed = false, ended = false, busy = false, lastNow = null, expiryTimer = null;
+  const requests = new Set(), cursors = new Map();
+  let owner, handle, unsubscribe = () => {};
+  function now() {
+    const value = monotonicNow();
+    if (!Number.isFinite(value) || value < 0 || (lastNow !== null && value < lastNow)) {
+      stop('The browser clock is unavailable. Reopen Plane before continuing.', true);
+      throw new Error('Connected reads unavailable.');
+    }
+    lastNow = value;
+    return value;
+  }
+  function wipe() {
+    token = null; pending = null; expires = 0;
+    clearTimeout(expiryTimer); expiryTimer = null;
+    for (const request of requests) request.abort();
+  }
+  function stop(note, permanent = false) {
+    epoch++; ended ||= permanent; wipe();
+    owner?.sessionControls.suspend(note);
+  }
+  function contextMatches() {
+    let c;
+    try { c = currentContext(); } catch { return null; }
+    if (c == null) return null;
+    if (!keys(c, ['version', 'user', 'workspace', 'context_generation', 'references']) || c.version !== 2
+        || !keys(c.user, ['id']) || !keys(c.workspace, ['id', 'name'])
+        || c.user.id !== doc.subject || c.workspace.id !== doc.workspace_id
+        || c.context_generation !== doc.context_generation || !Array.isArray(c.references) || c.references.length > 2) return false;
+    const matches = c.references.filter(r => r?.reference_id === ref.reference_id);
+    return matches.length === 1 && keys(matches[0], ['reference_id', 'endpoint_origin', 'revision'])
+      && matches[0].endpoint_origin === ref.endpoint_origin && matches[0].revision === ref.revision;
+  }
+  function valid(requireToken = false) {
+    if (disposed || ended) return false;
+    const matches = contextMatches();
+    if (matches === null) {
+      stop('Current authenticated workspace metadata is unavailable. Check it before signing in again.');
+      return false;
+    }
+    if (!matches) {
+      stop('The authenticated account, workspace or saved computer changed. Reopen Plane.', true);
+      return false;
+    }
+    let time;
+    try { time = now(); } catch { return false; }
+    if (requireToken && (!token || time >= expires)) {
+      stop('The connected session expired. Sign in again explicitly.');
+      return false;
+    }
+    return true;
+  }
+  function armExpiry() {
+    clearTimeout(expiryTimer);
+    const gen = epoch;
+    expiryTimer = setTimeout(() => {
+      if (!disposed && gen === epoch) stop('The connected session expired. Sign in again explicitly.');
+    }, Math.max(0, expires - now()));
+  }
+  function readRoute(url, streaming = false) {
+    if (typeof url !== 'string' || !url.startsWith('/api/') || url.startsWith('//')) throw new Error();
+    const u = new URL(url, ref.endpoint_origin);
+    if (u.origin !== ref.endpoint_origin || u.hash || u.username || u.password) throw new Error();
+    const suffix = u.pathname.slice(5);
+    const fields = /^tasks\/wi_[0-9a-f]{32}$/.test(suffix) ? ['fleet'] : Object.hasOwn(READS, suffix) ? READS[suffix] : undefined;
+    if (!fields || (streaming && suffix !== 'stream') || (!streaming && suffix === 'stream')) throw new Error();
+    const names = [...u.searchParams.keys()];
+    if (names.length !== new Set(names).size || names.some(k => !fields.includes(k))) throw new Error();
+    if (suffix === 'stream' && u.searchParams.has('cursor') && !cursor(u.searchParams.get('cursor'))) throw new Error();
+    return { url: ref.endpoint_origin + '/api/owner/connected/read/' + suffix + u.search, key: u.pathname + u.search };
+  }
+  async function boundedJSON(response, limit) {
+    // A synthetic fetch used by tests may supply json(), but shipped Fetch uses
+    // a bounded streaming body rather than an unbounded Response.json().
+    if (!response.body?.getReader) {
+      const data = await response.json();
+      if (new TextEncoder().encode(JSON.stringify(data)).length > limit) throw new Error();
+      return data;
+    }
+    const reader = response.body.getReader(), decoder = new TextDecoder('utf-8', { fatal: true });
+    let text = '', bytes = 0;
+    try {
+      for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        bytes += chunk.value.byteLength;
+        if (bytes > limit) throw new Error();
+        text += decoder.decode(chunk.value, { stream: true });
+      }
+      return JSON.parse(text + decoder.decode());
+    } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+  }
+  async function http(path, { method = 'GET', body, signal, timeout = 15000, bearer = token,
+    limit = 16384 } = {}) {
+    const start = now();
+    const controller = new AbortController(), relay = () => controller.abort();
+    if (signal?.aborted) controller.abort();
+    signal?.addEventListener('abort', relay, { once: true });
+    requests.add(controller);
+    const timer = setTimeout(relay, timeout), gen = epoch;
+    try {
+      const response = await fetch(path, { method, credentials: 'omit', cache: 'no-store', redirect: 'error',
+        signal: controller.signal, headers: { ...(bearer ? { Authorization: 'Bearer ' + bearer } : {}),
+          ...(body !== undefined ? { 'Content-Type': 'application/json', 'X-Claudlobby-Owner': '1' } : {}) },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+      let data;
+      if (response.status !== 204) {
+        try { data = await boundedJSON(response, limit); }
+        catch { if (response.status === 403) data = { state: 'denied' }; else throw new Error(); }
+      }
+      if (controller.signal.aborted || disposed || gen !== epoch || !valid()) throw new Error();
+      return { status: response.status, data, start };
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', relay);
+      requests.delete(controller);
+    }
+  }
+  function admission(data, start, needsToken) {
+    const fields = ['version', 'state', 'expires_in', 'read_profile', 'session_context', ...(needsToken ? ['token'] : [])];
+    const c = data?.session_context;
+    if (!keys(data, fields) || data.version !== 1 || data.state !== 'ready'
+        || !Number.isSafeInteger(data.expires_in) || data.expires_in <= 0 || data.expires_in > 900
+        || !keys(c, ['issuer', 'subject', 'workspace_id', 'binding_revision', 'binding_generation', 'operational_origin'])
+        || c.issuer !== doc.issuer || c.subject !== doc.subject || c.workspace_id !== doc.workspace_id
+        || c.operational_origin !== doc.operational_origin || c.binding_revision !== binding?.binding_revision
+        || c.binding_generation !== binding?.binding_generation || data.read_profile?.host_uid !== hostUID
+        || (needsToken && !secret(data.token)) || !valid() || start + data.expires_in * 1000 <= now()) {
+      stop('Connected session compatibility or bound identity could not be verified. Reopen Plane.', true);
+      throw new Error();
+    }
+    // The single canonical owner checker still validates and pins read_profile.
+    pending = { data, token: needsToken ? data.token : token, expires: start + data.expires_in * 1000 };
+    return data;
+  }
+  async function carrier(url, options) {
+    // A read-only probe cannot expire/abort an explicit sign-in before issue.
+    // The pending issued response still goes through the canonical checker.
+    if (url === '/api/owner/status' && busy && !token && !pending) throw new Error();
+    if (!valid()) throw new Error();
+    if (url === '/api/owner/status' && pending) return { status: 200, json: async () => pending.data };
+    const action = { '/api/owner/status': 'status', '/api/owner/renew': 'renew', '/api/owner/logout': 'logout' }[url];
+    if (action) {
+      if (!valid(true)) return { status: 403, json: async () => ({ state: 'denied' }) };
+      const result = await http(ref.endpoint_origin + '/api/owner/connected/' + action,
+        { method: action === 'status' ? 'GET' : 'POST', ...(action !== 'status' ? { body: {} } : {}), signal: options.signal });
+      if (result.status === 200 && action !== 'logout') admission(result.data, result.start, action === 'renew');
+      if (result.status === 200 && action === 'logout'
+          && (!keys(result.data, ['version', 'state']) || result.data.version !== 1 || result.data.state !== 'signed_out')) throw new Error();
+      return { status: result.status, json: async () => result.data };
+    }
+    if (!valid(true)) throw new Error();
+    const route = readRoute(url);
+    const result = await http(route.url, { signal: options.signal, limit: 8 * 1024 * 1024 });
+    return { status: result.status, json: async () => result.data };
+  }
+
+  class FetchStream {
+    constructor(url) {
+      this.listeners = new Map(); this.closed = false; this.controller = null;
+      this.live = () => false;
+      this.onopen = null; this.onmessage = null; this.onerror = null;
+      this.done = this.run(url);
+    }
+    addEventListener(name, fn) {
+      if (!this.listeners.has(name)) this.listeners.set(name, new Set());
+      this.listeners.get(name).add(fn);
+    }
+    close() { this.closed = true; this.controller?.abort(); }
+    emit(name, event, delivered = () => {}) {
+      if (!this.live(name === 'error')) return false;
+      delivered(); // Commit only this admitted frame, before consumer callbacks.
+      this['on' + name]?.(event);
+      for (const fn of this.listeners.get(name) || []) {
+        if (!this.live()) break;
+        fn(event);
+      }
+      return true;
+    }
+    async run(url) {
+      let reader;
+      try {
+        if (!valid(true)) throw new Error();
+        const route = readRoute(url, true), gen = epoch, controller = new AbortController();
+        this.controller = controller; requests.add(controller);
+        this.live = (allowAborted = false) => !this.closed && (allowAborted || !controller.signal.aborted) && gen === epoch
+          && handle.snapshot().state === 'ready' && valid(true);
+        const timer = setTimeout(() => controller.abort(), 15000);
+        let response;
+        try {
+          response = await fetch(route.url, { method: 'GET', credentials: 'omit', cache: 'no-store', redirect: 'error',
+            signal: controller.signal, headers: { Authorization: 'Bearer ' + token,
+              ...(cursors.has(route.key) ? { 'Last-Event-ID': cursors.get(route.key) } : {}) } });
+        } finally { clearTimeout(timer); }
+        if (!this.live()
+            || response.status !== 200 || !/^text\/event-stream(?:;|$)/i.test(response.headers.get('content-type') || '')
+            || !response.body?.getReader) throw new Error();
+        reader = response.body.getReader();
+        this.emit('open', { type: 'open' });
+        const decoder = new TextDecoder('utf-8', { fatal: true });
+        let buffer = '', data = [], event = 'message', id = null, size = 0;
+        const line = text => {
+          size += new TextEncoder().encode(text).length;
+          if (size > 8 * 1024 * 1024) throw new Error();
+          if (!text) {
+            if (data.length) this.emit(event, { type: event, data: data.join('\n'), lastEventId: id ?? cursors.get(route.key) ?? '' },
+              () => { if (id !== null) cursors.set(route.key, id); });
+            else if (id !== null && this.live()) cursors.set(route.key, id);
+            data = []; event = 'message'; id = null; size = 0;
+            return;
+          }
+          if (text.startsWith(':')) return; // canonical ping, no new recovery loop
+          const colon = text.indexOf(':'), field = colon < 0 ? text : text.slice(0, colon);
+          let value = colon < 0 ? '' : text.slice(colon + 1); if (value.startsWith(' ')) value = value.slice(1);
+          if (field === 'data') data.push(value);
+          else if (field === 'id') { if (!cursor(value)) throw new Error(); id = value; }
+          else if (field === 'event') { if (!['message', 'source'].includes(value)) throw new Error(); event = value; }
+          else if (field === 'retry' && (!cursor(value) || Number(value) > 60000)) throw new Error();
+        };
+        const lines = final => {
+          while (this.live()) {
+            const match = /[\r\n]/.exec(buffer); if (!match) break;
+            const index = match.index;
+            if (!final && buffer[index] === '\r' && index === buffer.length - 1) break;
+            const width = buffer[index] === '\r' && buffer[index + 1] === '\n' ? 2 : 1;
+            line(buffer.slice(0, index)); buffer = buffer.slice(index + width);
+          }
+        };
+        while (this.live()) {
+          const chunk = await reader.read();
+          if (!this.live()) return;
+          if (chunk.done) { buffer += decoder.decode(); lines(true); break; } // never dispatch an incomplete frame
+          if (chunk.value.byteLength > 8 * 1024 * 1024) throw new Error();
+          buffer += decoder.decode(chunk.value, { stream: true });
+          if (buffer.length > 8 * 1024 * 1024) throw new Error();
+          lines(false);
+        }
+        if (!this.closed && gen === epoch) throw new Error();
+      } catch {
+        if (!this.closed && !disposed) this.emit('error', { type: 'error' });
+      } finally {
+        await reader?.cancel().catch(() => {}); reader?.releaseLock();
+        if (this.controller) requests.delete(this.controller);
+      }
+    }
+  }
+
+  owner = createOwnerTransport({ fetch: carrier, EventSource: FetchStream,
+    monotonicNow, setTimeout, clearTimeout, requestTimeout: 15000, onAccessEnded: () => {},
+    onDispose() {
+      disposed = true; epoch++; wipe(); cursors.clear(); binding = null; unsubscribe();
+    },
+    onReadAdmitted() {
+      if (!pending || !valid()) throw new Error();
+      token = pending.token; expires = pending.expires; pending = null; armExpiry();
+    } });
+  handle = owner.readHandle();
+  unsubscribe = handle.subscribe(state => {
+    if (['denied', 'signed_out'].includes(state.state)) { epoch++; wipe(); }
+    else if (state.state === 'unavailable') pending = null;
+  });
+  async function connect() {
+    if (disposed || ended || busy || !valid()) return false;
+    busy = true; stop('Signing in to the selected computer…');
+    const gen = epoch;
+    try {
+      const result = await http(ref.endpoint_origin + '/api/owner/connected/challenge', { method: 'POST', body: {}, bearer: null });
+      const c = result.data;
+      if (result.status !== 202 || !keys(c, ['version', 'state', 'nonce', 'issuer', 'host_uid', 'operational_origin',
+          'binding_revision', 'binding_generation', 'expires_at']) || c.version !== 1 || c.state !== 'awaiting_session_assertion'
+          || !secret(c.nonce) || c.issuer !== doc.issuer || c.operational_origin !== doc.operational_origin
+          || !host(c.host_uid) || (hostUID !== null && hostUID !== c.host_uid)
+          || !positive(c.binding_revision) || !uuid(c.binding_generation) || !positive(c.expires_at)
+          || (binding && (binding.binding_revision !== c.binding_revision || binding.binding_generation !== c.binding_generation))) throw new Error();
+      hostUID = c.host_uid;
+      binding = { binding_revision: c.binding_revision, binding_generation: c.binding_generation };
+      const signing = new AbortController(); requests.add(signing);
+      const timer = setTimeout(() => signing.abort(), 15000);
+      let evidence;
+      try {
+        evidence = await Promise.race([
+          obtainSessionAssertion({ workspace_id: doc.workspace_id, host_uid: hostUID, nonce: c.nonce,
+            operational_origin: doc.operational_origin, ...binding, reference_id: ref.reference_id,
+            expected_context_generation: doc.context_generation }, { signal: signing.signal }),
+          new Promise((_, reject) => signing.signal.addEventListener('abort', () => reject(new Error()), { once: true })),
+        ]);
+      } finally { clearTimeout(timer); requests.delete(signing); }
+      if (disposed || gen !== epoch || !valid() || !keys(evidence, ['version', 'assertion', 'expires_at'])
+          || evidence.version !== 1 || typeof evidence.assertion !== 'string' || evidence.assertion.length > 8192
+          || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(evidence.assertion)
+          || !positive(evidence.expires_at)) throw new Error();
+      const issued = await http(ref.endpoint_origin + '/api/owner/connected/issue', { method: 'POST',
+        body: { nonce: c.nonce, assertion: evidence.assertion }, bearer: null, timeout: 35000 });
+      if (issued.status !== 200 || disposed || gen !== epoch) throw new Error();
+      admission(issued.data, issued.start, true);
+      await handle.start(); // genuine issued response goes through the one profile checker
+      return handle.snapshot().state === 'ready';
+    } catch {
+      if (!disposed && gen === epoch) stop('Sign-in did not complete. Its host outcome is unknown; sign in again explicitly.');
+      return false;
+    } finally { busy = false; }
+  }
+  function dispose() {
+    if (disposed) return;
+    handle.dispose();
+  }
+  return Object.freeze({ connect, start: () => handle.start(), check: () => handle.start(),
+    renew: async () => { if (!busy && valid(true)) { busy = true; try { await owner.sessionControls.renew(); } finally { busy = false; } } },
+    logout: async () => { if (!busy && valid(true)) { busy = true; try { await owner.sessionControls.logout(); } finally { busy = false; } } },
+    dispose, readHandle: handle, snapshot: handle.snapshot, subscribe: handle.subscribe });
+}

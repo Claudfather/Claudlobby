@@ -676,6 +676,25 @@ def test_app_js_import_is_cache_busted(tmp_path):
     assert transport.headers.get("cache-control") == "no-store"
 
 
+def test_connected_reader_asset_uses_same_versioned_owner_graph(tmp_path, monkeypatch):
+    import os
+    import shutil
+    from claudlobby.plane import view
+    ui = tmp_path / "ui"
+    shutil.copytree(view.UI_DIR, ui)
+    monkeypatch.setattr(view, "UI_DIR", ui)
+    client = TestClient(create_app(tmp_path, package=source_package()))
+    before = client.get("/connected-read-client.js")
+    assert before.status_code == 200
+    assert before.headers["cache-control"] == "no-store"
+    assert 'from "./owner-api-client.js?v=' in before.text
+    module = ui / "connected-read-client.js"
+    info = module.stat()
+    os.utime(module, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000))
+    after = client.get("/connected-read-client.js")
+    assert before.text != after.text
+
+
 def test_stream_defaults_to_head_never_replays(tmp_path):
     """Gauntlet consensus (3 reviewers, measured): a cursor-less connect used
     to replay the ENTIRE ledger per viewer per reconnect."""
