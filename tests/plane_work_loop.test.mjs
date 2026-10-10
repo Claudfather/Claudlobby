@@ -125,7 +125,7 @@ test('late receipt names its original recipient and preserves a newly selected r
   h.get('work-recipient').value = 'worker'; h.get('work-recipient').onchange();
   h.get('work-body').value = 'Worker draft'; h.get('work-body').emit('input');
   lookup.resolve(receipt(original)); await checking;
-  assert.match(h.get('work-notice').textContent, /message to lead:.*delivery confirmed/);
+  assert.match(h.get('work-notice').textContent, /message to Lead:.*delivery confirmed/);
   assert.equal(h.get('work-body').value, 'Worker draft');
   assert.equal(new ActionState(storage).pending.length, 0);
 });
@@ -134,7 +134,7 @@ test('receipt notice names its original task even if a different task was select
   h.loop.setRoom('web'); await settle(); h.update(); h.open('task-b');
   h.get('task-detail-content').querySelectorAll('[data-kind]')[0].onclick(); await settle();
   await h.pendingClick(original.request_id);
-  assert.match(h.get('work-notice').textContent, /message to lead · task task-a:/);
+  assert.match(h.get('work-notice').textContent, /message to Lead · task task-a:/);
 });
 test('reload and explicit discard never resend; discard requires the uncertainty confirmation', async () => {
   const storage = store(), original = saved(storage), h = harness({ storage, confirm: false });
@@ -192,7 +192,7 @@ test('one pending send attempts transport once and its late result preserves ano
   h.get('work-body').value = 'Keep worker draft'; h.get('work-body').emit('input');
   sending.resolve(receipt(h.sends[0])); await first;
   assert.equal(h.get('work-body').value, 'Keep worker draft');
-  assert.match(h.get('work-notice').textContent, /message to lead:.*delivery confirmed/);
+  assert.match(h.get('work-notice').textContent, /message to Lead:.*delivery confirmed/);
 });
 
 test('modal focus prefers the original panel when refreshed cards duplicate task and fleet', async () => {
@@ -252,7 +252,7 @@ test('late refusal from send and receipt lookup remains visible against its orig
     h.get('work-recipient').value = 'worker'; h.get('work-recipient').onchange();
     h.get('work-body').value = 'Keep the new draft'; h.get('work-body').emit('input');
     transport.resolve(receipt(original || h.sends[0], 'rejected')); await pending;
-    assert.match(h.get('work-notice').textContent, /message to lead.*request refused/);
+    assert.match(h.get('work-notice').textContent, /message to Lead.*request refused/);
     if (original) assert.match(h.get('work-notice').textContent, /task task-a/);
     assert.equal(h.get('work-body').value, 'Keep the new draft');
     assert.equal(new ActionState(storage).pending.length, 0);
@@ -276,7 +276,7 @@ test('receipt checks wait for their in-flight send; failed sends retain the orig
   await h.pendingClick(request.request_id);
   assert.equal(h.lookups.length, 1);
   assert.equal(h.lookups[0].request_id, request.request_id);
-  assert.match(h.get('work-notice').textContent, /message to lead:.*delivery confirmed/);
+  assert.match(h.get('work-notice').textContent, /message to Lead:.*delivery confirmed/);
   assert.equal(new ActionState(h.storage).pending.length, 0);
   assert.equal(h.sends.length, 1);
 });
@@ -329,4 +329,70 @@ test('unsupported synthetic detail retains labelled limited board snapshot; prot
     if(guarded) assert.doesNotMatch(h.get('task-detail-content').innerHTML,/board snapshot/);
     else assert.match(h.get('task-detail-content').innerHTML,/board snapshot only/);
   }
+});
+
+test('fresh submission refusal removes only owned pending row and keeps draft', async () => {
+  const storage=store(); saved(storage);
+  const refusal=Object.assign(Error('Refused'),{effect:'not_started'});
+  const h=harness({storage,sendAction(){throw refusal;}});
+  h.loop.setRoom('web'); await settle();
+  h.get('work-recipient').value='worker'; h.get('work-recipient').onchange();
+  await h.submit();
+  const rows=JSON.parse(storage.getItem('plane.pending-actions.v1'));
+  assert.deepEqual(rows.map(r=>r.request_id),['saved-request']);
+  assert.equal(h.get('work-body').value,'Hello');
+  assert.match(h.get('work-notice').textContent,/This submission was refused before delivery/);
+  assert.equal(h.sends.length,1);
+});
+
+test('reused local pending UUID cannot start a send or clear its earlier row', async () => {
+  const storage=store(); saved(storage);
+  const h=harness({storage,crypto:{randomUUID:()=> 'saved-request'}});
+  h.loop.setRoom('web'); await settle();
+  h.get('work-recipient').value='worker'; h.get('work-recipient').onchange();
+  await h.submit();
+  assert.equal(h.sends.length,0);
+  assert.equal(JSON.parse(storage.getItem('plane.pending-actions.v1'))[0].request_id,'saved-request');
+});
+
+test('paused action context preserves selected team and does not fetch grants', async () => {
+  const rooms=[]; const h=harness({interactionContext(room){rooms.push(room);return context;}});
+  h.loop.setRoom('web'); await settle();
+  h.get('work-body').value='Kept';h.get('work-body').emit('input');
+  h.loop.pause(); await settle();
+  assert.deepEqual(rooms,['web']);
+  assert.equal(h.get('work-scope').textContent,'web');
+  assert.match(h.get('work-notice').textContent,/Session access is paused/);
+  assert.equal(h.get('work-send').disabled,true);
+  h.loop.setRoom('web');await settle();
+  assert.equal(h.get('work-body').value,'Kept');
+});
+
+
+test('capability invalidation hides composer without hiding the refused submission notice', async () => {
+  let h;
+  const rooms=[];
+  h=harness({interactionContext(room){rooms.push(room);return context;},sendAction(){
+    h.loop.invalidate();
+    throw Object.assign(Error('Refused'),{effect:'not_started'});
+  }});
+  h.loop.setRoom('web');await settle();await h.submit();
+  assert.equal(h.get('work-form').hidden,true);
+  assert.equal(h.get('work-send').disabled,true);
+  assert.match(h.get('work-notice').textContent,/This submission was refused before delivery/);
+  assert.deepEqual(rooms,['web']);
+  assert.deepEqual(JSON.parse(h.storage.getItem('plane.pending-actions.v1')),[]);
+});
+
+test('refusal cleanup storage failure keeps original row and is handled without resend', async () => {
+  const storage=store();
+  const h=harness({storage,sendAction(){
+    storage.setItem=()=>{throw Error('storage unavailable');};
+    throw Object.assign(Error('Refused'),{effect:'not_started'});
+  }});
+  h.loop.setRoom('web');await settle();await h.submit();
+  assert.equal(h.sends.length,1);
+  assert.equal(JSON.parse(storage.getItem('plane.pending-actions.v1'))[0].request_id,'new-request');
+  assert.match(h.get('work-notice').textContent,/saved row could not be updated/);
+  assert.equal(h.get('work-send').disabled,true);
 });

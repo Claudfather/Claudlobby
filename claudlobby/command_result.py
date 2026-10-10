@@ -64,7 +64,7 @@ _PUBLIC.update({(domain, verb): f"{domain}.{verb}" for domain, verbs in (
 _PUBLIC.update({("bot", "automation", action): f"bot.automation.{action}"
                 for action in ("status", "pause", "resume", "record")})
 _PUBLIC.update({("host", "owner", action): f"host.owner.{action}"
-                for action in ("status", "initialize", "confirm", "revoke", "serve", "bind-source")})
+                for action in ("status", "initialize", "confirm", "revoke", "serve", "bind-source", "allow-messages", "revoke-messages")})
 _PUBLIC.update({("plane", action): f"plane.{action}" for action in
                 ("doctor", "emit", "emit-batch", "expire", "status", "spool", "prune", "registry")})
 _invocation = ContextVar("public_cli_invocation", default=(None, False))

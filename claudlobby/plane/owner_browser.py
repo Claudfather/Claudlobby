@@ -12,6 +12,7 @@ import asyncio
 import json
 from pathlib import Path
 import re
+import sqlite3
 from typing import Awaitable, Callable
 from urllib.parse import urlsplit
 
@@ -20,6 +21,9 @@ from starlette.responses import FileResponse, JSONResponse, RedirectResponse, Re
 from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
 
+from ..activation_state import ActivationError
+from ..operation_context import OperationContextError, OperationContextUnavailableError
+from .owner_actions import ActionNotStarted, OwnerActions
 from .ids import read_host_uid
 from .owner_access import AccessDenied, AccessUnavailable, PrincipalRef, PAIRING_SECONDS, SESSION_SECONDS
 from .owner_view import VerifiedReader, create_owner_app
@@ -27,9 +31,11 @@ from .owner_view import VerifiedReader, create_owner_app
 COOKIE_NAME = "__Host-claudlobby-owner"
 _COOKIE_TOKEN = re.compile(r"[A-Za-z0-9_-]{43}")
 _MAX_BODY = 1024
+_MAX_ACTION_BODY = 32768
 _BODY_SECONDS = 5
+_MAX_ACTION_WORKERS = 8
 _PREFIX = "/api/owner/"
-_METHODS = {"status": "GET", "pair": "POST", "login": "POST",
+_METHODS = {"actions/context": "POST", "actions/send": "POST", "actions/receipt": "POST", "status": "GET", "pair": "POST", "login": "POST",
             "renew": "POST", "logout": "POST"}
 PrincipalVerifier = Callable[[Scope], Awaitable[PrincipalRef]]
 _ENTRY_ASSETS = {
@@ -124,22 +130,45 @@ def _response(data: dict, status: int = 200, *, clear_cookie: bool = False) -> J
     return response
 
 
-async def _empty_json(receive: Receive) -> None:
+async def _read_body(receive: Receive, limit: int) -> bytearray:
     body = bytearray()
     while True:
         message = await receive()
         if message["type"] != "http.request":
             raise AccessDenied("invalid_browser_body")
         chunk = message.get("body", b"")
-        if len(body) + len(chunk) > _MAX_BODY:
+        if len(body) + len(chunk) > limit:
             raise AccessDenied("invalid_browser_body")
         body.extend(chunk)
         if not message.get("more_body", False):
-            break
+            return body
+
+
+async def _empty_json(receive: Receive) -> None:
+    body = await _read_body(receive, _MAX_BODY)
     try:
         if json.loads(body) != {}:
             raise ValueError
     except (ValueError, RecursionError) as exc:
+        raise AccessDenied("invalid_browser_body") from exc
+
+
+async def _action_json(receive: Receive) -> dict:
+    body = await _read_body(receive, _MAX_ACTION_BODY)
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate key")
+            result[key] = value
+        return result
+    try:
+        value = json.loads(body, object_pairs_hook=unique,
+            parse_constant=lambda value: (_ for _ in ()).throw(ValueError()))
+        if type(value) is not dict:
+            raise ValueError
+        return value
+    except (ValueError, RecursionError, UnicodeError) as exc:
         raise AccessDenied("invalid_browser_body") from exc
 
 
@@ -161,6 +190,9 @@ class _OwnerBrowser:
                                                      methods=["GET", "HEAD"]))
         self.state = self.read_app.state
         self.access = self.read_app.access
+        self.actions = OwnerActions(root, package=package)
+        self._inflight = set()
+        self._action_workers = 0
 
     async def _principal(self, scope: Scope) -> PrincipalRef:
         principal = await self.verify_principal(scope)
@@ -265,6 +297,8 @@ class _OwnerBrowser:
             else:
                 await self.read_app(scope, receive, send)
             return
+        action_result = None
+        action_worker_started = False
         try:
             if scope["method"] != _METHODS[action]:
                 response = _response({"state": "denied"}, 405)
@@ -279,7 +313,9 @@ class _OwnerBrowser:
                             or (_header(scope, b"content-type") or "").split(";", 1)[0].lower()
                             != "application/json"):
                         raise AccessDenied("browser_intent_required")
-                    await asyncio.wait_for(_empty_json(receive), timeout=_BODY_SECONDS)
+                    payload = await asyncio.wait_for(
+                        _action_json(receive) if action.startswith("actions/") else _empty_json(receive),
+                        timeout=_BODY_SECONDS)
                 principal = await self._principal(scope)
                 try:
                     token = _cookie(scope, required=False)
@@ -287,18 +323,96 @@ class _OwnerBrowser:
                     if action != "login":
                         raise AccessDenied("sign_in_required") from None
                     token = None
-                if action == "status":
+                if action.startswith("actions/"):
+                    if token is None:
+                        raise AccessDenied("sign_in_required")
+                    reader = VerifiedReader(principal, token)
+                    operation = action.split("/", 1)[1]
+                    fn = self.actions.context if operation == "context" else self.actions.operation
+                    args = (reader, payload) if operation == "context" else (operation, reader, payload)
+                    # Shield the worker lifetime: disconnect/cancellation does not
+                    # erase a committed or native effect. UUID inspection recovers it.
+                    if self._action_workers >= _MAX_ACTION_WORKERS:
+                        raise AccessUnavailable("owner actions unavailable")
+                    # Reservation and task creation contain no await: concurrent
+                    # requests cannot race past the active-plus-queued ceiling.
+                    self._action_workers += 1
+                    work = run_in_threadpool(fn, *args)
+                    try:
+                        task = asyncio.create_task(work)
+                    except BaseException:
+                        work.close()
+                        self._action_workers -= 1
+                        raise
+                    action_worker_started = True
+                    self._inflight.add(task)
+                    def finished(done):
+                        self._inflight.discard(done)
+                        self._action_workers -= 1
+                        if not done.cancelled():
+                            done.exception()
+                    task.add_done_callback(finished)
+                    action_result = await asyncio.shield(task)
+                    response = _response(action_result)
+                    response.headers["Cache-Control"] = "no-store, private"
+                elif action == "status":
                     response = await run_in_threadpool(self._status, principal, token)
                 else:
                     response = await run_in_threadpool(self._mutate, action, principal, token)
+        except ActionNotStarted as exc:
+            unavailable = isinstance(exc.refusal, (AccessUnavailable, OperationContextUnavailableError))
+            response = _response({"state": "unavailable" if unavailable else "denied",
+                                  "effect": "not_started"}, 503 if unavailable else 403)
         except AccessDenied as exc:
             # A delayed denial must not erase a newer cookie from a concurrent
             # successful sign-in or renewal. Only explicit logout deletes it.
             state = "sign_in_required" if exc.code == "sign_in_required" else "denied"
             response = _response({"state": state}, 403)
-        except (AccessUnavailable, OSError, ValueError, asyncio.TimeoutError):
+        except OperationContextUnavailableError:
             response = _response({"state": "unavailable"}, 503)
-        await response(scope, receive, send)
+        except OperationContextError:
+            response = _response({"state": "denied"}, 403)
+        except (AccessUnavailable, ActivationError, OSError, ValueError, sqlite3.Error, asyncio.TimeoutError):
+            response = _response({"state": "unavailable"}, 503)
+        except Exception:
+            if not action.startswith("actions/"):
+                raise
+            response = _response({"state": "unavailable"}, 503)
+        if action_result is None:
+            if action == "actions/send" and not action_worker_started:
+                # This invocation never reached an adapter; no claim about a
+                # previous use of its UUID. Never mark post-worker failures.
+                body = json.loads(response.body)
+                body["effect"] = "not_started"
+                response = _response(body, response.status_code)
+            await response(scope, receive, send)
+            return
+        # Hold headers until current session/grant/source admission permits the
+        # body. A slow or revoked operation cannot leak stale private metadata.
+        pending_start = None
+        async def action_send(message):
+            nonlocal pending_start
+            if message["type"] == "http.response.start":
+                pending_start = message
+                return
+            try:
+                await run_in_threadpool(self.actions.admit_response, operation, reader, action_result)
+            except OperationContextUnavailableError:
+                refusal = _response({"state": "unavailable"}, 503)
+            except (AccessDenied, OperationContextError):
+                refusal = _response({"state": "denied"}, 403)
+            except (AccessUnavailable, ActivationError, OSError, ValueError, sqlite3.Error):
+                refusal = _response({"state": "unavailable"}, 503)
+            except Exception:
+                refusal = _response({"state": "unavailable"}, 503)
+            else:
+                refusal = None
+            if refusal is not None:
+                await refusal(scope, receive, send)
+                return
+            await send(pending_start)
+            await send(message)
+        await response(scope, receive, action_send)
 
 
 def create_owner_browser_app(root: Path, *, verify_principal: PrincipalVerifier,
@@ -306,7 +420,8 @@ def create_owner_browser_app(root: Path, *, verify_principal: PrincipalVerifier,
     """Internal same-origin lifecycle plus protected canonical reads.
 
     Never initializes authority or exposes local pairing confirmation, grants,
-    revocation, or bot actions. The verifier must establish a PrincipalRef from
+    revocation, or bot lifecycle actions. Ordinary messages require an explicit
+    local grant and use the canonical durable request adapter. The verifier must establish a PrincipalRef from
     trusted ingress, not cookie/query/header claims accepted here. The external
     HTTPS origin is explicit even when the trusted proxy forwards local HTTP.
     """

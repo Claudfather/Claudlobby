@@ -144,7 +144,15 @@ current owner grant to one canonical fleet UID and one existing human actor UID
 and alias. It is never callable by a remote client. Approval transactionally
 creates the optional `message_grants` table in the private authority store;
 ordinary initialization and reads do not create or migrate that table. A grant
-cannot change actor until locally revoked. Owner revocation/re-pairing invalidates
+cannot change actor until locally revoked. Each grant includes an opaque durable
+`generation`: repeated approval preserves it, but revoke/reallow allocates a new
+one even for the same actor. An adapter must bind the complete grant, including
+generation, into its action context. Existing four-column stores derive a stable
+legacy generation from their persisted binding during reads. The first local
+grant write adds and persists that generation in the same transaction; it does
+not invalidate other fleets' contexts. New approvals always use fresh random
+generations. Invalid stored generations fail closed; reads never repair them.
+Owner revocation/re-pairing invalidates
 every old message grant. Reader access alone continues to refuse messages.
 
 `plane/owner_messages.py:OwnerMessages` pins an installation and accepts only
@@ -157,13 +165,16 @@ caller must register the intended human identity separately before local approva
 The send holds canonical runtime mutation admission and calls the extracted
 `commands/message_write.py:deliver_bound_message` workflow. CLI and internal
 owner sends therefore share request UUID conflict handling, recording, native
-delivery, held-box repair and receiver byte-integrity proof. Native submission
+delivery, first-attempt held-box repair and receiver byte-integrity proof. A
+strict owner replay inspects the retained outcome without native sends or Enter
+repair; ordinary CLI replay behavior is unchanged. Native submission
 alone is not success. Exceptions can follow effects: retain the original UUID,
 then `inspect` its bound request and receiver evidence without resending. A
 missing request does not prove no previous effect. The internal result types
 are evidence for a future adapter, not a ready-made browser response contract.
 
-Admission is rechecked at dispatch start and before returning inspection data.
+Admission is rechecked at dispatch start and before returning inspection data
+or send outcomes, including canonical `CommandFailure` outcome data.
 Revocation prevents subsequent admission; it does not cancel an effect already
 in progress. This slice supports ordinary messages only. It supplies no HTTP
 route, UI capability, retry control, reply, task mutation, local confirmation
@@ -225,7 +236,8 @@ the synthetic policy tests.
 
 The supported local authority door is `claudlobby --root DATA_ROOT host owner`.
 `DATA_ROOT` names the existing installation; these commands never create an
-installation identity, select a fleet, start a service or change Tailscale.
+installation identity, start a service or change Tailscale. Message allowance
+selects only its explicitly named target fleet; other owner doors are host-local.
 Run them in the operator terminal on that host:
 
 ```sh
@@ -248,6 +260,46 @@ or printed by the command. `revoke` shows the current grant and requires typing
 
 Changes refuse redirected input, JSON mode and generated bot/fleet selectors.
 Composed bot permissions deny these operator-only command forms as well.
+
+Ordinary-message authority is separately approved at the local terminal:
+
+```sh
+claudlobby --root DATA_ROOT host owner allow-messages --target-fleet example --actor human:local-owner
+# If absent, explicitly approve REGISTER, then approve the allocated UID with ALLOW:
+claudlobby --root DATA_ROOT host owner allow-messages --target-fleet example --actor human:local-owner --register-actor
+claudlobby --root DATA_ROOT host owner status --json
+claudlobby --root DATA_ROOT host owner revoke-messages --fleet-uid fleet_11111111111111111111111111111111
+```
+
+Allowance requires an active sealed runtime and a confirmed active fleet. It
+shows the current owner principal/revision, host, fleet UID and exact local
+human actor binding before typing `ALLOW`. An absent human requires the explicit
+`--register-actor` flag and a separate `REGISTER` approval: canonical Plane ingest
+records `operator_first_seen` under mutation admission, then the command shows
+the allocated actor UID for the second approval. Cancelling the second approval
+leaves that explicitly approved first-contact record, with no message grant.
+The operator attests the local human label; it is not derived from a browser
+claim or granted by a remote caller. No registration occurs during preview.
+
+After confirmation, the CLI rebinds the displayed identities and owner revision
+under runtime admission; any changed binding refuses. The store atomically
+rechecks the owner revision before granting. Only ordinary messages are covered;
+this grants no task mutation, reply, permission decision or website membership.
+
+Local status lists the current owner's retained message grants, including fleet
+UID, actor binding and generation, without selecting active configuration or
+reading Plane. Grants belonging to earlier owner revisions are inert and are
+not listed as current authority.
+
+Revocation displays one retained grant and requires `REVOKE-MESSAGES`. Its exact
+fleet UID names the retained authority even if active configuration or Plane
+storage is unavailable. The existing authority transaction compares both owner
+revision, displayed actor binding and generation, refusing a replacement grant
+even when it approves the same actor again. Revocation
+keeps owner read access and other fleets' message grants. These doors accept no
+credential arguments, generated bot/fleet context, ambient fleet selection,
+redirected confirmation or JSON mutation mode.
+
 These checks prevent accidental invocation in a bot context; they do not
 isolate a malicious process with the same OS privileges. Revocation invalidates
 the pairing and its sessions without stopping fleets or deleting their history.
@@ -310,6 +362,14 @@ that still has a valid session explicitly says it did not complete. Panel HTTP
 errors stay local; network failures or read-gate 503 pause private reads and
 permit one automatic status GET. Its recovery budget is rearmed by an admitted
 stream message or explicit interaction; renewal and logout are never replayed. An
+SSE failure has its own one-probe budget, unaffected by successful board reads
+or a short open/error cycle. An admitted stream message, explicit Check or
+successful renewal rearms it. A quiet connection that remained open for at
+least 30 seconds, measured with a monotonic clock, earns one fresh status probe
+on failure; a connection that never opened earns no additional probes.
+Inventory preserves the intended equipment
+selection in memory and only its latest request can restore that panel; grid
+reads also reject results spanning a session pause. An
 expired or absent session on GET/HEAD `/` redirects only to same-origin `/owner`.
 
 All other paths still cross the protected canonical read gate, including
@@ -785,6 +845,61 @@ unopenable db, a fleet the plane has never seen, or a plane that holds no bot
 of the fleet is REFUSED with a reason on stderr and a nonzero rc; an existing
 source with zero rows is an answer. The refusal never rides stdout, because
 `report-back.sh` and `fleet-pulse.sh` parse it.
+
+### Grant-bound owner browser messages
+
+The trusted direct-host owner browser transport exposes three same-origin POST
+doors under `/api/owner/actions/`: `context` accepts exactly `{room}`; `send`
+accepts exactly ActionState metadata (`scope`, `kind`, `target`, `request_id`,
+`submitted_at`) plus `body`; `receipt` accepts that metadata without a body.
+These doors retain the exact Host/Origin, browser intent, trusted principal and
+secure session-cookie boundaries. JSON is size/time bounded; duplicate and
+unknown fields are refused. They never register identities or author grants.
+
+Context version 1 names the selected fleet alias in `room` and `scope.fleet`,
+returns declared bot UIDs as recipients, `simulation: false`, and only the
+`message` action. The server recomputes frozen host/fleet/actor bindings and the
+current local message grant for every request. Opaque workspace/viewer hashes
+are comparison fences, not secret capabilities; viewer binds principal, owner
+revision, frozen fleet UID, human actor and durable message-grant generation,
+and survives session-cookie rotation. Revoke/reallow creates a new viewer scope
+even for the same actor; old contexts, sends, receipts and held responses are refused.
+Submitted scope is compared to this recomputed context. Only ordinary messages
+with `task_id: null`, canonical UUIDs and nonempty bodies up to 2,000 characters
+are admitted. `submitted_at` is browser display metadata, not server acceptance.
+
+The canonical OwnerMessages adapter receives the exact recomputed expected
+grant and uses durable preparation/reservation. Source-host/session/grant
+admission precedes dispatch and private response release. Native sends run in
+an owned threadpool task that survives cancellation of the HTTP waiter. At most
+eight action workers may be active or queued; overflow is immediately unavailable,
+with no automatic queue retry. Cancelled HTTP waiters retain their slot until the
+owned worker ends; all completed or failed workers release capacity. No
+request automatically retries or changes UUID. Receipt inspection has no native
+effect. `delivered` requires the exact sender/recipient receiver-integrity proof;
+`recorded` requires a verified committed communication fact. Every other result,
+including missing retained UUID history and exceptions after a possible effect,
+is `unknown`, never safe rejection or permission to resend. Responses contain
+metadata only and use `Cache-Control: no-store, private`. Direct-host HTTPS,
+trusted ingress and native receiver validation remain separate rollout gates.
+
+
+A send refusal may include `effect: "not_started"` only when that HTTP submission
+was stopped before any message adapter invocation. This is not a `rejected`
+receipt for the UUID: an earlier use of the UUID may already have had an effect,
+and missing retained history never proves otherwise. The controller can resolve
+only the fresh pending row created by that exact in-flight send, keeping its
+draft. Receipt checks and reused local IDs cannot use this marker to clear old
+uncertainty. Adapter-entry failures and held-response admission refusals remain
+unknown, even when their HTTP status is 403 or 503. No path automatically resends.
+
+An action 403 invalidates the composer capability and probes the read session
+once without pausing a valid board/SSE session or recreating a grant. Session
+pauses keep the selected team and saved draft and make no action-context request;
+a subsequent authorized resume refreshes the context. Unexpected action-context
+or response-admission failures return generic unavailable responses without
+exception text. Cancellation remains distinct and owned workers retain capacity
+until they finish.
 
 Owner source admission also requires the operator-created covering indexes. A
 table-rebuild migration may drop them even when the ownership marker survives;
