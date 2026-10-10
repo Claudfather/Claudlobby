@@ -87,9 +87,10 @@ test('explicit real handshake yields one canonical minted handle, exact signer b
 });
 
 test('start and explicit check never sign in, synthesize pairing or replay a mutation', async () => {
-  const h = harness(); await h.api.start(); await h.api.check();
-  assert.equal(h.calls.length, 0); assert.equal(h.signings.length, 0);
-  assert.notEqual(h.api.snapshot().state, 'ready'); h.api.dispose();
+  const h = harness(); await h.api.start();
+  assert.equal(h.api.snapshot().state, 'denied');
+  await h.api.check();assert.equal(h.api.snapshot().state, 'denied');
+  assert.equal(h.calls.length, 0); assert.equal(h.signings.length, 0);h.api.dispose();
 });
 
 for (const change of [
@@ -407,4 +408,14 @@ test('ordinary lifecycle cannot overlap held connect or use an invalid document 
   h.context={...h.context,context_generation:uuid(99)};
   assert.equal(await h.api.renew(),false);assert.equal(await h.api.logout(),false);
   assert.equal(h.calls.filter(c=>/\/(renew|logout)$/.test(c.url)).length,0);h.api.dispose();
+});
+
+
+test('ordinary check still fences retired document context without a network request',async()=>{
+  const h=harness();await h.api.connect();const count=h.calls.length;
+  h.context={...h.context,context_generation:uuid(99)};
+  await h.api.check();
+  assert.notEqual(h.api.snapshot().state,'ready');assert.equal(h.calls.length,count);
+  assert.equal(await h.api.readHandle.jget('/api/summary'),null);
+  assert.equal(h.calls.length,count);h.api.dispose();
 });

@@ -197,7 +197,9 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     if (url === '/api/owner/status' && pending) return { status: 200, json: async () => pending.data };
     const action = { '/api/owner/status': 'status', '/api/owner/renew': 'renew', '/api/owner/logout': 'logout' }[url];
     if (action) {
-      if (!valid(true)) return { status: 403, json: async () => ({ state: 'denied' }) };
+      // Before any admitted challenge, missing sign-in is a local denial.
+      // A retained binding with a lost issue response stays unknown.
+      if ((action === 'status' && !token && !binding) || !valid(true)) return { status: 403, json: async () => ({ state: 'denied' }) };
       const result = await http(ref.endpoint_origin + '/api/owner/connected/' + action,
         { method: action === 'status' ? 'GET' : 'POST', ...(action !== 'status' ? { body: {} } : {}), signal: options.signal });
       if (result.status === 200 && action !== 'logout') admission(result.data, result.start, action === 'renew');
@@ -372,10 +374,11 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     } finally { busy = false; }
   }
   async function lifecycle(action) {
+    if (!setupOnly && action === 'status') return handle.start();
     if (busy || !valid(true)) return false;
     busy = true;
     try {
-      if (!setupOnly) return await (action === 'status' ? handle.start() : action === 'renew' ? owner.sessionControls.renew() : owner.sessionControls.logout());
+      if (!setupOnly) return await (action === 'renew' ? owner.sessionControls.renew() : owner.sessionControls.logout());
       const result = await http(ref.endpoint_origin + '/api/owner/connected/' + action,
         {method:action === 'status' ? 'GET' : 'POST',...(action === 'status' ? {} : {body:{}})});
       if (result.status !== 200) { stop('Connection could not be confirmed. Check again explicitly.'); return false; }
