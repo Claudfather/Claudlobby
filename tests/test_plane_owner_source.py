@@ -363,3 +363,23 @@ def test_retired_preparation_never_reclassifies_missing_recorder_as_fresh(tmp_pa
         inspect_owner_setup(tmp_path)
     with pytest.raises(activation.ActivationError):
         activation._empty_plane(tmp_path)
+
+
+@pytest.mark.parametrize("overlay", ["local/example", "local/system/example"])
+@pytest.mark.parametrize("redirected", [False, True])
+def test_fresh_owner_refuses_retained_overlay_runtime_without_manifest(tmp_path, overlay, redirected):
+    from claudlobby.plane.owner_access import OwnerAccess
+    from claudlobby.plane.owner_source import inspect_owner_setup
+    ensure_host_uid(tmp_path / "state")
+    OwnerAccess.initialize(tmp_path, before_first_fleet=True)
+    runtime = tmp_path / overlay / "runtime"
+    runtime.parent.mkdir(parents=True)
+    if redirected:
+        target = tmp_path / "old-runtime"
+        target.mkdir()
+        runtime.symlink_to(target, target_is_directory=True)
+    else:
+        runtime.mkdir()
+        (runtime / "retained").write_text("old installation")
+    with pytest.raises(AccessUnavailable):
+        inspect_owner_setup(tmp_path)

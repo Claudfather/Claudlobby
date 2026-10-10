@@ -231,13 +231,15 @@ def authority_only_plane(root: Path, *, allow_absent: bool = False) -> None:
 def fresh_owner_setup(root: Path, *, allow_absent: bool = False) -> None:
     """No selection, activation or runtime; owner preparation grants no launch."""
     from ..activation_state import ActivationError, read_selection
+    from ..paths import _iter_fleet_dirs
 
     root = Path(root).absolute()
     try:
         if not root.is_dir() or read_selection(root) is not None:
             raise SourceUnavailable("fresh owner setup unavailable")
-        for path in (root / "runtime", root / "state/activations"):
-            if path.is_symlink() or path.exists() and (not path.is_dir() or next(path.iterdir(), None) is not None):
+        runtimes = [root / "runtime", *(overlay / "runtime" for overlay in _iter_fleet_dirs(root / "local"))]
+        for path in (*runtimes, root / "state/activations"):
+            if path.resolve() != path or path.exists() and (not path.is_dir() or next(path.iterdir(), None) is not None):
                 raise SourceUnavailable("fresh owner setup unavailable")
         authority_only_plane(root, allow_absent=allow_absent)
     except (OSError, ValueError, ActivationError) as exc:
