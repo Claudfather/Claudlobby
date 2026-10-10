@@ -9,7 +9,7 @@ const flush = async () => { await new Promise(resolve => setImmediate(resolve));
 const ready = { status: 200, data: { state: 'ready' } };
 const denied = { status: 403, data: { state: 'denied' } };
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
-function harness(replies = [ready]) {
+function harness(replies = [ready], { monotonicNow = () => 0 } = {}) {
   const calls = [], natives = [], replacements = [], timers = new Set(), nodes = new Map();
   let paused = 0, resumed = 0;
   const document = { getElementById(id) {
@@ -23,6 +23,7 @@ function harness(replies = [ready]) {
     addEventListener(name, callback) { this.listeners[name] = callback; }
   }
   const api = createOwnerTransport({
+    monotonicNow,
     EventSource: NativeStream, location: { replace(path) { replacements.push(path); } },
     setTimeout(callback) { timers.add(callback); return callback; }, clearTimeout(callback) { timers.delete(callback); },
     async fetch(url, options) {
@@ -373,4 +374,48 @@ test('grid half-completed reads never paint across pause, and paused polls issue
     await runInNewContext(`${poll}\npollGrid()`, state);
     assert.equal(calls.length, 2);
   }
+});
+
+test('quiet stream recovery respects the 30 second monotonic boundary and never rearms from board reads', async () => {
+  for (const duration of [29999, 30000]) {
+    let clock = 0;
+    const h = harness([ready, ready, { status: 200, data: ['healthy board'] }, ready], { monotonicNow: () => clock });
+    await h.controls.ready; h.api.createEventSource('/api/stream');
+    h.natives[0].onerror({}); await flush();
+    h.natives[1].onopen({}); // Timestamp0 must count as an actual open.
+    assert.deepEqual(await h.api.jget('/api/tasks'), ['healthy board']);
+    clock = duration; h.natives[1].onerror({}); await flush();
+    assert.equal(h.calls.filter(c => c.url === '/api/owner/status').length, duration < 30000 ? 2 : 3);
+    if (duration >= 30000) {
+      assert.equal(h.node('renew').disabled, false);
+      h.natives[2].onopen({}); h.natives[2].onerror({}); await flush();
+      assert.equal(h.calls.filter(c => c.url === '/api/owner/status').length, 3);
+    }
+    assert.match(h.node('status').textContent, /unknown/);
+    assert.equal(h.calls.every(c => c.options.method === 'GET'), true);
+    h.controls.dispose();
+  }
+});
+
+test('a stream that never opened cannot earn recovery by elapsed wall time', async () => {
+  let clock = 0;
+  const h = harness([ready, ready], { monotonicNow: () => clock }); await h.controls.ready;
+  h.api.createEventSource('/api/stream'); h.natives[0].onerror({}); await flush();
+  clock = 60000; h.natives[1].onerror({}); await flush();
+  assert.equal(h.calls.filter(c => c.url === '/api/owner/status').length, 2);
+  assert.match(h.node('status').textContent, /unknown/);
+  h.controls.dispose();
+});
+
+test('a quiet stable stream checks expired current cookie and redirects without any mutation replay', async () => {
+  let clock = 0;
+  const h = harness([ready, ready, { status: 200, data: { state: 'sign_in_required' } }], { monotonicNow: () => clock });
+  await h.controls.ready; h.api.createEventSource('/api/stream');
+  h.natives[0].onerror({}); await flush(); h.natives[1].onopen({});
+  clock = 30000; h.natives[1].onerror({}); await flush();
+  assert.equal(h.calls.filter(c => c.url === '/api/owner/status').length, 3);
+  assert.deepEqual(h.replacements, ['/owner']);
+  assert.equal(h.natives[1].closed, true);
+  assert.equal(h.calls.every(c => c.options.method === 'GET'), true);
+  h.controls.dispose();
 });

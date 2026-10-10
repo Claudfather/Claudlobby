@@ -2,7 +2,8 @@
 // Explicit renewal avoids assuming when a restored page's session began.
 export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis),
   EventSource = globalThis.EventSource, location = globalThis.location,
-  setTimeout = globalThis.setTimeout, clearTimeout = globalThis.clearTimeout } = {}) {
+  setTimeout = globalThis.setTimeout, clearTimeout = globalThis.clearTimeout,
+  monotonicNow = () => globalThis.performance.now() } = {}) {
   let generation = 0, mode = 'checking', busy = false, disposed = false;
   let recoveryUsed = false, readRecoveryUsed = false, streamRecoveryUsed = false, readRecoveryTimer = null;
   let mount = null, statusNote = null;
@@ -145,7 +146,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
   }
   function createEventSource(url) {
     const listeners = new Map();
-    let native = null, closed = false;
+    let native = null, closed = false, openedAt = null;
     const stream = {
       onmessage: null, onerror: null, onopen: null,
       removeEventListener(name, callback) { listeners.get(name)?.delete(callback); },
@@ -154,7 +155,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
         listeners.get(name).add(callback);
         if (native) attach(name, native, generation);
       },
-      pause() { native?.close(); native = null; },
+      pause() { native?.close(); native = null; openedAt = null; },
       close() { closed = true; stream.pause(); streams.delete(stream); },
       open() {
         if (closed || disposed || mode !== 'ready' || native) return;
@@ -163,6 +164,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
         const source = native;
         source.onopen = event => {
           if (source !== native || gen !== generation || mode !== 'ready') return;
+          openedAt = monotonicNow();
           stream.onopen?.(event);
           // Refresh after the new stream reaches HEAD, closing the gap
           // between the previous board snapshot and reconnection.
@@ -178,9 +180,13 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
         source.onerror = event => {
           if (source !== native || gen !== generation || mode !== 'ready') return;
           stream.onerror?.(event);
-          // HTTP reads and even an open/error cycle cannot prove a working
-          // stream. Only an admitted message or explicit session action rearms it.
-          if (streamRecoveryUsed) { pause('unavailable'); return; }
+          // Quiet fleets send comment pings, not message events. A connection
+          // that really stayed open for 30 seconds earns one more probe; a fast
+          // open/error cycle and successful HTTP reads never rearm the budget.
+          const elapsed = openedAt === null ? 0 : monotonicNow() - openedAt;
+          if (streamRecoveryUsed && !(Number.isFinite(elapsed) && elapsed >= 30000)) {
+            pause('unavailable'); return;
+          }
           streamRecoveryUsed = true;
           void checkSession();
         };

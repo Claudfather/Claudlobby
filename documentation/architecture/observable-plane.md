@@ -311,8 +311,11 @@ errors stay local; network failures or read-gate 503 pause private reads and
 permit one automatic status GET. Its recovery budget is rearmed by an admitted
 stream message or explicit interaction; renewal and logout are never replayed. An
 SSE failure has its own one-probe budget, unaffected by successful board reads
-or an open/error cycle. Only an admitted stream message, explicit Check or
-successful renewal rearms it. Inventory preserves the intended equipment
+or a short open/error cycle. An admitted stream message, explicit Check or
+successful renewal rearms it. A quiet connection that remained open for at
+least 30 seconds, measured with a monotonic clock, earns one fresh status probe
+on failure; a connection that never opened earns no additional probes.
+Inventory preserves the intended equipment
 selection in memory and only its latest request can restore that panel; grid
 reads also reject results spanning a session pause. An
 expired or absent session on GET/HEAD `/` redirects only to same-origin `/owner`.
