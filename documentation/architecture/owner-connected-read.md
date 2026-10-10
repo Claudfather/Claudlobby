@@ -221,6 +221,24 @@ This document never revives after observed loss; reopen through the authenticate
 website. Same-site cookie/CORS/private-network/device validation and actual
 operational publisher integration remain separate empirical gates.
 
+
+Account checks resume the renderer only when leaving its initial paused state;
+steady-state checks do not create a second board refresh loop. Periodic checks
+run only while the mounted document is visible; hiding cancels the timer and
+becoming visible performs one fresh check. Explicit checks remain available.
+Temporary checking uses aria-disabled with an activation guard so keyboard focus
+stays on the same control. Account retirement disables all navigation/debug
+controls after clearing private content, including focus-title text and datasets.
+Partial carrier/transport admission disposes locally constructed resources before
+an explicit retry. Disconnect stays available for an admitted but unavailable host.
+The website's actual v2 context route returns 401 for missing/expired sessions,
+403 for missing/lost workspace ownership, and context mismatches retire here;
+it does not invent 404/410 deleted-workspace states. Document expires_at is a
+shape-checked publisher lifetime bound; fresh website membership/session checks
+and canonical host session admission determine current access, not client clock
+interpretation of that field. The connected-context marker is supplied by the separately verified publisher;
+this core entry does not mint or verify its document ticket.
+
 ## First-use workspace approval in the connected document
 
 An explicit “Approve workspace on this computer” control consumes the existing workspace challenge, maintained website host assertion, and host stage protocol. It never confirms a binding, initializes the host, grants fleet actions, or connects automatically. Disconnect a currently ready read session before starting enrollment. A successful staged proposal displays its short-lived code only in that computer’s panel, beside the intended workspace, issuer and hostname.
@@ -230,3 +248,5 @@ On that computer use `claudlobby --root DATA_ROOT host owner confirm-workspace`,
 Stage refusal, malformed reply, network loss or timeout is uncertain: the proposal may already exist. The original code remains briefly available for local inspection; the consumer does not replay stage. “Forget approval code” clears and aborts browser state only, without cancelling or revoking server state. Expiry, account/reference retirement, document disposal or successful explicit Connect clears the code. Nonces/assertions are private in-memory request data, never URL arguments, storage, logs, postMessage or command arguments. The panel’s display is the explicit exception for the approval code; public snapshots contain only phase/expiry/busy metadata.
 
 This core module is part of the finite static graph. It reuses the document’s authenticated metadata check and account-refusal owner; no second account timer, renderer, setup authority or website orchestration is added. Synthetic transport/controller tests do not prove browser cross-site cookies, private-network permissions or a real host approval.
+
+Enrollment controllers participate in the same local admission transaction as read carriers, subscriptions and aggregate streams. Any construction failure disposes all partial resources before an explicit fresh account check; rollback never publishes a partially constructed computer as readable. Corrected visibility, paused-only resume, keyboard focus and unavailable Disconnect behavior remain shared with the read entry.

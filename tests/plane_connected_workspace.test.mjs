@@ -24,19 +24,24 @@ function dom() {
   const document={visibilityState:'visible',activeElement:null,
     getElementById:id=>elements.get(id),createElement:name=>new Element(name),
     querySelector:q=>q==='main'?elements.get('main'):null,
-    querySelectorAll:()=>[...nav,...(elements.get('fleet').children||[])].filter(e=>e.dataset.view||e.dataset.botInspect),
+    querySelectorAll:q=>{
+      assert.ok(['#view-nav button, [data-bot-inspect]', '#view-nav button, #debug-toggle, [data-bot-inspect]'].includes(q), 'selector must be modelled explicitly');
+      return [...nav,...(q.includes('#debug-toggle')?[elements.get('debug-toggle')]:[]),...(elements.get('fleet').children||[]).filter(e=>e.dataset.botInspect)];
+    },
     addEventListener(n,fn){listeners.set(n,fn);},removeEventListener(n){listeners.delete(n);}};
   class Element {
     constructor(tag='div'){this.tagName=tag.toUpperCase();this.children=[];this.dataset={};this.attributes={};this.handlers={};this.hidden=false;this.disabled=false;this.isConnected=true;this.value='';this.textContent='';}
+    set disabled(value){this._disabled=value;if(value&&document.activeElement===this)document.activeElement=null;}
+    get disabled(){return this._disabled;}
     append(...nodes){this.children.push(...nodes);}
-    replaceChildren(...nodes){for(const c of this.children)c.isConnected=false;this.children=nodes;}
+    replaceChildren(...nodes){for(const c of this.children)c.isConnected=false;this.children=nodes;this.textContent='';}
     setAttribute(k,v){this.attributes[k]=v;}
     addEventListener(n,fn){this.handlers[n]=fn;}
     focus(){document.activeElement=this;}
     close(){this.closed=true;}
     click(){if(!this.disabled)this.handlers.click?.();}
   }
-  for(const id of ['owner-session','main','fleet','fleet-totals','presence-strip','task-detail-content','focus-pane','task-detail','focus-overlay','search'])elements.set(id,new Element());
+  for(const id of ['owner-session','main','fleet','fleet-totals','presence-strip','task-detail-content','focus-pane','task-detail','focus-overlay','focus-title','debug-toggle','search'])elements.set(id,new Element());
   const nav=['channel','grid','fleet','trust'].map(view=>{const e=new Element('button');e.dataset.view=view;return e;});
   class Observer {constructor(fn){this.fn=fn;observers.push(this);}observe(){}disconnect(){this.closed=true;}}
   return {document,Element,nav,observers,listeners,get:id=>elements.get(id),MutationObserver:Observer};
@@ -216,4 +221,93 @@ test('account loss during host staging erases approval code and fences late stag
  const enroll=h.api.act(0,'enroll');await flush();h.metadataStatus=403;await h.api.checkAccount();held.resolve(reply(202,{version:1,state:'awaiting_local_approval',expires_at:1800000120}));
  assert.equal(await enroll,false);assert.equal(h.api.snapshot().phase,'denied');const panel=h.ui.get('owner-session').children[2].children.at(-1);assert.ok(!panel.children.some(c=>c.textContent.includes('Approval code:')));
  assert.equal(h.calls.filter(c=>c.url.endsWith('/issue')).length,0);h.api.dispose();
+});
+
+test('temporary account loading is aria-disabled and activation guarded without blurring focus',async()=>{
+  const h=harness();h.mount();await h.api.checkAccount();await flush();
+  const check=h.ui.get('owner-session').children[1];check.focus();
+  const held=deferred();h.overrides.set(documentContext.shell_origin+'/api/plane/context?workspace_id='+id(2),()=>held.promise);
+  const before=h.calls.length,pending=h.api.checkAccount();await flush();
+  assert.equal(check.disabled,false);assert.equal(check.attributes['aria-disabled'],'true');assert.equal(h.ui.document.activeElement,check);
+  check.click();assert.equal(h.calls.length,before+1);
+  held.resolve(reply(200,h.metadata));await pending;
+  assert.equal(check.attributes['aria-disabled'],'false');assert.equal(h.ui.document.activeElement,check);h.api.dispose();
+});
+
+test('successful account checks resume only a paused renderer; hidden documents have no account timer',async()=>{
+  for(const count of [0,1]){
+    const h=harness({count});let paused=0,resumed=0;h.mount({onPause:()=>paused++,onResume:()=>resumed++});
+    await h.api.checkAccount();await flush();assert.equal(paused,1);assert.equal(resumed,1);
+    await h.api.checkAccount();h.timer(30000);await flush();h.ui.listeners.get('visibilitychange')();await flush();assert.equal(resumed,1);
+    h.ui.document.visibilityState='hidden';h.ui.listeners.get('visibilitychange')();
+    const calls=h.calls.length;assert.equal(h.timers.some(t=>t.active&&t.ms===30000),false);
+    await h.api.checkAccount();assert.equal(h.calls.length,calls+1);assert.equal(h.timers.some(t=>t.active&&t.ms===30000),false);
+    h.ui.document.visibilityState='visible';h.ui.listeners.get('visibilitychange')();await flush();
+    assert.equal(h.timers.some(t=>t.active&&t.ms===30000),true);assert.equal(resumed,1);h.api.dispose();
+  }
+});
+
+test('retirement clears private focus text/dataset and disables every remaining scaffold control',async()=>{
+  const h=harness();h.mount();await h.api.checkAccount();await flush();
+  const title=h.ui.get('focus-title');title.textContent='Private bot · private room';title.dataset.bot='private';title.dataset.fleet='private';
+  h.metadataStatus=403;await h.api.checkAccount();
+  assert.equal(title.textContent,'');assert.deepEqual(title.dataset,{});
+  for(const button of [...h.ui.nav,h.ui.get('debug-toggle')])assert.equal(button.disabled,true);
+  h.ui.observers[0].fn();assert.equal(h.ui.nav[0].disabled,true);h.api.dispose();
+});
+
+test('retirement selectors are pinned to actual canonical HTML',async()=>{
+  const html=await read('index.html');
+  for(const id of ['view-nav','debug-toggle','fleet-totals','presence-strip','task-detail-content','focus-pane','focus-title','task-detail','focus-overlay','search','fleet'])
+    assert.match(html,new RegExp('id="'+id+'"'));
+  const nav=html.match(/<nav id="view-nav">([\s\S]*?)<\/nav>/)[1];
+  assert.deepEqual([...nav.matchAll(/data-view="([^"]+)"/g)].map(m=>m[1]),['channel','grid','fleet','trust']);
+  assert.match(workspaceText,/#view-nav button, #debug-toggle, \[data-bot-inspect\]/);
+  assert.match(workspaceText,/'focus-title'/);
+});
+
+test('partial client/transport admission is disposed and a later explicit account check retries cleanly',async()=>{
+  for(const failAt of ['client','transport','subscription','stream']){
+    let failing=true,created=0,disposed=0,stopped=0,subscribed=0,transportDisposed=0;
+    const h=harness({dependencies:{
+      createClient(){if(failing&&failAt==='client'&&created===1)throw new Error('second client');created++;
+        return {readHandle:{},snapshot:()=>({state:'login_required'}),subscribe(){subscribed++;if(failing&&failAt==='subscription'&&subscribed===2){throw new Error('subscription');}return()=>stopped++;},start:async()=>{},dispose(){disposed++;}};},
+      createTransport(){if(failing&&failAt==='transport')throw new Error('brand');return {jget:async()=>ok({}),dispose(){transportDisposed++;},createEventSource(){if(failing&&failAt==='stream')throw new Error('stream');return {close(){},addEventListener(){}};}};},
+    }});
+    if(failAt==='stream')h.api.createEventSource('/api/stream');
+    assert.equal(await h.api.checkAccount(),false);assert.equal(h.api.snapshot().phase,'unavailable');assert.equal(h.api.snapshot().computers.length,0);
+    assert.equal(disposed,created);assert.equal((await h.api.jget('/api/tasks')).state,'unavailable');
+    if(['subscription','stream'].includes(failAt))assert.equal(transportDisposed,1);
+    if(failAt==='subscription')assert.equal(stopped,1);
+    failing=false;assert.equal(await h.api.checkAccount(),true);await flush();assert.equal(h.api.snapshot().computers.length,2);
+    assert.equal((await h.api.jget('/api/tasks')).state,'ok');h.api.dispose();assert.equal(disposed,created);
+  }
+});
+
+test('unavailable admitted host exposes explicit Disconnect and uses existing carrier logout',async()=>{
+  const h=harness({count:1});h.mount();await h.api.checkAccount();await flush();await h.api.act(0,'connect');
+  h.overrides.set(refs[0].endpoint_origin+'/api/owner/connected/status',()=>reply(503,{}));
+  await h.api.act(0,'check');assert.equal(h.api.snapshot().computers[0].state,'unavailable');
+  const buttons=h.ui.get('owner-session').children[2].children;
+  assert.equal(buttons[3].disabled,true);assert.equal(buttons[4].disabled,false);
+  buttons[4].click();await flush();assert.equal(h.calls.filter(c=>c.url.endsWith('/logout')).length,1);
+  assert.equal(h.api.snapshot().computers[0].state,'signed_out');h.api.dispose();
+});
+
+test('enrollment resources join admission rollback, including partial streams, and a fresh retry disposes every resource',async()=>{
+  for (const failAt of ['enrollment','transport','subscription','stream']) {
+    let failing=true, clientsMade=0, clientsDisposed=0, enrollmentsMade=0, enrollmentsDisposed=0, subscriptions=0, stopped=0, opened=0, closed=0, transportsDisposed=0;
+    const h=harness({dependencies:{
+      createClient(){clientsMade++;return {readHandle:{},snapshot:()=>({state:'unavailable'}),start:async()=>{},dispose(){clientsDisposed++;},subscribe(){subscriptions++;if(failing&&failAt==='subscription'&&subscriptions===2)throw new Error('second subscription');return()=>stopped++;}};},
+      createEnrollment(){if(failing&&failAt==='enrollment'&&enrollmentsMade===1)throw new Error('second enrollment');enrollmentsMade++;return {snapshot:()=>({state:'idle',busy:false}),mountPanel(){},cancel(){},dispose(){enrollmentsDisposed++;}};},
+      createTransport(){if(failing&&failAt==='transport')throw new Error('transport');return {jget:async()=>ok({}),dispose(){transportsDisposed++;},createEventSource(){opened++;if(failing&&failAt==='stream'&&opened===2)throw new Error('second stream');return {addEventListener(){},close(){closed++;}};}};},
+    }});
+    if(failAt==='stream'){h.api.createEventSource('/api/stream');h.api.createEventSource('/api/stream');}
+    assert.equal(await h.api.checkAccount(),false);assert.equal(h.api.snapshot().phase,'unavailable');assert.equal(h.api.snapshot().computers.length,0);
+    assert.ok(enrollmentsMade>0);assert.equal(enrollmentsDisposed,enrollmentsMade);assert.equal(clientsDisposed,clientsMade);
+    assert.equal((await h.api.jget('/api/tasks')).state,'unavailable');
+    if(failAt==='stream'){assert.equal(closed,1);assert.equal(stopped,2);assert.equal(transportsDisposed,1);}
+    failing=false;assert.equal(await h.api.checkAccount(),true);await flush();assert.equal(h.api.snapshot().computers.length,2);
+    h.api.dispose();assert.equal(enrollmentsDisposed,enrollmentsMade);assert.equal(clientsDisposed,clientsMade);
+  }
 });
