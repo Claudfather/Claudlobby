@@ -1107,7 +1107,7 @@ test('the real stream source callback clears an open conversation through the ch
   const listeners = new Map(), cleared = [];
   const bindings = { createEventSource: () => ({ addEventListener: (name, listener) => listeners.set(name, listener) }),
     workLoop: h.loop, $: id => h.get(id), renderSummary() {}, renderHeader: value => cleared.push(value),
-    renderHostFacts: value => cleared.push(value), renderState() {}, pushDebugRow() {}, scheduleRefresh() {} };
+    renderHostFacts: value => cleared.push(value), renderState() {}, pushDebugRow() {}, scheduleRefresh() {}, generation: 0 };
   runInNewContext(appSlice('function openStream() {', '$("debug-toggle")'), bindings); bindings.openStream();
   listeners.get('source')({ data: JSON.stringify({state:'unreadable',remediation:'Source access unavailable'}) });
   assert.deepEqual(cleared, [null, null]);
@@ -1115,6 +1115,40 @@ test('the real stream source callback clears an open conversation through the ch
   h.get('task-detail-refresh').onclick(); await settle();
   assert.match(h.get('task-detail-content').innerHTML, /limited board snapshot/);
   assert.match(h.get('task-reports').innerHTML, /Source access unavailable/);
+});
+test('a refresh started before stream source loss cannot restore the cleared conversation on public or owner reads', async () => {
+  for (const guarded of [false, true]) {
+    const h = await conversationHarness({protected: guarded}), reports = h.get('task-reports');
+    // app.js's own refreshBoards, coalescing, safety timer and stream callback; reads and timers are held here.
+    const requests = [], timers = [], listeners = new Map(), painted = [];
+    const bindings = { fleetsSeen: true, workLoop: h.loop, $: id => h.get(id),
+      jget(url) { const request = deferred(); requests.push({ url, ...request }); return request.promise; },
+      setTimeout(callback, delay) { timers.push({ callback, delay }); return timers.length; }, clearTimeout() {},
+      createEventSource: () => ({ addEventListener: (name, listener) => listeners.set(name, listener) }),
+      channelUrl: () => '/api/channel', fleetQuery: () => '', syncWorkRoom: () => false, adoptFleets() {},
+      renderChannel: value => painted.push(value), renderTasks() {}, renderFleet() {}, renderSummary() {}, renderHeader() {},
+      renderHostFacts() {}, renderFleetTabs() {}, renderOverview() {}, renderState() {}, pushDebugRow() {} };
+    runInNewContext(appSlice('let refreshTimer = null;', '$("debug-toggle")'), bindings); bindings.openStream();
+    const board = {state:'ok',data:{tasks:[{task_id:'task-a',fleet:'web',title:'task-a'}]}};
+    const answer = async channel => {
+      for (const request of requests.splice(0))
+        request.resolve(request.url === '/api/channel' ? channel : request.url === '/api/tasks' ? board : {state:'ok',data:{}});
+      await settle(); await settle();
+    };
+    const stale = bindings.refreshBoards(); assert.equal(requests.length, 5);
+    listeners.get('source')({ data: JSON.stringify({state:'unreadable',remediation:'Source access unavailable'}) });
+    assert.equal(reports.children.length, 0); assert.match(reports.innerHTML, /Source access unavailable/);
+    await answer(conversationRead(conversationThread('task-a', ['first', 'older']))); await stale;
+    assert.deepEqual(painted, []); assert.equal(reports.children.length, 0); assert.match(reports.innerHTML, /Source access unavailable/);
+    // The retired read is replaced through the existing coalesced refetch, which re-arms the safety timer.
+    assert.deepEqual(timers.map(timer => timer.delay), [400]);
+    timers.shift().callback(); assert.equal(requests.length, 5);
+    await answer(conversationRead(conversationThread('task-a', ['first', 'recovered'])));
+    assert.equal(painted.length, 1);
+    assert.deepEqual(messagesIn(reports.children[0]).map(message => message.dataset.msgId), ['first', 'recovered']);
+    assert.deepEqual(timers.map(timer => timer.delay), [60000]);
+    assert.equal(h.sends.length + h.preparations.length + h.lookups.length, 0);
+  }
 });
 test('conversation does not disturb focus or selection in the frozen lifecycle region', async () => {
   const h = await conversationHarness(), content = h.get('task-detail-content');

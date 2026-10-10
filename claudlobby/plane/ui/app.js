@@ -828,6 +828,12 @@ function openStream() {
     // they hold came from a source that has stopped answering (§16).
     try {
       const env = JSON.parse(ev.data);
+      // A refresh already in flight read the source BEFORE this loss: retire
+      // it, or its older text repaints what is cleared below. The retired
+      // read would have re-armed the safety timer, so the coalesced refetch
+      // takes its place — the same door a pushed row uses, never a new one.
+      ++generation;
+      scheduleRefresh();
       renderSummary(env);
       renderHeader(null);
       renderHostFacts(null);
