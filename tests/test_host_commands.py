@@ -657,6 +657,21 @@ def test_status_missing_root_edges_follow_existing_normalization(tmp_path, capsy
     assert not missing.exists() and snapshot(tmp_path) == before
 
 
+@pytest.mark.parametrize("kind", ["file", "file-alias", "ancestor-file", "ancestor-file-alias"])
+def test_status_relative_non_directory_roots_keep_not_found(tmp_path, capsys, monkeypatch, kind):
+    file = tmp_path / "file"
+    file.write_text("private-content")
+    alias = tmp_path / "alias"
+    alias.symlink_to(file)
+    monkeypatch.chdir(tmp_path)
+    name = "alias" if kind.endswith("alias") else "file"
+    value = name + "/child" if kind.startswith("ancestor") else name
+    before = snapshot(tmp_path)
+    result = call(capsys, ["--root", value, "host", "status", "--json"], 3)
+    assert result["error"]["code"] == "not_found" and result["data"] == {}
+    assert snapshot(tmp_path) == before
+
+
 @pytest.mark.parametrize("storage", ["invalid", "redirected", "unavailable"])
 def test_status_active_recorded_diagnosis_survives_passive_storage_limit(candidate, capsys, monkeypatch, storage):
     from claudlobby import setup_observations as observations
@@ -699,6 +714,7 @@ def test_status_text_displays_fixed_observations_without_identifiers(tmp_path, c
     text = capsys.readouterr().out
     assert "package=present; tmux=missing, claude=missing, jq=missing" in text
     assert "Plane=absent" in text and "were not checked" in text
+    assert "browser pairing, runtime readiness" in text
     assert "private-" not in text
 
 

@@ -41,8 +41,6 @@ def absent_status_root(value):
     it as not_found. Leaf and ancestor aliases share that owner's normalization.
     """
     supplied = Path(value).expanduser()
-    if not supplied.is_absolute():
-        raise ObservationError("argument", "invalid")
     absolute = supplied.resolve()
     for parent in reversed((absolute, *absolute.parents)):
         state = directory_state(parent)
@@ -51,6 +49,8 @@ def absent_status_root(value):
         if state in {"invalid", "redirected"}:
             return None
         if state == "absent":
+            if not supplied.is_absolute():
+                raise ObservationError("argument", "invalid")
             return absolute
     return None
 
@@ -106,4 +106,5 @@ def text_lines(observation):
     tools = ", ".join(f"{name}={observation['executables'][name]}" for name in RUNTIME_EXECUTABLES)
     return (f"Passive observations: package={observation['package']['state']}; {tools}; "
             f"root={observation['root']}; Plane={observation['plane_storage']}.",
-            "Login, native manager, repository access and bootstrap eligibility were not checked.")
+            "Login, native manager, repository access, browser pairing, runtime readiness "
+            "and bootstrap eligibility were not checked.")

@@ -84,8 +84,7 @@ def _passive_status(args):
         try:
             root = absent_status_root(args.root)
         except ObservationError as exc:
-            code = ("invalid_argument" if exc.area == "argument" else
-                    "unavailable" if exc.state == "unavailable" else "conflict")
+            code = "invalid_argument" if exc.area == "argument" else "unavailable"
             raise CommandFailure(code, f"{code}: host status requires a safely inspectable data root") from exc
         if root is None:
             raise existing  # Preserve the recorded owner's existing-root refusal.
