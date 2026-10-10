@@ -13,7 +13,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ..context import resolve_paths
-from .ids import read_host_uid
+from .owner_source import admit_source, source_host_uid
 from .owner_access import AccessDenied, AccessUnavailable, OwnerAccess, PrincipalRef, VerifiedReader
 
 
@@ -64,10 +64,7 @@ class _OwnerReadGate:
         self.verify_reader = verify_reader
 
     def _admit(self, reader: VerifiedReader) -> None:
-        try:
-            host_uid = read_host_uid(self.access.root / "state")
-        except ValueError as exc:
-            raise AccessUnavailable("installation identity is unavailable") from exc
+        host_uid = source_host_uid(self.access.root)
         self.access.authorize_read(reader.token, reader.principal, host_uid=host_uid)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -99,6 +96,13 @@ class _OwnerReadGate:
         stopped = False
         event_stream = False
 
+        async def end_refused(exc):
+            if not started:
+                await _refusal(exc)(scope, receive, send)
+            elif event_stream:
+                await send({"type": "http.response.body", "body": b"", "more_body": False})
+            # Other started responses remain incomplete: a transport failure.
+
         async def guarded_send(message: Message) -> None:
             nonlocal pending_start, started, stopped, event_stream
             if stopped:
@@ -122,13 +126,7 @@ class _OwnerReadGate:
                 await run_in_threadpool(self._admit, reader)
             except (AccessDenied, AccessUnavailable) as exc:
                 stopped = True
-                if started:
-                    if event_stream:
-                        await send({"type": "http.response.body", "body": b"", "more_body": False})
-                    # No terminator for other responses: the server closes the
-                    # incomplete response, and clients detect a transport error.
-                else:
-                    await _refusal(exc)(scope, receive, send)
+                await end_refused(exc)
                 raise _ReadStopped() from None
             if not started:
                 await send(pending_start)
@@ -148,10 +146,7 @@ class _OwnerReadGate:
             refusal = _source_refusal(exc)
             if refusal is None:
                 raise
-            if not started:
-                await _refusal(refusal)(scope, receive, send)
-            elif event_stream:
-                await send({"type": "http.response.body", "body": b"", "more_body": False})
+            await end_refused(refusal)
 
 
 def create_owner_app(root: Path, *, verify_reader: ReaderVerifier,
@@ -167,14 +162,8 @@ def create_owner_app(root: Path, *, verify_reader: ReaderVerifier,
     from .view import create_app
 
     paths = resolve_paths(root=root, package=package)
-    from .owner_source import admit_source
-
     def admit_connection(conn):
-        try:
-            host_uid = read_host_uid(paths.root / "state")
-        except (ValueError, OSError) as exc:
-            raise AccessUnavailable("owner source unavailable") from exc
-        admit_source(conn, host_uid)
+        admit_source(conn, source_host_uid(paths.root))
 
     view = create_app(paths.root, sampler=sampler, package=paths.package,
                       admit_connection=admit_connection)

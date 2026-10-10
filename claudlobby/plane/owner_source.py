@@ -18,10 +18,11 @@ from .migrations import DowngradeError
 from .schema_state import PendingMigrationError, require_current_schema
 
 
-_TABLE = "owner_source_binding"
+HOST_TABLES = (*dict.fromkeys(CONSTRUCT_TABLES.values()), "events")
+_UNAVAILABLE = (sqlite3.Error, OSError, PendingMigrationError, DowngradeError)
 
 
-def _host(root: Path) -> str:
+def source_host_uid(root: Path) -> str:
     try:
         return read_host_uid(Path(root) / "state")
     except (ValueError, OSError) as exc:
@@ -30,7 +31,7 @@ def _host(root: Path) -> str:
 
 def _marker(conn: sqlite3.Connection, host_uid: str, *, required: bool) -> bool:
     exists = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (_TABLE,)
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", ("owner_source_binding",)
     ).fetchone()
     if not exists:
         if required:
@@ -60,7 +61,7 @@ def _retained(conn: sqlite3.Connection, host_uid: str) -> None:
 
     conn.set_progress_handler(progress, 10_000)
     try:
-        for table in (*dict.fromkeys(CONSTRUCT_TABLES.values()), "events"):
+        for table in HOST_TABLES:
             for direction in ("ASC", "DESC"):
                 row = conn.execute(
                     f"SELECT host_uid FROM {table}"
@@ -86,20 +87,20 @@ def admit_source(conn: sqlite3.Connection, host_uid: str) -> None:
         require_current_schema(conn)
         _marker(conn, host_uid, required=True)
         _retained(conn, host_uid)
-    except (sqlite3.Error, OSError, PendingMigrationError, DowngradeError) as exc:
+    except _UNAVAILABLE as exc:
         raise AccessUnavailable("owner source unavailable") from exc
 
 
 def inspect_source(root: Path) -> str:
     """Read-only startup check; query admission must still run per snapshot."""
-    host_uid = _host(root)
+    host_uid = source_host_uid(root)
     conn = None
     try:
         conn = connect_ro(db_file(root))
         conn.execute("BEGIN")
         admit_source(conn, host_uid)
         return host_uid
-    except (sqlite3.Error, OSError, PendingMigrationError, DowngradeError) as exc:
+    except _UNAVAILABLE as exc:
         raise AccessUnavailable("owner source unavailable") from exc
     finally:
         if conn is not None:
@@ -112,7 +113,7 @@ def bind_source(root: Path, *, expected_host_uid: str | None = None) -> str:
     Authority/interactive confirmation belong to the local CLI caller. This
     narrow writer creates metadata and read indexes, with no schema-version migration.
     """
-    host_uid = _host(root)
+    host_uid = source_host_uid(root)
     if expected_host_uid is not None and host_uid != expected_host_uid:
         raise AccessDenied("owner source denied")
     path = db_file(root)
@@ -130,7 +131,7 @@ def bind_source(root: Path, *, expected_host_uid: str | None = None) -> str:
         present = _marker(conn, host_uid, required=False)
         # Operator-authorized indexes only; a refusal rolls their DDL back.
         # Readers never create indexes, including on a retained older marker.
-        for table in (*dict.fromkeys(CONSTRUCT_TABLES.values()), "events"):
+        for table in HOST_TABLES:
             conn.execute(f"CREATE INDEX IF NOT EXISTS owner_source_{table}_host"
                          f" ON {table}(host_uid COLLATE BINARY)")
         _retained(conn, host_uid)
@@ -140,11 +141,11 @@ def bind_source(root: Path, *, expected_host_uid: str | None = None) -> str:
                          "host_uid TEXT NOT NULL)")
             conn.execute("INSERT INTO owner_source_binding VALUES (1, ?)", (host_uid,))
         # A concurrent installation identity change must not bind stale state.
-        if _host(root) != host_uid:
+        if source_host_uid(root) != host_uid:
             raise AccessUnavailable("owner source unavailable")
         conn.commit()
         return host_uid
-    except (sqlite3.Error, OSError, PendingMigrationError, DowngradeError) as exc:
+    except _UNAVAILABLE as exc:
         raise AccessUnavailable("owner source unavailable") from exc
     finally:
         if conn is not None:

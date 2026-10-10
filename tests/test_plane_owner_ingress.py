@@ -8,7 +8,6 @@ not establish installed Serve header replacement or real UDS reachability.
 
 import asyncio
 import copy
-import json
 import os
 import signal
 from pathlib import Path
@@ -138,30 +137,135 @@ def test_absolute_configured_executable_required(tmp_path):
             ServePrincipalVerifier(tailscale_binary=binary)
 
 
-def test_concurrency_has_no_unbounded_queue_and_cancellation_releases_slots(monkeypatch):
+def test_five_request_burst_succeeds_with_four_active_verifications(monkeypatch):
     verify = ServePrincipalVerifier(tailscale_binary=Path(sys.executable))
-    entered = 0
-    all_entered = None
-    async def command(*_):
-        nonlocal entered
-        entered += 1
-        if entered == owner_ingress._CONCURRENCY:
-            all_entered.set()
-        await asyncio.Event().wait()
-    monkeypatch.setattr(verify, '_command', command)
+    active = peak = entered = 0
     async def run():
-        nonlocal all_entered
-        all_entered = asyncio.Event()
-        tasks = [asyncio.create_task(verify(scope())) for _ in range(owner_ingress._CONCURRENCY)]
-        await asyncio.wait_for(all_entered.wait(), 1)
-        with pytest.raises(AccessUnavailable, match='owner_identity_busy'):
-            await verify(scope())
-        assert entered == owner_ingress._CONCURRENCY
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        assert verify._slots._value == owner_ingress._CONCURRENCY
+        release, full = asyncio.Event(), asyncio.Event()
+        async def admit(_source):
+            nonlocal active, peak, entered
+            active += 1
+            entered += 1
+            peak = max(peak, active)
+            if active == 4:
+                full.set()
+            try:
+                await release.wait()
+                return PrincipalRef('test', 'human')
+            finally:
+                active -= 1
+        monkeypatch.setattr(verify, '_admit', admit)
+        tasks = [asyncio.create_task(verify(scope())) for _ in range(5)]
+        await asyncio.wait_for(full.wait(), 1)
+        assert verify._pending == 5 and entered == 4
+        release.set()
+        assert await asyncio.gather(*tasks) == [PrincipalRef('test', 'human')] * 5
+        assert peak == 4 and entered == 5
+        assert verify._pending == 0 and verify._slots._value == 4
     asyncio.run(run())
+
+
+def test_active_plus_queued_capacity_is_32_and_33rd_refuses_without_work(monkeypatch):
+    verify = ServePrincipalVerifier(tailscale_binary=Path(sys.executable))
+    async def run():
+        entered = 0
+        full = asyncio.Event()
+        async def admit(_source):
+            nonlocal entered
+            entered += 1
+            if entered == 4:
+                full.set()
+            await asyncio.Event().wait()
+        monkeypatch.setattr(verify, '_admit', admit)
+        tasks = [asyncio.create_task(verify(scope())) for _ in range(32)]
+        try:
+            await asyncio.wait_for(full.wait(), 1)
+            assert verify._pending == 32 and entered == 4
+            with pytest.raises(AccessUnavailable, match='owner_identity_busy'):
+                await verify(scope())
+            assert verify._pending == 32 and entered == 4
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        assert verify._pending == 0 and verify._slots._value == 4
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('end', ['timeout', 'cancel'])
+def test_queued_timeout_or_cancellation_releases_reservation_without_admitting(monkeypatch, end):
+    verify = ServePrincipalVerifier(tailscale_binary=Path(sys.executable))
+    async def run():
+        entered = 0
+        full = asyncio.Event()
+        async def admit(_source):
+            nonlocal entered
+            entered += 1
+            if entered == 4:
+                full.set()
+            await asyncio.Event().wait()
+        monkeypatch.setattr(verify, '_admit', admit)
+        active = [asyncio.create_task(verify(scope())) for _ in range(4)]
+        try:
+            await asyncio.wait_for(full.wait(), 1)
+            monkeypatch.setattr(owner_ingress, '_TIMEOUT_SECONDS', .03)
+            queued = asyncio.create_task(verify(scope()))
+            await asyncio.sleep(0)
+            assert verify._pending == 5
+            if end == 'cancel':
+                queued.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await queued
+            else:
+                with pytest.raises(AccessUnavailable, match='owner_identity_lookup_unavailable'):
+                    await queued
+            assert entered == 4 and verify._pending == 4
+        finally:
+            for task in active:
+                task.cancel()
+            await asyncio.gather(*active, return_exceptions=True)
+        assert verify._pending == 0 and verify._slots._value == 4
+    asyncio.run(run())
+
+
+def test_queue_wait_and_verification_share_one_deadline(monkeypatch):
+    verify = ServePrincipalVerifier(tailscale_binary=Path(sys.executable))
+    async def run():
+        entered = 0
+        release, full, fifth = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        async def admit(_source):
+            nonlocal entered
+            entered += 1
+            if entered <= 4:
+                if entered == 4:
+                    full.set()
+                await release.wait()
+                return PrincipalRef('test', 'human')
+            fifth.set()
+            await asyncio.Event().wait()
+        monkeypatch.setattr(verify, '_admit', admit)
+        active = [asyncio.create_task(verify(scope())) for _ in range(4)]
+        await asyncio.wait_for(full.wait(), 1)
+        monkeypatch.setattr(owner_ingress, '_TIMEOUT_SECONDS', .2)
+        queued = asyncio.create_task(verify(scope()))
+        await asyncio.sleep(.1)
+        release.set()
+        await asyncio.gather(*active)
+        await asyncio.wait_for(fifth.wait(), 1)
+        with pytest.raises(AccessUnavailable):
+            await asyncio.wait_for(asyncio.shield(queued), .15)
+        assert verify._pending == 0 and verify._slots._value == 4
+    asyncio.run(run())
+
+
+def test_admission_error_releases_reservation_and_active_slot(monkeypatch):
+    verify = ServePrincipalVerifier(tailscale_binary=Path(sys.executable))
+    async def refuse(_source):
+        raise AccessDenied('fixture')
+    monkeypatch.setattr(verify, '_admit', refuse)
+    with pytest.raises(AccessDenied):
+        asyncio.run(verify(scope()))
+    assert verify._pending == 0 and verify._slots._value == 4
 
 
 def subprocess_helper(monkeypatch, tmp_path, program):
@@ -221,6 +325,7 @@ def test_stalled_cli_timeout_kills_and_reaps_subprocess(monkeypatch, tmp_path):
         asyncio.run(verify(scope()))
     assert processes[0].returncode is not None
     assert verify._slots._value == owner_ingress._CONCURRENCY
+    assert verify._pending == 0
 
 
 def test_request_cancellation_kills_and_reaps_subprocess(monkeypatch, tmp_path):
@@ -235,6 +340,7 @@ def test_request_cancellation_kills_and_reaps_subprocess(monkeypatch, tmp_path):
             await task
         assert processes[0].returncode is not None
         assert verify._slots._value == owner_ingress._CONCURRENCY
+        assert verify._pending == 0
     asyncio.run(run())
 
 

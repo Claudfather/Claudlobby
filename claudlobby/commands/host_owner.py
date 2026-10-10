@@ -77,16 +77,18 @@ def dispatch(args):
         paths = resolve_paths(root=args.root)
         store = OwnerAccess(paths.root)
         if args.owner_action == "serve":
-            from ..plane.owner_server import serve
+            from ..plane.owner_server import OwnerServerConfigurationError, serve
 
             try:
                 serve(paths.root, origin=args.origin, tailscale_binary=args.tailscale,
-                      socket_path=args.socket or paths.root / "state/plane/owner.sock",
+                      socket_path=args.socket,
                       package=paths.package)
+            except OwnerServerConfigurationError as exc:
+                raise CommandFailure("unavailable", str(exc)) from exc
             except ImportError as exc:
                 raise CommandFailure("unavailable", "owner serving requires the optional [plane-ui] dependencies") from exc
             except OSError as exc:
-                raise CommandFailure("unavailable", "owner server could not open its configured private socket") from exc
+                raise CommandFailure("unavailable", "owner server failed; inspect local logs and configured resources") from exc
             return CommandOutput({"state": "stopped"}, lines=("Owner server stopped.",))
         if args.owner_action == "status":
             grant = store.current_grant()
