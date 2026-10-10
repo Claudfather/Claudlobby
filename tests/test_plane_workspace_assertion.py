@@ -101,10 +101,11 @@ def test_signed_ordinary_user_jwt_and_extra_claim_are_refused(profile):
 
 
 @pytest.mark.parametrize("field", ["iat", "nbf", "exp"])
-@pytest.mark.parametrize("kind", ["string", "float", "boolean"])
+@pytest.mark.parametrize("kind", ["string", "float", "boolean", "infinity", "nan"])
 def test_time_fields_are_integers_not_coercions(profile, field, kind):
     value = profile[3][field]
-    value = str(value) if kind == "string" else float(value) if kind == "float" else True
+    value = {"string": str(value), "float": float(value), "boolean": True,
+             "infinity": float("inf"), "nan": float("nan")}[kind]
     with pytest.raises(AssertionRefused):
         verify(profile, claims={**profile[3], field: value})
 

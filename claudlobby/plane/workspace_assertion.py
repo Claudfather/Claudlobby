@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import base64
-import binascii
 from dataclasses import dataclass
 import ipaddress
 import json
@@ -10,12 +9,15 @@ import re
 from urllib.parse import urlsplit
 from uuid import UUID
 
+from .ids import ID_PATTERNS
+
 PURPOSE = "claudfather-workspace-host-bootstrap-v1"
 _CLAIMS = frozenset({"iss", "sub", "workspace_id", "host_uid", "nonce",
                      "operational_origin", "aud", "purpose", "iat", "nbf", "exp", "jti"})
-_HOST = re.compile(r"host_[0-9a-f]{32}\Z")
-_KID = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
-_BASE64 = re.compile(r"[A-Za-z0-9_-]{43}\Z")
+_REQUIRED_CLAIMS = sorted(_CLAIMS)
+_HOST = re.compile(ID_PATTERNS["host"])
+_KID = re.compile(r"[A-Za-z0-9._:-]{1,128}")
+_BASE64 = re.compile(r"[A-Za-z0-9_-]{43}")
 
 
 class AssertionRefused(Exception):
@@ -57,7 +59,7 @@ def _canonical_32_bytes(value: object) -> bool:
         return False
     try:
         raw = base64.b64decode(value + "=", altchars=b"-_", validate=True)
-    except (ValueError, binascii.Error):
+    except ValueError:
         return False
     return len(raw) == 32 and base64.urlsafe_b64encode(raw).decode().rstrip("=") == value
 
@@ -140,7 +142,7 @@ def _public_keys(public_jwks: bytes, jwt) -> dict:
                 raise ValueError
             parsed[kid] = jwt.PyJWK.from_dict(key, algorithm="EdDSA")
         return parsed
-    except (ValueError, TypeError, UnicodeError, RecursionError, jwt.PyJWTError):
+    except (ValueError, TypeError, RecursionError, jwt.PyJWTError):
         raise AssertionUnavailable() from None
 
 
@@ -178,7 +180,7 @@ def verify_workspace_assertion(
         claims = jwt.decode_complete(
             assertion, key, algorithms=["EdDSA"], issuer=expected.issuer,
             audience=f"urn:claudfather:host:{expected.host_uid}:workspace-read-bootstrap:v1",
-            options={"require": sorted(_CLAIMS), "strict_aud": True}, leeway=5,
+            options={"require": _REQUIRED_CLAIMS, "strict_aud": True}, leeway=5,
         )["payload"]
         if (set(claims) != _CLAIMS or claims["purpose"] != PURPOSE
                 or claims["host_uid"] != expected.host_uid
@@ -196,5 +198,5 @@ def verify_workspace_assertion(
             operational_origin=claims["operational_origin"], issued_at=claims["iat"],
             expires_at=claims["exp"], jti=claims["jti"],
         )
-    except (jwt.PyJWTError, ValueError, TypeError, UnicodeError, RecursionError):
+    except (jwt.PyJWTError, ValueError, TypeError, RecursionError):
         raise AssertionRefused() from None

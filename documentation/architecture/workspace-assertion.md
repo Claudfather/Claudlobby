@@ -10,11 +10,18 @@ nonce, or grant a session, read access or actions.
 
 The optional `plane-ui` extra pins `PyJWT[crypto]==2.15.1`; the core ledger does
 not import it. Importing this module also needs only the standard library.
-Missing verification dependencies or unusable configured keys raise fixed
-`AssertionUnavailable`; malformed assertions, known-key signature failures and
-profile mismatches raise fixed `AssertionRefused`. Unknown key IDs are
-unavailable, allowing a future consumer to decide bounded key refresh. This
-module performs no fetch, cache, environment read, persistence or retry.
+Invalid expected configuration, missing verification dependencies, unusable
+configured keys and unknown key IDs all raise fixed `AssertionUnavailable`;
+these causes are intentionally indistinguishable. With usable configuration
+and dependencies, malformed assertions, known-key signature failures and
+profile mismatches raise fixed `AssertionRefused`. Configuration is checked
+first, then token bounds, dependencies, configured keys and token verification;
+a bad token does not override an earlier unavailable configuration/key result.
+A future consumer must make any refresh conditional on its own trusted key
+state and bounded cooldown, never blindly refresh/retry every unavailable
+assertion. This module performs no fetch, cache, environment read, persistence
+or retry. Exact dependency bumps require the same refusal/compatibility checks
+and actual installed website signer interoperability proof.
 
 The exact claim roster is `iss`, `sub`, `workspace_id`, `host_uid`, `nonce`,
 `operational_origin`, `aud`, `purpose`, `iat`, `nbf`, `exp`, `jti`. Purpose is
@@ -39,6 +46,12 @@ Ed25519 public OKP key with canonical 32-byte public material, optional matching
 EdDSA/signature/verify metadata, and no private or unknown members. Duplicate
 JWKS members and unusable keys refuse the entire configured set; PyJWK parses
 the public keys. Nothing silently selects another algorithm or drops bad keys.
+
+Token JSON/encoding semantics stay with the maintained JWT parser; this module
+makes no raw-byte canonicalization or token-string uniqueness promise. Future
+replay enforcement must bind the validated semantic nonce and issuance ID to
+the actual local challenge, not deduplicate by raw JWT spelling. The strict
+JWKS parser instead rejects duplicate members in trusted configured key data.
 
 Later consumers must independently join a real outstanding challenge, trusted
 native principal, current source/owner revision and explicit local approval,
