@@ -9,8 +9,9 @@ const flush = async () => { await new Promise(resolve => setImmediate(resolve));
 const ready = { status: 200, data: { state: 'ready' } };
 const denied = { status: 403, data: { state: 'denied' } };
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
-function harness(replies = [ready], { monotonicNow = () => 0 } = {}) {
-  const calls = [], natives = [], replacements = [], timers = new Set(), nodes = new Map();
+function harness(replies = [ready], hooks = {}) {
+  const monotonicNow = hooks.monotonicNow || (() => 0);
+  const calls = [], natives = [], replacements = [], timers = new Set(), timeouts = [], nodes = new Map();
   let paused = 0, resumed = 0;
   const document = { getElementById(id) {
     if (!nodes.has(id)) nodes.set(id, { textContent: '', hidden: true, disabled: false,
@@ -25,7 +26,7 @@ function harness(replies = [ready], { monotonicNow = () => 0 } = {}) {
   const api = createOwnerTransport({
     monotonicNow,
     EventSource: NativeStream, location: { replace(path) { replacements.push(path); } },
-    setTimeout(callback) { timers.add(callback); return callback; }, clearTimeout(callback) { timers.delete(callback); },
+    setTimeout(callback, duration) { timers.add(callback); timeouts.push(duration); return callback; }, clearTimeout(callback) { timers.delete(callback); },
     async fetch(url, options) {
       calls.push({ url, options });
       let reply = replies.shift();
@@ -41,8 +42,8 @@ function harness(replies = [ready], { monotonicNow = () => 0 } = {}) {
   const node = id => document.getElementById(`owner-session-${id}`);
   const element = document.getElementById('owner-session');
   const controls = api.mountSessionControls({ document, element,
-    onPause() { paused++; }, onResume() { resumed++; } });
-  return { api, calls, natives, replacements, timers, replies, node, element, controls,
+    onPause() { paused++; hooks.onPause?.(api); }, onResume() { resumed++; hooks.onResume?.(api); }, onActionPause(scope) { hooks.onActionPause?.(api, scope); } });
+  return { api, calls, natives, replacements, timers, timeouts, replies, node, element, controls,
     get resumed() { return resumed; }, get paused() { return paused; },
     async click(id) { node(id).click(); await flush(); },
   };
@@ -222,6 +223,305 @@ test('named SSE listeners survive renewal and stale generations cannot publish',
   stream.removeEventListener('source', listener);
   h.natives[1].listeners.source({ data: '{}' }); assert.equal(sources, 1);
   h.controls.dispose();
+});
+
+const context = { version: 1, room: 'synthetic', simulation: false,
+  scope: { workspace: 'workspace-example', host: 'host-example', fleet: 'synthetic', viewer: 'stable-viewer' },
+  recipients: [{ id: 'bot-example', label: 'Example bot' }], actions: ['message'] };
+const action = { request_id: '11111111-1111-4111-8111-111111111111', kind: 'message',
+  scope: context.scope, target: { recipient: 'bot-example', task_id: null },
+  submitted_at: '2026-01-01T00:00:00.000Z', body: 'Exact message\nwith a second line.' };
+const receipt = value => ({ ...value, body: undefined, version: 1, status: 'delivered' });
+const ok = data => ({ status: 200, data });
+
+test('owner actions use exact canonical metadata and protected POST headers, stripping receipt bodies', async () => {
+  const h = harness([ready, ok(context), ok(receipt(action)), ok(receipt(action))]); await h.controls.ready;
+  assert.deepEqual(await h.api.interactionContext('synthetic'), context);
+  assert.equal((await h.api.sendAction(action)).status, 'delivered');
+  assert.equal((await h.api.actionReceipt({ ...action, room: 'ignore', authority: 'ignore' })).status, 'delivered');
+  assert.deepEqual(h.calls.slice(1).map(c => c.url), [
+    '/api/owner/actions/context', '/api/owner/actions/send', '/api/owner/actions/receipt']);
+  assert.deepEqual(JSON.parse(h.calls[1].options.body), { room: 'synthetic' });
+  assert.deepEqual(JSON.parse(h.calls[2].options.body), action);
+  const { body, ...metadata } = action;
+  assert.deepEqual(JSON.parse(h.calls[3].options.body), metadata);
+  for (const call of h.calls.slice(1)) {
+    assert.equal(call.options.method, 'POST');
+    assert.equal(call.options.credentials, 'same-origin'); assert.equal(call.options.cache, 'no-store');
+    assert.equal(call.options.redirect, 'error');
+    assert.deepEqual(call.options.headers, { 'Content-Type': 'application/json', 'X-Claudlobby-Owner': '1' });
+  }
+  assert.deepEqual(h.timeouts, [8000, 8000, 45000, 8000]);
+  h.controls.dispose();
+});
+
+test('context is unavailable before session readiness and refuses unsupported authority', async () => {
+  const checking = deferred();
+  const h = harness([() => checking.promise, ok({ ...context, actions: ['feedback'] }), ok(context)]);
+  assert.equal(await h.api.interactionContext('synthetic'), null);
+  assert.equal(h.calls.length, 1);
+  checking.resolve(ready); await h.controls.ready;
+  assert.equal(await h.api.interactionContext('all'), null);
+  assert.equal(await h.api.interactionContext('synthetic'), null);
+  assert.deepEqual(await h.api.interactionContext('synthetic'), context);
+  await assert.rejects(h.api.sendAction({ ...action, kind: 'feedback' }), /Unsupported/);
+  await assert.rejects(h.api.sendAction({ ...action, target: { ...action.target, task_id: 'task-example' } }), /Unsupported/);
+  assert.equal(h.calls.length, 3);
+  h.controls.dispose();
+});
+
+test('context refusal checks current cookie once and returns null without replay', async () => {
+  const h = harness([ready, denied, ready]); await h.controls.ready;
+  assert.equal(await h.api.interactionContext('synthetic'), null);
+  assert.equal(h.calls.filter(c => c.url.endsWith('/context')).length, 1);
+  assert.equal(h.calls.filter(c => c.url.endsWith('/status')).length, 2);
+  assert.deepEqual(h.replacements, []);
+  h.controls.dispose();
+});
+
+test('read-only owner context403 does not loop through lifecycle resume or disable the board', async () => {
+  const contexts = [], board = { state: 'ok', data: { tasks: [] } };
+  const h = harness([ready, denied, ready, ok(board)], {
+    onResume(api) { contexts.push(api.interactionContext('synthetic')); },
+  });
+  await h.controls.ready; await flush();
+  assert.deepEqual(await Promise.all(contexts), [null]);
+  assert.equal(h.calls.filter(c => c.url.endsWith('/context')).length, 1);
+  assert.equal(h.calls.filter(c => c.url.endsWith('/status')).length, 2);
+  assert.equal(h.resumed, 1); assert.equal(h.paused, 1);
+  assert.deepEqual(h.replacements, []);
+  assert.equal(h.node('renew').disabled, false);
+  assert.deepEqual(await h.api.jget('/api/tasks'), board);
+  h.controls.dispose();
+});
+
+test('revoked message grant retains the original UUID and active private read stream', async () => {
+  const { ActionState } = await load(await readFile(new URL('../claudlobby/plane/ui/action-state.js', import.meta.url), 'utf8'));
+  const values = new Map(), storage = { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) };
+  const state = new ActionState(storage);
+  const request = state.begin(context, 'message', action.target, action.body, action.request_id);
+  const board = { state: 'ok', data: { tasks: [] } };
+  const h = harness([ready, denied, ready, ok(board)]); await h.controls.ready;
+  h.api.createEventSource('/api/stream');
+  await assert.rejects(h.api.sendAction(request), /outcome unknown/);
+  assert.equal(new ActionState(storage).pending[0].request_id, request.request_id);
+  assert.equal(h.natives[0].closed, undefined);
+  assert.equal(h.paused, 1); assert.equal(h.resumed, 1);
+  assert.deepEqual(h.replacements, []);
+  assert.deepEqual(await h.api.jget('/api/tasks'), board);
+  assert.equal(h.calls.filter(c => c.url.endsWith('/send')).length, 1);
+  h.controls.dispose();
+});
+
+test('action-only503, malformed JSON and network failure preserve read access and saved requests', async () => {
+  const { ActionState } = await load(await readFile(new URL('../claudlobby/plane/ui/action-state.js', import.meta.url), 'utf8'));
+  for (const failure of [{ status: 503, data: { state: 'unavailable' } },
+    ok(new Error('private JSON error')), new Error('private network error')]) {
+    const values = new Map(), storage = { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) };
+    const state = new ActionState(storage);
+    const request = state.begin(context, 'message', action.target, action.body, action.request_id);
+    const board = { state: 'ok', data: { tasks: [] } };
+    const h = harness([ready, failure, failure, ok(board)]); await h.controls.ready;
+    h.api.createEventSource('/api/stream');
+    assert.equal(await h.api.interactionContext('synthetic'), null);
+    await assert.rejects(h.api.sendAction(request), /outcome unknown/);
+    assert.equal(new ActionState(storage).pending[0].request_id, request.request_id);
+    assert.equal(h.natives[0].closed, undefined);
+    assert.equal(h.paused, 1); assert.equal(h.resumed, 1);
+    assert.equal(h.calls.filter(c => c.url.endsWith('/status')).length, 1);
+    assert.deepEqual(await h.api.jget('/api/tasks'), board);
+    assert.deepEqual(h.replacements, []);
+    h.controls.dispose();
+  }
+});
+
+test('concurrent action403s share a direct status probe and genuine expiry still stops reads', async () => {
+  const status = deferred();
+  const h = harness([ready, denied, denied, () => status.promise]); await h.controls.ready;
+  const send = assert.rejects(h.api.sendAction(action), /outcome unknown/);
+  const lookup = assert.rejects(h.api.actionReceipt(action), /outcome unknown/);
+  await flush(); assert.equal(h.calls.filter(c => c.url.endsWith('/status')).length, 2);
+  status.resolve(ready); await Promise.all([send, lookup]);
+  assert.equal(h.paused, 1); assert.equal(h.resumed, 1); assert.deepEqual(h.replacements, []);
+  h.controls.dispose();
+  const expired = harness([ready, denied, ok({ state: 'sign_in_required' })]); await expired.controls.ready;
+  expired.api.createEventSource('/api/stream');
+  await assert.rejects(expired.api.sendAction(action), /outcome unknown/);
+  assert.deepEqual(expired.replacements, ['/owner']);
+  assert.equal(expired.natives[0].closed, true);
+  assert.equal(await expired.api.jget('/api/tasks'), null);
+  expired.controls.dispose();
+});
+
+test('a lost send reply retains metadata and original UUID across reload, with no replay', async () => {
+  const { ActionState } = await load(await readFile(new URL('../claudlobby/plane/ui/action-state.js', import.meta.url), 'utf8'));
+  const values = new Map(), storage = { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) };
+  const state = new ActionState(storage);
+  const request = state.begin(context, 'message', action.target, action.body, action.request_id);
+  const h = harness([ready, new Error('private transport detail'), ready, ok(receipt(request))]); await h.controls.ready;
+  await assert.rejects(h.api.sendAction(request), error => /outcome unknown/.test(error.message) && !/private/.test(error.message));
+  assert.equal(h.calls.filter(c => c.url.endsWith('/send')).length, 1);
+  const reloaded = new ActionState(storage);
+  assert.equal(reloaded.pending[0].request_id, action.request_id);
+  assert.equal(JSON.stringify([...values.values()]).includes(action.body), false);
+  await h.click('check');
+  reloaded.accept(reloaded.pending[0], await h.api.actionReceipt(reloaded.pending[0]));
+  assert.equal(reloaded.pending.length, 0);
+  assert.equal(h.calls.filter(c => c.url.endsWith('/send')).length, 1);
+  h.controls.dispose();
+});
+
+test('send timeout is bounded past lifecycle timeout and rejects a late body without resending', async () => {
+  const late = deferred(); const h = harness([ready, () => late.promise]); await h.controls.ready;
+  const send = assert.rejects(h.api.sendAction(action), /outcome unknown/);
+  assert.equal(h.timeouts.at(-1), 45000);
+  [...h.timers][0](); assert.equal(h.calls[1].options.signal.aborted, true);
+  late.resolve(ok(receipt(action))); await send;
+  assert.equal(h.calls.length, 2);
+  assert.equal(h.node('renew').disabled, false);
+  h.controls.dispose();
+});
+
+test('renewal fences a delayed action403, preserving renewed cookie and allowing receipt-only recovery', async () => {
+  const late = deferred(); const h = harness([ready, () => late.promise, ready, ok(receipt(action))]);
+  await h.controls.ready;
+  const send = assert.rejects(h.api.sendAction(action), /outcome unknown/);
+  await h.click('renew'); assert.equal(h.calls[1].options.signal.aborted, true);
+  late.resolve(denied); await send;
+  assert.deepEqual(h.replacements, []);
+  assert.equal(h.calls.filter(c => c.url.endsWith('/status')).length, 1);
+  assert.equal((await h.api.actionReceipt(action)).status, 'delivered');
+  assert.equal(h.calls.filter(c => c.url.endsWith('/send')).length, 1);
+  h.controls.dispose();
+});
+
+test('logout fences delayed action success and prohibits subsequent sends or receipt reads', async () => {
+  const late = deferred(); const h = harness([ready, () => late.promise, ok({ state: 'signed_out' })]);
+  await h.controls.ready;
+  const send = assert.rejects(h.api.sendAction(action), /outcome unknown/);
+  await h.click('logout'); late.resolve(ok(receipt(action))); await send;
+  await assert.rejects(h.api.sendAction(action), /outcome unknown/);
+  await assert.rejects(h.api.actionReceipt(action), /outcome unknown/);
+  assert.deepEqual(h.replacements, ['/owner']);
+  assert.equal(h.calls.length, 3);
+  h.controls.dispose();
+});
+
+test('send403 checks current cookie once and reports unknown even when another tab renewed', async () => {
+  const h = harness([ready, denied, ready]); await h.controls.ready;
+  await assert.rejects(h.api.sendAction(action), /outcome unknown/);
+  assert.equal(h.calls.filter(c => c.url.endsWith('/send')).length, 1);
+  assert.equal(h.calls.filter(c => c.url.endsWith('/status')).length, 2);
+  assert.deepEqual(h.replacements, []);
+  assert.equal(h.node('renew').disabled, false);
+  h.controls.dispose();
+});
+
+for (const renewal of ['same scope', 'new viewer', 'removed recipient', 'no message capability'])
+test(`app renewal restores worker selection and draft only with fresh matching authority: ${renewal}`, async () => {
+  const app = await readFile(new URL('../claudlobby/plane/ui/app.js', import.meta.url), 'utf8');
+  const pause = app.match(/onPause\(\) \{([\s\S]*?)\n\s*\},\n\s*onResume/)[1];
+  const sync = app.slice(app.indexOf('function syncWorkRoom()'), app.indexOf('const ownerSession ='));
+  const controller = (await readFile(new URL('../claudlobby/plane/ui/work-loop.js', import.meta.url), 'utf8'))
+    .replaceAll('from "/action-state.js"', `from "${new URL('../claudlobby/plane/ui/action-state.js', import.meta.url)}"`)
+    .replaceAll('from "/panel-state.js"', `from "${new URL('../claudlobby/plane/ui/panel-state.js', import.meta.url)}"`);
+  const { mountWorkLoop } = await load(controller);
+  const { ActionState } = await load(await readFile(new URL('../claudlobby/plane/ui/action-state.js', import.meta.url), 'utf8'));
+  const elements = new Map(), values = new Map();
+  const document = { getElementById(id) {
+    if (!elements.has(id)) elements.set(id, { value: '', hidden: false, disabled: false,
+      innerHTML: '', querySelectorAll: () => [], addEventListener(name, callback) { this[name] = callback; } });
+    return elements.get(id);
+  } };
+  const storage = { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) };
+  // Keep one earlier uncertain request for another recipient while editing an unsent draft.
+  const state = new ActionState(storage);
+  let access = { ...context, recipients: [...context.recipients,
+    { id: 'worker-bot', label: 'Worker' }, { id: 'other-bot', label: 'Other bot' }] };
+  state.begin(access, 'message', { recipient: 'other-bot', task_id: null }, 'Earlier uncertain message', action.request_id);
+  const oldDocument = globalThis.document, oldStorage = globalThis.sessionStorage;
+  globalThis.document = document; globalThis.sessionStorage = storage;
+  try {
+    let paused = false; const rooms = [];
+    const workLoop = mountWorkLoop({ api: {
+      interactionContext(room) { rooms.push(room); return paused ? null : access; },
+      sendAction() { throw Error('No sends expected'); }, actionReceipt() { throw Error('No receipt reads expected'); },
+    }, renderThread() {}, refresh() {} });
+    workLoop.setRoom('synthetic'); await flush();
+    const recipient = document.getElementById('work-recipient');
+    recipient.value = 'worker-bot'; recipient.onchange();
+    const body = document.getElementById('work-body'); body.value = 'Keep this unsent draft'; body.input();
+    const before = storage.getItem('plane.pending-actions.v1');
+    assert.equal(document.getElementById('work-send').disabled, false);
+    const bindings = { workLoop, workRoom: 'synthetic', currentFleet: 'synthetic', fleets: [],
+      sessionPaused: false, sessionEpoch: 1, generation: 1, trustGen: 1,
+      refreshTimer: null, safetyTimer: null, searchTimer: null,
+      clearTimeout() {}, $: id => document.getElementById(id), showLoading() {} };
+    paused = true; runInNewContext(`(function() { ${pause} })()`, bindings);
+    assert.equal(bindings.workRoom, undefined);
+    assert.equal(document.getElementById('work-send').disabled, true);
+    assert.equal(document.getElementById('work-form').hidden, true);
+    await flush();
+    if (renewal === 'new viewer') access = { ...access, scope: { ...access.scope, viewer: 'new-authority-viewer' } };
+    if (renewal === 'removed recipient') access = { ...access, recipients: access.recipients.filter(r => r.id !== 'worker-bot') };
+    if (renewal === 'no message capability') access = { ...access, actions: [] };
+    paused = false; runInNewContext(`${sync}\nsyncWorkRoom()`, bindings); await flush();
+    assert.deepEqual(rooms, ['synthetic', 'synthetic']);
+    assert.doesNotMatch(document.getElementById('work-notice').textContent, /host has not enabled/);
+    assert.equal(recipient.value, renewal === 'same scope' ? 'worker-bot' : 'bot-example');
+    assert.equal(body.value, renewal === 'same scope' ? 'Keep this unsent draft' : '');
+    assert.equal(document.getElementById('work-send').disabled, renewal === 'no message capability');
+    assert.equal(storage.getItem('plane.pending-actions.v1'), before);
+  } finally { await flush(); globalThis.document = oldDocument; globalThis.sessionStorage = oldStorage; }
+});
+
+
+test('explicit submission refusal preserves read session and invalidates action capability without recreating grants', async () => {
+  let invalidated = 0;
+  const h = harness([ready, {status:403,data:{state:'denied',effect:'not_started'}}, ready],
+    {onActionPause(){ invalidated++; }});
+  await h.controls.ready;
+  await assert.rejects(h.api.sendAction(action), e => e.effect === 'not_started');
+  assert.equal(invalidated, 1);
+  assert.equal(h.paused, 1); assert.equal(h.resumed, 1);
+  assert.deepEqual(h.calls.map(c=>c.url), ['/api/owner/status','/api/owner/actions/send','/api/owner/status']);
+  assert.deepEqual(h.replacements, []);
+});
+
+test('not_started is per send invocation only; receipt refusal preserves original uncertainty', async () => {
+  const h = harness([ready, {status:503,data:{state:'unavailable',effect:'not_started'}},
+    {status:403,data:{state:'denied',effect:'not_started'}}, ready]);
+  await h.controls.ready;
+  await assert.rejects(h.api.sendAction(action), e => e.effect === 'not_started');
+  await assert.rejects(h.api.actionReceipt(action), e => !e.effect && /outcome unknown/.test(e.message));
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/send')).length, 1);
+});
+
+
+for (const lifecycle of ['status','renew','logout']) test(`aborted403 ${lifecycle} body is unavailable and never replayed`, async () => {
+  const body = deferred(), started = deferred(), timers = new Set(), calls = [], replacements = [];
+  const nodes = new Map();
+  const doc = {getElementById(id){if(!nodes.has(id)) nodes.set(id,{disabled:false,addEventListener(n,f){this[n]=f;}});return nodes.get(id);}};
+  const api = createOwnerTransport({location:{replace(p){replacements.push(p);}},
+    setTimeout(f){timers.add(f);return f;},clearTimeout(f){timers.delete(f);},
+    async fetch(url){
+      calls.push(url);
+      if(lifecycle !== 'status' && calls.length === 1) return {status:200,json:async()=>ready.data};
+      return {status:403,json:async()=>{started.resolve();return body.promise;}};
+    }});
+  const controls = api.mountSessionControls({document:doc,element:{}});
+  if(lifecycle !== 'status') {
+    await controls.ready;
+    doc.getElementById(`owner-session-${lifecycle}`).click();
+  }
+  await started.promise;
+  for(const timeout of [...timers]) timeout();
+  body.resolve({state:'denied'});
+  await controls.ready; await flush();
+  assert.match(doc.getElementById('owner-session-status').textContent,/Session state is unknown/);
+  assert.deepEqual(replacements,[]);
+  assert.equal(calls.filter(c=>c.endsWith('/'+lifecycle)).length,1);
+  api.dispose?.();
 });
 
 test('initial ready session paints boards before an existing stream opens', async () => {
@@ -418,4 +718,55 @@ test('a quiet stable stream checks expired current cookie and redirects without 
   assert.equal(h.natives[1].closed, true);
   assert.equal(h.calls.every(c => c.options.method === 'GET'), true);
   h.controls.dispose();
+});
+
+
+for (const change of ['other room', 'new grant scope', 'current scope'])
+test(`late action403 invalidates only its originating composer: ${change}`, async () => {
+  const text = (await readFile(new URL('../claudlobby/plane/ui/work-loop.js', import.meta.url), 'utf8'))
+    .replaceAll('from "/action-state.js"', `from "${new URL('../claudlobby/plane/ui/action-state.js', import.meta.url)}"`)
+    .replaceAll('from "/panel-state.js"', `from "${new URL('../claudlobby/plane/ui/panel-state.js', import.meta.url)}"`);
+  const { mountWorkLoop } = await load(text);
+  const elements = new Map(), values = new Map();
+  const document = { getElementById(id) {
+    if (!elements.has(id)) elements.set(id, { value: '', hidden: false, disabled: false,
+      innerHTML: '', querySelectorAll: () => [], addEventListener(name, callback) { this[name] = callback; } });
+    return elements.get(id);
+  } };
+  const oldDocument = globalThis.document, oldStorage = globalThis.sessionStorage;
+  globalThis.document = document;
+  globalThis.sessionStorage = { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) };
+  const late = deferred(); let loop;
+  const fresh = change === 'other room' ? { ...context, room: 'second-team', scope: { ...context.scope, fleet: 'second-team' } }
+    : change === 'new grant scope' ? { ...context, scope: { ...context.scope, viewer: 'new-generation-viewer' } } : context;
+  const h = harness([ready, ok(context), () => late.promise, ok(fresh), ready, ok(['board'])], {
+    onActionPause(api, scope) { loop.invalidate(undefined, scope); }
+  });
+  try {
+    await h.controls.ready;
+    loop = mountWorkLoop({ api: h.api, renderThread() {}, refresh() {} });
+    loop.setRoom(context.room); await flush();
+    const rejected = assert.rejects(h.api.sendAction(action), /outcome unknown/);
+    loop.setRoom(fresh.room); await flush();
+    const draft = document.getElementById('work-body'); draft.value = 'Newly selected draft'; draft.input();
+    late.resolve(denied); await rejected;
+    assert.equal(document.getElementById('work-form').hidden, change === 'current scope');
+    assert.equal(draft.value, change === 'current scope' ? '' : 'Newly selected draft');
+    assert.equal(document.getElementById('work-send').disabled, change === 'current scope');
+    assert.deepEqual(await h.api.jget('/api/tasks'), ['board']);
+    assert.equal(h.node('renew').disabled, false); assert.deepEqual(h.replacements, []);
+    assert.equal(h.calls.filter(c => c.url.endsWith('/send')).length, 1);
+  } finally { h.controls.dispose(); globalThis.document = oldDocument; globalThis.sessionStorage = oldStorage; }
+});
+
+test('late context403 leaves context epoch ownership with the controller', async () => {
+  let invalidated = 0;
+  const late = deferred(), fresh = { ...context, room: 'second-team', scope: { ...context.scope, fleet: 'second-team' } };
+  const h = harness([ready, () => late.promise, ok(fresh), ready], { onActionPause() { invalidated++; } });
+  await h.controls.ready;
+  const old = h.api.interactionContext(context.room);
+  assert.deepEqual(await h.api.interactionContext(fresh.room), fresh);
+  late.resolve(denied); assert.equal(await old, null);
+  assert.equal(invalidated, 0); assert.equal(h.node('renew').disabled, false);
+  assert.deepEqual(h.replacements, []); h.controls.dispose();
 });

@@ -5,7 +5,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
   setTimeout = globalThis.setTimeout, clearTimeout = globalThis.clearTimeout,
   monotonicNow = () => globalThis.performance.now() } = {}) {
   let generation = 0, mode = 'checking', busy = false, disposed = false;
-  let recoveryUsed = false, readRecoveryUsed = false, streamRecoveryUsed = false, readRecoveryTimer = null;
+  let actionChecking = null, recoveryUsed = false, readRecoveryUsed = false, streamRecoveryUsed = false, readRecoveryTimer = null;
   let mount = null, statusNote = null;
   const reads = new Set(), streams = new Set();
   const labels = {
@@ -43,14 +43,14 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
     pause(next);
     location.replace('/owner'); // fixed same-origin entry, never auto-login
   }
-  async function request(url, action = false) {
+  async function request(url, action = false, body = {}, timeout = 8000) {
     const controller = new AbortController();
     reads.add(controller);
-    const timer = setTimeout(() => controller.abort(), 8000);
+    const timer = setTimeout(() => controller.abort(), timeout);
     try {
       const response = await fetch(url, { method: action ? 'POST' : 'GET',
         credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: controller.signal,
-        ...(action ? { headers: { 'Content-Type': 'application/json', 'X-Claudlobby-Owner': '1' }, body: '{}' } : {}),
+        ...(action ? { headers: { 'Content-Type': 'application/json', 'X-Claudlobby-Owner': '1' }, body: JSON.stringify(body) } : {}),
       });
       // Keep the timeout through body consumption, not only response headers.
       let data;
@@ -144,6 +144,87 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
       return null;
     }
   }
+  const unknown = () => new Error('Action outcome unknown. Check the original receipt.');
+  async function ownerAction(path, body, timeout = 8000) {
+    // A request may have reached delivery even when its reply or session is lost.
+    // Throw on uncertainty so ActionState keeps the original saved request ID.
+    if (disposed || mode !== 'ready') throw unknown();
+    const gen = generation;
+    let result;
+    try {
+      result = await request(`/api/owner/actions/${path}`, true, body, timeout);
+    } catch {
+      throw unknown();
+    }
+    if (disposed || gen !== generation || mode !== 'ready') throw unknown();
+    if (result.status === 403) {
+      // A missing/revoked message grant is independent of read access. Probe
+      // the current cookie without pause/resume, which would reload context.
+      // Context failures are already fenced by the controller room epoch.
+      // A mutation/receipt refusal may invalidate only its original scope.
+      if (path !== 'context') mount?.onActionPause(body.scope);
+      await checkActionSession(gen);
+      if (disposed || gen !== generation || mode !== 'ready') throw unknown();
+      if (path === 'send' && result.data?.effect === 'not_started') {
+        const refusal = new Error('This submission was refused before delivery; your draft is kept.');
+        refusal.effect = 'not_started';
+        throw refusal;
+      }
+      throw unknown();
+    }
+    if (path === 'send' && result.status === 503 && result.data?.effect === 'not_started') {
+      const refusal = new Error('This submission was refused before delivery; your draft is kept.');
+      refusal.effect = 'not_started';
+      throw refusal;
+    }
+    if (result.status !== 200) throw unknown();
+    recoveryUsed = false;
+    return result.data;
+  }
+  async function checkActionSession(gen) {
+    if (actionChecking?.gen === gen) return actionChecking.promise;
+    const promise = (async () => {
+      try {
+        const result = await request('/api/owner/status');
+        if (disposed || gen !== generation || mode !== 'ready') return;
+        if (result.status === 200 && result.data?.state === 'ready') return;
+        if (result.status === 403 || (result.status === 200 &&
+          ['needs_pairing', 'sign_in_required'].includes(result.data?.state))) leave('denied');
+        else pause('unavailable');
+      } catch {
+        if (!disposed && gen === generation && mode === 'ready') pause('unavailable');
+      }
+    })();
+    actionChecking = { gen, promise };
+    try { await promise; }
+    finally { if (actionChecking?.promise === promise) actionChecking = null; }
+  }
+  async function interactionContext(room) {
+    if (typeof room !== 'string' || !room || room === 'all') return null;
+    try {
+      const context = await ownerAction('context', { room });
+      // This transport exposes ordinary messages only. The shared controller
+      // validates the complete versioned context before enabling its composer.
+      if (context?.version !== 1 || context.simulation !== false || context.room !== room ||
+          context.scope?.fleet !== room || !Array.isArray(context.actions) ||
+          context.actions.length !== 1 || context.actions[0] !== 'message') return null;
+      return context;
+    } catch { return null; }
+  }
+  function actionMetadata(value) {
+    if (value?.kind !== 'message' || value.target?.task_id !== null) throw new Error('Unsupported action.');
+    return { request_id: value.request_id, kind: value.kind,
+      scope: { workspace: value.scope?.workspace, host: value.scope?.host,
+        fleet: value.scope?.fleet, viewer: value.scope?.viewer },
+      target: { recipient: value.target.recipient, task_id: null }, submitted_at: value.submitted_at };
+  }
+  async function sendAction(value) {
+    // Delivery can outlast lifecycle reads. One bounded attempt, never a retry.
+    return ownerAction('send', { ...actionMetadata(value), body: value.body }, 45000);
+  }
+  async function actionReceipt(value) {
+    return ownerAction('receipt', actionMetadata(value));
+  }
   function createEventSource(url) {
     const listeners = new Map();
     let native = null, closed = false, openedAt = null;
@@ -207,11 +288,11 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
     stream.open();
     return stream;
   }
-  function mountSessionControls({ document, element, onPause = () => {}, onResume = () => {} }) {
+  function mountSessionControls({ document, element, onPause = () => {}, onResume = () => {}, onActionPause = () => {} }) {
     mount = { status: document.getElementById('owner-session-status'),
       renew: document.getElementById('owner-session-renew'),
       logout: document.getElementById('owner-session-logout'),
-      check: document.getElementById('owner-session-check'), onPause, onResume };
+      check: document.getElementById('owner-session-check'), onPause, onResume, onActionPause };
     element.hidden = false;
     mount.renew.addEventListener('click', () => { void mutate('renew'); });
     mount.logout.addEventListener('click', () => { void mutate('logout'); });
@@ -225,10 +306,13 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
     pause('unavailable');
     for (const stream of [...streams]) stream.close();
   }
-  return { jget, createEventSource, mountSessionControls };
+  return { jget, createEventSource, mountSessionControls, interactionContext, sendAction, actionReceipt };
 }
 
 const owner = createOwnerTransport();
 export const jget = owner.jget;
 export const createEventSource = owner.createEventSource;
 export const mountSessionControls = owner.mountSessionControls;
+export const interactionContext = owner.interactionContext;
+export const sendAction = owner.sendAction;
+export const actionReceipt = owner.actionReceipt;
