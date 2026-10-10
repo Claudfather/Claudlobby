@@ -1258,7 +1258,7 @@ replay. A lifecycle-only older server is deliberately incompatible with this
 new client, rather than silently treated as the same read contract. The default
 read-only transport and injected synthetic transports are unchanged.
 
-### Two admitted source reads
+### Admitted source reads
 
 The core `createOwnerReadHandle` factory uses the same authenticated owner status
 admission and pinned read profile as the direct browser transport. Its lifecycle
@@ -1272,7 +1272,7 @@ handles with immutable distinct source keys and labels. A first computer needs
 no fake second source: coverage reports one readable source out of one, or zero
 out of one after loss. `createTwoSourceReadTransport({sources})` remains the
 exactly-two compatibility factory over the same implementation. Neither provisions
-sessions or choose a cross-origin carrier. An injected `/api-client.js` can expose
+sessions nor chooses a cross-origin carrier. An injected `/api-client.js` can expose
 the resulting read/stream/disposal methods to the one canonical renderer. The
 shipped default and direct-owner module selection remain unchanged. The injected
 wrapper must import the same cache-versioned owner module URL as the adapter: read
@@ -1284,7 +1284,7 @@ linked task detail to that source, including a task outside the board window.
 Task links require the recorded fleet UID and admitted host UID; they never infer
 ownership from an emitter or another host. Structural identities are qualified
 by source, while literal bodies and event detail are preserved. Each source keeps
-its own snapshot provenance, stream cursor and recent-window metadata. An initially unavailable source does not hide the other host; a source may
+its own snapshot provenance, stream cursor and recent-window metadata. An initially unavailable source does not hide any other host; a source may
 admit later only through its controller, with distinct pinned host identity. Source
 loss fences unfinished replies and omits that source's private rows; previously
 admitted fleet labels remain visibly unavailable. Partial totals cover readable
