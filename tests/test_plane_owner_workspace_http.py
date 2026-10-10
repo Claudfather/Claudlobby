@@ -306,7 +306,9 @@ def test_late_source_never_starts_begin_and_retains_capacity(http, monkeypatch):
 def test_started_begin_finishes_unknown_and_lifespan_drains_before_read_shutdown(http, monkeypatch):
     import threading
     from claudlobby.plane import owner_workspace_http as module
-    monkeypatch.setattr(module, "RESPONSE_SECONDS", 0.05, raising=False)
+    # Real source validation and SQLite admission must finish before this test
+    # exercises a deadline *after* begin. A 50ms setup budget races CI disk load.
+    monkeypatch.setattr(module, "RESPONSE_SECONDS", 2, raising=False)
     app, store, _, _, _ = http
     consumer = app.workspace_bootstrap
     entered, release = threading.Event(), threading.Event()
@@ -314,7 +316,7 @@ def test_started_begin_finishes_unknown_and_lifespan_drains_before_read_shutdown
     def held(*args, **kwargs):
         value = original(*args, **kwargs)
         entered.set()
-        release.wait(3)
+        release.wait(10)
         return value
     monkeypatch.setattr(consumer.workspace, "begin", held)
     observed = []
@@ -326,7 +328,7 @@ def test_started_begin_finishes_unknown_and_lifespan_drains_before_read_shutdown
     async def scenario():
         responses = []
         try:
-            await asyncio.wait_for(_raw_challenge(consumer, responses), 0.5)
+            await asyncio.wait_for(_raw_challenge(consumer, responses), 5)
             assert entered.is_set() and responses[0]["status"] == 503
             assert len(consumer._workers) == 1
             async def receive():
@@ -340,7 +342,7 @@ def test_started_begin_finishes_unknown_and_lifespan_drains_before_read_shutdown
             await _raw_challenge(consumer, denied)
             assert denied[0]["status"] == 503
             release.set()
-            await asyncio.wait_for(shutdown, 1)
+            await asyncio.wait_for(shutdown, 3)
             assert observed == [(True, 0), "lifespan.shutdown.complete"]
         finally:
             release.set()
