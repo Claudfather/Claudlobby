@@ -222,6 +222,38 @@ The view's GET-only contract remains intact, with pairing/session mutations
 in the separate authority transport below. No real protected use is claimed by
 the synthetic policy tests.
 
+### Local owner administration
+
+The supported local authority door is `claudlobby --root DATA_ROOT host owner`.
+`DATA_ROOT` names the existing installation; these commands never create an
+installation identity, select a fleet, start a service or change Tailscale.
+Run them in the operator terminal on that host:
+
+```sh
+claudlobby --root DATA_ROOT host owner initialize
+claudlobby --root DATA_ROOT host owner status --json
+claudlobby --root DATA_ROOT host owner confirm
+claudlobby --root DATA_ROOT host owner revoke
+```
+
+`initialize` requires typing `INITIALIZE` and prepares private authority storage.
+It preserves existing grants and is not a database-recovery operation. `status`
+is read-only; unavailable authority is an error, never an unpaired result.
+`confirm` reads the browser's short-lived pairing code with terminal echo disabled,
+previews its exact principal, host and expiry, then requires typing `PAIR`.
+The operator compares that principal with the browser before approving. The
+write transaction rechecks the previewed request; expiry or concurrent approval
+cannot turn a stale prompt into authority. No code is accepted in CLI arguments
+or printed by the command. `revoke` shows the current grant and requires typing
+`REVOKE`; the expected revision prevents revoking a replacement owner.
+
+Changes refuse redirected input, JSON mode and generated bot/fleet selectors.
+These checks prevent accidental invocation in a bot context; they do not
+isolate a malicious process with the same OS privileges. Revocation invalidates
+the pairing and its sessions without stopping fleets or deleting their history.
+Local confirmation grants private reads only: website membership and ordinary
+message permissions remain separate.
+
 ### Direct-host browser transport (internal experiment)
 
 `plane/owner_browser.py:create_owner_browser_app` wraps the protected read
@@ -258,12 +290,21 @@ challenge is not a session: local `confirm_pairing` must still verify its exact
 token and displayed principal. No HTTP confirmation, revocation, message grant
 or bot action exists.
 
+The exact public shell routes `/owner`, `/owner-entry.js` and `/owner-entry.css`
+contain no private facts and accept only query-free GET/HEAD under the same
+Host/Origin boundary. Their CSP permits only same-origin scripts, styles and
+requests, denies framing and uses no inline script or external asset. The page
+distinguishes unpaired, awaiting local approval, expired, sign-in-required,
+ready, signed-out, denied and unavailable states. Pairing, sign-in and sign-out
+require explicit interaction; page load never opens a session. Pairing details
+stay in page memory, and successful sign-out does not immediately sign in again.
+
 All other paths still cross the protected canonical read gate, including
-static files and each SSE body delivery. Logout or locally applied revocation
+the operational renderer's static files and each SSE body delivery. Logout or locally applied revocation
 therefore blocks the next private delivery. Tests exercise this with disposable
 state and an injected synthetic principal, plus a loopback HTTP subprocess
 simulating a proxy. They do not prove actual HTTPS browser cookie behavior or
-Tailscale identity. Trusted ingress, local confirmation UI, database ownership,
+Tailscale identity. Trusted ingress, database ownership,
 real browser validation and an independent bot canary remain activation gates.
 This is a same-origin direct-host protocol, not website OAuth, cross-origin
 embedding or workspace membership.

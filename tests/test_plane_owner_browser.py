@@ -623,3 +623,66 @@ def test_split_cookie_fields_accept_one_session_but_refuse_duplicates(browser, d
     body = b"".join(m.get("body", b"") for m in messages)
     assert json.loads(body) == {"state": "sign_in_required" if duplicate_session else "ready"}
     assert b"set-cookie" not in _raw_headers(messages)
+
+
+@pytest.mark.parametrize('path,media_type', [
+    ('/owner', 'text/html'), ('/owner-entry.js', 'text/javascript'),
+    ('/owner-entry.css', 'text/css'),
+])
+def test_exact_owner_entry_assets_are_public_without_private_authority(browser, path, media_type):
+    _, client, store, identity, _ = browser
+    identity[0] = None  # Public shell does not request or invent an identity.
+    store.path.unlink()  # Authority unavailable must not hide the entry page.
+    response = client.get(path)
+    assert response.status_code == 200
+    assert response.headers['content-type'].startswith(media_type)
+    assert response.headers['cache-control'] == 'no-store'
+    assert response.headers['referrer-policy'] == 'no-referrer'
+    assert response.headers['x-content-type-options'] == 'nosniff'
+    policy = response.headers['content-security-policy']
+    assert "default-src 'none'" in policy and "frame-ancestors 'none'" in policy
+    assert 'unsafe-inline' not in policy and 'unsafe-eval' not in policy
+    assert 'set-cookie' not in response.headers
+    assert 'human-001' not in response.text and 'work for engineering' not in response.text
+    head = client.head(path)
+    assert head.status_code == 200 and head.content == b''
+    assert head.headers['content-length'] == response.headers['content-length']
+
+
+@pytest.mark.parametrize('path', ['/owner', '/owner-entry.js', '/owner-entry.css'])
+def test_owner_entry_rejects_query_method_and_foreign_boundary(browser, path):
+    _, client, _, _, _ = browser
+    assert client.get(path + '?next=/').status_code == 403
+    assert client.get(path, headers={'Host': 'other.example.test'}).status_code == 403
+    assert client.get(path, headers={'Origin': 'https://other.example.test'}).status_code == 403
+    for method in ['POST', 'PUT', 'DELETE', 'OPTIONS']:
+        response = client.request(method, path)
+        assert response.status_code == 405
+        assert response.headers['allow'] == 'GET, HEAD'
+        assert 'access-control-allow-origin' not in response.headers
+
+
+def test_owner_entry_does_not_open_other_static_or_private_routes(browser):
+    _, client, store, _, _ = browser
+    for path in ['/', '/style.css', '/api/tasks', '/owner-other.js', '/owner-entry.html']:
+        assert client.get(path).status_code == 403
+    assert client.get('/owner').status_code == 200
+    _pair_locally(client, store)
+    assert _post(client, 'login').status_code == 200
+    assert _post(client, 'logout').status_code == 200
+    assert client.get('/owner').status_code == 200
+    assert client.get('/api/owner/status').json() == {'state': 'sign_in_required'}
+    assert client.get('/api/tasks').status_code == 403
+
+
+def test_owner_entry_controller_regressions(tmp_path):
+    import shutil
+    node = shutil.which('node')
+    if node is None:
+        pytest.skip('Node.js is unavailable')
+    env = constructed_env(tmp_path, extra_keys=())
+    Path(env['HOME']).mkdir()
+    Path(env['TMPDIR']).mkdir()
+    result = subprocess.run([node, '--test', str(Path(__file__).with_name('plane_owner_entry.test.mjs'))],
+        env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr

@@ -2,7 +2,8 @@
 
 Requires a trusted identity verifier and configured external HTTPS origin.
 Neither this factory nor its cookies authenticate Tailscale identity. The
-backend/proxy trust boundary and local confirmation UI remain caller-owned.
+backend/proxy trust boundary and local confirmation remain caller-owned. Only
+the fixed owner entry shell and its two assets are public; Plane reads stay gated.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from typing import Awaitable, Callable
 from urllib.parse import urlsplit
 
 from starlette.concurrency import run_in_threadpool
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.types import Receive, Scope, Send
 
 from .ids import read_host_uid
@@ -30,6 +31,35 @@ _PREFIX = "/api/owner/"
 _METHODS = {"status": "GET", "pair": "POST", "login": "POST",
             "renew": "POST", "logout": "POST"}
 PrincipalVerifier = Callable[[Scope], Awaitable[PrincipalRef]]
+_ENTRY_ASSETS = {
+    "/owner": ("owner-entry.html", "text/html"),
+    "/owner-entry.js": ("owner-entry.js", "text/javascript"),
+    "/owner-entry.css": ("owner-entry.css", "text/css"),
+}
+_ENTRY_HEADERS = {
+    "Cache-Control": "no-store",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; "
+        "connect-src 'self'; base-uri 'none'; object-src 'none'; form-action 'none'; "
+        "frame-ancestors 'none'",
+}
+
+
+def _entry_response(scope: Scope) -> Response:
+    """Exact public allowlist, independent of identity and authority state."""
+    if scope.get("query_string"):
+        raise AccessDenied("owner_query_refused")
+    if scope["method"] not in {"GET", "HEAD"}:
+        response = _response({"state": "denied"}, 405)
+        response.headers["Allow"] = "GET, HEAD"
+        return response
+    filename, media_type = _ENTRY_ASSETS[scope["path"]]
+    body = (Path(__file__).with_name("ui") / filename).read_bytes()
+    response = Response(body if scope["method"] == "GET" else b"",
+                        media_type=media_type, headers=_ENTRY_HEADERS)
+    response.headers["Content-Length"] = str(len(body))
+    return response
 
 
 def _origin(value: str) -> tuple[str, str]:
@@ -194,6 +224,15 @@ class _OwnerBrowser:
             self._boundary(scope)
         except AccessDenied:
             await _response({"state": "denied"}, 403)(scope, receive, send)
+            return
+        if scope["path"] in _ENTRY_ASSETS:
+            try:
+                response = await run_in_threadpool(_entry_response, scope)
+            except AccessDenied:
+                response = _response({"state": "denied"}, 403)
+            except OSError:
+                response = _response({"state": "unavailable"}, 503)
+            await response(scope, receive, send)
             return
         action = scope["path"].removeprefix(_PREFIX) if scope["path"].startswith(_PREFIX) else None
         if action not in _METHODS:
