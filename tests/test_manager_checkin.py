@@ -51,7 +51,8 @@ STUB_LIB_COMMON = """\
 install_error_trap() { :; }
 
 declared_bots_strict() {
-    local bad_out="${1:-}"
+    local bad_out=""
+    [ "${1:-}" = "--bad-out" ] && bad_out="${2:-}"
     if [ -s "$STUB_ROSTER_BAD_FILE" ]; then
         if [ -n "$bad_out" ]; then
             cat "$STUB_ROSTER_BAD_FILE" > "$bad_out"
