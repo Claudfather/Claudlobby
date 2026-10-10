@@ -61,8 +61,9 @@ Read bot event logs at these natural decision points — not continuously, not o
 | `overdue_dispatch` | pulse | A task you dispatched to this bot passed its deadline with no terminal linked report. Check the bot (cross-reference `activity_stuck`): if hung, recover it; if mis-scoped or wedged, re-dispatch or reassign; if it needs a human, escalate. Don't silently wait. |
 | `pane_stuck` (>5 min) | pulse | Investigate pane content, restart if confirmed stuck. Note: a live spinner animates the pane, so an animated-but-hung bot shows up as `activity_stuck`, not `pane_stuck`. |
 | `crash_loop` | pulse | The unit is **failing its start over and over** and systemd is already restarting it (`restarts` in the payload is how many times running). **Do NOT restart it** — another restart only zeroes the counter; the unit is enrolled, so `bot start` is not the fix either. The cause is in the bot's `logs/startup.log` (on 2026-09-23 it was a broken `claude` install, printed on every attempt). Fix the cause, or escalate to the human. Before #1769 this read as "boot in flight" indefinitely and paged no one. |
-| `service_down` | pulse | If the bot is meant to run, the selected manager calls `claudlobby --json bot start BOT_ID` with its literal declared ID; inspect state and readiness. |
-| `session_missing` | pulse | If the bot is meant to run, the selected manager calls `claudlobby --json bot start BOT_ID` with its literal declared ID; inspect state and readiness. |
+| `service_down` | pulse | The unit is installed and down. Its payload carries the session too (`session`: `up` or `missing`): a down unit is one alert, never a `session_missing` as well (#2243). If the bot is meant to run, the selected manager calls `claudlobby --json bot start BOT_ID` with its literal declared ID; inspect state and readiness. |
+| `session_missing` | pulse | The tmux session is gone while the unit is active (keepalive restarts it within a minute), or on a bot with no supervised service configured. If the bot is meant to run, the selected manager calls `claudlobby --json bot start BOT_ID` with its literal declared ID; inspect state and readiness. |
+| `unit_missing` | pulse | The bot names a service, its unit file is **not installed**, and **no stop was recorded**: nobody stopped it through `bot stop` (a botched disenroll, a broken activation, a deleted unit directory). It replaces `service_down` and `session_missing` for that bot and escalates like them (#2243). If the bot is meant to run, the selected manager calls `claudlobby --json bot start BOT_ID`; if it was stopped on purpose, `claudlobby --json bot stop BOT_ID` (with `--reason TEXT`) records that, and the alert ends. |
 | `wip_uncommitted` | pulse | Do NOT restart — task is in flight. **Decide on the payload's `paths`, never on `dirty_files`**: a count cannot separate `M lib/foo.py` from `?? .venv/`, and reading it as a count is what made this alert fire forever and get skipped (#1728). `dirty_tracked`/`dirty_untracked` are facts to read, not a filter — an unadded new source file is untracked and is the unrecoverable case. `unchanged_for_s` is a floor measured from the sweep's first sighting; past ~2h on a source path, check for staleness. |
 | `audit_selected` | audit | Informational — the rolling sweep picked this repo as stalest. |
 | `audit_dispatched` | audit | Informational — the audit was dispatched into the owner bot's session. |
@@ -79,9 +80,25 @@ tokenless session readiness (`session_ready`). If the CLI refuses or readiness
 is unknown, report the failure and inspect the selected unit and private
 session. Do not fall back to a raw launcher.
 
+**A bot stopped through `bot stop` raises no alert (#2243).** The stop door
+removes the unit file and records the stop, who made it and an optional
+`--reason`, in the bot's `data/.stopped`. fleet-pulse reads that record and
+stays silent: no row, no push, no escalation. `fleet status`, `fleet reconcile`
+and the pulse summary show the bot as `stopped`, with who and since. Once it
+has been stopped `fleet_pulse.stopped_remind_days` days (default 3, `0` off),
+the manager gets one reminder push, then one every as many days: never a page.
+`bot start` removes the record. A record left beside an installed unit (the
+unit came back through another door, such as `spin-up-bot.sh` or a hand
+install, or a start or a stop failed partway) is from a stop that is over: the
+sweep removes it once it is 15 minutes old, so a later loss of that unit pages
+`unit_missing`, and one the sweep cannot remove is pushed to the manager as
+`stop_record_kept` until it is gone. The plane's `bot_stopped` and `bot_started`
+rows are the audit trail; the sweep never reads them, so a stop made while the
+plane is down stays quiet.
+
 ## Active Notifications (push)
 
-Reading events at decision points is the default, but silent stalls — the reason `activity_stuck` exists — are exactly the case where a manager *can't* rely on remembering to poll. So `fleet-pulse.sh` also **pushes** a one-line note into your tmux session for the findings that need you (`crash_loop`, `session_missing`, `service_down`, `bridge_down`, `input_held`, `usage_limit_held`, `activity_stuck`, `overdue_dispatch`, and `worker_unassigned` where `OBSERVABILITY_UNASSIGNED_CHECK=1` arms it), debounced to once per episode:
+Reading events at decision points is the default, but silent stalls — the reason `activity_stuck` exists — are exactly the case where a manager *can't* rely on remembering to poll. So `fleet-pulse.sh` also **pushes** a one-line note into your tmux session for the findings that need you (`crash_loop`, `session_missing`, `service_down`, `unit_missing`, `bridge_down`, `input_held`, `usage_limit_held`, `activity_stuck`, `overdue_dispatch`, and `worker_unassigned` where `OBSERVABILITY_UNASSIGNED_CHECK=1` arms it), debounced to once per episode:
 
 ```
 [FLEET-PULSE] <bot> activity_stuck — no tool calls for 11400s while not idle (likely hung mid-task)
@@ -193,7 +210,7 @@ a large window.
 
 | Critical type | Raised by | Recorded against |
 |---------------|-----------|------------------|
-| `session_missing`, `service_down`, `bridge_down`, `crash_loop`, `activity_stuck`, `input_held`, `usage_limit_held`, `overdue_dispatch` | fleet-pulse, per bot | the bot |
+| `session_missing`, `service_down`, `unit_missing`, `bridge_down`, `crash_loop`, `activity_stuck`, `input_held`, `usage_limit_held`, `overdue_dispatch` | fleet-pulse, per bot | the bot |
 | `rc_timeout` | `start-bot.sh`, once per (re)start | the bot |
 | `script_error` | a runtime script's ERR trap | its bot; the fleet or the host for a script with none |
 | `bridge_down`, `reload_failed`, `restart_failed`, `keepalive_failed`, `alert_target_refused`, `alert_pair_unreachable`, `fleet_alert` | a FLEET ALERT raised with a fleet in scope: a fleet job, a bot's bring-up, `fleet notify --level alert` (`fleet_alert`) | the fleet, read as bot `fleet` |

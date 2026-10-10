@@ -307,3 +307,71 @@ def test_reconcile_reads_a_cleanly_stopped_session_absent_only_by_the_quiet_proo
             assert calls == ["svc_bot_session_observe"]
     finally:
         shutil.rmtree(tmux_dir, ignore_errors=True)
+
+
+def test_reconcile_reads_a_recorded_stop_as_stopped(tmp_path, monkeypatch):
+    """#2243 F8: not enrolled, no ready session and the stop door's record is `stopped`, whatever
+    the session probe could tell: `absent`, or `unknown` when the quiet proof fails (#2227). With
+    no record the states are unchanged."""
+    destination, _, selected = _scope(tmp_path)
+    monkeypatch.setattr(fleet, "_scope", lambda *_a, **_k: (destination, None, selected))
+    monkeypatch.setattr(fleet, "read_plan", lambda *_a: SimpleNamespace(release_id="selected-release"))
+    monkeypatch.setattr(fleet, "current_declarations", lambda *_a: ())
+    monkeypatch.setattr(fleet, "selected_bot_entry", lambda _r, _f, bot, _p: {
+        "target": bot + ".service", "installed": str(tmp_path / (bot + ".service"))})
+    monkeypatch.setattr(fleet, "build_supervision_spec", lambda bot, _f, _p: SimpleNamespace(
+        bot_dir=tmp_path / bot, label="private", environment={"TMUX_TMPDIR": str(tmp_path)}))
+    observed = {"worker-a": (True, "absent"), "worker-b": (True, "unknown"),
+                "manager": (False, "absent")}
+    destination.fleet.bots = {bot: bot for bot in observed}
+    for bot, (record, _session) in observed.items():
+        (tmp_path / bot / "data").mkdir(parents=True)
+        if record:
+            (tmp_path / bot / "data" / ".stopped").write_text(
+                '{"by": "operator", "reason": null, "request_id": "r", '
+                '"stopped_at": "2026-10-09T20:40:00Z", "stopped_epoch": 1791578400}\n')
+    units = [SimpleNamespace(declaration=SimpleNamespace(scope="bot", fleet="example",
+             bot=bot, working_directory=tmp_path / bot), target=bot + ".service",
+             installed=(), properties=(("ActiveState", "inactive"),))
+             for bot in observed]
+    monkeypatch.setattr(fleet, "collect_enrollment", lambda *_a, **_k: SimpleNamespace(
+        require_complete=lambda: SimpleNamespace(units=units)))
+    class Native:
+        package = destination.paths.package
+        def read(self, function):
+            return f"manager\tLinux\ndirectory\t{tmp_path}\n"
+        def call(self, function, *args, timeout=30):
+            if function == "svc_activation_quiet":
+                # the quiet proof fails, so an unknown session stays unknown (#2227)
+                return subprocess.CompletedProcess([], 3, "", "")
+            assert function == "svc_bot_session_observe"
+            return subprocess.CompletedProcess([], 0, observed[args[0].name][1] + "\n", "")
+    result = fleet.reconcile_fleet(root=tmp_path, fleet="example", adapter=Native())
+    assert [(row.bot, row.enrolled, row.session, row.state) for row in result.bots] == [
+        ("worker-a", False, "absent", "stopped"),
+        ("worker-b", False, "unknown", "stopped"),
+        ("manager", False, "absent", "unsupervised_down")]
+
+
+def test_fleet_lifecycle_lines_carry_what_each_bot_start_says(tmp_path, monkeypatch):
+    """#2243: `fleet start --workers` prints, under each bot, what `bot start` prints: a stop
+    record the start could not remove keeps a later loss of that bot's unit silent."""
+    from argparse import Namespace
+
+    from claudlobby import context
+    from claudlobby.commands import fleet_runtime
+
+    monkeypatch.setattr(context, "resolve_paths", lambda root=None: SimpleNamespace(root=tmp_path))
+    kept = BotLifecycleResult("example", "worker-a", "selected-release", "worker-a-unit",
+                              "running", True, "bridge_ready", recording="committed",
+                              stop_record_kept=True)
+    clean = BotLifecycleResult("example", "worker-b", "selected-release", "worker-b-unit",
+                               "running", True, "bridge_ready", recording="committed")
+    monkeypatch.setattr(fleet, "set_fleet_running", lambda **_k: fleet.FleetLifecycleResult(
+        "example", "selected-release", "start", True, (kept, clean)))
+    out = fleet_runtime.dispatch(Namespace(public_command="fleet.start", seed=False,
+                                           fleet="example", workers=True, root=str(tmp_path)))
+    first, note, last = out.lines
+    assert first == "example/worker-a: running; readiness=bridge_ready"
+    assert note.startswith("example/worker-a: ") and "could not remove this bot's stop record" in note
+    assert last == "example/worker-b: running; readiness=bridge_ready"

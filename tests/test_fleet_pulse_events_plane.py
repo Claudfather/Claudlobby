@@ -172,24 +172,39 @@ def test_no_event_file_is_read_or_reaped(tmp_path, *, scratch_plane_env):
 
 G = "g"
 
-# The tg-post.sh stub for the interleave: it captures every page like the
-# plain stub, and at fleet f's FIRST page it starts fleet g's pass and holds f
-# there until g is parked inside ITS first page -- g's window written, g's read
-# loop mid-flight. f then reads the rest of its own window and ends; g resumes
-# only once f's pass has ended (the test touches f.done). The background
-# subshell's stdio is detached, or f's `$(...)` around this stub would wait
-# for g's whole pass.
-_INTERLEAVE_STUB = """#!/bin/bash
-printf '%s\\n' "$1" >> "{capture}"
-case "$CLAUDLOBBY_FLEET:$1" in
-  "f:FLEET ALERT: session_missing"*)
-    ( CLAUDLOBBY_FLEET=g FLEET_NAME=g bash "{lib}/fleet-pulse.sh" g >"{sync}/g.out" 2>"{sync}/g.err"
-      echo $? >"{sync}/g.rc" ) </dev/null >/dev/null 2>&1 &
-    for _ in $(seq 2400); do [ -e "{sync}/g.parked" ] && break; sleep 0.1; done ;;
-  "g:FLEET ALERT: session_missing"*)
-    : >"{sync}/g.parked"
-    for _ in $(seq 2400); do [ -e "{sync}/f.done" ] && break; sleep 0.1; done ;;
-esac
+# The plane-lookup.py wrapper for the interleave. It runs the real lookup, so a
+# pass's window lands in its cache as always, and at each fleet's FIRST
+# --escalation read (the escalation window; the summary's read-back is the
+# second) it holds that pass between writing its window and reading it: f
+# starts fleet g's pass and waits until g is parked; g, its own window written,
+# parks until f's pass has ended (the test touches f.done). So g's write lands
+# inside f's write-to-read gap, and f's end of pass inside g's. The hold used to
+# sit in tg-post.sh at the first page, mid read loop; since #2243 a pass reads
+# its whole window before its one page, so a hold there sits inside neither
+# gap. g's stdio is detached: f's stdout here IS f's window cache.
+_INTERLEAVE_LOOKUP = """import os, subprocess, sys, time
+real, lib, sync = {real!r}, {lib!r}, {sync!r}
+args = sys.argv[1:]
+rc = subprocess.run([sys.executable, "-S", "-E", real, *args]).returncode
+fleet = args[args.index("--fleet") + 1] if "--fleet" in args else ""
+first = os.path.join(sync, fleet + ".window-read")
+if rc == 0 and "--escalation" in args and fleet in ("f", "g") and not os.path.exists(first):
+    open(first, "w").close()
+    if fleet == "f":
+        subprocess.Popen(
+            ["bash", "-c", 'bash "$1/fleet-pulse.sh" g >"$2/g.out" 2>"$2/g.err"; echo $? >"$2/g.rc"', "-", lib, sync],
+            env={{**os.environ, "CLAUDLOBBY_FLEET": "g", "FLEET_NAME": "g"}},
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True)
+        until = os.path.join(sync, "g.parked")
+    else:
+        open(os.path.join(sync, "g.parked"), "w").close()
+        until = os.path.join(sync, "f.done")
+    for _ in range(2400):
+        if os.path.exists(until):
+            break
+        time.sleep(0.1)
+sys.exit(rc)
 """
 
 
@@ -219,10 +234,11 @@ def test_two_fleets_passes_at_once_never_read_or_delete_each_others_window(
     this pass's end-of-pass `rm` landing inside the sibling's loop failed the
     sibling's next `<` redirect (a script_error, and the sibling aborted).
 
-    The interleave hits both points deterministically (the stub above). f's
-    second critical type is read AFTER g wrote its window, so f paging it with
-    f's own bots is the pin that f read its own rows; g finishing clean after
-    f's pass ended is the pin that f's cleanup never deleted g's."""
+    The interleave hits both points deterministically (the wrapper above). f
+    reads its window AFTER g wrote g's, so f paging both its causes with f's own
+    bots is the pin that f read its own rows; g reads its window after f's pass
+    ended, so g paging with g's own bots and finishing clean is the pin that f's
+    cleanup never deleted g's."""
     root, paths = _two_dead_bots(tmp_path)
     _second_fleet_beside(root)
     with _serving(root, scratch_plane_env) as socket:
@@ -238,7 +254,9 @@ def test_two_fleets_passes_at_once_never_read_or_delete_each_others_window(
         capture, sync = tmp_path / "tg.log", tmp_path / "sync"
         sync.mkdir()
         libdir = _pulse_lib(tmp_path, capture)
-        (libdir / "tg-post.sh").write_text(_INTERLEAVE_STUB.format(capture=capture, lib=libdir, sync=sync))
+        lookup = libdir / "plane-lookup.py"
+        lookup.unlink()                                    # the link to the real script
+        lookup.write_text(_INTERLEAVE_LOOKUP.format(real=str(LIB / "plane-lookup.py"), lib=str(libdir), sync=str(sync)))
         try:
             r_f = _pulse(root, libdir, socket=socket, serve=False,
                          scratch_plane_env=scratch_plane_env)
@@ -248,14 +266,16 @@ def test_two_fleets_passes_at_once_never_read_or_delete_each_others_window(
         while not (sync / "g.rc").exists() and time.monotonic() < deadline:
             time.sleep(0.5)
     g_err = (sync / "g.err").read_text() if (sync / "g.err").exists() else "(g never started)"
-    assert (sync / "g.parked").exists(), "no interleave: g never reached its first page\n" + g_err[-2000:]
+    assert (sync / "g.parked").exists(), "no interleave: g never read its window\n" + g_err[-2000:]
     assert r_f.returncode == 0, r_f.stderr[-2000:]
     assert (sync / "g.rc").exists() and (sync / "g.rc").read_text().strip() == "0", g_err[-2000:]
 
     paged = capture.read_text()
-    assert "FLEET ALERT: session_missing on 2 bots (w1 w2)." in paged, paged
-    assert "FLEET ALERT: bridge_down on 2 bots (w1 w2)." in paged, paged          # f's own window, after g wrote g's
-    assert "FLEET ALERT: session_missing on 2 bots (v1 v2)." in paged, paged      # g's own window
+    # f's own window, read after g wrote g's: both its causes, in its one page (#2243)
+    assert ("FLEET ALERT: session_missing on 2 bots (w1 w2); bridge_down on 2 bots (w1 w2). "
+            "Check f fleet health immediately.") in paged, paged
+    # g's own window, read after f's pass ended
+    assert "FLEET ALERT: session_missing on 2 bots (v1 v2). Check g fleet health immediately." in paged, paged
     for err in (r_f.stderr, g_err):                                                # a redirect onto a deleted window
         assert not re.search(r"fleet-pulse\.sh: line \d+: .*: No such file", err), err[-2000:]
     assert _await(root, "SELECT COUNT(*) FROM events WHERE event = 'script_error'", 0) == 0

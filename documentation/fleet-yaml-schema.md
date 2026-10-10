@@ -725,7 +725,7 @@ Emitted env vars: `OBSERVABILITY_PULSE_INTERVAL`, `OBSERVABILITY_ACTIVITY_STUCK_
 
 ### Fleet-pulse escalation (environment overrides)
 
-`claudlobby/_runtime_scripts/fleet-pulse.sh` escalates to Telegram when the same critical event (`service_down`, `session_missing`, `crash_loop`, …) affects multiple bots within a short window.
+`claudlobby/_runtime_scripts/fleet-pulse.sh` escalates to Telegram when the same critical event (`service_down`, `session_missing`, `unit_missing`, `crash_loop`, …) affects multiple bots within a short window. Every event over its threshold in one sweep goes out as one message (#2243).
 
 Set these in the fleet-level `fleet_pulse:` block. The composer emits them as `Environment=` lines on the fleet-pulse timer unit, which is the only tier the script can read:
 
@@ -739,6 +739,7 @@ fleet_pulse:
   escalation_state_dir: "~/.claude/channels/telegram-<bot-handle>"
   renotify_after_s: 21600
   rearm_window_s: 0
+  stopped_remind_days: 3
   timeout_s: 300
 ```
 
@@ -763,6 +764,7 @@ The composed env vars, and what each does:
 | `FLEET_PULSE_ESCALATION_WINDOW` | `10` | Lookback window, in minutes, for counting affected bots. |
 | `FLEET_PULSE_RENOTIFY_AFTER_S` | `21600` (6h) | Age at which a debounce marker re-fires, so an unresolved episode is not announced once and then silent forever (#831). `0` disables the re-fire. |
 | `FLEET_PULSE_REARM_WINDOW_S` | _(lib-common default)_ | Bounds debounce re-arming during a known crashloop. `0` disables the bound. |
+| `FLEET_PULSE_STOPPED_REMIND_DAYS` | `3` | From `stopped_remind_days`: a bot stopped through `bot stop` raises no alert, and its manager gets one reminder push once it has been stopped this many days, then one every as many days again (#2243). `0` turns the reminder off. |
 
 Set `FLEET_PULSE_ESCALATION_CHAT_ID` explicitly so alert targeting never depends on bot directory ordering.
 

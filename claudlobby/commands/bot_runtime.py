@@ -6,6 +6,18 @@ from pathlib import Path
 from ..command_result import CommandFailure, CommandOutput
 
 
+def lifecycle_notes(result) -> tuple[str, ...]:
+    """What a stop or a start owes its caller when its record did not land (#2243)."""
+    if result.stop_record_kept:
+        return ("The start could not remove this bot's stop record (data/.stopped in its "
+                "directory); until it is removed, a loss of the bot's unit reads as a "
+                "deliberate stop and pages no one.",)
+    if result.state == "stopped" and result.recording == "degraded":
+        return ("The stop's local record or its plane row did not land; "
+                "run bot stop again to record it.",)
+    return ()
+
+
 def dispatch(args) -> CommandOutput:
     from ..activation_state import ActivationError
     from ..bot_operations import BotLifecycleError, control_bot, handoff_bot, set_bot_running
@@ -26,6 +38,13 @@ def dispatch(args) -> CommandOutput:
     if ceiling is not None and ceiling <= 0:
         raise CommandFailure("invalid_argument", "--ceiling must be a positive integer")
     running = action != "stop"
+    reason = getattr(args, "reason", None)
+    if reason is not None:
+        from ..stop_record import StopRecordError, check_reason
+        try:
+            check_reason(reason)
+        except StopRecordError as exc:
+            raise CommandFailure("invalid_argument", str(exc)) from exc
     data = {"fleet": args.fleet, "bot": args.bot_id, "requested": action,
             "native_outcome": "unattempted", "runtime_state": "unknown"}
     try:
@@ -37,7 +56,7 @@ def dispatch(args) -> CommandOutput:
         else:
             result = set_bot_running(root=root, fleet=args.fleet, bot=args.bot_id,
                                      running=running, restart=action == "restart",
-                                     ceiling=ceiling)
+                                     ceiling=ceiling, reason=reason)
     except BotLifecycleError as exc:
         if exc.busy:
             raise CommandFailure("conflict", str(exc), data=data, retryable=True,
@@ -104,4 +123,4 @@ def dispatch(args) -> CommandOutput:
     else:
         lines = (f"{result.fleet}/{result.bot}: supervised running; "
                  f"readiness={result.readiness}.",)
-    return CommandOutput(data, release_id=result.release_id, lines=lines)
+    return CommandOutput(data, release_id=result.release_id, lines=lines + lifecycle_notes(result))

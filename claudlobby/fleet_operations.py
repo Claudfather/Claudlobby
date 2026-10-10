@@ -17,6 +17,7 @@ from .bot_operations import BotLifecycleError, BotLifecycleResult, _selected_ada
 from .config_plan import read_plan
 from .config_units import current_declarations
 from .operation_context import resolve_operation_scope
+from .stop_record import read_stop
 from .supervision import build_supervision_spec
 from .supervision_inventory import Adapter, InventoryError, collect_enrollment
 
@@ -182,7 +183,12 @@ def reconcile_fleet(*, root: Path, fleet: str | None, bot: str | None = None,
             active = dict(unit.properties).get("ActiveState", "unknown")
             if active not in {"active", "inactive", "unknown"}:
                 raise InventoryError("native active state is unfamiliar")
-            state = ("indeterminate" if session == "unknown" or active == "unknown" else
+            # #2243 F8: the stop door's record beside no enrolled unit and no ready
+            # session is a deliberate stop, whatever the probe could tell (absent,
+            # or unknown where the quiet proof fails); the session field says which.
+            stopped = not enrolled and session != "ready" and read_stop(spec.bot_dir) is not None
+            state = ("stopped" if stopped else
+                     "indeterminate" if session == "unknown" or active == "unknown" else
                      "healthy" if enrolled and session == "ready" else
                      "orphan" if session == "ready" else
                      "missing" if enrolled else "unsupervised_down")
