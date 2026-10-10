@@ -16,7 +16,8 @@ approval, and stale revocation cannot remove a replacement pairing.
 browser factory serves a self-contained `/owner` page for pairing, sign-in and
 sign-out, with no website dependency or persistent browser credential storage.
 Existing private reads remain gated. Trusted Tailscale ingress and network
-activation remain separate; the default Plane service is unchanged.
+activation remain separate; the default Plane service keeps its existing
+read-only behavior and serves the new inert static assets without owner APIs.
 
 ### Added — internal direct-host browser session transport
 

@@ -20,7 +20,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.types import Receive, Scope, Send
 
 from .ids import read_host_uid
-from .owner_access import AccessDenied, AccessUnavailable, PrincipalRef, SESSION_SECONDS
+from .owner_access import AccessDenied, AccessUnavailable, PrincipalRef, PAIRING_SECONDS, SESSION_SECONDS
 from .owner_view import VerifiedReader, create_owner_app
 
 COOKIE_NAME = "__Host-claudlobby-owner"
@@ -49,7 +49,7 @@ _ENTRY_HEADERS = {
 def _entry_response(scope: Scope) -> Response:
     """Exact public allowlist, independent of identity and authority state."""
     if scope.get("query_string"):
-        raise AccessDenied("owner_query_refused")
+        return _response({"state": "denied"}, 403)
     if scope["method"] not in {"GET", "HEAD"}:
         response = _response({"state": "denied"}, 405)
         response.headers["Allow"] = "GET, HEAD"
@@ -190,7 +190,7 @@ class _OwnerBrowser:
             challenge = self.access.begin_pairing(principal)
             return _response({"state": "awaiting_local_approval", "challenge": challenge.token,
                 "principal": {"namespace": principal.namespace, "subject": principal.subject},
-                "expires_at": challenge.expires_at}, 202)
+                "expires_at": challenge.expires_at, "expires_in": PAIRING_SECONDS}, 202)
         if action == "logout":
             if token is None:
                 raise AccessDenied("sign_in_required")
@@ -228,8 +228,6 @@ class _OwnerBrowser:
         if scope["path"] in _ENTRY_ASSETS:
             try:
                 response = await run_in_threadpool(_entry_response, scope)
-            except AccessDenied:
-                response = _response({"state": "denied"}, 403)
             except OSError:
                 response = _response({"state": "unavailable"}, 503)
             await response(scope, receive, send)

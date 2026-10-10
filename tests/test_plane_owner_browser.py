@@ -139,6 +139,7 @@ def test_pairing_requires_separate_local_approval_then_cookie_login(browser):
     assert requested.headers["referrer-policy"] == "no-referrer"
     assert requested.json()["state"] == "awaiting_local_approval"
     assert requested.json()["expires_at"] > 0
+    assert requested.json()["expires_in"] == 300
     assert client.get("/api/owner/status").json() == {"state": "needs_pairing"}
     assert _post(client, "login").status_code == 403
     assert client.get("/api/tasks").status_code == 403
@@ -675,14 +676,11 @@ def test_owner_entry_does_not_open_other_static_or_private_routes(browser):
     assert client.get('/api/tasks').status_code == 403
 
 
-def test_owner_entry_controller_regressions(tmp_path):
+def test_owner_entry_controller_regressions():
     import shutil
     node = shutil.which('node')
     if node is None:
         pytest.skip('Node.js is unavailable')
-    env = constructed_env(tmp_path, extra_keys=())
-    Path(env['HOME']).mkdir()
-    Path(env['TMPDIR']).mkdir()
     result = subprocess.run([node, '--test', str(Path(__file__).with_name('plane_owner_entry.test.mjs'))],
-        env=env, capture_output=True, text=True, timeout=30)
+        env=constructed_env(), capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr

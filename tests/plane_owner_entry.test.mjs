@@ -8,7 +8,7 @@ const flush = async () => { await new Promise(resolve => setImmediate(resolve));
 const code = 'a'.repeat(43);
 const pairing = {
   state: 'awaiting_local_approval', challenge: code,
-  principal: { namespace: 'test-verifier', subject: '<human-001>' }, expires_at: 1800000300,
+  principal: { namespace: 'test-verifier', subject: '<human-001>' }, expires_at: 1800000300, expires_in: 300,
 };
 function harness(replies = [{ state: 'needs_pairing' }]) {
   const nodes = new Map();
@@ -34,7 +34,7 @@ function harness(replies = [{ state: 'needs_pairing' }]) {
     },
   });
   const node = id => document.getElementById(`owner-${id}`);
-  return { entry, calls, replies, node,
+  return { entry, calls, node,
     async click(id) { assert.equal(node(id).disabled, false); node(id).click(); await flush(); },
     advance(milliseconds) { time += milliseconds; tick(); },
   };
@@ -106,13 +106,29 @@ test('challenge expiry erases credentials and offers explicit recovery without w
   h.entry.dispose();
 });
 
+test('pairing lifetime does not depend on the viewing device matching the host clock', async () => {
+  for (const skew of [-3600000, 3600000]) {
+    const h = harness([{ state: 'needs_pairing' }, pairing]);
+    await h.entry.ready;
+    h.advance(skew);
+    await h.click('pair');
+    assert.equal(h.node('challenge').textContent, code);
+    assert.match(h.node('expires').textContent, /Within 5 minutes/);
+    h.advance(299000);
+    assert.equal(h.node('challenge').textContent, code);
+    h.advance(1000);
+    assert.equal(h.node('challenge').textContent, '');
+    assert.match(h.node('status').textContent, /expired/);
+    h.entry.dispose();
+  }
+});
+
 test('in-flight requests disable controls, prevent duplicate mutations and abort on disposal', async () => {
   let settle;
-  let signal;
   const h = harness([{ state: 'needs_pairing' }, () => new Promise(resolve => { settle = resolve; })]);
   await h.entry.ready;
   h.node('pair').click();
-  signal = h.calls.at(-1).options.signal;
+  const signal = h.calls.at(-1).options.signal;
   for (const id of ['pair', 'check', 'login', 'logout']) assert.equal(h.node(id).disabled, true);
   h.node('pair').click();
   h.node('check').click();

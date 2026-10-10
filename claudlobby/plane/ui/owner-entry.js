@@ -37,7 +37,7 @@ export function mountOwnerEntry({ document, fetch, now = () => Date.now(),
     for (const id of ['pair', 'check', 'login', 'logout']) ui[id].disabled = busy;
   }
   function expire() {
-    if (challenge && challenge.expires_at * 1000 <= now()) {
+    if (challenge && challenge.deadline <= now()) {
       forgetChallenge();
       state = 'expired';
       render();
@@ -58,15 +58,17 @@ export function mountOwnerEntry({ document, fetch, now = () => Date.now(),
       if (typeof data.challenge !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(data.challenge)
         || typeof data.principal?.namespace !== 'string' || !data.principal.namespace
         || typeof data.principal?.subject !== 'string' || !data.principal.subject
-        || !Number.isFinite(data.expires_at) || data.expires_at * 1000 <= now()) {
+        || !Number.isFinite(data.expires_at)
+        || !Number.isFinite(data.expires_in) || data.expires_in <= 0 || data.expires_in > 300) {
         throw new Error('Invalid pairing response');
       }
-      forgetChallenge();
-      challenge = { expires_at: data.expires_at };
+      // The host enforces expiry. This local countdown avoids comparing two
+      // devices' wall clocks; a delayed request can still expire at approval.
+      challenge = { deadline: now() + data.expires_in * 1000 };
       ui.namespace.textContent = data.principal.namespace;
       ui.subject.textContent = data.principal.subject;
       ui.challenge.textContent = data.challenge;
-      ui.expires.textContent = new Date(data.expires_at * 1000).toLocaleString();
+      ui.expires.textContent = `Within ${Math.ceil(data.expires_in / 60)} minutes. The host checks expiry when you approve.`;
     } else if (data.state !== 'needs_pairing') {
       forgetChallenge();
     }

@@ -248,6 +248,7 @@ or printed by the command. `revoke` shows the current grant and requires typing
 `REVOKE`; the expected revision prevents revoking a replacement owner.
 
 Changes refuse redirected input, JSON mode and generated bot/fleet selectors.
+Composed bot permissions deny these operator-only command forms as well.
 These checks prevent accidental invocation in a bot context; they do not
 isolate a malicious process with the same OS privileges. Revocation invalidates
 the pairing and its sessions without stopping fleets or deleting their history.
@@ -295,7 +296,9 @@ contain no private facts and accept only query-free GET/HEAD under the same
 Host/Origin boundary. Their CSP permits only same-origin scripts, styles and
 requests, denies framing and uses no inline script or external asset. The page
 distinguishes unpaired, awaiting local approval, expired, sign-in-required,
-ready, signed-out, denied and unavailable states. Pairing, sign-in and sign-out
+ready, signed-out, denied and unavailable states. Its local pairing countdown
+uses the supplied relative lifetime, not clock equality with the host; the host
+still enforces the absolute expiry on approval. Pairing, sign-in and sign-out
 require explicit interaction; page load never opens a session. Pairing details
 stay in page memory, and successful sign-out does not immediately sign in again.
 
