@@ -3,7 +3,6 @@
 from concurrent.futures import ThreadPoolExecutor
 import json
 import os
-from pathlib import Path
 import shutil
 import sqlite3
 import stat
@@ -86,9 +85,40 @@ def test_initialization_failure_cannot_publish_partial_authority(tmp_path, monke
     assert OwnerAccess.initialize(tmp_path).current_grant() is None
 
 
-def test_concurrent_initializers_publish_one_complete_store(tmp_path):
+@pytest.mark.parametrize("directory_exists", [False, True])
+def test_initialization_syncs_authority_directory_and_its_parent(tmp_path, monkeypatch,
+                                                               directory_exists):
+    state = tmp_path / "state"
+    ensure_host_uid(state)
+    plane = state / "plane"
+    if directory_exists:
+        plane.mkdir(mode=0o700)
+    synced = []
+    fsync = os.fsync
+
+    def record(fd):
+        synced.append(os.fstat(fd).st_ino)
+        fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", record)
+    OwnerAccess.initialize(tmp_path)
+    assert state.stat().st_ino in synced, "the new plane entry must be durable in state"
+    assert plane.stat().st_ino in synced, "the published authority entry must be durable"
+
+
+def test_concurrent_initializers_publish_one_complete_store(tmp_path, monkeypatch):
     ensure_host_uid(tmp_path / "state")
     barrier = threading.Barrier(2)
+    parent_inode = (tmp_path / "state").stat().st_ino
+    synced_by = set()
+    fsync = os.fsync
+
+    def record(fd):
+        if os.fstat(fd).st_ino == parent_inode:
+            synced_by.add(threading.get_ident())
+        fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", record)
 
     def initialize(_):
         barrier.wait(timeout=5)
@@ -97,6 +127,7 @@ def test_concurrent_initializers_publish_one_complete_store(tmp_path):
     with ThreadPoolExecutor(2) as pool:
         one, two = pool.map(initialize, range(2))
     assert one.current_grant() is None and two.current_grant() is None
+    assert len(synced_by) == 2, "both initializers must sync the authority directory's parent"
     grant = pair(one)
     assert two.current_grant() == grant
     assert [p.name for p in one.path.parent.iterdir()] == ["owner-access.db"]

@@ -119,6 +119,18 @@ The prototype's contract:
   replacing existing authority; interrupted preparation can leave only a
   temporary file that is never consulted for admission.
 
+A writer interrupted during a SQLite commit can leave a hot rollback journal.
+Read admissions and `current_grant` use read-only connections, so they cannot
+roll it back and may report unavailable (503 through the protected factory).
+Recovery is an explicit local operation on the existing authority: the internal
+`OwnerAccess._connection(write=True)` context opens it in `mode=rw`, lets SQLite
+recover the journal, and validates its installation and schema. Entering and
+closing that context without changing rows preserves grants and sessions.
+An already-authorized pairing/session/revocation operation uses the same write
+connection, but still performs its declared mutation. No recovery CLI is
+exposed; `initialize` validates existing authority through a read-only
+connection and is not a recovery door. HTTP reads never perform this recovery.
+
 These lifetimes and limits are bounded experiment choices, not a selected
 browser protocol. The primitive grants no website membership, workspace
 binding or operational write authority. It cannot be substituted for the
@@ -143,10 +155,13 @@ Admission happens before calling the view and again immediately before every
 response body chunk, using current host identity, grant and session state.
 Headers are held until the first body is admitted. Every response is
 `Cache-Control: no-store`; sendfile extensions are disabled so static bytes
-cannot bypass the gate. Protected responses omit Content-Length to allow a
-held response to end normally on refusal. Before headers are sent, denial is
-403 and unavailable authority is 503, both with generic bodies. After a stream
-starts, refusal ends it without another private frame or a replacement status.
+cannot bypass the gate. Non-SSE responses preserve Content-Length when supplied.
+Before headers are sent, denial is 403 and unavailable authority is 503, both
+with generic bodies. After an SSE stream starts, refusal closes it normally
+without another private frame or a replacement status. Other started responses
+abort without a terminating body chunk, so a truncated response is a transport
+failure rather than a successful short 200. Refusal is latched for that response;
+subsequent sends cannot resume delivery even if the inner producer catches it.
 The existing stream's one-second idle tick supplies the next admission check.
 Already delivered/in-flight bytes cannot be recalled; this is admission at
 each delivery, not a global transaction between revocation and network output.
