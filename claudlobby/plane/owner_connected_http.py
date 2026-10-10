@@ -4,10 +4,10 @@ import math
 import time
 from urllib.parse import parse_qsl
 
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse
 
 from .owner_access import AccessDenied, AccessUnavailable, VerifiedReader
-from .owner_workspace_http import WorkspaceBootstrapHTTP, InvalidRequest, _header, _json
+from .owner_workspace_http import WorkspaceBootstrapHTTP, InvalidRequest, _header, _json, _DEADLINE
 from .session_assertion import verify_session_assertion
 from .workspace_assertion import _canonical_32_bytes
 
@@ -33,6 +33,9 @@ def _token(scope):
 class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
     """Reuse bounded bootstrap work/key owners; delegate one canonical read app."""
     methods = frozenset({"GET", "POST", "OPTIONS"})
+
+    def response_seconds(self, scope):
+        return 35 if scope["method"] == "POST" and scope["path"] == PREFIX + "issue" else 15
     def __init__(self, access, *, config, authority, verify_principal, read_app):
         super().__init__(access, config=config, authority=authority, verify_principal=verify_principal)
         self.connected = access.connected()
@@ -73,12 +76,18 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
             raise AccessUnavailable() from None
 
     async def _admit_reader(self, scope, reader, host_uid):
-        principal = await self._read_principal(scope)
-        if principal != reader.principal:
-            raise AccessDenied("connected_session_denied")
-        admission = await self._blocking(self.connected.authorize, reader.token, principal,
-            host_uid=host_uid, operational_origin=self.config.operational_origin)
-        self._binding_config(admission.binding)
+        token = _DEADLINE.set(time.monotonic() + READ_SECONDS)
+        try:
+            principal = await self._read_principal(scope)
+            if principal != reader.principal:
+                raise AccessDenied("connected_session_denied")
+            admission = await self._blocking(self.connected.authorize, reader.token, principal,
+                host_uid=host_uid, operational_origin=self.config.operational_origin)
+            self._binding_config(admission.binding)
+        except asyncio.TimeoutError:
+            raise AccessUnavailable() from None
+        finally:
+            _DEADLINE.reset(token)
 
     async def _admission(self, token, principal):
         # A fresh source preflight precedes any session mutation.
@@ -91,6 +100,8 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
     def _ready(self, admission):
         binding = admission.binding
         now = self.access._now()
+        if not admission.created_at <= now < admission.expires_at:
+            raise AccessDenied("connected_session_denied")
         return {"version": 1, "state": "ready", "expires_in": max(0, math.floor(admission.expires_at - now)),
             "read_profile": {"version": 1, "profile": "direct-owner-read-v1", "host_uid": admission.owner.host_uid},
             "session_context": {"issuer": binding.issuer, "subject": binding.subject,
@@ -98,8 +109,12 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
                 "binding_generation": binding.generation, "operational_origin": binding.operational_origin}}
 
     async def _perform(self, scope, receive):
-        deadline = time.monotonic() + 35
+        deadline = _DEADLINE.get()
         action = scope["path"][len(PREFIX):]
+        if scope["method"] == "OPTIONS":
+            method, allowed = self._preflight_fields(scope, action)
+            await self._preflight(scope, method, allowed)
+            return None, 204
         principal = await self._principal(scope, deadline)
         host_uid = await self._blocking(self._source)
         if action in {"challenge", "issue"}:
@@ -125,6 +140,8 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
             self._binding_config(with_binding)
             challenge = await self._blocking(self.connected.begin, principal)
             e = challenge.expected
+            if e.issuer != self.config.issuer or e.operational_origin != self.config.operational_origin:
+                raise AccessDenied("connected_session_denied")
             body = {"version": 1, "state": "awaiting_session_assertion", "nonce": e.nonce,
                 "issuer": e.issuer, "host_uid": e.host_uid, "operational_origin": e.operational_origin,
                 "binding_revision": e.binding_revision, "binding_generation": e.binding_generation,
@@ -173,10 +190,29 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
                 or _header(scope, b"access-control-request-method") != method
                 or len(fields) != len(set(fields)) or set(fields) != set(headers)):
             raise AccessDenied("connected_session_denied")
-        principal = await self._principal(scope, time.monotonic() + 15)
-        await self._blocking(self._source)
-        binding = await self._blocking(self.workspace.active_binding, principal)
-        self._binding_config(binding)
+        token = _DEADLINE.set(time.monotonic() + READ_SECONDS)
+        try:
+            principal = await self._read_principal(scope)
+            await self._blocking(self._source)
+            binding = await self._blocking(self.workspace.active_binding, principal)
+            self._binding_config(binding)
+        except asyncio.TimeoutError:
+            raise AccessUnavailable() from None
+        finally:
+            _DEADLINE.reset(token)
+
+    @staticmethod
+    def _preflight_fields(scope, action):
+        is_read = action.startswith("read/")
+        suffix = action[5:] if is_read else None
+        method = "GET" if is_read else _METHODS[action]
+        allowed = (["authorization"] if is_read or action == "status" else
+            ["content-type", "x-claudlobby-owner"] + ([] if action in {"challenge", "issue"} else ["authorization"]))
+        if suffix == "stream" and "last-event-id" in (_header(scope, b"access-control-request-headers") or "").lower():
+            allowed += ["last-event-id"]
+        if is_read and _header(scope, b"access-control-request-method") == "HEAD":
+            method = "HEAD"
+        return method, allowed
 
     @staticmethod
     def _read_route(scope, suffix):
@@ -192,7 +228,7 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
             raise InvalidRequest
         try:
             raw = scope.get("query_string", b"").decode("ascii")
-            query = parse_qsl(raw, keep_blank_values=True, strict_parsing=True)
+            query = parse_qsl(raw, keep_blank_values=True, strict_parsing=True) if raw else []
         except (ValueError, UnicodeError):
             raise InvalidRequest from None
         if len(query) != len({k for k, _ in query}) or any(k not in fields for k, _ in query):
@@ -220,18 +256,19 @@ class ConnectedReadHTTP(WorkspaceBootstrapHTTP):
                 await JSONResponse({"state": "unavailable"}, 503, headers=headers)(scope, receive, send)
                 return
             if scope["method"] == "OPTIONS":
-                allowed = (["authorization"] if is_read or action == "status" else
-                    ["content-type", "x-claudlobby-owner"] + ([] if action in {"challenge", "issue"} else ["authorization"]))
-                # First stream has no cursor header; reconnect may request it.
-                if suffix == "stream" and "last-event-id" in (_header(scope, b"access-control-request-headers") or "").lower():
-                    allowed += ["last-event-id"]
-                if is_read and _header(scope, b"access-control-request-method") == "HEAD":
-                    method = "HEAD"
-                await self._preflight(scope, method, allowed)
+                method, allowed = self._preflight_fields(scope, action)
                 headers.update({"Access-Control-Allow-Methods": method,
                     "Access-Control-Allow-Headers": ", ".join(allowed),
                     "Vary": "Origin, Access-Control-Request-Method, Access-Control-Request-Headers"})
-                await Response(status_code=204, headers=headers)(scope, receive, send)
+                async def preflight_send(message):
+                    if message["type"] == "http.response.start":
+                        names = {key.lower().encode() for key in headers}
+                        message = {**message, "headers": [(k, v) for k, v in message.get("headers", [])
+                            if k.lower() not in names] + [(k.lower().encode(), v.encode()) for k, v in headers.items()]}
+                    await send(message)
+                # Read query shape was already checked; no query enters OPTIONS
+                # authority. Reuse the same owned deadline/cancel/drain machinery.
+                await super().__call__({**scope, "query_string": b""}, receive, preflight_send)
             elif scope["method"] != method and not (is_read and scope["method"] == "HEAD"):
                 await JSONResponse({"state": "denied"}, 405,
                     headers={**headers, "Allow": "GET, HEAD, OPTIONS" if is_read else method + ", OPTIONS"})(scope, receive, send)

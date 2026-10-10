@@ -118,7 +118,7 @@ class OwnerConnected:
             now = self._now()
             self._cleanup(conn, "connected_challenges", now, owner, binding)
             if conn.execute("SELECT count(*) FROM connected_challenges").fetchone()[0] >= MAX_PENDING:
-                raise AccessDenied("connected_capacity")
+                raise AccessUnavailable()
             nonce = secrets.token_urlsafe(32)
             expires = now + CHALLENGE_SECONDS
             conn.execute("INSERT INTO connected_challenges VALUES(?,?,?,?,?,?,?)",
@@ -151,7 +151,7 @@ class OwnerConnected:
     def _issue(self, conn, owner, binding, now, valid_from, valid_until):
         self._cleanup(conn, "connected_sessions", now, owner, binding)
         if conn.execute("SELECT count(*) FROM connected_sessions").fetchone()[0] >= MAX_SESSIONS:
-            raise AccessDenied("connected_capacity")
+            raise AccessUnavailable()
         now = self._now()  # final write sample, after cleanup/capacity work
         if not valid_from <= now < valid_until:
             raise AccessDenied("connected_session_denied")

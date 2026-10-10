@@ -162,7 +162,7 @@ def test_final_renew_time_failure_keeps_original(connected):
 def test_init_cli_preview_refusal_then_explicit_initialize(local, monkeypatch):
     access, _, _, _ = local
     t = terminal(monkeypatch, iter(["NO\n"]))
-    assert call(access, "initialize-connected") == 1
+    assert call(access, "initialize-connected") == 4
     assert "No binding, session or action grant" in t.getvalue()
     t = terminal(monkeypatch, iter(["INITIALIZE-CONNECTED\n"]))
     assert call(access, "initialize-connected") == 0
@@ -174,8 +174,25 @@ def test_real_private_terminal_initialization_and_refusal(local):
     from tests.test_host_owner_terminal import _command
     access, _, _, _ = local
     rc, text = _command(access.root, "initialize-connected", [("Type INITIALIZE-CONNECTED", "NO")])
-    assert rc == 1 and "No binding, session or action grant" in text
+    assert rc == 4 and "No binding, session or action grant" in text
     rc, text = _command(access.root, "initialize-connected", [("Type INITIALIZE-CONNECTED", "INITIALIZE-CONNECTED")])
     assert rc == 0 and "storage initialized" in text
     with sqlite3.connect(access.path) as conn:
         assert conn.execute("SELECT count(*) FROM connected_sessions").fetchone()[0] == 0
+
+
+def test_capacity_refusal_keeps_challenge_and_full_retained_binding_is_checked(connected, monkeypatch):
+    import claudlobby.plane.owner_connected as module
+    store, access, _, binding, clock = connected
+    monkeypatch.setattr(module, "MAX_SESSIONS", 1)
+    first = store.issue(evidence(store, clock), OWNER)
+    e = evidence(store, clock)
+    with pytest.raises(AccessUnavailable):
+        store.issue(e, OWNER)
+    assert store.expected(e.expected.nonce, OWNER) == e.expected
+    # Even syntactically valid metadata alteration without a generation change
+    # cannot move a retained credential to another account.
+    with sqlite3.connect(access.path) as conn:
+        conn.execute("UPDATE workspace_bindings SET subject=? WHERE revision=?", ("00000000-0000-4000-8000-000000000004", binding.revision))
+    with pytest.raises(AccessDenied):
+        admit(store, first.token, binding)

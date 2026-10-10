@@ -328,6 +328,7 @@ class _OwnerBrowser:
                 async def receive():
                     message = await original_receive()
                     if message["type"] == "lifespan.shutdown":
+                        await self.connected_reads.shutdown()
                         await self.workspace_bootstrap.shutdown()
                     return message
             await self.read_app(scope, receive, send)

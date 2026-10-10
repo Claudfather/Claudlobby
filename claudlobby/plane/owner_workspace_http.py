@@ -76,6 +76,10 @@ async def _json(receive, limit):
 
 
 class WorkspaceBootstrapHTTP:
+    methods = frozenset({"POST", "OPTIONS"})
+
+    def response_seconds(self, scope):
+        return RESPONSE_SECONDS
     paths = PATHS
 
     def __init__(self, access, *, config, authority, verify_principal):
@@ -242,7 +246,7 @@ class WorkspaceBootstrapHTTP:
             await JSONResponse({"state": "denied"}, 403, headers=headers)(scope, receive, send)
             return
         headers["Access-Control-Allow-Origin"] = self.config.operational_origin
-        if scope["method"] not in {"POST", "OPTIONS"}:
+        if scope["method"] not in self.methods:
             headers["Allow"] = "POST, OPTIONS"
             body, status = {"state": "denied"}, 405
         elif self._stopping or len(self._workers) >= 8:
@@ -250,7 +254,7 @@ class WorkspaceBootstrapHTTP:
         else:
             # Reserve before body read/task creation. A disconnect/cancel only
             # abandons its response, never its still-running owned work/count.
-            deadline = time.monotonic() + RESPONSE_SECONDS
+            deadline = time.monotonic() + self.response_seconds(scope)
             token = _DEADLINE.set(deadline)
             try:
                 job = asyncio.create_task(self._response(scope, receive))
