@@ -131,14 +131,14 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     let nextTransport = null;
     try {
       for (const reference of doc.references) {
-        const row = {reference,key:`computer-${nextClients.length + 1}`, client:createClient({reference,
+        const row = {reference,key:'c-' + BigInt('0x' + reference.reference_id.replaceAll('-','')).toString(36), client:createClient({reference,
         documentContext:{issuer:doc.shell_origin, operational_origin:doc.operational_origin, subject:doc.user_id,
           workspace_id:doc.workspace_id, context_generation:doc.context_generation},
         currentContext:() => current, obtainSessionAssertion:(input,options) => accountAssertion('/api/plane/session-assertion',input,options), documentOrigin, fetch, setTimeout, clearTimeout})};
         nextClients.push(row);
         row.actions = row.client.createActions({key:row.key,
           onPause:(...args) => invoke(mount?.onActionPause,...args),
-          onSourceChange:() => invoke(mount?.onActionSourceChange,row.key)});
+          onSourceChange:() => { row.actionRecoveryPending = true; invoke(mount?.onActionSourceChange,row.key); }});
         row.enrollment = createEnrollment({reference, issuer:doc.shell_origin, operationalOrigin:doc.operational_origin,
           currentContext:() => current, obtainAssertion:(input,options) => accountAssertion('/api/plane/host-assertion',input,options),
           fetch,now,setTimeout,clearTimeout,onChange:changed});
@@ -210,7 +210,16 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     if (phase !== 'ready' || !transport) return failure('unavailable', 'Check your account before connecting a computer.');
     const ticket = sequence, active = transport;
     const value = await active.jget(url);
-    return disposed || phase !== 'ready' || ticket !== sequence || active !== transport ? failure('denied') : value;
+    if (disposed || phase !== 'ready' || ticket !== sequence || active !== transport) return failure('denied');
+    // Quiet recorder recovery is observed by the existing board refresh, not
+    // a source:ok event. Refresh only once after an admitted healthy overview.
+    if (url === '/api/overview') for (const source of value?.data?.sources || []) {
+      const row = clients.find(row => row.key === source.key);
+      if (row?.actionRecoveryPending && source.state === 'ok') {
+        row.actionRecoveryPending = false; invoke(mount?.onActionSourceChange,row.key);
+      }
+    }
+    return value;
   }
   function actionSource(room) {
     if (disposed || phase !== 'ready' || !current || typeof room !== 'string') return null;

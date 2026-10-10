@@ -7,7 +7,7 @@ const uid = (value, prefix) => typeof value === 'string' && value.length === pre
 // Qualification is presentation identity, never an action grant or credential.
 export function createSourceActionInterface({key, owner, snapshot, stamp, onPause = () => {}}) {
   if (typeof key !== 'string' || !/^[a-z][a-z0-9-]{0,31}$/.test(key) || key.trim() !== key) throw unknown();
-  const contexts = new Map();
+  const contexts = new Map(), contextRequests = new Map();
   const qualify = value => `${key}::${value}`;
   function bare(value, prefix) {
     if (typeof value !== 'string' || !value.startsWith(key + '::')) throw unknown();
@@ -23,10 +23,11 @@ export function createSourceActionInterface({key, owner, snapshot, stamp, onPaus
   }
   async function context(rawRoom, kind) {
     if (snapshot().state !== 'ready' || typeof rawRoom !== 'string' || !rawRoom || rawRoom === 'all') return null;
-    const before = stamp();
+    const before = stamp(), ticket = {};
+    contextRequests.set(kind,ticket);
     const read = kind === 'message' ? owner.interactionContext : kind === 'nudge' ? owner.nudgeContext : owner.feedbackContext;
     const value = await read(rawRoom);
-    if (before !== stamp() || snapshot().state !== 'ready' || value?.scope?.host !== snapshot().read_profile?.host_uid
+    if (contextRequests.get(kind) !== ticket || before !== stamp() || snapshot().state !== 'ready' || value?.scope?.host !== snapshot().read_profile?.host_uid
         || value.room !== rawRoom || value.scope.fleet !== rawRoom || value.simulation !== false
         || !(kind === 'message' ? validContext(value) && value.actions.length === 1 && value.actions[0] === kind
           : validTaskActionContext(value,kind)) || !value.recipients.every(r => uid(r.id,'actor'))) return null;
@@ -58,12 +59,12 @@ export function createSourceActionInterface({key, owner, snapshot, stamp, onPaus
   return Object.freeze({
     interactionContext:fleet => context(fleet,'message'),nudgeContext:fleet => context(fleet,'nudge'),feedbackContext:fleet => context(fleet,'feedback'),
     prepareAction:value => operation('prepareAction',value),sendAction:value => operation('sendAction',value),actionReceipt:value => operation('actionReceipt',value),
-    invalidate() { contexts.clear(); },
+    invalidate() { contexts.clear(); contextRequests.clear(); },
     pause(rawScope,kind,recipient) {
       const current = contexts.get(kind);
       if (!current || scopeKey(rawScope) !== scopeKey(current.raw.scope)
           || recipient && !current.raw.recipients.some(r => r.id === recipient)) return;
-      contexts.delete(kind); onPause(current.ui.scope,kind,recipient ? qualify(recipient) : undefined);
+      contexts.delete(kind); contextRequests.delete(kind); onPause(current.ui.scope,kind,recipient ? qualify(recipient) : undefined);
     },
   });
 }

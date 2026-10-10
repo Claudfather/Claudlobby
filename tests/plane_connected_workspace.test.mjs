@@ -15,6 +15,8 @@ const {createConnectedWorkspace} = await import(workspaceURL);
 const id = n => `00000000-0000-4000-8000-${String(n).padStart(12,'0')}`;
 const wi = 'wi_'+'1'.repeat(32), fleetUID='fleet_'+'2'.repeat(32);
 const refs = ['a','b'].map((n,i)=>({reference_id:id(i+4),endpoint_origin:`https://${n}.example.test`,revision:1}));
+const sourceKey=ref=>'c-'+BigInt('0x'+ref.reference_id.replaceAll('-','')).toString(36);
+const sourceA=sourceKey(refs[0]),sourceB=sourceKey(refs[1]);
 const documentContext = {version:1,user_id:id(1),workspace_id:id(2),context_generation:id(3),shell_origin:'https://accounts.example.test',operational_origin:'https://plane.example.test',references:refs,expires_at:1800000060};
 const context = references => ({version:2,user:{id:id(1)},workspace:{id:id(2),name:'Test workspace'},context_generation:id(3),references});
 const reply = (status,value) => new Response(JSON.stringify(value),{status,headers:{'Content-Type':'application/json'}});
@@ -49,7 +51,7 @@ function dom() {
   return {document,Element,nav,observers,listeners,get:id=>elements.get(id),MutationObserver:Observer};
 }
 function harness(options={}) {
-  const count=options.count??2,doc={...documentContext,references:refs.slice(0,count)},calls=[],timers=[],streams=[],overrides=new Map();
+  const count=options.count??2,doc={...documentContext,references:options.references??refs.slice(0,count)},calls=[],timers=[],streams=[],overrides=new Map();
   let metadata=context(doc.references),metadataStatus=200;
   const tokens=new Map(),receipts=new Map(), grants=new Set(['message','nudge','feedback']);
   const fetch=async(url,init)=>{
@@ -74,8 +76,8 @@ function harness(options={}) {
     if(path.startsWith('/api/owner/connected/actions/')) {
       const input=JSON.parse(init.body),operation=path.split('/').at(-1),kind=input.kind || 'message';
       if(!grants.has(kind))return reply(403,{state:'denied'});
-      const scope={workspace:'connected-test',host,fleet:'team',viewer:n+'-'+kind+'-grant1'};
-      if(operation==='context')return reply(200,{version:kind==='message'?1:2,room:'team',scope,simulation:false,
+      const scope={workspace:'connected-test',host,fleet:input.scope?.fleet||input.room,viewer:n+'-'+kind+'-grant1'};
+      if(operation==='context')return reply(200,{version:kind==='message'?1:2,room:input.room,scope,simulation:false,
         recipients:[{id:'actor_'+'c'.repeat(32),label:'Lead',lead:true},...(kind==='message'?[{id:'actor_'+'d'.repeat(32),label:'Worker'}]:[])],
         actions:[kind],...(kind!=='message'?{release_id:'r-'+'e'.repeat(64)}:{})});
       assert.deepEqual(input.scope,scope,'HTTP receives exact raw scope');
@@ -118,9 +120,9 @@ test('fresh account admission precedes explicit host handshake; aggregate and ou
   assert.equal(await h.api.act(0,'connect'),true);assert.equal(await h.api.act(1,'connect'),true);
   const overview=await h.api.jget('/api/overview');assert.equal(overview.data.coverage.reachable,2);
   const all=await h.api.jget('/api/channel?limit=120');assert.equal(all.data.threads.length,2);assert.equal(all.data.threads[0].messages[0].body,'<literal>');
-  assert.equal(all.data.threads[0].task_link.task_id,'computer-1::'+wi);
-  const detail=await h.api.jget(`/api/tasks/${encodeURIComponent('computer-1::'+wi)}?fleet=computer-1%20%2F%20team`);
-  assert.equal(detail.data.task.body,'full body');assert.equal(detail.data.task.fleet_uid,'computer-1::'+fleetUID);
+  assert.equal(all.data.threads[0].task_link.task_id,sourceA+'::'+wi);
+  const detail=await h.api.jget(`/api/tasks/${encodeURIComponent(sourceA+'::'+wi)}?fleet=${encodeURIComponent(sourceA+' / team')}`);
+  assert.equal(detail.data.task.body,'full body');assert.equal(detail.data.task.fleet_uid,sourceA+'::'+fleetUID);
   const signer=h.calls.find(c=>c.url.endsWith('/session-assertion'));
   assert.deepEqual(Object.keys(JSON.parse(signer.init.body)).sort(),['binding_generation','binding_revision','expected_context_generation','host_uid','nonce','operational_origin','reference_id','workspace_id']);
   assert.equal(typeof h.api.sendAction,'function');assert.equal(typeof h.api.prepareAction,'function');assert.ok(!JSON.stringify(h.api.snapshot()).includes('AAAAA'));
@@ -346,11 +348,11 @@ test('enrollment resources join admission rollback, including partial streams, a
 
 test('connected message, nudge and feedback use canonical pending bookkeeping and raw HTTP at one source boundary',async()=>{
   const h=harness({count:1});await h.api.checkAccount();await flush();await h.api.act(0,'connect');await h.api.jget('/api/overview');
-  const room='computer-1 / team',values=new Map(),storage={getItem:k=>values.get(k)||null,setItem:(k,v)=>values.set(k,v)},state=new ActionState(storage);
+  const room=sourceA+' / team',values=new Map(),storage={getItem:k=>values.get(k)||null,setItem:(k,v)=>values.set(k,v)},state=new ActionState(storage);
   for(const [index,kind]of ['message','nudge','feedback'].entries()){
     const context=await h.api[kind==='message'?'interactionContext':kind+'Context'](room);
-    assert.equal(context.scope.host,'computer-1::host_'+'a'.repeat(32));
-    const target={recipient:context.recipients[0].id,task_id:kind==='message'?null:'computer-1::'+wi,
+    assert.equal(context.scope.host,sourceA+'::host_'+'a'.repeat(32));
+    const target={recipient:context.recipients[0].id,task_id:kind==='message'?null:sourceA+'::'+wi,
       ...(kind!=='message'?{assignment_id:null,release_id:context.release_id}:{})};
     const request=kind==='message'?state.begin(context,kind,target,'Literal <body>',id(20+index))
       :state.prepare(context,target,'Literal <body>',id(20+index));
@@ -363,32 +365,84 @@ test('connected message, nudge and feedback use canonical pending bookkeeping an
   assert.equal(h.calls.filter(c=>c.url.endsWith('/actions/send')).length,3);
   assert.equal(h.calls.filter(c=>c.url.endsWith('/actions/prepare')).length,2);
   assert.equal(h.calls.filter(c=>c.url.endsWith('/actions/receipt')).length,3);
-  for(const call of h.calls.filter(c=>c.url.includes('/actions/'))){assert.equal(call.init.credentials,'omit');assert.equal(call.init.headers['X-Claudlobby-Owner'],'1');assert.ok(!call.init.body.includes('computer-1::'));assert.ok(!call.init.body.includes('computer-1 / '));}
+  for(const call of h.calls.filter(c=>c.url.includes('/actions/'))){assert.equal(call.init.credentials,'omit');assert.equal(call.init.headers['X-Claudlobby-Owner'],'1');assert.ok(!call.init.body.includes(sourceA+'::'));assert.ok(!call.init.body.includes(sourceA+' / '));}
   assert.equal(h.api.snapshot().computers[0].state,'ready');h.api.dispose();
 });
 
 test('wrong source targets/scopes cannot reach either same-named lead; missing grants preserve read access',async()=>{
   const h=harness();await h.api.checkAccount();await flush();await h.api.act(0,'connect');await h.api.act(1,'connect');await h.api.jget('/api/overview');
-  const context=await h.api.feedbackContext('computer-1 / team');
-  const request={version:2,request_id:id(30),kind:'feedback',scope:context.scope,target:{recipient:context.recipients[0].id,task_id:'computer-1::'+wi,assignment_id:null,release_id:context.release_id},submitted_at:'2026-10-10T00:00:00Z',body:'Comment'};
+  const context=await h.api.feedbackContext(sourceA+' / team');
+  const request={version:2,request_id:id(30),kind:'feedback',scope:context.scope,target:{recipient:context.recipients[0].id,task_id:sourceA+'::'+wi,assignment_id:null,release_id:context.release_id},submitted_at:'2026-10-10T00:00:00Z',body:'Comment'};
   const before=h.calls.length;
-  for(const patch of [{target:{...request.target,recipient:'computer-2::actor_'+'c'.repeat(32)}},{target:{...request.target,task_id:'computer-2::'+wi}},{scope:{...request.scope,fleet:'computer-2 / team'}},{scope:{...request.scope,viewer:'forged'}}])await assert.rejects(h.api.prepareAction({...request,...patch}),/unknown/);
+  for(const patch of [{target:{...request.target,recipient:sourceB+'::actor_'+'c'.repeat(32)}},{target:{...request.target,task_id:sourceB+'::'+wi}},{scope:{...request.scope,fleet:sourceB+' / team'}},{scope:{...request.scope,viewer:'forged'}}])await assert.rejects(h.api.prepareAction({...request,...patch}),/unknown/);
   assert.equal(h.calls.length,before);
   h.grants.delete('nudge');const statusBefore=h.calls.filter(c=>c.url.endsWith('/status')).length;
-  assert.equal(await h.api.nudgeContext('computer-1 / team'),null);
+  assert.equal(await h.api.nudgeContext(sourceA+' / team'),null);
   assert.equal(h.calls.filter(c=>c.url.endsWith('/status')).length-statusBefore,1);
   assert.equal(h.api.snapshot().computers[0].state,'ready');assert.equal((await h.api.jget('/api/overview')).data.coverage.reachable,2);h.api.dispose();
 });
 
 test('late send through renewal remains unknown with original UUID; restored receipt is pure and no mutation replays',async()=>{
   const h=harness({count:1});await h.api.checkAccount();await flush();await h.api.act(0,'connect');await h.api.jget('/api/overview');
-  const context=await h.api.interactionContext('computer-1 / team'),state=new ActionState({getItem:()=>null,setItem(){}});
+  const context=await h.api.interactionContext(sourceA+' / team'),state=new ActionState({getItem:()=>null,setItem(){}});
   const request=state.begin(context,'message',{recipient:context.recipients[0].id,task_id:null},'Keep me',id(40));
   const held=deferred();h.overrides.set(refs[0].endpoint_origin+'/api/owner/connected/actions/send',()=>held.promise);
   const send=h.api.sendAction(request);await flush();await h.api.act(0,'renew');
   const {body,...metadata}=request;const raw={...metadata,scope:{workspace:'connected-test',host:'host_'+'a'.repeat(32),fleet:'team',viewer:'a-message-grant1'},target:{recipient:'actor_'+'c'.repeat(32),task_id:null},version:1,status:'delivered'};
   held.resolve(reply(200,raw));await assert.rejects(send,/unknown/);assert.equal(state.pending[0].request_id,id(40));
-  await h.api.interactionContext('computer-1 / team');h.receipts.set('a'+request.request_id,raw);
+  await h.api.interactionContext(sourceA+' / team');h.receipts.set('a'+request.request_id,raw);
   assert.equal(state.accept(state.pending[0],await h.api.actionReceipt(state.pending[0])),'delivered');
   assert.equal(h.calls.filter(c=>c.url.endsWith('/actions/send')).length,1);assert.equal(h.calls.filter(c=>c.url.endsWith('/actions/receipt')).length,1);h.api.dispose();
+});
+
+test('out-of-order team and same-team context replies cannot replace the newest capability before send or receipt',async()=>{
+  const h=harness({count:1});await h.api.checkAccount();await flush();await h.api.act(0,'connect');
+  const endpoint=refs[0].endpoint_origin,overview=endpoint+'/api/owner/connected/read/overview';
+  h.overrides.set(overview,()=>reply(200,ok({fleets:['alpha','beta'].map((alias,i)=>({alias,uid:'fleet_'+String(i+1).repeat(32),bots:1,provisional:0})),host:{daemon_serving:true},totals:{}})));
+  await h.api.jget('/api/overview');
+  const held=deferred(),door=endpoint+'/api/owner/connected/actions/context';
+  const raw=room=>({version:1,room,scope:{workspace:'connected-test',host:'host_'+'a'.repeat(32),fleet:room,viewer:'a-message-grant1'},simulation:false,actions:['message'],recipients:[{id:'actor_'+'c'.repeat(32),label:'Lead',lead:true}]});
+  h.overrides.set(door,init=>JSON.parse(init.body).room==='alpha'?held.promise:reply(200,raw('beta')));
+  const a=h.api.interactionContext(sourceA+' / alpha'),b=await h.api.interactionContext(sourceA+' / beta');
+  held.resolve(reply(200,raw('alpha')));assert.equal(await a,null);
+  const state=new ActionState({getItem:()=>null,setItem(){}}),request=state.begin(b,'message',{recipient:b.recipients[0].id,task_id:null},'Newest team',id(60));
+  assert.equal(state.accept(request,await h.api.sendAction(request)),'recorded');
+  assert.equal(state.accept(state.pending[0],await h.api.actionReceipt(state.pending[0])),'delivered');
+  const older=deferred();let reads=0;
+  h.overrides.set(door,()=>++reads===1?older.promise:reply(200,raw('beta')));
+  const first=h.api.interactionContext(sourceA+' / beta'),latest=await h.api.interactionContext(sourceA+' / beta');
+  older.resolve(reply(200,{...raw('beta'),scope:{...raw('beta').scope,viewer:'stale-grant'}}));assert.equal(await first,null);
+  const next=state.begin(latest,'message',{recipient:latest.recipients[0].id,task_id:null},'Newest refresh',id(61));
+  assert.equal(state.accept(next,await h.api.sendAction(next)),'recorded');
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/actions/send')).length,2);h.api.dispose();
+});
+
+test('original pending receipt identity survives reordering or removal of another saved reference',async()=>{
+  for(const references of [[refs[1],refs[0]],[refs[1]]]){
+    const original=harness();await original.api.checkAccount();await flush();await original.api.act(1,'connect');await original.api.jget('/api/overview');
+    const context=await original.api.interactionContext(sourceB+' / team'),values=new Map(),storage={getItem:k=>values.get(k)||null,setItem:(k,v)=>values.set(k,v)};
+    const state=new ActionState(storage),request=state.begin(context,'message',{recipient:context.recipients[0].id,task_id:null},'Original UUID',id(62));
+    state.accept(request,await original.api.sendAction(request));original.api.dispose();
+    const reopened=harness({references});for(const [key,value] of original.receipts)reopened.receipts.set(key,value);
+    await reopened.api.checkAccount();await flush();await reopened.api.act(0,'connect');await reopened.api.jget('/api/overview');
+    const current=await reopened.api.interactionContext(sourceB+' / team'),restored=new ActionState(storage),pending=restored.pending[0];
+    assert.deepEqual(current.scope,pending.scope);assert.equal(restored.accept(pending,await reopened.api.actionReceipt(pending)),'delivered');
+    assert.equal(reopened.calls.filter(c=>c.url.endsWith('/actions/send')).length,0);
+    assert.equal(reopened.calls.filter(c=>c.url.endsWith('/actions/receipt')).length,1);reopened.api.dispose();
+  }
+});
+
+test('quiet source recovery in the existing overview refresh restores actions once without a new poller or mutation',async()=>{
+  const h=harness({count:1}),room=sourceA+' / team';let refresh;
+  h.mount({onActionSourceChange:key=>{assert.equal(key,sourceA);refresh=h.api.interactionContext(room);}});
+  await h.api.checkAccount();await flush();await h.api.act(0,'connect');await h.api.jget('/api/overview');await h.api.interactionContext(room);
+  const stream=h.api.createEventSource('/api/stream');await flush();
+  const contextDoor=refs[0].endpoint_origin+'/api/owner/connected/actions/context',overviewDoor=refs[0].endpoint_origin+'/api/owner/connected/read/overview';
+  h.overrides.set(contextDoor,()=>reply(503,{state:'unavailable'}));h.overrides.set(overviewDoor,()=>reply(200,{state:'unreadable',provenance:null,remediation:'Recorder source unavailable'}));
+  h.streams[0].control.enqueue(new TextEncoder().encode('event: source\ndata: {"state":"unreadable"}\n\n'));await flush();assert.equal(await refresh,null);
+  const before=h.calls.filter(c=>c.url===contextDoor).length;await h.api.jget('/api/overview');assert.equal(h.calls.filter(c=>c.url===contextDoor).length,before);
+  h.overrides.delete(contextDoor);h.overrides.delete(overviewDoor);await h.api.jget('/api/overview');await flush();
+  assert.equal((await refresh).room,room);assert.equal(h.calls.filter(c=>c.url===contextDoor).length,before+1);
+  await h.api.jget('/api/overview');assert.equal(h.calls.filter(c=>c.url===contextDoor).length,before+1);
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/actions/send')).length,0);stream.close();h.api.dispose();
 });
