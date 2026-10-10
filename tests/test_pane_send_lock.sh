@@ -262,9 +262,9 @@ echo "=== an Enter the box swallows: its retry comes before any other sender's k
 # Here the pane keeps A's text after A's first Enter (a swallowed Enter), so A
 # presses another after its verify window; B starts the moment A's first Enter
 # lands. Under one lock no B chunk may arrive between A's two Enters. The
-# control, each sender with its OWN lock dir, has to interleave there, or this
-# pane could not show the defect. A's payload has no letter B, so a chunk with
-# one is B's.
+# control uses separate lock directories: the occupied-input check must now
+# refuse B instead of appending to A. With one shared lock B waits until A
+# submits, then sends normally. A has no letter B, so B chunks identify B.
 # swallowed_pair <lock dir for A> <lock dir for B>: the number of B chunks the
 # pane received between its first and second Enter.
 swallowed_pair() {
@@ -291,10 +291,14 @@ swallowed_pair() {
         } END { print n + 0 }' "$PANE_LOG"
 }
 r=$(swallowed_pair "$TMPD/swallow-lock-a" "$TMPD/swallow-lock-b")
-if [ "$r" -gt 0 ]; then r=interleaved; else r="not interleaved ($r B chunks)"; fi
-assert_eq "control: with no shared lock, B types between A's swallowed Enter and its retry" "interleaved" "$r"
+assert_eq "separate locks: held-input refusal prevents B appending to A" "0" "$r"
+r=$(grep -c '^sockX|botW|chunk|B' "$PANE_LOG" || true)
+assert_eq "separate locks: B sent no new payload into the hold" "0" "$r"
 r=$(swallowed_pair "" "")
 assert_eq "one lock: no B chunk arrives between A's swallowed Enter and its retry" "0" "$r"
+r=$(submitted sockX botW)
+case "$r" in *"$B"*) r=submitted ;; *) r=missing ;; esac
+assert_eq "one lock: B sends after A submits, rather than being refused" "submitted" "$r"
 
 echo "=== the lock is per RECIPIENT: other panes are not held up ==="
 
@@ -358,6 +362,30 @@ r=$(grep -c 'NOT sent' "$TMPD/timeout.err" || true)
 assert_eq "...in words an operator can find (NOT sent)" "loud" "$r"
 [ -z "$HOLDER_PID" ] || kill "$HOLDER_PID" 2>/dev/null || true
 
+echo "=== an occupied input box is refused after taking the recipient lock ==="
+: > "$PANE_LOG"
+held_box=$(box_file sockX botHeld)
+lf=$(lock_file_for sockX botHeld)
+python3 - "$lf" "$held_box" "$TMPD/held-ready" <<'PYLOCK' &
+import fcntl, pathlib, sys, time
+with open(sys.argv[1], "a+") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    pathlib.Path(sys.argv[3]).touch()
+    time.sleep(0.4)
+    pathlib.Path(sys.argv[2]).write_text("PREEXISTING INPUT")
+    time.sleep(0.2)
+PYLOCK
+holder=$!
+while [ ! -f "$TMPD/held-ready" ]; do sleep 0.02; done
+rc=0
+pane_send_verified sockX botHeld "NEW INPUT" 2>"$TMPD/held.err" || rc=$?
+wait "$holder"
+assert_eq "held input returns a distinct definite refusal" "4" "$rc"
+assert_eq "the inspection used the pane after the prior holder released it" "PREEXISTING INPUT" "$(cat "$held_box")"
+assert_eq "no payload or Enter was sent to the occupied box" "0" "$(wc -l < "$PANE_LOG" | tr -d ' ')"
+lock_free "$lf" && r=free || r=held
+assert_eq "the refusal releases the recipient lock" "free" "$r"
+
 echo "=== the lock is released on every exit path ==="
 
 lf=$(lock_file_for sockX botR)
@@ -404,10 +432,13 @@ while [ "$i" -lt 30 ]; do
 done
 assert_eq "a sender SIGKILLed mid-send leaves the pane's lock free" "free" "$r"
 wait "$pk" 2>/dev/null || true
+prior=$(cat "$(box_file sockX botK)")
 : > "$PANE_LOG"
-pane_send_verified sockX botK "after the kill" >/dev/null 2>&1 || true
-r=$(submitted sockX botK)
-assert_eq "...and the next send to that pane goes through" "after the kill" "$r"
+rc=0
+pane_send_verified sockX botK "after the kill" >/dev/null 2>&1 || rc=$?
+assert_eq "...and a next send refuses the killed sender's stranded input" "4" "$rc"
+assert_eq "...without changing the stranded bytes" "$prior" "$(cat "$(box_file sockX botK)")"
+assert_eq "...without typing or pressing Enter" "0" "$(wc -l < "$PANE_LOG" | tr -d ' ')"
 
 echo "=== a lock that cannot be taken does not strand the fleet ==="
 

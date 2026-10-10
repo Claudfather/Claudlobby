@@ -1,9 +1,11 @@
 """Ordinary message effects use a private Plane and injected native carrier."""
 
 from dataclasses import replace
+from datetime import datetime, timezone
 import json
 import os
 import shutil
+import shlex
 import sqlite3
 from uuid import uuid4
 
@@ -15,12 +17,12 @@ from claudlobby.config import BotConfig, FleetConfig
 from claudlobby.context import Context
 from claudlobby.message_context import MessageRoute
 from claudlobby.message_payload import MessageBody
-from claudlobby.message_transport import TransportDestination, TransportOutcome
+from claudlobby.message_transport import TransportDestination, TransportOutcome, send as native_send
 from claudlobby.paths import Paths
 from claudlobby.plane.db import connect, db_file
 from claudlobby.plane.identity import resolve, resolve_party
 from claudlobby.plane.ids import ensure_host_uid
-from claudlobby.plane.ids import mint_msg_id
+from claudlobby.plane.ids import mint_msg_id, mint_event_id
 from claudlobby.request_facts import FactProof
 from claudlobby.request_receipts import ReceiptConflict, RequestStore, locked_request
 from claudlobby.report_payload import ReportPayload
@@ -96,6 +98,84 @@ def test_submitted_send_replay_has_one_native_effect_and_exact_facts(estate, dur
     assert b"SECRET" not in _receipt(route, request_id).intent.semantic_sha256.encode()
     path = route.selected.paths.root / "state/requests" / route.selected_fleet_uid / (request_id + ".json")
     assert b"Private SECRET body" not in path.read_bytes()
+
+
+@pytest.fixture
+def refused_native(estate, tmp_path):
+    """The shipped shell helper and transport, with a private read-only pane fake."""
+    route, package, _ = estate
+    native = tmp_path / "refused-native"
+    native.mkdir()
+    launches, writes = tmp_path / "launches", tmp_path / "writes"
+    (native / "lib-common.sh").write_text(
+        f". {shlex.quote(str(package.native / 'lib-common.sh'))}\n"
+        f"printf 'launch\n' >> {shlex.quote(str(launches))}\n"
+        "bot_tmux() {\n"
+        "  shift\n"
+        "  case \"$1\" in\n"
+        "    has-session) [ \"${REFUSE_NO_SESSION:-}\" != 1 ] ;;\n"
+        "    capture-pane) printf '> PREEXISTING Esc to cancel\n' ;;\n"
+        f"    send-keys) printf 'unexpected input\n' >> {shlex.quote(str(writes))} ;;\n"
+        "  esac\n"
+        "}\n")
+    package = replace(package, native=native)
+    selected = replace(route.selected, paths=Paths(root=route.selected.paths.root, package=package))
+    return replace(route, origin=selected, selected=selected, peer_context=selected), package, launches, writes
+
+
+@pytest.mark.parametrize("durable", [False, True])
+@pytest.mark.parametrize("refusal", ["held", "no-session"])
+def test_native_prewrite_refusal_records_failed_and_replay_is_pure(estate, refused_native, durable, refusal):
+    _, _, conn = estate
+    route, package, launches, writes = refused_native
+    if refusal == "no-session":
+        helper = package.native / "lib-common.sh"
+        helper.write_text("REFUSE_NO_SESSION=1\n" + helper.read_text())
+    alerts = []
+    def notify(*args, **kwargs):
+        alerts.append(kwargs)
+        return "unexpected alert"
+    request_id = str(uuid4())
+    def invoke():
+        return messages.send_message(route, package, MessageBody("New private body"),
+            request_id=request_id, kind="chat", trusted_tiers={}, transport=native_send,
+            require_durable_request=durable, notify=notify, clear=lambda *a, **k: None)
+    first = invoke()
+    assert (first.delivery, first.recording, first.code, first.exit_code) == (
+        "failed", "committed", "transport_failed", 5)
+    assert first.request_persisted and first.alert is None and alerts == []
+    saved = _receipt(route, request_id)
+    observation = saved.message_attempts[0].observation
+    assert observation.status == "failed"
+    assert observation.native_returncode is observation.wire_sha256 is observation.wire_bytes is None
+    assert saved.message_attempts[0].recording_status == "committed"
+    assert _counts(conn) == (1, 1)
+    assert [tuple(row) for row in conn.execute("SELECT event, json_extract(detail, '$.wire_sha256'), json_extract(detail, '$.wire_bytes') FROM events WHERE kind='transmission'")] == [("failed", None, None)]
+    replay = invoke()
+    assert replay.replayed and replay.message_id == first.message_id
+    assert replay.delivery == "failed" and replay.recording == "committed"
+    assert replay.alert is None and alerts == [] and _counts(conn) == (1, 1)
+    assert launches.read_text().splitlines() == ["launch"] and not writes.exists()
+
+
+def test_nonretained_native_refusal_still_commits_failed_transmission(estate, refused_native):
+    _, _, conn = estate
+    route, package, _, writes = refused_native
+    request_id = str(uuid4())
+    # Obtain the real operation owner's frozen intent/route, then exercise its
+    # no-retention transmission leg. No malformed observation may degrade it.
+    _call(route, package, request_id, transport=native_send, require_durable_request=True)
+    intent = _receipt(route, request_id).intent
+    result = messages.transmit_native_attempt(route, package, intent, request_id=request_id,
+        reservation=messages.NativeAttemptReservation(2, mint_event_id(), None, True, False),
+        envelope=messages.RenderedNativeEnvelope(intent.message_id, "New body"),
+        modes=messages._load_capture_config(route.selected.paths.root),
+        parties={route.caller.alias: route.caller.uid, route.peer.alias: route.peer.uid},
+        persistence=[False], store=None, at=datetime.now(timezone.utc), transport=native_send)
+    assert (result.delivery, result.transmission_recording, result.request_persisted) == ("failed", "committed", False)
+    assert result.observation.native_returncode is result.observation.wire_sha256 is None
+    assert not writes.exists()
+    assert [row[0] for row in conn.execute("SELECT event FROM events WHERE kind='transmission'")] == ["failed", "failed"]
 
 
 def test_recorder_outage_continues_one_disclosed_native_send(estate, monkeypatch):

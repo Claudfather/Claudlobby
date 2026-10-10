@@ -2224,7 +2224,18 @@ bot_tmux_send() {
             echo "bot_tmux_send: PLANE_MSG_ID '$PLANE_MSG_ID' is not a minted id -- no plane trailer appended" >&2
         fi
     fi
-    pane_send_verified "$peer_socket" "$session" "$safe"
+    local rc=0
+    pane_send_verified "$peer_socket" "$session" "$safe" || rc=$?
+    if [ "$rc" -eq 4 ]; then
+        # The proof was prepared before admission, but no bytes crossed the
+        # pane. Clear it here: the locked helper runs in a subshell and cannot
+        # reset these caller globals or their cross-process output itself.
+        PLANE_WIRE_SHA256=""; PLANE_WIRE_BYTES=""
+        if [ -n "${PLANE_WIRE_OUT:-}" ]; then
+            : > "$PLANE_WIRE_OUT" 2>/dev/null || true
+        fi
+    fi
+    return "$rc"
 }
 
 # --- verified pane send -------------------------------------------------------
@@ -3333,7 +3344,9 @@ pane_send_key() {
 # withheld, or it still held the payload after the last Enter. A 3 is not a
 # failure to deliver: the text is in the box, or may still arrive there, typed
 # and unsubmitted. A caller under set -e must handle it, since nothing a send
-# leaves behind is a crash.
+# leaves behind is a crash. Returns 4 when a fresh capture under the send lock
+# proves the input box already holds text: no new payload or Enter is sent, and
+# the existing input is left untouched. Unreadable captures are not held proof.
 #
 # The keystrokes go out as N chunks of at most PANE_SEND_CHUNK_BYTES, not as one
 # send-keys — see _pane_send_payload and the knobs above for the measurement
@@ -3383,6 +3396,19 @@ _pane_send_verified_locked() {
         emit_fleet_event send_blind dispatch \
             "$(printf '{"session":"%s","reason":"input-box-never-drawn","box":"%s"}' \
                 "$(json_escape "$session")" "$box")"
+    fi
+
+    # A previous send may have typed text but withheld its Enter. Appending a
+    # new payload would submit both as one prompt. Inspect after readiness and
+    # under the same recipient lock as the write; never clear or submit the hold.
+    local before
+    if before=$(bot_tmux "$socket" capture-pane -t "$session" -p 2>/dev/null) &&
+        pane_is_held "$before"; then
+        emit_fleet_event send_miss dispatch \
+            "$(printf '{"session":"%s","reason":"recipient-input-held"}' \
+                "$(json_escape "$session")")"
+        printf 'pane_send: recipient-input-held; no payload or Enter was sent\n' >&2
+        return 4
     fi
 
     # #1236: arm the trace BEFORE the send, so the one mkdir this costs happens
@@ -3606,12 +3632,14 @@ pane_is_busy() {
 #   Press up to edit queued messages   a message queued behind a running turn
 #   1. Yes, try it                     a menu's selected option: Enter CHOOSES
 # A menu also offers its own exit below the options ("Esc to cancel").
+# Exit words inside authored text are not chrome. An unnumbered footer is
+# recognized only as an exact line outside the rule below the input box.
 #
 # It says nothing about whether a turn is running, so a caller asks
-# pane_is_busy first; keepalive's classify_pane does. Byte-safe and fork-free
-# past pane_input_region: literal case patterns, so the answer does not move
-# with the locale. The idle bracket's does: under LC_ALL=C it matches a box
-# border's bytes, which is why classify_pane asks this before pane_is_idle.
+# pane_is_busy first; keepalive's classify_pane does. Byte-safe literal patterns
+# and a C-locale footer scan keep the verdict independent of locale. The idle
+# bracket's does: under LC_ALL=C it matches a box border's bytes, which is why
+# classify_pane asks this before pane_is_idle.
 pane_is_held() {
     local region first
     region=$(pane_input_region "$1")
@@ -3622,9 +3650,15 @@ pane_is_held() {
         'Try "'*'"'|'Press up to edit queued messages') return 1 ;;
         [0-9].\ *|[0-9][0-9].\ *) return 1 ;;
     esac
-    case "$region" in
-        *'Esc to cancel'*|*'Esc to go back'*) return 1 ;;
-    esac
+    if printf '%s\n' "$region" | LC_ALL=C awk '
+        NR > 1 {
+            line = $0; gsub("\342\224\200", "", line)
+            if (line ~ /^[ \t]*$/ && $0 ~ /\342\224\200/) outside = 1
+            if (outside && $0 ~ /^[ \t]*(Enter to confirm · )?Esc to (cancel|go back)[ \t]*$/) found = 1
+        }
+        END { exit !found }'; then
+        return 1
+    fi
     return 0
 }
 
@@ -3677,6 +3711,11 @@ held_delivery_match() {
     if pane_is_busy "$pane"; then printf busy; return 1; fi
     if ! pane_is_held "$pane"; then printf not-held; return 1; fi
     region=$(pane_input_region "$pane")
+    # Repair Enter requires stronger menu exclusion than a new-send refusal.
+    # Even authored exit words are ambiguous here: never choose a dialog.
+    case "$region" in
+        *'Esc to cancel'*|*'Esc to go back'*) printf not-held; return 1 ;;
+    esac
     trailer="⟦plane:${msg_id}⟧"
     if ! pane_shows_payload_end "$region" "$trailer"; then printf not-shown; return 1; fi
     box=$(_held_box_squeezed "$region")
@@ -4822,14 +4861,19 @@ inject_stamp() {
 # pane_send_verified's "not submitted" (#1236): the box never showed the
 # payload, or still held it after the last Enter. The bot is up and that prompt
 # was not submitted, so the boot goes on and the log says so (send_unsubmitted
-# records which on the plane, and the send's stderr line says it too). Any
-# other failure is returned, so under the caller's set -e and error trap it
-# ends the boot as the unguarded send used to. Here rather than in start-bot.sh
+# records which on the plane, and the send's stderr line says it too). rc 4
+# means existing input refused the send without any new keystrokes; log NOT
+# SENT and also continue, leaving the existing text untouched. Any other
+# failure is returned, so under the caller's set -e and error trap it ends the
+# boot as the unguarded send used to. Here rather than in start-bot.sh
 # because a test runs start-bot's injection branches against this file alone.
 boot_send_settled() {
     case "$2" in
         0) return 0 ;;
         3) printf '%s %s — NOT SUBMITTED: the input box never showed it, or still held it after the last Enter (#1236)\n' \
+               "$(ts_iso)" "$1" >> "$3"
+           return 0 ;;
+        4) printf '%s %s — NOT SENT: the input box already held text; no payload or Enter was sent\n' \
                "$(ts_iso)" "$1" >> "$3"
            return 0 ;;
         *) return "$2" ;;
