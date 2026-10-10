@@ -1,5 +1,6 @@
 """Owner-only transport selection; runtime/browser ingress is not exercised."""
 import asyncio
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -41,6 +42,22 @@ def test_default_plane_transport_has_no_owner_capability(browser):
     assert 'mountSessionControls' not in transport.text and '/api/owner/' not in transport.text
     page = client.get('/')
     assert 'id="owner-session"' in page.text and 'aria-label="Owner session" hidden' in page.text
+
+
+def test_owner_transport_change_refreshes_the_import_url(browser, tmp_path, monkeypatch):
+    from claudlobby.plane import view
+    _, client, store, _, _ = browser
+    _pair_locally(client, store)
+    assert _post(client, 'login').status_code == 200
+    ui = tmp_path / 'ui-assets'
+    shutil.copytree(view.UI_DIR, ui)
+    monkeypatch.setattr(view, 'UI_DIR', ui)
+    before = client.get('/app.js').text
+    transport = ui / 'owner-api-client.js'
+    info = transport.stat()
+    os.utime(transport, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000))
+    after = client.get('/app.js').text
+    assert '/api-client.js?v=' in before and before != after
 
 
 def test_session_controller_node_regressions():
