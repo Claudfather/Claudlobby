@@ -108,7 +108,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     const u = new URL(url, ref.endpoint_origin);
     if (u.origin !== ref.endpoint_origin || u.hash || u.username || u.password) throw new Error();
     const suffix = u.pathname.slice(5);
-    const fields = /^tasks\/wi_[0-9a-f]{32}$/.test(suffix) ? ['fleet'] : READS[suffix];
+    const fields = /^tasks\/wi_[0-9a-f]{32}$/.test(suffix) ? ['fleet'] : Object.hasOwn(READS, suffix) ? READS[suffix] : undefined;
     if (!fields || (streaming && suffix !== 'stream') || (!streaming && suffix === 'stream')) throw new Error();
     const names = [...u.searchParams.keys()];
     if (names.length !== new Set(names).size || names.some(k => !fields.includes(k))) throw new Error();
@@ -180,6 +180,9 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     return data;
   }
   async function carrier(url, options) {
+    // A read-only probe cannot expire/abort an explicit sign-in before issue.
+    // The pending issued response still goes through the canonical checker.
+    if (url === '/api/owner/status' && busy && !token && !pending) throw new Error();
     if (!valid()) throw new Error();
     if (url === '/api/owner/status' && pending) return { status: 200, json: async () => pending.data };
     const action = { '/api/owner/status': 'status', '/api/owner/renew': 'renew', '/api/owner/logout': 'logout' }[url];
@@ -201,6 +204,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   class FetchStream {
     constructor(url) {
       this.listeners = new Map(); this.closed = false; this.controller = null;
+      this.live = () => false;
       this.onopen = null; this.onmessage = null; this.onerror = null;
       this.done = this.run(url);
     }
@@ -209,10 +213,15 @@ export function createConnectedReadClient({ reference, documentContext, currentC
       this.listeners.get(name).add(fn);
     }
     close() { this.closed = true; this.controller?.abort(); }
-    emit(name, event) {
-      if (this.closed || !valid(true)) return;
+    emit(name, event, delivered = () => {}) {
+      if (!this.live(name === 'error')) return false;
+      delivered(); // Commit only this admitted frame, before consumer callbacks.
       this['on' + name]?.(event);
-      for (const fn of this.listeners.get(name) || []) fn(event);
+      for (const fn of this.listeners.get(name) || []) {
+        if (!this.live()) break;
+        fn(event);
+      }
+      return true;
     }
     async run(url) {
       let reader;
@@ -220,6 +229,8 @@ export function createConnectedReadClient({ reference, documentContext, currentC
         if (!valid(true)) throw new Error();
         const route = readRoute(url, true), gen = epoch, controller = new AbortController();
         this.controller = controller; requests.add(controller);
+        this.live = (allowAborted = false) => !this.closed && (allowAborted || !controller.signal.aborted) && gen === epoch
+          && handle.snapshot().state === 'ready' && valid(true);
         const timer = setTimeout(() => controller.abort(), 15000);
         let response;
         try {
@@ -227,7 +238,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
             signal: controller.signal, headers: { Authorization: 'Bearer ' + token,
               ...(cursors.has(route.key) ? { 'Last-Event-ID': cursors.get(route.key) } : {}) } });
         } finally { clearTimeout(timer); }
-        if (this.closed || controller.signal.aborted || gen !== epoch || !valid(true)
+        if (!this.live()
             || response.status !== 200 || !/^text\/event-stream(?:;|$)/i.test(response.headers.get('content-type') || '')
             || !response.body?.getReader) throw new Error();
         reader = response.body.getReader();
@@ -238,8 +249,9 @@ export function createConnectedReadClient({ reference, documentContext, currentC
           size += new TextEncoder().encode(text).length;
           if (size > 8 * 1024 * 1024) throw new Error();
           if (!text) {
-            if (id !== null) cursors.set(route.key, id);
-            if (data.length) this.emit(event, { type: event, data: data.join('\n'), lastEventId: cursors.get(route.key) || '' });
+            if (data.length) this.emit(event, { type: event, data: data.join('\n'), lastEventId: id ?? cursors.get(route.key) ?? '' },
+              () => { if (id !== null) cursors.set(route.key, id); });
+            else if (id !== null && this.live()) cursors.set(route.key, id);
             data = []; event = 'message'; id = null; size = 0;
             return;
           }
@@ -252,7 +264,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
           else if (field === 'retry' && (!cursor(value) || Number(value) > 60000)) throw new Error();
         };
         const lines = final => {
-          for (;;) {
+          while (this.live()) {
             const match = /[\r\n]/.exec(buffer); if (!match) break;
             const index = match.index;
             if (!final && buffer[index] === '\r' && index === buffer.length - 1) break;
@@ -260,9 +272,9 @@ export function createConnectedReadClient({ reference, documentContext, currentC
             line(buffer.slice(0, index)); buffer = buffer.slice(index + width);
           }
         };
-        for (;;) {
+        while (this.live()) {
           const chunk = await reader.read();
-          if (this.closed || controller.signal.aborted || gen !== epoch || !valid(true)) return;
+          if (!this.live()) return;
           if (chunk.done) { buffer += decoder.decode(); lines(true); break; } // never dispatch an incomplete frame
           if (chunk.value.byteLength > 8 * 1024 * 1024) throw new Error();
           buffer += decoder.decode(chunk.value, { stream: true });

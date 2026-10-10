@@ -263,3 +263,93 @@ test('read timeout covers a held response body after headers without publishing 
   assert.equal(h.calls.filter(c => c.url.endsWith('/read/tasks')).length, 1);
   assert.notEqual(h.api.snapshot().state, 'ready'); h.api.dispose();
 });
+
+for (const change of ['close', 'check', 'renew']) test(`buffered SSE callback ${change} retains only the delivered cursor across replacement`, async () => {
+  const h = harness(); await h.api.connect();
+  const stream = h.api.readHandle.createEventSource('/api/stream'), messages = [];
+  let replacement;
+  stream.onmessage = event => {
+    messages.push(event);
+    if (change === 'close') stream.close();
+    else replacement = h.api[change]();
+  };
+  await flush();
+  h.push('id: 1\ndata: first\n\nid: 2\ndata: undelivered\n\nid: 3\n\n');
+  await flush(); await replacement;
+  assert.deepEqual(messages.map(e => [e.data, e.lastEventId]), [['first', '1']]);
+  assert.equal(h.streams[0].init.signal.aborted, true);
+  const resumed = change === 'close' ? h.api.readHandle.createEventSource('/api/stream') : stream;
+  await flush();
+  assert.equal(h.streams.length, 2);
+  assert.equal(h.streams[1].init.headers['Last-Event-ID'], '1', 'later buffered data and id-only frames were not admitted');
+  resumed.onmessage = e => messages.push(e);
+  h.push('id: 2\ndata: undelivered\n\n'); await flush();
+  assert.deepEqual(messages.map(e => e.data), ['first', 'undelivered']);
+  h.api.dispose();
+});
+
+for (const change of ['expiry', 'context']) test(`buffered SSE ${change} loss after delivery fences later frames and id-only cursor`, async () => {
+  const h = harness(); await h.api.connect();
+  const stream = h.api.readHandle.createEventSource('/api/stream'), messages = [];
+  stream.onmessage = e => {
+    messages.push(e.data);
+    if (change === 'expiry') h.time = 900001;
+    else h.context = null;
+  };
+  await flush(); h.push('id: 1\ndata: first\n\nid: 2\ndata: undelivered\n\nid: 3\n\n'); await flush();
+  assert.deepEqual(messages, ['first']);
+  assert.equal(h.api.snapshot().state, 'unavailable');
+  if (change === 'context') h.context = { version: 2, user: { id: doc.subject }, workspace: { id: doc.workspace_id, name: 'Example' },
+    context_generation: doc.context_generation, references: [{ ...ref }] };
+  assert.equal(await h.api.connect(), true);
+  await flush();
+  assert.equal(h.streams.at(-1).init.headers['Last-Event-ID'], '1');
+  h.api.dispose();
+});
+
+test('live id-only SSE frames advance the source cursor without inventing a message', async () => {
+  const h = harness(); await h.api.connect(); const stream = h.api.readHandle.createEventSource('/api/stream');
+  let messages = 0; stream.onmessage = () => messages++; await flush();
+  h.push('id: 7\n\n'); await flush(); await h.api.check(); await flush();
+  assert.equal(messages, 0); assert.equal(h.streams[1].init.headers['Last-Event-ID'], '7'); h.api.dispose();
+});
+
+test('prototype read names fail locally without a bearer-carrying host request', async () => {
+  const h = harness(); await h.api.connect(); const count = h.calls.length;
+  for (const name of ['constructor', 'toString', 'valueOf', 'hasOwnProperty', '__proto__'])
+    assert.equal(await h.api.readHandle.jget('/api/' + name), null);
+  assert.equal(h.calls.length, count); h.api.dispose();
+});
+
+for (const stage of ['challenge', 'signer', 'issue']) for (const probe of ['check', 'start', 'readHandle'])
+  test(`read-only ${probe} during held ${stage} cannot expire or abort explicit sign-in`, async () => {
+    const done = deferred(), h = harness(stage === 'signer' ? {
+      obtainSessionAssertion: (input, { signal }) => { h.signings.push({ input, signal }); return done.promise; },
+    } : {});
+    if (stage !== 'signer') h.overrides.set(stage, () => done.promise);
+    const connect = h.api.connect(); await flush();
+    const held = stage === 'signer' ? h.signings[0] : h.calls.find(c => c.url.endsWith('/' + stage));
+    const signal = stage === 'signer' ? held.signal : held.init.signal;
+    await (probe === 'readHandle' ? h.api.readHandle.start() : h.api[probe]());
+    assert.equal(signal.aborted, false);
+    assert.doesNotMatch(h.api.snapshot().remediation || '', /expired/i);
+    assert.equal(h.calls.filter(c => c.url.endsWith('/status')).length, 0);
+    done.resolve(stage === 'signer' ? { version: 1, assertion: 'e30.e30.AAAA', expires_at: 1800000120 }
+      : reply(stage === 'challenge' ? 202 : 200, stage === 'challenge' ? challenge : ready(TOKEN)));
+    assert.equal(await connect, true);
+    assert.equal(h.calls.filter(c => c.url.endsWith('/challenge')).length, 1);
+    assert.equal(h.calls.filter(c => c.url.endsWith('/issue')).length, 1);
+    assert.equal(h.api.snapshot().state, 'ready');
+    h.api.dispose();
+  });
+
+test('a current SSE header timeout still reports loss through the existing read-only recovery', async () => {
+  const h = harness(); await h.api.connect();
+  h.overrides.set('read/stream', init => new Promise((_, reject) =>
+    init.signal.addEventListener('abort', () => reject(new Error('held stream headers')), { once: true })));
+  h.api.readHandle.createEventSource('/api/stream'); await flush(); h.runTimer(15000); await flush();
+  assert.equal(h.calls.filter(c => c.url.endsWith('/status')).length, 1);
+  assert.equal(h.calls.filter(c => c.url.endsWith('/issue')).length, 1);
+  assert.equal(h.calls.filter(c => c.url.endsWith('/renew')).length, 0);
+  h.api.dispose();
+});
