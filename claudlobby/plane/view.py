@@ -2101,10 +2101,10 @@ def create_app(
     # this estate updates source under running daemons by design
     # (update-siblings pulls weekly; weekly-worker-restart restarts BOTS,
     # not host services), so a process-lifetime token went stale in exactly
-    # the redeploy window it was built for (gauntlet round 2). Nine stats
+    # the redeploy window it was built for (gauntlet round 2). Ten stats
     # per page load — index() already reads the file per request.
     _UI_FILES = ("index.html", "app.js", "panel-state.js", "api-client.js",
-                 "work-loop.js", "action-state.js", "owner-api-client.js",
+                 "work-loop.js", "action-state.js", "owner-api-client.js", "two-source-read.js",
                  "style.css", "workspace.css")
 
     def asset_token() -> str:
@@ -2152,6 +2152,10 @@ def create_app(
     @app.get("/work-loop.js")
     def work_loop_js():
         return _busted_js("work-loop.js", ("panel-state.js", "action-state.js"))
+
+    @app.get("/two-source-read.js")
+    def two_source_read_js():
+        return _busted_js("two-source-read.js", ("owner-api-client.js",))
 
     class _NoStoreStatic(StaticFiles):
         async def get_response(self, path, scope):  # pragma: no cover - thin

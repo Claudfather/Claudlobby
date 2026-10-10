@@ -1,13 +1,17 @@
+const readHandles = new WeakSet();
+export const isOwnerReadHandle = handle => readHandles.has(handle);
+
 // Selected only by the trusted owner browser server, inside its read gate.
 // Explicit renewal avoids assuming when a restored page's session began.
 export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis),
   EventSource = globalThis.EventSource, location = globalThis.location,
   setTimeout = globalThis.setTimeout, clearTimeout = globalThis.clearTimeout,
-  monotonicNow = () => globalThis.performance.now() } = {}) {
+  monotonicNow = () => globalThis.performance.now(),
+  onAccessEnded = () => location.replace('/owner') } = {}) {
   let generation = 0, mode = 'checking', busy = false, disposed = false;
   let actionChecking = null, recoveryUsed = false, readRecoveryUsed = false, streamRecoveryUsed = false, readRecoveryTimer = null;
   let mount = null, statusNote = null, readHost = null;
-  const reads = new Set(), streams = new Set();
+  const reads = new Set(), streams = new Set(), stateListeners = new Set();
   const labels = {
     checking: 'Checking owner session…', ready: 'Owner session · renew before it expires.',
     renewing: 'Renewing owner session…', logout: 'Signing out…',
@@ -15,9 +19,15 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
     denied: 'Owner access ended. Returning to sign-in…',
     signed_out: 'Signed out. Local owner pairing remains.',
   };
+  function readerSnapshot() {
+    return Object.freeze({ state: mode, epoch: generation, remediation: statusNote,
+      read_profile: mode === 'ready' ? Object.freeze({ version: 1,
+        profile: 'direct-owner-read-v1', host_uid: readHost }) : null });
+  }
   function render(note) {
-    if (!mount) return;
     if (note) statusNote = note;
+    for (const listener of stateListeners) listener(readerSnapshot());
+    if (!mount) return;
     mount.status.textContent = statusNote || labels[mode];
     mount.renew.disabled = busy || mode !== 'ready';
     mount.logout.disabled = busy || !['ready', 'unavailable'].includes(mode);
@@ -59,7 +69,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
   }
   function leave(next) {
     pause(next);
-    location.replace('/owner'); // fixed same-origin entry, never auto-login
+    onAccessEnded(next); // Direct-host default redirects; read handles report only their source.
   }
   async function request(url, action = false, body = {}, timeout = 8000) {
     const controller = new AbortController();
@@ -353,7 +363,20 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
     pause('unavailable');
     for (const stream of [...streams]) stream.close();
   }
-  return { jget, createEventSource, mountSessionControls, interactionContext, nudgeContext, feedbackContext, prepareAction, sendAction, actionReceipt };
+  function readHandle() {
+    const handle = Object.freeze({ jget, createEventSource, dispose, snapshot: readerSnapshot,
+      start() {
+        recoveryUsed = false; readRecoveryUsed = false; streamRecoveryUsed = false;
+        return checkSession(); // Explicit read-only Check; never login or replay.
+      },
+      subscribe(listener) {
+        stateListeners.add(listener);
+        return () => stateListeners.delete(listener);
+      } });
+    readHandles.add(handle);
+    return handle;
+  }
+  return { jget, createEventSource, mountSessionControls, interactionContext, nudgeContext, feedbackContext, prepareAction, sendAction, actionReceipt, readHandle };
 }
 
 const owner = createOwnerTransport();
@@ -367,3 +390,9 @@ export const actionReceipt = owner.actionReceipt;
 export const nudgeContext = owner.nudgeContext;
 export const feedbackContext = owner.feedbackContext;
 export const prepareAction = owner.prepareAction;
+
+// Same authenticated admission and pinned-host checker, without global controls or actions.
+// The caller supplies a trusted carrier; this does not provision another host's session.
+export function createOwnerReadHandle(options = {}) {
+  return createOwnerTransport({ ...options, onAccessEnded: () => {} }).readHandle();
+}
