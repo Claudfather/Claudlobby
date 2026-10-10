@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import stat
 import uuid
 from pathlib import Path
 
@@ -109,6 +110,30 @@ def derive_session_uid(platform_session_id: str, agent_cli: str = "claude") -> s
 
 def mint_uid(kind: str) -> str:
     return mint(_UID_PREFIX[kind])
+
+
+def read_host_uid(state_dir: Path) -> str:
+    """Read an existing private installation identity without repairing it.
+
+    This identifies the installation, not its operator or a remote caller.
+    Readers must never mint a replacement identity or relax file checks.
+    """
+    state_dir = Path(state_dir)
+    try:
+        if state_dir.is_symlink():
+            raise ValueError("redirected state")
+        fd = os.open(state_dir / "host-uid", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "r") as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) != 0o600):
+                raise ValueError("host identity is not an owned private file")
+            value = stream.read().strip()
+        if not _HOST_UID_RE.fullmatch(value):
+            raise ValueError("malformed host identity")
+        return value
+    except (OSError, ValueError, UnicodeError) as exc:
+        raise ValueError("existing host identity is unavailable or invalid") from exc
 
 
 def ensure_host_uid(state_dir: Path) -> str:

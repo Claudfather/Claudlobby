@@ -68,6 +68,206 @@ counts the provisional ones. Session uids are transcript-stable
 (`sess_` + sha256 of the platform session id — the bash derivation in
 `claudlobby/_runtime_scripts/plane-session-start.sh` is pinned byte-identical to `ids.derive_session_uid(id)` for agent CLI `claude`; another agent CLI derives in Python only, through `ids.session_alias(id, agent_cli)` (#2145 F2)).
 
+## Owner access foundation (not enabled)
+
+`plane/owner_access.py` is an internal policy/state primitive for **direct,
+whole-deployment reads**, with separately approved per-fleet ordinary messages.
+It does not authenticate a browser. The internal
+`plane/owner_view.py:create_owner_app` factory exercises it with an explicitly
+injected verifier; no CLI command, environment flag or startup job enables
+that factory. The current runtime view is unchanged. This is bounded owner-access work
+related to #1623, not completion of that issue or permission to expose Plane.
+
+Explicit initialization requires the existing private `state/host-uid`, using
+`ids.read_host_uid` (also used by operation identity resolution). Reads never
+mint or repair it. The separate `state/plane/owner-access.db` is 0600 in a 0700
+directory, bound to that installation and schema version. It does not migrate
+or write the flight recorder. Missing, malformed, redirected, incompatible or
+wrong-installation authority fails closed. This is not protection from root
+or another process with the same OS identity, nor a solution to a clone that
+copies both the host identity and authority store.
+
+The prototype's contract:
+
+- A trusted ingress will supply a namespaced human `PrincipalRef`. This value
+  is only a reference; constructing it proves nothing. A pending pairing
+  expires after five minutes and confers no access. Separate local approval
+  must confirm its exact token and displayed principal. Only one owner is
+  active; replacement requires explicit revocation followed by fresh pairing.
+- Pairing/revocation append monotonically numbered grant changes. Concurrent
+  confirmations serialize; one wins and invalidates all pending challenges.
+  Revocation names the expected grant revision, so a stale approval cannot
+  remove a later owner's grant. There is no cloud-requested removal door or
+  claim that an undelivered removal has been applied.
+- A paired principal can establish a fresh direct session without the website.
+  Sessions last fifteen minutes in this prototype, are bound to the current
+  grant revision, and require the verified principal again for each read or
+  renewal. Renewal atomically replaces the token. Lost renewal responses need
+  fresh direct authentication; an old token cannot be replayed. Expiry and
+  session termination do not revoke the durable pairing.
+- `authorize_read` checks the supplied target installation (the caller must
+  derive it from the actual data source, never a browser claim), session expiry and current
+  owner revision from disk on every call. Applied revocation blocks the next
+  admission, renewal and fresh session, including in another process. The
+  internal protected view also checks before each response-body delivery and
+  closes a stream on refusal. The state module itself has no HTTP behavior.
+- Credentials contain 256 random bits; only SHA-256 digests are stored. Token
+  fields are omitted from object representations. Each store permits at most
+  32 pending challenges and 32 sessions, cleaning expired records on the next
+  corresponding write. Grant-change history remains local. Storage is durable
+  SQLite with explicit transactions; authorization reads are query-only.
+  Initialization publishes a complete private database atomically, without
+  replacing existing authority; interrupted preparation can leave only a
+  temporary file that is never consulted for admission.
+
+A writer interrupted during a SQLite commit can leave a hot rollback journal.
+Read admissions and `current_grant` use read-only connections, so they cannot
+roll it back and may report unavailable (503 through the protected factory).
+Recovery is an explicit local operation on the existing authority: the internal
+`OwnerAccess._connection(write=True)` context opens it in `mode=rw`, lets SQLite
+recover the journal, and validates its installation and schema. Entering and
+closing that context without changing rows preserves grants and sessions.
+An already-authorized pairing/session/revocation operation uses the same write
+connection, but still performs its declared mutation. No recovery CLI is
+exposed; `initialize` validates existing authority through a read-only
+connection and is not a recovery door. HTTP reads never perform this recovery.
+
+These lifetimes and limits are bounded experiment choices, not a selected
+browser protocol. Pairing and reader sessions grant no website membership,
+workspace binding or operational writes. The separate message grant below
+does not replace canonical operation binding or Plane actor attestation (#1622).
+
+### Explicit owner messages (internal, no browser endpoint)
+
+`OwnerAccess.allow_messages` is a local approval primitive: it binds the exact
+current owner grant to one canonical fleet UID and one existing human actor UID
+and alias. It is never callable by a remote client. Approval transactionally
+creates the optional `message_grants` table in the private authority store;
+ordinary initialization and reads do not create or migrate that table. A grant
+cannot change actor until locally revoked. Owner revocation/re-pairing invalidates
+every old message grant. Reader access alone continues to refuse messages.
+
+`plane/owner_messages.py:OwnerMessages` pins an installation and accepts only
+an already verified `VerifiedReader`. For each operation it checks the session
+and grant, binds current active host/fleet/actor identities, and refuses generated
+bot/timer environment selectors. It accepts an exact recipient UID from that
+fleet, never an alias supplied as the sender or an OS-account fallback. The
+caller must register the intended human identity separately before local approval.
+
+The send holds canonical runtime mutation admission and calls the extracted
+`commands/message_write.py:deliver_bound_message` workflow. CLI and internal
+owner sends therefore share request UUID conflict handling, recording, native
+delivery, held-box repair and receiver byte-integrity proof. Native submission
+alone is not success. Exceptions can follow effects: retain the original UUID,
+then `inspect` its bound request and receiver evidence without resending. A
+missing request does not prove no previous effect. The internal result types
+are evidence for a future adapter, not a ready-made browser response contract.
+
+Admission is rechecked at dispatch start and before returning inspection data.
+Revocation prevents subsequent admission; it does not cancel an effect already
+in progress. This slice supports ordinary messages only. It supplies no HTTP
+route, UI capability, retry control, reply, task mutation, local confirmation
+UI, trusted ingress verifier or browser origin/CSRF policy. Those and a real
+isolated bot canary remain required before enabling browser operations. Tests
+use real private activation/Plane owners with a synthetic native receiver.
+
+### Protected read factory (internal experiment)
+
+`create_owner_app` wraps the canonical `view.create_app` in one outer ASGI gate.
+The resolved source root also selects its owner authority and host UID; request
+parameters cannot select an authority store or another deployment. There is no
+path allowlist: API routes, search, grid, health details, static files, HEAD,
+errors and later-added routes all cross the gate. Even an admitted reader
+cannot use a write method or WebSocket through this factory.
+
+The required asynchronous verifier supplies an immutable `VerifiedReader`
+(principal and session token) from trusted server code. No identity headers,
+cookies, URL credentials, website user IDs or workspace IDs are interpreted.
+The test verifier is out of band and synthetic; it is not a production
+Tailscale verifier. This factory has no HTTP session-creation or pairing endpoint;
+the separate browser transport below owns those exact lifecycle routes.
+
+Admission happens before calling the view and again immediately before every
+response body chunk, using current host identity, grant and session state.
+Headers are held until the first body is admitted. Every response is
+`Cache-Control: no-store`; sendfile extensions are disabled so static bytes
+cannot bypass the gate. Non-SSE responses preserve Content-Length when supplied.
+Before headers are sent, denial is 403 and unavailable authority is 503, both
+with generic bodies. After an SSE stream starts, refusal closes it normally
+without another private frame or a replacement status. Other started responses
+abort without a terminating body chunk, so a truncated response is a transport
+failure rather than a successful short 200. Refusal is latched for that response;
+subsequent sends cannot resume delivery even if the inner producer catches it.
+The existing stream's one-second idle tick supplies the next admission check.
+Already delivered/in-flight bytes cannot be recalled; this is admission at
+each delivery, not a global transaction between revocation and network output.
+
+The protected factory preserves the existing lifespan and `begin_shutdown`
+signal. The normal `plane view` command continues to call the original factory.
+This experiment establishes response enforcement, not deployed protection,
+browser login, a credential transport choice or website workspace admission.
+Source binding is to the installation's local data root. It does not establish
+row provenance for an operator-copied or mixed-host database: a database-host
+ownership invariant/refusal is still required before protected activation.
+
+Before enabling protected endpoints, implement and validate the trusted
+Tailscale human identifier/ingress, local confirmation boundary, browser
+credential carrier, database ownership and end-to-end enforcement on the
+supported hosts and browsers. Tailscale Serve
+[documents user headers and their trust limits](https://tailscale.com/docs/features/tailscale-serve#identity-headers):
+they must not be accepted from an arbitrary directly reachable backend.
+Website-connected sessions additionally require independently verified website
+identity/workspace evidence; a supplied user/workspace string is insufficient.
+The view's GET-only contract remains intact, with pairing/session mutations
+in the separate authority transport below. No real protected use is claimed by
+the synthetic policy tests.
+
+### Direct-host browser transport (internal experiment)
+
+`plane/owner_browser.py:create_owner_browser_app` wraps the protected read
+factory and exposes exactly five lifecycle routes. It requires an asynchronous
+trusted `PrincipalRef` verifier and one configured canonical external HTTPS
+origin. There is no default identity verifier: cookies, query parameters and
+Tailscale/forwarded identity headers do not establish identity here. No CLI,
+environment flag or startup service enables this transport.
+
+| Route | Method | Effect |
+| --- | --- | --- |
+| `/api/owner/status` | GET | Reports needs-pairing, sign-in-required or ready; never initializes authority. |
+| `/api/owner/pair` | POST | Returns a five-minute challenge and verified principal for separate local approval. |
+| `/api/owner/login` | POST | Opens a session after local confirmation; a current session is rotated; stale cookies recover through fresh verified sign-in. |
+| `/api/owner/renew` | POST | Rotates the current session, invalidating its old token. |
+| `/api/owner/logout` | POST | Ends the current session and removes its cookie. |
+
+Every HTTP request must match the configured Host; any supplied Origin must
+match the configured HTTPS origin. POSTs additionally require that Origin,
+`X-Claudlobby-Owner: 1`, JSON content type and an empty JSON object (at most
+1 KiB, read within five seconds). Cross-origin preflight, query-bearing
+lifecycle requests and ambiguous Host/Origin/intent headers are refused. No CORS policy
+admits another origin. Local HTTP forwarding is permitted only because the
+caller must separately secure its HTTPS proxy/backend boundary.
+
+The session is carried only by `__Host-claudlobby-owner`, with Secure,
+HttpOnly, SameSite=Strict, Path=/ and no Domain. Responses never put session
+credentials in JSON or URLs, and lifecycle responses are no-store. Only
+explicit logout deletes the cookie. Status and failed-renewal responses
+do not clear it: a delayed response must not erase a newer cookie installed by
+an overlapping renewal. Explicit sign-in recovers malformed or expired cookies
+using the freshly verified principal and current local grant. The pairing
+challenge is not a session: local `confirm_pairing` must still verify its exact
+token and displayed principal. No HTTP confirmation, revocation, message grant
+or bot action exists.
+
+All other paths still cross the protected canonical read gate, including
+static files and each SSE body delivery. Logout or locally applied revocation
+therefore blocks the next private delivery. Tests exercise this with disposable
+state and an injected synthetic principal, plus a loopback HTTP subprocess
+simulating a proxy. They do not prove actual HTTPS browser cookie behavior or
+Tailscale identity. Trusted ingress, local confirmation UI, database ownership,
+real browser validation and an independent bot canary remain activation gates.
+This is a same-origin direct-host protocol, not website OAuth, cross-origin
+embedding or workspace membership.
+
 ## The write spine
 
 `emit()` / `emit_batch()` (`claudlobby/plane/emit_api.py`) is the one

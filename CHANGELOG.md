@@ -20,6 +20,28 @@ A bot unit runs with `KillMode=process`, so systemd marks it stopped as soon as 
   - `tests/test_bot_operations.py`: the stop waits, and both a session that never exits and a stop that never happened read unverified.
   - `tests/test_fleet_operations.py`: a stale socket reads absent only by the proof.
 
+### Added — internal direct-host browser session transport
+
+An internal factory connects an explicitly verified principal to local owner
+pairing and protected Plane reads. Exact status, pairing, sign-in, renewal and
+sign-out routes reuse the existing owner authority; session credentials stay
+in a Secure/HttpOnly host cookie. Host, Origin and explicit request-intent checks
+guard lifecycle writes, while static files and SSE retain the read gate's
+per-delivery checks. No runtime command enables it. A production identity
+verifier, local confirmation UI and actual HTTPS browser validation remain
+required; website OAuth and bot action endpoints are outside this increment.
+
+### Added — internal owner-authorized ordinary-message adapter
+
+An explicitly paired host owner can receive a separately approved message grant
+for one fleet and existing human actor. The internal adapter checks that grant,
+current identities and active-release admission before using the same send and
+receiver-integrity workflow as the CLI. It retains request evidence for recovery
+without resending, including when communication recording failed. Reader sessions
+remain read-only by default. No browser endpoint or runtime service enables this
+adapter; trusted ingress, local confirmation UI and real bot canary validation
+remain required before browser operations are activated.
+
 ### Fixed — the oversize-request daemon test passes when the daemon closes before the test's shutdown (#2215)
 
 `test_oversize_request_refused_not_fatal` guarded its send but not the `shutdown(SHUT_WR)` after it. When the send fit and the daemon refused and closed before that shutdown, macOS raised ENOTCONN where Linux returns, and a macOS lane failed (CI run 37550245839, attempt 1). The shutdown now sits inside the send's guard, so either order is an expected outcome. The test still checks any refusal it reads, and that the daemon serves the next request. Test-only.
