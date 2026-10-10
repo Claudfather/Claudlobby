@@ -908,7 +908,7 @@ test('bot roster names are native inspect buttons bound to full server fleet and
     get innerHTML() { return this.html; }, querySelectorAll() { return nodes; } };
   const twin = { ...botIdentity, uid: 'actor_' + '6'.repeat(32), alias: 'bot:other/worker', fleet: 'other', fleet_uid: 'fleet_' + '7'.repeat(32) };
   const state = { document, rosterIdentities: new Map(), rosterGeneration: 0, sessionEpoch: 2, sessionPaused: false,
-    currentView: 'channel', equipmentAlias: null, fleets: [botIdentity, twin].map(b => ({ alias: b.fleet, uid: b.fleet_uid })),
+    currentView: 'channel', equipmentAlias: null, equipmentFocus: null, fleets: [botIdentity, twin].map(b => ({ alias: b.fleet, uid: b.fleet_uid })),
     $: () => rail, esc: value => String(value), ago: () => '', renderState: () => false,
     refreshEquipmentAction() {}, inspectBot(identity) { opens.push(identity); },
     groupBy(rows, key) { return [...Map.groupBy(rows, key).values()]; } };
@@ -1219,4 +1219,44 @@ test('inventory reload preserves panel focus through replacement of the entire d
   h.reads[2].resolve(null); h.reads[3].resolve(null); await loading;
   h.reads[4].resolve(equipmentEnvelope(botIdentity.alias)); await flush();
   assert.equal(h.document.activeElement, h.buttons.get('.ed-message'));
+});
+
+for (const focus of ['origin', 'composer', 'separately focused replacement'])
+test(`same-room roster replacement preserves pending inspection focus intent: ${focus}`, async () => {
+  const h = inspectionHarness(), nodes = [];
+  const rail = {
+    set innerHTML(value) {
+      for (const node of nodes) {
+        if (h.document.activeElement === node) h.document.activeElement = h.document.body;
+        node.isConnected = false;
+      }
+      nodes.length = 0;
+      for (const match of value.matchAll(/data-bot-inspect="([^"]+)"/g)) nodes.push({
+        dataset: { botInspect: match[1] }, isConnected: true,
+        focus() { h.document.activeElement = this; },
+        addEventListener(event, listener) { this[event] = listener; },
+      });
+    }, querySelectorAll() { return nodes; },
+  };
+  const get = h.state.$; h.state.$ = id => id === 'fleet' ? rail : get(id);
+  h.state.renderState = node => { if (node === rail) return false; node.innerHTML = 'loading'; };
+  h.state.activeRoom = () => botIdentity.fleet;
+  let pending; h.state.setView = () => { pending = h.state.openEquipment(h.state.equipmentAlias); };
+  runInNewContext(rosterHelpers, h.state);
+  const board = { state: 'ok', data: { identities: [{ ...botIdentity, kind: 'actor', short: 'Worker' }] } };
+  h.state.renderFleet(board); const origin = nodes[0]; origin.focus(); origin.click();
+  assert.equal(h.state.equipmentFocus.origin, origin); assert.equal(h.reads.length, 1);
+  const composer = { isConnected: true };
+  if (focus !== 'origin') h.document.activeElement = composer;
+  h.state.renderFleet(board); const replacement = nodes[0];
+  assert.equal(origin.isConnected, false); assert.notEqual(replacement, origin); assert.equal(h.reads.length, 1);
+  if (focus === 'origin') {
+    assert.equal(h.document.activeElement, replacement); assert.equal(h.state.equipmentFocus.origin, replacement);
+  } else {
+    assert.equal(h.document.activeElement, composer); assert.equal(h.state.equipmentFocus.origin, origin);
+    if (focus === 'separately focused replacement') replacement.focus();
+  }
+  h.reads[0].resolve(equipmentEnvelope(botIdentity.alias)); await pending;
+  assert.equal(h.document.activeElement, focus === 'origin' ? h.buttons.get('.ed-close') : focus === 'composer' ? composer : replacement);
+  assert.equal(h.state.equipmentFocus, null); assert.deepEqual(h.selections, []);
 });

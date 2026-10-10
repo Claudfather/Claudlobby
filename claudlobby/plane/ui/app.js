@@ -530,8 +530,13 @@ function renderFleet(env) {
   });
   if (focusedIdentity) {
     const current = rosterIdentities.get(focusedIdentity.uid);
-    if (current && Object.keys(focusedIdentity).every(key => focusedIdentity[key] === current[key]))
-      [...el.querySelectorAll("[data-bot-inspect]")].find(button => button.dataset.botInspect === current.uid)?.focus();
+    if (current && Object.keys(focusedIdentity).every(key => focusedIdentity[key] === current[key])) {
+      const replacement = [...el.querySelectorAll("[data-bot-inspect]")].find(button => button.dataset.botInspect === current.uid);
+      if (replacement) {
+        if (equipmentFocus?.origin === focused) equipmentFocus.origin = replacement;
+        replacement.focus();
+      }
+    }
   }
 }
 // The roster generation moves only when an inspectable identity changed: an
