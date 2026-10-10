@@ -3,7 +3,7 @@ import { esc, ago, stateBlock } from "/panel-state.js";
 
 // One presentation for direct and embedded Plane. No transport is constructed
 // here: the default read-only client never supplies a write capability.
-export function mountWorkLoop({ api, renderThread, refresh }) {
+export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = () => {} }) {
   const root = document.getElementById("work-loop");
   const dialog = document.getElementById("task-detail");
   let storage;
@@ -53,6 +53,28 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
     try { state.draft(row(), $("work-body").value); }
     catch (error) { notice = error.message; }
   }
+  // Selection only: authority must already be admitted for this exact room.
+  // No context probe, task preparation, submission or receipt lookup lives here.
+  function canSelectMessageRecipient(identity) {
+    const message = contextsByKind.get("message");
+    return !!message && message.version === 1 && message.actions.includes("message")
+      && identity?.current === true && identity.provisional === false
+      && /^actor_[0-9a-f]{32}$/.test(identity.uid)
+      && /^fleet_[0-9a-f]{32}$/.test(identity.fleet_uid)
+      && typeof identity.alias === "string" && identity.alias.length > 0
+      && identity.fleet === room && message.room === room && message.scope.fleet === room
+      && message.recipients.some(recipient => recipient.id === identity.uid);
+  }
+  function selectMessageRecipient(identity) {
+    if (!canSelectMessageRecipient(identity)) return false;
+    saveDraft(); ++compositionEpoch;
+    context = contextsByKind.get("message"); kind = "message"; targetTitle = null;
+    target = { recipient: identity.uid, task_id: null };
+    messageRecipients.set(scopeKey(context.scope), identity.uid);
+    opener = null; openerIdentity = null;
+    closeDetail(); notice = ""; paint({ restoreDraft: true }); $("work-body").focus();
+    return true;
+  }
   function pendingRows() {
     const rows = state.pending.filter(visibleRequest);
     $("work-pending").innerHTML = rows.map(p => `<div class="pending-action">
@@ -93,6 +115,7 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
       : "";
     $("work-clear-saved").hidden = !state.corruptStorage;
     pendingRows();
+    onActionsChange();
   }
   function closeDetail() {
     ++detailEpoch; detailSnapshot = null;
@@ -492,5 +515,5 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
     } finally { checkingReceipts.delete(request.request_id); if (token === epoch) paint({ restoreDraft: selection === selectionKey() }); }
   };
   paint();
-  return { setRoom, update, invalidate, pause };
+  return { setRoom, update, invalidate, pause, canSelectMessageRecipient, selectMessageRecipient };
 }

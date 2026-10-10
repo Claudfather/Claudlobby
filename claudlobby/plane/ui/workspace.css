@@ -627,3 +627,8 @@ button:focus-visible,textarea:focus-visible,select:focus-visible { outline:3px s
 .task-record-details summary { cursor:pointer; }
 .task-record-details .task-facts { margin:12px 0; }
 .task-history > li { margin:16px 0; }
+
+/* Roster inspection uses native buttons, with the existing name treatment. */
+.bot-inspect { border:0; padding:0; background:transparent; color:var(--ink); text-align:left; overflow-wrap:anywhere }
+.bot-inspect:hover { text-decoration:underline }
+.ed-message { margin:12px 0; }

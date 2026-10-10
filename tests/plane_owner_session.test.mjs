@@ -597,7 +597,7 @@ test('aborted inventory from an earlier session cannot overwrite the resumed pan
   const app = await readFile(new URL('../claudlobby/plane/ui/app.js', import.meta.url), 'utf8');
   const poll = app.slice(app.indexOf('async function pollFleet()'), app.indexOf('function orgNode('));
   const inventory = deferred(), rendered = [];
-  const state = { sessionPaused: false, sessionEpoch: 1, inventoryGeneration: 0, currentFleet: 'synthetic', currentView: 'fleet',
+  const state = { sessionPaused: false, sessionEpoch: 1, inventoryGeneration: 0, equipmentGeneration: 0, inventoryAliases: new Set(), currentFleet: 'synthetic', currentView: 'fleet',
     fleetQuery: () => '?fleet=synthetic', $: () => ({}), renderState() {}, renderInventory(value) { rendered.push(value); },
     jget: () => inventory.promise };
   const pending = runInNewContext(`${poll}\npollFleet()`, state);
@@ -637,7 +637,7 @@ test('both resume callbacks preserve equipment through loading DOM replacement a
   for (const order of [[0, 1], [1, 0]]) {
     const requests = [deferred(), deferred()], rendered = [], opened = [], room = {};
     let detail = { hidden: false, alias: 'synthetic-worker' }, index = 0;
-    const state = { sessionPaused: true, sessionEpoch: 4, inventoryGeneration: 0,
+    const state = { sessionPaused: true, sessionEpoch: 4, inventoryGeneration: 0, equipmentGeneration: 0, inventoryAliases: new Set(),
       currentView: 'fleet', currentFleet: 'synthetic', equipmentAlias: 'synthetic-worker',
       fleetQuery: () => '?fleet=synthetic', refreshBoards() {},
       $: id => id === 'fleet-room' ? room : id === 'equip-detail' ? detail : { value: '' },
@@ -850,4 +850,197 @@ for(const lifecycle of ['renew','logout'])test(`session ${lifecycle} fences late
  const {semantic_sha256,...pre}=feedbackMetadata;
  for(const path of ['prepare','send']){const held=deferred(),h=harness([ready,()=>held.promise,ok(lifecycle==='renew'?{state:'ready'}:{state:'signed_out'})]);await h.controls.ready;
  const action=path==='prepare'?h.api.prepareAction({...pre,body:'Comment'}):h.api.sendAction({...feedbackMetadata,body:'Comment'});const rejection=assert.rejects(action,/unknown/);await h.click(lifecycle);held.resolve(ok(path==='prepare'?feedbackMetadata:{...feedbackMetadata,status:'delivered'}));await rejection;assert.equal(h.calls.filter(c=>c.url.endsWith('/'+path)).length,1);h.controls.dispose();}
+});
+
+const inspectionApp = await readFile(new URL('../claudlobby/plane/ui/app.js', import.meta.url), 'utf8');
+const inspectionHelpers = inspectionApp.slice(inspectionApp.indexOf('function closeEquipment()'));
+const rosterHelpers = inspectionApp.slice(inspectionApp.indexOf('function railRow('), inspectionApp.indexOf('// The header in the operator'));
+const botIdentity = { uid: 'actor_' + '4'.repeat(32), alias: 'bot:team/with/slash/worker',
+  fleet: 'team/with/slash', fleet_uid: 'fleet_' + '5'.repeat(32), provisional: false };
+const equipmentEnvelope = alias => ({ state: 'ok', data: { alias, short: 'Worker', equipment: {}, posture: {},
+  changes: [], versions: 1, composed_hashes: {}, org: {} } });
+function inspectionHarness() {
+  const reads = [], selections = [], buttons = new Map(), cards = [];
+  const document = { activeElement: null };
+  let box;
+  function detail() {
+    return { hidden: true, content: '', scrolls: 0,
+      set innerHTML(value) {
+        for (const button of buttons.values()) button.isConnected = false;
+        buttons.clear(); this.content = value;
+        for (const name of ['ed-close', 'ed-message']) if (value.includes(name)) {
+          buttons.set('.' + name, { isConnected: true, disabled: true,
+            addEventListener(event, listener) { this[event] = listener; } });
+        }
+      }, get innerHTML() { return this.content; },
+      querySelector(selector) { return buttons.get(selector) || null; },
+      scrollIntoView() { this.scrolls++; } };
+  }
+  box = detail();
+  const state = { sessionPaused: false, sessionEpoch: 1, currentFleet: botIdentity.fleet, currentView: 'fleet',
+    inventoryGeneration: 1, rosterGeneration: 1, equipmentGeneration: 0, equipmentAlias: null, equipmentSelection: botIdentity,
+    fleets: [{ alias: botIdentity.fleet, uid: botIdentity.fleet_uid }],
+    inventoryAliases: new Set([botIdentity.alias]), rosterIdentities: new Map([[botIdentity.uid, botIdentity]]),
+    EQUIP_ORDER: ['skills'], esc: value => String(value), ago: () => '',
+    document, $: id => id === 'equip-detail' ? box : id === 'fleet-room' ? { querySelectorAll: () => cards } : { scrollIntoView() {} },
+    stateBlock: (state, provenance, text) => text || state,
+    renderState(node) { node.innerHTML = 'loading'; },
+    jget(url) { const pending = deferred(); reads.push({ url, ...pending }); return pending.promise; },
+    workLoop: { canSelectMessageRecipient(identity) { return !!identity && !identity.provisional; },
+      selectMessageRecipient(identity) { if (!this.canSelectMessageRecipient(identity)) return false; selections.push(identity); return true; } },
+  };
+  runInNewContext(inspectionHelpers, state);
+  return { state, reads, selections, buttons, cards, document, get box() { return box; }, replaceBox() { box = detail(); } };
+}
+
+test('bot roster names are native inspect buttons bound to full server fleet and UID, including twins', () => {
+  const opens = [], nodes = [], document = { activeElement: null };
+  const rail = { html: '', set innerHTML(value) { this.html = value; for (const node of nodes) node.isConnected = false; nodes.length = 0;
+    for (const match of value.matchAll(/data-bot-inspect="([^"]+)"/g)) nodes.push({ dataset: { botInspect: match[1] }, isConnected: true, focus() { document.activeElement = this; },
+      addEventListener(event, listener) { this[event] = listener; } }); },
+    get innerHTML() { return this.html; }, querySelectorAll() { return nodes; } };
+  const twin = { ...botIdentity, uid: 'actor_' + '6'.repeat(32), alias: 'bot:other/worker', fleet: 'other', fleet_uid: 'fleet_' + '7'.repeat(32) };
+  const state = { document, rosterIdentities: new Map(), rosterGeneration: 0, sessionEpoch: 2, sessionPaused: false,
+    currentView: 'channel', equipmentAlias: null, fleets: [botIdentity, twin].map(b => ({ alias: b.fleet, uid: b.fleet_uid })),
+    $: () => rail, esc: value => String(value), ago: () => '', renderState: () => false,
+    refreshEquipmentAction() {}, inspectBot(identity) { opens.push(identity); },
+    groupBy(rows, key) { return [...Map.groupBy(rows, key).values()]; } };
+  runInNewContext(rosterHelpers, state);
+  const rows = [botIdentity, twin].map(b => ({ ...b, kind: 'actor', short: 'Worker' }));
+  state.renderFleet({ state: 'ok', data: { identities: rows } });
+  assert.match(rail.innerHTML, /<button class="bot-inspect" type="button"/);
+  assert.match(rail.innerHTML, /aria-label="Inspect Worker in team\/with\/slash"/);
+  nodes[1].click(); assert.equal(opens[0].uid, twin.uid); assert.equal(opens[0].alias, twin.alias); assert.equal(opens[0].fleet_uid, twin.fleet_uid);
+  nodes[1].focus(); const prior = document.activeElement, version = state.rosterGeneration;
+  state.renderFleet({ state: 'ok', data: { identities: rows } });
+  assert.notEqual(document.activeElement, prior); assert.equal(document.activeElement.dataset.botInspect, twin.uid);
+  assert.equal(state.rosterGeneration, version);
+  const stale = nodes[0]; state.rosterGeneration++; stale.click(); assert.equal(opens.length, 1);
+});
+
+for (const change of ['session', 'pause', 'fleet', 'view', 'inventory', 'roster', 'close', 'DOM', 'selection'])
+test(`equipment response is fenced after ${change} changes`, async () => {
+  const h = inspectionHarness(), loading = h.state.openEquipment(botIdentity.alias);
+  if (change === 'session') h.state.sessionEpoch++;
+  if (change === 'pause') h.state.sessionPaused = true;
+  if (change === 'fleet') h.state.currentFleet = 'other';
+  if (change === 'view') h.state.currentView = 'channel';
+  if (change === 'inventory') h.state.inventoryGeneration++;
+  if (change === 'roster') h.state.rosterGeneration++;
+  if (change === 'close') h.state.closeEquipment();
+  if (change === 'DOM') h.replaceBox();
+  if (change === 'selection') h.state.equipmentSelection = { ...botIdentity };
+  h.reads[0].resolve(equipmentEnvelope(botIdentity.alias)); await loading;
+  assert.equal(h.buttons.has('.ed-message'), false); assert.deepEqual(h.selections, []);
+});
+
+test('equipment same-alias close/reopen and out-of-order requests cannot restore an old panel', async () => {
+  const h = inspectionHarness(), old = h.state.openEquipment(botIdentity.alias);
+  h.state.closeEquipment(); h.state.equipmentSelection = botIdentity;
+  const fresh = h.state.openEquipment(botIdentity.alias);
+  h.reads[1].resolve({ ...equipmentEnvelope(botIdentity.alias), data: { ...equipmentEnvelope(botIdentity.alias).data, model: 'New model' } }); await fresh;
+  h.reads[0].resolve({ ...equipmentEnvelope(botIdentity.alias), data: { ...equipmentEnvelope(botIdentity.alias).data, model: 'Old model' } }); await old;
+  assert.match(h.box.innerHTML, /New model/); assert.doesNotMatch(h.box.innerHTML, /Old model/);
+});
+
+test('equipment must match the exact requested alias even when a twin has the same display name', async () => {
+  const h = inspectionHarness(), pending = h.state.openEquipment(botIdentity.alias);
+  h.reads[0].resolve(equipmentEnvelope('bot:other/worker')); await pending;
+  assert.match(h.box.innerHTML, /did not match the selected bot/); assert.equal(h.buttons.has('.ed-message'), false);
+  assert.equal(h.reads[0].url, '/api/equipment?alias=' + encodeURIComponent(botIdentity.alias));
+});
+
+test('equipment action checks current exact identity and authority, then only selects the recipient', async () => {
+  const h = inspectionHarness(), pending = h.state.openEquipment(botIdentity.alias);
+  h.reads[0].resolve(equipmentEnvelope(botIdentity.alias)); await pending;
+  const message = h.buttons.get('.ed-message'); assert.equal(message.disabled, false);
+  h.state.inventoryAliases.clear(); h.state.refreshEquipmentAction(); assert.equal(message.disabled, true);
+  message.click(); assert.deepEqual(h.selections, []);
+  h.state.inventoryAliases.add(botIdentity.alias);
+  h.state.rosterIdentities.set(botIdentity.uid, { ...botIdentity, alias: 'bot:other/worker' });
+  h.state.refreshEquipmentAction(); assert.equal(message.disabled, true); message.click(); assert.deepEqual(h.selections, []);
+  h.state.rosterIdentities.set(botIdentity.uid, botIdentity);
+  h.state.workLoop.canSelectMessageRecipient = () => false;
+  h.state.refreshEquipmentAction(); assert.equal(message.disabled, true); message.click(); assert.deepEqual(h.selections, []);
+  h.state.workLoop.canSelectMessageRecipient = identity => !!identity;
+  h.state.refreshEquipmentAction(); message.click();
+  assert.equal(h.selections.length, 1); assert.equal(h.selections[0].uid, botIdentity.uid); assert.equal(h.selections[0].alias, botIdentity.alias);
+  assert.equal(h.selections[0].fleet, botIdentity.fleet); assert.equal(h.selections[0].fleet_uid, botIdentity.fleet_uid);
+  assert.equal(h.box.hidden, true); assert.equal(h.reads.length, 1);
+  message.click(); assert.equal(h.selections.length, 1);
+});
+
+
+test('initial fleet discovery cannot change a newer room or resumed session', async () => {
+  const refresh = inspectionApp.slice(inspectionApp.indexOf('async function refreshBoards()'), inspectionApp.indexOf('function scheduleRefresh()'));
+  for (const reason of ['room', 'session']) {
+    const reply = deferred(), adopted = [];
+    const state = { sessionPaused: false, generation: 0, fleetsSeen: false,
+      jget: () => reply.promise, adoptFleets(value) { adopted.push(value); } };
+    const pending = runInNewContext(`${refresh}\nrefreshBoards()`, state);
+    state.generation++; if (reason === 'session') state.sessionPaused = true;
+    reply.resolve({ state: 'ok', data: { default: 'old room' } }); await pending;
+    assert.deepEqual(adopted, []);
+  }
+});
+
+test('unchanged roster keeps equipment open without a refetch; changed identity fences old equipment', () => {
+  const opened = [];
+  const state = { rosterIdentities: new Map([[botIdentity.uid, botIdentity]]), rosterGeneration: 3,
+    equipmentAlias: botIdentity.alias, currentView: 'fleet', refreshEquipmentAction() {},
+    openEquipment(alias) { opened.push(alias); } };
+  runInNewContext(rosterHelpers, state);
+  state.adoptRoster(new Map([[botIdentity.uid, { ...botIdentity }]]));
+  assert.equal(state.rosterGeneration, 3); assert.deepEqual(opened, []);
+  state.adoptRoster(new Map([[botIdentity.uid, { ...botIdentity, provisional: true }]]));
+  assert.equal(state.rosterGeneration, 4); assert.deepEqual(opened, [botIdentity.alias]);
+});
+
+test('closing equipment restores focus to its exact bot card, never a same-name twin', async () => {
+  const h = inspectionHarness();
+  const twin = { dataset: { alias: 'bot:other/worker' }, focus() { h.document.activeElement = this; } };
+  const current = { dataset: { alias: botIdentity.alias }, focus() { h.document.activeElement = this; } };
+  h.cards.push(twin, current);
+  const pending = h.state.openEquipment(botIdentity.alias); h.reads[0].resolve(equipmentEnvelope(botIdentity.alias)); await pending;
+  const close = h.buttons.get('.ed-close'); close.click();
+  assert.equal(h.box.hidden, true); assert.equal(h.document.activeElement, current);
+  h.document.activeElement = twin; close.click(); assert.equal(h.document.activeElement, twin);
+});
+
+test('stale session close cannot transfer focus into resumed inventory', async () => {
+  const h = inspectionHarness(), current = { dataset: { alias: botIdentity.alias }, focus() { h.document.activeElement = this; } };
+  h.cards.push(current);
+  const pending = h.state.openEquipment(botIdentity.alias); h.reads[0].resolve(equipmentEnvelope(botIdentity.alias)); await pending;
+  h.state.sessionEpoch++; h.buttons.get('.ed-close').click();
+  assert.equal(h.document.activeElement, null); assert.equal(h.box.hidden, false);
+});
+
+test('inspect switching fleets from the Team view uses its one existing inventory poll', () => {
+  const h = inspectionHarness(); let polls = 0;
+  h.state.currentFleet = 'other'; h.state.currentView = 'fleet';
+  h.state.syncWorkRoom = () => {}; h.state.savePick = () => {}; h.state.renderFleetTabs = () => {};
+  h.state.refreshBoards = () => {}; h.state.pollFleet = () => { polls++; };
+  h.state.setView = view => { h.state.currentView = view; if (view === 'fleet') h.state.pollFleet(); };
+  const get = h.state.$; h.state.$ = id => id === 'search-results' ? { hidden: true } : get(id);
+  const pick = inspectionApp.slice(inspectionApp.indexOf('function pickFleet('), inspectionApp.indexOf('const STATUS_DOT'));
+  const room = inspectionApp.slice(inspectionApp.indexOf('function activeRoom()'), inspectionApp.indexOf('const ownerSession ='));
+  runInNewContext(`${pick}\n${room}`, h.state);
+  h.state.inspectBot(botIdentity);
+  assert.equal(polls, 1); assert.equal(h.state.currentFleet, botIdentity.fleet);
+  assert.equal(h.state.equipmentSelection, botIdentity); assert.equal(h.state.equipmentAlias, botIdentity.alias);
+});
+
+test('equipment capability callback safely disables an existing panel during composer initialization', async () => {
+  const h = inspectionHarness(), pending = h.state.openEquipment(botIdentity.alias);
+  h.reads[0].resolve(equipmentEnvelope(botIdentity.alias)); await pending;
+  h.state.workLoop = null;
+  h.state.refreshEquipmentAction();
+  assert.equal(h.buttons.get('.ed-message').disabled, true);
+});
+
+test('human actors remain readable without a bot-inspection button, even with slash-bearing human aliases', () => {
+  const state = { esc: value => String(value), ago: () => '' };
+  runInNewContext(rosterHelpers, state);
+  const html = state.railRow({ kind: 'actor', uid: 'actor_' + '8'.repeat(32), alias: 'human:team/with/slash', short: 'Human', fleet: null });
+  assert.match(html, /Human/); assert.doesNotMatch(html, /data-bot-inspect|<button/);
 });
