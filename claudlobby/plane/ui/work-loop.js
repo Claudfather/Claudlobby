@@ -65,7 +65,7 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
       $("work-send").textContent = sending ? "Sending…" : kind === "nudge" ? "Nudge task" : kind === "feedback" ? "Send feedback" : "Send message";
       $("work-send").disabled = sending || !context.actions.includes(kind) || !!state.unresolved(row()) || state.storageError;
       if (restoreDraft) $("work-body").value = readDraft();
-    }
+    } else $("work-send").disabled = true;
     $("work-notice").textContent = usable && state.storageError
       ? "This tab cannot safely save or read pending receipts. Sending is disabled; existing requests were not resent."
       : notice;

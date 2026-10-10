@@ -809,3 +809,38 @@ unopenable db, a fleet the plane has never seen, or a plane that holds no bot
 of the fleet is REFUSED with a reason on stderr and a nonzero rc; an existing
 source with zero rows is an answer. The refusal never rides stdout, because
 `report-back.sh` and `fleet-pulse.sh` parse it.
+
+### Grant-bound owner browser messages
+
+The trusted direct-host owner browser transport exposes three same-origin POST
+doors under `/api/owner/actions/`: `context` accepts exactly `{room}`; `send`
+accepts exactly ActionState metadata (`scope`, `kind`, `target`, `request_id`,
+`submitted_at`) plus `body`; `receipt` accepts that metadata without a body.
+These doors retain the exact Host/Origin, browser intent, trusted principal and
+secure session-cookie boundaries. JSON is size/time bounded; duplicate and
+unknown fields are refused. They never register identities or author grants.
+
+Context version 1 names the selected fleet alias in `room` and `scope.fleet`,
+returns declared bot UIDs as recipients, `simulation: false`, and only the
+`message` action. The server recomputes frozen host/fleet/actor bindings and the
+current local message grant for every request. Opaque workspace/viewer hashes
+are comparison fences, not secret capabilities; viewer binds principal, owner
+revision, frozen fleet UID and human actor, and survives session-cookie rotation.
+Submitted scope is compared to this recomputed context. Only ordinary messages
+with `task_id: null`, canonical UUIDs and nonempty bodies up to 2,000 characters
+are admitted. `submitted_at` is browser display metadata, not server acceptance.
+
+The canonical OwnerMessages adapter receives the exact recomputed expected
+grant and uses durable preparation/reservation. Source-host/session/grant
+admission precedes dispatch and private response release. Native sends run in
+an owned threadpool task that survives cancellation of the HTTP waiter. At most
+eight action workers may be active or queued; overflow is immediately unavailable,
+with no automatic queue retry. Cancelled HTTP waiters retain their slot until the
+owned worker ends; all completed or failed workers release capacity. No
+request automatically retries or changes UUID. Receipt inspection has no native
+effect. `delivered` requires the exact sender/recipient receiver-integrity proof;
+`recorded` requires a verified committed communication fact. Every other result,
+including missing retained UUID history and exceptions after a possible effect,
+is `unknown`, never safe rejection or permission to resend. Responses contain
+metadata only and use `Cache-Control: no-store, private`. Direct-host HTTPS,
+trusted ingress and native receiver validation remain separate rollout gates.

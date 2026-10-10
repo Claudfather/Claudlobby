@@ -1279,6 +1279,10 @@ const ownerSession = typeof interactionApi.mountSessionControls === "function"
       onPause() {
         sessionPaused = true;
         ++generation; ++trustGen;
+        // Invalidate the action context as well as reads. setRoom saves the
+        // current draft in memory; resume must fetch fresh authority for this room.
+        workLoop.setRoom(null);
+        workRoom = undefined;
         clearTimeout(refreshTimer); refreshTimer = null;
         clearTimeout(safetyTimer);
         $("beat").className = "dot";
