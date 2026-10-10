@@ -199,16 +199,20 @@ function ladder(thread, conversation) {
   }
   const events = thread.task_events.map((e) => e.event);
   const steps = [{ label: "dispatched", on: true }];
-  const anyTx = thread.messages.some((m) => latestTx(m));
-  steps.push({ label: "delivered", on: thread.delivered,
-               now: anyTx && !thread.delivered });
+  const dispatches = thread.messages.filter(m => m.message_class === "task_request" && m.command_type === "task");
+  // The thread-wide stamp can describe a received reply or comment. Only the
+  // dispatch's own receiver verdict establishes delivery of the task request.
+  const delivered = dispatches.some(m => m.delivery === "delivered");
+  const anyTx = dispatches.some((m) => latestTx(m));
+  steps.push({ label: delivered ? "delivered" : "delivery unconfirmed", on: delivered,
+               now: anyTx && !delivered });
   if (events.includes("accepted")) steps.push({ label: "accepted", on: true });
   if (events.includes("progress")) steps.push({ label: "progress", on: true });
   if (thread.terminal) {
     steps.push({ label: THREAD_TERMINAL_STATUS[thread.terminal] || thread.terminal,
                  on: true });
-  } else {
-    steps.push({ label: "working…", on: false, now: thread.delivered });
+  } else if (events.includes("accepted") || events.includes("progress")) {
+    steps.push({ label: "working…", on: false, now: true });
   }
   return `<div class="t-ladder">` + steps.map((s) =>
     `<span class="step ${s.on ? "done" : ""} ${s.now ? "now" : ""}">`
@@ -240,6 +244,10 @@ function threadArticle(t) {
   // One recognition per message; the kicker, title, ribbon and rows share it.
   const reasons = t.messages.map((m) => nudgeReason(m, t));
   const nudgeOnly = reasons.length > 0 && reasons.every((r) => r !== null);
+  // The recent window may contain only a reply, with its dispatch or comment
+  // parent outside it. A task link alone cannot establish a dispatch ladder.
+  const conversation = reasons.some((r) => r !== null) || t.messages.some(m => m.message_class === "chat")
+    || !t.messages.some(m => m.message_class === "task_request" && m.command_type === "task");
   const kicker = nudgeOnly ? "task update request" : t.work_item_id
     ? `work item${t.repo ? ` · ${esc(t.repo)}` : ""}` : "conversation";
   // U2: a cross-fleet thread carries a visible mark; its names arrive
@@ -273,7 +281,7 @@ function threadArticle(t) {
     <div class="t-kicker">${kicker}</div>
     <div class="t-head"><span class="t-title">${esc(threadTitle(t, reasons[0]))}</span>
       ${xfleet}<span class="t-meta">${esc(attribution)}</span></div>
-    ${ladder(t, reasons.some((r) => r !== null) || t.messages.some(m => m.message_class === "chat"))}
+    ${ladder(t, conversation)}
     ${msgs}`;
   return el;
 }
