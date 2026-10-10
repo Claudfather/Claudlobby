@@ -653,8 +653,10 @@ function renderDebugRail() {
 let refreshTimer = null;
 let safetyTimer = null;
 let generation = 0;
+let sessionPaused = false;
 
 async function refreshBoards() {
+  if (sessionPaused) return;
   const gen = ++generation;   // stale responses never paint over newer ones
   if (!fleetsSeen) {
     // The FIRST paint learns the fleet dimension before it fetches a board:
@@ -684,14 +686,14 @@ async function refreshBoards() {
 }
 
 function scheduleRefresh() { // coalesce bursts into one refetch
-  if (refreshTimer) return;
+  if (sessionPaused || refreshTimer) return;
   refreshTimer = setTimeout(() => { refreshTimer = null; refreshBoards(); },
                             400);
 }
 
 function restartSafety() {  // relative times re-render; missed pushes heal
   clearTimeout(safetyTimer);
-  safetyTimer = setTimeout(refreshBoards, 60000);
+  if (!sessionPaused) safetyTimer = setTimeout(refreshBoards, 60000);
 }
 
 function openStream() {
@@ -1272,8 +1274,24 @@ function syncWorkRoom() {
   showLoading();
   return true;
 }
-refreshBoards();
+const ownerSession = typeof interactionApi.mountSessionControls === "function"
+  ? interactionApi.mountSessionControls({ document, element: $("owner-session"),
+      onPause() {
+        sessionPaused = true;
+        ++generation; ++trustGen;
+        clearTimeout(refreshTimer); refreshTimer = null;
+        clearTimeout(safetyTimer);
+        $("beat").className = "dot";
+        $("beat-label").textContent = "session access paused";
+      },
+      onResume() { sessionPaused = false; refreshBoards(); },
+    }) : null;
+if (!ownerSession) refreshBoards();
 openStream();
+if (ownerSession) {
+  window.addEventListener("pagehide", () => ownerSession.dispose(), { once: true });
+  window.addEventListener("pageshow", event => { if (event.persisted) location.reload(); });
+}
 
 
 // --- fleet inventory + per-bot equipment (#1405) ---------------------------

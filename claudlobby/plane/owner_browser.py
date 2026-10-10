@@ -16,7 +16,8 @@ from typing import Awaitable, Callable
 from urllib.parse import urlsplit
 
 from starlette.concurrency import run_in_threadpool
-from starlette.responses import JSONResponse, Response
+from starlette.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
 
 from .ids import read_host_uid
@@ -151,6 +152,13 @@ class _OwnerBrowser:
         self.verify_principal = verify_principal
         self.read_app = create_owner_app(root, verify_reader=self._reader,
                                          sampler=sampler, package=package)
+        # Substitute only this protected module. The existing read gate still
+        # verifies identity/session before headers and each response body.
+        def owner_transport(request):
+            return FileResponse(Path(__file__).with_name("ui") / "owner-api-client.js",
+                media_type="text/javascript", headers={"Cache-Control": "no-store"})
+        self.read_app.app.router.routes.insert(0, Route("/api-client.js", owner_transport,
+                                                     methods=["GET", "HEAD"]))
         self.state = self.read_app.state
         self.access = self.read_app.access
 
@@ -234,9 +242,28 @@ class _OwnerBrowser:
             return
         action = scope["path"].removeprefix(_PREFIX) if scope["path"].startswith(_PREFIX) else None
         if action not in _METHODS:
-            # Preserve the existing gate's streaming/error lifecycle, including
-            # failures after headers. Never turn those into a second response.
-            await self.read_app(scope, receive, send)
+            # The read gate remains authoritative. Only its root-page 403
+            # becomes a fixed entry redirect; API/asset errors and unavailable
+            # authority keep their existing status and response lifecycle.
+            if scope["path"] == "/" and scope["method"] in {"GET", "HEAD"}:
+                redirected = False
+
+                async def root_send(message):
+                    nonlocal redirected
+                    if redirected:
+                        return  # discard every byte of the refused response
+                    if (message["type"] == "http.response.start"
+                            and message["status"] == 403):
+                        redirected = True
+                        await RedirectResponse("/owner", status_code=303, headers={
+                            "Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
+                        })(scope, receive, send)
+                    else:
+                        await send(message)
+
+                await self.read_app(scope, receive, root_send)
+            else:
+                await self.read_app(scope, receive, send)
             return
         try:
             if scope["method"] != _METHODS[action]:
