@@ -314,10 +314,17 @@ class _OwnerBrowser:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
+            if scope["type"] == "lifespan" and self.workspace_bootstrap is not None:
+                original_receive = receive
+                async def receive():
+                    message = await original_receive()
+                    if message["type"] == "lifespan.shutdown":
+                        await self.workspace_bootstrap.shutdown()
+                    return message
             await self.read_app(scope, receive, send)
             return
         if (self.workspace_bootstrap is not None
-                and scope["path"] in {"/api/owner/workspace/challenge", "/api/owner/workspace/stage"}):
+                and scope["path"] in self.workspace_bootstrap.paths):
             await self.workspace_bootstrap(scope, receive, send)
             return
         try:

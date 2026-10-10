@@ -72,7 +72,7 @@ def serve(root: Path, *, origin: str, tailscale_binary: Path, socket_path: Path 
     """Foreground server; caller explicitly selects root and local authority."""
     import uvicorn
 
-    from .owner_access import OwnerAccess
+    from .owner_access import AccessUnavailable, OwnerAccess
     from .owner_browser import create_owner_browser_app
     from .owner_ingress import ServePrincipalVerifier
     from .owner_source import inspect_source
@@ -88,6 +88,12 @@ def serve(root: Path, *, origin: str, tailscale_binary: Path, socket_path: Path 
         app = create_owner_browser_app(root, expected_origin=origin,
             verify_principal=ServePrincipalVerifier(tailscale_binary=Path(tailscale_binary)),
             package=package, workspace_bootstrap=workspace_bootstrap)
+    except AccessUnavailable:
+        if workspace_bootstrap is not None:
+            raise OwnerServerConfigurationError(
+                "workspace bootstrap authority unavailable; inspect local workspace authority "
+                "and run host owner initialize-workspace if not initialized") from None
+        raise
     except ValueError as exc:
         raise OwnerServerConfigurationError(str(exc)) from exc
     socket_path = socket_path or Path(root) / "state/plane/owner.sock"

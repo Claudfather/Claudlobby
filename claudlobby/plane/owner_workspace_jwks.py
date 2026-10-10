@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import time
 
-from .workspace_assertion import AssertionUnavailable, validate_workspace_jwks
+from .workspace_assertion import AssertionUnavailable, _KID, validate_workspace_jwks
 
 
 class WorkspaceKeyset:
@@ -55,13 +55,16 @@ class WorkspaceKeyset:
         if isinstance(assertion, str) and assertion.isascii() and 1 <= len(assertion) <= 8192:
             try:
                 header = jwt.get_unverified_header(assertion)
-                if header.get("alg") == "EdDSA" and isinstance(header.get("kid"), str):
+                if (not set(header) - {"alg", "kid", "typ"}
+                        and header.get("alg") == "EdDSA"
+                        and ("typ" not in header or header["typ"] == "JWT")
+                        and isinstance(header.get("kid"), str) and _KID.fullmatch(header["kid"])):
                     kid = header["kid"]
-            except jwt.PyJWTError:
+            except (jwt.PyJWTError, RecursionError):
                 pass
         async with self._lock:
             fresh = self._fresh()
-            if fresh and kid in self._kids:
+            if fresh and (kid is None or kid in self._kids):
                 return self._raw
             now = time.monotonic()
             if self._attempt is not None and 0 <= now - self._attempt < 30:
@@ -76,5 +79,5 @@ class WorkspaceKeyset:
         try:
             # Includes lock wait, TLS, slow-drip body and complete key parsing.
             return await asyncio.wait_for(self._get(assertion), timeout=8)
-        except (TimeoutError, self._httpx.HTTPError, ValueError, ImportError):
+        except (asyncio.TimeoutError, TimeoutError, self._httpx.HTTPError, ValueError, ImportError):
             raise AssertionUnavailable() from None

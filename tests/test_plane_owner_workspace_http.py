@@ -3,8 +3,6 @@ import asyncio
 from dataclasses import replace
 import json
 import sqlite3
-import time
-from uuid import uuid4
 
 import jwt
 import pytest
@@ -15,7 +13,7 @@ from claudlobby.plane.owner_browser import create_owner_browser_app
 from claudlobby.plane.owner_source import bind_source
 from claudlobby.plane.owner_workspace_http import WorkspaceBootstrapConfig
 from tests.test_plane_two_fleets import _Sampler, _seed
-from tests.test_plane_workspace_assertion import profile, b64
+from tests.test_plane_workspace_assertion import profile
 
 HOST = "https://host.example.test"
 PLANE = "https://plane.example.test"
@@ -204,3 +202,205 @@ def test_readonly_admission_exact_deadline_principal_and_staged_challenge(http):
 def test_config_requires_both_exact_https(issuer, origin):
     with pytest.raises(ValueError):
         WorkspaceBootstrapConfig(issuer, origin)
+
+
+@pytest.mark.parametrize("state", ["absent", "revoked"])
+def test_preflight_requires_active_current_owner(http, state):
+    app, store, _, _, _ = http
+    owner = store.current_grant()
+    if state == "revoked":
+        store.revoke_owner(expected_revision=owner.revision)
+    else:
+        with sqlite3.connect(store.path) as conn:
+            conn.execute("DELETE FROM grants")
+    with TestClient(app, base_url=HOST) as client:
+        response = client.options("/api/owner/workspace/challenge", headers={"Origin": PLANE,
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type,x-claudlobby-owner"})
+        assert response.status_code == 403 and response.json() == {"state": "denied"}
+
+
+def test_challenge_capacity_is_unavailable_not_policy_denial(http):
+    from claudlobby.plane.owner_workspace import MAX_PENDING
+    for _ in range(MAX_PENDING):
+        http[1].workspace().begin(OWNER, issuer=ISSUER, operational_origin=PLANE)
+    with TestClient(http[0], base_url=HOST) as client:
+        result = post(client, "challenge")
+        assert result.status_code == 503 and result.json() == {"state": "unavailable"}
+
+
+async def _raw_challenge(consumer, responses):
+    scope = {"type": "http", "method": "POST", "path": "/api/owner/workspace/challenge",
+             "query_string": b"", "headers": [(b"host", b"host.example.test"),
+             (b"origin", PLANE.encode()), (b"content-type", b"application/json"),
+             (b"x-claudlobby-owner", b"1")]}
+    async def receive():
+        return {"type": "http.request", "body": b"{}"}
+    async def send(message):
+        responses.append(message)
+    await consumer(scope, receive, send)
+
+
+def test_pool_wait_is_in_deadline_and_never_begins_late(http, monkeypatch):
+    import threading
+    import anyio
+    from starlette.concurrency import run_in_threadpool
+    from claudlobby.plane import owner_workspace_http as module
+    monkeypatch.setattr(module, "RESPONSE_SECONDS", 0.05, raising=False)
+    entered, release = threading.Event(), threading.Event()
+    def occupied():
+        entered.set()
+        release.wait(3)
+    async def scenario():
+        limiter = anyio.to_thread.current_default_thread_limiter()
+        original = limiter.total_tokens
+        limiter.total_tokens = 1
+        blocker = asyncio.create_task(run_in_threadpool(occupied))
+        try:
+            while not entered.is_set():
+                await asyncio.sleep(0.001)
+            responses = []
+            await asyncio.wait_for(_raw_challenge(http[0].workspace_bootstrap, responses), 0.5)
+            assert responses[0]["status"] == 503
+            release.set()
+            await blocker
+            await http[0].workspace_bootstrap.shutdown()
+        finally:
+            release.set()
+            await blocker
+            limiter.total_tokens = original
+    asyncio.run(scenario())
+    with sqlite3.connect(http[1].path) as conn:
+        assert conn.execute("SELECT count(*) FROM workspace_challenges").fetchone()[0] == 0
+
+
+def test_late_source_never_starts_begin_and_retains_capacity(http, monkeypatch):
+    import threading
+    from claudlobby.plane import owner_workspace_http as module
+    monkeypatch.setattr(module, "RESPONSE_SECONDS", 0.05, raising=False)
+    consumer = http[0].workspace_bootstrap
+    entered, release = threading.Event(), threading.Event()
+    original = consumer._source
+    def held():
+        value = original()
+        entered.set()
+        release.wait(3)
+        return value
+    monkeypatch.setattr(consumer, "_source", held)
+    async def scenario():
+        responses = []
+        try:
+            await asyncio.wait_for(_raw_challenge(consumer, responses), 0.5)
+            assert entered.is_set() and responses[0]["status"] == 503
+            assert len(consumer._workers) == 1
+            release.set()
+            await consumer.shutdown()
+            assert not consumer._workers and not consumer._operations
+        finally:
+            release.set()
+    asyncio.run(scenario())
+    with sqlite3.connect(http[1].path) as conn:
+        assert conn.execute("SELECT count(*) FROM workspace_challenges").fetchone()[0] == 0
+
+
+def test_started_begin_finishes_unknown_and_lifespan_drains_before_read_shutdown(http, monkeypatch):
+    import threading
+    from claudlobby.plane import owner_workspace_http as module
+    monkeypatch.setattr(module, "RESPONSE_SECONDS", 0.05, raising=False)
+    app, store, _, _, _ = http
+    consumer = app.workspace_bootstrap
+    entered, release = threading.Event(), threading.Event()
+    original = consumer.workspace.begin
+    def held(*args, **kwargs):
+        value = original(*args, **kwargs)
+        entered.set()
+        release.wait(3)
+        return value
+    monkeypatch.setattr(consumer.workspace, "begin", held)
+    observed = []
+    async def read_lifespan(scope, receive, send):
+        assert (await receive())["type"] == "lifespan.shutdown"
+        observed.append((consumer._stopping, len(consumer._workers)))
+        await send({"type": "lifespan.shutdown.complete"})
+    monkeypatch.setattr(app, "read_app", read_lifespan)
+    async def scenario():
+        responses = []
+        try:
+            await asyncio.wait_for(_raw_challenge(consumer, responses), 0.5)
+            assert entered.is_set() and responses[0]["status"] == 503
+            assert len(consumer._workers) == 1
+            async def receive():
+                return {"type": "lifespan.shutdown"}
+            async def send(message):
+                observed.append(message["type"])
+            shutdown = asyncio.create_task(app({"type": "lifespan"}, receive, send))
+            await asyncio.sleep(0.02)
+            assert consumer._stopping and not shutdown.done() and not observed
+            denied = []
+            await _raw_challenge(consumer, denied)
+            assert denied[0]["status"] == 503
+            release.set()
+            await asyncio.wait_for(shutdown, 1)
+            assert observed == [(True, 0), "lifespan.shutdown.complete"]
+        finally:
+            release.set()
+    asyncio.run(scenario())
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute("SELECT count(*) FROM workspace_challenges").fetchone()[0] == 1
+
+
+def test_enabled_missing_workspace_schema_has_local_initialization_remedy(http):
+    from claudlobby.plane.owner_server import serve, OwnerServerConfigurationError
+    app, store, _, _, _ = http
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("DROP TABLE workspace_challenges")
+    with pytest.raises(OwnerServerConfigurationError, match="host owner initialize-workspace"):
+        serve(store.root, origin=HOST, tailscale_binary=__import__('pathlib').Path(__import__('sys').executable),
+              workspace_issuer=ISSUER, workspace_origin=PLANE)
+
+
+def test_started_stage_survives_response_deadline_as_unknown(http, monkeypatch):
+    import threading
+    from claudlobby.plane import owner_workspace_http as module
+    consumer = http[0].workspace_bootstrap
+    entered, release = threading.Event(), threading.Event()
+    original = consumer.workspace.stage
+    def held(*args):
+        proposal = original(*args)
+        entered.set()
+        release.wait(3)
+        return proposal
+    with TestClient(http[0], base_url=HOST) as client:
+        challenge = post(client, "challenge").json()
+        monkeypatch.setattr(module, "RESPONSE_SECONDS", 0.05, raising=False)
+        monkeypatch.setattr(consumer.workspace, "stage", held)
+        try:
+            response = post(client, "stage", {"nonce": challenge["nonce"], "assertion": token(http, challenge)})
+            assert entered.is_set() and response.status_code == 503
+            assert response.json() == {"state": "unavailable"} and len(consumer._workers) == 1
+            assert http[1].workspace().inspect(challenge["nonce"]).nonce == challenge["nonce"]
+        finally:
+            release.set()
+    assert not consumer._workers
+
+
+def test_shutdown_cancels_owned_identity_wait_before_read_lifespan_completion(http, monkeypatch):
+    app = http[0]
+    consumer = app.workspace_bootstrap
+    async def scenario():
+        entered, cancelled = asyncio.Event(), asyncio.Event()
+        async def held(scope):
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+        monkeypatch.setattr(consumer, "verify_principal", held)
+        responses = []
+        request = asyncio.create_task(_raw_challenge(consumer, responses))
+        await entered.wait()
+        await asyncio.wait_for(consumer.shutdown(), 1)
+        await request
+        assert cancelled.is_set() and not consumer._workers and not consumer._operations
+        assert responses[0]["status"] == 503
+    asyncio.run(scenario())

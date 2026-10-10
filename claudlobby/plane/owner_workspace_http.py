@@ -2,17 +2,22 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 from dataclasses import dataclass
 import json
 import time
+import threading
 
 from starlette.concurrency import run_in_threadpool
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 
-from .owner_access import AccessDenied, AccessUnavailable, PrincipalRef
+from .owner_access import AccessDenied, PrincipalRef
 from .owner_source import inspect_source
-from .workspace_assertion import (AssertionRefused, AssertionUnavailable,
+from .workspace_assertion import (AssertionRefused,
                                   _canonical_32_bytes, _origin, verify_workspace_assertion)
+
+RESPONSE_SECONDS = 35
+_DEADLINE = ContextVar("workspace_bootstrap_deadline")
 
 PATHS = frozenset({"/api/owner/workspace/challenge", "/api/owner/workspace/stage"})
 
@@ -71,12 +76,13 @@ async def _json(receive, limit):
 
 
 class WorkspaceBootstrapHTTP:
+    paths = PATHS
+
     def __init__(self, access, *, config, authority, verify_principal):
         from .owner_workspace_jwks import WorkspaceKeyset
         # Validate optional dependency readiness/schema without startup network
         # or initialization; current direct-owner path never constructs this.
-        import jwt
-        import httpx
+        __import__("jwt")  # Explicit optional dependency readiness, not network.
         if type(config) is not WorkspaceBootstrapConfig:
             raise ValueError("explicit workspace bootstrap configuration is required")
         self.access = access
@@ -85,6 +91,8 @@ class WorkspaceBootstrapHTTP:
         self.config, self.authority, self.verify_principal = config, authority, verify_principal
         self.keys = WorkspaceKeyset(config.issuer)
         self._workers = set()
+        self._operations = {}
+        self._stopping = False
 
     async def _principal(self, scope, deadline):
         principal = await asyncio.wait_for(self.verify_principal(scope),
@@ -94,20 +102,51 @@ class WorkspaceBootstrapHTTP:
         return principal
 
     async def _blocking(self, fn, *args, **kwargs):
-        # Caller cancellation must not release capacity while a DB thread is
-        # still running. Owned workers are shielded below; retain this seam too.
-        job = asyncio.create_task(run_in_threadpool(fn, *args, **kwargs))
+        deadline = _DEADLINE.get()
+        lock = threading.Lock()
+        started, abandoned = False, False
+
+        def guarded():
+            nonlocal started
+            # Threadpool wait is part of the deadline. Serialize this decision
+            # with cancellation so a queued call cannot become a late effect.
+            with lock:
+                if abandoned or self._stopping or time.monotonic() >= deadline:
+                    raise asyncio.TimeoutError
+                started = True
+            return fn(*args, **kwargs)
+
+        job = asyncio.create_task(run_in_threadpool(guarded))
         try:
             return await asyncio.shield(job)
         except asyncio.CancelledError:
-            await job
+            with lock:
+                abandoned = not started
+            if abandoned:
+                job.cancel()
+            # Only this handler owns cancellation of the pool job. Started
+            # synchronous work is never abandoned or cancelled a second time.
+            await asyncio.gather(job, return_exceptions=True)
             raise
+
+    def _cancel_operation(self, operation):
+        if operation in self._operations and not self._operations[operation]:
+            self._operations[operation] = True
+            operation.cancel()
+
+    async def shutdown(self):
+        """Stop admission and drain local work before the app's lifespan ends."""
+        self._stopping = True
+        for operation in tuple(self._operations):
+            self._cancel_operation(operation)
+        if self._workers:
+            await asyncio.gather(*tuple(self._workers), return_exceptions=True)
 
     def _source(self):
         return inspect_source(self.access.root)
 
     async def _perform(self, scope, receive):
-        deadline = time.monotonic() + 35
+        deadline = _DEADLINE.get()
         is_stage = scope["path"].endswith("/stage")
         if scope["method"] == "OPTIONS":
             requested = _header(scope, b"access-control-request-headers") or ""
@@ -117,7 +156,7 @@ class WorkspaceBootstrapHTTP:
                 raise AccessDenied("workspace_bootstrap_denied")
             principal = await self._principal(scope, deadline)
             owner = await self._blocking(self.access.current_grant)
-            if (owner.principal != principal or principal.namespace != "tailscale:controlplane.tailscale.com"
+            if (owner is None or not owner.active or owner.principal != principal or principal.namespace != "tailscale:controlplane.tailscale.com"
                     or not principal.subject.isascii() or not principal.subject.isdecimal()
                     or int(principal.subject) <= 0 or str(int(principal.subject)) != principal.subject):
                 raise AccessDenied("workspace_bootstrap_denied")
@@ -165,9 +204,22 @@ class WorkspaceBootstrapHTTP:
         return body, 202
 
     async def _response(self, scope, receive):
+        deadline = _DEADLINE.get()
+        operation = asyncio.create_task(self._perform(scope, receive))
+        self._operations[operation] = False
+        timer = asyncio.get_running_loop().call_later(
+            max(0, deadline - time.monotonic()), self._cancel_operation, operation)
         try:
-            return await self._perform(scope, receive)
-        except (AccessDenied, AssertionRefused):
+            return await asyncio.shield(operation)
+        except asyncio.CancelledError:
+            self._cancel_operation(operation)
+            await asyncio.gather(operation, return_exceptions=True)
+            return {"state": "unavailable"}, 503
+        except AccessDenied as exc:
+            if exc.code == "too_many_workspace_requests":
+                return {"state": "unavailable"}, 503
+            return {"state": "denied"}, 403
+        except AssertionRefused:
             return {"state": "denied"}, 403
         except InvalidRequest:
             return {"state": "invalid_request"}, 400
@@ -175,6 +227,9 @@ class WorkspaceBootstrapHTTP:
             # A staged proposal can survive a lost/denied response; this never
             # claims no effect or automatically retries/consumes it.
             return {"state": "unavailable"}, 503
+        finally:
+            timer.cancel()
+            self._operations.pop(operation, None)
 
     async def __call__(self, scope, receive, send):
         headers = {"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer",
@@ -190,24 +245,29 @@ class WorkspaceBootstrapHTTP:
         if scope["method"] not in {"POST", "OPTIONS"}:
             headers["Allow"] = "POST, OPTIONS"
             body, status = {"state": "denied"}, 405
-        elif len(self._workers) >= 8:
+        elif self._stopping or len(self._workers) >= 8:
             body, status = {"state": "unavailable"}, 503
         else:
             # Reserve before body read/task creation. A disconnect/cancel only
             # abandons its response, never its still-running owned work/count.
-            job = asyncio.create_task(self._response(scope, receive))
+            deadline = time.monotonic() + RESPONSE_SECONDS
+            token = _DEADLINE.set(deadline)
+            try:
+                job = asyncio.create_task(self._response(scope, receive))
+            finally:
+                _DEADLINE.reset(token)
             self._workers.add(job)
             def done(task):
                 self._workers.discard(task)
                 if not task.cancelled():
                     task.exception()
             job.add_done_callback(done)
-            body, status = await asyncio.shield(job)
+            completed, _ = await asyncio.wait({job}, timeout=max(0, deadline - time.monotonic()))
+            body, status = job.result() if completed else ({"state": "unavailable"}, 503)
         if status == 204:
             headers.update({"Access-Control-Allow-Methods": "POST",
                             "Access-Control-Allow-Headers": "Content-Type, X-Claudlobby-Owner",
                             "Vary": "Origin, Access-Control-Request-Method, Access-Control-Request-Headers"})
-            from starlette.responses import Response
             await Response(status_code=204, headers=headers)(scope, receive, send)
         else:
             await JSONResponse(body, status, headers=headers)(scope, receive, send)
