@@ -57,7 +57,7 @@ def gateway(active, monkeypatch):  # noqa: F811
     return adapter, reader, ctx, options, selection
 
 
-def receiver(monkeypatch, *, received=True, altered=False):
+def receiver(monkeypatch, *, received=True, altered=False, refused=False):
     calls, repairs = [], []
     original = message_operations.send_committed_native_attempt
     def transport(package, destination, *, message_id, body, timeout):
@@ -66,6 +66,8 @@ def receiver(monkeypatch, *, received=True, altered=False):
             assert conn.execute("SELECT count(*) FROM events WHERE event='nudged'").fetchone()[0] == 0
             assert conn.execute("SELECT message_class FROM communications WHERE msg_id=?", (message_id,)).fetchone()[0] == "chat"
         calls.append((message_id, body))
+        if refused:
+            return TransportOutcome("failed", reason="recipient input already held text; nothing was sent")
         wire = body.encode("utf-8")
         digest = "sha256:" + hashlib.sha256(wire).hexdigest()
         if received:
@@ -132,6 +134,27 @@ def test_committed_feedback_and_submission_are_not_delivery(gateway, monkeypatch
     with pytest.raises(CommandFailure):
         invoke(gateway)
     assert len(calls) == 1 and repairs == []
+
+
+def test_held_refusal_keeps_one_recorded_feedback_and_replay_never_notifies(gateway, monkeypatch):
+    adapter, reader, _, options, _ = gateway
+    calls, repairs = receiver(monkeypatch, refused=True)
+    for _ in range(2):
+        with pytest.raises(CommandFailure) as failed:
+            invoke(gateway)
+        assert failed.value.error.code == "notification_failed"
+        assert failed.value.data["recording"] == "committed"
+        assert failed.value.data["transport"] == "failed"
+        observed = adapter.inspect(reader, **options)
+        assert observed.receiver.integrity_verdict != "delivered"
+        assert len(observed.request.transmissions) == 1
+        transport = observed.request.transmissions[0].transport
+        assert transport.status == "failed" and transport.native_returncode is None
+        assert transport.wire_sha256 is transport.wire_bytes is None
+    assert len(calls) == 1 and repairs == []
+    with sqlite3.connect(db_file(adapter.root)) as conn:
+        assert conn.execute("SELECT count(*) FROM communications").fetchone()[0] == 1
+        assert conn.execute("SELECT event FROM events WHERE kind='transmission'").fetchall() == [("failed",)]
 
 
 @pytest.mark.parametrize("failure", ["read_only", "messages_only", "nudges_only", "wrong_type", "regrant", "owner", "session", "principal", "fleet", "manager", "release", "actor", "generated", "source", "unbound_source", "foreign_source"])

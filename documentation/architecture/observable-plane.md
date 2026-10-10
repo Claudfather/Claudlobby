@@ -964,6 +964,13 @@ accommodates ordinary lock and chunk pacing; a slow or hung send still returns
 unknown. Other operations retain their existing deadline. Timing out never
 authorizes another attempt.
 
+Observed text already in the lead's input box refuses new input: feedback stays
+recorded with a failed notification, and replay sends nothing. Text stranded by
+an unconfirmed send or timeout also blocks later sends until an operator inspects
+the box; inspect and clear a cut or uncertain envelope instead of pressing Enter
+to submit it blindly. A new UUID records another comment and does not repair the
+original request.
+
 Feedback has no retry flag, operation-level held-input recovery, Enter repair or
 recording alert. A retained UUID cannot repeat recording or fill a missing notification.
 Committed replay preserves original task/assignment/message coordinates even if

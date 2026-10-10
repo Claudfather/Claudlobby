@@ -3637,8 +3637,9 @@ pane_is_busy() {
 #
 # It says nothing about whether a turn is running, so a caller asks
 # pane_is_busy first; keepalive's classify_pane does. Byte-safe literal patterns
-# and a C-locale footer scan keep the verdict independent of locale. The idle bracket's does: under LC_ALL=C it matches a box
-# border's bytes, which is why classify_pane asks this before pane_is_idle.
+# and a C-locale footer scan keep the verdict independent of locale. The idle
+# bracket's does: under LC_ALL=C it matches a box border's bytes, which is why
+# classify_pane asks this before pane_is_idle.
 pane_is_held() {
     local region first
     region=$(pane_input_region "$1")
@@ -3710,6 +3711,11 @@ held_delivery_match() {
     if pane_is_busy "$pane"; then printf busy; return 1; fi
     if ! pane_is_held "$pane"; then printf not-held; return 1; fi
     region=$(pane_input_region "$pane")
+    # Repair Enter requires stronger menu exclusion than a new-send refusal.
+    # Even authored exit words are ambiguous here: never choose a dialog.
+    case "$region" in
+        *'Esc to cancel'*|*'Esc to go back'*) printf not-held; return 1 ;;
+    esac
     trailer="⟦plane:${msg_id}⟧"
     if ! pane_shows_payload_end "$region" "$trailer"; then printf not-shown; return 1; fi
     box=$(_held_box_squeezed "$region")
@@ -4858,7 +4864,8 @@ inject_stamp() {
 # records which on the plane, and the send's stderr line says it too). rc 4
 # means existing input refused the send without any new keystrokes; log NOT
 # SENT and also continue, leaving the existing text untouched. Any other
-# failure is returned, so under the caller's set -e and error trap it ends the boot as the unguarded send used to. Here rather than in start-bot.sh
+# failure is returned, so under the caller's set -e and error trap it ends the
+# boot as the unguarded send used to. Here rather than in start-bot.sh
 # because a test runs start-bot's injection branches against this file alone.
 boot_send_settled() {
     case "$2" in
