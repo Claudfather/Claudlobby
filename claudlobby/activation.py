@@ -342,7 +342,9 @@ def _finish_bootstrap_activation(root, store, activation_id, plan, release,
             else:
                 inspect_source(root)  # Resume observes prior binding; never re-attests running data.
         except (AccessUnavailable, ValueError, OSError) as exc:
-            raise ActivationError("owner authority or source unavailable; explicit recovery required") from exc
+            raise ActivationError("owner authority or source unavailable; explicit recovery required; "
+                                  "if the recorder is unbound, inspect its identity and use "
+                                  "host owner bind-source before resuming") from exc
     return _candidate_startup(root, store, activation_id, plan, release, declarations,
         starts, rank, install_directory, adapter, package, bootstrap=True)
 
