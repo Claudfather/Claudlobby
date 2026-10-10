@@ -335,9 +335,11 @@ def test_it_reaps_and_waits_for_what_outlives_the_session(scratch, start):
 
 
 def test_it_holds_nothing_it_inherited(scratch, start):
-    # The starter holds a file open on fd 8, as start-bot.sh holds its own; by
-    # the time the caller reads the report, the subreaper has let go of it.
+    # The starter holds a file open on fd 8, as start-bot.sh holds its own; the
+    # subreaper lets go of it before it reports. Read once it has re-executed:
+    # for a few ms before that, the interpreter holds its own script open.
     session = start("exec sleep 600\n", hold=scratch / "held")
+    wait_for(lambda: comm(session.subreaper) == "bot-subreaper", "the subreaper's re-execution")
     assert sorted(os.listdir(f"/proc/{session.subreaper}/fd"), key=int) == ["0", "1", "2"]
 
 
