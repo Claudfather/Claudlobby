@@ -303,6 +303,263 @@ def test_one_sided_work_item_still_one_thread(tmp_path, tagged_side):
     assert len(threads[0]["messages"]) == 2
 
 
+def _lineage_id(kind, number):
+    return f"{kind}_{number:032x}"
+
+
+def _seed_reply_lineage(root, *, depth=1, padding=120):
+    """A recent answer whose exact task-linked ancestors have old bodies."""
+    _full_capture(root)
+    initialize_plane(root)
+    task = _lineage_id("wi", 1)
+    rows = [{"event_type": "work_item", "emitter": "t", "fleet": "f",
+             "payload": {"work_item_id": task, "title": "Recorded task",
+                         "created_by": "bot:f/mgr"}}]
+    for number in range(depth):
+        rows.append({"event_type": "communication", "emitter": "t", "fleet": "f",
+            "payload": {"msg_id": _lineage_id("msg", number + 1),
+                "sender": "human:operator" if number == 0 else "bot:f/mgr",
+                "recipient": "bot:f/mgr" if number == 0 else "human:operator",
+                "message_class": "chat" if number == 0 else "answer",
+                "body": "HISTORIC BODY MUST NOT BE FETCHED",
+                **({"work_item_id": task} if number == 0 else
+                   {"reply_to_msg_id": _lineage_id("msg", number)})}})
+    for number in range(padding):
+        rows.append({"event_type": "communication", "emitter": "t", "fleet": "f",
+            "payload": {"msg_id": _lineage_id("msg", 1000 + number),
+                "sender": "bot:f/mgr", "recipient": "human:operator",
+                "message_class": "chat", "body": "Unrelated ordinary conversation"}})
+    answer = _lineage_id("msg", depth + 1)
+    rows.append({"event_type": "communication", "emitter": "t", "fleet": "f",
+        "payload": {"msg_id": answer, "sender": "bot:f/mgr",
+                    "recipient": "human:operator", "message_class": "answer",
+                    "body": "Recent answer", "reply_to_msg_id": _lineage_id("msg", depth)}})
+    emit_batch(root, rows, require_commit=True)
+    return task, answer
+
+
+def _recent_answer(root, *, limit=120, fleet="f"):
+    result = TestClient(create_app(root, package=source_package())).get(
+        "/api/channel", params={"fleet": fleet, "limit": limit}).json()
+    assert result["state"] == "ok", result
+    thread = next(t for t in result["data"]["threads"]
+                  if any(m["body"] == "Recent answer" for m in t["messages"]))
+    return result, thread
+
+
+@pytest.mark.parametrize("depth", [1, 3, 32])
+def test_recent_reply_inherits_exact_outside_window_task_without_old_bodies(tmp_path, depth):
+    task, answer = _seed_reply_lineage(tmp_path, depth=depth)
+    result, thread = _recent_answer(tmp_path)
+    assert thread["work_item_id"] == task
+    assert thread["title"] == "Recorded task"
+    assert [m["msg_id"] for m in thread["messages"]] == [answer]
+    assert "HISTORIC BODY MUST NOT BE FETCHED" not in json.dumps(result)
+    assert result["data"]["lineage"]["unresolved_threads"] == 0
+
+
+def test_in_window_lineage_control_keeps_both_messages(tmp_path):
+    task, answer = _seed_reply_lineage(tmp_path, padding=0)
+    _, thread = _recent_answer(tmp_path)
+    assert thread["work_item_id"] == task
+    assert [m["msg_id"] for m in thread["messages"]] == [_lineage_id("msg", 1), answer]
+
+
+@pytest.mark.parametrize("fault", ["missing", "cycle", "conflict", "foreign_host", "foreign_task_host", "wrong_fleet", "foreign_owner", "missing_task"])
+def test_unresolved_reply_lineage_never_assigns_task(tmp_path, fault):
+    import sqlite3
+    from claudlobby.plane.db import db_file
+    task, answer = _seed_reply_lineage(tmp_path)
+    if fault in {"conflict", "wrong_fleet"}:
+        emit_batch(tmp_path, [{"event_type": "work_item", "emitter": "t",
+            "fleet": "g" if fault == "wrong_fleet" else "f",
+            "payload": {"work_item_id": _lineage_id("wi", 2),
+                        "title": "Must not inherit this unrelated task", "created_by": "bot:g/mgr"}}],
+            require_commit=True)
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        if fault == "missing":
+            conn.execute("UPDATE communications SET reply_to_msg_id=? WHERE msg_id=?", (_lineage_id("msg", 9999), answer))
+        elif fault == "cycle":
+            conn.execute("UPDATE communications SET reply_to_msg_id=? WHERE msg_id=?", (answer, _lineage_id("msg", 1)))
+        elif fault == "conflict":
+            conn.execute("UPDATE communications SET work_item_id=? WHERE msg_id=?", (_lineage_id("wi", 2), answer))
+        elif fault == "foreign_host":
+            conn.execute("UPDATE communications SET host_uid=? WHERE msg_id=?", ("host_" + "f" * 32, _lineage_id("msg", 1)))
+        elif fault == "foreign_task_host":
+            conn.execute("UPDATE work_items SET host_uid=? WHERE work_item_id=?", ("host_" + "f" * 32, task))
+        elif fault == "foreign_owner":
+            conn.execute("UPDATE identity_registry SET parent_uid=? WHERE uid=(SELECT fleet_uid FROM work_items WHERE work_item_id=?)",
+                         ("host_" + "f" * 32, task))
+        elif fault == "wrong_fleet":
+            conn.execute("UPDATE communications SET work_item_id=? WHERE msg_id=?", (_lineage_id("wi", 2), _lineage_id("msg", 1)))
+        else:
+            conn.execute("DELETE FROM work_items WHERE work_item_id=?", (task,))
+    result, thread = _recent_answer(tmp_path)
+    assert thread["work_item_id"] is None
+    assert thread["task_events"] == [] and thread["title"] is None
+    assert result["data"]["lineage"]["unresolved_threads"] >= 1
+    assert "Must not inherit this unrelated task" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("sibling_task", [None, 2])
+def test_incomplete_lineage_keeps_only_a_messages_own_valid_task(tmp_path, sibling_task):
+    import sqlite3
+    from claudlobby.plane.db import db_file
+    task, answer = _seed_reply_lineage(tmp_path)
+    sibling, missing = _lineage_id("msg", 5000), _lineage_id("msg", 9999)
+    rows = [{"event_type": "communication", "emitter": "t", "fleet": "f",
+             "payload": {"msg_id": sibling, "sender": "bot:f/mgr",
+                         "recipient": "human:operator", "message_class": "answer",
+                         "body": "Untagged sibling"}}]
+    if sibling_task:
+        rows.insert(0, {"event_type": "work_item", "emitter": "t", "fleet": "f",
+            "payload": {"work_item_id": _lineage_id("wi", sibling_task),
+                        "title": "Other task", "created_by": "bot:f/mgr"}})
+    emit_batch(tmp_path, rows, require_commit=True)
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        conn.execute("UPDATE communications SET reply_to_msg_id=?,work_item_id=? WHERE msg_id=?",
+                     (missing, task, answer))
+        conn.execute("UPDATE communications SET reply_to_msg_id=?,work_item_id=? WHERE msg_id=?",
+                     (missing, sibling_task and _lineage_id("wi", sibling_task), sibling))
+    result, thread = _recent_answer(tmp_path)
+    other = next(t for t in result["data"]["threads"]
+                 if any(m["msg_id"] == sibling for m in t["messages"]))
+    assert other["work_item_id"] is None
+    assert result["data"]["lineage"]["unresolved_threads"] == 1
+    if sibling_task:
+        # Contradictory siblings stay fail-closed: neither direct tag is trusted.
+        assert thread["work_item_id"] is None
+        assert result["data"]["lineage"]["reasons"] == {"conflicting_tasks": 1}
+    else:
+        assert thread["work_item_id"] == task and thread["title"] == "Recorded task"
+        assert [m["msg_id"] for m in thread["messages"]] == [answer]
+        assert result["data"]["lineage"]["reasons"] == {"missing_parent": 1}
+
+
+@pytest.mark.parametrize("incomplete", [False, True])
+def test_reply_lineage_emitting_fleet_cannot_authorize_task(tmp_path, incomplete):
+    import sqlite3
+    from claudlobby.plane.db import db_file
+    _, answer = _seed_reply_lineage(tmp_path)
+    task = _lineage_id("wi", 2)
+    emit_batch(tmp_path, [{"event_type": "work_item", "emitter": "t", "fleet": "g",
+        "payload": {"work_item_id": task, "title": "Unrelated emitting-fleet task",
+                    "created_by": "bot:g/mgr"}}], require_commit=True)
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        # Both recorded parties remain in f. Only the emitting fleet matches g.
+        conn.execute("UPDATE communications SET fleet_uid=(SELECT fleet_uid FROM work_items WHERE work_item_id=?)",
+                     (task,))
+        tagged = answer if incomplete else _lineage_id("msg", 1)
+        conn.execute("UPDATE communications SET work_item_id=? WHERE msg_id=?", (task, tagged))
+        if incomplete:
+            conn.execute("UPDATE communications SET reply_to_msg_id=? WHERE msg_id=?",
+                         (_lineage_id("msg", 9999), answer))
+    result, thread = _recent_answer(tmp_path, fleet="g")
+    assert thread["work_item_id"] is None
+    assert thread["title"] is None and thread["task_events"] == []
+    assert "Unrelated emitting-fleet task" not in json.dumps(result)
+    assert result["data"]["lineage"]["unresolved_threads"] >= 1
+
+
+def test_reply_lineage_hop_exhaustion_is_bounded_and_unlinked(tmp_path):
+    _seed_reply_lineage(tmp_path, depth=33)
+    result, thread = _recent_answer(tmp_path)
+    assert thread["work_item_id"] is None
+    assert result["data"]["lineage"]["reasons"]["hop_limit"] == 1
+
+
+def test_reply_lineage_unique_lookup_budget_does_not_guess(tmp_path, monkeypatch):
+    from claudlobby.plane import view
+    monkeypatch.setattr(view, "_CHANNEL_LINEAGE_ANCESTORS", 2, raising=False)
+    _seed_reply_lineage(tmp_path, depth=3)
+    result, thread = _recent_answer(tmp_path)
+    assert thread["work_item_id"] is None
+    assert result["data"]["lineage"]["ancestor_lookups"] == 2
+    assert result["data"]["lineage"]["reasons"]["lookup_limit"] == 1
+
+
+@pytest.mark.parametrize("room", ["engineering", "data"])
+def test_outside_window_reply_keeps_legitimate_cross_fleet_task_owner(tmp_path, room):
+    import sqlite3
+    from claudlobby.plane.db import db_file
+    _seed_cross_fleet(tmp_path)
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        conn.execute("DELETE FROM communications WHERE msg_id=?", ("msg_" + "d" * 32,))
+        conn.execute("UPDATE communications SET work_item_id=NULL,body='Recent answer' WHERE msg_id=?", ("msg_" + "f" * 32,))
+    result, thread = _recent_answer(tmp_path, limit=1, fleet=room)
+    assert thread["work_item_id"] == "wi_" + "e" * 32
+    assert thread["cross_fleet"] is True
+    assert thread["messages"][0]["sender_short"] == "data/worker"
+    assert thread["messages"][0]["recipient_short"] == "engineering/lead"
+    assert result["data"]["lineage"]["unresolved_threads"] == 0
+
+
+def test_reply_lineage_metadata_queries_are_indexed_batched_and_body_free(tmp_path, monkeypatch):
+    from claudlobby.plane import view
+    _seed_reply_lineage(tmp_path, depth=3, padding=500)
+    original = view._ro_conn
+    queries = []
+    class BoundedReader:
+        def __init__(self, conn): self.conn = conn
+        def execute(self, sql, parameters=()):
+            if "s.parent_uid AS sender_fleet_uid" in sql:
+                assert len(parameters) <= 400
+                assert "body" not in sql.partition("FROM")[0]
+                plan = self.conn.execute("EXPLAIN QUERY PLAN " + sql, parameters).fetchall()
+                assert any("SEARCH c USING INDEX" in row[3] for row in plan)
+                assert not any("SCAN c" in row[3] for row in plan)
+                queries.append(sql)
+            return self.conn.execute(sql, parameters)
+        def __getattr__(self, name): return getattr(self.conn, name)
+    monkeypatch.setattr(view, "_ro_conn", lambda db: BoundedReader(original(db)))
+    result, thread = _recent_answer(tmp_path, limit=500)
+    assert thread["work_item_id"] == _lineage_id("wi", 1)
+    assert queries and "HISTORIC BODY MUST NOT BE FETCHED" not in json.dumps(result)
+
+
+def test_reply_lineage_does_not_infer_task_from_body_or_actor_alias(tmp_path):
+    import sqlite3
+    from claudlobby.plane.db import db_file
+    task, answer = _seed_reply_lineage(tmp_path)
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        conn.execute("UPDATE communications SET reply_to_msg_id=NULL,body=? WHERE msg_id=?",
+                     (json.dumps({"work_item_id": task, "sender": "bot:f/mgr"}), answer))
+    result = TestClient(create_app(tmp_path, package=source_package())).get("/api/channel?limit=1&fleet=f").json()
+    assert result["data"]["threads"][0]["work_item_id"] is None
+    assert result["data"]["lineage"]["unresolved_threads"] == 0
+
+
+def test_reply_lineage_read_preserves_database_bytes(tmp_path):
+    import hashlib
+    from claudlobby.plane.db import db_file
+    _seed_reply_lineage(tmp_path)
+    before = hashlib.sha256(db_file(tmp_path).read_bytes()).hexdigest()
+    _recent_answer(tmp_path)
+    assert hashlib.sha256(db_file(tmp_path).read_bytes()).hexdigest() == before
+
+
+def test_channel_reply_lineage_and_provenance_share_snapshot(tmp_path, monkeypatch):
+    import sqlite3
+    from claudlobby.plane import view
+    from claudlobby.plane.db import db_file
+    task, _ = _seed_reply_lineage(tmp_path)
+    with sqlite3.connect(db_file(tmp_path)) as conn: conn.execute("PRAGMA journal_mode=WAL")
+    original = view._fetch_channel
+    heads = []
+    def concurrent(conn, *args):
+        assert conn.in_transaction
+        heads.append(conn.execute("SELECT MAX(ingest_seq) FROM ingest_ledger").fetchone()[0])
+        with sqlite3.connect(db_file(tmp_path)) as writer:
+            writer.execute("UPDATE communications SET work_item_id=NULL WHERE msg_id=?", (_lineage_id("msg", 1),))
+            writer.execute("UPDATE work_items SET title='later title' WHERE work_item_id=?", (task,))
+            writer.execute("INSERT INTO ingest_ledger(event_id,family,ingested_at) VALUES('later','events','later')")
+        return original(conn, *args)
+    monkeypatch.setattr(view, "_fetch_channel", concurrent)
+    result, thread = _recent_answer(tmp_path)
+    assert thread["work_item_id"] == task and thread["title"] == "Recorded task"
+    assert result["provenance"]["last_ingest_seq"] == heads[0]
+
+
 def test_terminal_stamp_is_first_terminal_monotone(tmp_path):
     """The reducer's rule: a late terminal never rewrites — the channel must
     agree with TASK_STATUS_SQL (the client copy took the LAST terminal and

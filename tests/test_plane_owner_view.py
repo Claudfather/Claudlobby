@@ -210,6 +210,26 @@ def test_revoke_during_handler_refuses_before_headers_or_body(protected):
     assert "x-private" not in result.headers
 
 
+@pytest.mark.parametrize("change", ["revoke", "expire"])
+def test_channel_lineage_does_not_bypass_late_response_admission(protected, tmp_path, monkeypatch, change):
+    from claudlobby.plane import view
+    from tests.test_plane_view import _seed_reply_lineage
+    _, client, store, grant, _, clock = protected
+    _seed_reply_lineage(tmp_path)
+    original = view._fetch_channel
+    def late(*args):
+        result = original(*args)
+        assert any(t["work_item_id"] for t in result["threads"])
+        if change == "revoke": store.revoke_owner(expected_revision=grant.revision)
+        else: clock[0] += SESSION_SECONDS
+        return result
+    monkeypatch.setattr(view, "_fetch_channel", late)
+    response = client.get("/api/channel?fleet=f")
+    assert response.status_code == 403
+    assert response.headers["cache-control"] == "no-store"
+    assert "Recent answer" not in response.text and "Recorded task" not in response.text
+
+
 async def _drive(app, path, on_body, *, spec="2.4", query=b""):
     messages = []
 
