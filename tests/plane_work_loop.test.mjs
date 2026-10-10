@@ -76,6 +76,7 @@ function harness(options = {}) {
   globalThis.confirm = text => { confirmations.push(text); return options.confirm !== false; };
   const sends = [], lookups = [], preparations = [];
   const api = {
+    ...(options.roomLabel ? {roomLabel:options.roomLabel} : {}),
     interactionContext: options.interactionContext || (() => context),
     ...(options.feedbackContext ? {feedbackContext:options.feedbackContext} : {}),
     ...(options.nudgeContext || options.feedbackContext ? {...(options.nudgeContext ? {nudgeContext:options.nudgeContext} : {}),prepareAction:request=>{preparations.push(request);if(options.prepareAction)return options.prepareAction(request);const {body,...metadata}=request;return {...metadata,semantic_sha256:'d'.repeat(64)};}} : {}),
@@ -1449,10 +1450,22 @@ for (const kind of ['nudge','feedback']) test(`connected qualified ${kind} uses 
  const source='computer-1',room=source+' / web',id=source+'::'+nudgeTaskId;
  const capability={...ownerNudge,room,actions:[kind],scope:{...ownerNudge.scope,fleet:room},recipients:ownerNudge.recipients.map(r=>({...r,id:source+'::'+r.id}))};
  const detail=ownerDetail();detail.data.task={...detail.data.task,task_id:id,fleet:room};
- const h=harness({interactionContext:()=>null,[kind+'Context']:()=>capability,protected:true,jget:()=>detail,crypto:{randomUUID:()=> '11111111-1111-4111-8111-111111111111'}});
+ const h=harness({interactionContext:()=>null,[kind+'Context']:()=>capability,roomLabel:value=>value===room?'Computer 1 / web':value,protected:true,jget:()=>detail,crypto:{randomUUID:()=> '11111111-1111-4111-8111-111111111111'}});
  h.loop.setRoom(room);await settle();h.open(id,room);await settle();
+ assert.match(h.get('task-detail-content').innerHTML,/Computer 1 \/ web/);
  const button=h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind===kind);assert.equal(button.disabled,false);button.onclick();await settle();
  await h.submit();assert.equal(h.preparations.length,1);assert.equal(h.sends.length,1);assert.equal(h.sends[0].target.task_id,id);assert.equal(h.sends[0].target.assignment_id,null);
  h.open(id,room);await settle();h.loop.refreshActions('computer-2');assert.equal(h.get('task-detail').open,true);
  h.loop.refreshActions(source);await settle();assert.equal(h.get('task-detail').open,true);assert.match(h.get('task-detail-content').innerHTML,/Complete canonical body/);
+});
+
+test('composer and recoverable pending labels show the readable team while retaining the stable routing scope',async()=>{
+  const room='c-abcdefghijklmnopqrstuvwxy / web',label='Computer 1 / web';
+  const capability={...context,room,scope:{...context.scope,fleet:room}};
+  const state=new ActionState(store()),request=state.begin(capability,'message',{recipient:'lead',task_id:null},'Private draft','original-uuid');
+  const storage={getItem:()=>JSON.stringify([state.metadata(request),{invalid:true}]),setItem(){}};
+  const h=harness({interactionContext:()=>capability,roomLabel:value=>value===room?label:value,storage});h.loop.setRoom(room);await settle();
+  assert.equal(h.get('work-scope').textContent,label);assert.match(h.get('work-recoverable').innerHTML,/Computer 1 \/ web/);
+  assert.doesNotMatch(h.get('work-recoverable').innerHTML,/c-abcdefghijkl/);assert.match(h.get('work-recoverable').innerHTML,/original-uuid/);
+  assert.equal(h.sends.length+h.lookups.length+h.preparations.length,0);
 });

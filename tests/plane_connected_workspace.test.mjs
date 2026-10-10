@@ -8,6 +8,7 @@ const ownerURL = uri(await read('owner-api-client.js'));
 const actionsURL = uri((await read('connected-actions.js')).replace('"./action-state.js"',JSON.stringify(new URL('../claudlobby/plane/ui/action-state.js',import.meta.url).href)));
 const carrierURL = uri((await read('connected-read-client.js')).replace('"./owner-api-client.js"',JSON.stringify(ownerURL)).replace('"./connected-actions.js"',JSON.stringify(actionsURL)));
 const adapterURL = uri((await read('two-source-read.js')).replace('"./owner-api-client.js"',JSON.stringify(ownerURL)));
+const {createWorkspaceReadTransport}=await import(adapterURL);
 const enrollmentURL = uri(await read('workspace-enrollment.js'));
 const workspaceText = await read('connected-workspace.js');
 const workspaceURL = uri(workspaceText.replace('"./workspace-enrollment.js"',JSON.stringify(enrollmentURL)).replace('"./connected-read-client.js"',JSON.stringify(carrierURL)).replace('"./two-source-read.js"',JSON.stringify(adapterURL)));
@@ -445,4 +446,35 @@ test('quiet source recovery in the existing overview refresh restores actions on
   assert.equal((await refresh).room,room);assert.equal(h.calls.filter(c=>c.url===contextDoor).length,before+1);
   await h.api.jget('/api/overview');assert.equal(h.calls.filter(c=>c.url===contextDoor).length,before+1);
   assert.equal(h.calls.filter(c=>c.url.endsWith('/actions/send')).length,0);stream.close();h.api.dispose();
+});
+
+test('stable source routing uses readable computer/team display labels without changing receipt metadata',async()=>{
+  const h=harness({count:1});await h.api.checkAccount();await flush();await h.api.act(0,'connect');
+  const overview=await h.api.jget('/api/overview'),choice=overview.data.fleet_choices[0],fleet=overview.data.fleets[0];
+  assert.equal(fleet.alias,sourceA+' / team');assert.equal(choice.alias,fleet.alias);
+  assert.equal(fleet.display_label,'Computer 1 / team');assert.equal(choice.display_label,fleet.display_label);
+  assert.equal(h.api.roomLabel(fleet.alias),fleet.display_label);
+  const capability=await h.api.interactionContext(fleet.alias);assert.equal(capability.scope.fleet,fleet.alias);
+  h.api.dispose();
+});
+
+test('overview completed before source loss cannot consume the later recovery refresh',async()=>{
+  const reached=deferred(),release=deferred();let hold=false,refresh;
+  const h=harness({count:1,dependencies:{createTransport(options){
+    const actual=createWorkspaceReadTransport(options);
+    return {...actual,async jget(url){const value=await actual.jget(url);if(hold&&url==='/api/overview'){hold=false;reached.resolve();await release.promise;}return value;}};
+  }}}),room=sourceA+' / team';
+  h.mount({onActionSourceChange:()=>{refresh=h.api.interactionContext(room);}});
+  await h.api.checkAccount();await flush();await h.api.act(0,'connect');await h.api.jget('/api/overview');
+  const stream=h.api.createEventSource('/api/stream');await flush();hold=true;
+  const old=h.api.jget('/api/overview');await reached.promise;
+  const door=refs[0].endpoint_origin+'/api/owner/connected/actions/context';
+  h.overrides.set(door,()=>reply(503,{state:'unavailable'}));
+  h.streams[0].control.enqueue(new TextEncoder().encode('event: source\ndata: {"state":"unreadable"}\n\n'));await flush();assert.equal(await refresh,null);
+  const before=h.calls.filter(c=>c.url===door).length;release.resolve();await old;await flush();
+  assert.equal(h.calls.filter(c=>c.url===door).length,before,'stale healthy read must not spend recovery');
+  h.overrides.delete(door);await h.api.jget('/api/overview');await flush();assert.equal((await refresh).room,room);
+  assert.equal(h.calls.filter(c=>c.url===door).length,before+1);
+  await h.api.jget('/api/overview');assert.equal(h.calls.filter(c=>c.url===door).length,before+1);
+  stream.close();h.api.dispose();
 });

@@ -138,7 +138,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         nextClients.push(row);
         row.actions = row.client.createActions({key:row.key,
           onPause:(...args) => invoke(mount?.onActionPause,...args),
-          onSourceChange:() => { row.actionRecoveryPending = true; invoke(mount?.onActionSourceChange,row.key); }});
+          onSourceChange:() => { row.actionRecoveryPending = {}; invoke(mount?.onActionSourceChange,row.key); }});
         row.enrollment = createEnrollment({reference, issuer:doc.shell_origin, operationalOrigin:doc.operational_origin,
           currentContext:() => current, obtainAssertion:(input,options) => accountAssertion('/api/plane/host-assertion',input,options),
           fetch,now,setTimeout,clearTimeout,onChange:changed});
@@ -208,14 +208,14 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     if (disposed || phase === 'denied') return failure('denied');
     if (phase === 'empty') return failure('empty', 'Save a computer address in your website workspace, then open it again.');
     if (phase !== 'ready' || !transport) return failure('unavailable', 'Check your account before connecting a computer.');
-    const ticket = sequence, active = transport;
+    const ticket = sequence, active = transport, recovery = new Map(clients.map(row => [row.key,row.actionRecoveryPending]));
     const value = await active.jget(url);
     if (disposed || phase !== 'ready' || ticket !== sequence || active !== transport) return failure('denied');
     // Quiet recorder recovery is observed by the existing board refresh, not
     // a source:ok event. Refresh only once after an admitted healthy overview.
     if (url === '/api/overview') for (const source of value?.data?.sources || []) {
       const row = clients.find(row => row.key === source.key);
-      if (row?.actionRecoveryPending && source.state === 'ok') {
+      if (row?.actionRecoveryPending && row.actionRecoveryPending === recovery.get(row.key) && source.state === 'ok') {
         row.actionRecoveryPending = false; invoke(mount?.onActionSourceChange,row.key);
       }
     }
@@ -370,7 +370,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     mount?.cleanup?.(); retire('disposed');
     for (const stream of [...streams]) stream.close(); listeners.clear();
   }
-  return Object.freeze({jget,createEventSource,mountSessionControls,dispose,checkAccount,snapshot,act,
+  return Object.freeze({jget,roomLabel:room => transport?.roomLabel(room) || room,createEventSource,mountSessionControls,dispose,checkAccount,snapshot,act,
     interactionContext:room => actionContext(room,'interactionContext'),
     nudgeContext:room => actionContext(room,'nudgeContext'),feedbackContext:room => actionContext(room,'feedbackContext'),
     prepareAction:value => actionOperation('prepareAction',value),sendAction:value => actionOperation('sendAction',value),actionReceipt:value => actionOperation('actionReceipt',value),

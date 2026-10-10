@@ -12,6 +12,7 @@ if (contextElement) {
 const connected = contextElement ? createConnectedWorkspace({documentContext:context}) : null;
 export const mountSessionControls = connected?.mountSessionControls;
 export const dispose = connected?.dispose;
+export const roomLabel = connected?.roomLabel;
 export const interactionContext = connected?.interactionContext;
 export const nudgeContext = connected?.nudgeContext;
 export const feedbackContext = connected?.feedbackContext;

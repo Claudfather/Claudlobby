@@ -293,3 +293,9 @@ Context admission keeps only the latest request per kind, including same-team
 refreshes. A late previous-team response cannot replace the current capability.
 Quiet recorder recovery refreshes action contexts once when the existing board
 overview observes that source healthy again; no new poller or send retry is added.
+
+Stable routing qualifiers remain in data attributes and saved metadata. Team
+cards, tabs, composer scope and task detail headings show the source display
+label and raw team alias (for example Computer 1 / engineering). Recovery
+consumes its loss ticket only on an overview started after that loss; a stale
+healthy result cannot exhaust the later recovery refresh.

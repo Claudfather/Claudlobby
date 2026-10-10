@@ -116,7 +116,7 @@ export function createWorkspaceReadTransport({ sources }) {
   }
   function fleetChoices(values) {
     return entries.flatMap((e, i) => e.fleets.map(f => ({ ...f, alias: room(e, f.alias),
-      uid: qualified(e, f.uid), source_state: values[i].state })));
+      uid: qualified(e, f.uid), display_label: `${e.label} / ${f.alias}`, source_state: values[i].state })));
   }
   function coverage(values) {
     const reachable = values.filter(v => v.state === 'ok').length;
@@ -207,7 +207,7 @@ export function createWorkspaceReadTransport({ sources }) {
     if (path === '/api/tasks') return { ...v, data: { ...d, tasks: d.tasks.map(t => task(e, t)), issues: (d.issues || []).map(x => event(e, x)) } };
     if (path === '/api/identities') return { ...v, data: { ...d, identities: d.identities.map(x => fields(e, x, ['uid'], ['alias'], ['fleet'])) } };
     if (path === '/api/overview' && (!d.totals || !d.host)) throw new Error('Missing source facts.');
-    if (path === '/api/overview') return { ...v, data: { ...d, fleets: d.fleets.map(x => fields(e, x, ['uid'], ['acked_by'], ['alias'])) } };
+    if (path === '/api/overview') return { ...v, data: { ...d, fleets: d.fleets.map(x => ({...fields(e, x, ['uid'], ['acked_by'], ['alias']),display_label:`${e.label} / ${x.alias}`})) } };
     return v;
   }
   function createEventSource(url) {
@@ -232,6 +232,7 @@ export function createWorkspaceReadTransport({ sources }) {
   }
   function dispose() { disposed = true; for (const s of [...streams]) s.close(); for (const e of entries) e.unsubscribe(); }
   return Object.freeze({ jget, createEventSource, dispose,
+    roomLabel(value) { const found = rooms.get(value); return found ? `${found.e.label} / ${found.raw.alias}` : value; },
     routeRoom(selected) {
       const value = !disposed && rooms.get(selected);
       return value && admitted(value.e) ? Object.freeze({key:value.e.key,fleet:value.raw.alias}) : null;
