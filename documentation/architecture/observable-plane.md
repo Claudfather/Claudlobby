@@ -68,6 +68,124 @@ counts the provisional ones. Session uids are transcript-stable
 (`sess_` + sha256 of the platform session id — the bash derivation in
 `claudlobby/_runtime_scripts/plane-session-start.sh` is pinned byte-identical to `ids.derive_session_uid(id)` for agent CLI `claude`; another agent CLI derives in Python only, through `ids.session_alias(id, agent_cli)` (#2145 F2)).
 
+## Owner access foundation (not enabled)
+
+`plane/owner_access.py` is an internal policy/state primitive for **direct,
+whole-deployment reads**. It does not authenticate a browser. The internal
+`plane/owner_view.py:create_owner_app` factory exercises it with an explicitly
+injected verifier; no CLI command, environment flag or startup job enables
+that factory. The current runtime view is unchanged. This is bounded owner-access work
+related to #1623, not completion of that issue or permission to expose Plane.
+
+Explicit initialization requires the existing private `state/host-uid`, using
+`ids.read_host_uid` (also used by operation identity resolution). Reads never
+mint or repair it. The separate `state/plane/owner-access.db` is 0600 in a 0700
+directory, bound to that installation and schema version. It does not migrate
+or write the flight recorder. Missing, malformed, redirected, incompatible or
+wrong-installation authority fails closed. This is not protection from root
+or another process with the same OS identity, nor a solution to a clone that
+copies both the host identity and authority store.
+
+The prototype's contract:
+
+- A trusted ingress will supply a namespaced human `PrincipalRef`. This value
+  is only a reference; constructing it proves nothing. A pending pairing
+  expires after five minutes and confers no access. Separate local approval
+  must confirm its exact token and displayed principal. Only one owner is
+  active; replacement requires explicit revocation followed by fresh pairing.
+- Pairing/revocation append monotonically numbered grant changes. Concurrent
+  confirmations serialize; one wins and invalidates all pending challenges.
+  Revocation names the expected grant revision, so a stale approval cannot
+  remove a later owner's grant. There is no cloud-requested removal door or
+  claim that an undelivered removal has been applied.
+- A paired principal can establish a fresh direct session without the website.
+  Sessions last fifteen minutes in this prototype, are bound to the current
+  grant revision, and require the verified principal again for each read or
+  renewal. Renewal atomically replaces the token. Lost renewal responses need
+  fresh direct authentication; an old token cannot be replayed. Expiry and
+  session termination do not revoke the durable pairing.
+- `authorize_read` checks the supplied target installation (the caller must
+  derive it from the actual data source, never a browser claim), session expiry and current
+  owner revision from disk on every call. Applied revocation blocks the next
+  admission, renewal and fresh session, including in another process. The
+  internal protected view also checks before each response-body delivery and
+  closes a stream on refusal. The state module itself has no HTTP behavior.
+- Credentials contain 256 random bits; only SHA-256 digests are stored. Token
+  fields are omitted from object representations. Each store permits at most
+  32 pending challenges and 32 sessions, cleaning expired records on the next
+  corresponding write. Grant-change history remains local. Storage is durable
+  SQLite with explicit transactions; authorization reads are query-only.
+  Initialization publishes a complete private database atomically, without
+  replacing existing authority; interrupted preparation can leave only a
+  temporary file that is never consulted for admission.
+
+A writer interrupted during a SQLite commit can leave a hot rollback journal.
+Read admissions and `current_grant` use read-only connections, so they cannot
+roll it back and may report unavailable (503 through the protected factory).
+Recovery is an explicit local operation on the existing authority: the internal
+`OwnerAccess._connection(write=True)` context opens it in `mode=rw`, lets SQLite
+recover the journal, and validates its installation and schema. Entering and
+closing that context without changing rows preserves grants and sessions.
+An already-authorized pairing/session/revocation operation uses the same write
+connection, but still performs its declared mutation. No recovery CLI is
+exposed; `initialize` validates existing authority through a read-only
+connection and is not a recovery door. HTTP reads never perform this recovery.
+
+These lifetimes and limits are bounded experiment choices, not a selected
+browser protocol. The primitive grants no website membership, workspace
+binding or operational write authority. It cannot be substituted for the
+canonical action policy or Plane actor attestation (#1622).
+
+### Protected read factory (internal experiment)
+
+`create_owner_app` wraps the canonical `view.create_app` in one outer ASGI gate.
+The resolved source root also selects its owner authority and host UID; request
+parameters cannot select an authority store or another deployment. There is no
+path allowlist: API routes, search, grid, health details, static files, HEAD,
+errors and later-added routes all cross the gate. Even an admitted reader
+cannot use a write method or WebSocket through this factory.
+
+The required asynchronous verifier supplies an immutable `VerifiedReader`
+(principal and session token) from trusted server code. No identity headers,
+cookies, URL credentials, website user IDs or workspace IDs are interpreted.
+The test verifier is out of band and synthetic; it is not a production
+Tailscale verifier. There is no HTTP session-creation or pairing endpoint.
+
+Admission happens before calling the view and again immediately before every
+response body chunk, using current host identity, grant and session state.
+Headers are held until the first body is admitted. Every response is
+`Cache-Control: no-store`; sendfile extensions are disabled so static bytes
+cannot bypass the gate. Non-SSE responses preserve Content-Length when supplied.
+Before headers are sent, denial is 403 and unavailable authority is 503, both
+with generic bodies. After an SSE stream starts, refusal closes it normally
+without another private frame or a replacement status. Other started responses
+abort without a terminating body chunk, so a truncated response is a transport
+failure rather than a successful short 200. Refusal is latched for that response;
+subsequent sends cannot resume delivery even if the inner producer catches it.
+The existing stream's one-second idle tick supplies the next admission check.
+Already delivered/in-flight bytes cannot be recalled; this is admission at
+each delivery, not a global transaction between revocation and network output.
+
+The protected factory preserves the existing lifespan and `begin_shutdown`
+signal. The normal `plane view` command continues to call the original factory.
+This experiment establishes response enforcement, not deployed protection,
+browser login, a credential transport choice or website workspace admission.
+Source binding is to the installation's local data root. It does not establish
+row provenance for an operator-copied or mixed-host database: a database-host
+ownership invariant/refusal is still required before protected activation.
+
+Before enabling protected endpoints, implement and validate the trusted
+Tailscale human identifier/ingress, local confirmation boundary, browser
+credential carrier, database ownership and end-to-end enforcement on the
+supported hosts and browsers. Tailscale Serve
+[documents user headers and their trust limits](https://tailscale.com/docs/features/tailscale-serve#identity-headers):
+they must not be accepted from an arbitrary directly reachable backend.
+Website-connected sessions additionally require independently verified website
+identity/workspace evidence; a supplied user/workspace string is insufficient.
+The view's GET-only contract must remain intact, with pairing/session mutations
+behind a separate authority service. No real protected use is claimed by the
+synthetic policy tests.
+
 ## The write spine
 
 `emit()` / `emit_batch()` (`claudlobby/plane/emit_api.py`) is the one
