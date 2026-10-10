@@ -67,3 +67,50 @@ Later HTTP admission, trusted issuer/JWKS configuration and retrieval, operation
 browser carrier, session expiry/revocation and actual device/browser validation
 remain separate reviewed work. Website membership alone never confers host reads
 or actions, and metadata/profile shape alone never confers authentication.
+
+
+## Optional HTTP bootstrap precursor
+
+The foreground owner server accepts `--workspace-issuer` and
+`--workspace-origin` together as exact fixed HTTPS origins. This explicitly
+opts in only POST/OPTIONS `/api/owner/workspace/challenge` and
+`/api/owner/workspace/stage`; startup checks optional schema/dependencies without
+initializing or fetching keys. Existing direct lifecycle, cookies, reads and
+actions keep their original Origin boundary. No ambient configuration is used.
+
+The operational caller omits host credentials; these routes reject Cookie and
+Authorization and require exact configured operational Origin, host, JSON and
+intent. Their finite preflight allows only POST, Content-Type and
+X-Claudlobby-Owner. Native contained Serve/WhoIs identity must be the current
+paired owner; Origin is not identity. Headers/errors are private/no-store and
+never expose assertion, private paths or exception details. Local confirmation
+remains mandatory; staging does not issue a session, read or action grant.
+
+Challenges accept only `{}` (1024 bytes), stages only `{nonce,assertion}`
+(16384 bytes; assertion8192 ASCII characters), with duplicate/unknown fields
+refused. Eight owned workers include body/identity/key/DB work and survive caller
+response cancellation; body has a five-second total bound and bootstrap a
+35-second phase deadline. SQLite locks remain bounded by the existing five-
+second timeout; an already running DB thread is retained until completion and
+may finish after the phase deadline. Lost/denied response may leave a staged
+proposal: inspect locally rather than automatically replaying. Closing admission
+uses fresh native identity and exact challenge/proposal in one read transaction,
+including expiry/owner/binding/installation; it never confirms or renews.
+
+One fixed issuer `/api/auth/jwks` is fetched without credentials, redirects or
+ambient proxies, with verified TLS, three-second inactivity and eight-second
+TOTAL bounds including lock wait/body/key validation. Raw identity-encoded JSON
+is limited to64KiB/eight public Ed25519 keys. Whole-set cache lives only in memory
+for300 seconds under wall and monotonic clocks; rollback expires it. Refresh
+attempts have a30-second cooldown, including failures. Unknown kid is only a
+hint; signature/claims still pass the maintained pure verifier. No stale-cache
+fallback or generic discovery. Removed keys may remain trusted until expiry;
+local owner/workspace revocation supplies immediate host enforcement.
+
+This backend is a precursor: the canonical operational entry/acquisition
+controller is not mounted here. It must obtain issuer evidence using the
+selected same-site separate-origin website topology, keep it only in memory,
+and stage it directly at the pinned host. Current different-site deployment
+aliases, actual browser local-network consent, real native ingress and connected
+read carrier require separate proof. No browser or real host connection is
+claimed by synthetic ingress/HTTPX mock tests.

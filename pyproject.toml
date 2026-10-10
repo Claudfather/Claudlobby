@@ -23,11 +23,11 @@ dev = ["pytest>=7.0", "tomli; python_version < '3.11'",
        "build>=1,<2", "setuptools>=77", "wheel",
        # the plane-ui battery runs in CI; self-extra keeps ONE copy of the
        # pins (httpx = starlette TestClient engine)
-       "claudlobby[plane-ui]", "httpx>=0.24"]
+       "claudlobby[plane-ui]"]
 # Phase-4 operator plane UI (design walk ruling 2026-08-28): the view daemon.
 # OPTIONAL by §14's degrade rule — the core ledger, doors, and ingest daemon
 # never import these; `claudlobby plane view` refuses helpfully without them.
-plane-ui = ["fastapi>=0.110,<1", "uvicorn>=0.27,<1", "PyJWT[crypto]==2.15.1"]
+plane-ui = ["fastapi>=0.110,<1", "uvicorn>=0.27,<1", "PyJWT[crypto]==2.15.1", "httpx==0.28.1"]
 # Pinned (F1 lock) — bump policy: documentation/integrations/claudron-integration.md
 vault = ["claudron @ git+https://github.com/Claudfather/Claudron.git@v0.6.1"]
 

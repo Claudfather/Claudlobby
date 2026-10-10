@@ -68,7 +68,7 @@ def private_listener(path: Path):
 
 
 def serve(root: Path, *, origin: str, tailscale_binary: Path, socket_path: Path | None = None,
-          package=None):
+          package=None, workspace_issuer=None, workspace_origin=None):
     """Foreground server; caller explicitly selects root and local authority."""
     import uvicorn
 
@@ -81,9 +81,13 @@ def serve(root: Path, *, origin: str, tailscale_binary: Path, socket_path: Path 
     OwnerAccess(root).current_grant()  # validate existing authority, no initialization
     inspect_source(root)  # explicit local source attestation must already exist
     try:
+        workspace_bootstrap = None
+        if workspace_issuer is not None or workspace_origin is not None:
+            from .owner_workspace_http import WorkspaceBootstrapConfig
+            workspace_bootstrap = WorkspaceBootstrapConfig(workspace_issuer, workspace_origin)
         app = create_owner_browser_app(root, expected_origin=origin,
             verify_principal=ServePrincipalVerifier(tailscale_binary=Path(tailscale_binary)),
-            package=package)
+            package=package, workspace_bootstrap=workspace_bootstrap)
     except ValueError as exc:
         raise OwnerServerConfigurationError(str(exc)) from exc
     socket_path = socket_path or Path(root) / "state/plane/owner.sock"

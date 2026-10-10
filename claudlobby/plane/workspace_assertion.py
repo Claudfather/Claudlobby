@@ -146,6 +146,15 @@ def _public_keys(public_jwks: bytes, jwt) -> dict:
         raise AssertionUnavailable() from None
 
 
+def validate_workspace_jwks(public_jwks: bytes) -> frozenset[str]:
+    """Validate the entire finite public keyset without token or authority input."""
+    try:
+        import jwt
+    except ImportError:
+        raise AssertionUnavailable() from None
+    return frozenset(_public_keys(public_jwks, jwt))
+
+
 def verify_workspace_assertion(
     assertion: str, public_jwks: bytes, *, expected: ExpectedWorkspaceAssertion,
 ) -> WorkspaceAttestation:

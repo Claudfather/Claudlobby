@@ -260,10 +260,13 @@ def dispatch(args):
         if args.owner_action == "serve":
             from ..plane.owner_server import OwnerServerConfigurationError, OwnerServerStartupError, serve
 
+            if (args.workspace_issuer is None) != (args.workspace_origin is None):
+                raise CommandFailure("invalid_argument", "workspace issuer and origin must be supplied together")
             try:
                 serve(paths.root, origin=args.origin, tailscale_binary=args.tailscale,
                       socket_path=args.socket,
-                      package=paths.package)
+                      package=paths.package, workspace_issuer=args.workspace_issuer,
+                      workspace_origin=args.workspace_origin)
             except OwnerServerStartupError as exc:
                 raise CommandFailure("unavailable", "owner server startup failed; inspect local server logs") from exc
             except OwnerServerConfigurationError as exc:
