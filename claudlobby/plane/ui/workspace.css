@@ -80,7 +80,8 @@ button:disabled {
   padding:5px 11px;
   border-radius:7px
 }
-.pill.ghost.on {
+.pill.ghost.on,
+.plane-workspace #view-nav .pill.ghost.on {
   background:#e5ecdd;
   color:#36523e;
   border-color:#9ab18e
@@ -105,6 +106,12 @@ button:disabled {
 .plane-workspace main>section {
   border:0;
   min-width:0
+}
+/* Own rail placement across the legacy 1100px breakpoint too. */
+.plane-workspace #rail-fleet,
+.plane-workspace #rail-channel,
+.plane-workspace #rail-right {
+  order:0
 }
 .plane-workspace h2 {
   padding:0 0 12px;
@@ -184,7 +191,6 @@ button:disabled {
   border-radius:10px
 }
 .card b {
-  display:block;
   font-size:13px;
   line-height:1.5;
   padding-top:5px
@@ -193,9 +199,6 @@ button:disabled {
   font-size:10px;
   overflow-wrap:anywhere;
   line-height:1.6
-}
-.card .st {
-  font-size:9px
 }
 .card.attn {
   background:#fffcf3;
@@ -263,7 +266,8 @@ button:disabled {
   background:var(--panel)
 }
 .ov-card .ov-head {
-  font-size:11px
+  font-size:11px;
+  flex-wrap:wrap
 }
 .ov-card .ov-line {
   font-size:10px;
@@ -281,6 +285,7 @@ button:disabled {
   flex-wrap:wrap;
   gap:6px;
   margin-top:11px;
+  margin-left:0;
   letter-spacing:0;
   text-transform:none
 }
@@ -322,16 +327,8 @@ button:disabled {
   display:block
 }
 
-.plane-workspace #fleet-tabs {
-  margin-left:0
-}
-
 .plane-workspace .overview {
   grid-template-columns:repeat(auto-fit,minmax(190px,1fr))
-}
-
-.ov-card .ov-head {
-  flex-wrap:wrap
 }
 
 /* Status colors describe state; selection uses the sage navigation palette.
@@ -424,6 +421,17 @@ a:focus-visible,button:focus-visible,input:focus-visible,summary:focus-visible,[
   background:var(--panel)
 }
 
+/* Terminal captures keep the dark ANSI palette, including their panel states. */
+.plane-workspace .pane-card pre,
+.plane-workspace #focus-pane {
+  --ink:#e6edf3;
+  --dim:#8b949e;
+  --bad:#ff7b72;
+  --warn:#e3b341;
+  color:var(--ink);
+  color-scheme:dark
+}
+
 @media(min-width:1450px) {
 
 body.plane-workspace {
@@ -450,7 +458,7 @@ body.plane-workspace {
   gap:20px
 }
 
-#rail-fleet {
+.plane-workspace #rail-fleet {
   grid-column:1/-1;
   order:3
 }
@@ -522,11 +530,11 @@ body.plane-workspace {
 }
 
 .plane-workspace #rail-right {
-  order:1
+  order:0
 }
 
 .plane-workspace #rail-channel {
-  order:0
+  order:1
 }
 
 .plane-workspace #rail-fleet {

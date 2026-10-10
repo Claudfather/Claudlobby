@@ -1827,9 +1827,8 @@ def create_app(
     def _rewritten_index() -> "HTMLResponse":
         tok = asset_token()
         html = (UI_DIR / "index.html").read_text()
-        html = (html.replace("/app.js", f"/app.js?v={tok}")
-                    .replace("/style.css", f"/style.css?v={tok}")
-                    .replace("/workspace.css", f"/workspace.css?v={tok}"))
+        for asset in ("app.js", "style.css", "workspace.css"):
+            html = html.replace(f"/{asset}", f"/{asset}?v={tok}")
         return _no_store(HTMLResponse(html))
 
     @app.get("/", response_class=HTMLResponse)
@@ -1845,7 +1844,7 @@ def create_app(
     @app.get("/app.js")
     def app_js():
         js = (UI_DIR / "app.js").read_text()
-        # bust the intra-module import too, or the browser reuses a pinned
+        # bust the intra-module imports too, or the browser reuses pinned
         # dependencies from its module map.
         token = asset_token()
         for module in ("panel-state.js", "api-client.js"):
