@@ -144,14 +144,14 @@ def test_real_native_refuses_existing_input_without_typing_or_enter():
                     time.sleep(0.02)
                 pytest.fail("private input fixture did not render expected text")
             wait_for(">\n")
-            original = "STRANDED_PRIVATE_INPUT"
+            original = "STRANDED_PRIVATE_INPUT Esc to cancel"
             native("send-keys", "-t", "worker", "-l", "--", original)
             before = wait_for(original)
             destination = transport.TransportDestination(root, "fleet", "private-held", "worker", sockets)
             package = replace(source_package(), native=Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts")
             result = transport.send(package, destination, message_id=MSG,
                                     body="NEW_PAYLOAD_MUST_NOT_APPEND", timeout=10)
-            assert result.status == "failed" and result.native_returncode == 4, result
+            assert result.status == "failed" and result.native_returncode is None, result
             assert result.wire_sha256 is result.wire_bytes is None
             assert native("capture-pane", "-t", "worker", "-p").stdout == before
             assert not log.exists()  # No CR submitted either the old or new text.
@@ -212,6 +212,7 @@ def test_prelaunch_refusal_differs_from_partial_and_timeout_uncertainty(destinat
     missing_session = transport.send(package, destination, message_id=MSG, body="hi",
                                      runner=no_session)
     assert missing_session.status == "failed" and missing_session.wire_sha256 is None
+    assert missing_session.native_returncode is None
     def timed_out(command, **kwargs):
         raise subprocess.TimeoutExpired(command, kwargs["timeout"], output=b"transport-v1\tinvoked\n")
     result = transport.send(package, destination, message_id=MSG, body="hi", runner=timed_out)

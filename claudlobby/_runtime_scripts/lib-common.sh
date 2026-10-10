@@ -2224,7 +2224,18 @@ bot_tmux_send() {
             echo "bot_tmux_send: PLANE_MSG_ID '$PLANE_MSG_ID' is not a minted id -- no plane trailer appended" >&2
         fi
     fi
-    pane_send_verified "$peer_socket" "$session" "$safe"
+    local rc=0
+    pane_send_verified "$peer_socket" "$session" "$safe" || rc=$?
+    if [ "$rc" -eq 4 ]; then
+        # The proof was prepared before admission, but no bytes crossed the
+        # pane. Clear it here: the locked helper runs in a subshell and cannot
+        # reset these caller globals or their cross-process output itself.
+        PLANE_WIRE_SHA256=""; PLANE_WIRE_BYTES=""
+        if [ -n "${PLANE_WIRE_OUT:-}" ]; then
+            : > "$PLANE_WIRE_OUT" 2>/dev/null || true
+        fi
+    fi
+    return "$rc"
 }
 
 # --- verified pane send -------------------------------------------------------
@@ -3621,11 +3632,12 @@ pane_is_busy() {
 #   Press up to edit queued messages   a message queued behind a running turn
 #   1. Yes, try it                     a menu's selected option: Enter CHOOSES
 # A menu also offers its own exit below the options ("Esc to cancel").
+# Exit words inside authored text are not chrome. An unnumbered footer is
+# recognized only as an exact line outside the rule below the input box.
 #
 # It says nothing about whether a turn is running, so a caller asks
-# pane_is_busy first; keepalive's classify_pane does. Byte-safe and fork-free
-# past pane_input_region: literal case patterns, so the answer does not move
-# with the locale. The idle bracket's does: under LC_ALL=C it matches a box
+# pane_is_busy first; keepalive's classify_pane does. Byte-safe literal patterns
+# and a C-locale footer scan keep the verdict independent of locale. The idle bracket's does: under LC_ALL=C it matches a box
 # border's bytes, which is why classify_pane asks this before pane_is_idle.
 pane_is_held() {
     local region first
@@ -3637,9 +3649,15 @@ pane_is_held() {
         'Try "'*'"'|'Press up to edit queued messages') return 1 ;;
         [0-9].\ *|[0-9][0-9].\ *) return 1 ;;
     esac
-    case "$region" in
-        *'Esc to cancel'*|*'Esc to go back'*) return 1 ;;
-    esac
+    if printf '%s\n' "$region" | LC_ALL=C awk '
+        NR > 1 {
+            line = $0; gsub("\342\224\200", "", line)
+            if (line ~ /^[ \t]*$/ && $0 ~ /\342\224\200/) outside = 1
+            if (outside && $0 ~ /^[ \t]*(Enter to confirm · )?Esc to (cancel|go back)[ \t]*$/) found = 1
+        }
+        END { exit !found }'; then
+        return 1
+    fi
     return 0
 }
 
@@ -4812,14 +4830,18 @@ inject_stamp() {
 # pane_send_verified's "not submitted" (#1236): the box never showed the
 # payload, or still held it after the last Enter. The bot is up and that prompt
 # was not submitted, so the boot goes on and the log says so (send_unsubmitted
-# records which on the plane, and the send's stderr line says it too). Any
-# other failure is returned, so under the caller's set -e and error trap it
-# ends the boot as the unguarded send used to. Here rather than in start-bot.sh
+# records which on the plane, and the send's stderr line says it too). rc 4
+# means existing input refused the send without any new keystrokes; log NOT
+# SENT and also continue, leaving the existing text untouched. Any other
+# failure is returned, so under the caller's set -e and error trap it ends the boot as the unguarded send used to. Here rather than in start-bot.sh
 # because a test runs start-bot's injection branches against this file alone.
 boot_send_settled() {
     case "$2" in
         0) return 0 ;;
         3) printf '%s %s — NOT SUBMITTED: the input box never showed it, or still held it after the last Enter (#1236)\n' \
+               "$(ts_iso)" "$1" >> "$3"
+           return 0 ;;
+        4) printf '%s %s — NOT SENT: the input box already held text; no payload or Enter was sent\n' \
                "$(ts_iso)" "$1" >> "$3"
            return 0 ;;
         *) return "$2" ;;

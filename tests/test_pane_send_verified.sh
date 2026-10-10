@@ -155,17 +155,13 @@ bot_tmux() {
             if [ "${FUNCNAME[1]:-}" = _pane_send_verified_locked ] &&
                 [ ! -s "$SENT_LOG" ] && [ -s "$TMPD/last-ready" ]; then
                 fixture=$(cat "$TMPD/last-ready")
-                if [ -n "$(pane_input_region "$(cat "$fixture")")" ]; then
-                    printf 'capture:drawn:%s\n' "${fixture##*/}" >> "$ORDER_LOG"
-                else
-                    printf 'capture:predraw:%s\n' "${fixture##*/}" >> "$ORDER_LOG"
-                fi
-                cat "$fixture"; return 0
+            else
+                remaining=$(cat "$PANE_SCRIPT")
+                fixture=$(printf '%s\n' "$remaining" | head -1)
+                printf '%s\n' "$remaining" | tail -n +2 > "$PANE_SCRIPT.tmp"
+                [ -s "$PANE_SCRIPT.tmp" ] && mv "$PANE_SCRIPT.tmp" "$PANE_SCRIPT" || rm -f "$PANE_SCRIPT.tmp"
+                printf '%s' "$fixture" > "$TMPD/last-ready"
             fi
-            remaining=$(cat "$PANE_SCRIPT")
-            fixture=$(printf '%s\n' "$remaining" | head -1)
-            printf '%s\n' "$remaining" | tail -n +2 > "$PANE_SCRIPT.tmp"
-            [ -s "$PANE_SCRIPT.tmp" ] && mv "$PANE_SCRIPT.tmp" "$PANE_SCRIPT" || rm -f "$PANE_SCRIPT.tmp"
             # Classify for the order log by the same signal the gate uses, so the
             # log cannot disagree with the code about what "drawn" means.
             if [ -n "$(pane_input_region "$(cat "$fixture")")" ]; then
@@ -173,7 +169,6 @@ bot_tmux() {
             else
                 printf 'capture:predraw:%s\n' "${fixture##*/}" >> "$ORDER_LOG"
             fi
-            printf '%s' "$fixture" > "$TMPD/last-ready"
             cat "$fixture"
             ;;
     esac
@@ -1184,6 +1179,17 @@ assert_eq "the wire proof sha is sha256_prefixed(sanitize(payload))" \
     "$(sha256_prefixed "$_expect_safe")" "${PLANE_WIRE_SHA256:-}"
 assert_eq "the wire proof byte length is len(safe), trailer EXCLUDED" \
     "$(printf '%s' "$_expect_safe" | wc -c | tr -d ' ')" "${PLANE_WIRE_BYTES:-}"
+# Globals and the cross-process proof file describe sent bytes only. A held
+# preflight prepares proof but must erase it in the caller after the refusal.
+export PLANE_WIRE_OUT="$TMPD/refused-wire"
+printf 'stale proof\n' > "$PLANE_WIRE_OUT"
+run_bot_send "NEW BODY" "$FIXTURES/input-stuck-literal.txt"
+assert_eq "held bot send preserves its rc4 contract" "4" "$BOT_SEND_RC"
+assert_eq "held bot send clears prepared digest" "" "${PLANE_WIRE_SHA256:-}"
+assert_eq "held bot send clears prepared length" "" "${PLANE_WIRE_BYTES:-}"
+assert_eq "held bot send clears cross-process wire proof" "0" "$(wc -c < "$PLANE_WIRE_OUT" | tr -d ' ')"
+assert_eq "held bot send types nothing" "0" "$(wc -l < "$SENT_LOG" | tr -d ' ')"
+unset PLANE_WIRE_OUT
 unset PLANE_MSG_ID
 
 echo ""
@@ -1202,7 +1208,11 @@ r=$(boot_send_settled RESUME 0 "$blog"; echo "rc=$?")
 assert_eq "rc 0: the boot goes on" "rc=0" "$r"
 r=$(boot_send_settled RESUME 1 "$blog"; echo "rc=$?")
 assert_eq "rc 1: returned, so set -e still ends the boot" "rc=1" "$r"
-assert_eq "only the withheld Enter is logged" "1" "$(wc -l < "$blog" | tr -d ' ')"
+r=$(boot_send_settled STARTUP 4 "$blog"; echo "rc=$?")
+assert_eq "rc 4: a held resume does not abort the following startup" "rc=0" "$r"
+r=$(grep -c 'STARTUP — NOT SENT: the input box already held text' "$blog" || true)
+assert_eq "rc 4: the startup log distinguishes no new input" "1" "$r"
+assert_eq "both withheld and refused boot sends are logged" "2" "$(wc -l < "$blog" | tr -d ' ')"
 # Both boot sends go through it: the property, not one literal line.
 r=$(grep -cE '^[[:space:]]*boot_send_settled (RESUME|STARTUP) "\$_send_rc" "\$LOG"$' \
     "$SCRIPT_DIR/../claudlobby/_runtime_scripts/start-bot.sh" || true)
