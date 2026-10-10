@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — internal direct-host browser session transport
+
+An internal factory connects an explicitly verified principal to local owner
+pairing and protected Plane reads. Exact status, pairing, sign-in, renewal and
+sign-out routes reuse the existing owner authority; session credentials stay
+in a Secure/HttpOnly host cookie. Host, Origin and explicit request-intent checks
+guard lifecycle writes, while static files and SSE retain the read gate's
+per-delivery checks. No runtime command enables it. A production identity
+verifier, local confirmation UI and actual HTTPS browser validation remain
+required; website OAuth and bot action endpoints are outside this increment.
+
 ### Added — internal owner-authorized ordinary-message adapter
 
 An explicitly paired host owner can receive a separately approved message grant
