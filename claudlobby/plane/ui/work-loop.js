@@ -11,6 +11,7 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
   const state = new ActionState(storage);
   const messageRecipients = new Map(); // Tab memory only, bound to the full authorized scope.
   let context = null, room = null, epoch = 0, board = null, channel = null;
+  let detailEpoch = 0;
   let selected = null, target = null, kind = "message", sending = false, inFlightRequest = null, opener = null, openerIdentity = null;
   let notice = "Choose a team to see its available actions.";
   root.innerHTML = `<div class="work-loop-head"><div><h2>Talk to your team</h2>
@@ -80,6 +81,8 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
     pendingRows();
   }
   function closeDetail() {
+    ++detailEpoch;
+    $("task-detail-content").innerHTML = "";
     if (dialog.open) dialog.close();
     selected = null;
   }
@@ -133,21 +136,101 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
   }
   function detail() {
     if (!selected) return;
-    const task = board?.state === "ok" ? board.data.tasks.find(t => t.task_id === selected.id && (t.fleet || "") === selected.fleet) : null;
+    const token = ++detailEpoch, selection = selected;
     const content = $("task-detail-content");
-    if (!task) {
-      content.innerHTML = '<h2 id="task-detail-title">Task details are unavailable</h2>' + stateBlock("unavailable", null, null, { label: "No current task record", detail: "The selected task is not in the latest board response. Refresh the team view to check again." });
+    // Read at call time: a late reply must see the board as it is then.
+    const boardTask = () => board?.state === "ok" ? board.data.tasks.find(t => t.task_id === selection.id && (t.fleet || "") === selection.fleet) : null;
+    const showUnavailable = (...block) => { content.innerHTML = '<h2 id="task-detail-title">Task details are unavailable</h2>' + stateBlock(...block); };
+    if (!selection.fleet) {
+      const task = boardTask();
+      if (task && typeof api.mountSessionControls !== "function") renderDetail(task, true);
+      else showUnavailable("unknown", null, "This task has no recorded team. Full detail cannot be authorized in this view.");
       return;
     }
+    if (typeof api.jget !== "function") {
+      // Older injected transports can show their board snapshot, explicitly
+      // labelled. Never fall back after a real detail request was refused.
+      const task = boardTask();
+      if (task) renderDetail(task, true);
+      else showUnavailable("unavailable");
+      return;
+    }
+    content.innerHTML = '<h2 id="task-detail-title">Task details</h2>' + stateBlock("loading");
+    const url = `/api/tasks/${encodeURIComponent(selection.id)}?fleet=${encodeURIComponent(selection.fleet)}`;
+    Promise.resolve().then(() => api.jget(url)).then(envelope => {
+      if (token !== detailEpoch || selected !== selection) return;
+      const task = envelope?.state === "ok" ? envelope.data?.task : null;
+      if (!task || task.task_id !== selection.id || task.fleet !== selection.fleet) {
+        const previous = boardTask();
+        // Legacy/synthetic read transports may not implement this route yet.
+        // A protected transport refusal must never redisplay stale private data.
+        const fallback = !task && previous && typeof api.mountSessionControls !== "function"
+          && !["denied", "not_found", "invalid", "unknown"].includes(envelope?.state);
+        if (fallback) renderDetail(previous, true, envelope || {state:"disconnected"});
+        else showUnavailable(task ? "unknown" : envelope?.state || "disconnected",
+          envelope?.provenance, envelope?.remediation);
+        return;
+      }
+      renderDetail(task, false);
+    }).catch(() => {
+      if (token !== detailEpoch || selected !== selection) return;
+      showUnavailable("disconnected");
+    });
+  }
+  function historyWindow(label, window) {
+    return window?.truncated ? `<p class="note">${esc(label)}: showing ${esc(window.shown)} most recent of ${esc(window.total)} recorded entries.</p>` : "";
+  }
+  function recordIds(entries) {
+    const visible = entries.filter(([, value]) => value);
+    if (!visible.length) return "";
+    return `<details class="task-record-details"><summary>Record identifiers</summary><dl class="task-facts">${visible
+      .map(([label, value]) => `<dt>${esc(label)}</dt><dd>${esc(value)}</dd>`).join("")}</dl></details>`;
+  }
+  function eventDetails(event) {
+    if (typeof event.detail !== "string") return "";
+    let fields = null;
+    try { const value = JSON.parse(event.detail); if (value && typeof value === "object" && !Array.isArray(value)) fields = value; } catch {}
+    const prose = ["summary", "reason", "question"].filter(key => typeof fields?.[key] === "string")
+      .map(key => `<p class="note">${esc(key[0].toUpperCase() + key.slice(1))}</p><pre class="task-record-body">${esc(fields[key])}</pre>`).join("");
+    return prose + `<details class="task-record-details"><summary>Recorded event details</summary><pre class="task-record-body">${esc(event.detail)}</pre></details>`;
+  }
+  function events(rows) {
+    return (rows || []).map(e => {
+      const actor = e.actor_short && e.actor_short !== e.actor_uid ? e.actor_short : e.actor_alias || (e.actor_uid ? "Actor not resolved" : "");
+      return `<li><b>${esc((e.event || "Recorded event").replaceAll("_", " "))}</b> · ${esc(ago(e.occurred_at))}
+        ${actor ? ` · ${esc(actor)}` : ""}${eventDetails(e)}
+        ${recordIds([["Event", e.event_id], ["Actor", e.actor_uid], ["Assignment", e.assignment_id]])}</li>`;
+    }).join("");
+  }
+  function assigneeLabel(assignment) {
+    if (!assignment) return "No current assignment";
+    return assignment.assignee_short && assignment.assignee_short !== assignment.assignee_uid
+      ? assignment.assignee_short : assignment.assignee_alias || "Assignee not resolved";
+  }
+  function renderDetail(task, boardOnly, unavailable = null) {
+    const content = $("task-detail-content");
+    const lastEvent = task.last_event || task.history?.at(-1);
     const assignment = task.current_assignment;
-    content.innerHTML = `<p class="eyebrow">${esc(task.fleet || room)} · TASK</p>
-      <h2 id="task-detail-title">${esc(task.title || task.task_id)}</h2>
-      <p class="task-state"><b>${esc(task.state || "State unknown")}</b> · ${esc(task.task_id)}</p>
-      <dl class="task-facts"><dt>Assigned to</dt><dd>${esc(assignment?.assignee_short || assignment?.assignee_alias || "No current assignment")}</dd>
-      <dt>Last recorded action</dt><dd>${esc(task.last_event?.event || "No action recorded")} · ${esc(ago(task.last_event?.occurred_at))}</dd>
+    content.innerHTML = `<p class="eyebrow">${esc(task.fleet || "Team not recorded")} · TASK</p>
+      <h2 id="task-detail-title">${esc(task.title || "Recorded task")}</h2>
+      <p class="task-state"><b>${esc(task.state || "State unknown")}</b></p>
+      ${recordIds([["Task", task.task_id], ["Team", task.fleet_uid], ["Created by", task.created_by_alias || task.created_by_uid]])}
+      ${unavailable ? stateBlock(unavailable.state || "unavailable", unavailable.provenance, unavailable.remediation) : ""}
+      <dl class="task-facts"><dt>Assigned to</dt><dd>${esc(assigneeLabel(assignment))}</dd>
+      <dt>Last recorded action</dt><dd>${esc(lastEvent?.event || "No action recorded")} · ${esc(ago(lastEvent?.occurred_at))}</dd>
       <dt>Delivery evidence</dt><dd>${esc(task.delivery?.integrity || "No confirmed delivery evidence in this view")}</dd></dl>
-      ${task.attention_question ? `<div class="task-question"><b>Needs your input</b><p>${esc(task.attention_question)}</p></div>` : ""}
+      ${task.attention_question || task.attention_reason?.includes("escalated") ? `<div class="task-question"><b>Needs your input</b><pre class="task-record-body">${esc(task.attention_question || "The question was not recorded.")}</pre></div>` : ""}
       ${task.resolved === false ? '<p class="task-question">Task history has unresolved links. Its result cannot be treated as confirmed.</p>' : ""}
+      ${boardOnly ? '<p class="note">Showing a limited board snapshot. Full task detail is unavailable in this view.</p>' : `
+      <h3>Task description</h3>${task.body === null || task.body === undefined ? '<p class="detail-empty">No task body was recorded.</p>' : `<pre class="task-record-body">${esc(task.body)}</pre>`}
+      <h3>Assignments</h3>${historyWindow("Assignments", task.assignments_window)}
+      ${(task.assignments || []).map(a => `<details class="task-assignment"><summary>${esc(assigneeLabel(a))} · ${esc(a.state)}</summary>
+        ${recordIds([["Assignment", a.assignment_id], ["Assignee", a.assignee_uid], ["Assigned by", a.assigned_by_uid], ["Dispatch message", a.dispatch_message_id]])}
+        <p class="note">Assigned by ${esc(a.assigned_by_short && a.assigned_by_short !== a.assigned_by_uid ? a.assigned_by_short : a.assigned_by_alias || "an unresolved actor")} · expected by ${esc(a.expected_by || "not recorded")}</p>
+        ${historyWindow("Assignment history", a.history_window)}<ol class="task-history">${events(a.history)}</ol></details>`).join("") || '<p class="detail-empty">No assignment was recorded.</p>'}
+      <h3>Task history</h3>${historyWindow("Task history", task.history_window)}<ol class="task-history">${events(task.history)}</ol>
+      ${(task.issues || []).length ? `<h3>History issues</h3><ul>${task.issues.map(i => `<li>${esc(i.code)}${i.blocking ? " · unresolved" : " · historical"}</li>`).join("")}</ul>` : ""}
+      ${task.issues_window?.truncated ? '<p class="note">Additional history issues are omitted from this bounded view.</p>' : ""}`}
       <h3>Recent conversation &amp; reports</h3><p class="note">This is the recent channel window, not a complete task history. Completion alone does not mean a result was reviewed.</p>
       <div id="task-reports"></div>
       <div class="task-detail-actions"><button class="pill" type="button" data-kind="feedback">Give feedback</button>
@@ -172,7 +255,13 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
         paint({ restoreDraft: true }); $("work-body").focus();
       };
     }
-    $("task-action-note").textContent = sameFleet ? "Task feedback and nudges go to this team’s lead." : "Select this team with an authorized action connection to send feedback or a nudge.";
+    const feedback = sameFleet && context.actions.includes("feedback"), nudge = sameFleet && context.actions.includes("nudge");
+    const taskActions = feedback && nudge ? "Task feedback and nudges go to this team’s lead."
+      : feedback ? "Task feedback goes to this team’s lead. Nudges are unavailable with this connection."
+      : nudge ? "Task nudges go to this team’s lead. Feedback is unavailable with this connection."
+      : "Task feedback and nudges are unavailable with this connection.";
+    $("task-action-note").textContent = taskActions + (sameFleet && context.actions.includes("message")
+      ? " Close this task and use Talk to your team to send an ordinary message." : "");
   }
   function update(tasks, messages) {
     board = tasks; channel = messages;
@@ -191,6 +280,8 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
   $("task-detail-close").onclick = closeDetail;
   $("task-detail-refresh").onclick = () => { detail(); $("task-detail-refresh").hidden = true; };
   dialog.addEventListener("close", () => {
+    ++detailEpoch;
+    $("task-detail-content").innerHTML = "";
     selected = null;
     if (!openerIdentity) return;
     const rail = $("rail-right"), buttons = [...rail.querySelectorAll("[data-task-open]")];
