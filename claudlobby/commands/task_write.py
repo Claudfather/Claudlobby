@@ -394,8 +394,9 @@ def dispatch(args) -> CommandOutput:
     except CommandFailure:
         raise
     except TaskRecordingError as exc:
+        # nudge_bound_task translates its own recording failure.
         raise _recording_failure(exc, fleet_name=fleet_name, release_id=release_id,
-            notification=args.public_command in _REPORTS or args.public_command == "task.nudge") from exc
+                                 notification=args.public_command in _REPORTS) from exc
     except ReleaseMismatch as exc:
         raise CommandFailure("release_mismatch", "selected release differs from this caller",
                              hint=exc.hint) from exc
