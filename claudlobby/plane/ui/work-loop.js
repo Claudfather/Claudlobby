@@ -85,7 +85,8 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
     if (dialog.open) dialog.close();
     selected = null;
   }
-  function invalidate(message = "Message access is unavailable. Your draft is kept; task and activity records remain readable.") {
+  function invalidate(message = "Message access is unavailable. Your draft is kept; task and activity records remain readable.", expectedScope) {
+    if (expectedScope && (!context || scopeKey(expectedScope) !== scopeKey(context.scope))) return;
     saveDraft();
     if (context?.actions.includes("message") && kind === "message" && target?.task_id === null)
       messageRecipients.set(scopeKey(context.scope), target.recipient);

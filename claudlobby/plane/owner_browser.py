@@ -379,7 +379,7 @@ class _OwnerBrowser:
                 raise
             response = _response({"state": "unavailable"}, 503)
         if action_result is None:
-            if action == "actions/send" and not action_worker_started:
+            if action == "actions/send" and not action_worker_started and response.status_code in {403, 503}:
                 # This invocation never reached an adapter; no claim about a
                 # previous use of its UUID. Never mark post-worker failures.
                 body = json.loads(response.body)

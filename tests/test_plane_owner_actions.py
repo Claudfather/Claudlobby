@@ -414,3 +414,34 @@ def test_same_actor_reallow_during_inspection_hides_effect_result(browser_action
     assert response.status_code == 403 and response.json() == {"state": "denied"}
     assert len(calls) == 1
     assert context(client)["scope"]["viewer"] != request["scope"]["viewer"]
+
+
+@pytest.mark.parametrize("received", [True, False])
+@pytest.mark.parametrize("failure", ["invalid_body", "presemantic_policy"])
+def test_recovery_never_classifies_old_uuid_proof_for_different_body(browser_actions, monkeypatch, received, failure):
+    from claudlobby import message_operations
+    _, client, _, _, _, ctx, _, _ = browser_actions
+    calls = native_receiver(monkeypatch, received=received)
+    request = metadata(context(client), ctx.bots["worker"].uid)
+    original = post(client, "send", {**request, "body": "Original authored bytes"})
+    assert original.json()["status"] == ("delivered" if received else "recorded")
+    different = "Different valid bytes"
+    if failure == "invalid_body":
+        different += "\0"
+    else:
+        def fail_before_semantic(*args):
+            raise message_operations.MessageConflict("synthetic presemantic policy refusal")
+        monkeypatch.setattr(message_operations, "_load_capture_config", fail_before_semantic)
+    response = post(client, "send", {**request, "body": different})
+    assert response.status_code == 200
+    assert response.json() == {"version": 1, **request, "status": "unknown"}
+    assert post(client, "receipt", request).json() == original.json()
+    assert len(calls) == 1  # inspection does not resend either body
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD", "PUT"])
+def test_send_method_refusal_preserves_allow_without_effect_claim(browser_actions, method):
+    _, client, *_ = browser_actions
+    response = client.request(method, "/api/owner/actions/send")
+    assert response.status_code == 405 and response.headers["Allow"] == "POST"
+    if method != "HEAD": assert "effect" not in response.json()

@@ -160,7 +160,9 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
     if (result.status === 403) {
       // A missing/revoked message grant is independent of read access. Probe
       // the current cookie without pause/resume, which would reload context.
-      mount?.onActionPause();
+      // Context failures are already fenced by the controller room epoch.
+      // A mutation/receipt refusal may invalidate only its original scope.
+      if (path !== 'context') mount?.onActionPause(body.scope);
       await checkActionSession(gen);
       if (disposed || gen !== generation || mode !== 'ready') throw unknown();
       if (path === 'send' && result.data?.effect === 'not_started') {

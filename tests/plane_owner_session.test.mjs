@@ -42,7 +42,7 @@ function harness(replies = [ready], hooks = {}) {
   const node = id => document.getElementById(`owner-session-${id}`);
   const element = document.getElementById('owner-session');
   const controls = api.mountSessionControls({ document, element,
-    onPause() { paused++; hooks.onPause?.(api); }, onResume() { resumed++; hooks.onResume?.(api); }, onActionPause() { hooks.onActionPause?.(api); } });
+    onPause() { paused++; hooks.onPause?.(api); }, onResume() { resumed++; hooks.onResume?.(api); }, onActionPause(scope) { hooks.onActionPause?.(api, scope); } });
   return { api, calls, natives, replacements, timers, timeouts, replies, node, element, controls,
     get resumed() { return resumed; }, get paused() { return paused; },
     async click(id) { node(id).click(); await flush(); },
@@ -718,4 +718,55 @@ test('a quiet stable stream checks expired current cookie and redirects without 
   assert.equal(h.natives[1].closed, true);
   assert.equal(h.calls.every(c => c.options.method === 'GET'), true);
   h.controls.dispose();
+});
+
+
+for (const change of ['other room', 'new grant scope', 'current scope'])
+test(`late action403 invalidates only its originating composer: ${change}`, async () => {
+  const text = (await readFile(new URL('../claudlobby/plane/ui/work-loop.js', import.meta.url), 'utf8'))
+    .replaceAll('from "/action-state.js"', `from "${new URL('../claudlobby/plane/ui/action-state.js', import.meta.url)}"`)
+    .replaceAll('from "/panel-state.js"', `from "${new URL('../claudlobby/plane/ui/panel-state.js', import.meta.url)}"`);
+  const { mountWorkLoop } = await load(text);
+  const elements = new Map(), values = new Map();
+  const document = { getElementById(id) {
+    if (!elements.has(id)) elements.set(id, { value: '', hidden: false, disabled: false,
+      innerHTML: '', querySelectorAll: () => [], addEventListener(name, callback) { this[name] = callback; } });
+    return elements.get(id);
+  } };
+  const oldDocument = globalThis.document, oldStorage = globalThis.sessionStorage;
+  globalThis.document = document;
+  globalThis.sessionStorage = { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) };
+  const late = deferred(); let loop;
+  const fresh = change === 'other room' ? { ...context, room: 'second-team', scope: { ...context.scope, fleet: 'second-team' } }
+    : change === 'new grant scope' ? { ...context, scope: { ...context.scope, viewer: 'new-generation-viewer' } } : context;
+  const h = harness([ready, ok(context), () => late.promise, ok(fresh), ready, ok(['board'])], {
+    onActionPause(api, scope) { loop.invalidate(undefined, scope); }
+  });
+  try {
+    await h.controls.ready;
+    loop = mountWorkLoop({ api: h.api, renderThread() {}, refresh() {} });
+    loop.setRoom(context.room); await flush();
+    const rejected = assert.rejects(h.api.sendAction(action), /outcome unknown/);
+    loop.setRoom(fresh.room); await flush();
+    const draft = document.getElementById('work-body'); draft.value = 'Newly selected draft'; draft.input();
+    late.resolve(denied); await rejected;
+    assert.equal(document.getElementById('work-form').hidden, change === 'current scope');
+    assert.equal(draft.value, change === 'current scope' ? '' : 'Newly selected draft');
+    assert.equal(document.getElementById('work-send').disabled, change === 'current scope');
+    assert.deepEqual(await h.api.jget('/api/tasks'), ['board']);
+    assert.equal(h.node('renew').disabled, false); assert.deepEqual(h.replacements, []);
+    assert.equal(h.calls.filter(c => c.url.endsWith('/send')).length, 1);
+  } finally { h.controls.dispose(); globalThis.document = oldDocument; globalThis.sessionStorage = oldStorage; }
+});
+
+test('late context403 leaves context epoch ownership with the controller', async () => {
+  let invalidated = 0;
+  const late = deferred(), fresh = { ...context, room: 'second-team', scope: { ...context.scope, fleet: 'second-team' } };
+  const h = harness([ready, () => late.promise, ok(fresh), ready], { onActionPause() { invalidated++; } });
+  await h.controls.ready;
+  const old = h.api.interactionContext(context.room);
+  assert.deepEqual(await h.api.interactionContext(fresh.room), fresh);
+  late.resolve(denied); assert.equal(await old, null);
+  assert.equal(invalidated, 0); assert.equal(h.node('renew').disabled, false);
+  assert.deepEqual(h.replacements, []); h.controls.dispose();
 });
