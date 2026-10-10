@@ -433,3 +433,200 @@ def test_host_status_distinguishes_absent_active_and_interrupted_recorded_state(
     (root / "state/activations/torn").mkdir()
     torn = call(capsys, argv, 4)
     assert any(row["activation_id"] == "torn" for row in torn["data"]["activation_errors"])
+
+
+def test_status_missing_root_reports_real_passive_facts_without_creating_it(tmp_path, capsys, monkeypatch):
+    from claudlobby import setup_observations as observations
+    from claudlobby.commands import host
+    import sqlite3
+    import subprocess
+
+    root = tmp_path / "not-created"
+    package = SimpleNamespace(artifact_id="artifact", source_revision=None, content_sha256="digest")
+    monkeypatch.setattr(resources, "get_resources", lambda: package)
+    monkeypatch.setattr(observations.shutil, "which", lambda name: None if name == "claude" else "/unused/tool")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("passive status attempted a runtime effect or recorded-state backend")
+
+    monkeypatch.setattr(host, "_host_releases", forbidden)
+    monkeypatch.setattr(host, "_operator_shell", forbidden)
+    monkeypatch.setattr(sqlite3, "connect", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    before = snapshot(tmp_path)
+    result = call(capsys, ["--root", str(root), "host", "status", "--json"])
+    data = result["data"]
+    assert not root.exists() and snapshot(tmp_path) == before
+    assert result["command"] == "host.status" and result["request_id"] is None
+    assert result["release_id"] is None and data["selection"] is None
+    assert data["recorded_status"] == "unselected" and data["releases"] == []
+    facts = data["preactivation"]
+    assert facts["root"] == facts["plane_storage"] == "absent"
+    assert facts["package"] == {"state": "present", "artifact_id": "artifact",
+                                "source_revision": None, "content_sha256": "digest"}
+    assert facts["executables"] == {"tmux": "present", "claude": "missing", "jq": "present"}
+    assert "provider_login" in facts["not_checked"]
+    assert data["bootstrap_eligibility"] == "not_checked" and "can_activate" not in data
+
+
+def test_status_empty_root_adds_observations_without_changing_diagnosis(tmp_path, capsys):
+    result = call(capsys, ["--root", str(tmp_path), "host", "status", "--json"])
+    data = result["data"]
+    assert data["recorded_status"] == "unselected" and data["recovery"] == []
+    assert data["preactivation"]["root"] == "directory"
+    assert data["preactivation"]["plane_storage"] == "absent"
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_status_empty_plane_is_not_bootstrap_permission(tmp_path, capsys):
+    plane = tmp_path / "state/plane"
+    plane.mkdir(parents=True)
+    result = call(capsys, ["--root", str(tmp_path), "host", "status", "--json"])
+    assert result["data"]["preactivation"]["plane_storage"] == "empty"
+    assert result["data"]["bootstrap_eligibility"] == "not_checked"
+    assert list(plane.iterdir()) == []
+
+
+@pytest.mark.parametrize("area", ["state", "plane"])
+def test_status_refuses_non_directory_storage(tmp_path, capsys, area):
+    root = tmp_path / "root"
+    target = root if area == "root" else root / "state" if area == "state" else root / "state/plane"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("private-body")
+    result = call(capsys, ["--root", str(root), "host", "status", "--json"], 4)
+    assert "private-body" not in json.dumps(result)
+
+
+def test_status_retains_recorded_conflict_before_storage_refusal(candidate, capsys):
+    root, _, _, _ = candidate
+    (root / "state/selected-release.json").write_text("not-json-private")
+    (root / "state/plane").write_text("private-body")
+    result = call(capsys, ["--root", str(root), "host", "status", "--json"], 4)
+    assert result["data"]["recorded_status"] == "indeterminate"
+    assert result["data"]["selection_error"]
+    assert result["data"]["preactivation"]["plane_storage"] == "invalid"
+    assert result["error"]["message"] == "conflict: recorded host state is indeterminate"
+
+
+def test_status_isolated_cli_preserves_absent_root_and_private_home(tmp_path):
+    import subprocess
+    import sys
+    from tests.conftest import constructed_env
+
+    home, tools = tmp_path / "home", tmp_path / "tools"
+    home.mkdir()
+    tools.mkdir()
+    sentinel = tmp_path / "executed-native-tool"
+    for name in ("tmux", "claude", "jq"):
+        tool = tools / name
+        tool.write_text('#!/bin/sh\nprintf executed > "$TOOL_SENTINEL"\nexit 97\n')
+        tool.chmod(0o700)
+    env = constructed_env(HOME=home, PATH=tools, PYTHONDONTWRITEBYTECODE="1",
+                          TOOL_SENTINEL=sentinel, CLAUDLOBBY_ROOT=tmp_path / "ambient",
+                          BOT_DIR=tmp_path / "foreign-bot", BOT_ID="ignored-bot")
+    root = tmp_path / "absent"
+    before = snapshot(tmp_path)
+    for _ in range(2):
+        result = subprocess.run([sys.executable, "-m", "claudlobby", "--root", str(root),
+                                 "host", "status", "--json"], env=env, cwd=tmp_path,
+                                capture_output=True, text=True, timeout=15)
+        assert result.returncode == 0, result.stderr
+        body = json.loads(result.stdout)
+        assert body["data"]["preactivation"]["executables"] == dict.fromkeys(("tmux", "claude", "jq"), "present")
+        assert body["data"]["preactivation"]["root"] == "absent"
+        assert body["request_id"] is None and body["release_id"] is None
+    assert not root.exists() and not sentinel.exists() and not list(home.iterdir())
+    assert snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("entry", ["plane.db", "plane.db-wal", "daemon.sock", "staged", "unknown", "owner-access.db"])
+def test_status_discloses_any_plane_content_without_opening_or_removing_it(tmp_path, capsys, entry):
+    plane = tmp_path / "state/plane"
+    plane.mkdir(parents=True)
+    (plane / entry).write_bytes(b"unread private contents")
+    before = snapshot(tmp_path)
+    result = call(capsys, ["--root", str(tmp_path), "host", "status", "--json"])
+    assert result["data"]["preactivation"]["plane_storage"] == "nonempty"
+    assert result["data"]["bootstrap_eligibility"] == "not_checked"
+    assert b"unread private contents" not in json.dumps(result).encode()
+    assert snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("area", ["state", "plane"])
+def test_status_refuses_redirected_storage_without_foreign_details(tmp_path, capsys, area):
+    root, foreign = tmp_path / "root", tmp_path / "foreign"
+    root.mkdir()
+    foreign.mkdir()
+    (foreign / "private-marker").write_text("secret-value")
+    target = root if area == "root" else root / "state" if area == "state" else root / "state/plane"
+    if area == "root":
+        root.rmdir()
+    else:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    target.symlink_to(foreign, target_is_directory=True)
+    result = call(capsys, ["--root", str(root), "host", "status", "--json"], 4)
+    assert "secret-value" not in json.dumps(result) and "private-marker" not in json.dumps(result)
+    assert "foreign" not in result["error"]["message"]
+    assert list(foreign.iterdir()) == [foreign / "private-marker"]
+
+
+@pytest.mark.parametrize("spelling", ["symlink", "relative", "parent"])
+def test_status_existing_root_aliases_preserve_normalization(tmp_path, capsys, monkeypatch, spelling):
+    root = tmp_path / "real"
+    root.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(root, target_is_directory=True)
+    monkeypatch.chdir(tmp_path)
+    value = str(alias) if spelling == "symlink" else "real" if spelling == "relative" else "real/../real"
+    result = call(capsys, ["--root", value, "host", "status", "--json"])
+    assert result["data"]["root"] == str(root.resolve())
+    assert result["data"]["recorded_status"] == "unselected"
+    assert result["data"]["preactivation"]["root"] == "directory"
+    assert list(root.iterdir()) == []
+
+
+def test_status_classifies_unreadable_storage_without_exception_text(tmp_path, capsys, monkeypatch):
+    from claudlobby import setup_observations as observations
+    plane = tmp_path / "state/plane"
+    plane.mkdir(parents=True)
+    original = observations.os.scandir
+
+    def unreadable(path):
+        if Path(path) == plane:
+            raise PermissionError("private-path-and-token")
+        return original(path)
+
+    monkeypatch.setattr(observations.os, "scandir", unreadable)
+    result = call(capsys, ["--root", str(tmp_path), "host", "status", "--json"], 6)
+    assert result["data"]["preactivation"]["plane_storage"] == "unavailable"
+    assert "private-path-and-token" not in json.dumps(result)
+
+
+def test_status_missing_resources_and_discovery_error_remain_observations(tmp_path, capsys, monkeypatch):
+    from claudlobby import setup_observations as observations
+
+    def missing():
+        raise RuntimeError("private-package-path")
+
+    def discovery(name):
+        if name == "jq":
+            raise OSError("private-native-detail")
+        return None
+
+    monkeypatch.setattr(resources, "get_resources", missing)
+    monkeypatch.setattr(observations.shutil, "which", discovery)
+    result = call(capsys, ["--root", str(tmp_path / "absent"), "host", "status", "--json"])
+    facts = result["data"]["preactivation"]
+    assert facts["package"]["state"] == "unavailable" and facts["package"]["artifact_id"] is None
+    assert facts["executables"] == {"tmux": "missing", "claude": "missing", "jq": "unavailable"}
+    assert "private-" not in json.dumps(result)
+
+
+def test_status_rejects_relative_missing_root_and_keeps_mutation_root_requirement(tmp_path, capsys, monkeypatch):
+    from claudlobby.commands import host
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(host, "_operator_shell", lambda: None)
+    call(capsys, ["--root", "absent", "host", "status", "--json"], 2)
+    call(capsys, ["--root", str(tmp_path / "absent"), "host", "activate", "p-" + "a" * 64,
+                  "--install-directory", str(tmp_path), "--json"], 3)
+    assert list(tmp_path.iterdir()) == []
