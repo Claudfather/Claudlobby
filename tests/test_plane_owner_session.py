@@ -18,7 +18,7 @@ from tests.test_plane_owner_browser import browser, _pair_locally, _post, _raw_h
 
 def test_owner_transport_remains_protected_before_login_and_after_expiry(browser):
     _, client, store, _, clock = browser
-    for path in ['/api-client.js', '/api-client.js?v=example', '/owner-api-client.js']:
+    for path in ['/api-client.js', '/api-client.js?v=example', '/owner-api-client.js', '/two-source-read.js']:
         assert client.get(path).status_code == 403
     _pair_locally(client, store)
     assert _post(client, 'login').status_code == 200
@@ -44,7 +44,8 @@ def test_default_plane_transport_has_no_owner_capability(browser):
     assert 'id="owner-session"' in page.text and 'aria-label="Owner session" hidden' in page.text
 
 
-def test_owner_transport_change_refreshes_the_import_url(browser, tmp_path, monkeypatch):
+@pytest.mark.parametrize('asset', ['owner-api-client.js', 'two-source-read.js'])
+def test_owner_transport_change_refreshes_the_import_url(browser, tmp_path, monkeypatch, asset):
     from claudlobby.plane import view
     _, client, store, _, _ = browser
     _pair_locally(client, store)
@@ -53,7 +54,7 @@ def test_owner_transport_change_refreshes_the_import_url(browser, tmp_path, monk
     shutil.copytree(view.UI_DIR, ui)
     monkeypatch.setattr(view, 'UI_DIR', ui)
     before = client.get('/app.js').text
-    transport = ui / 'owner-api-client.js'
+    transport = ui / asset
     info = transport.stat()
     os.utime(transport, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000))
     after = client.get('/app.js').text

@@ -1257,3 +1257,54 @@ reopening Plane on the intended host. There is no automatic login or mutation
 replay. A lifecycle-only older server is deliberately incompatible with this
 new client, rather than silently treated as the same read contract. The default
 read-only transport and injected synthetic transports are unchanged.
+
+### Two admitted source reads
+
+The core `createOwnerReadHandle` factory uses the same authenticated owner status
+admission and pinned read profile as the direct browser transport. Its lifecycle
+is independent of DOM session controls and global redirects. `start`, `snapshot`,
+`subscribe`, `jget`, `createEventSource` and `dispose` expose reads only; a profile
+object supplied by a caller cannot stand in for an admitted handle. Direct-host
+controls retain their existing login, renewal and sign-out behavior.
+
+`createTwoSourceReadTransport({sources})` accepts exactly two core-issued
+handles with immutable distinct source keys and labels. It does not provision
+sessions or choose a cross-origin carrier. An injected `/api-client.js` can expose
+the resulting read/stream/disposal methods to the one canonical renderer. The
+shipped default and direct-owner module selection remain unchanged. The injected
+wrapper must import the same cache-versioned owner module URL as the adapter: read
+handles belong to that canonical module instance, not a second admission registry.
+
+The finite first slice combines fleets, recent activity, tasks, participants,
+overview and summary. Exact qualified team selection routes activity/tasks and
+linked task detail to that source, including a task outside the board window.
+Task links require the recorded fleet UID and admitted host UID; they never infer
+ownership from an emitter or another host. Structural identities are qualified
+by source, while literal bodies and event detail are preserved. Each source keeps
+its own snapshot provenance, stream cursor and recent-window metadata. An initially unavailable source does not hide the other host; a source may
+admit later only through its controller, with distinct pinned host identity. Source
+loss fences unfinished replies and omits that source's private rows; previously
+admitted fleet labels remain visibly unavailable. Partial totals cover readable
+sources, with separate host facts rather than an invented aggregate recorder.
+
+Inventory, equipment, search, grid, presence and trust are explicitly unavailable
+in this bounded adapter. No action capability/context/prepare/send/receipt is
+exported, and reconnection never replays a mutation. Synthetic injected proof does
+not establish OAuth, website bootstrap, private-device reachability or a real
+cross-origin connection. A future publisher must explicitly lock any new shared
+module instead of forking its renderer or deciding production host authority.
+
+Fleet and overview replies share one source-local routing roster. Later owner
+admission and registry changes are learned through the renderer's existing overview
+refresh. A newer roster request fences an older reply; changed alias/UID mappings
+fence unfinished focused reads. `fleet_choices` retains last-admitted teams with
+the current read state, separately from readable overview cards and totals. A
+missing endpoint or malformed projection degrades that read only; authenticated
+owner lifecycle and stream source facts control source epochs. The summary keeps
+each recorder's daemon state and ingest freshness, including down, unknown and
+quiet states.
+
+Qualification changes structural references, including assignment history and the
+last task event, but leaves canonical wire bodies and event detail literal. Nudge
+prose requires a consistent source qualifier on the projected pair; the unchanged
+wire body must match its corresponding bare task and assignment identities.
