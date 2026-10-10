@@ -133,6 +133,14 @@ No release selection, begun activation, runtime, recorder, queues, or
 unknown Plane files are accepted as a fresh host. Pairing and workspace approval
 grant neither activation nor fleet actions. Private reads remain recorder-bound.
 
+If initialization is killed, private `.owner-access-*` temporary files or their
+SQLite sidecars can remain in `state/plane`. The fresh-host check deliberately
+refuses these unknown files. With initialization and the owner server stopped,
+inspect the exact files and remove only confirmed abandoned, operator-owned
+0600 regular temporary files, then retry initialization. Never remove
+`owner-access.db`, its sidecars, recorder data or unfamiliar files to force
+fresh-host admission; use the existing recovery path instead.
+
 For this pre-activation state the owner server defaults to the private
 `state/owner/owner.sock`, outside recorder storage. An explicit socket must also
 be outside `state/plane`; existing hosts retain their original socket default.
@@ -147,3 +155,7 @@ recorder/selection/runtime files never makes a used installation fresh again.
 Imported/existing recorder data still requires
 explicit source binding and the established activation/recovery path. Browser
 team launch authority and actual cold-host acceptance are separate work.
+If ordinary owner authority was initialized after an interrupted bootstrap,
+inspect the recorder's identity and use
+`claudlobby --root DATA_ROOT host owner bind-source` before resuming the same
+activation. Resume never silently attests existing recorder data.
