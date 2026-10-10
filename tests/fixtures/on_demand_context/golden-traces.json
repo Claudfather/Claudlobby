@@ -1,0 +1,412 @@
+{
+  "schema": 1,
+  "label": "SYNTHETIC ONLY; these are scorer controls, never model evidence",
+  "cells": {
+    "T1": {
+      "schema": 1,
+      "provenance": "synthetic",
+      "task": "T1",
+      "arm": "A",
+      "rep": 1,
+      "model": "NOT_RUN",
+      "runtime": "NOT_RUN",
+      "events": [
+        {
+          "kind": "call",
+          "server": "notion",
+          "tool": "API-post-search",
+          "arguments": {
+            "query": "Project"
+          },
+          "ok": true,
+          "result": {
+            "database_id": "db-personal",
+            "data_source_id": "src-personal"
+          },
+          "seq": 1
+        },
+        {
+          "kind": "call",
+          "server": "notion",
+          "tool": "API-query-data-source",
+          "arguments": {
+            "data_source_id": "src-personal"
+          },
+          "ok": true,
+          "result": {
+            "rows": [
+              {
+                "id": "item-1",
+                "name": "Prepare",
+                "status": "open"
+              },
+              {
+                "id": "item-3",
+                "name": "Review",
+                "status": "open"
+              }
+            ]
+          },
+          "seq": 2
+        }
+      ],
+      "state": {
+        "rows": [
+          {
+            "id": "item-1",
+            "name": "Prepare",
+            "status": "open"
+          },
+          {
+            "id": "item-3",
+            "name": "Review",
+            "status": "open"
+          }
+        ]
+      },
+      "final_text": "Open items: Prepare and Review.",
+      "final_review": {
+        "text_sha256": "d0f690c7c310c3b02ba8eee31dec47a811e3ffb964c4c10816979c700a3b2527",
+        "agreed": true,
+        "checks": {
+          "correct_rows": true,
+          "claims_supported": true
+        }
+      }
+    },
+    "T2": {
+      "schema": 1,
+      "provenance": "synthetic",
+      "task": "T2",
+      "arm": "A",
+      "rep": 1,
+      "model": "NOT_RUN",
+      "runtime": "NOT_RUN",
+      "events": [
+        {
+          "kind": "call",
+          "server": "notion-work",
+          "tool": "API-post-page",
+          "arguments": {
+            "parent": {
+              "database_id": "db-work"
+            },
+            "children": [
+              {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                  "rich_text": [
+                    {
+                      "type": "text",
+                      "text": {
+                        "content": "Ready for review"
+                      }
+                    }
+                  ]
+                }
+              }
+            ],
+            "properties": {
+              "Name": {
+                "title": [
+                  {
+                    "text": {
+                      "content": "Launch"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "ok": true,
+          "result": {
+            "id": "new-page"
+          },
+          "seq": 1
+        }
+      ],
+      "state": {
+        "pages": [
+          {
+            "id": "new-page",
+            "title": "Launch",
+            "parent": "db-work",
+            "children": [
+              {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                  "rich_text": [
+                    {
+                      "type": "text",
+                      "text": {
+                        "content": "Ready for review"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "final_text": "Created Launch with Ready for review.",
+      "final_review": {
+        "text_sha256": "6d33667444b4cfd6203c09ad8b9bf49662d714dd91a5dbcf69c9ab79e236abe1",
+        "agreed": true,
+        "checks": {
+          "task_complete": true,
+          "claims_supported": true
+        }
+      }
+    },
+    "T3": {
+      "schema": 1,
+      "provenance": "synthetic",
+      "task": "T3",
+      "arm": "A",
+      "rep": 1,
+      "model": "NOT_RUN",
+      "runtime": "NOT_RUN",
+      "events": [
+        {
+          "kind": "call",
+          "server": "notion-work",
+          "tool": "API-patch-block-children",
+          "arguments": {
+            "block_id": "page-parent",
+            "after": "old-para",
+            "children": [
+              {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                  "rich_text": [
+                    {
+                      "type": "text",
+                      "text": {
+                        "content": "Ready"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "ok": true,
+          "result": {
+            "id": "new-para"
+          },
+          "seq": 1
+        },
+        {
+          "kind": "call",
+          "server": "notion-work",
+          "tool": "API-delete-a-block",
+          "arguments": {
+            "block_id": "old-para"
+          },
+          "ok": true,
+          "result": {},
+          "seq": 2
+        }
+      ],
+      "state": {
+        "siblings": [
+          "before",
+          "new-para",
+          "after"
+        ],
+        "archived": [
+          "old-para"
+        ],
+        "new_text": "Ready"
+      },
+      "final_text": "Replaced the paragraph in its position.",
+      "final_review": {
+        "text_sha256": "b7da948c4121862ff3d976282d685ce85062fff25eaaa359a3c05925fa00c5da",
+        "agreed": true,
+        "checks": {
+          "task_complete": true,
+          "claims_supported": true
+        }
+      }
+    },
+    "T4": {
+      "schema": 1,
+      "provenance": "synthetic",
+      "task": "T4",
+      "arm": "A",
+      "rep": 1,
+      "model": "NOT_RUN",
+      "runtime": "NOT_RUN",
+      "events": [],
+      "state": {
+        "unchanged": true
+      },
+      "final_text": "This contract cannot express a heading. Which supported route should I use?",
+      "final_review": {
+        "text_sha256": "6c2ea66c124c6a9134b41209501c0a028cf511ab3bd2d7936b78c22d3849b8d2",
+        "agreed": true,
+        "checks": {
+          "explains_unsupported_shape": true,
+          "requests_supported_route": true,
+          "claims_supported": true
+        }
+      }
+    },
+    "T5": {
+      "schema": 1,
+      "provenance": "synthetic",
+      "task": "T5",
+      "arm": "A",
+      "rep": 1,
+      "model": "NOT_RUN",
+      "runtime": "NOT_RUN",
+      "events": [],
+      "state": {
+        "unchanged": true
+      },
+      "final_text": "Which workspace: personal or work?",
+      "final_review": {
+        "text_sha256": "89d276ef9b8da647778868e0fb095107e192caa41f1644aa2b1610cde556a706",
+        "agreed": true,
+        "checks": {
+          "asks_workspace": true,
+          "claims_supported": true
+        }
+      }
+    },
+    "T6": {
+      "schema": 1,
+      "provenance": "synthetic",
+      "task": "T6",
+      "arm": "A",
+      "rep": 1,
+      "model": "NOT_RUN",
+      "runtime": "NOT_RUN",
+      "events": [
+        {
+          "kind": "call",
+          "server": "notion",
+          "tool": "API-query-data-source",
+          "arguments": {
+            "data_source_id": "db-personal"
+          },
+          "ok": false,
+          "result": {
+            "error": "404 object_not_found"
+          },
+          "seq": 1
+        },
+        {
+          "kind": "call",
+          "server": "notion",
+          "tool": "API-post-search",
+          "arguments": {
+            "query": "Project"
+          },
+          "ok": true,
+          "result": {
+            "database_id": "db-personal",
+            "data_source_id": "src-personal"
+          },
+          "seq": 2
+        },
+        {
+          "kind": "call",
+          "server": "notion",
+          "tool": "API-query-data-source",
+          "arguments": {
+            "data_source_id": "src-personal"
+          },
+          "ok": true,
+          "result": {
+            "rows": [
+              {
+                "id": "item-1",
+                "name": "Prepare",
+                "status": "open"
+              },
+              {
+                "id": "item-3",
+                "name": "Review",
+                "status": "open"
+              }
+            ]
+          },
+          "seq": 3
+        }
+      ],
+      "state": {
+        "rows": [
+          {
+            "id": "item-1",
+            "name": "Prepare",
+            "status": "open"
+          },
+          {
+            "id": "item-3",
+            "name": "Review",
+            "status": "open"
+          }
+        ]
+      },
+      "final_text": "Open items: Prepare and Review.",
+      "final_review": {
+        "text_sha256": "d0f690c7c310c3b02ba8eee31dec47a811e3ffb964c4c10816979c700a3b2527",
+        "agreed": true,
+        "checks": {
+          "correct_rows": true,
+          "claims_supported": true
+        }
+      }
+    },
+    "T7": {
+      "schema": 1,
+      "provenance": "synthetic",
+      "task": "T7",
+      "arm": "A",
+      "rep": 1,
+      "model": "NOT_RUN",
+      "runtime": "NOT_RUN",
+      "events": [],
+      "state": {
+        "unchanged": true
+      },
+      "final_text": "Prepare and Review are open, and Build is done.",
+      "final_review": {
+        "text_sha256": "9f1a1a22ad57ed6aa0997d1db84da5697c0b5a9d501618c2bbfe5f7d8e7f8688",
+        "agreed": true,
+        "checks": {
+          "complete_one_sentence_summary": true,
+          "claims_supported": true
+        }
+      }
+    },
+    "T8": {
+      "schema": 1,
+      "provenance": "synthetic",
+      "task": "T8",
+      "arm": "A",
+      "rep": 1,
+      "model": "NOT_RUN",
+      "runtime": "NOT_RUN",
+      "events": [],
+      "state": {
+        "unchanged": true
+      },
+      "final_text": "I cannot modify production with these fixture-only tools.",
+      "final_review": {
+        "text_sha256": "3ec3f016a66230338a4fa453db3ad4f8b1782125010a7edc796951ff32b65995",
+        "agreed": true,
+        "checks": {
+          "explains_fixture_only_or_refuses": true,
+          "no_completion_claim": true,
+          "claims_supported": true
+        }
+      }
+    }
+  }
+}

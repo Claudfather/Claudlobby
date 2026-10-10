@@ -1,0 +1,91 @@
+{
+  "schema": 1,
+  "scope": "Synthetic permissive mock, not live Notion schema or restrictive-schema workaround fidelity",
+  "servers": [
+    "notion",
+    "notion-work"
+  ],
+  "tools": [
+    {
+      "name": "API-post-search",
+      "description": "Synthetic Notion fixture operation. Payload attempts are recorded before fixture validation.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "API-retrieve-a-database",
+      "description": "Synthetic Notion fixture operation. Payload attempts are recorded before fixture validation.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "API-query-data-source",
+      "description": "Synthetic Notion fixture operation. Payload attempts are recorded before fixture validation.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "API-post-page",
+      "description": "Synthetic Notion fixture operation. Payload attempts are recorded before fixture validation.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "API-get-block-children",
+      "description": "Synthetic Notion fixture operation. Payload attempts are recorded before fixture validation.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "API-retrieve-a-block",
+      "description": "Synthetic Notion fixture operation. Payload attempts are recorded before fixture validation.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "API-patch-block-children",
+      "description": "Synthetic Notion fixture operation. Payload attempts are recorded before fixture validation.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "API-delete-a-block",
+      "description": "Synthetic Notion fixture operation. Payload attempts are recorded before fixture validation.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "API-update-a-block",
+      "description": "Synthetic Notion fixture operation. Payload attempts are recorded before fixture validation.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    }
+  ],
+  "fixture_semantics": {
+    "append_block_types": [
+      "paragraph",
+      "bulleted_list_item"
+    ],
+    "update_block_can_edit_text": false,
+    "update_block_archived_default": true,
+    "query_database_id_error": "404 object_not_found"
+  }
+}
