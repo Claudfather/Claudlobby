@@ -9,6 +9,7 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
   let storage;
   try { storage = sessionStorage; } catch { storage = null; }
   const state = new ActionState(storage);
+  const messageRecipients = new Map(); // Tab memory only, bound to the full authorized scope.
   let context = null, room = null, epoch = 0, board = null, channel = null;
   let selected = null, target = null, kind = "message", sending = false, inFlightRequest = null, opener = null, openerIdentity = null;
   let notice = "Choose a team to see its available actions.";
@@ -33,6 +34,8 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
   const selectionKey = () => row() ? rowKey(row()) : "";
   const leadId = c => (c.recipients.find(r => r.lead) || c.recipients[0]).id;
   const readDraft = () => row() ? state.draft(row()) : "";
+  const recipientLabel = request => (context && scopeKey(request.scope) === scopeKey(context.scope)
+    ? context.recipients.find(r => r.id === request.target.recipient)?.label : null) || request.target.recipient;
   function saveDraft() {
     if (!row()) return;
     try { state.draft(row(), $("work-body").value); }
@@ -41,12 +44,12 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
   function pendingRows() {
     const rows = context ? state.pending.filter(p => scopeKey(p.scope) === scopeKey(context.scope)) : [];
     $("work-pending").innerHTML = rows.map(p => `<div class="pending-action">
-      <div><b>Awaiting confirmation</b><p>${esc(p.kind)} · ${esc(p.target.recipient)}${p.target.task_id ? ` · task ${esc(p.target.task_id)}` : ""}</p>
+      <div><b>Awaiting confirmation</b><p>${esc(p.kind)} · ${esc(recipientLabel(p))}${p.target.task_id ? ` · task ${esc(p.target.task_id)}` : ""}</p>
       <small>Submitted ${esc(ago(p.submitted_at))} · ${esc(p.request_id)}</small></div>
       <button class="pill ghost" type="button" data-request="${esc(p.request_id)}"${p.request_id === inFlightRequest ? " disabled" : ""}>Check receipt</button>
       <button class="pill ghost" type="button" data-discard="${esc(p.request_id)}"${p.request_id === inFlightRequest ? " disabled" : ""}>Discard saved request</button></div>`).join("")
       + [...state.discarded.values()].filter(p => context && scopeKey(p.scope) === scopeKey(context.scope))
-        .map(p => `<p class="note">Discarded locally · ${esc(p.kind)} to ${esc(p.target.recipient)}${p.target.task_id ? ` · task ${esc(p.target.task_id)}` : ""} · ${esc(p.request_id)}. Outcome unknown; this ID is retained only until this tab reloads.</p>`).join("");
+        .map(p => `<p class="note">Discarded locally · ${esc(p.kind)} to ${esc(recipientLabel(p))}${p.target.task_id ? ` · task ${esc(p.target.task_id)}` : ""} · ${esc(p.request_id)}. Outcome unknown; this ID is retained only until this tab reloads.</p>`).join("");
   }
   function paint({ restoreDraft = false } = {}) {
     const usable = !!context && !!target;
@@ -71,7 +74,7 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
       : notice;
     $("work-recoverable").innerHTML = state.corruptStorage && state.recoverable.length
       ? '<p class="note">Readable saved request IDs from this tab. Copy any needed IDs before clearing the damaged records.</p>'
-        + state.recoverable.map(p => `<p class="note">${esc(p.scope.fleet)} · ${esc(p.kind)} to ${esc(p.target.recipient)}${p.target.task_id ? ` · task ${esc(p.target.task_id)}` : ""} · ${esc(p.request_id)}</p>`).join("")
+        + state.recoverable.map(p => `<p class="note">${esc(p.scope.fleet)} · ${esc(p.kind)} to ${esc(recipientLabel(p))}${p.target.task_id ? ` · task ${esc(p.target.task_id)}` : ""} · ${esc(p.request_id)}</p>`).join("")
       : "";
     $("work-clear-saved").hidden = !state.corruptStorage;
     pendingRows();
@@ -82,6 +85,8 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
   }
   function setRoom(fleet) {
     saveDraft();
+    if (context?.actions.includes("message") && kind === "message" && target?.task_id === null)
+      messageRecipients.set(scopeKey(context.scope), target.recipient);
     const token = ++epoch;
     room = fleet || "all";
     context = null; target = null; board = null; channel = null;
@@ -96,7 +101,8 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
       if (room !== "all" && validContext(value) && value.room === room && value.scope.fleet === room
           && typeof api.sendAction === "function" && typeof api.actionReceipt === "function") {
         context = value;
-        target = { recipient: leadId(value), task_id: null };
+        const remembered = value.actions.includes("message") ? messageRecipients.get(scopeKey(value.scope)) : null;
+        target = { recipient: value.recipients.some(r => r.id === remembered) ? remembered : leadId(value), task_id: null };
         kind = "message";
         notice = value.simulation ? "Example actions are recorded only by the test service. No real agents receive them." : "";
       } else notice = "This host has not enabled an authorized browser action service.";
@@ -190,7 +196,7 @@ export function mountWorkLoop({ api, renderThread, refresh }) {
     saveDraft(); target = { ...target, task_id: null }; kind = "message";
     notice = ""; paint({ restoreDraft: true }); $("work-body").focus();
   };
-  const requestLabel = request => `${request.kind} to ${request.target.recipient}${request.target.task_id ? ` · task ${request.target.task_id}` : ""}`;
+  const requestLabel = request => `${request.kind} to ${recipientLabel(request)}${request.target.task_id ? ` · task ${request.target.task_id}` : ""}`;
   function receiptNotice(status, simulation) {
     const prefix = simulation ? "Example receipt: " : "";
     return prefix + ({ delivered: simulation ? "simulated delivery confirmed. No real bot received this." : "delivery confirmed by the host.",

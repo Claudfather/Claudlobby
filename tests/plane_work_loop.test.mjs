@@ -123,7 +123,7 @@ test('late receipt names its original recipient and preserves a newly selected r
   h.get('work-recipient').value = 'worker'; h.get('work-recipient').onchange();
   h.get('work-body').value = 'Worker draft'; h.get('work-body').emit('input');
   lookup.resolve(receipt(original)); await checking;
-  assert.match(h.get('work-notice').textContent, /message to lead:.*delivery confirmed/);
+  assert.match(h.get('work-notice').textContent, /message to Lead:.*delivery confirmed/);
   assert.equal(h.get('work-body').value, 'Worker draft');
   assert.equal(new ActionState(storage).pending.length, 0);
 });
@@ -132,7 +132,7 @@ test('receipt notice names its original task even if a different task was select
   h.loop.setRoom('web'); await settle(); h.update(); h.open('task-b');
   h.get('task-detail-content').querySelectorAll('[data-kind]')[0].onclick(); await settle();
   await h.pendingClick(original.request_id);
-  assert.match(h.get('work-notice').textContent, /message to lead · task task-a:/);
+  assert.match(h.get('work-notice').textContent, /message to Lead · task task-a:/);
 });
 test('reload and explicit discard never resend; discard requires the uncertainty confirmation', async () => {
   const storage = store(), original = saved(storage), h = harness({ storage, confirm: false });
@@ -190,7 +190,7 @@ test('one pending send attempts transport once and its late result preserves ano
   h.get('work-body').value = 'Keep worker draft'; h.get('work-body').emit('input');
   sending.resolve(receipt(h.sends[0])); await first;
   assert.equal(h.get('work-body').value, 'Keep worker draft');
-  assert.match(h.get('work-notice').textContent, /message to lead:.*delivery confirmed/);
+  assert.match(h.get('work-notice').textContent, /message to Lead:.*delivery confirmed/);
 });
 
 test('modal focus prefers the original panel when refreshed cards duplicate task and fleet', async () => {
@@ -250,7 +250,7 @@ test('late refusal from send and receipt lookup remains visible against its orig
     h.get('work-recipient').value = 'worker'; h.get('work-recipient').onchange();
     h.get('work-body').value = 'Keep the new draft'; h.get('work-body').emit('input');
     transport.resolve(receipt(original || h.sends[0], 'rejected')); await pending;
-    assert.match(h.get('work-notice').textContent, /message to lead.*request refused/);
+    assert.match(h.get('work-notice').textContent, /message to Lead.*request refused/);
     if (original) assert.match(h.get('work-notice').textContent, /task task-a/);
     assert.equal(h.get('work-body').value, 'Keep the new draft');
     assert.equal(new ActionState(storage).pending.length, 0);
@@ -274,7 +274,7 @@ test('receipt checks wait for their in-flight send; failed sends retain the orig
   await h.pendingClick(request.request_id);
   assert.equal(h.lookups.length, 1);
   assert.equal(h.lookups[0].request_id, request.request_id);
-  assert.match(h.get('work-notice').textContent, /message to lead:.*delivery confirmed/);
+  assert.match(h.get('work-notice').textContent, /message to Lead:.*delivery confirmed/);
   assert.equal(new ActionState(h.storage).pending.length, 0);
   assert.equal(h.sends.length, 1);
 });

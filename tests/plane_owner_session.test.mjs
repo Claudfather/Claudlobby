@@ -415,7 +415,8 @@ test('send403 checks current cookie once and reports unknown even when another t
   h.controls.dispose();
 });
 
-test('app session pause disables the real composer and resume refreshes same-room authority without losing drafts or pending IDs', async () => {
+for (const renewal of ['same scope', 'new viewer', 'removed recipient', 'no message capability'])
+test(`app renewal restores worker selection and draft only with fresh matching authority: ${renewal}`, async () => {
   const app = await readFile(new URL('../claudlobby/plane/ui/app.js', import.meta.url), 'utf8');
   const pause = app.match(/onPause\(\) \{([\s\S]*?)\n\s*\},\n\s*onResume/)[1];
   const sync = app.slice(app.indexOf('function syncWorkRoom()'), app.indexOf('const ownerSession ='));
@@ -433,7 +434,8 @@ test('app session pause disables the real composer and resume refreshes same-roo
   const storage = { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) };
   // Keep one earlier uncertain request for another recipient while editing an unsent draft.
   const state = new ActionState(storage);
-  const access = { ...context, recipients: [...context.recipients, { id: 'other-bot', label: 'Other bot' }] };
+  let access = { ...context, recipients: [...context.recipients,
+    { id: 'worker-bot', label: 'Worker' }, { id: 'other-bot', label: 'Other bot' }] };
   state.begin(access, 'message', { recipient: 'other-bot', task_id: null }, 'Earlier uncertain message', action.request_id);
   const oldDocument = globalThis.document, oldStorage = globalThis.sessionStorage;
   globalThis.document = document; globalThis.sessionStorage = storage;
@@ -444,6 +446,8 @@ test('app session pause disables the real composer and resume refreshes same-roo
       sendAction() { throw Error('No sends expected'); }, actionReceipt() { throw Error('No receipt reads expected'); },
     }, renderThread() {}, refresh() {} });
     workLoop.setRoom('synthetic'); await flush();
+    const recipient = document.getElementById('work-recipient');
+    recipient.value = 'worker-bot'; recipient.onchange();
     const body = document.getElementById('work-body'); body.value = 'Keep this unsent draft'; body.input();
     const before = storage.getItem('plane.pending-actions.v1');
     assert.equal(document.getElementById('work-send').disabled, false);
@@ -455,10 +459,14 @@ test('app session pause disables the real composer and resume refreshes same-roo
     assert.equal(document.getElementById('work-send').disabled, true);
     assert.equal(document.getElementById('work-form').hidden, true);
     await flush();
+    if (renewal === 'new viewer') access = { ...access, scope: { ...access.scope, viewer: 'new-authority-viewer' } };
+    if (renewal === 'removed recipient') access = { ...access, recipients: access.recipients.filter(r => r.id !== 'worker-bot') };
+    if (renewal === 'no message capability') access = { ...access, actions: [] };
     paused = false; runInNewContext(`${sync}\nsyncWorkRoom()`, bindings); await flush();
     assert.deepEqual(rooms, ['synthetic', 'all', 'synthetic']);
-    assert.equal(body.value, 'Keep this unsent draft');
-    assert.equal(document.getElementById('work-send').disabled, false);
+    assert.equal(recipient.value, renewal === 'same scope' ? 'worker-bot' : 'bot-example');
+    assert.equal(body.value, renewal === 'same scope' ? 'Keep this unsent draft' : '');
+    assert.equal(document.getElementById('work-send').disabled, renewal === 'no message capability');
     assert.equal(storage.getItem('plane.pending-actions.v1'), before);
   } finally { await flush(); globalThis.document = oldDocument; globalThis.sessionStorage = oldStorage; }
 });
